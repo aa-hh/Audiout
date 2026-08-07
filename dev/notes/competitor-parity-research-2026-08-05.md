@@ -3,6 +3,11 @@
 *Roadmap item 003. Synthesized 2026-08-05 from 5 parallel researcher sweeps.
 Raw findings (80, with per-finding evidence URLs): `dev/notes/competitor-sweeps-raw-2026-08-05.json`.*
 
+*Status re-checked against `main` on **2026-08-07**. Competitor evidence is unchanged
+(still the 08-05 sweep); the Audiouter-status column has been re-verified against shipped
+code and corrected where work landed. What changed, and what it means for the ranking:
+**§7**.*
+
 ---
 
 ## 1. Method + sources snapshot
@@ -36,19 +41,19 @@ Five families swept in parallel on 2026-08-05:
 | Group master + per-speaker expansion | Sonos (patented the interaction) | table-stakes | **HAS** — group rows with master slider + animated expansion, SPEC §9 | docs.sonos.com/docs/volume; patent 12260064 |
 | Speaker hardware buttons/remote adjust app volume | TuneBlade added a DACP server after complaints; OwnTone users still ask | complaint / requested | **HAS** — merged, live-verified | tuneblade.com/releaseNotes 1.6.0; owntone #1094 |
 | Per-app routing (app → speakers, rest local) | SoundSource 6 shipped it Dec 2025 ($49); no native macOS support | requested → now differentiator | **HAS** — shipped, incl. mixing overlapping routes per speaker | weblog.rogueamoeba.com 2025/12/04; SPEC §3 v2 |
-| System-wide selectable output group (aggregate device) | SoundSource 6 custom output groups | differentiator | **HAS** — Wave 3 public "Audiouter" aggregate, live-verified; seamless AirPlay-exclusivity handoff built (unmerged) | rogueamoeba.com/soundsource/whatsnew.php |
+| System-wide selectable output group (aggregate device) | SoundSource 6 custom output groups | differentiator | **HAS** — Wave 3 public "Audiouter" aggregate, merged + live-verified `daa8793e` (2026-08-07). Handing the speaker back to macOS works when the user picks a *different* speaker; picking the *same* one still fails → roadmap 026 | rogueamoeba.com/soundsource/whatsnew.php |
 | Fully local control, no cloud | Sonos rewrite's cloud round-trip drove users away | complaint | **HAS — inherent** | theregister.com 2024/05/20; Sonos community 6904138 |
 | No driver/kext install friction | Rogue Amoeba's ACE was their biggest support burden for years | complaint | **HAS** — native process-tap API, TCC prompt only | rogueamoeba KB ACE-BigSur-Install-Troubleshooting |
 | Lossless on the wire | Audiophiles loudly complain AirPlay 2 senders silently transcode to AAC-256 | complaint | **HAS (mechanism)** — vendored sender encodes ALAC (`airplay.c` `alac_encode`, send path). No user-facing codec indicator. | audiophilestyle.com "Lossless Mess Part 2"; darko.audio 2023/10 |
 | Zero-config Spotify capture | Linux users accept librespot/named-pipe pain for the same outcome | requested | **HAS** — per-app tap of the Spotify app | owntone #295 + docs/integrations/spotify.md |
 | Better-than-benchmark latency vs cast tools | BubbleUPnP admits 5–8 s (Chromecast) to 12–14 s (UPnP) delay | complaint | **HAS** — real-time AP2 path, ~2 s sync buffer | bubblesoftapps.com tips; groups.google.com YtGjIfxvzG0 |
-| Synced local playback (Mac speakers in the group) | BubbleUPnP can't sync multiple renderers at all | complaint | **HAS (built)** — synced-local waves built; one live-blocking bug open | groups.google.com XKGGYl0FKVM |
+| Synced local playback (Mac speakers in the group) | BubbleUPnP can't sync multiple renderers at all | complaint | **HAS** — `SyncedLocalSink` + `PhaseController` merged to main and verified 2026-08-07; the live-blocking bug the 08-05 brief noted is fixed | groups.google.com XKGGYl0FKVM |
 
 ### Gaps — candidates (assessed in §3)
 
 | Feature | Who ships / who asks | Demand | Audiouter status | Evidence |
 |---|---|---|---|---|
-| Per-device delay/latency trim | Google Home ships it; TuneBlade shipped ±500 ms; snapcast per-client latency is table stakes; Airfoil users ask; OwnTone users ask | table-stakes (4 of 5 families) | **MISSING** — global buffer-ms setting only, no per-device trim | support.google.com/googlecast/6318642; tuneblade releaseNotes 1.5.1; snapcast README; forked-daapd #560; rogueamoeba KB AudioDelaysAndSync |
+| Per-device delay/latency trim | Google Home ships it; TuneBlade shipped ±500 ms; snapcast per-client latency is table stakes; Airfoil users ask; OwnTone users ask | table-stakes (4 of 5 families) | **HALF-BUILT, unmerged** — `BTSyncedSink` on `claude/foreman-roadmap-004-bt` already carries a signed per-device manual nudge (`trimMs`) plus an automatic per-device offset, and Alec's 2026-08-07 call cut the microphone auto-offset in favour of "manual offset is the shipping story". Two things are still missing: any UI for it (the SYNC column is spec'd, not built) and the same trim on the AirPlay side | support.google.com/googlecast/6318642; tuneblade releaseNotes 1.5.1; snapcast README; forked-daapd #560; rogueamoeba KB AudioDelaysAndSync |
 | Per-device EQ (bass/treble/balance/loudness) | Sonos, SoundSource (per-app 10-band), Airfoil (10-band), TuneBlade (3-band); snapcast users beg (#917, offered a PR) | table-stakes in the niche + requested upstream | **MISSING — already SPEC v2** ("per-device EQ / L-R balance", full window) | rogueamoeba.com/soundsource controls-applications; snapcast #917/#1230; support.sonos.com bass-treble article |
 | Shortcuts / automation actions | SoundSource 6 expanded Shortcuts actions; TuneBlade's HTTP API kept 3 community HA integrations alive for 4+ years; snapcast/OwnTone JSON APIs are load-bearing | requested (strongest small-vendor demand signal) | **MISSING** — companion protocol is private, no Shortcuts/App Intents, no public API | community.home-assistant.io/t/103642; rogueamoeba soundsource/whatsnew; snapcast README JSON-RPC |
 | Sleep timer (+ fade) | Sonos stripped it in 2024; loudly mourned until restored | complaint | **MISSING — already SPEC "Later"** (sleep timer + fade in/out) | digitaltrends.com sonos-app-redesign; soundguys.com 123602 |
@@ -57,15 +62,15 @@ Five families swept in parallel on 2026-08-05:
 | Manual add receiver by IP:port | TuneBlade (motivated by broken mDNS networks) | complaint (recurring support-load theme) | **MISSING** — Bonjour-only discovery | tuneblade releaseNotes 1.2.0 |
 | Per-device max-volume limit / settings lock | SoundSource 6 | differentiator | **MISSING** — adjacent: roadmap 018's anti-blast open question | rogueamoeba soundsource/whatsnew |
 | One-tap "everywhere" / select-all | Sonos party mode treated as baseline | table-stakes | **PARTIAL** — a saved all-speakers group does it; no built-in select-all control | Sonos community 5451386 |
-| Discovery grace (speakers never silently vanish) | Sonos rooms vanishing daily was a top-3 backlash theme | complaint | **PARTIAL** — Bonjour discovery + sticky-failed states exist; no audited keep-visible-but-unreachable grace policy | Sonos community 6885456, 6890530 |
-| Connection standby (silence → idle stream, resume on audio) | TuneBlade (refined over 4 releases) | differentiator | **MISSING** — and roadmap 017 shows the silence path currently has a *bug* (starvation skew) | tuneblade releaseNotes 1.2.0–1.3.2; ROADMAP 017 |
-| Bluetooth outputs synced with network speakers | Airfoil ships BT-in-group; every OSS project has an open wound (BT drift unsolved upstream) | complaint / differentiator | **MISSING (planned)** — roadmap 004 + PLAN-UNIVERSAL-SYNC designed, zero BT code | owntone #543; snapcast #50/#912; rogueamoeba.com/airfoil |
+| Discovery grace (speakers never silently vanish) | Sonos rooms vanishing daily was a top-3 backlash theme | complaint | **MOSTLY CLOSED** (roadmap 030, merged `89975cc7` 2026-08-07) — a speaker that fails now stays on screen with its real reason, deselect always works, retry is a scoped action, and the failure park only clears on a real state change; this Mac's own AirPlay receiver no longer pollutes the list. Still unaudited: what the list does when a *healthy* speaker simply stops answering Bonjour mid-session | Sonos community 6885456, 6890530 |
+| Connection standby (silence → idle stream, resume on audio) | TuneBlade (refined over 4 releases) | differentiator | **MISSING** — and the silence path is now *known* broken, not suspected: roadmap 017's starvation skew is corroborated across five days of telemetry (25 of 25 rebuilds with no re-anchor), and roadmap 019's Bluetooth-mic storm was reproduced live on 2026-08-07. Fix the silence path before building standby on top of it | tuneblade releaseNotes 1.2.0–1.3.2; ROADMAP 017, 019 |
+| Bluetooth outputs synced with network speakers | Airfoil ships BT-in-group; every OSS project has an open wound (BT drift unsolved upstream) | complaint / differentiator | **BUILT THROUGH WAVE 3, unmerged** — `claude/foreman-roadmap-004-bt` adds ~3,500 lines with tests: Bluetooth devices in discovery, `BTSyncedSink` (per-device delayed sinks, reference selection, adaptive drift gate), captured audio fanned out to Bluetooth alongside AirPlay, and selection semantics. Sync machinery was extracted into a licence-clean `SyncCore` first. Two hardware spikes came back GO (Sony WH-1000XM3: 4.4 s connect, 0.4 ppm clock). The 08-05 "zero BT code" line is stale | owntone #543; snapcast #50/#912; rogueamoeba.com/airfoil |
 | Chromecast / Google Cast output | Airfoil + AirParrot ship cross-protocol groups (fragile in practice per reviews) | differentiator | **MISSING (planned)** — roadmap 006 scoping brief | rogueamoeba.com/airfoil; airsquirrels.com/airparrot |
-| iOS companion remote | Airfoil Satellite, TuneBlade remote, Porthole remote — all three peers shipped one | table-stakes | **PARTIAL** — built on branch, unmerged, live-gated | rogueamoeba.com/airfoil/satellite; tuneblade 1.2.0; ROADMAP 005 |
+| iOS companion remote | Airfoil Satellite, TuneBlade remote, Porthole remote — all three peers shipped one | table-stakes | **PARTIAL** — first real phone↔Mac connect achieved (approval flow + Speakers tab, `65ad670`); still on `claude/companion-app-phase2-ios`, unmerged | rogueamoeba.com/airfoil/satellite; tuneblade 1.2.0; ROADMAP 005 |
 | Volume keys work everywhere (incl. aggregate output) | TidBITS notes dead volume keys on aggregates; Sonos friction threads | complaint | **PARTIAL** — Main mirrors system volume (merged); dead-keys-on-aggregate = A2 interceptor, queued | discussions.apple.com 255079124; TidBITS |
 | Line-in / input-device as source | TuneBlade "Specific Endpoint" capture | differentiator | **MISSING** | tuneblade releaseNotes 1.2.0 |
-| Glitch-free capture under CPU load | TuneBlade shipped dedicated work; AirParrot stutter complaints | complaint | **PARTIAL** — RT send-thread Stage 2 gated on live T10 measurement | tuneblade 1.5.1; askwoody AirParrot review |
-| Password/passcode receivers | TuneBlade treated each Apple auth mode as must-fix | table-stakes | **PARTIAL** — AP1 auth-setup/MFi deferred (AirPort Express); AP2-password status unverified | tuneblade 1.7.7 |
+| Glitch-free capture under CPU load | TuneBlade shipped dedicated work; AirParrot stutter complaints | complaint | **PARTIAL** — unchanged as a feature, but now measurable: the write-cadence counters merged 2026-08-07 (`e98c2c1d`) separate real drift from ordinary pauses, so a future claim here can be evidenced. Real-time send-thread Stage 2 still gated on a live measurement | tuneblade 1.5.1; askwoody AirParrot review |
+| Password/passcode receivers | TuneBlade treated each Apple auth mode as must-fix | table-stakes | **MISSING, now scoped** — the engine detects a password-protected receiver and the row says so (`.authRequired`, merged in roadmap 030). What's absent is the actual handshake in the vendored C sender plus a prompt UI → roadmap 027 has both written up | tuneblade 1.7.7 |
 
 ### Recorded, deliberately not chased (see §4)
 
@@ -181,3 +186,58 @@ Spec/roadmap-verified changes from the raw JSON's `audiouter_status_guess` field
 | Connection standby (silence handling) | unknown | **missing, with an open bug** | Roadmap 017: the silence path currently has a producer-starvation skew bug — fix before feature |
 | Chromecast output | missing | **missing (planned)** | Roadmap 006 already scopes the research |
 | Trial/pricing findings | unknown | **N/A** | SPEC §2: GPL-2.0-or-later open source, direct download — pricing mechanics moot |
+
+---
+
+## 7. Delta — what changed between 2026-08-05 and 2026-08-07
+
+Checked against `main` and against every branch that isn't merged into it. Competitor
+evidence was **not** re-swept; only Audiouter's own status moved.
+
+**Headline: none of the ten shortlist items were built, but the roadmap is closer to two of
+them than the 08-05 brief knew.** The rest of the two days went to reliability, and to
+Bluetooth — which the brief had recorded as having no code at all.
+
+### Landed on `main`
+
+| What | Effect on this brief |
+|---|---|
+| Aggregate output device + handing the speaker back to macOS (`daa8793e`, live-verified) | Was "built (unmerged)" — now shipped. New caveat: re-picking the *same* speaker still fails (entry 026) |
+| Unreachable-device lifecycle (`89975cc7`) | "Discovery grace" moves from a gap to mostly closed, and password-protected receivers now at least *say* so |
+| Synced local playback (`SyncedLocalSink`, `PhaseController`) | The live-blocking bug is gone; this is a clean parity win now |
+| Write-cadence counters (`e98c2c1d`) | Doesn't add a feature — makes "glitch-free under load" something we can prove rather than assert |
+
+### Built but sitting on branches
+
+- **Bluetooth output (`claude/foreman-roadmap-004-bt`)** — the biggest correction in this
+  pass. Waves 1–3 are written and tested, on top of a licence-clean `SyncCore` split out
+  of the synced-local code. Both hardware spikes came back GO. Unmerged and not
+  live-tested end to end.
+- **Per-device delay trim** — shortlist #1 exists in code for Bluetooth devices
+  (`trimMs`), because Alec cut the automatic microphone-based offset on 2026-08-07 and
+  made the manual nudge the shipping answer. What's left is the UI and the AirPlay-side
+  equivalent, which is a much smaller job than the brief assumed.
+- **iOS companion** — first genuine phone-to-Mac connection working
+  (`claude/companion-app-phase2-ios`).
+- **One-surface window (entry 032)** and the 25-item UI punch list — reshapes where any
+  new per-device control (trim, EQ, volume ceiling) would live. Worth landing before
+  adding controls to the row UI, or they get built twice.
+
+### What this does to the ranking in §3
+
+1. **Per-device delay trim** stays #1 and gets cheaper — finish the Bluetooth trim's UI
+   and mirror it onto AirPlay rather than starting from scratch.
+2. **Per-device EQ**, **Shortcuts/App Intents**, **sleep timer**, **scenes**,
+   **auto-connect**, **manual IP entry**, **codec transparency**, and **per-device
+   max-volume** are all still untouched — verified by searching `main` for each. The
+   ranking between them is unchanged.
+3. **Cast output** (#10) is unchanged, but its cost estimate should now be read against a
+   real second-protocol precedent: Bluetooth took three waves and two hardware spikes to
+   reach unmerged-and-untested, and Bluetooth shares a clock domain far more forgiving
+   than Cast's.
+
+### Still open from §5
+
+None of the eight owner questions have been answered, except that question 4's
+auto-offset half was settled by Alec on 2026-08-07 (manual offset wins). Questions 1, 2,
+3, 5, 6, 7 and 8 are still waiting.

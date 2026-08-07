@@ -3954,8 +3954,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     ///
     /// D4 best-effort: a failed op marks the device unavailable + parks it in
     /// `failedGate` (so we don't keep issuing sessions post-failure — root cause 5)
-    /// and stops the loop; the park is cleared by a later discovery/state update or
-    /// a user re-toggle (root cause 4).
+    /// and stops the loop; the park is cleared only on a genuine edge (storm fix,
+    /// 2026-08-06): a came-back discovery edge (changed descriptor, or reappearing
+    /// after a `disappeared`), an engine good-state transition, a membership edge
+    /// for this id, or the user's "Try again" (`retryOutput`) — never by a mere
+    /// same-descriptor re-announce.
     /// Release the `converging` slot for `id` and, if the coalesced target moved
     /// while the slot was held (a toggle — or a whole-system rebind recovery,
     /// below — landed mid-op), reclaim the slot and return the output id to kick
@@ -5060,10 +5063,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // Availability recovery (root cause 4), EDGE-GATED (storm fix,
             // 2026-08-06): clear a terminal-failure park only when this
             // re-resolve is evidence the device actually CAME BACK — no
-            // descriptor was on file (first sighting, back from sticky-AP2
-            // offline, or re-appeared after a `disappeared`, all of which nil
-            // the memo) or the announced descriptor CHANGED (the receiver
-            // restarted / moved). A dead-but-still-announcing receiver
+            // descriptor was on file (first sighting, or back from sticky-AP2
+            // offline, which nils the memo) or the announced descriptor CHANGED
+            // (the receiver restarted / moved). Reappearing after a
+            // `disappeared` keeps the memo (`removeEngineDiscovery` needs it to
+            // reconstruct the deregistration) — that case auto-reconnects
+            // because `markDisappeared` itself drops the park with the episode,
+            // not through this edge check. A dead-but-still-announcing receiver
             // re-resolving the SAME descriptor is NOT evidence of recovery:
             // the old unconditional clear here (STABILITY(C7), "no backoff")
             // plus the `desiredOn` re-kick below re-armed a failed device on
@@ -5322,7 +5328,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // unavailable + deselected and drop it from the streaming set. PARK
                 // it (root cause 5) so converge doesn't immediately re-issue a
                 // session against a receiver that just failed — the park is cleared
-                // by the next discovery/good-state transition or a user re-toggle.
+                // only on a genuine edge (storm fix, 2026-08-06): a came-back
+                // discovery edge, an engine good-state transition, a membership
+                // edge, or `retryOutput` — a same-descriptor re-announce keeps it.
                 device.isAvailable = false
                 device.isSelected = false
                 self.added.remove(id)

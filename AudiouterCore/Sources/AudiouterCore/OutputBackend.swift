@@ -329,8 +329,16 @@ public protocol OutputBackend: AnyObject {
     /// (`GroupController.retryConnection(for:)` is the only production caller).
     /// Scoped to `id` alone: it must not re-kick, re-park, or otherwise touch
     /// any OTHER `.failed` device, and it never changes membership (R12: intent
-    /// is the user's; retry is a backend-facing re-kick). A no-op for an id the
-    /// backend doesn't currently desire, or one already `.connected`.
+    /// is the user's; retry is a backend-facing re-kick).
+    ///
+    /// Required contract: a still-desired `.failed` id gets a fresh attempt;
+    /// an id the backend doesn't currently desire, or one already `.connected`,
+    /// is a no-op. Other non-connected states are CONFORMER LATITUDE:
+    /// `NativeBackend` re-kicks any still-desired non-`.connected` id (a retry
+    /// mid-`.reconnecting` restates `.connecting` — the user pressed the
+    /// button, so the attempt marker wins), while `MockBackend` acts only on
+    /// `.failed` and no-ops otherwise (scripted tests want no surprise
+    /// attempts). Don't tighten either direction without checking both.
     func retryOutput(_ id: String)
 
     /// Set the two master gain stages, both on the UI's 0–100 scale: what reaches

@@ -180,7 +180,7 @@ public final class AppSurfaceController {
         // chrome inset is measurable from the first mount.
         toolbarController.onSelectScreen = { [weak self] in self?.select($0) }
         toolbarController.onTogglePin = { [weak self] in self?.togglePin() }
-        toolbarController.onQuit = { NSApp.terminate(nil) }
+        toolbarController.onQuit = { NSApp?.terminate(nil) }
         if let window = shell.window {
             toolbarController.attach(to: window)
             // Materialize the toolbar's title-bar machinery NOW (a toolbar on

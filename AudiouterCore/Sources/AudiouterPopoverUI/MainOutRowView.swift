@@ -583,7 +583,7 @@ public final class MainOutRowView: NSView {
         // tracking the model forever (stability-audit-2026-07-18 §D4). A keyboard
         // change has no drag in flight, so it leaves the flag false and repaints stay
         // live.
-        switch NSApp.currentEvent?.type {
+        switch NSApp?.currentEvent?.type {
         case .leftMouseDown, .leftMouseDragged:
             isDraggingMaster = true
         default:

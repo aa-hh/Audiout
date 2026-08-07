@@ -502,7 +502,7 @@ public final class ControlPanelWindowController: NSWindowController {
 
         if isPinned {
             if !HeadlessRuntime.isActive {
-                NSApp.activate(ignoringOtherApps: true)
+                NSApp?.activate(ignoringOtherApps: true)
                 panel.makeKeyAndOrderFront(nil)
             }
             return
@@ -556,7 +556,7 @@ public final class ControlPanelWindowController: NSWindowController {
         // for the run's duration. Everything else (frame math, model state)
         // still runs so headless assertions stay exactly as strong.
         if !HeadlessRuntime.isActive {
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp?.activate(ignoringOtherApps: true)
             panel.makeKeyAndOrderFront(nil)
         }
 
@@ -664,7 +664,7 @@ public final class ControlPanelWindowController: NSWindowController {
     /// Whether THIS app still holds activation. The discriminator between the
     /// two very different reasons a window resigns key — see
     /// `windowDidResignKey`.
-    private var appIsActive: Bool { test_appIsActiveOverride ?? NSApp.isActive }
+    private var appIsActive: Bool { test_appIsActiveOverride ?? NSApp?.isActive ?? false }
 }
 
 // MARK: - NSWindowDelegate

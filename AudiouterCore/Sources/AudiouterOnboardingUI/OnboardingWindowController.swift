@@ -87,7 +87,7 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
 
     /// Seam for `NSApp.keyWindow` so the take-key-only-when-unclaimed rule in
     /// `appDidBecomeActive` is testable headless (no real key windows there).
-    var keyWindowProvider: () -> NSWindow? = { NSApp.keyWindow }
+    var keyWindowProvider: () -> NSWindow? = { NSApp?.keyWindow }
 
     @objc private func appDidBecomeActive() {
         guard !didFinish else { return }
@@ -117,7 +117,7 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
     /// guard's re-front, "Open Setup…" while already open) must not throw
     /// away a position the user chose (punch-list W6).
     public func present() {
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp?.activate(ignoringOtherApps: true)
         if !hasBeenPresented {
             hasBeenPresented = true
             contentVC.view.layoutSubtreeIfNeeded()

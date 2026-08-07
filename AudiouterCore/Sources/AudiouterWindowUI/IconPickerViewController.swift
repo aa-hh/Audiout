@@ -267,7 +267,9 @@ public final class IconPickerViewController: NSViewController {
     /// only re-resolves when asked under the right appearance).
     private func refreshSelectionRingColor() {
         guard let button = selectionRingButton, let layer = button.layer else { return }
-        let appearance = isViewLoaded ? view.effectiveAppearance : NSApp.effectiveAppearance
+        // `NSApp?.` per the UI-target rule in `AudiouterSharedUI/AGENTS.md`; the
+        // fallback covers a headless run with no NSApplication at all.
+        let appearance = isViewLoaded ? view.effectiveAppearance : (NSApp?.effectiveAppearance ?? .currentDrawing())
         appearance.performAsCurrentDrawingAppearance {
             layer.borderColor = Tokens.Color.gold.cgColor
         }

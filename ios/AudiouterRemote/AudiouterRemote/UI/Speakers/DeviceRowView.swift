@@ -184,6 +184,12 @@ struct DeviceRowView: View {
             .accessibilityLabel("\(device.name) volume\(disabledClause)")
             .accessibilityValue("\(Int(localVolume ?? Double(device.volume))) percent")
         }
+        // SwiftUI's own disabled tint on a Slider is nearly invisible, so the
+        // rule above read as "nothing changed" on a real screen. Dim to match
+        // the Mac's desaturated row. Only when the device is available: an
+        // unavailable one is already dimmed by the row-level opacity below,
+        // and both paths should land on the same 0.45 rather than compound.
+        .opacity(device.isAvailable && !controlsEnabled ? 0.45 : 1)
     }
 
     private var failureCard: some View {

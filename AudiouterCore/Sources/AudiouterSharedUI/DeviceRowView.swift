@@ -70,7 +70,7 @@ public final class DeviceRowView: NSView {
         /// already clamped to ±`BTSyncTrim.rangeMs`. Fired by the − / +
         /// stepper (`coarseStepMs` steps) and by typing in the value field
         /// (1 ms). Default no-op for hosts without the SYNC column.
-        func deviceRow(_ row: DeviceRowView, didSetSyncTrimMs ms: Int, for id: String)
+        func deviceRow(_ row: DeviceRowView, didSetSyncTrimMs ms: Double, for id: String)
         /// The user toggled this Bluetooth row's align-by-ear tick button
         /// (BT-OFFSET-UI). Default no-op for hosts without the SYNC column.
         func deviceRow(_ row: DeviceRowView, didToggleAlignTick active: Bool, for id: String)
@@ -306,7 +306,7 @@ public final class DeviceRowView: NSView {
     private let alignButton = NSButton()
     /// The trim the host last applied (also the revert value for unparseable
     /// typing).
-    private var syncTrimMs = 0
+    private var syncTrimMs: Double = 0
     /// Which metronome SF Symbol actually resolved (fill preferred).
     private var alignSymbolName = ""
     /// The most recently pushed meter level, for ``test_meterLevel()``. `0`
@@ -471,7 +471,7 @@ public final class DeviceRowView: NSView {
                       mainOutTargetsGroupName: String? = nil,
                       energizePending: Bool = false,
                       iconSymbolName: String? = nil,
-                      syncTrimMs: Int = 0,
+                      syncTrimMs: Double = 0,
                       alignTickActive: Bool = false) {
         self.device = device
         self.isSelectedInSet = selected
@@ -662,7 +662,7 @@ public final class DeviceRowView: NSView {
         if showsSyncControls {
             self.syncTrimMs = BTSyncTrim.clamp(syncTrimMs)
             if syncField.currentEditor() == nil {
-                syncField.stringValue = "\(self.syncTrimMs)"
+                syncField.stringValue = Self.formattedTrim(self.syncTrimMs)
             }
             let adjustable = device.isAvailable
             syncField.isEditable = adjustable
@@ -1657,7 +1657,7 @@ public final class DeviceRowView: NSView {
                 .withSymbolConfiguration(config)
             button.contentTintColor = Tokens.Color.secondaryLabel
             button.setAccessibilityLabel(label)
-            button.toolTip = "\(BTSyncTrim.coarseStepMs) ms steps — hold ⌥ for \(BTSyncTrim.fineStepMs) ms"
+            button.toolTip = "\(Self.formattedTrim(BTSyncTrim.coarseStepMs)) ms steps — hold ⌥ for \(Self.formattedTrim(BTSyncTrim.fineStepMs)) ms"
             button.target = self
             button.action = action
         }
@@ -1720,20 +1720,34 @@ public final class DeviceRowView: NSView {
     }
 
     /// Enter/typing commit: parse a signed integer (a trailing "ms" or spaces
-    /// are tolerated); unparseable input reverts to the current value.
+    /// are tolerated); unparseable input reverts to the current value. Whole
+    /// milliseconds only here — this row's plain field predates the drawer's
+    /// decimal ruler (BT-SYNC-DRAWER T4/T5), which is where typed 0.1 ms
+    /// input will land; parsing stays `Int` so this row's behavior is
+    /// unchanged by the `Double` widening, and the result is just stored
+    /// widened.
     @objc private func syncFieldEdited(_ sender: NSTextField) {
         let cleaned = sender.stringValue
             .replacingOccurrences(of: "ms", with: "")
             .trimmingCharacters(in: .whitespaces)
             .replacingOccurrences(of: "−", with: "-")   // typography minus
-        commitSyncTrim(Int(cleaned) ?? syncTrimMs)
+        commitSyncTrim(Int(cleaned).map(Double.init) ?? syncTrimMs)
     }
 
-    private func commitSyncTrim(_ ms: Int) {
+    private func commitSyncTrim(_ ms: Double) {
         let clamped = BTSyncTrim.clamp(ms)
         syncTrimMs = clamped
-        syncField.stringValue = "\(clamped)"
+        syncField.stringValue = Self.formattedTrim(clamped)
         delegate?.deviceRow(self, didSetSyncTrimMs: clamped, for: device.id)
+    }
+
+    /// Bare-integer text for a whole-number ms value — identical to the
+    /// pre-widening `Int` display for every value this row's plain stepper
+    /// cluster (whole `coarseStepMs`/`fineStepMs` steps) can produce; one
+    /// decimal place for anything finer, which only the drawer's 0.1 ms ruler
+    /// (BT-SYNC-DRAWER T4+) can ever produce.
+    private static func formattedTrim(_ ms: Double) -> String {
+        ms.rounded() == ms ? String(Int(ms)) : String(format: "%.1f", ms)
     }
 
     @objc private func alignTapped(_ sender: NSButton) {
@@ -2744,7 +2758,7 @@ public extension DeviceRowView.Delegate {
     func deviceRowDidRequestReconnect(_ row: DeviceRowView) {}
     /// Default no-ops — only the popover hosts the Bluetooth SYNC column
     /// (BT-OFFSET-UI).
-    func deviceRow(_ row: DeviceRowView, didSetSyncTrimMs ms: Int, for id: String) {}
+    func deviceRow(_ row: DeviceRowView, didSetSyncTrimMs ms: Double, for id: String) {}
     func deviceRow(_ row: DeviceRowView, didToggleAlignTick active: Bool, for id: String) {}
 }
 

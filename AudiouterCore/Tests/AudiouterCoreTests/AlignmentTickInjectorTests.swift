@@ -35,7 +35,7 @@ import AudioToolbox
         // alias a fully-offset device as aligned one beat late at 120 BPM.
         #expect(injector.test_beatFrames == 36_750)
         let beatMs = Double(injector.test_beatFrames) / 44.1
-        #expect(beatMs > Double(BTSyncTrim.rangeMs) + 100,
+        #expect(beatMs > BTSyncTrim.rangeMs + 100,
                 "the beat interval must clear the whole trim range with margin")
     }
 

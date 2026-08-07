@@ -250,13 +250,13 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// clamped. The app wires this to
     /// `(backend as? BTOutputControlling)?.setBTSyncTrim` — live-applied to
     /// that device's `BTSyncedSink` delay and persisted per device UID.
-    public var onSetBTTrim: ((_ ms: Int, _ deviceID: String) -> Void)?
+    public var onSetBTTrim: ((_ ms: Double, _ deviceID: String) -> Void)?
 
     /// The saved SYNC trim for a Bluetooth device id — seeds each row's value
     /// (and the read-only display on a disconnected row). Wired to
     /// `(backend as? BTOutputControlling)?.btSyncTrim`. `nil` = 0, and edits
     /// then live only in `btTrimsByID` (mock/dev — nothing persists them).
-    public var btTrimProvider: ((_ deviceID: String) -> Int)?
+    public var btTrimProvider: ((_ deviceID: String) -> Double)?
 
     /// Called with `true`/`false` as the align-by-ear tick starts/stops
     /// (BT-OFFSET-UI). Wired to
@@ -266,7 +266,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// The freshest trim value per device id (the user's latest edit, or the
     /// provider's persisted value on first read) — the rows' apply source, so
     /// a rebuild never has to round-trip the backend.
-    private var btTrimsByID: [String: Int] = [:]
+    private var btTrimsByID: [String: Double] = [:]
 
     /// The row whose align-by-ear tick is currently running, if any. One at a
     /// time: toggling another row's button moves the single tick.
@@ -1615,7 +1615,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// user's freshest edit), else the persisted value via `btTrimProvider`,
     /// else 0. Non-BT devices short-circuit to 0 (their rows mount no SYNC
     /// cluster and ignore the value anyway).
-    private func btSyncTrim(for device: Device) -> Int {
+    private func btSyncTrim(for device: Device) -> Double {
         guard device.isBluetooth else { return 0 }
         if let cached = btTrimsByID[device.id] { return cached }
         let persisted = btTrimProvider?(device.id) ?? 0
@@ -2748,7 +2748,7 @@ extension PopoverController: DeviceRowView.Delegate {
         groupController?.requestReconnect(for: row.device.id)
     }
 
-    public func deviceRow(_ row: DeviceRowView, didSetSyncTrimMs ms: Int, for id: String) {
+    public func deviceRow(_ row: DeviceRowView, didSetSyncTrimMs ms: Double, for id: String) {
         btTrimsByID[id] = ms
         onSetBTTrim?(ms, id)
     }

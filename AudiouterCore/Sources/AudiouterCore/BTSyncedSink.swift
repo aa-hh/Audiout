@@ -58,7 +58,7 @@ enum BTReferenceTimeline {
         presentationDelayMs: Int,
         btOnlyBufferMs: Int,
         deviceOffsetMs: Int,
-        trimMs: Int
+        trimMs: Double
     ) -> Int64 {
         SyncTiming.totalDelayNanos(
             presentationDelayMs: composition.airPlayPresent ? presentationDelayMs : btOnlyBufferMs,
@@ -915,7 +915,7 @@ final class BTSyncedSink: @unchecked Sendable {
     private var sinksByUID: [String: BTDeviceSink] = [:]
     private var composition = BTGroupComposition(airPlayPresent: false, macLocalPresent: false)
     private var offsetMsByUID: [String: Int] = [:]
-    private var trimMsByUID: [String: Int] = [:]
+    private var trimMsByUID: [String: Double] = [:]
     private var desiredRunning = false
 
     init(
@@ -1004,7 +1004,7 @@ final class BTSyncedSink: @unchecked Sendable {
     }
 
     /// The settable per-device signed manual trim (ms).
-    func setTrimMs(_ ms: Int, forDeviceUID uid: String) {
+    func setTrimMs(_ ms: Double, forDeviceUID uid: String) {
         let sink = tableLock.withLock { () -> BTDeviceSink? in
             guard trimMsByUID[uid] != ms else { return nil }
             trimMsByUID[uid] = ms

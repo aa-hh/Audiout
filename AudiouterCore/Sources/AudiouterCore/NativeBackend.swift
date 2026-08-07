@@ -294,7 +294,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// and snapshotted by `captureControlQueue` when a sink is (re)armed; a
     /// dedicated lock keeps those reads off `stateQueue` entirely.
     private let btTrimLock = NSLock()
-    private var btTrimsByUID: [String: Int] = [:]   // btTrimLock
+    private var btTrimsByUID: [String: Double] = [:]   // btTrimLock
 
     /// Test seam: a BT `Device.id` (its Core Audio UID) → the live
     /// `AudioObjectID` a per-device sink pins its engine to. `nil` (production)
@@ -7921,10 +7921,10 @@ public protocol BTOutputControlling: AnyObject {
     func lastUsedDatesForBTDevices() -> [String: Date]
     /// Set a device's SYNC trim (ms, clamped to ±`BTSyncTrim.rangeMs`):
     /// applied live to its `BTSyncedSink` delay and persisted per device UID.
-    func setBTSyncTrim(_ ms: Int, forDevice id: String)
+    func setBTSyncTrim(_ ms: Double, forDevice id: String)
     /// The saved SYNC trim for a device (0 when none) — what a disconnected
     /// row shows read-only, and what the stepper starts from.
-    func btSyncTrim(forDevice id: String) -> Int
+    func btSyncTrim(forDevice id: String) -> Double
     /// Start/stop the align-by-ear tick in the captured feed (auto-limits to
     /// ~30 s of ticks on its own).
     func setBTAlignTickActive(_ active: Bool)
@@ -7932,9 +7932,9 @@ public protocol BTOutputControlling: AnyObject {
 
 extension NativeBackend: BTOutputControlling {
 
-    public func setBTSyncTrim(_ ms: Int, forDevice id: String) {
+    public func setBTSyncTrim(_ ms: Double, forDevice id: String) {
         let clamped = BTSyncTrim.clamp(ms)
-        let all: [String: Int] = btTrimLock.withLock {
+        let all: [String: Double] = btTrimLock.withLock {
             btTrimsByUID[id] = clamped
             return btTrimsByUID
         }
@@ -7944,7 +7944,7 @@ extension NativeBackend: BTOutputControlling {
         }
     }
 
-    public func btSyncTrim(forDevice id: String) -> Int {
+    public func btSyncTrim(forDevice id: String) -> Double {
         btTrimLock.withLock { btTrimsByUID[id] ?? 0 }
     }
 
@@ -8003,14 +8003,14 @@ protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
     /// The UIDs whose per-device sink is emitting real audio right now — the
     /// signal a Bluetooth row's `.connecting` hold ends on.
     func renderingDeviceUIDs() -> Set<String>
-    /// Per-device signed manual trim (BT-OFFSET-UI). Default no-op so
-    /// lifecycle-only spies compile unchanged; ``BTSyncedSink`` provides the
-    /// real one (same-value writes are already guarded there).
-    func setTrimMs(_ ms: Int, forDeviceUID uid: String)
+    /// Per-device signed manual trim (BT-OFFSET-UI/BT-SYNC-DRAWER). Default
+    /// no-op so lifecycle-only spies compile unchanged; ``BTSyncedSink``
+    /// provides the real one (same-value writes are already guarded there).
+    func setTrimMs(_ ms: Double, forDeviceUID uid: String)
 }
 
 extension BTSyncedSinkControlling {
-    func setTrimMs(_ ms: Int, forDeviceUID uid: String) {}
+    func setTrimMs(_ ms: Double, forDeviceUID uid: String) {}
 }
 
 extension BTSyncedSink: BTSyncedSinkControlling {}

@@ -265,7 +265,10 @@ public final class SyncedLocalSink: @unchecked Sendable {
             presentationDelayMs: presentationDelayMs(),
             localOutputLatencySeconds: localOutputLatency()?.totalSeconds ?? 0,
             safetyMarginMs: safetyMarginMs,
-            userOffsetMs: userOffsetMs())
+            // `userOffsetMs` stays a whole-ms `Int` here (T-OFFSET-UI owns no
+            // fractional resolution) — widened only at this call, matching
+            // `totalDelayNanos`'s now-`Double` parameter (BT-SYNC-DRAWER T1).
+            userOffsetMs: Double(userOffsetMs()))
     }
 
     /// Just the engine-level teardown half of `stop()` — no session-state reset.
@@ -478,7 +481,7 @@ public final class SyncedLocalSink: @unchecked Sendable {
                     presentationDelayMs: presentationDelayMs(),
                     localOutputLatencySeconds: localOutputLatency()?.totalSeconds ?? 0,
                     safetyMarginMs: safetyMarginMs,
-                    userOffsetMs: userOffsetMs())
+                    userOffsetMs: Double(userOffsetMs()))
                 cachedTotalDelayNanos = delay
                 anchored = true
                 targetReleaseNanos = SyncTiming.targetReleaseMonotonicNanos(

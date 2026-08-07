@@ -622,6 +622,36 @@ public enum PopoverColumnGrid {
         syncTrailing + syncClusterWidth / 2
     }
 
+    // MARK: SYNC ruler (PLAN-BT-SYNC-DRAWER T4 — `BTSyncRulerView`)
+    //
+    // The fine-adjustment ruler is a ticked tape sliding under a FIXED centre
+    // pointer (D3), not a slider with a travelling thumb — it must not be
+    // mistaken for the row's volume sliders. Sized for the drawer's ~380 pt
+    // width: at that width `syncRulerVisibleSpanMs` (±6 ms, D4) works out to
+    // roughly 3 pt of travel per 0.1 ms, the smallest movement worth feeling
+    // by hand — a wider span would make the decimal digit a lie. Named
+    // constants only — the Figma design-system contract mirrors this file.
+
+    /// Height of the ruler view.
+    public static let syncRulerHeight: CGFloat = 40
+    /// Total visible span of the tape, in milliseconds (±half this around the
+    /// current value) — D4's ±6 ms window.
+    public static let syncRulerVisibleSpanMs: CGFloat = 12
+    /// Height of a minor (1 ms) tick.
+    public static let syncRulerMinorTickHeight: CGFloat = 6
+    /// Height of a major (5 ms, numeric-labeled) tick.
+    public static let syncRulerMajorTickHeight: CGFloat = 12
+    /// Width of the fixed centre pointer's vertical accent line.
+    public static let syncRulerPointerWidth: CGFloat = 2
+    /// Slowest drag gearing (at or below `BTSyncRulerView`'s ≤1 pt/event
+    /// speed floor): 0.1 ms of value change per roughly 3 pt of drag, so a
+    /// deliberate slow drag can land exact 0.1 ms steps by feel (D5). Also
+    /// the gearing a held ⌥ forces regardless of the actual drag speed.
+    public static let syncRulerSlowMsPerPoint: CGFloat = 0.1 / 3
+    /// Fastest drag gearing (at or above the ≥40 pt/event speed ceiling): a
+    /// fast drag covers setup-scale jumps in a handful of points (D5).
+    public static let syncRulerFastMsPerPoint: CGFloat = 2.0
+
     // MARK: Inter-column gaps
 
     /// Gap after the icon, before the name.

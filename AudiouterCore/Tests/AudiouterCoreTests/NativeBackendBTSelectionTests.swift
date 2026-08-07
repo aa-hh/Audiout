@@ -152,7 +152,7 @@ import CoreAudio
         func setComposition(_ composition: BTGroupComposition) {
             lock.withLock { _calls.append("setComposition"); _compositions.append(composition) }
         }
-        func setTrimMs(_ ms: Int, forDeviceUID uid: String) {
+        func setTrimMs(_ ms: Double, forDeviceUID uid: String) {
             lock.withLock { _calls.append("setTrimMs"); _trims.append((ms: ms, uid: uid)) }
         }
         func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {}
@@ -169,8 +169,8 @@ import CoreAudio
         var calls: [String] { lock.withLock { _calls } }
         var deviceSets: [[BTSyncedSink.DeviceSpec]] { lock.withLock { _deviceSets } }
         var compositions: [BTGroupComposition] { lock.withLock { _compositions } }
-        private var _trims: [(ms: Int, uid: String)] = []
-        var trims: [(ms: Int, uid: String)] { lock.withLock { _trims } }
+        private var _trims: [(ms: Double, uid: String)] = []
+        var trims: [(ms: Double, uid: String)] { lock.withLock { _trims } }
     }
 
     // MARK: Fixtures + helpers

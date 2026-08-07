@@ -17,7 +17,7 @@ import AppKit
     private final class SpyDelegate: DeviceRowView.Delegate {
         var toggles: [(on: Bool, id: String)] = []
         var reconnects: [String] = []
-        var trims: [(ms: Int, id: String)] = []
+        var trims: [(ms: Double, id: String)] = []
         var alignToggles: [(active: Bool, id: String)] = []
         func deviceRow(_ row: DeviceRowView, didSetVolume volume: Int, for id: String) {}
         func deviceRow(_ row: DeviceRowView, didToggleMute muted: Bool, for id: String) {}
@@ -28,7 +28,7 @@ import AppKit
         func deviceRowDidRequestReconnect(_ row: DeviceRowView) {
             reconnects.append(row.device.id)
         }
-        func deviceRow(_ row: DeviceRowView, didSetSyncTrimMs ms: Int, for id: String) {
+        func deviceRow(_ row: DeviceRowView, didSetSyncTrimMs ms: Double, for id: String) {
             trims.append((ms, id))
         }
         func deviceRow(_ row: DeviceRowView, didToggleAlignTick active: Bool, for id: String) {
@@ -44,7 +44,7 @@ import AppKit
 
     /// The popover's real BT row shape: bus + meter + SYNC cluster.
     private func makeRow(_ device: Device, delegate: SpyDelegate,
-                         syncTrimMs: Int = 0, alignTickActive: Bool = false,
+                         syncTrimMs: Double = 0, alignTickActive: Bool = false,
                          selected: Bool = false) -> DeviceRowView {
         let row = DeviceRowView(device: device, showsToggle: true,
                                 paintsSelectionBackground: false, showsMeter: true,
@@ -369,7 +369,7 @@ import AppKit
 
     @Test func trimEditsFlowThroughTheClosureAndSurviveRepaints() {
         let (popover, _, _) = makePopover()
-        var written: [(ms: Int, id: String)] = []
+        var written: [(ms: Double, id: String)] = []
         popover.btTrimProvider = { _ in 120 }
         popover.onSetBTTrim = { ms, id in written.append((ms, id)) }
         let devices = [local(), bt("bt-a:output", name: "Speaker A")]

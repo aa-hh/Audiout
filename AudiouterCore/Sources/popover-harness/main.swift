@@ -574,8 +574,8 @@ func runFeedColumnChecks(_ checks: Checks) {
         devices[idx].connectionState = .failed(.init(cause: .notResponding))
     }
     popover.update(devices: devices)
-    checks.expectEqual(popover.test_deviceRow(for: "office")?.test_feedText, "Couldn't connect",
-                       "a failed device's FEED column shows the failure-red override, not the composite")
+    checks.expectEqual(popover.test_deviceRow(for: "office")?.test_feedText, "Didn't respond",
+                       "a failed device's FEED column shows the failure-red headline override, not the composite")
 }
 
 func tempDir() -> URL {

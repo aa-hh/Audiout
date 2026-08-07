@@ -445,6 +445,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             (self?.backend as? AppRouteConfiguring)?.setLocalPlaybackVolume(
                 volume: volume, bundleID: bundleID)
         }
+        // BT-UI: the OUTPUT DEVICES "+" menu's "Pair a Bluetooth speaker…" —
+        // pairing is Apple-owned, so the one-tap Settings trip is the whole
+        // affordance; the fresh row auto-appears on return (connect
+        // notification → enumerator refresh).
+        popoverController.onPairBluetoothSpeaker = {
+            NSWorkspace.shared.open(SystemSettingsPane.bluetooth.url)
+        }
+        // BT-UI ghost pairings: recency feed for the Bluetooth subsection's
+        // stale-to-the-bottom sort. Capability-gated like the hooks above —
+        // nil on MockBackend/OwnToneBackend, which sorts by name alone.
+        popoverController.btLastUsedProvider = { [weak self] in
+            (self?.backend as? BTOutputControlling)?.lastUsedDatesForBTDevices() ?? [:]
+        }
         // Excluded apps (Settings › Audio) are un-routable: the popover reads this
         // to drop them from the Applications picker + rows.
         popoverController.isAppExcluded = { [weak self] bundleID in

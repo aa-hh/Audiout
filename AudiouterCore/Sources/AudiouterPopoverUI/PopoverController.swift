@@ -231,6 +231,21 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// ID with no live local stream, so the popover needs no destination knowledge.
     public var onSetLocalPlaybackVolume: ((_ volume: Int, _ bundleID: String) -> Void)?
 
+    /// Called when the user picks "Pair a Bluetooth speaker…" from the OUTPUT
+    /// DEVICES header's "+" menu (BT-UI, device-tier decision 3: never-paired
+    /// speakers get NO rows — pairing is a one-tap Settings trip). The app
+    /// wires this to open `SystemSettingsPane.bluetooth`; the fresh row then
+    /// auto-appears on return via the enumerator refresh. `nil` = the menu
+    /// item still renders but taps into nothing (tests wire a spy).
+    public var onPairBluetoothSpeaker: (() -> Void)?
+
+    /// When macOS last used each Bluetooth pairing, keyed by device id — the
+    /// Bluetooth subsection's ghost-pairing sort input (stale pairings sink to
+    /// the BOTTOM; sort-only in v1, nothing is hidden). The app wires this to
+    /// `(backend as? BTOutputControlling)?.lastUsedDatesForBTDevices`. `nil`
+    /// (mock/tests without the capability) sorts by name alone.
+    public var btLastUsedProvider: (() -> [String: Date])?
+
     /// Predicate: is `bundleID` excluded from capture (Settings › Audio, "never
     /// captured")? An excluded app is un-routable — dropped from the "+ Add
     /// application…" picker and its route row skipped in `rebuild` (defensive; the
@@ -906,23 +921,26 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // still builds, showing a single non-interactive "Looking for devices…"
         // placeholder so it never silently vanishes.
         let locals = allDevices.filter(\.isLocalDevice)
-        let airplay = allDevices.filter { !$0.isLocalDevice }
+        let airplay = allDevices.filter { !$0.isLocalDevice && !$0.isBluetooth }
+        let bluetooth = orderedBluetoothDevices(in: allDevices)
         devicesPlaceholderShown = false
+        renderedSubsectionTitles = []
         // Combined header row: "Output Devices" title on the left, "VOLUME" over
         // the slider. The membership "Selected" column MOVED to the left spine
         // (v4 §Call-1), so this card no longer heads a membership column — but
         // its device rows' trailing dropdown column, once left empty, now
         // fills the FEED composite (v4.1 item 3), so the header names it
         // "Feed" (`DeviceRowView.updateFeedText`/`feedStack`). The trailing
-        // accessory (F1) saves the current Selected Devices set as a group;
-        // its enabled state tracks `canSaveCurrentSetup`, kept fresh via
-        // `refreshDevicesAccessory()` on selection repaints.
+        // "+" accessory is a MENU now (BT-UI): "Save Selected Devices as
+        // group" (enabled iff `canSaveCurrentSetup` — the gating moved off the
+        // button onto the item) and "Pair a Bluetooth speaker…", so the button
+        // itself stays always-enabled.
         panel.beginCard(header: Self.outputDevicesCardTitle, volumeTitle: "Volume", trailingTitle: "Feed",
                         trailingAccessory: PopoverPanelViewController.HeaderAccessory(
                             symbol: "plus",
-                            label: "Save Selected Devices as group",
-                            action: { [weak self] in self?.saveCurrentSetup() },
-                            isEnabled: canSaveCurrentSetup),
+                            label: "Save the Selected Devices as a group, or pair a Bluetooth speaker",
+                            action: { [weak self] in self?.presentOutputDevicesPlusMenu() },
+                            isEnabled: true),
                         collapsible: true,
                         collapsed: collapsedState(for: Self.outputDevicesCardTitle, default: false),
                         onToggle: { [weak self] in self?.toggleCard(Self.outputDevicesCardTitle) })
@@ -937,7 +955,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         if let note = devicesCardNote {
             panel.addCardNote(note)
         }
-        if locals.isEmpty && airplay.isEmpty {
+        if locals.isEmpty && airplay.isEmpty && bluetooth.isEmpty {
             panel.addRow(makePlaceholderRow(text: "Looking for devices…"))
             devicesPlaceholderShown = true
         } else {
@@ -949,12 +967,19 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                 // the row under it still shows the real underlying device name
                 // (e.g. "MacBook Pro Speakers", via `currentOutputDeviceName`, which
                 // resolves through the aggregate to the wrapped speakers).
-                panel.addSubsectionHeader("This Mac")
+                addSubsection("This Mac")
                 for device in locals { panel.addRow(makeDeviceRow(device, indented: false)) }
             }
             if !airplay.isEmpty {
-                panel.addSubsectionHeader("AirPlay Devices")
+                addSubsection("AirPlay Devices")
                 for device in airplay { panel.addRow(makeDeviceRow(device, indented: false)) }
+            }
+            // Bluetooth subsection (BT-UI): HIDDEN entirely when no BT devices
+            // exist — never an empty grouping label. Rows are ordinary rail
+            // rows; recency ordering is `orderedBluetoothDevices`.
+            if !bluetooth.isEmpty {
+                addSubsection(Self.bluetoothSubsectionTitle)
+                for device in bluetooth { panel.addRow(makeDeviceRow(device, indented: false)) }
             }
         }
         // Set each row's rail extent + feed the continuous rail overlay: the
@@ -1027,6 +1052,36 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     private func orderedDevices() -> [Device] {
         devicesByID.values.sorted { ($0.name, $0.id) < ($1.name, $1.id) }
+    }
+
+    /// The Bluetooth subsection's grouping label (BT-UI) — a constant because,
+    /// like the card titles, tests key off the rendered string.
+    static let bluetoothSubsectionTitle = "Bluetooth Devices"
+
+    /// Subsection titles the LAST `rebuild()` actually rendered, in order —
+    /// the hide-when-empty assertion surface (`test_subsectionTitles`).
+    private var renderedSubsectionTitles: [String] = []
+
+    /// `panel.addSubsectionHeader` + the rendered-titles record, so the test
+    /// surface can never drift from what was actually mounted.
+    private func addSubsection(_ title: String) {
+        renderedSubsectionTitles.append(title)
+        panel.addSubsectionHeader(title)
+    }
+
+    /// The Bluetooth subsection's rows, recency-ordered (BT-UI ghost
+    /// pairings): most-recently-used pairing first, so a years-dead ghost
+    /// sinks to the BOTTOM — sort only, nothing hidden in v1. A device with
+    /// no known `lastUsed` sorts below every dated one; name (then id) breaks
+    /// ties deterministically.
+    private func orderedBluetoothDevices(in devices: [Device]) -> [Device] {
+        let lastUsed = btLastUsedProvider?() ?? [:]
+        return devices.filter(\.isBluetooth).sorted { a, b in
+            let ua = lastUsed[a.id] ?? .distantPast
+            let ub = lastUsed[b.id] ?? .distantPast
+            if ua != ub { return ua > ub }
+            return (a.name, a.id) < (b.name, b.id)
+        }
     }
 
     // MARK: Collapse-default policy (T-5, PLAN §B)
@@ -1515,7 +1570,11 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// `rebuild()`.
     private func updateBusRailExtents() {
         let ordered = orderedDevices()
-        let renderOrder = ordered.filter(\.isLocalDevice) + ordered.filter { !$0.isLocalDevice }
+        // Must match `rebuild()`'s render order exactly: locals, AirPlay, then
+        // the recency-ordered Bluetooth subsection (BT-UI).
+        let renderOrder = ordered.filter(\.isLocalDevice)
+            + ordered.filter { !$0.isLocalDevice && !$0.isBluetooth }
+            + orderedBluetoothDevices(in: ordered)
         let lastSelected = renderOrder.lastIndex {
             groupController?.isSpeakerSelected($0.id) ?? false
         }
@@ -1540,10 +1599,50 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                           deviceCardTitle: Self.outputDevicesCardTitle)
     }
 
-    /// Sync the Devices card's "Save Selected Devices as group" accessory enabled
-    /// state with `canSaveCurrentSetup` in place — no-op if the card isn't built.
+    /// The Devices card's "+" button stays ALWAYS enabled now that it fronts a
+    /// menu (BT-UI): the "Pair a Bluetooth speaker…" item must be reachable
+    /// even when nothing is selected, so `canSaveCurrentSetup` gates only the
+    /// save ITEM (`makeOutputDevicesPlusMenu` re-reads it per presentation).
     private func refreshDevicesAccessory() {
-        panel.setAccessoryEnabled(title: Self.outputDevicesCardTitle, enabled: canSaveCurrentSetup)
+        panel.setAccessoryEnabled(title: Self.outputDevicesCardTitle, enabled: true)
+    }
+
+    // MARK: OUTPUT DEVICES "+" menu (BT-UI)
+
+    /// Build the "+" affordance's menu FRESH per presentation — two items
+    /// dispatching through real `NSMenuItem` target/action (tests drive them
+    /// via `NSMenu.performActionForItem(at:)`, never a bypass seam):
+    /// "Save Selected Devices as group" (enabled iff `canSaveCurrentSetup`)
+    /// and "Pair a Bluetooth speaker…" (device-tier decision 3 — never-paired
+    /// speakers get NO rows; pairing is a one-tap Settings trip).
+    func makeOutputDevicesPlusMenu() -> NSMenu {
+        let menu = NSMenu(title: "Add")
+        menu.autoenablesItems = false
+        let save = NSMenuItem(title: "Save Selected Devices as group",
+                              action: #selector(plusMenuSaveGroup(_:)), keyEquivalent: "")
+        save.target = self
+        save.isEnabled = canSaveCurrentSetup
+        menu.addItem(save)
+        let pair = NSMenuItem(title: "Pair a Bluetooth speaker…",
+                              action: #selector(plusMenuPairBluetooth(_:)), keyEquivalent: "")
+        pair.target = self
+        menu.addItem(pair)
+        return menu
+    }
+
+    @objc private func plusMenuSaveGroup(_ sender: Any?) { saveCurrentSetup() }
+    @objc private func plusMenuPairBluetooth(_ sender: Any?) { onPairBluetoothSpeaker?() }
+
+    /// The "+" button's click: pop the menu just under the button. The actual
+    /// on-screen pop is gated on `HeadlessRuntime.isActive` (house rule — a
+    /// blocking `popUp` under `swift test` would also hang the runner);
+    /// headless callers assert via `test_outputDevicesPlusMenu()` instead.
+    private func presentOutputDevicesPlusMenu() {
+        guard !HeadlessRuntime.isActive,
+              let button = panel.accessoryButton(title: Self.outputDevicesCardTitle)
+        else { return }
+        makeOutputDevicesPlusMenu().popUp(
+            positioning: nil, at: NSPoint(x: 0, y: button.bounds.maxY + 4), in: button)
     }
 
     /// A non-interactive placeholder body row (V2 Devices empty state / V11
@@ -2470,6 +2569,15 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     public func test_saveCurrentSetup() { saveCurrentSetup() }
 
+    /// Subsection titles the LAST rebuild actually rendered, in order —
+    /// asserts the Bluetooth subsection's hide-when-empty rule (BT-UI).
+    public func test_subsectionTitles() -> [String] { renderedSubsectionTitles }
+
+    /// The OUTPUT DEVICES "+" menu, built exactly as a live click builds it.
+    /// Tests dispatch its items via `NSMenu.performActionForItem(at:)` — real
+    /// AppKit menu dispatch, per the row-selection lesson (never a bypass seam).
+    public func test_outputDevicesPlusMenu() -> NSMenu { makeOutputDevicesPlusMenu() }
+
     /// Simulate flipping a device row's membership switch through its delegate.
     /// Returns the model's `SelectionResult` so tests can assert refusal/auto-swap.
     @discardableResult
@@ -2541,6 +2649,15 @@ extension PopoverController: DeviceRowView.Delegate {
         test_lastRefusalReason = reason
         presentRefusal(reason)
         toggleBlockedNote(for: row.device.id, reason: reason)
+    }
+
+    /// A greyed Bluetooth row's click (BT-UI "click connects"): a
+    /// membership-FREE reconnect kick — `requestReconnect` goes straight to
+    /// `OutputBackend.retryOutput`, never editing selection (selecting a
+    /// greyed row separately means "play when up" and stays the node/checkbox's
+    /// job, exactly like AirPlay rows).
+    public func deviceRowDidRequestReconnect(_ row: DeviceRowView) {
+        groupController?.requestReconnect(for: row.device.id)
     }
 }
 

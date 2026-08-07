@@ -60,6 +60,12 @@ public final class DeviceRowView: NSView {
         /// (resolves the significant break §8.5). Default no-op so non-bus hosts
         /// (mixer window, tests) are unaffected.
         func deviceRowDidRequestBlockedExplanation(_ row: DeviceRowView)
+        /// The user clicked a greyed (paired-but-disconnected) BLUETOOTH row's
+        /// name (BT-UI): "click connects" — the macOS-Bluetooth-menu behavior.
+        /// The host maps this to a membership-free reconnect
+        /// (`GroupController.requestReconnect` → `OutputBackend.retryOutput`);
+        /// it never edits selection. Default no-op for non-BT hosts.
+        func deviceRowDidRequestReconnect(_ row: DeviceRowView)
     }
 
     /// Control-Center row density: comfortable height that seats a mini switch,
@@ -648,8 +654,23 @@ public final class DeviceRowView: NSView {
         guard busActive else { return }
         let node: MembershipBusView.Node
         var dim = busNodeDimmed
+        var isConnectingNow: Bool {
+            switch device.connectionState {
+            case .connecting, .reconnecting: return true
+            default: return false
+            }
+        }
         if isToggleBlocked {
             node = .blocked              // §4.6 greyed hollow node
+        } else if device.isBluetooth, !device.isAvailable, isConnectingNow {
+            // BT reconnect attempt (BT-UI): a greyed row's click starts a
+            // baseband reconnect while `isAvailable` is STILL false (the
+            // endpoint only appears on success), so without this branch the
+            // unavailable arm below would hide the in-flight state the spec's
+            // node vocabulary requires ("the node's connecting state during a
+            // reconnect attempt"). AirPlay rows never pair `.connecting` with
+            // unavailable, so this is BT-scoped on purpose.
+            node = .connecting
         } else if !device.isAvailable {
             // Unavailable signature (spec §3.6 matrix): a HOLLOW, tinted node the
             // line detours — an unavailable device is not currently in the mix,
@@ -950,13 +971,29 @@ public final class DeviceRowView: NSView {
             clearFeedPills()
             return
         }
-        if case .failed = device.connectionState {
-            setFeedText("Couldn't connect", color: Tokens.Color.failure)
+        if case .failed(let failure) = device.connectionState {
+            // The failure HEADLINE, not a hardcoded generic (BT-UI locked spec:
+            // "failure headline sublabel" — "Connected elsewhere"/"Not paired"
+            // must read distinctly; `.unknown` still renders "Couldn't
+            // connect", so AirPlay's common case is unchanged). Copy lives on
+            // `ConnectionFailure` — single source shared with the panel.
+            setFeedText(failure.headline, color: Tokens.Color.failure)
             return
         }
         if !device.isAvailable {
-            setFeedText("Unavailable", color: Tokens.Color.failure)
-            return
+            // A BT reconnect attempt keeps `isAvailable == false` until the
+            // endpoint appears — the connecting ring/node carry that state, so
+            // don't shout "Unavailable" over an attempt still in flight.
+            var isConnectingNow: Bool {
+                switch device.connectionState {
+                case .connecting, .reconnecting: return true
+                default: return false
+                }
+            }
+            if !(device.isBluetooth && isConnectingNow) {
+                setFeedText("Unavailable", color: Tokens.Color.failure)
+                return
+            }
         }
         var segments: [FeedSegment] = []
         // The neutral main-mix segment (spec item 3's own word "carries" the
@@ -1534,6 +1571,14 @@ public final class DeviceRowView: NSView {
             delegate?.deviceRowDidRequestBlockedExplanation(self)
             return
         }
+        // A greyed Bluetooth row's click CONNECTS (BT-UI "click to connect" is
+        // the row's ordinary click behavior, never a printed instruction).
+        // Ordered before the enabled guard: an unavailable+unselected row's
+        // checkbox is disabled, which is exactly the greyed case.
+        if device.isBluetooth, !device.isAvailable {
+            delegate?.deviceRowDidRequestReconnect(self)
+            return
+        }
         guard enableCheckbox.isEnabled else { return }
         let flipped = enableCheckbox.state != .on
         enableCheckbox.state = flipped ? .on : .off
@@ -1634,6 +1679,11 @@ public final class DeviceRowView: NSView {
     public func test_clickName() {
         if isToggleBlocked {
             delegate?.deviceRowDidRequestBlockedExplanation(self)
+            return
+        }
+        // Mirrors the real gesture handler's greyed-BT branch (BT-UI).
+        if device.isBluetooth, !device.isAvailable {
+            delegate?.deviceRowDidRequestReconnect(self)
             return
         }
         guard enableCheckbox.isEnabled else { return }
@@ -2357,6 +2407,9 @@ public extension DeviceRowView.Delegate {
     /// implement the blocked-explanation surfacing (spec §4.6). The popover
     /// overrides this to present the in-place refusal note.
     func deviceRowDidRequestBlockedExplanation(_ row: DeviceRowView) {}
+    /// Default no-op — only the popover maps the greyed-BT-row click to a
+    /// reconnect (BT-UI).
+    func deviceRowDidRequestReconnect(_ row: DeviceRowView) {}
 }
 
 // MARK: - Invisible switch cell (spec §4.8)

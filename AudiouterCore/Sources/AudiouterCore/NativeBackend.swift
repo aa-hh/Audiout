@@ -2440,6 +2440,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         var address: String?
         let isBT: Bool = stateQueue.sync {
             guard let device = self.known[id], device.isBluetooth else { return false }
+            // "Not paired" tier (device-tier decision 2): the id survives in app
+            // data but the OS pairing record is gone — the enumerator's merged
+            // list is the pairedness truth, so fail FAST here, before any
+            // baseband attempt that could only time out ~15 s later. The
+            // `.connecting` blip first makes each deliberate click a fresh
+            // failure episode for the popover's diagnosis-panel semantics.
+            if let paired = self.btPairedIDs, !paired.contains(id) {
+                self.setConnectionState(.connecting, for: id)
+                self.setConnectionState(.failed(ConnectionFailure(
+                    cause: .notPaired, detail: "id absent from the OS paired list")), for: id)
+                Telemetry.log(.localPlayback, "bt_connect_not_paired", ["device": id])
+                return true
+            }
             guard self.btConnectionManager != nil,
                   device.connectionState != .connecting,
                   let mac = BTConnectionManager.macAddress(fromUID: id) else { return true }
@@ -6277,9 +6290,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// forever-remembered pairing list produces, whatever surface it picks.
     private var btLastUsed: [String: Date] = [:]   // on stateQueue
 
-    /// The ``btLastUsed`` stash, read safely off `stateQueue`. Internal for
-    /// tests today; the intended read for whatever surface the BT-UI wave picks.
-    func lastUsedDatesForBTDevices() -> [String: Date] {
+    /// The ids the enumerator's LATEST merged list contains — i.e. every BT id
+    /// macOS currently knows a pairing (or live endpoint) for. `nil` until the
+    /// first snapshot arrives, so "not in the set" is never conflated with
+    /// "enumeration hasn't run yet". A known `.bluetooth` row whose id is
+    /// absent here has had its pairing record deleted out from under the app
+    /// — the `.notPaired` fast-fail in ``retryBTOutput`` keys off this.
+    /// On `stateQueue`.
+    private var btPairedIDs: Set<String>?
+
+    /// The ``btLastUsed`` stash, read safely off `stateQueue` — the
+    /// ``BTOutputControlling`` read the popover's Bluetooth-subsection sort
+    /// uses (ghost pairings sink to the bottom by recency; sort-only in v1).
+    public func lastUsedDatesForBTDevices() -> [String: Date] {
         stateQueue.sync { btLastUsed }
     }
 
@@ -6291,6 +6314,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private func applyBTSnapshots(_ snapshots: [BTDeviceSnapshot]) {
         var seen: Set<String> = []
         var desiredAvailabilityMoved = false
+        btPairedIDs = Set(snapshots.map(\.id))
         for snapshot in snapshots {
             let id = snapshot.id
             seen.insert(id)
@@ -7742,6 +7766,19 @@ extension CaptureControlling {
 }
 
 extension NativeCaptureCoordinator: CaptureControlling {}
+
+/// Optional backend capability for the Bluetooth device-row UI (BT-UI /
+/// BT-OFFSET-UI) — the same `backend as? Capability` pattern as
+/// ``MeteringControlling``/``AppRouteConfiguring``: `NativeBackend` is the only
+/// conformer; on `MockBackend`/`OwnToneBackend` the cast is `nil` and the
+/// popover's Bluetooth affordances degrade gracefully.
+public protocol BTOutputControlling: AnyObject {
+    /// When macOS last used each known BT pairing, keyed by `Device.id` — the
+    /// popover's ghost-pairing sort input (stale pairings to the bottom).
+    func lastUsedDatesForBTDevices() -> [String: Date]
+}
+
+extension NativeBackend: BTOutputControlling {}
 
 /// The full lifecycle surface T-BACKEND drives on the delayed local sink: the
 /// fan-out target itself (``SyncedLocalPCMSink``, T-FANOUT) plus start/stop and

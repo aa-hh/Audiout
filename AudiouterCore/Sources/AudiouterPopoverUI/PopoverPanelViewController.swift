@@ -576,6 +576,12 @@ final class PopoverPanelViewController: NSViewController {
         accessoryButtonsByHeader[title]?.isEnabled = enabled
     }
 
+    /// The header accessory button for `title`, if the card has one — the
+    /// anchor view for an accessory that fronts a menu (the Devices "+").
+    func accessoryButton(title: String) -> NSButton? {
+        accessoryButtonsByHeader[title]
+    }
+
     /// Add a content row (Main Out row, group header, device row) into the
     /// current card's COLLAPSIBLE body, full card width. On the first body row of
     /// a card that opened collapsed, apply the initial collapsed end state (no

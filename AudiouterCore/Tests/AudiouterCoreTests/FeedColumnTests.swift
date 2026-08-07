@@ -98,7 +98,7 @@ import AudiouterCore
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .failed(.init(cause: .notResponding))),
                   selected: true, controllable: true, routedAppNames: ["Music"])
-        #expect(row.test_feedText == "Couldn't connect", "failure overrides the composite entirely — never both")
+        #expect(row.test_feedText == "Didn't respond", "failure overrides the composite entirely — never both — with the failure's own headline")
         #expect(row.test_feedIsErrorColored)
         #expect(row.test_statusText == nil, "the sublabel carries no words for a failed bus row")
     }
@@ -151,7 +151,7 @@ import AudiouterCore
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .failed(.init(cause: .vanished)), supportsAirPlay2: false),
                   selected: true, controllable: true)
-        #expect(row.test_feedText == "Couldn't connect")
+        #expect(row.test_feedText == "Not on the network")
         #expect(!(row.test_feedHasAP1Tag))
     }
 
@@ -229,7 +229,7 @@ import AudiouterCore
         row.apply(makeDevice(connectionState: .failed(.init(cause: .notResponding))),
                   selected: true, controllable: true, routedAppNames: ["Music"],
                   appTintColors: ["Music": .systemGreen])
-        #expect(row.test_feedText == "Couldn't connect")
+        #expect(row.test_feedText == "Didn't respond")
         #expect(row.test_feedChipCount == 0)
     }
 

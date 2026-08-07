@@ -868,7 +868,7 @@ import AppKit
 
         #expect(popover.test_cardNoteTexts(title: "Output Devices") == [], "R12: a failure keeps intent, so the checked set never diverged and there is no dormancy note to show")
         #expect(popover.test_deviceRow(for: "office")?.test_busNodeDimmed == false, "the FAILED member never tints — failure outranks configuration (R2)")
-        #expect(popover.test_deviceRow(for: "office")?.test_feedText == "Couldn't connect", "the failure FEED override renders at full emphasis")
+        #expect(popover.test_deviceRow(for: "office")?.test_feedText == "Took too long", "the failure FEED override renders the failure's own headline at full emphasis")
         #expect(popover.test_diagnosisPanel(for: "office") != nil, "the diagnosis panel attaches normally")
         #expect(controller.selectedDeviceIDs.contains("office"), "R12: the failed device stays SELECTED — the failure must not rewrite what the user chose")
 
@@ -2552,22 +2552,28 @@ import AppKit
         #expect(popover.test_diagnosisPanel(for: "office") != nil, "the retry failing again re-surfaces the panel")
     }
 
-    // MARK: F1 — Devices "Save as group" header accessory
+    // MARK: F1 — Devices "+" header accessory (a menu since BT-UI)
 
-    /// The Devices card's accessory saves the current selection as a group; firing
-    /// it never collapses the card, and its enabled state tracks
+    /// The Devices card's "+" fronts a MENU now: its save item creates a group
+    /// through real `NSMenu` dispatch, never collapses the card, and the item's
+    /// enabled state (not the button's — the button stays always-enabled so
+    /// "Pair a Bluetooth speaker…" is always reachable) tracks
     /// `canSaveCurrentSetup`.
     @Test func devicesSaveGroupAccessoryCreatesGroupWithoutCollapsing() async throws {
         let (popover, controller, _) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        #expect(popover.test_cardAccessoryEnabled(title: "Output Devices") == true, "a non-empty, not-yet-saved selection ⇒ accessory enabled")
+        #expect(popover.test_cardAccessoryEnabled(title: "Output Devices") == true, "the + button itself stays enabled — it fronts a menu")
+        var menu = popover.test_outputDevicesPlusMenu()
+        #expect(menu.items.first?.isEnabled == true, "a non-empty, not-yet-saved selection ⇒ save item enabled")
         let wasCollapsed = popover.test_isCardCollapsed(title: "Output Devices")
 
-        #expect(popover.test_fireCardAccessory(title: "Output Devices"), "the accessory fired")
-        #expect(controller.groups.count == 1, "firing the accessory created a group")
-        #expect(popover.test_isCardCollapsed(title: "Output Devices") == wasCollapsed, "the accessory click did NOT collapse the card")
-        // The just-saved selection now equals a group ⇒ accessory disables (dedup).
-        #expect(popover.test_cardAccessoryEnabled(title: "Output Devices") == false, "selection already saved as a group ⇒ accessory disables in place")
+        menu.performActionForItem(at: 0)   // real AppKit menu dispatch
+        #expect(controller.groups.count == 1, "the save item created a group")
+        #expect(popover.test_isCardCollapsed(title: "Output Devices") == wasCollapsed, "the menu action did NOT collapse the card")
+        // The just-saved selection now equals a group ⇒ the save ITEM disables.
+        menu = popover.test_outputDevicesPlusMenu()
+        #expect(menu.items.first?.isEnabled == false, "selection already saved as a group ⇒ save item disables")
+        #expect(popover.test_cardAccessoryEnabled(title: "Output Devices") == true, "the + button never disables")
     }
 
     // MARK: V14 — keyboard selection movement (host half)

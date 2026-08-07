@@ -29,6 +29,12 @@ bundle-ID resolution, `.currentDevice` anti-feedback guard, etc.) — those
 apply directly to the files in this folder and are not restated here to
 avoid drift between two copies.
 
+`SyncCore.swift` (`SyncTiming`, `FractionalResampler`, `PhaseController`) is
+deliberately LICENSE-CLEAN — it carries no GPL SPDX header, unlike every
+sibling, so the upcoming Apple-only Bluetooth sink can share its timing/drift
+math (PLAN-UNIVERSAL-SYNC Decision 5). Never add the GPL header to it and
+never move GPL-derived code into it.
+
 ## Architecture
 
 ```mermaid

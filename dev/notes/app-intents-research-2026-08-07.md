@@ -115,6 +115,9 @@ pass in `make-app.sh` (~line 613 onward), or the signature won't cover it.
   you don't have to register them yourself."
 - **macOS 13.0+** — confirmed on the framework page. This package is macOS 14,
   so no gate.
+- **Every intent needs a `ParameterSummary`** covering all required parameters
+  that have no default, or it does not appear in Spotlight Actions (§3a). Not
+  polish — a missing summary silently removes the action.
 - **Intents run inside the app's process**, so macOS launches Audiouter if it
   isn't running. For a menu-bar app that is the behaviour you want anyway.
 - The controllers the intents will call (`GroupController`,
@@ -150,12 +153,38 @@ translation layer with zero logic** — resolve the entity, call the one
 yet for the thin-wrapper shape, and it is not a preference — it is the only
 place tests can run.
 
-**2. Spotlight is not free.** With `AppShortcutsProvider` dropped (§7), Spotlight
-looked like the remaining discovery path. It isn't automatic: entities surface
-in Spotlight only if they conform to `IndexedEntity` and are donated, with
-`IndexedEntityQuery` for reindexing. So "the actions ship invisible" (§7.2)
-stands, and the cheap fix if that becomes a problem is `IndexedEntity` on
-`SpeakerEntity` — a small, well-defined add, not a rethink.
+**2. Spotlight gives the actions away for free — I got this wrong first time.**
+I read `/documentation/appintents/spotlight` and concluded Spotlight needed
+`IndexedEntity`. That page is about indexing app **entities** — making your
+*data* findable. It is a different feature from Spotlight **Actions**, the
+macOS 26 Tahoe catalog of runnable app actions, and I conflated the two.
+
+WWDC25 session 260 is explicit that actions are automatic: intents appear in
+Spotlight on Mac **without** an `AppShortcutsProvider`, subject to three
+conditions —
+
+> "the parameter summary, which is what people will see in Spotlight UI, must
+> contain all required parameters that don't have a default value"
+
+and the intent must not be hidden (`isDiscoverable` false, or `assistantOnly`
+true), and must have a `perform` method.
+
+Two consequences:
+
+- **The "ships invisible" worry in §7.2 is mostly wrong.** Dropping Siri phrases
+  costs the canned shortcuts and voice, not discovery — the six verbs show up in
+  Spotlight Actions on their own. That makes the no-phrases decision cheaper
+  than it looked when it was made.
+- **New hard requirement:** every intent needs a `ParameterSummary` listing all
+  required parameters that have no default. This bites us directly — the
+  auto-start volume parameter (§7a) is deliberately *required*, so if it is
+  missing from the summary the intent silently vanishes from Spotlight. Same for
+  the speaker on Set Speaker Volume. Treat the parameter summary as mandatory on
+  every intent, not as polish.
+
+Entity indexing (`IndexedEntity` + donation) remains a separate, optional add —
+it would make individual *speakers* findable in Spotlight, which is a nice-to-
+have and not needed for any of the six verbs.
 
 ## 4. How deep to go — recommended scope
 
@@ -244,9 +273,11 @@ is downstream of 005, not free with it.
    `AppShortcutsProvider`**, no canned shortcuts, no spoken phrases, and the
    10-shortcut and phrase ceilings stop mattering. Plain App Intents still
    appear as actions in the Shortcuts app under Audiouter, which is the target.
-   Consequence: the actions are *not* discoverable — nobody finds them unless
-   they open Shortcuts and look, so this needs a line in the docs or Settings
-   pointing at it, or it effectively ships invisible.
+   Consequence, **corrected in §3a**: discovery is not lost. Plain intents
+   appear in macOS 26+ Spotlight Actions on their own, so what this decision
+   actually costs is the canned shortcuts and voice triggering, not visibility.
+   The price is a mandatory `ParameterSummary` on every intent — without one
+   covering all required parameters, the intent drops out of Spotlight.
    Keep the intents in the main app target anyway (§3): dropping
    `AppShortcutsProvider` technically relaxes that rule, but intents in a
    statically-linked SPM library are exactly the configuration Apple DTS
@@ -331,7 +362,8 @@ bigger change to the build and would reset this recommendation.
 
 - [App Intents (Apple)](https://developer.apple.com/documentation/appintents) ·
   [App Intents Testing](https://developer.apple.com/documentation/AppIntentsTesting/testing-your-app-intents-code) ·
-  [Spotlight integration](https://developer.apple.com/documentation/appintents/spotlight) ·
+  [Spotlight entity indexing](https://developer.apple.com/documentation/appintents/spotlight) ·
+  [Develop for Shortcuts and Spotlight with App Intents — WWDC25 session 260](https://developer.apple.com/videos/play/wwdc2025/260/) (the authority on Spotlight Actions being automatic) ·
   [AppShortcutsProvider](https://developer.apple.com/documentation/appintents/appshortcutsprovider) ·
   [Adopting App Intents for system experiences](https://developer.apple.com/documentation/AppIntents/adopting-app-intents-to-support-system-experiences)
 - [DTS: App Intents in an SPM package don't show in Shortcuts](https://developer.apple.com/forums/thread/759160) — the main-target and metadata-extraction constraints

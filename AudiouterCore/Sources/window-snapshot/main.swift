@@ -60,11 +60,11 @@ func tempDir() -> URL {
 /// makes the resolution deterministic regardless of what's driving the run.
 let snapshotBackingScale: CGFloat = 2
 
-/// One capture of `view` into a fresh explicit-@2x bitmap, PNG-encoded.
-/// Explicit pixel dimensions (`snapshotBackingScale` x the point size) keep the
-/// output independent of the host screen's backingScaleFactor.
+/// One capture of `view` into a fresh explicit-@2x bitmap rep. Explicit pixel
+/// dimensions (`snapshotBackingScale` x the point size) keep the output
+/// independent of the host screen's backingScaleFactor.
 @MainActor
-private func captureOnce(view: NSView, bounds: NSRect) -> Data? {
+func captureRep(view: NSView, bounds: NSRect) -> NSBitmapImageRep? {
     let pixelsWide = Int((bounds.width * snapshotBackingScale).rounded())
     let pixelsHigh = Int((bounds.height * snapshotBackingScale).rounded())
     guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixelsWide,
@@ -94,7 +94,14 @@ private func captureOnce(view: NSView, bounds: NSRect) -> Data? {
     guard let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
     ctx.cgContext.setAllowsFontSmoothing(false)
     view.displayIgnoringOpacity(bounds, in: ctx)
-    return rep.representation(using: .png, properties: [:])
+    return rep
+}
+
+/// `captureRep`, PNG-encoded — the form `renderPNG`'s stabilization loop
+/// compares byte-for-byte.
+@MainActor
+private func captureOnce(view: NSView, bounds: NSRect) -> Data? {
+    captureRep(view: view, bounds: bounds)?.representation(using: .png, properties: [:])
 }
 
 @MainActor
@@ -373,7 +380,8 @@ func snapshotStandaloneView(_ view: NSView, label: String, appearanceName: NSApp
 /// Render the control-panel shell (T11) with Groups content: the sticky
 /// floating NSPanel + decorative backing window with the beak. Position it
 /// with a mock menu-bar status-item anchor (top-right corner), then composite
-/// the backing window's chrome with the panel's content into an offscreen render
+/// the backing window's chrome with the panel's FRAME view — titlebar chrome
+/// (close button included, V13) plus content — into an offscreen render
 /// target and snapshot that.
 @MainActor
 func snapshotControlPanel(_ controller: ControlPanelWindowController,
@@ -447,8 +455,8 @@ func snapshotControlPanel(_ controller: ControlPanelWindowController,
         }
     }
 
-    // Create a view for the panel's content (the Groups interface), positioned
-    // to sit visually on top of the beak at its natural position.
+    // Create a view for the panel's FRAME view — content plus titlebar chrome —
+    // positioned to sit visually on top of the beak at its natural position.
     let contentLayer = NSView(
         frame: NSRect(x: 0, y: beakHeight, width: containerWidth, height: panel.frame.height)
     )
@@ -461,34 +469,25 @@ func snapshotControlPanel(_ controller: ControlPanelWindowController,
     contentLayer.layer?.masksToBounds = true
     container.addSubview(contentLayer)
 
-    // Render the panel's content view into the content layer. Materials are
-    // pinned within-window and the rep scale pinned @2x for the same
-    // determinism reasons as `renderPNG` (behind-window vibrancy samples the
-    // live desktop; `bitmapImageRepForCachingDisplay` inherits the host
-    // screen's scale).
-    panelContent.appearance = appearance
-    pinMaterialsWithinWindow(in: panelContent)
-    panelContent.layoutSubtreeIfNeeded()
-    let contentBounds = NSRect(x: 0, y: 0, width: containerWidth, height: panel.frame.height)
-    if let rep = NSBitmapImageRep(
-        bitmapDataPlanes: nil,
-        pixelsWide: Int(contentBounds.width * 2),
-        pixelsHigh: Int(contentBounds.height * 2),
-        bitsPerSample: 8,
-        samplesPerPixel: 4,
-        hasAlpha: true,
-        isPlanar: false,
-        colorSpaceName: .deviceRGB,
-        bytesPerRow: 0,
-        bitsPerPixel: 32
-    ) {
-        rep.size = contentBounds.size
-        panelContent.cacheDisplay(in: contentBounds, to: rep)
-        if let layer = contentLayer.layer,
-           let cgImage = rep.cgImage {
-            layer.contents = cgImage
-            layer.contentsGravity = .topLeft
-        }
+    // Render the panel's frame view (the contentView's superview), not the
+    // contentView: the transparent-titlebar chrome — including the standard
+    // close button, the panel's ONE close affordance (V13) — lives on the
+    // frame view, so a contentView-only capture can never show it. Same
+    // `displayIgnoringOpacity` primitive as `snapshotWindow`: it draws the
+    // hierarchy directly, so it traverses the layer-backed subtrees a bare
+    // `cacheDisplay` on this root skips. Materials pinned within-window and
+    // the rep scale pinned @2x for the same determinism reasons as
+    // `renderPNG`.
+    let frameView = panel.contentView?.superview ?? panelContent
+    frameView.appearance = appearance
+    pinMaterialsWithinWindow(in: frameView)
+    hideNondeterministicChrome(in: frameView)
+    frameView.layoutSubtreeIfNeeded()
+    if let rep = captureRep(view: frameView, bounds: frameView.bounds),
+       let layer = contentLayer.layer,
+       let cgImage = rep.cgImage {
+        layer.contents = cgImage
+        layer.contentsGravity = .topLeft
     }
 
     // Render the composite container to PNG.
@@ -550,8 +549,9 @@ func run() -> Int32 {
         windowController.update(devices: backend.devices)
         // The controller owns no window any more (U6) — build a plain titled
         // host so the frame snapshots still render the content in window
-        // chrome. 560×505 is the retired standalone default, kept only so the
-        // goldens stay comparable until P4 re-renders them under the surface.
+        // chrome. Deliberate stand-in: these states document the Groups
+        // CONTENT; the shell chrome the app really wraps it in is state 5's
+        // job. 560×505 is the screen's designed size (plan 032 R2).
         let window = NSWindow(
             contentRect: NSRect(origin: .zero, size: NSSize(width: 560, height: 505)),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],

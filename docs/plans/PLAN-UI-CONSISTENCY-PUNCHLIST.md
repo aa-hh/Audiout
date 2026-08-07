@@ -1,5 +1,13 @@
 # UI & window-management consistency — prioritized punch list
 
+> **STATUS (2026-08-07, one-surface program — roadmap 032):** `W1`–`W5` are
+> **superseded**: the surfaces they arbitrate no longer exist. The standalone
+> Settings and Groups windows, the `AIRPLAY_CONTROL_PANEL` flag fork, and the
+> NSPopover were all deleted; the app runs on one `AppSurfaceController`
+> hosted by the evolved shell. See `PLAN-ONE-SURFACE-032.md` (execution log at
+> the bottom). Every other item shipped through that program — per-item
+> "Shipped in" markers below. Only `V15` remains, owed on the signed build.
+
 Roadmap entry `002`. Audit only; no fixes applied. Every item names its surface,
 its code area, what is wrong and what "done" looks like, so any one of them can
 be lifted into its own bounded roadmap task without re-reading this file's
@@ -123,6 +131,7 @@ rely on the secondary paths is recorded.
 
 ### A1 — Reduce Transparency is honored in exactly one view, and one surface promises it without delivering
 
+**Shipped in `c8df2082` (P1).**
 **Surface:** SET, GRP, quit indicator.
 **Code:** the app's only read of `accessibilityDisplayShouldReduceTransparency`
 is `AudiouterCore/Sources/AudiouterSharedUI/WarmCanvasView.swift:71`.
@@ -149,6 +158,7 @@ claiming it does.
 
 ### V1 — Settings › Audio has a manual "Apply Settings" button among immediate-apply controls
 
+**Shipped in `50e5302d` (T2).**
 **Surface:** SET.
 **Code:** `AudiouterCore/Sources/AudiouterSettingsUI/AudioSettingsViewController.swift:129`,
 `:454-459`, `:498`.
@@ -165,6 +175,7 @@ control instead of sitting at pane level.
 
 ### W10 — Owner-reported: the Setup window drops behind other windows after a permission is granted
 
+**Shipped in `5ae36594` (with W6, pre-program).**
 **Surface:** ONB.
 **Code:** `OnboardingWindowController.swift:65-71` (deliberate normal level — an
 earlier `.floating` version was reverted because it hovered over every app),
@@ -198,6 +209,7 @@ too weak in this one, so fix them together.
 
 ### V2 — One window calls the same list two things; one flow has three names
 
+**Shipped in `9bc5a3da` (T5).**
 **Surface:** GRP, SET, ONB.
 **Code:** `AudiouterCore/Sources/AudiouterWindowUI/SidebarViewController.swift`
 (sidebar header "Devices") vs
@@ -220,6 +232,7 @@ end to end, and both are noted beside Warm Signal decision m.
 
 ### V3 — Button titles disagree on capitalization and on the ellipsis rule
 
+**Shipped in `9bc5a3da` (T5).**
 **Surface:** GRP, SET, ONB.
 **Code:** `MixerWindowController.swift:764` and `SidebarViewController.swift:192,196`
 ("New Group"); `GroupEditorViewController.swift:214` ("Delete group…");
@@ -249,6 +262,7 @@ ends in "…", and button titles are Title Case app-wide. Mechanical, one pass.
 
 ### V4 — One popover list paints its rows with two different washes
 
+**Shipped in `020d2819` (T4).**
 **Surface:** POP.
 **Code:** `AudiouterCore/Sources/AudiouterPopoverUI/GroupRowView.swift:370-379`
 uses raw `NSColor.controlAccentColor` @ **0.15** and raw
@@ -269,6 +283,7 @@ app rows.
 
 ### V5 — The dark theme preview shows a color the product stopped drawing
 
+**Shipped in `020d2819` (T4).**
 **Surface:** SET.
 **Code:** `AppearanceSettingsViewController.swift:321` hard-codes the dark
 preview's `well` as `0x2B2620`; `AudiouterCore/Sources/AudiouterSharedUI/Tokens.swift:186-188`
@@ -285,6 +300,7 @@ the two together so the next re-tune cannot drift them apart again.
 
 ### V6 — The Groups icon badge renders identically in light and dark
 
+**Shipped in `020d2819` (T4).**
 **Surface:** GRP.
 **Code:** `AudiouterCore/Sources/AudiouterWindowUI/DeviceIconWellView.swift:87-88`
 (`NSColor(white: 0, alpha: 0.55)`, `NSColor(white: 1, alpha: 0.25)`), stamped
@@ -302,6 +318,7 @@ on appearance change).
 
 ### V7 — The popover's two icon-button families contradict each other and their own docs
 
+**Shipped in `fab9cd9a` (T3).**
 **Surface:** POP.
 **Code:** `AudiouterCore/Sources/AudiouterPopoverUI/PopoverHeaderView.swift:206-208`
 uses `bezelStyle = .accessoryBar` with `showsBorderOnlyWhileMouseInside`;
@@ -320,6 +337,7 @@ assert they match.
 
 ### V8 — Settings shows a user an environment-variable name
 
+**Shipped in `9bc5a3da` (T5).**
 **Surface:** SET.
 **Code:** `AudioSettingsViewController.swift:435` —
 "Overridden by AIRPLAY_START_BUFFER_MS (120 ms) for this launch."
@@ -333,6 +351,7 @@ outside dev builds).
 
 ### V9 — Groups' empty state does not say what a group is
 
+**Shipped in `9bc5a3da` (T5).**
 **Surface:** GRP.
 **Code:** `MixerWindowController.swift:751-752`.
 
@@ -367,6 +386,7 @@ including whether Settings should also land home on close.
 
 ### W6 — Onboarding re-fronts itself on every app activation, over whatever else is open
 
+**Shipped in `5ae36594` (with W10, pre-program).**
 **Surface:** ONB.
 **Code:** `OnboardingWindowController.swift:79-91` (`appDidBecomeActive` →
 unconditional `makeKeyAndOrderFront`), `:97-104` (`present()` → unconditional
@@ -391,6 +411,7 @@ window stops re-centering it.
 
 ### V10 — Layout constants are minted per file, so no two surfaces can agree by construction
 
+**Shipped in `6e6f86eb` (T1).**
 **Surface:** all five.
 **Code:** three un-tokenized content widths —
 `PopoverPanelViewController.swift:104` (623),
@@ -417,6 +438,7 @@ other visual item so the fixes have somewhere to land.
 
 ### V11 — Six custom `draw(_:)` overrides carry no documented reason
 
+**Shipped in `bf2bd38c` (P2).**
 **Surface:** POP, GRP, SET.
 **Code:** root `AGENTS.md:186,203` sanctions seven Warm Signal custom-drawn
 pieces and requires any other deviation to record its "why" in the nearest
@@ -435,6 +457,7 @@ replaced by system chrome.
 
 ### V12 — Two banners with one design bypass the token that carries Increase Contrast
 
+**Shipped in `020d2819` (T4).**
 **Surface:** POP vs ONB.
 **Code:** `AudiouterCore/Sources/AudiouterPopoverUI/SilenceFallbackBannerView.swift:40,41,67,68`
 uses raw `NSColor.systemOrange` at 0.14 / 0.40; the visually identical onboarding
@@ -450,6 +473,7 @@ requires).
 
 ### W7 — Window-restoration policy is decided on one window out of five
 
+**Shipped in `c8df2082` (P3).**
 **Surface:** all.
 **Code:** `OnboardingWindowController.swift:61` is the app's only `isRestorable`;
 `applicationSupportsSecureRestorableState` appears nowhere in
@@ -460,6 +484,7 @@ defaults to `false`), but it reads as unfinished rather than decided.
 
 ### W8 — The quit indicator is a sixth window with none of the fifth's rules
 
+**Shipped in `c8df2082` (P1).**
 **Surface:** quit indicator (outside the audited five; found in passing).
 **Code:** `AppDelegate.swift:1466-1500`.
 
@@ -473,6 +498,8 @@ different Space or nowhere.
 
 ### W9 — No test covers which surface a menu-bar click produces
 
+**Intent satisfied by U4's click-policy tests (`cd051a2d`)** — the arbitration
+now lives in `AppSurfaceController`, where it is directly tested.
 **Surface:** all.
 **Code:** `AppDelegate.swift:302-338`; `AudiouterCore/Tests/AudiouterCoreTests/`
 has no `AppDelegate` test file.
@@ -485,6 +512,8 @@ isolation. **Doing this first makes W1, W3 and W4 cheap and safe.**
 
 ### V13 — The panel's only close affordance has no visual regression coverage
 
+**Shipped in P4 (this program's final commit)** — `window-snapshot` now
+composites the panel's frame view, so the close button is in the fixtures.
 **Surface:** SHELL.
 **Code:** `AudiouterCore/Sources/window-snapshot/main.swift:379-440` —
 `snapshotControlPanel` composites `panel.contentView`, never the window frame
@@ -497,6 +526,7 @@ defect.)
 
 ### V14 — Device detail puts a colon on one row out of five
 
+**Shipped in `9bc5a3da` (T5).**
 **Surface:** GRP.
 **Code:** `AudiouterCore/Sources/AudiouterWindowUI/DeviceDetailViewController.swift:144`
 — "In groups:" carries a colon; "Status", "Available", "Volume" and "Kind" do
@@ -504,6 +534,7 @@ not. Visible together in `mixer-4-device-detail-*.png`.
 
 ### V15 — Onboarding's header icon is a placeholder in unbundled runs
 
+**Still owed — verify on the signed build.**
 **Surface:** ONB.
 
 `onboarding-light-initial.png` shows a generic system icon where the app icon

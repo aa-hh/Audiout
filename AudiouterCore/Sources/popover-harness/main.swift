@@ -197,8 +197,15 @@ func run() -> Int32 {
 
     // --- 7. Selecting a group routes: backend output set == members.
     print("\n[7] Selecting a group routes to its members")
-    checks.expectEqual(Set(backend.devices.filter(\.isSelected).map(\.id)), Set(group.memberIDs),
-                       "output set equals the group's members")
+    // The local Mac is never part of the BACKEND output set (AudiouterCore/AGENTS.md
+    // — it is filtered out of `setOutputSet`; the synced local sink carries it
+    // instead). Section 5 put `local-mac` into the set this group was saved from, so
+    // the routed set is the group's AirPlay members, not its whole membership.
+    let expectedGroupRouted = Set(group.memberIDs.filter { id in
+        backend.devices.first { $0.id == id }?.isLocalDevice == false
+    })
+    checks.expectEqual(Set(backend.devices.filter(\.isSelected).map(\.id)), expectedGroupRouted,
+                       "output set equals the group's AirPlay members")
     checks.expectEqual(controller.activeGroupID, group.id, "group is the active target")
 
     // --- 8. Selecting Selected Devices applies the composed set.
@@ -290,8 +297,17 @@ func run() -> Int32 {
     // --- 15. Seeding a route + reopen-style rebuild expands the card.
     print("\n[15] Seeding a route expands the card on reopen")
     let musicBundleID = "com.apple.Music"
+    // One role per speaker: a device already in Main Out is NOT offered as a
+    // redirect target, and a route pointing at one is cleared by
+    // `AppRoutingController.clearRoutes(toDevices:)` the moment it's selected
+    // (AppDelegate wires that; the harness doesn't stand up AppDelegate). Sections
+    // 5-8 left `office` in Main Out, so seeding a route to it would build a state
+    // the real app resolves away — and the row would honestly render "no redirect"
+    // because its target is missing from its own menu. Redirect to a speaker that
+    // is NOT in Main Out, which is the only state this row can actually be in.
+    let musicDestinationID = "appletv-lr"
     appRouting.addRoute(bundleID: musicBundleID, displayName: "Music")
-    appRouting.setDestination(.device(id: "office"), for: musicBundleID)
+    appRouting.setDestination(.device(id: musicDestinationID), for: musicBundleID)
     popover.test_simulateOpen()   // reopen-style rebuild (T-5 recomputes defaults)
     checks.expectEqual(popover.test_isCardCollapsed(title: "App Exceptions"), false,
                        "Applications card is expanded once a route is redirected")
@@ -301,7 +317,7 @@ func run() -> Int32 {
     print("\n[16] Seeded app row config")
     checks.expectEqual(popover.test_appRowBundleIDs(), [musicBundleID],
                        "row order matches appRoutes order")
-    checks.expectEqual(popover.test_appRowSelectedDestinationID(for: musicBundleID), "office",
+    checks.expectEqual(popover.test_appRowSelectedDestinationID(for: musicBundleID), musicDestinationID,
                        "row shows the redirected destination")
     checks.expectEqual(popover.test_appRowSliderDimmed(for: musicBundleID), false,
                        "slider is live (not dimmed) while redirected to an AirPlay device")
@@ -384,8 +400,12 @@ func run() -> Int32 {
                        "a tapped-in device's node is FILLED on the line")
     checks.expectEqual(popover.test_deviceRow(for: "airport-mixer")?.test_busNode, .nonMember,
                        "an untapped device's node is HOLLOW — the line detours it")
-    checks.expectEqual(popover.test_deviceRow(for: "local-mac")?.test_busNode, .blocked,
-                       "the local-mix-blocked Mac renders the distinct greyed node")
+    // T-UI-ALLOW / T-GROUPCTL Q5 retired the Phase-1 local-mix block: the Mac may
+    // join a mixed set (the synced local sink carries it), so `PopoverController`
+    // never passes `blocked:` to a row and the §4.6 greyed node is unreachable
+    // here. The Mac now sits on the spine as an ordinary member like any speaker.
+    checks.expectEqual(popover.test_deviceRow(for: "local-mac")?.test_busNode, .member,
+                       "the Mac joined the mix and renders an ordinary member node (T-UI-ALLOW)")
     let officeX = popover.test_deviceRow(for: "office")?.test_busNodeCenterX() ?? -1
     let mixerX = popover.test_deviceRow(for: "airport-mixer")?.test_busNodeCenterX() ?? -2
     checks.expect(abs(officeX - mixerX) < 0.5, "every node sits at one fixed column x")
@@ -410,8 +430,9 @@ func run() -> Int32 {
                        "exactly one terminating (lowest selected) node ends the spine (spec v4 §Call-1)")
 
     // --- 22. Connection-status flow (brief §7.3), on a scripted MockBackend:
-    // fail → toggle bounced + warning + auto-expanded panel; sticky warning
-    // survives the cleanup setOutputSet; "Try again" → connected + panel gone.
+    // fail → membership KEPT (R12) + warning + auto-expanded panel; sticky
+    // warning survives the cleanup setOutputSet; "Try again" → connected + panel
+    // gone.
     print("\n[22] Connection-status flow (scripted MockBackend)")
     runConnectionStatusChecks(checks)
 
@@ -487,10 +508,15 @@ func runConnectionStatusChecks(_ checks: Checks) {
     guard waitForOffice(".failed", officeIsFailed) else { return }
     popover.update(devices: backend.devices)
 
-    checks.expect(!controller.isSpeakerSelected("office"),
-                  "failure bounced the toggle (membership removed)")
-    checks.expect(popover.test_deviceRow(for: "office")?.test_isEnabledOn == false,
-                  "row switch rests OFF after the bounce")
+    // R12 (AudiouterPopoverUI/AGENTS.md, W2-T3 — "keep intent, always"): a failure
+    // no longer drops the device from Selected Devices. The user asked for this
+    // speaker, and it stays asked-for — the failure is REPORTED (ring + diagnosis
+    // panel below) while the backend keeps auto-reconnecting. So membership and the
+    // switch both hold their ON state; only the status rendering changes.
+    checks.expect(controller.isSpeakerSelected("office"),
+                  "failure kept the membership the user asked for (R12)")
+    checks.expect(popover.test_deviceRow(for: "office")?.test_isEnabledOn == true,
+                  "row switch stays ON through the failure (R12)")
     checks.expect(popover.test_deviceRow(for: "office")?.test_statusKind == .failed,
                   "the failed halo ring is shown")
     let panel = popover.test_diagnosisPanel(for: "office")
@@ -500,7 +526,7 @@ func runConnectionStatusChecks(_ checks: Checks) {
     checks.expect(panel?.test_copyDetailsEnabled == true,
                   "Copy details enabled (detail present)")
 
-    // Sticky warning: the bounce triggered a cleanup setOutputSet without the
+    // Sticky warning: the failure episode's cleanup setOutputSet runs without the
     // id; the backend keeps .failed and the popover keeps the warning + panel.
     drain(0.3)
     popover.update(devices: backend.devices)

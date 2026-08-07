@@ -281,8 +281,40 @@ Scoped tests first, the commit's guard runs the full suite.
 
 ## Execution log
 
-- 5ae36594 — W10+W6 shipped (Setup window floating; pre-program).
-- (append per task)
+- 5ae36594 — W10+W6 shipped (Setup window stays foreground; pre-program).
+- 82c3248c — this plan authored (research-grounded, against 82cab605).
+- 6e6f86eb — **T1** · layout constants folded into `Tokens.Layout` (V10).
+- 50e5302d — **T2** · Settings › Audio buffer applies immediately (V1).
+- fab9cd9a — **T3** · one bezel family for the popover icon buttons (V7).
+- 020d2819 — **T4** · raw colors eliminated; `Tokens.Color.info` added
+  (V4/V5/V6/V12).
+- 9bc5a3da — **T5** · copy pass: one noun, one flow name, HIG buttons, §5.9
+  empty states (V2/V3/V8/V9/V14).
+- e18aa365, 606f5820 — owner addenda: tab-bar switcher, three-tier translucent
+  header, capsule toolbar-item-group idiom.
+- 20716386 — **U1** · shell pinned/transient manner profiles + guarded
+  click-outside dismiss.
+- 4515199b (merged 733533aa) — **U2** · PopoverController host-agnostic
+  visibility + lifecycle seams.
+- 805fde22 — **U3** · `AppSurfaceController`: capsule tab bar on the tiered
+  glass header, pin persistence.
+- cd051a2d — **U4** · AppDelegate cutover: click policy, routes, menus (the
+  policy tests are the W9 answer).
+- e7185175 (merged 67b4d53e) — **U5** · standalone Settings window retired.
+- 967ca26f — **U6** · standalone Groups window + `AIRPLAY_CONTROL_PANEL` flag
+  retired.
+- a53f79a9 — **U7** · NSPopover deleted — the surface is the only host.
+- bf2bd38c — **P2** · a documented "why" for every custom draw override (V11).
+- c8df2082 — **P1+P3** · Reduce Transparency fallbacks, quit HUD alignment,
+  restoration decision (A1/W8/W7).
+- (this commit) — **P4** · `window-snapshot` composites the panel frame view
+  (close affordance visible — V13); all four generators re-run; punch list
+  annotated.
+
+Two process facts, recorded honestly: **U6's and P1/P3's agents returned
+before committing** — the orchestrator reviewed and committed their verified
+work (967ca26f, c8df2082). And the program is **not merged**: the live
+verification checklist below is the open gate before anything reaches `main`.
 
 ## Live verification owed to Alec before merge
 

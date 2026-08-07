@@ -305,6 +305,18 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   `.selectedDevices` `isMainOutMember` and `isSpeakerSelected` are
   *provably* the same read (`mainOutMemberIDs` is `Array(selectedDeviceIDs)`
   in that branch) — so this only changes behavior on the group path.
+- **Never touch IOBluetooth outside `BTDeviceEnumerator`'s authorization gate.**
+  On macOS 27 an IOBluetooth call from a process without the Bluetooth TCC
+  grant KILLS the process — SIGABRT, no prompt, no error (live-verified
+  2026-08-07). Every IOBluetooth touch must sit behind a `CBManager
+  .authorization` check (a prompt-free read) and degrade to Core-Audio-only
+  enumeration when ungranted; tests always inject the enumerator's seams and
+  never reach real IOBluetooth. Bluetooth devices are surfaced-only for now:
+  they never get an `outputIDs` entry, are never fed to the engine, and are
+  ineligible per-app route targets — routing them is BT-BACKEND's partition
+  (`docs/plans/PLAN-UNIVERSAL-SYNC.md`, risk R-partition), not a missing guard
+  here. `BTDeviceEnumerator.swift` is LICENSE-CLEAN like `SyncCore.swift`
+  (no GPL header — see the header note in the file).
 - **`TCCAccessPreflight` is cached for the CALLING process's whole lifetime**,
   so a grant made after launch is invisible to any in-process read forever —
   and the `com.apple.tcc.access.changed` Darwin notification fires but does NOT
@@ -574,6 +586,7 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `NativeBackend` | Shipping backend; drives `AirPlayEngine`, owns capture gate, owns aggregate device lifecycle. |
 | `AggregateOutputDevice` | Lifecycle owner (adopt-or-create/off-switch/orphan sweep) for the PUBLIC, Sound-settings-visible "Audiouter" aggregate (UID `com.audiouter.Audiouter.aggregate`); thin CoreAudio shell wired by `NativeBackend`. Becomes Mac default when whole-system routing arms; restore-prior-default-then-destroy on quit; echo-guarded. New `BackendEvent` case `routingBlockedNeedsDefault(Bool)` signals when the app can't route because its aggregate isn't the Mac's default output. |
 | `NativeDiscovery` | Bonjour discovery (AP2 + AP1). |
+| `BTDeviceEnumerator` | Bluetooth outputs: Core Audio BT transport merged with the TCC-gated IOBluetooth paired list; paired-but-disconnected speakers surface unavailable, with pairing recency kept for ghost-row filtering. |
 | `NativeCaptureCoordinator` | Whole-system Core Audio capture; excludes individually-routed + user-excluded apps. |
 | `PerAppCaptureCoordinator` | Per-process Core Audio capture taps, one per individually-routed app. |
 | `AudioProcessResolver` / `AudioProcessEnumerating` | Bundle ID → ALL its Core Audio process objects (main + helper/child processes) via four ANY-of attribution layers: own bundle id, responsible pid, bundle-path containment, parent-pid walk; the AppKit lookups (pid→bundle, bundle→`.app` path) are injected. `resolveWithAttribution(bundleID:)` (T2) is the diagnostic twin of `resolve(bundleID:)`, tagging each resolved process with its matching `AttributionLayer` for `Telemetry`. |

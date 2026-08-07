@@ -67,6 +67,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private let engine: EngineControlling
     private let discovery: DiscoverySource
 
+    /// Bluetooth audio-output enumeration (BT-ENUM): Core Audio BT transport
+    /// merged with the IOBluetooth paired list, surfacing `.bluetooth` rows the
+    /// same way discovery surfaces AirPlay rows. `nil` (the designated init's
+    /// default, so every existing test stays BT-free) means no BT enumeration;
+    /// the production convenience init wires the real ``BTDeviceEnumerator``.
+    /// BT devices never get an `outputIDs` entry and are never fed to the
+    /// engine — structurally unroutable until BT-BACKEND partitions the output
+    /// set (plan risk R-partition).
+    private let btEnumerator: BTDeviceEnumerating?
+
     /// The Mac's own default-output volume/mute. This is the ONLY control path the
     /// local device row (``localDeviceID``) has: the Mac is the thing *sending*
     /// audio, so it is never an engine output, has no ``outputIDs`` entry, and every
@@ -1096,6 +1106,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.init(
             engineControl: EngineAdapter(engine: engine),
             discoverySource: discovery,
+            btEnumerator: BTDeviceEnumerator(),
             processResolver: processResolver,
             defaultOutputSwitcher: DefaultOutputSwitcher())
     }
@@ -1132,6 +1143,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     init(
         engineControl: EngineControlling,
         discoverySource: DiscoverySource,
+        btEnumerator: BTDeviceEnumerating? = nil,
         dacpEndpoint: DACPEndpoint = DACPServer(),
         systemVolume: SystemVolumeControlling = SystemOutputVolume(),
         ptpHelperActivator: PTPHelperActivating = PTPHelperActivator(),
@@ -1171,6 +1183,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.silenceFallbackDelay = silenceFallbackDelay
         self.engine = engineControl
         self.discovery = discoverySource
+        self.btEnumerator = btEnumerator
         self.dacpServer = dacpEndpoint
         self.systemVolume = systemVolume
         self.ptpHelperActivator = ptpHelperActivator
@@ -1373,6 +1386,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         //    so the engine knows about it (a prerequisite for `addOutput`). Only the
         //    local Mac output is never fed (it isn't a discovered receiver).
         discovery.onEvent = { [weak self] event in self?.handleDiscovery(event) }
+
+        // 1a. Bluetooth outputs (BT-ENUM) flow through the SAME add/update/emit
+        //     path as AirPlay rows, from their own enumerator. Started here, not
+        //     inside the engine Task below: BT rows don't depend on the AirPlay
+        //     engine any more than the local row does.
+        if let btEnumerator {
+            btEnumerator.onSnapshot = { [weak self] snapshots in
+                self?.stateQueue.async { self?.applyBTSnapshots(snapshots) }
+            }
+            btEnumerator.start()
+        }
 
         // 1b. TWO-WAY SYNC for the local row. Its slider/mute ARE the Mac's default
         //     output, so changes made outside this app have to flow back in: the
@@ -1690,6 +1714,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         localPlaybackEngine?.stop()
         discovery.onEvent = nil
         discovery.stop()
+        btEnumerator?.onSnapshot = nil
+        btEnumerator?.stop()
         // Drop the local row's two-way sync (the row itself is removed below).
         systemVolume.onExternalChange = nil
         systemVolume.stop()
@@ -5940,6 +5966,55 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // being an effective redirect and that app rejoins the system mix. The
             // popover ALSO resets such a route (`handleDeviceDisappeared`), but the
             // backend must never depend on a UI layer for its own audibility.
+            commitKnownDevice(id, device)
+        }
+    }
+
+    // MARK: Bluetooth outputs → deviceAdded/deviceUpdated (BT-ENUM)
+
+    /// When macOS last used each known BT pairing, keyed by `Device.id`
+    /// (``BTDeviceSnapshot/lastUsed``). `Device` deliberately doesn't carry this
+    /// yet — it's stashed here so the UI wave can filter/sort the ghost rows a
+    /// forever-remembered pairing list produces, whatever surface it picks.
+    private var btLastUsed: [String: Date] = [:]   // on stateQueue
+
+    /// The ``btLastUsed`` stash, read safely off `stateQueue`. Internal for
+    /// tests today; the intended read for whatever surface the BT-UI wave picks.
+    func lastUsedDatesForBTDevices() -> [String: Date] {
+        stateQueue.sync { btLastUsed }
+    }
+
+    /// Fold a full BT enumeration into the model, through the same
+    /// `known`/`order`/`emit` flow AirPlay discovery uses. A BT device that
+    /// leaves the merged list entirely (unpaired mid-session) goes unavailable
+    /// but keeps its row — same greyed-not-vanished contract as
+    /// ``markDisappeared``. On `stateQueue`.
+    private func applyBTSnapshots(_ snapshots: [BTDeviceSnapshot]) {
+        var seen: Set<String> = []
+        for snapshot in snapshots {
+            let id = snapshot.id
+            seen.insert(id)
+            btLastUsed[id] = snapshot.lastUsed
+            if let existing = known[id] {
+                var updated = existing
+                updated.name = snapshot.name
+                updated.isAvailable = snapshot.isConnected
+                if updated != existing { commitKnownDevice(id, updated) }
+            } else {
+                let device = Device(
+                    id: id,
+                    name: snapshot.name,
+                    kind: .bluetooth,
+                    isAvailable: snapshot.isConnected,
+                    supportsAirPlay2: false)
+                known[id] = device
+                order.append(id)
+                emit(.deviceAdded(device))
+            }
+        }
+        for id in order where known[id]?.kind == .bluetooth && !seen.contains(id) {
+            guard var device = known[id], device.isAvailable else { continue }
+            device.isAvailable = false
             commitKnownDevice(id, device)
         }
     }

@@ -364,6 +364,7 @@ public final class DeviceDetailViewController: NSViewController {
         case .airportExpress: return "AirPort Express"
         case .sonos:          return "Sonos"
         case .generic:        return "AirPlay Speaker"
+        case .bluetooth:      return "Bluetooth Speaker"
         }
     }
 

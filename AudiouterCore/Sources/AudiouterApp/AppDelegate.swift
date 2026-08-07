@@ -939,9 +939,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     private func makeStatusMenu() -> NSMenu {
         let menu = NSMenu()
-        let settings = menu.addItem(withTitle: "Settings…", action: #selector(menuOpenSettings), keyEquivalent: ",")
+        // No ellipsis (HIG): both switch tabs on the surface, they don't open a
+        // window — the app menu's own "Settings…" below keeps its ellipsis,
+        // that one IS the macOS menu-bar convention (⌘,), unrelated to this rule.
+        let settings = menu.addItem(withTitle: "Settings", action: #selector(menuOpenSettings), keyEquivalent: ",")
         settings.target = self
-        let groups = menu.addItem(withTitle: "Groups…", action: #selector(menuOpenGroups), keyEquivalent: "")
+        let groups = menu.addItem(withTitle: "Groups", action: #selector(menuOpenGroups), keyEquivalent: "")
         groups.target = self
         menu.addItem(.separator())
         let quit = menu.addItem(withTitle: "Quit Audiouter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")

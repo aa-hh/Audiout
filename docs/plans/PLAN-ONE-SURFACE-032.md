@@ -9,8 +9,34 @@ at commit 82cab605). Supersedes punch-list items W1–W5
 
 One window replaces five. A single panel — the evolved
 `ControlPanelWindowController` — hosts three screens (Mixer = today's popover
-content, Groups, Settings) behind a **segmented-control strip** at the top of
-the surface, with a **Pin** button beside Quit in the header. Unpinned
+content, Groups, Settings) behind a **tab-bar-style switcher** (owner
+addendum 2026-08-07, supersedes the earlier segmented-control choice): three
+icon+label tabs in the macOS toolbar-tabs idiom — SF Symbols with text
+labels, the native Mac translation of the HIG's tab-bar pattern (the HIG
+scopes literal tab bars to iOS/iPadOS; on the Mac this role belongs to
+toolbar tabs). A **Pin** button sits beside Quit in the header.
+
+**Header material (owner addendum 2026-08-07): translucent, three tiers.**
+The header strip (tabs + pin + quit) is the app's floating controls layer
+per current Apple guidance — Liquid Glass on macOS 26+, with content
+scrolling edge-to-edge beneath it:
+1. macOS 26+: `NSGlassEffectView` with the header controls as its
+   `contentView` (never a sibling — the system needs to own legibility
+   treatments). Corner radius matched to the bubble; a subtle warm tint is
+   allowed via the tint property. On 26+ the PINNED mode's standard title
+   bar is already glass for free; the header's glass must visually merge
+   with it, not stack under it (one glass layer per view — never
+   glass-on-glass).
+2. macOS 14–15: `NSVisualEffectView` fallback with
+   `blendingMode = .withinWindow` — frosts the app's own content scrolling
+   under the header. `.behindWindow` is deliberately NOT used here: it
+   composites the desktop through the window, which fights the opaque Warm
+   Signal canvas and reads as a different effect entirely.
+3. Reduce Transparency (any OS): opaque warm header — reuse the A1
+   fallback pattern; the `rendersOnGlass` flag idiom already in
+   `SidebarViewController` is the precedent for OS-gating.
+The content layer (Mixer/Groups/Settings screens) stays opaque Warm Signal
+canvas — glass is chrome-only, never the bubble body. Unpinned
 (default): anchored under the status item with the beak, click-outside
 dismisses, menu-bar click toggles. Pinned: normal movable window, remembers
 its frame across launches, can sit behind other apps; menu-bar click always
@@ -130,8 +156,15 @@ its scoped verification, then the full suite green, then one commit + push.
   `--filter PopoverControllerTests`; full suite.
 - **U3 · AppSurfaceController + switcher + pin button** — new
   `AudiouterPopoverUI/AppSurfaceController.swift`; `Package.swift:170-174`
-  deps; `PopoverHeaderView.swift` Groups/Settings buttons → segmented
-  switcher + Pin (keep Quit); `AppSettings` gains `surfacePinned`;
+  deps; `PopoverHeaderView.swift` Groups/Settings buttons → the tab-bar
+  switcher + Pin (keep Quit) per the End-state addendum: three icon+label
+  tabs (SF Symbols — e.g. `slider.horizontal.3` Mixer,
+  `hifispeaker.2` Groups, `gearshape` Settings; verify names exist at the
+  deployment target), hosted on the three-tier translucent header
+  (`NSGlassEffectView` on macOS 26+ via `#available`, `NSVisualEffectView`
+  `.withinWindow` below, opaque warm under Reduce Transparency — see End
+  state). Tab selection is the screen switch; keyboard: ⌘1/⌘2/⌘3.
+  `AppSettings` gains `surfacePinned`;
   `SettingsRootViewController` public + in-content tabs; per-screen sizing
   bridge (Mixer exact-fit channel `panelContentDidChangeHeight`; Groups
   560×505 — R2: the shell's 720×460 at `AppDelegate.swift:1043` /

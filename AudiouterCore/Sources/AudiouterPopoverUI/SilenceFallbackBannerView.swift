@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
+import AudiouterSharedUI
 
 /// The popover's "Speakers unreachable — playing on this Mac" banner (Wave 2
 /// W2-T2, R11). A stock system-orange rounded inset card with a warning glyph and
@@ -34,7 +35,7 @@ final class SilenceFallbackBannerView: NSView {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
-        layer?.cornerRadius = 11
+        layer?.cornerRadius = Tokens.Layout.bannerCornerRadius
         layer?.cornerCurve = .continuous
         layer?.borderWidth = 1
         layer?.backgroundColor = NSColor.systemOrange.withAlphaComponent(0.14).cgColor

@@ -369,8 +369,11 @@ public final class GroupRowView: NSView {
 
     public override func draw(_ dirtyRect: NSRect) {
         // Active group → a subtle accent wash; hover → the standard row hover.
-        let rect = bounds.insetBy(dx: 5, dy: 2)
-        let path = NSBezierPath(roundedRect: rect, xRadius: 7, yRadius: 7)
+        let rect = bounds.insetBy(dx: PopoverColumnGrid.selectionHighlightInsetX,
+                                  dy: PopoverColumnGrid.selectionHighlightInsetY)
+        let path = NSBezierPath(roundedRect: rect,
+                                xRadius: PopoverColumnGrid.selectionHighlightCornerRadius,
+                                yRadius: PopoverColumnGrid.selectionHighlightCornerRadius)
         if isActive {
             NSColor.controlAccentColor.withAlphaComponent(0.15).setFill()
             path.fill()

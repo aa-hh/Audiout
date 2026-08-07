@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
+import AudiouterSharedUI
 
 /// The popover's single note-slot banner, originally the "double-path audio"
 /// note (Wave 3 W3-T3, `BackendEvent.systemDefaultIsAirPlayActive`) — shown
@@ -113,7 +114,7 @@ final class SystemAirPlayNoteBannerView: NSView {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
-        layer?.cornerRadius = 11
+        layer?.cornerRadius = Tokens.Layout.bannerCornerRadius
         layer?.cornerCurve = .continuous
         layer?.borderWidth = 1
         layer?.backgroundColor = severity.tintColor.withAlphaComponent(severity.backgroundAlpha).cgColor

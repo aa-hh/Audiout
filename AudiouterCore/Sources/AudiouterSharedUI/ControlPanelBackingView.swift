@@ -27,8 +27,9 @@ public final class ControlPanelBackingView: NSView {
     public static let beakWidth: CGFloat = 18
     /// Corner radius of the bubble body — kept in sync with the corner mask
     /// `ControlPanelWindowController` applies to the hosted content's layer
-    /// so the two windows read as one continuous shape.
-    public static let cornerRadius: CGFloat = 12
+    /// so the two windows read as one continuous shape. Sourced from
+    /// `Tokens.Layout.panelCornerRadius`, the app's one standard panel radius.
+    public static let cornerRadius: CGFloat = Tokens.Layout.panelCornerRadius
 
     /// Fraction (0...1) along the bubble's top edge where the beak tip sits.
     /// Clamped by the setter so the tip never lands inside a rounded corner.

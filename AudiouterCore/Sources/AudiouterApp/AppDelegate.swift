@@ -1498,7 +1498,7 @@ final class QuittingIndicatorPanel: NSPanel {
         effectView.material = .popover
         effectView.state = .active
         effectView.wantsLayer = true
-        effectView.layer?.cornerRadius = 12
+        effectView.layer?.cornerRadius = Tokens.Layout.panelCornerRadius
         effectView.layer?.masksToBounds = true
 
         let spinner = NSProgressIndicator()

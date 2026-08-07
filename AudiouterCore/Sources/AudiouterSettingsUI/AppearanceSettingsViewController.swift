@@ -339,6 +339,7 @@ final class ThemeTileButton: NSButton {
         let ringInset: CGFloat = 3
         let labelHeight: CGFloat = 16
         let gap: CGFloat = 6
+        let ringCornerRadius: CGFloat = 9
         // Top-down (isFlipped): preview thumbnail on top, label beneath it.
         let thumb = NSRect(
             x: ringInset,
@@ -350,7 +351,7 @@ final class ThemeTileButton: NSButton {
 
         // Selection ring (accent) / hover ring (subtle), around the thumbnail.
         let ringRect = thumb.insetBy(dx: -2.5, dy: -2.5)
-        let ring = NSBezierPath(roundedRect: ringRect, xRadius: 9, yRadius: 9)
+        let ring = NSBezierPath(roundedRect: ringRect, xRadius: ringCornerRadius, yRadius: ringCornerRadius)
         if isSelectedTile {
             Tokens.Color.accent.setStroke()
             ring.lineWidth = 2.5

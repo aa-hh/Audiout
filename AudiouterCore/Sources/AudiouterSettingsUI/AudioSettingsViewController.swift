@@ -207,10 +207,10 @@ public final class AudioSettingsViewController: NSViewController {
         container.addSubview(column)
         NSLayoutConstraint.activate([
             container.widthAnchor.constraint(equalToConstant: SettingsForm.contentWidth),
-            column.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
-            column.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
-            column.topAnchor.constraint(equalTo: container.topAnchor, constant: 18),
-            column.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -18),
+            column.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: SettingsForm.horizontalPadding),
+            column.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -SettingsForm.horizontalPadding),
+            column.topAnchor.constraint(equalTo: container.topAnchor, constant: SettingsForm.verticalPadding),
+            column.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -SettingsForm.verticalPadding),
             subtitle.widthAnchor.constraint(equalTo: column.widthAnchor),
             listContainer.widthAnchor.constraint(equalTo: column.widthAnchor),
         ])

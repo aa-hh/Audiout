@@ -731,11 +731,16 @@ public enum Tokens {
 
     // MARK: - Layout
 
-    /// Layout aliases. `PopoverColumnGrid` remains the geometry authority —
-    /// it is not moved, renamed, or duplicated. These are forwarding
-    /// properties only, so code that wants "the app's layout tokens" has one
-    /// import (`Tokens.Layout`) without new call sites needing to know that
-    /// the underlying constants still live in `PopoverColumnGrid`.
+    /// Layout tokens. Most of these are forwarding aliases over
+    /// `PopoverColumnGrid`, which remains the geometry authority for row/card
+    /// layout — it is not moved, renamed, or duplicated; code that wants "the
+    /// app's layout tokens" has one import (`Tokens.Layout`) without new call
+    /// sites needing to know the underlying constants still live there.
+    ///
+    /// The three corner-radius constants below are the exception: each
+    /// consolidates a value that used to be typed out independently at two or
+    /// more call sites in different UI packages (V10 cleanup) — this file is
+    /// their one real declaration, not a forwarding alias over anything else.
     public enum Layout {
         /// Alias of `PopoverColumnGrid.leadingInset`.
         public static var leadingInset: CGFloat { PopoverColumnGrid.leadingInset }
@@ -755,6 +760,22 @@ public enum Tokens {
         public static var trailingControlWidth: CGFloat { PopoverColumnGrid.trailingControlWidth }
         /// Alias of `PopoverColumnGrid.bodyRowHeight`.
         public static var bodyRowHeight: CGFloat { PopoverColumnGrid.bodyRowHeight }
+
+        /// The standard rounded-panel corner radius: the control-panel
+        /// shell's bubble body (`ControlPanelBackingView`) and the
+        /// quit-in-progress HUD (`AppDelegate.QuittingIndicatorPanel`) both
+        /// draw at this radius — previously two independent `12` literals.
+        public static let panelCornerRadius: CGFloat = 12
+        /// The inset warning/note banner corner radius shared by
+        /// `SilenceFallbackBannerView` and `SystemAirPlayNoteBannerView` —
+        /// previously two independent `11` literals.
+        public static let bannerCornerRadius: CGFloat = 11
+        /// The System Settings "grouped inset-list" card corner radius,
+        /// shared by onboarding's `RoundedContainerView` (the permission
+        /// card) and the Groups window's `GroupedSectionView` — both
+        /// explicitly modeled on the same macOS grouped-list idiom;
+        /// previously two independent `10` literals.
+        public static let groupedSectionCornerRadius: CGFloat = 10
     }
 
     // MARK: - Material

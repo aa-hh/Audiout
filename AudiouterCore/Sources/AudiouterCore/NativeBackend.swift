@@ -495,6 +495,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// behind the user's back. `stateQueue`.
     private var handoffReleased = false
 
+    /// Whether the default output has genuinely left our aggregate since the current
+    /// handoff release began. Arms the D1 ".stillOurs ⇒ resume" trigger: after a
+    /// BLOCKED-ATTEMPT release the default never moved (macOS aborts the failed
+    /// AirPlay connect before switching), so ".stillOurs" is just the resting state —
+    /// resuming on it re-grabs the ports and re-blocks the user's retry (live-found
+    /// loop, 2026-08-07). A userDeselected release starts with this `true` (the
+    /// deselect IS the departure); a blockedAttempt release starts `false` and it
+    /// flips only on an observed genuine departure. `stateQueue`.
+    private var defaultLeftUsSinceRelease = true
+
     /// The blocked-AirPlay-attempt watcher (Seamless handoff T3) — runs only while
     /// we might plausibly be holding the PTP ports against a real routing intent
     /// (see `reconcileHandoffWatcherLocked`). `stateQueue`.
@@ -1479,7 +1489,22 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         // never routed through our aggregate to begin with.
                         if !self.expectedSelected.isEmpty, self.aggregateDefaultActive,
                            self.publicAggregate.classifyOffSwitch(newDefaultUID: newDefaultUID) == .userDeselected {
-                            self.releaseForHandoff(reason: "userDeselected")
+                            self.releaseForHandoff(reason: "userDeselected", defaultAlreadyLeftUs: true)
+                        }
+
+                        // A blocked-attempt release happens with our aggregate STILL
+                        // the default (macOS aborts the failed AirPlay connect before
+                        // any switch) — so ".stillOurs" is the default's RESTING
+                        // state after that release, not evidence of a re-pick. Arm
+                        // the D1 resume only once the default has genuinely LEFT us
+                        // post-release; before that, a stray default notification
+                        // would instantly resume, re-grab the ports, and re-block the
+                        // user's retry — the exact loop this release exists to break
+                        // (found live 2026-08-07: fail → bounce-back → re-hold →
+                        // fail, forever).
+                        if self.handoffReleased,
+                           self.publicAggregate.classifyOffSwitch(newDefaultUID: newDefaultUID) == .userDeselected {
+                            self.defaultLeftUsSinceRelease = true
                         }
 
                         // D1 (adversarial review): the user putting us back as
@@ -1490,7 +1515,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         // the routing-blocked banner (via `evaluateRoutingBlocked`
                         // above) with no way left to un-stick `handoffReleased` /
                         // `suspended` — permanent silence with no affordance.
-                        if self.handoffReleased,
+                        // Gated on `defaultLeftUsSinceRelease` (see above): a
+                        // userDeselected release sets it true immediately (the
+                        // default provably left us — that's what triggered it), so
+                        // the original D1 behavior is unchanged there.
+                        if self.handoffReleased, self.defaultLeftUsSinceRelease,
                            self.publicAggregate.classifyOffSwitch(newDefaultUID: newDefaultUID) == .stillOurs {
                             let (kicks, teardown) = self.resumeFromHandoffLocked()
                             for (id, out) in kicks {
@@ -1706,6 +1735,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // watcher so no orphan `log` child survives quit (AppDelegate's quit
             // path calls `stop()`).
             self.handoffReleased = false
+            self.defaultLeftUsSinceRelease = true
             self.handoffWatcher?.stop()
             self.handoffWatcher = nil
             // D2 (adversarial review): drop the reference — `engine.stop()` below
@@ -2021,6 +2051,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // (silent, since `convergeDevice` has no `suspended` guard of its own).
             if self.handoffReleased, !ids.isEmpty {
                 self.handoffReleased = false
+                self.defaultLeftUsSinceRelease = true
                 self.suspended = false
             }
             // Fix C: an explicit (re)selection is a fresh normal-operation context, not
@@ -4959,7 +4990,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// The user's system-output action means macOS wants the timing ports. Tear the
     /// AirPlay sessions down (KEEPING selection intent) and free 319/320 fast, so
     /// their next attempt in Sound settings succeeds. On `stateQueue`.
-    private func releaseForHandoff(reason: String) {   // on stateQueue
+    /// - Parameter defaultAlreadyLeftUs: whether the system default output has
+    ///   ALREADY moved off our aggregate at the moment of this release. True for a
+    ///   user deselect (that departure is what triggered it); false for a blocked
+    ///   attempt (macOS aborts before switching, so we are still the default).
+    ///   Arms `defaultLeftUsSinceRelease` — passed explicitly rather than derived
+    ///   from `reason`, which exists only for telemetry and must not carry logic.
+    private func releaseForHandoff(reason: String, defaultAlreadyLeftUs: Bool) {   // on stateQueue
         guard self.started, !self.handoffReleased, !self.suspended else { return }
         // The gate below is "do we plausibly hold the ports at all" — a release
         // with nothing streaming/converging would tear down zero sessions and just
@@ -4978,6 +5015,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         guard !self.added.isEmpty || !self.streamBindings.isEmpty || !self.converging.isEmpty else { return }
 
         self.handoffReleased = true
+        self.defaultLeftUsSinceRelease = defaultAlreadyLeftUs
         self.suspended = true
         let toRemove = self.suspendSessionsKeepingIntentLocked()
         // D3 (adversarial review — corrects the T3.9 answer): a per-app-ONLY target
@@ -5018,7 +5056,24 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// A blocked macOS AirPlay attempt was observed in the unified log — treat it as
     /// the user's switch-away intent. Called from the watcher's pipe I/O thread.
     private func handleBlockedAirPlayAttempt() {
-        stateQueue.async { self.releaseForHandoff(reason: "blockedAttempt") }
+        stateQueue.async {
+            // The watcher firing without a release that follows is otherwise
+            // invisible — `releaseForHandoff`'s guards return silently. Logging the
+            // inputs makes the REJECTING guard readable straight from telemetry
+            // instead of inferred; it earned its keep on 2026-08-07, where
+            // `added:0, bindings:0, converging:0` is what proved a blocked attempt
+            // had arrived with nothing left to release (roadmap 026, the
+            // same-device case). Cheap: fires only on a real blocked attempt.
+            Telemetry.log(.airplay, "handoff_blocked_attempt_state", [
+                "started": String(self.started),
+                "handoffReleased": String(self.handoffReleased),
+                "suspended": String(self.suspended),
+                "added": String(self.added.count),
+                "bindings": String(self.streamBindings.count),
+                "converging": String(self.converging.count),
+            ])
+            self.releaseForHandoff(reason: "blockedAttempt", defaultAlreadyLeftUs: false)
+        }
     }
 
     /// Start/stop the blocked-attempt watcher to match whether we currently have
@@ -5409,6 +5464,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private func resumeFromHandoffLocked() -> (kicks: [(String, OutputID)], teardown: Task<Void, Never>?) {   // on stateQueue
         guard self.started, self.handoffReleased else { return ([], nil) }
         self.handoffReleased = false
+        self.defaultLeftUsSinceRelease = true
         self.suspended = false
         self.clearSilenceOverride()
         let teardown = self.handoffTeardown

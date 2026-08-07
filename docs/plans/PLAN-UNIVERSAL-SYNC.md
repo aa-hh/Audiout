@@ -161,6 +161,21 @@ What: implement the Section-D table; map to `isAvailable` greying + `connectionS
 Kind: backend · Depends on: BT-CONNECT, BT-BACKEND · **Model: sonnet 5 · Effort: medium.**
 Verify: state-transition unit tests + hardware.
 
+**UI SPEC LOCKED 2026-08-07 (Alec, via mockup review — binding for BT-OFFSET-UI and BT-UI):**
+Bluetooth devices are their own "Bluetooth Devices" subsection in OUTPUT DEVICES, rows
+identical to AirPlay rows (rail/tether select on the left, meter under the name, VOLUME
+slider + %, FEED pill far right). **SYNC is a column title in the Bluetooth subsection
+only**, sitting between VOLUME and FEED: compact − / bare-ms-value / + stepper (±500 ms,
+10 ms steps; value field allows 1 ms typing) plus an align-by-ear icon button —
+**`metronome.fill`** SF Symbol (fall back to outline `metronome` if the fill clots at
+final size) with a hover TOOLTIP explaining its purpose. Disconnected rows keep their
+saved value read-only. The align aid plays a REAL metronome-style tick (sharp woodblock
+transient — the ear detects double-hits/flams down to ~10–20 ms) on BOTH the reference
+device and the BT device on the same beat; the user nudges until the flam collapses to a
+single tick. Beat spacing must dodge offset aliasing: at 120 BPM (500 ms) a fully-offset
+device sounds aligned one beat late — use ~70–80 BPM (750–850 ms) or a slightly
+irregular interval.
+
 **BT-OFFSET-UI — per-device manual offset (numeric ms + nudge) + persistence**
 Files: Settings Audio tab (match the existing "Advanced buffer ms" precedent), `AppSettings.swift`, `BTSyncedSink.swift` (consume), per-brand seed table.
 What: per-device numeric ms offset (bare number/unit — house rule on numeric controls), an A/B "nudge until it blends" affordance, per-brand seed defaults, persisted per device UID.

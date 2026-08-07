@@ -171,6 +171,114 @@ import Testing
         #expect(received.all.count == 1)
     }
 
+    // MARK: The authorization ASK (the prompt seam)
+
+    /// Scriptable stand-in for the CoreBluetooth ask: records how often the
+    /// request fired, holds the decision callback, and plays the OS's
+    /// authorization state.
+    private final class AuthScript: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _authorized = false
+        private var _undetermined = true
+        private var _requests = 0
+        private var _onDecided: (@Sendable () -> Void)?
+        var authorized: Bool {
+            get { lock.withLock { _authorized } }
+            set { lock.withLock { _authorized = newValue } }
+        }
+        var undetermined: Bool {
+            get { lock.withLock { _undetermined } }
+            set { lock.withLock { _undetermined = newValue } }
+        }
+        var requestCount: Int { lock.withLock { _requests } }
+        func makeRequest(_ onDecided: @escaping @Sendable () -> Void) -> AnyObject? {
+            lock.withLock { _requests += 1; _onDecided = onDecided }
+            return self
+        }
+        /// The user answered the prompt — plays the delegate decision callback.
+        func decide() { lock.withLock { _onDecided }?() }
+    }
+
+    private func makeAskingEnumerator(
+        _ script: AuthScript, listPaired: @escaping @Sendable () -> [BTPairedRecord]
+    ) -> BTDeviceEnumerator {
+        let output = btOutput()
+        return BTDeviceEnumerator(
+            listOutputs: { [output] },
+            listPaired: listPaired,
+            isBluetoothAuthorized: { script.authorized },
+            isBluetoothUndetermined: { script.undetermined },
+            makeAuthorizationRequest: { script.makeRequest($0) })
+    }
+
+    private func waitFor(timeout: TimeInterval = 2, _ cond: @escaping () -> Bool) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if cond() { return }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+        }
+    }
+
+    /// The live root cause this seam exists for: `.notDetermined` never
+    /// resolves on its own, so the first enumeration must ASK — once — and a
+    /// grant must land the merged paired list with no relaunch (the decision
+    /// callback re-enumerates).
+    @Test func undeterminedFiresOneRequestAndGrantRefreshesTheMergedList() {
+        let script = AuthScript()
+        let received = SnapshotBox()
+        let record = paired()
+        let enumerator = makeAskingEnumerator(script) { [record] }
+        enumerator.onSnapshot = { received.append($0) }
+
+        enumerator.refresh()
+        #expect(script.requestCount == 1, "the undetermined status fires the ask")
+        #expect(received.all.last?.count == 1, "pre-decision enumeration is Core-Audio-only")
+
+        enumerator.refresh()
+        #expect(script.requestCount == 1, "the ask fires ONCE, not per refresh")
+
+        // The user grants: the decision callback re-enumerates on its own —
+        // the paired list (the ghost/disconnected rows) lands immediately.
+        script.authorized = true
+        script.undetermined = false
+        script.decide()
+        waitFor { received.all.last?.count == 2 }
+        #expect(received.all.last?.count == 2, "a grant refreshes without a relaunch")
+    }
+
+    /// A denial ends the wait the same way but changes nothing: the gate keeps
+    /// IOBluetooth untouched forever and enumeration stays Core-Audio-only.
+    @Test func denialStaysDegradedAndNeverTouchesIOBluetooth() {
+        let script = AuthScript()
+        let pairedTouched = LockedFlag()
+        let received = SnapshotBox()
+        let record = paired()
+        let enumerator = makeAskingEnumerator(script) { pairedTouched.set(); return [record] }
+        enumerator.onSnapshot = { received.append($0) }
+
+        enumerator.refresh()
+        script.undetermined = false   // the user denied; authorized stays false
+        script.decide()
+        waitFor(timeout: 0.3) { false }
+        enumerator.refresh()
+        #expect(!pairedTouched.isSet, "denied ⇒ IOBluetooth is never touched")
+        #expect(received.all.last?.map(\.id) == [sonosUID], "still Core-Audio-only")
+        #expect(script.requestCount == 1, "no re-ask after a denial either")
+    }
+
+    /// An already-decided status (granted or denied at launch) never
+    /// constructs the request at all.
+    @Test func decidedStatusNeverAsks() {
+        let script = AuthScript()
+        script.undetermined = false
+        script.authorized = true
+        let record = paired()
+        let enumerator = makeAskingEnumerator(script) { [record] }
+        enumerator.onSnapshot = { _ in }
+        enumerator.refresh()
+        #expect(script.requestCount == 0)
+    }
+
     // MARK: Thread-safe test boxes
 
     private final class LockedFlag: @unchecked Sendable {

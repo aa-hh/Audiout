@@ -1153,7 +1153,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.init(
             engineControl: EngineAdapter(engine: engine),
             discoverySource: discovery,
-            btEnumerator: BTDeviceEnumerator(),
+            btEnumerator: BTDeviceEnumerator.production(),
             btConnectionManager: BTConnectionManager(),
             btTrimStore: BTTrimStore(),
             processResolver: processResolver,

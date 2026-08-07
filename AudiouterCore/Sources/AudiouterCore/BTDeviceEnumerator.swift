@@ -116,18 +116,43 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
     private let listOutputs: @Sendable () -> [BTCoreAudioOutput]
     private let listPaired: @Sendable () -> [BTPairedRecord]
     private let isBluetoothAuthorized: @Sendable () -> Bool
+    private let isBluetoothUndetermined: @Sendable () -> Bool
+    private let makeAuthorizationRequest: @Sendable (@escaping @Sendable () -> Void) -> AnyObject?
+    /// The in-flight (then decided) authorization request — retained for the
+    /// enumerator's lifetime so the `CBCentralManager` behind it survives long
+    /// enough to fire the prompt AND deliver the decision callback. Confined
+    /// to `queue`. `authorizationRequested` is the fired-once guard (separate,
+    /// because an injected maker may legitimately return nil).
+    private var authorizationRequest: AnyObject?
+    private var authorizationRequested = false
 
-    /// Production defaults touch the real HAL / IOBluetooth; tests inject all
-    /// three (`NativeBackend`'s designated init defaults to NO enumerator, so
-    /// no test constructs a real one by accident).
+    /// The production configuration — the ONE construction that can fire the
+    /// real Bluetooth prompt. Deliberately not init defaults: a test that
+    /// injects the list seams but forgets the authorization pair must degrade
+    /// to "never asks" (the ask instantiates a real `CBCentralManager`, and a
+    /// TCC prompt popping mid-`swift test` is exactly the class of accident
+    /// the injected seams exist to prevent).
+    static func production() -> BTDeviceEnumerator {
+        BTDeviceEnumerator(
+            isBluetoothUndetermined: { CBManager.authorization == .notDetermined },
+            makeAuthorizationRequest: { BTAuthorizationRequest(onDecided: $0) })
+    }
+
+    /// `listOutputs`/`listPaired`/`isBluetoothAuthorized` default to the real
+    /// HAL / IOBluetooth reads; the authorization-ASK pair defaults inert (see
+    /// ``production()``). Tests inject whichever seams they exercise.
     init(
         listOutputs: @escaping @Sendable () -> [BTCoreAudioOutput] = BTDeviceEnumerator.systemOutputs,
         listPaired: @escaping @Sendable () -> [BTPairedRecord] = BTDeviceEnumerator.systemPairedRecords,
-        isBluetoothAuthorized: @escaping @Sendable () -> Bool = { CBManager.authorization == .allowedAlways }
+        isBluetoothAuthorized: @escaping @Sendable () -> Bool = { CBManager.authorization == .allowedAlways },
+        isBluetoothUndetermined: @escaping @Sendable () -> Bool = { false },
+        makeAuthorizationRequest: @escaping @Sendable (@escaping @Sendable () -> Void) -> AnyObject? = { _ in nil }
     ) {
         self.listOutputs = listOutputs
         self.listPaired = listPaired
         self.isBluetoothAuthorized = isBluetoothAuthorized
+        self.isBluetoothUndetermined = isBluetoothUndetermined
+        self.makeAuthorizationRequest = makeAuthorizationRequest
     }
 
     /// Initial enumeration + a `kAudioHardwarePropertyDevices` listener so a
@@ -138,6 +163,19 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
         queue.async {
             self.installDeviceListListenerLocked()
             self.refreshLocked()
+        }
+    }
+
+    /// Fire the Bluetooth TCC prompt exactly once, iff still `.notDetermined`.
+    /// The decision callback (granted OR denied — either ends the wait)
+    /// re-enumerates so a grant lands the merged paired list immediately, no
+    /// relaunch; a denial re-runs the same gated path and changes nothing.
+    private func requestAuthorizationIfNeededLocked() {
+        guard !authorizationRequested, isBluetoothUndetermined() else { return }
+        authorizationRequested = true
+        authorizationRequest = makeAuthorizationRequest { [weak self] in
+            guard let self else { return }
+            self.queue.async { self.refreshLocked() }
         }
     }
 
@@ -156,6 +194,13 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
     }
 
     private func refreshLocked() {
+        // The Bluetooth grant is REQUESTED here, on the first enumeration that
+        // finds it `.notDetermined`: the status is a passive read that never
+        // resolves on its own, so without an ask the gate below degrades to
+        // Core-Audio-only forever — the paired list, and every ghost/
+        // disconnected row with it, never loads (found live: only already-
+        // connected speakers ever surfaced).
+        requestAuthorizationIfNeededLocked()
         let paired = isBluetoothAuthorized() ? listPaired() : []
         let merged = Self.merge(outputs: listOutputs(), paired: paired)
         guard merged != lastEmitted else { return }
@@ -360,5 +405,46 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
         AudioObjectRemovePropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &addr, queue, deviceListListener)
         listenerInstalled = false
+    }
+}
+
+// MARK: - The Bluetooth TCC ask
+
+/// The one sanctioned way to fire the Bluetooth permission prompt:
+/// instantiating a `CBCentralManager` (with the `NSBluetoothAlwaysUsageDescription`
+/// string make-app.sh bakes in) is what surfaces it — there is no standalone
+/// "request" API. CoreBluetooth only, so this never risks the ungranted-
+/// IOBluetooth process kill the class doc above describes. The power alert is
+/// suppressed (`CBCentralManagerOptionShowPowerAlertKey: false`) — this object
+/// exists to ask about PERMISSION, not to nag about the radio being off.
+///
+/// `onDecided` fires ONCE, on the first state callback where authorization is
+/// no longer `.notDetermined` — granted and denied both end the wait (the
+/// caller re-enumerates either way; the authorization gate decides what that
+/// yields). The instance must be RETAINED until then, which is why the
+/// enumerator stores it for its lifetime.
+final class BTAuthorizationRequest: NSObject, CBCentralManagerDelegate, @unchecked Sendable {
+
+    private var manager: CBCentralManager?
+    private let onDecided: @Sendable () -> Void
+    private let lock = NSLock()
+    private var decided = false
+
+    init(onDecided: @escaping @Sendable () -> Void) {
+        self.onDecided = onDecided
+        super.init()
+        manager = CBCentralManager(
+            delegate: self, queue: nil,
+            options: [CBCentralManagerOptionShowPowerAlertKey: false])
+    }
+
+    func centralManagerDidUpdateState(_ central: CBCentralManager) {
+        guard CBManager.authorization != .notDetermined else { return }
+        let firstDecision: Bool = lock.withLock {
+            guard !decided else { return false }
+            decided = true
+            return true
+        }
+        if firstDecision { onDecided() }
     }
 }

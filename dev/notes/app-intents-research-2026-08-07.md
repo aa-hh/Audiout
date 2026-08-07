@@ -105,9 +105,16 @@ pass in `make-app.sh` (~line 613 onward), or the signature won't cover it.
   package cannot back App Shortcuts. So the intent types go in
   `Sources/AudiouterApp/`, calling into `AudiouterCore` — not in `AudiouterCore`
   itself. `AudiouterApp` is currently 5 files; this roughly doubles it.
-- **Maximum 10 App Shortcuts per app**, and every trigger phrase must contain
-  the `\(.applicationName)` placeholder. (There is also a 1000-phrase ceiling
-  where each parameter option counts — irrelevant at our scale.)
+- **Reported** maximum of 10 App Shortcuts per app, with every trigger phrase
+  containing the `\(.applicationName)` placeholder. Flagging the sourcing: this
+  comes from developer-forum threads, **not** from Apple's own App Shortcuts
+  page, which states no limit. Moot for us either way — §7 dropped
+  `AppShortcutsProvider` — but do not treat the number as authoritative if that
+  decision is ever revisited. What Apple *does* state plainly is the auto-appear
+  behaviour: shortcuts "are available as soon as someone installs your app, and
+  you don't have to register them yourself."
+- **macOS 13.0+** — confirmed on the framework page. This package is macOS 14,
+  so no gate.
 - **Intents run inside the app's process**, so macOS launches Audiouter if it
   isn't running. For a menu-bar app that is the behaviour you want anyway.
 - The controllers the intents will call (`GroupController`,
@@ -119,6 +126,37 @@ pass in `make-app.sh` (~line 613 onward), or the signature won't cover it.
 - macOS 14 minimum is already well past App Intents' macOS 13 floor. No gate.
 
 ---
+
+## 3a. Two things only Apple's own docs said
+
+Both found late, by reading the framework reference directly rather than
+search summaries. (Apple's docs pages are JavaScript-rendered and fetch as an
+empty title — the readable source is the docs site's own JSON, e.g.
+`developer.apple.com/tutorials/data/documentation/appintents.json`. Worth
+knowing for any future Apple-docs question in this project.)
+
+**1. The intents will not be covered by our test suite.** Apple ships an
+`AppIntentsTesting` framework for exactly this — "prevent and catch regressions
+before they ship", with support for testing intents, entities, and entity
+queries. We cannot use it: "App Intents Testing runs your intents inside a live
+app process, so your tests belong in a **UI testing bundle** rather than a unit
+test target." A UI test bundle is an Xcode target type; SwiftPM has no
+equivalent. So the intent layer sits outside `scripts/run-tests.sh` and Guard
+4/6 entirely.
+
+That converts directly into a design rule: **keep every intent type a pure
+translation layer with zero logic** — resolve the entity, call the one
+`GroupController` method, return. Anything with a branch in it belongs in
+`AudiouterCore`, where the suite can reach it. This is the strongest argument
+yet for the thin-wrapper shape, and it is not a preference — it is the only
+place tests can run.
+
+**2. Spotlight is not free.** With `AppShortcutsProvider` dropped (§7), Spotlight
+looked like the remaining discovery path. It isn't automatic: entities surface
+in Spotlight only if they conform to `IndexedEntity` and are donated, with
+`IndexedEntityQuery` for reindexing. So "the actions ship invisible" (§7.2)
+stands, and the cheap fix if that becomes a problem is `IndexedEntity` on
+`SpeakerEntity` — a small, well-defined add, not a rethink.
 
 ## 4. How deep to go — recommended scope
 
@@ -293,6 +331,8 @@ bigger change to the build and would reset this recommendation.
 ## Sources
 
 - [App Intents (Apple)](https://developer.apple.com/documentation/appintents) ·
+  [App Intents Testing](https://developer.apple.com/documentation/AppIntentsTesting/testing-your-app-intents-code) ·
+  [Spotlight integration](https://developer.apple.com/documentation/appintents/spotlight) ·
   [AppShortcutsProvider](https://developer.apple.com/documentation/appintents/appshortcutsprovider) ·
   [Adopting App Intents for system experiences](https://developer.apple.com/documentation/AppIntents/adopting-app-intents-to-support-system-experiences)
 - [DTS: App Intents in an SPM package don't show in Shortcuts](https://developer.apple.com/forums/thread/759160) — the main-target and metadata-extraction constraints

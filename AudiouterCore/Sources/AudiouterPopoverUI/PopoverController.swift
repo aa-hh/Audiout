@@ -515,7 +515,27 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// Push the latest device snapshot and repaint. Re-derives active-group state
     /// (defensive under a group target) and repaints mounted rows in place.
     public func update(devices: [Device]) {
+        let previousDevices = devicesByID
         devicesByID = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0) })
+        // A SELECTED Bluetooth device that LOSES availability is DESELECTED
+        // (Alec's call — off = unselected, replacing the backend's power-off
+        // park). Both loss paths — a listed-but-disconnected snapshot AND a
+        // vanish (unpair mid-session, sleep) — reach this surface as the same
+        // availability edge on a kept row, so one edge covers them. Routed
+        // through `setDeviceSelected` (the one selection owner — persist,
+        // re-route, current-device floor), the same path a user's toggle-off
+        // takes; the mirror of `handleDeviceDisappeared`'s route reset below.
+        // Edge-only on purpose: a selection made ON an already-greyed row
+        // ("play when up") has no edge and survives, so it still auto-starts
+        // on connect; and a `.failed` story alone never deselects (R12) — only
+        // the availability fact does.
+        if let controller = groupController {
+            for device in devices where device.isBluetooth && !device.isAvailable {
+                guard previousDevices[device.id]?.isAvailable == true,
+                      controller.isSpeakerSelected(device.id) else { continue }
+                _ = controller.setDeviceSelected(device.id, false)
+            }
+        }
         // Drop any live-streaming entry (T9) for a device that vanished from the
         // snapshot entirely. Defensive: a normal route-change already clears the
         // entry itself (a redirect leaving X emits `.routedApps(X, [])`), but a

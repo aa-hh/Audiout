@@ -397,6 +397,49 @@ import AppKit
         #expect(gates.last == false)
     }
 
+    // MARK: Deselect on availability loss (off = unselected)
+
+    /// A selected BT device that loses availability — power-off, vanish, or
+    /// sleep all reach this surface as the same edge — is DESELECTED through
+    /// `GroupController.setDeviceSelected`; on return it sits available but
+    /// unselected (no auto-resume) until the user selects it again.
+    @Test func selectedBTRowIsDeselectedOnAvailabilityLossAndStaysOffOnReturn() {
+        let (popover, controller, _) = makePopover(fleet: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.test_deviceRow(for: "bt-a:output")?.test_clickName()   // select
+        #expect(controller.selectedDeviceIDs.contains("bt-a:output"))
+
+        // Loss: off = unselected, truthfully.
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A", available: false)])
+        #expect(!controller.selectedDeviceIDs.contains("bt-a:output"),
+                "availability loss deselects — the row reads what's true")
+        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_isEnabledOn == false)
+
+        // Return: available, still unselected, NOT playing.
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        #expect(!controller.selectedDeviceIDs.contains("bt-a:output"),
+                "a return never auto-resumes — selecting again is the user's move")
+
+        // The user's select-after-return plays (greyed-select semantics stay:
+        // selection intact through a later loss-free connect auto-starts).
+        popover.test_deviceRow(for: "bt-a:output")?.test_clickName()
+        #expect(controller.selectedDeviceIDs.contains("bt-a:output"))
+    }
+
+    /// The edge-only guard: a selection made ON an already-greyed row ("play
+    /// when up") has no loss edge, so it SURVIVES repaints while the device is
+    /// still away — that deliberate intent is what auto-starts on connect.
+    @Test func selectionMadeOnAGreyedRowSurvivesWhileStillUnavailable() {
+        let (popover, controller, _) = makePopover(fleet: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A", available: false)])
+        _ = popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)   // "play when up"
+        #expect(controller.selectedDeviceIDs.contains("bt-a:output"))
+
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A", available: false)])
+        #expect(controller.selectedDeviceIDs.contains("bt-a:output"),
+                "no availability EDGE ⇒ the held intent survives every repaint")
+    }
+
     // MARK: Greyed-row click keeps membership honest end-to-end
 
     @Test func greyedBTRowClickNeverEditsSelection() {

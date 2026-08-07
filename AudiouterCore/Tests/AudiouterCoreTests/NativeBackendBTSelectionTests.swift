@@ -514,13 +514,16 @@ import CoreAudio
         #expect(slow.cause == .unknown, #""Couldn't connect", matching AirPlay's generic failure"#)
     }
 
-    /// Power-off park (Alec, 2026-08-07): a selected speaker that powers off
-    /// and RETURNS must not auto-resume — the row reads `.off` and the sink
-    /// set excludes it — until the user retries, which un-parks, connects, and
-    /// resumes.
-    @Test func btPowerOffReturn_doesNotAutoResume_untilUserRetry() {
-        let manager = FakeBTConnectionManager()
-        let (backend, _, _, bt, sink, _) = makeBackend(btConnection: manager)
+    /// Availability-loss handling moved UPSTREAM (Alec's deselect-on-power-off
+    /// decision: the popover deselects on the loss edge via
+    /// `GroupController.setDeviceSelected` — see `BTPopoverRowsTests`). The
+    /// backend contract that remains: a loss reads `.off` and, once the
+    /// routing brain's deselect lands as a plain `setOutputSet` drop, the sink
+    /// set empties — while a return with the selection STILL intact resumes,
+    /// because intact selection is deliberate intent (the greyed-row "play
+    /// when up" select).
+    @Test func btLossReadsOffDeselectDropsTheSinkAndIntactSelectionResumes() {
+        let (backend, _, _, bt, sink, _) = makeBackend()
         defer { backend.stop() }
         backend.start()
         bt.fire([btMove])
@@ -528,30 +531,34 @@ import CoreAudio
         backend.setOutputSet([btMove.id])
         waitFor { sink.calls.contains("start") }
 
-        // Power off, then back on: available again, but parked — no auto-play.
+        // Power off: the row reads .off; the routing brain's deselect (the
+        // popover's loss-edge reaction) reaches the backend as a plain drop.
         bt.fire([BTDeviceSnapshot(id: btMove.id, name: btMove.name, isConnected: false)])
         waitFor { self.device(backend, self.btMove.id)?.isAvailable == false }
         #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off)
+        backend.setOutputSet([])
+        waitFor { sink.calls.contains("stop") }
+        waitFor { sink.deviceSets.last?.isEmpty == true }
+
+        // Return while UNselected: available, .off, sink set stays empty.
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id)?.isAvailable == true }
         #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off,
-                "returning after a power-off must not read .connected")
-        waitFor { sink.deviceSets.last?.isEmpty == true }
-        #expect(sink.deviceSets.last?.isEmpty == true,
-                "the applied set stays empty — no auto-resume")
+                "returning unselected must not read .connected")
+        #expect(sink.deviceSets.last?.isEmpty == true, "…and must not re-enter the sink set")
 
-        // The user's retry is the un-park: connect succeeds → resumes.
-        let appliesBefore = sink.deviceSets.count
-        backend.retryOutput(btMove.id)
+        // The user selects again → plays.
+        backend.setOutputSet([btMove.id])
         waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
-        waitFor { sink.deviceSets.count > appliesBefore && sink.deviceSets.last?.map(\.uid) == [self.btMove.id] }
-        #expect(sink.deviceSets.last?.map(\.uid) == [btMove.id],
-                "retry un-parks and the device re-enters the applied set")
+        waitFor { sink.deviceSets.last?.map(\.uid) == [self.btMove.id] }
+        #expect(sink.deviceSets.last?.map(\.uid) == [btMove.id])
     }
 
-    /// Reselecting a parked row is explicit intent too: deselect → reselect
-    /// clears the park, so the device plays again without a retry.
-    @Test func btReselect_clearsThePowerOffPark() {
+    /// The other half of the contract: a return while the selection is STILL
+    /// intact (nothing deselected it — the user picked a greyed row, "play
+    /// when up") auto-starts. This was the park's false negative: it also
+    /// blocked exactly this deliberate intent after a power-off round-trip.
+    @Test func btReturnWhileStillSelectedResumes() {
         let (backend, _, _, bt, sink, _) = makeBackend()
         defer { backend.stop() }
         backend.start()
@@ -563,14 +570,12 @@ import CoreAudio
         bt.fire([BTDeviceSnapshot(id: btMove.id, name: btMove.name, isConnected: false)])
         waitFor { self.device(backend, self.btMove.id)?.isAvailable == false }
         bt.fire([btMove])
-        waitFor { self.device(backend, self.btMove.id)?.isAvailable == true }
-
-        backend.setOutputSet([])
-        waitFor { sink.calls.contains("stop") }
-        backend.setOutputSet([btMove.id])
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connected,
+                "selection intact across the loss = deliberate intent — the return resumes")
         waitFor { sink.deviceSets.last?.map(\.uid) == [self.btMove.id] }
         #expect(sink.deviceSets.last?.map(\.uid) == [btMove.id],
-                "a fresh membership edge clears the park")
+                "the reconnect-reapply re-enters the applied set")
     }
 
     // MARK: - Wave-4 delay agreement (Mac + BT without AirPlay)

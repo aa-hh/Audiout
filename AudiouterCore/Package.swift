@@ -292,6 +292,21 @@ let package = Package(
         .executableTarget(
             name: "process-audio-dump"
         ),
+        // Throwaway visual prototype of the one-surface window
+        // (docs/plans/PLAN-ONE-SURFACE-032.md) — see the product comment in
+        // Sources/surface-mockup/main.swift. Additive only: it hosts the real
+        // shell/Mixer/Groups/Settings views unmodified and is linked by nothing.
+        .executableTarget(
+            name: "surface-mockup",
+            dependencies: [
+                "AudiouterCore",
+                "AudiouterSharedUI",
+                "AudiouterPopoverUI",
+                "AudiouterWindowUI",
+                "AudiouterSettingsUI",
+            ],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
+        ),
         .testTarget(
             name: "AudiouterCoreTests",
             dependencies: [

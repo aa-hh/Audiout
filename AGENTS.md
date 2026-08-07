@@ -78,6 +78,36 @@ symbol you cannot find in source, believe the source and fix the doc.
   repo's own path contains a space, which silently breaks unquoted loops.
 - **Inner-loop test command:** see [AudiouterCore/AGENTS.md](AudiouterCore/AGENTS.md) for
   guidance on scoping tests with `--filter`.
+- **Flag finished worktrees `.prunable`; never hand-delete them.** Fifteen
+  worktrees' SwiftPM caches once filled the disk to zero bytes free mid-build.
+  `scripts/housekeeping.sh` (invoked automatically by `scripts/run-tests.sh`
+  and `scripts/make-app.sh` whenever a build starts) does two things: it
+  removes any worktree whose root contains a `.prunable` marker — but only if
+  it is clean, unreferenced by any running process, and its HEAD is merged
+  into `main` or pushed — and it sweeps machine-wide `.build` caches: any
+  cache untouched for `AUDIOUTER_CACHE_MAX_AGE_DAYS` (7) is deleted, and
+  below `AUDIOUTER_MIN_FREE_GB` (8) free disk, caches go least-recently-
+  built-first. **The floor is headroom the script guarantees with its own
+  caches, not a claim on the disk** — when reclaiming everything still would
+  not reach it, the shortfall came from elsewhere (Xcode device support,
+  simulators), so the caches stay warm and it says so instead of thrashing.
+  Below `AUDIOUTER_CRITICAL_FREE_GB` (2) it takes everything anyway. The
+  building checkout and any checkout a live process references are never
+  touched.
+  When a branch is merged AND live-verified (or abandoned with everything
+  pushed), `touch .claude/worktrees/<slug>/.prunable` and let the system
+  collect it. The flag is a request, not a command — a dirty or unpushed
+  worktree is refused with the reason printed.
+- **Sweep stale PTP-helper daemons routinely — and always before a native live
+  test.** Old dev builds and side-by-side copies leave `*.ptphelper` launchd
+  jobs bound to UDP 319/320; a single stale one makes a healthy on-demand helper
+  look broken (they have piled up 16-deep). `scripts/purge-stale-ptp-helpers.sh`
+  lists them (dry-run, no sudo — safe to run anytime, so run it periodically);
+  `scripts/purge-stale-ptp-helpers.sh --apply` boots them out. `--apply` needs
+  `sudo`, so it prompts and cannot run unattended — an agent runs it only where a
+  human can enter the password. Never `--apply` while a live Audiouter session is
+  actively streaming: it unloads the running helper too. It only ever touches
+  `*.ptphelper` jobs.
 
 ## `main` is MERGE-ONLY (HARD RULE)
 
@@ -107,8 +137,10 @@ loose edits looks like helpfulness.**
 Merge-only makes docs-ahead-of-code structurally impossible: a doc and its code
 ride the same branch and become true on `main` in the same instant.
 
-**Two pre-commit guards** (`.githooks/`; enable once per clone with
-`git config core.hooksPath .githooks`, override once with `--no-verify`):
+**Pre-commit guards** (`.githooks/pre-commit`; enable once per clone with
+`git config core.hooksPath .githooks`, override once with `--no-verify`). The
+two that shape how you work, plus the review gate; the rest (test suites 4/6,
+warn-only 3/5) are documented in the hook file itself:
 
 - **Guard 1 blocks** a direct commit on `main`. Merges are unaffected; it never
   fires in a worktree.
@@ -118,6 +150,13 @@ ride the same branch and become true on `main` in the same instant.
   truth is still true) and not the working tree (which would have let `f1f3e94`
   through). Known false positives: AppKit types named as design guidance but used
   nowhere.
+- **Guard 7 blocks** a Swift commit until the staged-diff readability
+  self-review has run: `scripts/self-review.sh` shows the checklist and writes
+  a receipt keyed to the exact staged bytes — READ your staged diff against
+  [docs/REVIEW-RUBRIC.md](docs/REVIEW-RUBRIC.md) (change-log narration, stale
+  claims, misleading names, reviewer-speak) before committing; restaging
+  invalidates the receipt on purpose. It also hard-blocks near-certain slop
+  patterns in added comments (trailing `slop-ok` exempts a legitimate line).
 
 ## UI / Design Conventions (all targets)
 

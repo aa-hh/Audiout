@@ -19,7 +19,7 @@ import AppKit
 ///
 /// Columns, leading → trailing:
 /// ```
-/// │ [leading zone] [icon] [name  …  ] [ slider ][ %% ] ···flex··· [status][ ctl ] │
+/// │ [leading zone] [icon] [name  …  ] [ slider ][ %% ] ···flex··· [ ctl ] │
 /// ```
 /// The `%` readout is NOT trailing-anchored — it hangs immediately off the
 /// **slider's** trailing edge (`sliderToReadout` gap), so the number always
@@ -27,10 +27,8 @@ import AppKit
 /// not floated over near the trailing control. The flexible slack now lives
 /// BETWEEN the readout and the trailing control instead of in the name column
 /// alone; the slider column itself stays a fixed width and a fixed distance from
-/// the trailing edge, so everything still lines up across row types. The
-/// connection-status slot (brief §6) sits fixed between the readout and the
-/// trailing control, same trailing-anchored trick. A row that lacks a given
-/// column leaves the slot empty but keeps the same anchors.
+/// the trailing edge, so everything still lines up across row types. A row
+/// that lacks a given column leaves the slot empty but keeps the same anchors.
 public enum PopoverColumnGrid {
 
     // MARK: Leading edges
@@ -94,7 +92,6 @@ public enum PopoverColumnGrid {
     // LENGTH as the device meters (`meterUnderNameWidth`, unchanged) but a
     // heavier THICKNESS — thickness alone signifies "master bus," so it still
     // reads as a gauge-sibling of the device meters, not a different species.
-    // UNUSED until the master-strip task wires it.
 
     /// Thickness of the Main Audio master meter bar (spec ~6 pt, vs the device
     /// meters' `meterUnderNameHeight` 3 pt). Length stays `meterUnderNameWidth`.
@@ -161,10 +158,8 @@ public enum PopoverColumnGrid {
 
     // MARK: Fixed column widths
 
-    /// The device/Main-Out icon column. Bumped 22→26 (2026-07-17) when the
-    /// connection-status indicator moved OFF a right-side slot and ONTO the icon
-    /// as a corner badge (`StatusDotView`) — a slightly larger glyph gives the
-    /// badge somewhere to sit without crowding the symbol.
+    /// The device/Main-Out icon column — sized so the corner badge (now
+    /// `RouteArmedDotView`) sits on the glyph without crowding the symbol.
     public static let iconWidth: CGFloat = 26
     /// The volume/master slider column — one fixed width shared by every row so
     /// the slider column is identical in all three sections.
@@ -260,12 +255,14 @@ public enum PopoverColumnGrid {
 
     // MARK: On-icon status badge (2026-07-17)
     //
-    // The connection-status indicator is a small corner dot overlapping the
-    // device icon's bottom-right (a notification-badge position), replacing the
-    // retired right-side status slot. These are grouped as NAMED CONSTANTS on
-    // purpose: a future settings menu will offer compact/normal/large row
-    // densities, so the icon + badge sizing must be swappable HERE, in one
-    // place, not scattered as magic numbers across `DeviceRowView`/``HaloRingView``.
+    // Geometry inherited from the RETIRED corner connection dot (the halo ring
+    // §3.2 replaced it): `statusDotInset` still seats `RouteArmedDotView` on
+    // the icon's corner, `statusDotBorderWidth` its punch-out rim, and the
+    // `statusDotBreath*` timings drive `HaloRingView`'s breathing pulse.
+    // Grouped as NAMED CONSTANTS on purpose: a future settings menu will offer
+    // compact/normal/large row densities, so icon + badge sizing must be
+    // swappable HERE, in one place, not scattered as magic numbers across
+    // `DeviceRowView`/``HaloRingView``.
 
     /// Diameter of the on-icon status badge (the connection-state dot).
     public static let statusDotDiameter: CGFloat = 10
@@ -467,8 +464,7 @@ public enum PopoverColumnGrid {
     // enable the two row types to render as a cohesive popover list.
 
     /// The shared body-row height for DeviceRowView and AppRowView, unifying
-    /// the previously divergent 42 (device) and 38 (app) heights. Consumers adopt
-    /// this constant in a later task.
+    /// the previously divergent 42 (device) and 38 (app) heights.
     public static let bodyRowHeight: CGFloat = 42
     /// Alpha for the unified pointer-hover wash, drawn in
     /// `NSColor.selectedContentBackgroundColor` at this opacity. Shared by
@@ -595,8 +591,7 @@ public enum PopoverColumnGrid {
     public static let sliderToReadout: CGFloat = 6
     /// Gap between the `%` readout's trailing edge and the trailing control
     /// (ENABLED switch) it sits left of — the flexible slack column. The
-    /// right-side status slot was retired 2026-07-17 (status moved onto the
-    /// icon), so the readout now sits directly before the trailing control again.
+    /// readout sits directly before the trailing control.
     public static let readoutToTrailingControl: CGFloat = 6
     /// Gap between the mute glyph and the slider it sits left of.
     public static let muteToSlider: CGFloat = 6
@@ -614,8 +609,7 @@ public enum PopoverColumnGrid {
     /// Distance from the row trailing edge to the **slider's trailing edge** — the
     /// slider column is fixed-width and fixed here, so it lines up across every
     /// row type. Sized to clear the readout that hangs off it, the min flex
-    /// slack, and the trailing control. (The right-side status slot that once sat
-    /// between the readout and the trailing control was retired 2026-07-17.)
+    /// slack, and the trailing control.
     public static var sliderTrailing: CGFloat {
         trailingControlTrailing + trailingControlWidth + readoutToTrailingControl
             + readoutWidth + sliderToReadout
@@ -640,7 +634,4 @@ public enum PopoverColumnGrid {
     public static var trailingControlCenterFromTrailing: CGFloat { trailingControlTrailing + trailingControlWidth / 2 }
 
     // Every element keeps plain `centerYAnchor` — no per-element optical nudge.
-    // (The volume sliders are stock `NSSlider`s as of 2026-07-17; the earlier
-    // custom Control-Center slider carried a 1.75pt optical-rise tweak, removed
-    // with it when ahh reverted to default macOS slider styling.)
 }

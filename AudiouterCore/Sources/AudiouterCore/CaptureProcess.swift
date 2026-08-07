@@ -168,16 +168,27 @@ final class AudiocapProcess: CaptureProcess, @unchecked Sendable {
 }
 
 /// Accumulates stream bytes and yields complete newline-delimited lines.
-/// Thread-confined to the single `readabilityHandler` callback chain.
-private final class LineBuffer: @unchecked Sendable {
+///
+/// Internally synchronized: `append` runs on the pipe's `readabilityHandler`
+/// I/O queue while `flush` is called from the `Process` termination queue, and
+/// `readabilityHandler = nil` does NOT wait for an in-flight invocation — so
+/// the two genuinely race during teardown (adversarial finding D9, 2026-07-27;
+/// shared by both consumers, `AudiocapProcess` and `LogStreamProcess`). The
+/// lock makes the interleaving safe; one benign residual remains by design: a
+/// chunk appended AFTER the final `flush` stays buffered and is dropped with
+/// the dead process — a torn tail line, never a corrupted one.
+final class LineBuffer: @unchecked Sendable {
+    private let lock = NSLock()
     private var partial = Data()
 
     func append(_ data: Data) -> [String] {
+        lock.lock(); defer { lock.unlock() }
         partial.append(data)
         return drainLines()
     }
 
     func flush() -> [String] {
+        lock.lock(); defer { lock.unlock() }
         guard !partial.isEmpty else { return [] }
         let line = String(decoding: partial, as: UTF8.self)
         partial.removeAll()

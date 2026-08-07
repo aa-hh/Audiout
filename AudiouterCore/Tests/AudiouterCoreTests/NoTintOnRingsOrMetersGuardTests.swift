@@ -32,7 +32,7 @@ import AudiouterCore
     }
 
     /// Assert two colors resolve to the same sRGB components.
-    private func assertSameHue(
+    private func assertSameColor(
         _ a: NSColor?,
         _ b: NSColor?,
         _ message: String,
@@ -53,9 +53,9 @@ import AudiouterCore
         let meter = LevelMeterView()
         let colors = meter.test_gradientColors
         #expect(colors.count == 3, "Meter gradient must have exactly 3 stops")
-        assertSameHue(colors[0], Tokens.Color.ember, "Stop 0 is ember")
-        assertSameHue(colors[1], Tokens.Color.gold, "Stop 1 is gold")
-        assertSameHue(colors[2], Tokens.Color.caution, "Stop 2 is caution ceiling")
+        assertSameColor(colors[0], Tokens.Color.ember, "Stop 0 is ember")
+        assertSameColor(colors[1], Tokens.Color.gold, "Stop 1 is gold")
+        assertSameColor(colors[2], Tokens.Color.caution, "Stop 2 is caution ceiling")
     }
 
     @Test func meterGradientNeverContainsFailureRed() {
@@ -112,7 +112,7 @@ import AudiouterCore
         row.apply(makeDevice(connectionState: .connected), selected: true)
 
         if let ringColor = row.test_ringStrokeColor {
-            assertSameHue(ringColor, Tokens.Color.ringConnected, "Connected ring is ringConnected")
+            assertSameColor(ringColor, Tokens.Color.ringConnected, "Connected ring is ringConnected")
         }
     }
 
@@ -122,7 +122,7 @@ import AudiouterCore
         row.apply(failed, selected: true)
 
         if let ringColor = row.test_ringStrokeColor {
-            assertSameHue(ringColor, Tokens.Color.failure, "Failed ring is failure red")
+            assertSameColor(ringColor, Tokens.Color.failure, "Failed ring is failure red")
         }
     }
 
@@ -142,7 +142,7 @@ import AudiouterCore
 
         // FEED column IS allowed to wear the tether tint
         let feedColor = row.test_feedAppSegmentColor(for: "Music")
-        assertSameHue(feedColor, tetherTint, "FEED column app segment wears tether tint")
+        assertSameColor(feedColor, tetherTint, "FEED column app segment wears tether tint")
     }
 
     @Test func feedColumnNeutralSegmentDoesNotWearTether() {
@@ -177,7 +177,7 @@ import AudiouterCore
         // But FEED column shows the tether tints
         for (appName, tint) in tints {
             let feedColor = row.test_feedAppSegmentColor(for: appName)
-            assertSameHue(feedColor, tint, "\(appName) segment in FEED wears tint")
+            assertSameColor(feedColor, tint, "\(appName) segment in FEED wears tint")
         }
     }
 
@@ -241,7 +241,7 @@ import AudiouterCore
         #expect(row.test_meterTarget >= 0)
     }
 
-    @Test func connectingDeviceKeepsWarmMetricAndConnectionRing() {
+    @Test func connectingDeviceKeepsWarmMeterAndConnectionRing() {
         let row = DeviceRowView(
             device: makeDevice(connectionState: .connecting),
             showsMeter: true,

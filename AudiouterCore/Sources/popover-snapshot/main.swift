@@ -543,15 +543,18 @@ func snapshotConnectionStates(appearanceName: NSAppearance.Name, label: String, 
     popover.configure(groupController: controller)
 
     // Membership in the Selected Devices set drives the switch (never
-    // `connectionState` directly — §7.3 "honest toggle"). `.connecting`/
-    // `.connected`/`.reconnecting` are all still "expected selected"; only
-    // `.failed` should render OFF, and that bounce-off happens for free below
-    // via the real `.off → .failed` transition handling.
+    // `connectionState` directly — §7.3 "honest toggle"). EVERY state here is
+    // "expected selected", `.failed` included: this used to leave the failed
+    // device unselected, on the pre-R12 rule that a failure bounced it back OFF,
+    // but R12 (W2-T3) removed that bounce — a failed device KEEPS the user's
+    // intent. So an unselected-and-failed row no longer models anything the app
+    // can actually produce, and staging it here suppressed the very thing this
+    // scenario exists to show: since 2026-08-06 the diagnosis panel is retired
+    // when the user drops the selection, so an unselected failed row renders no
+    // panel at all. Selecting it stages the real post-R12 state — red ring, red
+    // "Couldn't connect" feed token, panel open.
     for device in fleet {
-        guard case .failed = device.connectionState else {
-            _ = popover.test_toggleDeviceEnabled(deviceID: device.id, on: true)
-            continue
-        }
+        _ = popover.test_toggleDeviceEnabled(deviceID: device.id, on: true)
     }
 
     // Push the fleet's explicit connection states straight through — this is

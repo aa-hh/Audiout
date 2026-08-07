@@ -421,6 +421,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onOpenPTPHelperLoginItems = { [weak self] in
             self?.permissionProviders.ptpHelper.openSystemSettingsLoginItems()
         }
+        // Wave 3 T5 (routing-blocked warning's "Use Audiouter" button, Q6): the
+        // user's own click IS their intent, so re-selecting the public aggregate as
+        // the Mac's default output here is the ONLY sanctioned re-select — never
+        // programmatic (Q2). No-op on backends without the aggregate
+        // (`MockBackend`/`OwnToneBackend`), matching the other `NativeBackend`-only
+        // capability hooks above.
+        popoverController.onReselectAudiouter = { [weak self] in
+            (self?.backend as? NativeBackend)?.reselectAggregateAsDefault()
+        }
         // Metering-active gate (T-GATE): only compute/emit `.level` while the
         // popover is actually open. `backend as? MeteringControlling` is nil for
         // backends without the capability (`OwnToneBackend`), so this is a no-op
@@ -558,6 +567,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // path skips entirely. Give every native-backend launch one silent
             // registration attempt so their Login Items entry appears too.
             registerPTPHelperIfNeeded()
+            healPTPHelperZombieIfNeeded()
             // If audio capture is already NOT granted at launch (revoked or reset
             // since setup completed), present setup NOW — synchronously, since the
             // grant is a silent read — so it's the first thing on screen. Without
@@ -674,6 +684,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             log("PTP helper registered at launch (existing-user path)")
         } catch {
             log("PTP helper registration failed at launch: \(error)")
+        }
+    }
+
+    /// One-shot launch-time auto-heal for the PTP helper "zombie" state
+    /// (T-ZOMBIE, T4): `SMAppService` reports `.enabled` (Login Items approved)
+    /// yet launchd has no loaded job for the label, so every AirPlay 2 session
+    /// silently loses its shared clock. WHY `auditRequiredPermissionsIfNeeded()`
+    /// just below can't catch this: that audit is a STATUS-only read
+    /// (`SetupModel.auditRequiredPermissions()` calls `PTPHelperManaging
+    /// .status`), and a zombie helper reports `.enabled` right through it — a
+    /// status-only check PASSES a zombie silently. Only an ACTIVE liveness probe
+    /// distinguishes an `.enabled`-but-dead job from a genuinely healthy one,
+    /// which is exactly what `PTPHelperReconciler.reconcile()` runs. This method
+    /// is both the detection and the auto-repair; a false zombie verdict on a
+    /// valid, merely-contended connection is impossible by construction (only
+    /// `XPC_ERROR_CONNECTION_INVALID` ever maps to `.zombie` — see
+    /// `PTPLivenessProbeResult`), so healing here can never tear down a daemon
+    /// that is still mid-takeover for its ports.
+    ///
+    /// `reconcile()` is async (a bounded XPC probe, ~1.5s worst case), so this
+    /// fires it inside its own `Task` rather than awaiting inline — launch must
+    /// never block on it. Native-backend-gated, same posture as
+    /// `registerPTPHelperIfNeeded()` above: the mock/OwnTone paths never
+    /// register the helper, so there is nothing to reconcile. On `.healed`
+    /// landing back in `.requiresApproval`, or on `.healFailed` (the auto-heal
+    /// itself didn't work and the user needs the manual recovery), presents the
+    /// `.permissionLost([.ptpHelper])` approval screen — guarded on
+    /// `onboardingWindowController == nil`, the same guard the launch-time
+    /// audio-capture `.permissionLost` call site above uses, so this can't
+    /// double-present against another site opening onboarding first.
+    @MainActor
+    private func healPTPHelperZombieIfNeeded() {
+        guard case .native = backendKind else { return }
+        let reconciler = PTPHelperReconciler(helper: permissionProviders.ptpHelper)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let outcome = await reconciler.reconcile()
+            switch outcome {
+            case .healed(let newStatus) where newStatus == .requiresApproval:
+                self.log("PTP helper zombie healed at launch — re-registration needs Login Items approval")
+                if self.onboardingWindowController == nil {
+                    self.presentSetup(reason: .permissionLost([.ptpHelper]))
+                }
+            case .healFailed:
+                self.log("PTP helper zombie heal failed at launch — surfacing manual recovery")
+                if self.onboardingWindowController == nil {
+                    self.presentSetup(reason: .permissionLost([.ptpHelper]))
+                }
+            case .notEnabled, .healthy, .indeterminate, .healed:
+                break
+            }
         }
     }
 
@@ -1331,6 +1392,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popoverController.setTakeoverStatus(status)
             log("event: \(describe(event))")
             return
+        case .routingBlockedNeedsDefault(let active):
+            // Wave 3 T5: the app is actively routing but the Mac's default output
+            // isn't our public aggregate, so audio is dead until the user switches
+            // back. Show or clear the popover's routing-blocked warning; a whole-app
+            // condition with no home on a `Device` — handle it and return.
+            popoverController.setRoutingBlockedNeedsDefault(active)
+            log("event: \(describe(event))")
+            return
         }
         // Establish the out-of-the-box default (current device selected ⇒
         // passthrough) once the fleet is known (SPEC §9b). No-op after the first
@@ -1379,6 +1448,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "streamHealth(\(id), recovering: \(recovering))"
         case .takeoverStatus(let status):
             return "takeoverStatus(\(status.map { "\($0)" } ?? "nil"))"
+        case .routingBlockedNeedsDefault(let active):
+            return "routingBlockedNeedsDefault(\(active)) — \(active ? "actively routing but the aggregate isn't the Mac's default output" : "aggregate is default again / routing stopped")"
         }
     }
 

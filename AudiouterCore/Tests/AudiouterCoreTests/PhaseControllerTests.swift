@@ -388,7 +388,7 @@ import Testing
 
         for cycle in 0..<3_000 {
             // Keep the ring fed at the reference rate (one chunk per cycle).
-            if cycle % 1 == 0 { enqueueChunk(N) }
+            enqueueChunk(N)
             let produced = out.withUnsafeMutableBufferPointer {
                 sink.renderInterleaved(into: $0, frameCount: N,
                                        cycleStartMonotonicNanos: Int64(cycleStart.rounded()))
@@ -401,9 +401,6 @@ import Testing
         #expect(released, "audio must have been released")
         #expect(errorsNs.count > 2_000, "should have many post-release cycles")
 
-        // Held near zero over the final ~1 s: |error| well under one frame (20.8 µs)
-        // — in fact within a few µs — despite the continuous 60 ppm skew that a
-        // 1:1 (uncorrected) drain would let accrue without bound.
         // Held to ≈ zero over the final ~1 s (in practice sub-nanosecond, rounding to
         // 0 ns): the continuous PI correction cancels the 60 ppm skew that a 1:1
         // (uncorrected) drain would let accrue without bound. This is the target —

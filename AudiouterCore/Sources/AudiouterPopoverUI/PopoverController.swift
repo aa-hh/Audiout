@@ -205,6 +205,16 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// taps into nothing — the app always wires this in practice.
     public var onOpenPTPHelperLoginItems: (() -> Void)?
 
+    /// Called when the user taps the routing-blocked note's "Use
+    /// `AggregateOutputDevice.productName`" button (T-UI) — the app is
+    /// actively routing but the aggregate isn't the Mac's current default
+    /// output, so audio isn't reaching it. The app wires this to whatever
+    /// re-selects the aggregate as the system default output. The user's own
+    /// click is the intent here (Alec's Q6 call), so this does NOT violate
+    /// the "never auto-reselect" rule elsewhere. `nil` (the default) means
+    /// the button, if ever rendered, taps into nothing.
+    public var onReselectAudiouter: (() -> Void)?
+
     /// Called with `true` on `popoverDidShow` and `false` on `popoverDidClose`
     /// (T-GATE): the metering-active gate. The app wires this to
     /// `(backend as? MeteringControlling)?.setMeteringActive(_:)` so the backend
@@ -626,15 +636,17 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     var test_localFallbackBannerText: String? { panel.test_bannerText }
 
     // MARK: System-AirPlay guard note (Wave 3 W3-T3) + takeover status strip (T6)
+    //        + routing-blocked-needs-default warning (T-UI)
     //
-    // Both conditions want the SAME physical note slot (`panel.setSystemAirPlayNote`)
+    // All three conditions want the SAME physical note slot (`panel.setSystemAirPlayNote`)
     // — there is only one, never two stacked notes (PLAN-AIRPLAY-COEXISTENCE.md T6).
-    // PRECEDENCE: a takeover status, when present, outranks the double-path guard
-    // note; the double-path note reappears underneath the instant the takeover
-    // status clears. Each condition keeps its own idempotence-check state var
-    // (`systemAirPlayNoteActive` / `takeoverStatus`); `applyNoteSlot()` is the one
-    // place that resolves precedence and actually pushes to the panel, called by
-    // both setters and by the tail of `rebuild()`.
+    // PRECEDENCE, highest first: routing-blocked (T-UI, WARNING severity — audio is
+    // dead right now) outranks the takeover status, which outranks the double-path
+    // guard note; each lower note reappears underneath the instant the one above it
+    // clears. Each condition keeps its own idempotence-check state var
+    // (`routingBlockedNeedsDefault` / `takeoverStatus` / `systemAirPlayNoteActive`);
+    // `applyNoteSlot()` is the one place that resolves precedence and actually
+    // pushes to the panel, called by every setter and by the tail of `rebuild()`.
 
     /// The exact note copy from PLAN-RELIABILITY Wave 3's "System-AirPlay guard"
     /// bullet: non-blocking, informational — this never changes what's actually
@@ -652,6 +664,30 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// nothing to explain. Drives the note (see PRECEDENCE above); re-applied on
     /// every `rebuild()` so a rebuild mid-takeover keeps it pinned.
     private var takeoverStatus: TakeoverStatus?
+
+    /// Whether the routing-blocked-needs-default warning (T-UI) is currently
+    /// active: this app is actively routing but `AggregateOutputDevice.productName`
+    /// is NOT the Mac's current default output, so nothing actually reaches it.
+    /// TOP precedence in the note slot (see PRECEDENCE above) — re-applied on
+    /// every `rebuild()` so a rebuild mid-condition keeps it pinned.
+    private var routingBlockedNeedsDefault = false
+
+    /// The routing-blocked warning's exact copy (T-UI, locked design): the
+    /// "Audiouter" token comes from `AggregateOutputDevice.productName` rather
+    /// than a hardcoded string.
+    static var routingBlockedNeedsDefaultText: String {
+        "\(AggregateOutputDevice.productName) isn't your Mac's output device — audio won't play until you switch back."
+    }
+
+    /// Show or clear the routing-blocked-needs-default warning (T-UI). Called
+    /// by the host (`AppDelegate`) directly — a whole-app condition with no
+    /// home on `Device`, same shape as ``setSystemAirPlayNoteActive(_:)``.
+    /// Idempotent: a repeat of the current state is a no-op.
+    public func setRoutingBlockedNeedsDefault(_ active: Bool) {
+        guard active != routingBlockedNeedsDefault else { return }
+        routingBlockedNeedsDefault = active
+        applyNoteSlot()
+    }
 
     /// Show or clear the "double-path audio" note
     /// (`BackendEvent.systemDefaultIsAirPlayActive`). Called by the host
@@ -680,24 +716,40 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     private func applyNoteSlot() {
         guard isEffectivelyShown else { return }
         let note = resolvedSystemAirPlayNote
-        panel.setSystemAirPlayNote(note.text, action: note.action)
+        panel.setSystemAirPlayNote(note.text, action: note.action, severity: note.severity)
         panel.panelContentDidChangeHeight(animated: true)
         // When not shown, the next `rebuildForOpen()` re-applies this from the
         // tail of `rebuild()`.
     }
 
-    /// What the note slot should currently show: a takeover status (T6) outranks
-    /// the double-path guard (W3-T3); neither active means no note. `action` is
-    /// non-nil only for `.needsApproval` (state 1) — the one state with an actual
-    /// remedy this button can offer.
-    private var resolvedSystemAirPlayNote: (text: String?, action: SystemAirPlayNoteBannerView.Action?) {
+    /// What the note slot should currently show, highest precedence first:
+    /// routing-blocked (T-UI, WARNING — audio is dead right now) outranks a
+    /// takeover status (T6), which outranks the double-path guard (W3-T3);
+    /// none active means no note. `action` is non-nil for routing-blocked (the
+    /// "Use <productName>" button) and for the takeover strip's
+    /// `.needsApproval` (state 1) — the only states with an actual remedy a
+    /// button can offer.
+    private var resolvedSystemAirPlayNote: (text: String?, action: SystemAirPlayNoteBannerView.Action?, severity: SystemAirPlayNoteBannerView.Severity) {
+        if routingBlockedNeedsDefault {
+            return (Self.routingBlockedNeedsDefaultText, routingBlockedNeedsDefaultAction, .warning)
+        }
         if let takeoverStatus {
-            return (Self.takeoverStatusText(for: takeoverStatus), takeoverStatusAction(for: takeoverStatus))
+            return (Self.takeoverStatusText(for: takeoverStatus), takeoverStatusAction(for: takeoverStatus), .info)
         }
         if systemAirPlayNoteActive {
-            return (Self.systemAirPlayNoteText, nil)
+            return (Self.systemAirPlayNoteText, nil, .info)
         }
-        return (nil, nil)
+        return (nil, nil, .info)
+    }
+
+    /// The routing-blocked warning's action button (T-UI, Alec's Q6 — the
+    /// user's own click is their intent, so re-selecting the aggregate here
+    /// does NOT violate "never auto-reselect").
+    private var routingBlockedNeedsDefaultAction: SystemAirPlayNoteBannerView.Action {
+        SystemAirPlayNoteBannerView.Action(
+            title: "Use \(AggregateOutputDevice.productName)",
+            accessibilityLabel: "Use \(AggregateOutputDevice.productName) as the Mac's output device",
+            handler: { [weak self] in self?.onReselectAudiouter?() })
     }
 
     /// The takeover strip's copy for each state (T6, PLAN-AIRPLAY-COEXISTENCE.md) —
@@ -890,7 +942,14 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             devicesPlaceholderShown = true
         } else {
             if !locals.isEmpty {
-                panel.addSubsectionHeader("Current Device")
+                // "This Mac", not "Current Device": once the app inserts its own
+                // aggregate ("Audiouter") as the default output, the literal
+                // "current device" is the aggregate — a plumbing artifact the user
+                // shouldn't see. This section names the Mac's own output honestly;
+                // the row under it still shows the real underlying device name
+                // (e.g. "MacBook Pro Speakers", via `currentOutputDeviceName`, which
+                // resolves through the aggregate to the wrapped speakers).
+                panel.addSubsectionHeader("This Mac")
                 for device in locals { panel.addRow(makeDeviceRow(device, indented: false)) }
             }
             if !airplay.isEmpty {
@@ -959,11 +1018,11 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // above dropped it with everything else, so a rebuild that happens WHILE the
         // fallback is active (e.g. a device set change) must restore it.
         panel.setBanner(localFallbackActive ? Self.localFallbackBannerText : nil)
-        // Re-pin the note slot (W3-T3 double-path guard / T6 takeover strip) the
-        // same way — resolved through the same PRECEDENCE `applyNoteSlot()` uses,
-        // so a rebuild mid-takeover (or mid-double-path) restores the right one.
+        // Re-pin the note slot (T-UI routing-blocked / T6 takeover strip / W3-T3
+        // double-path guard) the same way — resolved through the same PRECEDENCE
+        // `applyNoteSlot()` uses, so a rebuild mid-condition restores the right one.
         let note = resolvedSystemAirPlayNote
-        panel.setSystemAirPlayNote(note.text, action: note.action)
+        panel.setSystemAirPlayNote(note.text, action: note.action, severity: note.severity)
     }
 
     private func orderedDevices() -> [Device] {
@@ -1517,17 +1576,19 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// Toggle the in-place refusal note under the blocked device row `id`: mount
     /// it directly beneath the row when absent, remove it when a second body-click
     /// asks again. No-op if the row isn't currently mounted.
+    /// The re-fit is the row primitives' own job now (`insertRow`/`removeRow`) —
+    /// this used to re-fit here, which measured the note BEFORE `removeRow`'s
+    /// deferred detach actually took it out of the tree and left the popover a row
+    /// too tall. Same latent bug the diagnosis panel hit; one fix covers both.
     private func toggleBlockedNote(for id: String, reason: String) {
         if let existing = blockedNoteByID.removeValue(forKey: id) {
             panel.removeRow(existing, animated: true)
-            panel.panelContentDidChangeHeight(animated: true)
             return
         }
         guard let row = deviceRowsByID[id] else { return }
         let note = makeRefusalNoteRow(text: reason)
         blockedNoteByID[id] = note
         panel.insertRow(note, after: row, animated: true)
-        panel.panelContentDidChangeHeight(animated: true)
     }
 
     /// A one-line refusal-note row (spec §4.6): an `info` glyph + `reason` in
@@ -1577,10 +1638,10 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     // automatically once discovery reports the device reachable again
     // (`NativeBackend.addOrUpdate`'s `desiredOn`-driven re-kick) — no user
     // action required. On `→ .connected` / `→ .off` any panel for the id is
-    // torn down. "Try again" re-adds membership (the toggle-on path IS the
-    // retry path, and remains a no-op if the device was never removed). The
-    // panel is purely auto-driven off these transitions — the manual
-    // warning-button toggle was retired 2026-07-17.
+    // torn down. "Try again" is `OutputBackend.retryOutput(_:)` via
+    // `GroupController.retryConnection(for:)` — a single-device re-kick that
+    // never touches membership. The panel is purely auto-driven off these
+    // transitions — the manual warning-button toggle was retired 2026-07-17.
 
     /// Diff the new snapshot's connection states against the last one and run
     /// the edge-triggered reactions above. Also prunes state for devices that
@@ -1628,6 +1689,30 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             openDiagnosisIDs.remove(id)
             dismissedDiagnosisIDs.remove(id)
         }
+
+        // Devices the user no longer wants audio on: drop the panel even though the
+        // backend keeps them `.failed`. `.failed` is STICKY (§1) — deselecting a
+        // failed device produces no `→ .off` edge, so without this the panel outlives
+        // the intent that justified it and sits under an unselected row forever
+        // (found live: select → fail → deselect leaves the panel mounted for the rest
+        // of the session, and each round leaves the popover sized for a row that is
+        // no longer there). This is the MIRROR of R12, not a violation of it: R12
+        // forbids a FAILURE from dropping the user's selection; this drops the
+        // failure REPORT when the USER drops the selection. A redirect target counts
+        // as intent too — its row is live and "Try again" still means something —
+        // so it keeps its panel exactly like a Selected-Devices member.
+        for id in openDiagnosisIDs.union(dismissedDiagnosisIDs) where !wantsAudio(id) {
+            openDiagnosisIDs.remove(id)
+            dismissedDiagnosisIDs.remove(id)
+        }
+    }
+
+    /// Whether the user currently intends audio on `id` — a Selected-Devices/group
+    /// member, or an app-redirect target. The same predicate `applySelectionState`
+    /// uses for `controllable:`, so a row that renders live keeps its panel and one
+    /// that doesn't loses it.
+    private func wantsAudio(_ id: String) -> Bool {
+        (groupController?.isSpeakerSelected(id) ?? false) || isRedirectTarget(id)
     }
 
     /// Make the mounted panel views match `openDiagnosisIDs`: tear down panels
@@ -1677,13 +1762,16 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     /// "Try again": under R12 (W2-T3) the id is normally ALREADY selected/a
     /// group member (`.failed` no longer drops it), so this can't ride a
-    /// plain `setDeviceSelected(id, true)` off→on edge any more —
-    /// `GroupController.retryConnection(for:)` is the dedicated entry point
-    /// that re-applies routing regardless, so the backend gets another
-    /// `setOutputSet` call and can re-kick the `.failed` id back to
-    /// `.connecting`. Same call whether `id` is a Selected-Devices member or
-    /// an active group's member (Groups and Selected Devices behave
-    /// identically here).
+    /// plain `setDeviceSelected(id, true)` off→on edge —
+    /// `GroupController.retryConnection(for:)` is the dedicated entry point,
+    /// which calls `OutputBackend.retryOutput(id)`: a single-device re-kick
+    /// back to `.connecting` that touches no other device (a broad routing
+    /// re-apply used to re-kick EVERY parked `.failed` id — the retry storm,
+    /// fixed 2026-08-06). Same call whether `id` is a Selected-Devices member
+    /// or an active group's member (Groups and Selected Devices behave
+    /// identically here). The eager `.failed → .connecting` edge this produces
+    /// is also what marks the attempt USER-INITIATED for the episode
+    /// semantics above — the backend's autonomous recovery never emits it.
     private func retryConnection(for id: String) {
         let result = groupController?.retryConnection(for: id) ?? .ok
         handleSelection(result, deviceID: id)

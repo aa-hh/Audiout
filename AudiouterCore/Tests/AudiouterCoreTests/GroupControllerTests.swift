@@ -1495,6 +1495,11 @@ private final class RecordingBackend: OutputBackend {
         inner.setOutputSet(ids)
     }
 
+    func retryOutput(_ id: String) {
+        callOrder.append("retry")
+        inner.retryOutput(id)
+    }
+
     func setVolume(_ volume: Int, for id: String) {
         volumeWrites.append((id: id, volume: volume))
         inner.setVolume(volume, for: id)

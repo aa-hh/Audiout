@@ -26,7 +26,7 @@ import Testing
 @Suite struct WorkgroupLifecycleTests {
 
     /// Thread-safe latch used to fence on "this closure ran on the engine
-    /// thread," replacing XCTestExpectation's `fulfill()`/`wait(for:timeout:)`.
+    /// thread."
     private final class Fence: @unchecked Sendable {
         private let lock = NSLock()
         private var _fired = false
@@ -34,8 +34,7 @@ import Testing
         var fired: Bool { lock.withLock { _fired } }
     }
 
-    /// Polls `fence.fired` for up to `timeout`, mirroring the old
-    /// `wait(for:timeout:)` fence pattern without XCTestExpectation.
+    /// Polls `fence.fired` for up to `timeout`.
     private func awaitFence(_ fence: Fence, timeout: Duration = .seconds(5)) async throws {
         var remainingMs = Int(timeout.components.seconds * 1000)
         while !fence.fired && remainingMs > 0 {

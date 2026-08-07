@@ -6,8 +6,8 @@ import AppKit
 @testable import AudiouterPopoverUI
 
 /// Interaction + accessibility coverage for `GroupRowView` — SPEC §9 revised's
-/// "click anywhere on the row toggles expansion" contract, and task
-/// A11Y-LABELS's fix: the row claimed `.button` accessibility role but
+/// "click anywhere on the row toggles expansion" contract, and the AXPress
+/// fix: the row claimed `.button` accessibility role but
 /// VoiceOver's activate gesture (VO+Space / double-tap) did nothing, since a
 /// plain `NSView` doesn't get AXPress wired to an action the way `NSButton`
 /// does. Built directly, like `PopoverIconTests`'s group-row cases — the row
@@ -44,7 +44,7 @@ import AppKit
         return (row, delegate)
     }
 
-    // MARK: AXPress actually toggles expansion (A11Y-LABELS)
+    // MARK: AXPress actually toggles expansion
 
     /// The bug this task fixes: pressing the row via VoiceOver used to do
     /// nothing at all despite the row announcing itself as a button.

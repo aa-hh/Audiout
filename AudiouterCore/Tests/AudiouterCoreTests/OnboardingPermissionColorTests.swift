@@ -20,18 +20,13 @@ import AppKit
 /// and the glyph-only decision (Q3) holds end to end: granting still
 /// gold-lights the glyph while the tile's own FILL never recolours.
 ///
-/// Two helpers are ported rather than shared, per the task's own instruction
-/// to leave `AppTetherColorTests.swift`/`SettingsAccentAndHintsTests.swift`
-/// untouched:
-///  - `relativeLuminance`/`contrastRatio` — ported from `AppTetherColorTests`
-///    (~lines 293-307).
-///  - `resolved(_:appearanceName:)` — ported from `SettingsAccentAndHintsTests`
-///    (~lines 89-96).
-/// Re-confirmed before writing this file: `SettingsAccentAndHintsTests`'s own
-/// `testAccentDialNeverRemapsFailureCautionOrRing` names `failure`/`caution`/
-/// `ringConnected` explicitly — not "every token the dial doesn't touch" — so
-/// these four new permission tokens (which the dial DOES remap, just not via
-/// `accentDynamic`) don't trip it, and that file needs no edit here.
+/// Two helpers are ported rather than shared (so those suites stay untouched):
+///  - `relativeLuminance`/`contrastRatio` — ported from `AppTetherColorTests`.
+///  - `resolved(_:appearanceName:)` — ported from `SettingsAccentAndHintsTests`.
+/// `SettingsAccentAndHintsTests.accentDialNeverRemapsFailureCautionOrRing`
+/// names `failure`/`caution`/`ringConnected` explicitly — not "every token the
+/// dial doesn't touch" — so these four permission tokens (which the dial DOES
+/// remap, just not via `accentDynamic`) don't trip it.
 ///
 /// Nested into `SerializedSharedState` alongside `SettingsAccentAndHintsTests`
 /// — both mutate the process-global `Tokens.accentStyle` (see the `deinit`
@@ -218,7 +213,7 @@ extension SerializedSharedState {
     /// deterministically off-window — the same combination
     /// `ControlPanelBackingViewTests`/`WarmFaderCellTests` pin `.appearance`
     /// for, and `AccessibilitySignalSweepTests`'s
-    /// `testWarmCanvasRepaintsOnDisplayOptionsChange` (~lines 242-243) uses
+    /// `warmCanvasRepaintsOnDisplayOptionsChange` uses
     /// `layer?.displayIfNeeded()` for on an off-window layer-backed view.
     private func settle(_ tile: IconTileView, appearance: NSAppearance.Name) {
         tile.appearance = NSAppearance(named: appearance)
@@ -228,16 +223,13 @@ extension SerializedSharedState {
 
     /// `PermissionRowView.update(status:)` and `PTPHelperRowView.update(status:)`
     /// both forward straight to `IconTileView.setLit(status == .granted / .enabled)`
-    /// on their own PRIVATE `iconTile` field (verified via `git grep -n
-    /// "iconTile.setLit" Sources/AudiouterOnboardingUI/`). `iconTile` stays
-    /// `private` on both row types — T2's own report flags this: only
-    /// `IconTileView`'s hooks were in scope for T2, not exposing the field —
-    /// and Swift's `private` is not reachable from a different file even
-    /// under `@testable import`. So this test exercises `IconTileView.setLit`
-    /// directly on a tile constructed exactly the way both rows build theirs
-    /// (`color:` = one of the four permission tokens) — the identical call
-    /// each row's `update(status:)` makes on its own private field, just
-    /// reached through a tile this test owns instead of the row's.
+    /// on their own PRIVATE `iconTile` field, and Swift's `private` is not
+    /// reachable from a different file even under `@testable import`. So this
+    /// test exercises `IconTileView.setLit` directly on a tile constructed
+    /// exactly the way both rows build theirs (`color:` = one of the four
+    /// permission tokens) — the identical call each row's `update(status:)`
+    /// makes on its own private field, just reached through a tile this test
+    /// owns instead of the row's.
     @Test func grantedLightsGlyphGoldWithoutRecoloringTileFill() {
         for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
             for (name, color) in permissionTokens {

@@ -38,18 +38,14 @@ import AppKit
 @MainActor
 @Suite final class GroupsWindowTextColorLockTests: IsolatedSuite {
 
-    /// CONVERSION NOTE: the two `guard ... else { throw XCTSkip(...) }` sites
-    /// below (`membershipWellView(of:)`, `sampledColumnColors`) used to record
-    /// a SKIP for a condition that, in practice, never fires on this toolchain
-    /// (a real WindowServer is always available under `swift test` on macOS).
-    /// swift-testing has no in-body "mark skipped" equivalent — traits are
-    /// evaluated before the test runs (migration cookbook §9) — and both
-    /// helpers must return a real value, so an early `return` isn't available
-    /// the way it is in a Void-returning test body. Throwing this instead of
-    /// `XCTSkip` means the enclosing test now reports FAILED rather than
-    /// SKIPPED if this environment guard is ever actually hit. Flagged per the
-    /// cookbook's guidance rather than inventing a hoisted trait for a
-    /// condition that only resolves after real AppKit calls.
+    /// Environment guard for `membershipWellView(of:)`/`sampledColumnColors`:
+    /// conditions that in practice never fire under `swift test` on this
+    /// toolchain (a real WindowServer is always available). swift-testing has
+    /// no in-body "mark skipped" — traits are evaluated before the test runs
+    /// (migration cookbook §9) — and both helpers must return a real value, so
+    /// hitting this reports the enclosing test FAILED rather than SKIPPED.
+    /// Deliberate: don't invent a hoisted trait for a condition that only
+    /// resolves after real AppKit calls.
     private struct TestEnvironmentLimitation: Error, CustomStringConvertible {
         let description: String
     }
@@ -364,10 +360,9 @@ import AppKit
         for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
             let colors = try sampledColumnColors(of: well, appearanceName: appearanceName)
             guard let expectedWell = resolved(Tokens.Color.well, appearanceName: appearanceName) else {
-                // CONVERSION NOTE: was `throw XCTSkip(...)`; an early `return`
-                // is available here (unlike the two helpers above) since this
-                // is directly inside a Void-returning @Test body, and XCTSkip
-                // also aborted the whole test rather than just this iteration.
+                // Environment guard: no resolvable token color ⇒ nothing to
+                // assert; a plain `return` works directly inside the Void @Test
+                // body (unlike the two throwing helpers above).
                 return
             }
             let matches = colors.filter { sameColor($0, expectedWell, tolerance: 0.02) }
@@ -388,7 +383,7 @@ import AppKit
         for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
             let colors = try sampledColumnColors(of: well, appearanceName: appearanceName)
             guard let expectedHairline = resolved(Tokens.Color.hairline, appearanceName: appearanceName) else {
-                // CONVERSION NOTE: see membershipWellFillIsWellTokenBothAppearances above.
+                // Same environment guard as membershipWellFillIsWellTokenBothAppearances above.
                 return
             }
             let matches = colors.filter { sameColor($0, expectedHairline, tolerance: 0.02) }

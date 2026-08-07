@@ -12,22 +12,13 @@ import AudiouterCore
 /// material through `Tokens`, never through a raw literal `NSColor`,
 /// `NSFont`, or magic number of its own.
 ///
-/// **At this module's creation, `Tokens` held ZERO custom values.** Every
-/// case aliased an existing stock `NSColor`/`NSFont`/`NSVisualEffectView.Material`
-/// already in use, and `Tokens.Layout` re-exported `PopoverColumnGrid` (which
-/// remains the geometry authority — nothing moved). That zero-custom-value
-/// state was the SEAM, not a permanent constraint: **warm-signal-v2** (the
-/// popover canvas + card de-nest, `dev/notes/warm-signal-v3.md` §1/§5.1) is
-/// the first wave to actually populate `Tokens.Color` with real custom
-/// values — the warm surface ladder + hairline (`canvas`, `canvasHi`,
-/// `panel`, `raised`, `well`, `hairline`; see the "Warm Signal custom
-/// palette" section below). `Tokens.Font`/`Tokens.Layout`/`Tokens.Material`
-/// remain pure forwarding aliases (plus `Font.microLabel`, the spec-named
-/// §2 micro-label voice added by S3's MUTED sublabel token); only
-/// `Tokens.Color` gains custom cases, and only ones a real call site
-/// consumes in the same wave: the S-chain has since added `ringConnected`/
-/// `failure` (S1), `gold`/`ember` (S-BUS), and `caution`/`glow`/`dotSocket`
-/// (S2+S3, the meter gradient + route-armed dot). `link` remains unadded
+/// `Tokens.Font`/`Tokens.Layout`/`Tokens.Material` are pure forwarding
+/// aliases over stock values (`Font.microLabel`, the spec-named §2
+/// micro-label voice, is the one custom Font case); `Tokens.Layout`
+/// re-exports `PopoverColumnGrid`, which remains the geometry authority.
+/// Only `Tokens.Color` holds real custom palette values — the warm surface
+/// ladder + hairline and the signal/accent/permission instruments below,
+/// each added together with its first consumer. `link` remains unadded
 /// (its call site — the reference page — doesn't exist yet).
 ///
 /// Do not add a case here for a color/font/material combination that isn't
@@ -53,18 +44,40 @@ public enum Tokens {
     /// next time AppKit asks — surfaces pick the new accent up on their next
     /// draw/rebuild with no color re-fetch needed. Main-thread-only by
     /// convention (same as every other AppKit token access here).
-    public static var accentStyle: AccentStyle = .fullGold
+    ///
+    /// Setting it BROADCASTS ``accentStyleDidChangeNotification`` — see there
+    /// for why a re-resolving `NSColor` is not enough for every instrument.
+    public static var accentStyle: AccentStyle = .fullGold {
+        didSet {
+            guard oldValue != accentStyle else { return }
+            NotificationCenter.default.post(name: Tokens.accentStyleDidChangeNotification,
+                                            object: nil)
+        }
+    }
+
+    /// Posted (on `NotificationCenter.default`) whenever ``accentStyle``
+    /// actually changes, from the property's own `didSet` — so a dial call
+    /// site cannot forget to announce it.
+    ///
+    /// A `draw(_:)`-based instrument needs nothing but an invalidation: it
+    /// re-reads its tokens every pass. A **layer-color** instrument does not —
+    /// it stamps a resolved `CGColor` onto a `CALayer` and keeps showing it
+    /// until something re-stamps. `viewDidChangeEffectiveAppearance` covers
+    /// light/dark and `NSWorkspace.accessibilityDisplayOptionsDidChangeNotification`
+    /// covers Increase Contrast, but the accent dial is neither — it is an
+    /// app-internal setting, so it needs its own broadcast (the live bug: the
+    /// Main Audio ring kept the old gold while the rail it joins had already
+    /// re-tinted). An instrument that stamps `gold`/`ember`/`glow` into a
+    /// layer must observe this the same way it observes the a11y notification.
+    public static let accentStyleDidChangeNotification =
+        Notification.Name("Audiouter.Tokens.accentStyleDidChange")
 
     // MARK: - Color
 
-    /// Semantic color aliases. Every case forwards to the exact `NSColor`
-    /// class-property the codebase already calls directly (verified via
-    /// `git grep -n "NSColor\." AudiouterCore/Sources/{AudiouterOnboardingUI,
-    /// AudiouterSharedUI,AudiouterPopoverUI,AudiouterWindowUI,
-    /// AudiouterSettingsUI}`). No custom RGB/hex value lives here — only
-    /// forwarding. When the warm palette lands in a later wave, it replaces
-    /// the right-hand side of these aliases; call sites that already route
-    /// through `Tokens.Color` won't need to change.
+    /// Semantic color aliases plus the Warm Signal custom palette. The
+    /// alias cases forward to stock `NSColor` class-properties; the
+    /// custom warm/instrument cases below each carry a documented
+    /// contrast rationale (the governance rule above).
     public enum Color {
         /// Primary label text. Alias of `NSColor.labelColor`.
         public static var label: NSColor { .labelColor }
@@ -79,10 +92,12 @@ public enum Tokens {
         public static var accent: NSColor { .controlAccentColor }
         /// Hairline/divider strokes. Alias of `NSColor.separatorColor`.
         public static var separator: NSColor { .separatorColor }
-        /// Opaque window chrome background (onboarding, Settings). Alias of
-        /// `NSColor.windowBackgroundColor`. (Its former consumer, the
-        /// control-panel backing bubble, repointed to the warm `canvas` token
-        /// in W8, spec §5.4.)
+        /// Opaque window chrome background. Alias of
+        /// `NSColor.windowBackgroundColor`. UNCONSUMED — no call site reads
+        /// this alias (Settings/About chrome uses the
+        /// `Tokens.Material.windowBackground` MATERIAL; the control-panel
+        /// backing bubble paints the warm `canvas` token, §5.4). Verify a
+        /// real call site before pointing anything here.
         public static var windowBackground: NSColor { .windowBackgroundColor }
         /// The color a decorative punch-out border is drawn in so a corner badge
         /// reads as separate from what's behind it. Alias of
@@ -119,11 +134,7 @@ public enum Tokens {
         // light + dark + Increase Contrast variants with a documented
         // contrast rationale"). V2 (the popover canvas + card de-nest) is
         // the first consumer: the warm surface ladder + hairline from spec
-        // §1.1 (dark) / §1.2 (light). `panel`/`raised`/`well` are defined
-        // here per the spec's full palette table but are NOT YET painted
-        // anywhere — V2's de-nest removes the card's own panel fill rather
-        // than adding one; they're reserved for a later wave (ring contrast
-        // reference, slider track/well, mute-pill fill). Every case below
+        // §1.1 (dark) / §1.2 (light). Every case below
         // resolves LIVE via `NSColor(name:dynamicProvider:)` against both
         // the color's `NSAppearance` argument (light/dark) and the CURRENT
         // `NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast`
@@ -148,15 +159,12 @@ public enum Tokens {
         public static var canvasHi: NSColor {
             warmDynamic(name: "canvasHi", dark: 0x1B1712, light: 0xF7F3EC)
         }
-        /// Card/panel fill — "the reference canvas a ring sits on" (§1). Not
-        /// yet painted by any call site in V2 (cards stop drawing their own
-        /// fill when de-nested onto the canvas, §5.1); reserved for a later
-        /// wave. No stated contrast floor.
+        /// Card/panel fill — "the reference canvas a ring sits on" (§1).
+        /// No stated contrast floor.
         public static var panel: NSColor {
             warmDynamic(name: "panel", dark: 0x1D1915, light: 0xFBF8F2)
         }
-        /// Raised well fill (icon well, blocked-checkbox fill, §1). Not yet
-        /// painted by any call site in V2 — reserved for a later wave. No
+        /// Raised well fill (icon well, blocked-checkbox fill, §1). No
         /// stated contrast floor.
         public static var raised: NSColor {
             warmDynamic(name: "raised", dark: 0x241F1A, light: 0xFFFFFF)
@@ -368,6 +376,19 @@ public enum Tokens {
                                                light: 0xAE9668, lightHighContrast: 0x8A744C),
                           systemAccentScale: 0.55)
         }
+
+        /// **The membership rail's SPINE TONE** — `gold` while the spine is
+        /// armed, its `ember` companion otherwise (Warm Signal v4 §Call-1
+        /// rail-segment tone).
+        ///
+        /// It exists so the rail's line/hook/terminus (`BusRailOverlayView`)
+        /// and the Main Audio ring the hook LANDS ON (`HaloRingView`'s
+        /// connected stroke) resolve their tone from ONE place: the two are
+        /// required to read as a single continuous line, and while each picked
+        /// `gold`/`ember` for itself that agreement was pure convention — the
+        /// accent dial moved one and not the other. Nothing else may consume
+        /// this; a non-rail instrument wanting gold asks for ``gold``.
+        public static func spineTone(armed: Bool) -> NSColor { armed ? gold : ember }
 
         // MARK: Signal-dot + meter instruments (spec §3.3 / §1, S2+S3)
         //

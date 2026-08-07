@@ -182,6 +182,29 @@ public enum BackendEvent: Sendable, Equatable {
     /// `OwnToneBackend` never do (no rebind-recovery machinery to observe).
     case streamHealth(id: String, recovering: Bool)
 
+    /// The public "Audiouter" aggregate's off-switch state (Wave 3, T5). `active:
+    /// true` means: this app is ACTIVELY ROUTING (at least one AirPlay output is
+    /// selected — the whole-system capture gate wants to run) **and** the Mac's
+    /// current default output device is NOT our aggregate
+    /// (``AggregateOutputDevice/productUID``). The whole-system tap follows the
+    /// Mac's default output device, so if that isn't the aggregate the captured
+    /// mix has nothing flowing into it and **nothing reaches the speakers** until
+    /// the user points the Mac's output back at Audiouter. This one flag covers
+    /// BOTH "the user deselected the aggregate in Sound settings mid-session"
+    /// (`.userDeselected`) and "the aggregate was never the default while routing"
+    /// (never-selected-while-active). `active: false` means the default IS our
+    /// aggregate again (`.stillOurs`) OR routing stopped: audio flows normally.
+    ///
+    /// The *only* signal for the popover's routing-blocked warning
+    /// (`PopoverController.setRoutingBlockedNeedsDefault`) — a whole-app condition
+    /// with no home on a single `Device`, same shape as
+    /// ``systemDefaultIsAirPlayActive(_:)``. Reflects STEADY STATE, not just the
+    /// transition edge, and the backend edge-de-duplicates it so it can never
+    /// thrash. Only ``NativeBackend`` emits it (the only backend that owns the
+    /// public aggregate + default-output writes); `MockBackend`/`OwnToneBackend`
+    /// never do.
+    case routingBlockedNeedsDefault(Bool)
+
     /// The takeover status strip (T6, PLAN-AIRPLAY-COEXISTENCE.md): a
     /// progressive explanation, alongside a connecting row, of what's
     /// happening while `convergeDevice` races macOS off the PTP timing ports
@@ -310,19 +333,36 @@ public protocol OutputBackend: AnyObject {
     /// set move to `.connecting` (verified later to `.connected`); ids leaving
     /// the set drop to `.off` — **unless** they're currently `.failed`, in
     /// which case that state is sticky and survives the removal.
+    /// (`NativeBackend` deliberately has NO sticky-failed-survives-deselect:
+    /// deselecting drops its `.failed` to `.off` eagerly, ending the episode.)
     ///
-    /// Retry (`dev/notes/p1-connection-status-brief.md` §1/§3): re-adding an id
-    /// that had been dropped is one way to retry a `.failed` device — but as of
-    /// R12/W2-T3, `.failed` no longer drops the id from the desired set at all
-    /// (the popover's "Try again" keeps Selected-Devices/group intent through a
-    /// failure), so the *ordinary* retry call now arrives here with the id
-    /// ALREADY present, unchanged. Conforming backends must still treat that as
-    /// a fresh attempt: re-check each requested id's CURRENT `connectionState`
-    /// (not just whether membership changed) and re-kick anything `.off` or
-    /// `.failed` back to `.connecting`. `OwnToneBackend` does this naturally
-    /// (it re-evaluates every id on every call); `NativeBackend`/`MockBackend`
-    /// detect the "already desired, still `.failed`" case explicitly.
+    /// **A membership-neutral call is NOT a retry** (storm fix, 2026-08-06 —
+    /// this reverses the earlier R12-era contract): under R12/W2-T3 a `.failed`
+    /// id keeps its place in the desired set, so ANY unrelated routing traffic
+    /// (a This-Mac toggle, a Main-Out re-pick) re-issues the same set — and
+    /// when backends treated "already desired, still `.failed`" as a fresh
+    /// attempt, every such call re-kicked every parked device with zero
+    /// backoff (the autonomous retry storm). Backends must now re-kick only on
+    /// a genuine membership EDGE for that id (off→on / on→off); the deliberate
+    /// same-membership retry ("Try again") travels ``retryOutput(_:)`` instead.
     func setOutputSet(_ ids: Set<String>)
+
+    /// Force ONE fresh connection attempt for a single, still-desired id whose
+    /// connection previously failed — the "Try again" entry point
+    /// (`GroupController.retryConnection(for:)` is the only production caller).
+    /// Scoped to `id` alone: it must not re-kick, re-park, or otherwise touch
+    /// any OTHER `.failed` device, and it never changes membership (R12: intent
+    /// is the user's; retry is a backend-facing re-kick).
+    ///
+    /// Required contract: a still-desired `.failed` id gets a fresh attempt;
+    /// an id the backend doesn't currently desire, or one already `.connected`,
+    /// is a no-op. Other non-connected states are CONFORMER LATITUDE:
+    /// `NativeBackend` re-kicks any still-desired non-`.connected` id (a retry
+    /// mid-`.reconnecting` restates `.connecting` — the user pressed the
+    /// button, so the attempt marker wins), while `MockBackend` acts only on
+    /// `.failed` and no-ops otherwise (scripted tests want no surprise
+    /// attempts). Don't tighten either direction without checking both.
+    func retryOutput(_ id: String)
 
     /// Set the two master gain stages, both on the UI's 0–100 scale: what reaches
     /// a device is `Main × Group × Device`, multiplied before the dB/curve mapping.

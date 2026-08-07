@@ -2238,6 +2238,208 @@ import AppKit
         #expect(popover.test_deviceRowFlashing(id: "local-mac") == !reduceMotion, "the auto-unchecked local row flashes (unless Reduce Motion)")
     }
 
+    // MARK: Surplus container height must not deform the content
+
+    /// Alec's call, 2026-08-06 — resilience, not a root fix. The live report's
+    /// banner ballooned into a tall empty box because the card stack's bottom pin
+    /// was a single REQUIRED `==`: a container taller than its content was
+    /// unsatisfiable, so Auto Layout deformed the content instead and the surplus
+    /// landed in the one view with nothing pinning its height. The pin is now
+    /// `<=` required (anti-collapse) plus `==` at 999 (hug), so surplus falls to
+    /// blank space at the bottom and every row keeps its geometry — which is also
+    /// what keeps the rail anchored to its rows through such a mismatch.
+    @Test func aContainerTallerThanItsContentLeavesRowGeometryUntouched() async throws {
+        let (popover, _, _) = try await makePopover()
+        popover.test_simulateOpen()
+        popover.setLocalFallbackActive(true)   // mount the banner from the report
+        let root = popover.test_panelView
+        root.layoutSubtreeIfNeeded()
+
+        func firstDescendant<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
+            if let hit = view as? T { return hit }
+            for sub in view.subviews {
+                if let hit = firstDescendant(type, in: sub) { return hit }
+            }
+            return nil
+        }
+        let banner = try #require(firstDescendant(SilenceFallbackBannerView.self, in: root),
+                                  "the fallback banner is mounted")
+        let anyRow = try #require(popover.test_deviceRow(for: "office"))
+
+        let naturalFit = popover.test_panelFittingSize.height
+        let bannerHeight = banner.frame.height
+        // Content is TOP-anchored (header → container top, stack → header bottom),
+        // so the invariant is the row's distance from the TOP. Surplus appearing as
+        // blank space at the bottom is the intended outcome, not a regression.
+        func rowInsetFromTop() -> CGFloat {
+            root.frame.height - root.convert(anyRow.bounds, from: anyRow).maxY
+        }
+        let rowFromTop = rowInsetFromTop()
+
+        // Impose a container 200pt taller than its content — the exact pathology.
+        let stretch = root.heightAnchor.constraint(equalToConstant: naturalFit + 200)
+        stretch.isActive = true
+        root.layoutSubtreeIfNeeded()
+        defer { stretch.isActive = false }
+
+        #expect(root.frame.height == naturalFit + 200, "the container really is over-tall")
+        #expect(banner.frame.height == bannerHeight,
+                "the banner kept its natural height instead of absorbing the surplus")
+        #expect(rowInsetFromTop() == rowFromTop,
+                "the device rows held their position under the header, so the surplus became blank space at the bottom rather than displacing content")
+    }
+
+    // MARK: The rail's invalidation hangs off the view that moves the rows
+
+    /// Live bug, 2026-08-06: the whole rail — origin hook, spine and both detour
+    /// arcs — rendered displaced from the rows by a rigid offset. `resolvePlan`
+    /// reads live frames at DRAW time, so the resolved geometry was never wrong;
+    /// the overlay was simply never told to redraw. The invalidation hung off the
+    /// panel's top-level CONTAINER, whose `layout()` does not run when only its
+    /// descendants re-lay out inside an unchanged container frame — exactly the
+    /// state a too-tall popover produces (constant container, swelling banner,
+    /// every card below it sliding). It now hangs off the card stack
+    /// (`RailStackView`), which re-lays out in both cases.
+    ///
+    /// SCOPE — read before trusting this: it guards the WIRING, not the redraw.
+    /// The behavioral assertion is not written here because neither shape works in
+    /// this process, both established the hard way: a snapshot can't catch it
+    /// (`cacheDisplay` forces a full repaint, so the PNG is correct by
+    /// construction however stale the invalidation is), `needsDisplay` assertions
+    /// pass vacuously (AppKit drops the flag on a windowless view and won't let
+    /// you clear one it has already scheduled), and `BusRailOverlayView`'s
+    /// `test_drawCount` never moves because a non-GUI test process runs no display
+    /// cycle at all — `display()` is a no-op even for an ordered-front window.
+    /// The mechanism was proven with standalone on-screen probes instead (four
+    /// scenarios; only a container-frame change fired the container's `layout()`,
+    /// while the stack's fired in all four). What this test does catch is the
+    /// realistic regression: the hook being deleted, or left unwired.
+    @Test func theRailOverlayIsInvalidatedByTheCardStack() async throws {
+        let (popover, _, _) = try await makePopover()
+        popover.test_simulateOpen()
+        let root = popover.test_panelView
+        root.layoutSubtreeIfNeeded()
+
+        func firstDescendant<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
+            if let hit = view as? T { return hit }
+            for sub in view.subviews {
+                if let hit = firstDescendant(type, in: sub) { return hit }
+            }
+            return nil
+        }
+        let overlay = try #require(firstDescendant(BusRailOverlayView.self, in: root),
+                                   "the rail overlay is mounted in the panel")
+        let stack = try #require(firstDescendant(RailStackView.self, in: root),
+                                 "the CARD STACK carries the invalidation hook — not the container, whose layout() misses descendant-only relayouts")
+        #expect(stack.railOverlay === overlay,
+                "the stack's hook points at the mounted overlay; unwired, the rail silently goes stale again")
+        #expect(stack.arrangedSubviews.contains { $0 is CardView },
+                "and it really is the stack holding the cards, i.e. the view whose layout pass moves the rows")
+    }
+
+    // MARK: Deselecting a failed device retires its panel (live bug, 2026-08-06)
+
+    /// Reported live: clicking a stuck-unreachable device's radio on and off left
+    /// the "Couldn't connect" panel mounted under a row the user had explicitly
+    /// UNSELECTED, and the popover kept the height that extra row needed.
+    ///
+    /// The trap is that `.failed` is STICKY (§1): deselecting doesn't move the
+    /// device out of `.failed`, so there is no `→ .off` edge for
+    /// `handleConnectionTransitions` to clear the open intent on. The intent has to
+    /// be pruned against MEMBERSHIP, not against a connection-state edge. This is
+    /// the mirror of R12, not a breach of it — R12 stops a FAILURE from dropping
+    /// the user's selection; here the USER drops the selection, so the failure
+    /// report goes with it.
+    @Test func deselectingAFailedDeviceRetiresItsDiagnosisPanel() async throws {
+        let fail = ConnectScript.Attempt.fail(after: 0.05, ConnectionFailure(cause: .notResponding))
+        let (popover, controller, backend) = try await makeScriptedPopover(scripts: [
+            "office": ConnectScript(attempts: [fail, fail, fail, fail]),
+        ])
+
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        try await waitForConnectionState(backend, id: "office", isFailed)
+        popover.update(devices: backend.devices)
+        let mounted = try #require(popover.test_diagnosisPanel(for: "office"),
+                                   "the panel auto-expanded on the failure")
+
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false)
+        popover.update(devices: backend.devices)
+
+        #expect(!controller.isSpeakerSelected("office"), "the user's deselect took effect")
+        #expect(isFailed(try #require(backend.devices.first { $0.id == "office" }).connectionState),
+                "the backend still reports .failed — this is the sticky case, not a state change")
+        #expect(popover.test_diagnosisPanel(for: "office") == nil,
+                "the panel must not outlive the selection that justified it")
+        // The VIEW has to leave the tree too, not just the dictionary entry.
+        try await Task.sleep(nanoseconds: 400_000_000)
+        #expect(mounted.superview == nil, "the panel view detached from the row's stack")
+    }
+
+    /// The same gesture repeated: no row and no height may accumulate. This is the
+    /// half the user actually saw — the popover kept growing, and the slack landed
+    /// in the pinned banner, which ballooned into a tall empty box.
+    @Test func repeatedSelectDeselectOnAFailedDeviceAccumulatesNothing() async throws {
+        let fail = ConnectScript.Attempt.fail(after: 0.05, ConnectionFailure(cause: .notResponding))
+        let (popover, _, backend) = try await makeScriptedPopover(scripts: [
+            "office": ConnectScript(attempts: [fail, fail, fail, fail, fail, fail, fail, fail]),
+        ])
+        popover.test_simulateOpen()
+        popover.test_applyExactFitSize()
+
+        func mountedRowCount() -> Int {
+            guard let row = popover.test_deviceRow(for: "office"),
+                  let stack = row.superview as? NSStackView else { return -1 }
+            return stack.arrangedSubviews.count
+        }
+        let baselineRows = mountedRowCount()
+        let baselineHeight = popover.test_panelFittingSize.height
+
+        for _ in 1...4 {
+            _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+            try await waitForConnectionState(backend, id: "office", isFailed)
+            popover.update(devices: backend.devices)
+            _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false)
+            popover.update(devices: backend.devices)
+            try await Task.sleep(nanoseconds: 350_000_000)   // let the animated detach land
+        }
+
+        #expect(mountedRowCount() == baselineRows,
+                "the device card ended with the rows it started with — one row per device")
+        #expect(popover.test_panelFittingSize.height == baselineHeight,
+                "the panel returned to its original content height")
+        #expect(popover.test_preferredContentSize.height == popover.test_panelFittingSize.height,
+                "the published popover height still agrees with the content — a divergence here is what stretches the banner")
+    }
+
+    /// The size primitive belongs to the row primitives: mounting a diagnosis panel
+    /// must republish the popover's height by itself, with no help from the caller.
+    /// Before this, `reconcileDiagnosisPanels` (the in-place repaint path and the ✕)
+    /// mounted and unmounted real rows while the popover kept its old size.
+    @Test func mountingAndRemovingADiagnosisPanelRepublishesTheSize() async throws {
+        let (popover, _, backend) = try await makeScriptedPopover(scripts: [
+            "office": ConnectScript(attempts: [.fail(after: 0.05, ConnectionFailure(cause: .timedOut))]),
+        ])
+        popover.test_simulateOpen()
+        popover.test_applyExactFitSize()
+        let bare = popover.test_preferredContentSize.height
+
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        try await waitForConnectionState(backend, id: "office", isFailed)
+        popover.update(devices: backend.devices)
+        try #require(popover.test_diagnosisPanel(for: "office"), "panel mounted")
+        #expect(popover.test_preferredContentSize.height > bare,
+                "mounting the panel grew the published height")
+        #expect(popover.test_preferredContentSize.height == popover.test_panelFittingSize.height,
+                "published height == content height while the panel is up")
+
+        // The ✕ path: a removal whose detach is deferred into an animation
+        // completion. The size must be republished AFTER the row actually leaves.
+        try #require(popover.test_diagnosisPanel(for: "office")).test_tapDismiss()
+        try await Task.sleep(nanoseconds: 400_000_000)
+        #expect(popover.test_preferredContentSize.height == popover.test_panelFittingSize.height,
+                "published height == content height once the row has detached")
+    }
+
     // MARK: B2 — dismissible diagnosis panel + episode semantics
 
     /// The ✕ tears the panel down.
@@ -2469,6 +2671,43 @@ import AppKit
 
         popover.setSystemAirPlayNoteActive(false)
         #expect(popover.test_systemAirPlayNoteText == nil, "the note clears once the guard ends")
+    }
+
+    // MARK: Routing-blocked warning (Wave 3 T-UI)
+
+    /// The "Audiouter isn't your output device" warning: shows the verbatim copy
+    /// with a "Use Audiouter" action button, OUTRANKS an active takeover status (it
+    /// sits at the top of the single note slot), fires `onReselectAudiouter` when the
+    /// button is tapped, and — once cleared — lets the lower-precedence note show
+    /// through. Guards the whole T-UI feature (adversarial review #3): a refactor
+    /// that inverts the precedence or unhooks the button now fails here.
+    @Test func routingBlockedWarningShowsOutranksTakeoverFiresReselectAndClears() async throws {
+        let (popover, _, _) = try await makePopover()
+        #expect(popover.test_systemAirPlayNoteText == nil, "no note by default")
+
+        popover.setRoutingBlockedNeedsDefault(true)
+        #expect(popover.test_systemAirPlayNoteText == "Audiouter isn't your Mac's output device — audio won't play until you switch back.",
+                "shows the verbatim warning copy")
+        #expect(popover.test_systemAirPlayNoteHasActionButton, "the warning offers the 'Use Audiouter' remedy")
+
+        // Precedence: even with a takeover status active, routing-blocked wins the slot.
+        popover.setTakeoverStatus(.takingOver)
+        #expect(popover.test_systemAirPlayNoteText == "Audiouter isn't your Mac's output device — audio won't play until you switch back.",
+                "routing-blocked outranks an active takeover status")
+
+        // Tapping "Use Audiouter" fires the user-initiated re-select callback.
+        var reselectFired = false
+        popover.onReselectAudiouter = { reselectFired = true }
+        popover.test_tapSystemAirPlayNoteAction()
+        #expect(reselectFired, "the action button invokes onReselectAudiouter")
+
+        // Clearing routing-blocked reveals the still-set (lower-precedence) takeover note.
+        popover.setRoutingBlockedNeedsDefault(false)
+        #expect(popover.test_systemAirPlayNoteText == "Taking audio back from macOS…",
+                "with routing-blocked cleared, the takeover status shows through")
+
+        popover.setTakeoverStatus(nil)
+        #expect(popover.test_systemAirPlayNoteText == nil, "clearing both empties the slot")
     }
 
     // MARK: Takeover status strip (T6, PLAN-AIRPLAY-COEXISTENCE.md)

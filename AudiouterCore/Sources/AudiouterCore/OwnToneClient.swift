@@ -191,14 +191,8 @@ struct OwnToneClient: @unchecked Sendable {
         let response: URLResponse
         do {
             (data, response) = try await session.data(for: request)
-        } catch let urlError as URLError {
-            switch urlError.code {
-            case .cannotConnectToHost, .cannotFindHost, .timedOut,
-                 .networkConnectionLost, .notConnectedToInternet:
-                throw ClientError.unreachable
-            default:
-                throw ClientError.unreachable
-            }
+        } catch is URLError {
+            throw ClientError.unreachable
         }
 
         guard let http = response as? HTTPURLResponse else { throw ClientError.unreachable }

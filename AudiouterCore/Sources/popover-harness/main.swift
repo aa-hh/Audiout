@@ -13,9 +13,9 @@
 // Main Out master = the current target's master; and (T-9) the Applications
 // card: present and rendered LAST, collapsed-by-default with zero routes,
 // expanded after seeding a route + a reopen-style rebuild, correct row
-// count/config, the destination popup's exact two sections, the "+ Add
-// application…" row present last, adding an app via the picker hook mounts a
-// row, and removing it resets the card back to empty. Prints PASS/FAIL; exits
+// count/config, the destination popup's exact two sections, the ± footer's
+// add (picker hook mounts a row) and remove paths, and removing the last
+// route resets the card back to empty. Prints PASS/FAIL; exits
 // nonzero on failure so it can gate CI alongside `swift test`.
 
 import AppKit

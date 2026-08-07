@@ -85,6 +85,11 @@ extension SerializedSharedState {
 
         /// Ids that should THROW on `addOutput` (best-effort partial-failure test).
         var addFailures: Set<UInt64> = []
+        /// The error `addFailures` throws — defaults to the generic session
+        /// failure; the auth-mapping test sets `.passwordRequired` to prove the
+        /// connect path surfaces `.authRequired` instead of flattening to
+        /// `.unknown`.
+        var addFailureError: AirPlayEngineError = .sessionFailed
         /// Ids that should THROW on `removeOutput`.
         var removeFailures: Set<UInt64> = []
         /// Ids that should THROW on `flushOutput` — forces a whole-system rebind
@@ -101,8 +106,28 @@ extension SerializedSharedState {
         /// Optional hook run INSIDE `addOutput`'s op body, after the add is recorded
         /// but before it returns successfully. Lets a test deterministically inject
         /// an out-of-band state transition in the window between addOutput resolving
-        /// and NativeBackend's post-success write (medium finding).
+        /// and NativeBackend's post-success write (medium finding). T6 (008): ALSO
+        /// invoked from the per-app `addOutput(_:streamId:)` — without that, no
+        /// per-app-side interleaving is forceable.
         var onAddOutputBody: (@Sendable (OutputID) -> Void)?
+
+        /// Async HOLD-OPEN hook (008 race tests): awaited inside BOTH `addOutput`
+        /// variants, after the op is recorded and any `onAddOutputBody` ran but
+        /// BEFORE the spy's `liveStreams` write — so while a test holds an add
+        /// open here, a concurrent `boundStreamId` read still sees the pre-add
+        /// world. The stream argument is 0 for the whole-system add, ≥ 1 for the
+        /// per-app add, so one hook can hold the two apart.
+        var onAddOutputHold: (@Sendable (OutputID, UInt32) async -> Void)?
+
+        /// Async hold-open hook awaited inside `removeOutput`, after the remove is
+        /// recorded but BEFORE the spy's `liveStreams` removal — the window a 008
+        /// test uses to fire the other FIFO from strictly inside a teardown.
+        var onRemoveOutputBody: (@Sendable (OutputID) async -> Void)?
+
+        /// Async hold-open hook awaited inside `rebindOutput`, between the
+        /// rebind's stop-half and add-half (the stop already cleared
+        /// `liveStreams`, so a concurrent read sees no stale stream).
+        var onRebindBody: (@Sendable (OutputID, UInt32) async -> Void)?
 
         /// Artificial per-op latency (ns). Used by the toggle-spam test to force
         /// slow op completions to race fast toggle flips, so a broken (unserialized)
@@ -157,7 +182,9 @@ extension SerializedSharedState {
                 self.lock.withLock { self.added.append(id); self.opLog.append("add:\(id.rawValue)") }
                 let hook = self.lock.withLock { self.onAddOutputBody }
                 hook?(id)
-                if self.addFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
+                let hold = self.lock.withLock { self.onAddOutputHold }
+                if let hold { await hold(id, 0) }
+                if self.addFailures.contains(id.rawValue) { throw self.addFailureError }
                 // Engine idempotency: an already-live session is NOT re-bound.
                 self.lock.withLock { if self.liveStreams[id.rawValue] == nil { self.liveStreams[id.rawValue] = 0 } }
             }
@@ -165,6 +192,8 @@ extension SerializedSharedState {
         func removeOutput(_ id: OutputID) async throws {
             try await runOp(id) {
                 self.lock.withLock { self.removed.append(id); self.opLog.append("remove:\(id.rawValue)") }
+                let hold = self.lock.withLock { self.onRemoveOutputBody }
+                if let hold { await hold(id) }
                 if self.removeFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
                 self.lock.withLock { self.liveStreams.removeValue(forKey: id.rawValue) }
             }
@@ -203,7 +232,9 @@ extension SerializedSharedState {
                     self.opLog.append("remove:\(id.rawValue)")
                     self.liveStreams.removeValue(forKey: id.rawValue)
                 }
-                if self.addFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
+                let hold = self.lock.withLock { self.onRebindBody }
+                if let hold { await hold(id, streamId) }
+                if self.addFailures.contains(id.rawValue) { throw self.addFailureError }
                 self.lock.withLock {
                     if streamId == 0 {
                         self.added.append(id)
@@ -226,7 +257,13 @@ extension SerializedSharedState {
                     self.streamAdds.append((id, streamId))
                     self.opLog.append("streamAdd:\(id.rawValue):\(streamId)")
                 }
-                if self.addFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
+                // T6 (008): the per-app add runs the same mid-op hooks as the
+                // whole-system add, so per-app-side interleavings are forceable.
+                let hook = self.lock.withLock { self.onAddOutputBody }
+                hook?(id)
+                let hold = self.lock.withLock { self.onAddOutputHold }
+                if let hold { await hold(id, streamId) }
+                if self.addFailures.contains(id.rawValue) { throw self.addFailureError }
                 // Engine idempotency: an already-live session is NOT re-bound to
                 // `streamId` — that silent no-op is exactly defect B.
                 self.lock.withLock {
@@ -260,8 +297,10 @@ extension SerializedSharedState {
         func writeCadenceSnapshot() -> WriteCadenceSnapshot { lock.withLock { cadenceSnapshotToReturn } }
 
         /// Run a device op, tracking concurrent-in-flight-per-device (to catch
-        /// overlapping ops) and applying the artificial latency.
-        private func runOp(_ id: OutputID, _ body: () throws -> Void) async throws {
+        /// overlapping ops) and applying the artificial latency. The body is
+        /// async (008) so the hold-open hooks can be awaited at their exact
+        /// placement points instead of blocking a cooperative-pool thread.
+        private func runOp(_ id: OutputID, _ body: () async throws -> Void) async throws {
             lock.withLock {
                 let n = (inFlightByID[id.rawValue] ?? 0) + 1
                 inFlightByID[id.rawValue] = n
@@ -270,7 +309,7 @@ extension SerializedSharedState {
             defer { lock.withLock { inFlightByID[id.rawValue, default: 1] -= 1 } }
             let delay = lock.withLock { opDelayNanos }
             if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
-            try body()
+            try await body()
         }
 
         func feedCount(for id: OutputID) -> Int { lock.withLock { feedCounts[id.rawValue] ?? 0 } }
@@ -523,6 +562,25 @@ extension SerializedSharedState {
         }
     }
 
+    /// No-op ``AggregateDeviceControlling`` double: every read returns nil/empty
+    /// and create/destroy never run, so `AggregateOutputDevice.sweepOrphans()`/
+    /// `adoptOrCreate()` — which `NativeBackend.start()` AND `.stop()` both call
+    /// unconditionally — are pure no-ops instead of hitting the real HAL.
+    /// Without this, `NativeBackend`'s default `aggregateControl` param
+    /// (`CoreAudioAggregateDeviceControl()`) creates/destroys a REAL public
+    /// "Audiouter" aggregate device in macOS Sound settings on every
+    /// `makeBackend()`/direct-construction call in this file. Never touches the
+    /// real HAL — same reason `FakeSystemVolume` above exists.
+    private struct NoOpAggregateControl: AggregateDeviceControlling {
+        func resolveDeviceID(forUID uid: String) -> AudioObjectID? { nil }
+        func createAggregate(uid: String, name: String, subDeviceUID: String) -> AudioObjectID? { nil }
+        func destroyAggregate(_ deviceID: AudioObjectID) -> Bool { false }
+        func aggregateDeviceUIDs() -> [String] { [] }
+        func deviceUID(_ deviceID: AudioObjectID) -> String? { nil }
+        func builtInOutputDeviceUID() -> String? { nil }
+        func setDefaultOutputDevice(_ deviceID: AudioObjectID) -> Bool { false }
+    }
+
     // MARK: Fixtures
 
     private func ap2Device(id: String = "AA:BB:CC:DD:EE:01", name: String = "Sonos Move", model: String = "S13") -> DiscoveredDevice {
@@ -555,6 +613,7 @@ extension SerializedSharedState {
         injectedMeteringCapture: PerAppCaptureCoordinator? = nil,
         captureRetryDelay: TimeInterval = 2.0,
         captureRetryMaxBackoff: TimeInterval = 10.0,
+        takeoverStripDelay: TimeInterval = 0,
         watchdogScheduler: SilenceWatchdogScheduling? = nil,
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
         systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = { false }
@@ -569,10 +628,40 @@ extension SerializedSharedState {
             injectedMeteringCapture: injectedMeteringCapture,
             captureRetryDelay: captureRetryDelay,
             captureRetryMaxBackoff: captureRetryMaxBackoff,
+            // 0 = the old synchronous `.takingOver` emit. The suite's scripted
+            // activators resolve instantly, so the production debounce (which
+            // exists to SUPPRESS the strip on fast resolutions) would hide the
+            // very ordering the strip tests pin; only the debounce tests pass a
+            // real delay.
+            takeoverStripDelay: takeoverStripDelay,
             watchdogScheduler: watchdogScheduler,
             silenceFallbackDelay: silenceFallbackDelay,
-            systemDefaultOutputIsAirPlayClass: systemDefaultOutputIsAirPlayClass)
+            systemDefaultOutputIsAirPlayClass: systemDefaultOutputIsAirPlayClass,
+            aggregateControl: NoOpAggregateControl(),
+            // D7 (adversarial review, Seamless handoff T3): the real default
+            // factory posix_spawns `/usr/bin/log stream`. Every other collaborator
+            // this helper touches (`systemVolume`, `ptpHelperActivator`,
+            // `aggregateControl`, …) is already swapped for a hermetic fake for
+            // exactly this reason — this is that same convention, not a
+            // `HeadlessRuntime`-gated production default (there is no precedent in
+            // `NativeBackend`'s own init for auto-detecting tests at a production
+            // default; every other collaborator is always real in production and
+            // always swapped explicitly here).
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         return (backend, engine, discovery)
+    }
+
+    /// Inert `LogStreamSpawning` stand-in (D7): never spawns a real subprocess,
+    /// `isRunning` always false. Keeps this suite hermetic without exercising the
+    /// watcher's own logic — that's owed as a dedicated `AirPlayHandoffWatcherTests`
+    /// suite, out of scope here.
+    private final class NoOpLogStream: LogStreamSpawning, @unchecked Sendable {
+        func start(onLine: @escaping @Sendable (String) -> Void,
+                    onTermination: @escaping @Sendable () -> Void) throws {}
+        func stop() {}
+        var isRunning: Bool { false }
     }
 
     /// A scripted `AudioProcessEnumerating` fake: hands back a fixed process list
@@ -2027,6 +2116,72 @@ extension SerializedSharedState {
                       "the auto-recovery reconnect must still push a level to the engine (the seed fires) — the preserved 75, not skipped")
     }
 
+    /// An engine `.passwordRequired` on the STATE STREAM surfaces as
+    /// `.authRequired`, never flattened to `.unknown` (live 2026-08-06: an
+    /// auth-blocked Mac receiver — act=2 "Current User" access control — was
+    /// debugged blind because the panel said "failed for an unknown reason"
+    /// while the engine knew it wanted a password).
+    @Test func passwordRequiredOnStateStreamSurfacesAuthRequiredCause() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+
+        engine.pushState(device.outputID, .passwordRequired)
+        await pollUntil {
+            if case .failed(let f)? = backend.devices.first(where: { $0.id == device.id })?.connectionState {
+                return f.cause == .authRequired
+            }
+            return false
+        }
+        guard case .failed(let failure)? =
+                backend.devices.first(where: { $0.id == device.id })?.connectionState else {
+            Issue.record("device did not enter .failed")
+            return
+        }
+        #expect(failure.cause == .authRequired,
+                "a password rejection carries its known cause, not .unknown")
+    }
+
+    /// The same mapping on the CONNECT path: an `addOutput` that throws the
+    /// engine's `.passwordRequired` parks the device with `.authRequired` —
+    /// `convergeDevice`'s catch mirrors `applyEngineState`'s arm.
+    @Test func passwordRequiredAddThrowSurfacesAuthRequiredCause() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device()
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil {
+            if case .failed(let f)? = backend.devices.first(where: { $0.id == device.id })?.connectionState {
+                return f.cause == .authRequired
+            }
+            return false
+        }
+        guard case .failed(let failure)? =
+                backend.devices.first(where: { $0.id == device.id })?.connectionState else {
+            Issue.record("device did not enter .failed")
+            return
+        }
+        #expect(failure.cause == .authRequired,
+                "the add-throw catch maps the engine's passwordRequired, not .unknown")
+    }
+
     /// A MUTED AirPlay-1 receiver that drops and reconnects must come back TRULY
     /// silent (the −144 dB sentinel), not at the AP1 curve's −30 dB floor.
     /// `connectVolumeSeed`'s muted branch used to push the AP2-only
@@ -2573,8 +2728,11 @@ extension SerializedSharedState {
 
     /// Root cause 4 + 5: a device whose add fails (engine NACKs SETPEERS under a
     /// session storm) is marked unavailable and PARKED (converge stops issuing
-    /// sessions), but must be RECOVERABLE — a subsequent discovery re-resolution
-    /// clears the park and a user re-toggle re-enables it, with the retry succeeding.
+    /// sessions), but must be RECOVERABLE — "Try again" (`retryOutput`) clears
+    /// the park for that id and the retry succeeds. (The discovery re-resolve in
+    /// between no longer clears the park by itself — same descriptor, so it's
+    /// not evidence of recovery under the 2026-08-06 storm fix — but it must not
+    /// WEDGE anything either.)
     @Test func setPeersFailureRecoversNotWedged() async {
         let (backend, engine, discovery) = makeBackend()
         backend.start(); defer { backend.stop() }
@@ -2594,7 +2752,8 @@ extension SerializedSharedState {
         }
         #expect(backend.devices.first { $0.id == device.id }?.isAvailable == false)
 
-        // RECOVERY: the receiver settles; discovery re-resolves it (clears the park),
+        // RECOVERY: the receiver settles; discovery re-resolves it (same
+        // descriptor — availability comes back, the park deliberately does NOT),
         // and the engine now accepts the add.
         engine.addFailures = []
         discovery.fire(.updated(device))
@@ -2602,8 +2761,8 @@ extension SerializedSharedState {
             backend.devices.first { $0.id == device.id }?.isAvailable == true
         }
 
-        // A user re-toggle now succeeds — the device is not permanently wedged.
-        backend.setOutputSet([device.id])
+        // "Try again" now succeeds — the device is not permanently wedged.
+        backend.retryOutput(device.id)
         await pollUntil(timeout: 5) {
             let d = backend.devices.first { $0.id == device.id }
             return d?.isSelected == true && d?.isAvailable == true
@@ -2612,6 +2771,130 @@ extension SerializedSharedState {
         #expect(d?.isSelected == true, "a NACKed device must be re-enableable after recovery (root cause 4)")
         #expect(d?.isAvailable == true)
         #expect(engine.addedIDs.contains(device.outputID))
+    }
+
+    // MARK: Retry-storm damping (2026-08-06 — parked `.failed` devices)
+
+    /// Drive `device` to a parked `.failed` (its adds NACK) and return the
+    /// number of engine add attempts consumed getting there.
+    private func parkDevice(
+        _ backend: NativeBackend, _ engine: SpyEngine, _ discovery: FakeDiscovery,
+        _ device: DiscoveredDevice
+    ) async -> Int {
+        engine.addFailures = [device.outputID.rawValue]
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil {
+            if case .failed = backend.devices.first(where: { $0.id == device.id })?.connectionState { return true }
+            return false
+        }
+        return engine.addedIDs.filter { $0 == device.outputID }.count
+    }
+
+    private func isFailedNow(_ backend: NativeBackend, _ id: String) -> Bool {
+        if case .failed = backend.devices.first(where: { $0.id == id })?.connectionState { return true }
+        return false
+    }
+
+    /// Storm fix, routing-traffic arm: with a device parked `.failed` and still
+    /// desired (R12 keeps intent), a membership-NEUTRAL `setOutputSet` — the
+    /// exact same set re-issued, which is what a This-Mac toggle, a Main-Out
+    /// re-pick, or any unrelated selection change produces — must NOT un-park
+    /// or re-kick it: no new engine attempt, no `.connecting` churn. Pre-fix,
+    /// the blanket park-clear plus `isRetryOfFailed` turned every such call
+    /// into a zero-backoff retry of every parked id (telemetry: 69 identical
+    /// `set_output_set added:[] removed:[]` calls in one storm session).
+    @Test func membershipNeutralSetOutputSetDoesNotRetryParkedDevice() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:60", name: "Parked Speaker")
+        let attempts = await parkDevice(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])   // membership-neutral: added:[] removed:[]
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == attempts,
+                "a membership-neutral setOutputSet must not re-kick a parked .failed device")
+        #expect(isFailedNow(backend, device.id),
+                "…and must not strobe its resting .failed through .connecting")
+    }
+
+    /// Storm fix, discovery arm: a Bonjour re-resolve of the IDENTICAL
+    /// descriptor — a dead-but-still-announcing receiver, re-announced — is not
+    /// evidence of recovery and must leave the park (and the engine) alone.
+    /// Pre-fix, `addOrUpdate` cleared the gate unconditionally (STABILITY(C7),
+    /// "no backoff") and re-kicked every still-desired id per re-announce.
+    @Test func sameDescriptorReResolveDoesNotRetryParkedDevice() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:61", name: "Announcing Corpse")
+        let attempts = await parkDevice(backend, engine, discovery, device)
+
+        discovery.fire(.updated(device))    // same descriptor, isAvailable == true
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == attempts,
+                "a same-descriptor re-resolve must not re-kick a parked .failed device")
+        #expect(isFailedNow(backend, device.id), "the resting .failed survives the re-announce")
+    }
+
+    /// The load-bearing auto-reconnect (R12) survives the damping: a re-resolve
+    /// announcing a CHANGED descriptor (the receiver restarted / moved — here a
+    /// new port) IS evidence the device came back, so the park clears and the
+    /// still-desired id reconnects with no user action.
+    @Test func changedDescriptorReResolveAutoReconnectsParkedDevice() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:62", name: "Restarted Speaker")
+        _ = await parkDevice(backend, engine, discovery, device)
+
+        engine.addFailures = []
+        let restarted = DiscoveredDevice(
+            id: device.id,
+            descriptor: DeviceDescriptor(
+                name: device.descriptor.name, address: device.descriptor.address,
+                family: .ipv4, port: device.descriptor.port + 1,
+                txtRecord: device.descriptor.txtRecord),
+            outputID: device.outputID, isAirPlay2Supported: true)
+        discovery.fire(.updated(restarted))
+
+        await pollUntil(timeout: 5) {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+        #expect(backend.devices.first { $0.id == device.id }?.connectionState == .connected,
+                "a changed-descriptor re-resolve auto-reconnects a still-desired parked device")
+    }
+
+    /// The other load-bearing recovery arm: a parked device that DISAPPEARS
+    /// entirely and later re-appears — even with the identical descriptor —
+    /// auto-reconnects, because the disappear ended the failure episode
+    /// (`markDisappeared` drops the park along with the `.failed` state).
+    @Test func reappearAfterDisappearAutoReconnectsParkedDevice() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:63", name: "Round Tripper")
+        _ = await parkDevice(backend, engine, discovery, device)
+
+        _ = await collect(from: backend) { events in
+            events.contains {
+                if case .deviceUpdated(let d) = $0 { return d.id == device.id && d.connectionState == .off }
+                else { return false }
+            }
+        } after: { discovery.fire(.disappeared(id: device.id, wasAirPlay2Supported: true)) }
+
+        engine.addFailures = []
+        discovery.fire(.appeared(device))   // identical descriptor
+        await pollUntil(timeout: 5) {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+        #expect(backend.devices.first { $0.id == device.id }?.connectionState == .connected,
+                "drop-off-and-return auto-reconnects a still-desired device (episode ended at disappear)")
     }
 
     // MARK: State-stream vs converge ordering (2026-07-17 findings)
@@ -2807,8 +3090,8 @@ extension SerializedSharedState {
     }
 
     /// Recovery clears to connecting/connected: after a NACK parks the device
-    /// `.failed`, a discovery re-resolution clears the park (root cause 4) and a
-    /// user re-toggle retries — the connection dot must follow through
+    /// `.failed`, "Try again" (`retryOutput`) clears the park (root cause 4) and
+    /// retries — the connection dot must follow through
     /// `.failed → .connecting → .connected`, not stay stuck amber.
     @Test func connectionStateRecoveryClearsFailedThenReconnects() async {
         let (backend, engine, discovery) = makeBackend()
@@ -2827,15 +3110,18 @@ extension SerializedSharedState {
             return false
         }
 
-        // The receiver settles; discovery re-resolves it. This clears the park but
-        // is not itself a retry, so the dot should NOT jump to .connecting on its
-        // own here — it stays .failed (sticky) until the user re-toggles.
+        // The receiver settles; discovery re-resolves it (same descriptor — the
+        // park deliberately survives, storm fix 2026-08-06). This is not a
+        // retry, so the dot must NOT jump to .connecting on its own here — it
+        // stays .failed (sticky) until the user acts.
         engine.addFailures = []
         discovery.fire(.updated(device))
         await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == true }
+        #expect({ if case .failed = backend.devices.first(where: { $0.id == device.id })?.connectionState { return true }; return false }(),
+                "a same-descriptor re-resolve is not a retry — the resting .failed dot survives it")
 
-        // User re-toggle: the dot must move .failed → .connecting → .connected.
-        backend.setOutputSet([device.id])
+        // "Try again": the dot must move .failed → .connecting → .connected.
+        backend.retryOutput(device.id)
         await pollUntil(timeout: 5) {
             backend.devices.first { $0.id == device.id }?.connectionState == .connected
         }
@@ -4194,7 +4480,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.3)
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.3,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:90", name: "Single-Flight Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -4258,7 +4545,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05)
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:91", name: "Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -4314,7 +4602,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05)
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:92", name: "Reverse-Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -4381,7 +4670,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5)
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Sleep-Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -4431,7 +4721,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5)
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Sleep-Badge Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -4519,10 +4810,19 @@ extension SerializedSharedState {
     // no-op faithfully, so each test genuinely fails without the
     // `boundStreamId` + `rebindOutput` arbitration.
 
-    /// WHOLE-SYSTEM -> PER-APP, same device: a Selected Device (live on stream 0)
-    /// that becomes a per-app redirect target must end up with its ENGINE session
-    /// on the per-app stream — not merely with `streamBindings` claiming so.
-    @Test func deviceMovingFromWholeSystemToPerAppRebindsTheLiveSession() async {
+    /// WHOLE-SYSTEM -> PER-APP, same device — via the LEGITIMATE direction.
+    ///
+    /// SUPERSEDED SCENARIO (roadmap 008): this test originally redirected a device
+    /// while it was STILL SELECTED and asserted the session moved to a per-app
+    /// stream. The backend now enforces whole-system priority — that redirect is
+    /// demoted and never binds at all (`redirectToASelectedDeviceNeverBindsAtAll`
+    /// pins the new semantics; `demotedRouteReengagesOnDeselect` pins the
+    /// restore), which is the backend enforcement of the UX rule the UI layer
+    /// already encodes (clearRoutes + the redirect-menu filter). The
+    /// within-transition purpose survives here in the sanctioned order: DESELECT
+    /// first, then route — the engine session must genuinely end up on the
+    /// per-app stream once whole-system releases the device.
+    @Test func deviceMovingFromWholeSystemToPerAppAfterDeselectEndsOnThePerAppStream() async {
         let (backend, engine, discovery) = makeBackend(
             injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
         defer { backend.stop() }
@@ -4535,19 +4835,19 @@ extension SerializedSharedState {
         #expect(engine.liveStream(of: device.outputID) == 0,
                 "precondition: the device must be live on the whole-system stream")
 
-        // Now redirect an app to the SAME device.
+        // Deselect (whole-system releases the device), then redirect an app to it.
+        backend.setOutputSet([])
+        await pollUntil { engine.liveStream(of: device.outputID) == nil }
+
         backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
 
         await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
         let live = engine.liveStream(of: device.outputID)
         #expect(live != nil && live! >= 1,
                 """
-                the engine session must actually MOVE to the per-app stream — \
-                a silent addOutput no-op leaves it on \(live.map(String.init) ?? "nil") \
-                while the app's audio is written to a stream the device never joined
+                after whole-system releases the device, the per-app domain must \
+                genuinely own the engine session — it ended on \(live.map(String.init) ?? "nil")
                 """)
-        #expect(engine.rebindCalls.contains { $0.0 == device.outputID },
-                "the move must go through the engine's serialized rebindOutput, not a cross-FIFO remove+add pair")
     }
 
     /// PER-APP -> WHOLE-SYSTEM, same device: a redirect target (live on stream N)
@@ -4578,6 +4878,625 @@ extension SerializedSharedState {
                 """)
         #expect(engine.rebindCalls.contains { $0.0 == device.outputID && $0.1 == 0 },
                 "the move must go through the engine's serialized rebindOutput")
+    }
+
+    // MARK: Roadmap 008 — scope arbiter (whole-system priority) race tests
+    //
+    // Every test below names the interleaving it forces and forces it
+    // deterministically via a SpyEngine hold hook, an armable PTP gate, or a
+    // telemetry-observed classification — never a sleep-as-synchronization.
+    // The policy under test: whole-system routing (stream 0) always wins a
+    // contested device; the per-app domain yields LOUDLY (telemetry + queryable
+    // conflict + `.routedApps` clear + audible fallback into the system mix)
+    // and re-engages automatically on deselect.
+
+    /// Parse the sink's captured lines into `.airplay` JSON objects for `evt`,
+    /// optionally filtered to one device id (mirrors
+    /// `rebindRecoveryEmitsTelemetry...`'s local helpers).
+    private func telemetryLines(
+        _ box: TelemetryLineBox, evt: String, device: String? = nil
+    ) -> [[String: Any]] {
+        box.snapshot().compactMap { line -> [String: Any]? in
+            guard let data = line.data(using: .utf8),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            else { return nil }
+            return obj
+        }.filter {
+            $0["cat"] as? String == "airplay" && $0["evt"] as? String == evt
+                && (device == nil || $0["device"] as? String == device)
+        }
+    }
+
+    /// A test-controlled hold point for the SpyEngine's async hooks: `hold()`
+    /// (called from inside an engine op) marks `entered` and suspends until the
+    /// test calls `open()` — the explicit open IS the synchronization.
+    private final class HoldPoint: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _entered = false
+        private var _open = false
+        var entered: Bool { lock.withLock { _entered } }
+        func open() { lock.withLock { _open = true } }
+        func hold() async {
+            lock.withLock { _entered = true }
+            while !(lock.withLock { _open }) { try? await Task.sleep(nanoseconds: 2_000_000) }
+        }
+    }
+
+    /// A once-latch for hooks that must act on their first invocation only.
+    private final class OnceFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var fired = false
+        /// Returns whether the flag was ALREADY set (and sets it).
+        func testAndSet() -> Bool { lock.withLock { let was = fired; fired = true; return was } }
+    }
+
+    /// A `PTPHelperActivating` that resolves `.ready` instantly until `arm()`ed,
+    /// after which every activation HOLDS until `release()` — how a race test
+    /// parks `convergeDevice` inside its widest suspension window
+    /// (`ensurePTPTakeover`) at a test-chosen moment.
+    private final class ArmableHoldingPTPActivator: PTPHelperActivating, @unchecked Sendable {
+        var willWaitForClock: Bool { false }
+        private let lock = NSLock()
+        private var armed = false
+        private let gate = HoldPoint()
+        func arm() { lock.withLock { armed = true } }
+        func release() { gate.open() }
+        var holding: Bool { gate.entered }
+        func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome {
+            if lock.withLock({ armed }) { await gate.hold() }
+            return .ready
+        }
+    }
+
+    /// Collects every `.routedApps` name list emitted for one device, in order.
+    private final class RoutedAppsLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var entries: [[String]] = []
+        func append(_ names: [String]) { lock.withLock { entries.append(names) } }
+        var last: [String]? { lock.withLock { entries.last } }
+    }
+
+    /// Subscribe a `RoutedAppsLog` for `deviceID` BEFORE firing any stimulus.
+    private func subscribeRoutedApps(
+        _ backend: NativeBackend, deviceID: String
+    ) -> (RoutedAppsLog, Task<Void, Never>) {
+        let log = RoutedAppsLog()
+        let task = Task {
+            for await event in backend.makeEventStream() {
+                if case .routedApps(let id, let names) = event, id == deviceID {
+                    log.append(names)
+                }
+            }
+        }
+        return (log, task)
+    }
+
+    /// Test 1 (sanctioned direction, steady state): selecting a device that
+    /// currently carries a per-app redirect demotes the route, clears its
+    /// `.routedApps` claim, records a queryable conflict, and leaves the engine
+    /// session on stream 0 with the whole-system domain the sole owner — the
+    /// deferred/downgraded unbind settles with a NO-OP verify, never a
+    /// session-killing removeOutput.
+    @Test func selectingARedirectTargetDemotesTheRouteAndWinsStream0() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+        let (routedApps, sub) = subscribeRoutedApps(backend, deviceID: device.id)
+        defer { sub.cancel() }
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        await pollUntil { routedApps.last == ["Foo"] }
+
+        backend.setOutputSet([device.id])
+
+        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
+        #expect(engine.liveStream(of: device.outputID) == 0,
+                "whole-system must win the contested device onto stream 0")
+        await pollUntil { routedApps.last?.isEmpty == true }
+        #expect(routedApps.last?.isEmpty == true,
+                ".routedApps must be cleared for the demoted device — the teal dot never lies")
+        await pollUntil {
+            self.telemetryLines(box, evt: "scope_conflict", device: device.id)
+                .contains { $0["stage"] as? String == "routeDemoted" }
+        }
+        #expect(telemetryLines(box, evt: "scope_conflict", device: device.id)
+                    .contains { $0["stage"] as? String == "routeDemoted" })
+        #expect(backend.test_scopeConflict(deviceID: device.id)?.bundleIDs == ["com.foo.player"],
+                "the conflict must be queryable while it is engaged")
+
+        // The demotion's trailing unbind resolves through the verify-first
+        // settle and finds the session already on 0 — zero extra engine ops.
+        await pollUntil(timeout: 5) {
+            self.telemetryLines(box, evt: "unbind_downgraded", device: device.id)
+                .contains { $0["settled"] as? String == "noop" }
+        }
+        #expect(telemetryLines(box, evt: "unbind_downgraded", device: device.id)
+                    .contains { $0["settled"] as? String == "noop" })
+        #expect(engine.ops.filter { $0 == "remove:\(device.outputID.rawValue)" }.count == 1,
+                "exactly ONE remove — the scope rebind's own stop half; the unbind must never have issued the I4 session-killer")
+        #expect(engine.liveStream(of: device.outputID) == 0)
+    }
+
+    /// Test 2 (demote-at-decision): a route pushed at an ALREADY-selected device
+    /// is ineligible from the first read — no `.bind` op ever exists, so there is
+    /// no fire-time race to win.
+    @Test func redirectToASelectedDeviceNeverBindsAtAll() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+
+        // The conflict record engaging proves the route WAS processed — and
+        // demoted at decision, so the absence of a bind op below is a settled
+        // fact, not a not-yet.
+        await pollUntil { backend.test_scopeConflict(deviceID: device.id) != nil }
+        #expect(backend.test_scopeConflict(deviceID: device.id)?.bundleIDs == ["com.foo.player"])
+        #expect(!engine.ops.contains { $0.hasPrefix("streamAdd:\(device.outputID.rawValue):") },
+                "demoted at decision: no per-app bind op may ever be issued for a Selected Device")
+        // Poll for the telemetry LINE separately from the conflict RECORD: the
+        // record is written under `stateQueue` (what the poll above saw), but
+        // `Telemetry.log` hands the line to its own queue, so the sink append
+        // races a bare read of the box (flaked exactly so, 2026-08-07 — same
+        // discipline as the `unbind_downgraded` polls in the sibling tests).
+        await pollUntil {
+            self.telemetryLines(box, evt: "scope_conflict", device: device.id)
+                .contains { $0["stage"] as? String == "routeDemoted" }
+        }
+        #expect(telemetryLines(box, evt: "scope_conflict", device: device.id)
+                    .contains { $0["stage"] as? String == "routeDemoted" })
+        #expect(engine.liveStream(of: device.outputID) == 0,
+                "the whole-system session is untouched")
+    }
+
+    /// Test 3 (forces I4 — the kill-the-fresh-session bug): the demotion's
+    /// `.unbind` fires while converge's 1→0 rebind is HELD OPEN mid-op
+    /// (`onRebindBody` between the stop and add halves), so its classification
+    /// deterministically sees the whole-system op in flight → case 3, deferred —
+    /// and the release-side settle then verifies engine truth (already 0) with
+    /// zero extra ops. The stream-0 session the user just asked for survives.
+    @Test func unbindFiringDuringConvergesRebindIsDeferredThenSettles() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+
+        // Hold converge's 1→0 rebind open between its stop and add halves.
+        let rebindHold = HoldPoint()
+        engine.onRebindBody = { id, streamId in
+            if id == device.outputID, streamId == 0 { await rebindHold.hold() }
+        }
+
+        backend.setOutputSet([device.id])
+
+        // The demotion's `.unbind` fires while the rebind is held → deferred,
+        // not executed (case 3): the converge's outcome is unknowable now.
+        await pollUntil(timeout: 5) {
+            !self.telemetryLines(box, evt: "unbind_deferred", device: device.id).isEmpty
+        }
+        #expect(!telemetryLines(box, evt: "unbind_deferred", device: device.id).isEmpty,
+                "an unbind landing inside an in-flight whole-system op must defer to its release")
+
+        rebindHold.open()
+
+        // Converge completes; its release consumes the pending settle; the
+        // verify reads live == 0 → success with zero engine ops.
+        await pollUntil(timeout: 5) {
+            self.telemetryLines(box, evt: "unbind_downgraded", device: device.id)
+                .contains { $0["settled"] as? String == "noop" }
+        }
+        #expect(telemetryLines(box, evt: "unbind_downgraded", device: device.id)
+                    .contains { $0["settled"] as? String == "noop" })
+        #expect(engine.liveStream(of: device.outputID) == 0,
+                "the fresh stream-0 session must survive the deferred unbind")
+        #expect(engine.ops.filter { $0 == "remove:\(device.outputID.rawValue)" }.count == 1,
+                "exactly one remove — the held rebind's own stop half; the deferred unbind issued none")
+        #expect(backend.devices.first { $0.id == device.id }?.isSelected == true,
+                "whole-system bookkeeping still owns the device")
+    }
+
+    /// Test 4 (forces I3 — deselect-then-redirect): the route lands strictly
+    /// INSIDE converge's teardown `removeOutput` (pushed from the
+    /// `onRemoveOutputBody` hook, which then HOLDS the teardown open until the
+    /// bind has provably bowed out — without the hold the bind would race the
+    /// slot release and the test would flake between bow-out and direct bind).
+    /// The bind bows out `ws_in_flight`; the release re-drives it; the device
+    /// ends genuinely owned by the per-app domain.
+    @Test func bindBowsOutDuringWholeSystemTeardownAndIsRedriven() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let appRoute = route("com.foo.player", name: "Foo", toDevice: device.id)
+        let once = OnceFlag()
+        let backendRef = backend
+        engine.onRemoveOutputBody = { id in
+            guard id == device.outputID, !once.testAndSet() else { return }
+            // Fire the other FIFO from strictly within the teardown window…
+            backendRef.updateAppRoutes([appRoute])
+            // …and hold the teardown open until the bind has bowed out.
+            while !box.snapshot().contains(where: {
+                $0.contains("bind_superseded") && $0.contains(device.id)
+            }) {
+                try? await Task.sleep(nanoseconds: 2_000_000)
+            }
+        }
+
+        backend.setOutputSet([])   // converge teardown: the removeOutput runs the hook
+
+        await pollUntil(timeout: 5) { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        let live = engine.liveStream(of: device.outputID)
+        #expect(live != nil && live! >= 1,
+                "the re-driven bind must land after the whole-system release")
+        #expect(telemetryLines(box, evt: "bind_superseded", device: device.id)
+                    .contains { $0["reason"] as? String == "ws_in_flight" },
+                "the bind must bow out loudly while the teardown is in flight")
+        #expect(!telemetryLines(box, evt: "per_app_redrive").isEmpty,
+                "the release side must re-drive the bowed-out bind")
+        let ops = engine.ops
+        let removeIdx = ops.firstIndex(of: "remove:\(device.outputID.rawValue)")
+        let bindIdx = ops.firstIndex { $0.hasPrefix("streamAdd:\(device.outputID.rawValue):") }
+        #expect(removeIdx != nil && bindIdx != nil && removeIdx! < bindIdx!,
+                "the teardown's remove must strictly precede the re-driven bind — no resurrection ordering")
+    }
+
+    /// Test 5 (forces I5 — recovery-backoff ping-pong): a route pushed while a
+    /// whole-system rebind recovery holds `converging[D]` across its backoff is
+    /// demoted at decision (the device is still SELECTED), so the `.bind` that
+    /// used to land between retry attempts never exists. Deselecting mid-backoff
+    /// lets the chain reach a terminal exit, release the slot, and re-drive the
+    /// per-app bind — with no alternating add(0)/streamAdd anywhere.
+    @Test func routeDuringWholeSystemRecoveryBackoffDoesNotPingPong() async {
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let capture = FakeCapture()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
+            systemVolume: FakeSystemVolume(),
+            ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]),
+            maxRebindRecoveryAttempts: 6, rebindRecoveryRetryDelay: 0.25)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A5", name: "Backoff Speaker")
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        // Make the recovery's attempt fail: flush no-ops (falls through to
+        // teardown+re-add), re-add throws → a backed-off retry holds the slot.
+        engine.flushNoOps = [device.outputID.rawValue]
+        engine.addFailures = [device.outputID.rawValue]
+        capture.fireDeviceRateRebuild()
+        await pollUntil(timeout: 5) {
+            self.telemetryLines(box, evt: "rebind", device: device.id)
+                .contains { $0["outcome"] as? String == "retry_scheduled" }
+        }
+
+        // The route lands while the recovery owns the device across its backoff.
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        await pollUntil(timeout: 5) { backend.test_scopeConflict(deviceID: device.id) != nil }
+        #expect(backend.test_scopeConflict(deviceID: device.id) != nil,
+                "the route must be demoted — the device is still selected")
+        #expect(!engine.ops.contains { $0.hasPrefix("streamAdd:\(device.outputID.rawValue):") },
+                "no per-app bind may land between the recovery's retry attempts")
+
+        // Deselect mid-backoff and let the engine accept the next attempt: the
+        // chain reaches a terminal exit, the release re-drives the route.
+        backend.setOutputSet([])
+        engine.addFailures = []
+        await pollUntil(timeout: 10) { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        #expect((engine.liveStream(of: device.outputID) ?? 0) >= 1,
+                "after the deselect the demoted route must re-engage by itself")
+        let bindOps = engine.ops.filter {
+            $0.hasPrefix("add:\(device.outputID.rawValue)")
+                || $0.hasPrefix("streamAdd:\(device.outputID.rawValue):")
+        }
+        #expect(bindOps.filter { $0.hasPrefix("streamAdd:") }.count == 1,
+                "exactly one per-app bind — no ping-pong")
+        #expect(bindOps.last?.hasPrefix("streamAdd:") == true,
+                "the FINAL bind for the device must be the per-app one — an add(0) after it is the ping-pong")
+    }
+
+    /// Test 6 (forces I1/I2 TOCTOU, favorable engine order): the selection lands
+    /// MID per-app add — after the bind's fire-time check passed, before the
+    /// spy's `liveStreams` write (the wired-into-`addOutput(_:streamId:)`
+    /// `onAddOutputBody`). Arming the PTP activator from the same hook parks the
+    /// kicked converge inside `ensurePTPTakeover` until the per-app session is
+    /// provably live, FORCING converge's `boundStreamId` read to see stream 1 —
+    /// so it must arbitrate on engine truth and rebind to 0.
+    @Test func selectionLandingInsidePerAppAddConvergesToWholeSystem() async {
+        let activator = ArmableHoldingPTPActivator()
+        let (backend, engine, discovery) = makeBackend(
+            ptpHelperActivator: activator,
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let once = OnceFlag()
+        let backendRef = backend
+        engine.onAddOutputBody = { id in
+            guard id == device.outputID, !once.testAndSet() else { return }
+            activator.arm()
+            backendRef.setOutputSet([device.id])
+        }
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+
+        await pollUntil { engine.liveStream(of: device.outputID) == 1 }
+        #expect(engine.liveStream(of: device.outputID) == 1,
+                "precondition: the per-app session must be live while converge is still parked")
+        await pollUntil { activator.holding }
+        activator.release()
+
+        await pollUntil(timeout: 5) { engine.liveStream(of: device.outputID) == 0 }
+        #expect(engine.liveStream(of: device.outputID) == 0,
+                "converge must arbitrate on engine truth and move the session to 0")
+        #expect(engine.rebindCalls.contains { $0.0 == device.outputID && $0.1 == 0 },
+                "the move must go through the serialized rebindOutput")
+        #expect(engine.maxConcurrent == 1,
+                "the per-app add and converge's rebind must never overlap for the device")
+        await pollUntil { backend.test_scopeConflict(deviceID: device.id) != nil }
+        #expect(backend.test_scopeConflict(deviceID: device.id) != nil,
+                "the mid-op claim must surface as a queryable demotion")
+        // The demotion's deferred unbind settles with a no-op verify — no
+        // surviving per-app engine claim.
+        await pollUntil(timeout: 5) {
+            self.telemetryLines(box, evt: "unbind_downgraded", device: device.id)
+                .contains { $0["settled"] as? String == "noop" }
+        }
+        #expect(engine.liveStream(of: device.outputID) == 0)
+    }
+
+    /// Test 7 (end-to-end backend-only exclusivity, no GroupController): a
+    /// demoted route re-engages BY ITSELF on deselect — no route-table edit in
+    /// either direction, conflict record cleared, `.routedApps` repopulated.
+    @Test func demotedRouteReengagesOnDeselect() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+        let (routedApps, sub) = subscribeRoutedApps(backend, deviceID: device.id)
+        defer { sub.cancel() }
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        await pollUntil { routedApps.last == ["Foo"] }
+
+        // Select: demoted, whole-system wins.
+        backend.setOutputSet([device.id])
+        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
+        await pollUntil { backend.test_scopeConflict(deviceID: device.id) != nil }
+        await pollUntil { routedApps.last?.isEmpty == true }
+
+        // Deselect: the route re-engages with no route-table edit. (The mixer may
+        // assign a FRESH stream id on re-engage — any per-app stream (>= 1) is
+        // the ownership fact under test.)
+        backend.setOutputSet([])
+        await pollUntil(timeout: 5) { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        #expect((engine.liveStream(of: device.outputID) ?? 0) >= 1,
+                "the demoted route must re-engage the moment the device is deselected")
+        await pollUntil { routedApps.last == ["Foo"] }
+        #expect(routedApps.last == ["Foo"], ".routedApps must repopulate on restore")
+        await pollUntil { backend.test_scopeConflict(deviceID: device.id) == nil }
+        #expect(backend.test_scopeConflict(deviceID: device.id) == nil,
+                "the conflict record must clear on disengage")
+        #expect(telemetryLines(box, evt: "scope_conflict", device: device.id)
+                    .contains { $0["stage"] as? String == "routeRestored" },
+                "the disengage must be loud too")
+    }
+
+    /// Test 8 (constraint-2 pin): the single-domain op traces are byte-identical
+    /// to the pre-arbiter sequences — zero extra engine ops on either path.
+    @Test func wholeSystemOnlyAndPerAppOnlyOpTracesAreUnchanged() async {
+        // Whole-system only: select → add + connect-volume seed; deselect → remove.
+        do {
+            let (backend, engine, discovery) = makeBackend()
+            defer { backend.stop() }
+            let device = ap2Device()
+            await startAndDiscover(backend, engine, discovery, device)
+            let raw = device.outputID.rawValue
+
+            backend.setOutputSet([device.id])
+            await pollUntil { engine.ops.contains("volume:\(raw)") }
+            backend.setOutputSet([])
+            await pollUntil { engine.ops.contains("remove:\(raw)") }
+
+            #expect(engine.ops == ["add:\(raw)", "volume:\(raw)", "remove:\(raw)"],
+                    "the whole-system-only op trace must be exactly the pre-arbiter sequence")
+        }
+        // Per-app only: route → streamAdd; unroute → remove.
+        do {
+            let (backend, engine, discovery) = makeBackend(
+                injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+            defer { backend.stop() }
+            let device = ap2Device()
+            await startAndDiscover(backend, engine, discovery, device)
+            let raw = device.outputID.rawValue
+
+            backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+            await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+            let stream = engine.liveStream(of: device.outputID) ?? 0
+            backend.updateAppRoutes([])
+            await pollUntil { engine.ops.contains("remove:\(raw)") }
+
+            #expect(engine.ops == ["streamAdd:\(raw):\(stream)", "remove:\(raw)"],
+                    "the per-app-only op trace must be exactly the pre-arbiter sequence")
+        }
+    }
+
+    /// Test 9 (forces the I1 interleaving the original design believed
+    /// impossible): converge reads `boundStreamId` = nil BEFORE the in-flight
+    /// per-app add lands (its `liveStreams` write is held open), then converge's
+    /// own stream-0 `addOutput` is the engine's silent `.alreadyBound` no-op —
+    /// `added` records a session the engine never moved, the engine is stuck on
+    /// stream 1. The guaranteed trailing `.unbind` (FIFO-ordered after the
+    /// astray bind) is the deterministic last word: its case-4 verify reads
+    /// engine truth AFTER the astray op completed and rebinds 1 → 0.
+    @Test func staleConvergeReadIsHealedByTheSettlingUnbind() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let perAppHold = HoldPoint()
+        let wsHold = HoldPoint()
+        engine.onAddOutputHold = { id, stream in
+            guard id == device.outputID else { return }
+            if stream >= 1 { await perAppHold.hold() } else { await wsHold.hold() }
+        }
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        await pollUntil { perAppHold.entered }   // per-app add in flight, pre-liveStreams-write
+
+        backend.setOutputSet([device.id])
+        // Converge's boundStreamId read is FORCED to see nil (the per-app write
+        // is still held), so it falls to the plain stream-0 add — held in turn.
+        await pollUntil(timeout: 5) { wsHold.entered }
+
+        perAppHold.open()                        // per-app session lands: live → 1
+        await pollUntil { engine.liveStream(of: device.outputID) == 1 }
+        wsHold.open()                            // converge's add: silent .alreadyBound no-op
+
+        await pollUntil(timeout: 5) { engine.liveStream(of: device.outputID) == 0 }
+        #expect(engine.liveStream(of: device.outputID) == 0,
+                "the settling unbind must heal the silent-no-op corruption back to stream 0")
+        #expect(engine.rebindCalls.contains { $0.0 == device.outputID && $0.1 == 0 },
+                "the heal must be the verify-first settle's rebindOutput(_, 0)")
+        await pollUntil(timeout: 5) {
+            self.telemetryLines(box, evt: "unbind_downgraded", device: device.id)
+                .contains { $0["settled"] as? String == "rebound" }
+        }
+        #expect(telemetryLines(box, evt: "unbind_downgraded", device: device.id)
+                    .contains { $0["settled"] as? String == "rebound" },
+                "the settle must record that it found an astray session and rebound it")
+        await pollUntil { backend.test_scopeConflict(deviceID: device.id) != nil }
+        #expect(backend.test_scopeConflict(deviceID: device.id) != nil,
+                "no per-app bookkeeping survives — the demotion is queryable")
+    }
+
+    /// Test 10 (defect found in the final adversarial review): an `.unbind`
+    /// deferred mid-converge (case 3) is consumed at release by RE-ENQUEUING it —
+    /// but when the user DESELECTED while that converge was still in flight, the
+    /// restore replay has already re-decided a binding for the device and its
+    /// `.bind` sits AHEAD of the re-enqueued unbind in the FIFO (here: parked
+    /// inside `ensurePTPTakeover` on the armed activator, so the ordering is
+    /// forced, not hoped). The stale unbind would then fire with no claim left
+    /// (case 1) and removeOutput-kill the freshly re-engaged per-app session —
+    /// and with `streamBindings` still set, every replay guard
+    /// (`streamBindings == nil`) skips the device forever: silent stranding.
+    /// The consume must DROP the settle (loudly) when the decision layer already
+    /// wants the device bound again.
+    @Test func staleDeferredUnbindMustNotKillAReengagedRoute() async {
+        let activator = ArmableHoldingPTPActivator()
+        let (backend, engine, discovery) = makeBackend(
+            ptpHelperActivator: activator,
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+
+        // Hold converge's 1→0 rebind open so the demotion's unbind
+        // deterministically defers (case 3) and the deselect below lands while
+        // the converge is provably still in flight.
+        let rebindHold = HoldPoint()
+        engine.onRebindBody = { id, streamId in
+            if id == device.outputID, streamId == 0 { await rebindHold.hold() }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil(timeout: 5) {
+            !self.telemetryLines(box, evt: "unbind_deferred", device: device.id).isEmpty
+        }
+        #expect(!telemetryLines(box, evt: "unbind_deferred", device: device.id).isEmpty,
+                "precondition: the demotion's unbind must have deferred mid-converge")
+
+        // Deselect while the converge is held. The restore replay re-decides the
+        // binding and its `.bind` parks inside `ensurePTPTakeover` (armed) —
+        // provably queued AHEAD of anything the release later enqueues.
+        activator.arm()
+        backend.setOutputSet([])
+        await pollUntil(timeout: 5) { activator.holding }
+        #expect(activator.holding,
+                "precondition: the restored route's bind must be parked pre-gate before the release runs")
+
+        // Let the converge finish: its add-half completes, the loop tears the
+        // now-undesired session down, and the release consumes the deferred
+        // settle — which must be DROPPED, not re-enqueued behind the parked bind.
+        rebindHold.open()
+        await pollUntil(timeout: 5) {
+            self.telemetryLines(box, evt: "unbind_redrive", device: device.id)
+                .contains { $0["outcome"] as? String == "dropped_route_reengaged" }
+        }
+        #expect(telemetryLines(box, evt: "unbind_redrive", device: device.id)
+                    .contains { $0["outcome"] as? String == "dropped_route_reengaged" },
+                "the release must drop (loudly) a settle whose device the route table re-claimed")
+
+        activator.release()
+        await pollUntil(timeout: 5) { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        #expect((engine.liveStream(of: device.outputID) ?? 0) >= 1,
+                "the re-engaged per-app session must survive — a stale unbind here is silent stranding")
+        let ops = engine.ops
+        let lastBind = ops.lastIndex { $0.hasPrefix("streamAdd:\(device.outputID.rawValue):") }
+        let lastRemove = ops.lastIndex(of: "remove:\(device.outputID.rawValue)")
+        #expect(lastBind != nil && (lastRemove == nil || lastRemove! < lastBind!),
+                "no remove may follow the re-engaged bind — the stale unbind must never fire")
     }
 
     // MARK: Per-app PTP takeover gate (redirect-order bug, PLAN-AIRPLAY-COEXISTENCE.md)
@@ -5405,7 +6324,8 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            processNotYetAudibleRetryDelay: 0.05, processNotYetAudibleMaxBackoff: 0.2)
+            processNotYetAudibleRetryDelay: 0.05, processNotYetAudibleMaxBackoff: 0.2,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:83", name: "Retry Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -5443,7 +6363,8 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.08)
+            processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.08,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:85", name: "Unbounded Retry Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -5477,7 +6398,8 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.05)
+            processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.05,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:86", name: "De-routed Retry Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -5538,7 +6460,8 @@ extension SerializedSharedState {
             // A generous 0.3s delay (well past the 5ms poll granularity and the
             // sub-millisecond de-route call below) so the de-route deterministically
             // lands before the timer fires, rather than racing it.
-            processNotYetAudibleRetryDelay: 0.3, processNotYetAudibleMaxBackoff: 0.6)
+            processNotYetAudibleRetryDelay: 0.3, processNotYetAudibleMaxBackoff: 0.6,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:8A", name: "Orphan Race Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -5606,7 +6529,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture)
+            processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:8C", name: "Toggle Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -5682,7 +6606,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture)
+            processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Terminate Relaunch Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -5755,7 +6680,8 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02)
+            maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:87", name: "Rebind Recovery Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -5814,7 +6740,8 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            maxRebindRecoveryAttempts: 2, rebindRecoveryRetryDelay: 0.02)
+            maxRebindRecoveryAttempts: 2, rebindRecoveryRetryDelay: 0.02,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:88", name: "Gone Receiver")
         await startAndDiscover(backend, engine, discovery, device)
@@ -5908,7 +6835,8 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02)
+            maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:89", name: "Telemetry Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6477,11 +7405,18 @@ extension SerializedSharedState {
                              "a redirect-only device must receive a .level from its per-app stream")
     }
 
-    /// T3: a device fed by BOTH the whole-system mix (it's a Selected Device) AND a
-    /// per-app stream (it's also a redirect target) reports the MAX of the two
-    /// contributions — the documented product decision. Proven in both directions:
-    /// system-high beats a present stream, and when the system drops the stream
-    /// drives the meter.
+    /// T3: a device's `.level` is the MAX of its whole-system and app-stream
+    /// contributions.
+    ///
+    /// SUPERSEDED SHAPE (roadmap 008): this test originally made ONE device both
+    /// a Selected Device and a live redirect target and pushed both sources at
+    /// once — a state the scope arbiter now structurally prevents (the route is
+    /// demoted while the device is selected; see
+    /// `redirectToASelectedDeviceNeverBindsAtAll`). Each side of the MAX is
+    /// proven in the state that can now actually carry it: the stream drives the
+    /// meter while the device is a redirect-only target, and selecting the
+    /// device (which demotes the route and tears its stream) hands the meter to
+    /// the system side — with the demoted stream contributing nothing.
     @Test func deviceFedBySystemAndStreamReportsMax() async {
         let registry = TapRegistry()
         let perAppCapture = registeringPerAppCapture(muteBehavior: .mutedWhenTapped, bundleIDs: ["com.foo"], into: registry)
@@ -6493,16 +7428,12 @@ extension SerializedSharedState {
         let device = ap2Device(id: "AA:BB:CC:DD:EE:82", name: "Both Sources")
         await startAndDiscover(backend, engine, discovery, device)
 
-        // Make it a Selected Device (system contribution) …
-        backend.setOutputSet([device.id])
-        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
         backend.setMeteringActive(true)
-        await pollUntil { capture.meteringActive }
 
-        // … AND a per-app redirect target (stream contribution).
+        // Redirect-only target first: the stream contribution drives the meter.
         backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
         await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
-        let stream = engine.streamAddCalls.first { $0.0 == device.outputID }!.1
+        let stream = engine.streamAddCalls.first { $0.0 == device.outputID }?.1 ?? 0
         await pollUntil {
             if case .capturing = perAppCapture.state(for: "com.foo") { return true }; return false
         }
@@ -6514,26 +7445,28 @@ extension SerializedSharedState {
         let (sink, task) = subscribeLevels(backend); defer { task.cancel() }
         try? await Task.sleep(nanoseconds: 20_000_000)
 
-        // Phase A — system HIGH (0.95) over a present stream (0xAA ≈ 0.667):
-        // the device level is the system value (the max), and the stream RMS is
-        // now cached (a write reached the engine).
-        capture.fireLevelIfActive(0.95)
+        // Stream side: 0xAA ≈ 0.667 — MAX(no system contribution, stream).
         tap.push(fingerprintedBuffer(fill: 0xAA, frames: 1000, atSecond: 1))
         await pollUntil { engine.rawWriteCalls.contains { $0.streamId == stream } }
-        await pollUntil { (sink.lastDeviceLevel(device.id) ?? 0) > 0.9 }
-        #expect(sink.lastDeviceLevel(device.id) ?? 0 > 0.9,
-                             "system 0.95 must win over the ~0.667 stream (MAX)")
-
-        // Phase B — system drops to 0: the cached stream RMS now drives the meter,
-        // proving the MAX flips to the stream side rather than sticking at 0.95.
-        capture.fireLevelIfActive(0.0)
         await pollUntil {
             let l = sink.lastDeviceLevel(device.id) ?? 0
             return l > 0.4 && l < 0.9
         }
-        let settled = sink.lastDeviceLevel(device.id) ?? 0
-        #expect(settled > 0.4 && settled < 0.9,
-                      "with system at 0 the stream (~0.667) must drive the level — MAX(0, stream)")
+        let streamDriven = sink.lastDeviceLevel(device.id) ?? 0
+        #expect(streamDriven > 0.4 && streamDriven < 0.9,
+                "a redirect-only device's stream (~0.667) must drive its level — MAX(0, stream)")
+
+        // Select the device: the arbiter demotes the route (its stream is torn
+        // down), and the system contribution now owns the meter.
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+        await pollUntil { capture.meteringActive }
+        await pollUntil { backend.test_scopeConflict(deviceID: device.id) != nil }
+
+        capture.fireLevelIfActive(0.95)
+        await pollUntil { (sink.lastDeviceLevel(device.id) ?? 0) > 0.9 }
+        #expect(sink.lastDeviceLevel(device.id) ?? 0 > 0.9,
+                "once selected, the system contribution (0.95) must drive the level — the demoted stream contributes nothing")
     }
 
     /// T3: unbinding a device's per-app stream (a destination-set change) emits a
@@ -7141,6 +8074,13 @@ extension SerializedSharedState {
         }
     }
 
+    /// R12: a still-desired `.failed` device self-heals with NO user action when
+    /// discovery reports a genuine COME-BACK edge. Under the 2026-08-06 storm
+    /// fix the edge is required: a same-descriptor re-resolve (a
+    /// dead-but-still-announcing receiver) deliberately stays parked (see
+    /// `sameDescriptorReResolveDoesNotRetryParkedDevice`); here the receiver
+    /// genuinely dropped OFFLINE and came back, which nils then re-arms the
+    /// descriptor memo — that edge clears the park and re-converges.
     @Test func failedDeviceReconvergesOnRediscoveryWithoutUserAction() async {
         let (backend, engine, discovery) = makeBackend()
         let device = ap2Device(id: "AA:BB:CC:DD:EE:33", name: "SelfHealer")
@@ -7160,10 +8100,15 @@ extension SerializedSharedState {
         #expect(backend.test_expectedSelected == [device.id],
                 "R12: intent (expectedSelected) is untouched by the failure")
 
-        // The receiver comes back and the engine stops NACKing — simulate ONLY
-        // rediscovery, no `setOutputSet` re-call (the popover under R12 never
-        // makes one on `.failed`).
+        // The receiver goes OFFLINE (sticky-AP2 downgrade: advert gone) and then
+        // comes back, and the engine stops NACKing — simulate ONLY discovery, no
+        // `setOutputSet` re-call (the popover under R12 never makes one on
+        // `.failed`).
         engine.addFailures = []
+        let offline = DiscoveredDevice(id: device.id, descriptor: device.descriptor,
+                                       outputID: device.outputID,
+                                       isAirPlay2Supported: true, isAvailable: false)
+        discovery.fire(.updated(offline))
         discovery.fire(.updated(device))
 
         await pollUntil(timeout: 5) {
@@ -7171,16 +8116,18 @@ extension SerializedSharedState {
         }
         let d = backend.devices.first { $0.id == device.id }
         #expect(d?.connectionState == .connected,
-                "rediscovery alone re-converged the still-desired device")
+                "an offline→online rediscovery edge alone re-converged the still-desired device")
         #expect(d?.isSelected == true)
     }
 
     /// R12/W2-T3, the explicit "Try again" path (as opposed to the rediscovery
-    /// path above): `GroupController.retryConnection(for:)` re-issues
-    /// `setOutputSet` with the SAME set — the id was never removed — so
-    /// `NativeBackend` must detect "already desired, still `.failed`" itself
-    /// and re-kick, rather than skipping because `previous == wantOn`.
-    @Test func retryOfFailedWithUnchangedSetStillReconverges() async {
+    /// path above): `GroupController.retryConnection(for:)` calls
+    /// `retryOutput(id)` — the id was never removed from the set, and a
+    /// same-membership `setOutputSet` re-issue is deliberately NOT a retry any
+    /// more (storm fix, 2026-08-06; see
+    /// `membershipNeutralSetOutputSetDoesNotRetryParkedDevice`), so the
+    /// dedicated entry point is what must reconnect the `.failed` device.
+    @Test func retryOutputReconnectsFailedDeviceWithUnchangedMembership() async {
         let (backend, engine, discovery) = makeBackend()
         let device = ap2Device(id: "AA:BB:CC:DD:EE:34", name: "TryAgainer")
         engine.addFailures = [device.outputID.rawValue]
@@ -7198,16 +8145,16 @@ extension SerializedSharedState {
         }
 
         // The receiver recovers, but nothing re-discovers it — only an explicit
-        // "Try again" re-issues the SAME output set (the id was already in it).
+        // "Try again" (the id is still in the desired set, membership unchanged).
         engine.addFailures = []
-        backend.setOutputSet([device.id])
+        backend.retryOutput(device.id)
 
         await pollUntil(timeout: 5) {
             backend.devices.first { $0.id == device.id }?.connectionState == .connected
         }
         let d = backend.devices.first { $0.id == device.id }
         #expect(d?.connectionState == .connected,
-                "a same-membership retry call must still reconnect a .failed device")
+                "retryOutput must reconnect a .failed device without a membership edge")
         #expect(d?.isSelected == true)
     }
 
@@ -7788,6 +8735,31 @@ extension SerializedSharedState {
                 == .failed(ConnectionFailure(cause: .timingUnavailable)))
     }
 
+    /// Banner-flash fix (2026-08-06): with the production debounce in force, a
+    /// clock wait that resolves BEFORE `takeoverStripDelay` elapses must never
+    /// mount the transient `.takingOver` strip at all — no blue flash, no
+    /// double panel re-fit — even though `willWaitForClock` was true. (The
+    /// ordering tests above pass `takeoverStripDelay: 0` to keep the old
+    /// synchronous emit for a wait that IS observed.)
+    @Test func fastClockWaitNeverFlashesTakingOverStrip() async {
+        let activator = ScriptedPTPHelperActivator(willWaitForClock: true, outcome: .ready)
+        let (backend, engine, discovery) = makeBackend(
+            ptpHelperActivator: activator, takeoverStripDelay: 5)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:B6", name: "Fast Takeover Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let events = await collect(from: backend, until: { events in
+            events.contains {
+                if case .deviceUpdated(let d) = $0 { return d.id == device.id && d.connectionState == .connected }
+                else { return false }
+            }
+        }, after: { backend.setOutputSet([device.id]) })
+
+        #expect(takeoverEvents(in: events).isEmpty,
+                "a wait that resolves inside the debounce window must mount no takeover strip")
+    }
+
     /// Edge-triggered discipline (mirrors `reconcileSystemAirPlayGuard`): a
     /// SECOND connect attempt that resolves to the exact same takeover status
     /// must NOT re-emit it — only a genuine change fires.
@@ -7901,7 +8873,8 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            processNotYetAudibleRetryDelay: 0.5, processNotYetAudibleMaxBackoff: 1.0)
+            processNotYetAudibleRetryDelay: 0.5, processNotYetAudibleMaxBackoff: 1.0,
+            aggregateControl: NoOpAggregateControl())
         let capture = FakeCapture()
         backend.captureCoordinator = capture
         defer { backend.stop() }

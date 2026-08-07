@@ -6,9 +6,8 @@ import Foundation
 /// decision 8, EXTENDED with a genuine third state). Three cases:
 ///  - `.noRedirect` — the neutral/unset state. The default for a newly-added
 ///    app; no deliberate choice has been made yet.
-///  - `.currentDevice` — an explicit, deliberate "play on this Mac" pick, now
-///    its own selectable menu item (previously this doubled as both the
-///    default AND the explicit choice — no longer).
+///  - `.currentDevice` — an explicit, deliberate "play on this Mac" pick, its
+///    own selectable menu item.
 ///  - `.device(id:)` — names an AirPlay target device by its stable `Device.id`.
 ///
 /// `.noRedirect` and `.currentDevice` are ENGINE/CAPTURE-EQUIVALENT: both mean

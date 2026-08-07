@@ -2,21 +2,18 @@
 
 import AppKit
 import AudiouterCore
-import AudiouterSharedUI
 
-/// A single device's controls (SPEC §9 "Device row"), shared by BOTH the
-/// menu-bar extra's popover dropdown and the full mixer window (both host it in
-/// an `NSStackView`). This is the "same row component" the SPEC and
-/// PLAN-PHASE-1 §D call for — one implementation, one test surface, identical
-/// behaviour in both hosts.
+/// A single device's controls (SPEC §9 "Device row"), hosted by the popover
+/// (`PopoverController`) in an `NSStackView` — the "same row component" the
+/// SPEC and PLAN-PHASE-1 §D call for: one implementation, one test surface.
 ///
 /// The row's PRIMARY control is a "Selected Devices" membership `NSButton`
 /// checkbox (SPEC §9 routing model); volume and a small secondary mute button
 /// follow.
 ///
 /// It lives in `AudiouterSharedUI` (not the popover target) so the
-/// window target can link it without pulling in the whole dropdown; both
-/// `PopoverController` (the popover) is its host (the window's mixer pane was retired 2026-07-18).
+/// window target can link it without pulling in the whole dropdown;
+/// `PopoverController` (the popover) is its host.
 ///
 /// The custom-view rules below (`draw`/highlight/tracking) still support the
 /// legacy `NSMenuItem` host branch; in the popover and window there is no
@@ -71,9 +68,8 @@ public final class DeviceRowView: NSView {
     /// before the status sublabel — brief §6 sanctions bumping this constant
     /// once a second text line needs the room, which it does: two 10pt lines
     /// plus their line gap don't fit 38pt without crowding the slider/switch).
-    /// Now sourced from `PopoverColumnGrid.bodyRowHeight` (2026-07-18 unification
-    /// with `AppRowView`'s row height) rather than a private literal — both row
-    /// types share one body-row dimension.
+    /// Sourced from `PopoverColumnGrid.bodyRowHeight` — both row types share
+    /// one body-row dimension.
     public static let rowHeight: CGFloat = PopoverColumnGrid.bodyRowHeight
 
     // (See `DeviceRowView.Delegate` extension at file end for the
@@ -159,8 +155,8 @@ public final class DeviceRowView: NSView {
     /// drawn AROUND the icon carrying the connection lifecycle, driven off
     /// `device.connectionState` alone (teal retired — no routing rung on the
     /// ring). Replaced the retired corner connection dot (`StatusDotView`,
-    /// deleted). The icon's corner is repurposed for the gold route-armed dot in
-    /// a later task (§3.3). See ``HaloRingView``.
+    /// deleted). The icon's corner now hosts the gold route-armed dot (§3.3).
+    /// See ``HaloRingView``.
     private let haloRingView = HaloRingView()
     /// The **gold route-armed corner dot** (Warm Signal v3 §3.3, S2) at the
     /// icon's bottom-right — the position the retired connection dot vacated.
@@ -450,8 +446,18 @@ public final class DeviceRowView: NSView {
         // Primary membership control: ON iff the device is in the Selected
         // Devices set. Don't fight a live toggle animation. Group-member rows
         // hide the toggle entirely (task C) — membership there is fixed.
+        //
+        // Enablement is INTENT-derived, not availability-derived (live bug,
+        // 2026-08-06): the native backend's failure paths force
+        // `isAvailable = false` while the user's selection intent stays true,
+        // and an intent control that renders ON but can never be turned OFF is
+        // a dead end — every deselect affordance (checkbox hit-test, name
+        // click, node click, keyboard/VoiceOver) rides this one flag, so a
+        // stuck-`.failed` row was physically un-deselectable. A SELECTED row
+        // therefore keeps a live toggle regardless of availability; an
+        // unavailable+UNselected row keeps the dead toggle (nothing to drop).
         enableCheckbox.state = selected ? .on : .off
-        enableCheckbox.isEnabled = showsToggle && device.isAvailable && !blocked
+        enableCheckbox.isEnabled = showsToggle && (device.isAvailable || selected) && !blocked
         enableCheckbox.toolTip = (showsToggle && blocked) ? blockReason : nil
         // A1: dim, don't disable — `isEnabled` above is untouched by
         // `selectionDimmed`, only the alpha is. EXCEPTION for bus rows (spec §4.7):
@@ -472,7 +478,7 @@ public final class DeviceRowView: NSView {
             NSImage.SymbolConfiguration(pointSize: PopoverColumnGrid.iconGlyphPointSize,
                                         weight: .regular)
         )
-        // The icon is ALWAYS neutral now (2026-07-17): identity only, no
+        // The icon is ALWAYS neutral: identity only, no
         // accent-when-selected fill. Selection reads from the switch state; the
         // on-icon corner dot carries the connection status instead. (This also
         // covers unsupported/AP1 rows — no accent regardless of stale selection.)
@@ -784,12 +790,10 @@ public final class DeviceRowView: NSView {
     /// Separator joining routing-line tokens: space, U+00B7 MIDDLE DOT, space.
     private static let routingTokenSeparator = " · "
 
-    // NOTE (2026-07-22, Warm Signal S1): the corner connection dot
-    // (`StatusDotView`) is retired; `apply` now drives `HaloRingView.apply(_:)`
-    // directly (same idempotent reset, so a repeated `apply` still can't leave a
-    // stale breathing animation running) and routes every sublabel through
-    // `resolveSublabel(routedAppNames:liveAppNames:)`'s ladder, which subsumes
-    // the failed-only case as its highest rung.
+    // `apply` drives `HaloRingView.apply(_:)` directly — same idempotent reset,
+    // so a repeated `apply` can't leave a stale breathing animation running —
+    // and routes every sublabel through `resolveSublabel()`'s ladder (failed =
+    // its highest rung).
 
     /// On a **bus row** the sublabel carries ONLY state words now (Warm Signal
     /// v4.1 item 3 — the routing/failure content that used to live here moved
@@ -1174,8 +1178,8 @@ public final class DeviceRowView: NSView {
     ///
     /// NOTE: this path leaves `controllable` at its `false` default, so the
     /// slider/mute come up DISABLED regardless of `selected` — see that
-    /// parameter's doc. Both real hosts (popover + mixer) pass `controllable`
-    /// explicitly and never rely on this shim for a live row.
+    /// parameter's doc. The real host (the popover) passes `controllable`
+    /// explicitly and never relies on this shim for a live row.
     public func apply(_ device: Device) {
         apply(device, selected: device.isSelected)
     }
@@ -1811,7 +1815,7 @@ public final class DeviceRowView: NSView {
     /// resets it whenever the row isn't a playing output).
     public func test_meterLevel() -> Float { lastMeterLevel }
 
-    /// The row's icon tint. Always `.secondaryLabelColor` now (2026-07-17 — the
+    /// The row's icon tint. Always `.secondaryLabelColor` (the
     /// icon is neutral identity-only; selection reads from the switch, status
     /// from the on-icon dot). Retained for the T-U8 reset test.
     public var test_iconTint: NSColor? { iconView.contentTintColor }
@@ -2146,7 +2150,7 @@ public final class DeviceRowView: NSView {
     /// Fire a one-shot attention pulse (A4) — e.g. so a host can draw the eye to
     /// a row that just changed for a reason other than the user directly acting
     /// on it. A single opacity keyframe up-and-back over ~0.5s, via
-    /// `CAKeyframeAnimation` (mirrors `StatusDotView`'s Core-Animation idiom).
+    /// `CAKeyframeAnimation`.
     /// A no-op under Reduce Motion — the row simply never flashes rather than
     /// jumping straight to some static "flashed" look that would itself read as
     /// a persistent state change.
@@ -2178,7 +2182,7 @@ public final class DeviceRowView: NSView {
     /// Whether the attention pulse (A4) is currently mid-flash — lets tests
     /// assert `flashRow()` fired without a real Core Animation run loop pumping
     /// (the animation is present on the layer's model the instant it's added,
-    /// same as `StatusDotView.test_isBreathing`).
+    /// same as `RouteArmedDotView.test_isBlooming`).
     public var test_isFlashing: Bool { flashLayer.animation(forKey: Self.flashAnimationKey) != nil }
 
     /// Simulate a host asking this row to flash (A4 test hook).
@@ -2346,8 +2350,8 @@ extension DeviceRowView: RailNodeProviding {
 public extension DeviceRowView.Delegate {
     /// Default no-op so conformers that predate the routing control (or that
     /// don't host the on/off switch — e.g. narrow test doubles) still compile.
-    /// The real hosts (popover + mixer window) override this to call
-    /// `GroupController.setDeviceEnabled`.
+    /// The real host (the popover) overrides this to call
+    /// `GroupController.setDeviceSelected`.
     func deviceRow(_ row: DeviceRowView, didToggleEnabled on: Bool, for id: String) {}
     /// Default no-op so non-bus hosts (mixer window, narrow test doubles) needn't
     /// implement the blocked-explanation surfacing (spec §4.6). The popover

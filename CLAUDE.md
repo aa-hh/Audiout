@@ -21,7 +21,7 @@ A native AppKit macOS app that sends system audio to multiple AirPlay 2 speakers
 git config core.hooksPath .githooks
 ```
 
-Guards: **Guard 1** blocks direct commits on `main` (merges only). **Guard 4** runs the test suite on any commit touching Swift sources.
+Guards: **Guard 1** blocks direct commits on `main` (merges only). **Guard 4/6** run the test suites on any commit touching Swift sources. **Guard 7** blocks Swift commits until the staged-diff readability self-review has run — `scripts/self-review.sh`, rubric in [`docs/REVIEW-RUBRIC.md`](docs/REVIEW-RUBRIC.md).
 
 ## Build & run
 
@@ -56,6 +56,7 @@ bash scripts/run-tests.sh
   ```
   Commits on the branch are pushed to `origin/<branch>` as work progresses. The branch merges into `main` BOTH as a local `git merge` AND as a GitHub PR — so origin/main and local main stay in sync.
 - **If you find uncommitted edits in the `main` checkout: stop and ask.** Never stash, reset, or discard them — they belong to another session.
+- **Finished with a worktree (branch merged + live-verified, or abandoned-but-pushed)?** `touch .claude/worktrees/<slug>/.prunable` — `scripts/housekeeping.sh` removes it safely at the next build, and also collects stale `.build` caches (see AGENTS.md).
 
 ## Backend env var
 

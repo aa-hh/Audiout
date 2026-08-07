@@ -7,7 +7,7 @@ import Foundation
 /// (`kAudioHardwarePropertyDefaultOutputDevice`) and that device's nominal
 /// sample rate (`kAudioDevicePropertyNominalSampleRate`).
 ///
-/// ## Why this exists (architecture review 2026-07-26, defect D)
+/// ## Why this exists
 /// Nothing owned the shared device rate. Every component that cared installed
 /// its OWN pair of HAL property listeners on the SAME system object and the
 /// SAME device — two capture coordinators today, a third routing path proposed

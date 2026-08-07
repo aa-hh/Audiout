@@ -9,6 +9,28 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 
 ## Rules
 
+- **This Mac's own AirPlay receiver is never surfaced as a device** (Alec's
+  call, 2026-08-07). macOS's AirPlay Receiver announces `_airplay._tcp` under
+  the machine's own mDNS hostname, so undiscriminating discovery offers the Mac
+  the app runs on as a speaker — a self-loop that mostly can't work (the live
+  2026-08-06 "Couldn't connect" storm was this row) and whose legitimate intent
+  ("play here") the local This-Mac row already covers. `NativeDiscovery` drops
+  any resolved service whose hostname matches `systemLocalHostname()`
+  (normalized: case-insensitive, trailing dot stripped) BEFORE identity
+  extraction, for both service types; the filter fails OPEN when the hostname is
+  unavailable (`localHostname: nil`), because a phantom self row is annoying but
+  a silently missing real speaker is a support case. Drops log to stderr once
+  per instance name (D6). Tests inject `localHostname:` alongside the browser
+  double. If self-AirPlay ever becomes a real feature (e.g. as a receiver-side
+  target for ANOTHER Mac running Audiouter), lift this at the discovery seam —
+  don't re-plumb the popover.
+- **`.passwordRequired` never flattens to `.unknown`.** Both places an engine
+  auth rejection surfaces — `applyEngineState`'s `.passwordRequired` arm and
+  `convergeDevice`'s add-throw catch — map it to
+  `ConnectionFailure.Cause.authRequired`, whose copy names the receiver-side fix
+  (a Mac receiver's "Current User" access-control mode is the common case).
+  In-app password entry is roadmapped, not shipped; keep the copy honest about
+  that until it lands.
 - **Any window/panel `show*()` entry point must gate its actual on-screen
   presentation behind `HeadlessRuntime.isActive`** (`HeadlessRuntime.swift`).
   `swift test` and the harness/snapshot tools (`window-harness`,
@@ -64,6 +86,35 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   engine stream per routed device. The whole-system capture gate still keys off
   `expectedSelected` (what `setOutputSet` was last handed), which no longer
   includes redirect targets, so passthrough no longer opens it.
+- **Scope arbiter (roadmap 008): whole-system routing ALWAYS wins a contested
+  device inside `NativeBackend` — the per-app domain yields loudly, and is
+  RE-DRIVEN ONLY when the losing bow-out's own in-flight release resolves
+  (`releaseConvergingAndRequeueIfNeeded`'s `redrivePerApp`), never the
+  reverse.** A `.device` route whose target is in `expectedSelected` is
+  demoted to effective-`.noRedirect` (same R5 semantics as an unreachable
+  target, `isRouteTargetEligibleLocked`); every `bindTail` op re-checks the
+  operational whole-system claim (`desiredOn`/`converging`/`added`) under
+  `stateQueue` immediately before its engine call — AFTER `ensurePTPTakeover`,
+  because a gate before that seconds-wide wait re-opens the window it closes
+  — and bows out. **Live-verified gap (2026-08-05, see roadmap 008 notes):**
+  re-drive fires for the settle immediately following the CLAIM that caused
+  the demotion, but a LATER, separate whole-system deselect of the same
+  device (`setOutputSet` dropping it from `desiredOn` well after the contest
+  settled) does not re-drive the demoted per-app route — confirmed via
+  telemetry, no `scope_conflict`/`unbind_redrive`/re-capture fired at that
+  deselect. Read this as accepted current behavior (Alec: turning a speaker
+  off shouldn't necessarily hand it back to a stale per-app assignment), not
+  as "the reverse never happens" — it currently does, on this path. TWO
+  TRAPS: (1) a
+  `bindTail` op must NEVER WAIT on the `converging` slot — a bind queued ahead
+  of a recovery that holds the slot would deadlock the FIFO (bow-out +
+  re-drive is the only safe shape); (2) an `.unbind` under a whole-system
+  claim is neither executed nor blanket-skipped — executing it kills the
+  user's fresh stream-0 session, skipping it strands an astray engine session
+  (the engine's `addOutput` is a silent no-op on a live session) or leaks a
+  zombie per-app session when the converge parked. `performBindOp`'s
+  four-case arm + the verify-first settle exist precisely for this; don't
+  "simplify" them back to either extreme.
 - **The whole-system tap's `.failed` now self-heals via a bounded retry (T16,
   E10).** `CaptureControlling` gained `onStateChange`; `NativeBackend` wires it in
   `start()` and drives a capped-exponential backoff retry
@@ -339,7 +390,7 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 
     ```
     git config --local audiouter.remoteHost 'user@192.168.4.41'
-    git config --local audiouter.testPrefer remote   # or: local (default)
+    git config --local audiouter.testPrefer remote   # or: local (default), cpu
     ```
 
     This lands in `.git/config`, which is **not tracked** — so a personal
@@ -352,9 +403,13 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 
     `testPrefer=local` (default) treats the two machines as ONE POOL: two runs
     locally, and the third and fourth agent overflow to the remote rather than
-    queueing. `testPrefer=remote` sends every run there first instead. Either way
-    an asleep/offline remote costs one 5s probe and then behaves exactly as if
-    none were configured.
+    queueing. `testPrefer=remote` sends every run there first instead, blind to
+    whether it's actually free. `testPrefer=cpu` probes `vm.loadavg` on both
+    machines (normalised by `hw.ncpu`, since core counts differ) and sends the
+    run to whichever is less loaded right now — the setting to use if the
+    remote isn't reliably idle when you'd want to use it. Any of the three:
+    an asleep/offline/unmeasurable remote costs one 5s probe and then behaves
+    exactly as if none were configured.
 
     **A remote PASS is accepted; a remote FAILURE is re-run locally before it
     can block anything.** Guard 4 refuses commits on this result, and the remote
@@ -516,7 +571,8 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `OutputBackend` | The protocol seam between app and audio routing. |
 | `MockBackend` | Fully-working offline backend for tests/demos. |
 | `OwnToneBackend` | HTTP-polling backend against OwnTone; superseded. |
-| `NativeBackend` | Shipping backend; drives `AirPlayEngine`, owns capture gate. |
+| `NativeBackend` | Shipping backend; drives `AirPlayEngine`, owns capture gate, owns aggregate device lifecycle. |
+| `AggregateOutputDevice` | Lifecycle owner (adopt-or-create/off-switch/orphan sweep) for the PUBLIC, Sound-settings-visible "Audiouter" aggregate (UID `com.audiouter.Audiouter.aggregate`); thin CoreAudio shell wired by `NativeBackend`. Becomes Mac default when whole-system routing arms; restore-prior-default-then-destroy on quit; echo-guarded. New `BackendEvent` case `routingBlockedNeedsDefault(Bool)` signals when the app can't route because its aggregate isn't the Mac's default output. |
 | `NativeDiscovery` | Bonjour discovery (AP2 + AP1). |
 | `NativeCaptureCoordinator` | Whole-system Core Audio capture; excludes individually-routed + user-excluded apps. |
 | `PerAppCaptureCoordinator` | Per-process Core Audio capture taps, one per individually-routed app. |

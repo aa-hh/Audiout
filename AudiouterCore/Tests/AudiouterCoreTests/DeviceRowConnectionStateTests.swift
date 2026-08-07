@@ -406,6 +406,31 @@ import AudiouterCore
                 "…it surfaces the refusal explanation instead (S4)")
     }
 
+    @Test func failedUnavailableSelectedRowStaysDeselectable() {
+        // Live bug (2026-08-06, the deselect dead-end): the native backend's
+        // failure paths pair `.failed` with `isAvailable = false` while the
+        // user's selection intent stays true. The checkbox renders that intent
+        // (ON) and must stay OPERABLE — enablement is intent-derived
+        // (`isAvailable || selected`), because an intent control that shows ON
+        // but can never be turned OFF strands the user in the failure episode:
+        // every deselect affordance (checkbox hit-test, name click, node click,
+        // keyboard/VoiceOver) funnels through this one enabled flag.
+        let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod,
+                            isAvailable: false,
+                            connectionState: .failed(.init(cause: .notResponding)))
+        let row = DeviceRowView(device: device)
+        row.apply(device, selected: true)
+        #expect(row.test_isEnabledOn, "the checkbox renders INTENT: ON while selected, even failed+unavailable")
+
+        let delegate = RecordingDelegate()
+        row.delegate = delegate
+        row.test_clickName()
+
+        #expect(delegate.toggledFor == "dev-1",
+                "the deselect path is live on a failed+unavailable SELECTED row")
+        #expect(delegate.toggledOn == false, "…and the click expresses the deselect (OFF)")
+    }
+
     @Test func clickingNameIsNoOpWhenUnavailable() {
         // A merely-UNAVAILABLE device (checkbox disabled, not blocked) keeps the
         // old behavior: the name-click is a plain no-op — no toggle, no note.

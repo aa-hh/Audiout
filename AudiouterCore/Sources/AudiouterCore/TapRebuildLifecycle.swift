@@ -1,6 +1,6 @@
 import Foundation
 
-// MARK: - Shared tap-rebuild lifecycle pieces (architecture review 2026-07-26, defect A)
+// MARK: - Shared tap-rebuild lifecycle pieces
 //
 // ``NativeCaptureCoordinator``'s `recreateTap(cause:)` and
 // ``PerAppCaptureCoordinator``'s `handleDeviceChange(bundleID:)` run the same
@@ -24,7 +24,7 @@ import Foundation
 // | Step | Whole-system | Per-app |
 // |---|---|---|
 // | State store | one coordinator-level `_state` | a `[String: Slot]` dictionary of reference-type slots |
-// | Claim payload | `(proceed, old, excludedProcessObjectIDs, previousRate, previousDeviceID)` | `(proceed, old, oldFormat)` |
+// | Claim payload | `(proceed, old, excludedProcessObjectIDs, previousRate, previousDeviceID)` | `(proceed, old, oldFormat, previousDeviceID)` |
 // | Extra claim work | clears `converter`, calls `publishBufferSnapshot()`, resolves the live exclusion set | none |
 // | Workgroup | leaves the old aggregate's I/O workgroup before teardown, joins the new one after commit (T7 EDGE 3) | does not participate in the audio workgroup at all |
 // | Between teardown and create | nothing | re-resolves the bundle ID's process set, and may bail out to `.failed(.processNotYetAudible)` — a step with no whole-system counterpart |

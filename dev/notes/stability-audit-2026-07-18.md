@@ -39,31 +39,6 @@ Together, T2/T3/T4 form the "lost tap" recovery loop for per-app capture:
 
 This is the production per-app routing safety net; the system-wide tap has only the device-change coalescing from C6 (see Section 3 — resolved).
 
-### C7 — discovery re-resolve clears the failure gate with no backoff
-
-**Site:** `AudiouterCore/Sources/AudiouterCore/NativeBackend.swift`, the
-`self.failedGate.remove(id)` at line 1065, and the re-kick block ending in
-`Task { [weak self] in await self?.convergeDevice(...) }` around
-1094–1102.
-
-**Mechanism:** every AP2 discovery re-resolution for a device — which
-happens on ordinary Bonjour re-adverts, not just recovery — clears
-`failedGate` and, if the device is still desired-on, re-kicks the converge
-loop unconditionally. A receiver that's flapping (dropping and re-
-advertising repeatedly) drives an unbounded reconnect loop with no backoff,
-competing for the same converge/network resources that a healthy device
-needs.
-
-**Fix sketch:** track a per-id last-failure timestamp; let a discovery-
-driven re-kick honor a backoff window measured from that timestamp, while a
-direct user toggle still re-kicks immediately (never gated).
-
-**Rough cost:** small — one timestamp dictionary plus a threshold check
-ahead of the existing re-kick condition.
-
-When fixed: delete the STABILITY(C7) marker(s) at `NativeBackend.swift:1065`
-and `NativeBackend.swift:1094` and move this entry to Resolved.
-
 ### C8 — main thread blocks on the state queue for slow work
 
 **Sites:**
@@ -244,6 +219,22 @@ marker in source. Don't add one; duplicating tracking here would just drift.
   of truth.
 
 ## Section 3 — Resolved by this merge
+
+- **C7** — discovery re-resolve no longer clears the failure gate with no
+  backoff (storm fix, 2026-08-06, branch `claude/failed-row-stack`). The
+  original entry proposed a timestamp backoff; the landed fix is stronger —
+  the park-clear in `addOrUpdate` is EDGE-GATED: it fires only when the
+  re-resolve is evidence the device actually came back (no descriptor on
+  file, or a changed descriptor), and `markDisappeared` drops the park with
+  the episode so drop-off-and-return reconnects even with an identical
+  descriptor. A dead-but-still-announcing receiver re-resolving the same
+  descriptor stays parked; recovery for that case is the next engine
+  good-state transition, a user re-toggle, or "Try again"
+  (`OutputBackend.retryOutput`). The edge IS the backoff — no timers.
+  Regression tests: `sameDescriptorReResolveDoesNotRetryParkedDevice`,
+  `reappearAfterDisappearAutoReconnectsParkedDevice` (each verified to fail
+  with its half of the fix reverted). The remaining C7 mentions in
+  `NativeBackend.swift` document the shipped fix rather than a TODO.
 
 - **C6** — a rebuild trigger arriving mid-rebuild is no longer silently
   dropped. `NativeCaptureCoordinator` gained a queue-confined

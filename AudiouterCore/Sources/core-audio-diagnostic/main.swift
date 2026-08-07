@@ -192,8 +192,7 @@ private func readProcessBundleID(_ processID: AudioObjectID) -> String? {
         return nil
     }
 
-    let result = bundleID as String
-    return result
+    return bundleID as String
 }
 
 struct DiagnosticError: Error, CustomStringConvertible {

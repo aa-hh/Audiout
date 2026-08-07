@@ -90,7 +90,7 @@ Variable names (each resolvable by name; IDs ledgered in the build state):
 | Atom · Fader | `45:15` |
 | Atom · Fields | `45:16` |
 | Note · Tab views (no kit component) | `45:17` |
-| Atom · Shell | `45:18` |
+| Atom · Shell & Banners | `45:18` |
 | Component · Device Row | `45:20` |
 | Component · Main Row | `45:21` |
 | Component · App Row | `45:22` |
@@ -131,6 +131,8 @@ Variable names (each resolvable by name; IDs ledgered in the build state):
 | ControlPanelShell | `56:11` | `AudiouterSharedUI/ControlPanelBackingView.swift` |
 | Banner | `56:28` | `AudiouterPopoverUI/SilenceFallbackBannerView.swift` (also `SystemAirPlayNoteBannerView.swift`) |
 | ConnectionDiagnosis | `56:29` | `AudiouterPopoverUI/ConnectionDiagnosisView.swift` |
+| BTAlignmentPrompt | `120:53` | `AudiouterPopoverUI/BTAlignmentPromptView.swift` |
+| BTAlignmentWizard | `123:1923` (set: `Screen=intro` `123:70` · `Screen=question` `123:80` · `Screen=receipt` `123:1895` · `Screen=gracefulExit` `123:1912`) | `AudiouterPopoverUI/BTAlignmentWizardView.swift` (screens = `AudiouterCore/BTAlignmentWizardSession.swift`'s `Screen`) |
 | DeviceRow | `61:258` (+6 BT variants 2026-08-07: `BT connected + sync` `103:297` · `BT connected idle (non-member)` `107:192` · `BT disconnected (greyed — click connects)` `104:146` · `BT connecting (unavailable — reconnect in flight)` `104:196` · `BT failed · Not paired` `105:168` · `BT failed · Connected elsewhere` `105:220`) | `AudiouterSharedUI/DeviceRowView.swift` |
 | MainOutRow | `64:264` | `AudiouterPopoverUI/MainOutRowView.swift` |
 | AppRow | `65:150` | `AudiouterSharedUI/AppRowView.swift` |
@@ -148,7 +150,7 @@ Variable names (each resolvable by name; IDs ledgered in the build state):
 
 | Screen | Node ID | Swift source |
 |---|---|---|
-| Popover | `68:2` (887 tall since the Bluetooth Devices subsection, 2026-08-07; LIGHT twin `111:981`; OUTPUT DEVICES "+" menu `109:981` / LIGHT `111:2222`) | `AudiouterPopoverUI/PopoverPanelViewController.swift` |
+| Popover | `68:2` (887 tall since the Bluetooth Devices subsection, 2026-08-07; LIGHT twin `111:981`; OUTPUT DEVICES "+" menu `109:981` / LIGHT `111:2222`; BT first-mix intercept state `125:1160` / LIGHT `125:2099`) | `AudiouterPopoverUI/PopoverPanelViewController.swift` |
 | Groups window | `70:2` | `AudiouterWindowUI/MixerWindowController.swift` + `GroupEditorViewController.swift` + `SidebarViewController.swift` |
 | Settings · General | `71:287` | `AudiouterSettingsUI/GeneralSettingsViewController.swift` |
 | Settings · Appearance | `71:342` | `AudiouterSettingsUI/AppearanceSettingsViewController.swift` |
@@ -197,6 +199,7 @@ glow shadow (glow color, radius 3.5, opacity .6) from `RouteArmedDotView.swift`.
 | Accents/Orange | `217ec9fc3d0cba151f9fd834caebcf3a2209f515` |
 | Accents/Blue | `ff84b0ff8ceb09a62d86ed2e9f119a1aa7c6b8cb` |
 | Text Field (component set) | `5addd9d6fd1bbe1b5cacd6969ae86726f6b23946` (the BT rows' SYNC value field — `NSTextField .roundedBezel` small) |
+| Button (component set) | `069f568d24a3ed47c701e5afd8b2bcc8a1cac6a0` — the titled push button. **Only `Size=XL` carries a title** (36 pt tall, hugs its label, label is the `Symbol#4389:1094` TEXT property); `Size=Medium` is a 24×24 icon-only button. There is no small/regular titled push button in the kit, so an XL instance stands in for `NSButton .rounded .small`/`.regular` and the drawn height is the kit's, not the code's. Flip its `Mode` variant to `Light` in light twins. |
 
 Checkbox, Switch, Radio and Button instances also come from the macOS 27 kit;
 their keys were not ledgered — find them by name in the kit library
@@ -407,6 +410,67 @@ Mirrored the shipped Bluetooth work (worktree `foreman-roadmap-004-bt` @
   all pre-measured tokens; the kit Text Field re-themes through the kit
   collection's mode. The one hand-adjusted literal is the "+" menu twin's
   chrome fill, copied from the Secondary-click menu · LIGHT precedent.
+
+## Upkeep pass 2026-08-08 — alignment wizard (W3/W4)
+
+Mirrored the first-mix intercept card and the alignment wizard (worktree
+`foreman-roadmap-004-bt` @ `f77cc397`; UX spec = `PLAN-UNIVERSAL-SYNC.md`
+"ALIGNMENT WIZARD UX LOCKED 2026-08-08"). Extends the 2026-08-07 BT pass, does
+not duplicate it.
+
+- **No new variables.** `BTAlignmentPromptView`/`BTAlignmentWizardView` add no
+  `PopoverColumnGrid` constants and no `Tokens.Color` cases — their insets are
+  private per-view statics (10 / 4 / 10 / r7 / 8 / 6), exactly like
+  `ConnectionDiagnosisView`'s, and the contract only mirrors `PopoverColumnGrid`
+  1:1. The only shared geometry they consume is `firstElementLeading(indented:)`
+  = 38.5, already a variable. Foundations · Layout therefore unchanged.
+- **`BTAlignmentPrompt` `120:53`** and **`BTAlignmentWizard` `123:1923`** live on
+  *Atom · Shell & Banners* (`45:18`), beside `ConnectionDiagnosis` — the view
+  both of them copy. No new Component page: these are anchored panels, not row
+  parts. Wizard variants are named after the code's own enum
+  (`Screen=intro|question|receipt|gracefulExit`).
+- **Both bind `panel`, not a literal.** This is the one place they differ from
+  the diagnosis panel: the card is an OFFER, not an error, so
+  `BTAlignmentPromptView.applyBackgroundTint` uses plain `Tokens.Color.panel`
+  with no failure blend (house rule 8) — a real variable binding where the
+  diagnosis panel needs a computed dark literal.
+- **Buttons are real macOS 27 kit `Button` instances** (key ledgered above),
+  tagged `SYSTEM: NSButton .rounded …` and never restyled. The kit ships only
+  one titled size (XL, 36 pt), so the drawn height is the kit's and the layer
+  name records the code's real `controlSize`. This supersedes the older
+  hand-drawn `(SYSTEM — swap: macOS 27 Push Button small)` stand-ins inside
+  `ConnectionDiagnosis` — swap those next time that component is touched.
+- **One stand-in remains**, per rubric c: the wizard's narrowing indicator
+  (`NSProgressIndicator .bar .small` determinate). No screen in the file
+  instances one, so no kit key was harvestable and library search returns
+  nothing on this plan. It is a clearly-labelled positional placeholder (track
+  `quaternaryLabel`, fill `accent`, 180×4 at 60 %) naming the real control —
+  re-instance it from the kit when the key turns up.
+- **Screen** — *Screens · Popover* gained **`125:1160`**, a focused state frame
+  (SYNC subsection header + the four BT rows + the card anchored under
+  "Bathroom Flip 6" at leading 38.5 / vertical inset 4). Deliberately a sibling
+  frame rather than a second full clone of `68:2`: the page's own convention for
+  a secondary popover state is the standalone frame (`109:981`, the "+" menu),
+  and nothing outside the BT block changes. LIGHT twin `125:2099`, pinned to the
+  three light modes and with the nested kit buttons' `Mode` flipped, per rubric d.
+- **Verification**: no snapshots exist for these views under
+  `dev/notes/*-snapshots/`, so structure was checked against code + the locked
+  spec instead — copy strings against the `static let`s in both views, screens
+  against `BTAlignmentWizardSession.Screen`, geometry against each view's
+  layout constants, mount/teardown against `PopoverController`
+  `reconcileBTAlignmentPanels` / `startBTAlignmentWizard`.
+- **Light-mode finding (measured, NOT fixed — logged on *Reference · Spec
+  backlog*)**: `canvas`, `panel` and `raised` all alias Circuit `bg/normal`
+  `#FBFBF9` in Light and Light HC, so **any** inset card drawn on plain `panel`
+  — both new panels and the existing `ConnectionDiagnosis` — sits at **1.00:1**
+  against the canvas and vanishes in light. Dark is unaffected (`panel` is one
+  ladder step lighter). Left alone on purpose: separating them re-aliases a
+  shared scaffolding token in Alec's Circuit mapping table and moves every panel
+  surface at once. Choices recorded for him: lift `panel`/`raised` a step in
+  light, give light inset cards a hairline (AppKit-native, but the code draws
+  none), or accept position-only reading. Everything else measured clean —
+  body/education text 5.48–16.4:1, dismiss ✕ 4.67:1, all against Circuit
+  `bg/normal`.
 
 ## Pull direction (Figma → code)
 

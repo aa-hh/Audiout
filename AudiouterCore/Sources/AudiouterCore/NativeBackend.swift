@@ -1970,11 +1970,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.muted.insert(id)
                 if self.stashedVolume[id] == nil { self.stashedVolume[id] = self.known[id]?.volume ?? 0 }
                 self.applyLocal(id) { $0.isMuted = true; $0.volume = 0 }
-                // For AirPlay-1 (RAOP) devices, send a sentinel value to trigger true silence (-144 dB).
-                // For AirPlay-2, use the standard 0 volume with stashed value.
-                let isAirPlay1 = !(self.known[id]?.supportsAirPlay2 ?? true)
-                let engineValue = isAirPlay1 ? -1.0 : Self.engineVolume(0)
-                self.pushVolume(outputID, engineValue: engineValue)
+                // True silence, the same value an effective zero sends
+                // (``engineVolume(forID:uiVolume:)``): neither protocol's quietest
+                // audible step is what a user means by "muted".
+                self.pushVolume(outputID, engineValue: Self.silentEngineVolume)
             } else {
                 self.muted.remove(id)
                 self.applyLocal(id) { $0.isMuted = false }
@@ -4495,7 +4494,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         // AUDIBLE immediately AND at a safe, moderate level (not the
                         // Mac's possibly-loud system volume — G1-N1): the engine's
                         // volume field is 0 until an explicit setVolume, and 0 maps to
-                        // ≈ −30 dB (silent) — the −30 dB trap, see `connectVolumeSeed`.
+                        // ≈ −30 dB (a whisper) — the −30 dB trap, see `connectVolumeSeed`.
                         // Suppressed for an
                         // `applyStartBuffer` re-add (which restores the in-session
                         // level itself), so a plain buffer change never resets volume.
@@ -6383,6 +6382,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         min(max(fraction, 0.0), 1.0)
     }
 
+    /// The engine value meaning TRUE SILENCE (−144 dB) rather than the quietest
+    /// audible step of the AirPlay range (−30 dB, which is what a plain 0.0 sends).
+    /// Any negative value does it: both vendored senders read an out-of-range
+    /// percent as "off" (`airplay_volume_from_pct` / `raop_volume_from_pct`), so
+    /// this is protocol-blind — AirPlay 1 and AirPlay 2 both honour it.
+    static let silentEngineVolume = -1.0
+
     /// Perceptual floor for AirPlay-1 (RAOP) receivers, in dB of the AirPlay
     /// −30…0 range. RAOP receivers (shairport-sync's default: software volume
     /// spread across the output device's FULL mixer range, often ~100 dB) stretch
@@ -6434,22 +6440,23 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     ///   different things on the two protocols.
     private func engineVolume(forID id: String, uiVolume: Int) -> Double {
         let fraction = Double(uiVolume.clampedToVolume) / 100.0 * masterGainFraction
-        let isAirPlay2 = known[id]?.supportsAirPlay2 ?? true
         // ZERO MEANS SILENT, from whichever stage produced it — Main, the group, or
-        // the device's own fader. Without this an AP1 receiver floors at
-        // `airPlay1MinVolumeDB` (−12 dB), which is plainly audible: pulling Main to
-        // 0 would duck the room but not silence it. Reuses the true-mute sentinel
-        // the mute path already sends (`setMuted`, ~1548) so "muted" and "turned all
-        // the way down" reach an AP1 receiver as the same −144 dB, instead of
-        // disagreeing by 12 dB.
+        // the device's own fader — and on either protocol, because NEITHER curve's
+        // bottom is silent. AP1 floors at `airPlay1MinVolumeDB` (−12 dB); AP2's 0.0
+        // is the AirPlay range's quietest AUDIBLE step, −30 dB (`airplay.c`'s
+        // `airplay_volume_from_pct`, reached from `payload_make_set_volume`). Both
+        // leave a wide-range receiver playing, so pulling any stage to 0 would duck
+        // the room without silencing it. Only ``silentEngineVolume`` reaches
+        // −144 dB, and it is what the mute path sends too (`setMuted`), so "muted"
+        // and "turned all the way down" arrive as the same thing.
         //
         // Deliberately EXACT zero, not an epsilon: the inputs are integer percents,
         // so `0/100` is exactly 0.0 and any audible-but-tiny value must still take
         // the curve. And deliberately only the zero case — whether −12 dB is the
         // right floor for the AUDIBLE range is a by-ear question against real
         // hardware (see ``airPlay1MinVolumeDB``), untouched here.
-        if fraction == 0 { return isAirPlay2 ? Self.engineVolume(fraction: 0) : -1.0 }
-        return isAirPlay2
+        if fraction == 0 { return Self.silentEngineVolume }
+        return known[id]?.supportsAirPlay2 ?? true
             ? Self.engineVolume(fraction: fraction)
             : Self.engineVolumeAP1(fraction: fraction)
     }
@@ -6603,9 +6610,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// ## Why this exists — the −30 dB trap (do NOT delete without reading this)
     /// The engine's per-output volume field is zero-initialized and is only ever set
     /// by an explicit `setVolume`; the AirPlay volume model maps 0 to about −30 dB,
-    /// the quietest non-muted level — effectively silent on the receiver
+    /// the quietest non-muted level — a barely-there whisper on the receiver
     /// (`AirPlayEngine.swift:650-657`). So a freshly connected output nobody touched
-    /// streams INAUDIBLY until the first slider drag. Every real (re)connect must
+    /// streams all but INAUDIBLY until the first slider drag. Every real (re)connect must
     /// push a real starting volume; this is that push, called from BOTH add-success
     /// sites (`convergeDevice` and `applyEngineState`).
     ///
@@ -6694,11 +6701,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
         if muted.contains(id) {
             // Keep the mute; only update the level an unmute will restore.
-            // Via `engineVolume(forID:)` rather than the static AP2-only map, so a
-            // muted AP1 receiver that drops and reconnects comes back TRULY silent
-            // (−144 dB) instead of at the curve's −30 dB floor — quietly audible,
-            // which is not what "muted" means. `setMuted` already sends the sentinel
-            // on this device; this path had been missing it.
+            // Via `engineVolume(forID:)`, not a raw 0.0, so a muted receiver that
+            // drops and reconnects comes back TRULY silent (−144 dB) rather than at
+            // the bottom of its curve — quietly audible, which is not what "muted"
+            // means.
             stashedVolume[id] = seed
             pushVolume(outputID, engineValue: engineVolume(forID: id, uiVolume: 0))
         } else {

@@ -1012,19 +1012,24 @@ public actor AirPlayEngine {
         return issued.value
     }
 
-    /// Set the volume (0.0...1.0) on `id`. Maps onto AirPlay's volume model and
-    /// calls `output_airplay.device_volume_set`. Awaits the completion.
+    /// Set the volume on `id`: 0.0...1.0 for an audible level, or a NEGATIVE value
+    /// for true silence (see ``applyVolumeOnDevice``). Maps onto AirPlay's volume
+    /// model and calls `output_airplay.device_volume_set`. Awaits the completion.
     public func setVolume(_ id: OutputID, _ volume: Double) async throws {
         try requireStarted()
         guard knownOutputs[id] != nil else { throw AirPlayEngineError.unknownOutput(id) }
 
-        let clamped = max(0.0, min(1.0, volume))
+        // A negative value is the silence sentinel and must survive to
+        // `applyVolumeOnDevice`, which is where it is given its meaning. Folding it
+        // into 0...1 here would turn silence into device->volume = 0, i.e. -30 dB —
+        // the quietest AUDIBLE step of the AirPlay range, not silence at all.
+        let normalized = volume < 0 ? volume : max(0.0, min(1.0, volume))
         // Set device->volume (a 0...100 PERCENT) BEFORE the op, on the engine
         // thread. The vendored airplay_set_volume_one reads it to build
         // SET_PARAMETER, and airplay_volume_from_pct() maps 0..100 -> -30..0 dB.
         // Kept out of the issue closure so it still runs in headless test mode
         // (where the issue closure is overridden).
-        await applyVolumeOnDevice(id: id, normalized: clamped)
+        await applyVolumeOnDevice(id: id, normalized: normalized)
 
         let terminal = try await startOp(id: id) { device, cbId in
             return outputs_device_volume_set(device, cbId)
@@ -1044,14 +1049,15 @@ public actor AirPlayEngine {
     /// it was always 0 — pinning every request to volume=0 => -30 dB (the quietest
     /// non-muted level), which reads as "no/inaudible sound" on the receiver.
     /// Map the normalized value straight onto the 0..100 percent the C layer wants.
-    /// Sentinel: a negative normalized value (used for AirPlay-1 true mute) is passed
-    /// through as -1, which raop_volume_from_pct interprets as out-of-range and maps
-    /// to -144 dB (true silence).
+    /// Sentinel: a negative normalized value is passed through as -1, which both
+    /// senders' `*_volume_from_pct` read as out of range and map to -144 dB (true
+    /// silence). It is the ONLY way to reach silence — 0 is -30 dB, the quietest
+    /// audible step — and it works on AirPlay 1 and AirPlay 2 alike.
     private func applyVolumeOnDevice(id: OutputID, normalized: Double) async {
         let apply: () -> Void = {
             guard let device = outputs_device_get(id.rawValue) else { return }
-            // For true mute on AirPlay-1, use sentinel value -1 to trigger -144 dB.
-            // Otherwise, map normalized 0.0–1.0 to device volume 0–100.
+            // Negative = the silence sentinel (-1 => -144 dB). Otherwise map
+            // normalized 0.0–1.0 to device volume 0–100.
             device.pointee.volume = Int32(normalized < 0 ? -1 : (normalized * 100.0).rounded())
         }
         if issueOverride != nil { apply() }

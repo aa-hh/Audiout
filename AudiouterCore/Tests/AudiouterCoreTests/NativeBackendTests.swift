@@ -1443,7 +1443,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                 "AP1 volume curve is not monotonic at \(pct)%")
         }
 
-        // AP2 path is untouched: linear 0…1 (0% → −30 dB is fine on AP2 receivers).
+        // The AP2 map is the plain linear identity. Its bottom (0.0 → −30 dB) is a
+        // level, not silence — reaching silence is `engineVolume(forID:uiVolume:)`'s
+        // job, covered by the "zero means silent" tests below.
         #expect(abs(NativeBackend.engineVolume(0) - 0.0) <= 0.001)
         #expect(abs(NativeBackend.engineVolume(50) - 0.5) <= 0.001)
         #expect(abs(NativeBackend.engineVolume(100) - 1.0) <= 0.001)
@@ -2127,7 +2129,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                        "all three stages multiply: Main 50 × Group 40 × Device 50 → 0.10 (0.25 would mean the group term was dropped)")
     }
 
-    // MARK: Zero means silent — on AirPlay 1 too
+    // MARK: Zero means silent — on both protocols
 
     /// Pulling MAIN to 0 must silence an AirPlay-1 receiver, not merely duck it.
     /// The AP1 perceptual curve floors at `airPlay1MinVolumeDB` (−12 dB) so that
@@ -2174,24 +2176,98 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                        "a device's own fader at 0 silences AP1 too — the check is on the product, not on Main")
     }
 
-    /// An AP2 receiver keeps taking plain 0.0 at effective zero: the sentinel is an
-    /// AirPlay-1 protocol affordance, and sending a negative value to AP2 would be
-    /// meaningless. Guards against "fixing" zero by making it protocol-blind.
-    @Test func effectiveZeroStaysPlainZeroOnAirPlay2() async {
+    /// An AP2 receiver at effective zero must go SILENT, not merely quiet. Plain 0.0
+    /// is the bottom of the AirPlay range, −30 dB — a level, not silence: `airplay.c`
+    /// maps a 0…100 percent onto −30…0 dB and only an out-of-range one onto −144.
+    /// Wide-range hardware plays −30 dB audibly.
+    ///
+    /// All three gain stages in one test because the guarantee is precisely that they
+    /// are INDISTINGUISHABLE at zero: the check is on the formed product, so Main,
+    /// the group and the device's own fader must each put the SAME value on the wire.
+    /// Testing them separately would let three copies of the rule drift apart.
+    @Test func everyGainStageAtZeroTrulySilencesAnAirPlay2Receiver() async {
         let (backend, engine, discovery) = makeBackend()
         backend.start(); defer { backend.stop() }
         await waitUntilStarted(engine)
 
-        let device = ap2Device()
+        let device = ap2Device()   // stored volume settles at 50
         _ = await collect(from: backend) { events in
             events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
         } after: { discovery.fire(.appeared(device)) }
 
-        backend.setMasterGain(mainOut: 0, group: 100, mirrorToSystemVolume: false)
+        /// The wire value the next push for this output produces, from a marker
+        /// taken before the gesture (pushes for OTHER outputs are irrelevant here).
+        func nextPush(after marker: Int, _ gesture: () -> Void) async -> Double? {
+            gesture()
+            await pollUntil { engine.volumeCalls.dropFirst(marker).contains { $0.0 == device.outputID } }
+            return engine.volumeCalls.dropFirst(marker).first { $0.0 == device.outputID }?.1
+        }
 
-        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 == 0.0 } }
-        #expect(!engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 < 0 },
-                       "the true-mute sentinel is AP1-only; AP2 takes plain 0.0")
+        // (1) MAIN at 0, with the group and the device's own fader wide open.
+        let fromMain = await nextPush(after: engine.volumeCalls.count) {
+            backend.setMasterGain(mainOut: 0, group: 100, mirrorToSystemVolume: false)
+        }
+
+        // (2) The GROUP stage at 0, with Main back up.
+        let fromGroup = await nextPush(after: engine.volumeCalls.count) {
+            backend.setMasterGain(mainOut: 100, group: 0, mirrorToSystemVolume: false)
+        }
+
+        // (3) The device's OWN fader at 0, with both gain stages wide open.
+        backend.setMasterGain(mainOut: 100, group: 100, mirrorToSystemVolume: false)
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.5) < 0.001 } }
+        let fromDevice = await nextPush(after: engine.volumeCalls.count) {
+            backend.setVolume(0, for: device.id)
+        }
+
+        #expect(fromMain == NativeBackend.silentEngineVolume,
+                "Main at 0 must reach an AP2 receiver as true silence, not the −30 dB bottom of its range")
+        #expect(fromGroup == NativeBackend.silentEngineVolume,
+                "the group stage at 0 must reach an AP2 receiver as true silence")
+        #expect(fromDevice == NativeBackend.silentEngineVolume,
+                "the device's own fader at 0 must reach an AP2 receiver as true silence")
+        #expect(fromMain == fromGroup && fromGroup == fromDevice,
+                "zero is zero whichever stage produced it — the three must be indistinguishable on the wire")
+    }
+
+    /// The zero test is EXACT, never an epsilon: integer percents make `0/100`
+    /// exactly 0.0, so a product that is merely tiny is still a level and must take
+    /// the ordinary curve — AP2's linear map and AP1's compressed one alike. An
+    /// epsilon here would silence a receiver the user only turned down.
+    @Test func aTinyButNonZeroProductStillTakesTheOrdinaryCurve() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let ap2 = ap2Device()
+        let ap1 = ap1Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == ap1.id } else { return false } }
+        } after: {
+            discovery.fire(.appeared(ap2))
+            discovery.fire(.appeared(ap1))
+        }
+
+        // The smallest non-zero product either stage can make: device 1 × Main 1.
+        backend.setVolume(1, for: ap2.id)
+        backend.setVolume(1, for: ap1.id)
+        await pollUntil {
+            backend.devices.first { $0.id == ap2.id }?.volume == 1 &&
+            backend.devices.first { $0.id == ap1.id }?.volume == 1
+        }
+        backend.setMasterGain(mainOut: 1, group: 100, mirrorToSystemVolume: false)
+
+        let ap1Expected = NativeBackend.engineVolumeAP1(fraction: 0.0001)
+        await pollUntil {
+            engine.volumeCalls.contains { $0.0 == ap2.outputID && abs($0.1 - 0.0001) < 1e-9 } &&
+            engine.volumeCalls.contains { $0.0 == ap1.outputID && abs($0.1 - ap1Expected) < 1e-9 }
+        }
+        #expect(engine.volumeCalls.contains { $0.0 == ap2.outputID && abs($0.1 - 0.0001) < 1e-9 },
+                "1% × 1% = 0.0001 is quiet, not zero — AP2 must still get the linear map")
+        #expect(engine.volumeCalls.contains { $0.0 == ap1.outputID && abs($0.1 - ap1Expected) < 1e-9 },
+                "1% × 1% must still take the AP1 curve, which floors at airPlay1MinVolumeDB")
+        #expect(!engine.volumeCalls.contains { $0.1 < 0 },
+                "nothing but an EXACT zero may reach the silence sentinel")
     }
 
     /// A Main/Group gain change RE-PUSHES every currently-added output's wire
@@ -2260,7 +2336,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // Wait for the MUTE's own push before snapshotting. Snapshotting on the
         // model edge can catch it still in flight, and it then lands inside the
         // window below — inflating the count and reading as a (wrong) re-push.
-        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 == 0.0 } }
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 == NativeBackend.silentEngineVolume } }
         let callsBeforeGainChange = engine.volumeCalls.filter { $0.0 == device.outputID }.count
 
         backend.setMasterGain(mainOut: 50, group: 100, mirrorToSystemVolume: false)
@@ -2906,12 +2982,11 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                 "the add-throw catch maps the engine's passwordRequired, not .unknown")
     }
 
-    /// A MUTED AirPlay-1 receiver that drops and reconnects must come back TRULY
-    /// silent (the −144 dB sentinel), not at the AP1 curve's −30 dB floor.
-    /// `connectVolumeSeed`'s muted branch used to push the AP2-only
-    /// `Self.engineVolume(0)` = 0.0, which on AP1 maps to an audible ~−30 dB; it now
-    /// routes through `engineVolume(forID:)`, so AP1 gets its −1.0 true-mute
-    /// sentinel. On an AP2 device both map to 0.0, so this can ONLY be caught on AP1.
+    /// A MUTED receiver that drops and reconnects must come back TRULY silent (the
+    /// −144 dB sentinel), not at the bottom of its curve. `connectVolumeSeed`'s
+    /// muted branch is a THIRD place a level is formed (after `setVolume` and the
+    /// gain re-push), so it needs its own coverage: a raw 0.0 here would leave a
+    /// reconnected muted speaker quietly playing.
     @Test func mutedAirPlay1ReconnectSeedsTrueSilenceSentinelNotTheCurveFloor() async {
         let (backend, engine, discovery) = makeBackend(connectVolume: { 35 })
         backend.start(); defer { backend.stop() }
@@ -3103,11 +3178,11 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID } }
 
         // (a) The device is not audibly un-muted: the engine must never see the
-        // seeded system level (0.60) on the wire for this output, only 0.
+        // seeded system level (0.60) on the wire for this output, only silence.
         #expect(!(engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.60) < 0.001 }),
                        "a muted device's connect-time seed must never push the unmuted level to the engine")
-        #expect(engine.volumeCalls.allSatisfy { $0.0 != device.outputID || $0.1 == 0.0 },
-                      "every engine push for a muted device must stay 0")
+        #expect(engine.volumeCalls.allSatisfy { $0.0 != device.outputID || $0.1 == NativeBackend.silentEngineVolume },
+                      "every engine push for a muted device must stay silent")
 
         // (b) The intended level tracks the CURRENT system level (60) — proven
         // by unmuting and observing the restore. Before the connect-time seed,
@@ -3124,8 +3199,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                       "unmute must push the seeded system level (0.60) to the engine")
     }
 
-    /// Mute stashes the pre-mute volume and pushes 0 to the engine; unmute restores
-    /// the stashed level and pushes it back (shim pattern).
+    /// Mute stashes the pre-mute volume and pushes silence to the engine; unmute
+    /// restores the stashed level and pushes it back (shim pattern).
     @Test func muteStashAndRestore() async {
         let (backend, engine, discovery) = makeBackend()
         backend.start(); defer { backend.stop() }
@@ -3140,7 +3215,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         backend.setVolume(70, for: device.id)
         await pollUntil { backend.devices.first { $0.id == device.id }?.volume == 70 }
 
-        // Mute: model shows volume 0 + isMuted; engine pushed 0.0.
+        // Mute: model shows volume 0 + isMuted; engine pushed the silence sentinel.
         backend.setMuted(true, for: device.id)
         await pollUntil {
             let d = backend.devices.first { $0.id == device.id }
@@ -3149,9 +3224,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // The model settles BEFORE the engine push lands, so poll for the push
         // itself — asserting straight off the model's edge reads volumeCalls too
         // early and fails only when the machine is busy enough to widen the gap.
-        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 == 0.0 } }
-        #expect(engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 == 0.0 },
-                      "mute should push engine volume 0.0")
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 == NativeBackend.silentEngineVolume } }
+        #expect(engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 == NativeBackend.silentEngineVolume },
+                      "mute must push true silence, not the −30 dB bottom of the AirPlay range")
 
         // Unmute: restores 70 in the model AND pushes 0.7 to the engine.
         backend.setMuted(false, for: device.id)

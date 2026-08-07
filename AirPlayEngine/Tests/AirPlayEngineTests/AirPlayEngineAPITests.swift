@@ -226,6 +226,31 @@ extension SerializedEngineState {
             }
         }
 
+        // MARK: - setVolume: the silence sentinel survives to the C device.
+        //
+        // A negative normalized value is the ONLY way to reach -144 dB: both
+        // senders' `*_volume_from_pct` map an out-of-range percent to "off", and
+        // device->volume = 0 is -30 dB — the quietest AUDIBLE step, which
+        // wide-range receivers plainly play. Clamping the sentinel into 0...1 on
+        // the way in therefore turns "silent" into "quiet" with nothing to show
+        // for it, on AirPlay 1 and AirPlay 2 alike.
+        @Test func setVolumePassesTheSilenceSentinelThroughUnclamped() async throws {
+            let id = OutputID(rawValue: 0xB6)
+            makeRegistryDevice(id: id.rawValue)
+
+            let engine = AirPlayEngine()
+            await engine.enterHeadlessTestMode(issue: { device, _ in
+                #expect(device.pointee.volume == -1,
+                        "a negative volume must reach device->volume as -1 (=> -144 dB), not be clamped to 0 (=> -30 dB)")
+                return 1
+            })
+            await engine.registerKnownOutputForTest(id)
+
+            async let op: Void = engine.setVolume(id, -1.0)
+            try await fireWhenArmed(id: id.rawValue, state: OUTPUT_STATE_STREAMING, engine: engine)
+            try await op
+        }
+
         // MARK: - removeOutput: awaits stop completion.
 
         @Test func removeOutputCompletes() async throws {

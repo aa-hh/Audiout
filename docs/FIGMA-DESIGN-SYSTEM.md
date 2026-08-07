@@ -216,6 +216,12 @@ c. **New/changed stock-AppKit usage** → instance from the macOS 27 kit, tag th
 
 d. **Screen change** → update the assembled screen from components. Code wins
    over spec; spec-only ideas go on the *Reference · Spec backlog* page.
+   Every screen has a **LIGHT twin** beside it — a clone pinned to the Light
+   modes (`Color · Warm Signal` → Light `41:2`, macOS 27 kit `Colors` → Light
+   `1:0`, kit control instances' `Mode` property → Light). Twins are plain
+   clones, NOT instances: mirror any screen edit into both, or re-clone and
+   re-pin. Variable-bound fills re-theme themselves; only literals (computed
+   blends, sidebar/menu chrome approximations) need hand-adjusting.
 
 e. **Verify** against the checked-in snapshot PNGs under `dev/notes/*-snapshots/`
    (`popover-snapshots/`, `window-snapshots/`, `settings-snapshots/`,

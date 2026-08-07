@@ -221,4 +221,16 @@ import Testing
         #expect(AppSettings.maxSyncOffsetMs > 0)
         #expect((AppSettings.minSyncOffsetMs...AppSettings.maxSyncOffsetMs).contains(AppSettings.defaultSyncOffsetMs))
     }
+
+    // MARK: One-surface pin (U3)
+
+    @Test func surfacePinnedDefaultsFalseAndRoundTrips() {
+        let settings = AppSettings(defaults: defaults)
+        #expect(!settings.surfacePinned, "fresh install: the transient bubble")
+        settings.surfacePinned = true
+        #expect(settings.surfacePinned)
+        #expect(AppSettings(defaults: defaults).surfacePinned, "persisted across instances")
+        settings.surfacePinned = false
+        #expect(!AppSettings(defaults: defaults).surfacePinned)
+    }
 }

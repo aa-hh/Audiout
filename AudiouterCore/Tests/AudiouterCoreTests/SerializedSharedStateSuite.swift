@@ -67,8 +67,17 @@ import Testing
 ///  - `TelemetryTests`               (also the only user of `_resetForTesting`)
 ///  - `NativeCaptureCoordinatorTests`
 ///  - `PerAppCaptureCoordinatorTests`
-///  - `NativeBackendTests`
+///  - `NativeBackendGlobalStateTests` (NOT `NativeBackendTests` — see below)
 ///  - `SetupModelTests`
+///
+/// `NativeBackendTests` itself is deliberately NOT here: 183 of its 200 tests
+/// touch no process-global state, and holding them in this chain made it the
+/// second-longest pole in the suite. Only the 17 that do were split out into
+/// `NativeBackendGlobalStateTests` — 15 for `_installTestSink`, plus 2 that
+/// construct `NativeBackend` without `aggregateControl:` and so drive the REAL
+/// macOS-wide aggregate device on a fixed UID, which two tests cannot share.
+/// Note `--filter NativeBackendTests` no longer matches those 17; use
+/// `--filter NativeBackend` to catch both.
 ///
 /// Add a suite here when — and only when — it mutates state that outlives the
 /// test instance and is shared process-wide. Per-test temp dirs and

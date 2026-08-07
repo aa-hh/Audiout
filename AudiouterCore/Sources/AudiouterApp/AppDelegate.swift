@@ -56,9 +56,9 @@ private let audioProcessResolver = AudioProcessResolver(
 /// Owns app lifecycle: activation policy, the status item, the backend, and the
 /// event-stream consumer that holds the app's device model.
 ///
-/// The dropdown is a Control-Center-style `NSPopover` (SPEC §9 revised — NSMenu
-/// → NSPopover): the status button's action toggles the popover, which hosts the
-/// groups + devices panel built by `PopoverController`.
+/// The dropdown is the one-surface panel (SPEC §9): the status button's action
+/// drives `AppSurfaceController`'s click policy, and the surface hosts the
+/// Mixer panel built by `PopoverController`.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
@@ -74,7 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// via `.button`, never the deprecated `.view`/`.title`/`.image`).
     private var statusItemController: StatusItemController!
 
-    /// The popover dropdown (SPEC §9 revised). Owns the `NSPopover` and, via the
+    /// The Mixer panel's controller (SPEC §9 revised). Owns, via the
     /// injected `GroupController`, all group/master/mute/routing interaction.
     /// Wired with an explicit production `AppRoutingController` so app routes
     /// persist to Application Support (T-11).
@@ -85,19 +85,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `applicationDidFinishLaunching` so it binds to the resolved `backend`.
     private var groupController: GroupController!
 
-    /// The full mixer window (SPEC §9 "Full window", T-U4). Created lazily the
-    /// first time "Open Mixer…" is chosen, then reused/focused. Holds the same
-    /// `GroupController` as the menu, so both views stay in lockstep.
+    /// Owns the Groups screen's content (SPEC §9). Created lazily the first
+    /// time the Groups tab is visited, then reused; it is a pure content
+    /// controller (its standalone window was retired in U6). Holds the same
+    /// `GroupController` as the Mixer, so the two screens stay in lockstep.
     private var mixerWindowController: MixerWindowController?
+
+    /// The one surface (U4): a single window hosting the Mixer, Groups and
+    /// Settings screens behind the header's tab switcher. Owns the menu-bar
+    /// click policy, so this class only forwards clicks to it.
+    private var surface: AppSurfaceController!
 
     /// Scalar user preferences (theme, density, …), backed by `UserDefaults`.
     /// The app reads `theme` at launch to apply the appearance override, and the
-    /// Settings window writes it back.
+    /// Settings screen writes it back.
     private let settings = AppSettings()
-
-    /// The Settings window (header gear). Lazily built on first open, then
-    /// reused/focused — same lifecycle as the mixer window.
-    private var settingsWindowController: SettingsWindowController?
 
     /// The resolved backend kind (same resolution `makeBackend()` used). The
     /// first-run setup flow only presents on `.native` — the sole path that taps
@@ -117,7 +119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let permissionProviders = PermissionMode.resolved().makeProviders()
 
     /// The first-run onboarding/permission-priming window, retained while open
-    /// (first launch, or "Check Permissions…" from Settings ▸ General).
+    /// (first launch, or "Open Setup…" from Settings ▸ General).
     private var onboardingWindowController: OnboardingWindowController?
 
     /// The `SetupModel` behind the last-presented onboarding window, kept alive
@@ -235,25 +237,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var mediaKeyController = MediaKeyController(
         remoteControl: permissionProviders.remoteControl)
 
-    /// Control-panel prototype (design review 2026-07-18): route Groups through a
-    /// sticky floating `NSPanel` anchored under the menu-bar item instead of a
-    /// standalone window, gated by `AIRPLAY_CONTROL_PANEL=1`. Off by default, so
-    /// the shipping window path is untouched. See `dev/notes/`.
-    private let useControlPanel = ProcessInfo.processInfo.environment["AIRPLAY_CONTROL_PANEL"] == "1"
-
-    /// True while a control-panel session is live (panel opened, not yet closed).
-    /// A status-item click during a session re-summons the tucked panel (restore
-    /// in place) instead of toggling the popover.
-    private var controlPanelSessionActive = false
-
-    /// The ONE shared control-panel shell (control-panel rollout). The Groups,
-    /// Settings, and future Setup surfaces unify onto this single sticky floating
-    /// `NSPanel` instead of each owning an orphaned window: opening a different
-    /// surface swaps its content (`setContent`) rather than stacking a second
-    /// window. Created lazily on the first control-panel open, then reused; its
-    /// `onClose` "lands home" by re-presenting the popover.
-    private var controlPanel: ControlPanelWindowController?
-
     /// Set once `applicationShouldTerminate` has begun tearing down (C1). A second
     /// Quit while the first is still waiting on `stopAndWait` must not re-enter
     /// `backend.stop()` or reply to `NSApp` a second time — AppKit only expects one
@@ -271,6 +254,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // finishing launch so a Dock icon never even flickers.
         NSApp.setActivationPolicy(.accessory)
     }
+
+    /// Decided policy (P3/W7): a menu-bar app with no window restoration —
+    /// every window sets `isRestorable = false` — so opting into secure state
+    /// restoration is free and silences the macOS secure-coding warning.
+    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
 
     @MainActor
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -293,32 +281,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Tokens.accentStyle = settings.accentStyle
 
         // Status item first so there's immediate UI feedback that we launched.
-        // The button's action toggles the popover (SPEC §9 revised) — EXCEPT while
-        // first-run setup is open: setup is the only thing the user should be in
-        // until it's done, and it's how they get the window back after clicking
-        // away (e.g. to grant a permission in System Settings). So while it's up,
-        // the menu-bar click re-fronts Setup instead of opening the popover.
+        // The button's action drives the one surface (SPEC §9) through the
+        // policy that lives on `AppSurfaceController` — including the case
+        // where first-run setup is open, which owns the click outright: setup
+        // is the only thing the user should be in until it's done, and this is
+        // how they get the window back after clicking away (e.g. to grant a
+        // permission in System Settings).
         statusItemController = StatusItemController()
-        statusItemController.onButtonClicked = { [weak self] button in
+        statusItemController.onButtonClicked = { [weak self] _ in
             guard let self else { return }
-            if let onboarding = self.onboardingWindowController {
-                onboarding.present()
-                return
-            }
-            // Control-panel rollout: while a control-panel session is live, the
-            // menu-bar click TOGGLES the shared shell (whatever surface it's
-            // hosting) rather than the popover. If the shell is showing, close it
-            // (a real close → lands home on the popover, exactly like the ✕/Esc);
-            // if it's tucked away after an app-switch, restore it in place. A bare
-            // re-show here (the old behavior) could never dismiss the panel, so a
-            // click on an already-open panel did nothing.
-            if self.useControlPanel, self.controlPanelSessionActive,
-               let shell = self.controlPanel {
-                if shell.isPanelVisible {
-                    shell.performClose()
-                } else {
-                    shell.show(anchorRect: self.statusAnchorRect())
-                }
+            let action = self.surface.clickAction(
+                setupIsOpen: self.onboardingWindowController != nil)
+            if action == .refrontSetup {
+                self.onboardingWindowController?.present()
                 return
             }
             // T6-rev: a menu-bar click is a "the user is engaging with the app
@@ -335,16 +310,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // (Done doesn't require a grant — see `OnboardingViewController`'s
             // Done handler), and a menu-bar click is the user's own explicit
             // decision to use the app — the natural moment to offer the
-            // friendly first-run nudge rather than silently opening a popover
+            // friendly first-run nudge rather than silently opening a surface
             // that can do nothing. `presentSetupForUndeterminedIfNeeded()`
             // one-shot/cooldown-gates the presentation (T4/B3) and reports
-            // whether it actually took over, so the popover doesn't ALSO open
+            // whether it actually took over, so the surface doesn't ALSO open
             // underneath it in the same click.
             if SystemAudioCaptureTCC.effectiveStatus() == .undetermined,
                self.presentSetupForUndeterminedIfNeeded() {
                 return
             }
-            self.popoverController.toggle(relativeTo: button)
+            self.surface.perform(action, anchorRect: self.statusAnchorRect())
         }
 
         // Secondary (right/control) click on the menu-bar icon raises a small menu
@@ -413,8 +388,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController = PopoverController(appRouting: appRouting)
         popoverController.deviceIconController = deviceIconController
         popoverController.configure(groupController: groupController)
-        popoverController.onOpenMixer = { [weak self] in self?.openMixer() }
-        popoverController.onOpenSettings = { [weak self] in self?.openSettings() }
         // T6 (takeover status strip, state 1's "Open Login Items…" button): the
         // same `PTPHelperManaging` seam `registerPTPHelperIfNeeded()` already
         // reads, reused rather than standing up a second instance.
@@ -450,6 +423,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.isAppExcluded = { [weak self] bundleID in
             self?.excludedApps.isExcluded(bundleID) ?? false
         }
+
+        // The one surface (U4). Both screen providers are lazy — the Groups and
+        // Settings trees are only built when their tab is first visited — and
+        // the Mixer panel is claimed from the popover on its first mount.
+        surface = AppSurfaceController(
+            popoverController: popoverController,
+            settings: settings,
+            groupsContent: { [unowned self] in self.groupsScreenContent() },
+            settingsContent: { [unowned self] in self.makeSettingsRoot() })
+        // The Groups content skips its rebuild while hidden (B8) and has no
+        // window of its own to ask about visibility any more, so the surface
+        // tells it which screen the user is looking at.
+        surface.onVisibleScreenChange = { [weak self] screen in
+            self?.mixerWindowController?.setHostVisible(screen == .groups)
+        }
+
         // Enforce the precedence up front: prune any persisted route for an
         // already-excluded app (e.g. excluded in a previous session).
         pruneRoutesForExcludedApps()
@@ -822,7 +811,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Build (or reuse) a ``SetupModel`` (production probes) + onboarding window
-    /// and present it. Used for first-run, "Check Permissions…", the automatic
+    /// and present it. Used for first-run, "Open Setup…", the automatic
     /// permission-revocation reopen (`auditRequiredPermissionsIfNeeded`), and the
     /// undetermined-verdict popover-open path (`onButtonClicked`). `onFinished`
     /// starts the backend if it hasn't already (first run) and is a guarded
@@ -840,7 +829,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// finish side effects (`startBackendIfNeeded`, `pushAppRoutesToBackend`,
     /// `showPopoverHome`) before the user had actually finished. Three of five
     /// call sites happened to already guard `onboardingWindowController == nil`
-    /// before calling this; "Check Permissions…" (`onRunSetupAgain`) did not,
+    /// before calling this; "Open Setup…" (`onRunSetupAgain`) did not,
     /// and the popover-open check this task adds would have been a sixth
     /// unguarded site — so the fix belongs HERE, unconditionally, rather than
     /// as yet another guard every caller has to remember to add. When a window
@@ -876,8 +865,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // == nil` pattern above). Both this branch and the memory-leak branch hit
         // this independently, which is how confident we are it's real: without the
         // guard, a second call while a first onboarding window is still open
-        // (reachable via Settings ▸ General's "Run Setup Again…" — the window is
-        // normal-level, so Settings stays clickable) silently overwrites
+        // (reachable via Settings ▸ General's "Open Setup…" — the setup
+        // window floats above Settings but doesn't block it, floating being
+        // z-order not modality, so Settings stays clickable) silently overwrites
         // `onboardingWindowController`. Releasing the old controller fires its
         // `windowWillClose` → `onFinished`, which nils the reference to the NEW
         // controller just stored, leaving it unretained so it deallocates and
@@ -932,10 +922,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             // First-run Done (or the ✕/lost-permission reopen) currently left
             // the user with NO window at all — the whole point of finishing
-            // setup is to start using the app, so open the main popover the
-            // moment onboarding dismisses rather than making them go find the
+            // setup is to start using the app, so open the surface the moment
+            // onboarding dismisses rather than making them go find the
             // menu-bar icon themselves.
-            self.showPopoverHome()
+            self.showSurface(.mixer)
         }
         onboardingWindowController = controller
         controller.present()
@@ -945,13 +935,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// The menu shown on a right/control-click of the status item — the
     /// discoverable path to Settings, Groups, and Quit for a Dock-less app whose
-    /// only other quit affordance is the small power glyph in the popover header.
+    /// only other quit affordance is the small power glyph in the surface header.
     @MainActor
     private func makeStatusMenu() -> NSMenu {
         let menu = NSMenu()
-        let settings = menu.addItem(withTitle: "Settings…", action: #selector(menuOpenSettings), keyEquivalent: ",")
+        // No ellipsis (HIG): both switch tabs on the surface, they don't open a
+        // window — the app menu's own "Settings…" below keeps its ellipsis,
+        // that one IS the macOS menu-bar convention (⌘,), unrelated to this rule.
+        let settings = menu.addItem(withTitle: "Settings", action: #selector(menuOpenSettings), keyEquivalent: ",")
         settings.target = self
-        let groups = menu.addItem(withTitle: "Groups…", action: #selector(menuOpenGroups), keyEquivalent: "")
+        let groups = menu.addItem(withTitle: "Groups", action: #selector(menuOpenGroups), keyEquivalent: "")
         groups.target = self
         menu.addItem(.separator())
         let quit = menu.addItem(withTitle: "Quit Audiouter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -969,8 +962,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// with a File ▸ Close item exists at all — with no main menu (the prior
     /// state) or a main menu missing this item, ⌘W does nothing. `target: nil`
     /// sends `performClose:` down the responder chain, so it reaches whichever
-    /// window is key (Settings or the Groups panel/mixer window) rather than
-    /// being hardwired to one.
+    /// window is key (the surface, Setup, or About) rather than being
+    /// hardwired to one.
     @MainActor
     private func installMainMenu() {
         let mainMenu = NSMenu()
@@ -994,135 +987,71 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = mainMenu
     }
 
-    @MainActor @objc private func menuOpenSettings() { openSettings() }
-    @MainActor @objc private func menuOpenGroups() { openMixer() }
+    @MainActor @objc private func menuOpenSettings() { showSurface(.settings) }
+    @MainActor @objc private func menuOpenGroups() { showSurface(.groups) }
 
-    /// "Open Mixer…" target — open/focus the full mixer window (SPEC §9, T-U4).
-    /// Lazily built on first use, then reused; seeded with the current device
-    /// snapshot so it's correct the instant it appears. Shares the app's one
-    /// `GroupController`, so menu and window never diverge.
+    /// Bring the surface up on `screen` — the one destination every "open X"
+    /// affordance now shares (right-click menu, ⌘,, the header tabs' pre-claim
+    /// fallbacks, and the post-Setup landing).
     @MainActor
-    private func openMixer() {
-        if useControlPanel {
-            openGroupsPanel()
-            return
-        }
-        let controller: MixerWindowController
-        if let existing = mixerWindowController {
-            controller = existing
-        } else {
-            controller = MixerWindowController(groupController: groupController,
-                                               appRouting: appRouting,
-                                               deviceIconController: deviceIconController)
-            mixerWindowController = controller
-        }
+    private func showSurface(_ screen: SurfaceScreen) {
+        surface.select(screen)
+        surface.show(anchorRect: statusAnchorRect())
+    }
+
+    /// The Groups screen's content: `MixerWindowController`'s split view. The
+    /// controller owns the sidebar/editor plumbing and nothing else. Built on
+    /// the first visit to the Groups tab and reused; seeded with the current
+    /// device snapshot so it is correct the instant it appears.
+    @MainActor
+    private func groupsScreenContent() -> NSViewController {
+        let controller = mixerWindowController ?? MixerWindowController(
+            groupController: groupController,
+            deviceIconController: deviceIconController)
+        mixerWindowController = controller
         controller.update(devices: Array(devicesByID.values))
-        controller.showWindow()
-        log("Open Mixer… (window shown)")
+        return controller.contentController
     }
 
-    /// Control-panel rollout: open Groups in the shared floating shell anchored
-    /// under the menu-bar item. Build/reuse the `MixerWindowController` (WINDOW
-    /// chrome — the shell provides the panel now; this controller only supplies
-    /// its content view), then host its content in the one shared shell.
+    /// The Settings screen's content, built on the first visit to the Settings
+    /// tab. In-content tabs (`.segmentedControlOnTop`) so the panes' own tab
+    /// strip renders BENEATH the surface's screen switcher rather than in a
+    /// title bar the surface doesn't have.
     @MainActor
-    private func openGroupsPanel() {
-        let controller: MixerWindowController
-        if let existing = mixerWindowController {
-            controller = existing
-        } else {
-            controller = MixerWindowController(groupController: groupController,
-                                               appRouting: appRouting,
-                                               deviceIconController: deviceIconController)
-            mixerWindowController = controller
-        }
-        controller.update(devices: Array(devicesByID.values))
-        presentInControlPanel(content: controller.contentController,
-                              title: "Groups",
-                              defaultSize: NSSize(width: 720, height: 460))
-        log("Open Groups (control panel)")
+    private func makeSettingsRoot() -> SettingsRootViewController {
+        let general = GeneralSettingsViewController(loginItem: SMAppServiceLoginItem())
+        // "Open Setup…" (General pane) re-opens the first-run priming window;
+        // the backend is already running, so its onFinished is a guarded no-op.
+        general.onRunSetupAgain = { [weak self] in self?.presentSetup() }
+
+        let appearance = AppearanceSettingsViewController(settings: settings)
+        appearance.onThemeChanged = { [weak self] theme in self?.applyAppearance(theme) }
+        // Accent dial (W1, spec §1.3): the pane has already persisted and
+        // remapped `Tokens.accentStyle`; this nudge repaints whatever is on
+        // screen so `draw(_:)`-based instruments re-resolve now. Layer-color
+        // instruments re-read the tokens on their next state update/rebuild
+        // (the Mixer rebuilds on every open).
+        appearance.onAccentChanged = { [weak self] _ in self?.repaintOpenWindowsForAccentChange() }
+
+        let audio = AudioSettingsViewController(excluded: excludedApps,
+                                                settings: settings,
+                                                latency: makeLatencySettingModel(),
+                                                wakeRestore: makeWakeRestoreSettingModel())
+        audio.onChange = { [weak self] in self?.handleExcludedAppsChanged() }
+
+        return SettingsRootViewController(tabs: [
+            .init(title: "General", symbolName: "gearshape", viewController: general),
+            .init(title: "Appearance", symbolName: "paintpalette", viewController: appearance),
+            .init(title: "Audio", symbolName: "speaker.wave.2", viewController: audio),
+        ], tabStyle: .segmentedControlOnTop)
     }
 
-    /// Host `content` in the ONE shared control-panel shell (control-panel
-    /// rollout — Groups only; Settings now owns a standalone window). Create
-    /// the shell and wire its land-home `onClose` exactly once; otherwise swap
-    /// its content in place. Hands off from the popover (close it first),
-    /// marks the session live, and shows the shell anchored just under the
-    /// menu-bar item. When the shell later closes for real, `onClose`
-    /// re-presents the popover so you always land back "home" and are never
-    /// stranded in a dockless void. `defaultSize` is Groups' own documented
-    /// size (`MixerWindowController`'s 720×460) passed explicitly rather than
-    /// relied on as `setContent`'s default.
-    @MainActor
-    private func presentInControlPanel(content: NSViewController,
-                                       title: String,
-                                       defaultSize: NSSize) {
-        let shell: ControlPanelWindowController
-        if let existing = controlPanel {
-            shell = existing
-        } else {
-            shell = ControlPanelWindowController()
-            shell.onClose = { [weak self] in
-                guard let self else { return }
-                self.controlPanelSessionActive = false
-                self.showPopoverHome()
-            }
-            controlPanel = shell
-        }
-        shell.setContent(content, defaultSize: defaultSize)
-        shell.setTitle(title)
-        controlPanelSessionActive = true
-        popoverController.popover.performClose(nil)   // hand off from the popover
-        shell.show(anchorRect: statusAnchorRect())
-    }
-
-    /// Re-present the popover from the status item — the "return home" after the
-    /// control panel closes. No-op if it's somehow already showing.
-    @MainActor
-    private func showPopoverHome() {
-        guard let button = statusItemController.button else { return }
-        if !popoverController.popover.isShown {
-            popoverController.toggle(relativeTo: button)
-        }
-    }
-
-    /// The menu-bar item's frame in screen coordinates, for anchoring the panel
-    /// just beneath it. `nil` (item not yet in the bar) → the panel centers.
+    /// The menu-bar item's frame in screen coordinates, for anchoring the
+    /// surface just beneath it. `nil` (item not yet in the bar) → it centers.
     @MainActor
     private func statusAnchorRect() -> NSRect? {
         guard let button = statusItemController.button, let win = button.window else { return nil }
         return win.convertToScreen(button.convert(button.bounds, to: nil))
-    }
-
-    /// Header gear target — open/focus the Settings window (previously a
-    /// `// TODO: settings` stub). Lazily built, then reused; theme changes made
-    /// in the Appearance pane are applied app-wide via `applyAppearance`.
-    @MainActor
-    private func openSettings() {
-        let controller: SettingsWindowController
-        if let existing = settingsWindowController {
-            controller = existing
-        } else {
-            controller = SettingsWindowController(settings: settings,
-                                                  excludedApps: excludedApps,
-                                                  latency: makeLatencySettingModel(),
-                                                  wakeRestore: makeWakeRestoreSettingModel())
-            controller.onThemeChanged = { [weak self] theme in self?.applyAppearance(theme) }
-            // Accent dial (W1, spec §1.3): the pane has already persisted and
-            // remapped `Tokens.accentStyle`; this nudge repaints whatever is
-            // on screen so `draw(_:)`-based instruments re-resolve now.
-            // Layer-color instruments re-read the tokens on their next state
-            // update/rebuild (the popover rebuilds on every open).
-            controller.onAccentChanged = { [weak self] _ in self?.repaintOpenWindowsForAccentChange() }
-            controller.onExcludedAppsChanged = { [weak self] in self?.handleExcludedAppsChanged() }
-            // "Check Permissions…" (General pane) re-opens the first-run priming
-            // window; the backend is already running, so its onFinished is a
-            // guarded no-op.
-            controller.onRunSetupAgain = { [weak self] in self?.presentSetup() }
-            settingsWindowController = controller
-        }
-        controller.showWindow()
-        log("Open Settings (window shown)")
     }
 
     /// The Advanced › Audio buffer model (PLAN-LATENCY-SETTING.md), or nil when
@@ -1414,7 +1343,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the Mac (Main Out membership OR a live per-app redirect).
         statusItemController.updateMasterVolume(popoverController.statusMasterVolume)
         statusItemController.updateStreamingState(devices: devices, liveRoutedAppNames: routedAppNamesByDeviceID)
-        // Keep the mixer window (if open) in lockstep with the same snapshot.
+        // Keep the Groups screen in lockstep with the same snapshot. Nil until
+        // that tab has been visited, and its own hidden-means-idle gate drops
+        // the rebuild whenever the user is looking at another screen — so a
+        // backend event never builds or repaints a screen nobody can see.
         mixerWindowController?.update(devices: devices)
     }
 
@@ -1489,16 +1421,26 @@ final class QuittingIndicatorPanel: NSPanel {
         isFloatingPanel = true
         level = .floating
         isOpaque = false
-        backgroundColor = .clear
+        backgroundColor = Tokens.Color.clear
         hasShadow = true
         hidesOnDeactivate = false
+        // Same space manners as the app's other windows (onboarding, the
+        // surface shell): follow the user to the active Space, and stay
+        // visible over a full-screen app — a quit started there should still
+        // show its indicator.
+        collectionBehavior.formUnion([.moveToActiveSpace, .fullScreenAuxiliary])
 
         let effectView = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
-        effectView.material = .popover
+        // The token alias resolves `.menu` — the menu-surface material the
+        // app's floating HUD chrome standardizes on (PLAN-ONE-SURFACE-032 P1
+        // sanctions the look).
+        effectView.material = Tokens.Material.popover
         effectView.state = .active
         effectView.wantsLayer = true
-        effectView.layer?.cornerRadius = 12
+        effectView.layer?.cornerRadius = Tokens.Layout.panelCornerRadius
         effectView.layer?.masksToBounds = true
+        // A1: opaque stand-in while Reduce Transparency is on, live-updating.
+        ReduceTransparencyFallbackView.install(in: effectView)
 
         let spinner = NSProgressIndicator()
         spinner.style = .spinning

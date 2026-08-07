@@ -5,12 +5,31 @@
 The shipping executable target — a thin AppKit shell that boots the app and
 wires the pieces together. It owns no model and no AirPlay logic of its own;
 `AppDelegate` resolves a backend, builds the shared `GroupController`, and
-hands it to the popover and mixer window so they never diverge. For the
+hands it to the one surface's screens so they never diverge. For the
 package layout, backends, and core types, see
 [../../AGENTS.md](../../AGENTS.md).
 
 ## Rules
 
+- **One surface, and this target only COMPOSES it.** `AppSurfaceController`
+  (AudiouterPopoverUI) owns the window, the three screens and the menu-bar
+  click policy; `AppDelegate` supplies the two lazy content providers
+  (`MixerWindowController`'s content for Groups, a `SettingsRootViewController`
+  for Settings) and forwards clicks. **Behavior goes THERE, not here** — this
+  target is invisible to the test suite, so anything decided here is untestable
+  by construction. That is why `clickAction(setupIsOpen:)` returns a decision
+  the delegate merely performs: the four cases are asserted in a library test.
+- **Every "open X" affordance leads to a screen, never a window.** The
+  right-click menu, ⌘,, the Mixer header's tabs and the post-Setup landing all
+  go through the surface. Setup and About are the two windows that survive; if
+  you find yourself calling `showWindow()` on anything else, the cutover has
+  been undone.
+- **A screen the user isn't looking at does no work.** Backend events fan out
+  to the Groups content unconditionally, and its own hidden-means-idle gate
+  drops the rebuild — driven by `setHostVisible(_:)` off the surface's
+  `onVisibleScreenChange`, because that controller no longer has a window whose
+  visibility it could read. Never force-build a screen to deliver an event: an
+  unbuilt screen is a screen nobody has opened yet.
 - **No main menu.** The app is `.accessory` with no `NSMenu` ever assigned —
   no Edit/Window menu to host standard keyboard commands. Any shortcut this
   app needs must be wired explicitly; any action with no keyboard path needs
@@ -32,7 +51,7 @@ package layout, backends, and core types, see
   the backend's Bonjour discovery triggers the Local Network prompt, and priming
   means the setup screen explains it first. `startBackendIfNeeded()` runs from
   the window's `onFinished` (Done or ✕). Every non-native backend and every
-  later launch starts immediately. "Run Setup Again…" (Settings ▸ General) calls
+  later launch starts immediately. "Open Setup…" (Settings ▸ General) calls
   `presentSetup()` again; its `onFinished` is then a guarded no-op.
 - **`AIRPLAY_SETUP` overrides the first-run gate (testing knob).**
   `SetupPresentation.resolved` reads it: `skip` never presents (so repeated dev
@@ -71,40 +90,18 @@ package layout, backends, and core types, see
   (system-audio tap), `NSLocalNetworkUsageDescription` + `NSBonjourServices`
   (`_airplay._tcp`/`_raop._tcp` — must match `NativeDiscovery`, or discovery is
   silently blocked even with the usage string).
-- **One shared control-panel shell, behind `AIRPLAY_CONTROL_PANEL=1` —
-  Groups only.** Settings LEFT the shared shell (owner-locked, screens
-  follow-up): it is now always its own standalone titled window
-  (`SettingsWindowController`, `AudiouterSettingsUI`, tabbed
-  General/Appearance/Audio) regardless of the flag, so a tall Settings tab can
-  never dictate the Groups panel's geometry. The flag's mechanism is
-  otherwise unchanged, just narrower in scope: when set, `openMixer` routes
-  through `openGroupsPanel`, which builds/reuses the `MixerWindowController`
-  with plain WINDOW chrome and hands its `contentController` to the single
-  `controlPanel` (`ControlPanelWindowController`, `AudiouterSharedUI`) via
-  `presentInControlPanel(content:title:defaultSize:)`. That method creates the
-  shell and wires its land-home `onClose` (→ `showPopoverHome`) EXACTLY once,
-  then swaps content (`setContent`) on later opens — never a second panel.
-  Each surface passes its own documented size explicitly as `defaultSize`
-  (Groups: 720×460, matching `MixerWindowController`'s own window sizing)
-  rather than relying on `setContent`'s default. A status-item click during a
-  live session (`controlPanelSessionActive`) TOGGLES `controlPanel`: it CLOSES
-  a showing panel (a real close, so it lands home on the popover, like ✕/Esc)
-  and RESTORES one tucked away on an app-switch — it never merely re-fronts an
-  already-open panel. The flag defaults off, so the shipping window path
-  (`openMixer`'s `showWindow()`) is untouched; `openSettings` is unconditional
-  now, flag or not.
 - **File ▸ Close (⌘W)**, wired in `installMainMenu`. AppKit does not
   synthesize ⌘W for a `.closable` window unless a main menu carries a File ▸
   Close item, so this is explicit: action `performClose:`, target `nil`, so it
-  dispatches down the responder chain to whichever window is key (Settings or
-  the Groups panel/mixer window) rather than being hardwired to one.
+  dispatches down the responder chain to whichever window is key (the surface,
+  Setup or About) rather than being hardwired to one.
 - **The mid-session permission grant is detected by EVENTS, never a timer.**
   `AppDelegate` owns the one `PermissionStateObserver` (retained for the app's
   lifetime — its `CFNotificationCenter` registration holds an unretained
   back-pointer) and arms it at launch ONLY when the grant isn't already in
   place. It is kicked from five places and polled from none: the Darwin
   notification (inside the observer), launch, `NSWorkspace.didWakeNotification`,
-  every routing action, and a menu-bar/popover open. Routing actions must reach
+  every routing action, and a menu-bar click. Routing actions must reach
   it through `NativeBackend.onRoutingAction` — the two backend chokepoints — not
   the four `GroupController` call sites, which miss a group activated via
   `activateGroup(id:)` inside `applyRouting()`. Any hook added here MUST be
@@ -117,12 +114,19 @@ package layout, backends, and core types, see
   device at launch would contradict the product decision recorded in
   [../../AGENTS.md](../../AGENTS.md); sleep, by contrast, is a transient dropout
   that keeps the selection intent.
+- **No window restoration, secure state opt-in (P3/W7).** A menu-bar app has
+  nothing to restore: every window sets `isRestorable = false` (the surface
+  panel in `ControlPanelWindowController.makePanel`, Setup in
+  `OnboardingWindowController`), and `AppDelegate` implements
+  `applicationSupportsSecureRestorableState → true` — the opt-in is free with
+  no restorable windows, and it silences the macOS secure-coding warning. Any
+  new window must also set `isRestorable = false`.
 
 ## Map
 
 | Type | Role |
 |---|---|
-| `AppDelegate` | Lifecycle owner: activation policy, backend, `GroupController`, popover + mixer window, the shared control-panel shell (`AIRPLAY_CONTROL_PANEL=1`), excluded-apps/routing precedence, and the first-run setup gate (`presentSetup()` / `startBackendIfNeeded()`). |
+| `AppDelegate` | Lifecycle owner: activation policy, backend, `GroupController`, the surface + its two screen providers, excluded-apps/routing precedence, and the first-run setup gate (`presentSetup()` / `startBackendIfNeeded()`). |
 | `StatusItemController` | The `NSStatusItem`; renders the volume-tracking symbol, forwards clicks. |
 | (bootstrap) | `main.swift` — builds and retains `AppDelegate`, calls `NSApplicationMain`. |
 | `scripts/make-app.sh` | Wraps the built binary into a signed `.app` with the three TCC/Bonjour Info.plist keys. |
@@ -158,5 +162,5 @@ which read as "the setup keeps popping up." Recoverability instead comes from tw
 places: `OnboardingWindowController` re-fronts itself on
 `NSApplication.didBecomeActiveNotification` (e.g. returning from a System Settings
 permission change), and `AppDelegate`'s menu-bar click re-fronts it (rather than
-opening the popover) whenever `onboardingWindowController` is non-nil. First-run
+opening the surface) whenever `onboardingWindowController` is non-nil. First-run
 completion persists in `AppSettings.hasCompletedSetup`.

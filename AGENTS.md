@@ -186,6 +186,9 @@ This app must feel like a native macOS citizen, not a cross-platform port.
   is the Warm Signal spec, `dev/notes/warm-signal-v3.md` — not Control Center.
   Stock AppKit behavior, controls, and accessibility remain mandatory
   regardless: the spec governs paint, not interaction model.
+- **The Figma design system mirrors the UI code.** Any change to `Tokens`,
+  `PopoverColumnGrid`, a custom-drawn view, or a screen must be mirrored in the
+  Figma file per [docs/FIGMA-DESIGN-SYSTEM.md](docs/FIGMA-DESIGN-SYSTEM.md).
 - Deviating is fine when the system has no equivalent — but note *why* in the
   nearest AGENTS.md, so the next agent doesn't "fix" it back to a system control
   that doesn't fit.

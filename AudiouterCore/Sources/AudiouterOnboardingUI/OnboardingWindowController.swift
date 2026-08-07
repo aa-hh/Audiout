@@ -5,7 +5,7 @@ import AudiouterCore
 
 /// The first-run onboarding/permission-priming window (public-release readiness).
 ///
-/// Same lazy-create-then-reuse lifecycle as `SettingsWindowController` /
+/// Same lazy-create-then-reuse lifecycle as
 /// `MixerWindowController`: the app builds it on demand, calls the no-arg
 /// ``present()``, and reuses/focuses it thereafter. It hosts a single
 /// ``OnboardingViewController`` bound to a Core ``SetupModel``, and wires the real
@@ -17,9 +17,9 @@ import AudiouterCore
 /// run so the Local Network prompt is *primed* here rather than sprung at launch.
 /// Persisting "setup complete" is separate: only **Done** calls
 /// ``SetupModel/complete()``, so closing with the ✕ leaves the flow to reappear
-/// next launch (the user didn't finish). Re-running setup later ("Run Setup
-/// Again…" in Settings ▸ General) just constructs and presents this again — it
-/// never clears the completed flag.
+/// next launch (the user didn't finish). Re-running setup later ("Open
+/// Setup…" in Settings ▸ General) just constructs and presents this again —
+/// it never clears the completed flag.
 @MainActor
 public final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
 
@@ -57,17 +57,21 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
 
         let window = NSWindow(contentViewController: contentVC)
         window.styleMask = [.titled, .closable]
-        window.title = "Welcome"
+        window.title = "Setup"
         window.isRestorable = false   // fixed-size, centered; never restored
         // Appear on whatever Space the user is on (incl. over a fullscreen app)
         // when summoned/re-fronted, rather than Space-switching (window-panel.md M1).
         window.collectionBehavior.formUnion([.moveToActiveSpace, .fullScreenAuxiliary])
-        // NOTE: deliberately a NORMAL window level. An earlier version made this
-        // `.floating` to keep it recoverable after a permission prompt stole focus,
-        // but floating means always-on-top over EVERY other app — it hovered over
-        // whatever the user was doing and read as "the setup keeps popping up".
-        // Recoverability is handled instead by re-fronting on app-reactivate
-        // (below) plus an explicit re-front right after each Allow's prompt.
+        // Deliberately `.floating` for the window's whole open lifetime:
+        // granting a permission must never leave this window buried, and the
+        // normal-level alternative depends on `NSApp.activate`, which macOS 14's
+        // cooperative activation may decline while another app is frontmost.
+        // The cost that killed an earlier floating version ("the setup keeps
+        // popping up") is bounded two ways: the window exists only for a
+        // deliberately-summoned flow that dies at Done/✕, and the reactivate
+        // hook below never steals keyboard focus from sibling windows. Decision
+        // history in this folder's AGENTS.md — read it before changing the level.
+        window.level = .floating
 
         super.init(window: window)
         trampoline.action = { [weak self] in self?.finish(markComplete: true) }
@@ -81,9 +85,22 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
             name: NSApplication.didBecomeActiveNotification, object: nil)
     }
 
+    /// Seam for `NSApp.keyWindow` so the take-key-only-when-unclaimed rule in
+    /// `appDidBecomeActive` is testable headless (no real key windows there).
+    var keyWindowProvider: () -> NSWindow? = { NSApp.keyWindow }
+
     @objc private func appDidBecomeActive() {
         guard !didFinish else { return }
-        window?.makeKeyAndOrderFront(nil)
+        // The floating level already keeps the window visible, so this hook only
+        // governs keyboard focus — and it must not grab it away from a sibling
+        // window the user actually clicked (Settings and Setup open together is a
+        // normal state: Setup is reached FROM Settings). Take key only when
+        // nothing else in the app holds it, e.g. returning from a permission
+        // prompt or System Settings.
+        let key = keyWindowProvider()
+        if key == nil || key === window {
+            window?.makeKeyAndOrderFront(nil)
+        }
         // Returning to the app (e.g. back from System Settings) is exactly when a
         // permission the user just changed should be re-read — so the rows reflect
         // reality instead of a stale "Requested".
@@ -92,13 +109,21 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    /// Open/focus the window, sized to its content and centered. The app is an
-    /// accessory (no Dock icon), so activate explicitly to bring it forward.
+    private var hasBeenPresented = false
+
+    /// Open/focus the window. The app is an accessory (no Dock icon), so
+    /// activate explicitly to bring it forward. Sizing + centering happen on the
+    /// first presentation only — a re-present (the `presentSetup` re-entry
+    /// guard's re-front, "Open Setup…" while already open) must not throw
+    /// away a position the user chose (punch-list W6).
     public func present() {
         NSApp.activate(ignoringOtherApps: true)
-        contentVC.view.layoutSubtreeIfNeeded()
-        window?.setContentSize(contentVC.view.fittingSize)
-        window?.center()
+        if !hasBeenPresented {
+            hasBeenPresented = true
+            contentVC.view.layoutSubtreeIfNeeded()
+            window?.setContentSize(contentVC.view.fittingSize)
+            window?.center()
+        }
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
     }
@@ -144,6 +169,10 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
 
     /// Whether the single-fire finish has run.
     public var test_didFinish: Bool { didFinish }
+
+    /// Fire the app-reactivate hook directly — headless tests can't activate
+    /// the app, and the key-steal guard is exactly what needs pinning.
+    func test_appDidBecomeActive() { appDidBecomeActive() }
 }
 
 /// Bridges the VC's Done tap back to the window controller across the

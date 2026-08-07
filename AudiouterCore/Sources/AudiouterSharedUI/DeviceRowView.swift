@@ -2113,8 +2113,11 @@ public final class DeviceRowView: NSView {
             // Devices set (Control Center "on" look), else a fainter hover wash on
             // pointer-over. Both are driven off state that ``apply`` resets, so a
             // deselected row returns to a fully clean background (T-U8 bug fix).
-            let rect = bounds.insetBy(dx: 5, dy: 2)
-            let path = NSBezierPath(roundedRect: rect, xRadius: 7, yRadius: 7)
+            let rect = bounds.insetBy(dx: PopoverColumnGrid.selectionHighlightInsetX,
+                                      dy: PopoverColumnGrid.selectionHighlightInsetY)
+            let path = NSBezierPath(roundedRect: rect,
+                                    xRadius: PopoverColumnGrid.selectionHighlightCornerRadius,
+                                    yRadius: PopoverColumnGrid.selectionHighlightCornerRadius)
             if isSelectedInSet && paintsSelectionBackground {
                 Tokens.Color.accent.withAlphaComponent(PopoverColumnGrid.rowSelectionWashAlpha).setFill()
                 path.fill()

@@ -6,7 +6,7 @@ import AudiouterSharedUI
 /// Tiny layout kit shared by the Settings panes so every pane reads as one
 /// consistent macOS form: a fixed-width column of `title · optional subtitle`
 /// rows with the control right-aligned, standard insets, and a fitting height
-/// that `SettingsWindowController` measures and applies to the window itself
+/// that `SettingsRootViewController` measures and publishes to its host
 /// (AppKit's tab controller does NOT do that for you — see the sizing-trap note
 /// there). Deliberately minimal — panes stay small, so this is a few helpers,
 /// not a framework.
@@ -14,6 +14,13 @@ enum SettingsForm {
 
     /// Fixed content width for every pane (settings windows don't reflow).
     static let contentWidth: CGFloat = 460
+
+    /// Standard left/right pane margin — shared by `paneView(rows:)` and
+    /// `AudioSettingsViewController.loadView()`'s equivalent hand-rolled
+    /// column, which used to retype this same number.
+    static let horizontalPadding: CGFloat = 20
+    /// Standard top/bottom pane margin — same sharing as `horizontalPadding`.
+    static let verticalPadding: CGFloat = 18
 
     /// A leading-aligned label.
     static func label(_ string: String) -> NSTextField {
@@ -53,7 +60,7 @@ enum SettingsForm {
         field.textColor = Tokens.Color.secondaryLabel
         field.lineBreakMode = .byWordWrapping
         field.maximumNumberOfLines = 0
-        field.preferredMaxLayoutWidth = contentWidth - 40
+        field.preferredMaxLayoutWidth = contentWidth - horizontalPadding * 2
         return field
     }
 
@@ -129,10 +136,10 @@ enum SettingsForm {
 
         NSLayoutConstraint.activate([
             container.widthAnchor.constraint(equalToConstant: contentWidth),
-            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
-            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
-            stack.topAnchor.constraint(equalTo: container.topAnchor, constant: 18),
-            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -18),
+            stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: horizontalPadding),
+            stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -horizontalPadding),
+            stack.topAnchor.constraint(equalTo: container.topAnchor, constant: verticalPadding),
+            stack.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -verticalPadding),
         ])
         // Each row fills the column width (a vertical stack sizes arranged views
         // to their intrinsic width otherwise).

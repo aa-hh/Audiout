@@ -123,7 +123,6 @@ pass in `make-app.sh` (~line 613 onward), or the signature won't cover it.
   every intent becomes a new entry point into main-actor state that previously
   only the UI touched. Worth a look for reentrancy against the existing
   single-owner rules.
-- macOS 14 minimum is already well past App Intents' macOS 13 floor. No gate.
 
 ---
 

@@ -19,6 +19,7 @@ import AppKit
         var reconnects: [String] = []
         var trims: [(ms: Int, id: String)] = []
         var alignToggles: [(active: Bool, id: String)] = []
+        var wizardRequests: [String] = []
         func deviceRow(_ row: DeviceRowView, didSetVolume volume: Int, for id: String) {}
         func deviceRow(_ row: DeviceRowView, didToggleMute muted: Bool, for id: String) {}
         func deviceRow(_ row: DeviceRowView, didToggleEnabled on: Bool, for id: String) {
@@ -33,6 +34,9 @@ import AppKit
         }
         func deviceRow(_ row: DeviceRowView, didToggleAlignTick active: Bool, for id: String) {
             alignToggles.append((active, id))
+        }
+        func deviceRowDidRequestAlignmentWizard(_ row: DeviceRowView) {
+            wizardRequests.append(row.device.id)
         }
     }
 
@@ -258,6 +262,39 @@ import AppKit
         #expect(row.test_alignTickOn)
         row.test_fireAlignClick()
         #expect(spy.alignToggles.map(\.active) == [true, false])
+    }
+
+    @Test func optionClickOnTheMetronomeRequestsTheWizardNotTheTick() {
+        let spy = SpyDelegate()
+        let row = makeRow(btDevice(), delegate: spy)
+        row.test_optionModifierOverride = true
+        row.test_fireAlignClick()
+        #expect(spy.wizardRequests == [btDevice().id], "⌥-click asks for the guided wizard")
+        #expect(spy.alignToggles.isEmpty, "…never the manual tick")
+        #expect(!row.test_alignTickOn, "and the toggle never flips")
+        #expect(row.test_alignTooltip?.contains("⌥ for the guided alignment") == true,
+                "the tooltip teaches the invisible modifier")
+    }
+
+    @Test func contextMenuCarriesAlignSpeakerOnBTRowsThroughRealMenuDispatch() {
+        let spy = SpyDelegate()
+        let row = makeRow(btDevice(), delegate: spy)
+        let menu = row.test_contextMenu()
+        #expect(menu?.items.map(\.title) == ["Align speaker…"])
+        #expect(menu?.items.first?.isEnabled == true)
+        menu?.performActionForItem(at: 0)   // real AppKit menu dispatch
+        #expect(spy.wizardRequests == [btDevice().id])
+
+        let plain = DeviceRowView(device: btDevice(), showsToggle: true,
+                                  paintsSelectionBackground: false, showsMeter: true,
+                                  showsBus: true, showsSyncControls: false)
+        #expect(plain.test_contextMenu() == nil, "non-sync rows carry no alignment menu")
+    }
+
+    @Test func contextMenuAlignItemDisablesOnAGreyedRow() {
+        let row = makeRow(btDevice(available: false), delegate: SpyDelegate())
+        #expect(row.test_contextMenu()?.items.first?.isEnabled == false,
+                "no wizard offer over a silent target")
     }
 }
 

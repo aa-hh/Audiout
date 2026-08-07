@@ -37,8 +37,8 @@ final class SystemAirPlayNoteBannerView: NSView {
 
         var tintColor: NSColor {
             switch self {
-            case .info: return .systemBlue
-            case .warning: return .systemOrange
+            case .info: return Tokens.Color.info
+            case .warning: return Tokens.Color.warning
             }
         }
         var backgroundAlpha: CGFloat {
@@ -162,5 +162,17 @@ final class SystemAirPlayNoteBannerView: NSView {
         super.updateLayer()
         layer?.backgroundColor = severity.tintColor.withAlphaComponent(severity.backgroundAlpha).cgColor
         layer?.borderColor = severity.tintColor.withAlphaComponent(severity.borderAlpha).cgColor
+    }
+
+    /// The layer's currently-stamped fill/border, read back as `NSColor` —
+    /// asserts they resolve from `Tokens.Color.info`/`.warning`, not a raw
+    /// `NSColor.systemBlue`/`.systemOrange` literal.
+    var test_backgroundColor: NSColor? {
+        guard let cgColor = layer?.backgroundColor else { return nil }
+        return NSColor(cgColor: cgColor)
+    }
+    var test_borderColor: NSColor? {
+        guard let cgColor = layer?.borderColor else { return nil }
+        return NSColor(cgColor: cgColor)
     }
 }

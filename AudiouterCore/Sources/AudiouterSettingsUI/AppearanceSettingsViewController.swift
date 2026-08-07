@@ -314,11 +314,18 @@ final class ThemeTileButton: NSButton {
         let gold: NSColor      // §1.1/§1.2 `gold` (route-armed dot, meter hot end)
         let ember: NSColor     // §1.1/§1.2 `ember` (meter low end)
 
-        /// Dark flagship (spec §1.1).
+        /// Dark flagship (spec §1.1). `well` is `0x100D0A` — the fader-
+        /// legibility retune's darkened value (`Tokens.Color.well`'s dark
+        /// case, Tokens.swift), NOT the original spec hex `0x2B2620`: this
+        /// tile depicts the live product, so a token re-tune must carry over
+        /// here too. `PreviewPaletteTokenPinTests` pins every literal below
+        /// that has a `Tokens.Color` counterpart against the live token, so a
+        /// future re-tune fails loudly here instead of drifting silently
+        /// (this exact case — `well` sat stale through one retune already).
         static let dark = WarmPreviewPalette(
             chrome: Mock.darkChrome, stroke: Mock.darkStroke,
             canvas: NSColor(srgbRed: 0x16 / 255, green: 0x13 / 255, blue: 0x0F / 255, alpha: 1),
-            well: NSColor(srgbRed: 0x2B / 255, green: 0x26 / 255, blue: 0x20 / 255, alpha: 1),
+            well: NSColor(srgbRed: 0x10 / 255, green: 0x0D / 255, blue: 0x0A / 255, alpha: 1),
             name: NSColor(srgbRed: 0xEF / 255, green: 0xE9 / 255, blue: 0xDD / 255, alpha: 1),
             nameDim: NSColor(srgbRed: 0x7A / 255, green: 0x70 / 255, blue: 0x62 / 255, alpha: 1),
             gold: NSColor(srgbRed: 0xE8 / 255, green: 0xB8 / 255, blue: 0x4B / 255, alpha: 1),
@@ -500,6 +507,26 @@ final class ThemeTileButton: NSButton {
         frame.lineWidth = 1
         frame.stroke()
     }
+
+    // MARK: Test-support hooks (V5 — preview-palette/Tokens pin)
+
+    /// The dark/light preview palettes' `canvas`/`well`/`gold`/`ember` —
+    /// the four fields that mirror a real `Tokens.Color` case (`name`/
+    /// `nameDim`/`chrome`/`stroke` have no token counterpart: they're mock
+    /// window chrome or the spec's unaliased `text`/`text-3`). `WarmPreviewPalette`
+    /// is `private`, reachable only from this file, so the pin test goes
+    /// through this accessor rather than the type directly.
+    static func test_previewPaletteColor(dark isDark: Bool, field: TestPreviewField) -> NSColor {
+        let palette: WarmPreviewPalette = isDark ? .dark : .light
+        switch field {
+        case .canvas: return palette.canvas
+        case .well: return palette.well
+        case .gold: return palette.gold
+        case .ember: return palette.ember
+        }
+    }
+
+    enum TestPreviewField { case canvas, well, gold, ember }
 }
 
 private extension AppearanceTheme {

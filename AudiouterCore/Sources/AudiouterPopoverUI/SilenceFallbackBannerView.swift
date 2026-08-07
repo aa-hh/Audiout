@@ -19,7 +19,7 @@ final class SilenceFallbackBannerView: NSView {
         icon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill",
                              accessibilityDescription: "Warning")
         icon.symbolConfiguration = .init(pointSize: 15, weight: .semibold)
-        icon.contentTintColor = .systemOrange
+        icon.contentTintColor = Tokens.Color.warning
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.setContentHuggingPriority(.required, for: .horizontal)
         icon.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -38,8 +38,8 @@ final class SilenceFallbackBannerView: NSView {
         layer?.cornerRadius = Tokens.Layout.bannerCornerRadius
         layer?.cornerCurve = .continuous
         layer?.borderWidth = 1
-        layer?.backgroundColor = NSColor.systemOrange.withAlphaComponent(0.14).cgColor
-        layer?.borderColor = NSColor.systemOrange.withAlphaComponent(0.40).cgColor
+        layer?.backgroundColor = Tokens.Color.warning.withAlphaComponent(0.14).cgColor
+        layer?.borderColor = Tokens.Color.warning.withAlphaComponent(0.40).cgColor
 
         let row = NSStackView(views: [icon, text])
         row.orientation = .horizontal
@@ -65,7 +65,21 @@ final class SilenceFallbackBannerView: NSView {
     /// (layer colors don't auto-resolve dynamic `NSColor`s).
     override func updateLayer() {
         super.updateLayer()
-        layer?.backgroundColor = NSColor.systemOrange.withAlphaComponent(0.14).cgColor
-        layer?.borderColor = NSColor.systemOrange.withAlphaComponent(0.40).cgColor
+        layer?.backgroundColor = Tokens.Color.warning.withAlphaComponent(0.14).cgColor
+        layer?.borderColor = Tokens.Color.warning.withAlphaComponent(0.40).cgColor
+    }
+
+    // MARK: Test-support hooks
+
+    /// The layer's currently-stamped fill/border, read back as `NSColor` —
+    /// asserts they resolve from `Tokens.Color.warning`, not a raw
+    /// `NSColor.systemOrange` literal.
+    var test_backgroundColor: NSColor? {
+        guard let cgColor = layer?.backgroundColor else { return nil }
+        return NSColor(cgColor: cgColor)
+    }
+    var test_borderColor: NSColor? {
+        guard let cgColor = layer?.borderColor else { return nil }
+        return NSColor(cgColor: cgColor)
     }
 }

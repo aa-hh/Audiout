@@ -119,6 +119,20 @@ public enum Tokens {
         /// Warning/failure sublabel and card tint (connection-diagnosis,
         /// onboarding failure card). Alias of `NSColor.systemOrange`.
         public static var warning: NSColor { .systemOrange }
+        /// Informational note/banner tint (`SystemAirPlayNoteBannerView`'s
+        /// `.info` tier — the system-double-path note, the takeover status
+        /// strip's default state). Alias of `NSColor.systemBlue`. Declared as
+        /// a plain semantic alias, matching how ``warning``/``destructive``
+        /// are declared immediately above — a system dynamic color already
+        /// resolves light/dark and a reasonable Increase Contrast response on
+        /// its own, so it needs no `warmDynamic` trio or authored contrast
+        /// rationale; that requirement (root AGENTS.md's "every case ships
+        /// light + dark + Increase Contrast variants with a documented
+        /// rationale") targets the CUSTOM warm-palette hex literals below,
+        /// per this file's own governing comment ("the custom warm/instrument
+        /// cases below each carry a documented contrast rationale") — not the
+        /// semantic aliases in this section, none of which carry one either.
+        public static var info: NSColor { .systemBlue }
         /// Opaque shadow color for card/panel drop shadows (`CardView`). Alias
         /// of `NSColor.black`.
         public static var shadow: NSColor { .black }
@@ -490,6 +504,43 @@ public enum Tokens {
                        light: 0xE0D8C6, lightHighContrast: 0xC4B89E)
         }
 
+        // MARK: Icon-well badge instrument (V6, raw-color elimination pass)
+        //
+        // `DeviceIconWellView`'s corner edit badge: a dark disc + light rim
+        // sitting over the device/group icon GLYPH, whose color is arbitrary
+        // (an SF Symbol tint, a user-picked icon) — not the app's own
+        // light/dark surface. Like `shadow`, the hue is deliberately the SAME
+        // in both themes (a theme-adaptive hue here would force the badge to
+        // flip to a light disc in dark mode, which would in turn force the
+        // pencil glyph it hosts to flip too — rejected: the badge's whole job
+        // is to read the same "dark scrim, light rim" regardless of what it
+        // sits over). Unlike `shadow`, it needs a real Increase Contrast
+        // response, so it is NOT a plain alias: `scrimDynamic` steps the
+        // ALPHA up under Increase Contrast — the only axis left once the hue
+        // is already the endpoint (pure black / pure white) — while the base
+        // hex stays fixed. First consumer: `DeviceIconWellView`'s badge fill/
+        // border, previously two frozen `NSColor(white:alpha:)` literals
+        // stamped into a `CALayer` once at init and never re-stamped, so they
+        // sat outside Increase Contrast entirely and could never react to a
+        // live appearance/a11y change.
+
+        /// The corner edit badge's FILL (`DeviceIconWellView`) — a dark scrim,
+        /// alpha 0.55 normally. CONTRAST RATIONALE: content-agnostic overlay,
+        /// no stated floor (same precedent as `canvas`/`panel`/`raised` —
+        /// it's a backdrop for the pencil glyph, not itself a foreground
+        /// instrument). Increase Contrast steps alpha to 0.85 for real
+        /// headroom against whatever it sits over.
+        public static var iconWellBadge: NSColor {
+            scrimDynamic(name: "iconWellBadge", hex: 0x000000, alpha: 0.55, highContrastAlpha: 0.85)
+        }
+
+        /// The rim paired with ``iconWellBadge`` — same reasoning, pure
+        /// white, alpha 0.25 normally, stepping to 0.55 under Increase
+        /// Contrast.
+        public static var iconWellBadgeBorder: NSColor {
+            scrimDynamic(name: "iconWellBadgeBorder", hex: 0xFFFFFF, alpha: 0.25, highContrastAlpha: 0.55)
+        }
+
         // MARK: Permission-row instruments (colour-return pass, decisions Q1-Q6/NEW-1)
         //
         // Onboarding's four permission rows (`PermissionRowView`: System Audio,
@@ -831,6 +882,22 @@ private func warmDynamic(name: String,
             hex = increaseContrast ? (lightHighContrast ?? light) : light
         }
         return NSColor(warmSignalHex: hex)
+    }
+}
+
+/// Builds a translucent, theme-INDEPENDENT "scrim" `NSColor` — same `hex` in
+/// both appearances (an overlay meant to read consistently over arbitrary
+/// content, not the app's own light/dark surface), but the ALPHA steps to
+/// `highContrastAlpha` under Increase Contrast for real headroom, resolved
+/// live on every access exactly like `warmDynamic`. `warmDynamic` itself
+/// can't express this: its hex-only branching always resolves to an OPAQUE
+/// color (`NSColor(warmSignalHex:)` hardcodes `alpha: 1`), so a case that
+/// needs a non-1 base alpha AND an Increase-Contrast-only response needs its
+/// own constructor.
+private func scrimDynamic(name: String, hex: UInt32, alpha: CGFloat, highContrastAlpha: CGFloat) -> NSColor {
+    NSColor(name: NSColor.Name("WarmSignal.\(name)")) { _ in
+        let increaseContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        return NSColor(warmSignalHex: hex).withAlphaComponent(increaseContrast ? highContrastAlpha : alpha)
     }
 }
 

@@ -367,18 +367,31 @@ public final class GroupRowView: NSView {
 
     deinit { removeMouseMovedMonitor() }
 
-    public override func draw(_ dirtyRect: NSRect) {
-        // Active group → a subtle accent wash; hover → the standard row hover.
-        let rect = bounds.insetBy(dx: PopoverColumnGrid.selectionHighlightInsetX,
-                                  dy: PopoverColumnGrid.selectionHighlightInsetY)
-        let path = NSBezierPath(roundedRect: rect,
-                                xRadius: PopoverColumnGrid.selectionHighlightCornerRadius,
-                                yRadius: PopoverColumnGrid.selectionHighlightCornerRadius)
+    /// Row highlight colour, `nil` when neither active nor hovered. Same
+    /// two washes and alphas as `DeviceRowView`/`AppRowView`
+    /// (`PopoverColumnGrid.rowSelectionWashAlpha`/`rowHoverWashAlpha`) so all
+    /// three row types present identical interactive-state styling — this row
+    /// used to carry its own one-off alphas (0.15/0.12). Factored out of
+    /// `draw(_:)`, mirroring `AppRowView.currentHighlightColor`, so offscreen
+    /// tests can assert it without rasterizing a draw cycle.
+    private var currentHighlightColor: NSColor? {
         if isActive {
-            NSColor.controlAccentColor.withAlphaComponent(0.15).setFill()
-            path.fill()
+            return Tokens.Color.accent.withAlphaComponent(PopoverColumnGrid.rowSelectionWashAlpha)
         } else if isHovered {
-            NSColor.selectedContentBackgroundColor.withAlphaComponent(0.12).setFill()
+            return Tokens.Color.selectedContentBackground.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha)
+        } else {
+            return nil
+        }
+    }
+
+    public override func draw(_ dirtyRect: NSRect) {
+        if let highlight = currentHighlightColor {
+            let rect = bounds.insetBy(dx: PopoverColumnGrid.selectionHighlightInsetX,
+                                      dy: PopoverColumnGrid.selectionHighlightInsetY)
+            let path = NSBezierPath(roundedRect: rect,
+                                    xRadius: PopoverColumnGrid.selectionHighlightCornerRadius,
+                                    yRadius: PopoverColumnGrid.selectionHighlightCornerRadius)
+            highlight.setFill()
             path.fill()
         }
         nameLabel.textColor = Tokens.Color.label
@@ -412,6 +425,12 @@ public final class GroupRowView: NSView {
 
     /// Whether a transient hover wash is currently active.
     var test_isHovered: Bool { isHovered }
+
+    /// The alpha of the row-highlight fill `draw(_:)` would paint (`nil` when
+    /// neither active nor hovered) — mirrors `AppRowView.test_highlightAlpha`
+    /// so a headless test can assert the resolved wash without rasterizing a
+    /// draw cycle.
+    var test_highlightAlpha: CGFloat? { currentHighlightColor?.alphaComponent }
 
     /// Simulate the pointer entering this row.
     func test_simulateMouseEntered() { setHovered(true) }

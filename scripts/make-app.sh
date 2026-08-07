@@ -169,6 +169,14 @@ if [ -x "$SCRIPT_DIR/housekeeping.sh" ]; then
   "$SCRIPT_DIR/housekeeping.sh" --current "$(cd "$SCRIPT_DIR/.." && pwd)" || true
 fi
 
+# App Intents const-value extraction (below) reads this file to know which
+# protocol conformances — AppIntent, AppEntity, AppShortcutsProvider, ... —
+# to gather from the compiled module. Xcode's own "Extract App Intents
+# Metadata" build phase generates this list itself; we have no Xcode
+# project, so it's ours to maintain by hand — a new App Intents protocol
+# Apple adds later is silently ignored until someone adds it here.
+APPINTENTS_PROTOCOLS_FILE="$SCRIPT_DIR/appintents-protocols.json"
+
 echo "==> Building $EXECUTABLE (release)"
 # --build-system native: Xcode 26+/27 made the new "swiftbuild" engine the
 # default for `swift build`, but it doesn't forward a C target's cSettings
@@ -179,8 +187,26 @@ echo "==> Building $EXECUTABLE (release)"
 # 'CAirPlayEngine'". The deprecated native engine still merges those flags
 # correctly. Pin it explicitly until Package.swift's header search paths are
 # restructured to survive the new engine (or SwiftPM fixes the propagation).
-swift build --build-system native --package-path "$PACKAGE_DIR" -c release --product "$EXECUTABLE"
-BIN_DIR="$(swift build --build-system native --package-path "$PACKAGE_DIR" -c release --show-bin-path)"
+#
+# -emit-const-values plus the two -Xfrontend -const-gather-protocols-file
+# pairs (each spelled as two -Xswiftc hops, since -Xfrontend itself takes one
+# argument at a time) make the compiler write a .swiftconstvalues file per
+# module, recording every conformance to a protocol named in
+# $APPINTENTS_PROTOCOLS_FILE. That file is the App Intents metadata step's
+# input, further down this script. `native` emits no .swiftconstvalues at all
+# without these flags; the default `swiftbuild` engine would emit them for
+# free, but can't build this package (see the paragraph above). Give the
+# --show-bin-path re-invocation the SAME flags, or SwiftPM may re-plan the
+# build and report a different bin path than the one it just built
+# (dev/notes/app-intents-research-2026-08-07.md §2, spike-verified).
+swift build --build-system native --package-path "$PACKAGE_DIR" -c release --product "$EXECUTABLE" \
+  -Xswiftc -emit-const-values \
+  -Xswiftc -Xfrontend -Xswiftc -const-gather-protocols-file \
+  -Xswiftc -Xfrontend -Xswiftc "$APPINTENTS_PROTOCOLS_FILE"
+BIN_DIR="$(swift build --build-system native --package-path "$PACKAGE_DIR" -c release --show-bin-path \
+  -Xswiftc -emit-const-values \
+  -Xswiftc -Xfrontend -Xswiftc -const-gather-protocols-file \
+  -Xswiftc -Xfrontend -Xswiftc "$APPINTENTS_PROTOCOLS_FILE")"
 BUILT_BINARY="$BIN_DIR/$EXECUTABLE"
 test -x "$BUILT_BINARY" || { echo "error: built binary not found at $BUILT_BINARY" >&2; exit 1; }
 
@@ -565,6 +591,75 @@ for diag in AUDIOUTER_STATUS_LABEL AIRPLAYENGINE_LOG_FILE AIRPLAYENGINE_LOG_LEVE
     echo "==> LSEnvironment.$diag = $val (dev diagnostic)"
   fi
 done
+
+# --- App Intents metadata extraction (best-effort) --------------------------
+# SwiftPM has no equivalent of Xcode's "Extract App Intents Metadata" build
+# phase, so without this step the bundle would ship with no Metadata.appintents
+# directory and Shortcuts/Spotlight would never see any AppIntent this app
+# declares. appintentsmetadataprocessor ships inside the toolchain and runs
+# fine outside Xcode; its input is the .swiftconstvalues files the flags on
+# the $EXECUTABLE build above made the compiler emit
+# (dev/notes/app-intents-research-2026-08-07.md §2, spike-verified). Runs
+# before the xattr strip below so it covers these new files too, and before
+# codesign so the signature covers them.
+#
+# MUST STAY NON-FATAL: an Xcode upgrade can move or change this tool before
+# anyone notices, and a toolchain change must never be able to block shipping
+# an unrelated fix — warn loudly and continue on any failure, never exit.
+echo "==> Extracting App Intents metadata (best-effort)"
+APPINTENTS_PROCESSOR="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/bin/appintentsmetadataprocessor"
+if [ -x "$APPINTENTS_PROCESSOR" ]; then
+  APPINTENTS_SRC_LIST="$(mktemp)"
+  APPINTENTS_CONSTVALS_LIST="$(mktemp)"
+  find "$PACKAGE_DIR/Sources/$EXECUTABLE" -name '*.swift' > "$APPINTENTS_SRC_LIST"
+  find "$BIN_DIR" -name '*.swiftconstvalues' > "$APPINTENTS_CONSTVALS_LIST"
+  if [ -s "$APPINTENTS_CONSTVALS_LIST" ]; then
+    # razor: --deployment-target/--target-triple hardcoded to 14.0/arm64 —
+    # matches both the spike-verified invocation and this package's actual
+    # compile target (AudiouterCore/Package.swift: platforms: [.macOS(.v14)]),
+    # which is a different, looser number than this script's own $MIN_MACOS
+    # (14.2 — a stricter *runtime* floor for the process-tap API, enforced
+    # only via Info.plist). Derive the arch from `uname -m` instead if an
+    # Intel build machine is ever needed.
+    if "$APPINTENTS_PROCESSOR" \
+        --output "$RESOURCES_DIR" \
+        --toolchain-dir "$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain" \
+        --module-name "$EXECUTABLE" \
+        --sdk-root "$(xcrun --sdk macosx --show-sdk-path)" \
+        --xcode-version "$(xcodebuild -version | tail -1 | awk '{print $3}')" \
+        --platform-family macOS --deployment-target 14.0 \
+        --target-triple arm64-apple-macos14.0 \
+        --source-file-list "$APPINTENTS_SRC_LIST" \
+        --swift-const-vals-list "$APPINTENTS_CONSTVALS_LIST" --force; then
+      echo "    appintentsmetadataprocessor ran"
+    else
+      echo "WARNING: appintentsmetadataprocessor failed — App Intents will not appear in Shortcuts/Spotlight for this build (continuing; this must never block the bundle)" >&2
+    fi
+  else
+    echo "WARNING: no .swiftconstvalues files under $BIN_DIR — App Intents metadata not extracted (continuing)" >&2
+  fi
+  rm -f "$APPINTENTS_SRC_LIST" "$APPINTENTS_CONSTVALS_LIST"
+else
+  echo "WARNING: appintentsmetadataprocessor not found at $APPINTENTS_PROCESSOR (Xcode toolchain layout may have changed) — App Intents metadata not extracted (continuing)" >&2
+fi
+# Best-effort regression guard: assert the processor actually produced usable
+# metadata rather than a silently empty/missing file — the closest thing to a
+# check this layer can have. Shortcuts.app itself is still the only real
+# verification (dev/notes/app-intents-research-2026-08-07.md §8). A real
+# JSON-key parse, not a grep for a guessed key name: the file nests each
+# intent's own name under "actions" as its dictionary key (e.g.
+# "actions": {"GateProbeIntent": {...}}), not under any "name" field.
+ACTIONSDATA="$RESOURCES_DIR/Metadata.appintents/extract.actionsdata"
+if [ -s "$ACTIONSDATA" ] && python3 -c '
+import json, sys
+with open(sys.argv[1]) as f:
+    data = json.load(f)
+sys.exit(0 if data.get("actions") else 1)
+' "$ACTIONSDATA" 2>/dev/null; then
+  echo "    $ACTIONSDATA present and names at least one intent"
+else
+  echo "WARNING: $ACTIONSDATA missing or names no intent — no App Intent will appear in Shortcuts/Spotlight for this build" >&2
+fi
 
 # --- Strip extended attributes ---------------------------------------------
 # codesign refuses to sign anything carrying AppleDouble/resource-fork-style

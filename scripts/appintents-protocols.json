@@ -1,0 +1,17 @@
+[
+  "AppIntent",
+  "AppEntity",
+  "AppEnum",
+  "AppShortcutsProvider",
+  "EntityQuery",
+  "EntityStringQuery",
+  "EnumerableEntityQuery",
+  "DynamicOptionsProvider",
+  "PersistentlyIdentifiable",
+  "TransientAppEntity",
+  "URLRepresentableEntity",
+  "URLRepresentableEnum",
+  "URLRepresentableIntent",
+  "AssistantSchemaProviding",
+  "IndexedEntity"
+]

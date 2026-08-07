@@ -1309,6 +1309,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         stateQueue.sync { lastSeenSystemVolume }
     }
 
+    /// Publish who owns the volume right now (``BackendEvent/systemVolumeOwnershipChanged(_:)``).
+    ///
+    /// MUST be called on `stateQueue` — it reads `lastSeenSystemVolume`, which is
+    /// only ever mutated there. Takes the default-output UID as a parameter
+    /// rather than reading it, so callers that already resolved it (the
+    /// default-changed path has it in hand) don't pay for a second HAL round trip.
+    private func publishVolumeOwnershipLocked(defaultOutputUID: String?) {
+        emit(.systemVolumeOwnershipChanged(VolumeOwnership.weOwnVolume(
+            defaultOutputUID: defaultOutputUID,
+            systemOutputVolume: lastSeenSystemVolume)))
+    }
+
     public func makeEventStream() -> AsyncStream<BackendEvent> {
         AsyncStream { continuation in
             let key = UUID()
@@ -1366,6 +1378,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.priorDefaultUID = nil
             self.expectedDefaultWriteUID = nil
             self.routingBlockedEmitted = false
+
+            // Seed volume ownership. Without this the only signal is a default-
+            // output CHANGE, so an aggregate left as the default by a previous
+            // session would never announce itself and the key interceptor would
+            // never install — dead volume keys for the whole launch. Safe here and
+            // nowhere earlier: `lastSeenSystemVolume` was populated above, so the
+            // nil arm of the predicate can't misfire on a launch transient.
+            self.publishVolumeOwnershipLocked(
+                defaultOutputUID: self.currentDefaultOutputUIDProvider())
         }
 
         // 1. Wire discovery → the app model + the engine descriptor feed. Every
@@ -1444,12 +1465,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 if !defaultDeviceChanged, let volume, volume != previousVolume {
                     self.emit(.systemVolumeChanged(volume: volume))
                 }
-                // razor: the volume/media KEYS themselves are still delivered by
-                // macOS to whatever the current default output is — they are NOT
-                // intercepted here. A CGEventTap key interceptor that gates on
-                // `AggregateOutputDevice.productUID` (so the keys drive Main Out only
-                // while Audiouter is the Mac's output) is a SEPARATE project,
-                // `docs/plans/PLAN-VOLUME-KEY-INTERCEPTION.md` — not this file's job.
+                // The volume/media KEYS themselves are not intercepted here, and
+                // must not be: the CGEventTap lives in the app target, because a
+                // tap needs a run loop and an Accessibility grant that this layer
+                // has no business owning. What this file DOES owe it is the gate —
+                // `.systemVolumeOwnershipChanged`, published below on every
+                // default-output change. See
+                // `docs/plans/PLAN-VOLUME-KEY-INTERCEPTION.md`.
 
                 // 1d. W3-T3: the default output device itself may have just BECOME (or
                 //     stopped being) AirPlay-class — re-evaluate the double-path guard.
@@ -1469,6 +1491,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     //     it against the aggregate and (re)emit the routing-blocked
                     //     warning for the new steady state.
                     let newDefaultUID = self.currentDefaultOutputUIDProvider()
+
+                    // Volume ownership turns on exactly this UID, so republish it
+                    // BEFORE the echo test below. Our own switch to the aggregate
+                    // is consumed as an echo down there, but it is precisely the
+                    // moment we GAIN ownership — skipping it would leave the keys
+                    // dead through the whole takeover we just performed.
+                    self.publishVolumeOwnershipLocked(defaultOutputUID: newDefaultUID)
+
                     if let pending = self.expectedDefaultWriteUID, pending == newDefaultUID {
                         self.expectedDefaultWriteUID = nil
                     } else {

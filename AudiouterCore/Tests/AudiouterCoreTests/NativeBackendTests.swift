@@ -571,7 +571,10 @@ private func makeBackend(
     takeoverStripDelay: TimeInterval = 0,
     watchdogScheduler: SilenceWatchdogScheduling? = nil,
     silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
-    systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = { false }
+    systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = { false },
+    /// The Mac's default-output UID. `nil` by default — no device, so the
+    /// volume-ownership gate reads "not our aggregate" unless a test says otherwise.
+    currentDefaultOutputUID: @escaping @Sendable () -> String? = { nil }
 ) -> (NativeBackend, SpyEngine, FakeDiscovery) {
     let engine = SpyEngine()
     let discovery = FakeDiscovery()
@@ -593,6 +596,7 @@ private func makeBackend(
         silenceFallbackDelay: silenceFallbackDelay,
         systemDefaultOutputIsAirPlayClass: systemDefaultOutputIsAirPlayClass,
         aggregateControl: NoOpAggregateControl(),
+        currentDefaultOutputUID: currentDefaultOutputUID,
         // D7 (adversarial review, Seamless handoff T3): the real default
         // factory posix_spawns `/usr/bin/log stream`. Every other collaborator
         // this helper touches (`systemVolume`, `ptpHelperActivator`,
@@ -1909,6 +1913,53 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         #expect(systemVolumeEvents(in: events) == [30],
                        "an external volume change must republish for the Main Out mirror")
+    }
+
+    // MARK: Volume ownership — `BackendEvent.systemVolumeOwnershipChanged`
+    //
+    // The gate for the volume-key interceptor. Wrong in either direction it fails
+    // SILENTLY — either the keys stay dead on the aggregate, or the tap installs on
+    // a normal output and double-steps every press on top of the existing
+    // `.systemVolumeChanged` path. Both pinned below, at `start()`, because an
+    // aggregate left as the default by a previous session announces itself ONLY
+    // there: no default-output change ever fires for it.
+
+    /// Our aggregate as the default output means macOS refuses the volume write, so
+    /// the app must take the keys over — EVEN THOUGH the aggregate reports a
+    /// perfectly readable volume here. That lie is the trap: a capability-based gate
+    /// reads it as an ordinary settable device and the takeover never fires.
+    @Test func aggregateAsDefaultOutputPublishesVolumeOwnershipAtStart() async {
+        let volume = FakeSystemVolume(volume: 50, muted: false)
+        let (backend, _, _) = makeBackend(
+            systemVolume: volume,
+            currentDefaultOutputUID: { AggregateOutputDevice.productUID })
+        defer { backend.stop() }
+
+        let events = await collect(from: backend) { events in
+            events.contains { if case .systemVolumeOwnershipChanged = $0 { return true } else { return false } }
+        } after: { backend.start() }
+
+        #expect(events.compactMap {
+            if case .systemVolumeOwnershipChanged(let owned) = $0 { return owned } else { return nil }
+        } == [true], "the aggregate's readable volume must not be mistaken for a settable one")
+    }
+
+    /// A normal settable output leaves the keys with macOS, which already carries
+    /// them into Main via `.systemVolumeChanged`.
+    @Test func normalDefaultOutputPublishesNoVolumeOwnershipAtStart() async {
+        let volume = FakeSystemVolume(volume: 50, muted: false)
+        let (backend, _, _) = makeBackend(
+            systemVolume: volume,
+            currentDefaultOutputUID: { "BuiltInSpeakerDevice" })
+        defer { backend.stop() }
+
+        let events = await collect(from: backend) { events in
+            events.contains { if case .systemVolumeOwnershipChanged = $0 { return true } else { return false } }
+        } after: { backend.start() }
+
+        #expect(events.compactMap {
+            if case .systemVolumeOwnershipChanged(let owned) = $0 { return owned } else { return nil }
+        } == [false], "a settable output must leave the keys to macOS")
     }
 
     /// A DEFAULT-DEVICE SWITCH (speakers → AirPods) also reports a fresh volume/mute,

@@ -235,6 +235,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var mediaKeyController = MediaKeyController(
         remoteControl: permissionProviders.remoteControl)
 
+    /// Catches the hardware volume keys while the Mac's default output cannot take
+    /// a volume write — our aggregate, or plain HDMI — and drives Main Out with
+    /// them, because macOS's own key handling is dead in exactly that state.
+    /// Installed and torn down by `.systemVolumeOwnershipChanged`; shares the
+    /// Accessibility seam with `mediaKeyController` so there is one grant path.
+    private lazy var volumeKeyInterceptor: VolumeKeyInterceptor = {
+        let interceptor = VolumeKeyInterceptor(remoteControl: permissionProviders.remoteControl)
+        interceptor.onAction = { [weak self] action in
+            guard let self else { return }
+            switch action {
+            case .setMainVolume(let volume):
+                // The read-back arm: bring Main into agreement and re-push every
+                // dependent gain, writing NO hardware — which is right here, since
+                // the premise is that this output cannot take a volume write.
+                self.groupController.applyExternalSystemVolume(volume)
+            case .toggleMainMute:
+                self.groupController.setMainOutMuted(!self.groupController.isMainOutMuted)
+            }
+            // This path never enters the backend event stream, so nothing else
+            // will repaint the master readout for it.
+            self.repaintFromCurrentState()
+        }
+        interceptor.onAccessibilityMissing = { [weak self] in
+            self?.log("volume keys: Accessibility not granted — they stay dead until it is")
+        }
+        return interceptor
+    }()
+
     /// Control-panel prototype (design review 2026-07-18): route Groups through a
     /// sticky floating `NSPanel` anchored under the menu-bar item instead of a
     /// standalone window, gated by `AIRPLAY_CONTROL_PANEL=1`. Off by default, so
@@ -1400,7 +1428,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popoverController.setRoutingBlockedNeedsDefault(active)
             log("event: \(describe(event))")
             return
+        case .systemVolumeOwnershipChanged(let weOwnIt):
+            // The Mac's default output can no longer take a volume write (our
+            // aggregate, or plain HDMI), so macOS's own key handling is dead and
+            // the app has to catch the keys itself. Install or tear down the tap
+            // to match; no device model changed — handle it and return.
+            volumeKeyInterceptor.setOwnsVolume(weOwnIt)
+            volumeKeyInterceptor.setCurrentMainVolume(groupController.mainOutMasterVolume)
+            log("event: \(describe(event))")
+            return
         }
+        repaintFromCurrentState()
+    }
+
+    /// Push the current model out to every surface that shows it. The tail of
+    /// `apply(_:)` for most events, and also what the volume-key interceptor calls
+    /// after moving Main — that path never enters the event stream, so without
+    /// this the readouts would sit stale until the next unrelated backend event.
+    private func repaintFromCurrentState() {
         // Establish the out-of-the-box default (current device selected ⇒
         // passthrough) once the fleet is known (SPEC §9b). No-op after the first
         // time / if a persisted selection was loaded.
@@ -1413,6 +1458,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // and the symbol goes accent-coloured while anything is actually leaving
         // the Mac (Main Out membership OR a live per-app redirect).
         statusItemController.updateMasterVolume(popoverController.statusMasterVolume)
+        // Keep the interceptor's step-from value current. It can't read Main
+        // synchronously from a tap callback, so the value has to be pushed, and
+        // this repaint already runs on every event that could have moved it.
+        volumeKeyInterceptor.setCurrentMainVolume(groupController.mainOutMasterVolume)
         statusItemController.updateStreamingState(devices: devices, liveRoutedAppNames: routedAppNamesByDeviceID)
         // Keep the mixer window (if open) in lockstep with the same snapshot.
         mixerWindowController?.update(devices: devices)
@@ -1434,6 +1483,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "appLevel(\(bundleID), \(rms))"
         case .systemVolumeChanged(let volume):
             return "systemVolumeChanged(\(volume)) — syncing Main Out"
+        case .systemVolumeOwnershipChanged(let weOwnIt):
+            return weOwnIt
+                ? "systemVolumeOwnershipChanged(true) — output takes no volume write, intercepting the keys"
+                : "systemVolumeOwnershipChanged(false) — macOS owns the keys again, tap removed"
         case .routedApps(let deviceID, let appNames):
             return "routedApps(\(deviceID), [\(appNames.joined(separator: ", "))])"
         case .routedAppRunning(let bundleID, let isRunning):

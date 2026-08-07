@@ -278,6 +278,22 @@ banners, sidebar. This is a color theme only — no Circuit UI components.
 | `destructive` / `warning` | `fg/danger` / `fg/warning` |
 | `selectedContentBackground` (hover wash @10%) | `fg/normal` |
 
+**Contrast, measured 2026-08-07** (instruments vs `bg/normal` #FBFBF9; 3:1 is
+the WCAG 1.4.11 bar for graphical objects): gold **3.53** (up from 3.20 on the
+old warm-paper canvas — Circuit's lighter ground gave every dark instrument
+headroom, nothing regressed), failure 5.39, caution 3.86, faderThumb 4.02,
+ringConnected 3.15, faderRim 3.13 — all pass. Below the bar: **ember 2.39**
+(pre-existing, ~2.2 on warm paper; it carries "idle rail / not tapped", so it
+is the one instrument worth darkening in the light contrast pass), plus
+meterTrack 1.77, glow 1.78, dotSocket 1.37 — those three are intentionally
+quiet backdrops, not signal-bearers. Circuit's own text tokens all pass body
+contrast (fg/normal 16.4, fg/subtle 5.48, fg/placeholder 4.67).
+
+**Figma light is AHEAD of code.** `Tokens.swift`'s light/lightHC columns still
+hold the original warm-paper values (canvas #F4EFE7 …), so the shipping app is
+unchanged — Figma holds the proposal until those Circuit hexes are pulled
+across. The warm-paper light values remain recoverable from the code.
+
 `accent` deliberately KEEPS the macOS system accent in light (Alec's call).
 Any frame showing light mode must also pin `Theme · Circuit` → Light (`79:0`)
 so the alias chain resolves (all light twins already do). Pulling light values

@@ -64,7 +64,13 @@ Variable names (each resolvable by name; IDs ledgered in the build state):
   only — it cannot be a Figma mode.
 - **Layout collection** — every `PopoverColumnGrid` constant, slash-grouped:
   `insets/ rail/ meter/ mainAudioRing/ columns/ anchors/ feed/ statusBadge/
-  halo/ rows/ gaps/ fader/ field/ alphas/ surfaces/`.
+  halo/ rows/ gaps/ fader/ field/ alphas/ surfaces/ sync/`. The `sync/` group
+  (added 2026-08-07, BT-OFFSET-UI) mirrors the SYNC-column MARK:
+  `syncStepperButtonWidth 15 · syncValueFieldWidth 32 · syncControlGap 2 ·
+  syncAlignButtonWidth 18 · syncAlignGap 4 · btFeedReserveWidth 48 ·
+  btFeedToSyncGap 4 · syncClusterWidth 88 · syncTrailing 66 ·
+  syncCenterFromTrailing 110` (the last three are the code's derived vars,
+  stored as their computed values).
 
 ### Pages
 
@@ -125,13 +131,13 @@ Variable names (each resolvable by name; IDs ledgered in the build state):
 | ControlPanelShell | `56:11` | `AudiouterSharedUI/ControlPanelBackingView.swift` |
 | Banner | `56:28` | `AudiouterPopoverUI/SilenceFallbackBannerView.swift` (also `SystemAirPlayNoteBannerView.swift`) |
 | ConnectionDiagnosis | `56:29` | `AudiouterPopoverUI/ConnectionDiagnosisView.swift` |
-| DeviceRow | `61:258` | `AudiouterSharedUI/DeviceRowView.swift` |
+| DeviceRow | `61:258` (+6 BT variants 2026-08-07: `BT connected + sync` `103:297` · `BT connected idle (non-member)` `107:192` · `BT disconnected (greyed — click connects)` `104:146` · `BT connecting (unavailable — reconnect in flight)` `104:196` · `BT failed · Not paired` `105:168` · `BT failed · Connected elsewhere` `105:220`) | `AudiouterSharedUI/DeviceRowView.swift` |
 | MainOutRow | `64:264` | `AudiouterPopoverUI/MainOutRowView.swift` |
 | AppRow | `65:150` | `AudiouterSharedUI/AppRowView.swift` |
 | GroupRow | `66:771` | `AudiouterPopoverUI/GroupRowView.swift` |
 | MembershipRow | `66:833` | `AudiouterWindowUI/MembershipRowView.swift` |
 | SectionHeader | `67:19` | `AudiouterPopoverUI/PopoverPanelViewController.swift` |
-| SubsectionHeader | `67:20` | `AudiouterPopoverUI/PopoverPanelViewController.swift` |
+| SubsectionHeader | `101:79` (now a set: `columnTitle=None` `67:20` · `columnTitle=Sync` `101:76`) | `AudiouterPopoverUI/PopoverPanelViewController.swift` |
 | CardNote | `67:22` | `AudiouterPopoverUI/PopoverPanelViewController.swift` |
 | HeaderBar | `67:24` | `AudiouterPopoverUI/PopoverHeaderView.swift` |
 | ApplicationsFooter | `67:38` | `AudiouterPopoverUI/PopoverController.swift` |
@@ -142,7 +148,7 @@ Variable names (each resolvable by name; IDs ledgered in the build state):
 
 | Screen | Node ID | Swift source |
 |---|---|---|
-| Popover | `68:2` | `AudiouterPopoverUI/PopoverPanelViewController.swift` |
+| Popover | `68:2` (887 tall since the Bluetooth Devices subsection, 2026-08-07; LIGHT twin `111:981`; OUTPUT DEVICES "+" menu `109:981` / LIGHT `111:2222`) | `AudiouterPopoverUI/PopoverPanelViewController.swift` |
 | Groups window | `70:2` | `AudiouterWindowUI/MixerWindowController.swift` + `GroupEditorViewController.swift` + `SidebarViewController.swift` |
 | Settings · General | `71:287` | `AudiouterSettingsUI/GeneralSettingsViewController.swift` |
 | Settings · Appearance | `71:342` | `AudiouterSettingsUI/AppearanceSettingsViewController.swift` |
@@ -190,6 +196,7 @@ glow shadow (glow color, radius 3.5, opacity .6) from `RouteArmedDotView.swift`.
 | Accents/Red | `883b5d7ccd148ee111e83d94fb40c8ccd1234f27` |
 | Accents/Orange | `217ec9fc3d0cba151f9fd834caebcf3a2209f515` |
 | Accents/Blue | `ff84b0ff8ceb09a62d86ed2e9f119a1aa7c6b8cb` |
+| Text Field (component set) | `5addd9d6fd1bbe1b5cacd6969ae86726f6b23946` (the BT rows' SYNC value field — `NSTextField .roundedBezel` small) |
 
 Checkbox, Switch, Radio and Button instances also come from the macOS 27 kit;
 their keys were not ledgered — find them by name in the kit library
@@ -353,6 +360,53 @@ Any frame showing light mode must also pin `Theme · Circuit` → Light (`79:0`)
 so the alias chain resolves (all light twins already do). Pulling light values
 to code now means pulling the resolved Circuit hexes into `Tokens.swift`'s
 light/lightHC columns.
+
+## Upkeep pass 2026-08-07 — Bluetooth UI (BT-UI / BT-OFFSET-UI)
+
+Mirrored the shipped Bluetooth work (worktree `foreman-roadmap-004-bt` @
+`ff645565` + the locked UI spec in `PLAN-UNIVERSAL-SYNC.md`):
+
+- **`sync/` Layout variables** (10, listed in the collection bullet above), all
+  with iOS code syntax; the Foundations · Layout page gained a BT
+  trailing-slot diagram (`101:63`) and the summary text now carries the sync
+  numbers.
+- **DeviceRow BT variants** (node IDs in the components table): hifispeaker.2.fill
+  placeholder glyph; SYNC cluster = − / bare-ms value / + (frames named
+  `SYSTEM: NSButton accessoryBar`, same stand-in convention as the mute
+  button) + align-by-ear `metronome.fill` placeholder; the value field is a
+  real macOS 27 kit **Text Field** instance (key above), `State=Disabled` on
+  read-only rows. The BT FEED pill **right-aligns inside the row** (frame
+  `FEED pills (BT — right-aligned into btFeedReserveWidth, clips overlong)`),
+  deliberately NOT a FeedPill variant — the code puts the right-alignment in
+  `DeviceRowView`'s constraints, `FeedPillView` is unchanged. Overlong pills
+  ("Unavailable", "Not paired", "Connected elsewhere") honestly clip at the
+  48 pt reserve, as the code's mask does.
+- **SubsectionHeader** is now a set (`columnTitle=None|Sync`); the SYNC title
+  reuses the card header's column-label voice, centered
+  `syncCenterFromTrailing` from trailing.
+- **Screen · Popover** gained the "Bluetooth Devices" subsection (4
+  recency-sorted demo rows: playing+sync, connected idle, greyed
+  disconnected, failed "Not paired"), a gold rail extension to the BT playing
+  row (`107:1523` — the new lowest selected node), and the OUTPUT DEVICES "+"
+  **NSMenu frame** (`109:981`, precedent: the Secondary-click menu `73:14`)
+  with "Save Selected Devices as group" + "Pair a Bluetooth speaker…". Light
+  twins re-cloned + re-pinned per the rubric (`111:981`, menu `111:2222`).
+- **Verification**: no BT snapshots exist under `dev/notes/*-snapshots/` yet —
+  structure was verified against the code + the locked spec instead
+  (geometry from `PopoverColumnGrid`, states from `DeviceRowView.updateBus`/
+  `updateFeedText`, headlines from `ConnectionState.swift`).
+- **Repair found in passing**: the dark Popover's `WarmCanvas` instance
+  (`68:3`) carried a stray explicit `Color · Warm Signal → Light` mode AND a
+  fill bound directly to Circuit `bg/subtle` — the dark screen rendered on the
+  light canvas (Circuit's default mode is Light). Rebound the fill to the
+  Warm Signal `canvas` variable and cleared the stray pin; dark now resolves
+  the authored warm near-black, the light twin still resolves Circuit
+  `bg/normal` through its pins, per the mapping table.
+- No new color literals: the cluster's glyphs bind `secondaryLabel`, the
+  active align tint is the `accent` alias, failure pills reuse `failure` —
+  all pre-measured tokens; the kit Text Field re-themes through the kit
+  collection's mode. The one hand-adjusted literal is the "+" menu twin's
+  chrome fill, copied from the Secondary-click menu · LIGHT precedent.
 
 ## Pull direction (Figma → code)
 

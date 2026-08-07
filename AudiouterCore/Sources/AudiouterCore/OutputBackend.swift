@@ -325,6 +325,26 @@ public protocol OutputBackend: AnyObject {
     func setVolume(_ volume: Int, for id: String)
     func setMuted(_ muted: Bool, for id: String)
 
+    /// Attach a level to `id`'s NEXT connect, so the device comes up at that
+    /// level instead of the app-wide connect default.
+    ///
+    /// The level must land AS PART OF the connect, not after it: setting a
+    /// volume once the device is already streaming leaves a window where it
+    /// plays at the default first, which is the whole hazard this exists to
+    /// close (an automation connecting a speaker at 3 a.m. and blasting the
+    /// house before the correction lands). So this only ARMS a value —
+    /// ``setOutputSet(_:)`` consumes it when it next adds `id`.
+    ///
+    /// Armed for exactly one connect and then consumed. Arming an id that is
+    /// never subsequently connected is harmless; arming twice before a connect
+    /// keeps the later value.
+    ///
+    /// Introduced for the App Intents actions (roadmap 035), where an
+    /// automation states its own level rather than inheriting whatever the
+    /// connect default happens to be. Default no-op: only ``NativeBackend``
+    /// puts levels on a wire.
+    func armConnectVolume(_ volume: Int, for id: String)
+
     /// Replace the output set with exactly these devices. Activating a saved
     /// group calls this with the group's members — "one active group at a time,"
     /// groups behave like output presets (SPEC.md §9 interaction model).
@@ -410,6 +430,11 @@ public extension OutputBackend {
     /// is unknown. Only ``NativeBackend`` overrides them.
     func setMasterGain(mainOut: Int, group: Int, mirrorToSystemVolume: Bool) {}
     var systemOutputVolume: Int? { nil }
+
+    /// Same reason as ``setMasterGain(mainOut:group:mirrorToSystemVolume:)``:
+    /// a backend with no wire has no connect level to seed, so arming one is
+    /// simply not applied anywhere. Only ``NativeBackend`` overrides this.
+    func armConnectVolume(_ volume: Int, for id: String) {}
 }
 
 /// The optional latency-tuning capability (PLAN-LATENCY-SETTING.md). A backend

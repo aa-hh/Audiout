@@ -4,14 +4,12 @@ import SwiftUI
 import AudiouterProtocol
 
 /// Tab 1: which Mac is connected, Main Out (picker + master volume/mute),
-/// and every speaker. The only state this view owns locally is the Main Out
-/// master slider's in-drag echo (`localMasterVolume`) — everything else comes
-/// straight from `session.snapshot`, mirroring the same local-echo-while-
-/// dragging policy `DeviceRowView` uses per-row.
+/// and every speaker. This view owns no local state at all — every value it
+/// renders comes straight from `session.snapshot`. The in-drag slider echoes
+/// live one level down, in ``MainOutRow`` and ``DeviceRowView``, so each dies
+/// with the list it's in.
 struct SpeakersView: View {
     let session: any MacSessionProtocol
-
-    @State private var localMasterVolume: Double?
 
     var body: some View {
         NavigationStack {
@@ -23,7 +21,9 @@ struct SpeakersView: View {
                     List {
                         Section("Main Out") {
                             MainOutPicker(snapshot: snapshot, session: session)
-                            masterRow(snapshot)
+                            MainOutRow(masterVolume: snapshot.mainOutMasterVolume,
+                                       isMuted: snapshot.mainOutMuted,
+                                       session: session)
                         }
 
                         Section("Speakers") {
@@ -107,41 +107,85 @@ struct SpeakersView: View {
         case .idle, .disconnected: return .secondary
         }
     }
+}
 
-    // MARK: Main Out master row
+// MARK: - Main Out master row
 
-    private func masterRow(_ snapshot: Snapshot) -> some View {
+/// Main Out's mute + master volume. A leaf view for the same reason
+/// ``DeviceRowView`` is one: the in-drag echo (`localVolume`) has to be scoped
+/// to the row so it dies with the list whenever the snapshot goes away
+/// (backgrounding, a keepalive drop, a reconnect). Held on `SpeakersView` —
+/// which lives as long as the app does — a drag whose release callback never
+/// arrived left the echo set forever, and the thumb then ignored every later
+/// snapshot the Mac sent.
+///
+/// The echo now outlives the RELEASE too — that's what keeps the thumb off the
+/// ~50ms rubber-band back to the pre-release value — which is only safe
+/// because it stays bounded: the next Main Out snapshot clears it, and a
+/// disconnect or a tab change takes the whole list, and this view with it. The
+/// other three sliders still clear on release; this is the one that was
+/// reported.
+struct MainOutRow: View {
+    let masterVolume: Int
+    let isMuted: Bool
+    let session: any MacSessionProtocol
+
+    @State private var localVolume: Double?
+    /// True from the drag's first tick to its release. While it's true the
+    /// Mac's echoes must NOT clear `localVolume` — they arrive ~50ms behind
+    /// the finger and would drag the thumb backwards under it.
+    @State private var isDragging = false
+
+    /// What the thumb shows: the finger while a drag is in flight (and the
+    /// value it was released at until the Mac echoes it back), the Mac's
+    /// value whenever neither applies.
+    static func thumbValue(local: Double?, server: Int) -> Double {
+        local ?? Double(server)
+    }
+
+    var body: some View {
         HStack(spacing: 12) {
             Button {
-                session.setMainOutMuted(!snapshot.mainOutMuted)
+                session.setMainOutMuted(!isMuted)
             } label: {
-                Image(systemName: snapshot.mainOutMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
             }
             .buttonStyle(.borderless)
-            .accessibilityLabel(snapshot.mainOutMuted ? "Unmute Main Out" : "Mute Main Out")
+            .accessibilityLabel(isMuted ? "Unmute Main Out" : "Mute Main Out")
 
             Slider(
                 value: Binding(
-                    get: { localMasterVolume ?? Double(snapshot.mainOutMasterVolume) },
+                    get: { Self.thumbValue(local: localVolume, server: masterVolume) },
                     set: { newValue in
-                        localMasterVolume = newValue
+                        localVolume = newValue
                         session.setMainOutMasterVolume(Int(newValue.rounded()), isFinal: false)
                     }
                 ),
                 in: 0...100,
                 step: 1,
                 onEditingChanged: { editing in
-                    // Same shape as every other slider: local echo while
-                    // dragging, coalesced sends, always send the release
-                    // value — no drag bracket (Main is a stateless set).
+                    // Local echo while dragging, coalesced sends, always send
+                    // the release value — no drag bracket (Main is a
+                    // stateless set).
+                    isDragging = editing
                     guard !editing else { return }
-                    let final = Int((localMasterVolume ?? Double(snapshot.mainOutMasterVolume)).rounded())
+                    let final = Int(Self.thumbValue(local: localVolume, server: masterVolume).rounded())
                     session.setMainOutMasterVolume(final, isFinal: true)
-                    localMasterVolume = nil
+                    // The echo is ~50ms behind, so clearing the echo HERE (as
+                    // the other rows still do) rubber-bands the thumb to the
+                    // pre-release value for that beat. Hold it instead and let
+                    // the snapshot below clear it.
                 }
             )
+            .onChange(of: masterVolume) {
+                // The bound on the hold: any snapshot that moves Main Out ends
+                // it, so a released — or stranded — echo can never outlive one
+                // round trip, and the thumb goes back to following the Mac.
+                guard !isDragging else { return }
+                localVolume = nil
+            }
             .accessibilityLabel("Main Out volume")
-            .accessibilityValue("\(Int(localMasterVolume ?? Double(snapshot.mainOutMasterVolume))) percent")
+            .accessibilityValue("\(Int(Self.thumbValue(local: localVolume, server: masterVolume))) percent")
         }
     }
 }

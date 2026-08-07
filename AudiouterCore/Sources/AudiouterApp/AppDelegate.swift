@@ -1378,11 +1378,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 await self.scheduleCompanionBroadcast()
             })
 
-        // Group/Main-Out/mute state — the broadest snapshot input. This
-        // closure is otherwise unclaimed (both UI surfaces repaint via
-        // `update(devices:)` from `apply(event:)`, not via this hook).
+        // Group/Main-Out/mute state — the broadest snapshot input, and the only
+        // signal behind a USER-driven Main Out master move: that emits no
+        // `BackendEvent`, so `apply(event:)`'s repaint tail never runs for one (a
+        // phone-driven master change left the Mac's popover frozen until some
+        // unrelated device event arrived). Repaint the two Mac surfaces that read
+        // the master here, then broadcast. Both repaints are idempotent reads of
+        // committed state. The volume-key arm is the exception that costs a second
+        // pass — it rides the `.systemVolumeChanged` handled below, which repaints
+        // too — and `GroupController` keeps that to the master's change edge.
         groupController.onStateDidChange = { [weak self] in
-            self?.scheduleCompanionBroadcast()
+            guard let self else { return }
+            self.popoverController.refreshMainOutMaster()
+            self.statusItemController.updateMasterVolume(self.popoverController.statusMasterVolume)
+            self.scheduleCompanionBroadcast()
         }
 
         // The denylist feeds `addableApps`/`appRoutes` filtering. Fires on the

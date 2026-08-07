@@ -11,17 +11,18 @@ import AudiouterProtocol
 /// Volume slider policy: while dragging, the thumb tracks `localVolume` (set
 /// on every tick) rather than `device.volume` from the snapshot, because
 /// device-volume effects come back through the ~50ms coalescer and would
-/// otherwise fight the user's finger. `localVolume` clears on release so the
-/// slider reconciles from the next snapshot like any other row.
+/// otherwise fight the user's finger. `localVolume` clears on release, so the
+/// slider reconciles from the next snapshot — and rubber-bands to the
+/// pre-release value for that one beat, which ``MainOutRow`` no longer does.
 ///
-/// `isAvailable == false` means the device is gone from the network entirely
-/// (distinct from `connection.state`, which can be "failed"/"off" while still
-/// `isAvailable`) — dimmed AND its controls disabled, since there's nothing
-/// on the other end to apply them. For a device that IS available but not
-/// `connected` (e.g. "off"/"connecting"), volume/mute stay enabled: the Mac
-/// refuses those commands for a non-connected device, and that refusal
-/// already surfaces as a toast (`ToastCenter`) rather than a pre-disabled
-/// control silently doing nothing.
+/// Volume and mute are enabled by the same rule the Mac's own row uses (see
+/// ``isControllable``); the select toggle is enabled by the Mac's separate,
+/// weaker checkbox rule (availability alone). `isAvailable == false` means the
+/// device is gone from the network entirely (distinct from
+/// `connection.state`, which can be "failed"/"off" while still `isAvailable`)
+/// — dimmed AND everything disabled, since there's nothing on the other end
+/// to apply them. A control the rule disables says WHY when VoiceOver reads
+/// it (see ``disabledReason(for:controllable:)``).
 struct DeviceRowView: View {
     let device: DeviceState
     let session: any MacSessionProtocol
@@ -29,7 +30,75 @@ struct DeviceRowView: View {
     @State private var localVolume: Double?
     @State private var showFailureDetail = false
 
-    private var isFailed: Bool { device.connection.state == "failed" }
+    /// D9's failure card takes the whole control slot: a `"failed"` device
+    /// gets headline / details / Try Again INSTEAD of volume + mute. This is
+    /// where the phone's row deliberately parts from the Mac's, which keeps a
+    /// failed row's controls and only desaturates them.
+    static func showsFailureCard(_ device: DeviceState) -> Bool {
+        device.connection.state == "failed"
+    }
+
+    private var isFailed: Bool { Self.showsFailureCard(device) }
+
+    /// The Mac's rule for the volume slider and the mute button, mirrored
+    /// exactly (AudiouterSharedUI/DeviceRowView: `device.isAvailable &&
+    /// controllable`, where `PopoverController` passes `controllable` =
+    /// `isSpeakerSelected(id) || isRedirectTarget(id)`, and a redirect target
+    /// is any app route pointed at this device).
+    ///
+    /// Connection state is deliberately absent, because it's absent from the
+    /// Mac's rule too — there it only dims the controls. So an available but
+    /// not-yet-connected device stays draggable and the server's refusal
+    /// (`CompanionCommandDispatcher.deviceWriteRefusal`, which gates on
+    /// connection state ALONE) surfaces as a toast (`ToastCenter`). A
+    /// `"failed"` device is this side's exception: the row swaps both
+    /// controls for the failure card (``showsFailureCard(_:)``), so the
+    /// rule's answer for it never reaches a control at all.
+    ///
+    /// Two known gaps against the Mac, both judged harmless:
+    /// - TRANSIENT: excluding an app filters its route off the wire
+    ///   immediately (`CompanionSnapshotBuilder`), while the Mac's own row
+    ///   keeps counting that route until the coordinating layer prunes it —
+    ///   so for that beat the phone greys a slider the Mac still has live.
+    ///   Self-corrects on the next snapshot.
+    /// - BY DESIGN: this rule is STRICTER than the server's refusal gate. A
+    ///   connected-but-unselected device's write would be ACCEPTED, so the
+    ///   greyed control has no refusal behind it to toast. It follows the
+    ///   Mac's row rather than the server's — and the row's own Select switch
+    ///   sits directly above it, with the spoken reason below covering
+    ///   VoiceOver, so the control is never dead-and-silent.
+    static func isControllable(_ device: DeviceState, appRoutes: [AppRouteState]) -> Bool {
+        guard device.isAvailable else { return false }
+        return device.isSelected || appRoutes.contains {
+            $0.destinationKind == "device" && $0.deviceID == device.id
+        }
+    }
+
+    /// Why volume and mute are disabled, or `nil` while they're live. The Mac
+    /// composes this reason into its row's own label (the membership clause in
+    /// `AudiouterSharedUI/DeviceRowView.configureAccessibility`); the phone has
+    /// no row-level label — each control is its own element — so the clause
+    /// rides on the two controls the rule disables instead. Worded in the
+    /// phone's own vocabulary ("Select", "Main Out" — what its visible
+    /// controls say), and spoken exactly once, never duplicated onto a hint.
+    static func disabledReason(for device: DeviceState, controllable: Bool) -> String? {
+        if controllable { return nil }
+        return device.isAvailable ? "not selected for Main Out" : "unavailable"
+    }
+
+    /// This row's answer to that rule. No snapshot yet means no known routes,
+    /// so the redirect half is false — never assume controllable, that would
+    /// be inventing state.
+    private var controlsEnabled: Bool {
+        Self.isControllable(device, appRoutes: session.snapshot?.appRoutes ?? [])
+    }
+
+    /// The reason as a trailing label clause, matching how the Mac appends its
+    /// own clauses (`", \(state)"`). Empty when there's nothing to explain.
+    private var disabledClause: String {
+        Self.disabledReason(for: device, controllable: controlsEnabled)
+            .map { ", \($0)" } ?? ""
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -90,8 +159,9 @@ struct DeviceRowView: View {
                 Image(systemName: device.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
             }
             .buttonStyle(.borderless)
-            .disabled(!device.isAvailable)
-            .accessibilityLabel(device.isMuted ? "Unmute \(device.name)" : "Mute \(device.name)")
+            .disabled(!controlsEnabled)
+            .accessibilityLabel(
+                (device.isMuted ? "Unmute \(device.name)" : "Mute \(device.name)") + disabledClause)
 
             Slider(
                 value: Binding(
@@ -110,8 +180,8 @@ struct DeviceRowView: View {
                     localVolume = nil
                 }
             )
-            .disabled(!device.isAvailable)
-            .accessibilityLabel("\(device.name) volume")
+            .disabled(!controlsEnabled)
+            .accessibilityLabel("\(device.name) volume\(disabledClause)")
             .accessibilityValue("\(Int(localVolume ?? Double(device.volume))) percent")
         }
     }

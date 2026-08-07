@@ -576,6 +576,34 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         }
     }
 
+    /// Repaint the Main Out readouts from the model, for a master move that did
+    /// NOT originate in this popover — a phone command (T7), or the Mac's own
+    /// volume keys. A user-driven master change emits no `BackendEvent` (see
+    /// `GroupController.setMain`), so `update(devices:)`'s repaint tail never
+    /// runs for one; `GroupController.onStateDidChange` calls this instead.
+    /// In-place only, never a `rebuild()` (audit B8), and it only READS the
+    /// controller — no re-entrant mutation, unlike `update(devices:)`. Mid-drag
+    /// thumb writes are already suppressed by `MainOutRowView`/`DeviceRowView`'s
+    /// own drag guards.
+    public func refreshMainOutMaster() {
+        // Closed: nothing to repaint — every open goes through `rebuildForOpen()`,
+        // whose `rebuild()` re-applies the Main Out row from the model.
+        guard isEffectivelyShown else { return }
+        refreshMainOutRow()
+        // Deliberately NOT `refreshDeviceRows()`: no device row's paint depends on
+        // the master EXCEPT the Mac's own while `localRowDrivesMain`, where the row
+        // and Main are one control and `applySelectionState` overlays Main onto it.
+        // The full sweep would re-run the energize reconcile, the rail extents and
+        // the card accessory on every step of a volume-key hold, for one row's
+        // number. (Everything else this hook can also announce — mute, membership,
+        // groups — reaches the rows through the backend echo and its
+        // `update(devices:)` tail, as it did before this repaint existed.)
+        guard groupController?.localRowDrivesMain == true,
+              let local = devicesByID.values.first(where: \.isLocalDevice),
+              let row = deviceRowsByID[local.id] else { return }
+        applySelectionState(to: row, device: local)
+    }
+
     /// Record a routed-app process-lifecycle change (T4, `BackendEvent.routedAppRunning`).
     /// Called by the host (`AppDelegate`) directly — the signal has no home on
     /// `Device` and can't ride `update(devices:)`. Stores the offline state and

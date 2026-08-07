@@ -3,6 +3,7 @@
 import Foundation
 import Testing
 import AppKit
+import AudiouterProtocol
 @testable import AudiouterCore
 @testable import AudiouterPopoverUI
 @testable import AudiouterSharedUI
@@ -281,6 +282,99 @@ import AppKit
         #expect(controller.mainOutMasterVolume == 30, "master volume is the dragged value")
         #expect(backend.devices.first { $0.id == "office" }?.volume == 40, "member volumes remain unchanged")
         #expect(backend.devices.first { $0.id == "homepod-bed" }?.volume == 80, "member volumes remain unchanged")
+    }
+
+    // MARK: A master move from OFF this Mac (the phone)
+
+    /// A phone's `setMainOutMasterVolume` produces NO `BackendEvent`, so nothing
+    /// calls `update(devices:)` and the popover's normal repaint tail never runs
+    /// for it. `GroupController.onStateDidChange` is the only announcement, and
+    /// `AppDelegate` chains `refreshMainOutMaster()` onto it. Without that pair
+    /// the Mac's slider sat frozen at its old value until some unrelated device
+    /// event happened to arrive. The hook is wired here the way
+    /// `AppDelegate.wireCompanionServer()` wires it (that file isn't reachable
+    /// from tests), and the move is driven through the REAL dispatcher.
+    @Test func aPhoneMasterMoveRepaintsTheMainOutRowWithNoBackendEvent() async throws {
+        let (popover, controller, _) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)   // a real output — not the passthrough case
+        popover.test_selectMainOut(.selectedDevices); await drain()
+        popover.test_dragMainOutMaster(to: 20); await drain()
+        #expect(popover.test_mainOutRow.test_masterValue == 20, "precondition: the row starts where the Mac left it")
+
+        controller.onStateDidChange = { popover.refreshMainOutMaster() }
+        let dispatcher = CompanionCommandDispatcher(
+            groupController: controller,
+            appRouting: tempAppRoutingController(),
+            settings: AppSettings(),
+            isExcluded: { _ in false },
+            setLocalPlaybackVolume: { _, _ in },
+            applyStartBuffer: { _ in })
+
+        #expect(dispatcher.execute(.setMainOutMasterVolume(volume: 73)).applied)
+        await drain()
+
+        #expect(controller.mainOutMasterVolume == 73, "precondition: the model took the phone's value")
+        #expect(popover.test_mainOutRow.test_masterValue == 73,
+                       "the Main Out slider follows a phone-originated master move with no backend event behind it")
+        // The READOUT, not `statusMasterVolume` — that reads the controller
+        // straight through (see its doc), so asserting it here would pass against
+        // a popover that never repainted at all. The label is a real painted
+        // surface and moves only if the repaint ran.
+        #expect(popover.test_mainOutRow.test_masterReadout == "73%",
+                       "and the readout beside it, not just the thumb")
+    }
+
+    /// The passthrough half of the same repaint: with nothing but the Mac
+    /// selected, the Mac's DEVICE row slider reads Main, so a phone-driven master
+    /// move has to move that row too — not just the Main Out row.
+    @Test func aPhoneMasterMoveRepaintsTheMacRowInPassthrough() async throws {
+        let (popover, controller, _) = try await makePopover()
+        popover.test_selectMainOut(.selectedDevices); await drain()
+        #expect(controller.localRowDrivesMain, "precondition: nothing but the Mac is selected")
+        // A known starting master, so the move below is a real change edge — the
+        // seed comes from `AppSettings`' persisted value, which this suite doesn't
+        // isolate and so can't assume.
+        popover.test_dragMainOutMaster(to: 12); await drain()
+
+        controller.onStateDidChange = { popover.refreshMainOutMaster() }
+        controller.setMainOutMasterVolume(44); await drain()
+
+        #expect(popover.test_deviceRow(for: "local-mac")?.test_sliderValue == 44,
+                       "the Mac's row follows Main while it is the thing driving Main")
+    }
+
+    /// The narrowed repaint's other half: with a real output in the target the
+    /// Mac's row is an ordinary member reading its OWN fader, so a master move
+    /// must leave it alone (`refreshMainOutMaster` skips the device sweep there).
+    @Test func aMasterMoveLeavesTheMacRowAloneWhenItIsAnOrdinaryMember() async throws {
+        let (popover, controller, backend) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        _ = popover.test_toggleDeviceEnabled(deviceID: "local-mac", on: true)   // mixed set — the Mac is just a member
+        popover.test_selectMainOut(.selectedDevices); await drain()
+        let macFader = try #require(backend.devices.first { $0.id == "local-mac" }?.volume)
+
+        controller.onStateDidChange = { popover.refreshMainOutMaster() }
+        controller.setMainOutMasterVolume(macFader == 44 ? 45 : 44); await drain()
+
+        #expect(popover.test_deviceRow(for: "local-mac")?.test_sliderValue == macFader,
+                       "the Mac's own stored fader is what its row shows once it shares the mix")
+    }
+
+    /// A master move from the phone must not land under a finger already dragging
+    /// the Mac's own master. The thumb was guarded; the readout beside it was not,
+    /// so the phone's number appeared next to the user's own position.
+    @Test func aPhoneMasterMoveLeavesBothThumbAndReadoutAloneMidDrag() async throws {
+        let (popover, controller, _) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        popover.test_selectMainOut(.selectedDevices); await drain()
+        popover.test_dragMainOutMaster(to: 20); await drain()
+
+        popover.test_mainOutRow.test_isDraggingMaster = true
+        controller.onStateDidChange = { popover.refreshMainOutMaster() }
+        controller.setMainOutMasterVolume(73); await drain()
+
+        #expect(popover.test_mainOutRow.test_masterValue == 20, "the thumb stays under the finger")
+        #expect(popover.test_mainOutRow.test_masterReadout == "20%", "and so does the number beside it")
     }
 
     // MARK: The passthrough exception — the Mac's row IS Main

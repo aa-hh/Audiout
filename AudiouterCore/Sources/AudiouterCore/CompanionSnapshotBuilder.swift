@@ -48,6 +48,9 @@ public enum CompanionSnapshotBuilder {
     ///     leaves at their construction-time defaults and which disagree with
     ///     the controller-level notion (see `GroupController.swift`'s doc
     ///     comments on `isSpeakerSelected`/`isMainOutMember`/`setMuted`).
+    ///     `DeviceState.volume` is the raw `Device.volume` with ONE overlay —
+    ///     the Mac's own row under `localRowDrivesMain` reads the master (see
+    ///     `deviceState(for:groupController:iconFor:)`).
     ///   - appRouting: source of the per-app redirect table.
     ///   - excludedBundleIDs: apps on the exclusion denylist
     ///     (`ExcludedAppsController.excludedBundleIDs`). **Trap:** an excluded
@@ -196,7 +199,16 @@ public enum CompanionSnapshotBuilder {
             isAvailable: device.isAvailable,
             supportsAirPlay2: device.supportsAirPlay2,
             isLocalDevice: device.isLocalDevice,
-            volume: device.volume,
+            // Passthrough overlay, mirroring `PopoverController.applySelectionState`:
+            // with no real output behind the current Main Out target, the Mac's row
+            // WRITES Main (`setMemberVolume` redirects a local-row write to
+            // `setMainOutMasterVolume`), so it has to READ Main too. Without this the
+            // phone showed the Mac's stored fader for a row whose slider moved the
+            // master — a different number from the Mac's own row for the same thing.
+            // The stored fader underneath is deliberately untouched: it is what the
+            // row goes back to showing the moment an AirPlay device joins.
+            volume: device.isLocalDevice && groupController.localRowDrivesMain
+                ? groupController.mainOutMasterVolume : device.volume,
             isMuted: groupController.isMuted(device.id),
             isSelected: groupController.isSpeakerSelected(device.id),
             isMainOutMember: groupController.isMainOutMember(device.id),

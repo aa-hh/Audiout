@@ -288,8 +288,15 @@ public final class MainOutRowView: NSView {
             }
         }
 
-        if !isDraggingMaster { slider.integerValue = master }
-        readoutLabel.stringValue = "\(master)%"
+        // The readout is guarded WITH the thumb, not separately: the two show the
+        // same number, so letting a master move from elsewhere (the phone, T7)
+        // land on the label alone would print that value under the finger still
+        // dragging the slider. `masterChanged` keeps the label live during the
+        // drag from the drag's own value.
+        if !isDraggingMaster {
+            slider.integerValue = master
+            readoutLabel.stringValue = "\(master)%"
+        }
         configureAccessibility()
     }
 
@@ -628,6 +635,16 @@ public final class MainOutRowView: NSView {
     public var test_selectableTargets: [MainOutTarget] { options.filter { !$0.isHeader }.map(\.target) }
     /// The currently shown master value.
     public var test_masterValue: Int { slider.integerValue }
+    /// The master percentage the READOUT prints — a separate surface from the
+    /// thumb, and the one an off-Mac master move used to overwrite mid-drag.
+    public var test_masterReadout: String { readoutLabel.stringValue }
+    /// Force the live-drag guard, so tests can pin what `apply(...)` may touch
+    /// while the user's finger is down. There is no other way in: the flag is set
+    /// from `NSApp.currentEvent`, which is always nil under `swift test`.
+    public var test_isDraggingMaster: Bool {
+        get { isDraggingMaster }
+        set { isDraggingMaster = newValue }
+    }
     /// The currently checkmarked selection title (the full menu title).
     public var test_selectedTitle: String? { selectedTitle }
     /// The label actually shown on the COLLAPSED pop-up button — the current

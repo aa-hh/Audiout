@@ -213,6 +213,58 @@ import Testing
         #expect(speakerB.isMainOutMember == true)
     }
 
+    // MARK: Trap 3b — the Mac's own volume under passthrough
+
+    /// While nothing but the Mac sits behind Main Out, a write to the Mac's row
+    /// goes to the MASTER — `setMemberVolume` redirects it — and never touches
+    /// that device's stored fader. A row reporting the raw `Device.volume` there
+    /// shows the phone a different number than the Mac's own popover shows for
+    /// the same row (`PopoverController.applySelectionState` overlays Main onto
+    /// it), and moving the phone's slider makes them disagree further.
+    @Test func localDeviceVolumeReadsTheMasterWhileTheMacsRowDrivesMain() async throws {
+        let backend = try await makeBackend()
+        let controller = makeGroupController(backend: backend)
+        let appRouting = makeAppRouting()
+
+        controller.setDeviceSelected("local", true)
+        #expect(controller.localRowDrivesMain, "precondition: nothing but the Mac is behind Main Out")
+        // The redirect the overlay exists for: this moves Main, not the fader.
+        controller.setMemberVolume(37, for: "local")
+        #expect(controller.mainOutMasterVolume == 37)
+        #expect(backend.devices.first { $0.id == "local" }?.volume == 50,
+                "precondition: the stored fader is untouched, so the two sources disagree")
+
+        let snapshot = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        #expect(snapshot.devices.first { $0.id == "local" }?.volume == 37,
+                "the Mac's row must show what its own slider actually writes")
+        #expect(snapshot.devices.first { $0.id == "speaker-a" }?.volume == 50,
+                "and no other row is overlaid — the master is not a device level")
+
+        // A real output behind Main Out ends the exception (the auto-swap drops
+        // the Mac from the set): its row goes back to its own stored fader.
+        controller.setDeviceSelected("speaker-a", true)
+        #expect(controller.localRowDrivesMain == false)
+        let mixed = CompanionSnapshotBuilder.build(
+            devices: backend.devices, groupController: controller, appRouting: appRouting,
+            excludedBundleIDs: noExcludedBundleIDs, iconFor: iconFor, addableApps: noAddableApps,
+            runningRouted: noRunningRouted, liveRoutedAppNames: noLiveRoutedAppNames,
+            localFallbackActive: false, takeoverStatus: nil, serverName: defaultServerName,
+            connectVolume: defaultConnectVolume, connectVolumeMin: defaultConnectVolumeMin,
+            connectVolumeMax: defaultConnectVolumeMax, startBufferMs: defaultStartBufferMs,
+            startBufferOptionsMs: defaultStartBufferOptionsMs
+        )
+        #expect(mixed.devices.first { $0.id == "local" }?.volume == 50,
+                "the fader the overlay left untouched is what the row returns to")
+    }
+
     // MARK: Trap 4 — excluded apps
 
     @Test func excludedAppsAreAbsentFromAddableAppsAndAppRoutes() async throws {

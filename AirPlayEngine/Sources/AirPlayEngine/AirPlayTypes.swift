@@ -221,10 +221,12 @@ public struct WriteCadenceSnapshot: Sendable, Equatable {
     public var writeCount: UInt64
     /// Cumulative wall-clock time the write cadence has run BEHIND the audio
     /// time actually DELIVERED (seconds) — includes the audio time of writes
-    /// the engine's own backpressure guard refused (see `refusedSeconds`), so
-    /// this equals the receiver-visible shortfall regardless of whether the
-    /// producer stalled or the engine dropped. Monotonically non-decreasing
-    /// except across a `reset()`.
+    /// the engine's own backpressure guard refused (see `refusedSeconds`).
+    /// Monotonically non-decreasing except across a `reset()`.
+    ///
+    /// NOT the receiver-visible shortfall on its own: this is a one-sided sum,
+    /// so symmetric scheduling jitter inflates it with no audio lost. Read
+    /// `netDriftSeconds` for the shortfall.
     public var deficitSeconds: Double
     /// Cumulative wall-clock time the write cadence has run AHEAD of the audio
     /// time it was claiming to deliver (seconds, i.e. bursty/overrunning
@@ -242,6 +244,18 @@ public struct WriteCadenceSnapshot: Sendable, Equatable {
     public var refusedWrites: UInt64
     /// Cumulative audio time (seconds) of the refused writes above.
     public var refusedSeconds: Double
+    /// Cumulative time (seconds) spent in gaps too long to be slow feeding —
+    /// playback paused, the Mac slept, the tap was rebuilt. Excluded from
+    /// `deficitSeconds` so a lid-close cannot masquerade as audio loss.
+    /// Monotonically non-decreasing except across a `reset()`.
+    public var stalledSeconds: Double
+    /// How many such discontinuities were observed.
+    public var stallCount: UInt64
+
+    /// The actual drift: how far the receiver has fallen behind, in seconds.
+    /// Deficit minus overrun, so symmetric jitter cancels instead of
+    /// accumulating. This is the number to read, chart, and alarm on.
+    public var netDriftSeconds: Double { deficitSeconds - overrunSeconds }
 
     public init(
         writeCount: UInt64 = 0,
@@ -249,7 +263,9 @@ public struct WriteCadenceSnapshot: Sendable, Equatable {
         overrunSeconds: Double = 0,
         lastGapSeconds: Double = 0,
         refusedWrites: UInt64 = 0,
-        refusedSeconds: Double = 0
+        refusedSeconds: Double = 0,
+        stalledSeconds: Double = 0,
+        stallCount: UInt64 = 0
     ) {
         self.writeCount = writeCount
         self.deficitSeconds = deficitSeconds
@@ -257,6 +273,8 @@ public struct WriteCadenceSnapshot: Sendable, Equatable {
         self.lastGapSeconds = lastGapSeconds
         self.refusedWrites = refusedWrites
         self.refusedSeconds = refusedSeconds
+        self.stalledSeconds = stalledSeconds
+        self.stallCount = stallCount
     }
 }
 

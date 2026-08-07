@@ -1564,7 +1564,9 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                       energizePending: energizePendingIDs.contains(device.id),
                       iconSymbolName: deviceIconController?.symbolName(for: device),
                       syncTrimMs: btSyncTrim(for: device),
-                      alignTickActive: alignTickDeviceID == device.id)
+                      // See the note on the main `apply` below: non-zero == tuned
+                      // until T7 supplies a real signal.
+                      syncTrimIsSet: btSyncTrim(for: device) != 0)
             return
         }
         let selected = controller.isSpeakerSelected(device.id)
@@ -1621,7 +1623,12 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                   energizePending: energizePendingIDs.contains(device.id),
                   iconSymbolName: deviceIconController?.symbolName(for: device),
                   syncTrimMs: btSyncTrim(for: device),
-                  alignTickActive: alignTickDeviceID == device.id)
+                  // T6's "tuned vs never tuned" (D10). Until T7 wires a real
+                  // has-a-persisted-entry signal, a non-zero trim IS the
+                  // evidence the device was tuned; an explicit 0.0 reads as
+                  // untuned, which is the honest default for a value nobody
+                  // has moved.
+                  syncTrimIsSet: btSyncTrim(for: device) != 0)
     }
 
     /// A Bluetooth row's current SYNC trim: the session cache first (the

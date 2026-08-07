@@ -576,50 +576,60 @@ public enum PopoverColumnGrid {
     /// the thing it marks.
     public static let editAffordanceHoverAlpha: CGFloat = 1.0
 
-    // MARK: SYNC column (Bluetooth rows — BT-OFFSET-UI)
+    // MARK: SYNC column (Bluetooth rows — BT-OFFSET-UI, chip since T6)
     //
-    // Bluetooth rows carve a per-device SYNC cluster — compact − / bare-ms
-    // value / + stepper plus the align-by-ear (metronome) button — out of the
-    // LEFT portion of the reserved trailing-control slot: the slider/% columns
-    // keep their exact trailing anchors (cross-section alignment untouched),
-    // while the BT row's FEED pill right-aligns into `btFeedReserveWidth` at
-    // the far right (locked UI spec: "feed pill stays far right") instead of
-    // the AirPlay rows' left-aligned `feedColumnWidth`. Named constants only —
-    // the Figma design-system contract mirrors this file 1:1.
+    // Bluetooth rows carve a per-device SYNC control out of the LEFT portion
+    // of the reserved trailing-control slot: the slider/% columns keep their
+    // exact trailing anchors (cross-section alignment untouched), while the BT
+    // row's FEED pill right-aligns into `btFeedReserveWidth` at the far right
+    // (locked UI spec: "feed pill stays far right") instead of the AirPlay
+    // rows' left-aligned `feedColumnWidth`. Named constants only — the Figma
+    // design-system contract mirrors this file 1:1.
+    //
+    // PLAN-BT-SYNC-DRAWER T6 replaced the old four-control cluster (− / value
+    // field / + / metronome) with ONE read-only value chip that opens the
+    // drawer; the stepper/field/align geometry is gone with it, and the
+    // drawer's own metrics live in the "SYNC drawer" section below.
 
-    /// Width of each compact − / + stepper button.
-    public static let syncStepperButtonWidth: CGFloat = 15
-    /// Width of the editable bare-ms value field — sized for "−500".
-    public static let syncValueFieldWidth: CGFloat = 32
-    /// Gap between the stepper buttons and the value field between them.
-    public static let syncControlGap: CGFloat = 2
-    /// Width of the align-by-ear (metronome) toggle button.
-    public static let syncAlignButtonWidth: CGFloat = 18
-    /// Gap between the + button and the align button trailing it.
-    public static let syncAlignGap: CGFloat = 4
+    /// Width of the row's SYNC value chip. Sized for the widest label the chip
+    /// can ever show — "−500.0 ms" at `DeviceRowView`'s tabular-figures
+    /// caption font — plus its trailing chevron and the chip's own side
+    /// padding, so the number never truncates at either end of the range.
+    public static let syncChipWidth: CGFloat = 84
+    /// Height of the SYNC value chip: tall enough to read as a control on a
+    /// body row without crowding the row's vertical rhythm.
+    public static let syncChipHeight: CGFloat = 18
+    /// Corner radius of the SYNC value chip. A soft rounded rect ("this is a
+    /// control you can press"), deliberately NOT the fully-rounded capsule —
+    /// that shape means "control engaged" (`mutePillCornerRadius`) and the
+    /// chip is a resting affordance, not an engaged state.
+    public static let syncChipCornerRadius: CGFloat = 5
+    /// Stroke width of the chip's border, solid (tuned) or dashed (untuned).
+    public static let syncChipBorderWidth: CGFloat = 1
+    /// Dash ON length of the UNTUNED chip's border (D10's discoverability
+    /// affordance: "Not set" inside a dashed outline reads as an invitation,
+    /// where a solid box would read as a finished value).
+    public static let syncChipDashLength: CGFloat = 3
+    /// Dash OFF length of that same untuned border.
+    public static let syncChipDashGap: CGFloat = 2
     /// The BT row's FEED slot: the trailing-control column's far-right portion
     /// the right-aligned feed pill keeps (an overlong pill clips at the slot's
     /// edge via the feed stack's existing mask, exactly like overflow pills).
     public static let btFeedReserveWidth: CGFloat = 48
-    /// Gap between the SYNC cluster's trailing edge and the BT feed slot.
+    /// Gap between the SYNC chip's trailing edge and the BT feed slot.
     public static let btFeedToSyncGap: CGFloat = 4
-    /// The SYNC cluster's total width (− · value · + ·· align), derived so a
-    /// button/field resize reflows the cluster in lockstep.
-    public static var syncClusterWidth: CGFloat {
-        syncStepperButtonWidth * 2 + syncValueFieldWidth + syncControlGap * 2
-            + syncAlignGap + syncAlignButtonWidth
-    }
-    /// Distance from the row trailing edge to the SYNC cluster's TRAILING edge
-    /// — the cluster sits immediately left of the BT feed slot.
+    /// Distance from the row trailing edge to the SYNC chip's TRAILING edge
+    /// — the chip sits immediately left of the BT feed slot.
     public static var syncTrailing: CGFloat {
         trailingInset + btFeedReserveWidth + btFeedToSyncGap
     }
-    /// Distance from the row trailing edge to the SYNC cluster's CENTER, so
-    /// the Bluetooth subsection header can center its "SYNC" column title over
-    /// the cluster (the title lives in that subsection header ONLY — the card
-    /// header's VOLUME/FEED titles are untouched).
+    /// Distance from the row trailing edge to the SYNC chip's CENTER, so the
+    /// Bluetooth subsection header can center its "SYNC" column title over the
+    /// chip (the title lives in that subsection header ONLY — the card
+    /// header's VOLUME/FEED titles are untouched). Derived from the chip's own
+    /// width, so re-sizing the chip re-centres the title in lockstep.
     public static var syncCenterFromTrailing: CGFloat {
-        syncTrailing + syncClusterWidth / 2
+        syncTrailing + syncChipWidth / 2
     }
 
     // MARK: SYNC ruler (PLAN-BT-SYNC-DRAWER T4 — `BTSyncRulerView`)
@@ -679,7 +689,7 @@ public enum PopoverColumnGrid {
     public static let syncDrawerReadoutToSuffixGap: CGFloat = 4
     /// The drawer's top band height (caption + gap + readout), derived so
     /// resizing either part reflows the band in lockstep — the style of the
-    /// existing derived `syncClusterWidth`.
+    /// derived `syncCenterFromTrailing` above.
     public static var syncDrawerTopBandHeight: CGFloat {
         syncDrawerCaptionHeight + syncDrawerCaptionToReadoutGap + syncDrawerReadoutHeight
     }
@@ -698,7 +708,7 @@ public enum PopoverColumnGrid {
     public static let syncDrawerFooterHeight: CGFloat = 16
     /// The drawer's total height, derived from its parts (top/bottom insets,
     /// the top band, the ruler, and the footer) rather than a magic number —
-    /// the style of the existing derived `syncClusterWidth`. `PopoverController`
+    /// the style of the derived `syncCenterFromTrailing`. `PopoverController`
     /// (T7) grows the popover by exactly this on expand and shrinks it back
     /// by exactly this on collapse.
     public static var syncDrawerHeight: CGFloat {

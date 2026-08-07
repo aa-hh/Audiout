@@ -66,14 +66,16 @@ public final class DeviceRowView: NSView {
         /// (`GroupController.requestReconnect` → `OutputBackend.retryOutput`);
         /// it never edits selection. Default no-op for non-BT hosts.
         func deviceRowDidRequestReconnect(_ row: DeviceRowView)
-        /// The user changed this Bluetooth row's SYNC trim (BT-OFFSET-UI) —
-        /// already clamped to ±`BTSyncTrim.rangeMs`. Fired by the − / +
-        /// stepper (`coarseStepMs` steps) and by typing in the value field
-        /// (1 ms). Default no-op for hosts without the SYNC column.
-        func deviceRow(_ row: DeviceRowView, didSetSyncTrimMs ms: Double, for id: String)
-        /// The user toggled this Bluetooth row's align-by-ear tick button
-        /// (BT-OFFSET-UI). Default no-op for hosts without the SYNC column.
-        func deviceRow(_ row: DeviceRowView, didToggleAlignTick active: Bool, for id: String)
+        /// The user clicked this Bluetooth row's SYNC value chip
+        /// (PLAN-BT-SYNC-DRAWER T6). The chip is READ-ONLY — it neither edits
+        /// nor clamps a trim; it asks the host to open (or, on a second
+        /// click, close) the sync drawer for this device. The host owns the
+        /// one-drawer-at-a-time rule (D2) and echoes the resulting state back
+        /// through ``apply(_:selected:…syncDrawerExpanded:)``. Every trim edit
+        /// now arrives through ``BTSyncDrawerViewDelegate`` instead, which is
+        /// also where the align-by-ear toggle moved (D9). Default no-op for
+        /// hosts without the SYNC column.
+        func deviceRow(_ row: DeviceRowView, didToggleSyncDrawerFor id: String)
     }
 
     /// Control-Center row density: comfortable height that seats a mini switch,
@@ -287,28 +289,35 @@ public final class DeviceRowView: NSView {
     /// Selected Devices rows and Main Out pass `true`.
     private let showsMeter: Bool
 
-    // MARK: Bluetooth SYNC cluster (BT-OFFSET-UI)
+    // MARK: Bluetooth SYNC chip (BT-OFFSET-UI → PLAN-BT-SYNC-DRAWER T6)
 
-    /// Whether this row carries the SYNC cluster — the popover passes `true`
-    /// for `.bluetooth` rows only. The cluster occupies the LEFT portion of
-    /// the reserved trailing slot; the FEED pill right-aligns into
+    /// Whether this row carries the SYNC control — the popover passes `true`
+    /// for `.bluetooth` rows only. The chip occupies the LEFT portion of the
+    /// reserved trailing slot; the FEED pill right-aligns into
     /// `PopoverColumnGrid.btFeedReserveWidth` beside it (feed pill far right,
     /// locked spec). Non-sync rows are byte-for-byte unchanged.
     private let showsSyncControls: Bool
-    private let syncMinusButton = NSButton()
-    private let syncPlusButton = NSButton()
-    /// The editable bare-ms value field: − / + step by
-    /// `BTSyncTrim.coarseStepMs`; typing here commits at 1 ms (house rule —
-    /// bare numbers with units in numeric controls; the subsection header's
-    /// SYNC title + the field's tooltip carry the unit).
-    private let syncField = NSTextField()
-    /// The align-by-ear toggle (`metronome.fill`, outline fallback).
-    private let alignButton = NSButton()
-    /// The trim the host last applied (also the revert value for unparseable
-    /// typing).
+    /// The row's ONE sync control (T6): a read-only value chip that opens the
+    /// drawer. It replaced the − / value-field / + / metronome cluster
+    /// wholesale — every one of those behaviours now lives in
+    /// ``BTSyncDrawerView``, so the row can never hold a second, divergent
+    /// copy of the editing rules.
+    private let syncChipButton = NSButton()
+    /// The chip's drawing-only skin (border + engaged fill). Held so `apply`
+    /// can push its state without reaching through `syncChipButton.cell`.
+    private let syncChipCell = SyncChipCell()
+    /// The trim the host last applied, in milliseconds.
     private var syncTrimMs: Double = 0
-    /// Which metronome SF Symbol actually resolved (fill preferred).
-    private var alignSymbolName = ""
+    /// Whether that trim is a real tuned value rather than "never tuned"
+    /// (D10) — an untuned device's chip reads "Not set", never "0.0 ms",
+    /// because zero reads as finished where "Not set" reads as an invitation.
+    private var syncTrimIsSet = false
+    /// Whether this row's drawer is currently open (host-owned, D2) — drives
+    /// the chevron direction, the engaged fill, and `accessibilityExpanded`.
+    private var syncDrawerExpanded = false
+    /// Which chevron the chip actually resolved, so the test hook reads the
+    /// DRAWN glyph rather than re-stating the flag that chose it.
+    private var syncChipChevronName = ""
     /// The most recently pushed meter level, for ``test_meterLevel()``. `0`
     /// when there's no meter or after a ``LevelMeterView/reset()``.
     private var lastMeterLevel: Float = 0
@@ -472,7 +481,8 @@ public final class DeviceRowView: NSView {
                       energizePending: Bool = false,
                       iconSymbolName: String? = nil,
                       syncTrimMs: Double = 0,
-                      alignTickActive: Bool = false) {
+                      syncTrimIsSet: Bool = false,
+                      syncDrawerExpanded: Bool = false) {
         self.device = device
         self.isSelectedInSet = selected
         self.isToggleBlocked = blocked
@@ -655,25 +665,18 @@ public final class DeviceRowView: NSView {
             lastMeterLevel = 0
         }
 
-        // Bluetooth SYNC cluster (BT-OFFSET-UI): show the host's trim value;
-        // a DISCONNECTED row keeps the saved value visible READ-ONLY (locked
-        // spec). Never stomp the field mid-edit — a background repaint while
-        // the user types would eat their keystrokes.
+        // Bluetooth SYNC chip (T6): show the host's trim value; a
+        // DISCONNECTED row keeps the saved value visible but DEAD (locked
+        // spec — there is nothing to tune while the speaker is away, so the
+        // chip refuses to open the drawer rather than opening an inert one).
+        // The chip is read-only, so unlike the field it replaced there is no
+        // mid-edit state a repaint could stomp.
         if showsSyncControls {
             self.syncTrimMs = BTSyncTrim.clamp(syncTrimMs)
-            if syncField.currentEditor() == nil {
-                syncField.stringValue = Self.formattedTrim(self.syncTrimMs)
-            }
-            let adjustable = device.isAvailable
-            syncField.isEditable = adjustable
-            syncField.isSelectable = adjustable
-            syncField.textColor = adjustable ? Tokens.Color.label : Tokens.Color.tertiaryLabel
-            syncMinusButton.isEnabled = adjustable
-            syncPlusButton.isEnabled = adjustable
-            alignButton.isEnabled = adjustable
-            alignButton.state = alignTickActive ? .on : .off
-            alignButton.contentTintColor = alignTickActive
-                ? Tokens.Color.accent : Tokens.Color.secondaryLabel
+            self.syncTrimIsSet = syncTrimIsSet
+            self.syncDrawerExpanded = syncDrawerExpanded
+            syncChipButton.isEnabled = device.isAvailable
+            updateSyncChip()
         }
 
         // Membership bus (spec §4): re-derive the node from the freshly-applied
@@ -1427,14 +1430,11 @@ public final class DeviceRowView: NSView {
         addSubview(muteButton)
         // FEED column (v4.1 item 3): only a bus row has the free trailing slot.
         if busActive { addSubview(feedStack) }
-        // Bluetooth SYNC cluster (BT-OFFSET-UI), sharing that slot's left
-        // portion — sync rows re-anchor the FEED pill to the far right below.
+        // Bluetooth SYNC chip (T6), sharing that slot's left portion — sync
+        // rows re-anchor the FEED pill to the far right below.
         if showsSyncControls {
-            configureSyncControls()
-            addSubview(syncMinusButton)
-            addSubview(syncField)
-            addSubview(syncPlusButton)
-            addSubview(alignButton)
+            configureSyncChip()
+            addSubview(syncChipButton)
         }
 
         var constraints: [NSLayoutConstraint] = [
@@ -1531,7 +1531,7 @@ public final class DeviceRowView: NSView {
             if showsSyncControls {
                 // Bluetooth rows (BT-OFFSET-UI): the FEED pill hugs the FAR
                 // RIGHT of the slot (`btFeedReserveWidth` — locked spec) so
-                // the SYNC cluster can take the slot's left portion; the
+                // the SYNC chip can take the slot's left portion; the
                 // stack's existing mask clips an overlong pill at the reserve's
                 // edge, same honest-clipping fallback as elsewhere.
                 constraints.append(contentsOf: [
@@ -1540,31 +1540,18 @@ public final class DeviceRowView: NSView {
                         constant: -PopoverColumnGrid.trailingInset),
                     feedStack.widthAnchor.constraint(
                         lessThanOrEqualToConstant: PopoverColumnGrid.btFeedReserveWidth),
-                    // The cluster, trailing→leading: align · + · value · −.
-                    alignButton.trailingAnchor.constraint(
+                    // The chip: one fixed-width control on the same trailing
+                    // anchor the old cluster ended at, so the subsection
+                    // header's SYNC title (centred via
+                    // `syncCenterFromTrailing`) still lands over it.
+                    syncChipButton.trailingAnchor.constraint(
                         equalTo: trailingAnchor,
                         constant: -PopoverColumnGrid.syncTrailing),
-                    alignButton.widthAnchor.constraint(
-                        equalToConstant: PopoverColumnGrid.syncAlignButtonWidth),
-                    alignButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-                    syncPlusButton.trailingAnchor.constraint(
-                        equalTo: alignButton.leadingAnchor,
-                        constant: -PopoverColumnGrid.syncAlignGap),
-                    syncPlusButton.widthAnchor.constraint(
-                        equalToConstant: PopoverColumnGrid.syncStepperButtonWidth),
-                    syncPlusButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-                    syncField.trailingAnchor.constraint(
-                        equalTo: syncPlusButton.leadingAnchor,
-                        constant: -PopoverColumnGrid.syncControlGap),
-                    syncField.widthAnchor.constraint(
-                        equalToConstant: PopoverColumnGrid.syncValueFieldWidth),
-                    syncField.centerYAnchor.constraint(equalTo: centerYAnchor),
-                    syncMinusButton.trailingAnchor.constraint(
-                        equalTo: syncField.leadingAnchor,
-                        constant: -PopoverColumnGrid.syncControlGap),
-                    syncMinusButton.widthAnchor.constraint(
-                        equalToConstant: PopoverColumnGrid.syncStepperButtonWidth),
-                    syncMinusButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+                    syncChipButton.widthAnchor.constraint(
+                        equalToConstant: PopoverColumnGrid.syncChipWidth),
+                    syncChipButton.heightAnchor.constraint(
+                        equalToConstant: PopoverColumnGrid.syncChipHeight),
+                    syncChipButton.centerYAnchor.constraint(equalTo: centerYAnchor),
                 ])
             } else {
                 // FEED column: the trailing control column is otherwise empty
@@ -1636,126 +1623,102 @@ public final class DeviceRowView: NSView {
         button.action = action
     }
 
-    // MARK: Bluetooth SYNC cluster (BT-OFFSET-UI)
+    // MARK: Bluetooth SYNC chip (PLAN-BT-SYNC-DRAWER T6)
 
-    /// The align button's hover tooltip — the affordance is a bare glyph, so
-    /// the tooltip carries its whole story.
+    /// The align-by-ear tooltip. The BUTTON moved off the row into the drawer
+    /// (D9 — it is only useful while adjusting), but the string stays here as
+    /// the module's one copy: ``BTSyncDrawerView`` reads it rather than
+    /// re-authoring the sentence.
     static let alignTooltip =
         "Play alignment ticks on this speaker and the rest of the group — adjust sync until they land as one"
 
-    private func configureSyncControls() {
-        for (button, symbol, label, action) in [
-            (syncMinusButton, "minus", "Decrease sync offset", #selector(syncMinusTapped(_:))),
-            (syncPlusButton, "plus", "Increase sync offset", #selector(syncPlusTapped(_:))),
-        ] {
-            button.translatesAutoresizingMaskIntoConstraints = false
-            button.bezelStyle = .accessoryBar
-            button.isBordered = false
-            button.imagePosition = .imageOnly
-            let config = NSImage.SymbolConfiguration(pointSize: 9, weight: .medium)
-            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
-                .withSymbolConfiguration(config)
-            button.contentTintColor = Tokens.Color.secondaryLabel
-            button.setAccessibilityLabel(label)
-            button.toolTip = "\(Self.formattedTrim(BTSyncTrim.coarseStepMs)) ms steps — hold ⌥ for \(Self.formattedTrim(BTSyncTrim.fineStepMs)) ms"
-            button.target = self
-            button.action = action
+    /// The chip's tabular-figures label font: monospaced DIGITS so a live
+    /// scrub can't make the chip's number jitter in width under the fixed
+    /// `syncChipWidth` column — the same problem (and answer) as
+    /// `BTSyncRulerView`'s tick labels and the drawer's big readout.
+    private static let syncChipFont =
+        NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+
+    private func configureSyncChip() {
+        syncChipButton.translatesAutoresizingMaskIntoConstraints = false
+        // Drawing-only cell swap FIRST, then configure the button — the same
+        // ordering `WarmFaderCell`/`WarmNameFieldCell` require, so everything
+        // set below lands on the new cell. Behaviour, keyboard activation and
+        // VoiceOver stay stock `NSButton`.
+        syncChipButton.cell = syncChipCell
+        syncChipButton.bezelStyle = .accessoryBar
+        syncChipButton.isBordered = false        // the cell draws the border
+        syncChipButton.font = Self.syncChipFont
+        // Chevron TRAILING the number, hugging it, so the pair reads as one
+        // "value, expandable" token centred in the chip.
+        syncChipButton.imagePosition = .imageTrailing
+        syncChipButton.imageHugsTitle = true
+        syncChipButton.alignment = .center
+        syncChipButton.target = self
+        syncChipButton.action = #selector(syncChipTapped(_:))
+        updateSyncChip()
+    }
+
+    /// Re-render the chip for the current `syncTrimMs` / `syncTrimIsSet` /
+    /// `syncDrawerExpanded`. Three states, one place:
+    ///
+    /// - **tuned** — "22.4 ms" in the normal label colour inside a solid
+    ///   hairline border;
+    /// - **untuned** (D10) — "Not set" in `tertiaryLabel` inside a DASHED
+    ///   border: the discoverability affordance, since zero reads as finished
+    ///   while "Not set" reads as an invitation;
+    /// - **drawer open** — the app's established ENGAGED-CONTROL treatment,
+    ///   identical in recipe to the mute pill (``updateMuteTint()``): a
+    ///   translucent `accent` fill at `mutePillFillAlpha` plus an
+    ///   accent-tinted glyph and label. Deliberately NOT a solid gold fill —
+    ///   gold is the route-armed/primary vocabulary and this chip is a
+    ///   secondary, transient affordance.
+    private func updateSyncChip() {
+        let engaged = syncDrawerExpanded
+        let title = syncTrimIsSet ? Self.syncChipTrimText(syncTrimMs) : "Not set"
+        let color: NSColor
+        if engaged {
+            color = Tokens.Color.accent
+        } else if syncTrimIsSet {
+            color = Tokens.Color.label
+        } else {
+            color = Tokens.Color.tertiaryLabel
         }
-
-        syncField.translatesAutoresizingMaskIntoConstraints = false
-        syncField.controlSize = .small
-        syncField.font = Tokens.Font.caption
-        syncField.alignment = .center
-        syncField.bezelStyle = .roundedBezel
-        syncField.toolTip = "Sync offset in milliseconds — ↑/↓ nudges 1 ms, ⌥↑/↓ 10 ms"
-        syncField.setAccessibilityLabel("Sync offset in milliseconds")
-        syncField.target = self
-        syncField.action = #selector(syncFieldEdited(_:))
-        // Return/arrow handling rides the field editor's command dispatch (the
-        // NSTextFieldDelegate extension at file end): Return COMMITS and is
-        // CONSUMED there — un-consumed, it bubbles past the field and closes
-        // the popover with the edit lost (live finding).
-        syncField.delegate = self
-
-        alignButton.translatesAutoresizingMaskIntoConstraints = false
-        alignButton.bezelStyle = .accessoryBar
-        alignButton.setButtonType(.pushOnPushOff)
-        alignButton.isBordered = false
-        alignButton.imagePosition = .imageOnly
-        // `metronome.fill` verified AppKit-resolvable; the outline `metronome`
-        // stays as the defensive fallback (locked spec's own contingency).
-        for name in ["metronome.fill", "metronome"] {
-            if let image = NSImage(systemSymbolName: name, accessibilityDescription: "Align by ear")?
-                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)) {
-                alignButton.image = image
-                alignSymbolName = name
-                break
-            }
-        }
-        alignButton.contentTintColor = Tokens.Color.secondaryLabel
-        alignButton.toolTip = Self.alignTooltip
-        alignButton.setAccessibilityLabel("Align by ear")
-        alignButton.setAccessibilityHelp(Self.alignTooltip)
-        alignButton.target = self
-        alignButton.action = #selector(alignTapped(_:))
+        syncChipButton.attributedTitle = NSAttributedString(
+            string: title,
+            attributes: [.font: Self.syncChipFont, .foregroundColor: color])
+        syncChipChevronName = engaged ? "chevron.up" : "chevron.down"
+        syncChipButton.image = NSImage(systemSymbolName: syncChipChevronName,
+                                       accessibilityDescription: nil)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 8, weight: .semibold))
+        syncChipButton.contentTintColor = color
+        syncChipCell.isEngaged = engaged
+        syncChipCell.isUntuned = !syncTrimIsSet
+        // The tooltip is where the DIRECTION lives: the chip is too narrow for
+        // D7's "later"/"earlier" phrasing, and a bare signed number is exactly
+        // the ambiguity D7 warns about — so hover (and VoiceOver, below) spell
+        // it out while the chip itself stays a compact summary.
+        syncChipButton.toolTip = syncTrimIsSet
+            ? "Sync offset — \(BTSyncRulerView.accessibilityValueDescription(for: syncTrimMs)). Click to adjust."
+            : "This speaker has never been tuned. Click to adjust its sync offset."
+        syncChipButton.setNeedsDisplay(syncChipButton.bounds)
     }
 
-    /// Whether ⌥ is held for the current stepper click — the fine-step
-    /// modifier. Seam-overridable (`test_optionModifierOverride`) because a
-    /// headless `performClick` carries no `NSApp.currentEvent`.
-    private var optionIsHeld: Bool {
-        test_optionModifierOverride ?? (NSApp.currentEvent?.modifierFlags.contains(.option) ?? false)
+    /// The chip's compact value text: one decimal place always, so the digit
+    /// count (and therefore the chip's optical weight) doesn't flicker between
+    /// "22" and "22.4" during a scrub. A negative value uses the typographic
+    /// MINUS (U+2212) rather than a hyphen — it sits on the digit's own width
+    /// in a monospaced-digit font.
+    private static func syncChipTrimText(_ ms: Double) -> String {
+        let magnitude = String(format: "%.1f", abs(ms))
+        return "\(BTSyncTrim.quantise(ms) < 0 ? "−" : "")\(magnitude) ms"
     }
 
-    /// Modifier seam for the stepper tests — same idiom as
-    /// ``test_reduceMotionOverride``; `nil` (default) reads the live event.
-    public var test_optionModifierOverride: Bool?
-
-    @objc private func syncMinusTapped(_ sender: NSButton) {
-        commitSyncTrim(syncTrimMs - (optionIsHeld ? BTSyncTrim.fineStepMs : BTSyncTrim.coarseStepMs))
-    }
-
-    @objc private func syncPlusTapped(_ sender: NSButton) {
-        commitSyncTrim(syncTrimMs + (optionIsHeld ? BTSyncTrim.fineStepMs : BTSyncTrim.coarseStepMs))
-    }
-
-    /// Enter/typing commit: parse a signed integer (a trailing "ms" or spaces
-    /// are tolerated); unparseable input reverts to the current value. Whole
-    /// milliseconds only here — this row's plain field predates the drawer's
-    /// decimal ruler (BT-SYNC-DRAWER T4/T5), which is where typed 0.1 ms
-    /// input will land; parsing stays `Int` so this row's behavior is
-    /// unchanged by the `Double` widening, and the result is just stored
-    /// widened.
-    @objc private func syncFieldEdited(_ sender: NSTextField) {
-        let cleaned = sender.stringValue
-            .replacingOccurrences(of: "ms", with: "")
-            .trimmingCharacters(in: .whitespaces)
-            .replacingOccurrences(of: "−", with: "-")   // typography minus
-        commitSyncTrim(Int(cleaned).map(Double.init) ?? syncTrimMs)
-    }
-
-    private func commitSyncTrim(_ ms: Double) {
-        let clamped = BTSyncTrim.clamp(ms)
-        syncTrimMs = clamped
-        syncField.stringValue = Self.formattedTrim(clamped)
-        delegate?.deviceRow(self, didSetSyncTrimMs: clamped, for: device.id)
-    }
-
-    /// Bare-integer text for a whole-number ms value — identical to the
-    /// pre-widening `Int` display for every value this row's plain stepper
-    /// cluster (whole `coarseStepMs`/`fineStepMs` steps) can produce; one
-    /// decimal place for anything finer, which only the drawer's 0.1 ms ruler
-    /// (BT-SYNC-DRAWER T4+) can ever produce.
-    private static func formattedTrim(_ ms: Double) -> String {
-        ms.rounded() == ms ? String(Int(ms)) : String(format: "%.1f", ms)
-    }
-
-    @objc private func alignTapped(_ sender: NSButton) {
-        // `pushOnPushOff` has already flipped the state; land the tint now so
-        // the toggle reads immediately, before the host's re-apply echoes it.
-        alignButton.contentTintColor = sender.state == .on
-            ? Tokens.Color.accent : Tokens.Color.secondaryLabel
-        delegate?.deviceRow(self, didToggleAlignTick: sender.state == .on, for: device.id)
+    /// The chip's one job: ask the host to open — or, on a second click,
+    /// close — this device's sync drawer (T7 owns the state and the
+    /// one-at-a-time rule). It never edits the trim itself.
+    @objc private func syncChipTapped(_ sender: NSButton) {
+        delegate?.deviceRow(self, didToggleSyncDrawerFor: device.id)
     }
 
     // MARK: Actions
@@ -1765,7 +1728,11 @@ public final class DeviceRowView: NSView {
         // NSSlider continuous drag: mark drag in-progress so a concurrent
         // `deviceUpdated` echo doesn't yank the thumb back under the user.
         isDraggingSlider = true
-        let event = NSApp.currentEvent
+        // `NSApp` is an implicitly-unwrapped optional and is genuinely NIL in a
+        // narrowly-filtered `swift test` run that never creates the shared
+        // application — so this must be an optional chain, not a force-unwrap
+        // that happens to survive because some other suite ran first.
+        let event = NSApp?.currentEvent
         if event?.type == .leftMouseUp { isDraggingSlider = false }
         // Keep the `%` readout live through the drag (change 4 — mirrors
         // MainOutRowView), since `apply` won't push the model value mid-drag.
@@ -2209,52 +2176,69 @@ public final class DeviceRowView: NSView {
     /// reports the host-driven dormancy input. `nil` when the row has no bus.
     public var test_busNodeDimmed: Bool? { busActive ? busView.test_dimmed : nil }
 
-    // MARK: Bluetooth SYNC cluster (BT-OFFSET-UI) test hooks
+    // MARK: Bluetooth SYNC chip (T6) test hooks
 
-    /// Whether this row mounts the SYNC cluster at all.
+    /// Whether this row mounts the SYNC chip at all.
     public var test_showsSyncControls: Bool { showsSyncControls }
 
-    /// The value field's CURRENTLY displayed text, or `nil` on a non-sync row.
-    public var test_syncTrimDisplayed: String? {
-        showsSyncControls ? syncField.stringValue : nil
+    /// The chip's CURRENTLY displayed text ("22.4 ms" / "Not set"), or `nil`
+    /// on a non-sync row.
+    public var test_syncChipTitle: String? {
+        showsSyncControls ? syncChipButton.attributedTitle.string : nil
     }
 
-    /// Whether the cluster is currently adjustable (false = the disconnected
-    /// row's read-only saved value).
-    public var test_syncControlsEnabled: Bool {
-        showsSyncControls && syncField.isEditable
-            && syncMinusButton.isEnabled && syncPlusButton.isEnabled
+    /// The colour the chip's label is actually drawn in — the de-emphasis an
+    /// untuned chip and the accent an engaged one must both show.
+    public var test_syncChipTitleColor: NSColor? {
+        guard showsSyncControls, syncChipButton.attributedTitle.length > 0 else { return nil }
+        return syncChipButton.attributedTitle
+            .attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
     }
 
-    /// Fire the − / + buttons through AppKit's own `performClick` — the real
+    /// Which chevron the chip resolved: `chevron.down` collapsed,
+    /// `chevron.up` while its drawer is open. `nil` on a non-sync row.
+    public var test_syncChipChevronSymbolName: String? {
+        showsSyncControls ? syncChipChevronName : nil
+    }
+
+    /// Whether the chip draws the UNTUNED dashed border (D10).
+    public var test_syncChipIsDashed: Bool { showsSyncControls && syncChipCell.isUntuned }
+
+    /// Whether the chip wears the ENGAGED treatment (drawer open) — pair with
+    /// `test_syncChipFill` to pin that it is the translucent-accent recipe,
+    /// never a solid gold fill.
+    public var test_syncChipIsEngaged: Bool { showsSyncControls && syncChipCell.isEngaged }
+
+    /// The chip's drawn background fill, or `nil` when it draws none (every
+    /// state but engaged) — read off the cell that paints it, so the hook
+    /// can't drift from the pixels.
+    public var test_syncChipFill: NSColor? {
+        showsSyncControls ? syncChipCell.fillColor : nil
+    }
+
+    /// The chip's drawn border colour.
+    public var test_syncChipBorderColor: NSColor? {
+        showsSyncControls ? syncChipCell.borderColor : nil
+    }
+
+    /// Whether the chip can be pressed (false = the disconnected row's
+    /// read-only saved value — there is nothing to tune while the speaker is
+    /// away).
+    public var test_syncChipEnabled: Bool {
+        showsSyncControls && syncChipButton.isEnabled
+    }
+
+    /// Fire the chip through AppKit's own `performClick` — the real
     /// target/action dispatch, mirroring `test_performEnableClick` (a no-op
     /// while disabled, exactly like a live click).
-    public func test_fireSyncMinusClick() { syncMinusButton.performClick(nil) }
-    public func test_fireSyncPlusClick() { syncPlusButton.performClick(nil) }
+    public func test_fireSyncChipClick() { syncChipButton.performClick(nil) }
 
-    /// Type into the value field and fire its OWN target/action — the real
-    /// Enter-commit dispatch (mirrors `test_fireSliderAction`'s house style).
-    public func test_commitSyncField(_ text: String) {
-        syncField.stringValue = text
-        guard let action = syncField.action,
-              let target = syncField.target as? NSObject else { return }
-        _ = target.perform(action, with: syncField)
-    }
-
-    /// Fire the align-by-ear toggle through `performClick` (real dispatch).
-    public func test_fireAlignClick() { alignButton.performClick(nil) }
-
-    /// Whether the align toggle currently reads ON.
-    public var test_alignTickOn: Bool { alignButton.state == .on }
-
-    /// Which metronome SF Symbol the align button resolved
-    /// ("metronome.fill", or the outline fallback), "" on a non-sync row.
-    public var test_alignSymbolName: String { alignSymbolName }
-
-    /// The align button's hover tooltip (locked spec: the glyph must explain
-    /// itself on hover).
-    public var test_alignTooltip: String? {
-        showsSyncControls ? alignButton.toolTip : nil
+    /// The chip's spoken identity/value/expanded state and its hover tooltip.
+    public var test_syncChipAXLabel: String? { syncChipButton.accessibilityLabel() }
+    public var test_syncChipAXValue: String? { syncChipButton.accessibilityValue() as? String }
+    public var test_syncChipAXExpanded: Bool { syncChipButton.isAccessibilityExpanded() }
+    public var test_syncChipTooltip: String? {
+        showsSyncControls ? syncChipButton.toolTip : nil
     }
 
     /// Whether the host has raised the energize "press-play" pending beat on this
@@ -2599,6 +2583,19 @@ public final class DeviceRowView: NSView {
                 isSelectedInSet ? "Remove \(device.name) from Selected Devices"
                                 : "Add \(device.name) to Selected Devices")
         }
+        // The SYNC chip (T6) speaks as a DISCLOSURE control: a stable label,
+        // the D7 phrase as its value ("22.4 milliseconds later" — never a
+        // bare signed number), and `accessibilityExpanded` carrying the
+        // drawer's state, so VoiceOver announces the open/close the click
+        // performs instead of leaving it a silent visual change.
+        if showsSyncControls {
+            syncChipButton.setAccessibilityLabel("Sync offset for \(device.name)")
+            syncChipButton.setAccessibilityValue(
+                syncTrimIsSet
+                    ? BTSyncRulerView.accessibilityValueDescription(for: syncTrimMs)
+                    : "not set")
+            syncChipButton.setAccessibilityExpanded(syncDrawerExpanded)
+        }
         slider.setAccessibilityRole(.slider)
         slider.setAccessibilityLabel("\(device.name) volume")
         muteButton.setAccessibilityLabel(device.isMuted ? "Unmute \(device.name)" : "Mute \(device.name)")
@@ -2676,68 +2673,62 @@ extension DeviceRowView: RailNodeProviding {
     public var railNodeBounds: NSRect { bounds }
 }
 
-// MARK: - SYNC field editing (BT-OFFSET-UI, Return/arrow handling)
+// MARK: - SYNC value chip skin (PLAN-BT-SYNC-DRAWER T6)
 
-extension DeviceRowView: NSTextFieldDelegate {
+/// The row SYNC chip's DRAWING-ONLY skin — the same "only the drawing
+/// changes" contract `WarmFaderCell` has over the sliders and
+/// `InvisibleSwitchCell` under the membership node. It paints the chip's
+/// border and its engaged fill; the title, the chevron, hit-testing,
+/// keyboard activation and VoiceOver all stay stock `NSButtonCell`.
+///
+/// Colours resolve at DRAW time (never stamped into a `CALayer`), so light/
+/// dark, Increase Contrast and the accent dial all land without this cell
+/// observing anything — unlike the mute pill, whose `CGColor` fill needs a
+/// `viewDidChangeEffectiveAppearance` re-stamp.
+private final class SyncChipCell: NSButtonCell {
+    /// The drawer for this row is open: the app's engaged-control treatment
+    /// (translucent accent fill + accent border), the exact recipe
+    /// `DeviceRowView.updateMuteTint()` uses — NOT a solid gold fill.
+    var isEngaged = false
+    /// This device has never been tuned (D10): dashed border, "Not set".
+    var isUntuned = false
 
-    /// The field editor's command dispatch for the SYNC value field — the one
-    /// seam AppKit routes Return and the arrow keys through while editing.
-    ///
-    /// - Return COMMITS the typed value and returns `true`: consumed, so the
-    ///   key never bubbles past the field (un-consumed it closed the popover
-    ///   with the edit lost — live finding).
-    /// - ↑/↓ nudge by `fineStepMs` (1 ms — the by-ear granularity); with ⌥ by
-    ///   `coarseStepMs`. ⌥-arrows arrive as the PARAGRAPH selectors (Cocoa's
-    ///   standard key bindings), so both spellings are handled.
-    public func control(_ control: NSControl, textView: NSTextView,
-                        doCommandBy commandSelector: Selector) -> Bool {
-        guard control === syncField else { return false }
-        switch commandSelector {
-        case #selector(NSResponder.insertNewline(_:)):
-            syncFieldEdited(syncField)
-            return true
-        case #selector(NSResponder.moveUp(_:)):
-            commitSyncTrim(syncTrimMs + (optionIsHeld ? BTSyncTrim.coarseStepMs : BTSyncTrim.fineStepMs))
-            return true
-        case #selector(NSResponder.moveDown(_:)):
-            commitSyncTrim(syncTrimMs - (optionIsHeld ? BTSyncTrim.coarseStepMs : BTSyncTrim.fineStepMs))
-            return true
-        case Selector(("moveToBeginningOfParagraph:")):
-            commitSyncTrim(syncTrimMs + BTSyncTrim.coarseStepMs)
-            return true
-        case Selector(("moveToEndOfParagraph:")):
-            commitSyncTrim(syncTrimMs - BTSyncTrim.coarseStepMs)
-            return true
-        default:
-            return false
+    override func draw(withFrame cellFrame: NSRect, in controlView: NSView) {
+        // Inset by half the stroke so the 1 pt border lands ON the chip's
+        // edge rather than straddling (and blurring across) it.
+        let inset = PopoverColumnGrid.syncChipBorderWidth / 2
+        let path = NSBezierPath(
+            roundedRect: cellFrame.insetBy(dx: inset, dy: inset),
+            xRadius: PopoverColumnGrid.syncChipCornerRadius,
+            yRadius: PopoverColumnGrid.syncChipCornerRadius)
+        path.lineWidth = PopoverColumnGrid.syncChipBorderWidth
+        if let fillColor {
+            fillColor.setFill()
+            path.fill()
         }
+        if isUntuned {
+            path.setLineDash([PopoverColumnGrid.syncChipDashLength,
+                              PopoverColumnGrid.syncChipDashGap], count: 2, phase: 0)
+        }
+        borderColor.setStroke()
+        path.stroke()
+        super.draw(withFrame: cellFrame, in: controlView)
     }
 
-    /// Focus loss (click-away, Tab) commits whatever was typed — an edit must
-    /// never silently evaporate because the user clicked another control.
-    public func controlTextDidEndEditing(_ obj: Notification) {
-        guard (obj.object as? NSTextField) === syncField else { return }
-        syncFieldEdited(syncField)
+    /// The engaged fill — the mute pill's exact recipe
+    /// (`Tokens.Color.accent` at `mutePillFillAlpha`), never a solid gold.
+    /// `nil` in every other state: a resting chip is an outline only.
+    var fillColor: NSColor? {
+        guard isEngaged else { return nil }
+        return Tokens.Color.accent.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha)
     }
 
-    // MARK: Test hooks — real dispatch through the exact delegate seam
-
-    /// Set the field's text WITHOUT committing (the "user typed, hasn't
-    /// confirmed yet" state the command/end-editing hooks below act on).
-    public func test_setSyncFieldText(_ text: String) { syncField.stringValue = text }
-
-    /// Drive `control(_:textView:doCommandBy:)` with the real field — the
-    /// identical call the field editor makes for Return/arrows. Returns the
-    /// consumed flag (the "popover stays open" mechanism for Return).
-    @discardableResult
-    public func test_performSyncFieldCommand(_ commandSelector: Selector) -> Bool {
-        control(syncField, textView: NSTextView(), doCommandBy: commandSelector)
-    }
-
-    /// Drive `controlTextDidEndEditing` with the real field (focus loss).
-    public func test_endSyncFieldEditing() {
-        controlTextDidEndEditing(Notification(
-            name: NSControl.textDidEndEditingNotification, object: syncField))
+    /// Engaged borrows the accent; untuned uses the same `tertiaryLabel` its
+    /// "Not set" text does (one de-emphasis, spoken twice); a tuned resting
+    /// chip wears the shared `hairline`, the codebase's border tone.
+    var borderColor: NSColor {
+        if isEngaged { return Tokens.Color.accent }
+        return isUntuned ? Tokens.Color.tertiaryLabel : Tokens.Color.hairline
     }
 }
 
@@ -2756,10 +2747,9 @@ public extension DeviceRowView.Delegate {
     /// Default no-op — only the popover maps the greyed-BT-row click to a
     /// reconnect (BT-UI).
     func deviceRowDidRequestReconnect(_ row: DeviceRowView) {}
-    /// Default no-ops — only the popover hosts the Bluetooth SYNC column
-    /// (BT-OFFSET-UI).
-    func deviceRow(_ row: DeviceRowView, didSetSyncTrimMs ms: Double, for id: String) {}
-    func deviceRow(_ row: DeviceRowView, didToggleAlignTick active: Bool, for id: String) {}
+    /// Default no-op — only the popover hosts the Bluetooth SYNC column, and
+    /// only it can open a drawer (PLAN-BT-SYNC-DRAWER T6/T7).
+    func deviceRow(_ row: DeviceRowView, didToggleSyncDrawerFor id: String) {}
 }
 
 // MARK: - Invisible switch cell (spec §4.8)

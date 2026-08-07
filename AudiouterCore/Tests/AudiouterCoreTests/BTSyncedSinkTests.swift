@@ -204,6 +204,208 @@ import Testing
                 == -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
     }
 
+    // MARK: - BT-SYNC-DRAWER T2: live trim as a delay-line seek
+
+    /// A mono delay line whose ring is big enough that nothing here ever wraps.
+    static func makeDelayLine(crossfadeFrames: Int) -> BTDelayLine {
+        BTDelayLine(
+            minimumCapacityFrames: 1 << 14, channelCount: 1,
+            crossfadeFrames: crossfadeFrames)
+    }
+
+    /// Fill a mono line with frames whose VALUE is their own index, so a
+    /// read-back sample names the exact position it came from.
+    static func writeIndexRamp(into line: BTDelayLine, frames count: Int) {
+        let ramp = (0..<count).map(Float.init)
+        ramp.withUnsafeBufferPointer {
+            _ = line.write(interleavedFrames: $0.baseAddress!, frameCount: count)
+        }
+    }
+
+    static func readMono(_ line: BTDelayLine, frames: Int) -> [Float] {
+        var out: [Float] = []
+        var frame: Float = 0
+        for _ in 0..<frames {
+            guard withUnsafeMutablePointer(to: &frame, { line.readFrame(into: $0) }) else { break }
+            out.append(frame)
+        }
+        return out
+    }
+
+    static func maxStep(_ samples: [Float]) -> Float {
+        zip(samples, samples.dropFirst()).map { abs($1 - $0) }.max() ?? 0
+    }
+
+    @Test func ringSeek_clampsToHistoryBehindAndUnreadDataAhead() {
+        let ring = BTFrameRing(minimumCapacityFrames: 8, channelCount: 1)
+        let frames = (0..<4).map(Float.init)
+        frames.withUnsafeBufferPointer {
+            _ = ring.write(interleavedFrames: $0.baseAddress!, frameCount: 4)
+        }
+
+        // Forward: four unread frames, so an over-ask stops exactly at the
+        // write pointer and reports what it managed.
+        #expect(ring.seek(byFrames: 10) == 4)
+        #expect(ring.seek(byFrames: 1) == 0, "nothing left ahead of the read pointer")
+
+        // Backward: with nothing unread the whole 8-frame capacity is history,
+        // and once replayed there is none left to replay again.
+        #expect(ring.seek(byFrames: -100) == -8)
+        #expect(ring.seek(byFrames: -1) == 0)
+    }
+
+    @Test func shift_movesTheTimelineByExactlyTheRequestedFrames() {
+        let crossfade = 8
+        let line = Self.makeDelayLine(crossfadeFrames: crossfade)
+        Self.writeIndexRamp(into: line, frames: 4_096)
+        _ = Self.readMono(line, frames: 1_000)          // read position is now 1000
+
+        line.requestShift(frames: -240)                  // a LONGER delay: replay history
+        let after = Self.readMono(line, frames: crossfade + 4)
+
+        // The first faded frame carries fade-out weight 1, so it is EXACTLY the
+        // sample the un-shifted line would have produced — that is what makes
+        // the splice continuous rather than merely quiet.
+        #expect(after[0] == 1_000)
+        // Past the fade the line is playing exactly 240 frames further back
+        // than it would have been, and keeps advancing one frame per read.
+        #expect(after[crossfade] == Float(1_000 - 240 + crossfade))
+        #expect(after[crossfade + 3] == Float(1_000 - 240 + crossfade + 3))
+    }
+
+    @Test func twoShiftsBeforeOneRead_bothLand() {
+        let crossfade = 8
+        let line = Self.makeDelayLine(crossfadeFrames: crossfade)
+        Self.writeIndexRamp(into: line, frames: 4_096)
+        _ = Self.readMono(line, frames: 1_000)
+
+        // A fast scrub hands over several deltas between two render cycles.
+        // They must ACCUMULATE — an overwriting "pending shift" would drop the
+        // first one and the ruler would stop tracking the audio.
+        line.requestShift(frames: -100)
+        line.requestShift(frames: -140)
+        let after = Self.readMono(line, frames: crossfade + 1)
+        #expect(after[crossfade] == Float(1_000 - 240 + crossfade))
+    }
+
+    /// The anti-click assertion: a raw seek splices two unrelated points of the
+    /// waveform together and clicks; the crossfade is what stops it.
+    @Test func shift_leavesNoStepBiggerThanTheSourceSignalsOwn() {
+        let line = Self.makeDelayLine(crossfadeFrames: 240)   // 5 ms at 48 kHz
+        let sine = Self.oneKilohertzSine(frames: 8_192)
+        sine.withUnsafeBufferPointer {
+            _ = line.write(interleavedFrames: $0.baseAddress!, frameCount: sine.count)
+        }
+
+        _ = Self.readMono(line, frames: 2_000)
+        line.requestShift(frames: -777)          // deliberately not a whole period
+        let out = Self.readMono(line, frames: 2_000)
+
+        #expect(Self.maxStep(out) <= Self.maxStep(sine) * Self.spliceStepCeiling,
+                "step \(Self.maxStep(out)) vs source \(Self.maxStep(sine))")
+    }
+
+    @Test func shiftArrivingMidCrossfade_staysContinuous() {
+        let crossfade = 240
+        let line = Self.makeDelayLine(crossfadeFrames: crossfade)
+        let sine = Self.oneKilohertzSine(frames: 8_192)
+        sine.withUnsafeBufferPointer {
+            _ = line.write(interleavedFrames: $0.baseAddress!, frameCount: sine.count)
+        }
+
+        _ = Self.readMono(line, frames: 2_000)
+        line.requestShift(frames: -777)
+        let duringFade = Self.readMono(line, frames: crossfade / 3)   // well inside the fade
+        line.requestShift(frames: -333)
+        let after = Self.readMono(line, frames: 2_000)
+
+        // Measured across the join too, so a half-applied first fade (the
+        // failure mode: the old tail simply dropped when the second shift
+        // arrived) shows up as a step at the boundary.
+        #expect(Self.maxStep(duringFade + after) <= Self.maxStep(sine) * Self.spliceStepCeiling,
+                "step \(Self.maxStep(duringFade + after)) vs source \(Self.maxStep(sine))")
+    }
+
+    /// THE SIGN PIN (plan trap 4.1). A larger trim means the device plays
+    /// LATER, means a longer delay, means the read pointer moves BACKWARD.
+    /// Inverting it compiles and still produces plausible-sounding audio, so
+    /// this is asserted on the real manager→sink path, in frames.
+    @Test func positiveTrim_seeksTheReadPointerBackward() throws {
+        let manager = BTSyncedSink(
+            renderSampleRate: Self.sampleRate, channelCount: 1,
+            presentationDelayMs: { 100 })
+        manager.setComposition(BTGroupComposition(airPlayPresent: true, macLocalPresent: false))
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        Self.enqueueRamp(into: manager)
+        let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
+
+        // The ramp's value is its position + 1, so the last sample of a cycle
+        // reads off where the delay line has got to; the difference between two
+        // consecutive cycles is how far the timeline moved.
+        let framesPerCycle = 512
+        var out = [Float](repeating: 0, count: framesPerCycle)
+        var cycle = 0
+        func renderCycleTail() -> Float {
+            let start = Self.anchorNanos
+                + Int64((Double(cycle * framesPerCycle) * Self.nsPerFrame).rounded())
+            cycle += 1
+            out.withUnsafeMutableBufferPointer {
+                _ = sink.renderInterleaved(
+                    into: $0, frameCount: framesPerCycle, cycleStartMonotonicNanos: start)
+            }
+            return out[framesPerCycle - 1]
+        }
+
+        while renderCycleTail() == 0 {}                   // pre-release cycles are silent
+        let settled = renderCycleTail()
+        #expect(renderCycleTail() - settled == Float(framesPerCycle),
+                "an untrimmed cycle advances exactly one buffer")
+
+        // +5 ms at 48 kHz = 240 frames of history replayed, so this cycle
+        // advances 240 frames LESS than an untrimmed one.
+        let beforeTrim = out[framesPerCycle - 1]
+        manager.setTrimMs(5, forDeviceUID: "dev-a")
+        #expect(renderCycleTail() - beforeTrim == Float(framesPerCycle - 240))
+
+        // And back to zero moves it forward again by the same 240.
+        let beforeUndo = out[framesPerCycle - 1]
+        manager.setTrimMs(0, forDeviceUID: "dev-a")
+        #expect(renderCycleTail() - beforeUndo == Float(framesPerCycle + 240))
+    }
+
+    @Test func preReleaseTrim_movesTheGateInsteadOfSeeking() throws {
+        let manager = BTSyncedSink(
+            renderSampleRate: Self.sampleRate, channelCount: 1,
+            presentationDelayMs: { 100 })
+        manager.setComposition(BTGroupComposition(airPlayPresent: true, macLocalPresent: false))
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        let ramp = Self.enqueueRamp(into: manager)
+
+        // Anchored by that enqueue but still holding silence. Nothing has been
+        // emitted for a seek to stay continuous WITH, and seeking would throw
+        // away pre-roll the device has not played yet — so the gate moves.
+        manager.setTrimMs(50, forDeviceUID: "dev-a")
+
+        let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
+        let hit = try #require(Self.firstNonSilence(of: sink, startNanos: Self.anchorNanos))
+        #expect(abs(hit.nanos - (Self.anchorNanos + 150_000_000))
+                <= Int64(Self.nsPerFrame.rounded()),
+                "the release target must move from 100 ms to 100 + 50 ms")
+        #expect(hit.sample == ramp[0],
+                "and the delay line must still release from its very first frame")
+    }
+
+    /// An equal-power pair sums to at most √2 where the two sides correlate, so
+    /// a spliced sinusoid can carry that much more slope than the source; the
+    /// slow fade envelope adds a few percent on top. A real click is a step of
+    /// order the full amplitude — some fifteen times a 1 kHz sine's own — so
+    /// this ceiling still catches one with room to spare.
+    static let spliceStepCeiling: Float = 1.5
+
+    static func oneKilohertzSine(frames: Int) -> [Float] {
+        (0..<frames).map { Float(sin(2 * Double.pi * 1_000 * Double($0) / sampleRate)) }
+    }
+
     // MARK: - BT-DRIFT: pacing-clock corrector with the adaptive settle gate
 
     /// Synthetic pacing clock: advances a device sample counter at a commanded
@@ -314,5 +516,49 @@ import Testing
                 "the 30 ms step must never be chased (that would need a ~500 ppm excursion); worst deviation \(maxDeviation)")
         #expect(abs(corrector.correctionPpm - (-50)) <= 3,
                 "the rate estimate must survive the re-anchor")
+    }
+}
+
+/// The one BT-SINK case that touches `Telemetry`'s process-global test sink, so
+/// it lives under `SerializedSharedState` (cookbook §18) while the rest of the
+/// suite above stays parallel. Named to keep `--filter BTSyncedSinkTests`
+/// matching both.
+extension SerializedSharedState {
+
+    @Suite final class BTSyncedSinkTestsRebuildTelemetry: IsolatedSuite {
+
+        private final class LineCapture: @unchecked Sendable {
+            private let lock = NSLock()
+            private var lines: [String] = []
+            func append(_ line: String) { lock.withLock { lines.append(line) } }
+            func snapshot() -> [String] { lock.withLock { lines } }
+        }
+
+        /// D6 in one assertion: a trim must not rebuild the sink, because a
+        /// rebuild re-arms the release gate and the device falls silent for the
+        /// whole delay — about half a second per edit.
+        @Test func trimChangeNeverRebuildsTheSink() {
+            let capture = LineCapture()
+            Telemetry._installTestSink { capture.append($0) }
+            defer { Telemetry._installTestSink(nil) }
+
+            let manager = BTSyncedSink(
+                renderSampleRate: 48_000, channelCount: 1, presentationDelayMs: { 100 })
+            manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+            manager.setTrimMs(12.5, forDeviceUID: "dev-a")
+            manager.setTrimMs(-3, forDeviceUID: "dev-a")
+            // Positive control: an OFFSET change IS a structural change and must
+            // still rebuild — without it an empty log would prove nothing.
+            manager.setOffsetMs(40, forDeviceUID: "dev-a")
+            manager.stop()                    // drains the sink's async rebuild
+            Telemetry._installTestSink(nil)   // flush barrier
+
+            let lines = capture.snapshot()
+            let rebuilds = lines.filter { $0.contains("\"evt\":\"bt_sink_rebuild\"") }
+            #expect(rebuilds.count == 1, "lines: \(lines)")
+            #expect(rebuilds.first?.contains("\"cause\":\"offset_change\"") == true,
+                    "lines: \(lines)")
+            #expect(!lines.contains { $0.contains("trim_change") }, "lines: \(lines)")
+        }
     }
 }

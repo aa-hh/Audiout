@@ -1,16 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// window-harness — programmatic verification for the "Groups" window
-// (design revamp, SPEC §9). The window is CONFIGURATION-ONLY: viewing or
-// editing a group here never activates it or moves audio — activation lives
-// in the app's popover, not this window.
+// window-harness — programmatic verification for the Groups SCREEN's content
+// (design revamp, SPEC §9; the standalone Groups window was retired in U6).
+// The screen is CONFIGURATION-ONLY: viewing or editing a group here never
+// activates it or moves audio — activation lives in the app's Mixer screen.
 //
-// The window isn't visible to an agent shell, so this instantiates the real
-// `MixerWindowController` with a MockBackend-backed `GroupController`, drives
-// the same code paths the sidebar / editor / create-sheet actions call (via
-// the `test_*` hooks), and asserts the built structure — see the numbered
-// checks below. Prints PASS/FAIL per check; exits nonzero on any failure so
-// it can gate CI alongside `swift test`.
+// The content isn't visible to an agent shell, so this instantiates the real
+// `MixerWindowController` (the screen-content controller) with a
+// MockBackend-backed `GroupController`, drives the same code paths the
+// sidebar / editor / create-sheet actions call (via the `test_*` hooks), and
+// asserts the built structure — see the numbered checks below. Prints
+// PASS/FAIL per check; exits nonzero on any failure so it can gate CI
+// alongside `swift test`.
 
 import AppKit
 import AudiouterCore
@@ -79,6 +80,10 @@ func run() -> Int32 {
     let controller = GroupController(backend: backend, store: GroupStore(directory: tempDir()),
                                      loadPersisted: false)
     let window = MixerWindowController(groupController: controller)
+    // The real host seam: the surface marks the Groups screen visible, which
+    // opens the B8 refresh gate — without it every `update(devices:)` below
+    // only stores its snapshot and the sidebar renders empty.
+    window.setHostVisible(true)
 
     backend.start()
     guard waitForFleet(backend, count: 7) else {
@@ -86,26 +91,15 @@ func run() -> Int32 {
     }
     window.update(devices: backend.devices)
 
-    // --- 0. Window chrome: full-size content view, NO toolbar at all
-    //        (live-test feedback 2026-07-18: the master slider left with the
-    //        mixer pane — nothing in this window touches audio), titled
-    //        "Groups".
-    print("\n[0] Window chrome (full-size content, no toolbar)")
-    checks.expect(window.test_hasFullSizeContentView,
-                  "styleMask includes .fullSizeContentView (SPEC §9)")
-    checks.expect(window.test_hasNoToolbar,
-                  "the window mounts NO toolbar (config-only: no volume UI here)")
-    checks.expectEqual(window.window?.title, "Groups", "window title is 'Groups'")
-
     // --- 1. Baseline sidebar: zero groups still shows BOTH sections (the
     //        Groups section carries an empty-state row instead of vanishing).
     print("\n[1] Baseline sidebar (zero groups)")
-    checks.expectEqual(window.test_sidebar.test_sectionTitles, ["Groups", "Devices"],
-                       "'Groups' and 'Devices' sections both present even with zero groups")
+    checks.expectEqual(window.test_sidebar.test_sectionTitles, ["Groups", "Speakers"],
+                       "'Groups' and 'Speakers' sections both present even with zero groups")
     checks.expect(window.test_sidebar.test_hasGroupsEmptyStateRow,
                   "the Groups section shows its empty-state row at zero groups")
     checks.expectEqual(window.test_sidebar.test_deviceRowCount, 7,
-                       "all 7 devices listed (Devices section lists every device, flat model)")
+                       "all 7 devices listed (Speakers section lists every device, flat model)")
     checks.expect(!window.test_isShowingEditor, "no editor shows with zero groups")
 
     // --- 2. Baseline content: with zero groups the AUTO-SELECT rule lands on
@@ -230,10 +224,10 @@ func run() -> Int32 {
     checks.expectEqual(controller.activeGroupID, nil,
                        "auto-selection does NOT activate (config-only)")
 
-    // --- 8. beginNewGroup() presents the create sheet.
-    print("\n[8] beginNewGroup() presents the create sheet")
-    window.beginNewGroup()
-    checks.expect(window.test_isPresentingCreateSheet, "beginNewGroup() wires a live create sheet")
+    // --- 8. Cancelling a presented create sheet clears it.
+    print("\n[8] Cancelling the create sheet clears it")
+    window.test_presentCreateSheet(preselected: [])
+    checks.expect(window.test_isPresentingCreateSheet, "presenting wires a live create sheet")
     window.test_createSheet?.test_cancel()
     drain()
     checks.expect(!window.test_isPresentingCreateSheet, "cancelling clears the sheet")
@@ -250,7 +244,7 @@ func run() -> Int32 {
     checks.expectEqual(window.test_detail.test_shownDeviceID, candidateA,
                        "detail pane is showing the selected device")
     checks.expectEqual(window.test_detail.test_groupMembershipText, "Whole House",
-                       "detail pane's 'In groups:' text names the device's saved group")
+                       "detail pane's 'In groups' text names the device's saved group")
     checks.expectEqual(controller.activeGroupID, nil,
                        "selecting a device in the sidebar does NOT activate any group")
     window.test_select(nil)

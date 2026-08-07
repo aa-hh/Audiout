@@ -506,7 +506,7 @@ plutil -extract NSBonjourServices.0 raw -o - "$PLIST" >/dev/null || { echo "ERRO
 
 # --- LSEnvironment: release runtime defaults --------------------------------
 # Environment variables LaunchServices injects when the app is launched by
-# double-click / `open` (a bundled build), so two release defaults live HERE
+# double-click / `open` (a bundled build), so the release default lives HERE
 # rather than baked into the Swift, keeping dev overrides intact: a developer who
 # runs the raw Mach-O directly does NOT go through LaunchServices, so LSEnvironment
 # is NOT applied and the shell's own env wins (and `swift run`/tests never read
@@ -521,16 +521,10 @@ plutil -extract NSBonjourServices.0 raw -o - "$PLIST" >/dev/null || { echo "ERRO
 #     the native code default is what actually guarantees real audio.) Override
 #     in dev with `AIRPLAY_BACKEND=mock <binary>` (direct exec ignores
 #     LSEnvironment) or by running via SwiftPM.
-#   AIRPLAY_CONTROL_PANEL=1 — ship the control-panel window shell as the default
-#     chrome (AppDelegate reads `== "1"`). Off in dev/tests, where the env is
-#     unset; override a bundled build by launching the raw binary with the var
-#     unset or set to something other than "1".
-echo "==> Writing LSEnvironment (release backend + control-panel defaults)"
+echo "==> Writing LSEnvironment (release backend default)"
 plutil -insert LSEnvironment -dictionary "$PLIST"
 plutil -insert LSEnvironment.AIRPLAY_BACKEND -string "native" "$PLIST"
-plutil -insert LSEnvironment.AIRPLAY_CONTROL_PANEL -string "1" "$PLIST"
 plutil -extract LSEnvironment.AIRPLAY_BACKEND raw -o - "$PLIST" >/dev/null || { echo "ERROR: LSEnvironment.AIRPLAY_BACKEND missing from Info.plist — release builds must pin the native backend explicitly (belt-and-suspenders over the native code default)" >&2; exit 1; }
-plutil -extract LSEnvironment.AIRPLAY_CONTROL_PANEL raw -o - "$PLIST" >/dev/null || { echo "ERROR: LSEnvironment.AIRPLAY_CONTROL_PANEL missing from Info.plist" >&2; exit 1; }
 
 # Opt-in dev diagnostics, baked into LSEnvironment so an `open`-launched bundle
 # still sees them: an `open`ed app does NOT inherit the shell env, and it MUST be

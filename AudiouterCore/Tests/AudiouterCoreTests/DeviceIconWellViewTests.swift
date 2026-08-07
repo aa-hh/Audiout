@@ -3,6 +3,7 @@
 import Testing
 import AppKit
 @testable import AudiouterWindowUI
+@testable import AudiouterSharedUI
 
 /// Keyboard/VoiceOver operability coverage for `DeviceIconWellView`
 /// (A11Y-GROUPS): a live test found the icon well — the one approved
@@ -102,5 +103,51 @@ import AppKit
         #expect(well.resignFirstResponder())
         #expect(abs(well.test_badgeAlpha - 0.7) <= 0.001,
                        "losing focus should drop the badge back to rest alpha")
+    }
+
+    // MARK: Badge colour tokens (V6 — raw-color elimination pass)
+
+    private func assertSameRGBA(_ a: NSColor?, _ b: NSColor, _ message: String) {
+        guard let a = a?.usingColorSpace(.sRGB), let b = b.usingColorSpace(.sRGB) else {
+            Issue.record("nil or non-convertible color: \(message)")
+            return
+        }
+        #expect(abs(a.redComponent - b.redComponent) <= 0.004, "red: \(message)")
+        #expect(abs(a.greenComponent - b.greenComponent) <= 0.004, "green: \(message)")
+        #expect(abs(a.blueComponent - b.blueComponent) <= 0.004, "blue: \(message)")
+        #expect(abs(a.alphaComponent - b.alphaComponent) <= 0.004, "alpha: \(message)")
+    }
+
+    /// The corner badge's fill/border must come from `Tokens.Color`, not a
+    /// frozen `NSColor(white:alpha:)` literal.
+    @Test func badgeFillAndBorderComeFromTokens() {
+        let well = DeviceIconWellView()
+        assertSameRGBA(well.test_badgeFillColor, Tokens.Color.iconWellBadge, "badge fill")
+        assertSameRGBA(well.test_badgeBorderColor, Tokens.Color.iconWellBadgeBorder, "badge border")
+    }
+
+    /// The bug this task fixes: the badge layer used to be stamped once at
+    /// init and never touched again, so it silently ignored every later
+    /// appearance change. A colour-equality check alone can't tell "still
+    /// correct" from "never re-stamped, but happened to start correct" —
+    /// `test_restampCount` proves the re-stamp actually ran.
+    @Test func viewDidChangeEffectiveAppearanceReStampsTheBadgeLayer() {
+        let well = DeviceIconWellView()
+        let countAfterInit = well.test_restampCount
+        well.viewDidChangeEffectiveAppearance()
+        #expect(well.test_restampCount == countAfterInit + 1,
+                       "an appearance change must re-stamp the badge layer, not leave it frozen from init")
+    }
+
+    /// Increase Contrast toggles arrive via the workspace notification, not
+    /// `viewDidChangeEffectiveAppearance` (AudiouterSharedUI/AGENTS.md) — the
+    /// badge must reconcile on that path too, the same discipline
+    /// `HaloRingView` already follows.
+    @Test func accessibilityDisplayOptionsChangeReStampsTheBadgeLayer() {
+        let well = DeviceIconWellView()
+        let countAfterInit = well.test_restampCount
+        well.test_postAccessibilityDisplayOptionsChanged()
+        #expect(well.test_restampCount == countAfterInit + 1,
+                       "a live Increase Contrast toggle must re-stamp the badge layer")
     }
 }

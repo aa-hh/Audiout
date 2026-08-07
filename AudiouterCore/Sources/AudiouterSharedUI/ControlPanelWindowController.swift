@@ -3,27 +3,66 @@
 import AppKit
 import AudiouterCore
 
-/// Reusable "control panel" shell (control-panel rollout, `AIRPLAY_CONTROL_PANEL=1`):
-/// a sticky floating `NSPanel` that hosts an arbitrary content `NSViewController`.
-/// The shell hosts Groups only today — Settings is its own standalone
-/// window (`AudiouterSettingsUI.SettingsWindowController`), and Setup may
-/// return onto the shell later, so it stays content-agnostic: the app
-/// keeps exactly one `ControlPanelWindowController` alive and calls
-/// `setContent(_:)` to swap what it's showing rather than opening a
-/// second window.
+/// Reusable "control panel" shell: a sticky floating `NSPanel` that hosts an
+/// arbitrary content `NSViewController`. It is the ONE SURFACE's window (the
+/// old `AIRPLAY_CONTROL_PANEL` opt-in flag is retired — this shell always
+/// ships): `AppSurfaceController` keeps exactly one
+/// `ControlPanelWindowController` alive and calls `setContent(_:)` to swap
+/// between the Mixer/Groups/Settings screens rather than opening a second
+/// window. It stays content-agnostic — no screen concepts in here.
 ///
 /// Panel behavior (decided, do not drift):
 /// - ACTIVATING: takes focus on open. Deliberately NOT `.nonactivatingPanel` —
 ///   this is a real work surface (text fields, buttons), not a HUD.
-/// - `hidesOnDeactivate = true`: tucks away on app-switch; AppKit restores it
-///   automatically when the app regains activation. This is NOT a close, so
-///   `onClose` must never fire for it — see `windowWillClose` below.
+/// - `hidesOnDeactivate = true` (UNPINNED only): tucks away on app-switch;
+///   AppKit restores it automatically when the app regains activation. This is
+///   NOT a close, so `onClose` must never fire for it — see `windowWillClose`.
 /// - On a REAL close (✕ / Esc / `performClose`) the app "lands home": `onClose`
 ///   fires so the caller can re-present the menu-bar popover.
 /// - Anchored just under the menu-bar status item via `show(anchorRect:)`,
 ///   CENTERED on its midX like `NSPopover` (clamped on-screen), with a
 ///   custom-drawn arrow "beak" tying the two together — see
 ///   `ControlPanelBackingView`.
+///
+/// ## Two manner profiles (U1)
+///
+/// The same window, the same hosted content, two sets of MANNERS — flipped at
+/// runtime by `setPinned(_:)`. Content is NEVER re-hosted across the flip
+/// (re-assigning `contentViewController` snaps the window to a 500×500
+/// fallback — see `setContent`'s TRAP — and the hosted view trees are heavily
+/// stateful), so "pin" is a property change on one live window, never a move
+/// to a different one.
+///
+/// - UNPINNED (the default): anchored under the status item
+///   with the beak, `isMovable = false`, `hidesOnDeactivate = true`,
+///   `level = .floating`, transparent title-bar area (the surface's toolbar
+///   items sit directly on the bubble), standard buttons hidden, no frame
+///   autosave, and click-outside dismisses (`windowDidResignKey`).
+/// - PINNED: an ordinary movable window — `isMovable = true`,
+///   `hidesOnDeactivate = false`, `level = .normal`, the system toolbar strip
+///   with the standard close button visible (the title-bar TEXT stays hidden
+///   in both profiles — the one header strip is the surface's toolbar, owner
+///   decision 2026-08-07), the decorative beak/backing window hidden, an
+///   opaque warm background of its own, and frame autosave armed so the
+///   position survives relaunch. It does NOT dismiss on click-out; it can sit
+///   behind other apps. Dragging by the toolbar strip works (system default
+///   for a movable window's title-bar area).
+///
+/// **Only APPEARANCE/manner bits ever change** — `.titled` and `.closable`
+/// stay in the style mask in BOTH profiles, forever (see `makePanel`: removing
+/// `.titled` silently kills `performClose`/`windowWillClose`/`onClose` and
+/// Escape). "Show a real title bar" is `titlebarAppearsTransparent` +
+/// `titleVisibility`, never style-mask surgery.
+///
+/// **Un-pinning re-anchors IMMEDIATELY when the panel is on screen** (rather
+/// than deferring to the next `show`): a pinned window can be anywhere —
+/// dragged to another corner, restored from a saved frame on a different
+/// screen — and the moment it stops being pinned it grows a beak that points
+/// at the status item. Leaving it in place until the next show would render a
+/// beak aimed at nothing and a "transient" panel nowhere near the menu bar.
+/// Re-anchoring on the spot keeps the window on screen and its manners and
+/// position consistent at every instant. When it is NOT on screen there is
+/// nothing to re-anchor — the next `show(anchorRect:)` positions it normally.
 @MainActor
 public final class ControlPanelWindowController: NSWindowController {
 
@@ -60,16 +99,44 @@ public final class ControlPanelWindowController: NSWindowController {
     private let backingWindow: NSWindow
     private let backingView: ControlPanelBackingView
 
-    public init(contentViewController: NSViewController? = nil, title: String = "") {
+    /// The autosave name the PINNED profile persists its frame under. Injectable
+    /// because `NSWindow.setFrameAutosaveName` always writes `UserDefaults
+    /// .standard` no matter what defaults suite a caller uses — a per-test name
+    /// is the only way to keep a test from racing the shipping key.
+    private let frameAutosaveName: NSWindow.FrameAutosaveName
+
+    /// Whether the panel is wearing the PINNED manner profile. Plain runtime
+    /// state — persisting the user's choice belongs to `AppSettings`, not here.
+    public private(set) var isPinned = false
+
+    /// When the panel last closed ITSELF because it resigned key (click-out).
+    /// Monotonic (`CACurrentMediaTime`, never wall-clock — an NTP step must not
+    /// make a fresh dismissal look stale). Read and cleared exactly once by
+    /// `consumeRecentResignDismissal(within:)`; `nil` when there is no
+    /// unconsumed self-dismissal.
+    private var lastResignDismissalTime: CFTimeInterval?
+
+    /// How recently a resign-key self-dismissal has to have happened for the
+    /// status-item click handler to treat it as "that click is what closed me".
+    /// A whole mouse-down→mouse-up on a menu-bar item is milliseconds; this is
+    /// sized for a slow deliberate click, not for a later unrelated one.
+    nonisolated public static let recentResignDismissalInterval: TimeInterval = 0.3
+
+    public init(contentViewController: NSViewController? = nil,
+                title: String = "",
+                frameAutosaveName: NSWindow.FrameAutosaveName = "ControlPanelSurface") {
         let panel = Self.makePanel()
         (backingWindow, backingView) = Self.makeBackingWindow()
+        self.frameAutosaveName = frameAutosaveName
         super.init(window: panel)
         panel.delegate = self
         if !title.isEmpty { panel.title = title }
-        // Attached once; the parent/child relationship survives close/reshow
-        // (verified empirically — AppKit re-tracks position and visibility
-        // automatically), so `show(anchorRect:)` never needs to re-attach it.
-        panel.addChildWindow(backingWindow, ordered: .below)
+        // Applies the UNPINNED profile, which is also what attaches the
+        // decorative backing window. Attached once per unpinned spell; the
+        // parent/child relationship survives close/reshow (verified empirically
+        // — AppKit re-tracks position and visibility automatically), so
+        // `show(anchorRect:)` never needs to re-attach it.
+        applyPinProfile()
         if let contentViewController {
             setContent(contentViewController)
         }
@@ -77,27 +144,30 @@ public final class ControlPanelWindowController: NSWindowController {
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    /// Build the sticky floating panel: ACTIVATING
-    /// (no `.nonactivatingPanel`), floats above other apps, never claims a
-    /// Dock slot, tucks away on app-switch and is restored on return, takes
+    /// Build the panel's PROFILE-INDEPENDENT configuration — the bits that are
+    /// identical pinned and unpinned. Everything that differs between the two
+    /// manner profiles (level, movability, `hidesOnDeactivate`, title-bar
+    /// visibility, opacity/shadow, frame autosave, the decorative backing
+    /// window) is set by `applyPinProfile()`, which `init` calls immediately;
+    /// a panel returned from here is not yet fully configured.
+    ///
+    /// ACTIVATING (no `.nonactivatingPanel`), never claims a Dock slot, takes
     /// key for text editing, and isn't released on close so it can be reused.
     ///
-    /// T11 adds the visual "borderless bubble" look WITHOUT touching any of
-    /// the bits above: `.titled` + `.closable` stay in the style mask because
-    /// `performClose(_:)` silently no-ops (no `windowWillClose`, no `onClose`)
-    /// on a window whose style mask lacks `.titled` — verified empirically.
-    /// Removing it would have desynchronized `onClose` from ✕/Esc/performClose,
-    /// which the whole "land home" contract (and this file's own tests) depend
-    /// on. The native title bar is made visually invisible
-    /// (`titlebarAppearsTransparent` + hidden title) while the standard CLOSE
-    /// button is deliberately KEPT VISIBLE as the panel's close affordance: an
-    /// anchored work surface that does NOT dismiss on click-out (it only tucks
-    /// away on app-switch) has to give the user a real, obvious way out. The
-    /// miniaturize/zoom buttons are hidden — neither makes sense on a fixed,
-    /// anchored, non-movable panel. The window is painted transparent so the
-    /// only large chrome is `ControlPanelBackingView`'s bubble in the window
-    /// behind it, with the lone close button sitting in the top-left safe area
-    /// over it. Escape is wired to close too — see `ControlPanelPanel`.
+    /// T11 gave it a visual "borderless bubble" look WITHOUT touching the bits
+    /// above: `.titled` + `.closable` stay in the style mask — IN BOTH
+    /// PROFILES, permanently — because `performClose(_:)` silently no-ops (no
+    /// `windowWillClose`, no `onClose`) on a window whose style mask lacks
+    /// `.titled`, verified empirically. Removing it would desynchronize
+    /// `onClose` from ✕/Esc/performClose, which the whole "land home" contract
+    /// (and this file's own tests) depend on. The title-bar TEXT is hidden in
+    /// both profiles (the surface's window-attached toolbar is the one header
+    /// strip); what flips per profile is the strip's material
+    /// (`titlebarAppearsTransparent`) and the standard close button's
+    /// visibility — see `applyPinProfile`. The miniaturize/zoom buttons stay
+    /// hidden in both — the style mask carries neither `.miniaturizable` nor a
+    /// zoom-worthy window, so they would be dead chrome. Escape is wired to
+    /// close too — see `ControlPanelPanel`.
     private static func makePanel() -> NSPanel {
         let panel = ControlPanelPanel(
             contentRect: NSRect(x: 0, y: 0, width: 720, height: 460),
@@ -105,38 +175,134 @@ public final class ControlPanelWindowController: NSWindowController {
             backing: .buffered,
             defer: false
         )
-        panel.isFloatingPanel = true
-        panel.level = .floating
-        panel.hidesOnDeactivate = true       // tuck away on app-switch; restored on return
         panel.becomesKeyOnlyIfNeeded = false // ACTIVATING: takes key on open
         panel.isReleasedWhenClosed = false   // reused across opens (one panel, swapped content)
+        panel.isRestorable = false           // decided policy (P3/W7): menu-bar app, no window restoration
         panel.animationBehavior = .utilityWindow
 
-        // Borderless bubble look (T11): no native title bar, no shadow of its
-        // own (the backing window behind draws a shape-fitted shadow instead),
-        // fully transparent everywhere the hosted content doesn't paint.
-        panel.titlebarAppearsTransparent = true
-        panel.titleVisibility = .hidden
-        // The close button is the panel's one visible close affordance — kept
-        // shown (this is the fix for "no way to close the panel"). Miniaturize
-        // and zoom are hidden: an anchored, non-movable panel has no use for
-        // them, and a lone close button reads cleanly against the bubble.
-        panel.standardWindowButton(.closeButton)?.isHidden = false
+        // Miniaturize and zoom are hidden in BOTH profiles: neither is in the
+        // style mask, so they would be dead chrome. The close button's
+        // visibility is profile-dependent (owner decision 2026-08-07) — see
+        // `applyPinProfile`.
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.standardWindowButton(.zoomButton)?.isHidden = true
-        panel.isOpaque = false
-        panel.backgroundColor = Tokens.Color.clear
-        panel.hasShadow = false
-        // Not user-draggable: an anchored, transient panel has no business
-        // being repositioned by the user, and keeping it fixed guarantees the
-        // decorative backing window (which follows this one's frame deltas,
-        // not a live layout pass) never drifts out of sync.
-        panel.isMovable = false
         // Summon onto the CURRENT Space (and over a fullscreen app) rather than
         // switching Spaces — matches the "summon → act → dismiss" model
         // (window-panel.md M1).
         panel.collectionBehavior.formUnion([.moveToActiveSpace, .fullScreenAuxiliary])
         return panel
+    }
+
+    // MARK: - Manner profiles (U1)
+
+    /// Flip the panel between its two manner profiles (see the class doc).
+    /// Only manner/appearance bits move — the style mask, the hosted content,
+    /// and the window identity are untouched, so no state is lost either way.
+    ///
+    /// Un-pinning while the panel is ON SCREEN re-anchors it under the status
+    /// item on the spot (a pinned window can be anywhere, and the beak it grows
+    /// back has to point at something); un-pinning while it is hidden leaves
+    /// positioning to the next `show(anchorRect:)`.
+    public func setPinned(_ pinned: Bool) {
+        guard pinned != isPinned else { return }
+        isPinned = pinned
+        applyPinProfile()
+        if !pinned, isPanelVisible {
+            show(anchorRect: lastAnchorRect)
+        }
+    }
+
+    /// Stamp the current profile's manner bits onto the panel. Idempotent, and
+    /// the ONLY place either profile's bits are written — `makePanel` sets none
+    /// of them, so there is exactly one definition of each profile.
+    private func applyPinProfile() {
+        // Typed as `NSPanel`, not `NSWindow`: `isFloatingPanel` is READ-ONLY on
+        // `NSWindow` and read-write only on `NSPanel`.
+        guard let panel = window as? NSPanel else { return }
+        if isPinned {
+            // `isFloatingPanel` IS the level switch, in both directions — it
+            // writes `level` as a side effect (`false` → `.normal`, `true` →
+            // `.floating`), measured on both flips. So there is no explicit
+            // level assignment here: one before this line would be silently
+            // overwritten, and one after it would be dead code.
+            panel.isFloatingPanel = false
+            panel.hidesOnDeactivate = false  // may sit behind other apps
+            panel.isMovable = true
+            // NO separate visible title bar (owner decision 2026-08-07, live
+            // build review): the window-attached toolbar the surface installs
+            // IS the one header strip, and `titleVisibility` stays `.hidden`
+            // so the title-bar text never stacks a second strip above it (the
+            // toolbar carries a centered app-name item instead; `window.title`
+            // remains set for VoiceOver / Mission Control). The title bar
+            // area keeps its system material pinned (`titlebarAppearsTransparent
+            // = false`) — the system draws the unified-toolbar strip, Liquid
+            // Glass on macOS 26+, the older material below, Reduce
+            // Transparency handled for free. Appearance bits only: the style
+            // mask is NOT touched (see `makePanel`), so `.fullSizeContentView`
+            // stays on — the hosted content still spans the whole frame,
+            // including under the toolbar strip, and content that needs to
+            // clear it has to inset itself.
+            panel.titlebarAppearsTransparent = false
+            panel.titleVisibility = .hidden
+            // Pinned shows the standard close button (an ordinary window's
+            // close affordance); unpinned hides it — the menu-bar click and
+            // Escape close the transient bubble.
+            panel.standardWindowButton(.closeButton)?.isHidden = false
+            // The decorative bubble is gone, so the window has to paint and
+            // cast a shadow itself — otherwise a pinned surface would be an
+            // invisible rectangle under a floating toolbar strip. `panel` is
+            // the same warm fill the bubble draws (the ONE surface canvas,
+            // owner decision 2026-08-07), so the hosted content (deliberately
+            // transparent — see `configureContentAppearance`) reads
+            // identically in both profiles.
+            panel.isOpaque = true
+            panel.backgroundColor = Tokens.Color.panel
+            panel.hasShadow = true
+            panel.removeChildWindow(backingWindow)
+            backingWindow.orderOut(nil)
+            // `setFrameUsingName` FIRST, then `setFrameAutosaveName`:
+            // `setFrameAutosaveName`'s own Bool return is not a trustworthy
+            // "was a frame restored" signal (verified empirically — it returns
+            // `true` even for a brand-new name with nothing ever saved), so
+            // the restore goes through the API that both restores
+            // and reports; the autosave call afterward only ARMS ongoing
+            // save-on-move/resize. With no saved frame this is a no-op and the
+            // window pins exactly where it already sits; with one it returns
+            // to where it was last pinned, which is the whole point of
+            // remembering it.
+            _ = panel.setFrameUsingName(frameAutosaveName)
+            panel.setFrameAutosaveName(frameAutosaveName)
+        } else {
+            // Disarm autosave FIRST: the re-anchor that follows must not be
+            // written back over the user's remembered pinned position.
+            panel.setFrameAutosaveName("")
+            panel.isFloatingPanel = true     // also restores `level` to `.floating`
+            panel.hidesOnDeactivate = true   // tuck away on app-switch; restored on return
+            // Not user-draggable: an anchored, transient panel has no business
+            // being repositioned by the user, and keeping it fixed guarantees
+            // the decorative backing window (which follows this one's frame
+            // deltas, not a live layout pass) never drifts out of sync.
+            panel.isMovable = false
+            // Borderless bubble look (T11): the title-bar area goes fully
+            // transparent so the window-attached toolbar's items sit directly
+            // on the warm bubble — the strip must not paint a rectangular
+            // material band across the bubble's rounded top (owner decision
+            // 2026-08-07: the header has no backing fill of its own). No
+            // shadow of its own (the backing window behind draws a
+            // shape-fitted shadow instead).
+            panel.titlebarAppearsTransparent = true
+            panel.titleVisibility = .hidden
+            // The transient bubble hides the standard buttons; Escape and the
+            // menu-bar toggle are its close affordances (owner decision
+            // 2026-08-07).
+            panel.standardWindowButton(.closeButton)?.isHidden = true
+            panel.isOpaque = false
+            panel.backgroundColor = Tokens.Color.clear
+            panel.hasShadow = false
+            if backingWindow.parent !== panel {
+                panel.addChildWindow(backingWindow, ordered: .below)
+            }
+        }
     }
 
     /// Build the decorative backing window (T11): borderless, click-through,
@@ -241,11 +407,49 @@ public final class ControlPanelWindowController: NSWindowController {
         window?.title = title
     }
 
+    /// Whether the panel currently offers the user a drag-resize handle/cursor.
+    /// The surface toggles this PER SCREEN (F3, live review): an exact-fit
+    /// screen re-sizes the window itself on every content change, so a manual
+    /// drag fights it — the drag sticks until the next content change, then
+    /// snaps back to the exact fit. Turning `.resizable` off for those screens
+    /// removes the affordance instead of leaving it to fight a resize the user
+    /// didn't ask for; Groups keeps it (its session drag-memory is deliberate,
+    /// U3). Only the `.resizable` bit moves — `.titled`/`.closable` never do
+    /// (R6), and `.resizable` is not one of them, so this is independent of
+    /// the pin-profile manner bits `applyPinProfile()` owns.
+    public func setUserResizable(_ resizable: Bool) {
+        guard let panel = window else { return }
+        if resizable {
+            panel.styleMask.insert(.resizable)
+        } else {
+            panel.styleMask.remove(.resizable)
+        }
+    }
+
+    /// Whether the panel's style mask currently carries `.resizable`, for
+    /// structural assertions.
+    public var isUserResizable: Bool {
+        window?.styleMask.contains(.resizable) ?? false
+    }
+
+    /// The panel's pre-dispatch key-equivalent hook (see `ControlPanelPanel`).
+    /// The surface installs its ⌘1/⌘2/⌘3 screen shortcuts here; the shell
+    /// itself attaches no meaning to any key.
+    public var keyEquivalentHandler: ((NSEvent) -> Bool)? {
+        get { (window as? ControlPanelPanel)?.keyEquivalentHandler }
+        set { (window as? ControlPanelPanel)?.keyEquivalentHandler = newValue }
+    }
+
     /// Whether the panel is currently on screen, as opposed to tucked away by
     /// `hidesOnDeactivate` after an app-switch. The status-item click handler
     /// reads this to decide between toggling a live panel CLOSED and restoring
     /// a tucked-away one — see `AppDelegate`'s `onButtonClicked`.
-    public var isPanelVisible: Bool { window?.isVisible ?? false }
+    ///
+    /// Honors `test_isPanelVisibleOverride` so headless tests can drive the
+    /// on-screen-only paths (`swift test` never orders a real window on
+    /// screen), mirroring `PopoverController.test_isShownOverride` and
+    /// `MixerWindowController.test_isVisibleOverride`.
+    public var isPanelVisible: Bool { test_isPanelVisibleOverride ?? (window?.isVisible ?? false) }
 
     /// Close the panel exactly as the ✕ button or Escape would: routed through
     /// `performClose(_:)` so `windowWillClose` → `onClose` fires and the app
@@ -253,6 +457,29 @@ public final class ControlPanelWindowController: NSWindowController {
     /// than a bare `close()`/`orderOut`, which would skip the land-home contract.
     public func performClose() {
         window?.performClose(nil)
+    }
+
+    /// Whether the panel closed ITSELF by resigning key within the last
+    /// `interval`, consuming that fact so it can only ever be read once.
+    ///
+    /// This is the R1 status-click race guard. The status item's click is
+    /// EXACTLY the click that makes an unpinned panel resign key, and AppKit
+    /// delivers the resign (→ close) BEFORE the button's action fires. The
+    /// action then looks at a closed panel, concludes "it wasn't open", and
+    /// reopens it — the panel can never be toggled shut from the menu bar, it
+    /// just flickers. So the click handler asks this first: a `true` means
+    /// "the click you are handling is what dismissed me — do nothing", a
+    /// `false` means "I was already closed — open me".
+    ///
+    /// Consuming on ANY call (stale or fresh) is deliberate: a leftover stamp
+    /// must never survive to swallow a later, unrelated click.
+    @discardableResult
+    public func consumeRecentResignDismissal(
+        within interval: TimeInterval = ControlPanelWindowController.recentResignDismissalInterval
+    ) -> Bool {
+        guard let stamp = lastResignDismissalTime else { return false }
+        lastResignDismissalTime = nil
+        return CACurrentMediaTime() - stamp <= interval
     }
 
     /// Show the panel anchored just under `anchorRect` (the menu-bar status
@@ -263,10 +490,24 @@ public final class ControlPanelWindowController: NSWindowController {
     /// on screen. The backing window is kept in lockstep (same x/width,
     /// `beakHeight` taller) and its beak tip repositioned to track wherever
     /// the anchor actually ends up after clamping.
+    /// Pinned, this degrades to a plain front-and-focus: an ordinary window
+    /// belongs wherever the user left it (or wherever its autosaved frame
+    /// restored it to), it has no beak to keep in lockstep, and a re-front is
+    /// not an appearance so it does not re-fade. The anchor is still recorded
+    /// so a later un-pin has something to re-anchor to.
     public func show(anchorRect: NSRect?) {
         guard let panel = window else { return }
         lastAnchorRect = anchorRect
         panel.contentView?.layoutSubtreeIfNeeded()
+
+        if isPinned {
+            if !HeadlessRuntime.isActive {
+                NSApp?.activate(ignoringOtherApps: true)
+                panel.makeKeyAndOrderFront(nil)
+            }
+            return
+        }
+
         let size = panel.frame.size
 
         if let anchor = anchorRect {
@@ -397,6 +638,33 @@ public final class ControlPanelWindowController: NSWindowController {
 
     /// The decorative backing window, for structural assertions (T11).
     public var test_backingWindow: NSWindow? { backingWindow }
+
+    /// `nil` = read the real `window.isVisible`. `swift test` never orders a
+    /// window on screen, so the on-screen-only paths (close-on-resign, the
+    /// un-pin re-anchor) are unreachable without this.
+    public var test_isPanelVisibleOverride: Bool?
+
+    /// `nil` = read the real `window.attachedSheet`. A real sheet cannot be
+    /// begun headlessly without putting a window on the developer's screen.
+    public var test_hasAttachedSheetOverride: Bool?
+
+    /// `nil` = read the real `NSApp.isActive`. Test processes are not active
+    /// applications, so the in-app-focus-loss path needs to be driven.
+    public var test_appIsActiveOverride: Bool?
+
+    /// A sheet is up (e.g. group creation). Dismissing the panel out from under
+    /// it would kill the sheet mid-edit — R7. Public: the surface's click
+    /// policy (`AppSurfaceController.clickAction`) reads this too, to front
+    /// the window instead of attempting `performClose` (which AppKit refuses,
+    /// with a beep, while a sheet is attached).
+    public var hasAttachedSheet: Bool {
+        test_hasAttachedSheetOverride ?? (window?.attachedSheet != nil)
+    }
+
+    /// Whether THIS app still holds activation. The discriminator between the
+    /// two very different reasons a window resigns key — see
+    /// `windowDidResignKey`.
+    private var appIsActive: Bool { test_appIsActiveOverride ?? NSApp?.isActive ?? false }
 }
 
 // MARK: - NSWindowDelegate
@@ -408,6 +676,37 @@ extension ControlPanelWindowController: NSWindowDelegate {
     public func windowWillClose(_ notification: Notification) {
         animateDisappearance()
         onClose?()
+    }
+
+    /// UNPINNED ONLY: losing key focus inside this app is a click-outside, and
+    /// a transient anchored panel dismisses on one. Four conditions, each of
+    /// which is a real, separate bug if dropped:
+    ///
+    /// 1. `!isPinned` — a pinned window is an ordinary window. Click-out must
+    ///    leave it exactly where it is.
+    /// 2. `isPanelVisible` — closing a window RESIGNS its key status, so this
+    ///    method fires again during every ✕/Esc/`performClose` teardown.
+    ///    Without the visibility gate that second pass calls `performClose`
+    ///    once more and `onClose` (the "land home" contract) fires TWICE. A
+    ///    panel that is not on screen also cannot have been clicked away from,
+    ///    so this is the honest precondition, not just re-entrancy defense.
+    /// 3. `!hasAttachedSheet` — R7: dismissing the host out from under a live
+    ///    sheet destroys the sheet mid-edit.
+    /// 4. `appIsActive` — the two reasons a window resigns key are NOT the
+    ///    same event. Another of OUR windows taking focus (Setup, a
+    ///    standalone window, the status item) is the in-app focus loss that
+    ///    means "click outside the panel" → close. The user switching to
+    ///    ANOTHER APP is the `hidesOnDeactivate` tuck-away, which AppKit
+    ///    reverses by itself when the app comes back and which must keep
+    ///    behaving exactly as it always has — a close there would mean an
+    ///    app-switch silently loses the surface.
+    ///
+    /// The timestamp recorded before closing is the R1 race guard — see
+    /// `consumeRecentResignDismissal(within:)` for what it protects against.
+    public func windowDidResignKey(_ notification: Notification) {
+        guard !isPinned, isPanelVisible, !hasAttachedSheet, appIsActive else { return }
+        lastResignDismissalTime = CACurrentMediaTime()
+        window?.performClose(nil)
     }
 
     /// Resync the decorative bubble/beak window when the user drags the
@@ -425,7 +724,10 @@ extension ControlPanelWindowController: NSWindowDelegate {
     /// panel was last centered (no anchor to track), in which case the beak
     /// simply keeps its current fraction.
     public func windowDidResize(_ notification: Notification) {
-        guard let panel = window else { return }
+        // Pinned: the decorative backing window is detached and off screen —
+        // there is nothing to keep in lockstep, and re-framing a hidden child
+        // would only risk ordering it back on screen.
+        guard !isPinned, let panel = window else { return }
         panel.contentView?.layoutSubtreeIfNeeded()
         let frame = panel.frame
         backingWindow.setFrame(
@@ -441,17 +743,36 @@ extension ControlPanelWindowController: NSWindowDelegate {
 
 // MARK: - ControlPanelPanel
 
-/// The shell's `NSPanel`, subclassed for ONE reason: to make Escape a
-/// deterministic close. Pressing Escape (or ⌘.) sends `cancelOperation(_:)` up
-/// the responder chain; routing it to `performClose(_:)` guarantees Esc closes
-/// the panel through the SAME path as the ✕ button — `windowWillClose` →
-/// `onClose` (land home) — instead of relying on incidental default panel
-/// behavior. `performClose(_:)` only fires when the style mask contains
-/// `.titled`/`.closable` (it does — see `ControlPanelWindowController.makePanel`),
-/// so this closes cleanly with no system beep. A field editor still gets first
-/// crack at Escape (to cancel in-progress text editing) before it reaches here.
+/// The shell's `NSPanel`, subclassed for TWO reasons:
+///
+/// 1. To make Escape a deterministic close. Pressing Escape (or ⌘.) sends
+///    `cancelOperation(_:)` up the responder chain; routing it to
+///    `performClose(_:)` guarantees Esc closes the panel through the SAME path
+///    as the close button — `windowWillClose` → `onClose` (land home) —
+///    instead of relying on incidental default panel behavior.
+///    `performClose(_:)` only fires when the style mask contains
+///    `.titled`/`.closable` (it does — see
+///    `ControlPanelWindowController.makePanel`), so this closes cleanly with no
+///    system beep. A field editor still gets first crack at Escape (to cancel
+///    in-progress text editing) before it reaches here.
+/// 2. To offer callers a key-equivalent seam. The surface's screen shortcuts
+///    (⌘1/⌘2/⌘3) used to ride `NSButton.keyEquivalent` on in-content header
+///    buttons; a window-attached `NSToolbarItemGroup` carries no per-segment
+///    key equivalents, so the window itself consults the injected handler
+///    first. Content-agnostic: the shell knows nothing about what the keys
+///    mean, and an unhandled event falls through to stock dispatch untouched.
 final class ControlPanelPanel: NSPanel {
+    /// Consulted before stock key-equivalent dispatch; return `true` to
+    /// consume the event. Set through
+    /// `ControlPanelWindowController.keyEquivalentHandler`.
+    var keyEquivalentHandler: ((NSEvent) -> Bool)?
+
     override func cancelOperation(_ sender: Any?) {
         performClose(sender)
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if keyEquivalentHandler?(event) == true { return true }
+        return super.performKeyEquivalent(with: event)
     }
 }

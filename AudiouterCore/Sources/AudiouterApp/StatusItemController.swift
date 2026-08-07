@@ -42,10 +42,9 @@ import AudiouterSharedUI
 /// Both states are also spoken: the image's accessibility description appends
 /// "muted" / "routing" so VoiceOver reads what the glance shows.
 ///
-/// SPEC §9 revised (NSMenu → NSPopover): the dropdown is now an `NSPopover`, so
-/// the button's *action* toggles the popover (rather than assigning `.menu`,
-/// which would auto-open a menu). The action closure is wired in
-/// `onButtonClicked`.
+/// SPEC §9 revised: the dropdown is the one-surface panel, so the button's
+/// *action* drives it (rather than assigning `.menu`, which would auto-open a
+/// menu). The action closure is wired in `onButtonClicked`.
 final class StatusItemController {
 
     private let statusItem: NSStatusItem

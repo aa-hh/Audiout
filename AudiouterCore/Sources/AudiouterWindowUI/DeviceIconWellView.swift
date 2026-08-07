@@ -84,8 +84,6 @@ final class DeviceIconWellView: NSView {
     /// read the same pair of alphas off the grid.
     private static let badgeRestAlpha = PopoverColumnGrid.editAffordanceRestAlpha
     private static let badgeHoverAlpha = PopoverColumnGrid.editAffordanceHoverAlpha
-    private static let badgeColor = NSColor(white: 0, alpha: 0.55)
-    private static let badgeBorderColor = NSColor(white: 1, alpha: 0.25)
 
     let iconImageView = NSImageView()
     private let badgeView = NSView()
@@ -134,15 +132,18 @@ final class DeviceIconWellView: NSView {
         badgeView.translatesAutoresizingMaskIntoConstraints = false
         badgeView.wantsLayer = true
         badgeView.layer?.cornerRadius = Self.badgeDiameter / 2
-        badgeView.layer?.backgroundColor = Self.badgeColor.cgColor
         badgeView.layer?.borderWidth = 1
-        badgeView.layer?.borderColor = Self.badgeBorderColor.cgColor
         badgeView.alphaValue = Self.badgeRestAlpha
 
         let badgePencil = NSImage(systemSymbolName: "pencil", accessibilityDescription: nil)
         badgePencil?.isTemplate = true
         badgePencilImageView.translatesAutoresizingMaskIntoConstraints = false
         badgePencilImageView.image = badgePencil
+        // Deliberately fixed white, not a token: the badge fill it sits on
+        // (`Tokens.Color.iconWellBadge`) is itself a fixed dark scrim in both
+        // themes (see that case's doc comment) precisely so this glyph never
+        // has to flip too — a theme-adaptive badge would force this to chase
+        // it every time.
         badgePencilImageView.contentTintColor = .white
         badgePencilImageView.imageScaling = .scaleProportionallyUpOrDown
 
@@ -173,9 +174,45 @@ final class DeviceIconWellView: NSView {
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
         setAccessibilityLabel("Edit icon")
+
+        restampBadgeLayerColors()
+        // A mid-session Increase Contrast toggle arrives via neither `apply`
+        // nor `viewDidChangeEffectiveAppearance` (AudiouterSharedUI/AGENTS.md
+        // — the same reason `HaloRingView` et al. observe this notification):
+        // the badge's fill/border are stamped `CGColor`s on a `CALayer`, so
+        // without this they would keep showing the pre-toggle alpha until
+        // the next full rebuild. No matching `removeObserver` needed — AppKit
+        // auto-unregisters on dealloc (post-10.11).
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(accessibilityDisplayOptionsDidChange),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    /// Re-stamps the corner badge's fill/border from the live
+    /// `Tokens.Color.iconWellBadge`/`.iconWellBadgeBorder` — unlike the well
+    /// itself (which reads `Tokens.Color` live inside `draw(_:)`, so it
+    /// re-resolves on every repaint for free), the badge is a plain
+    /// `CALayer` whose `backgroundColor`/`borderColor` are frozen `CGColor`
+    /// snapshots that only this call updates.
+    private func restampBadgeLayerColors() {
+        badgeView.layer?.backgroundColor = Tokens.Color.iconWellBadge.cgColor
+        badgeView.layer?.borderColor = Tokens.Color.iconWellBadgeBorder.cgColor
+        test_restampCount += 1
+    }
+
+    /// Counts `restampBadgeLayerColors()` calls — a colour-equality check
+    /// alone can't tell "correct already" from "never re-stamped, but
+    /// happened to start correct," so the appearance-change/Increase-Contrast
+    /// tests assert this instead.
+    private(set) var test_restampCount = 0
+
+    @objc private func accessibilityDisplayOptionsDidChange() {
+        restampBadgeLayerColors()
+    }
 
     // MARK: Warm-well drawing (Warm Signal §1/§5.3)
 
@@ -228,6 +265,7 @@ final class DeviceIconWellView: NSView {
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         needsDisplay = true
+        restampBadgeLayerColors()
     }
 
     // MARK: Hover tracking
@@ -342,6 +380,30 @@ final class DeviceIconWellView: NSView {
     /// (`setOverlayVisible(_:)`), including the keyboard-focus case a headless
     /// run can't observe visually.
     var test_badgeAlpha: CGFloat { badgeView.alphaValue }
+
+    /// The badge layer's currently-stamped fill/border, read back as
+    /// `NSColor` — asserts `restampBadgeLayerColors()` actually wrote
+    /// `Tokens.Color.iconWellBadge`/`.iconWellBadgeBorder` into the layer,
+    /// and that an appearance/Increase-Contrast change re-stamps them rather
+    /// than leaving the layer frozen at its init-time value.
+    var test_badgeFillColor: NSColor? {
+        guard let cgColor = badgeView.layer?.backgroundColor else { return nil }
+        return NSColor(cgColor: cgColor)
+    }
+    var test_badgeBorderColor: NSColor? {
+        guard let cgColor = badgeView.layer?.borderColor else { return nil }
+        return NSColor(cgColor: cgColor)
+    }
+
+    /// Re-stamps the badge layer as if the OS posted a live Increase Contrast
+    /// toggle — exercises `accessibilityDisplayOptionsDidChange` through the
+    /// real notification path, the same way `HaloRingView`'s tests drive it
+    /// (`test_reduceMotionOverride`'s doc comment), rather than calling the
+    /// private re-stamp method directly.
+    func test_postAccessibilityDisplayOptionsChanged() {
+        NSWorkspace.shared.notificationCenter.post(
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+    }
 
     /// Whether the well is currently drawing the active-group gold ring
     /// (Warm Signal §5.3) instead of the resting hairline edge.

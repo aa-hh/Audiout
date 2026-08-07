@@ -126,7 +126,7 @@ extension SerializedSharedState {
     /// On macOS < 15 there is no Local Network privacy permission, so the model is
     /// constructed with `localNetworkGated: false`: it must start `.granted`, never
     /// run a Bonjour browse, and never surface as a missing required permission
-    /// (which is what produced the dead-end "Open Settings" → nonexistent pane).
+    /// (which is what produced the dead-end "Open Settings…" → nonexistent pane).
     private func makeUngatedModel(localNetwork net: SpyLocalNetwork) -> SetupModel {
         SetupModel(audioProbe: CannedAudioProbe(result: .granted),
                    localNetwork: net,

@@ -1,5 +1,10 @@
 # Window & panel mechanics — discovery audit (Task A1)
 
+> **LARGELY SUPERSEDED — historical record.** Written at `bcd6086`. C1 (partly),
+> C2, C3, M1, M2 and M3 have since shipped, and C2 is now inverted: the control
+> panel is the default chrome in every bundled build. For the current state see
+> [`docs/plans/PLAN-UI-CONSISTENCY-PUNCHLIST.md`](../PLAN-UI-CONSISTENCY-PUNCHLIST.md).
+
 Audiouter is a menu-bar-only (`.accessory`) app: no Dock icon, no main menu,
 no `Cmd+Tab` safety net. Every window it owns has to be recoverable through
 the status item alone, or it strands the user. This audit traces every

@@ -6759,7 +6759,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// per-app meter) — and drives the metering-only tap lifecycle (the
     /// `.noRedirect` per-app meter): on `true`, start a dedicated `.unmuted` tap
     /// for every currently-eligible listed app; on `false`, stop them all.
-    /// `PopoverController` calls this on `popoverDidShow`/`popoverDidClose` via
+    /// `PopoverController` calls this on `surfaceDidShow`/`surfaceDidHide` via
     /// `backend as? MeteringControlling`. The `?` sub-components are `nil` in
     /// tests / the UI-only smoke path (harmless no-ops).
     public func setMeteringActive(_ active: Bool) {

@@ -42,5 +42,5 @@ The menu-bar popover UI (pure AppKit), and — since U3 — the **one-surface ho
 | `ConnectionDiagnosisView` | "Couldn't connect" panel under a failed row. |
 | `PopoverHeaderView` | The switcher strip: three capsule tabs + Pin + Quit on tiered glass. |
 | `CapsuleFillView` | Draw-time capsule fill; tokens re-resolve per repaint. |
-| `GroupRowView` | Group's master row; built for the window, unused here. |
+| `GroupRowView` | Group's master row; built for the window, unused here. Its `draw(_:)` paints the same inset rounded active/hover pill as the `AudiouterSharedUI` rows (unified `PopoverColumnGrid` alphas) — its stack host provides no system row highlight. |
 | `RunningAppInfo` | Snapshot of a running app for the add picker. |

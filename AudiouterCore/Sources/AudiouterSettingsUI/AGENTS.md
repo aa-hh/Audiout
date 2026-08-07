@@ -90,7 +90,15 @@ layout and where the settings model types (`AppSettings`,
   draw with dark-adapted (light) text/colors over whatever happens to sit
   behind the window, which is illegible. It is pinned with four zero-constant
   edge constraints and **must not** go back to an autoresizing mask (trap 4).
-  Stock material, not a `Tokens` one — Settings chrome stays system.
+  Stock material, not a `Tokens` one — Settings chrome stays system. Both this
+  background and About's carry a `ReduceTransparencyFallbackView`
+  (`AudiouterSharedUI`) — an opaque cover shown exactly while Reduce
+  Transparency is on, installed before the content subviews.
+- `BorderedListView` (`AudioSettingsViewController.swift`) draws its rounded
+  hairline border around the excluded-apps list in `draw(_:)` — no stock
+  control gives a rounded separator-color border, and drawing (vs a stamped
+  layer color) lets the color resolve under the current appearance each paint
+  with no manual appearance-change bookkeeping.
 - Test/snapshot seams: assemble the panes directly (the way
   `AppDelegate.makeSettingsRoot` does), wire callbacks on the pane itself, and
   use the root's public surface — `selectTab(at:)`, `fittedContentSize`,

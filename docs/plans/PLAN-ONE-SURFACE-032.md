@@ -164,6 +164,14 @@ its scoped verification, then the full suite green, then one commit + push.
   (`NSGlassEffectView` on macOS 26+ via `#available`, `NSVisualEffectView`
   `.withinWindow` below, opaque warm under Reduce Transparency — see End
   state). Tab selection is the screen switch; keyboard: ⌘1/⌘2/⌘3.
+  Switcher rendering detail (owner nitpick 2026-08-07, Apple Music as the
+  reference): render the tabs as the toolbar-item-group idiom — capsule
+  segments sharing one glass lozenge, the selected segment getting the
+  filled capsule (in the pinned title bar this is `NSToolbarItemGroup`
+  with `selectionMode = .selectOne`; the unpinned header's custom row
+  mimics the same capsule geometry). And NO hard border/hairline on the
+  glass tiers — Liquid Glass defines its edge by refraction, so stroked
+  edges belong only to the opaque Reduce-Transparency fallback.
   `AppSettings` gains `surfacePinned`;
   `SettingsRootViewController` public + in-content tabs; per-screen sizing
   bridge (Mixer exact-fit channel `panelContentDidChangeHeight`; Groups

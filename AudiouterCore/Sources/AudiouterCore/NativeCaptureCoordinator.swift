@@ -2182,6 +2182,28 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         sampleRate: 44100, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
     private var tappedOutputDeviceID: AudioObjectID = kAudioObjectUnknown
 
+    /// The nominal rate the tapped DEVICE was settled at when this tap was
+    /// built — which is what the compare-before-rebuild guard has to be asked
+    /// about, and is NOT always `format.sampleRate`.
+    ///
+    /// The two are the same number whenever the aggregate follows its main
+    /// sub-device, which is every case but one: while
+    /// `pinAggregateRateAwayFromHandsFree` holds the aggregate above a
+    /// hands-free device, `format` is deliberately 44100 and the device is
+    /// deliberately 16000. Reporting `format.sampleRate` as tracked would then
+    /// read as "diverged" against the live device on EVERY notification for the
+    /// whole call — and since a tap rebuild perturbs the device into posting
+    /// more notifications, that is a self-feeding rebuild storm, the exact
+    /// failure ``TapRebuildDecision`` exists to break. Remembering the device's
+    /// own rate keeps the question the guard answers the right one: has the
+    /// device moved since we built on it?
+    ///
+    /// nil before `createAndStart` has a settled reading and again after
+    /// `teardown()`, mirroring `tappedOutputDeviceID`; an unreadable rate falls
+    /// back to `format.sampleRate`, which is the same number in every case
+    /// where the aggregate was not pinned.
+    private var tappedDeviceRate: Int?
+
     /// The device this tap is anchored to (``SystemAudioTap/tappedDeviceID``), or nil
     /// before `createAndStart` resolved one / after `teardown()` cleared it.
     var tappedDeviceID: AudioObjectID? {
@@ -2274,6 +2296,12 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             // `startIOProc` (aggregate live, rate settled) and before the monitor
             // subscription so its compare-before-rebuild uses the corrected rate.
             reconcileFormatWithAggregate()
+            // Both halves of what the compare-before-rebuild guard is told —
+            // the aggregate's real rate above, the DEVICE's real rate here —
+            // are sampled at the same settled moment, after the aggregate is
+            // running and before the monitor subscription below can ask.
+            tappedDeviceRate = Self.readNominalSampleRate(tappedOutputDeviceID)
+                .map { Int($0.rounded()) }
             subscribeToDefaultOutput()
         } catch {
             // Any step after the tap/aggregate was created leaves live system
@@ -2381,6 +2409,29 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         let aggregateUID = UUID().uuidString
         lastAggregateUID = aggregateUID
 
+        // D2 telemetry ONLY (whole-system-dropout investigation): read the
+        // sub-device's rate immediately BEFORE the create call below — the
+        // other half of the "did our own create flip the rate" comparison
+        // `aggregate_create` reports. A read, never a write — cannot itself
+        // perturb anything, and cannot slow the create down (no I/O, no wait).
+        // Also feeds the hands-free decision immediately below.
+        let rateBeforeCreate = Self.readNominalSampleRate(outputID)
+        let pinAwayFromHandsFree = Self.handsFreeRatePinEnabled
+            && Self.isHandsFreeArtifactRate(
+                transport: Self.readTransportType(outputID), rate: rateBeforeCreate)
+
+        var subDevice: [String: Any] = [kAudioSubDeviceUIDKey as String: outputUID]
+        if pinAwayFromHandsFree {
+            // Drift-compensate the sub-DEVICE (not just the sub-tap) so the
+            // aggregate is allowed to hold its own nominal rate while the
+            // headset stays in the 16 kHz mode macOS put it in. Without this the
+            // rate we set below has only one way to be honoured — dragging the
+            // physical device back up — and this process must not fight the OS
+            // for a headset that is mid-call. Set ONLY on this path — an
+            // aggregate that is not pinned carries no sub-device drift key.
+            subDevice[kAudioSubDeviceDriftCompensationKey as String] = true
+        }
+
         let description: [String: Any] = [
             kAudioAggregateDeviceNameKey as String:          "Tap-\(name)",
             kAudioAggregateDeviceUIDKey as String:           aggregateUID,
@@ -2388,9 +2439,7 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             kAudioAggregateDeviceIsPrivateKey as String:     true,
             kAudioAggregateDeviceIsStackedKey as String:     false,
             kAudioAggregateDeviceTapAutoStartKey as String:  true,
-            kAudioAggregateDeviceSubDeviceListKey as String: [
-                [ kAudioSubDeviceUIDKey as String: outputUID ]
-            ],
+            kAudioAggregateDeviceSubDeviceListKey as String: [subDevice],
             kAudioAggregateDeviceTapListKey as String: [
                 [
                     kAudioSubTapDriftCompensationKey as String: true,
@@ -2399,19 +2448,21 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             ]
         ]
 
-        // D2 telemetry ONLY (whole-system-dropout investigation): read the
-        // sub-device's rate immediately BEFORE the create call below — the
-        // other half of the "did our own create flip the rate" comparison
-        // `aggregate_create` reports. A read, never a write — cannot itself
-        // perturb anything, and cannot slow the create down (no I/O, no wait).
-        let rateBeforeCreate = Self.readNominalSampleRate(outputID)
-
         var newAggregateID: AudioObjectID = kAudioObjectUnknown
         let err = AudioHardwareCreateAggregateDevice(description as CFDictionary, &newAggregateID)
         guard err == noErr else {
             throw NativeCaptureError.aggregateDeviceFailed(reason: "AudioHardwareCreateAggregateDevice \(err)")
         }
         self.aggregateID = newAggregateID
+
+        // Before `startIOProc()` — a nominal-rate write lands cleanly on a
+        // device that is not yet running IO — and before `aggregate_create`
+        // below, so that line's `rateAfterCreate` read of the PHYSICAL device
+        // answers the one question this write raises: did pinning our own
+        // aggregate drag the headset's rate with it.
+        if pinAwayFromHandsFree {
+            pinAggregateRateAwayFromHandsFree(deviceRate: rateBeforeCreate)
+        }
 
         // D2 telemetry ONLY: answers "which of the four live aggregates
         // (whole-system + one per routed app) is this, does its sub-device
@@ -2431,6 +2482,41 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             "rateAfterCreate": Self.describeRate(Self.readNominalSampleRate(outputID)),
         ])
         scheduleDelayedRateTelemetry(deviceID: outputID, aggregateUID: aggregateUID)
+    }
+
+    /// Hold OUR aggregate at the engine's rate while the tapped output device
+    /// sits in Bluetooth hands-free mode.
+    ///
+    /// Live 2026-08-07 (roadmap 019): opening the mic while streaming drops a
+    /// WH-1000XM3's OUTPUT device from 44100 to 16000 for as long as the mic is
+    /// open. The aggregate follows its main sub-device, so `format` reconciled
+    /// to 16000 and the AirPlay speaker was fed 16 kHz audio upsampled back to
+    /// 44100 for the whole call — a rate the user never chose and the speaker
+    /// has no reason to inherit.
+    ///
+    /// The write targets our OWN private aggregate, never the user's device;
+    /// the sub-device drift compensation set alongside it in `createAggregate`
+    /// is what lets the two run at different rates. Best-effort by design: if
+    /// the pin does not take, `reconcileFormatWithAggregate()` reads whatever
+    /// the aggregate actually settled at and the pipeline degrades to exactly
+    /// today's follow-the-device behaviour. That is why nothing here records
+    /// whether the pin held — the aggregate's own nominal rate is the single
+    /// source of truth for `format`, before and after this call.
+    ///
+    /// razor: whole-system capture only. A per-app redirect running while the
+    /// mic is open inherits the same 16 kHz window, but it was not what was
+    /// reproduced and pinning it doubles the surface a live test has to clear.
+    /// Upgrade path: the identical call in `PerAppCaptureCoordinator`'s own
+    /// `createAggregate`, whose aggregate is built the same way.
+    private func pinAggregateRateAwayFromHandsFree(deviceRate: Double?) {
+        let target = Double(PCMFormat.airplay.sampleRate)
+        let status = Self.setNominalSampleRate(aggregateID, target)
+        Telemetry.log(.captureWS, "hfp_rate_pin", [
+            "deviceRate": Self.describeRate(deviceRate),
+            "requested": Self.describeRate(target),
+            "readBack": Self.describeRate(Self.readNominalSampleRate(aggregateID)),
+            "status": "\(status)",
+        ])
     }
 
     /// D2 telemetry ONLY: the ~250ms-delayed half of `aggregate_create`'s
@@ -2621,6 +2707,68 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         return rate
     }
 
+    /// Set `deviceID`'s nominal sample rate, returning the raw `OSStatus` so the
+    /// caller can log a refusal rather than act on it.
+    ///
+    /// The ONE HAL write on this whole path, and it is only ever aimed at this
+    /// process's own private aggregate — never at the user's output device, and
+    /// never from ``DefaultOutputDeviceMonitor``, which is watcher-only for the
+    /// documented reason that a second writer would compete with
+    /// ``LocalPlaybackEngine``. Keep that true: read `readNominalSampleRate`'s
+    /// callers before pointing this at anything else.
+    static func setNominalSampleRate(_ deviceID: AudioObjectID, _ rate: Double) -> OSStatus {
+        guard deviceID != kAudioObjectUnknown, rate.isFinite, rate > 0 else {
+            return kAudioHardwareBadObjectError
+        }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyNominalSampleRate,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var value = Float64(rate)
+        return AudioObjectSetPropertyData(
+            deviceID, &address, 0, nil, UInt32(MemoryLayout<Float64>.size), &value)
+    }
+
+    /// Escape hatch for the hands-free rate pin (`AUDIOUTER_HFP_RATE_PIN=0`),
+    /// so a live session can A/B it against follow-the-device without a
+    /// rebuild. On by default: the state it corrects is already broken, and a
+    /// pin nobody exercises is a pin nobody trusts.
+    static let handsFreeRatePinEnabled =
+        ProcessInfo.processInfo.environment["AUDIOUTER_HFP_RATE_PIN"] != "0"
+
+    /// The highest rate a Bluetooth output device is taken to be in hands-free
+    /// mode at: HFP carries 8 kHz (CVSD) or 16 kHz (mSBC) voice, while the A2DP
+    /// music profile macOS negotiates runs at 44.1 or 48 kHz.
+    private static let handsFreeRateCeiling: Double = 16_000
+
+    /// Is `rate` a rate macOS imposed to run a mic, rather than one the user's
+    /// audio is meant to be at? True only for a Bluetooth output device down at
+    /// a hands-free voice rate — the marker for the live-reproduced case where
+    /// opening the mic collapses a headset to 16 kHz and drags the whole-system
+    /// capture (and everything streamed from it) down with it.
+    ///
+    /// Pure so the marker is testable without a headset. An unreadable
+    /// transport or rate returns false: this gates a HAL write, so absence of
+    /// evidence must mean "leave it alone".
+    ///
+    /// razor: transport + rate, with no memory of what the device was running a
+    /// moment ago and no expiry — a Bluetooth output device sitting at ≤16 kHz
+    /// IS in hands-free mode, so the recent-healthy-rate history the symptom
+    /// suggests turns out to carry no extra information, and history that
+    /// survives a tap rebuild would have to be owned somewhere that outlives the
+    /// tap. Upgrade path, should a Bluetooth output device ever be found that
+    /// legitimately rests at a voice rate for playback: remember the last
+    /// non-hands-free rate per device UID on ``NativeCaptureCoordinator`` (never
+    /// on the rebuildable tap) and require a recent healthy reading here.
+    static func isHandsFreeArtifactRate(transport: UInt32?, rate: Double?) -> Bool {
+        guard let transport,
+              transport == kAudioDeviceTransportTypeBluetooth
+                || transport == kAudioDeviceTransportTypeBluetoothLE
+        else { return false }
+        guard let rate, rate.isFinite, rate > 0 else { return false }
+        return rate <= handsFreeRateCeiling
+    }
+
     // MARK: D2 telemetry helpers (whole-system-dropout investigation)
     //
     // Read-only HAL property probes + string formatters feeding
@@ -2763,7 +2911,8 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
                     reported = pinned
                 }
                 return DefaultOutputDeviceMonitor.Tracked(
-                    deviceID: reported, rate: self.format.sampleRate)
+                    deviceID: reported,
+                    rate: self.tappedDeviceRate ?? self.format.sampleRate)
             },
             onChange: { [weak self] snapshot in
                 guard let self else { return }
@@ -2796,11 +2945,16 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
     /// Test seam (hermetic suite only): seed the device/rate a live
     /// `createAndStart` would have resolved, so the monitor subscription can be
     /// exercised without real Core Audio.
-    func test_seedTrackedState(deviceID: AudioObjectID, sampleRate: Int) {
+    /// `deviceRate` defaults to `sampleRate` because that is the relationship
+    /// everywhere the aggregate follows its main sub-device; pass them apart to
+    /// seed the one state where they differ on purpose — the aggregate pinned
+    /// above a hands-free device.
+    func test_seedTrackedState(deviceID: AudioObjectID, sampleRate: Int, deviceRate: Int? = nil) {
         tappedOutputDeviceID = deviceID
         format = TapFormat(
             sampleRate: sampleRate, channels: 2, bitsPerSample: 32,
             isFloat: true, isInterleaved: false)
+        tappedDeviceRate = deviceRate ?? sampleRate
     }
 
     // MARK: Teardown (order matters: stop → destroy IOProc → destroy aggregate → destroy tap)
@@ -2817,6 +2971,7 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
 
         unsubscribeFromDefaultOutput()
         tappedOutputDeviceID = kAudioObjectUnknown
+        tappedDeviceRate = nil
         if aggregateID != kAudioObjectUnknown, let proc = ioProcID {
             let stopErr = AudioDeviceStop(aggregateID, proc)
             if stopErr != noErr { AudioDiag.log("CoreAudioSystemTap.teardown AudioDeviceStop failed: \(stopErr)") }

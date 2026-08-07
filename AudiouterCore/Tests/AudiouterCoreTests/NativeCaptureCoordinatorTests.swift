@@ -1390,6 +1390,55 @@ extension SerializedSharedState {
         #expect(CoreAudioSystemTap.reconciledFormat(declared: declared, aggregateRate: .infinity) == declared)
     }
 
+    /// The hands-free marker (roadmap 019). Live 2026-08-07: opening the mic
+    /// dropped a WH-1000XM3's OUTPUT device from 44100 to 16000 for the whole
+    /// call, and the AirPlay speaker inherited that rate. A Bluetooth output
+    /// device at a voice rate is macOS running a mic — 8 kHz CVSD or 16 kHz
+    /// mSBC — never a rate the user's music is meant to be at.
+    @available(macOS 14.2, *)
+    @Test func handsFreeArtifactRateMarksBluetoothVoiceRates() {
+        let bluetooth = kAudioDeviceTransportTypeBluetooth
+        #expect(CoreAudioSystemTap.isHandsFreeArtifactRate(transport: bluetooth, rate: 16000),
+            "16 kHz on a Bluetooth output device is the live-reproduced HFP marker")
+        #expect(CoreAudioSystemTap.isHandsFreeArtifactRate(transport: bluetooth, rate: 8000),
+            "narrowband hands-free is the same artifact one codec down")
+        #expect(CoreAudioSystemTap.isHandsFreeArtifactRate(
+            transport: kAudioDeviceTransportTypeBluetoothLE, rate: 16000))
+        #expect(!CoreAudioSystemTap.isHandsFreeArtifactRate(transport: bluetooth, rate: 44100),
+            "A2DP music rates are what the pin exists to preserve, not to override")
+        #expect(!CoreAudioSystemTap.isHandsFreeArtifactRate(transport: bluetooth, rate: 48000))
+    }
+
+    /// The marker gates a HAL write, so anything short of positive evidence
+    /// leaves the aggregate alone: a device that is not Bluetooth cannot be in
+    /// hands-free mode however low its rate, and an unreadable transport or
+    /// rate proves nothing.
+    @available(macOS 14.2, *)
+    @Test func handsFreeArtifactRateIgnoresNonBluetoothAndUnreadable() {
+        #expect(!CoreAudioSystemTap.isHandsFreeArtifactRate(
+            transport: kAudioDeviceTransportTypeBuiltIn, rate: 16000),
+            "a wired device at 16 kHz is a rate someone chose — never ours to override")
+        #expect(!CoreAudioSystemTap.isHandsFreeArtifactRate(
+            transport: kAudioDeviceTransportTypeUSB, rate: 16000))
+        #expect(!CoreAudioSystemTap.isHandsFreeArtifactRate(transport: nil, rate: 16000))
+        let bluetooth = kAudioDeviceTransportTypeBluetooth
+        #expect(!CoreAudioSystemTap.isHandsFreeArtifactRate(transport: bluetooth, rate: nil))
+        #expect(!CoreAudioSystemTap.isHandsFreeArtifactRate(transport: bluetooth, rate: 0))
+        #expect(!CoreAudioSystemTap.isHandsFreeArtifactRate(transport: bluetooth, rate: -16000))
+        #expect(!CoreAudioSystemTap.isHandsFreeArtifactRate(transport: bluetooth, rate: .nan))
+    }
+
+    /// The capture path's only HAL *write* refuses a target it cannot trust
+    /// rather than handing Core Audio an unknown object or a degenerate rate.
+    @available(macOS 14.2, *)
+    @Test func setNominalSampleRateRefusesUnknownDeviceOrDegenerateRate() {
+        #expect(CoreAudioSystemTap.setNominalSampleRate(kAudioObjectUnknown, 44100)
+            == kAudioHardwareBadObjectError)
+        #expect(CoreAudioSystemTap.setNominalSampleRate(1, 0) == kAudioHardwareBadObjectError)
+        #expect(CoreAudioSystemTap.setNominalSampleRate(1, .nan) == kAudioHardwareBadObjectError)
+        #expect(CoreAudioSystemTap.setNominalSampleRate(1, .infinity) == kAudioHardwareBadObjectError)
+    }
+
     /// Compare-before-rebuild loop-breaker: a nominal-rate notification that
     /// re-announces the SAME rate the converter already runs at must NOT rebuild.
     @available(macOS 14.2, *)
@@ -1866,6 +1915,44 @@ extension SerializedSharedState {
         hal.fire(kAudioHardwarePropertyDefaultOutputDevice)
         monitor._drainForTesting()
         #expect(fires.count == 2, "a genuine default-output-device change must rebuild the tap")
+
+        tap.teardown()
+    }
+
+    /// STORM GUARD FOR THE HANDS-FREE PIN. While the aggregate is held above a
+    /// hands-free device the tap's format (44100) and the device's rate (16000)
+    /// differ ON PURPOSE, for as long as the mic stays open. The guard must
+    /// therefore be asked about the DEVICE: asked about the format it would
+    /// read "diverged" on every notification of the whole call, and each
+    /// rebuild that triggered would perturb the device into posting the next
+    /// one — a self-feeding storm.
+    @available(macOS 14.2, *)
+    @Test func pinnedTapIgnoresReAnnouncementsWhileTheDeviceHoldsItsHandsFreeRate() {
+        let hal = TapMonitorFakeHAL(deviceID: 42, rate: 16_000)
+        let monitor = DefaultOutputDeviceMonitor(hal: hal, settleWindow: 60)
+        let tap = CoreAudioSystemTap(name: "test", monitor: monitor)
+        let fires = TapMonitorFireCounter()
+        tap.onDefaultDeviceChanged = { fires.bump() }
+
+        // Mid-call: capture pinned at the engine's rate, headset in hands-free.
+        tap.test_seedTrackedState(deviceID: 42, sampleRate: 44_100, deviceRate: 16_000)
+        tap.subscribeToDefaultOutput()
+
+        for _ in 0..<3 {
+            hal.fire(kAudioDevicePropertyNominalSampleRate)
+            monitor._drainForTesting()
+        }
+        #expect(fires.count == 0,
+            "the device has not moved since this tap was built on it — re-announcements during the call must not rebuild")
+
+        // The mic closes and the device genuinely renegotiates. The tap must
+        // still be told: a rate TRANSITION silences a process tap whatever our
+        // own aggregate is pinned to, so this edge is not ours to suppress.
+        hal.rate = 44_100
+        hal.fire(kAudioDevicePropertyNominalSampleRate)
+        monitor._drainForTesting()
+        #expect(fires.count == 1,
+            "a real device renegotiation must still rebuild, pinned or not")
 
         tap.teardown()
     }

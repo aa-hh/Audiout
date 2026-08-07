@@ -219,6 +219,28 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   inside `updateAppRoutes` whenever routes/excluded change, and an app that
   becomes excluded has its metering tap stopped immediately. The metering-only
   taps NEVER start/stop the primary routing coordinators' taps.
+- **The whole-system tap holds its OWN aggregate away from a Bluetooth
+  hands-free rate, and that pin is the capture path's ONLY HAL write.** Opening
+  a mic drops a Bluetooth headset's *output* device to a 16 kHz voice rate for
+  as long as the mic stays open; the tap-aggregate follows its main sub-device,
+  so every speaker streamed from it inherited that rate too.
+  `CoreAudioSystemTap.isHandsFreeArtifactRate` marks exactly that state
+  (Bluetooth transport at a voice rate — nothing else qualifies) and
+  `setNominalSampleRate` holds the private aggregate at the engine's rate, with
+  the sub-*device* drift-compensated so the headset is left where macOS put it.
+  **Never aim that write at the user's device:** `DefaultOutputDeviceMonitor` is
+  watcher-only for the same reason — a second writer competes with
+  `LocalPlaybackEngine`. It is best-effort by design, so a refused pin needs no
+  handling: `reconcileFormatWithAggregate` reads what the aggregate actually
+  settled at either way, which is what makes follow-the-device the automatic
+  fallback. `AUDIOUTER_HFP_RATE_PIN=0` turns it off.
+  **TRAP: while the pin holds, the tap's format rate and its device's rate
+  differ on purpose, so the rate a tap reports to `DefaultOutputDeviceMonitor`
+  is the DEVICE's rate as of when the tap was built — never its format's.**
+  The guard's question is "has the device moved since we built on it", and
+  answering it with the format instead reads as permanent divergence for the
+  whole call: every notification fires a rebuild, and a rebuild perturbs the
+  device into posting the next one.
 - **A whole-system capture-tap rebuild caused by a DEVICE/RATE change must reset
   the stream-0 AirPlay session (R10) — but ONLY that cause.** When the tapped
   output device changes or renegotiates its nominal sample rate (another app

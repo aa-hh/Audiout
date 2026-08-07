@@ -7,7 +7,16 @@ Feature is NOT started — this is the spec to implement. SPIKE FIRST (§5).
 
 # Implementation Plan — "Consistent Main Out: pin the whole-system capture rate"
 
-**Status:** READ-ONLY research complete. No code written. This document is the complete handoff — a fresh agent needs nothing else.
+**Status: PARTLY SUPERSEDED — read this first.** The narrow half of §3 Part 1
+shipped on `claude/hfp-rate-pin` (roadmap 019) as a Bluetooth-hands-free-only
+pin: the aggregate is held at the engine's rate *only* when the tapped output
+device is a Bluetooth device at a voice rate, not on every device unconditionally.
+§3 Part 2 (suppressing the same-device rate-flap rebuild) is NOT shipped and must
+not be, on hermetic evidence alone — the tap-goes-silent bet in §5 is still
+unproven and this codebase has no all-zero-PCM detector to catch it. The live A/B
+in §5 still applies; run it against `AUDIOUTER_HFP_RATE_PIN=0` for the baseline.
+
+**Status of the rest:** READ-ONLY research complete. This document is the complete handoff — a fresh agent needs nothing else.
 **Worktree:** `/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/audio-dropout-investigation-5c2a1f`
 **Branch:** `claude/audio-dropout-investigation-5c2a1f` (NOT merged to main; live test owed on prior pause-on-call work already on this branch).
 

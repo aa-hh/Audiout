@@ -163,6 +163,12 @@ if [ "${AUDIOUTER_BUNDLE_DYLIBS:-0}" = "1" ]; then
   "$SCRIPT_DIR/build-min-ffmpeg.sh"
 fi
 
+# Disk housekeeping (prune flagged worktrees, cap .build caches) before this
+# build starts writing ~1 GB of artifacts. Best-effort: never fails the build.
+if [ -x "$SCRIPT_DIR/housekeeping.sh" ]; then
+  "$SCRIPT_DIR/housekeeping.sh" --current "$(cd "$SCRIPT_DIR/.." && pwd)" || true
+fi
+
 echo "==> Building $EXECUTABLE (release)"
 # --build-system native: Xcode 26+/27 made the new "swiftbuild" engine the
 # default for `swift build`, but it doesn't forward a C target's cSettings

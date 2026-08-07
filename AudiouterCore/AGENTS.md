@@ -368,7 +368,7 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 
     ```
     git config --local audiouter.remoteHost 'user@192.168.4.41'
-    git config --local audiouter.testPrefer remote   # or: local (default)
+    git config --local audiouter.testPrefer remote   # or: local (default), cpu
     ```
 
     This lands in `.git/config`, which is **not tracked** — so a personal
@@ -381,9 +381,13 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 
     `testPrefer=local` (default) treats the two machines as ONE POOL: two runs
     locally, and the third and fourth agent overflow to the remote rather than
-    queueing. `testPrefer=remote` sends every run there first instead. Either way
-    an asleep/offline remote costs one 5s probe and then behaves exactly as if
-    none were configured.
+    queueing. `testPrefer=remote` sends every run there first instead, blind to
+    whether it's actually free. `testPrefer=cpu` probes `vm.loadavg` on both
+    machines (normalised by `hw.ncpu`, since core counts differ) and sends the
+    run to whichever is less loaded right now — the setting to use if the
+    remote isn't reliably idle when you'd want to use it. Any of the three:
+    an asleep/offline/unmeasurable remote costs one 5s probe and then behaves
+    exactly as if none were configured.
 
     **A remote PASS is accepted; a remote FAILURE is re-run locally before it
     can block anything.** Guard 4 refuses commits on this result, and the remote

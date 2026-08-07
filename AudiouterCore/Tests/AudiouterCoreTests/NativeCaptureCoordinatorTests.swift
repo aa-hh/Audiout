@@ -147,10 +147,14 @@ extension SerializedSharedState {
     private final class FakeConverter: PCMConverting, @unchecked Sendable {
         let lock = NSLock()
         var dropAll = false
+        /// Scripted all-zero output (same 4-frame size) — drives the T-7
+        /// `silence_window` discriminator without AVFoundation.
+        var emitSilence = false
         private(set) var convertCount = 0
         func convertToAirPlayPCM(_ buffer: CapturedBuffer) -> Data? {
             lock.withLock { convertCount += 1 }
             if lock.withLock({ dropAll }) { return nil }
+            if lock.withLock({ emitSilence }) { return Data(count: 16) }
             // 4 interleaved S16LE stereo frames = 16 bytes.
             return Data([0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00,
                          0x05, 0x00, 0x06, 0x00, 0x07, 0x00, 0x08, 0x00])
@@ -1597,6 +1601,44 @@ extension SerializedSharedState {
         #expect(conservationLines().count == 2)
         #expect(conservationLines().last?.contains("\"ioprocIn\":\"4000\"") == true)
         #expect(conservationLines().last?.contains("\"engineWrite\":\"4000\"") == true)
+
+        coordinator.stop()
+    }
+
+    /// T-7 `silence_window` discriminator: a full sampling window of flowing
+    /// but ALL-ZERO converted buffers emits exactly one event; a window with
+    /// real samples emits nothing (silence is the signal — a live-but-silent
+    /// tap must be distinguishable from a stalled one, which never closes a
+    /// window at all).
+    @Test func silenceWindowEmittedOnlyForAllZeroWindows() {
+        let capturedLines = TelemetryLineBox()
+        Telemetry._installTestSink { capturedLines.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let tap = FakeTap()
+        let sink = SpySink()
+        let converter = FakeConverter()
+        converter.emitSilence = true
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: converter)
+        coordinator.start()
+
+        func silenceLines() -> [String] {
+            capturedLines.snapshot.filter { $0.contains("\"evt\":\"silence_window\"") }
+        }
+
+        for i in 0..<500 { tap.pushBuffer(buffer(hostTime: UInt64(i + 1) * 1_000_000)) }
+        waitFor { sink.forwarded.count == 500 }
+        Telemetry._installTestSink { capturedLines.append($0) } // flush barrier
+        #expect(silenceLines().count == 1,
+            "an all-zero window must emit exactly one silence_window, got: \(silenceLines())")
+
+        // Real signal in the next window: no further event.
+        converter.emitSilence = false
+        for i in 500..<1000 { tap.pushBuffer(buffer(hostTime: UInt64(i + 1) * 1_000_000)) }
+        waitFor { sink.forwarded.count == 1000 }
+        Telemetry._installTestSink(nil) // synchronous flush barrier
+        #expect(silenceLines().count == 1,
+            "a window with nonzero samples must not emit silence_window")
 
         coordinator.stop()
     }

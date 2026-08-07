@@ -959,6 +959,30 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     private var conservationSampleCounter = 0
     private var lastReportedConservation: (UInt64, UInt64, UInt64, UInt64) = (0, 0, 0, 0)
 
+    /// T-7 (judder plan): whether any converted buffer in the CURRENT sampling
+    /// window carried a nonzero sample — distinguishes "tap delivering
+    /// silence" (buffers flow, all zeros → `silence_window`) from "tap not
+    /// delivering at all" (no writes, so the window never closes; that case
+    /// is the gap metrics' job). Delivery-thread-confined, reset at each
+    /// window boundary in ``sampleWriteConservationIfDue(converter:)``.
+    private var windowHadNonzeroSamples = false
+
+    /// Cheap non-silence witness: inspects ONLY the first and middle frames
+    /// (4 bytes each of S16LE stereo) instead of scanning — one nonzero byte
+    /// anywhere in 500 buffers of real signal is certain, so a window-wide
+    /// miss means genuine silence, while the per-buffer cost stays a handful
+    /// of byte reads.
+    private static func hasNonzeroSample(in pcm: Data) -> Bool {
+        let count = pcm.count
+        guard count >= 4 else { return false }
+        let mid = (count / 2) & ~3
+        return pcm.withUnsafeBytes { raw -> Bool in
+            let b = raw.bindMemory(to: UInt8.self)
+            return b[0] != 0 || b[1] != 0 || b[2] != 0 || b[3] != 0
+                || b[mid] != 0 || b[mid + 1] != 0 || b[mid + 2] != 0 || b[mid + 3] != 0
+        }
+    }
+
     /// Throttled (1-in-`conservationSampleInterval`), delta-gated emission of
     /// all four conservation counters as ONE `write_conservation` event.
     /// Runs on the tap delivery thread, after a successful engine write —
@@ -967,6 +991,14 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     private func sampleWriteConservationIfDue(converter: PCMConverting) {
         conservationSampleCounter &+= 1
         guard conservationSampleCounter % Self.conservationSampleInterval == 0 else { return }
+        // T-7: silence is the signal — a window of flowing-but-all-zero
+        // buffers emits, a window with any real sample stays quiet. Checked
+        // ahead of the conservation delta-gate so an unchanged-counters
+        // window can never swallow it.
+        if !windowHadNonzeroSamples {
+            Telemetry.log(.captureWS, "silence_window", [:])
+        }
+        windowHadNonzeroSamples = false
         let (converterIn, converterOut) = converter.conservationFrameCounts()
         let current = (ioprocFramesIn, converterIn, converterOut, engineWriteFrames)
         guard current != lastReportedConservation else { return }
@@ -1032,6 +1064,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         sink.write(pcm: pcm, pts: buffer.pts)
         // S16LE stereo interleaved = 4 bytes/frame (`PCMFormat.airplay`).
         engineWriteFrames &+= UInt64(pcm.count / 4)
+        if !windowHadNonzeroSamples {
+            windowHadNonzeroSamples = Self.hasNonzeroSample(in: pcm)
+        }
         sampleWriteConservationIfDue(converter: converter)
 
         // T-FANOUT: fan the SAME converted PCM (and its pts) to the delayed local

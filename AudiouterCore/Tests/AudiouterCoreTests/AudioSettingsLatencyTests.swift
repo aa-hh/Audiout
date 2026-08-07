@@ -8,7 +8,7 @@ import AppKit
 
 /// The Advanced › Audio buffer control (PLAN-LATENCY-SETTING.md; V1 immediate
 /// apply, PLAN-ONE-SURFACE-032.md), driven through the pane's `test_` hooks —
-/// same headless discipline as `SettingsWindowControllerTests`. The apply
+/// same headless discipline as `SettingsRootViewControllerTests`. The apply
 /// CHOREOGRAPHY (remove-all → set → re-add) is `NativeBackendTests`' job; here
 /// we assert the pane's contract: section presence, numeric labels, that a
 /// popup selection applies exactly once, that reselecting the current value
@@ -112,30 +112,21 @@ import AppKit
         #expect(pane.test_latencyOptionTitles.count == 1, "env mode shows just the env value")
     }
 
-    @Test func windowControllerPassesModelThrough() {
-        let suite = "AudiouterTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defaults.removePersistentDomain(forName: suite)
+    /// A latency-bearing Audio pane mounted on the root (the surface's
+    /// Settings screen, post-U5): the section renders and the measured Audio
+    /// tab size is real — i.e. the model survives the assembly the app does in
+    /// `AppDelegate.makeSettingsRoot`.
+    @Test func rootMeasuresTheLatencyBearingAudioPane() {
         let model = LatencySettingModel(
             optionsMs: AppSettings.startBufferOptionsMs, initialMs: 1000,
             envOverrideMs: nil, isStreaming: { false }, apply: { _ in })
-        let controller = SettingsWindowController(
-            settings: AppSettings(defaults: defaults),
-            loginItem: NoopLoginItem(),
-            excludedApps: makeExcluded(),
-            runningAppsProvider: { [] },
-            latency: model)
-        #expect(controller.test_audio.test_hasLatencySection)
-        // `test_contentFittingSize` measures the SELECTED tab, and the Audio
-        // tab isn't selected by default (the window always opens on General) —
-        // select it first or this asserts General's height, not the Audio
-        // pane's.
-        controller.test_selectTab(at: 2)
-        #expect(controller.test_contentFittingSize.height > 100)
-    }
-
-    private final class NoopLoginItem: LoginItemManaging {
-        var isEnabled: Bool { false }
-        func setEnabled(_ newValue: Bool) throws {}
+        let audio = AudioSettingsViewController(
+            excluded: makeExcluded(), runningAppsProvider: { [] }, latency: model)
+        let root = SettingsRootViewController(tabs: [
+            .init(title: "Audio", symbolName: "speaker.wave.2", viewController: audio),
+        ], tabStyle: .segmentedControlOnTop)
+        #expect(audio.test_hasLatencySection)
+        root.selectTab(at: 0)
+        #expect(root.fittedContentSize.height > 100)
     }
 }

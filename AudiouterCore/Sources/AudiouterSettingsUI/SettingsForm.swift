@@ -6,7 +6,7 @@ import AudiouterSharedUI
 /// Tiny layout kit shared by the Settings panes so every pane reads as one
 /// consistent macOS form: a fixed-width column of `title · optional subtitle`
 /// rows with the control right-aligned, standard insets, and a fitting height
-/// that `SettingsWindowController` measures and applies to the window itself
+/// that `SettingsRootViewController` measures and publishes to its host
 /// (AppKit's tab controller does NOT do that for you — see the sizing-trap note
 /// there). Deliberately minimal — panes stay small, so this is a few helpers,
 /// not a framework.

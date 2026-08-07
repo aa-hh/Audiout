@@ -148,8 +148,7 @@ public final class GeneralSettingsViewController: NSViewController {
 
     /// The About window controller, so a test can drill into
     /// `AboutViewController`'s own `test_*` hooks without this pane
-    /// re-exposing every one of them a second time (mirrors
-    /// `SettingsWindowController.test_general` etc.).
+    /// re-exposing every one of them a second time.
     public var test_about: AboutWindowController { aboutWindowController }
 
     /// Invoke "About Audiouter…" as a click would.

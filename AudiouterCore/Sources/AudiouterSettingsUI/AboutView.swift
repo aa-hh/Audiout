@@ -278,15 +278,16 @@ public final class AboutViewController: NSViewController {
     }
 
     /// The laid-out content view, for offscreen snapshot rendering (mirrors
-    /// `SettingsWindowController.test_rootView`).
+    /// `SettingsRootViewController.tabRootView(at:)`).
     public var test_rootView: NSView {
         view.layoutSubtreeIfNeeded()
         return view
     }
 }
 
-/// The About window (Settings › General › "About Audiouter…"). Sibling to
-/// `SettingsWindowController`: same lazy-create-then-reuse lifecycle at the
+/// The About window (Settings › General › "About Audiouter…") — the one
+/// deliberate standalone-window exception in the one-surface app (owner call,
+/// PLAN-ONE-SURFACE-032.md). Lazy-create-then-reuse lifecycle at the
 /// `GeneralSettingsViewController` call site, a no-arg `show()`, and `test_`
 /// structure hooks (the window isn't visible to a headless harness).
 @MainActor
@@ -309,7 +310,7 @@ public final class AboutWindowController: NSWindowController {
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    /// Open/focus the window (mirrors `SettingsWindowController.showWindow()`):
+    /// Open/focus the window:
     /// sizing always runs headlessly too, but the actual on-screen presentation
     /// is gated behind `HeadlessRuntime.isActive` so `swift test`/a headless
     /// tool never flashes a real window on the developer's screen.

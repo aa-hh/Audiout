@@ -866,6 +866,34 @@ public final class GroupController {
         return groups.first { $0.id == id }?.masterVolume ?? 100
     }
 
+    /// Set a group's own level — the GROUP stage of `Main × Group × Device`.
+    ///
+    /// Until this existed, `Group.masterVolume` was persisted and read by
+    /// ``groupGain`` but written by nothing at runtime, so the middle stage sat
+    /// permanently at its 100 identity and the three-stage chain was really two
+    /// (found while adding the Shortcuts actions, roadmap 035). Nothing else
+    /// about the chain changed; this just gives the stage a writer.
+    ///
+    /// Re-pushes only when the group being changed is the one currently
+    /// targeted — a level on an inactive group is stored for when it is next
+    /// activated, and must not disturb whatever is playing now. Never mirrors
+    /// to the Mac's hardware volume: that belongs to Main alone
+    /// (``setMainOutMasterVolume(_:)``), and the Mac is not a member of the
+    /// group stage.
+    ///
+    /// Silently ignores an unknown id, matching the rest of this controller's
+    /// per-device setters.
+    public func setGroupVolume(_ volume: Int, for groupID: String) {
+        guard let index = groups.firstIndex(where: { $0.id == groupID }) else { return }
+        let clamped = volume.clampedToVolume
+        guard groups[index].masterVolume != clamped else { return }
+        groups[index].masterVolume = clamped
+        try? store.save(groups)
+        if case .group(let activeID) = mainOut, activeID == groupID {
+            pushMasterGain(mirrorToSystemVolume: false)
+        }
+    }
+
     /// Push the current `Main × Group` product to the backend, which multiplies in
     /// each device's own level at its write boundary. Writes no device level.
     private func pushMasterGain(mirrorToSystemVolume: Bool) {

@@ -19,8 +19,8 @@ import AudiouterCore
 ///
 /// Shape copied from ``SetSpeakerVolumeIntent``, with one deliberate exception
 /// noted at `perform()`.
-struct SelectSpeakerIntent: AppIntent {
-    static var title: LocalizedStringResource { "Select Speaker" }
+struct ConnectSpeakerIntent: AppIntent {
+    static var title: LocalizedStringResource { "Connect Speaker" }
 
     static var description: IntentDescription {
         IntentDescription("Start or stop sending audio to an AirPlay speaker. Leave the volume blank to connect it muted.")
@@ -29,14 +29,14 @@ struct SelectSpeakerIntent: AppIntent {
     @Parameter(title: "Speaker")
     var speaker: SpeakerEntity
 
-    @Parameter(title: "Selected", default: true)
-    var selected: Bool
+    @Parameter(title: "Connected", default: true)
+    var connected: Bool
 
     @Parameter(title: "Volume")
     var volume: Int?
 
     static var parameterSummary: some ParameterSummary {
-        Summary("Set \(\.$speaker) selected to \(\.$selected) at volume \(\.$volume)")
+        Summary("Set \(\.$speaker) connected to \(\.$connected) at volume \(\.$volume)")
     }
 
     /// The one branch permitted in this layer. An on/off parameter is two
@@ -49,7 +49,7 @@ struct SelectSpeakerIntent: AppIntent {
     func perform() async throws -> some IntentResult {
         let controller = try await AppIntentBridge.waitForGroupController()
         await MainActor.run {
-            if selected {
+            if connected {
                 _ = controller.connect(speaker.id, at: volume)
             } else {
                 _ = controller.setDeviceSelected(speaker.id, false)

@@ -15,8 +15,15 @@ struct SpeakerEntity: AppEntity {
     static var typeDisplayRepresentation: TypeDisplayRepresentation { "Speaker" }
     static var defaultQuery = SpeakerEntityQuery()
 
+    /// `LocalizedStringResource(stringLiteral:)`, NOT the `"\(name)"`
+    /// interpolation the AppIntents samples use. The interpolating form builds
+    /// a format-string-plus-arguments resource, and a speaker's name is DATA,
+    /// not a translatable template — crossing to the Shortcuts process it came
+    /// back cut short ("Alec's MacBook Pro" listed as "Alec's"). The literal
+    /// form carries the string whole. Never interpolate a device-supplied name
+    /// into a `LocalizedStringResource` here.
     var displayRepresentation: DisplayRepresentation {
-        DisplayRepresentation(title: "\(name)")
+        DisplayRepresentation(title: LocalizedStringResource(stringLiteral: name))
     }
 }
 

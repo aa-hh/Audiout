@@ -118,11 +118,44 @@ package layout, backends, and core types, see
   [../../AGENTS.md](../../AGENTS.md); sleep, by contrast, is a transient dropout
   that keeps the selection intent.
 
+## App Intents (`Intents/`) — five rules, all load-bearing
+
+The Shortcuts/Spotlight actions (roadmap 035). Design notes and the
+build-wiring proof: [../../../dev/notes/app-intents-research-2026-08-07.md](../../../dev/notes/app-intents-research-2026-08-07.md).
+
+- **They live HERE, in the main app target, never in `AudiouterCore`.** Apple
+  DTS is explicit that intents in a statically-linked package do not work, and
+  SwiftPM links this package statically. Moving them "somewhere tidier" breaks
+  the feature silently.
+- **THIS LAYER HAS NO TEST COVERAGE AND CANNOT HAVE ANY.** Apple's
+  `AppIntentsTesting` runs intents in a live app process and requires an Xcode
+  UI test bundle; SwiftPM has no equivalent target type. So every intent is a
+  pure translation layer — resolve the entity, hop to the main actor, call ONE
+  `GroupController` method, return. Anything with a branch belongs in
+  `AudiouterCore` where the suite reaches it. `SelectSpeakerIntent`'s on/off is
+  the single permitted exception and documents itself as such.
+- **A missing `ParameterSummary` deletes the action.** Every intent needs one
+  covering every required parameter that has no default value, or the action
+  silently disappears from macOS Spotlight Actions — no crash, no log
+  (WWDC25 session 260). Spotlight Actions is also why there is no
+  `AppShortcutsProvider` here: plain intents surface on their own, so the
+  canned-shortcuts machinery buys nothing this app wants.
+- **Reach the controller through `AppIntentBridge`, never construct one.**
+  `AppDelegate` hands ONE `GroupController` to the popover and the mixer so
+  they never diverge; a second instance would put an intent on its own private
+  copy of the routing state. `GroupController` is NOT `@MainActor`, so the
+  compiler cannot catch an off-thread call — the hop is written out by hand.
+- **Intents exist only in bundled builds.** The metadata comes from
+  `scripts/make-app.sh`'s extraction step, so `swift run AudiouterApp` has no
+  actions at all. Testing an intent change means a `make-app.sh` round trip.
+
 ## Map
 
 | Type | Role |
 |---|---|
 | `AppDelegate` | Lifecycle owner: activation policy, backend, `GroupController`, popover + mixer window, the shared control-panel shell (`AIRPLAY_CONTROL_PANEL=1`), excluded-apps/routing precedence, and the first-run setup gate (`presentSetup()` / `startBackendIfNeeded()`). |
+| `Intents/AppIntentBridge` | The only route from an App Intent to the app's one live `GroupController`; bounded readiness wait plus the explicit main-actor hop. |
+| `Intents/SpeakerEntity`, `Intents/GroupEntity` | Shortcuts-facing pickers over the real speakers and saved groups, keyed on stable ids so a rename cannot break a saved shortcut. |
 | `StatusItemController` | The `NSStatusItem`; renders the volume-tracking symbol, forwards clicks. |
 | (bootstrap) | `main.swift` — builds and retains `AppDelegate`, calls `NSApplicationMain`. |
 | `scripts/make-app.sh` | Wraps the built binary into a signed `.app` with the three TCC/Bonjour Info.plist keys. |

@@ -1587,6 +1587,53 @@ import Testing
         #expect(backend.volumeWrites.contains { $0.id == "office" && $0.volume == 30 },
                 "each member's remembered level still applies underneath Main")
     }
+
+    // MARK: Group gain stage (roadmap 035)
+
+    @Test func setGroupVolumeRePushesWhenTheGroupIsTheActiveTarget() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        try controller.saveGroup(Group(id: "g1", name: "Office", memberIDs: ["office"],
+                                       memberVolumes: [:], masterVolume: 80))
+        controller.setMainOut(.group(id: "g1"))
+        backend.reset()
+
+        controller.setGroupVolume(40, for: "g1")
+
+        #expect(backend.gainWrites.last?.group == 40, "the group stage carries the new level")
+        #expect(backend.gainWrites.last?.mirrorToSystemVolume == false,
+                "only Main levels the Mac's own hardware — the group stage never does")
+    }
+
+    @Test func setGroupVolumeOnAnInactiveGroupStoresWithoutDisturbingPlayback() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        try controller.saveGroup(Group(id: "g1", name: "Office", memberIDs: ["office"],
+                                       memberVolumes: [:], masterVolume: 80))
+        try controller.saveGroup(Group(id: "g2", name: "Kitchen", memberIDs: ["sonos-move"],
+                                       memberVolumes: [:], masterVolume: 90))
+        controller.setMainOut(.group(id: "g1"))
+        backend.reset()
+
+        controller.setGroupVolume(25, for: "g2")
+
+        #expect(backend.gainWrites.isEmpty,
+                "a level set on a group that isn't playing must not touch what is")
+        #expect(controller.groups.first { $0.id == "g2" }?.masterVolume == 25, "but it is stored")
+    }
+
+    @Test func setGroupVolumeClampsAndIgnoresAnUnknownGroup() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        try controller.saveGroup(Group(id: "g1", name: "Office", memberIDs: ["office"],
+                                       memberVolumes: [:], masterVolume: 80))
+        controller.setMainOut(.group(id: "g1"))
+        backend.reset()
+
+        controller.setGroupVolume(150, for: "g1")
+        #expect(controller.groups.first { $0.id == "g1" }?.masterVolume == 100, "clamped to the 0…100 scale")
+
+        backend.reset()
+        controller.setGroupVolume(50, for: "does-not-exist")
+        #expect(backend.gainWrites.isEmpty, "an unknown group id is ignored, not a crash")
+    }
 }
 
 /// Wraps a real ``MockBackend`` — so `devices`, echoes and queue ordering behave

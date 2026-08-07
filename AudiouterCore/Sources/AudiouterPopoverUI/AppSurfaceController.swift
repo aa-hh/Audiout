@@ -45,9 +45,8 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
 /// The one-surface host (U3): owns ONE `ControlPanelWindowController` shell and
 /// the three lazily-built screens behind the header's tab-bar switcher —
 ///
-/// - **Mixer** — the real `PopoverController` panel, claimed from the
-///   `NSPopover` (which silently reclaims its `contentViewController`'s view
-///   unless released — prototype-verified) and driven through the U2
+/// - **Mixer** — the real `PopoverController` panel, claimed through
+///   `claimPanelForSurfaceHosting()` and driven through the U2
 ///   host-agnostic seams: `surfaceDidShow()`/`surfaceDidHide()` on window
 ///   show/hide/switch, and a `surfaceResizer` that animates the SHELL to the
 ///   panel's exact-fit `preferredContentSize` (the existing
@@ -99,9 +98,9 @@ public final class AppSurfaceController {
     /// something else still needs.
     private let makeSettingsContent: () -> SettingsRootViewController
 
-    /// The Mixer panel, once claimed from the popover (lazy — claiming
-    /// releases the `NSPopover`'s view ownership, so it only happens when the
-    /// surface actually hosts the Mixer).
+    /// The Mixer panel, once claimed from its controller (lazy — claiming
+    /// also rewires the header and installs the resize hook, so it only
+    /// happens when the surface actually hosts the Mixer).
     private var mixerPanel: PopoverPanelViewController?
     private var groupsScreen: SurfaceScreenViewController?
     private var settingsScreen: SurfaceScreenViewController?
@@ -299,7 +298,7 @@ public final class AppSurfaceController {
             let panel = claimedMixerPanel()
             // Re-ingest everything that arrived while the panel was hidden or
             // unmounted (hidden-means-idle, audit B8) and recompute collapse
-            // defaults — the same open ritual `toggle(relativeTo:)` performs.
+            // defaults — the Mixer open ritual every host must perform.
             popoverController.rebuildForOpen()
             shell.setContent(panel, defaultSize: Self.mixerSeedContentSize)
             restoreFrameAfterSwap(previousFrame)
@@ -327,10 +326,11 @@ public final class AppSurfaceController {
 
     // MARK: Lazy screens
 
-    /// The Mixer panel, claimed from the popover on first use. Claiming also
-    /// installs the surface's resize behavior and takes over the header's
-    /// switcher wiring (the popover host wired Groups/Settings tabs to the old
-    /// open-window callbacks; under the surface a tab IS the screen switch).
+    /// The Mixer panel, claimed from its controller on first use. Claiming
+    /// also installs the surface's resize behavior and takes over the header's
+    /// switcher wiring (pre-claim the Groups/Settings tabs forward through
+    /// `onOpenMixer`/`onOpenSettings`; under the surface a tab IS the screen
+    /// switch).
     private func claimedMixerPanel() -> PopoverPanelViewController {
         if let mixerPanel { return mixerPanel }
         let panel = popoverController.claimPanelForSurfaceHosting()

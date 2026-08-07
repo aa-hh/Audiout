@@ -56,9 +56,9 @@ private let audioProcessResolver = AudioProcessResolver(
 /// Owns app lifecycle: activation policy, the status item, the backend, and the
 /// event-stream consumer that holds the app's device model.
 ///
-/// The dropdown is a Control-Center-style `NSPopover` (SPEC §9 revised — NSMenu
-/// → NSPopover): the status button's action toggles the popover, which hosts the
-/// groups + devices panel built by `PopoverController`.
+/// The dropdown is the one-surface panel (SPEC §9): the status button's action
+/// drives `AppSurfaceController`'s click policy, and the surface hosts the
+/// Mixer panel built by `PopoverController`.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
 
@@ -74,7 +74,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// via `.button`, never the deprecated `.view`/`.title`/`.image`).
     private var statusItemController: StatusItemController!
 
-    /// The popover dropdown (SPEC §9 revised). Owns the `NSPopover` and, via the
+    /// The Mixer panel's controller (SPEC §9 revised). Owns, via the
     /// injected `GroupController`, all group/master/mute/routing interaction.
     /// Wired with an explicit production `AppRoutingController` so app routes
     /// persist to Application Support (T-11).

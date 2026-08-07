@@ -439,7 +439,7 @@ public protocol LatencyConfigurable: AnyObject {
 /// The optional metering-active capability (T-GATE, playback-meter-research.md).
 /// A backend that computes RMS just to feed `.level` adopts this so the work can
 /// be switched off while nobody's watching a meter — `PopoverController` flips it
-/// on `popoverDidShow`/`popoverDidClose` via `backend as? MeteringControlling`, so
+/// on `surfaceDidShow`/`surfaceDidHide` via `backend as? MeteringControlling`, so
 /// a backend without the concept (`OwnToneBackend`) never sees the call.
 /// Deliberately NOT part of ``OutputBackend``, mirroring ``LatencyConfigurable``:
 /// the base seam stays capability-free.

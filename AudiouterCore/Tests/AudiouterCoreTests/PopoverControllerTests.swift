@@ -1934,14 +1934,14 @@ import AppKit
         #expect(popover.test_deviceRow(for: "local-mac")?.test_meterLevel() == 0.55)
     }
 
-    /// `popoverDidClose` zeroes every device row's meter (the reopen-never-shows-
+    /// `surfaceDidHide` zeroes every device row's meter (the reopen-never-shows-
     /// a-stale-bar discipline documented at the call site).
     @Test func popoverDidCloseZeroesAllDeviceRowMeters() async throws {
         let (popover, _, _) = try await makePopover()
         popover.test_pushLevel(0.7, for: "local-mac")
         #expect(popover.test_deviceRow(for: "local-mac")?.test_meterLevel() == 0.7)
 
-        popover.popoverDidClose(Notification(name: Notification.Name("test")))
+        popover.surfaceDidHide()
         #expect(popover.test_deviceRow(for: "local-mac")?.test_meterLevel() == 0, "closing the popover must reset every row's meter, not just the one just pushed to")
     }
 
@@ -1960,7 +1960,7 @@ import AppKit
         #expect(popover.test_appRow(for: "com.example.music")?.test_meterLevel() == 0.55)
     }
 
-    /// `popoverDidClose` zeroes every app row's meter too (not just device rows
+    /// `surfaceDidHide` zeroes every app row's meter too (not just device rows
     /// and Main Out), so a reopen never shows a stale app-row bar either.
     @Test func popoverDidCloseZeroesAllAppRowMeters() async throws {
         let appRouting = tempAppRoutingController()
@@ -1971,7 +1971,7 @@ import AppKit
         popover.test_pushAppLevel(0.7, for: "com.example.music")
         #expect(popover.test_appRow(for: "com.example.music")?.test_meterLevel() == 0.7)
 
-        popover.popoverDidClose(Notification(name: Notification.Name("test")))
+        popover.surfaceDidHide()
         #expect(popover.test_appRow(for: "com.example.music")?.test_meterLevel() == 0, "closing the popover must reset every app row's meter, not just the one just pushed to")
     }
 

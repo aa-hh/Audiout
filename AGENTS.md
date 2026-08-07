@@ -87,8 +87,13 @@ symbol you cannot find in source, believe the source and fix the doc.
   into `main` or pushed — and it sweeps machine-wide `.build` caches: any
   cache untouched for `AUDIOUTER_CACHE_MAX_AGE_DAYS` (7) is deleted, and
   below `AUDIOUTER_MIN_FREE_GB` (8) free disk, caches go least-recently-
-  built-first until the floor is restored. The building checkout and any
-  checkout a live process references are never touched.
+  built-first. **The floor is headroom the script guarantees with its own
+  caches, not a claim on the disk** — when reclaiming everything still would
+  not reach it, the shortfall came from elsewhere (Xcode device support,
+  simulators), so the caches stay warm and it says so instead of thrashing.
+  Below `AUDIOUTER_CRITICAL_FREE_GB` (2) it takes everything anyway. The
+  building checkout and any checkout a live process references are never
+  touched.
   When a branch is merged AND live-verified (or abandoned with everything
   pushed), `touch .claude/worktrees/<slug>/.prunable` and let the system
   collect it. The flag is a request, not a command — a dirty or unpushed

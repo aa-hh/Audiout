@@ -240,6 +240,35 @@ f. **Known Plugin-API traps** (from the build ledger, verbatim — they prevent
    - "variant names must not contain commas outside Prop=Value pairs"
    - "kit imports: importComponentSetByKeyAsync → defaultVariant may be undefined, fall back to children[0]"
 
+g. **Light mode — every new element must resolve in BOTH appearances.** Light is
+   not a coat of paint applied later; it is the second half of every token. Rules:
+   - **Scaffolding binds to tokens, never to a hex.** Surfaces, text, dividers,
+     borders and washes must bind to the Warm Signal tokens whose Light values
+     already alias Circuit (see the mapping table below). Bind and light mode is
+     free; hardcode and you have silently shipped a dark-only element.
+   - **Instruments never go Circuit, in any mode** — the gold family, `failure`,
+     `caution`, rings, meters incl. `meterTrack`, fader hardware, permission hues.
+     They carry meaning, so they keep their authored Warm Signal values.
+   - **When one token cannot serve both grounds, make it mode-aware** rather than
+     forking the component. Example: `feedPillText` resolves `secondaryLabel` in
+     dark but `label` in light, because the light pill fill would otherwise drop
+     the text to 3.57:1. Two modes, one component.
+   - **Literals that cannot be tokenised still need light values.** Runtime-derived
+     colours (app tether tints) are modelled as `_example/tether-*` variables
+     carrying a dark hue AND its light-adapted counterpart (the code's
+     `lightBrightnessDrop`); computed blends carry a documented dark literal.
+     A dark-mode hex reused in light is a bug — it measured 2.17:1 before this
+     was fixed.
+   - **Measure, don't eyeball:** instruments ≥3:1 as graphical objects
+     (WCAG 1.4.11), text ≥4.5:1 body, against BOTH canvases. Light backgrounds
+     are near-white, so mid-tone colours that read fine on the warm near-black
+     will fail — check every one.
+   - **Beware the fill/text tug-of-war:** pushing a container's fill away from the
+     canvas pushes it toward mid-tone text. Verify both the container-vs-canvas
+     and the text-on-container ratios before settling on a value.
+   - **Add the element to the LIGHT twin** of every screen it appears on (twins
+     are clones — see step d).
+
 ## Figma-side placeholders that are NOT code truths
 
 Do not "fix" the code to match any of these; they are Figma stand-ins:
@@ -288,6 +317,21 @@ is the one instrument worth darkening in the light contrast pass), plus
 meterTrack 1.77, glow 1.78, dotSocket 1.37 — those three are intentionally
 quiet backdrops, not signal-bearers. Circuit's own text tokens all pass body
 contrast (fg/normal 16.4, fg/subtle 5.48, fg/placeholder 4.67).
+
+**Two NEW tokens the code does not have yet** (added 2026-08-07 fixing a measured
+FEED-pill contrast failure; both carry iOS code syntax and land with roadmap 033):
+
+- `feedPillFill` — dark `#38322B` / dark-HC `#423B33`, light aliases Circuit
+  `border/normal`, light-HC `bg/neutral-strong`. Replaces
+  `NSColor.quaternaryLabelColor`.
+- `feedPillText` — aliases `secondaryLabel` in dark, `label` in light.
+
+**`FeedPillView` loses its border.** Measured border-vs-fill was **1.14:1 dark
+and 1.00:1 light** — the outline was decorative in both modes (a latent
+code-side issue Circuit merely exposed: old warm-paper light measured ~1.04:1).
+The pill now reads by fill alone — 1.46:1 vs canvas dark (was 1.31), 1.54:1
+light (was 1.21) — while keeping the error pill at 3.24:1 and lifting light
+neutral text from 4.54 to **10.66:1**. `feedPillBorderWidth` becomes unused.
 
 **Figma light is AHEAD of code.** `Tokens.swift`'s light/lightHC columns still
 hold the original warm-paper values (canvas #F4EFE7 …), so the shipping app is

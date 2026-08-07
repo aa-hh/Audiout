@@ -12,8 +12,11 @@ public enum BTSyncTrim {
     /// beat spacing in mind: ticks at ~72 BPM (~833 ms) keep a fully-offset
     /// device from aliasing as aligned one beat late — 500 ms spacing would.
     public static let rangeMs = 500
-    /// The − / + buttons' step. The field itself accepts 1 ms typing.
+    /// The − / + buttons' plain step. The field itself accepts 1 ms typing.
     public static let coarseStepMs = 10
+    /// The fine step: ⌥-click on − / +, and the field's ↑/↓ arrow nudge —
+    /// 10 ms proved too coarse to collapse the flam by ear (live finding).
+    public static let fineStepMs = 1
 
     public static func clamp(_ ms: Int) -> Int {
         Swift.min(rangeMs, Swift.max(-rangeMs, ms))

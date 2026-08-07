@@ -1657,6 +1657,7 @@ public final class DeviceRowView: NSView {
                 .withSymbolConfiguration(config)
             button.contentTintColor = Tokens.Color.secondaryLabel
             button.setAccessibilityLabel(label)
+            button.toolTip = "\(BTSyncTrim.coarseStepMs) ms steps — hold ⌥ for \(BTSyncTrim.fineStepMs) ms"
             button.target = self
             button.action = action
         }
@@ -1666,10 +1667,15 @@ public final class DeviceRowView: NSView {
         syncField.font = Tokens.Font.caption
         syncField.alignment = .center
         syncField.bezelStyle = .roundedBezel
-        syncField.toolTip = "Sync offset in milliseconds"
+        syncField.toolTip = "Sync offset in milliseconds — ↑/↓ nudges 1 ms, ⌥↑/↓ 10 ms"
         syncField.setAccessibilityLabel("Sync offset in milliseconds")
         syncField.target = self
         syncField.action = #selector(syncFieldEdited(_:))
+        // Return/arrow handling rides the field editor's command dispatch (the
+        // NSTextFieldDelegate extension at file end): Return COMMITS and is
+        // CONSUMED there — un-consumed, it bubbles past the field and closes
+        // the popover with the edit lost (live finding).
+        syncField.delegate = self
 
         alignButton.translatesAutoresizingMaskIntoConstraints = false
         alignButton.bezelStyle = .accessoryBar
@@ -1694,12 +1700,23 @@ public final class DeviceRowView: NSView {
         alignButton.action = #selector(alignTapped(_:))
     }
 
+    /// Whether ⌥ is held for the current stepper click — the fine-step
+    /// modifier. Seam-overridable (`test_optionModifierOverride`) because a
+    /// headless `performClick` carries no `NSApp.currentEvent`.
+    private var optionIsHeld: Bool {
+        test_optionModifierOverride ?? (NSApp.currentEvent?.modifierFlags.contains(.option) ?? false)
+    }
+
+    /// Modifier seam for the stepper tests — same idiom as
+    /// ``test_reduceMotionOverride``; `nil` (default) reads the live event.
+    public var test_optionModifierOverride: Bool?
+
     @objc private func syncMinusTapped(_ sender: NSButton) {
-        commitSyncTrim(syncTrimMs - BTSyncTrim.coarseStepMs)
+        commitSyncTrim(syncTrimMs - (optionIsHeld ? BTSyncTrim.fineStepMs : BTSyncTrim.coarseStepMs))
     }
 
     @objc private func syncPlusTapped(_ sender: NSButton) {
-        commitSyncTrim(syncTrimMs + BTSyncTrim.coarseStepMs)
+        commitSyncTrim(syncTrimMs + (optionIsHeld ? BTSyncTrim.fineStepMs : BTSyncTrim.coarseStepMs))
     }
 
     /// Enter/typing commit: parse a signed integer (a trailing "ms" or spaces
@@ -2638,6 +2655,71 @@ extension DeviceRowView: RailNodeProviding {
     /// The node is centred on the row's own centre-y.
     public var railNodeView: NSView { self }
     public var railNodeBounds: NSRect { bounds }
+}
+
+// MARK: - SYNC field editing (BT-OFFSET-UI, Return/arrow handling)
+
+extension DeviceRowView: NSTextFieldDelegate {
+
+    /// The field editor's command dispatch for the SYNC value field — the one
+    /// seam AppKit routes Return and the arrow keys through while editing.
+    ///
+    /// - Return COMMITS the typed value and returns `true`: consumed, so the
+    ///   key never bubbles past the field (un-consumed it closed the popover
+    ///   with the edit lost — live finding).
+    /// - ↑/↓ nudge by `fineStepMs` (1 ms — the by-ear granularity); with ⌥ by
+    ///   `coarseStepMs`. ⌥-arrows arrive as the PARAGRAPH selectors (Cocoa's
+    ///   standard key bindings), so both spellings are handled.
+    public func control(_ control: NSControl, textView: NSTextView,
+                        doCommandBy commandSelector: Selector) -> Bool {
+        guard control === syncField else { return false }
+        switch commandSelector {
+        case #selector(NSResponder.insertNewline(_:)):
+            syncFieldEdited(syncField)
+            return true
+        case #selector(NSResponder.moveUp(_:)):
+            commitSyncTrim(syncTrimMs + (optionIsHeld ? BTSyncTrim.coarseStepMs : BTSyncTrim.fineStepMs))
+            return true
+        case #selector(NSResponder.moveDown(_:)):
+            commitSyncTrim(syncTrimMs - (optionIsHeld ? BTSyncTrim.coarseStepMs : BTSyncTrim.fineStepMs))
+            return true
+        case Selector(("moveToBeginningOfParagraph:")):
+            commitSyncTrim(syncTrimMs + BTSyncTrim.coarseStepMs)
+            return true
+        case Selector(("moveToEndOfParagraph:")):
+            commitSyncTrim(syncTrimMs - BTSyncTrim.coarseStepMs)
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Focus loss (click-away, Tab) commits whatever was typed — an edit must
+    /// never silently evaporate because the user clicked another control.
+    public func controlTextDidEndEditing(_ obj: Notification) {
+        guard (obj.object as? NSTextField) === syncField else { return }
+        syncFieldEdited(syncField)
+    }
+
+    // MARK: Test hooks — real dispatch through the exact delegate seam
+
+    /// Set the field's text WITHOUT committing (the "user typed, hasn't
+    /// confirmed yet" state the command/end-editing hooks below act on).
+    public func test_setSyncFieldText(_ text: String) { syncField.stringValue = text }
+
+    /// Drive `control(_:textView:doCommandBy:)` with the real field — the
+    /// identical call the field editor makes for Return/arrows. Returns the
+    /// consumed flag (the "popover stays open" mechanism for Return).
+    @discardableResult
+    public func test_performSyncFieldCommand(_ commandSelector: Selector) -> Bool {
+        control(syncField, textView: NSTextView(), doCommandBy: commandSelector)
+    }
+
+    /// Drive `controlTextDidEndEditing` with the real field (focus loss).
+    public func test_endSyncFieldEditing() {
+        controlTextDidEndEditing(Notification(
+            name: NSControl.textDidEndEditingNotification, object: syncField))
+    }
 }
 
 // MARK: - Delegate default (backward-compatible)

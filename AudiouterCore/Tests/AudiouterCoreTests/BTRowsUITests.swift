@@ -92,6 +92,25 @@ import AppKit
                 "the in-flight attempt is never shouted over by the unavailable pill")
     }
 
+    /// The GREYED row's reconnect spinner actually ANIMATES: the dashed ring's
+    /// breathing pulse installs on an unavailable BT row exactly as on an
+    /// available one (`HaloRingView` is driven by `connectionState` alone —
+    /// availability never gates it). Same mapping pin as
+    /// `DeviceRowConnectionStateTests.connectingRingBreathingMatchesReduceMotionSetting`:
+    /// present iff on-screen and Reduce Motion off.
+    @Test func greyedRowReconnectRingBreathesLikeAnyConnectingRing() {
+        let spy = SpyDelegate()
+        let row = makeRow(btDevice(available: false, state: .connecting), delegate: spy)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 320, height: 44),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView?.addSubview(row)
+        row.apply(btDevice(available: false, state: .connecting), selected: false)
+        #expect(row.test_ringIsDashed, "the connecting FORM renders on the greyed row")
+        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        #expect(row.test_ringIsBreathing == !reduceMotion,
+                "…and it breathes iff Reduce Motion is off — greyed-ness never freezes it")
+    }
+
     // MARK: Failure headline (never instructional sublabels)
 
     @Test func failedRowRendersTheFailureHeadlineInTheFeedPill() {
@@ -139,6 +158,56 @@ import AppKit
         row.test_commitSyncField("abc")
         #expect(spy.trims.last?.ms == -500, "unparseable input reverts to the current value")
         #expect(row.test_syncTrimDisplayed == "-500")
+    }
+
+    @Test func optionClickOnTheSteppersStepsOneMillisecond() {
+        let spy = SpyDelegate()
+        let row = makeRow(btDevice(), delegate: spy, syncTrimMs: 0)
+        row.test_optionModifierOverride = true
+        row.test_fireSyncPlusClick()
+        #expect(spy.trims.last?.ms == 1, "⌥-click steps fine (1 ms)")
+        row.test_fireSyncMinusClick()
+        #expect(spy.trims.last?.ms == 0)
+        row.test_optionModifierOverride = false
+        row.test_fireSyncPlusClick()
+        #expect(spy.trims.last?.ms == 10, "a plain click keeps the coarse 10 ms step")
+    }
+
+    @Test func returnCommitsAndIsConsumedAndFocusLossCommitsToo() {
+        let spy = SpyDelegate()
+        let row = makeRow(btDevice(), delegate: spy, syncTrimMs: 0)
+        row.test_setSyncFieldText("42")
+        let consumed = row.test_performSyncFieldCommand(#selector(NSResponder.insertNewline(_:)))
+        #expect(consumed, "Return is CONSUMED — it must never bubble past the field and close the popover")
+        #expect(spy.trims.last?.ms == 42, "…and it COMMITS the typed value")
+
+        row.test_setSyncFieldText("77")
+        row.test_endSyncFieldEditing()
+        #expect(spy.trims.last?.ms == 77, "focus loss commits the typed value too")
+        #expect(row.test_syncTrimDisplayed == "77")
+
+        row.test_setSyncFieldText("9999")
+        row.test_performSyncFieldCommand(#selector(NSResponder.insertNewline(_:)))
+        #expect(spy.trims.last?.ms == 500, "a Return-committed value still clamps")
+    }
+
+    @Test func arrowKeysNudgeOneMillisecondOptionArrowsTen() {
+        let spy = SpyDelegate()
+        let row = makeRow(btDevice(), delegate: spy, syncTrimMs: 0)
+        row.test_optionModifierOverride = false
+        row.test_performSyncFieldCommand(#selector(NSResponder.moveUp(_:)))
+        #expect(spy.trims.last?.ms == 1, "↑ nudges fine — the by-ear granularity")
+        row.test_performSyncFieldCommand(#selector(NSResponder.moveDown(_:)))
+        #expect(spy.trims.last?.ms == 0)
+        row.test_performSyncFieldCommand(Selector(("moveToBeginningOfParagraph:")))
+        #expect(spy.trims.last?.ms == 10, "⌥↑ arrives as the paragraph binding and nudges coarse")
+        row.test_performSyncFieldCommand(Selector(("moveToEndOfParagraph:")))
+        #expect(spy.trims.last?.ms == 0, "⌥↓ likewise")
+
+        let ceiling = makeRow(btDevice(), delegate: spy, syncTrimMs: 500)
+        ceiling.test_optionModifierOverride = false
+        ceiling.test_performSyncFieldCommand(#selector(NSResponder.moveUp(_:)))
+        #expect(spy.trims.last?.ms == 500, "the clamp holds under arrow nudges")
     }
 
     @Test func disconnectedRowShowsTheSavedTrimReadOnly() {

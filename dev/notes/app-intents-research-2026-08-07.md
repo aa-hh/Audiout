@@ -215,18 +215,66 @@ is downstream of 005, not free with it.
    statically-linked SPM library are exactly the configuration Apple DTS
    describes as not working, and splitting them out would mean merging metadata
    across modules via `--static-metadata-file-list` for no benefit.
-3. **Engine not running: auto-start capture.** The intent connects and starts
-   streaming rather than failing. This is the friendlier automation behaviour
-   and the riskier one — an automation can now pull audio to speakers with no
-   user present, at whatever level the connect path seeds. That makes roadmap
-   **018 (connect-volume seed / anti-blast) a hard prerequisite in practice**,
-   not an adjacent concern: shipping auto-start on top of an unresolved seed
-   level is how you get a 3 a.m. full-volume incident. Wire 035 → 018 or ship
-   the auto-start behind 018 landing.
+3. **Engine not running: auto-start capture, and the intent carries the
+   volume.** The intent connects and starts streaming rather than failing.
+   Auto-start alone would have made roadmap 018 (connect-volume seed /
+   anti-blast) a hard prerequisite — an automation pulling audio to speakers
+   with nobody present, at whatever level the connect path seeds, is how you get
+   a 3 a.m. full-volume incident. Alec's answer: **give the intent a required
+   volume parameter**, so the automation states its own level and never inherits
+   a default. See §7a — the plumbing already exists, and this removes the 018
+   dependency for the automation path.
 4. **Speaker identity: stable device id, display name as the title.** Taken as
    the obvious default rather than asked — a name-keyed shortcut silently breaks
    the moment a speaker is renamed. Cost is a stale picker entry when hardware
    is replaced, which is the better failure.
+
+## 7a. The volume parameter — verified, and it's a small change
+
+The idea only works if the level lands **at** the connect, not after it.
+Set-the-volume-afterwards would leave a window where audio plays at the seeded
+level and then drops, which is exactly the blast you were trying to avoid.
+
+Checked the code. It lands at the connect:
+
+- `NativeBackend.connectVolumeSeed` (`NativeBackend.swift:6624`) runs on
+  `stateQueue` during the connect and `pushVolume()`s the level as part of it.
+  No window.
+- Its source is already injectable — `connectVolumeProvider`, a `@Sendable`
+  closure (line 93), reading `AppSettings.connectVolume` in production — and
+  there is already a per-id marker for "the user asked for this connect",
+  `userConnectSeed` (line 683), a `Set<String>`.
+- Values are already clamped to `AppSettings.minConnectVolume ...
+  maxConnectVolume` (5…100), so an intent's number inherits the same safety net.
+
+**The whole change:** make `userConnectSeed` a `[String: Int]` so a caller can
+attach a level to a specific pending connect, and have `connectVolumeSeed`
+prefer that over `connectVolumeProvider()`. One edit in the shared function
+rather than a guard at every caller. A per-connect value also avoids the race a
+global mutation would create between two concurrent intents, or an intent and a
+UI click.
+
+**Hard condition:** the volume parameter must be **required** on every intent
+that can auto-start. Optional-and-omitted falls straight back to the global
+default and the hazard returns.
+
+**What this does and doesn't do for 018.** It resolves the automation path, so
+035 no longer depends on 018 (dependency removed). 018 still owns the ordinary
+case — the user clicks a speaker in the popover and nobody specified a level —
+and stays open on its own merits.
+
+## 7b. This also buys scenes early (roadmap 037)
+
+Once the per-speaker verbs exist, a user can hand-author a shortcut that *is* a
+scene — "kitchen 30, living room 40, activate Movie Night" — with no app support
+at all. That covers replaying a known state, which is most of what people want
+from profiles, and it is a good reason to ship the granular verbs rather than
+only coarse ones.
+
+It does not cover **snapshotting**: save what I have set up right now, under a
+name. That is 037's actual value and no amount of hand-authoring substitutes for
+it. So this defers 037 rather than closing it, and the snapshot half is what is
+left to build. Recorded on the entry.
 
 ---
 

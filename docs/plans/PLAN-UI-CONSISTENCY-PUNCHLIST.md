@@ -163,6 +163,35 @@ nothing on screen saying which control belongs to which.
 the reconnect cost in its hint), or the button is visibly bound to that one
 control instead of sitting at pane level.
 
+### W10 — Owner-reported: the Setup window drops behind other windows after a permission is granted
+
+**Surface:** ONB.
+**Code:** `OnboardingWindowController.swift:65-71` (deliberate normal level — an
+earlier `.floating` version was reverted because it hovered over every app),
+`:84-91` (re-front fires only on `didBecomeActive`);
+`OnboardingViewController.swift:125-132` and `:536-546` (post-Allow re-fronts:
+`NSApp.activate(ignoringOtherApps: true)` + `makeKeyAndOrderFront`).
+
+Owner report (2026-08-07): after adding a permission, the Setup window ends up
+behind other windows instead of staying in front. The recovery design covers
+two paths and each has a hole: the System-Settings path re-fronts only when the
+app next becomes active, i.e. nothing recovers the window until the user
+manually clicks back to the app; the prompt path relies on
+`activate(ignoringOtherApps:)` being honored, and under macOS 14's cooperative
+activation the system can decline that request while another app is frontmost —
+`makeKeyAndOrderFront` then orders the window within an inactive app, which
+still leaves it behind. (Hypothesis — confirm which path the report hits before
+fixing.) Desired behavior, per owner: the window stays in the foreground for as
+long as it is open.
+
+**Done when:** after each grant — prompt path and System-Settings path — the
+Setup window is frontmost again without the user clicking the app, verified
+live. Either fix the re-activation path, or revisit the level decision (e.g.
+elevated only while setup is open or a grant is in flight) — the earlier
+revert's "keeps popping up over everything" objection must be answered, not
+ignored. Pairs with W6: the same re-front is too eager in one direction and
+too weak in this one, so fix them together.
+
 ---
 
 # P2 — visible inconsistency, no dead end
@@ -489,7 +518,8 @@ snapshots does not re-file it.
 
 `W9` first — it is the harness for `W1`, `W3` and `W4`, which are the same
 function. `V10` before any other visual item, so the fixes have somewhere to
-land. Everything else is independent.
+land. `W6` and `W10` are two faces of the onboarding re-front — fix as one
+task. Everything else is independent.
 
 ---
 

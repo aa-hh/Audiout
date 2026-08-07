@@ -112,6 +112,9 @@ public final class AboutViewController: NSViewController {
     private let openURL: (URL) -> Void
     private let sourceCodeButton = NSButton()
     private let creditsTextView = NSTextView()
+    /// The background's Reduce Transparency cover (nil before `loadView`).
+    /// Public only for its `test_` seams.
+    public private(set) var backgroundFallback: ReduceTransparencyFallbackView?
 
     public init(info: AboutInfo, openURL: @escaping (URL) -> Void) {
         self.info = info
@@ -205,6 +208,8 @@ public final class AboutViewController: NSViewController {
         background.blendingMode = .behindWindow
         background.state = .followsWindowActiveState
         background.translatesAutoresizingMaskIntoConstraints = false
+        // A1: opaque stand-in while Reduce Transparency is on, live-updating.
+        backgroundFallback = ReduceTransparencyFallbackView.install(in: background)
         let content = SettingsForm.paneView(rows: rows)
         background.addSubview(content)
         NSLayoutConstraint.activate([

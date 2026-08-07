@@ -173,6 +173,7 @@ public final class ControlPanelWindowController: NSWindowController {
         )
         panel.becomesKeyOnlyIfNeeded = false // ACTIVATING: takes key on open
         panel.isReleasedWhenClosed = false   // reused across opens (one panel, swapped content)
+        panel.isRestorable = false           // decided policy (P3/W7): menu-bar app, no window restoration
         panel.animationBehavior = .utilityWindow
 
         // The close button is the panel's one visible close affordance — kept

@@ -114,6 +114,13 @@ package layout, backends, and core types, see
   device at launch would contradict the product decision recorded in
   [../../AGENTS.md](../../AGENTS.md); sleep, by contrast, is a transient dropout
   that keeps the selection intent.
+- **No window restoration, secure state opt-in (P3/W7).** A menu-bar app has
+  nothing to restore: every window sets `isRestorable = false` (the surface
+  panel in `ControlPanelWindowController.makePanel`, Setup in
+  `OnboardingWindowController`), and `AppDelegate` implements
+  `applicationSupportsSecureRestorableState → true` — the opt-in is free with
+  no restorable windows, and it silences the macOS secure-coding warning. Any
+  new window must also set `isRestorable = false`.
 
 ## Map
 

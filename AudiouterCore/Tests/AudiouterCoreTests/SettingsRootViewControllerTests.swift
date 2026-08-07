@@ -3,6 +3,7 @@
 import Foundation
 import Testing
 import AppKit
+import AudiouterSharedUI
 @testable import AudiouterCore
 @testable import AudiouterSettingsUI
 
@@ -73,6 +74,23 @@ import AppKit
             .init(title: "Audio", symbolName: "speaker.wave.2", viewController: audio),
         ], tabStyle: .segmentedControlOnTop)
         return (root, general, appearance, audio)
+    }
+
+    /// A1: the background effect view carries an opaque cover that stands in
+    /// for the blur exactly while Reduce Transparency is on — driven through
+    /// the seam because the live accessibility setting isn't scriptable
+    /// headlessly (the notification-driven live flip is on the live
+    /// checklist).
+    @Test func backgroundGetsAnOpaqueCoverOnlyUnderReduceTransparency() throws {
+        let (root, _, _, _) = makeRoot()
+        _ = root.view  // force viewDidLoad, which builds the background
+        let fallback = try #require(root.backgroundFallback)
+
+        fallback.test_reduceTransparencyOverride = false
+        #expect(!fallback.test_isCoveringOpaquely)
+
+        fallback.test_reduceTransparencyOverride = true
+        #expect(fallback.test_isCoveringOpaquely)
     }
 
     @Test func tabLabelsInOrder() {

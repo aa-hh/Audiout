@@ -2,6 +2,7 @@
 
 import AppKit
 import AudiouterCore
+import AudiouterSharedUI
 
 // The file name predates the standalone Settings window's retirement
 // (PLAN-ONE-SURFACE-032.md, U5); only `SettingsRootViewController` lives here
@@ -196,6 +197,8 @@ public final class SettingsRootViewController: NSTabViewController {
         background.blendingMode = .behindWindow
         background.state = .followsWindowActiveState
         background.translatesAutoresizingMaskIntoConstraints = false
+        // A1: opaque stand-in while Reduce Transparency is on, live-updating.
+        backgroundFallback = ReduceTransparencyFallbackView.install(in: background)
         view.addSubview(background, positioned: .below, relativeTo: nil)
         NSLayoutConstraint.activate([
             background.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -204,6 +207,10 @@ public final class SettingsRootViewController: NSTabViewController {
             background.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
     }
+
+    /// The background's Reduce Transparency cover (nil before `viewDidLoad`).
+    /// Public only for its `test_` seams.
+    public private(set) var backgroundFallback: ReduceTransparencyFallbackView?
 
     /// The size the host's content should be for the CURRENTLY SELECTED tab:
     /// `SettingsForm.contentWidth` wide, as tall as that pane needs at that

@@ -78,6 +78,8 @@ struct ControlPanelWindowControllerTests {
         #expect(panel.hidesOnDeactivate)
         #expect(!panel.becomesKeyOnlyIfNeeded)
         #expect(!panel.isReleasedWhenClosed)
+        // Decided policy (P3/W7): menu-bar app, no window restoration.
+        #expect(!panel.isRestorable)
         #expect(panel.animationBehavior == .utilityWindow)
     }
 

@@ -93,11 +93,11 @@ public enum Tokens {
         /// Hairline/divider strokes. Alias of `NSColor.separatorColor`.
         public static var separator: NSColor { .separatorColor }
         /// Opaque window chrome background. Alias of
-        /// `NSColor.windowBackgroundColor`. UNCONSUMED — no call site reads
-        /// this alias (Settings/About chrome uses the
-        /// `Tokens.Material.windowBackground` MATERIAL; the control-panel
-        /// backing bubble paints the warm `canvas` token, §5.4). Verify a
-        /// real call site before pointing anything here.
+        /// `NSColor.windowBackgroundColor`. Consumed by
+        /// `ReduceTransparencyFallbackView`'s default fill (A1) — the opaque
+        /// stand-in for the system chrome MATERIALS
+        /// (`Tokens.Material.windowBackground`/`popover`) while Reduce
+        /// Transparency is on.
         public static var windowBackground: NSColor { .windowBackgroundColor }
         /// The color a decorative punch-out border is drawn in so a corner badge
         /// reads as separate from what's behind it. Alias of
@@ -836,16 +836,11 @@ public enum Tokens {
     /// here — only forwarding.
     public enum Material {
         /// The system menu-surface material. Alias of
-        /// `NSVisualEffectView.Material.menu`. UNCONSUMED as of V2: `CardView`
-        /// and `PopoverPanelViewController` both used `.menu` directly (not
-        /// through this alias) before the warm-signal-v2 de-nest, which
-        /// replaced both call sites with the custom-painted warm canvas
-        /// (`WarmCanvasView`, spec §5.1) — neither draws any
-        /// `NSVisualEffectView` material anymore. Kept as a forwarding alias
-        /// per the governance rule's spirit (it still names a real, applied-
-        /// elsewhere-in-AppKit system material) but has no current call site;
-        /// do not add a NEW consumer without checking this comment is still
-        /// accurate.
+        /// `NSVisualEffectView.Material.menu`. Consumed by the quit
+        /// indicator (`AudiouterApp.QuittingIndicatorPanel`) — the app's one
+        /// floating HUD surface; every other chrome surface paints the
+        /// custom warm canvas (`WarmCanvasView`, spec §5.1) and draws no
+        /// material.
         public static var popover: NSVisualEffectView.Material { .menu }
         /// Opaque window-chrome material (onboarding background, Settings
         /// window background, About panel). Alias of

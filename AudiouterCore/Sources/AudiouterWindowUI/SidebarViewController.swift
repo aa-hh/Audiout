@@ -451,10 +451,17 @@ public final class SidebarViewController: NSViewController {
     /// Mutually exclusive with ``test_hasTintOverlay``.
     public var test_hasFallbackBacking: Bool { !warmSurfaceView.rendersOnGlass }
 
-    /// The alpha the 26+ tint overlay draws at (0 when this OS renders the
-    /// opaque fallback instead — the two never blend, one or the other).
-    public var test_warmSurfaceAlpha: CGFloat {
-        warmSurfaceView.rendersOnGlass ? SidebarWarmSurfaceView.tintAlpha : 1
+    /// The alpha the wash actually draws at: the 26+ tint overlay's low
+    /// alpha, or 1 on the pre-26 opaque fallback — AND on the glass branch
+    /// while Reduce Transparency is on (A1: the wash promotes itself to the
+    /// opaque backing).
+    public var test_warmSurfaceAlpha: CGFloat { warmSurfaceView.effectiveAlpha }
+
+    /// `nil` = read the live Reduce Transparency setting; tests pin both
+    /// sides of the wash's opaque promotion with this.
+    public var test_reduceTransparencyOverride: Bool? {
+        get { warmSurfaceView.test_reduceTransparencyOverride }
+        set { warmSurfaceView.test_reduceTransparencyOverride = newValue }
     }
 }
 
@@ -465,7 +472,9 @@ public final class SidebarViewController: NSViewController {
 /// controller's own view — there is no public API to tint it directly) is
 /// left completely alone; this draws a LOW-ALPHA warm wash on top of it.
 /// Below macOS 26 there is no glass to tint at all, so this draws the SAME
-/// color fully opaque as the sidebar's whole backing.
+/// color fully opaque as the sidebar's whole backing. Reduce Transparency
+/// promotes the 26+ wash to that same opaque backing too — see
+/// ``effectiveAlpha``.
 ///
 /// Deliberately NOT drawn by setting `outlineView.backgroundColor` —
 /// `NSTableView.h`'s `NSTableViewStyleSourceList` doc comment states that
@@ -493,6 +502,23 @@ private final class SidebarWarmSurfaceView: NSView {
     /// eye than nudging up from no perceptible change.
     static let tintAlpha: CGFloat = 0.30
 
+    /// `nil` = read the live `accessibilityDisplayShouldReduceTransparency`.
+    /// Tests drive both sides of the opaque promotion with this.
+    var test_reduceTransparencyOverride: Bool? {
+        didSet { needsDisplay = true }
+    }
+
+    /// The alpha ``draw(_:)`` actually uses. On the 26+ glass branch, Reduce
+    /// Transparency promotes the wash to the SAME fully-opaque backing the
+    /// pre-26 fallback draws — the system flattens its glass underneath, and
+    /// a translucent tint over whatever it flattens to would still read as
+    /// transparency (A1). The pre-26 branch is already opaque.
+    var effectiveAlpha: CGFloat {
+        let reduceTransparency = test_reduceTransparencyOverride
+            ?? NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+        return (rendersOnGlass && !reduceTransparency) ? Self.tintAlpha : 1
+    }
+
     init(rendersOnGlass: Bool) {
         self.rendersOnGlass = rendersOnGlass
         super.init(frame: .zero)
@@ -500,6 +526,8 @@ private final class SidebarWarmSurfaceView: NSView {
         // Reconcile live on a mid-session Reduce Transparency / Increase
         // Contrast toggle (`AudiouterSharedUI/AGENTS.md`'s instrument rule —
         // neither arrives through this view's own lifecycle otherwise).
+        // `draw(_:)` re-reads both flags per repaint via `effectiveAlpha`,
+        // so the invalidation is all the reconciliation needed.
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
             selector: #selector(accessibilityDisplayOptionsDidChange),
@@ -529,7 +557,8 @@ private final class SidebarWarmSurfaceView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         let base = Tokens.Color.sidebarWarmTint
-        let color = rendersOnGlass ? base.withAlphaComponent(Self.tintAlpha) : base
+        let alpha = effectiveAlpha
+        let color = alpha < 1 ? base.withAlphaComponent(alpha) : base
         color.setFill()
         bounds.fill()
     }

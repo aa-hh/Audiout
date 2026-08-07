@@ -255,6 +255,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
     }
 
+    /// Decided policy (P3/W7): a menu-bar app with no window restoration —
+    /// every window sets `isRestorable = false` — so opting into secure state
+    /// restoration is free and silences the macOS secure-coding warning.
+    func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
+
     @MainActor
     func applicationDidFinishLaunching(_ notification: Notification) {
         // T1 diagnostic (`AUDIOUTER_TCC_DIAG=1`, off by default): starts a
@@ -1418,16 +1423,26 @@ final class QuittingIndicatorPanel: NSPanel {
         isFloatingPanel = true
         level = .floating
         isOpaque = false
-        backgroundColor = .clear
+        backgroundColor = Tokens.Color.clear
         hasShadow = true
         hidesOnDeactivate = false
+        // Same space manners as the app's other windows (onboarding, the
+        // surface shell): follow the user to the active Space, and stay
+        // visible over a full-screen app — a quit started there should still
+        // show its indicator.
+        collectionBehavior.formUnion([.moveToActiveSpace, .fullScreenAuxiliary])
 
         let effectView = NSVisualEffectView(frame: NSRect(origin: .zero, size: size))
-        effectView.material = .popover
+        // The token alias resolves `.menu` — the menu-surface material the
+        // app's floating HUD chrome standardizes on (PLAN-ONE-SURFACE-032 P1
+        // sanctions the look).
+        effectView.material = Tokens.Material.popover
         effectView.state = .active
         effectView.wantsLayer = true
         effectView.layer?.cornerRadius = Tokens.Layout.panelCornerRadius
         effectView.layer?.masksToBounds = true
+        // A1: opaque stand-in while Reduce Transparency is on, live-updating.
+        ReduceTransparencyFallbackView.install(in: effectView)
 
         let spinner = NSProgressIndicator()
         spinner.style = .spinning

@@ -30,6 +30,9 @@ import AppKit
 
     @Test func macOS26PlusShowsTintOverlayNotFallbackBacking() {
         let sidebar = loaded(SidebarViewController(osSupportsLiquidGlassSidebar: true))
+        // Pin Reduce Transparency off — the alpha assertion below is about the
+        // glass tint, and must not depend on the machine's live setting.
+        sidebar.test_reduceTransparencyOverride = false
 
         #expect(sidebar.test_hasTintOverlay)
         #expect(!sidebar.test_hasFallbackBacking)
@@ -38,10 +41,37 @@ import AppKit
 
     @Test func belowMacOS26ShowsFallbackBackingNotTintOverlay() {
         let sidebar = loaded(SidebarViewController(osSupportsLiquidGlassSidebar: false))
+        sidebar.test_reduceTransparencyOverride = false
 
         #expect(sidebar.test_hasFallbackBacking)
         #expect(!sidebar.test_hasTintOverlay)
         #expect(abs(sidebar.test_warmSurfaceAlpha - 1) <= 0.0001)
+    }
+
+    /// A1: on the glass branch, Reduce Transparency promotes the low-alpha
+    /// wash to the same fully-opaque backing the pre-26 fallback draws — a
+    /// translucent tint over whatever the flattened glass resolves to would
+    /// still read as transparency. Flipping the setting back mid-session must
+    /// restore the tint (the wash re-reads the flag per repaint).
+    @Test func reduceTransparencyPromotesTheGlassWashToOpaque() {
+        let sidebar = loaded(SidebarViewController(osSupportsLiquidGlassSidebar: true))
+
+        sidebar.test_reduceTransparencyOverride = true
+        #expect(abs(sidebar.test_warmSurfaceAlpha - 1) <= 0.0001)
+
+        sidebar.test_reduceTransparencyOverride = false
+        #expect(abs(sidebar.test_warmSurfaceAlpha - 0.30) <= 0.0001)
+    }
+
+    /// The pre-26 opaque fallback is already the Reduce Transparency answer —
+    /// the setting must not change what it draws.
+    @Test func reduceTransparencyLeavesTheOpaqueFallbackAlone() {
+        let sidebar = loaded(SidebarViewController(osSupportsLiquidGlassSidebar: false))
+
+        for reduce in [true, false] {
+            sidebar.test_reduceTransparencyOverride = reduce
+            #expect(abs(sidebar.test_warmSurfaceAlpha - 1) <= 0.0001)
+        }
     }
 
     /// The default (no explicit seam override) must resolve from the real

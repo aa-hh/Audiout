@@ -169,7 +169,14 @@ only**, sitting between VOLUME and FEED: compact − / bare-ms-value / + stepper
 10 ms steps; value field allows 1 ms typing) plus an align-by-ear icon button —
 **`metronome.fill`** SF Symbol (fall back to outline `metronome` if the fill clots at
 final size) with a hover TOOLTIP explaining its purpose. Disconnected rows keep their
-saved value read-only. The align aid plays a REAL metronome-style tick (sharp woodblock
+saved value read-only. **AMENDED same day (Alec): no instructional sublabels** —
+BT rows express connection state through the SAME rail/node + ring vocabulary
+AirPlay rows already use (greyed row + dimmed hollow node = paired-but-
+disconnected; the node's connecting state during a reconnect attempt; failure-
+hue ring + failure headline sublabel on `.failed`). "Click to connect" is the
+row's ordinary click behavior, never a printed instruction; sublabels stay
+reserved for failure headlines ("Connected elsewhere", "Couldn't connect") and
+feed info, exactly as AirPlay rows use them. The align aid plays a REAL metronome-style tick (sharp woodblock
 transient — the ear detects double-hits/flams down to ~10–20 ms) on BOTH the reference
 device and the BT device on the same beat; the user nudges until the flam collapses to a
 single tick. Beat spacing must dodge offset aliasing: at 120 BPM (500 ms) a fully-offset

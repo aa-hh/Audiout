@@ -47,6 +47,23 @@ no IOProc fallback needed on Sonos):
   re-anchor on steps > ~2ms) before tightening; after settling the pacing clock is a
   first-class servo source. Mirrors the FLUSH re-anchor lesson.
 
+## Second brand — Sony WH-1000XM3 (added later the same evening)
+
+- **Power-on auto-reconnect**: the XM3 reconnected itself to the Mac the moment it was
+  powered on (last-host memory) — our reconnect flow is for devices that DON'T do this.
+  While unpowered it failed identically to the JBL (15.38s, 0xe00002d6) — the ~15s
+  unreachable horizon is consistent across brands.
+- **Fresh programmatic connect** (after closeConnection round-trip): baseband **3.76s**
+  + CoreAudio endpoint **0.6s** = **4.4s total** (vs Sonos 2.4s). Disconnect: instant,
+  device gone in 0.4s. **BT-SPIKE-CONNECT ≥2-brands criterion: satisfied. GO.**
+- **Pacing clock: ZERO jumps, +0.4 ppm over 118s** — no settling chaos at all, unlike
+  the Sonos's ~40s. The settling window is strongly brand-dependent.
+- **Design refinement for BT-DRIFT**: replace the fixed ~60s distrust window with an
+  ADAPTIVE settle gate — treat the clock as trustworthy once it has been jump-free
+  (steps < ~2ms) for ~10s, with re-entry into the distrust state on any later jump.
+  Sony-class devices then lock in seconds while Sonos-class devices get the full
+  protection.
+
 ## Net
 
 Both Wave-0 gates cleared same-day. No plan changes required beyond: (a) BT-CONNECT

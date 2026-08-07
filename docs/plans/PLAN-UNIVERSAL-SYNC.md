@@ -176,7 +176,20 @@ disconnected; the node's connecting state during a reconnect attempt; failure-
 hue ring + failure headline sublabel on `.failed`). "Click to connect" is the
 row's ordinary click behavior, never a printed instruction; sublabels stay
 reserved for failure headlines ("Connected elsewhere", "Couldn't connect") and
-feed info, exactly as AirPlay rows use them. The align aid plays a REAL metronome-style tick (sharp woodblock
+feed info, exactly as AirPlay rows use them.
+**Device-tier handling (Alec, 2026-08-07, locked):** (1) remembered/paired but
+disconnected → normal greyed row, click connects (the macOS-Bluetooth-menu
+behavior; already built + live-tested); selecting a greyed row = "play when
+up", auto-starts on connect. (2) pairing record genuinely deleted while app
+data (group/trim/icon) still references the id → row survives wherever that
+data puts it; click fails fast with a distinct "Not paired" failure headline +
+Bluetooth-Settings deep-link suggestion (new `ConnectionFailure.Cause`, UI
+wave); never auto-purge — the MAC-derived id resurrects trim + membership on
+re-pair. (3) never-paired → NO rows, no scanning (unpairable rows are dead
+ends); the OUTPUT DEVICES `+` menu gains "Pair a Bluetooth speaker…" →
+`SystemSettingsPane.bluetooth` deep-link, and the row auto-appears on return
+(connect notification → enumerator refresh, already built). Hide the Bluetooth
+subsection entirely when it would be empty. The align aid plays a REAL metronome-style tick (sharp woodblock
 transient — the ear detects double-hits/flams down to ~10–20 ms) on BOTH the reference
 device and the BT device on the same beat; the user nudges until the flam collapses to a
 single tick. Beat spacing must dodge offset aliasing: at 120 BPM (500 ms) a fully-offset

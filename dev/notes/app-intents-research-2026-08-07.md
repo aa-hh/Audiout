@@ -142,11 +142,13 @@ in a picker instead of asking them to type a name. This is the single biggest
 quality difference between an App Intents integration that feels native and one
 that feels like a scripting hack, and it is most of the work in tier 1.
 
+Plus, **decided into v1** (§7): **Route App to Speakers**, taking an app and a
+set of speakers. Needs a third `AppEntity` for running apps.
+
 ### Tier 2 — after the matching features land
 
-"Apply Scene" (one intent, needs 037) · set per-device trim (033) · set per-device
-EQ (034) · start sleep timer (036) · route an app to speakers (needs an
-`AppEntity` for running apps, which is more surface than it looks).
+"Apply Scene" (one intent, needs 037) · set per-device trim (033) · set
+per-device EQ (034) · start sleep timer (036).
 
 ### Not doing
 
@@ -192,20 +194,39 @@ is downstream of 005, not free with it.
 
 ---
 
-## 7. Decisions needed before building
+## 7. Decisions — settled by Alec, 2026-08-07
 
-1. **Verb list.** Confirm or cut the tier-1 six in §4.
-2. **Speaker identity.** Does `SpeakerEntity` key on a stable device id or on
-   the display name? A name-keyed shortcut breaks when the user renames a
-   speaker; an id-keyed one shows a stale entry when hardware is replaced.
-   Recommend stable id with name as the display title.
-3. **Engine not running.** Should an intent that needs live capture start it,
-   or fail with a message? Silent auto-start is the friendlier default and the
-   riskier one (it can pull audio to speakers unexpectedly, adjacent to the
-   018 anti-blast question).
-4. **Siri phrases.** Ship 3–5 App Shortcuts with spoken phrases, or expose the
-   actions in the Shortcuts app only? Phrases are the reach; they are also a
-   naming commitment that is awkward to change later.
+1. **Verb list: tier-1 six PLUS per-app routing.** "Route this app to these
+   speakers" is in v1. That pulls in a third entity type for running apps, and
+   with it three questions the other entities don't have: how an app is
+   identified (bundle id, presumably, matching `AppRouteStore`), what the intent
+   does when the named app isn't running, and how it interacts with the
+   exclusion rules in `AppRoutingController`. Budget for this being the largest
+   single piece of the work, not a seventh easy verb.
+2. **Siri phrases: none — Shortcuts app only.** So **no
+   `AppShortcutsProvider`**, no canned shortcuts, no spoken phrases, and the
+   10-shortcut and phrase ceilings stop mattering. Plain App Intents still
+   appear as actions in the Shortcuts app under Audiouter, which is the target.
+   Consequence: the actions are *not* discoverable — nobody finds them unless
+   they open Shortcuts and look, so this needs a line in the docs or Settings
+   pointing at it, or it effectively ships invisible.
+   Keep the intents in the main app target anyway (§3): dropping
+   `AppShortcutsProvider` technically relaxes that rule, but intents in a
+   statically-linked SPM library are exactly the configuration Apple DTS
+   describes as not working, and splitting them out would mean merging metadata
+   across modules via `--static-metadata-file-list` for no benefit.
+3. **Engine not running: auto-start capture.** The intent connects and starts
+   streaming rather than failing. This is the friendlier automation behaviour
+   and the riskier one — an automation can now pull audio to speakers with no
+   user present, at whatever level the connect path seeds. That makes roadmap
+   **018 (connect-volume seed / anti-blast) a hard prerequisite in practice**,
+   not an adjacent concern: shipping auto-start on top of an unresolved seed
+   level is how you get a 3 a.m. full-volume incident. Wire 035 → 018 or ship
+   the auto-start behind 018 landing.
+4. **Speaker identity: stable device id, display name as the title.** Taken as
+   the obvious default rather than asked — a name-keyed shortcut silently breaks
+   the moment a speaker is renamed. Cost is a stale picker entry when hardware
+   is replaced, which is the better failure.
 
 ---
 

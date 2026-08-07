@@ -762,6 +762,10 @@ final class BTDeviceSink: @unchecked Sendable {
     /// cannot stall it. A rebuild clears it along with the rest of the session.
     var hasStartedRendering: Bool { stateLock.withLock { released } }
 
+    /// Whether this sink has been handed any captured audio at all. False the
+    /// whole time the Mac is silent — see ``BTSyncedSink/anchoredDeviceUIDs()``.
+    var hasAnchored: Bool { stateLock.withLock { anchored } }
+
     /// Void the session (anchor, ring, resampler) AND the drift state. The
     /// render thread is stopped by every caller (engine down), so resetting the
     /// render-owned resampler is safe; the clock sampler is likewise stopped,
@@ -1312,6 +1316,20 @@ final class BTSyncedSink: @unchecked Sendable {
     func renderingDeviceUIDs() -> Set<String> {
         let sinks = tableLock.withLock { Array(sinksByUID.values) }
         return Set(sinks.lazy.filter(\.hasStartedRendering).map(\.deviceUID))
+    }
+
+    /// The UIDs that have been HANDED at least one captured buffer, whether or
+    /// not their delay gate has opened yet. This is the "is there anything to
+    /// wait for" question, and it is not the same as
+    /// ``renderingDeviceUIDs()``: with nothing playing on the Mac, the capture
+    /// fan-out never calls `enqueue`, so no sink ever anchors and none can ever
+    /// render. A caller holding a `.connecting` state must treat that as an
+    /// IDLE speaker (connected, nothing to play) rather than a failure —
+    /// otherwise selecting a healthy speaker while paused reports "no audio
+    /// started" once its ceiling expires.
+    func anchoredDeviceUIDs() -> Set<String> {
+        let sinks = tableLock.withLock { Array(sinksByUID.values) }
+        return Set(sinks.lazy.filter(\.hasAnchored).map(\.deviceUID))
     }
 
     // MARK: Feed

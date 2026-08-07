@@ -2804,7 +2804,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         captureControlQueue.async { [weak self] in
             guard let self else { return }
             let rendering = self.btSink?.renderingDeviceUIDs() ?? []
-            self.stateQueue.async { self.applyBTRenderStart(rendering) }
+            let anchored = self.btSink?.anchoredDeviceUIDs()
+            self.stateQueue.async { self.applyBTRenderStart(rendering, anchored: anchored) }
         }
     }
 
@@ -2812,7 +2813,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// ceiling — and re-arm the poll for whatever is still breathing. A row
     /// deselected mid-hold just drops out: the deselect edge already wrote its
     /// own `.off`. On `stateQueue`.
-    private func applyBTRenderStart(_ rendering: Set<String>) {   // on stateQueue
+    ///
+    /// The ceiling only means FAILURE for a device that was handed audio and
+    /// still never started playing it. A device that was handed nothing is
+    /// idle, not broken: with the Mac silent the capture fan-out never calls
+    /// `enqueue`, so no sink can anchor and none can ever render. Failing on
+    /// the ceiling alone reported "no audio started" for a perfectly healthy
+    /// speaker selected while paused — the link is up, and it will play the
+    /// moment there is anything to play. Whether sound is actually moving is
+    /// what the armed dot and the meter are for; the connection state must not
+    /// try to answer it too.
+    private func applyBTRenderStart(
+        _ rendering: Set<String>, anchored: Set<String>?
+    ) {   // on stateQueue
         let now = Date()
         for (id, deadline) in btConnectingDeadlines {
             guard expectedSelected.contains(id) else {
@@ -2824,6 +2837,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 setConnectionState(.connected, for: id)
             } else if now >= deadline {
                 btConnectingDeadlines[id] = nil
+                guard anchored?.contains(id) ?? true else {
+                    setConnectionState(.connected, for: id)
+                    Telemetry.log(.localPlayback, "bt_render_start_idle", ["device": id])
+                    continue
+                }
                 setConnectionState(.failed(ConnectionFailure(
                     cause: .unknown, detail: "no audio started")), for: id)
                 Telemetry.log(.localPlayback, "bt_render_start_timeout", ["device": id])
@@ -8076,6 +8094,12 @@ protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
     /// The UIDs whose per-device sink is emitting real audio right now — the
     /// signal a Bluetooth row's `.connecting` hold ends on.
     func renderingDeviceUIDs() -> Set<String>
+    /// The UIDs handed any captured audio at all — how the hold's ceiling tells
+    /// a silent Mac (idle, promote to `.connected`) from a device that got
+    /// audio and never played it (a real failure). `nil` means "can't tell",
+    /// which the caller reads as anchored: lifecycle-only spies then keep the
+    /// old fail-on-ceiling behaviour and their expectations are unchanged.
+    func anchoredDeviceUIDs() -> Set<String>?
     /// Per-device signed manual trim (BT-OFFSET-UI/BT-SYNC-DRAWER). Default
     /// no-op so lifecycle-only spies compile unchanged; ``BTSyncedSink``
     /// provides the real one (same-value writes are already guarded there).
@@ -8088,6 +8112,7 @@ protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
 }
 
 extension BTSyncedSinkControlling {
+    func anchoredDeviceUIDs() -> Set<String>? { nil }
     func setTrimMs(_ ms: Double, forDeviceUID uid: String) {}
     func usableTrimRangeMs(forDeviceUID uid: String) -> ClosedRange<Double> {
         -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs

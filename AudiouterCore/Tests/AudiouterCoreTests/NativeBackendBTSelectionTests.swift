@@ -165,6 +165,15 @@ import CoreAudio
         }
         func renderingDeviceUIDs() -> Set<String> { renderingUIDs }
         private var _rendering: Set<String> = []
+        /// `nil` (the protocol default) means "can't tell", which the backend
+        /// reads as anchored — set this to an explicit set to model a SILENT
+        /// Mac, where no sink is ever handed a buffer.
+        var anchoredUIDs: Set<String>? {
+            get { lock.withLock { _anchored } }
+            set { lock.withLock { _anchored = newValue } }
+        }
+        func anchoredDeviceUIDs() -> Set<String>? { anchoredUIDs }
+        private var _anchored: Set<String>?
 
         var calls: [String] { lock.withLock { _calls } }
         var deviceSets: [[BTSyncedSink.DeviceSpec]] { lock.withLock { _deviceSets } }
@@ -683,6 +692,27 @@ import CoreAudio
         guard case .failed = device(backend, btMove.id)?.connectionState else {
             Issue.record("expected the capped hold to degrade to .failed"); return
         }
+    }
+
+    /// A speaker selected while the Mac is SILENT must land `.connected`, not
+    /// `.failed`. Nothing is playing, so the capture fan-out hands the sink no
+    /// buffers, so it can never anchor and can never render — the ceiling
+    /// expiring says only "there was nothing to play", which is an idle
+    /// speaker, not a broken one. Live-found: selecting a healthy, already
+    /// connected Move 2 with the Mac paused reported "no audio started" six
+    /// seconds later, every time.
+    @Test func speakerSelectedWithNothingPlayingLandsConnectedNotFailed() {
+        let (backend, _, _, bt, sink, _) = makeBackend(btRenderStartTimeout: 0.2)
+        defer { backend.stop() }
+        sink.anchoredUIDs = []            // a silent Mac: no sink ever anchors
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id)?.isAvailable == true }
+
+        backend.setOutputSet([btMove.id])
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connected,
+                "a silent Mac must not turn a healthy speaker into a failed row")
     }
 
     /// Deselecting mid-hold ends the spinner at once — the poll must not

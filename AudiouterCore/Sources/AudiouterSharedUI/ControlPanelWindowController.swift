@@ -35,13 +35,18 @@ import AudiouterCore
 ///
 /// - UNPINNED (the default): anchored under the status item
 ///   with the beak, `isMovable = false`, `hidesOnDeactivate = true`,
-///   `level = .floating`, transparent title bar, no frame autosave, and
-///   click-outside dismisses (`windowDidResignKey`).
+///   `level = .floating`, transparent title-bar area (the surface's toolbar
+///   items sit directly on the bubble), standard buttons hidden, no frame
+///   autosave, and click-outside dismisses (`windowDidResignKey`).
 /// - PINNED: an ordinary movable window — `isMovable = true`,
-///   `hidesOnDeactivate = false`, `level = .normal`, a real (visible) title
-///   bar, the decorative beak/backing window hidden, an opaque warm
-///   background of its own, and frame autosave armed so the position survives
-///   relaunch. It does NOT dismiss on click-out; it can sit behind other apps.
+///   `hidesOnDeactivate = false`, `level = .normal`, the system toolbar strip
+///   with the standard close button visible (the title-bar TEXT stays hidden
+///   in both profiles — the one header strip is the surface's toolbar, owner
+///   decision 2026-08-07), the decorative beak/backing window hidden, an
+///   opaque warm background of its own, and frame autosave armed so the
+///   position survives relaunch. It does NOT dismiss on click-out; it can sit
+///   behind other apps. Dragging by the toolbar strip works (system default
+///   for a movable window's title-bar area).
 ///
 /// **Only APPEARANCE/manner bits ever change** — `.titled` and `.closable`
 /// stay in the style mask in BOTH profiles, forever (see `makePanel`: removing
@@ -155,15 +160,14 @@ public final class ControlPanelWindowController: NSWindowController {
     /// `windowWillClose`, no `onClose`) on a window whose style mask lacks
     /// `.titled`, verified empirically. Removing it would desynchronize
     /// `onClose` from ✕/Esc/performClose, which the whole "land home" contract
-    /// (and this file's own tests) depend on. Unpinned, the native title bar is
-    /// made visually invisible (`titlebarAppearsTransparent` + hidden title)
-    /// while the standard CLOSE button is deliberately KEPT VISIBLE as the
-    /// panel's close affordance; pinned, the same title bar is made visible
-    /// again, which is what puts that button in an ordinary title bar.
-    /// The miniaturize/zoom buttons stay hidden in both — the style mask
-    /// carries neither `.miniaturizable` nor a zoom-worthy window, so they
-    /// would be dead chrome. Escape is wired to close too — see
-    /// `ControlPanelPanel`.
+    /// (and this file's own tests) depend on. The title-bar TEXT is hidden in
+    /// both profiles (the surface's window-attached toolbar is the one header
+    /// strip); what flips per profile is the strip's material
+    /// (`titlebarAppearsTransparent`) and the standard close button's
+    /// visibility — see `applyPinProfile`. The miniaturize/zoom buttons stay
+    /// hidden in both — the style mask carries neither `.miniaturizable` nor a
+    /// zoom-worthy window, so they would be dead chrome. Escape is wired to
+    /// close too — see `ControlPanelPanel`.
     private static func makePanel() -> NSPanel {
         let panel = ControlPanelPanel(
             contentRect: NSRect(x: 0, y: 0, width: 720, height: 460),
@@ -176,11 +180,10 @@ public final class ControlPanelWindowController: NSWindowController {
         panel.isRestorable = false           // decided policy (P3/W7): menu-bar app, no window restoration
         panel.animationBehavior = .utilityWindow
 
-        // The close button is the panel's one visible close affordance — kept
-        // shown (this is the fix for "no way to close the panel"). Miniaturize
-        // and zoom are hidden: neither is in the style mask, and a lone close
-        // button reads cleanly against the bubble.
-        panel.standardWindowButton(.closeButton)?.isHidden = false
+        // Miniaturize and zoom are hidden in BOTH profiles: neither is in the
+        // style mask, so they would be dead chrome. The close button's
+        // visibility is profile-dependent (owner decision 2026-08-07) — see
+        // `applyPinProfile`.
         panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
         panel.standardWindowButton(.zoomButton)?.isHidden = true
         // Summon onto the CURRENT Space (and over a fullscreen app) rather than
@@ -225,22 +228,35 @@ public final class ControlPanelWindowController: NSWindowController {
             panel.isFloatingPanel = false
             panel.hidesOnDeactivate = false  // may sit behind other apps
             panel.isMovable = true
-            // A real, visible title bar — which is also what makes the standard
-            // close button reachable as ordinary window chrome. Appearance
-            // bits only: the style mask is NOT touched (see `makePanel`), so
-            // `.fullSizeContentView` stays on — the hosted content still spans
-            // the whole frame, including under the opaque title bar, and
-            // content that needs to clear it has to inset itself.
+            // NO separate visible title bar (owner decision 2026-08-07, live
+            // build review): the window-attached toolbar the surface installs
+            // IS the one header strip, and `titleVisibility` stays `.hidden`
+            // so the title-bar text never stacks a second strip above it (the
+            // toolbar carries a centered app-name item instead; `window.title`
+            // remains set for VoiceOver / Mission Control). The title bar
+            // area keeps its system material pinned (`titlebarAppearsTransparent
+            // = false`) — the system draws the unified-toolbar strip, Liquid
+            // Glass on macOS 26+, the older material below, Reduce
+            // Transparency handled for free. Appearance bits only: the style
+            // mask is NOT touched (see `makePanel`), so `.fullSizeContentView`
+            // stays on — the hosted content still spans the whole frame,
+            // including under the toolbar strip, and content that needs to
+            // clear it has to inset itself.
             panel.titlebarAppearsTransparent = false
-            panel.titleVisibility = .visible
+            panel.titleVisibility = .hidden
+            // Pinned shows the standard close button (an ordinary window's
+            // close affordance); unpinned hides it — the menu-bar click and
+            // Escape close the transient bubble.
+            panel.standardWindowButton(.closeButton)?.isHidden = false
             // The decorative bubble is gone, so the window has to paint and
             // cast a shadow itself — otherwise a pinned surface would be an
-            // invisible rectangle under a floating title bar. `canvas` is the
-            // same warm fill the bubble drew (Warm Signal §5.4), so the hosted
-            // content (deliberately transparent — see `configureContentAppearance`)
-            // reads identically in both profiles.
+            // invisible rectangle under a floating toolbar strip. `panel` is
+            // the same warm fill the bubble draws (the ONE surface canvas,
+            // owner decision 2026-08-07), so the hosted content (deliberately
+            // transparent — see `configureContentAppearance`) reads
+            // identically in both profiles.
             panel.isOpaque = true
-            panel.backgroundColor = Tokens.Color.canvas
+            panel.backgroundColor = Tokens.Color.panel
             panel.hasShadow = true
             panel.removeChildWindow(backingWindow)
             backingWindow.orderOut(nil)
@@ -267,11 +283,19 @@ public final class ControlPanelWindowController: NSWindowController {
             // the decorative backing window (which follows this one's frame
             // deltas, not a live layout pass) never drifts out of sync.
             panel.isMovable = false
-            // Borderless bubble look (T11): no native title bar, no shadow of
-            // its own (the backing window behind draws a shape-fitted shadow
-            // instead), fully transparent everywhere the content doesn't paint.
+            // Borderless bubble look (T11): the title-bar area goes fully
+            // transparent so the window-attached toolbar's items sit directly
+            // on the warm bubble — the strip must not paint a rectangular
+            // material band across the bubble's rounded top (owner decision
+            // 2026-08-07: the header has no backing fill of its own). No
+            // shadow of its own (the backing window behind draws a
+            // shape-fitted shadow instead).
             panel.titlebarAppearsTransparent = true
             panel.titleVisibility = .hidden
+            // The transient bubble hides the standard buttons; Escape and the
+            // menu-bar toggle are its close affordances (owner decision
+            // 2026-08-07).
+            panel.standardWindowButton(.closeButton)?.isHidden = true
             panel.isOpaque = false
             panel.backgroundColor = Tokens.Color.clear
             panel.hasShadow = false
@@ -381,6 +405,14 @@ public final class ControlPanelWindowController: NSWindowController {
     /// accessibility/VoiceOver title and the Mission Control / ⌘` window name.
     public func setTitle(_ title: String) {
         window?.title = title
+    }
+
+    /// The panel's pre-dispatch key-equivalent hook (see `ControlPanelPanel`).
+    /// The surface installs its ⌘1/⌘2/⌘3 screen shortcuts here; the shell
+    /// itself attaches no meaning to any key.
+    public var keyEquivalentHandler: ((NSEvent) -> Bool)? {
+        get { (window as? ControlPanelPanel)?.keyEquivalentHandler }
+        set { (window as? ControlPanelPanel)?.keyEquivalentHandler = newValue }
     }
 
     /// Whether the panel is currently on screen, as opposed to tucked away by
@@ -683,17 +715,36 @@ extension ControlPanelWindowController: NSWindowDelegate {
 
 // MARK: - ControlPanelPanel
 
-/// The shell's `NSPanel`, subclassed for ONE reason: to make Escape a
-/// deterministic close. Pressing Escape (or ⌘.) sends `cancelOperation(_:)` up
-/// the responder chain; routing it to `performClose(_:)` guarantees Esc closes
-/// the panel through the SAME path as the ✕ button — `windowWillClose` →
-/// `onClose` (land home) — instead of relying on incidental default panel
-/// behavior. `performClose(_:)` only fires when the style mask contains
-/// `.titled`/`.closable` (it does — see `ControlPanelWindowController.makePanel`),
-/// so this closes cleanly with no system beep. A field editor still gets first
-/// crack at Escape (to cancel in-progress text editing) before it reaches here.
+/// The shell's `NSPanel`, subclassed for TWO reasons:
+///
+/// 1. To make Escape a deterministic close. Pressing Escape (or ⌘.) sends
+///    `cancelOperation(_:)` up the responder chain; routing it to
+///    `performClose(_:)` guarantees Esc closes the panel through the SAME path
+///    as the close button — `windowWillClose` → `onClose` (land home) —
+///    instead of relying on incidental default panel behavior.
+///    `performClose(_:)` only fires when the style mask contains
+///    `.titled`/`.closable` (it does — see
+///    `ControlPanelWindowController.makePanel`), so this closes cleanly with no
+///    system beep. A field editor still gets first crack at Escape (to cancel
+///    in-progress text editing) before it reaches here.
+/// 2. To offer callers a key-equivalent seam. The surface's screen shortcuts
+///    (⌘1/⌘2/⌘3) used to ride `NSButton.keyEquivalent` on in-content header
+///    buttons; a window-attached `NSToolbarItemGroup` carries no per-segment
+///    key equivalents, so the window itself consults the injected handler
+///    first. Content-agnostic: the shell knows nothing about what the keys
+///    mean, and an unhandled event falls through to stock dispatch untouched.
 final class ControlPanelPanel: NSPanel {
+    /// Consulted before stock key-equivalent dispatch; return `true` to
+    /// consume the event. Set through
+    /// `ControlPanelWindowController.keyEquivalentHandler`.
+    var keyEquivalentHandler: ((NSEvent) -> Bool)?
+
     override func cancelOperation(_ sender: Any?) {
         performClose(sender)
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if keyEquivalentHandler?(event) == true { return true }
+        return super.performKeyEquivalent(with: event)
     }
 }

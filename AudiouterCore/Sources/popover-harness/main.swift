@@ -252,16 +252,12 @@ func run() -> Int32 {
         checks.expectEqual(backend.devices.first { $0.id == target }?.volume, volBefore, "unmute restores")
     }
 
-    // --- 11. Header bar (U3): the surface switcher's three tabs resolve
-    // system SF Symbols, and the pre-cutover wiring still opens the mixer
-    // path from the Groups tab.
-    print("\n[11] Header bar")
-    checks.expect(popover.test_headerTabImagesResolved,
-                  "all three switcher tabs resolved system SF Symbols")
-    var openedMixer = false
-    popover.onOpenMixer = { openedMixer = true }
-    popover.test_tapHeaderTab(.groups)
-    checks.expect(openedMixer, "the header Groups tab opens the mixer path (pre-cutover)")
+    // --- 11. Toolbar-era panel: the switcher moved to the surface window's
+    // native toolbar (live-review D1), so the panel is pure content — its
+    // stack starts at the resting inset until a surface seats it.
+    print("\n[11] Panel content inset (toolbar-era header)")
+    checks.expectEqual(popover.test_panelContentTopInset, 0,
+                       "unclaimed panel carries no surface chrome inset")
 
     // --- 12. A Selected-Devices row shows its on/off toggle. "airport-mixer" is
     // discovered but never grouped here.

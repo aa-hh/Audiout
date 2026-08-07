@@ -71,17 +71,19 @@ public final class ControlPanelBackingView: NSView {
     }
 
     public override func draw(_ dirtyRect: NSRect) {
-        // Warm Signal §5.4: the bubble+beak fill IS the warm `canvas` token,
-        // so shell chrome and the hosted (transparent) content pane read as
-        // ONE warm shape with no seam, light and dark. `Tokens.Color.canvas`
-        // is a live `NSColor(name:dynamicProvider:)`; `setFill()` inside
-        // `draw(_:)` resolves it against the CURRENT drawing appearance every
-        // repaint — never a frozen snapshot (the C3b half-render rule).
-        Tokens.Color.canvas.setFill()
+        // The bubble+beak fill IS the ONE surface canvas — `Tokens.Color.panel`
+        // (owner decision 2026-08-07: every screen sits on the Groups content
+        // pane's flat warm `panel`; this supersedes §5.4's `canvas` here) — so
+        // shell chrome and the hosted (transparent) content pane read as ONE
+        // warm shape with no seam, light and dark. The token is a live
+        // `NSColor(name:dynamicProvider:)`; `setFill()` inside `draw(_:)`
+        // resolves it against the CURRENT drawing appearance every repaint —
+        // never a frozen snapshot (the C3b half-render rule).
+        Tokens.Color.panel.setFill()
         bubblePath().fill()
     }
 
-    /// Repaint on a light/dark flip. This bubble's warm `canvas` fill is the
+    /// Repaint on a light/dark flip. This bubble's warm `panel` fill is the
     /// LIVE source of the shell's content-pane background too — the hosted
     /// content is left transparent so this shows through it (see
     /// `ControlPanelWindowController.configureContentAppearance`). A custom

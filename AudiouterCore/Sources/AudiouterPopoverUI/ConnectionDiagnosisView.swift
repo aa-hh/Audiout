@@ -185,8 +185,8 @@ public final class ConnectionDiagnosisView: NSView {
 
     /// The quiet dismiss ("x") control pinned to the tinted background's
     /// top-trailing corner: `bezelStyle = .accessoryBar` + `isBordered = false`
-    /// (no box at rest, matching the borderless toolbar-glyph convention used
-    /// elsewhere in this popover, e.g. `PopoverHeaderView`), a small bold glyph,
+    /// (no box at rest, matching the popover's borderless icon-glyph
+    /// convention — e.g. the card accessory buttons), a small bold glyph,
     /// and `.tertiaryLabelColor` so it reads as a quiet affordance rather than
     /// competing with "Try Again"/"Copy Details".
     private func configureDismissButton() {

@@ -16,6 +16,23 @@ labels, the native Mac translation of the HIG's tab-bar pattern (the HIG
 scopes literal tab bars to iOS/iPadOS; on the Mac this role belongs to
 toolbar tabs). A **Pin** button sits beside Quit in the header.
 
+> **SUPERSEDED — owner live-review decision D1, 2026-08-07 (commit "Surface:
+> native unified toolbar header + one canvas across screens").** The
+> three-tier translucent header below, the capsule toolbar-item-group
+> rendering detail in U3, and the "capsule row is the ONE switcher" decision
+> are all replaced by a REAL window-attached `NSToolbar` (`.unified`,
+> `titleVisibility` hidden in both profiles): tabs as a native
+> `NSToolbarItemGroup` (`selectionMode = .selectOne`), "Audiouter" as a
+> centered toolbar item, Pin + Quit trailing. The system provides the strip's
+> materials (Liquid Glass on 26+, the older material below) and Reduce
+> Transparency handling — the custom `PopoverHeaderView`, `CapsuleFillView`,
+> and all three material tiers were deleted. The pinned profile's separate
+> visible title bar is gone with them. Owner decision D2 in the same review
+> unified the canvas: every screen (and the shell bubble) sits on the Groups
+> content pane's flat `Tokens.Color.panel` (`WarmPanelView`), superseding the
+> Mixer's §5.1 gradient canvas and §5.2's "Settings on stock chrome" inside
+> the surface.
+
 **Header material (owner addendum 2026-08-07): translucent, three tiers.**
 The header strip (tabs + pin + quit) is the app's floating controls layer
 per current Apple guidance — Liquid Glass on macOS 26+, with content
@@ -307,9 +324,19 @@ Scoped tests first, the commit's guard runs the full suite.
 - bf2bd38c — **P2** · a documented "why" for every custom draw override (V11).
 - c8df2082 — **P1+P3** · Reduce Transparency fallbacks, quit HUD alignment,
   restoration decision (A1/W8/W7).
-- (this commit) — **P4** · `window-snapshot` composites the panel frame view
+- 01e156b4 — **P4** · `window-snapshot` composites the panel frame view
   (close affordance visible — V13); all four generators re-run; punch list
   annotated.
+- 1e45a458 — live-review fix · Groups sidebar split item made uncollapsible
+  (the surface offers no way back out of a collapse).
+- (this commit) — **live-review D1+D2** · the custom header
+  (`PopoverHeaderView` + `CapsuleFillView` + three material tiers) replaced
+  by a native unified `NSToolbar` on the shell window (both profiles; no
+  separate title bar; ⌘1/⌘2/⌘3 via the shell panel's key-equivalent seam);
+  canvas unified on the Groups pane's flat `panel` (`WarmPanelView`) across
+  Mixer, Settings, and the shell bubble; snapshots regenerated — the
+  `mixer-5-panel-chrome` renders are the offscreen proof the toolbar draws
+  on the unpinned bubble.
 
 Two process facts, recorded honestly: **U6's and P1/P3's agents returned
 before committing** — the orchestrator reviewed and committed their verified

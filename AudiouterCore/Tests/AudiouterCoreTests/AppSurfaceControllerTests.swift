@@ -10,12 +10,13 @@ import AppKit
 @testable import AudiouterWindowUI
 
 /// Structural + lifecycle coverage for the one-surface host (U3,
-/// PLAN-ONE-SURFACE-032): screen switching (lazy build, `setContent` routing,
+/// PLAN-ONE-SURFACE-032; header reworked to a native window toolbar by the
+/// live-review D1): screen switching (lazy build, `setContent` routing,
 /// per-screen sizes), the Mixer's `surfaceDidShow`/`surfaceDidHide` lifecycle,
-/// pin persistence, header state sync, and the pinned-chrome inset. Headless:
-/// nothing here ever orders a window on screen (`HeadlessRuntime` gates the
-/// shell's presentation calls), so every assertion reads window/controller
-/// STATE, never visibility.
+/// pin persistence, toolbar state sync, ⌘1/⌘2/⌘3, and the toolbar chrome
+/// inset. Headless: nothing here ever orders a window on screen
+/// (`HeadlessRuntime` gates the shell's presentation calls), so every
+/// assertion reads window/controller STATE, never visibility.
 @MainActor
 @Suite final class AppSurfaceControllerTests: IsolatedSuite {
 
@@ -164,8 +165,10 @@ import AppKit
                 "the shell resized to the Mixer's exact fit")
 
         surface.select(.groups)
-        #expect(window.frame.size == AppSurfaceController.groupsDefaultContentSize,
-                "Groups opens at its designed 560×520 (derived so the 7-device editor fits)")
+        var expected = AppSurfaceController.groupsDefaultContentSize
+        expected.height += surface.test_chromeTopInset
+        #expect(window.frame.size == expected,
+                "Groups opens at its designed 560×468 content plus the measured toolbar strip")
     }
 
     @Test func settingsSizesPerTabThroughTheFittedChannel() throws {
@@ -175,17 +178,17 @@ import AppKit
         let window = try #require(surface.shell.window)
         let root = try #require(surface.test_settingsRoot)
 
-        let header = SurfaceScreenViewController.headerHeight
+        let chrome = surface.test_chromeTopInset
         let fittedFirst = root.fittedContentSize
         #expect(fittedFirst.height > 200, "fitted height includes the in-content tab chrome")
-        #expect(window.frame.size.height == fittedFirst.height + header,
-                "settings screen = header strip + fitted tabs")
+        #expect(window.frame.size.height == fittedFirst.height + chrome,
+                "settings screen = toolbar strip + fitted tabs")
 
         // A tab switch re-measures and the surface follows (trigger 2).
         root.selectTab(at: 2)
         let fittedThird = root.fittedContentSize
         #expect(fittedThird.height > fittedFirst.height, "the third pane is taller")
-        #expect(window.frame.size.height == fittedThird.height + header,
+        #expect(window.frame.size.height == fittedThird.height + chrome,
                 "the surface resized for the newly selected tab")
     }
 
@@ -252,71 +255,109 @@ import AppKit
         #expect(!settings.surfacePinned, "unpinning persists too")
     }
 
-    @Test func pinnedChromeInsetSeatsHeadersBelowTheTitleBarAndUnpinRemovesIt() throws {
+    @Test func toolbarChromeInsetSeatsContentBelowTheStripInBothProfiles() throws {
         let (surface, _, _, _) = makeSurface()
         surface.show(anchorRect: nil)
         surface.select(.groups)
         let groupsScreen = try #require(surface.test_groupsScreen)
         let panel = try #require(surface.test_mixerPanel)
-        #expect(groupsScreen.test_headerTopInset == 0, "unpinned: content under the invisible bar")
-        #expect(panel.test_headerTopInset == 0)
+
+        // The toolbar strip overlaps `.fullSizeContentView` content in BOTH
+        // manner profiles now — the inset is measured, never zero.
+        let unpinnedInset = surface.test_chromeTopInset
+        #expect(unpinnedInset > 0, "the unified toolbar strip costs real height unpinned")
+        #expect(groupsScreen.test_contentTopInset == unpinnedInset,
+                "screens seat below the measured strip")
+        #expect(panel.test_contentTopInset == unpinnedInset,
+                "the Mixer panel insets its own content")
 
         surface.togglePin()
-        let inset = surface.test_chromeTopInset
-        #expect(inset > 0, "pinned: a real title bar overlaps fullSizeContentView content")
-        #expect(groupsScreen.test_headerTopInset == inset, "screens seat below the measured bar")
-        #expect(panel.test_headerTopInset == inset, "the Mixer panel insets its own header")
-
-        surface.togglePin()
-        #expect(groupsScreen.test_headerTopInset == 0, "unpinning removes the inset")
-        #expect(panel.test_headerTopInset == 0)
+        let pinnedInset = surface.test_chromeTopInset
+        #expect(pinnedInset > 0, "pinned keeps the one toolbar strip — no separate title bar")
+        #expect(groupsScreen.test_contentTopInset == pinnedInset)
+        #expect(panel.test_contentTopInset == pinnedInset)
     }
 
-    // MARK: Header sync — tab selection state across screens
+    // MARK: Toolbar header — the one strip, host-synced (D1)
 
-    @Test func everyBuiltHeaderTracksSelectionAndPin() {
+    @Test func toolbarIsAttachedUnifiedWithTitleHidden() throws {
+        let (surface, _, _, _) = makeSurface()
+        let window = try #require(surface.shell.window)
+        #expect(window.toolbar === surface.test_toolbarController.toolbar,
+                "the surface's toolbar IS the shell window's toolbar")
+        #expect(window.toolbarStyle == .unified)
+        #expect(window.titleVisibility == .hidden,
+                "no separate title bar ever — the centered toolbar item carries the name")
+        #expect(surface.test_toolbarController.test_centeredTitleText == "Audiouter")
+    }
+
+    @Test func toolbarTracksSelectionAndPin() {
         let (surface, _, _, _) = makeSurface()
         surface.show(anchorRect: nil)
         surface.select(.groups)
         surface.select(.settings)
+        #expect(surface.test_toolbarController.selectedScreen == .settings,
+                "the toolbar shows the selected tab")
 
-        #expect(surface.test_builtHeaders.count == 3, "all three screens built, three headers")
-        #expect(surface.test_builtHeaders.allSatisfy { $0.selectedScreen == .settings },
-                "every header shows the same selected tab")
-
-        // Back to an ALREADY-BUILT screen: nothing lazy-builds on this switch,
-        // so the sync must come from the select path itself (the lazy-build
-        // path also syncs, which would mask a select-path regression above).
         surface.select(.groups)
-        #expect(surface.test_builtHeaders.allSatisfy { $0.selectedScreen == .groups },
-                "a switch between built screens re-syncs every header")
+        #expect(surface.test_toolbarController.selectedScreen == .groups,
+                "a switch between built screens re-syncs the toolbar")
 
         surface.togglePin()
-        #expect(surface.test_builtHeaders.allSatisfy { $0.isPinned },
-                "every header shows the pinned state")
+        #expect(surface.test_toolbarController.isPinned, "the toolbar shows the pinned state")
     }
 
-    @Test func headerTabTapSwitchesTheScreen() throws {
+    @Test func toolbarTabTapSwitchesTheScreen() {
         let (surface, _, _, _) = makeSurface()
         surface.show(anchorRect: nil)
-        let panel = try #require(surface.test_mixerPanel)
 
-        panel.header.test_selectTab(.groups)
+        surface.test_toolbarController.test_selectTab(.groups)
 
-        #expect(surface.selectedScreen == .groups,
-                "the surface rewired the claimed panel's header: a tab IS the screen switch")
+        #expect(surface.selectedScreen == .groups, "a toolbar tab IS the screen switch")
         #expect(surface.test_hostedContentViewController === surface.test_groupsScreen)
     }
 
-    @Test func headerPinTapTogglesTheSurfacePin() throws {
+    @Test func toolbarPinTapTogglesTheSurfacePin() {
         let (surface, _, _, _) = makeSurface()
         surface.show(anchorRect: nil)
-        let panel = try #require(surface.test_mixerPanel)
 
-        panel.header.test_tapPin()
-        #expect(surface.isPinned, "the header Pin button drives the surface's pin flip")
-        panel.header.test_tapPin()
+        surface.test_toolbarController.test_tapPin()
+        #expect(surface.isPinned, "the toolbar Pin item drives the surface's pin flip")
+        surface.test_toolbarController.test_tapPin()
         #expect(!surface.isPinned)
+    }
+
+    /// ⌘1/⌘2/⌘3 moved from the retired header buttons' key equivalents to the
+    /// shell panel's pre-dispatch seam (a toolbar item group carries none).
+    @Test func commandNumberShortcutsSelectScreensThroughTheShellSeam() throws {
+        let (surface, _, _, _) = makeSurface()
+        surface.show(anchorRect: nil)
+        let handler = try #require(surface.shell.keyEquivalentHandler,
+                                   "the surface installs the shortcut handler")
+
+        func keyEvent(_ character: String, command: Bool) -> NSEvent? {
+            NSEvent.keyEvent(with: .keyDown, location: .zero,
+                             modifierFlags: command ? [.command] : [],
+                             timestamp: 0, windowNumber: 0, context: nil,
+                             characters: character, charactersIgnoringModifiers: character,
+                             isARepeat: false, keyCode: 0)
+        }
+
+        let cmd2 = try #require(keyEvent("2", command: true))
+        #expect(handler(cmd2), "⌘2 is consumed")
+        #expect(surface.selectedScreen == .groups)
+
+        let cmd3 = try #require(keyEvent("3", command: true))
+        #expect(handler(cmd3), "⌘3 is consumed")
+        #expect(surface.selectedScreen == .settings)
+
+        let cmd1 = try #require(keyEvent("1", command: true))
+        #expect(handler(cmd1), "⌘1 is consumed")
+        #expect(surface.selectedScreen == .mixer)
+
+        let bare2 = try #require(keyEvent("2", command: false))
+        #expect(!handler(bare2), "an un-modified key falls through to stock dispatch")
+        #expect(surface.selectedScreen == .mixer)
     }
 
     // MARK: Menu-bar click policy — all four cases (U4)
@@ -479,7 +520,9 @@ import AppKit
         surface.select(.groups)
 
         let window = try #require(surface.shell.window)
-        #expect(window.frame.size == AppSurfaceController.groupsDefaultContentSize,
+        var designed = AppSurfaceController.groupsDefaultContentSize
+        designed.height += surface.test_chromeTopInset
+        #expect(window.frame.size == designed,
                 "the real split view mounts at the designed size, not a 500×500 fallback")
         let screen = try #require(surface.test_groupsScreen)
         screen.view.layoutSubtreeIfNeeded()

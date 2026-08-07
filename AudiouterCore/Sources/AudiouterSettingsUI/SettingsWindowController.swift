@@ -175,8 +175,12 @@ public final class SettingsRootViewController: NSTabViewController {
         // window fill. Confirmed necessary by rendering in dark mode
         // (`settings-snapshot`): without it, child controls draw with
         // dark-adapted (light) text/colors over whatever happens to sit behind,
-        // which is illegible. Stock `NSVisualEffectView` material, not a
-        // `Tokens` one — Settings chrome stays system (Warm Signal §5.2).
+        // which is illegible. The fill is `WarmPanelView` — the ONE surface
+        // canvas (owner decision D2, live build review 2026-08-07: every
+        // screen sits on the Groups content pane's flat warm `panel`; this
+        // supersedes Warm Signal §5.2's "Settings on stock chrome" for the
+        // in-surface world). Opaque by construction, so the old
+        // `ReduceTransparencyFallbackView` cover is no longer needed here.
         //
         // TRAP 4 LIVES HERE — the four edge constraints below are load-bearing,
         // do not "simplify" them back to an autoresizing mask. This view used to
@@ -192,14 +196,10 @@ public final class SettingsRootViewController: NSTabViewController {
         // they're immune. (They also make this view genuinely cover the pane:
         // under the mask it had settled at 420×0 inside a 460×308 content
         // view, drawing nothing at all.)
-        let background = NSVisualEffectView()
-        background.material = .windowBackground
-        background.blendingMode = .behindWindow
-        background.state = .followsWindowActiveState
+        let background = WarmPanelView()
         background.translatesAutoresizingMaskIntoConstraints = false
-        // A1: opaque stand-in while Reduce Transparency is on, live-updating.
-        backgroundFallback = ReduceTransparencyFallbackView.install(in: background)
         view.addSubview(background, positioned: .below, relativeTo: nil)
+        test_background = background
         NSLayoutConstraint.activate([
             background.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             background.trailingAnchor.constraint(equalTo: view.trailingAnchor),
@@ -208,9 +208,9 @@ public final class SettingsRootViewController: NSTabViewController {
         ])
     }
 
-    /// The background's Reduce Transparency cover (nil before `viewDidLoad`).
-    /// Public only for its `test_` seams.
-    public private(set) var backgroundFallback: ReduceTransparencyFallbackView?
+    /// The unified-canvas background (nil before `viewDidLoad`), for
+    /// structural tests asserting D2's one-background rule.
+    public private(set) var test_background: NSView?
 
     /// The size the host's content should be for the CURRENTLY SELECTED tab:
     /// `SettingsForm.contentWidth` wide, as tall as that pane needs at that

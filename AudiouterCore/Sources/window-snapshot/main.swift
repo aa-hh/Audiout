@@ -42,6 +42,8 @@
 
 import AppKit
 import AudiouterCore
+import AudiouterPopoverUI
+import AudiouterSettingsUI
 import AudiouterSharedUI
 import AudiouterWindowUI
 
@@ -380,12 +382,16 @@ func snapshotStandaloneView(_ view: NSView, label: String, appearanceName: NSApp
 /// Render the control-panel shell (T11) with Groups content: the sticky
 /// floating NSPanel + decorative backing window with the beak. Position it
 /// with a mock menu-bar status-item anchor (top-right corner), then composite
-/// the backing window's chrome with the panel's FRAME view — titlebar chrome
-/// (close button included, V13) plus content — into an offscreen render
-/// target and snapshot that.
+/// the backing window's chrome with the panel's FRAME view — the unified
+/// toolbar header (live-review D1) plus content — into an offscreen render
+/// target and snapshot that. `present` performs the actual show so the caller
+/// can route it through the one-surface host (which mounts the screen, seats
+/// its content below the toolbar strip and sizes the window) rather than the
+/// bare shell.
 @MainActor
 func snapshotControlPanel(_ controller: ControlPanelWindowController,
-                         label: String, appearanceName: NSAppearance.Name, outDir: URL) {
+                         label: String, appearanceName: NSAppearance.Name, outDir: URL,
+                         present: (NSRect?) -> Void) {
     let appearance = NSAppearance(named: appearanceName)
 
     // Position both windows with a mock menu-bar anchor (top-right, like a
@@ -393,9 +399,9 @@ func snapshotControlPanel(_ controller: ControlPanelWindowController,
     if let screen = NSScreen.main {
         let vf = screen.visibleFrame
         let mockAnchor = NSRect(x: vf.maxX - 20, y: vf.maxY - 4, width: 24, height: 4)
-        controller.show(anchorRect: mockAnchor)
+        present(mockAnchor)
     } else {
-        controller.show(anchorRect: nil)
+        present(nil)
     }
 
     // Set appearance on both windows; keep them out of mouse routing for the
@@ -462,9 +468,12 @@ func snapshotControlPanel(_ controller: ControlPanelWindowController,
     )
     contentLayer.wantsLayer = true
     contentLayer.appearance = appearance
-    appearance?.performAsCurrentDrawingAppearance {
-        contentLayer.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-    }
+    // CLEAR, not `windowBackgroundColor`: the unpinned panel is transparent
+    // wherever its content doesn't paint — most visibly the toolbar strip,
+    // which the content is seated BELOW — and the backing bubble behind shows
+    // through. An opaque backdrop here would occlude the bubble render below
+    // and paint the strip stock grey, which the live window never does.
+    contentLayer.layer?.backgroundColor = NSColor.clear.cgColor
     contentLayer.layer?.cornerRadius = ControlPanelBackingView.cornerRadius
     contentLayer.layer?.masksToBounds = true
     container.addSubview(contentLayer)
@@ -636,16 +645,35 @@ func run() -> Int32 {
             windowController.test_detail.test_setOverlayVisible(true)
             drain()
 
-            // 5. Panel chrome (T11): the control-panel shell with Groups content
-            // anchored to a mock menu-bar status item (top-right). The sticky
-            // floating NSPanel + decorative backing window with the beak,
-            // right-edge-aligned and rendered together.
-            let panelController = ControlPanelWindowController(
-                contentViewController: windowController.contentController,
-                title: "Groups"
-            )
-            snapshotControlPanel(panelController, label: "5-panel-chrome",
-                                appearanceName: appearanceName, outDir: outDir)
+            // 5. Panel chrome: the ONE SURFACE hosting the Groups screen,
+            // anchored to a mock menu-bar status item (top-right) — the real
+            // shell + decorative beak PLUS the window's native unified
+            // toolbar header (live-review D1: tabs, centered app name, Pin,
+            // Quit), which a bare shell would not carry. This render is the
+            // standing offscreen proof that the toolbar actually draws on the
+            // unpinned bubble.
+            let surfacePopover = PopoverController(
+                appRouting: AppRoutingController(store: AppRouteStore(directory: tempDir()),
+                                                 loadPersisted: false),
+                runningAppsProvider: { [] })
+            let surfaceSettings = AppSettings(
+                defaults: UserDefaults(suiteName: "window-snapshot-\(UUID().uuidString)")!)
+            let surface = AppSurfaceController(
+                popoverController: surfacePopover,
+                settings: surfaceSettings,
+                groupsContent: { windowController.contentController },
+                settingsContent: {
+                    // Lazily built on first .settings selection — never
+                    // reached in this render (only Groups is selected).
+                    SettingsRootViewController(tabs: [], tabStyle: .segmentedControlOnTop)
+                },
+                frameAutosaveName: "WindowSnapshotSurface")
+            snapshotControlPanel(surface.shell, label: "5-panel-chrome",
+                                appearanceName: appearanceName, outDir: outDir,
+                                present: { anchor in
+                                    surface.show(anchorRect: anchor)
+                                    surface.select(.groups)
+                                })
         }
     }
 

@@ -89,12 +89,14 @@ lives in the Mixer screen. All group logic goes through the shared
   `test_*` mirror or it is untestable outside a live window.
 - **Depends on the model, never the reverse.** No backend types; everything
   arrives via `GroupController` or `update(devices:)`.
-- **Three small `draw(_:)` overrides are token-resolution, not new chrome:**
-  `WarmPanelView` and `HairlineView` (`MixerWindowController.swift`) and
-  `WarmPreviewTileView` (`IconPickerViewController.swift`) draw rather than
-  stamp a layer color so their `Tokens` fills (`panel`, `hairline`, `canvas`)
-  re-resolve live per appearance flip and Increase Contrast on every paint —
-  the `WarmCanvasView` pattern; `HairlineView` is click-through pure chrome.
+- **Two small `draw(_:)` overrides are token-resolution, not new chrome:**
+  `HairlineView` (`MixerWindowController.swift`) and `WarmPreviewTileView`
+  (`IconPickerViewController.swift`) draw rather than stamp a layer color so
+  their `Tokens` fills (`hairline`, `canvas`) re-resolve live per appearance
+  flip and Increase Contrast on every paint; `HairlineView` is click-through
+  pure chrome. The content pane's `panel` fill is `AudiouterSharedUI`'s
+  `WarmPanelView` — it moved there when the owner made it the ONE canvas
+  every surface screen sits on (2026-08-07).
 
 ## Map
 

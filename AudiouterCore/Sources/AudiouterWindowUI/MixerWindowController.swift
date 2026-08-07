@@ -452,39 +452,10 @@ public final class MixerWindowController {
     }
 }
 
-// MARK: - WarmPanelView
-
-/// The Groups screen's CONTENT-PANE canvas (Warm Signal spec §5.3, decision
-/// j: "content pane warm, chrome stock"): a flat, fully opaque fill of
-/// `Tokens.Color.panel` — the warm surface one rung LIGHTER than the
-/// popover's `canvas` gradient — with **no grain** (grain is the popover's
-/// density texture, §1.1; a configuration screen doesn't carry it) and no
-/// gradient. The chrome around it (split view, sidebar material, sheets)
-/// stays fully native and untouched.
-///
-/// A `draw(_:)` override — deliberately NOT a frozen layer color — so the
-/// token re-resolves live per appearance flip and Increase Contrast on every
-/// paint (`WarmCanvasView`'s pattern; always opaque, so Reduce Transparency
-/// needs no fallback branch).
-final class WarmPanelView: NSView {
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    override func draw(_ dirtyRect: NSRect) {
-        Tokens.Color.panel.setFill()
-        bounds.fill()
-    }
-
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        needsDisplay = true
-    }
-}
+// `WarmPanelView` — the flat `Tokens.Color.panel` canvas this screen's content
+// pane introduced (Warm Signal §5.3, decision j) — moved to `AudiouterSharedUI`
+// when the owner picked it as the ONE background every surface screen sits on
+// (live build review 2026-08-07). This file keeps using it unchanged.
 
 /// A one-token divider line. `draw(_:)`-based rather than a frozen layer color
 /// for the same reason as `WarmPanelView`: `Tokens.Color.hairline` re-resolves

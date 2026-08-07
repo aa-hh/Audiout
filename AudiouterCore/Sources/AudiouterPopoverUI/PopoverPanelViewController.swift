@@ -90,19 +90,16 @@ final class PopoverPanelViewController: NSViewController {
     /// row (a header-only card has nothing to collapse until it has a body).
     private var pendingCollapsed: [String: Bool] = [:]
 
-    /// The header bar pinned above the scroll area — since U3 the one-surface
-    /// tab-bar switcher strip (Mixer/Groups/Settings tabs + Pin + Quit). Lives
-    /// INSIDE the panel (unlike the other screens' container-owned headers) so
-    /// the Mixer's exact-fit height includes it for free.
-    let header = PopoverHeaderView()
+    /// The card stack's top pin, kept so the surface can seat the whole
+    /// content below the window's toolbar strip (`setContentTopInset` — the
+    /// one header lives on the WINDOW since the 2026-08-07 live review, so
+    /// the panel is pure content). The inset rides the exact-fit measure for
+    /// free because the pin is part of `contentContainer`'s required chain.
+    private var contentTopConstraint: NSLayoutConstraint?
 
-    /// `header`'s top pin, kept so the surface can seat the whole content
-    /// below a pinned window's real title bar (`setHeaderTopInset`).
-    private var headerTopConstraint: NSLayoutConstraint?
-
-    /// The header's resting inset from the container top (breathing room the
-    /// original layout always had; the pinned chrome inset adds to it).
-    private static let headerRestingTopInset: CGFloat = 4
+    /// The content's resting inset from the container top (breathing room the
+    /// original layout always had; the surface's chrome inset adds to it).
+    private static let contentRestingTopInset: CGFloat = 4
 
     /// Popover width — SoundSource-style proportions so the columns
     /// (name · Volume · Device) line up. Narrowed 2026-07-16 (change 5): the
@@ -122,17 +119,14 @@ final class PopoverPanelViewController: NSViewController {
     /// for the lifetime of its button (target/action holds `target` weakly).
     private static var actionTargetKey: UInt8 = 0
 
-    /// The popover's own warm CANVAS (spec §5.1) — the single continuous
-    /// surface every de-nested section sits directly on, filling `container`
-    /// behind everything else. Through 2026-07-21 this was a real,
-    /// `.behindWindow`-blended `NSVisualEffectView` (ahh asked, 2026-07-16, for
-    /// more translucency specifically here, distinct from the then-separate
-    /// card tiles). warm-signal-v2 replaces it with `WarmCanvasView` — the
-    /// spec'd `canvasHi → canvas` gradient (+ deterministic grain in dark
-    /// mode) instead of system vibrancy. Always fully opaque (V2 §D — no
-    /// Reduce-Transparency special case needed: unlike the vibrant view it
-    /// replaces, this one was never translucent).
-    private let background = WarmCanvasView()
+    /// The Mixer's canvas — the single continuous surface every de-nested
+    /// section sits directly on, filling `container` behind everything else.
+    /// Owner decision D2 (live build review 2026-08-07): every surface screen
+    /// sits on the GROUPS content pane's flat warm `panel` fill
+    /// (`WarmPanelView`), so this supersedes the spec-§5.1 `WarmCanvasView`
+    /// gradient+grain here (the Setup window keeps it). Always fully opaque —
+    /// no Reduce-Transparency special case needed.
+    private let background = WarmPanelView()
 
     /// The continuous membership-rail spine (Warm Signal v4 §Call-1): drawn once
     /// for the whole panel, ON TOP of every card + divider, so the rail is one
@@ -170,7 +164,6 @@ final class PopoverPanelViewController: NSViewController {
         stackView.spacing = 8
         stackView.edgeInsets = NSEdgeInsets(top: 12, left: 0, bottom: 12, right: 0)
 
-        container.addSubview(header)
         container.addSubview(stackView)
         // The rail overlay is added LAST so it composites ON TOP of the cards +
         // hairline dividers — the continuous spine reads unbroken where it would
@@ -178,10 +171,10 @@ final class PopoverPanelViewController: NSViewController {
         railOverlay.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(railOverlay)
 
-        // The header's top pin, kept for the surface's pinned-chrome inset.
-        let headerTop = header.topAnchor.constraint(equalTo: container.topAnchor,
-                                                    constant: Self.headerRestingTopInset)
-        headerTopConstraint = headerTop
+        // The stack's top pin, kept for the surface's toolbar chrome inset.
+        let contentTop = stackView.topAnchor.constraint(equalTo: container.topAnchor,
+                                                        constant: Self.contentRestingTopInset)
+        contentTopConstraint = contentTop
 
         // The stack is pinned DIRECTLY inside the container — no `NSScrollView`, so
         // no scroller chrome can ever appear (T-3, PLAN-POPOVER-ROUTING.md §A: the
@@ -206,15 +199,11 @@ final class PopoverPanelViewController: NSViewController {
             background.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             background.trailingAnchor.constraint(equalTo: container.trailingAnchor),
 
-            // Header bar pinned to the very top, above the System card (its
-            // top pin is `headerTop` above, kept for the pinned-chrome inset).
-            headerTop,
-            header.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            header.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-
-            // Stack pinned header-bottom → container-bottom, full width. The bottom
-            // pin is the anti-collapse guarantee (see the note above).
-            stackView.topAnchor.constraint(equalTo: header.bottomAnchor),
+            // Stack pinned container-top → container-bottom, full width (its
+            // top pin is `contentTop` above, kept for the surface's toolbar
+            // chrome inset). The bottom pin is the anti-collapse guarantee
+            // (see the note above).
+            contentTop,
             stackView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             stackView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             // The bottom pin, SPLIT (Alec's call, 2026-08-06). It used to be a
@@ -492,8 +481,7 @@ final class PopoverPanelViewController: NSViewController {
             // button is kept alive and keyed by header title so the host can
             // enable/disable it in place later via `setAccessoryEnabled`, without
             // rebuilding the card). Styled with `.accessoryBar` bezel and
-            // hover-only border, matching the header icon buttons in
-            // `PopoverHeaderView`.
+            // hover-only border — the popover's one icon-button family.
             let button = NSButton()
             button.translatesAutoresizingMaskIntoConstraints = false
             button.bezelStyle = .accessoryBar
@@ -918,33 +906,21 @@ final class PopoverPanelViewController: NSViewController {
     /// Test-only: simulate a click on the note's action button, if any.
     func test_tapSystemAirPlayNoteAction() { systemAirPlayNoteView?.test_tapActionButton() }
 
-    /// Wire the header's switcher + Quit (U3). Pin is deliberately absent:
-    /// only the surface host has a pin concept, and it rewires the header
-    /// directly when it claims the panel (`AppSurfaceController.wireHeader`).
-    func setHeaderActions(onSelectScreen: @escaping (SurfaceScreen) -> Void,
-                          onQuit: @escaping () -> Void) {
-        header.onSelectScreen = onSelectScreen
-        header.onQuit = onQuit
-    }
-
-    /// Seat the whole content (header included — the card stack hangs off the
-    /// header's bottom) below a pinned surface window's title bar. The caller
-    /// republishes the exact-fit size afterward; this only moves the pin.
-    func setHeaderTopInset(_ inset: CGFloat) {
+    /// Seat the card stack below the surface window's toolbar strip. The
+    /// caller republishes the exact-fit size afterward; this only moves the
+    /// pin.
+    func setContentTopInset(_ inset: CGFloat) {
         _ = view // ensure loadView ran so the constraint exists
-        headerTopConstraint?.constant = Self.headerRestingTopInset + inset
+        contentTopConstraint?.constant = Self.contentRestingTopInset + inset
     }
 
-    /// The header's current extra top inset (0 unpinned), for structural tests.
-    var test_headerTopInset: CGFloat {
-        (headerTopConstraint?.constant ?? Self.headerRestingTopInset) - Self.headerRestingTopInset
+    /// The content's current extra top inset, for structural tests.
+    var test_contentTopInset: CGFloat {
+        (contentTopConstraint?.constant ?? Self.contentRestingTopInset) - Self.contentRestingTopInset
     }
 
     // MARK: Test-support
 
-    /// Whether the header exposes a Quit button image (the footer Quit moved to
-    /// the header, 2026-07-14).
-    var test_headerHasQuit: Bool { header.test_quitButtonHasImage }
     /// Number of section cards currently mounted (footer card removed).
     var test_cardCount: Int {
         stackView.arrangedSubviews.compactMap { $0 as? CardView }.count

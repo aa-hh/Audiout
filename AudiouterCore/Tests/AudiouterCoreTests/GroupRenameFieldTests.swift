@@ -55,9 +55,9 @@ import AppKit
         window.setHostVisible(true)
         window.update(devices: devices)
         window.test_select(.group(id: group.id))
-        var size = AppSurfaceController.groupsDefaultContentSize
-        size.height -= SurfaceScreenViewController.headerHeight
-        window.contentController.view.setFrameSize(size)
+        // `groupsDefaultContentSize` IS the content area below the window's
+        // toolbar strip (live-review D1), so no header subtraction remains.
+        window.contentController.view.setFrameSize(AppSurfaceController.groupsDefaultContentSize)
         settle(window)
         return (window, controller, group)
     }

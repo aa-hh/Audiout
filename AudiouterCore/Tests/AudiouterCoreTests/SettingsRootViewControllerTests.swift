@@ -76,21 +76,20 @@ import AudiouterSharedUI
         return (root, general, appearance, audio)
     }
 
-    /// A1: the background effect view carries an opaque cover that stands in
-    /// for the blur exactly while Reduce Transparency is on — driven through
-    /// the seam because the live accessibility setting isn't scriptable
-    /// headlessly (the notification-driven live flip is on the live
-    /// checklist).
-    @Test func backgroundGetsAnOpaqueCoverOnlyUnderReduceTransparency() throws {
+    /// D2 (live build review 2026-08-07): Settings sits on the ONE surface
+    /// canvas — the flat warm `panel` fill (`WarmPanelView`) the Groups
+    /// content pane draws — not the retired stock `.windowBackground`
+    /// material. Opaque by construction, so no Reduce Transparency cover is
+    /// needed (or present) any more.
+    @Test func backgroundIsTheUnifiedWarmPanelCanvas() throws {
         let (root, _, _, _) = makeRoot()
         _ = root.view  // force viewDidLoad, which builds the background
-        let fallback = try #require(root.backgroundFallback)
+        let background = try #require(root.test_background)
 
-        fallback.test_reduceTransparencyOverride = false
-        #expect(!fallback.test_isCoveringOpaquely)
-
-        fallback.test_reduceTransparencyOverride = true
-        #expect(fallback.test_isCoveringOpaquely)
+        #expect(background is WarmPanelView,
+                "Settings draws the same flat panel canvas as the Groups content pane")
+        #expect(!(background is NSVisualEffectView),
+                "the stock material background is retired inside the surface")
     }
 
     @Test func tabLabelsInOrder() {

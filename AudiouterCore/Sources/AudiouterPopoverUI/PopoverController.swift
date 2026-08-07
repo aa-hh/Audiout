@@ -188,15 +188,6 @@ public final class PopoverController: NSObject {
     /// updates, Main Out selection, etc.) leaves the transient state alone.
     private var isRebuildingForOpen = false
 
-    /// Called when the user picks "Open Mixer…", the header's "Open Groups editor"
-    /// button (task A — group membership editing lives in the mixer window), or
-    /// otherwise wants the mixer window shown.
-    public var onOpenMixer: (() -> Void)?
-
-    /// Called when the user taps the header's Settings button (task A). The app
-    /// wires this to open the Settings window.
-    public var onOpenSettings: (() -> Void)?
-
     /// Called when the user taps the takeover status strip's "Open Login
     /// Items…" button (T6, state 1). The app wires this to
     /// `PTPHelperManaging.openSystemSettingsLoginItems()` — the same seam
@@ -442,21 +433,6 @@ public final class PopoverController: NSObject {
         super.init()
         panel.controller = self
         mainOutRow.delegate = self
-        // Header switcher actions, PRE-CLAIM wiring: until the surface claims
-        // the panel (`claimPanelForSurfaceHosting()`), the Groups/Settings tabs
-        // forward to `onOpenMixer`/`onOpenSettings`, which the app routes into
-        // the surface's screens. The surface REPLACES this wiring at claim
-        // time (a tab becomes the screen switch); the Mixer tab/Pin are inert
-        // here — pre-claim there are no screens to switch and nothing to pin.
-        panel.setHeaderActions(
-            onSelectScreen: { [weak self] screen in
-                switch screen {
-                case .mixer: break
-                case .groups: self?.onOpenMixer?()
-                case .settings: self?.onOpenSettings?()
-                }
-            },
-            onQuit: { NSApp.terminate(nil) })
         applicationsFooter.onAdd = { [weak self] in
             guard let self else { return }
             self.presentAddApplicationPicker(relativeTo: self.applicationsFooter)
@@ -2328,15 +2304,11 @@ public final class PopoverController: NSObject {
     /// Main Out selector's group-routing entries — a saved group becomes a
     /// destination even though the popover no longer renders a Groups section).
     public var test_saveCurrentSetupEnabled: Bool { canSaveCurrentSetup }
-    public var test_headerHasQuit: Bool { panel.test_headerHasQuit }
 
-    // Header switcher (U3) test hooks — public because `popover-harness`
-    // reads them through the non-testable import.
-    /// Whether every switcher tab resolved a non-nil SF Symbol image.
-    public var test_headerTabImagesResolved: Bool { panel.header.test_allTabImagesResolved }
-    /// Fire a header tab exactly as a click would (pre-cutover, Groups opens
-    /// the mixer path and Settings the settings path).
-    public func test_tapHeaderTab(_ screen: SurfaceScreen) { panel.header.test_selectTab(screen) }
+    /// The panel content's extra top inset (the surface seats the card stack
+    /// below the window's toolbar strip) — public because `popover-harness`
+    /// reads it through the non-testable import.
+    public var test_panelContentTopInset: CGFloat { panel.test_contentTopInset }
 
     /// Count of device rows in the Selected Devices section.
     public var test_deviceSectionRowCount: Int { deviceRowsByID.count }

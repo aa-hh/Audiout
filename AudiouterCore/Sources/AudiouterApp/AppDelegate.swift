@@ -388,11 +388,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController = PopoverController(appRouting: appRouting)
         popoverController.deviceIconController = deviceIconController
         popoverController.configure(groupController: groupController)
-        // Pre-claim fallbacks: until the surface claims the Mixer panel these
-        // are what the header's Groups/Settings tabs fire. Retargeted at the
-        // surface's screens so they can never resurrect a standalone window.
-        popoverController.onOpenMixer = { [weak self] in self?.showSurface(.groups) }
-        popoverController.onOpenSettings = { [weak self] in self?.showSurface(.settings) }
         // T6 (takeover status strip, state 1's "Open Login Items…" button): the
         // same `PTPHelperManaging` seam `registerPTPHelperIfNeeded()` already
         // reads, reused rather than standing up a second instance.

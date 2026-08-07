@@ -6,7 +6,7 @@ import AudiouterSharedUI
 import AudiouterSettingsUI
 
 /// The three screens the one-surface app hosts (U3, PLAN-ONE-SURFACE-032).
-/// `Int`-raw so the header's tab buttons can carry a screen in `NSButton.tag`.
+/// `Int`-raw so the toolbar's tab group can map a segment index to a screen.
 public enum SurfaceScreen: Int, CaseIterable, Sendable {
     case mixer, groups, settings
 
@@ -28,8 +28,8 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
         }
     }
 
-    /// Defense-in-depth fallbacks so a tab is never glyph-less (the previous
-    /// header's idiom); ordered nearest-meaning first.
+    /// Defense-in-depth fallbacks so a tab is never glyph-less; ordered
+    /// nearest-meaning first.
     var fallbackSymbolNames: [String] {
         switch self {
         case .mixer: return ["slider.horizontal.below.rectangle", "dial.min"]
@@ -42,8 +42,11 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
     var keyEquivalent: String { String(rawValue + 1) }
 }
 
-/// The one-surface host (U3): owns ONE `ControlPanelWindowController` shell and
-/// the three lazily-built screens behind the header's tab-bar switcher —
+/// The one-surface host (U3): owns ONE `ControlPanelWindowController` shell,
+/// the shell window's native toolbar header (`SurfaceToolbarController` —
+/// owner decision D1, 2026-08-07: a real `NSToolbar` is the one header strip
+/// in both manner profiles), and the three lazily-built screens behind the
+/// toolbar's tab group —
 ///
 /// - **Mixer** — the real `PopoverController` panel, claimed through
 ///   `claimPanelForSurfaceHosting()` and driven through the U2
@@ -52,13 +55,13 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
 ///   panel's exact-fit `preferredContentSize` (the existing
 ///   `panelContentDidChangeHeight` channel — Mixer is always exact-fit).
 /// - **Groups** — the caller-provided content controller
-///   (`MixerWindowController.contentController` in the app), seated below a
-///   header strip in a `SurfaceScreenViewController`. Fixed default
-///   560×520 — derived so the 7-device group editor fits (see
-///   `groupsDefaultContentSize`) — and the one screen whose user-dragged size is
-///   remembered for the session (the shell's own drag-holds philosophy).
+///   (`MixerWindowController.contentController` in the app), seated below the
+///   toolbar strip in a `SurfaceScreenViewController`. Fixed default content
+///   size 560×468 below the strip — derived so the 7-device group editor fits
+///   (see `groupsDefaultContentSize`) — and the one screen whose user-dragged
+///   size is remembered for the session (the shell's drag-holds philosophy).
 /// - **Settings** — a caller-provided `SettingsRootViewController` (in-content
-///   tabs, so they render beneath the switcher), same container. Per-tab
+///   tabs, so they render beneath the toolbar), same container. Per-tab
 ///   height rides `onFittedContentSizeChange`, which THIS controller takes
 ///   over (R5: the standalone Settings window's four sizing traps transfer to
 ///   whoever hosts these panes — the re-measure triggers live in the root
@@ -70,10 +73,12 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
 /// bar) and, unpinned, re-centered on the status-item anchor.
 ///
 /// **Pin** drives U1's `setPinned(_:)` manner flip and persists in
-/// `AppSettings.surfacePinned` (restored at construction). Pinned mode's real
-/// title bar overlaps the content (`.fullSizeContentView` never leaves the
-/// style mask — R6), so each screen's header takes a measured chrome inset
-/// rather than a hardcoded title-bar height.
+/// `AppSettings.surfacePinned` (restored at construction). The toolbar strip
+/// overlaps the content in BOTH profiles (`.fullSizeContentView` never leaves
+/// the style mask — R6), so every screen's content is seated below it by a
+/// measured chrome inset (`contentLayoutRect`), never a hardcoded strip
+/// height. ⌘1/⌘2/⌘3 ride the shell panel's `keyEquivalentHandler` seam — a
+/// toolbar item group carries no per-segment key equivalents.
 ///
 /// Lives in AudiouterPopoverUI (a library) because `AudiouterApp` is invisible
 /// to the test target (R9) — which is also why the menu-bar click policy
@@ -88,6 +93,9 @@ public final class AppSurfaceController {
 
     private let popoverController: PopoverController
     private let settings: AppSettings
+    /// The shell window's one header strip (D1): tabs + centered app name +
+    /// Pin + Quit, as a real unified `NSToolbar`.
+    private let toolbarController = SurfaceToolbarController()
     /// Lazily builds the Groups content the FIRST time the Groups tab is
     /// selected (`MixerWindowController.contentController` in the app — the
     /// surface must not construct window controllers itself).
@@ -99,8 +107,8 @@ public final class AppSurfaceController {
     private let makeSettingsContent: () -> SettingsRootViewController
 
     /// The Mixer panel, once claimed from its controller (lazy — claiming
-    /// also rewires the header and installs the resize hook, so it only
-    /// happens when the surface actually hosts the Mixer).
+    /// also installs the resize hook, so it only happens when the surface
+    /// actually hosts the Mixer).
     private var mixerPanel: PopoverPanelViewController?
     private var groupsScreen: SurfaceScreenViewController?
     private var settingsScreen: SurfaceScreenViewController?
@@ -138,14 +146,14 @@ public final class AppSurfaceController {
     /// surface) never re-announces.
     private var publishedVisibleScreen: SurfaceScreen?
 
-    /// Groups' default content size. The height is DERIVED, not picked: the
-    /// group editor pane has no scroll view, so a 7-device fleet's editor
-    /// (fitting height 440, measured — `MembershipRailTests`) plus the
-    /// screen's footer strip (28) plus the header strip (52) must all fit.
-    /// 516 (the split view's bare minimum, the prototype number) left the
-    /// editor 4pt short; 560×505 per the plan is below the split view's
-    /// floor entirely and it fights back.
-    public static let groupsDefaultContentSize = NSSize(width: 560, height: 520)
+    /// Groups' default content size, BELOW the toolbar strip. The height is
+    /// DERIVED, not picked: the group editor pane has no scroll view, so a
+    /// 7-device fleet's editor (fitting height 440, measured —
+    /// `MembershipRailTests`) plus the screen's footer strip (28) must fit.
+    /// The window's real content size adds the MEASURED toolbar-strip inset
+    /// on top (`groupsTargetContentSize()`) — the strip is window chrome now,
+    /// not a 52pt in-content header row.
+    public static let groupsDefaultContentSize = NSSize(width: 560, height: 468)
 
     /// The Mixer panel's width is fixed (623); height is always exact-fit, so
     /// this seed only positions the very first mount before the fit lands.
@@ -166,6 +174,33 @@ public final class AppSurfaceController {
         // only re-anchors a visible panel, so this is a pure profile stamp.
         shell.setPinned(settings.surfacePinned)
         shell.onClose = { [weak self] in self?.handleShellClosed() }
+
+        // The one header (D1): a real unified NSToolbar on the shell window,
+        // both profiles. Attaching here — before anything shows — means the
+        // chrome inset is measurable from the first mount.
+        toolbarController.onSelectScreen = { [weak self] in self?.select($0) }
+        toolbarController.onTogglePin = { [weak self] in self?.togglePin() }
+        toolbarController.onQuit = { NSApp.terminate(nil) }
+        if let window = shell.window {
+            toolbarController.attach(to: window)
+            // Materialize the toolbar's title-bar machinery NOW (a toolbar on
+            // a never-laid-out window reports a title-bar-only
+            // `contentLayoutRect` until AppKit's first layout pass), so
+            // `chromeTopInset` measures the real strip from the first mount.
+            window.layoutIfNeeded()
+        }
+        syncToolbar()
+
+        // ⌘1/⌘2/⌘3 (the retired header buttons' key equivalents): the shell
+        // panel consults this before stock dispatch while the surface is key.
+        shell.keyEquivalentHandler = { [weak self] event in
+            guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+                  let chars = event.charactersIgnoringModifiers,
+                  let screen = SurfaceScreen.allCases.first(where: { $0.keyEquivalent == chars })
+            else { return false }
+            self?.select(screen)
+            return true
+        }
     }
 
     // MARK: Show / hide
@@ -218,7 +253,7 @@ public final class AppSurfaceController {
 
     /// Switch to `screen`: lazy-builds it on first visit, swaps it in through
     /// the shell's `setContent` (R3), animates the window to the screen's size
-    /// (top edge anchored), and keeps every built header's tab state in sync.
+    /// (top edge anchored), and confirms the toolbar's tab selection.
     /// Selecting the current screen is a no-op.
     public func select(_ screen: SurfaceScreen) {
         guard screen != selectedScreen else { return }
@@ -232,7 +267,7 @@ public final class AppSurfaceController {
             popoverController.surfaceDidHide()
         }
         selectedScreen = screen
-        syncHeaders()
+        syncToolbar()
         mount(screen, animated: isShown)
         if screen == .mixer, isShown {
             popoverController.surfaceDidShow()
@@ -300,6 +335,10 @@ public final class AppSurfaceController {
         switch screen {
         case .mixer:
             let panel = claimedMixerPanel()
+            // Seat the content below the toolbar strip AFTER the lazy build
+            // (a screen that doesn't exist yet can't be seated), BEFORE the
+            // rebuild/size so the exact fit includes the inset.
+            applyChromeTopInset()
             // Re-ingest everything that arrived while the panel was hidden or
             // unmounted (hidden-means-idle, audit B8) and recompute collapse
             // defaults — the Mixer open ritual every host must perform.
@@ -312,11 +351,13 @@ public final class AppSurfaceController {
             panel.panelContentDidChangeHeight(animated: animated)
         case .groups:
             let screenVC = builtGroupsScreen()
+            applyChromeTopInset()
             shell.setContent(screenVC, defaultSize: groupsTargetContentSize())
             restoreFrameAfterSwap(previousFrame)
             applyWindowContentSize(groupsTargetContentSize(), animated: animated)
         case .settings:
             let screenVC = builtSettingsScreen()
+            applyChromeTopInset()
             shell.setContent(screenVC, defaultSize: settingsTargetContentSize())
             restoreFrameAfterSwap(previousFrame)
             applyWindowContentSize(settingsTargetContentSize(), animated: animated)
@@ -331,10 +372,8 @@ public final class AppSurfaceController {
     // MARK: Lazy screens
 
     /// The Mixer panel, claimed from its controller on first use. Claiming
-    /// also installs the surface's resize behavior and takes over the header's
-    /// switcher wiring (pre-claim the Groups/Settings tabs forward through
-    /// `onOpenMixer`/`onOpenSettings`; under the surface a tab IS the screen
-    /// switch).
+    /// also installs the surface's resize behavior (the panel is pure content
+    /// now — the switcher lives on the window's toolbar).
     private func claimedMixerPanel() -> PopoverPanelViewController {
         if let mixerPanel { return mixerPanel }
         let panel = popoverController.claimPanelForSurfaceHosting()
@@ -344,17 +383,13 @@ public final class AppSurfaceController {
             guard let self, let panel else { return }
             self.applyWindowContentSize(panel.preferredContentSize, animated: animated)
         }
-        wireHeader(panel.header)
-        syncHeaders()
         return panel
     }
 
     private func builtGroupsScreen() -> SurfaceScreenViewController {
         if let groupsScreen { return groupsScreen }
         let screen = SurfaceScreenViewController(content: makeGroupsContent())
-        wireHeader(screen.header)
         groupsScreen = screen
-        syncHeaders()
         return screen
     }
 
@@ -371,27 +406,13 @@ public final class AppSurfaceController {
                                         animated: self.isShown)
         }
         let screen = SurfaceScreenViewController(content: root)
-        wireHeader(screen.header)
         settingsScreen = screen
-        syncHeaders()
         return screen
     }
 
-    private func wireHeader(_ header: PopoverHeaderView) {
-        header.onSelectScreen = { [weak self] in self?.select($0) }
-        header.onTogglePin = { [weak self] in self?.togglePin() }
-        header.onQuit = { NSApp.terminate(nil) }
-    }
-
-    private var builtHeaders: [PopoverHeaderView] {
-        [mixerPanel?.header, groupsScreen?.header, settingsScreen?.header].compactMap { $0 }
-    }
-
-    private func syncHeaders() {
-        for header in builtHeaders {
-            header.setSelectedScreen(selectedScreen)
-            header.setPinned(shell.isPinned)
-        }
+    private func syncToolbar() {
+        toolbarController.setSelectedScreen(selectedScreen)
+        toolbarController.setPinned(shell.isPinned)
     }
 
     // MARK: Pin
@@ -401,35 +422,41 @@ public final class AppSurfaceController {
     public func togglePin() { setPinned(!shell.isPinned) }
 
     /// Flip the shell's manner profile (U1) and persist the choice. Also
-    /// re-seats every screen's header below the pinned title bar (measured,
-    /// not hardcoded) and re-applies the current screen's size, whose target
-    /// height includes that chrome.
+    /// re-seats every screen's content below the toolbar strip (measured —
+    /// the strip's height can differ per profile) and re-applies the current
+    /// screen's size, whose target height includes that chrome.
     public func setPinned(_ pinned: Bool) {
         guard pinned != shell.isPinned else { return }
         settings.surfacePinned = pinned
         shell.setPinned(pinned)
-        syncHeaders()
+        syncToolbar()
         applyChromeTopInset()
         reapplyCurrentScreenSize()
     }
 
-    /// Points of window chrome overlapping the content's top: the real title
-    /// bar in PINNED mode (`.fullSizeContentView` keeps content under it —
-    /// content must inset itself, per U1). Measured from the live window
-    /// (`contentLayoutRect`), never a hardcoded 28. Unpinned is 0 BY DESIGN —
-    /// the invisible title-bar strip only carries the floating close button,
-    /// which the header's `closeButtonReserve` already clears.
+    /// Points of window chrome overlapping the content's TOP: the unified
+    /// toolbar strip, in BOTH profiles (`.fullSizeContentView` keeps content
+    /// under it — content must inset itself). Measured from the live window
+    /// (`contentLayoutRect`), never a hardcoded strip height. The strip is the
+    /// gap ABOVE `contentLayoutRect.maxY` — measured, NOT the height
+    /// difference: mid-resize the rect's size lags the just-set frame (probed:
+    /// a stale bottom offset leaked into the difference and over-inset the
+    /// content by 50pt), while the top gap stays true. Deliberately NO
+    /// `layoutIfNeeded()` here: forcing window layout mid-mount let a freshly
+    /// mounted split view widen the window to its own minimum (probed, 560 →
+    /// 707); the one legitimate materialization pass runs at attach time in
+    /// `init`.
     private var chromeTopInset: CGFloat {
-        guard shell.isPinned, let window = shell.window,
+        guard let window = shell.window,
               let contentView = window.contentView else { return 0 }
-        return max(0, contentView.frame.height - window.contentLayoutRect.height)
+        return max(0, contentView.frame.height - window.contentLayoutRect.maxY)
     }
 
     private func applyChromeTopInset() {
         let inset = chromeTopInset
-        mixerPanel?.setHeaderTopInset(inset)
-        groupsScreen?.setHeaderTopInset(inset)
-        settingsScreen?.setHeaderTopInset(inset)
+        mixerPanel?.setContentTopInset(inset)
+        groupsScreen?.setContentTopInset(inset)
+        settingsScreen?.setContentTopInset(inset)
     }
 
     private func reapplyCurrentScreenSize() {
@@ -456,9 +483,7 @@ public final class AppSurfaceController {
     private func settingsTargetContentSize() -> NSSize {
         guard let settingsRoot else { return Self.groupsDefaultContentSize }
         let fitted = settingsRoot.fittedContentSize
-        return NSSize(width: fitted.width,
-                      height: fitted.height + SurfaceScreenViewController.headerHeight
-                              + chromeTopInset)
+        return NSSize(width: fitted.width, height: fitted.height + chromeTopInset)
     }
 
     /// Resize the shell to `contentSize`, TOP edge anchored (the surface hangs
@@ -502,8 +527,8 @@ public final class AppSurfaceController {
     public var test_hostedContentViewController: NSViewController? {
         shell.window?.contentViewController
     }
-    /// The built screens' headers, for tier/tab-state assertions.
-    var test_builtHeaders: [PopoverHeaderView] { builtHeaders }
+    /// The window's toolbar header, for item/selection assertions.
+    var test_toolbarController: SurfaceToolbarController { toolbarController }
     /// The lazily-built pieces, `nil` until their tab is first selected.
     var test_mixerPanel: PopoverPanelViewController? { mixerPanel }
     var test_groupsScreen: SurfaceScreenViewController? { groupsScreen }
@@ -515,28 +540,25 @@ public final class AppSurfaceController {
 
 // MARK: - SurfaceScreenViewController
 
-/// One surface screen for content that doesn't carry its own header strip
-/// (Groups, Settings): the shared header pinned on top, the content
-/// controller — a real CHILD view controller, so the responder chain and
-/// appearance plumbing stay stock — seated BELOW it. (The Mixer panel is
-/// hosted directly instead: its header lives inside the panel and its height
+/// One surface screen (Groups, Settings): a thin container that seats the
+/// content controller — a real CHILD view controller, so the responder chain
+/// and appearance plumbing stay stock — below the window's toolbar strip by
+/// the surface-pushed chrome inset. (The Mixer panel is hosted directly
+/// instead: it seats its own content via `setContentTopInset`, so the inset
 /// participates in the exact-fit measure.)
 ///
-/// The root view paints NOTHING: the shell's backing bubble already fills the
-/// live warm canvas behind transparent content (Warm Signal §5.4), and content
-/// that paints its own background (Settings' visual-effect root) covers it —
-/// both intended. Each screen is its own controller instance because the shell
-/// keys size preservation on the hosted controller's identity.
+/// The root view paints NOTHING: the shell's backing bubble (unpinned) and
+/// the pinned window's own background both fill the one warm `panel` canvas
+/// behind transparent content, and content that paints its own background
+/// (Groups' content pane, Settings' root) paints that same canvas — one
+/// background across the surface (owner decision D2, 2026-08-07). Each screen
+/// is its own controller instance because the shell keys size preservation on
+/// the hosted controller's identity.
 @MainActor
 final class SurfaceScreenViewController: NSViewController {
 
-    /// The header strip's height — `PopoverHeaderView.barHeight`, re-exported
-    /// so sizing math doesn't reach into the view class.
-    static var headerHeight: CGFloat { PopoverHeaderView.barHeight }
-
-    let header = PopoverHeaderView()
     let content: NSViewController
-    private var headerTopConstraint: NSLayoutConstraint?
+    private var contentTopConstraint: NSLayoutConstraint?
 
     init(content: NSViewController) {
         self.content = content
@@ -552,16 +574,11 @@ final class SurfaceScreenViewController: NSViewController {
         let contentView = content.view
         contentView.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(contentView)
-        root.addSubview(header)
 
-        let headerTop = header.topAnchor.constraint(equalTo: root.topAnchor)
-        headerTopConstraint = headerTop
+        let contentTop = contentView.topAnchor.constraint(equalTo: root.topAnchor)
+        contentTopConstraint = contentTop
         NSLayoutConstraint.activate([
-            headerTop,
-            header.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            header.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-
-            contentView.topAnchor.constraint(equalTo: header.bottomAnchor),
+            contentTop,
             contentView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             contentView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             contentView.bottomAnchor.constraint(equalTo: root.bottomAnchor),
@@ -569,13 +586,13 @@ final class SurfaceScreenViewController: NSViewController {
         view = root
     }
 
-    /// Seat the header below the pinned title bar (0 unpinned). The content
-    /// rides the header's bottom anchor, so it moves with it.
-    func setHeaderTopInset(_ inset: CGFloat) {
+    /// Seat the content below the window's toolbar strip (the measured chrome
+    /// inset — `.fullSizeContentView` content spans under the strip).
+    func setContentTopInset(_ inset: CGFloat) {
         _ = view // ensure loadView ran so the constraint exists
-        headerTopConstraint?.constant = inset
+        contentTopConstraint?.constant = inset
     }
 
-    /// The current header inset, for structural tests.
-    var test_headerTopInset: CGFloat { headerTopConstraint?.constant ?? 0 }
+    /// The current content inset, for structural tests.
+    var test_contentTopInset: CGFloat { contentTopConstraint?.constant ?? 0 }
 }

@@ -84,16 +84,16 @@ layout and where the settings model types (`AppSettings`,
   the HOST's job now: the surface re-reads `fittedContentSize` when the
   Settings screen is shown, so a show can't inherit a stale size.
 - `SettingsRootViewController` puts an explicit opaque, appearance-adaptive
-  `NSVisualEffectView` (`.windowBackground`, `.behindWindow`) behind the panes
-  rather than relying on the ambient window fill — confirmed necessary by
-  rendering in dark mode via `settings-snapshot`: without it, child controls
-  draw with dark-adapted (light) text/colors over whatever happens to sit
-  behind the window, which is illegible. It is pinned with four zero-constant
-  edge constraints and **must not** go back to an autoresizing mask (trap 4).
-  Stock material, not a `Tokens` one — Settings chrome stays system. Both this
-  background and About's carry a `ReduceTransparencyFallbackView`
-  (`AudiouterSharedUI`) — an opaque cover shown exactly while Reduce
-  Transparency is on, installed before the content subviews.
+  background behind the panes rather than relying on the ambient window fill —
+  confirmed necessary by rendering in dark mode via `settings-snapshot`:
+  without it, child controls draw with dark-adapted (light) text/colors over
+  whatever happens to sit behind the window, which is illegible. Since the
+  2026-08-07 canvas unification that background is `WarmPanelView`
+  (`AudiouterSharedUI`) — the flat warm `panel` fill every surface screen sits
+  on. Opaque by construction, so it needs no `ReduceTransparencyFallbackView`
+  (About's stock-material background still carries one). It is pinned with
+  four zero-constant edge constraints and **must not** go back to an
+  autoresizing mask (trap 4).
 - `BorderedListView` (`AudioSettingsViewController.swift`) draws its rounded
   hairline border around the excluded-apps list in `draw(_:)` — no stock
   control gives a rounded separator-color border, and drawing (vs a stamped
@@ -114,11 +114,15 @@ layout and where the settings model types (`AppSettings`,
   visual/dark-mode verification without any window — run it after any layout
   change here.
 
-- **Settings chrome stays system** (Warm Signal spec §5.2): no warm canvas and
-  no gold anywhere in these panes. The ONLY warm/gold pixels are inside the
-  theme tiles' previews, and those use ABSOLUTE sRGB mirrors of the spec
-  palette on purpose — a tile depicts an appearance; live `Tokens` would adopt
-  the current appearance/accent and lie. Don't "fix" them to semantic tokens.
+- **Settings CONTROLS stay system; the BACKGROUND is the one warm surface
+  canvas.** Warm Signal §5.2's "Settings on stock chrome" is SUPERSEDED for
+  the in-surface world (owner decision, live build review 2026-08-07): the
+  screen sits on the same flat `panel` fill as the Groups content pane. The
+  controls themselves stay stock — still no gold anywhere in these panes. The
+  ONLY warm/gold pixels beyond the background are inside the theme tiles'
+  previews, and those use ABSOLUTE sRGB mirrors of the spec palette on
+  purpose — a tile depicts an appearance; live `Tokens` would adopt the
+  current appearance/accent and lie. Don't "fix" them to semantic tokens.
 - **The Appearance pane is the accent dial's writer**: a radio click persists
   `AppSettings.accentStyle` AND applies the live remap (`Tokens.accentStyle`)
   itself, then fires `onAccentChanged` as a repaint nudge only. The app layer

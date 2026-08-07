@@ -5,10 +5,9 @@ import AppKit
 /// The Reduce Transparency stand-in for an `NSVisualEffectView` (A1,
 /// PLAN-ONE-SURFACE-032): an opaque fill covering the blur while the
 /// accessibility setting is on, hidden otherwise, re-resolved LIVE off
-/// `accessibilityDisplayOptionsDidChangeNotification` — the same idiom as
-/// `PopoverHeaderView`'s opaque tier, packaged once for the effect views that
-/// host real content (Settings background, About background, the quit
-/// indicator) instead of three hand-rolled copies.
+/// `accessibilityDisplayOptionsDidChangeNotification` (the A1 idiom) —
+/// packaged once for the effect views that host real content (About
+/// background, the quit indicator) instead of hand-rolled copies.
 ///
 /// Install with ``install(in:fill:)`` immediately after creating the effect
 /// view, BEFORE its content subviews — the cover must composite above the

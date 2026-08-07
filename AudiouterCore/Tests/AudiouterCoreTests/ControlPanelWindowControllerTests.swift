@@ -139,22 +139,61 @@ struct ControlPanelWindowControllerTests {
         #expect(controller.window?.title == "Settings")
     }
 
-    // MARK: - Close affordances (control-panel-ship)
+    // MARK: - Close affordances (control-panel-ship, revised by live-review D1)
 
-    /// The panel is a real work surface that does NOT dismiss on click-out, so
-    /// it must expose an obvious close control — the standard close button, kept
-    /// visible. Miniaturize/zoom are hidden (meaningless on an anchored, fixed
-    /// panel). This is the fix for the "no visible way to close the panel" bug.
-    @Test func closeButtonIsVisibleAndOtherTrafficLightsHidden() {
-        let controller = makeController()
-        guard let panel = controller.test_panel else {
-            Issue.record("window should be an NSPanel")
-            return
-        }
-        #expect(panel.standardWindowButton(.closeButton)?.isHidden == false,
-                "the close button must stay visible so the panel can be closed")
+    /// Owner decision 2026-08-07: the transient bubble hides ALL standard
+    /// buttons (Escape and the menu-bar toggle close it); pinning shows the
+    /// standard close button, an ordinary window's close affordance.
+    /// Miniaturize/zoom stay hidden in both profiles (neither is in the style
+    /// mask — dead chrome).
+    @Test func standardButtonsFollowThePinProfile() throws {
+        let name = uniqueAutosaveName()
+        defer { clearSavedFrame(name) }
+        let controller = makeController(frameAutosaveName: name)
+        let panel = try #require(controller.test_panel)
+
+        #expect(panel.standardWindowButton(.closeButton)?.isHidden == true,
+                "unpinned: the bubble carries no traffic lights")
         #expect(panel.standardWindowButton(.miniaturizeButton)?.isHidden == true)
         #expect(panel.standardWindowButton(.zoomButton)?.isHidden == true)
+
+        controller.setPinned(true)
+        #expect(panel.standardWindowButton(.closeButton)?.isHidden == false,
+                "pinned: an ordinary window shows its close button")
+        #expect(panel.standardWindowButton(.miniaturizeButton)?.isHidden == true)
+        #expect(panel.standardWindowButton(.zoomButton)?.isHidden == true)
+
+        controller.setPinned(false)
+        #expect(panel.standardWindowButton(.closeButton)?.isHidden == true,
+                "un-pinning hides it again")
+    }
+
+    /// The window-attached toolbar's ⌘-shortcut seam (live-review D1): the
+    /// panel consults the injected handler before stock dispatch, and an
+    /// unhandled event falls through untouched.
+    @Test func keyEquivalentHandlerIsConsultedBeforeStockDispatch() throws {
+        let controller = makeController()
+        let panel = try #require(controller.test_panel)
+        var seen: [String] = []
+        controller.keyEquivalentHandler = { event in
+            seen.append(event.charactersIgnoringModifiers ?? "")
+            return event.charactersIgnoringModifiers == "2"
+        }
+
+        func keyEvent(_ character: String) throws -> NSEvent {
+            try #require(NSEvent.keyEvent(with: .keyDown, location: .zero,
+                                          modifierFlags: [.command], timestamp: 0,
+                                          windowNumber: 0, context: nil,
+                                          characters: character,
+                                          charactersIgnoringModifiers: character,
+                                          isARepeat: false, keyCode: 0))
+        }
+
+        #expect(panel.performKeyEquivalent(with: try keyEvent("2")),
+                "a handled event is consumed")
+        #expect(!panel.performKeyEquivalent(with: try keyEvent("9")),
+                "an unhandled event falls through to stock dispatch")
+        #expect(seen == ["2", "9"], "the handler saw both, in order")
     }
 
     /// Escape closes the panel through the SAME real-close/land-home path as the
@@ -277,8 +316,10 @@ struct ControlPanelWindowControllerTests {
     }
 
     /// Pinning flips EVERY manner bit to the ordinary-window profile: movable,
-    /// normal level, survives an app-switch, a real visible title bar, and it
-    /// paints/shadows itself now that the decorative bubble is detached.
+    /// normal level, survives an app-switch, the system toolbar-strip material
+    /// (the title-bar TEXT stays hidden in both profiles — the one header is
+    /// the surface's toolbar, D1), and it paints/shadows itself now that the
+    /// decorative bubble is detached.
     @Test func pinningFlipsEveryMannerBit() throws {
         let name = uniqueAutosaveName()
         defer { clearSavedFrame(name) }
@@ -293,7 +334,8 @@ struct ControlPanelWindowControllerTests {
         #expect(!panel.hidesOnDeactivate, "a pinned window may sit behind other apps")
         #expect(panel.isMovable)
         #expect(!panel.titlebarAppearsTransparent)
-        #expect(panel.titleVisibility == .visible)
+        #expect(panel.titleVisibility == .hidden,
+                "no separate title bar ever — D1; the toolbar is the one strip")
         #expect(panel.isOpaque, "with the bubble gone the window has to paint itself")
         #expect(panel.hasShadow)
         #expect(controller.test_backingWindow?.parent == nil,

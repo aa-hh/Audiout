@@ -319,7 +319,7 @@ import AppKit
     /// "Delete group…" button fell below the screen's edge with nothing to
     /// scroll them back. Under the one surface (U6) the budget is the Groups
     /// screen's content area — `AppSurfaceController.groupsDefaultContentSize`
-    /// minus the surface header strip — minus the footer strip.
+    /// (already below the window's toolbar strip) minus the footer strip.
     ///
     /// Every term is DERIVED, not typed in: the surface's shipping constants
     /// and the footer strip measured off the real host.
@@ -336,11 +336,11 @@ import AppKit
         window.update(devices: devices)
         window.test_select(.group(id: group.id))
 
-        let header = SurfaceScreenViewController.headerHeight
+        // `groupsDefaultContentSize` is the content area BELOW the window's
+        // toolbar strip (live-review D1), so only the footer subtracts.
         let footerStrip = window.test_contentPaneChromeHeight
-        #expect(header > 0, "the surface's header strip must cost real height")
         #expect(footerStrip > 0, "the footer strip must cost real height")
-        let available = AppSurfaceController.groupsDefaultContentSize.height - header - footerStrip
+        let available = AppSurfaceController.groupsDefaultContentSize.height - footerStrip
 
         let editor = GroupEditorViewController(groupController: controller)
         editor.loadView()
@@ -351,7 +351,7 @@ import AppKit
             editor.view.fittingSize.height <= available,
             Comment(rawValue: "a 7-device editor needs \(editor.view.fittingSize.height)pt but the Groups screen's default " +
             "gives the pane only \(available)pt (\(AppSurfaceController.groupsDefaultContentSize.height) " +
-            "− \(header) header strip − \(footerStrip) footer). The pane has no scroll view, so this " +
+            "− \(footerStrip) footer). The pane has no scroll view, so this " +
             "is an overflow, not a preference."))
     }
 
@@ -371,8 +371,7 @@ import AppKit
         window.setHostVisible(true)
         window.update(devices: devices)
         window.test_select(.group(id: group.id))
-        var size = AppSurfaceController.groupsDefaultContentSize
-        size.height -= SurfaceScreenViewController.headerHeight
+        let size = AppSurfaceController.groupsDefaultContentSize
         let content = window.contentController.view
         content.setFrameSize(size)
         content.layoutSubtreeIfNeeded()

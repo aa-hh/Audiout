@@ -383,25 +383,28 @@ import AppKit
         }
     }
 
-    // MARK: Layout overhaul (header / columns / member toggle / groups "+")
+    // MARK: Layout overhaul (columns / member toggle / groups "+")
 
-    /// U3 — the header is now the surface switcher: its three tabs resolve
-    /// system SF Symbols, and the PRE-CUTOVER wiring keeps the popover host
-    /// fully usable until U4 — the Groups tab opens the mixer path and the
-    /// Settings tab the settings path, exactly as the superseded icon
-    /// buttons did.
-    @Test func headerSwitcherTabsResolveAndKeepPreCutoverWiring() async throws {
+    /// Live-review D1 — the switcher moved to the surface window's native
+    /// toolbar, so the panel is pure content that a surface seats below the
+    /// toolbar strip via `setContentTopInset`. The inset must ride the
+    /// exact-fit measure (it is part of the required content chain), or a
+    /// seated panel would publish a size one strip too short and the last
+    /// card would clip.
+    @Test func surfaceContentInsetRidesTheExactFitMeasure() async throws {
         let (popover, _, _) = try await makePopover()
-        #expect(popover.test_headerTabImagesResolved, "all three switcher tabs resolved system SF Symbols")
+        let panel = popover.claimPanelForSurfaceHosting()
+        #expect(popover.test_panelContentTopInset == 0, "unclaimed resting state carries no inset")
+        let restingHeight = panel.fittingSizeSettled().height
 
-        var openedMixer = false
-        var openedSettings = false
-        popover.onOpenMixer = { openedMixer = true }
-        popover.onOpenSettings = { openedSettings = true }
-        popover.test_tapHeaderTab(.groups)
-        popover.test_tapHeaderTab(.settings)
-        #expect(openedMixer, "the header Groups tab opens the mixer path")
-        #expect(openedSettings, "the header Settings tab opens the settings path")
+        panel.setContentTopInset(52)
+
+        #expect(popover.test_panelContentTopInset == 52)
+        #expect(panel.fittingSizeSettled().height == restingHeight + 52,
+                "the seated inset grows the exact-fit height by exactly itself")
+
+        panel.setContentTopInset(0)
+        #expect(panel.fittingSizeSettled().height == restingHeight, "and it is fully reversible")
     }
 
     /// A Selected-Devices row for a device shows its on/off toggle.

@@ -273,7 +273,10 @@ let package = Package(
         // review) — see the product comment in window-snapshot/main.swift.
         .executableTarget(
             name: "window-snapshot",
-            dependencies: ["AudiouterCore", "AudiouterWindowUI", "AudiouterSharedUI"],
+            // AudiouterPopoverUI + AudiouterSettingsUI: state 5 renders the
+            // REAL one-surface host (toolbar header + shell), not a bare shell.
+            dependencies: ["AudiouterCore", "AudiouterPopoverUI", "AudiouterSettingsUI",
+                           "AudiouterWindowUI", "AudiouterSharedUI"],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // Silent read-only diagnostic for enumerating Core Audio process objects

@@ -7,6 +7,7 @@ import AppKit
 @testable import AudiouterPopoverUI
 @testable import AudiouterSettingsUI
 @testable import AudiouterSharedUI
+@testable import AudiouterWindowUI
 
 /// Structural + lifecycle coverage for the one-surface host (U3,
 /// PLAN-ONE-SURFACE-032): screen switching (lazy build, `setContent` routing,
@@ -316,5 +317,203 @@ import AppKit
         #expect(surface.isPinned, "the header Pin button drives the surface's pin flip")
         panel.header.test_tapPin()
         #expect(!surface.isPinned)
+    }
+
+    // MARK: Menu-bar click policy — all four cases (U4)
+
+    /// The resign-key notification AppKit delivers when the user clicks
+    /// somewhere else in this app — including on the status item. Driven
+    /// directly because `swift test` can never make a window key on screen
+    /// (same seam `ControlPanelWindowControllerTests` uses).
+    private func resignKey(_ surface: AppSurfaceController) {
+        surface.shell.test_appIsActiveOverride = true
+        surface.shell.test_hasAttachedSheetOverride = false
+        surface.shell.windowDidResignKey(
+            Notification(name: NSWindow.didResignKeyNotification, object: surface.shell.window))
+    }
+
+    /// (a) Setup owns the click outright: no surface action of any kind, so a
+    /// menu-bar click can never bury the window the user is being asked to
+    /// finish.
+    @Test func setupOpenTakesTheClickAndLeavesTheSurfaceAlone() {
+        let (surface, _, _, _) = makeSurface()
+
+        let action = surface.clickAction(setupIsOpen: true)
+        surface.perform(action, anchorRect: nil)
+
+        #expect(action == .refrontSetup)
+        #expect(!surface.isShown, "the surface must not open behind Setup")
+        #expect(surface.test_mixerPanel == nil, "nor build anything")
+    }
+
+    /// (b) Unpinned is a toggle — the transient bubble's whole contract.
+    @Test func unpinnedClickTogglesTheSurface() {
+        let (surface, _, _, _) = makeSurface()
+        surface.shell.test_isPanelVisibleOverride = false
+
+        let opening = surface.clickAction(setupIsOpen: false)
+        surface.perform(opening, anchorRect: nil)
+        #expect(opening == .show)
+        #expect(surface.isShown)
+
+        surface.shell.test_isPanelVisibleOverride = true
+        var closes = 0
+        surface.onClose = { closes += 1 }
+        let closing = surface.clickAction(setupIsOpen: false)
+        surface.perform(closing, anchorRect: nil)
+
+        #expect(closing == .dismiss)
+        #expect(closes == 1, "a toggle-close goes through the real close path")
+        #expect(!surface.isShown)
+    }
+
+    /// (b, R1) The status click IS the click that made the unpinned surface
+    /// resign key, and AppKit delivers that resign — and the close it causes —
+    /// BEFORE the button's action runs. Without the guard the handler sees a
+    /// closed surface, concludes "it wasn't open", and reopens it: the surface
+    /// could never be dismissed from the menu bar, it would just flicker.
+    @Test func theClickThatDismissedTheSurfaceDoesNotReopenIt() {
+        let (surface, _, _, _) = makeSurface()
+        surface.show(anchorRect: nil)
+        surface.shell.test_isPanelVisibleOverride = true
+
+        resignKey(surface)
+        #expect(!surface.isShown, "the resign closed it")
+        // What the app really sees a moment later, when the button action runs.
+        surface.shell.test_isPanelVisibleOverride = false
+
+        let sameClick = surface.clickAction(setupIsOpen: false)
+        surface.perform(sameClick, anchorRect: nil)
+        #expect(sameClick == .ignore)
+        #expect(!surface.isShown, "the dismissing click must not bounce it back open")
+
+        // The stamp is consumed, so the NEXT click is an ordinary open — the
+        // guard swallows exactly one click, never two.
+        let nextClick = surface.clickAction(setupIsOpen: false)
+        surface.perform(nextClick, anchorRect: nil)
+        #expect(nextClick == .show)
+        #expect(surface.isShown)
+    }
+
+    /// (c) Pinned + open (visible, or sitting behind another app) fronts the
+    /// window. Never a toggle: a pinned window is an ordinary window, and a
+    /// click that closed it would make "pinned" mean nothing.
+    @Test func pinnedClickFrontsAnOpenWindowInsteadOfTogglingIt() {
+        let (surface, popover, _, _) = makeSurface()
+        surface.show(anchorRect: nil)
+        surface.togglePin()
+        surface.shell.test_isPanelVisibleOverride = true
+        var closes = 0
+        surface.onClose = { closes += 1 }
+        let rebuilds = popover.test_rebuildCount
+
+        let action = surface.clickAction(setupIsOpen: false)
+        surface.perform(action, anchorRect: nil)
+
+        #expect(action == .front)
+        #expect(closes == 0, "a pinned window is never toggled shut from the menu bar")
+        #expect(surface.isShown)
+        #expect(popover.test_rebuildCount == rebuilds,
+                "fronting an open surface is the same session — no open ritual")
+    }
+
+    /// (d) Closing a pinned window does NOT unpin it: the next click reopens
+    /// it, still pinned, at the frame it remembers.
+    @Test func pinnedClickReopensAClosedWindowStillPinned() {
+        let (surface, _, _, _) = makeSurface()
+        surface.show(anchorRect: nil)
+        surface.togglePin()
+        surface.shell.test_isPanelVisibleOverride = true
+        surface.performClose()
+        surface.shell.test_isPanelVisibleOverride = false
+        #expect(!surface.isShown)
+        #expect(surface.isPinned, "closing is not unpinning")
+
+        let action = surface.clickAction(setupIsOpen: false)
+        surface.perform(action, anchorRect: nil)
+
+        #expect(action == .show)
+        #expect(surface.isShown, "the pinned surface came back")
+        #expect(surface.isPinned)
+    }
+
+    /// A pinned window never self-dismisses on resign, so no stamp can be
+    /// standing when its click arrives — but a stamp left over from an earlier
+    /// unpinned spell must not swallow a pinned click either.
+    @Test func aLeftoverDismissalNeverSwallowsAPinnedClick() {
+        let (surface, _, _, _) = makeSurface()
+        surface.show(anchorRect: nil)
+        surface.shell.test_isPanelVisibleOverride = true
+        resignKey(surface)                        // stamps a dismissal, unpinned
+        surface.setPinned(true)
+        surface.shell.test_isPanelVisibleOverride = false
+
+        #expect(surface.clickAction(setupIsOpen: false) == .show,
+                "pinned reads its own state, never a stale unpinned dismissal")
+    }
+
+    /// Every other case here stubs the Groups screen, and a real
+    /// `NSSplitViewController` is exactly what breaks differently: mounted
+    /// before its view is laid out it collapses to a near-zero intrinsic size,
+    /// and its own minimums fight a host that asks for less. So this mounts the
+    /// REAL content the app hands over and checks the geometry survives.
+    @Test func theRealGroupsSplitViewMountsAtItsDesignedSize() throws {
+        let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        let groups = MixerWindowController(
+            groupController: GroupController(backend: backend,
+                                             store: GroupStore(directory: scratchDir),
+                                             loadPersisted: false),
+            frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurfaceGroups")))
+        let popover = PopoverController(
+            appRouting: AppRoutingController(store: AppRouteStore(directory: scratchDir),
+                                             loadPersisted: false),
+            runningAppsProvider: { [] })
+        let surface = AppSurfaceController(
+            popoverController: popover,
+            settings: AppSettings(defaults: isolatedDefaults),
+            groupsContent: { groups.contentController },
+            settingsContent: { [self] in makeSettingsRoot() },
+            frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurfaceTests")))
+
+        surface.show(anchorRect: nil)
+        surface.select(.groups)
+
+        let window = try #require(surface.shell.window)
+        #expect(window.frame.size == AppSurfaceController.groupsDefaultContentSize,
+                "the real split view mounts at the designed size, not a 500×500 fallback")
+        let screen = try #require(surface.test_groupsScreen)
+        screen.view.layoutSubtreeIfNeeded()
+        #expect(screen.content.view.frame.height > 0,
+                "the hosted split view has real height (it is laid out, not collapsed)")
+    }
+
+    // MARK: Visible-screen publishing (the Groups content's hidden-work gate)
+
+    @Test func visibleScreenIsPublishedOnShowSwitchAndClose() {
+        let (surface, _, _, _) = makeSurface()
+        var published: [SurfaceScreen?] = []
+        surface.onVisibleScreenChange = { published.append($0) }
+
+        surface.show(anchorRect: nil)
+        surface.show(anchorRect: nil)          // re-front: same visible screen
+        surface.select(.groups)
+        surface.select(.groups)                // no-op switch
+        surface.shell.test_isPanelVisibleOverride = true
+        surface.performClose()
+
+        #expect(published == [.mixer, .groups, nil],
+                "one announcement per real change — a re-front or a no-op switch is not one")
+    }
+
+    @Test func aScreenSwitchWhileClosedAnnouncesNothing() {
+        let (surface, _, _, _) = makeSurface()
+        var published: [SurfaceScreen?] = []
+        surface.onVisibleScreenChange = { published.append($0) }
+
+        surface.select(.groups)
+
+        #expect(published.isEmpty, "nothing is visible, so nothing became visible")
+        #expect(surface.visibleScreen == nil)
     }
 }

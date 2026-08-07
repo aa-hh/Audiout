@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The menu-bar popover UI (pure AppKit), and — since U3 — the **one-surface host**: `AppSurfaceController` owns the single `ControlPanelWindowController` shell and swaps three screens through it (Mixer = the real popover panel, Groups, Settings) behind the header's tab-bar switcher. `PopoverController` owns the Mixer brain (and, pre-cutover, still the `NSPopover` host), builds the card stack, ingests `Device` snapshots via `update(devices:)`, and drives `GroupController`/`AppRoutingController`. Routing arithmetic lives in Core (see [../../AGENTS.md](../../AGENTS.md)); this folder only renders and turns clicks into controller calls. Shared row views live in [../AudiouterSharedUI/](../AudiouterSharedUI/). This target depends on `AudiouterWindowUI` + `AudiouterSettingsUI` (the surface composes their content) — neither may ever depend back on it.
+The menu-bar popover UI (pure AppKit), and — since U3 — the **one-surface host**: `AppSurfaceController` owns the single `ControlPanelWindowController` shell and swaps three screens through it (Mixer = the real popover panel, Groups, Settings) behind the header's tab-bar switcher. `PopoverController` owns the Mixer brain (and, until U7 deletes it, a now-unreachable `NSPopover`), builds the card stack, ingests `Device` snapshots via `update(devices:)`, and drives `GroupController`/`AppRoutingController`. Routing arithmetic lives in Core (see [../../AGENTS.md](../../AGENTS.md)); this folder only renders and turns clicks into controller calls. Shared row views live in [../AudiouterSharedUI/](../AudiouterSharedUI/). This target depends on `AudiouterWindowUI` + `AudiouterSettingsUI` (the surface composes their content) — neither may ever depend back on it.
 
 ## Rules
 

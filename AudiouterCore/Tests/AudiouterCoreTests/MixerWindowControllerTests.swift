@@ -221,6 +221,30 @@ import AppKit
         #expect(window.window?.title == "Groups")
     }
 
+    /// Hosted as the surface's Groups screen (U4) this controller's own window
+    /// is never ordered on screen, so `setHostVisible(_:)` is what tells it the
+    /// user is looking at its content. Turning it on must CATCH UP on whatever
+    /// arrived while it was hidden — otherwise every speaker discovered before
+    /// the Groups tab was first opened would be missing from the sidebar for
+    /// the rest of the session.
+    @Test func hostVisibilityOpensTheRefreshGateAndCatchesUp() async throws {
+        let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        try await waitForFleet(backend, count: 7)
+        let store = GroupStore(directory: tempDirectory())
+        let controller = GroupController(backend: backend, store: store, loadPersisted: false)
+        let window = MixerWindowController(groupController: controller,
+                                           frameAutosaveName: mixerWindowAutosaveName)
+
+        window.update(devices: backend.devices)
+        #expect(window.test_sidebar.test_deviceRowCount == 0,
+                "no host is showing the content, so the snapshot is only stored (B8)")
+
+        window.setHostVisible(true)
+        #expect(window.test_sidebar.test_deviceRowCount == 7,
+                "becoming the visible screen refreshes from the stored snapshot")
+    }
+
     // MARK: Sidebar structure (config-only revamp: always both sections)
 
     @Test func sidebarAlwaysShowsGroupsAndSpeakersSections() async throws {

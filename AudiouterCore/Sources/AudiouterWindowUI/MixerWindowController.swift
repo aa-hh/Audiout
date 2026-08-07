@@ -267,10 +267,26 @@ public final class MixerWindowController: NSWindowController {
     /// (same B8 problem, same fix shape, one host each).
     public var test_isWindowVisibleOverride = false
 
-    /// Whether the window should be treated as visible for refresh-gating
-    /// purposes — the real `window?.isVisible` OR the test override above.
-    /// Mirrors `PopoverController.isEffectivelyShown`.
-    private var isEffectivelyVisible: Bool { (window?.isVisible ?? false) || test_isWindowVisibleOverride }
+    private var hostIsVisible = false
+
+    /// Set by a host that shows ``contentController`` WITHOUT ever ordering
+    /// this controller's own window (the one surface's Groups screen), so the
+    /// refresh gate below asks about the content the user is actually looking
+    /// at rather than about a window that will never appear. Turning it on
+    /// refreshes immediately: `update(devices:)` kept storing snapshots while
+    /// hidden, so there is always a current one to catch up to.
+    /// `PopoverController.surfaceDidShow()` is the same idea, one host over.
+    public func setHostVisible(_ visible: Bool) {
+        hostIsVisible = visible
+        if visible { refreshAll() }
+    }
+
+    /// Whether the content should be treated as visible for refresh-gating
+    /// purposes — this controller's own window, a host showing its content, or
+    /// the test override. Mirrors `PopoverController.isEffectivelyShown`.
+    private var isEffectivelyVisible: Bool {
+        (window?.isVisible ?? false) || hostIsVisible || test_isWindowVisibleOverride
+    }
 
     /// Push the latest device snapshot. Refreshes the sidebar and the visible
     /// content pane (auto-selecting a group if nothing was selected yet) —

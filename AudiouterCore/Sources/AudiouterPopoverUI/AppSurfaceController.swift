@@ -77,8 +77,9 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
 /// rather than a hardcoded title-bar height.
 ///
 /// Lives in AudiouterPopoverUI (a library) because `AudiouterApp` is invisible
-/// to the test target (R9) — the click policy U4 adds must be testable here.
-/// U3 does NOT cut the app over; the popover host keeps working until U4.
+/// to the test target (R9) — which is also why the menu-bar click policy
+/// (`clickAction(setupIsOpen:)`, U4) is decided here and merely performed by
+/// the app.
 @MainActor
 public final class AppSurfaceController {
 
@@ -124,8 +125,19 @@ public final class AppSurfaceController {
     private var rememberedGroupsFrameSize: NSSize?
 
     /// Fired after the shell window really closes (✕ / Esc / `performClose`).
-    /// U4 wires the app's click policy to this.
     public var onClose: (() -> Void)?
+
+    /// Fired whenever the screen a user can actually SEE changes — a tab
+    /// switch, a show, or a close (`nil` = nothing is on screen). Screen
+    /// content that skips work while hidden (the Groups content's B8 gate)
+    /// hangs off this; the Mixer needs no subscriber because the surface
+    /// drives its `surfaceDidShow`/`surfaceDidHide` pair directly.
+    public var onVisibleScreenChange: ((SurfaceScreen?) -> Void)?
+
+    /// The last value `onVisibleScreenChange` published, so a no-op transition
+    /// (selecting the screen already selected, showing an already-shown
+    /// surface) never re-announces.
+    private var publishedVisibleScreen: SurfaceScreen?
 
     /// Groups' default content size: the split view's real minimum, measured
     /// in the runnable prototype (560×505 per the plan is below the split
@@ -173,6 +185,7 @@ public final class AppSurfaceController {
         if !wasShown, selectedScreen == .mixer {
             popoverController.surfaceDidShow()
         }
+        publishVisibleScreen()
     }
 
     /// Close through the shell's real-close path (`windowWillClose` →
@@ -184,7 +197,18 @@ public final class AppSurfaceController {
             popoverController.surfaceDidHide()
         }
         isShown = false
+        publishVisibleScreen()
         onClose?()
+    }
+
+    /// The screen a user can currently see, `nil` while the surface is closed.
+    public var visibleScreen: SurfaceScreen? { isShown ? selectedScreen : nil }
+
+    private func publishVisibleScreen() {
+        let current = visibleScreen
+        guard current != publishedVisibleScreen else { return }
+        publishedVisibleScreen = current
+        onVisibleScreenChange?(current)
     }
 
     // MARK: Screen switching
@@ -209,6 +233,54 @@ public final class AppSurfaceController {
         mount(screen, animated: isShown)
         if screen == .mixer, isShown {
             popoverController.surfaceDidShow()
+        }
+        publishVisibleScreen()
+    }
+
+    // MARK: Menu-bar click policy
+
+    /// What a menu-bar click should do. Decided here rather than in
+    /// `AppDelegate` so all four cases are directly testable (R9 — the app
+    /// target is invisible to the test target).
+    public enum ClickAction: Equatable, Sendable {
+        /// Setup is open and owns the click: re-front it, never the surface.
+        case refrontSetup
+        /// Put the surface on screen — unpinned open, or a pinned surface the
+        /// user closed (it reopens at its remembered frame).
+        case show
+        /// The pinned surface is already open, possibly behind another app:
+        /// bring it forward, don't toggle it shut.
+        case front
+        /// The unpinned surface is open: this click closes it.
+        case dismiss
+        /// This click is the one that ALREADY dismissed the unpinned surface
+        /// (it resigned key before the button action ran) — do nothing, or the
+        /// surface can never be toggled shut from the menu bar.
+        case ignore
+    }
+
+    /// Decide what the menu-bar click does. Pure — no side effects beyond
+    /// consuming the shell's resign-dismissal stamp (which must be consumed on
+    /// EVERY click, stale or fresh, so a leftover can't swallow a later one).
+    /// The caller performs the result, which lets the app run its permission
+    /// gates in between exactly where it always did.
+    public func clickAction(setupIsOpen: Bool) -> ClickAction {
+        if setupIsOpen { return .refrontSetup }
+        let dismissedByThisClick = shell.consumeRecentResignDismissal()
+        // Pinned is an ordinary window: it never self-dismisses, so a click is
+        // only ever "front it" or "reopen it".
+        if shell.isPinned { return shell.isPanelVisible ? .front : .show }
+        if dismissedByThisClick { return .ignore }
+        return shell.isPanelVisible ? .dismiss : .show
+    }
+
+    /// Carry out a `clickAction(setupIsOpen:)` result. `refrontSetup` is the
+    /// app's to perform — Setup is not a surface screen.
+    public func perform(_ action: ClickAction, anchorRect: NSRect?) {
+        switch action {
+        case .refrontSetup, .ignore: break
+        case .dismiss: performClose()
+        case .show, .front: show(anchorRect: anchorRect)
         }
     }
 

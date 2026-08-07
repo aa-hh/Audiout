@@ -213,15 +213,26 @@ final class BTConnectionManager: BTConnectionManaging, @unchecked Sendable {
     func startObservingConnections() {
         guard isBluetoothAuthorized() else { return }
         lock.lock()
-        defer { lock.unlock() }
-        guard notificationTarget == nil else { return }
+        guard notificationTarget == nil else {
+            lock.unlock()
+            return
+        }
         let target = ConnectionNotificationTarget { [weak self] in
             self?.onConnectionsChanged?()
         }
         notificationTarget = target
-        connectNotification = IOBluetoothDevice.register(
+        lock.unlock()
+        // The registration call must sit OUTSIDE the critical section:
+        // IOBluetooth SYNCHRONOUSLY replays every currently-connected device
+        // into the target during `register` (ReturnAllCurrentDevices), and the
+        // handler re-enters this manager through the `onConnectionsChanged`
+        // getter — same lock → main-thread deadlock before the status item
+        // exists (live-hit 2026-08-07; only reachable once the Bluetooth TCC
+        // grant lets the authorization guard above pass).
+        let note = IOBluetoothDevice.register(
             forConnectNotifications: target,
             selector: #selector(ConnectionNotificationTarget.deviceConnected(_:device:)))
+        lock.withLock { connectNotification = note }
     }
 
     func stopObservingConnections() {

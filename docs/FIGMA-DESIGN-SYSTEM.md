@@ -317,11 +317,19 @@ kept in the Figma file). Dark modes stay pure Warm Signal, and the
 Circuit themes only scaffolding: canvas/rows, text, dividers, wells/text boxes,
 banners, sidebar. This is a color theme only — no Circuit UI components.
 
+> **CORRECTED 2026-08-08 (roadmap 036 closed as Figma-only):** the surface-ladder
+> rows below are STALE for `canvas canvasHi panel raised well hairline` — their
+> Light/Light-HC aliasing into Circuit collapsed the ladder to one hex
+> (`bg/normal` #FBFBF9), which the code never does. Those six now carry
+> `Tokens.swift`'s real resolved values as DIRECT hexes (see the 2026-08-08
+> surface-fix ledger entry). The remaining rows (text, dividers via `separator`,
+> washes, danger/warning) still alias Circuit as tabled.
+
 | Warm Signal (Light alias) | Circuit token |
 |---|---|
-| `canvas`, `canvasHi` (gradient collapses flat), `panel`, `raised`, `underPageBackground`, `windowBackground` | `bg/normal` |
-| `well`, `sidebarWarmTint` | `bg/subtle` |
-| `hairline`, `separator` | `border/divider` |
+| ~~`canvas`, `canvasHi`, `panel`, `raised`~~ (superseded — direct hexes now), `underPageBackground`, `windowBackground` | `bg/normal` |
+| ~~`well`~~ (superseded), `sidebarWarmTint` | `bg/subtle` |
+| ~~`hairline`~~ (superseded), `separator` | `border/divider` |
 | `label` / `secondaryLabel` / `tertiaryLabel` | `fg/normal` / `fg/subtle` / `fg/placeholder` |
 | `quaternaryLabel`, `tertiarySystemFill` | `bg/highlight` |
 | `destructive` / `warning` | `fg/danger` / `fg/warning` |
@@ -459,18 +467,37 @@ not duplicate it.
   against `BTAlignmentWizardSession.Screen`, geometry against each view's
   layout constants, mount/teardown against `PopoverController`
   `reconcileBTAlignmentPanels` / `startBTAlignmentWizard`.
-- **Light-mode finding (measured, NOT fixed — logged on *Reference · Spec
-  backlog*)**: `canvas`, `panel` and `raised` all alias Circuit `bg/normal`
-  `#FBFBF9` in Light and Light HC, so **any** inset card drawn on plain `panel`
-  — both new panels and the existing `ConnectionDiagnosis` — sits at **1.00:1**
-  against the canvas and vanishes in light. Dark is unaffected (`panel` is one
-  ladder step lighter). Left alone on purpose: separating them re-aliases a
-  shared scaffolding token in Alec's Circuit mapping table and moves every panel
-  surface at once. Choices recorded for him: lift `panel`/`raised` a step in
-  light, give light inset cards a hairline (AppKit-native, but the code draws
-  none), or accept position-only reading. Everything else measured clean —
-  body/education text 5.48–16.4:1, dismiss ✕ 4.67:1, all against Circuit
-  `bg/normal`.
+- **Light-mode finding — RESOLVED same day, it was a MIRROR bug**: the 1.00:1
+  panel-vs-canvas collapse measured during this pass was caused by the file's
+  own Light aliasing (surface ladder → Circuit `bg/normal`), not by the code.
+  Fixed in the follow-up entry below; the three remediation options logged on
+  *Reference · Spec backlog* are marked MOOT there. Text/glyph contrast
+  measurements stand (body/education 5.48–16.4:1, dismiss ✕ 4.67:1).
+
+## Upkeep pass 2026-08-08 — light surface-ladder fix (roadmap 036, Figma-only)
+
+Verified against `Tokens.swift`: the app's light surfaces never collapse — the
+code branches high-contrast on `accessibilityDisplayShouldIncreaseContrast`,
+not the appearance, and backgrounds deliberately carry no IC variant. The
+mirror's Light/Light-HC aliasing of the six surface variables into Circuit was
+wrong. Their Light (`41:2`) and Light HC (`41:3`) modes now hold the code's
+real resolved values as **direct hexes** (before: aliases into Circuit):
+
+| Variable | Was (Light & Light HC) | Now Light | Now Light HC |
+|---|---|---|---|
+| `canvas` | alias `bg/normal` #FBFBF9 | `#F4EFE7` | `#F4EFE7` |
+| `canvasHi` | alias `bg/normal` | `#F7F3EC` | `#F7F3EC` |
+| `panel` | alias `bg/normal` | `#FBF8F2` | `#FBF8F2` |
+| `raised` | alias `bg/normal` | `#FFFFFF` | `#FFFFFF` |
+| `well` | alias `bg/subtle` #F5F4ED | `#ECE5D8` | `#ECE5D8` |
+| `hairline` | alias `border/divider` | `#E2DACC` | `#9B8768` (the one IC variant) |
+
+Dark modes untouched (already correct). The doc's "Figma light is AHEAD of
+code" claim no longer applies to these six — file and `Tokens.swift` now agree.
+Both Popover light twins re-verified rendering the ladder distinctly
+(`111:981` full screen, `125:2099` intercept state — the anchored cards read as
+inset panels again). Spec-backlog remediation options marked MOOT on `74:1052`
+("code was never wrong — mirror aliasing fixed, 2026-08-08").
 
 ## Pull direction (Figma → code)
 

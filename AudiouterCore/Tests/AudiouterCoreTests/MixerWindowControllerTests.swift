@@ -138,6 +138,27 @@ import AppKit
         #expect(!(window.test_isShowingEditor))
     }
 
+    /// The sidebar must survive every route to a collapse. A collapsed sidebar
+    /// is unrecoverable — no toolbar sidebar toggle, no View menu, and this
+    /// controller is reused for the process lifetime — and it is the ONLY way
+    /// to change selection, so a collapse strands the user on one group's
+    /// editor. `canCollapse` refuses the user's divider drag; the refresh
+    /// re-assert covers AppKit's own narrow-layout auto-collapse.
+    @Test func theSidebarCannotBeCollapsedAway() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let split = try #require(window.contentController as? NSSplitViewController)
+        let sidebarItem = try #require(split.splitViewItems.first)
+        #expect(!sidebarItem.canCollapse, "the user's divider drag cannot collapse it")
+
+        // AppKit's own auto-collapse takes this route; recovery is on us.
+        sidebarItem.isCollapsed = true
+        _ = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        #expect(!sidebarItem.isCollapsed, "a refresh restores a collapsed sidebar")
+        #expect(window.test_sidebar.test_sectionTitles == ["Groups", "Speakers"],
+                "and it still lists both sections")
+    }
+
     @Test func baselineContentIsEmptyStateAtZeroGroups() async throws {
         let (window, _, _) = try await makeWindow()
         #expect(window.test_isShowingEmptyState, "zero groups + no selection auto-lands on the 'No groups yet' pane")

@@ -86,6 +86,10 @@ public final class MixerWindowController {
     /// changes as the sidebar selection changes.
     private let contentSplitItem: NSSplitViewItem
 
+    /// The sidebar split item, kept so `refreshAll()` can re-assert that it is
+    /// expanded. Collapsing it is unrecoverable — see the setup in `init`.
+    private let sidebarSplitItem: NSSplitViewItem
+
     public init(groupController: GroupController,
                deviceIconController: DeviceIconController = DeviceIconController(loadPersisted: false)) {
         self.groupController = groupController
@@ -108,7 +112,16 @@ public final class MixerWindowController {
         // it holds one column of short names, and every point past this is
         // taken from the pane that actually has a form in it.
         sidebarItem.maximumThickness = 260
-        sidebarItem.canCollapse = true
+        // NOT collapsible: a collapse here is a ONE-WAY DOOR. The sidebar is
+        // the only way to change selection, and nothing can bring it back —
+        // the surface has no toolbar sidebar toggle and no View menu, and this
+        // controller is built once and reused for the process lifetime — so a
+        // collapsed sidebar strands the user on one group's editor for the
+        // rest of the session. `refreshAll()` re-asserts it too: `canCollapse`
+        // only refuses the USER's divider drag, and AppKit still auto-collapses
+        // a sidebar item laid out narrower than its items' minimums.
+        sidebarItem.canCollapse = false
+        sidebarSplitItem = sidebarItem
 
         // Content item — wraps the footer-bearing host, which starts on the
         // empty pane; the first refresh auto-selects a group when one exists.
@@ -325,6 +338,12 @@ public final class MixerWindowController {
     // MARK: Refresh
 
     private func refreshAll() {
+        // A collapsed sidebar is unrecoverable (see the split-item setup), and
+        // `canCollapse` does not stop AppKit collapsing it on its own. This
+        // runs on mount and whenever the screen becomes visible — exactly when
+        // it has to be whole.
+        if sidebarSplitItem.isCollapsed { sidebarSplitItem.isCollapsed = false }
+
         let devices = orderedDevices()
         sidebarViewController.reload(groups: groupController.groups,
                                      activeGroupID: groupController.activeGroupID,

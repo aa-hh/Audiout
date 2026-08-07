@@ -487,6 +487,73 @@ import AppKit
                 "the hosted split view has real height (it is laid out, not collapsed)")
     }
 
+    /// The Groups screen is a SPLIT: speakers/groups sidebar on the left,
+    /// editor pane on the right. Both halves must be mounted, laid out and
+    /// side by side at the surface's real Groups size — a screen showing only
+    /// the editor has no way to change selection at all. Hand the surface the
+    /// content half alone, or drop the sidebar split item, and this fails.
+    @Test func theGroupsScreenShowsTheSidebarAndTheEditor() throws {
+        let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        backend.start()
+        let groupController = GroupController(backend: backend,
+                                              store: GroupStore(directory: scratchDir),
+                                              loadPersisted: false)
+        // A saved group over a fully-discovered fleet, so the screen
+        // auto-selects it and mounts a POPULATED editor pane — the state the
+        // live regression was reported in.
+        _ = try groupController.createGroup(name: "Group 1",
+                                            memberIDs: ["sonos-move", "office"])
+        let groups = MixerWindowController(groupController: groupController)
+        groups.test_isVisibleOverride = true
+        groups.update(devices: backend.devices)
+        let popover = PopoverController(
+            appRouting: AppRoutingController(store: AppRouteStore(directory: scratchDir),
+                                             loadPersisted: false),
+            runningAppsProvider: { [] })
+        let surface = AppSurfaceController(
+            popoverController: popover,
+            settings: AppSettings(defaults: isolatedDefaults),
+            groupsContent: { groups.contentController },
+            settingsContent: { [self] in makeSettingsRoot() },
+            frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurfaceTests")))
+
+        surface.show(anchorRect: nil)
+        // Reach Groups the way a user does — via the NARROWER Settings screen.
+        // `mount` restores the outgoing screen's frame before animating to the
+        // incoming one, so the split view is laid out at Settings' 460 first.
+        surface.select(.settings)
+        surface.shell.window?.contentView?.layoutSubtreeIfNeeded()
+        surface.select(.groups)
+        let screen = try #require(surface.test_groupsScreen)
+        screen.view.layoutSubtreeIfNeeded()
+
+        let split = try #require(screen.content as? NSSplitViewController,
+                                 "the Groups screen's content IS the split view controller")
+        #expect(split.splitViewItems.count == 2, "sidebar item + content item")
+        #expect(split.splitViewItems.first?.isCollapsed == false,
+                "the sidebar item is not collapsed")
+
+        let sidebar = groups.test_sidebar.view
+        let editor = groups.test_editor.view
+        #expect(sidebar.isDescendant(of: screen.view),
+                "the speakers/groups sidebar is mounted in the Groups screen")
+        #expect(editor.isDescendant(of: screen.view),
+                "the editor pane is mounted beside the sidebar")
+        #expect(!sidebar.isHiddenOrHasHiddenAncestor, "and it is not hidden")
+
+        // Compare in ONE coordinate space — the two panes have different
+        // superviews, so raw `frame`s are not comparable.
+        let sidebarBox = sidebar.convert(sidebar.bounds, to: screen.view)
+        let editorBox = editor.convert(editor.bounds, to: screen.view)
+        #expect(sidebarBox.width >= 200 && sidebarBox.height > 0,
+                "the sidebar gets its real width, not a zero-width sliver (got \(sidebarBox))")
+        #expect(editorBox.width > 0 && editorBox.height > 0,
+                "the editor pane gets real space (got \(editorBox))")
+        #expect(editorBox.minX >= sidebarBox.maxX - 1,
+                "editor sits to the RIGHT of the sidebar — a real split, not a stack")
+    }
+
     // MARK: Visible-screen publishing (the Groups content's hidden-work gate)
 
     @Test func visibleScreenIsPublishedOnShowSwitchAndClose() {

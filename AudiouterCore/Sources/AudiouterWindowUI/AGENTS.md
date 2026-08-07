@@ -23,6 +23,14 @@ lives in the Mixer screen. All group logic goes through the shared
   screen is visible (B8 — backend events fire for the whole app lifetime).
   Turning visibility on catches up from the stored snapshot. Test seam:
   `test_isVisibleOverride` (mirrors `PopoverController.test_isShownOverride`).
+- **The sidebar split item must never end up collapsed.** It is the only way
+  to change selection, and a collapse here is a ONE-WAY DOOR: the surface has
+  no toolbar sidebar toggle and no View menu, and this controller is built once
+  and reused for the process lifetime, so a collapsed sidebar strands the user
+  on one group's editor for the rest of the session. `canCollapse = false`
+  refuses the user's divider drag; `refreshAll()` re-asserts `isCollapsed =
+  false` because that flag does NOT stop AppKit's own auto-collapse when the
+  split is laid out narrower than its items' minimums. Keep both.
 - **The content pane is swapped, not toggled.** `ContentPaneHostViewController
   .setContent(_:)` re-parents the child; the content `NSSplitViewItem` itself
   is never removed (that used to drag the footer along with it).

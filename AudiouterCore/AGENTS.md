@@ -353,8 +353,18 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   repo's most expensive failure shape, so never add a mute that can strand.
   The manager remembers per-UID gains precisely so a hold decided in the same
   selection change that creates the sink lands BEFORE the engine starts; a
-  release therefore must push gain 1 (not merely forget the hold) or the
-  remembered 0 re-mutes the next select.
+  release therefore must push a real gain (not merely forget the hold) or the
+  remembered 0 re-mutes the next select. That gain is never a hardcoded 1:
+  **the sink gain is ONE composed product with ONE writer** —
+  `NativeBackend.btSinkGain(forUID:)` forms `Main × Group × Device` (the same
+  Volume-decoupling product AirPlay outputs get, linear because the sink's
+  mixer wants an amplitude, not a dB wire value), forced to 0 while the id is
+  muted or held. Every `setGain(_:forDeviceUID:)` push — slider, mute/unmute,
+  master re-push, hold release, and the seed `applyBTSinkTransition` applies
+  on every (re)arm — goes through it, so user volume and the W3 hold can
+  never fight over the knob, and a release/reconnect comes back at the
+  user's level. The wizard is orthogonal by design: it writes trims, never
+  gains.
 - **`TCCAccessPreflight` is cached for the CALLING process's whole lifetime**,
   so a grant made after launch is invisible to any in-process read forever —
   and the `com.apple.tcc.access.changed` Darwin notification fires but does NOT

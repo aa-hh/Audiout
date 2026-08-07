@@ -187,6 +187,13 @@ import CoreAudio
         backend.devices.first { $0.id == id }
     }
 
+    /// The sink gain is the composed `Main × Group × Device` product; drive the
+    /// device faders to 100 so "released / never held" reads as exactly 1 in
+    /// these lifecycle tests (the fresh-row default is 50 → 0.5).
+    private func setFullVolume(_ backend: NativeBackend, _ ids: String...) {
+        for id in ids { backend.setVolume(100, for: id) }
+    }
+
     // MARK: - Trigger matrix
 
     /// Never-aligned + first mix (two BT devices) → both prompt and both join
@@ -213,6 +220,7 @@ import CoreAudio
         backend.start()
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
+        setFullVolume(backend, btMove.id)
 
         backend.setOutputSet([btMove.id])
         waitFor { !sink.gains.isEmpty }
@@ -251,6 +259,7 @@ import CoreAudio
         backend.start()
         bt.fire([btMove, btFlip])
         waitFor { self.device(backend, self.btFlip.id) != nil }
+        setFullVolume(backend, btMove.id, btFlip.id)
 
         backend.setOutputSet([btMove.id, btFlip.id])
         waitFor { events.promptedDeviceIDs().count == 1 }
@@ -270,6 +279,7 @@ import CoreAudio
             backend.start()
             bt.fire([btMove, btFlip])
             waitFor { self.device(backend, self.btFlip.id) != nil }
+            setFullVolume(backend, btMove.id, btFlip.id)
             backend.setOutputSet([btMove.id, btFlip.id])
             waitFor { events.promptedDeviceIDs().count == 2 }
 
@@ -285,6 +295,7 @@ import CoreAudio
         backend.start()
         bt.fire([btMove, btFlip])
         waitFor { self.device(backend, self.btFlip.id) != nil }
+        setFullVolume(backend, btMove.id, btFlip.id)
         backend.setOutputSet([btMove.id, btFlip.id])
         waitFor { !sink.gains.isEmpty }
 
@@ -318,6 +329,7 @@ import CoreAudio
         backend.start()
         bt.fire([btMove, btFlip])
         waitFor { self.device(backend, self.btFlip.id) != nil }
+        setFullVolume(backend, btMove.id, btFlip.id)
 
         backend.setOutputSet([btMove.id, btFlip.id])
         waitFor { events.promptedDeviceIDs().count == 2 }
@@ -334,11 +346,56 @@ import CoreAudio
         backend.start()
         bt.fire([btMove, btFlip])
         waitFor { self.device(backend, self.btFlip.id) != nil }
+        setFullVolume(backend, btMove.id, btFlip.id)
 
         backend.setOutputSet([btMove.id, btFlip.id])
         waitFor { events.promptedDeviceIDs().count == 2 }
         waitFor { sink.lastGain(for: self.btMove.id) == 1 && sink.lastGain(for: self.btFlip.id) == 1 }
         #expect(sink.lastGain(for: btMove.id) == 1)
+        #expect(sink.lastGain(for: btFlip.id) == 1)
+    }
+
+    // MARK: - Hold × user volume (one composed product)
+
+    /// A slider write DURING the hold cannot un-mute: the composed gain is 0
+    /// for a held uid regardless of the level — and the resolve then pushes
+    /// the level the user chose mid-hold, never a hardcoded 1.
+    @Test func volumeDuringHoldStaysSilentAndResolvePushesComposed() {
+        let (backend, bt, sink, events) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove, btFlip])
+        waitFor { self.device(backend, self.btFlip.id) != nil }
+
+        backend.setOutputSet([btMove.id, btFlip.id])
+        waitFor { events.promptedDeviceIDs().count == 2 }
+        waitFor { sink.lastGain(for: self.btMove.id) == 0 }
+
+        backend.setVolume(40, for: btMove.id)
+        waitFor { self.device(backend, self.btMove.id)?.volume == 40 }
+        #expect(sink.lastGain(for: btMove.id) == 0, "held stays silent through a slider write")
+
+        backend.resolveBTAlignmentPrompt(forDevice: btMove.id, dismissed: false)
+        waitFor { sink.lastGain(for: self.btMove.id).map { abs($0 - 0.4) < 0.001 } == true }
+        #expect(sink.lastGain(for: btMove.id).map { abs($0 - 0.4) < 0.001 } == true,
+                "the release pushes the composed user gain, not 1")
+    }
+
+    /// The watchdog release is composed too — giving up on the card must not
+    /// blow away the user's level.
+    @Test func watchdogReleasePushesComposedNotUnity() {
+        let (backend, bt, sink, events) = makeBackend(holdTimeout: 0.2)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove, btFlip])
+        waitFor { self.device(backend, self.btFlip.id) != nil }
+        backend.setVolume(40, for: btMove.id)
+        setFullVolume(backend, btFlip.id)
+
+        backend.setOutputSet([btMove.id, btFlip.id])
+        waitFor { events.promptedDeviceIDs().count == 2 }
+        waitFor { sink.lastGain(for: self.btMove.id).map { abs($0 - 0.4) < 0.001 } == true }
+        #expect(sink.lastGain(for: btMove.id).map { abs($0 - 0.4) < 0.001 } == true)
         #expect(sink.lastGain(for: btFlip.id) == 1)
     }
 

@@ -29,11 +29,19 @@ import CoreFoundation
     private final class SpawnLedger: @unchecked Sendable {
         private let lock = NSLock()
         private var _spawns = 0
+        private var _completions = 0
         private var _line: String
 
         init(line: String) { _line = line }
 
         var spawns: Int { lock.lock(); defer { lock.unlock() }; return _spawns }
+
+        /// Whether every spawn handed out has already delivered its answer —
+        /// i.e. ``TCCProbeRunner`` has nothing in flight and nothing coalesced
+        /// behind it. Waiting on THIS, rather than sleeping a fixed interval, is
+        /// what stops a re-kick from spawning later, after a test has already
+        /// snapshotted the count.
+        var isSettled: Bool { lock.lock(); defer { lock.unlock() }; return _completions == _spawns }
 
         /// Change what every SUBSEQUENT spawn answers — how a test models the
         /// user granting partway through a session.
@@ -46,7 +54,16 @@ import CoreFoundation
                 let line = _line
                 lock.unlock()
                 DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
+                    // Count the completion only AFTER it returns, and never
+                    // under the lock: delivering the answer can re-enter this
+                    // very closure (that is `TCCProbeRunner`'s coalesced
+                    // re-kick), which under the lock would deadlock and before
+                    // the call would read as "settled" while a second spawn is
+                    // still in flight.
                     completion(.output(line))
+                    self.lock.lock()
+                    self._completions += 1
+                    self.lock.unlock()
                 }
             }
         }
@@ -88,16 +105,32 @@ import CoreFoundation
         return observer
     }
 
-    /// Spin until `condition` holds or the deadline passes. Mirrors
-    /// `NativeBackendTests.pollUntil` — the resolution completes on an arbitrary
-    /// thread, so there is nothing to await.
-    private func pollUntil(timeout: TimeInterval = 3, _ condition: @escaping () -> Bool) async {
+    /// Spin until `condition` holds or the deadline passes; reports whether it
+    /// held. Mirrors `NativeBackendTests.pollUntil` — the resolution completes on
+    /// an arbitrary thread, so there is nothing to await. The final re-check
+    /// after the loop matters: without it a change landing during the LAST sleep
+    /// is never seen, because the loop exits on the deadline before testing the
+    /// condition again.
+    @discardableResult
+    private func pollUntil(timeout: TimeInterval = 3, _ condition: @escaping () -> Bool) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if condition() { return }
+            if condition() { return true }
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
+        return condition()
     }
+
+    /// Deadline for a BARRIER — a wait for something that must happen, as
+    /// opposed to a wait-and-hope. Generous on purpose: a barrier costs only as
+    /// long as the thing it waits for actually takes (milliseconds on an idle
+    /// machine), so a long deadline buys tolerance of a loaded one for free.
+    /// A fixed sleep can't make that trade — it always costs its full length and
+    /// still races. This suite runs `@MainActor` (via ``IsolatedSuite``) and a
+    /// Darwin notification is delivered on the main run loop, so it shares one
+    /// thread with every other main-actor test in the process — several of which
+    /// block it outright (`RunLoop.current.run(until:)`, `Thread.sleep`).
+    private static let barrierTimeout: TimeInterval = 10
 
     // MARK: The grant edge
 
@@ -219,38 +252,52 @@ import CoreFoundation
     /// the observer, so a missing removal is a dangling pointer with no symptom
     /// until it crashes. This asserts both halves: the notification reaches the
     /// bare C callback while armed, and reaches nothing after `stop()`.
-    @Test func darwinObserver_isAddedAndRemoved() async {
+    ///
+    /// EVERY WAIT HERE IS A BARRIER, never a best-effort sleep, and none may go
+    /// back to "wait a bit and hope" — that shape is what made this test flaky.
+    /// The old version sleep-waited 300ms for the launch kick's spawn and then
+    /// polled 3s for the post's, carrying on with a STALE count if neither came.
+    /// A kick that arrives while a spawn is in flight does not spawn: it sets
+    /// ``TCCProbeRunner``'s pending re-kick, which spawns whenever that in-flight
+    /// completion happens to land. On a loaded machine that landed after the
+    /// snapshot — and the resulting extra spawn failed the assertion below,
+    /// reporting a dangling pointer when the real cause was a starved run loop.
+    @Test func darwinObserver_isAddedAndRemoved() async throws {
         let spawns = SpawnLedger(line: Self.undeterminedLine)
         let grants = GrantLedger()
         let name = privateNotificationName()
         let observer = makeObserver(spawns: spawns, grants: grants, notificationName: name)
+        let witness = NotificationWitness(name: name)
 
         #expect(!observer.test_isArmed)
         observer.start()
         #expect(observer.test_isArmed)
 
-        // The launch kick already spawned once; wait it out so the count below
-        // can only reflect the notification.
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        // Let the launch kick's spawn finish, so the count below can only move
+        // for the notification and nothing is left queued behind it.
+        let launchSettled = await pollUntil(timeout: Self.barrierTimeout) { spawns.isSettled }
+        try #require(launchSettled, "the launch kick's spawn never completed — infrastructure, not the observer")
         let spawnsBeforePost = spawns.spawns
         #expect(spawnsBeforePost > 0, "start() performs the launch kick")
 
+        // Two separate failures, kept separate: the post not reaching this
+        // process at all, and an armed observer not reacting to one that did.
         post(name)
-        var spawnsAfterPost = spawnsBeforePost
-        let deadline = Date().addingTimeInterval(3)
-        while Date() < deadline {
-            if spawns.spawns > spawnsBeforePost {
-                spawnsAfterPost = spawns.spawns
-                break
-            }
-            try? await Task.sleep(nanoseconds: 20_000_000)
-        }
+        let firstPostDelivered = await pollUntil(timeout: Self.barrierTimeout) { witness.posts == 1 }
+        try #require(firstPostDelivered, "the post never reached this process — infrastructure, not the observer")
+        let armedObserverReacted = await pollUntil(timeout: Self.barrierTimeout) { spawns.spawns > spawnsBeforePost }
+        try #require(armedObserverReacted, "an armed observer must re-check when the notification fires")
+        let spawnsAfterPost = spawns.spawns
 
         observer.stop()
         #expect(!observer.test_isArmed)
 
+        // The witness is the barrier the old fixed sleep only approximated:
+        // waiting for it means the assertion can no longer pass merely because
+        // the second post hadn't been delivered yet.
         post(name)
-        try? await Task.sleep(nanoseconds: 500_000_000)
+        let secondPostDelivered = await pollUntil(timeout: Self.barrierTimeout) { witness.posts == 2 }
+        try #require(secondPostDelivered, "the post never reached this process — infrastructure, not the observer")
         #expect(spawns.spawns == spawnsAfterPost,
                 "a removed observer must not be called back — a live one is a dangling pointer")
     }
@@ -294,5 +341,55 @@ import CoreFoundation
             CFNotificationCenterGetDarwinNotifyCenter(),
             CFNotificationName(rawValue: name as CFString),
             nil, nil, true)
+    }
+
+    /// A second, independent observer of the same private name, registered
+    /// exactly the way ``PermissionStateObserver`` does. It exists so a test can
+    /// WAIT for a post to actually reach this process instead of sleeping and
+    /// hoping — the difference between "the removed observer did no work" and
+    /// "the notification hadn't been delivered yet," which a fixed sleep cannot
+    /// tell apart on a machine whose main run loop is busy. `CFNotificationCenter`
+    /// hands a Darwin post to every observer of that name in ONE synchronous
+    /// pass, so a post this witness has counted is a post a still-registered
+    /// observer would already have been called back for.
+    private final class NotificationWitness: @unchecked Sendable {
+        private let name: String
+        private let lock = NSLock()
+        private var _posts = 0
+
+        var posts: Int { lock.lock(); defer { lock.unlock() }; return _posts }
+
+        init(name: String) {
+            self.name = name
+            CFNotificationCenterAddObserver(
+                CFNotificationCenterGetDarwinNotifyCenter(),
+                Unmanaged.passUnretained(self).toOpaque(),
+                Self.postedCallback,
+                name as CFString,
+                nil,
+                .deliverImmediately)
+        }
+
+        /// Same unretained-pointer contract as the type under test: this MUST
+        /// run, or the notification center is left holding a pointer to freed
+        /// memory. Removing ONE observer of a name leaves the name registered
+        /// for the others — which is what lets the observer under test be
+        /// stopped mid-test while this one keeps counting.
+        deinit {
+            CFNotificationCenterRemoveObserver(
+                CFNotificationCenterGetDarwinNotifyCenter(),
+                Unmanaged.passUnretained(self).toOpaque(),
+                CFNotificationName(rawValue: name as CFString),
+                nil)
+        }
+
+        /// A bare C function pointer, capturing nothing — same shape (and same
+        /// reason) as ``PermissionStateObserver``'s own callback.
+        private static let postedCallback: CFNotificationCallback = { _, observer, _, _, _ in
+            guard let observer else { return }
+            Unmanaged<NotificationWitness>.fromOpaque(observer).takeUnretainedValue().record()
+        }
+
+        private func record() { lock.lock(); _posts += 1; lock.unlock() }
     }
 }

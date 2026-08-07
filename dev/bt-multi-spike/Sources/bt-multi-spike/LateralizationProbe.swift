@@ -71,6 +71,20 @@ enum LateralizationProbe {
     private static let tickDecayTau = 0.006
     private static let interTrialGapSeconds = 0.6
 
+    // MARK: Keep-alive noise bed (live-found 2026-08-07: the Sonos Move 2
+    // POWER-GATES its amplifier on signal energy — a `say` sentence lost its
+    // first ~6 s while the pacing clock advanced perfectly, so the Mac fed it
+    // flawlessly and the speaker's amp just woke late. Sparse 30 ms ticks over
+    // silence are exactly the shape such an amp never wakes for, or eats in
+    // its attack ramp. A continuous low-level noise floor on BOTH devices
+    // holds the amps open for the whole session.)
+    /// ~-47 dBFS RMS: enough energy to hold an energy-gated amp open, quiet
+    /// enough not to mask a -5 dBFS tick.
+    private static let bedRMS: Float = 0.0045
+    /// Bed alone at session start, before any UI prompt, so gated amps are
+    /// open before the operator hears the first tick.
+    private static let bedWakeupSeconds = 3.0
+
     // MARK: - Entry point
 
     static func run(_ rawArgs: [String]) -> Int32 {
@@ -112,6 +126,11 @@ enum LateralizationProbe {
 
         guard let stimulus = Stimulus(deviceA: deviceA, deviceB: deviceB) else { return 1 }
         defer { stimulus.stop() }
+
+        // Bed alone before ANY prompt or tick: an energy-gated amp (Sonos
+        // Move 2, live 2026-08-07) needs seconds of signal before it opens.
+        print("warming up: \(Int(bedWakeupSeconds))s of low-level noise on both devices, so energy-gated amps are awake before the first tick...")
+        Thread.sleep(forTimeInterval: bedWakeupSeconds)
 
         if smoke {
             return runSmoke(stimulus, nameA: deviceA.name, nameB: deviceB.name)
@@ -178,14 +197,29 @@ enum LateralizationProbe {
         private let engineB: BTOutputEngine
         private let bufferA: AVAudioPCMBuffer
         private let bufferB: AVAudioPCMBuffer
+        // One keep-alive noise bed per device, INDEPENDENT (uncorrelated).
+        // The correlation choice matters: identical (correlated) noise on both
+        // speakers would form a coherent phantom image of its own, and that
+        // image would shift with any inter-device offset — including the
+        // offset under test — handing the operator a second, always-on cue
+        // and biasing the which-side judgement. Uncorrelated equal-level
+        // noise has no coherent interaural timing image: it reads as diffuse
+        // room hiss with no side to lean to, so it can hold the amps open
+        // without touching the tick's lateralization.
+        private let bedA: [Float]
+        private let bedB: [Float]
 
         init?(deviceA: BTOutputDevice, deviceB: BTOutputDevice) {
             engineA = BTOutputEngine(deviceID: deviceA.id, deviceName: deviceA.name, mode: .click)
             engineB = BTOutputEngine(deviceID: deviceB.id, deviceName: deviceB.name, mode: .click)
+            let frames = Int(ToneSource.sampleRate * loopSeconds)
+            bedA = Stimulus.makeBed(frames: frames)
+            bedB = Stimulus.makeBed(frames: frames)
             bufferA = Stimulus.makeSilentLoop()
             bufferB = Stimulus.makeSilentLoop()
             engineA.setVolume(0.5)
             engineB.setVolume(0.5)
+            silence() // = bed only; both loops carry the bed from frame 0
             do {
                 try engineA.start()
                 try engineB.start()
@@ -209,29 +243,32 @@ enum LateralizationProbe {
         func setGainA(_ gain: Float) { engineA.setVolume(gain) }
         func setGainB(_ gain: Float) { engineB.setVolume(gain) }
 
+        /// "Silence" = bed only. Never true digital silence anywhere in the
+        /// session — that is what lets an energy-gated amp fall asleep.
         func silence() {
-            write(tickSeconds: nil, into: bufferA)
-            write(tickSeconds: nil, into: bufferB)
+            write(tickSeconds: nil, into: bufferA, bed: bedA)
+            write(tickSeconds: nil, into: bufferB, bed: bedB)
         }
 
         /// Level-match pattern: A ticks, then B ticks half a loop later.
         func setAlternating() {
-            write(tickSeconds: 0.15, into: bufferA)
-            write(tickSeconds: 0.15 + loopSeconds / 2, into: bufferB)
+            write(tickSeconds: 0.15, into: bufferA, bed: bedA)
+            write(tickSeconds: 0.15 + loopSeconds / 2, into: bufferB, bed: bedB)
         }
 
-        /// Only one side ticks (smoke check).
+        /// Only one side ticks (smoke check). The OTHER side still carries
+        /// the bed — the smoke test must prove ticks, not wake-from-cold.
         func setSolo(a: Bool) {
-            write(tickSeconds: a ? baseTickSeconds : nil, into: bufferA)
-            write(tickSeconds: a ? nil : baseTickSeconds, into: bufferB)
+            write(tickSeconds: a ? baseTickSeconds : nil, into: bufferA, bed: bedA)
+            write(tickSeconds: a ? nil : baseTickSeconds, into: bufferB, bed: bedB)
         }
 
         /// Both tick once per loop; `offsetMs` > 0 delays B (A leads, image
         /// pulls toward A), < 0 delays A. Sample-accurate: the offset is in
         /// the tick's frame position.
         func setCentered(offsetMs: Double) {
-            write(tickSeconds: baseTickSeconds + max(0, -offsetMs) / 1000, into: bufferA)
-            write(tickSeconds: baseTickSeconds + max(0, offsetMs) / 1000, into: bufferB)
+            write(tickSeconds: baseTickSeconds + max(0, -offsetMs) / 1000, into: bufferA, bed: bedA)
+            write(tickSeconds: baseTickSeconds + max(0, offsetMs) / 1000, into: bufferB, bed: bedB)
         }
 
         private static func makeSilentLoop() -> AVAudioPCMBuffer {
@@ -243,13 +280,36 @@ enum LateralizationProbe {
             return buffer
         }
 
-        /// Zero the whole loop, then (unless nil) write one tick at `tickSeconds`.
-        private func write(tickSeconds: Double?, into buffer: AVAudioPCMBuffer) {
+        /// One loop of keep-alive noise: white noise through a one-pole
+        /// low-pass (~1 kHz corner — "filtered dither", pink-ish, no hissy
+        /// top end), normalized to `bedRMS`. Fresh random samples per call,
+        /// so A's and B's beds are independent by construction. The loop
+        /// seam is a noise-to-noise discontinuity at ~-47 dBFS — inaudible.
+        private static func makeBed(frames: Int) -> [Float] {
+            var bed = [Float](repeating: 0, count: frames)
+            var y: Float = 0
+            for i in 0..<frames {
+                let white = Float.random(in: -1...1)
+                y += 0.15 * (white - y)
+                bed[i] = y
+            }
+            let rms = sqrt(bed.reduce(0) { $0 + $1 * $1 } / Float(frames))
+            guard rms > 0 else { return bed }
+            let scale = bedRMS / rms
+            for i in 0..<frames { bed[i] *= scale }
+            return bed
+        }
+
+        /// Fill the whole loop with this device's bed, then (unless nil) add
+        /// one tick at `tickSeconds`.
+        private func write(tickSeconds: Double?, into buffer: AVAudioPCMBuffer, bed: [Float]) {
             guard let channels = buffer.floatChannelData else { return }
             let frames = Int(buffer.frameLength)
             for channel in 0..<Int(buffer.format.channelCount) {
                 let data = channels[channel]
-                data.update(repeating: 0, count: frames)
+                bed.withUnsafeBufferPointer { src in
+                    data.update(from: src.baseAddress!, count: min(frames, src.count))
+                }
                 if let tickSeconds {
                     writeTick(data, at: Int(ToneSource.sampleRate * tickSeconds), capacity: frames)
                 }
@@ -279,15 +339,17 @@ enum LateralizationProbe {
 
     // MARK: - Smoke check (non-interactive; no tty, no staircase)
 
-    /// Audible plumbing proof: 3 ticks on A alone, then 3 on B alone, exit.
+    /// Audible plumbing proof: 5 ticks on A alone, then 5 on B alone, exit.
     /// Runnable from a script — this is the check that would have caught the
-    /// silent-Bluetooth scheduling bug before the operator sat down.
+    /// silent-Bluetooth scheduling bug before the operator sat down. Five per
+    /// side so a late-waking amp still demonstrates several; the idle side
+    /// keeps its bed throughout.
     private static func runSmoke(_ stimulus: Stimulus, nameA: String, nameB: String) -> Int32 {
-        let perSide = 3.0 * loopSeconds + 0.3
-        print("smoke: 3 ticks on A = \"\(nameA)\" ...")
+        let perSide = 5.0 * loopSeconds + 0.3
+        print("smoke: 5 ticks on A = \"\(nameA)\" ...")
         stimulus.setSolo(a: true)
         Thread.sleep(forTimeInterval: perSide)
-        print("smoke: 3 ticks on B = \"\(nameB)\" ...")
+        print("smoke: 5 ticks on B = \"\(nameB)\" ...")
         stimulus.setSolo(a: false)
         Thread.sleep(forTimeInterval: perSide)
         stimulus.silence()
@@ -557,7 +619,7 @@ enum LateralizationProbe {
 
         print(String(format: "pair: A(left)=\"%@\"  B(right)=\"%@\"  centred at %+.2f ms", nameA, nameB, baseMs))
         print("staircase: start \(fmt(startMagnitudeMs)) ms, 1-up/2-down, x\(downFactor) down / x\(upFactor) up, floor \(fmt(floorMs)) ms, ceiling \(fmt(ceilingMs)) ms, stop at \(maxTrials) trials or \(maxReversals) reversals")
-        print("stimulus: steady tick every \(fmt(loopSeconds)) s until answered, \(Int(tickDurationSeconds * 1000)) ms woodblock (1.8 + 2.9 kHz, exponential decay), offset baked into the samples of a continuously-looping buffer (no per-trial scheduling)")
+        print("stimulus: steady tick every \(fmt(loopSeconds)) s until answered, \(Int(tickDurationSeconds * 1000)) ms woodblock (1.8 + 2.9 kHz, exponential decay), offset baked into the samples of a continuously-looping buffer (no per-trial scheduling); continuous uncorrelated ~-47 dBFS noise bed on both devices (amp keep-alive)")
 
         // Per-magnitude hit rate.
         var order: [String] = []

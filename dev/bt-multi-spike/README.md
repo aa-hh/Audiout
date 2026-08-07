@@ -184,9 +184,10 @@ than the fuse/split one. This probe measures your own number, with your own
 speakers, in your own room.
 
 ```sh
-# FIRST: 8-second audible plumbing check — 3 ticks on A alone, then 3 on B
-# alone, then exit. Non-interactive (no tty needed, nothing scored). Run this
-# before every session; silence from either side means stop and debug here.
+# FIRST: ~16-second audible plumbing check — 3s noise warm-up, then 5 ticks
+# on A alone, then 5 on B alone, then exit. Non-interactive (no tty needed,
+# nothing scored). Run this before every session; silence from either side
+# means stop and debug here.
 .build/release/bt-multi-spike --lateralization-probe 1 2 --smoke
 
 # Learn what the cue sounds like (not blind, nothing scored):
@@ -197,16 +198,29 @@ speakers, in your own room.
 ```
 
 **How the audio is produced (and why):** each engine is started once and
-loops one silent 1.2 s buffer forever; every phase rewrites that buffer's
-samples in place. Nothing is ever scheduled at an absolute time. The first
-build scheduled each trial with `play(at: hostTime)` and the Bluetooth side
-was **silent** while the Mac ticked: on a BT device the host-time →
-sample-time mapping goes through the BT stack's pacing clock, which this
-branch's own `--pacing-probe` measured jumping ±5–100 ms for ~40 s after
-connect — a jump lands the scheduled buffer in the device's past and the
-player renders silence with no error. The two loops start with an
-arbitrary-but-constant skew; step 2 dials it out along with the device
-latency difference.
+loops one 1.2 s buffer forever; every phase rewrites that buffer's samples in
+place. Nothing is ever scheduled at an absolute time. The first build
+scheduled each trial with `play(at: hostTime)` and the Bluetooth side was
+**silent** while the Mac ticked: on a BT device the host-time → sample-time
+mapping goes through the BT stack's pacing clock, which this branch's own
+`--pacing-probe` measured jumping ±5–100 ms for ~40 s after connect — a jump
+lands the scheduled buffer in the device's past and the player renders
+silence with no error. The two loops start with an arbitrary-but-constant
+skew; step 2 dials it out along with the device latency difference.
+
+**The keep-alive noise bed (energy-gated amps — live finding, Sonos Move 2,
+2026-08-07):** after the scheduling fix the Move was *fed* perfectly (pacing
+clock advancing at 44.1 k/s, ±0.016 ms) and still swallowed the first ~6 s of
+a spoken test sentence — its amplifier power-gates on signal energy and wakes
+late. Sparse 30 ms ticks over digital silence are exactly the shape such an
+amp never wakes for, or eats in its attack ramp. So the probe never emits
+true silence: a continuous ~-47 dBFS filtered-noise floor runs on **both**
+devices for the whole session (all steps, trials, gaps, smoke), plus a 3 s
+bed-only warm-up before the first prompt. The beds are **independent
+(uncorrelated) per device** — identical noise on both speakers would form a
+coherent phantom image that shifts with the very offset under test, biasing
+the which-side judgement; uncorrelated equal-level noise reads as diffuse
+hiss with no side to lean to.
 
 `<A> <B>` are either the **index** printed by running the flag with no
 arguments, or part of a device name/uid. **A is the LEFT speaker, B the

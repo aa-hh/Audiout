@@ -196,6 +196,33 @@ single tick. Beat spacing must dodge offset aliasing: at 120 BPM (500 ms) a full
 device sounds aligned one beat late — use ~70–80 BPM (750–850 ms) or a slightly
 irregular interval.
 
+**ALIGNMENT WIZARD UX LOCKED 2026-08-08 (Alec — binding for the wizard track):**
+Two-tier tuning: the WIZARD is the setup-time path; everyday touch-up is a live
+scrubber (separate track, popover surface). Wizard = lateralization bisection —
+probe-validated live (clear which-side signal at 7–15 ms even on a broken
+baseline; the confusing manual-centre step of the probe does NOT exist in the
+wizard, whose bisection self-centres from the answers). **No seed table exists**
+(no data source — confirmed by research); a fresh BT speaker's default is raw,
+so the FIRST mixed playback is exactly when it sounds wrong. Hence the
+**first-mix intercept**: the click that first puts a never-aligned BT speaker
+into a mix with any other device connects the speaker and starts its stream but
+holds it SILENT; an anchored card (never a modal) explains in one sentence
+("Bluetooth speakers each run on their own delay — a quick alignment keeps
+everything in step") and offers: (1) Align with your music (unmute both, live
+tuning — control design belongs to the touch-up track), (2) Align with ticks
+(the wizard: continuous ticks + which-side buttons named after the actual
+devices + "Can't tell"; ~5 answers; narrowing progress; ms number shown only as
+a closing receipt with Keep / Try again; two "can't tell" = graceful exit
+"these speakers are far apart — they're already as aligned as they need to
+be"), (3) Not now (unmute, play as-is). The intercept fires ONCE per device
+EVER on its own — "Not now" is final, no reminders ("if they're happy, they're
+happy"); re-launch stays available forever via the row's metronome button in
+the speakers/groups window, and the wizard's closing copy educates the popover
+scrubber for everyday touch-ups. Aligned once → trim saved → never intercepted
+again. SYNC stepper column placement (popover vs window-only) is deliberately
+left to reconcile with the touch-up track's scrubber design — don't move it
+until that lands.
+
 **BT-OFFSET-UI — per-device manual offset (numeric ms + nudge) + persistence**
 Files: Settings Audio tab (match the existing "Advanced buffer ms" precedent), `AppSettings.swift`, `BTSyncedSink.swift` (consume), per-brand seed table.
 What: per-device numeric ms offset (bare number/unit — house rule on numeric controls), an A/B "nudge until it blends" affordance, per-brand seed defaults, persisted per device UID.

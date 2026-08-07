@@ -5,11 +5,13 @@ import Testing
 import AppKit
 @testable import AudiouterSharedUI
 
-/// Warm Signal §5.4 (W8) — the control-panel shell's bubble fill. The backing
-/// bubble (bubble + beak) must paint the warm `canvas` token LIVE in BOTH
-/// appearances so shell chrome and the hosted transparent content read as one
-/// warm shape, and a mid-session theme flip must repaint — the C3b
-/// "half-render" class of bug (a fill frozen at one appearance) must not recur.
+/// The control-panel shell's bubble fill — since the 2026-08-07 canvas
+/// unification the ONE surface canvas, `Tokens.Color.panel` (superseding
+/// §5.4's `canvas`). The backing bubble (bubble + beak) must paint it LIVE in
+/// BOTH appearances so shell chrome and the hosted transparent content read
+/// as one warm shape, and a mid-session theme flip must repaint — the C3b
+/// "half-render" class of bug (a fill frozen at one appearance) must not
+/// recur.
 @MainActor
 @Suite final class ControlPanelBackingViewTests: IsolatedSuite {
 
@@ -34,15 +36,15 @@ import AppKit
         return color
     }
 
-    /// `Tokens.Color.canvas` resolved under `name` — dynamic tokens resolve
+    /// `Tokens.Color.panel` resolved under `name` — dynamic tokens resolve
     /// against the CURRENT drawing appearance, so pin it explicitly.
-    private func resolvedCanvas(under name: NSAppearance.Name) throws -> NSColor {
+    private func resolvedPanel(under name: NSAppearance.Name) throws -> NSColor {
         let appearance = try #require(NSAppearance(named: name), "appearance \(name.rawValue) unavailable")
         var resolved: NSColor?
         appearance.performAsCurrentDrawingAppearance {
-            resolved = Tokens.Color.canvas.usingColorSpace(.sRGB)
+            resolved = Tokens.Color.panel.usingColorSpace(.sRGB)
         }
-        let result = try #require(resolved, "canvas token did not resolve to sRGB")
+        let result = try #require(resolved, "panel token did not resolve to sRGB")
         return result
     }
 
@@ -59,22 +61,22 @@ import AppKit
         #expect(abs(a.blueComponent - b.blueComponent) <= 0.02, "\(message) (blue)")
     }
 
-    // MARK: §5.4 — the bubble fill is the warm canvas token, both appearances
+    // MARK: The bubble fill is the one surface canvas (`panel`), both appearances
 
     @Test func bubbleFillIsWarmCanvasInDarkMode() throws {
         let view = makeBackingView()
         view.appearance = NSAppearance(named: .darkAqua)
         let sampled = try sampledBubbleCenterColor(of: view)
-        assertSameHue(sampled, try resolvedCanvas(under: .darkAqua),
-                      "the bubble body must paint the warm `canvas` token in dark mode")
+        assertSameHue(sampled, try resolvedPanel(under: .darkAqua),
+                      "the bubble body must paint the warm `panel` token in dark mode")
     }
 
     @Test func bubbleFillIsWarmCanvasInLightMode() throws {
         let view = makeBackingView()
         view.appearance = NSAppearance(named: .aqua)
         let sampled = try sampledBubbleCenterColor(of: view)
-        assertSameHue(sampled, try resolvedCanvas(under: .aqua),
-                      "the bubble body must paint the warm `canvas` token in light mode")
+        assertSameHue(sampled, try resolvedPanel(under: .aqua),
+                      "the bubble body must paint the warm `panel` token in light mode")
     }
 
     /// The C3b guard, end-to-end on ONE view instance: render dark, flip the
@@ -85,13 +87,13 @@ import AppKit
         let view = makeBackingView()
         view.appearance = NSAppearance(named: .darkAqua)
         let darkSample = try sampledBubbleCenterColor(of: view)
-        assertSameHue(darkSample, try resolvedCanvas(under: .darkAqua),
-                      "first render (dark) paints the dark canvas")
+        assertSameHue(darkSample, try resolvedPanel(under: .darkAqua),
+                      "first render (dark) paints the dark panel canvas")
 
         view.appearance = NSAppearance(named: .aqua)
         let lightSample = try sampledBubbleCenterColor(of: view)
-        assertSameHue(lightSample, try resolvedCanvas(under: .aqua),
-                      "after a theme flip the SAME view must repaint the light canvas — a frozen fill here is the C3b half-render bug")
+        assertSameHue(lightSample, try resolvedPanel(under: .aqua),
+                      "after a theme flip the SAME view must repaint the light panel canvas — a frozen fill here is the C3b half-render bug")
     }
 
     /// A live in-window flip reaches the view as `viewDidChangeEffectiveAppearance`,
@@ -111,7 +113,7 @@ import AppKit
                 "an appearance flip must schedule a repaint of the bubble fill")
     }
 
-    // MARK: §5.4 — hosted content composes over the warm fill
+    // MARK: Hosted content composes over the warm fill
 
     /// The transparent-content mechanism (`configureContentAppearance`): the
     /// hosted view must stay TRANSPARENT (never an opaque fill of its own) so

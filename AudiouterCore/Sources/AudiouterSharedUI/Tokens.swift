@@ -93,11 +93,11 @@ public enum Tokens {
         /// Hairline/divider strokes. Alias of `NSColor.separatorColor`.
         public static var separator: NSColor { .separatorColor }
         /// Opaque window chrome background. Alias of
-        /// `NSColor.windowBackgroundColor`. UNCONSUMED — no call site reads
-        /// this alias (Settings/About chrome uses the
-        /// `Tokens.Material.windowBackground` MATERIAL; the control-panel
-        /// backing bubble paints the warm `canvas` token, §5.4). Verify a
-        /// real call site before pointing anything here.
+        /// `NSColor.windowBackgroundColor`. Consumed by
+        /// `ReduceTransparencyFallbackView`'s default fill (A1) — the opaque
+        /// stand-in for the system chrome MATERIALS
+        /// (`Tokens.Material.windowBackground`/`popover`) while Reduce
+        /// Transparency is on.
         public static var windowBackground: NSColor { .windowBackgroundColor }
         /// The color a decorative punch-out border is drawn in so a corner badge
         /// reads as separate from what's behind it. Alias of
@@ -119,6 +119,20 @@ public enum Tokens {
         /// Warning/failure sublabel and card tint (connection-diagnosis,
         /// onboarding failure card). Alias of `NSColor.systemOrange`.
         public static var warning: NSColor { .systemOrange }
+        /// Informational note/banner tint (`SystemAirPlayNoteBannerView`'s
+        /// `.info` tier — the system-double-path note, the takeover status
+        /// strip's default state). Alias of `NSColor.systemBlue`. Declared as
+        /// a plain semantic alias, matching how ``warning``/``destructive``
+        /// are declared immediately above — a system dynamic color already
+        /// resolves light/dark and a reasonable Increase Contrast response on
+        /// its own, so it needs no `warmDynamic` trio or authored contrast
+        /// rationale; that requirement (root AGENTS.md's "every case ships
+        /// light + dark + Increase Contrast variants with a documented
+        /// rationale") targets the CUSTOM warm-palette hex literals below,
+        /// per this file's own governing comment ("the custom warm/instrument
+        /// cases below each carry a documented contrast rationale") — not the
+        /// semantic aliases in this section, none of which carry one either.
+        public static var info: NSColor { .systemBlue }
         /// Opaque shadow color for card/panel drop shadows (`CardView`). Alias
         /// of `NSColor.black`.
         public static var shadow: NSColor { .black }
@@ -490,6 +504,43 @@ public enum Tokens {
                        light: 0xE0D8C6, lightHighContrast: 0xC4B89E)
         }
 
+        // MARK: Icon-well badge instrument (V6, raw-color elimination pass)
+        //
+        // `DeviceIconWellView`'s corner edit badge: a dark disc + light rim
+        // sitting over the device/group icon GLYPH, whose color is arbitrary
+        // (an SF Symbol tint, a user-picked icon) — not the app's own
+        // light/dark surface. Like `shadow`, the hue is deliberately the SAME
+        // in both themes (a theme-adaptive hue here would force the badge to
+        // flip to a light disc in dark mode, which would in turn force the
+        // pencil glyph it hosts to flip too — rejected: the badge's whole job
+        // is to read the same "dark scrim, light rim" regardless of what it
+        // sits over). Unlike `shadow`, it needs a real Increase Contrast
+        // response, so it is NOT a plain alias: `scrimDynamic` steps the
+        // ALPHA up under Increase Contrast — the only axis left once the hue
+        // is already the endpoint (pure black / pure white) — while the base
+        // hex stays fixed. First consumer: `DeviceIconWellView`'s badge fill/
+        // border, previously two frozen `NSColor(white:alpha:)` literals
+        // stamped into a `CALayer` once at init and never re-stamped, so they
+        // sat outside Increase Contrast entirely and could never react to a
+        // live appearance/a11y change.
+
+        /// The corner edit badge's FILL (`DeviceIconWellView`) — a dark scrim,
+        /// alpha 0.55 normally. CONTRAST RATIONALE: content-agnostic overlay,
+        /// no stated floor (same precedent as `canvas`/`panel`/`raised` —
+        /// it's a backdrop for the pencil glyph, not itself a foreground
+        /// instrument). Increase Contrast steps alpha to 0.85 for real
+        /// headroom against whatever it sits over.
+        public static var iconWellBadge: NSColor {
+            scrimDynamic(name: "iconWellBadge", hex: 0x000000, alpha: 0.55, highContrastAlpha: 0.85)
+        }
+
+        /// The rim paired with ``iconWellBadge`` — same reasoning, pure
+        /// white, alpha 0.25 normally, stepping to 0.55 under Increase
+        /// Contrast.
+        public static var iconWellBadgeBorder: NSColor {
+            scrimDynamic(name: "iconWellBadgeBorder", hex: 0xFFFFFF, alpha: 0.25, highContrastAlpha: 0.55)
+        }
+
         // MARK: Permission-row instruments (colour-return pass, decisions Q1-Q6/NEW-1)
         //
         // Onboarding's four permission rows (`PermissionRowView`: System Audio,
@@ -731,11 +782,16 @@ public enum Tokens {
 
     // MARK: - Layout
 
-    /// Layout aliases. `PopoverColumnGrid` remains the geometry authority —
-    /// it is not moved, renamed, or duplicated. These are forwarding
-    /// properties only, so code that wants "the app's layout tokens" has one
-    /// import (`Tokens.Layout`) without new call sites needing to know that
-    /// the underlying constants still live in `PopoverColumnGrid`.
+    /// Layout tokens. Most of these are forwarding aliases over
+    /// `PopoverColumnGrid`, which remains the geometry authority for row/card
+    /// layout — it is not moved, renamed, or duplicated; code that wants "the
+    /// app's layout tokens" has one import (`Tokens.Layout`) without new call
+    /// sites needing to know the underlying constants still live there.
+    ///
+    /// The three corner-radius constants below are the exception: each
+    /// consolidates a value that used to be typed out independently at two or
+    /// more call sites in different UI packages (V10 cleanup) — this file is
+    /// their one real declaration, not a forwarding alias over anything else.
     public enum Layout {
         /// Alias of `PopoverColumnGrid.leadingInset`.
         public static var leadingInset: CGFloat { PopoverColumnGrid.leadingInset }
@@ -755,6 +811,22 @@ public enum Tokens {
         public static var trailingControlWidth: CGFloat { PopoverColumnGrid.trailingControlWidth }
         /// Alias of `PopoverColumnGrid.bodyRowHeight`.
         public static var bodyRowHeight: CGFloat { PopoverColumnGrid.bodyRowHeight }
+
+        /// The standard rounded-panel corner radius: the control-panel
+        /// shell's bubble body (`ControlPanelBackingView`) and the
+        /// quit-in-progress HUD (`AppDelegate.QuittingIndicatorPanel`) both
+        /// draw at this radius — previously two independent `12` literals.
+        public static let panelCornerRadius: CGFloat = 12
+        /// The inset warning/note banner corner radius shared by
+        /// `SilenceFallbackBannerView` and `SystemAirPlayNoteBannerView` —
+        /// previously two independent `11` literals.
+        public static let bannerCornerRadius: CGFloat = 11
+        /// The System Settings "grouped inset-list" card corner radius,
+        /// shared by onboarding's `RoundedContainerView` (the permission
+        /// card) and the Groups window's `GroupedSectionView` — both
+        /// explicitly modeled on the same macOS grouped-list idiom;
+        /// previously two independent `10` literals.
+        public static let groupedSectionCornerRadius: CGFloat = 10
     }
 
     // MARK: - Material
@@ -764,16 +836,11 @@ public enum Tokens {
     /// here — only forwarding.
     public enum Material {
         /// The system menu-surface material. Alias of
-        /// `NSVisualEffectView.Material.menu`. UNCONSUMED as of V2: `CardView`
-        /// and `PopoverPanelViewController` both used `.menu` directly (not
-        /// through this alias) before the warm-signal-v2 de-nest, which
-        /// replaced both call sites with the custom-painted warm canvas
-        /// (`WarmCanvasView`, spec §5.1) — neither draws any
-        /// `NSVisualEffectView` material anymore. Kept as a forwarding alias
-        /// per the governance rule's spirit (it still names a real, applied-
-        /// elsewhere-in-AppKit system material) but has no current call site;
-        /// do not add a NEW consumer without checking this comment is still
-        /// accurate.
+        /// `NSVisualEffectView.Material.menu`. Consumed by the quit
+        /// indicator (`AudiouterApp.QuittingIndicatorPanel`) — the app's one
+        /// floating HUD surface; every other chrome surface paints the
+        /// custom warm canvas (`WarmCanvasView`, spec §5.1) and draws no
+        /// material.
         public static var popover: NSVisualEffectView.Material { .menu }
         /// Opaque window-chrome material (onboarding background, Settings
         /// window background, About panel). Alias of
@@ -810,6 +877,22 @@ private func warmDynamic(name: String,
             hex = increaseContrast ? (lightHighContrast ?? light) : light
         }
         return NSColor(warmSignalHex: hex)
+    }
+}
+
+/// Builds a translucent, theme-INDEPENDENT "scrim" `NSColor` — same `hex` in
+/// both appearances (an overlay meant to read consistently over arbitrary
+/// content, not the app's own light/dark surface), but the ALPHA steps to
+/// `highContrastAlpha` under Increase Contrast for real headroom, resolved
+/// live on every access exactly like `warmDynamic`. `warmDynamic` itself
+/// can't express this: its hex-only branching always resolves to an OPAQUE
+/// color (`NSColor(warmSignalHex:)` hardcodes `alpha: 1`), so a case that
+/// needs a non-1 base alpha AND an Increase-Contrast-only response needs its
+/// own constructor.
+private func scrimDynamic(name: String, hex: UInt32, alpha: CGFloat, highContrastAlpha: CGFloat) -> NSColor {
+    NSColor(name: NSColor.Name("WarmSignal.\(name)")) { _ in
+        let increaseContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        return NSColor(warmSignalHex: hex).withAlphaComponent(increaseContrast ? highContrastAlpha : alpha)
     }
 }
 

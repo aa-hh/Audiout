@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
+import AudiouterSharedUI
 
 /// The popover's single note-slot banner, originally the "double-path audio"
 /// note (Wave 3 W3-T3, `BackendEvent.systemDefaultIsAirPlayActive`) — shown
@@ -36,8 +37,8 @@ final class SystemAirPlayNoteBannerView: NSView {
 
         var tintColor: NSColor {
             switch self {
-            case .info: return .systemBlue
-            case .warning: return .systemOrange
+            case .info: return Tokens.Color.info
+            case .warning: return Tokens.Color.warning
             }
         }
         var backgroundAlpha: CGFloat {
@@ -113,7 +114,7 @@ final class SystemAirPlayNoteBannerView: NSView {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         wantsLayer = true
-        layer?.cornerRadius = 11
+        layer?.cornerRadius = Tokens.Layout.bannerCornerRadius
         layer?.cornerCurve = .continuous
         layer?.borderWidth = 1
         layer?.backgroundColor = severity.tintColor.withAlphaComponent(severity.backgroundAlpha).cgColor
@@ -161,5 +162,17 @@ final class SystemAirPlayNoteBannerView: NSView {
         super.updateLayer()
         layer?.backgroundColor = severity.tintColor.withAlphaComponent(severity.backgroundAlpha).cgColor
         layer?.borderColor = severity.tintColor.withAlphaComponent(severity.borderAlpha).cgColor
+    }
+
+    /// The layer's currently-stamped fill/border, read back as `NSColor` —
+    /// asserts they resolve from `Tokens.Color.info`/`.warning`, not a raw
+    /// `NSColor.systemBlue`/`.systemOrange` literal.
+    var test_backgroundColor: NSColor? {
+        guard let cgColor = layer?.backgroundColor else { return nil }
+        return NSColor(cgColor: cgColor)
+    }
+    var test_borderColor: NSColor? {
+        guard let cgColor = layer?.borderColor else { return nil }
+        return NSColor(cgColor: cgColor)
     }
 }

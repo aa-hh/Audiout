@@ -4,6 +4,7 @@ import Testing
 import Foundation
 import AppKit
 @testable import AudiouterCore
+@testable import AudiouterPopoverUI
 @testable import AudiouterSharedUI
 @testable import AudiouterWindowUI
 
@@ -309,19 +310,19 @@ import AppKit
     }
 
     /// The editor pane has NO scroll view, so its fitting height is a hard
-    /// budget — and the budget is NOT the window's height.
+    /// budget — and the budget is NOT the whole Groups screen's height.
     ///
-    /// This guard used to compare the pane against the whole 505 pt content
-    /// height and passed while the pane was ~22 pt too tall to actually fit:
-    /// the title bar (~32 pt — the window is `.fullSizeContentView`, so the
-    /// pane starts at its SAFE AREA, not its top) and the persistent footer
-    /// strip (~28 pt) both come out of that number first. At a 7-device fleet
-    /// the bottom of the list and the "Delete group…" button fell below the
-    /// window's edge with nothing to scroll them back.
+    /// This guard used to compare the pane against the whole content height
+    /// and passed while the pane was ~22 pt too tall to actually fit: the
+    /// chrome above the pane and the persistent footer strip both come out of
+    /// that number first. At a 7-device fleet the bottom of the list and the
+    /// "Delete group…" button fell below the screen's edge with nothing to
+    /// scroll them back. Under the one surface (U6) the budget is the Groups
+    /// screen's content area — `AppSurfaceController.groupsDefaultContentSize`
+    /// (already below the window's toolbar strip) minus the footer strip.
     ///
-    /// Every term is DERIVED from the real window, not typed in: the default
-    /// content size the controller ships, the title-bar height measured off the
-    /// live window, and the footer strip measured off the real host.
+    /// Every term is DERIVED, not typed in: the surface's shipping constants
+    /// and the footer strip measured off the real host.
     @Test func editorFitsTheHeightTheWindowActuallyGivesIt() throws {
         let devices = (0..<7).map { makeDevice(id: "d\($0)", name: "Device \($0)") }
         let controller = GroupController(backend: MockBackend(fleet: []),
@@ -330,16 +331,16 @@ import AppKit
         let group = try controller.createGroup(name: "Downstairs", memberIDs: ["d0"],
                                                memberVolumes: [:]).group
 
-        let window = MixerWindowController(groupController: controller,
-                                           frameAutosaveName: uniqueName("MembershipRailTests"))
+        let window = MixerWindowController(groupController: controller)
+        window.setHostVisible(true)
         window.update(devices: devices)
         window.test_select(.group(id: group.id))
 
-        let titleBar = window.test_titleBarHeight
+        // `groupsDefaultContentSize` is the content area BELOW the window's
+        // toolbar strip (live-review D1), so only the footer subtracts.
         let footerStrip = window.test_contentPaneChromeHeight
-        #expect(titleBar > 0, "a titled window must report a real title-bar height")
         #expect(footerStrip > 0, "the footer strip must cost real height")
-        let available = MixerWindowController.defaultContentSize.height - titleBar - footerStrip
+        let available = AppSurfaceController.groupsDefaultContentSize.height - footerStrip
 
         let editor = GroupEditorViewController(groupController: controller)
         editor.loadView()
@@ -348,15 +349,17 @@ import AppKit
 
         #expect(
             editor.view.fittingSize.height <= available,
-            Comment(rawValue: "a 7-device editor needs \(editor.view.fittingSize.height)pt but the window's default " +
-            "gives the pane only \(available)pt (\(MixerWindowController.defaultContentSize.height) " +
-            "− \(titleBar) title bar − \(footerStrip) footer). The pane has no scroll view, so this " +
+            Comment(rawValue: "a 7-device editor needs \(editor.view.fittingSize.height)pt but the Groups screen's default " +
+            "gives the pane only \(available)pt (\(AppSurfaceController.groupsDefaultContentSize.height) " +
+            "− \(footerStrip) footer). The pane has no scroll view, so this " +
             "is an overflow, not a preference."))
     }
 
-    /// The same budget, from the other end: with the window at its shipping
-    /// default and a full fleet selected, the pane it actually hands the editor
-    /// must still hold the editor's laid-out content.
+    /// The same budget, from the other end: with the content laid out at the
+    /// Groups screen's shipping content area and a full fleet selected, the
+    /// pane the split view actually hands the editor must still hold the
+    /// editor's laid-out content, and nothing may need more width than the
+    /// screen provides.
     @Test func defaultWindowSizeIsWideEnoughThatNothingForcesItWider() throws {
         let devices = (0..<7).map { makeDevice(id: "d\($0)", name: "Device \($0)") }
         let controller = GroupController(backend: MockBackend(fleet: []),
@@ -364,16 +367,17 @@ import AppKit
                                          loadPersisted: false)
         let group = try controller.createGroup(name: "Downstairs", memberIDs: ["d0"],
                                                memberVolumes: [:]).group
-        let window = MixerWindowController(groupController: controller,
-                                           frameAutosaveName: uniqueName("MembershipRailTests"))
+        let window = MixerWindowController(groupController: controller)
+        window.setHostVisible(true)
         window.update(devices: devices)
         window.test_select(.group(id: group.id))
-        window.window?.contentView?.layoutSubtreeIfNeeded()
+        let size = AppSurfaceController.groupsDefaultContentSize
+        let content = window.contentController.view
+        content.setFrameSize(size)
+        content.layoutSubtreeIfNeeded()
 
-        #expect(window.window?.frame.width == MixerWindowController.defaultContentSize.width,
-                "no required content constraint may grow the window past its default width")
-        #expect(window.window?.frame.height == MixerWindowController.defaultContentSize.height,
-                "…nor past its default height")
+        #expect(content.fittingSize.width <= size.width,
+                "no required content constraint may need more than the screen's default width")
         let pane = window.test_editor.view.frame
         #expect(pane.width > 0)
         #expect(window.test_editor.view.fittingSize.height <= pane.height,

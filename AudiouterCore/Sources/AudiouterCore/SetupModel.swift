@@ -453,7 +453,7 @@ public final class SetupModel {
     /// it just adds a disabled entry to Login Items. The user-facing step is
     /// the *approval* afterwards, which `.requiresApproval` surfaces. Called
     /// once, at onboarding load (mirrors the design doc's "at first launch").
-    /// Idempotent — safe to call again (e.g. "Check Permissions…").
+    /// Idempotent — safe to call again (e.g. "Open Setup…").
     ///
     /// NOTE (Developer-ID gating): under this branch's ad-hoc signing,
     /// `register()` cannot validate and this will not progress past

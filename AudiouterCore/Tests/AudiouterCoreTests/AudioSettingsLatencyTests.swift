@@ -6,12 +6,13 @@ import AppKit
 @testable import AudiouterCore
 @testable import AudiouterSettingsUI
 
-/// The Advanced › Audio buffer control (PLAN-LATENCY-SETTING.md), driven
-/// through the pane's `test_` hooks — same headless discipline as
-/// `SettingsWindowControllerTests`. The apply CHOREOGRAPHY (remove-all → set →
-/// re-add) is `NativeBackendTests`' job; here we assert the pane's contract:
-/// section presence, numeric labels, CTA arming, the apply round-trip, and the
-/// env-override disabled state.
+/// The Advanced › Audio buffer control (PLAN-LATENCY-SETTING.md; V1 immediate
+/// apply, PLAN-ONE-SURFACE-032.md), driven through the pane's `test_` hooks —
+/// same headless discipline as `SettingsRootViewControllerTests`. The apply
+/// CHOREOGRAPHY (remove-all → set → re-add) is `NativeBackendTests`' job; here
+/// we assert the pane's contract: section presence, numeric labels, that a
+/// popup selection applies exactly once, that reselecting the current value
+/// is a no-op, and the env-override disabled state.
 @MainActor
 @Suite struct AudioSettingsLatencyTests {
 
@@ -61,55 +62,47 @@ import AppKit
         }
     }
 
-    @Test func changingSelectionArmsTheCTAWithContextualTitle() {
-        let recorder = ApplyRecorder()
-        let pane = makePane(recorder: recorder)
-
-        // Unchanged selection: disarmed "Apply Settings".
-        #expect(!pane.test_applyButtonEnabled)
-        #expect(pane.test_applyButtonTitle == "Apply Settings")
-
-        // Changed while idle: armed, still "Apply Settings" (instant, no gap).
-        pane.test_selectLatencyOption(ms: 1500)
-        #expect(pane.test_applyButtonEnabled)
-        #expect(pane.test_applyButtonTitle == "Apply Settings")
-
-        // Changed while streaming: armed and warns about the reconnect.
-        recorder.streaming = true
-        pane.test_selectLatencyOption(ms: 2250)
-        #expect(pane.test_applyButtonEnabled)
-        #expect(pane.test_applyButtonTitle == "Apply & Reconnect")
-
-        // Back to the applied value: disarmed again.
-        pane.test_selectLatencyOption(ms: 1000)
-        #expect(!pane.test_applyButtonEnabled)
-    }
-
-    @Test func applyRoundTripInvokesModelAndDisarms() async {
+    @Test func selectingANewValueAppliesExactlyOnce() async {
         let recorder = ApplyRecorder()
         recorder.streaming = true
         let pane = makePane(recorder: recorder)
 
-        pane.test_selectLatencyOption(ms: 1500)
-        await pane.test_apply()
+        await pane.test_selectLatencyOption(ms: 1500)
 
-        #expect(recorder.applied == [1500])
-        #expect(!pane.test_applyButtonEnabled, "applied value == pending → disarmed")
+        #expect(recorder.applied == [1500], "one apply, with the chosen value")
         #expect(pane.test_bufferPopupEnabled, "popup re-enabled after apply")
         #expect(pane.test_applyStatusText == "Speakers reconnected")
+    }
 
-        // A second apply without a new change is a no-op.
-        await pane.test_apply()
+    @Test func reselectingTheCurrentValueDoesNotApply() async {
+        let recorder = ApplyRecorder()
+        let pane = makePane(recorder: recorder, initialMs: 1000)
+
+        // Same value the pane already started on: no apply fires.
+        await pane.test_selectLatencyOption(ms: 1000)
+        #expect(recorder.applied.isEmpty, "reselecting the current value must not apply")
+
+        // A genuine change still applies normally afterward.
+        await pane.test_selectLatencyOption(ms: 1500)
         #expect(recorder.applied == [1500])
+
+        // And the newly-applied value is itself now a no-op reselection.
+        await pane.test_selectLatencyOption(ms: 1500)
+        #expect(recorder.applied == [1500], "reselecting the just-applied value must not re-apply")
     }
 
     @Test func applyWhileIdleShowsPlainConfirmation() async {
         let recorder = ApplyRecorder()
         let pane = makePane(recorder: recorder)
-        pane.test_selectLatencyOption(ms: 2250)
-        await pane.test_apply()
+        await pane.test_selectLatencyOption(ms: 2250)
         #expect(recorder.applied == [2250])
         #expect(pane.test_applyStatusText == "Applied")
+    }
+
+    @Test func hintStatesTheReconnectCost() {
+        let pane = makePane(recorder: ApplyRecorder())
+        #expect(pane.test_bufferHint.localizedCaseInsensitiveContains("reconnects"),
+                      "the hint must state the cost of changing the buffer up front — no CTA left to carry it: \(pane.test_bufferHint)")
     }
 
     @Test func envOverrideRendersDisabled() {
@@ -117,33 +110,23 @@ import AppKit
         #expect(pane.test_hasLatencySection)
         #expect(!pane.test_bufferPopupEnabled)
         #expect(pane.test_latencyOptionTitles.count == 1, "env mode shows just the env value")
-        #expect(!pane.test_applyButtonEnabled, "no armable CTA in env-override mode")
     }
 
-    @Test func windowControllerPassesModelThrough() {
-        let suite = "AudiouterTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defaults.removePersistentDomain(forName: suite)
+    /// A latency-bearing Audio pane mounted on the root (the surface's
+    /// Settings screen, post-U5): the section renders and the measured Audio
+    /// tab size is real — i.e. the model survives the assembly the app does in
+    /// `AppDelegate.makeSettingsRoot`.
+    @Test func rootMeasuresTheLatencyBearingAudioPane() {
         let model = LatencySettingModel(
             optionsMs: AppSettings.startBufferOptionsMs, initialMs: 1000,
             envOverrideMs: nil, isStreaming: { false }, apply: { _ in })
-        let controller = SettingsWindowController(
-            settings: AppSettings(defaults: defaults),
-            loginItem: NoopLoginItem(),
-            excludedApps: makeExcluded(),
-            runningAppsProvider: { [] },
-            latency: model)
-        #expect(controller.test_audio.test_hasLatencySection)
-        // `test_contentFittingSize` measures the SELECTED tab, and the Audio
-        // tab isn't selected by default (the window always opens on General) —
-        // select it first or this asserts General's height, not the Audio
-        // pane's.
-        controller.test_selectTab(at: 2)
-        #expect(controller.test_contentFittingSize.height > 100)
-    }
-
-    private final class NoopLoginItem: LoginItemManaging {
-        var isEnabled: Bool { false }
-        func setEnabled(_ newValue: Bool) throws {}
+        let audio = AudioSettingsViewController(
+            excluded: makeExcluded(), runningAppsProvider: { [] }, latency: model)
+        let root = SettingsRootViewController(tabs: [
+            .init(title: "Audio", symbolName: "speaker.wave.2", viewController: audio),
+        ], tabStyle: .segmentedControlOnTop)
+        #expect(audio.test_hasLatencySection)
+        root.selectTab(at: 0)
+        #expect(root.fittedContentSize.height > 100)
     }
 }

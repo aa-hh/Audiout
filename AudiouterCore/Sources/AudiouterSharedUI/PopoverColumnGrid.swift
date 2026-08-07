@@ -493,7 +493,9 @@ public enum PopoverColumnGrid {
     // The Applications card's single-selection model (± footer controls,
     // context-menu remove, Delete/Backspace) needs a selected-row highlight
     // distinct from `DeviceRowView`'s membership/hover pill. Named here per
-    // house rule (no magic numbers) even though today only `AppRowView` draws it.
+    // house rule (no magic numbers) — `DeviceRowView` and `GroupRowView`'s own
+    // hover/selection pills (V10) now also draw from these same constants
+    // instead of retyping the same numbers.
 
     /// Horizontal/vertical inset of the selection-highlight rounded rect from
     /// the row's bounds — matches `DeviceRowView`'s hover/selection pill inset.

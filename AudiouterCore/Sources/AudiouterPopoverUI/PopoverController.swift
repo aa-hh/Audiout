@@ -102,8 +102,11 @@ private final class ApplicationsFooterView: NSView {
     func test_tapRemove() { onRemove?() }
 }
 
-/// Builds and owns the status-item **`NSPopover`** dropdown (SPEC §9 revised —
-/// NSMenu → NSPopover; SoundSource-inspired Main Out model, 2026-07-14b).
+/// Builds and owns the **Mixer panel** (SPEC §9 revised — SoundSource-inspired
+/// Main Out model, 2026-07-14b). The panel is put on screen by the one-surface
+/// host (`AppSurfaceController`), which claims it via
+/// ``claimPanelForSurfaceHosting()``; this controller never presents anything
+/// itself.
 ///
 /// Structure, top to bottom:
 /// 1. **System section — a single "Main Out" row** (`MainOutRowView`): speaker
@@ -125,9 +128,7 @@ private final class ApplicationsFooterView: NSView {
 /// All group/master/mute/selection arithmetic goes through the injected
 /// `GroupController` (UI-agnostic, unit-tested in core). `@MainActor`.
 @MainActor
-public final class PopoverController: NSObject, NSPopoverDelegate {
-
-    public let popover = NSPopover()
+public final class PopoverController: NSObject {
 
     private var groupController: GroupController?
     private var devicesByID: [String: Device] = [:]
@@ -187,15 +188,6 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// updates, Main Out selection, etc.) leaves the transient state alone.
     private var isRebuildingForOpen = false
 
-    /// Called when the user picks "Open Mixer…", the header's "Open Groups editor"
-    /// button (task A — group membership editing lives in the mixer window), or
-    /// otherwise wants the mixer window shown.
-    public var onOpenMixer: (() -> Void)?
-
-    /// Called when the user taps the header's Settings button (task A). The app
-    /// wires this to open the Settings window.
-    public var onOpenSettings: (() -> Void)?
-
     /// Called when the user taps the takeover status strip's "Open Login
     /// Items…" button (T6, state 1). The app wires this to
     /// `PTPHelperManaging.openSystemSettingsLoginItems()` — the same seam
@@ -215,8 +207,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// the button, if ever rendered, taps into nothing.
     public var onReselectAudiouter: (() -> Void)?
 
-    /// Called with `true` on `popoverDidShow` and `false` on `popoverDidClose`
-    /// (T-GATE): the metering-active gate. The app wires this to
+    /// Called with `true` on `surfaceDidShow()` and `false` on
+    /// `surfaceDidHide()` (T-GATE): the metering-active gate. The app wires this to
     /// `(backend as? MeteringControlling)?.setMeteringActive(_:)` so the backend
     /// only computes/emits `.level` while a user can actually see a meter. `nil`
     /// means "no backend adopts the capability" — the popover works exactly the
@@ -344,8 +336,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     /// Active only while the popover is open: a local mouse-down monitor that
     /// clears `selectedAppBundleID` when the user clicks outside any app row or
-    /// the ± footer (deselect-on-outside-click). Installed in `popoverDidShow`,
-    /// removed in `popoverDidClose`.
+    /// the ± footer (deselect-on-outside-click). Installed in `surfaceDidShow()`,
+    /// removed in `surfaceDidHide()`.
     private var deselectClickMonitor: Any?
 
     /// The Applications card's ± footer row (T3, LOCKED DECISION — replaces
@@ -439,19 +431,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         self.appRouting = appRouting
         self.runningAppsProvider = runningAppsProvider
         super.init()
-        popover.behavior = .transient
-        popover.animates = true
-        popover.delegate = self
-        popover.contentViewController = panel
         panel.controller = self
         mainOutRow.delegate = self
-        // Header bar actions (task A): the "Open Groups editor" button opens the
-        // mixer window (where group membership editing lives); Settings forwards
-        // to `onOpenSettings` (the app wires it to the Settings window).
-        panel.setHeaderActions(
-            onOpenGroupsEditor: { [weak self] in self?.onOpenMixer?() },
-            onOpenSettings: { [weak self] in self?.onOpenSettings?() },
-            onQuit: { NSApp.terminate(nil) })
         applicationsFooter.onAdd = { [weak self] in
             guard let self else { return }
             self.presentAddApplicationPicker(relativeTo: self.applicationsFooter)
@@ -797,65 +778,64 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     // MARK: Show / hide
 
-    /// Headless test seam: an `NSPopover` can never actually show under `swift
-    /// test`, so tests flip this to exercise the shown-path repaint semantics
-    /// (the view tree IS the test suite's rendering surface). Production code
-    /// never sets it. `toggle(relativeTo:)` and `setPopoverAnimates` still key
-    /// off the real `popover.isShown` — this only affects repaint routing.
+    /// Whether the HOST currently has this panel on screen. Owned by
+    /// ``surfaceDidShow()`` / ``surfaceDidHide()`` — the two calls a host makes
+    /// around putting the panel on/off screen.
+    private var hostIsShown = false
+
+    /// Headless test seam: no host can actually put the panel on screen under
+    /// `swift test`, so tests flip this to exercise the shown-path repaint
+    /// semantics (the view tree IS the test suite's rendering surface).
+    /// Production code never sets it.
     public var test_isShownOverride = false
-    private var isEffectivelyShown: Bool { popover.isShown || test_isShownOverride }
+
+    /// The ONE visibility question this controller asks. Every
+    /// skip-work-while-hidden gate reads this and nothing else, which is what
+    /// lets any host present the same panel content.
+    private var isEffectivelyShown: Bool { hostIsShown || test_isShownOverride }
 
     /// Total `rebuild()` calls, for tests asserting a closed popover does NOT
     /// rebuild per backend event (audit B8).
     public private(set) var test_rebuildCount = 0
 
-    public func toggle(relativeTo button: NSStatusBarButton) {
-        if popover.isShown {
-            popover.performClose(nil)
-        } else {
-            rebuildForOpen()
-            // Exact-fit initial size (T-3): settle layout and set the popover's
-            // content size while it is still HIDDEN, so it opens at exactly the
-            // content height with no scrollbar (PLAN-POPOVER-ROUTING.md §E risk 1 —
-            // non-animated path for initial show). A `preferredContentSize` change
-            // on a not-yet-shown popover never animates, so this is safe to do with
-            // `animates` left true — the show fade below still plays; only later,
-            // IN-PLACE resizes (T-4 expand/collapse) animate the frame.
-            panel.panelContentDidChangeHeight(animated: false)
-            // Never actually present under `swift test`/a headless tool
-            // (`HeadlessRuntime`) — those hold a real WindowServer connection,
-            // so an un-gated `popover.show` would flash a real window on the
-            // developer's actual screen. No test/tool currently calls
-            // `toggle()` (real presentation only happens from the live app's
-            // status-item click), but gate it for defense-in-depth.
-            guard !HeadlessRuntime.isActive else { return }
-            NSApp.activate(ignoringOtherApps: true)
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        }
+    /// The host's resize behavior. A host assigns this to run `apply` (the
+    /// `preferredContentSize` assignment) inside whatever animation IT uses to
+    /// follow the panel's new size — the surface assigns it at claim time to
+    /// resize its shell window. `nil` means NO host is following the panel
+    /// (pre-claim, or headless tests/tools): the size change applies
+    /// immediately with no animation, which is exactly right for a panel
+    /// nothing is showing.
+    var surfaceResizer: ((_ animated: Bool, _ apply: () -> Void) -> Void)?
+
+    /// Hand the panel to the one-surface host (U3, `AppSurfaceController`) —
+    /// the single door through which a host may take the panel. A plain
+    /// accessor today, but the name is the contract: taking the panel is a
+    /// CLAIM (the caller must install `surfaceResizer` and run the open
+    /// ritual), not a peek — so `panel` itself stays private.
+    func claimPanelForSurfaceHosting() -> PopoverPanelViewController {
+        panel
     }
 
-    /// Set the popover's resize animation for the NEXT `preferredContentSize`
-    /// change, then restore. The panel's resize primitive
+    /// Apply the panel's next `preferredContentSize` change with the current
+    /// host's resize animation. The panel's resize primitive
     /// (`panelContentDidChangeHeight`) calls this so the DOCUMENTED
     /// `preferredContentSize` size channel animates (or not) exactly as the caller
-    /// asked — `NSPopover` animates a `preferredContentSize` change iff `animates`
-    /// is true (T-3, PLAN §E risk 1). The panel owns no `NSPopover` reference; this
-    /// controller does. Only meaningful while the popover is shown; a resize on a
-    /// hidden popover never animates, so this is a no-op then (and must NOT clobber
-    /// `animates`, which also gates the show/hide fade). The `apply` closure makes
-    /// the size assignment inside the temporarily-set flag.
-    func setPopoverAnimates(_ animates: Bool, whileApplying apply: () -> Void) {
-        guard popover.isShown else { apply(); return }
-        let previous = popover.animates
-        popover.animates = animates
+    /// asked; the panel itself holds no reference to any host.
+    func applySurfaceResize(animated: Bool, whileApplying apply: () -> Void) {
+        if let surfaceResizer {
+            surfaceResizer(animated, apply)
+            return
+        }
         apply()
-        popover.animates = previous
     }
 
     /// Rebuild as an OPEN (T-5, PLAN §B): recompute every collapsible card's
     /// default and discard manual toggles from the previous open, THEN rebuild.
-    /// Shared by `toggle()`'s show path and `test_simulateOpen()`.
-    private func rebuildForOpen() {
+    /// Shared by `test_simulateOpen()` and the surface host's mount path
+    /// (`AppSurfaceController`), which must run this open ritual before
+    /// putting the panel on screen (hidden means idle, so an open re-ingests
+    /// everything that arrived meanwhile).
+    func rebuildForOpen() {
         isRebuildingForOpen = true
         transientCollapsed.removeAll()
         rebuild()
@@ -903,8 +883,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
         // 2. Selected Devices card — split into Current Device + AirPlay. ALWAYS
         // present now (V2): when no devices have been discovered yet the card
-        // still builds, showing a single non-interactive "Looking for devices…"
-        // placeholder so it never silently vanishes.
+        // still builds, showing a single non-interactive "Looking for
+        // speakers…" placeholder (§5.9) so it never silently vanishes.
         let locals = allDevices.filter(\.isLocalDevice)
         let airplay = allDevices.filter { !$0.isLocalDevice }
         devicesPlaceholderShown = false
@@ -938,7 +918,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             panel.addCardNote(note)
         }
         if locals.isEmpty && airplay.isEmpty {
-            panel.addRow(makePlaceholderRow(text: "Looking for devices…"))
+            panel.addRow(makePlaceholderRow(text: Self.devicesEmptyPlaceholderText))
             devicesPlaceholderShown = true
         } else {
             if !locals.isEmpty {
@@ -996,7 +976,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // show a single non-interactive placeholder BEFORE the ± footer.
         applicationsPlaceholderShown = false
         if renderedRoutes.isEmpty {
-            panel.addRow(makePlaceholderRow(text: "No apps routed — use + below to route an app."))
+            panel.addRow(makePlaceholderRow(text: Self.applicationsEmptyPlaceholderText))
             applicationsPlaceholderShown = true
         }
         applicationsFooter.isRemoveEnabled = selectedAppBundleID != nil
@@ -1042,6 +1022,16 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// The Applications card's title, so its default is keyed identically to
     /// every other card even though the card itself isn't built yet (T-8).
     static let applicationsCardTitle = "App Exceptions"
+
+    /// Warm Signal §5.9's locked empty-state copy for the Devices card. Shown
+    /// while nothing has been discovered yet; §5.9 also specs a distinguishable
+    /// "none found" resting state hinting at Local Network permission, but this
+    /// layer has no discovery-completion signal to tell "still looking" apart
+    /// from "genuinely none" — see the AGENTS.md note on this gap.
+    static let devicesEmptyPlaceholderText = "Looking for speakers…"
+    /// Warm Signal §5.9's locked empty-state copy for the Applications card.
+    static let applicationsEmptyPlaceholderText =
+        "Route one app somewhere else — music to the house, calls on your Mac. Use + to pick an app."
 
     /// The collapsed state `rebuild()` should hand `beginCard` for the card
     /// titled `title`: on an OPEN-triggered rebuild, the freshly computed
@@ -1547,8 +1537,9 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     }
 
     /// A non-interactive placeholder body row (V2 Devices empty state / V11
-    /// Applications empty state): `text` in a tertiary-label, row-height view
-    /// whose label leading edge aligns with the name column (past the icon).
+    /// Applications empty state; copy carried by both to the §5.9 spec text
+    /// under V9): `text` in a tertiary-label, row-height view whose label
+    /// leading edge aligns with the name column (past the icon).
     private func makePlaceholderRow(text: String) -> NSView {
         let label = NSTextField(labelWithString: text)
         label.translatesAutoresizingMaskIntoConstraints = false
@@ -2223,9 +2214,9 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         deviceRowsByID[id]
     }
 
-    /// Simulate the popover being opened (T-5): recomputes collapse defaults and
-    /// discards this open's manual toggles, exactly like `toggle()`'s show path,
-    /// without needing a real `NSStatusBarButton`/`NSPopover.show`.
+    /// Simulate the panel being opened (T-5): recomputes collapse defaults and
+    /// discards this open's manual toggles, exactly like the surface's Mixer
+    /// mount path, without needing a real host to show anything.
     public func test_simulateOpen() { rebuildForOpen() }
 
     // MARK: Running-app picker test hooks (T-7)
@@ -2313,28 +2304,29 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// Main Out selector's group-routing entries — a saved group becomes a
     /// destination even though the popover no longer renders a Groups section).
     public var test_saveCurrentSetupEnabled: Bool { canSaveCurrentSetup }
-    public var test_headerHasQuit: Bool { panel.test_headerHasQuit }
 
-    // Header (task A) test hooks.
-    public var test_headerTitle: String { panel.header.test_title }
-    public var test_headerGroupsButtonHasImage: Bool { panel.header.test_groupsButtonHasImage }
-    public var test_headerSettingsButtonHasImage: Bool { panel.header.test_settingsButtonHasImage }
-    /// Simulate tapping the header's "Open Groups editor" button.
-    public func test_tapHeaderGroupsEditor() { panel.header.test_tapGroupsEditor() }
-    /// Simulate tapping the header's Settings button.
-    public func test_tapHeaderSettings() { panel.header.test_tapSettings() }
+    /// The panel content's extra top inset (the surface seats the card stack
+    /// below the window's toolbar strip) — public because `popover-harness`
+    /// reads it through the non-testable import.
+    public var test_panelContentTopInset: CGFloat { panel.test_contentTopInset }
 
     /// Count of device rows in the Selected Devices section.
     public var test_deviceSectionRowCount: Int { deviceRowsByID.count }
 
     // MARK: Empty-state / card-note / accessory test hooks (V2 / V11 / A1 / F1)
 
-    /// Whether the Devices card's "Looking for devices…" placeholder is currently
+    /// Whether the Devices card's "Looking for speakers…" placeholder is currently
     /// mounted (V2).
     public var test_devicesPlaceholderShown: Bool { devicesPlaceholderShown }
-    /// Whether the Applications card's "No apps routed…" placeholder is currently
+    /// Whether the Applications card's empty-state placeholder is currently
     /// mounted (V11).
     public var test_applicationsPlaceholderShown: Bool { applicationsPlaceholderShown }
+    /// The Devices card's empty-state copy (§5.9) — pinned so a future edit
+    /// can't silently drift from the spec text.
+    public static var test_devicesPlaceholderText: String { devicesEmptyPlaceholderText }
+    /// The Applications card's empty-state copy (§5.9) — pinned so a future
+    /// edit can't silently drift from the spec text.
+    public static var test_applicationsPlaceholderText: String { applicationsEmptyPlaceholderText }
     /// The card-note texts (`addCardNote`) for `title`, in add order — the A1
     /// dormancy annotation's assertion surface.
     public func test_cardNoteTexts(title: String) -> [String] {
@@ -2666,12 +2658,21 @@ extension PopoverController: AppRowView.Delegate {
     //      it — empty space, a device row, the header, etc. all deselect, like
     //      clicking away from a table row.
 
-    public func popoverDidShow(_ notification: Notification) {
+    /// The host just put the panel on screen. Records visibility (so every
+    /// skip-work-while-hidden gate opens), arms the deselect monitor, and turns
+    /// the backend's RMS computation on.
+    func surfaceDidShow() {
+        hostIsShown = true
         installDeselectMonitor()
         onMeteringActiveChange?(true)
     }
 
-    public func popoverDidClose(_ notification: Notification) {
+    /// The host just took the panel off screen. The mirror of
+    /// ``surfaceDidShow()``, plus the two things that must not survive a
+    /// session: the transient app-row selection, and every meter's last
+    /// reading (a reopen must never show a stale bar).
+    func surfaceDidHide() {
+        hostIsShown = false
         removeDeselectMonitor()
         selectedAppBundleID = nil
         for row in deviceRowsByID.values { row.resetLevel() }
@@ -2689,15 +2690,15 @@ extension PopoverController: AppRowView.Delegate {
     /// Push a live RMS reading for device `id` into its row's meter, and into
     /// the Main Out master meter when `id` is currently selected (Main Out
     /// shares the same level feed as its member device rows, task T4a).
-    /// Early-returns while the popover isn't shown — metering only matters
+    /// Early-returns while the panel isn't shown — metering only matters
     /// while a user can see it.
     public func updateLevel(_ rms: Float, for id: String) {
-        guard popover.isShown else { return }
+        guard isEffectivelyShown else { return }
         dispatchLevel(rms, for: id)
     }
 
-    /// Same dispatch as ``updateLevel(_:for:)`` but WITHOUT the `isShown`
-    /// gate — headless snapshots/tests never actually show the popover.
+    /// Same dispatch as ``updateLevel(_:for:)`` but WITHOUT the visibility
+    /// gate — headless snapshots/tests never actually show the panel.
     public func test_pushLevel(_ rms: Float, for id: String) {
         dispatchLevel(rms, for: id)
     }
@@ -2712,15 +2713,15 @@ extension PopoverController: AppRowView.Delegate {
     /// Push a live RMS reading for the app with `bundleID` into its
     /// Applications-row meter (task T5). Unlike device levels, an app level
     /// never feeds Main Out — Main Out mirrors the SELECTED DEVICE's level,
-    /// not any one app's contribution. Early-returns while the popover isn't
+    /// not any one app's contribution. Early-returns while the panel isn't
     /// shown, mirroring ``updateLevel(_:for:)``.
     public func updateAppLevel(_ rms: Float, for bundleID: String) {
-        guard popover.isShown else { return }
+        guard isEffectivelyShown else { return }
         dispatchAppLevel(rms, for: bundleID)
     }
 
-    /// Same dispatch as ``updateAppLevel(_:for:)`` but WITHOUT the `isShown`
-    /// gate — headless snapshots/tests never actually show the popover.
+    /// Same dispatch as ``updateAppLevel(_:for:)`` but WITHOUT the visibility
+    /// gate — headless snapshots/tests never actually show the panel.
     public func test_pushAppLevel(_ rms: Float, for bundleID: String) {
         dispatchAppLevel(rms, for: bundleID)
     }
@@ -2753,7 +2754,7 @@ extension PopoverController: AppRowView.Delegate {
     /// synchronous rebuild here would destroy the very view being clicked.
     private func deselectIfClickOutsideSelectedRow(_ event: NSEvent) {
         guard selectedAppBundleID != nil,
-              let window = popover.contentViewController?.view.window,
+              let window = panel.view.window,
               event.window === window else { return }
         let hit = window.contentView?.hitTest(event.locationInWindow)
         if let hit,

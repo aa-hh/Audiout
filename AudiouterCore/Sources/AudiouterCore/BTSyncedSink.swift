@@ -875,7 +875,10 @@ final class BTSyncedSink: @unchecked Sendable {
     /// lip-sync — Decision 1).
     static let defaultBTOnlyBufferMs = 500
 
-    private let renderSampleRate: Double
+    /// Internal (not `private`) — ``SyncedLocalPCMSink``'s requirement: the
+    /// capture fan-out reads it to build the base-rate converter that feeds
+    /// `enqueue` (identity at the default airplay rate).
+    let renderSampleRate: Double
     private let channelCount: Int
     private let btOnlyBufferMs: Int
     /// The LIVE AirPlay presentation delay (`currentPresentationDelayMs()` in
@@ -1041,3 +1044,8 @@ final class BTSyncedSink: @unchecked Sendable {
         tableLock.withLock { sinksByUID[uid] }
     }
 }
+
+/// The manager IS a fan-out target (BT-FANOUT): `enqueue`/`renderSampleRate`
+/// already match the protocol, so `NativeCaptureCoordinator.setBTSink` feeds it
+/// through the same seam the synced-local sink uses.
+extension BTSyncedSink: SyncedLocalPCMSink {}

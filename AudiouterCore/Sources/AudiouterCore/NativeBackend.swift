@@ -7367,6 +7367,11 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// Default no-op so a capture-gate-only fake compiles unchanged;
     /// ``NativeCaptureCoordinator`` provides the real one.
     func setSyncedLocalSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?)
+
+    /// Attach/detach the Bluetooth sink-manager fan-out (BT-FANOUT) — same
+    /// contract as `setSyncedLocalSink`, one slot per consumer. Default no-op;
+    /// ``NativeCaptureCoordinator`` provides the real one.
+    func setBTSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?)
 }
 
 extension CaptureControlling {
@@ -7387,6 +7392,8 @@ extension CaptureControlling {
     /// Default no-op (T-FANOUT) so a fake that doesn't exercise the synced-local
     /// sink compiles unchanged; ``NativeCaptureCoordinator`` provides the real one.
     func setSyncedLocalSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {}
+    /// Default no-op (BT-FANOUT), same posture.
+    func setBTSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {}
 }
 
 extension NativeCaptureCoordinator: CaptureControlling {}

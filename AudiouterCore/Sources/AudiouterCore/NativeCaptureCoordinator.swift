@@ -154,24 +154,31 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         let meteringActive: Bool
         let syncedLocalSink: SyncedLocalPCMSink?
         let syncedLocalBaseResampler: SyncedLocalBaseResampler?
+        let btSink: SyncedLocalPCMSink?
+        let btBaseResampler: SyncedLocalBaseResampler?
 
         /// The published value before anything has been started, and the value
         /// every teardown path returns to: no converter, so ``handleBuffer(_:)``
         /// drops the buffer at its first guard.
         static let empty = BufferSnapshot(
             converter: nil, meteringActive: false,
-            syncedLocalSink: nil, syncedLocalBaseResampler: nil)
+            syncedLocalSink: nil, syncedLocalBaseResampler: nil,
+            btSink: nil, btBaseResampler: nil)
 
         init(
             converter: PCMConverting?,
             meteringActive: Bool,
             syncedLocalSink: SyncedLocalPCMSink?,
-            syncedLocalBaseResampler: SyncedLocalBaseResampler?
+            syncedLocalBaseResampler: SyncedLocalBaseResampler?,
+            btSink: SyncedLocalPCMSink?,
+            btBaseResampler: SyncedLocalBaseResampler?
         ) {
             self.converter = converter
             self.meteringActive = meteringActive
             self.syncedLocalSink = syncedLocalSink
             self.syncedLocalBaseResampler = syncedLocalBaseResampler
+            self.btSink = btSink
+            self.btBaseResampler = btBaseResampler
         }
     }
 
@@ -255,6 +262,15 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// Deliberately NOT a ``FractionalResampler`` — that stays the sink's ppm
     /// DRIFT corrector at ratio ≈ 1; base conversion is a distinct step here.
     private var syncedLocalBaseResampler: SyncedLocalBaseResampler?
+
+    /// BT-FANOUT: the Bluetooth sink manager to ALSO feed (the third consumer of
+    /// the same converted PCM+pts), the pid of the process that renders the BT
+    /// sinks' output, and its base-rate converter — the exact trio the
+    /// synced-local fan-out keeps above, one slot per consumer. All
+    /// queue-confined and set together via ``setBTSink(_:renderProcessPID:)``.
+    private var btSink: SyncedLocalPCMSink?
+    private var btRenderPID: pid_t?
+    private var btBaseResampler: SyncedLocalBaseResampler?
 
     /// W1-T7 (Gap 1 + Fix 1): the excluded process-OBJECT set the CURRENT live tap
     /// was last built/recreated against — the compare-before-rebuild key for the
@@ -703,6 +719,52 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         recreateTap(cause: .exclusionChange)
     }
 
+    /// Attach (or detach, with `nil`) the Bluetooth sink-manager fan-out
+    /// (BT-FANOUT): the same converted PCM+pts the engine and the synced-local
+    /// sink receive is also handed to this sink, whose `enqueue` fans it to
+    /// every active per-device BT delay line. `renderProcessPID` is the process
+    /// rendering the BT sinks' output (our own pid — they are in-process
+    /// `AVAudioEngine`s) and joins the tap's exclusion set exactly like the
+    /// synced-local sink's, so delayed BT output is never re-captured as an
+    /// echo (plan risk R-echo).
+    ///
+    /// Unlike ``setSyncedLocalSink(_:renderProcessPID:)``, a pid change here
+    /// never forces an unconditional tap recreate: in production the pid is our
+    /// own process, which the unconditional self-exclude in
+    /// ``resolveExcludedObjectIDsLoggingAttribution(bundleIDs:)`` already covers
+    /// on every tap creation — so the decision is delegated to
+    /// ``rebuildIfExclusionObjectsChanged()``'s compare-before-rebuild, which
+    /// rebuilds only when the RESOLVED object set genuinely changed. Attaching
+    /// mid-capture with an already-excluded pid is therefore rebuild-free (no
+    /// per-BT-toggle tap-rebuild storm), while a genuinely new render process
+    /// still takes effect immediately.
+    public func setBTSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {
+        let checkExclusions: Bool = queue.sync {
+            self.btSink = sink
+            // Fresh converter per attach for the same clean-filter-state reason
+            // `setSyncedLocalSink` documents; identity (bit-exact passthrough)
+            // when the manager renders at the airplay rate.
+            if let sink {
+                self.btBaseResampler = SyncedLocalBaseResampler(
+                    inputRate: Double(PCMFormat.airplay.sampleRate),
+                    outputRate: sink.renderSampleRate,
+                    channelCount: PCMFormat.airplay.channels)
+            } else {
+                self.btBaseResampler = nil
+            }
+            // Republish BEFORE the pid short-circuit below, same T8 discipline
+            // as `setSyncedLocalSink`.
+            self.publishBufferSnapshot()
+            let newPID: pid_t? = (sink == nil) ? nil : renderProcessPID
+            guard newPID != btRenderPID else { return false }
+            btRenderPID = newPID
+            if case .capturing = _state { return true }
+            return false
+        }
+        guard checkExclusions else { return }
+        rebuildIfExclusionObjectsChanged()
+    }
+
     // MARK: Start sequence (on `queue`)
 
     /// Reject a tap format the converter/aggregate can't safely consume before it
@@ -739,6 +801,12 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     private func resolveExcludedProcessObjectIDs() -> Set<AudioObjectID> {   // must hold `queue`
         var result = resolveExcludedObjectIDsLoggingAttribution(bundleIDs: currentExcludedBundleIDs)
         if let renderPID = syncedLocalRenderPID {
+            result.formUnion(processResolver.resolve(pid: renderPID).map(\.objectID))
+        }
+        // BT-FANOUT self-exclude: the BT sinks' render process, same contract
+        // as the synced-local pid above (and equally redundant-but-harmless
+        // whenever it is our own already-self-excluded pid).
+        if let renderPID = btRenderPID {
             result.formUnion(processResolver.resolve(pid: renderPID).map(\.objectID))
         }
         return result
@@ -836,9 +904,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// a stale baseline that suppresses a later one. Recreates as a benign
     /// `.exclusionChange` (device/clock unchanged → no AirPlay session reset).
     private func rebuildIfExclusionObjectsChanged() {
-        let snapshot: (bundleIDs: Set<String>, renderPID: pid_t?)? = queue.sync {
+        let snapshot: (bundleIDs: Set<String>, renderPID: pid_t?, btPID: pid_t?)? = queue.sync {
             guard case .capturing = _state else { return nil }
-            return (currentExcludedBundleIDs, syncedLocalRenderPID)
+            return (currentExcludedBundleIDs, syncedLocalRenderPID, btRenderPID)
         }
         guard let snapshot else { return }
 
@@ -848,13 +916,17 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         if let renderPID = snapshot.renderPID {
             newObjects.formUnion(processResolver.resolve(pid: renderPID).map(\.objectID))
         }
+        if let btPID = snapshot.btPID {
+            newObjects.formUnion(processResolver.resolve(pid: btPID).map(\.objectID))
+        }
 
         let needsRecreate: Bool = queue.sync {
             guard case .capturing = _state else { return false }
             // Inputs unchanged since the snapshot, else a concurrent
-            // updateRouting/setSyncedLocalSink already owns the rebuild.
+            // updateRouting/setSyncedLocalSink/setBTSink already owns the rebuild.
             guard currentExcludedBundleIDs == snapshot.bundleIDs,
-                  syncedLocalRenderPID == snapshot.renderPID else { return false }
+                  syncedLocalRenderPID == snapshot.renderPID,
+                  btRenderPID == snapshot.btPID else { return false }
             guard newObjects != lastExcludedObjects else { return false } // COMPARE-BEFORE-REBUILD
             return true
         }
@@ -949,7 +1021,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             converter: converter,
             meteringActive: meteringActive,
             syncedLocalSink: syncedLocalSink,
-            syncedLocalBaseResampler: syncedLocalBaseResampler)
+            syncedLocalBaseResampler: syncedLocalBaseResampler,
+            btSink: btSink,
+            btBaseResampler: btBaseResampler)
         snapshotLock.lock()
         _bufferSnapshot = snapshot
         snapshotLock.unlock()
@@ -1015,6 +1089,18 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // can't loop back as an echo.
         if let syncedSink, let baseResampler {
             Self.fanOutToSyncedLocal(pcm, pts: buffer.pts, into: syncedSink, resampler: baseResampler)
+        }
+
+        // BT-FANOUT: the third consumer of the identical converted PCM+pts —
+        // the Bluetooth sink manager, whose `enqueue` fans one block to every
+        // active per-device delay line. Same widen/base-resample helper, its
+        // own resampler instance (streaming filter state is per-consumer).
+        // Gated exactly like the synced-local fan-out above; the BT sinks'
+        // render process is excluded from this tap
+        // (``resolveExcludedProcessObjectIDs()``) so their delayed output
+        // can't loop back as an echo.
+        if let btSink = snapshot.btSink, let btResampler = snapshot.btBaseResampler {
+            Self.fanOutToSyncedLocal(pcm, pts: buffer.pts, into: btSink, resampler: btResampler)
         }
 
         // Level pass-through: compute RMS on the CONVERTED S16LE buffer once, for

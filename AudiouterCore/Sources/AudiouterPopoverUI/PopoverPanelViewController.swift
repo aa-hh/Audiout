@@ -474,12 +474,14 @@ final class PopoverPanelViewController: NSViewController {
             // The trailing header accessory (task D — the Groups "+"; F1 — the
             // button is kept alive and keyed by header title so the host can
             // enable/disable it in place later via `setAccessoryEnabled`, without
-            // rebuilding the card). Styled with the same stock bezel
-            // (`bezelStyle = .smallSquare`) as the header icon buttons
-            // (`PopoverHeaderView`).
+            // rebuilding the card). Styled with `.accessoryBar` bezel and
+            // hover-only border, matching the header icon buttons in
+            // `PopoverHeaderView`.
             let button = NSButton()
             button.translatesAutoresizingMaskIntoConstraints = false
-            button.bezelStyle = .smallSquare
+            button.bezelStyle = .accessoryBar
+            button.isBordered = true
+            button.showsBorderOnlyWhileMouseInside = true
             button.imagePosition = .imageOnly
             button.imageScaling = .scaleProportionallyDown
             button.contentTintColor = Tokens.Color.secondaryLabel

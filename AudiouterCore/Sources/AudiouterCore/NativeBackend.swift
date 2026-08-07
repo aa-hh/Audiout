@@ -76,6 +76,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// engine — structurally unroutable until BT-BACKEND partitions the output
     /// set (plan risk R-partition).
     private let btEnumerator: BTDeviceEnumerating?
+    /// BT-CONNECT: IOBluetooth connect/disconnect for paired BT speakers.
+    /// `nil` under most tests (like `btEnumerator`), which keeps every BT
+    /// reconnect path inert unless a fake is injected.
+    private let btConnectionManager: BTConnectionManaging?
 
     /// The Mac's own default-output volume/mute. This is the ONLY control path the
     /// local device row (``localDeviceID``) has: the Mac is the thing *sending*
@@ -1138,6 +1142,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             engineControl: EngineAdapter(engine: engine),
             discoverySource: discovery,
             btEnumerator: BTDeviceEnumerator(),
+            btConnectionManager: BTConnectionManager(),
             processResolver: processResolver,
             defaultOutputSwitcher: DefaultOutputSwitcher())
     }
@@ -1175,6 +1180,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         engineControl: EngineControlling,
         discoverySource: DiscoverySource,
         btEnumerator: BTDeviceEnumerating? = nil,
+        btConnectionManager: BTConnectionManaging? = nil,
         dacpEndpoint: DACPEndpoint = DACPServer(),
         systemVolume: SystemVolumeControlling = SystemOutputVolume(),
         ptpHelperActivator: PTPHelperActivating = PTPHelperActivator(),
@@ -1215,6 +1221,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.engine = engineControl
         self.discovery = discoverySource
         self.btEnumerator = btEnumerator
+        self.btConnectionManager = btConnectionManager
         self.dacpServer = dacpEndpoint
         self.systemVolume = systemVolume
         self.ptpHelperActivator = ptpHelperActivator
@@ -1427,6 +1434,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self?.stateQueue.async { self?.applyBTSnapshots(snapshots) }
             }
             btEnumerator.start()
+        }
+
+        // 1a-CONNECT: IOBluetooth connect/disconnect edges re-enumerate right
+        //     away — the baseband edge lands before the Core Audio device-list
+        //     listener echoes the endpoint appearing/vanishing, so the row's
+        //     greyed state moves as fast as the OS knows. TCC-gated inside the
+        //     manager (an ungranted IOBluetooth touch kills the process).
+        if let btConnectionManager {
+            btConnectionManager.onConnectionsChanged = { [weak self] in
+                self?.btEnumerator?.refresh()
+            }
+            btConnectionManager.startObservingConnections()
         }
 
         // 1b. TWO-WAY SYNC for the local row. Its slider/mute ARE the Mac's default
@@ -1747,6 +1766,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         discovery.stop()
         btEnumerator?.onSnapshot = nil
         btEnumerator?.stop()
+        btConnectionManager?.onConnectionsChanged = nil
+        btConnectionManager?.stopObservingConnections()
         // Drop the local row's two-way sync (the row itself is removed below).
         systemVolume.onExternalChange = nil
         systemVolume.stop()

@@ -79,6 +79,10 @@ protocol BTDeviceEnumerating: AnyObject, Sendable {
     var onSnapshot: (@Sendable ([BTDeviceSnapshot]) -> Void)? { get set }
     func start()
     func stop()
+    /// Re-enumerate now, emitting if the merged list changed — the IOBluetooth
+    /// connect/disconnect notification hook (BT-CONNECT) calls this so a
+    /// baseband edge lands before the Core Audio device-list listener echoes it.
+    func refresh()
 }
 
 // MARK: - Enumerator
@@ -219,8 +223,9 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
     /// but can never be claimed by a paired record). Works on any of the
     /// observed formats — `aa-bb-cc-dd-ee-ff`, `AA:BB:CC:DD:EE:FF`, and Core
     /// Audio's `AA-BB-CC-DD-EE-FF:output` — because neither the separators nor
-    /// the `output`/`input` suffix contain hex characters.
-    private static func macKey(_ s: String?) -> String? {
+    /// the `output`/`input` suffix contain hex characters. Internal (not
+    /// `private`): ``BTConnectionManager``'s endpoint probe matches on it too.
+    static func macKey(_ s: String?) -> String? {
         guard let s else { return nil }
         let hex = normalizedHex(s)
         return hex.count == 12 ? hex : nil
@@ -231,8 +236,11 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
     }
 
     // MARK: Real Core Audio listing (production seam default)
+    //
+    // Internal (not `private`): ``BTConnectionManager``'s endpoint probe reuses
+    // this listing rather than growing its own HAL walk.
 
-    private static let systemOutputs: @Sendable () -> [BTCoreAudioOutput] = {
+    static let systemOutputs: @Sendable () -> [BTCoreAudioOutput] = {
         allDeviceIDs().compactMap { device in
             guard let transport = transportType(device), let uid = deviceUID(device) else { return nil }
             return BTCoreAudioOutput(

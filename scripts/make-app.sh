@@ -46,6 +46,9 @@ AUDIO_CAPTURE_USAGE="Audiouter needs to capture your Mac's audio so it can send 
 # Shown INSIDE the macOS Local Network permission dialog. The app browses Bonjour
 # (_airplay._tcp / _raop._tcp) to find AirPlay speakers; say that plainly.
 LOCAL_NETWORK_USAGE="Audiouter looks for AirPlay speakers on your local network so you can play your Mac's audio to them. It only finds speakers — it doesn't read or collect anything else about your network."
+# Shown INSIDE the macOS Bluetooth permission dialog (BT-CONNECT,
+# PLAN-UNIVERSAL-SYNC §B/§K). Same mental-model rule as the two above.
+BLUETOOTH_USAGE="Audiouter connects to Bluetooth speakers you've already paired so it can play your Mac's audio on them. It only reaches speakers you choose — it never scans for or reads anything else."
 
 # The privileged root PTP helper (T2/T5, ptp-helper-design.md §2). Lives in
 # the AirPlayEngine package, not AudiouterCore — a separate `swift build`
@@ -503,6 +506,15 @@ plutil -insert NSBonjourServices.0 -string "_airplay._tcp" "$PLIST"
 plutil -insert NSBonjourServices.1 -string "_raop._tcp" "$PLIST"
 plutil -extract NSLocalNetworkUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSLocalNetworkUsageDescription missing from Info.plist" >&2; exit 1; }
 plutil -extract NSBonjourServices.0 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices missing from Info.plist" >&2; exit 1; }
+
+# Bluetooth (BT-CONNECT): reconnecting an already-paired speaker touches
+# IOBluetooth, which macOS gates behind the Bluetooth TCC prompt — and a
+# process WITHOUT this usage string is KILLED on its first touch (SIGABRT, no
+# prompt, no error; live-verified 2026-08-07, dev/notes/bt-spike-findings-
+# 2026-08-07.md). So this key is a hard requirement, not a nicety — hence the
+# same plutil-plus-assert treatment as the audio-capture string above.
+plutil -insert NSBluetoothAlwaysUsageDescription -string "$BLUETOOTH_USAGE" "$PLIST"
+plutil -extract NSBluetoothAlwaysUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBluetoothAlwaysUsageDescription missing from Info.plist" >&2; exit 1; }
 
 # --- LSEnvironment: release runtime defaults --------------------------------
 # Environment variables LaunchServices injects when the app is launched by

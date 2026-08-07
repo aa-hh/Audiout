@@ -61,6 +61,7 @@ import CoreAudio
         }
         func start() {}
         func stop() {}
+        func refresh() {}
         func fire(_ snapshots: [BTDeviceSnapshot]) { onSnapshot?(snapshots) }
     }
 

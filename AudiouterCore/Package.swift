@@ -191,13 +191,12 @@ let package = Package(
             dependencies: ["AudiouterCore", "AudiouterSharedUI"],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
-        // The pure-AppKit Settings window (the header gear's destination): a
-        // `SettingsWindowController` hosting a `.toolbar`-style
-        // `NSTabViewController`, one pane per tab (General, Appearance, …). A
-        // *library* so the app AND tests can link it and assert the built window
-        // structure, exactly like the popover/mixer UI libs. Only needs Core (the
-        // `AppSettings` scalar store + appearance/density enums) — no shared rows
-        // yet.
+        // The pure-AppKit Settings content: a `SettingsRootViewController`
+        // (an `NSTabViewController`, one pane per tab — General, Appearance, …)
+        // hosted on the one-surface shell. A *library* so the app AND tests can
+        // link it and assert the built structure, exactly like the popover/mixer
+        // UI libs. Only needs Core (the `AppSettings` scalar store +
+        // appearance/density enums) — no shared rows yet.
         .target(
             name: "AudiouterSettingsUI",
             // AudiouterSharedUI: the Tokens design-token layer (Wave 2 of the

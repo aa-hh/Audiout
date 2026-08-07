@@ -102,29 +102,19 @@ import AppKit
         #expect(bounds.max == AppSettings.maxSyncOffsetMs)
     }
 
-    @Test func windowControllerMountsSyncOffsetSection() {
-        // `SettingsWindowController` doesn't currently thread its own `settings`
-        // parameter into `AudioSettingsViewController` (pre-existing — the same
-        // is true of the connect-volume control; both panes fall back to their
-        // own `AppSettings()` default, which is the real store in production,
-        // same as every other call site). So this only asserts structural
-        // presence via the `latency` gate, mirroring
-        // `AudioSettingsLatencyTests.windowControllerPassesModelThrough`
-        // rather than a value round-trip through this particular path.
+    /// Structural presence via the `latency` gate: a latency-bearing Audio
+    /// pane mounts the sync-offset section too, mirroring
+    /// `AudioSettingsLatencyTests.rootMeasuresTheLatencyBearingAudioPane`
+    /// rather than a value round-trip (the value tests above cover that).
+    @Test func latencyBearingPaneMountsSyncOffsetSection() {
         let latency = LatencySettingModel(
             optionsMs: AppSettings.startBufferOptionsMs, initialMs: 1000,
             envOverrideMs: nil, isStreaming: { false }, apply: { _ in })
-        let controller = SettingsWindowController(
-            settings: makeSettings(),
-            loginItem: NoopLoginItem(),
-            excludedApps: makeExcluded(),
+        let pane = AudioSettingsViewController(
+            excluded: makeExcluded(),
             runningAppsProvider: { [] },
+            settings: makeSettings(),
             latency: latency)
-        #expect(controller.test_audio.test_hasSyncOffsetSection)
-    }
-
-    private final class NoopLoginItem: LoginItemManaging {
-        var isEnabled: Bool { false }
-        func setEnabled(_ newValue: Bool) throws {}
+        #expect(pane.test_hasSyncOffsetSection)
     }
 }

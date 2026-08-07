@@ -600,13 +600,13 @@ public final class AudioSettingsViewController: NSViewController {
 
     /// Repopulate the list from the controller and resize the pane to fit.
     ///
-    /// Writing `preferredContentSize` is what makes the WINDOW grow too, but not
-    /// by itself: AppKit's tab controller never resizes its window (probed —
-    /// see the sizing-trap note on `SettingsWindowController`). The write below
-    /// reaches the window only because `SettingsRootViewController` overrides
-    /// `preferredContentSizeDidChange(for:)`, which AppKit calls on the parent,
-    /// and re-applies the content size from there. Without that override the
-    /// pane would silently clip when a user adds an excluded app.
+    /// Writing `preferredContentSize` is what makes the HOST grow too, but not
+    /// by itself: AppKit's tab controller never resizes its host (probed —
+    /// see the sizing-trap note on `SettingsRootViewController`). The write
+    /// below reaches the host only because `SettingsRootViewController`
+    /// observes each pane's `preferredContentSize` by KVO and republishes
+    /// `fittedContentSize` from there. Without that the pane would silently
+    /// clip when a user adds an excluded app.
     private func rebuildList() {
         for row in listStack.arrangedSubviews {
             listStack.removeArrangedSubview(row)

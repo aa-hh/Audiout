@@ -5,8 +5,8 @@ import AudiouterCore
 
 /// Reusable "control panel" shell (control-panel rollout, `AIRPLAY_CONTROL_PANEL=1`):
 /// a sticky floating `NSPanel` that hosts an arbitrary content `NSViewController`.
-/// The shell hosts Groups only today — Settings is its own standalone
-/// window (`AudiouterSettingsUI.SettingsWindowController`), and Setup may
+/// The shell hosts the one-surface screens (Mixer / Groups / Settings via
+/// `AppSurfaceController`), and Setup may
 /// return onto the shell later, so it stays content-agnostic: the app
 /// keeps exactly one `ControlPanelWindowController` alive and calls
 /// `setContent(_:)` to swap what it's showing rather than opening a

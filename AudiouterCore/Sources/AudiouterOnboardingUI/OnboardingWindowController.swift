@@ -5,7 +5,7 @@ import AudiouterCore
 
 /// The first-run onboarding/permission-priming window (public-release readiness).
 ///
-/// Same lazy-create-then-reuse lifecycle as `SettingsWindowController` /
+/// Same lazy-create-then-reuse lifecycle as
 /// `MixerWindowController`: the app builds it on demand, calls the no-arg
 /// ``present()``, and reuses/focuses it thereafter. It hosts a single
 /// ``OnboardingViewController`` bound to a Core ``SetupModel``, and wires the real

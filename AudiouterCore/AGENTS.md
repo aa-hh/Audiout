@@ -171,7 +171,9 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   follow any default (creates feedback loops).
 - **Every real (re)connect must reseed the engine volume** from
   `connectVolumeProvider()` (an `AppSettings.connectVolume` read, clamped to
-  min/max — NOT the Mac's system level, which is what this said before): the
+  min/max — NOT the Mac's system level, which is what this said before), or from a
+  level a caller attached to that one connect with `armConnectVolume` (same
+  clamp, so an automation's number is no more trusted than the setting's): the
   engine's volume field is zero-initialized and 0 maps to ≈ −30 dB (silent), so a
   connect that pushes no volume streams INAUDIBLY until the first slider touch —
   the −30 dB trap. The clamp keeps the seed audible on its own; note that Main is

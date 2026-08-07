@@ -654,10 +654,23 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// to avoid.
     private var bufferReAdding: Set<String> = []
 
-    /// Ids whose next add-success should take the CONFIGURED CONNECT DEFAULT rather
-    /// than the level the device was already streaming at (F-REBIND). Armed by
-    /// `setOutputSet` on the user's off→on edge — the one place a connect is
-    /// USER-intended — and consumed by ``connectVolumeSeed(_:outputID:)``.
+    /// What each id's next add-success should come up at — present only for a
+    /// connect the USER asked for, absent for one the device took on its own
+    /// (F-REBIND, which keeps the level it was already streaming at). Armed by
+    /// `setOutputSet` on the user's off→on edge and by `retryOutput`, and consumed
+    /// by ``connectVolumeSeed(_:outputID:)``.
+    ///
+    /// Three states, which is why this is a dictionary and not a `Set`: absent =
+    /// not a user connect, ``ArmedConnect/connectDefault`` = the configured
+    /// connect volume, ``ArmedConnect/level(_:)`` = a level a caller attached with
+    /// ``armConnectVolume(_:for:)``. An enum rather than `[String: Int?]` because
+    /// the dictionary's own absent/present axis already carries the first state,
+    /// so stacking a second optional on top buys nothing and makes every read a
+    /// double optional.
+    ///
+    /// **Both arming sites mark WITHOUT overwriting an attached level.** An arm
+    /// lands microseconds before the selection that consumes it, so a plain
+    /// assignment there destroys the level it was arming for.
     ///
     /// Everything else that re-issues an `addOutput` for a device the user never
     /// turned off leaves it unarmed. The case this exists for: a Bluetooth headset
@@ -680,7 +693,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// suppressed a seed while set and had to be hand-cleared at every teardown,
     /// whereas this one is consumed on use and only ever selects WHICH level is
     /// pushed.
-    private var userConnectSeed: Set<String> = []
+    private var userConnectSeed: [String: ArmedConnect] = [:]
+
+    /// The level a pending user connect comes up at (see ``userConnectSeed``).
+    private enum ArmedConnect {
+        /// The configured connect volume, read at seed time from
+        /// ``connectVolumeProvider``.
+        case connectDefault
+        /// A level attached to this one connect by ``armConnectVolume(_:for:)``.
+        /// Clamped where it is consumed, not here.
+        case level(Int)
+    }
 
     private var stateStreamTask: Task<Void, Never>?
 
@@ -1960,6 +1983,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
     }
 
+    /// Attach a level to `id`'s next connect (``OutputBackend/armConnectVolume(_:for:)``).
+    /// Stores it on ``userConnectSeed``, where ``connectVolumeSeed(_:outputID:)``
+    /// consumes it AS PART OF the connect — clamped there, along the same path the
+    /// configured default takes, so an armed level can no more reach silence than a
+    /// configured one can.
+    ///
+    /// `async` on `stateQueue` like the other setters, which also orders it: the
+    /// queue is serial, so an arm posted before a `setOutputSet` (which takes the
+    /// same queue) is always in place by the time that selection arms its marker.
+    public func armConnectVolume(_ volume: Int, for id: String) {
+        stateQueue.async { self.userConnectSeed[id] = .level(volume) }
+    }
+
     public func setMasterGain(mainOut: Int, group: Int, mirrorToSystemVolume: Bool) {
         let main = mainOut.clampedToVolume
         let newGroup = group.clampedToVolume
@@ -2142,7 +2178,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         // default. Deliberately only here, not in `convergeToTarget`
                         // (which flaps `desiredOn` for `applyStartBuffer`'s internal
                         // re-add) — see `userConnectSeed`.
-                        self.userConnectSeed.insert(id)
+                        //
+                        // Mark, never overwrite: an `armConnectVolume` level for
+                        // this very connect arrives just before this line and must
+                        // survive it.
+                        self.userConnectSeed[id] = self.userConnectSeed[id] ?? .connectDefault
                         Telemetry.log(.airplay, "connect_requested", ["device": id])
                     }
                 }
@@ -2267,7 +2307,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             guard !self.converging.contains(id) else { return nil }
             self.converging.insert(id)
             // F-REBIND: the USER asked for this connect, same as a fresh toggle.
-            self.userConnectSeed.insert(id)
+            // Mark, never overwrite — same reason as `setOutputSet`'s arm site.
+            self.userConnectSeed[id] = self.userConnectSeed[id] ?? .connectDefault
             Telemetry.log(.airplay, "connect_requested", ["device": id, "trigger": "retry"])
             return outputID
         }
@@ -6551,9 +6592,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         pushVolume(outputID, engineValue: engineVolume(forID: id, uiVolume: intended))
     }
 
-    /// Seed a just-(re)connected engine output's starting volume — from the
-    /// configured connect-volume default on a connect the user asked for, or from the
-    /// level the device was already streaming at on one it didn't (F-REBIND, see
+    /// Seed a just-(re)connected engine output's starting volume — from the level
+    /// ``armConnectVolume(_:for:)`` attached to this connect, else the configured
+    /// connect-volume default on a connect the user asked for, else the level the
+    /// device was already streaming at on one it didn't (F-REBIND, see
     /// ``userConnectSeed``). Pushes the level to the engine and returns the value to
     /// display on the model, or `nil` when the seed is suppressed (leave the model
     /// volume untouched). On `stateQueue`.
@@ -6611,7 +6653,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// ``AppSettings/minConnectVolume``…``AppSettings/maxConnectVolume``. That
     /// clamp is the load-bearing safety net for the DEFAULT: even if the setting
     /// or an injected test provider returns 0 or something out of range, the
-    /// default that reaches the wire is always audible.
+    /// default that reaches the wire is always audible. A level armed for one
+    /// specific connect (``armConnectVolume(_:for:)``) replaces the provider read
+    /// and inherits that same clamp — an automation stating its own level gets the
+    /// safety net, not an exemption from it.
     ///
     /// The clamp does NOT bound the F-REBIND preserve branch: a level the user
     /// dialled in themselves is theirs to keep, INCLUDING a deliberate 0 (an
@@ -6635,12 +6680,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // `restoreEffectiveVolume` and `applyStartBuffer` use. A preserved level is
         // NOT re-clamped to the connect range: that clamp bounds the DEFAULT, and a
         // level the user dialled in themselves is theirs to keep.
-        let isUserConnect = userConnectSeed.remove(id) != nil
+        let armed = userConnectSeed.removeValue(forKey: id)   // nil ⇒ not a user connect
         let seed: Int
-        if !isUserConnect, let inSession = stashedVolume[id] ?? known[id]?.volume {
+        if armed == nil, let inSession = stashedVolume[id] ?? known[id]?.volume {
             seed = inSession
         } else {
-            seed = min(max(connectVolumeProvider(), AppSettings.minConnectVolume), AppSettings.maxConnectVolume)
+            // A level `armConnectVolume` attached to THIS connect wins over the
+            // configured default, and takes the same clamp: a caller's number is
+            // no more trusted than the setting's, so neither can seed silence.
+            let attached: Int?
+            if case .some(.level(let level)) = armed { attached = level } else { attached = nil }
+            seed = min(max(attached ?? connectVolumeProvider(), AppSettings.minConnectVolume), AppSettings.maxConnectVolume)
         }
         if muted.contains(id) {
             // Keep the mute; only update the level an unmute will restore.

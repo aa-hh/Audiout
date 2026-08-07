@@ -2681,6 +2681,165 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                       "the auto-recovery reconnect must still push a level to the engine (the seed fires) — the preserved 75, not skipped")
     }
 
+    /// A level armed for one connect wins over the configured connect default.
+    /// The level has to land AS PART OF the connect: setting the volume once the
+    /// device is already streaming leaves a window where it plays at the default
+    /// first, which is the blast the arm exists to prevent. This also pins the
+    /// clobber hazard at `setOutputSet`'s marker site — that marker is written
+    /// microseconds after the arm and must not erase it.
+    @Test func armedConnectVolumeWinsOverTheConfiguredDefault() async {
+        let (backend, engine, discovery) = makeBackend(connectVolume: { 35 })
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.armConnectVolume(20, for: device.id)
+        backend.setOutputSet([device.id])
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID } }
+
+        #expect(engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.20) < 0.001 },
+                "the armed level (20) is what the connect must push to the wire")
+        #expect(!(engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.35) < 0.001 }),
+                "the configured default must never reach the wire when a level is armed — that window is the whole hazard")
+        #expect(backend.devices.first { $0.id == device.id }?.volume == 20,
+                "the model row must reflect the armed level")
+    }
+
+    /// An armed level takes the SAME clamp as the configured default: a caller's
+    /// number is no more trusted than the setting's, so neither can seed the 0 /
+    /// −30 dB silent floor, and neither can exceed the ceiling.
+    @Test func armedConnectVolumeIsClampedToTheConnectRange() async {
+        func connect(arming armed: Int) async -> (model: Int?, wire: Double?) {
+            let (backend, engine, discovery) = makeBackend(connectVolume: { 35 })
+            backend.start(); defer { backend.stop() }
+            await waitUntilStarted(engine)
+
+            let device = ap2Device()
+            _ = await collect(from: backend) { events in
+                events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+            } after: { discovery.fire(.appeared(device)) }
+
+            backend.armConnectVolume(armed, for: device.id)
+            backend.setOutputSet([device.id])
+            await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID } }
+            return (backend.devices.first { $0.id == device.id }?.volume,
+                    engine.volumeCalls.last(where: { $0.0 == device.outputID })?.1)
+        }
+
+        let low = await connect(arming: 0)
+        #expect(low.model == AppSettings.minConnectVolume,
+                "arming 0 must clamp up to the audible floor")
+        #expect((low.wire ?? 0) > 0,
+                "arming 0 must never put silence on the wire — that is the −30 dB trap, reached through the new path")
+
+        let high = await connect(arming: 150)
+        #expect(high.model == AppSettings.maxConnectVolume,
+                "arming an out-of-range level must clamp down to the ceiling")
+        #expect(high.wire.map { abs($0 - 1.0) < 0.001 } ?? false,
+                "the clamped ceiling (100) is what reaches the wire, not 1.5")
+    }
+
+    /// The arm is a one-shot token: the connect it was armed for consumes it, and
+    /// the NEXT user connect falls back to the configured default like any other.
+    @Test func armedConnectVolumeIsConsumedByOneConnect() async {
+        let (backend, engine, discovery) = makeBackend(connectVolume: { 35 })
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.armConnectVolume(20, for: device.id)
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.volume == 20 }
+
+        backend.setOutputSet([])
+        await pollUntil {
+            backend.devices.first { $0.id == device.id }?.isSelected == false
+                && engine.removedIDs.contains(device.outputID)
+        }
+
+        // Nothing armed this time.
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.volume == 35 }
+        #expect(backend.devices.first { $0.id == device.id }?.volume == 35,
+                "a later connect with nothing armed takes the configured default — the arm was spent on the first")
+    }
+
+    /// F-REBIND, pinned against the arming path: with nothing armed, a rebind the
+    /// user never asked for still preserves the in-session level. A spent arm must
+    /// not resurrect as the rebind level either — this is the live Sonos bug (a
+    /// Bluetooth event slamming an 80% speaker back to the connect default) with
+    /// the arm added to the picture.
+    @Test func rebindAfterAConsumedArmPreservesTheInSessionLevel() async {
+        let (backend, engine, discovery) = makeBackend(connectVolume: { 35 })
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.armConnectVolume(20, for: device.id)
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.volume == 20 }
+
+        // The user dials it up themselves — now theirs to keep.
+        backend.setVolume(80, for: device.id)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.volume == 80 }
+
+        // Out-of-band drop and return: the rebind nobody asked for.
+        engine.pushState(device.outputID, .failed)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == false }
+        engine.pushState(device.outputID, .connected)
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == true }
+
+        #expect(backend.devices.first { $0.id == device.id }?.volume == 80,
+                "the rebind preserves the in-session level (80) — not the spent arm (20), not the connect default (35)")
+        #expect(engine.volumeCalls.last.map { $0.0 == device.outputID && abs($0.1 - 0.80) < 0.001 } ?? false,
+                "the rebind still pushes a level (the seed always fires) — the preserved 80")
+    }
+
+    /// The other marker site: `retryOutput` marks the retry as user-intended, and
+    /// must do it WITHOUT erasing a level armed while the device sat failed.
+    @Test func armedConnectVolumeSurvivesTheRetryMarker() async {
+        let (backend, engine, discovery) = makeBackend(connectVolume: { 35 })
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:35", name: "Retry Armer")
+        engine.addFailures = [device.outputID.rawValue]
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil {
+            if case .failed = backend.devices.first(where: { $0.id == device.id })?.connectionState { return true }
+            return false
+        }
+
+        // A level is armed while the device sits failed, then "Try again".
+        engine.addFailures = []
+        backend.armConnectVolume(20, for: device.id)
+        backend.retryOutput(device.id)
+        await pollUntil(timeout: 5) {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+
+        #expect(backend.devices.first { $0.id == device.id }?.volume == 20,
+                "retry's user-connect marker must not clobber the armed level")
+        #expect(!(engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.35) < 0.001 }),
+                "the configured default must not reach the wire on a retry that had a level armed")
+    }
+
     /// An engine `.passwordRequired` on the STATE STREAM surfaces as
     /// `.authRequired`, never flattened to `.unknown` (live 2026-08-06: an
     /// auth-blocked Mac receiver — act=2 "Current User" access control — was

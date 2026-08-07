@@ -74,6 +74,10 @@ public final class DeviceRowView: NSView {
         /// The user toggled this Bluetooth row's align-by-ear tick button
         /// (BT-OFFSET-UI). Default no-op for hosts without the SYNC column.
         func deviceRow(_ row: DeviceRowView, didToggleAlignTick active: Bool, for id: String)
+        /// The user asked for the guided alignment wizard on this Bluetooth
+        /// row — ⌥-click on the metronome button, or the "Align speaker…"
+        /// context-menu item. Default no-op for hosts without the wizard.
+        func deviceRowDidRequestAlignmentWizard(_ row: DeviceRowView)
     }
 
     /// Control-Center row density: comfortable height that seats a mini switch,
@@ -1641,7 +1645,7 @@ public final class DeviceRowView: NSView {
     /// The align button's hover tooltip — the affordance is a bare glyph, so
     /// the tooltip carries its whole story.
     static let alignTooltip =
-        "Play alignment ticks on this speaker and the rest of the group — adjust sync until they land as one"
+        "Play alignment ticks on this speaker and the rest of the group — adjust sync until they land as one (⌥ for the guided alignment)"
 
     private func configureSyncControls() {
         for (button, symbol, label, action) in [
@@ -1747,11 +1751,45 @@ public final class DeviceRowView: NSView {
     }
 
     @objc private func alignTapped(_ sender: NSButton) {
+        if optionIsHeld {
+            // ⌥-click asks for the guided wizard instead of the manual tick —
+            // undo the `pushOnPushOff` flip so the toggle never moves.
+            sender.state = sender.state == .on ? .off : .on
+            delegate?.deviceRowDidRequestAlignmentWizard(self)
+            return
+        }
         // `pushOnPushOff` has already flipped the state; land the tint now so
         // the toggle reads immediately, before the host's re-apply echoes it.
         alignButton.contentTintColor = sender.state == .on
             ? Tokens.Color.accent : Tokens.Color.secondaryLabel
         delegate?.deviceRow(self, didToggleAlignTick: sender.state == .on, for: device.id)
+    }
+
+    // MARK: Context menu (BT rows)
+    //
+    // The discoverable route to the guided wizard — ⌥-click alone is
+    // invisible. AppKit calls `menu(for:)` for a right-click landing anywhere
+    // in the row that no subview's own menu claims (the `AppRowView` idiom).
+
+    public override func menu(for event: NSEvent) -> NSMenu? {
+        guard showsSyncControls else { return super.menu(for: event) }
+        return buildContextMenu()
+    }
+
+    private func buildContextMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let align = NSMenuItem(title: "Align speaker…",
+                               action: #selector(alignSpeakerMenuItemSelected(_:)),
+                               keyEquivalent: "")
+        align.target = self
+        align.isEnabled = device.isAvailable
+        menu.addItem(align)
+        return menu
+    }
+
+    @objc private func alignSpeakerMenuItemSelected(_ sender: NSMenuItem) {
+        delegate?.deviceRowDidRequestAlignmentWizard(self)
     }
 
     // MARK: Actions
@@ -2239,6 +2277,13 @@ public final class DeviceRowView: NSView {
 
     /// Fire the align-by-ear toggle through `performClick` (real dispatch).
     public func test_fireAlignClick() { alignButton.performClick(nil) }
+
+    /// The row's context menu exactly as `menu(for:)` builds it — `nil` on a
+    /// non-sync row. Tests dispatch items via `performActionForItem(at:)`
+    /// (real AppKit menu dispatch), never the delegate shortcut.
+    public func test_contextMenu() -> NSMenu? {
+        showsSyncControls ? buildContextMenu() : nil
+    }
 
     /// Whether the align toggle currently reads ON.
     public var test_alignTickOn: Bool { alignButton.state == .on }
@@ -2756,6 +2801,8 @@ public extension DeviceRowView.Delegate {
     /// (BT-OFFSET-UI).
     func deviceRow(_ row: DeviceRowView, didSetSyncTrimMs ms: Int, for id: String) {}
     func deviceRow(_ row: DeviceRowView, didToggleAlignTick active: Bool, for id: String) {}
+    /// Default no-op — only the popover hosts the alignment wizard.
+    func deviceRowDidRequestAlignmentWizard(_ row: DeviceRowView) {}
 }
 
 // MARK: - Invisible switch cell (spec §4.8)

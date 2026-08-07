@@ -628,8 +628,11 @@ public final class ControlPanelWindowController: NSWindowController {
     public var test_appIsActiveOverride: Bool?
 
     /// A sheet is up (e.g. group creation). Dismissing the panel out from under
-    /// it would kill the sheet mid-edit — R7.
-    private var hasAttachedSheet: Bool {
+    /// it would kill the sheet mid-edit — R7. Public: the surface's click
+    /// policy (`AppSurfaceController.clickAction`) reads this too, to front
+    /// the window instead of attempting `performClose` (which AppKit refuses,
+    /// with a beep, while a sheet is attached).
+    public var hasAttachedSheet: Bool {
         test_hasAttachedSheetOverride ?? (window?.attachedSheet != nil)
     }
 

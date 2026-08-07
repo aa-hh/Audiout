@@ -305,6 +305,13 @@ public final class AppSurfaceController {
     public func clickAction(setupIsOpen: Bool) -> ClickAction {
         if setupIsOpen { return .refrontSetup }
         let dismissedByThisClick = shell.consumeRecentResignDismissal()
+        // A sheet-bearing surface (e.g. the New Group sheet) can't be
+        // dismissed — `performClose` refuses and beeps while the sheet
+        // survives untouched (R7 already stops the window from
+        // self-dismissing for this reason; this is the same call for a
+        // deliberate menu-bar click). Front it instead, bringing the sheet to
+        // the user, regardless of pin state.
+        if shell.hasAttachedSheet { return shell.isPanelVisible ? .front : .show }
         // Pinned is an ordinary window: it never self-dismisses, so a click is
         // only ever "front it" or "reopen it".
         if shell.isPinned { return shell.isPanelVisible ? .front : .show }

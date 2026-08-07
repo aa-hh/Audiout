@@ -493,6 +493,38 @@ import AppKit
                 "pinned reads its own state, never a stale unpinned dismissal")
     }
 
+    /// (R7) A sheet-bearing unpinned surface (e.g. the New Group sheet) must
+    /// not be handed `.dismiss`: `performClose` refuses on a window with an
+    /// attached sheet and AppKit beeps, while the sheet survives untouched
+    /// anyway — a beep with no effect. The click should front the window
+    /// instead, bringing the sheet to the user.
+    @Test func sheetBearingSurfaceFrontsInsteadOfDismissing() {
+        let (surface, _, _, _) = makeSurface()
+        surface.show(anchorRect: nil)
+        surface.shell.test_isPanelVisibleOverride = true
+        surface.shell.test_hasAttachedSheetOverride = true
+        var closes = 0
+        surface.onClose = { closes += 1 }
+
+        let action = surface.clickAction(setupIsOpen: false)
+        surface.perform(action, anchorRect: nil)
+
+        #expect(action == .front, "not .dismiss — that would beep and leave the sheet stranded")
+        #expect(closes == 0, "the sheet-bearing surface is never closed by this click")
+        #expect(surface.isShown)
+    }
+
+    /// The same sheet guard applies before a click even reaches the
+    /// pinned/unpinned split — a sheet on a currently-closed (pinned, reopening)
+    /// surface still just shows, never dismisses (there's nothing to dismiss).
+    @Test func sheetBearingClosedSurfaceStillShows() {
+        let (surface, _, _, _) = makeSurface()
+        surface.shell.test_isPanelVisibleOverride = false
+        surface.shell.test_hasAttachedSheetOverride = true
+
+        #expect(surface.clickAction(setupIsOpen: false) == .show)
+    }
+
     /// Every other case here stubs the Groups screen, and a real
     /// `NSSplitViewController` is exactly what breaks differently: mounted
     /// before its view is laid out it collapses to a near-zero intrinsic size,

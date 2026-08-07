@@ -42,7 +42,7 @@ private var gRawModeActive = false
 /// Puts stdin into raw mode: no line buffering (ICANON off), no local echo,
 /// one byte at a time (VMIN=1, VTIME=0). Saves the prior settings in
 /// `gOriginalTermios` so `restoreTerminal()` can undo this exactly.
-private func enableRawMode() {
+func enableRawMode() {
     tcgetattr(STDIN_FILENO, &gOriginalTermios)
     var raw = gOriginalTermios
     raw.c_lflag &= ~UInt(ECHO | ICANON)
@@ -59,7 +59,7 @@ private func enableRawMode() {
 /// Restores whatever termios settings were in effect before `enableRawMode()`.
 /// Idempotent and safe to call from a signal handler (only touches C globals
 /// and calls a plain C syscall — no allocation, no Swift runtime machinery).
-private func restoreTerminal() {
+func restoreTerminal() {
     if gRawModeActive {
         tcsetattr(STDIN_FILENO, TCSANOW, &gOriginalTermios)
         gRawModeActive = false
@@ -69,7 +69,7 @@ private func restoreTerminal() {
 /// CRITICAL: install SIGINT/SIGTERM handlers that restore the terminal
 /// before the process dies — without this, Ctrl-C during raw-mode input
 /// leaves the invoking shell silently un-echoing and un-line-buffered.
-private func installSignalHandlers() {
+func installSignalHandlers() {
     signal(SIGINT) { _ in
         restoreTerminal()
         _exit(0)
@@ -426,6 +426,14 @@ if args.contains("--pacing-probe") {
     exit(PacingProbe.run(args.filter { $0 != "--pacing-probe" }))
 }
 
+// MARK: - Perceptual probe: how fine an offset reads as image POSITION
+// (throwaway — decides whether the by-ear wizard asks "one tick or two?"
+// or "which side does it lean?"). Emits audio; the operator runs it live.
+
+if args.contains("--lateralization-probe") {
+    exit(LateralizationProbe.run(args.filter { $0 != "--lateralization-probe" }))
+}
+
 // MARK: - T5: --selftest (flow-proof against the built-in output device)
 
 if args.contains("--selftest") {
@@ -446,6 +454,7 @@ if args.contains("-h") || args.contains("--help") {
     print("       bt-multi-spike --drift-selftest")
     print("       bt-multi-spike --connect-probe [name-or-address] [--disconnect]")
     print("       bt-multi-spike --pacing-probe <name-or-uid> [--seconds N]")
+    print("       bt-multi-spike --lateralization-probe <A> <B> [--demo]")
     exit(0)
 }
 

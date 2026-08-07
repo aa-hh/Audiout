@@ -284,11 +284,20 @@ final class BTOutputEngine {
     /// is dialed in), not the arbitrary gap between when each device was added.
     /// Safe to call while playing; a no-op if this engine isn't running.
     func restartLoop(at when: AVAudioTime) {
+        playBuffer(ToneSource.makeBuffer(for: mode), at: when, loops: true)
+    }
+
+    /// Replace whatever the player has queued with `buffer`, starting at `when`
+    /// — a host time shared across engines. The lateralization probe uses this
+    /// to put a sample-accurate tick pattern on each device: the inter-device
+    /// offset under test lives INSIDE the buffer, never in the delay AU, whose
+    /// parameter resolution is unspecified at the fractions of a millisecond
+    /// that probe measures. No-op if this engine isn't running.
+    func playBuffer(_ buffer: AVAudioPCMBuffer, at when: AVAudioTime, loops: Bool) {
         graphQueue.sync {
             guard isRunningTracked, engine.isRunning else { return }
             player.stop()
-            let buffer = ToneSource.makeBuffer(for: mode)
-            player.scheduleBuffer(buffer, at: nil, options: .loops, completionHandler: nil)
+            player.scheduleBuffer(buffer, at: nil, options: loops ? .loops : [], completionHandler: nil)
             player.play(at: when)
         }
     }

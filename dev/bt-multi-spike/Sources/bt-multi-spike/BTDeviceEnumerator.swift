@@ -17,30 +17,54 @@ struct BTOutputDevice {
     let name: String
     let uid: String
     let isAggregate: Bool
+    /// The raw kAudioDevicePropertyTransportType value, so a caller that is NOT
+    /// Bluetooth-only (the lateralization probe pairs built-in with BT) can
+    /// still label what it picked.
+    let transport: UInt32
+
+    /// Short human label for the transport — display only.
+    var transportLabel: String {
+        switch transport {
+        case kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE: return "bluetooth"
+        case kAudioDeviceTransportTypeBuiltIn: return "built-in"
+        case kAudioDeviceTransportTypeAggregate: return "aggregate"
+        case kAudioDeviceTransportTypeUSB: return "usb"
+        case kAudioDeviceTransportTypeAirPlay: return "airplay"
+        case kAudioDeviceTransportTypeVirtual: return "virtual"
+        case kAudioDeviceTransportTypeHDMI: return "hdmi"
+        case kAudioDeviceTransportTypeDisplayPort: return "displayport"
+        default: return "other"
+        }
+    }
 }
 
 enum BTDeviceEnumerator {
 
-    /// All Core Audio devices with at least one output stream AND a Bluetooth
-    /// transport type. Also flags kAudioDeviceTransportTypeAggregate devices
-    /// (excluded by convention — callers should skip them for real BT routing).
-    static func listBluetoothOutputDevices() -> [BTOutputDevice] {
+    /// Every Core Audio device with at least one output stream, whatever its
+    /// transport. Aggregates are flagged, never filtered out — callers that
+    /// drive audio MUST refuse them (AVAudioEngine silently no-ops on an
+    /// aggregate device).
+    static func listAllOutputDevices() -> [BTOutputDevice] {
         guard let devices = allDeviceIDs() else { return [] }
-        var results: [BTOutputDevice] = []
-        for device in devices {
-            guard hasOutputStreams(device) else { continue }
-            guard let transport = transportType(device) else { continue }
-            let isAggregate = transport == kAudioDeviceTransportTypeAggregate
-            guard transport == kAudioDeviceTransportTypeBluetooth || isAggregate else { continue }
-            // Aggregates rarely self-report as Bluetooth transport, but we only
-            // want to surface an aggregate here if it's plausibly BT-composed;
-            // conservatively include ALL aggregates so the trap is visible, and
-            // let the caller decide (marked EXCLUDED in the CLI output below).
-            let name = deviceName(device) ?? "<unknown>"
-            let uid = (try? readDeviceUID(device)) ?? "<no-uid>"
-            results.append(BTOutputDevice(id: device, name: name, uid: uid, isAggregate: isAggregate))
+        return devices.compactMap { device in
+            guard hasOutputStreams(device), let transport = transportType(device) else { return nil }
+            return BTOutputDevice(
+                id: device,
+                name: deviceName(device) ?? "<unknown>",
+                uid: (try? readDeviceUID(device)) ?? "<no-uid>",
+                isAggregate: transport == kAudioDeviceTransportTypeAggregate,
+                transport: transport)
         }
-        return results
+    }
+
+    /// All output devices with a Bluetooth transport type, plus every aggregate
+    /// device. Aggregates rarely self-report as Bluetooth transport, but we
+    /// conservatively surface ALL of them so the silent-no-op trap is visible,
+    /// and let the caller decide (marked EXCLUDED in the CLI output).
+    static func listBluetoothOutputDevices() -> [BTOutputDevice] {
+        listAllOutputDevices().filter {
+            $0.isAggregate || $0.transport == kAudioDeviceTransportTypeBluetooth
+        }
     }
 
     // MARK: - CoreAudio plumbing (pattern: LocalPlaybackEngine.builtInOutputDeviceID)

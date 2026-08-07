@@ -169,6 +169,111 @@ probe says so and waits. For a meaningful run, either let the IOProc fallback
 engage or play audio to the speaker from another terminal (the interactive
 loop) first.
 
+### Lateralization probe — `--lateralization-probe` (emits audio; you run it live)
+
+Answers one question before anyone builds the by-ear alignment wizard: **how
+small a timing offset can you still hear as a direction?**
+
+The current wizard idea asks "do the two clicks sound like one or two?", which
+has a hard floor around **4 ms** — below roughly 1–5 ms two clicks fuse into
+one event and the question stops having an answer. But the fused tick still
+leans toward whichever speaker fired *first*, and hearing that lean is far
+finer than hearing the split. If you can name the leading speaker at, say,
+0.4 ms, a "which side does it lean?" wizard can converge ten times tighter
+than the fuse/split one. This probe measures your own number, with your own
+speakers, in your own room.
+
+```sh
+# Learn what the cue sounds like first (not blind, nothing scored):
+.build/release/bt-multi-spike --lateralization-probe 1 2 --demo
+
+# The real, blind, scored run:
+.build/release/bt-multi-spike --lateralization-probe 1 2
+```
+
+`<A> <B>` are either the **index** printed by running the flag with no
+arguments, or part of a device name/uid. **A is the LEFT speaker, B the
+RIGHT** — put them that way round and sit between them, or the arrow keys will
+fight you. Any output devices work (built-in + one BT speaker is the expected
+pairing); aggregate devices are refused, because `AVAudioEngine` accepts one
+and then silently renders nothing.
+
+```sh
+# Which devices can I pick?
+.build/release/bt-multi-spike --lateralization-probe
+```
+
+#### The three steps
+
+**1. Level match (mandatory).** The two speakers tick alternately, once a
+second each. A loudness difference imitates a timing offset — the precedence
+effect survives about 10 dB of mismatch — so an unmatched pair measures
+loudness, not timing.
+
+| Key | Does |
+|---|---|
+| `1` / `2` | pick which device you are adjusting |
+| `]` / `[` | that device louder / quieter (0.02 steps) |
+| `space` | confirm equally loud, continue |
+| `q` | quit |
+
+**2. Centre the image.** Both speakers now tick together. A BT speaker runs
+150–250 ms behind the built-in output, and that fixed offset would swamp every
+trial, so you dial it out first. **Do not chase "one tick"** — below a few
+milliseconds you will hear one tick no matter what. Adjust until that single
+tick sounds like it comes from *between* the speakers.
+
+| Key | Does |
+|---|---|
+| `←` / `→` | shift 10 ms toward A / toward B |
+| `[` / `]` | shift 1 ms |
+| `,` / `.` | shift 0.1 ms |
+| `space` | accept this as centre, start the run |
+| `q` | quit |
+
+**3. The blind run.** Each trial plays 5 ticks at 1.2 s with a randomly-signed
+offset. Answer which side they came from. **The answer is never revealed until
+the summary** — that is the whole point.
+
+| Key | Does |
+|---|---|
+| `←` | it came from A |
+| `→` | it came from B |
+| `space` | can't tell |
+| `q` | stop early (the summary still prints) |
+
+Staircase as built: start **8 ms**, 1-up/2-down (two right in a row → ×0.7,
+one wrong → ×1.6), floor **0.05 ms**, ceiling **30 ms**, stops at **24 trials
+or 8 reversals**, whichever comes first. "Can't tell" counts as wrong for the
+staircase and is tallied separately. Roughly 4 minutes end to end.
+
+#### Reading the summary
+
+- **Per-magnitude hit rate** — how often you were right at each offset the
+  staircase visited. Expect ~100% at the top, sliding toward 50% (chance) at
+  the bottom.
+- **Threshold estimate** — the arithmetic mean of the last 6 reversal
+  magnitudes (a reversal is recorded at the magnitude tested when the staircase
+  turned around). Fewer than 6 reversals is flagged as provisional.
+- **Verdict line** — the smallest magnitude you called correctly at ≥75% over
+  2+ trials, and what that implies for the wizard. If nothing reaches 75% and
+  you are near 50% overall, the two speakers are not forming a shared stereo
+  image: a real result, and a hard bound on where the wizard can be offered.
+
+#### Caveat (printed by the tool too, deliberately)
+
+The number describes **this listener, these two speakers, this room, this
+seating position**. Move a speaker, turn your head, or swap a speaker and it
+changes. Two speakers in **different rooms** share no stereo image at all, so
+expect chance performance there.
+
+Two more limits worth knowing: the centre you dial in by ear in step 2 can
+itself only be as accurate as your own threshold, so a fraction of a
+millisecond of residual bias is unavoidable; and BT pacing clocks drift
+(measured at ~0.4 ppm on the Sony WH-1000XM3, i.e. ~0.25 ms over ten minutes),
+so if the image wanders during a long run, stop and re-run rather than
+pushing through.
+
 ### Interactive control loop (the hardware test)
 
 ```sh
@@ -523,6 +628,7 @@ q
 - `FlowCheck.swift`: Self-test runner, drift monitor.
 - `ConnectProbe.swift`: BT-SPIKE-CONNECT harness — IOBluetooth paired listing, timed connect/disconnect round-trip, TCC diagnosis.
 - `PacingProbe.swift`: passive ~1 Hz pacing-clock sampler — ppm trend + jump detection.
+- `LateralizationProbe.swift`: blind forced-choice staircase measuring the operator's own image-position timing threshold (offsets baked into the sample data, not the delay AU).
 - `make-spike-app.sh`: wraps the built CLI in a minimal ad-hoc-signed `.app` (Bluetooth TCC attribution fallback); launch via `open` only.
 - `Package.swift`: SwiftPM manifest.
 

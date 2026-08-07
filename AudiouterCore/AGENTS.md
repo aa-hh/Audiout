@@ -9,6 +9,28 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 
 ## Rules
 
+- **This Mac's own AirPlay receiver is never surfaced as a device** (Alec's
+  call, 2026-08-07). macOS's AirPlay Receiver announces `_airplay._tcp` under
+  the machine's own mDNS hostname, so undiscriminating discovery offers the Mac
+  the app runs on as a speaker — a self-loop that mostly can't work (the live
+  2026-08-06 "Couldn't connect" storm was this row) and whose legitimate intent
+  ("play here") the local This-Mac row already covers. `NativeDiscovery` drops
+  any resolved service whose hostname matches `systemLocalHostname()`
+  (normalized: case-insensitive, trailing dot stripped) BEFORE identity
+  extraction, for both service types; the filter fails OPEN when the hostname is
+  unavailable (`localHostname: nil`), because a phantom self row is annoying but
+  a silently missing real speaker is a support case. Drops log to stderr once
+  per instance name (D6). Tests inject `localHostname:` alongside the browser
+  double. If self-AirPlay ever becomes a real feature (e.g. as a receiver-side
+  target for ANOTHER Mac running Audiouter), lift this at the discovery seam —
+  don't re-plumb the popover.
+- **`.passwordRequired` never flattens to `.unknown`.** Both places an engine
+  auth rejection surfaces — `applyEngineState`'s `.passwordRequired` arm and
+  `convergeDevice`'s add-throw catch — map it to
+  `ConnectionFailure.Cause.authRequired`, whose copy names the receiver-side fix
+  (a Mac receiver's "Current User" access-control mode is the common case).
+  In-app password entry is roadmapped, not shipped; keep the copy honest about
+  that until it lands.
 - **Any window/panel `show*()` entry point must gate its actual on-screen
   presentation behind `HeadlessRuntime.isActive`** (`HeadlessRuntime.swift`).
   `swift test` and the harness/snapshot tools (`window-harness`,

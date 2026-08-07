@@ -87,6 +87,49 @@ import AirPlayEngine
 
     // MARK: appear -> update -> disappear (AP2)
 
+    /// Self-receiver filter (Alec's call, 2026-08-07): a service announced under
+    /// THIS machine's own mDNS hostname — macOS's AirPlay Receiver on the Mac the
+    /// app runs on — is dropped before it ever becomes an event, for both service
+    /// types, with hostname matching that survives Bonjour's trailing dot and
+    /// mDNS case-insensitivity. A same-named service from a DIFFERENT host (the
+    /// real second-Mac case) still surfaces. Ordering on the discovery queue
+    /// makes the assertion airtight: the self resolves are processed before the
+    /// real one, so a single .appeared event proves they produced nothing.
+    @Test func selfHostnameServicesAreNeverSurfaced() {
+        let browser = FakeBrowser()
+        let discovery = NativeDiscovery(browser: browser, localHostname: "my-test-mac.local")
+        let events = EventCollector()
+        discovery.onEvent = { events.append($0) }
+        discovery.start()
+
+        // This Mac's own receiver: announce form differs by CASE and the
+        // trailing dot — both must still match (normalizedHostname).
+        var selfService = airplayService(id: "EE:CF:9C:BE:22:88", name: "My Test Mac",
+                                         features: ap2Features)
+        selfService.hostname = "My-Test-Mac.local."
+        browser.resolve(selfService)
+        var selfRaop = selfService
+        selfRaop.serviceType = .raop
+        browser.resolve(selfRaop)
+
+        // A different host — surfaces normally even though everything else about
+        // it is ordinary.
+        var speaker = airplayService(id: "AA:BB:CC:DD:EE:07", name: "Real Speaker",
+                                     features: ap2Features)
+        speaker.hostname = "sonos-move.local."
+        browser.resolve(speaker)
+
+        let received = events.wait(count: 1)
+        guard case .appeared(let device)? = received.first else {
+            Issue.record("expected exactly the real speaker's .appeared, got \(received)")
+            return
+        }
+        #expect(device.id == "AA:BB:CC:DD:EE:07",
+                "only the non-self host surfaced; the self receiver produced no event")
+        #expect(discovery.devices.map(\.id) == ["AA:BB:CC:DD:EE:07"],
+                "the self receiver never entered the known set either")
+    }
+
     /// An `_airplay._tcp` resolve with valid AP2 feature bits appears as an
     /// AP2-capable device with descriptor fields propagated verbatim, then a
     /// re-resolve with changed facts fires `.updated`, then removal fires

@@ -222,9 +222,17 @@ import AppKit
         // ring-shaped because the popover's origin is a ring, so a rounded-rect
         // tile reports its inscribed circle and only the left edge is drawn to.
         #expect(abs(ringRadius - DeviceIconWellView.size / 2) <= 0.01)
+        // Tolerance is half a POINT, not 0.01: the plan resolves from LIVE
+        // frames, and AppKit pixel-aligns them — a view tree that has never
+        // been in a window resolves at integral alignment while one whose
+        // process has touched a 2x-scale window context lands on half-point
+        // boundaries. Under the full suite (shared process, AppKit suites run
+        // first) the well's converted X came out exactly 0.5 off the isolated
+        // value and Guard 4 refused unrelated commits (2026-08-07); ±0.5 still
+        // pins "the hook lands on the well's LEFT edge at the content inset".
         #expect(abs((ringCenterX - ringRadius)
-                    - PopoverColumnGrid.firstElementLeading(indented: false)) <= 0.01,
-                Comment(rawValue: "the hook lands on the well's LEFT edge, exactly at the content inset — " +
+                    - PopoverColumnGrid.firstElementLeading(indented: false)) <= 0.5,
+                Comment(rawValue: "the hook lands on the well's LEFT edge, at the content inset — " +
                 "measured in the OVERLAY's space, which is pinned to the column, not the pane"))
         #expect(centerY > plan.railTopY, "the rail drops below the well's centre")
 

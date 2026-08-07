@@ -85,6 +85,11 @@ extension SerializedSharedState {
 
         /// Ids that should THROW on `addOutput` (best-effort partial-failure test).
         var addFailures: Set<UInt64> = []
+        /// The error `addFailures` throws — defaults to the generic session
+        /// failure; the auth-mapping test sets `.passwordRequired` to prove the
+        /// connect path surfaces `.authRequired` instead of flattening to
+        /// `.unknown`.
+        var addFailureError: AirPlayEngineError = .sessionFailed
         /// Ids that should THROW on `removeOutput`.
         var removeFailures: Set<UInt64> = []
         /// Ids that should THROW on `flushOutput` — forces a whole-system rebind
@@ -179,7 +184,7 @@ extension SerializedSharedState {
                 hook?(id)
                 let hold = self.lock.withLock { self.onAddOutputHold }
                 if let hold { await hold(id, 0) }
-                if self.addFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
+                if self.addFailures.contains(id.rawValue) { throw self.addFailureError }
                 // Engine idempotency: an already-live session is NOT re-bound.
                 self.lock.withLock { if self.liveStreams[id.rawValue] == nil { self.liveStreams[id.rawValue] = 0 } }
             }
@@ -229,7 +234,7 @@ extension SerializedSharedState {
                 }
                 let hold = self.lock.withLock { self.onRebindBody }
                 if let hold { await hold(id, streamId) }
-                if self.addFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
+                if self.addFailures.contains(id.rawValue) { throw self.addFailureError }
                 self.lock.withLock {
                     if streamId == 0 {
                         self.added.append(id)
@@ -258,7 +263,7 @@ extension SerializedSharedState {
                 hook?(id)
                 let hold = self.lock.withLock { self.onAddOutputHold }
                 if let hold { await hold(id, streamId) }
-                if self.addFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
+                if self.addFailures.contains(id.rawValue) { throw self.addFailureError }
                 // Engine idempotency: an already-live session is NOT re-bound to
                 // `streamId` — that silent no-op is exactly defect B.
                 self.lock.withLock {
@@ -608,6 +613,7 @@ extension SerializedSharedState {
         injectedMeteringCapture: PerAppCaptureCoordinator? = nil,
         captureRetryDelay: TimeInterval = 2.0,
         captureRetryMaxBackoff: TimeInterval = 10.0,
+        takeoverStripDelay: TimeInterval = 0,
         watchdogScheduler: SilenceWatchdogScheduling? = nil,
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
         systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = { false }
@@ -622,6 +628,12 @@ extension SerializedSharedState {
             injectedMeteringCapture: injectedMeteringCapture,
             captureRetryDelay: captureRetryDelay,
             captureRetryMaxBackoff: captureRetryMaxBackoff,
+            // 0 = the old synchronous `.takingOver` emit. The suite's scripted
+            // activators resolve instantly, so the production debounce (which
+            // exists to SUPPRESS the strip on fast resolutions) would hide the
+            // very ordering the strip tests pin; only the debounce tests pass a
+            // real delay.
+            takeoverStripDelay: takeoverStripDelay,
             watchdogScheduler: watchdogScheduler,
             silenceFallbackDelay: silenceFallbackDelay,
             systemDefaultOutputIsAirPlayClass: systemDefaultOutputIsAirPlayClass,
@@ -2104,6 +2116,72 @@ extension SerializedSharedState {
                       "the auto-recovery reconnect must still push a level to the engine (the seed fires) — the preserved 75, not skipped")
     }
 
+    /// An engine `.passwordRequired` on the STATE STREAM surfaces as
+    /// `.authRequired`, never flattened to `.unknown` (live 2026-08-06: an
+    /// auth-blocked Mac receiver — act=2 "Current User" access control — was
+    /// debugged blind because the panel said "failed for an unknown reason"
+    /// while the engine knew it wanted a password).
+    @Test func passwordRequiredOnStateStreamSurfacesAuthRequiredCause() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+
+        engine.pushState(device.outputID, .passwordRequired)
+        await pollUntil {
+            if case .failed(let f)? = backend.devices.first(where: { $0.id == device.id })?.connectionState {
+                return f.cause == .authRequired
+            }
+            return false
+        }
+        guard case .failed(let failure)? =
+                backend.devices.first(where: { $0.id == device.id })?.connectionState else {
+            Issue.record("device did not enter .failed")
+            return
+        }
+        #expect(failure.cause == .authRequired,
+                "a password rejection carries its known cause, not .unknown")
+    }
+
+    /// The same mapping on the CONNECT path: an `addOutput` that throws the
+    /// engine's `.passwordRequired` parks the device with `.authRequired` —
+    /// `convergeDevice`'s catch mirrors `applyEngineState`'s arm.
+    @Test func passwordRequiredAddThrowSurfacesAuthRequiredCause() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device()
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil {
+            if case .failed(let f)? = backend.devices.first(where: { $0.id == device.id })?.connectionState {
+                return f.cause == .authRequired
+            }
+            return false
+        }
+        guard case .failed(let failure)? =
+                backend.devices.first(where: { $0.id == device.id })?.connectionState else {
+            Issue.record("device did not enter .failed")
+            return
+        }
+        #expect(failure.cause == .authRequired,
+                "the add-throw catch maps the engine's passwordRequired, not .unknown")
+    }
+
     /// A MUTED AirPlay-1 receiver that drops and reconnects must come back TRULY
     /// silent (the −144 dB sentinel), not at the AP1 curve's −30 dB floor.
     /// `connectVolumeSeed`'s muted branch used to push the AP2-only
@@ -2650,8 +2728,11 @@ extension SerializedSharedState {
 
     /// Root cause 4 + 5: a device whose add fails (engine NACKs SETPEERS under a
     /// session storm) is marked unavailable and PARKED (converge stops issuing
-    /// sessions), but must be RECOVERABLE — a subsequent discovery re-resolution
-    /// clears the park and a user re-toggle re-enables it, with the retry succeeding.
+    /// sessions), but must be RECOVERABLE — "Try again" (`retryOutput`) clears
+    /// the park for that id and the retry succeeds. (The discovery re-resolve in
+    /// between no longer clears the park by itself — same descriptor, so it's
+    /// not evidence of recovery under the 2026-08-06 storm fix — but it must not
+    /// WEDGE anything either.)
     @Test func setPeersFailureRecoversNotWedged() async {
         let (backend, engine, discovery) = makeBackend()
         backend.start(); defer { backend.stop() }
@@ -2671,7 +2752,8 @@ extension SerializedSharedState {
         }
         #expect(backend.devices.first { $0.id == device.id }?.isAvailable == false)
 
-        // RECOVERY: the receiver settles; discovery re-resolves it (clears the park),
+        // RECOVERY: the receiver settles; discovery re-resolves it (same
+        // descriptor — availability comes back, the park deliberately does NOT),
         // and the engine now accepts the add.
         engine.addFailures = []
         discovery.fire(.updated(device))
@@ -2679,8 +2761,8 @@ extension SerializedSharedState {
             backend.devices.first { $0.id == device.id }?.isAvailable == true
         }
 
-        // A user re-toggle now succeeds — the device is not permanently wedged.
-        backend.setOutputSet([device.id])
+        // "Try again" now succeeds — the device is not permanently wedged.
+        backend.retryOutput(device.id)
         await pollUntil(timeout: 5) {
             let d = backend.devices.first { $0.id == device.id }
             return d?.isSelected == true && d?.isAvailable == true
@@ -2689,6 +2771,130 @@ extension SerializedSharedState {
         #expect(d?.isSelected == true, "a NACKed device must be re-enableable after recovery (root cause 4)")
         #expect(d?.isAvailable == true)
         #expect(engine.addedIDs.contains(device.outputID))
+    }
+
+    // MARK: Retry-storm damping (2026-08-06 — parked `.failed` devices)
+
+    /// Drive `device` to a parked `.failed` (its adds NACK) and return the
+    /// number of engine add attempts consumed getting there.
+    private func parkDevice(
+        _ backend: NativeBackend, _ engine: SpyEngine, _ discovery: FakeDiscovery,
+        _ device: DiscoveredDevice
+    ) async -> Int {
+        engine.addFailures = [device.outputID.rawValue]
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil {
+            if case .failed = backend.devices.first(where: { $0.id == device.id })?.connectionState { return true }
+            return false
+        }
+        return engine.addedIDs.filter { $0 == device.outputID }.count
+    }
+
+    private func isFailedNow(_ backend: NativeBackend, _ id: String) -> Bool {
+        if case .failed = backend.devices.first(where: { $0.id == id })?.connectionState { return true }
+        return false
+    }
+
+    /// Storm fix, routing-traffic arm: with a device parked `.failed` and still
+    /// desired (R12 keeps intent), a membership-NEUTRAL `setOutputSet` — the
+    /// exact same set re-issued, which is what a This-Mac toggle, a Main-Out
+    /// re-pick, or any unrelated selection change produces — must NOT un-park
+    /// or re-kick it: no new engine attempt, no `.connecting` churn. Pre-fix,
+    /// the blanket park-clear plus `isRetryOfFailed` turned every such call
+    /// into a zero-backoff retry of every parked id (telemetry: 69 identical
+    /// `set_output_set added:[] removed:[]` calls in one storm session).
+    @Test func membershipNeutralSetOutputSetDoesNotRetryParkedDevice() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:60", name: "Parked Speaker")
+        let attempts = await parkDevice(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])   // membership-neutral: added:[] removed:[]
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == attempts,
+                "a membership-neutral setOutputSet must not re-kick a parked .failed device")
+        #expect(isFailedNow(backend, device.id),
+                "…and must not strobe its resting .failed through .connecting")
+    }
+
+    /// Storm fix, discovery arm: a Bonjour re-resolve of the IDENTICAL
+    /// descriptor — a dead-but-still-announcing receiver, re-announced — is not
+    /// evidence of recovery and must leave the park (and the engine) alone.
+    /// Pre-fix, `addOrUpdate` cleared the gate unconditionally (STABILITY(C7),
+    /// "no backoff") and re-kicked every still-desired id per re-announce.
+    @Test func sameDescriptorReResolveDoesNotRetryParkedDevice() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:61", name: "Announcing Corpse")
+        let attempts = await parkDevice(backend, engine, discovery, device)
+
+        discovery.fire(.updated(device))    // same descriptor, isAvailable == true
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == attempts,
+                "a same-descriptor re-resolve must not re-kick a parked .failed device")
+        #expect(isFailedNow(backend, device.id), "the resting .failed survives the re-announce")
+    }
+
+    /// The load-bearing auto-reconnect (R12) survives the damping: a re-resolve
+    /// announcing a CHANGED descriptor (the receiver restarted / moved — here a
+    /// new port) IS evidence the device came back, so the park clears and the
+    /// still-desired id reconnects with no user action.
+    @Test func changedDescriptorReResolveAutoReconnectsParkedDevice() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:62", name: "Restarted Speaker")
+        _ = await parkDevice(backend, engine, discovery, device)
+
+        engine.addFailures = []
+        let restarted = DiscoveredDevice(
+            id: device.id,
+            descriptor: DeviceDescriptor(
+                name: device.descriptor.name, address: device.descriptor.address,
+                family: .ipv4, port: device.descriptor.port + 1,
+                txtRecord: device.descriptor.txtRecord),
+            outputID: device.outputID, isAirPlay2Supported: true)
+        discovery.fire(.updated(restarted))
+
+        await pollUntil(timeout: 5) {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+        #expect(backend.devices.first { $0.id == device.id }?.connectionState == .connected,
+                "a changed-descriptor re-resolve auto-reconnects a still-desired parked device")
+    }
+
+    /// The other load-bearing recovery arm: a parked device that DISAPPEARS
+    /// entirely and later re-appears — even with the identical descriptor —
+    /// auto-reconnects, because the disappear ended the failure episode
+    /// (`markDisappeared` drops the park along with the `.failed` state).
+    @Test func reappearAfterDisappearAutoReconnectsParkedDevice() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:63", name: "Round Tripper")
+        _ = await parkDevice(backend, engine, discovery, device)
+
+        _ = await collect(from: backend) { events in
+            events.contains {
+                if case .deviceUpdated(let d) = $0 { return d.id == device.id && d.connectionState == .off }
+                else { return false }
+            }
+        } after: { discovery.fire(.disappeared(id: device.id, wasAirPlay2Supported: true)) }
+
+        engine.addFailures = []
+        discovery.fire(.appeared(device))   // identical descriptor
+        await pollUntil(timeout: 5) {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+        #expect(backend.devices.first { $0.id == device.id }?.connectionState == .connected,
+                "drop-off-and-return auto-reconnects a still-desired device (episode ended at disappear)")
     }
 
     // MARK: State-stream vs converge ordering (2026-07-17 findings)
@@ -2884,8 +3090,8 @@ extension SerializedSharedState {
     }
 
     /// Recovery clears to connecting/connected: after a NACK parks the device
-    /// `.failed`, a discovery re-resolution clears the park (root cause 4) and a
-    /// user re-toggle retries — the connection dot must follow through
+    /// `.failed`, "Try again" (`retryOutput`) clears the park (root cause 4) and
+    /// retries — the connection dot must follow through
     /// `.failed → .connecting → .connected`, not stay stuck amber.
     @Test func connectionStateRecoveryClearsFailedThenReconnects() async {
         let (backend, engine, discovery) = makeBackend()
@@ -2904,15 +3110,18 @@ extension SerializedSharedState {
             return false
         }
 
-        // The receiver settles; discovery re-resolves it. This clears the park but
-        // is not itself a retry, so the dot should NOT jump to .connecting on its
-        // own here — it stays .failed (sticky) until the user re-toggles.
+        // The receiver settles; discovery re-resolves it (same descriptor — the
+        // park deliberately survives, storm fix 2026-08-06). This is not a
+        // retry, so the dot must NOT jump to .connecting on its own here — it
+        // stays .failed (sticky) until the user acts.
         engine.addFailures = []
         discovery.fire(.updated(device))
         await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == true }
+        #expect({ if case .failed = backend.devices.first(where: { $0.id == device.id })?.connectionState { return true }; return false }(),
+                "a same-descriptor re-resolve is not a retry — the resting .failed dot survives it")
 
-        // User re-toggle: the dot must move .failed → .connecting → .connected.
-        backend.setOutputSet([device.id])
+        // "Try again": the dot must move .failed → .connecting → .connected.
+        backend.retryOutput(device.id)
         await pollUntil(timeout: 5) {
             backend.devices.first { $0.id == device.id }?.connectionState == .connected
         }
@@ -4841,6 +5050,15 @@ extension SerializedSharedState {
         #expect(backend.test_scopeConflict(deviceID: device.id)?.bundleIDs == ["com.foo.player"])
         #expect(!engine.ops.contains { $0.hasPrefix("streamAdd:\(device.outputID.rawValue):") },
                 "demoted at decision: no per-app bind op may ever be issued for a Selected Device")
+        // Poll for the telemetry LINE separately from the conflict RECORD: the
+        // record is written under `stateQueue` (what the poll above saw), but
+        // `Telemetry.log` hands the line to its own queue, so the sink append
+        // races a bare read of the box (flaked exactly so, 2026-08-07 — same
+        // discipline as the `unbind_downgraded` polls in the sibling tests).
+        await pollUntil {
+            self.telemetryLines(box, evt: "scope_conflict", device: device.id)
+                .contains { $0["stage"] as? String == "routeDemoted" }
+        }
         #expect(telemetryLines(box, evt: "scope_conflict", device: device.id)
                     .contains { $0["stage"] as? String == "routeDemoted" })
         #expect(engine.liveStream(of: device.outputID) == 0,
@@ -7856,6 +8074,13 @@ extension SerializedSharedState {
         }
     }
 
+    /// R12: a still-desired `.failed` device self-heals with NO user action when
+    /// discovery reports a genuine COME-BACK edge. Under the 2026-08-06 storm
+    /// fix the edge is required: a same-descriptor re-resolve (a
+    /// dead-but-still-announcing receiver) deliberately stays parked (see
+    /// `sameDescriptorReResolveDoesNotRetryParkedDevice`); here the receiver
+    /// genuinely dropped OFFLINE and came back, which nils then re-arms the
+    /// descriptor memo — that edge clears the park and re-converges.
     @Test func failedDeviceReconvergesOnRediscoveryWithoutUserAction() async {
         let (backend, engine, discovery) = makeBackend()
         let device = ap2Device(id: "AA:BB:CC:DD:EE:33", name: "SelfHealer")
@@ -7875,10 +8100,15 @@ extension SerializedSharedState {
         #expect(backend.test_expectedSelected == [device.id],
                 "R12: intent (expectedSelected) is untouched by the failure")
 
-        // The receiver comes back and the engine stops NACKing — simulate ONLY
-        // rediscovery, no `setOutputSet` re-call (the popover under R12 never
-        // makes one on `.failed`).
+        // The receiver goes OFFLINE (sticky-AP2 downgrade: advert gone) and then
+        // comes back, and the engine stops NACKing — simulate ONLY discovery, no
+        // `setOutputSet` re-call (the popover under R12 never makes one on
+        // `.failed`).
         engine.addFailures = []
+        let offline = DiscoveredDevice(id: device.id, descriptor: device.descriptor,
+                                       outputID: device.outputID,
+                                       isAirPlay2Supported: true, isAvailable: false)
+        discovery.fire(.updated(offline))
         discovery.fire(.updated(device))
 
         await pollUntil(timeout: 5) {
@@ -7886,16 +8116,18 @@ extension SerializedSharedState {
         }
         let d = backend.devices.first { $0.id == device.id }
         #expect(d?.connectionState == .connected,
-                "rediscovery alone re-converged the still-desired device")
+                "an offline→online rediscovery edge alone re-converged the still-desired device")
         #expect(d?.isSelected == true)
     }
 
     /// R12/W2-T3, the explicit "Try again" path (as opposed to the rediscovery
-    /// path above): `GroupController.retryConnection(for:)` re-issues
-    /// `setOutputSet` with the SAME set — the id was never removed — so
-    /// `NativeBackend` must detect "already desired, still `.failed`" itself
-    /// and re-kick, rather than skipping because `previous == wantOn`.
-    @Test func retryOfFailedWithUnchangedSetStillReconverges() async {
+    /// path above): `GroupController.retryConnection(for:)` calls
+    /// `retryOutput(id)` — the id was never removed from the set, and a
+    /// same-membership `setOutputSet` re-issue is deliberately NOT a retry any
+    /// more (storm fix, 2026-08-06; see
+    /// `membershipNeutralSetOutputSetDoesNotRetryParkedDevice`), so the
+    /// dedicated entry point is what must reconnect the `.failed` device.
+    @Test func retryOutputReconnectsFailedDeviceWithUnchangedMembership() async {
         let (backend, engine, discovery) = makeBackend()
         let device = ap2Device(id: "AA:BB:CC:DD:EE:34", name: "TryAgainer")
         engine.addFailures = [device.outputID.rawValue]
@@ -7913,16 +8145,16 @@ extension SerializedSharedState {
         }
 
         // The receiver recovers, but nothing re-discovers it — only an explicit
-        // "Try again" re-issues the SAME output set (the id was already in it).
+        // "Try again" (the id is still in the desired set, membership unchanged).
         engine.addFailures = []
-        backend.setOutputSet([device.id])
+        backend.retryOutput(device.id)
 
         await pollUntil(timeout: 5) {
             backend.devices.first { $0.id == device.id }?.connectionState == .connected
         }
         let d = backend.devices.first { $0.id == device.id }
         #expect(d?.connectionState == .connected,
-                "a same-membership retry call must still reconnect a .failed device")
+                "retryOutput must reconnect a .failed device without a membership edge")
         #expect(d?.isSelected == true)
     }
 
@@ -8501,6 +8733,31 @@ extension SerializedSharedState {
                 "the strip must show 'taking over' before settling on the timeout backstop")
         #expect(backend.devices.first { $0.id == device.id }?.connectionState
                 == .failed(ConnectionFailure(cause: .timingUnavailable)))
+    }
+
+    /// Banner-flash fix (2026-08-06): with the production debounce in force, a
+    /// clock wait that resolves BEFORE `takeoverStripDelay` elapses must never
+    /// mount the transient `.takingOver` strip at all — no blue flash, no
+    /// double panel re-fit — even though `willWaitForClock` was true. (The
+    /// ordering tests above pass `takeoverStripDelay: 0` to keep the old
+    /// synchronous emit for a wait that IS observed.)
+    @Test func fastClockWaitNeverFlashesTakingOverStrip() async {
+        let activator = ScriptedPTPHelperActivator(willWaitForClock: true, outcome: .ready)
+        let (backend, engine, discovery) = makeBackend(
+            ptpHelperActivator: activator, takeoverStripDelay: 5)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:B6", name: "Fast Takeover Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let events = await collect(from: backend, until: { events in
+            events.contains {
+                if case .deviceUpdated(let d) = $0 { return d.id == device.id && d.connectionState == .connected }
+                else { return false }
+            }
+        }, after: { backend.setOutputSet([device.id]) })
+
+        #expect(takeoverEvents(in: events).isEmpty,
+                "a wait that resolves inside the debounce window must mount no takeover strip")
     }
 
     /// Edge-triggered discipline (mirrors `reconcileSystemAirPlayGuard`): a

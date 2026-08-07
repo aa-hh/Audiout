@@ -94,7 +94,11 @@ extension ConnectionFailure {
         case .refusedOrBusy:
             return "The speaker refused the connection — another device may hold an exclusive session. Stop playback from other apps or restart the speaker, then try again."
         case .authRequired:
-            return "This speaker requires a password or pairing, which isn't supported yet."
+            // A Mac receiver in "Current User" access-control mode is by far the
+            // most common way to hit this (live 2026-08-06: act=2 in the TXT
+            // record), and it has a receiver-side fix — name it. Entering a
+            // password in Audiouter itself is roadmapped, not shipped.
+            return "This speaker requires a password or pairing. If it's a Mac, set AirPlay Receiver to allow “Anyone on the same network” in its System Settings, then try again. Entering a password here isn't supported yet."
         case .droppedMidStream:
             return "The speaker dropped the stream and reconnecting failed. Check the speaker, then try again."
         case .timedOut:

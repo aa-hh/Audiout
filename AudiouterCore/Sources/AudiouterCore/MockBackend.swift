@@ -234,14 +234,13 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
                 guard let device = self.live[id] else { continue }
                 let shouldSelect = ids.contains(id)
                 let alreadyExpected = self.expectedSelected.contains(id)
-                // R12/W2-T3: `.failed` no longer drops an id from the caller's
-                // desired set (`OutputBackend.setOutputSet`'s doc covers the
-                // contract), so "Try again" now arrives as a same-membership
-                // re-select instead of a genuine off→on edge. Treat that as a
-                // retry too — otherwise the membership-delta guard below
-                // silently swallows it and the device never reconnects.
-                let isRetryOfFailed = shouldSelect && alreadyExpected && device.connectionState.isFailed
-                guard alreadyExpected != shouldSelect || isRetryOfFailed else { continue }
+                // Membership EDGES only (storm fix, 2026-08-06): a call that
+                // re-issues the same set is a no-op for this id even while it
+                // sits `.failed` — the deliberate same-membership retry ("Try
+                // again") travels `retryOutput(_:)` instead, mirroring
+                // `NativeBackend`. (`OutputBackend.setOutputSet`'s doc covers
+                // the contract.)
+                guard alreadyExpected != shouldSelect else { continue }
                 if shouldSelect { self.expectedSelected.insert(id) } else { self.expectedSelected.remove(id) }
 
                 if let script = self.connectScripts[id] {
@@ -265,6 +264,27 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
                     self.live[id] = updated
                     self.emit(.deviceUpdated(updated))
                 }
+            }
+        }
+    }
+
+    public func retryOutput(_ id: String) {
+        queue.async {
+            // Contract (`OutputBackend.retryOutput`): only a still-desired,
+            // currently-`.failed` id gets a fresh attempt; everything else is a
+            // no-op — a retry never invents membership and never restarts an
+            // in-flight `.connecting` choreography.
+            guard let device = self.live[id],
+                  self.expectedSelected.contains(id),
+                  device.connectionState.isFailed else { return }
+            if let script = self.connectScripts[id] {
+                self.beginScriptedConnect(id, script: script)
+            } else {
+                var updated = device
+                updated.isSelected = true
+                updated.connectionState = .connected
+                self.live[id] = updated
+                self.emit(.deviceUpdated(updated))
             }
         }
     }

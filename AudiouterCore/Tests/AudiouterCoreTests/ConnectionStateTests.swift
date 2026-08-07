@@ -54,7 +54,7 @@ import Testing
             ),
             .authRequired: (
                 "Password required",
-                "This speaker requires a password or pairing, which isn't supported yet."
+                "This speaker requires a password or pairing. If it's a Mac, set AirPlay Receiver to allow “Anyone on the same network” in its System Settings, then try again. Entering a password here isn't supported yet."
             ),
             .droppedMidStream: (
                 "Connection dropped",

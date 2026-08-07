@@ -1576,17 +1576,19 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// Toggle the in-place refusal note under the blocked device row `id`: mount
     /// it directly beneath the row when absent, remove it when a second body-click
     /// asks again. No-op if the row isn't currently mounted.
+    /// The re-fit is the row primitives' own job now (`insertRow`/`removeRow`) —
+    /// this used to re-fit here, which measured the note BEFORE `removeRow`'s
+    /// deferred detach actually took it out of the tree and left the popover a row
+    /// too tall. Same latent bug the diagnosis panel hit; one fix covers both.
     private func toggleBlockedNote(for id: String, reason: String) {
         if let existing = blockedNoteByID.removeValue(forKey: id) {
             panel.removeRow(existing, animated: true)
-            panel.panelContentDidChangeHeight(animated: true)
             return
         }
         guard let row = deviceRowsByID[id] else { return }
         let note = makeRefusalNoteRow(text: reason)
         blockedNoteByID[id] = note
         panel.insertRow(note, after: row, animated: true)
-        panel.panelContentDidChangeHeight(animated: true)
     }
 
     /// A one-line refusal-note row (spec §4.6): an `info` glyph + `reason` in
@@ -1636,10 +1638,10 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     // automatically once discovery reports the device reachable again
     // (`NativeBackend.addOrUpdate`'s `desiredOn`-driven re-kick) — no user
     // action required. On `→ .connected` / `→ .off` any panel for the id is
-    // torn down. "Try again" re-adds membership (the toggle-on path IS the
-    // retry path, and remains a no-op if the device was never removed). The
-    // panel is purely auto-driven off these transitions — the manual
-    // warning-button toggle was retired 2026-07-17.
+    // torn down. "Try again" is `OutputBackend.retryOutput(_:)` via
+    // `GroupController.retryConnection(for:)` — a single-device re-kick that
+    // never touches membership. The panel is purely auto-driven off these
+    // transitions — the manual warning-button toggle was retired 2026-07-17.
 
     /// Diff the new snapshot's connection states against the last one and run
     /// the edge-triggered reactions above. Also prunes state for devices that
@@ -1687,6 +1689,30 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             openDiagnosisIDs.remove(id)
             dismissedDiagnosisIDs.remove(id)
         }
+
+        // Devices the user no longer wants audio on: drop the panel even though the
+        // backend keeps them `.failed`. `.failed` is STICKY (§1) — deselecting a
+        // failed device produces no `→ .off` edge, so without this the panel outlives
+        // the intent that justified it and sits under an unselected row forever
+        // (found live: select → fail → deselect leaves the panel mounted for the rest
+        // of the session, and each round leaves the popover sized for a row that is
+        // no longer there). This is the MIRROR of R12, not a violation of it: R12
+        // forbids a FAILURE from dropping the user's selection; this drops the
+        // failure REPORT when the USER drops the selection. A redirect target counts
+        // as intent too — its row is live and "Try again" still means something —
+        // so it keeps its panel exactly like a Selected-Devices member.
+        for id in openDiagnosisIDs.union(dismissedDiagnosisIDs) where !wantsAudio(id) {
+            openDiagnosisIDs.remove(id)
+            dismissedDiagnosisIDs.remove(id)
+        }
+    }
+
+    /// Whether the user currently intends audio on `id` — a Selected-Devices/group
+    /// member, or an app-redirect target. The same predicate `applySelectionState`
+    /// uses for `controllable:`, so a row that renders live keeps its panel and one
+    /// that doesn't loses it.
+    private func wantsAudio(_ id: String) -> Bool {
+        (groupController?.isSpeakerSelected(id) ?? false) || isRedirectTarget(id)
     }
 
     /// Make the mounted panel views match `openDiagnosisIDs`: tear down panels
@@ -1736,13 +1762,16 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     /// "Try again": under R12 (W2-T3) the id is normally ALREADY selected/a
     /// group member (`.failed` no longer drops it), so this can't ride a
-    /// plain `setDeviceSelected(id, true)` off→on edge any more —
-    /// `GroupController.retryConnection(for:)` is the dedicated entry point
-    /// that re-applies routing regardless, so the backend gets another
-    /// `setOutputSet` call and can re-kick the `.failed` id back to
-    /// `.connecting`. Same call whether `id` is a Selected-Devices member or
-    /// an active group's member (Groups and Selected Devices behave
-    /// identically here).
+    /// plain `setDeviceSelected(id, true)` off→on edge —
+    /// `GroupController.retryConnection(for:)` is the dedicated entry point,
+    /// which calls `OutputBackend.retryOutput(id)`: a single-device re-kick
+    /// back to `.connecting` that touches no other device (a broad routing
+    /// re-apply used to re-kick EVERY parked `.failed` id — the retry storm,
+    /// fixed 2026-08-06). Same call whether `id` is a Selected-Devices member
+    /// or an active group's member (Groups and Selected Devices behave
+    /// identically here). The eager `.failed → .connecting` edge this produces
+    /// is also what marks the attempt USER-INITIATED for the episode
+    /// semantics above — the backend's autonomous recovery never emits it.
     private func retryConnection(for id: String) {
         let result = groupController?.retryConnection(for: id) ?? .ok
         handleSelection(result, deviceID: id)

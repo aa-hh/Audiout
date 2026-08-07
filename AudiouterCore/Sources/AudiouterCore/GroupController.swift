@@ -342,45 +342,34 @@ public final class GroupController {
     /// Force a fresh connection attempt for `id` — what the diagnosis panel's
     /// "Try again" calls (R12/W2-T3).
     ///
-    /// Before R12, retry rode `setDeviceSelected(id, true)`: a `.failed` id had
-    /// been dropped from the desired set as failure *cleanup*, so re-adding it
-    /// was a genuine off→on membership edge that reached `applyRouting()`
-    /// naturally. R12 stopped that cleanup — `.failed` keeps the id in the
-    /// desired set (Selected Devices OR an active group's members) so the
-    /// user's intent survives the failure — which means the id is usually
-    /// ALREADY present by the time "Try again" fires. `setDeviceSelected`'s own
-    /// no-op guard would swallow that call before it ever reached the backend.
-    /// This bypasses that guard and re-applies routing unconditionally, so
-    /// `OutputBackend.setOutputSet` is called again and can re-kick a `.failed`
-    /// id (see that method's doc for the "already-desired retry" contract each
-    /// backend implements).
+    /// Under R12, `.failed` keeps the id in the desired set (Selected Devices
+    /// OR an active group's members) so the user's intent survives the failure
+    /// — which means the id is usually ALREADY present by the time "Try again"
+    /// fires, and neither `setDeviceSelected` (same-state no-op) nor a plain
+    /// `applyRouting()` re-issue can carry the retry: a membership-neutral
+    /// `setOutputSet` is deliberately NOT a retry any more (storm fix,
+    /// 2026-08-06 — re-applying the whole set used to re-kick EVERY parked
+    /// `.failed` device on any routing traffic). `OutputBackend.retryOutput(_:)`
+    /// is the dedicated entry point: it retries exactly this one id.
     ///
-    /// Handles both membership shapes identically (Groups and Selected Devices
-    /// behave the same under R12): `id` already in `selectedDeviceIDs`, or
-    /// already a member of the currently-active group. Falls back to the
-    /// ordinary add path (`setDeviceSelected(id, true)`) if `id` isn't
-    /// currently desired by either — shouldn't normally happen from the retry
-    /// button, but keeps this safe as a general-purpose entry point.
-    ///
-    /// `selectedDeviceIDs` and an active group's `memberIDs` are INDEPENDENT
-    /// sets — a device can sit in both at once (selected individually, then
-    /// also swept into a group that later becomes Main Out). What must decide
-    /// which re-kick fires is which routing is ACTUALLY live right now, i.e.
-    /// `mainOut` itself — not "which membership set happens to contain `id`
-    /// first". So the active-group check runs BEFORE the Selected-Devices
-    /// early return (R12 rediscovery fixup): a `.failed` device that is both
-    /// selected AND a member of the currently-active group must re-kick via
-    /// the group path, since that's the routing actually in effect.
+    /// The retry fires only when `id` is part of the routing ACTUALLY live
+    /// right now (`mainOut` decides, not "which membership set contains `id`
+    /// first" — a device can sit in `selectedDeviceIDs` AND the active group at
+    /// once; the active-group check runs first for that reason, R12 rediscovery
+    /// fixup). Falls back to the ordinary add path (`setDeviceSelected(id,
+    /// true)`) if `id` isn't currently desired by either — shouldn't normally
+    /// happen from the retry button, but keeps this safe as a general-purpose
+    /// entry point.
     @discardableResult
     public func retryConnection(for id: String) -> SelectionResult {
         if case .group(let groupID) = mainOut,
            let group = groups.first(where: { $0.id == groupID }),
            group.memberIDs.contains(id) {
-            applyRouting()
+            backend.retryOutput(id)
             return .ok
         }
         if selectedDeviceIDs.contains(id) {
-            if mainOut == .selectedDevices { applyRouting() }
+            if mainOut == .selectedDevices { backend.retryOutput(id) }
             return .ok
         }
         return setDeviceSelected(id, true)

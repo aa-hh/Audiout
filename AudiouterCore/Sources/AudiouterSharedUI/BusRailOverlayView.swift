@@ -74,8 +74,9 @@ public final class BusRailOverlayView: NSView {
     /// headers) ONCE, convert them into the overlay's coordinate space, then hand
     /// the plain numbers to `RailPlan.resolve` — a pure function — so the drawn
     /// geometry is a deterministic function of the CURRENT layout. The collapse
-    /// animation drives `bodyClip`'s height frame-by-frame; `RailHostView.layout`
-    /// re-invalidates this overlay on every one of those layout passes, so calling
+    /// animation drives `bodyClip`'s height frame-by-frame; the host's card stack
+    /// (`RailStackView.layout`) re-invalidates this overlay on every one of those
+    /// layout passes, so calling
     /// `resolvePlan` each frame makes the rail squeeze/extend IN SYNC with the
     /// collapse (behavior 3) using the intermediate clip frame, never a before/
     /// after snap. `nil` when the origin anchor can't be resolved (no window / not

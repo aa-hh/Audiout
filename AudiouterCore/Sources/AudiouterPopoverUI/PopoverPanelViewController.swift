@@ -58,8 +58,9 @@ final class PopoverPanelViewController: NSViewController {
 
     /// The vertical stack of section **cards** (and the footer card). Public to
     /// the module so the controller can animate `layoutSubtreeIfNeeded()` on it
-    /// during a group's expand/collapse.
-    let stackView = NSStackView()
+    /// during a group's expand/collapse. It is also what re-invalidates the rail
+    /// overlay — see `RailStackView`.
+    let stackView = RailStackView()
 
     /// The card currently being filled by `addRow` / `addSubsectionHeader`.
     private var currentCard: CardView?
@@ -127,16 +128,25 @@ final class PopoverPanelViewController: NSViewController {
     /// for the whole panel, ON TOP of every card + divider, so the rail is one
     /// uninterrupted line down a clear left gutter (section titles sit to its
     /// right, at the icon column). Fed the Main Audio row + device rows by the
-    /// controller each rebuild; repainted on every layout by `RailHostView`.
+    /// controller each rebuild; repainted on every layout by `RailStackView`.
     let railOverlay = BusRailOverlayView()
 
+    /// The rigid content column — header + card stack, chained top-to-bottom by
+    /// REQUIRED constraints, so its `fittingSize` is exactly the content height.
+    /// This, not `view`, is what `fittingSizeSettled` measures: `view` is the
+    /// surplus-shield wrapper, and a wrapper's `fittingSize` was MEASURED to keep
+    /// a feasible stale frame height rather than minimize down to its `<=` floor
+    /// (returned the pre-collapse height after a card collapsed, at every pin
+    /// priority tried, and with no pin at all).
+    private let contentContainer = NSView()
+
     override func loadView() {
-        let container = RailHostView()
-        container.railOverlay = railOverlay
+        let container = contentContainer
+        stackView.railOverlay = railOverlay
         container.translatesAutoresizingMaskIntoConstraints = false
 
         background.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(background)
+        container.addSubview(background)   // re-parented onto the wrapper below
 
         stackView.translatesAutoresizingMaskIntoConstraints = false
         stackView.orientation = .vertical
@@ -175,10 +185,11 @@ final class PopoverPanelViewController: NSViewController {
             container.widthAnchor.constraint(equalToConstant: panelWidth),
 
             // The background fills the whole container, behind everything else.
+            // (Its bottom pin moves to the WRAPPER below, so a surplus-taller
+            // wrapper still reads as continuous canvas — see the surplus shield.)
             background.topAnchor.constraint(equalTo: container.topAnchor),
             background.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             background.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            background.bottomAnchor.constraint(equalTo: container.bottomAnchor),
 
             // Header bar pinned to the very top (task A), above the System card.
             header.topAnchor.constraint(equalTo: container.topAnchor, constant: 4),
@@ -190,6 +201,14 @@ final class PopoverPanelViewController: NSViewController {
             stackView.topAnchor.constraint(equalTo: header.bottomAnchor),
             stackView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             stackView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            // The bottom pin, SPLIT (Alec's call, 2026-08-06). It used to be a
+            // single required `==`, which made a container taller than its content
+            // unsatisfiable — so Auto Layout deformed the content instead, dumping
+            // the surplus into whatever had nothing pinning its height. In practice
+            // that was the pinned banner, which ballooned into a tall empty box and
+            // pushed every card below it down (the live report). The re-fit in
+            // `insertRow`/`removeRow` stops the mismatch arising, but this makes the
+            // failure mode boring rather than broken if one ever does:
             stackView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
 
             // The rail overlay spans the whole panel (it reads row frames in its
@@ -199,8 +218,33 @@ final class PopoverPanelViewController: NSViewController {
             railOverlay.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             railOverlay.bottomAnchor.constraint(equalTo: container.bottomAnchor),
         ])
-
-        view = container
+        // SURPLUS SHIELD (Alec's resilience call, 2026-08-06). The content keeps
+        // its original, fully-REQUIRED constraint chain — that rigidity is what
+        // makes its fitting height exact — and the popover sizes this WRAPPER
+        // instead. The container hangs from the wrapper's top; the required `<=`
+        // stops it overflowing; and there is deliberately NO constraint pulling
+        // the container's bottom down to the wrapper's. Every in-place softening
+        // was measured to fail: a `<=` bottom pin let `fittingSize` return stale
+        // frame heights; an added `==` needed priority >500 before `fittingSize`
+        // honored it, but anything ≥251 lets an over-tall wrapper stretch the
+        // banner (its label hugs at 250) — the live report's tall empty box. No
+        // such priority exists, so the wrapper carries no tail pin and the size
+        // channel reads `contentContainer.fittingSize` directly (see
+        // `fittingSizeSettled`). A wrapper taller than the content — the
+        // pathology behind the ballooned banner — now just shows inert warm
+        // canvas below the last card (the canvas backs the WRAPPER), with every
+        // row's geometry, and therefore the rail's anchoring, untouched.
+        let wrapper = NSView()
+        wrapper.translatesAutoresizingMaskIntoConstraints = false
+        wrapper.addSubview(container)
+        NSLayoutConstraint.activate([
+            background.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor),
+            container.topAnchor.constraint(equalTo: wrapper.topAnchor),
+            container.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor),
+            container.trailingAnchor.constraint(equalTo: wrapper.trailingAnchor),
+            container.bottomAnchor.constraint(lessThanOrEqualTo: wrapper.bottomAnchor),
+        ])
+        view = wrapper
     }
 
     /// Point the continuous rail overlay at the current Main Audio row + device
@@ -230,7 +274,9 @@ final class PopoverPanelViewController: NSViewController {
     func fittingSizeSettled() -> NSSize {
         _ = view   // ensure `loadView` ran
         view.layoutSubtreeIfNeeded()
-        return view.fittingSize
+        // The RIGID content column, not `view`: the wrapper's own `fittingSize`
+        // keeps stale frame heights (see the surplus-shield note in `loadView`).
+        return contentContainer.fittingSize
     }
 
     /// The single resize primitive (T-3 → consumed by the collapsible-sections task
@@ -638,6 +684,15 @@ final class PopoverPanelViewController: NSViewController {
         view.leadingAnchor.constraint(equalTo: stack.leadingAnchor).isActive = true
         view.trailingAnchor.constraint(equalTo: stack.trailingAnchor).isActive = true
 
+        // Republish the size HERE, not at the call site (found live 2026-08-06):
+        // mounting a row changes the panel's height, and every caller that forgot
+        // this left the popover sized for the old content. Auto Layout then has to
+        // reconcile a container whose height disagrees with its content, and the
+        // slack lands wherever nothing pins it — in practice the pinned banner,
+        // which balloons into a tall empty box. Measured BEFORE the `isHidden`
+        // animation dance below so the target is the row's final, visible height.
+        panelContentDidChangeHeight(animated: animated)
+
         // Same Reduce Motion gate `setCardCollapsed` already applies (PLAN §E
         // risk 1 / house rule — "Respect system settings: Reduce Motion"):
         // re-derive `wantsAnimation` here rather than trusting the caller's
@@ -662,11 +717,19 @@ final class PopoverPanelViewController: NSViewController {
     func removeRow(_ view: NSView, animated: Bool) {
         guard let stack = view.superview as? NSStackView else {
             view.removeFromSuperview()
+            panelContentDidChangeHeight(animated: animated)
             return
         }
-        let detach = {
+        // The detach is DEFERRED into the animation's completion handler, so the
+        // row is still in the tree while the fade runs — which is exactly why the
+        // re-fit has to live in here too (found live 2026-08-06). Measuring at the
+        // call site sized the popover for a row that was about to leave, and
+        // nothing ever measured again once it did: the popover stayed permanently
+        // taller than its content, one row's worth per removal. See `insertRow`.
+        let detach = { [weak self] in
             stack.removeArrangedSubview(view)
             view.removeFromSuperview()
+            self?.panelContentDidChangeHeight(animated: false)
         }
         // Same Reduce Motion gate as `insertRow` above (and `setCardCollapsed`).
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -676,6 +739,11 @@ final class PopoverPanelViewController: NSViewController {
             context.allowsImplicitAnimation = true
             view.animator().isHidden = true
             self.stackView.layoutSubtreeIfNeeded()
+            // Kick the popover resize in the SAME turn as the row's fade so the two
+            // glide together rather than the panel snapping shut after it (the
+            // precedent `setCardCollapsed` sets). The `detach` above then publishes
+            // the exact end state, so a mid-flight mismeasure can't persist.
+            self.panelContentDidChangeHeight(animated: true)
         }, completionHandler: detach)
     }
 
@@ -936,12 +1004,28 @@ final class PopoverPanelViewController: NSViewController {
     }
 }
 
-/// The panel's top-level container (Warm Signal v4 §Call-1): a plain view that
-/// repaints the continuous rail overlay on every layout pass, so the spine
-/// always reflects the current row frames (collapse / expand / resize) with no
-/// cached geometry. The overlay draws from settled frames, so `cacheDisplay`
-/// snapshots stay deterministic.
-private final class RailHostView: NSView {
+/// The card stack (Warm Signal v4 §Call-1), which also repaints the continuous
+/// rail overlay on every layout pass so the spine always reflects the current row
+/// frames (collapse / expand / resize) with no cached geometry. The overlay draws
+/// from settled frames, so `cacheDisplay` snapshots stay deterministic.
+///
+/// **Why the STACK and not the container** (live bug, 2026-08-06): this hook used
+/// to live on the panel's top-level container (`RailHostView`), whose `layout()`
+/// runs only when the CONTAINER's own frame changes — not when its descendants
+/// re-lay out inside a container of unchanged size. That is exactly the state a
+/// too-tall popover produces: the container's frame is constant while the banner
+/// swells and every card below it slides. Nothing re-invalidated the overlay, so
+/// it composited its last painted figure — hook, spine and arcs together — over
+/// rows that had since moved, displacing the whole rail by the surplus. The stack
+/// re-lays out in BOTH cases (its frame is pinned to the container's four edges,
+/// so a container resize moves it too), which is why the container hook is gone
+/// rather than doubled up.
+///
+/// Do NOT move this to an ancestor's `viewWillDraw()`: an ancestor is drawn on
+/// every display pass, so dirtying a subview from there schedules another pass
+/// forever. Dirtying from `layout()` cannot loop — `needsDisplay` does not
+/// invalidate layout.
+final class RailStackView: NSStackView {
     weak var railOverlay: BusRailOverlayView?
     override func layout() {
         super.layout()

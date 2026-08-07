@@ -2313,6 +2313,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // on `captureControlQueue`; unchanged decisions enqueue nothing, so
             // unrelated routing traffic never touches the running sinks.
             let btUIDs = ids.filter { self.known[$0]?.isBluetooth == true }.sorted()
+            // A genuine membership EDGE clears a BT power-off park, the same
+            // rule the engine loop applies to its own park above: reselecting
+            // a parked row is explicit intent.
+            for id in btUIDs where !self.btSelectedUIDs.contains(id) {
+                self.failedGate.remove(id)
+            }
             let wantBT = !btUIDs.isEmpty
             let composition = BTGroupComposition(
                 airPlayPresent: ids.contains {
@@ -2330,8 +2336,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.btSinkEnabled = wantBT
                 self.btSelectedUIDs = btUIDs
                 self.btComposition = composition
+                // Parked ids stay out of the APPLIED set (power-off park) while
+                // `btSelectedUIDs` keeps full membership for change detection.
+                let activeUIDs = btUIDs.filter { !self.failedGate.contains($0) }
                 self.captureControlQueue.async { [weak self] in
-                    self?.applyBTSinkTransition(enable: wantBT, uids: btUIDs, composition: composition)
+                    self?.applyBTSinkTransition(enable: wantBT, uids: activeUIDs, composition: composition)
                 }
                 if localReferenceMoved, self.syncedLocalSinkApplied {
                     // Re-anchor the already-running local sink onto the new
@@ -2434,6 +2443,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             guard self.btConnectionManager != nil,
                   device.connectionState != .connecting,
                   let mac = BTConnectionManager.macAddress(fromUID: id) else { return true }
+            // THE explicit un-park site for a BT id, mirroring the AirPlay arm:
+            // a user retry clears the power-off park so a success below (or a
+            // later availability return) may resume playback again.
+            self.failedGate.remove(id)
             // Eager `.connecting`, mirroring the AirPlay arm: immediate spinner,
             // and the `.failed → .connecting` edge marks a fresh user-initiated
             // attempt for the row's failure-episode semantics.
@@ -2472,9 +2485,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // Live-measured classification (bt-spike-findings-2026-08-07):
                 // a powered-off speaker holds the OS attempt ~15.4 s (both
                 // brands) or hits our 20 s ceiling; a speaker another host
-                // holds refuses fast.
+                // holds refuses fast. The slow case reads `.unknown` — headline
+                // "Couldn't connect", matching AirPlay's generic failure (Alec,
+                // 2026-08-07) — rather than the AirPlay-flavored `.timedOut`.
                 let cause: ConnectionFailure.Cause =
-                    (reason == "timeout" || elapsed >= 10) ? .timedOut : .connectedElsewhere
+                    (reason == "timeout" || elapsed >= 10) ? .unknown : .connectedElsewhere
                 self.setConnectionState(.failed(ConnectionFailure(
                     cause: cause,
                     detail: "\(reason) after \(String(format: "%.1f", elapsed))s")), for: id)
@@ -2490,7 +2505,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `stateQueue`.
     private func reapplyBTSinkLocked() {
         guard btSinkEnabled else { return }
-        let uids = btSelectedUIDs
+        // Parked ids (power-off park, above) stay OUT of the applied set even
+        // once available again — un-parking is the user's move.
+        let uids = btSelectedUIDs.filter { !failedGate.contains($0) }
         let composition = btComposition
         captureControlQueue.async { [weak self] in
             self?.applyBTSinkTransition(enable: true, uids: uids, composition: composition)
@@ -5601,7 +5618,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// (correctly) counts as silence and falls back to the Mac. On `stateQueue`.
     private func desiredDeviceAudibleLocked(_ id: String) -> Bool {   // on stateQueue
         guard let device = known[id] else { return false }
-        if device.isBluetooth { return device.isAvailable }
+        // A PARKED id (power-off park) renders nothing even once available
+        // again — counting it audible would silently re-mute the Mac while
+        // no speaker plays.
+        if device.isBluetooth { return device.isAvailable && !failedGate.contains(id) }
         return device.connectionState == .connected
     }
 
@@ -6286,18 +6306,27 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     }
                     commitKnownDevice(id, updated)
                     // BT-RECONNECT: the row's lifecycle follows the baseband
-                    // fact. A return while selected reads `.connected` (the
-                    // sink re-enters via the reapply below); a loss reads
-                    // `.off` — EXCEPT sticky-failed: a `.failed` story from a
-                    // user-initiated attempt survives until retry or return.
+                    // fact. A loss while SELECTED also PARKS the id (Alec,
+                    // 2026-08-07): a speaker that powers off and later returns
+                    // must NOT auto-resume — that may not be the person's
+                    // intention. The park clears on user retry or reselect;
+                    // selecting an already-greyed row was never parked, so
+                    // that explicit intent still auto-starts on connect.
+                    // Sticky-failed: a `.failed` story from a user-initiated
+                    // attempt survives a loss until retry or return.
                     if availabilityMoved {
                         if updated.isAvailable {
+                            let parked = failedGate.contains(id)
                             setConnectionState(
-                                expectedSelected.contains(id) ? .connected : .off, for: id)
-                        } else if case .failed = existing.connectionState {
-                            // keep the failure story
+                                (expectedSelected.contains(id) && !parked) ? .connected : .off,
+                                for: id)
                         } else {
-                            setConnectionState(.off, for: id)
+                            if expectedSelected.contains(id) { failedGate.insert(id) }
+                            if case .failed = existing.connectionState {
+                                // keep the failure story
+                            } else {
+                                setConnectionState(.off, for: id)
+                            }
                         }
                     }
                 }

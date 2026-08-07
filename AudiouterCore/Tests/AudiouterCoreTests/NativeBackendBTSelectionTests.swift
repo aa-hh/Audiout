@@ -496,21 +496,54 @@ import CoreAudio
         backend.retryOutput(btMove.id)
         waitFor {
             if case .failed(let f) = self.device(backend, self.btMove.id)?.connectionState {
-                return f.cause == .timedOut
+                return f.cause == .unknown
             }
             return false
         }
         guard case .failed(let slow) = device(backend, btMove.id)?.connectionState else {
             Issue.record("expected .failed"); return
         }
-        #expect(slow.cause == .timedOut)
+        #expect(slow.cause == .unknown, #""Couldn't connect", matching AirPlay's generic failure"#)
     }
 
-    /// A selected BT id whose availability RETURNS via the enumerator (the
-    /// speaker auto-reconnected on its own) also re-applies the sink decision
-    /// and reads `.connected`; a loss reads `.off` — unless a `.failed` story
-    /// is standing (sticky-failed).
-    @Test func btAvailabilityEdges_driveStateAndSinkReapply() {
+    /// Power-off park (Alec, 2026-08-07): a selected speaker that powers off
+    /// and RETURNS must not auto-resume — the row reads `.off` and the sink
+    /// set excludes it — until the user retries, which un-parks, connects, and
+    /// resumes.
+    @Test func btPowerOffReturn_doesNotAutoResume_untilUserRetry() {
+        let manager = FakeBTConnectionManager()
+        let (backend, _, _, bt, sink, _) = makeBackend(btConnection: manager)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+        backend.setOutputSet([btMove.id])
+        waitFor { sink.calls.contains("start") }
+
+        // Power off, then back on: available again, but parked — no auto-play.
+        bt.fire([BTDeviceSnapshot(id: btMove.id, name: btMove.name, isConnected: false)])
+        waitFor { self.device(backend, self.btMove.id)?.isAvailable == false }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off)
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id)?.isAvailable == true }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off,
+                "returning after a power-off must not read .connected")
+        waitFor { sink.deviceSets.last?.isEmpty == true }
+        #expect(sink.deviceSets.last?.isEmpty == true,
+                "the applied set stays empty — no auto-resume")
+
+        // The user's retry is the un-park: connect succeeds → resumes.
+        let appliesBefore = sink.deviceSets.count
+        backend.retryOutput(btMove.id)
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
+        waitFor { sink.deviceSets.count > appliesBefore && sink.deviceSets.last?.map(\.uid) == [self.btMove.id] }
+        #expect(sink.deviceSets.last?.map(\.uid) == [btMove.id],
+                "retry un-parks and the device re-enters the applied set")
+    }
+
+    /// Reselecting a parked row is explicit intent too: deselect → reselect
+    /// clears the park, so the device plays again without a retry.
+    @Test func btReselect_clearsThePowerOffPark() {
         let (backend, _, _, bt, sink, _) = makeBackend()
         defer { backend.stop() }
         backend.start()
@@ -518,18 +551,18 @@ import CoreAudio
         waitFor { self.device(backend, self.btMove.id) != nil }
         backend.setOutputSet([btMove.id])
         waitFor { sink.calls.contains("start") }
-        let appliesBefore = sink.deviceSets.count
 
         bt.fire([BTDeviceSnapshot(id: btMove.id, name: btMove.name, isConnected: false)])
         waitFor { self.device(backend, self.btMove.id)?.isAvailable == false }
-        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off)
-
         bt.fire([btMove])
-        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
-        #expect(device(backend, btMove.id)?.connectionState == .connected)
-        waitFor { sink.deviceSets.count > appliesBefore }
-        #expect(sink.deviceSets.count > appliesBefore,
-                "the return re-applies the sink decision so the device re-enters")
+        waitFor { self.device(backend, self.btMove.id)?.isAvailable == true }
+
+        backend.setOutputSet([])
+        waitFor { sink.calls.contains("stop") }
+        backend.setOutputSet([btMove.id])
+        waitFor { sink.deviceSets.last?.map(\.uid) == [self.btMove.id] }
+        #expect(sink.deviceSets.last?.map(\.uid) == [btMove.id],
+                "a fresh membership edge clears the park")
     }
 
     // MARK: - Wave-4 delay agreement (Mac + BT without AirPlay)

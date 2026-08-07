@@ -733,6 +733,12 @@ final class PopoverPanelViewController: NSViewController {
         // nothing ever measured again once it did: the popover stayed permanently
         // taller than its content, one row's worth per removal. See `insertRow`.
         let detach = { [weak self] in
+            // The view may have LEFT this stack while the fade ran — a row
+            // that is a single reused instance (the BT sync drawer) can be
+            // re-mounted under a different sibling before this fires, and
+            // `removeArrangedSubview` on a stack the view no longer belongs to
+            // raises. Whoever re-parented it already republished the height.
+            guard view.superview === stack else { return }
             stack.removeArrangedSubview(view)
             view.removeFromSuperview()
             self?.panelContentDidChangeHeight(animated: false)

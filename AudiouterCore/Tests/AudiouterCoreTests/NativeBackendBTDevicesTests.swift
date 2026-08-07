@@ -269,8 +269,8 @@ import CoreAudio
         let store = BTTrimStore(directory: directory)
 
         let (first, _) = makeBackend(trimStore: store)
-        first.setBTSyncTrim(620, forDevice: sonos.id)     // clamps to 500
-        first.setBTSyncTrim(-40, forDevice: flip.id)
+        first.setBTSyncTrim(620, forDevice: sonos.id, persist: true)   // clamps to 500
+        first.setBTSyncTrim(-40, forDevice: flip.id, persist: true)
         #expect(first.btSyncTrim(forDevice: sonos.id) == 500)
         #expect(first.btSyncTrim(forDevice: flip.id) == -40)
         first.stop()
@@ -280,6 +280,28 @@ import CoreAudio
                 "a relaunched backend restores the persisted trim")
         #expect(second.btSyncTrim(forDevice: flip.id) == -40)
         #expect(second.btSyncTrim(forDevice: "never-set:output") == 0)
+        #expect(second.btHasSyncTrim(forDevice: sonos.id))
+        #expect(!second.btHasSyncTrim(forDevice: "never-set:output"),
+                "D10's honest signal: no ENTRY, not merely a zero value")
+        second.stop()
+    }
+
+    /// T7 §4: a live scrub reaches the audio path but must not touch the JSON
+    /// store — the drag's end is what persists.
+    @Test func liveScrubUpdatesInMemoryButNeverWritesTheStore() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bt-trims-\(UUID().uuidString)", isDirectory: true)
+        let store = BTTrimStore(directory: directory)
+
+        let (first, _) = makeBackend(trimStore: store)
+        first.setBTSyncTrim(31.24, forDevice: sonos.id, persist: false)
+        #expect(first.btSyncTrim(forDevice: sonos.id) == 31.2,
+                "quantised on the way in (T7 §7), and readable mid-drag")
+        first.stop()
+
+        let (second, _) = makeBackend(trimStore: store)
+        #expect(second.btSyncTrim(forDevice: sonos.id) == 0,
+                "nothing was written, so a relaunch sees no trim")
         second.stop()
     }
 

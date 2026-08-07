@@ -745,7 +745,7 @@ import CoreAudio
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
 
-        backend.setBTSyncTrim(-120, forDevice: btMove.id)   // no sink yet — stored only
+        backend.setBTSyncTrim(-120, forDevice: btMove.id, persist: true)   // no sink yet — stored only
         backend.setOutputSet([btMove.id])
         waitFor { sink.calls.contains("start") }
         #expect(sink.trims.contains { $0.ms == -120 && $0.uid == btMove.id },
@@ -755,7 +755,7 @@ import CoreAudio
             #expect(trimIndex < devicesIndex, "trims land before the device set arms")
         }
 
-        backend.setBTSyncTrim(60, forDevice: btMove.id)
+        backend.setBTSyncTrim(60, forDevice: btMove.id, persist: true)
         waitFor { sink.trims.contains { $0.ms == 60 } }
         #expect(sink.trims.last?.ms == 60, "a live edit reaches the armed sink directly")
     }

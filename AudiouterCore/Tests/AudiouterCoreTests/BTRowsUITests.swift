@@ -363,16 +363,16 @@ import AppKit
 
     // MARK: SYNC plumbing — cache, closures, chip seeding
 
-    /// The chip is read-only (T6), so the edit ENTERS through the host's own
-    /// trim sink — the same method the drawer's delegate call lands on once
-    /// T7 wires it. What is pinned here is the host half: the closure fires,
-    /// the session cache outranks the provider, and the row's chip re-reads
-    /// the freshest value on a repaint.
+    /// The chip is read-only (T6), so the edit ENTERS through the drawer. What
+    /// is pinned here is the host half: the closure fires, the session cache
+    /// outranks the provider, and the row's chip re-reads the freshest value
+    /// on a repaint.
     @Test func trimEditsFlowThroughTheClosureAndSurviveRepaints() {
         let (popover, _, _) = makePopover()
-        var written: [(ms: Double, id: String)] = []
+        var written: [(ms: Double, id: String, persist: Bool)] = []
         popover.btTrimProvider = { _ in 120 }
-        popover.onSetBTTrim = { ms, id in written.append((ms, id)) }
+        popover.btTrimIsSetProvider = { _ in true }
+        popover.onSetBTTrim = { ms, id, persist in written.append((ms, id, persist)) }
         let devices = [local(), bt("bt-a:output", name: "Speaker A")]
         popover.update(devices: devices)
 
@@ -380,29 +380,43 @@ import AppKit
         #expect(row?.test_syncChipTitle == "120.0 ms", "rows seed from the persisted trim")
         #expect(row?.test_syncChipIsDashed == false, "a persisted trim is a TUNED chip")
 
-        popover.deviceRow(row!, didSetSyncTrimMs: 130, for: "bt-a:output")
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        popover.test_syncDrawer?.test_firePlusClick()      // +10 ms, real target/action
         #expect(written.last?.ms == 130)
         #expect(written.last?.id == "bt-a:output")
+        #expect(written.last?.persist == true, "a stepper click is a committed gesture")
 
         // A repaint keeps the freshest edit — the cache outranks the provider.
         popover.update(devices: devices)
         #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipTitle == "130.0 ms")
     }
 
-    /// D10 at the popover level: a device the provider has no trim for reads
-    /// "Not set" on its chip, not "0.0 ms".
-    @Test func neverTunedDeviceGetsTheUntunedChip() {
+    /// D10 at the popover level: a device with no persisted ENTRY reads "Not
+    /// set" on its chip, not "0.0 ms" — and a device deliberately tuned to
+    /// exactly 0.0 reads "0.0 ms", which the value alone could never tell
+    /// apart (T7 §6).
+    @Test func untunedChipTracksThePersistedENTRYNotTheValue() {
         let (popover, _, _) = makePopover()
         popover.btTrimProvider = { _ in 0 }
-        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
-        let row = popover.test_deviceRow(for: "bt-a:output")
-        #expect(row?.test_syncChipTitle == "Not set")
-        #expect(row?.test_syncChipIsDashed == true)
+        popover.btTrimIsSetProvider = { $0 == "bt-b:output" }
+        popover.update(devices: [local(),
+                                 bt("bt-a:output", name: "Speaker A"),
+                                 bt("bt-b:output", name: "Speaker B")])
+
+        let never = popover.test_deviceRow(for: "bt-a:output")
+        #expect(never?.test_syncChipTitle == "Not set")
+        #expect(never?.test_syncChipIsDashed == true)
+
+        let tunedToZero = popover.test_deviceRow(for: "bt-b:output")
+        #expect(tunedToZero?.test_syncChipTitle == "0.0 ms",
+                "a deliberate 0.0 is TUNED — the old value != 0 placeholder got this wrong")
+        #expect(tunedToZero?.test_syncChipIsDashed == false)
     }
 
     @Test func disconnectedRowShowsPersistedTrimReadOnly() {
         let (popover, _, _) = makePopover()
         popover.btTrimProvider = { _ in -50 }
+        popover.btTrimIsSetProvider = { _ in true }
         popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A", available: false)])
         let row = popover.test_deviceRow(for: "bt-a:output")
         #expect(row?.test_syncChipTitle == "−50.0 ms")
@@ -412,9 +426,8 @@ import AppKit
     // MARK: Align tick lifecycle — one at a time, stops on close
 
     /// The align-by-ear BUTTON moved off the row into the drawer (D9), so the
-    /// gesture now arrives at the host from there; T7 wires that delegate up.
-    /// The HOST's lifecycle rules — one tick at a time, stopped by the
-    /// popover closing — are unchanged and still pinned here.
+    /// gesture arrives at the host from there. The HOST's lifecycle rules —
+    /// one tick at a time, stopped by the popover closing — are unchanged.
     @Test func alignTickIsOneAtATimeAndStopsWhenThePopoverCloses() {
         let (popover, _, _) = makePopover()
         var gates: [Bool] = []
@@ -424,14 +437,18 @@ import AppKit
             bt("bt-a:output", name: "Speaker A"),
             bt("bt-b:output", name: "Speaker B"),
         ])
-        let rowA = popover.test_deviceRow(for: "bt-a:output")!
-        let rowB = popover.test_deviceRow(for: "bt-b:output")!
 
-        popover.deviceRow(rowA, didToggleAlignTick: true, for: "bt-a:output")
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        popover.test_syncDrawer?.test_fireAlignClick()
         #expect(popover.test_alignTickDeviceID() == "bt-a:output")
         #expect(gates.last == true)
 
-        popover.deviceRow(rowB, didToggleAlignTick: true, for: "bt-b:output")
+        // Opening B's drawer closes A's, which takes A's tick with it — the
+        // tick can only ever belong to the one visible control (T7 §3).
+        popover.test_toggleSyncDrawer(deviceID: "bt-b:output")
+        #expect(popover.test_alignTickDeviceID() == nil,
+                "a collapsing drawer stops its tick — no metronome without a control")
+        popover.test_syncDrawer?.test_fireAlignClick()
         #expect(popover.test_alignTickDeviceID() == "bt-b:output", "the single tick MOVES")
 
         popover.popoverDidClose(Notification(name: NSPopover.didCloseNotification))
@@ -495,5 +512,264 @@ import AppKit
         popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A", available: true)])
         popover.test_deviceRow(for: "bt-a:output")?.test_clickName()
         #expect(controller.selectedDeviceIDs.contains("bt-a:output"))
+    }
+}
+
+/// The SYNC drawer accordion (PLAN-BT-SYNC-DRAWER T7): one drawer at a time,
+/// mounted directly under its row, auto-collapsing with its device, and the
+/// live-scrub / committed-edit split that keeps a drag off the JSON store.
+@MainActor
+@Suite(.serialized) struct BTSyncDrawerAccordionTests {
+
+    private func tempDirectory() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    }
+
+    private func makePopover(fleet: [Device] = []) -> (PopoverController, GroupController) {
+        let backend = MockBackend(fleet: fleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        let controller = GroupController(backend: backend,
+                                         store: GroupStore(directory: tempDirectory()),
+                                         routingStore: RoutingStore(directory: tempDirectory()),
+                                         loadPersisted: false)
+        let popover = PopoverController()
+        popover.configure(groupController: controller)
+        popover.test_isShownOverride = true
+        if !fleet.isEmpty {
+            backend.start()
+            let deadline = Date().addingTimeInterval(5)
+            while Date() < deadline && backend.devices.count < fleet.count {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+            }
+        }
+        return (popover, controller)
+    }
+
+    private func local() -> Device {
+        Device(id: "mac", name: "This Mac", kind: .localMac, isLocalDevice: true)
+    }
+
+    private func airplay(_ id: String = "office") -> Device {
+        Device(id: id, name: "Office", kind: .homePod)
+    }
+
+    private func bt(_ id: String, name: String, available: Bool = true) -> Device {
+        Device(id: id, name: name, kind: .bluetooth,
+               isAvailable: available, supportsAirPlay2: false)
+    }
+
+    /// Every `BTSyncDrawerView` anywhere in the popover's view tree — the only
+    /// way to prove D2 ("at most one") rather than merely trusting the model
+    /// flag.
+    private func mountedDrawers(_ popover: PopoverController, reachableFrom id: String)
+        -> [BTSyncDrawerView] {
+        var root: NSView? = popover.test_deviceRow(for: id)
+        while let parent = root?.superview { root = parent }
+        guard let root else { return [] }
+        func collect(_ view: NSView) -> [BTSyncDrawerView] {
+            if let drawer = view as? BTSyncDrawerView { return [drawer] }
+            return view.subviews.flatMap(collect)
+        }
+        return collect(root)
+    }
+
+    /// Whether the mounted drawer sits in the very next stack slot after its
+    /// row (D1 — it opens in place, under the row it belongs to).
+    private func drawerFollowsRow(_ popover: PopoverController, _ id: String) -> Bool {
+        guard let row = popover.test_deviceRow(for: id),
+              let drawer = popover.test_syncDrawer,
+              let stack = row.superview as? NSStackView,
+              let rowIndex = stack.arrangedSubviews.firstIndex(of: row),
+              let drawerIndex = stack.arrangedSubviews.firstIndex(of: drawer)
+        else { return false }
+        return drawerIndex == rowIndex + 1
+    }
+
+    // MARK: The chip is really wired (the seam trap)
+
+    /// `test_*` hooks here bypass AppKit dispatch and have hidden real breaks
+    /// before, so this one goes through the chip's own target/action.
+    @Test func chipClickOpensAndClosesTheDrawerThroughItsRealAction() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+
+        popover.test_deviceRow(for: "bt-a:output")?.test_fireSyncChipClick()
+        #expect(popover.test_expandedSyncDeviceID == "bt-a:output")
+        #expect(popover.test_syncDrawerVisible)
+        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipIsEngaged == true)
+
+        popover.test_deviceRow(for: "bt-a:output")?.test_fireSyncChipClick()
+        #expect(popover.test_expandedSyncDeviceID == nil, "a second click closes it")
+        #expect(!popover.test_syncDrawerVisible)
+    }
+
+    // MARK: D2 — one drawer at a time
+
+    @Test func openingASecondDrawerLeavesExactlyOneAttachedToTheNewRow() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(),
+                                 bt("bt-a:output", name: "Speaker A"),
+                                 bt("bt-b:output", name: "Speaker B")])
+
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        #expect(drawerFollowsRow(popover, "bt-a:output"))
+
+        popover.test_toggleSyncDrawer(deviceID: "bt-b:output")
+        #expect(popover.test_expandedSyncDeviceID == "bt-b:output")
+        #expect(mountedDrawers(popover, reachableFrom: "bt-a:output").count == 1,
+                "opening B while A is open leaves exactly ONE drawer")
+        #expect(drawerFollowsRow(popover, "bt-b:output"), "…attached to B")
+        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipIsEngaged == false)
+        #expect(popover.test_deviceRow(for: "bt-b:output")?.test_syncChipIsEngaged == true)
+    }
+
+    // MARK: Auto-collapse
+
+    @Test func drawerCollapsesWhenItsDeviceIsDeselected() {
+        let (popover, controller) = makePopover(fleet: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.test_deviceRow(for: "bt-a:output")?.test_clickName()   // select
+        #expect(controller.selectedDeviceIDs.contains("bt-a:output"))
+
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        #expect(popover.test_syncDrawerVisible)
+
+        popover.test_deviceRow(for: "bt-a:output")?.test_clickName()   // deselect
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        #expect(popover.test_expandedSyncDeviceID == nil, "out of the mix ⇒ no drawer")
+        #expect(!popover.test_syncDrawerVisible)
+    }
+
+    /// A drawer opened on an available-but-UNSELECTED row (tuning a speaker
+    /// before adding it to the mix) has no selection to lose, so it survives
+    /// repaints — the collapse above is an EDGE, not a standing requirement.
+    @Test func drawerOpenedOnAnUnselectedRowSurvivesRepaints() {
+        let (popover, _) = makePopover()
+        let devices = [local(), bt("bt-a:output", name: "Speaker A")]
+        popover.update(devices: devices)
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+
+        popover.update(devices: devices)
+        #expect(popover.test_expandedSyncDeviceID == "bt-a:output")
+        #expect(popover.test_syncDrawerVisible)
+    }
+
+    @Test func drawerCollapsesWhenItsRowDisappearsOrGoesUnavailable() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        #expect(popover.test_syncDrawerVisible)
+
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A", available: false)])
+        #expect(popover.test_expandedSyncDeviceID == nil, "an unavailable row has nothing to tune")
+
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        #expect(popover.test_syncDrawerVisible)
+
+        popover.update(devices: [local()])            // the device vanishes entirely
+        #expect(popover.test_expandedSyncDeviceID == nil)
+        #expect(!popover.test_syncDrawerVisible)
+    }
+
+    @Test func popoverCloseCollapsesTheDrawer() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+
+        popover.popoverDidClose(Notification(name: NSPopover.didCloseNotification))
+        #expect(popover.test_expandedSyncDeviceID == nil)
+        #expect(!popover.test_syncDrawerVisible)
+    }
+
+    // MARK: Live scrub vs saved commit (D6 / T7 §4)
+
+    @Test func aScrubAppliesManyTimesAndPersistsExactlyOnce() {
+        let (popover, _) = makePopover()
+        var applied: [(ms: Double, persist: Bool)] = []
+        popover.onSetBTTrim = { ms, _, persist in applied.append((ms, persist)) }
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+
+        let ruler = popover.test_syncDrawer!.test_ruler
+        ruler.test_beginScrub()
+        for _ in 0..<12 { ruler.test_scrub(byPoints: 4, speed: 4) }
+
+        // Mid-drag: the audio path has taken every tick, the store none of
+        // them, and the row's chip is already showing what the ear is hearing.
+        #expect(applied.count >= 5, "every scrub tick reaches the audio path")
+        #expect(applied.allSatisfy { !$0.persist }, "a live scrub never writes the store")
+        let scrubbed = popover.test_syncDrawer!.test_trimMs
+        #expect(scrubbed != 0, "the scrub moved the value")
+        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipTitle?
+                    .contains(String(format: "%.1f", abs(scrubbed))) == true,
+                "the chip tracks the SCRUB, not just the commit")
+
+        ruler.test_endScrub()
+        #expect(applied.filter(\.persist).count == 1, "exactly one persist, at drag end")
+        #expect(applied.last?.persist == true)
+    }
+
+    /// T7 §7: every value that reaches the host is quantised, so the readout,
+    /// the ruler and the persisted value can never disagree.
+    @Test func committedTrimsAreQuantisedToTheResolution() {
+        let (popover, _) = makePopover()
+        var applied: [Double] = []
+        popover.onSetBTTrim = { ms, _, _ in applied.append(ms) }
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+
+        popover.syncDrawer(popover.test_syncDrawer!, didChangeTrimMs: 22.44, committed: true)
+        popover.syncDrawer(popover.test_syncDrawer!, didChangeTrimMs: 22.45, committed: true)
+        #expect(applied == [22.4, 22.5])
+    }
+
+    // MARK: Geometry + range
+
+    @Test func popoverGrowsByTheDrawerHeightAndReturnsExactlyOnCollapse() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        let collapsed = popover.test_panelContentHeight
+
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        #expect(popover.test_panelContentHeight
+                == collapsed + PopoverColumnGrid.syncDrawerHeight)
+
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        #expect(popover.test_panelContentHeight == collapsed, "…and returns exactly")
+    }
+
+    /// T3's trap: the usable range moves when AirPlay joins or leaves the
+    /// group, so an OPEN drawer must re-read it on every snapshot.
+    @Test func openDrawerReReadsTheUsableRangeOnEveryUpdate() {
+        let (popover, _) = makePopover()
+        var floor: Double = -100
+        popover.btTrimRangeProvider = { _ in floor...BTSyncTrim.rangeMs }
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        #expect(popover.test_syncDrawer?.test_ruler.usableRangeMs.lowerBound == -100)
+
+        floor = -420
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        #expect(popover.test_syncDrawer?.test_ruler.usableRangeMs.lowerBound == -420,
+                "the range is never cached at open time")
+    }
+
+    // MARK: AirPlay rows are untouched
+
+    @Test func airPlayRowsExposeNeitherChipNorDrawer() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), airplay(), bt("bt-a:output", name: "Speaker A")])
+
+        let airplayRow = popover.test_deviceRow(for: "office")
+        #expect(airplayRow?.test_showsSyncControls == false)
+        #expect(airplayRow?.test_syncChipTitle == nil)
+
+        popover.test_toggleSyncDrawer(deviceID: "office")
+        #expect(popover.test_expandedSyncDeviceID == nil,
+                "a non-Bluetooth row can never carry a drawer")
+        #expect(!popover.test_syncDrawerVisible)
     }
 }

@@ -461,11 +461,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // BT-OFFSET-UI: the SYNC column's trim round-trip (live-applied to the
         // device's BTSyncedSink delay + persisted per device UID) and the
         // align-by-ear tick gate. Same capability posture as above.
-        popoverController.onSetBTTrim = { [weak self] ms, deviceID in
-            (self?.backend as? BTOutputControlling)?.setBTSyncTrim(ms, forDevice: deviceID)
+        popoverController.onSetBTTrim = { [weak self] ms, deviceID, persist in
+            (self?.backend as? BTOutputControlling)?
+                .setBTSyncTrim(ms, forDevice: deviceID, persist: persist)
         }
         popoverController.btTrimProvider = { [weak self] deviceID in
             (self?.backend as? BTOutputControlling)?.btSyncTrim(forDevice: deviceID) ?? 0
+        }
+        // BT-SYNC-DRAWER T7: D10's real "tuned or never tuned" signal. `false`
+        // without the capability, so a mock/dev popover starts every chip at
+        // "Not set" and only the user's own edits mark one tuned.
+        popoverController.btTrimIsSetProvider = { [weak self] deviceID in
+            (self?.backend as? BTOutputControlling)?.btHasSyncTrim(forDevice: deviceID) ?? false
         }
         // BT-SYNC-DRAWER T3: the drawer's hard-stop range. `nil` fallback
         // matches the protocol's own default (full ±range) so a MockBackend/

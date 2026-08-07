@@ -7936,12 +7936,24 @@ public protocol BTOutputControlling: AnyObject {
     /// When macOS last used each known BT pairing, keyed by `Device.id` — the
     /// popover's ghost-pairing sort input (stale pairings to the bottom).
     func lastUsedDatesForBTDevices() -> [String: Date]
-    /// Set a device's SYNC trim (ms, clamped to ±`BTSyncTrim.rangeMs`):
-    /// applied live to its `BTSyncedSink` delay and persisted per device UID.
-    func setBTSyncTrim(_ ms: Double, forDevice id: String)
+    /// Set a device's SYNC trim (ms, snapped to `BTSyncTrim.resolutionMs` and
+    /// clamped to ±`BTSyncTrim.rangeMs`): applied live to its `BTSyncedSink`
+    /// delay, and written to disk only when `persist` is true.
+    ///
+    /// `persist: false` is the drawer's live SCRUB (D6): the ruler emits a new
+    /// value many times a second while the user drags, and every one of those
+    /// must reach the audio path — but writing the JSON store at that rate
+    /// would be absurd. The drag's END (and every discrete gesture: a stepper
+    /// click, a typed commit, Revert) arrives separately with `persist: true`.
+    func setBTSyncTrim(_ ms: Double, forDevice id: String, persist: Bool)
     /// The saved SYNC trim for a device (0 when none) — what a disconnected
-    /// row shows read-only, and what the stepper starts from.
+    /// row shows read-only, and what the drawer starts from.
     func btSyncTrim(forDevice id: String) -> Double
+    /// Whether this device has a trim ENTRY at all — the honest answer to
+    /// D10's "tuned or never tuned?", which a value alone cannot give: a
+    /// device deliberately tuned to exactly 0.0 ms is tuned, and must not
+    /// read "Not set".
+    func btHasSyncTrim(forDevice id: String) -> Bool
     /// Start/stop the align-by-ear tick in the captured feed (auto-limits to
     /// ~30 s of ticks on its own).
     func setBTAlignTickActive(_ active: Bool)
@@ -7968,20 +7980,32 @@ extension BTOutputControlling {
 
 extension NativeBackend: BTOutputControlling {
 
-    public func setBTSyncTrim(_ ms: Double, forDevice id: String) {
-        let clamped = BTSyncTrim.clamp(ms)
+    public func setBTSyncTrim(_ ms: Double, forDevice id: String, persist: Bool) {
+        // Quantise, not merely clamp (T7 §7): the ruler resolves 0.1 ms, so
+        // snapping here is what keeps the readout, the ruler and the persisted
+        // value from ever disagreeing about what "22.4" means.
+        let value = BTSyncTrim.quantise(ms)
         let all: [String: Double] = btTrimLock.withLock {
-            btTrimsByUID[id] = clamped
+            btTrimsByUID[id] = value
             return btTrimsByUID
         }
-        try? btTrimStore?.save(all)
+        // The in-memory map updates on a scrub too — only the DISK write is
+        // skipped. `btSyncTrim`/`btHasSyncTrim` are read-back seams, and a
+        // reader mid-drag should see what the user is hearing.
+        if persist {
+            try? btTrimStore?.save(all)
+        }
         captureControlQueue.async { [weak self] in
-            self?.btSink?.setTrimMs(clamped, forDeviceUID: id)
+            self?.btSink?.setTrimMs(value, forDeviceUID: id)
         }
     }
 
     public func btSyncTrim(forDevice id: String) -> Double {
         btTrimLock.withLock { btTrimsByUID[id] ?? 0 }
+    }
+
+    public func btHasSyncTrim(forDevice id: String) -> Bool {
+        btTrimLock.withLock { btTrimsByUID[id] != nil }
     }
 
     public func setBTAlignTickActive(_ active: Bool) {

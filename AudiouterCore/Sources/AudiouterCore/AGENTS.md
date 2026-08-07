@@ -35,6 +35,17 @@ sibling, so the upcoming Apple-only Bluetooth sink can share its timing/drift
 math (PLAN-UNIVERSAL-SYNC Decision 5). Never add the GPL header to it and
 never move GPL-derived code into it.
 
+**A Bluetooth trim change must NEVER rebuild a sink.** The delay is physically
+the audio piled up in `BTDelayLine`'s ring when the release gate opened, so a
+trim is a move of the read position — `applyTrimDelta(ms:)`, spliced with an
+equal-power crossfade — not a new session. Rebuilding stops and restarts the
+engine and re-holds silence for the whole delay, which the drawer's live scrub
+would turn into permanent silence. The seek must also never run
+`clearSessionStateLocked`: a seek is not a new clock context, and wiping the
+drift `PhaseController` would throw away its learned rate. `requestRebuild` is
+for genuine structural changes only (`config_change`, `rate_change`,
+`offset_change`, `composition_change`).
+
 ## Architecture
 
 ```mermaid

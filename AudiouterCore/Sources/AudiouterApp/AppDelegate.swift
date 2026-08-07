@@ -85,6 +85,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `applicationDidFinishLaunching` so it binds to the resolved `backend`.
     private var groupController: GroupController!
 
+    /// Narrow read-only window onto `groupController` for the App Intent
+    /// bridge (roadmap 035 T5, `Intents/AppIntentBridge.swift`) — the exact
+    /// same instance handed to the popover and mixer window below, so they
+    /// never diverge (AudiouterApp/AGENTS.md); never a second
+    /// `GroupController`. `nil` until construction below runs; an intent
+    /// that cold-launches the app can observe that window, which is why the
+    /// bridge waits rather than assuming this is set.
+    var groupControllerForAppIntents: GroupController? { groupController }
+
     /// The full mixer window (SPEC §9 "Full window", T-U4). Created lazily the
     /// first time "Open Mixer…" is chosen, then reused/focused. Holds the same
     /// `GroupController` as the menu, so both views stay in lockstep.

@@ -42,7 +42,7 @@ import AudioToolbox
     @Test func ticksLandOnTheConfiguredBeatAndNowhereElse() {
         // Small synthetic clock so one buffer spans several beats: 1 kHz,
         // 600 BPM → a tick every 100 frames; the tick itself is 30 frames.
-        let injector = AlignmentTickInjector(sampleRate: 1_000, bpm: 600, maxTicks: 3)
+        let injector = AlignmentTickInjector(sampleRate: 1_000, config: .init(bpm: 600, maxTicks: 3, bedEnabled: false))
         #expect(injector.test_beatFrames == 100)
         var pcm = zeroBuffer(frames: 250)
         injector.mix(into: &pcm)
@@ -56,7 +56,7 @@ import AudioToolbox
     }
 
     @Test func beatClockCarriesAcrossBufferBoundaries() {
-        let injector = AlignmentTickInjector(sampleRate: 1_000, bpm: 600, maxTicks: 4)
+        let injector = AlignmentTickInjector(sampleRate: 1_000, config: .init(bpm: 600, maxTicks: 4, bedEnabled: false))
         // Deliver 60 + 60 frames: the second tick starts at absolute frame 100,
         // i.e. 40 frames INTO the second buffer.
         var first = zeroBuffer(frames: 60)
@@ -69,7 +69,7 @@ import AudioToolbox
     }
 
     @Test func stopsEmittingAfterMaxTicks() {
-        let injector = AlignmentTickInjector(sampleRate: 1_000, bpm: 600, maxTicks: 2)
+        let injector = AlignmentTickInjector(sampleRate: 1_000, config: .init(bpm: 600, maxTicks: 2, bedEnabled: false))
         var pcm = zeroBuffer(frames: 400)
         injector.mix(into: &pcm)
         let samples = channel0(pcm)
@@ -80,7 +80,7 @@ import AudioToolbox
     }
 
     @Test func mixAddsOntoProgramAudioInsteadOfReplacingIt() {
-        let injector = AlignmentTickInjector(sampleRate: 1_000, bpm: 600, maxTicks: 1)
+        let injector = AlignmentTickInjector(sampleRate: 1_000, config: .init(bpm: 600, maxTicks: 1, bedEnabled: false))
         var pcm = zeroBuffer(frames: 100)
         pcm.withUnsafeMutableBytes { raw in
             let p = raw.bindMemory(to: Int16.self)
@@ -92,6 +92,63 @@ import AudioToolbox
                 "off-beat samples keep the program audio untouched")
         #expect(samples[1...29].contains { $0 != 1_000 },
                 "on-beat samples are program + tick, never a replacement")
+    }
+
+    // MARK: Keep-alive bed + wake preamble (W2 — the Sonos amp-gate fix)
+
+    /// The bed rides under every active frame at ~−47 dBFS RMS — present, but
+    /// far below the tick.
+    @Test func bedIsPresentAtTheTargetLevel() {
+        let injector = AlignmentTickInjector(
+            sampleRate: 1_000, config: .init(bpm: 600, maxTicks: 4))
+        var pcm = zeroBuffer(frames: 100)
+        injector.mix(into: &pcm)
+        let samples = channel0(pcm)
+        // Between ticks (frames 30..<100) only the bed plays.
+        let bedOnly = samples[30..<100].map { Double($0) / 32_768.0 }
+        #expect(bedOnly.contains { $0 != 0 }, "the bed keeps signal flowing between ticks")
+        let rms = (bedOnly.map { $0 * $0 }.reduce(0, +) / Double(bedOnly.count)).squareRoot()
+        let dBFS = 20 * log10(max(rms, 1e-12))
+        #expect(dBFS > -53 && dBFS < -41, "bed ≈ −47 dBFS RMS, measured \(dBFS)")
+    }
+
+    /// The wizard's wake preamble: bed only — no tick — for the configured
+    /// stretch, then the first tick lands on already-awake amps.
+    @Test func preambleIsBedOnlyBeforeTheFirstTick() {
+        let injector = AlignmentTickInjector(
+            sampleRate: 1_000,
+            config: .init(bpm: 600, maxTicks: 2, preambleSeconds: 0.2))
+        #expect(injector.test_preambleFrames == 200)
+        var pcm = zeroBuffer(frames: 300)
+        injector.mix(into: &pcm)
+        let samples = channel0(pcm)
+        let tickPeak = Double(0.35 * 0.7 * 32_767)   // the tick's first partial scale
+        #expect(samples[0..<200].allSatisfy { abs(Double($0)) < tickPeak / 8 },
+                "the preamble carries only the quiet bed, never a tick")
+        #expect(samples[200...229].contains { abs(Double($0)) > tickPeak / 8 },
+                "the first tick starts right after the preamble")
+    }
+
+    /// The bed stops WITH the tick budget — an expired injector adds nothing,
+    /// so a forgotten switch-off leaks silence, not hiss.
+    @Test func bedStopsWhenTheTickBudgetExpires() {
+        let injector = AlignmentTickInjector(
+            sampleRate: 1_000, config: .init(bpm: 600, maxTicks: 2))
+        var pcm = zeroBuffer(frames: 400)
+        injector.mix(into: &pcm)
+        let samples = channel0(pcm)
+        #expect(samples[0..<200].contains { $0 != 0 })
+        #expect(samples[200..<400].allSatisfy { $0 == 0 },
+                "past the budget, neither tick nor bed is emitted")
+    }
+
+    /// The wizard config: long budget, ~3 s preamble, bed on.
+    @Test func wizardConfigShape() {
+        let config = AlignmentTickInjector.Config.wizard
+        #expect(config.maxTicks == 360)
+        #expect(config.preambleSeconds == 3)
+        #expect(config.bedEnabled)
+        #expect(AlignmentTickInjector.Config.manual.preambleSeconds == 0)
     }
 
     // MARK: Coordinator seam — one mixed feed, every consumer

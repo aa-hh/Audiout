@@ -283,6 +283,10 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// ``BufferSnapshot``. A fresh injector per activation restarts the beat
     /// clock and its self-limiting tick budget.
     private var tickInjector: AlignmentTickInjector?
+    /// The config the live injector was built with (`nil` = inactive) — the
+    /// idempotence key for ``setAlignTick(_:config:)``, so a wizard activation
+    /// can replace a manual one and vice versa. Confined to `queue`.
+    private var tickConfig: AlignmentTickInjector.Config?
 
     /// W1-T7 (Gap 1 + Fix 1): the excluded process-OBJECT set the CURRENT live tap
     /// was last built/recreated against — the compare-before-rebuild key for the
@@ -1049,9 +1053,23 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// ``setBTSink(_:renderProcessPID:)``, so the very next delivered buffer
     /// already carries (or has dropped) the tick.
     public func setAlignTick(_ active: Bool) {
+        setAlignTickMode(active ? .manual : .off)
+    }
+
+    /// Mode-aware twin (W2): the wizard activates with `.wizard` — long tick
+    /// budget plus the keep-alive bed's wake preamble. Switching mode while
+    /// active swaps in a fresh injector (new beat clock + budget); a same-mode
+    /// call stays a no-op.
+    public func setAlignTickMode(_ mode: AlignTickMode) {
         queue.sync {
-            guard (self.tickInjector != nil) != active else { return }
-            self.tickInjector = active ? AlignmentTickInjector() : nil
+            let config: AlignmentTickInjector.Config? = switch mode {
+            case .off: nil
+            case .manual: .manual
+            case .wizard: .wizard
+            }
+            guard self.tickConfig != config else { return }
+            self.tickConfig = config
+            self.tickInjector = config.map { AlignmentTickInjector(config: $0) }
             self.publishBufferSnapshot()
         }
     }

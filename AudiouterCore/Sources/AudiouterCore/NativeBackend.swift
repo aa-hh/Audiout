@@ -7851,6 +7851,13 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// `start()`/`stop()`. See ``NativeCaptureCoordinator/setMeteringActive(_:)``.
     func setMeteringActive(_ active: Bool)
 
+    /// Mode-aware align-tick seam (W2): `.wizard` carries the alignment
+    /// wizard's shape (long tick budget + keep-alive bed wake preamble) without
+    /// exposing the injector's internals through this public protocol. Default
+    /// (below) forwards to `setAlignTick(_:)`; ``NativeCaptureCoordinator``
+    /// provides the real mode → injector-config mapping.
+    func setAlignTickMode(_ mode: AlignTickMode)
+
     /// Keep the whole-system tap's exclusion set in sync with the routing table
     /// (T4/T6): individually-routed apps (`.device(id:)` routes) and user-excluded
     /// apps must not double up into the system-wide mix. Default no-op so a fake
@@ -7906,6 +7913,11 @@ extension CaptureControlling {
     func setBTSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {}
     /// Default no-op (BT-OFFSET-UI align tick), same posture.
     func setAlignTick(_ active: Bool) {}
+    /// Default forwards to the flag-only seam so a fake recording plain
+    /// `setAlignTick` calls also observes wizard activations (W2).
+    func setAlignTickMode(_ mode: AlignTickMode) {
+        setAlignTick(mode != .off)
+    }
 }
 
 extension NativeCaptureCoordinator: CaptureControlling {}
@@ -7928,6 +7940,24 @@ public protocol BTOutputControlling: AnyObject {
     /// Start/stop the align-by-ear tick in the captured feed (auto-limits to
     /// ~30 s of ticks on its own).
     func setBTAlignTickActive(_ active: Bool)
+
+    // MARK: Alignment wizard (W2)
+
+    /// Push a CANDIDATE trim live to the device's sink — clamped like
+    /// ``setBTSyncTrim(_:forDevice:)`` but NEVER persisted and never entering
+    /// the stored trim table, so cancel can restore by re-pushing the store.
+    /// (A selection change mid-wizard re-pushes stored trims over the preview;
+    /// the wizard session re-applies on its next answer, so the stomp is a
+    /// beat, not a loss.)
+    func setBTWizardTrimPreview(_ ms: Int, forDevice id: String)
+    /// End a preview: `keepMs` non-nil persists it (the wizard's Keep, via the
+    /// ordinary ``setBTSyncTrim(_:forDevice:)`` path); `nil` restores the
+    /// stored trim to the live sink (cancel / Try again / graceful exit).
+    func endBTWizardTrimPreview(forDevice id: String, keepMs: Int?)
+    /// The wizard's continuous tick run: long budget plus the keep-alive bed's
+    /// ~3 s wake preamble (the Sonos amp-gate live finding, 2026-08-07) —
+    /// distinct from the row button's ~30 s ``setBTAlignTickActive(_:)``.
+    func setBTWizardTickActive(_ active: Bool)
 }
 
 extension NativeBackend: BTOutputControlling {
@@ -7950,6 +7980,28 @@ extension NativeBackend: BTOutputControlling {
 
     public func setBTAlignTickActive(_ active: Bool) {
         captureCoordinator?.setAlignTick(active)
+    }
+
+    public func setBTWizardTrimPreview(_ ms: Int, forDevice id: String) {
+        let clamped = BTSyncTrim.clamp(ms)
+        captureControlQueue.async { [weak self] in
+            self?.btSink?.setTrimMs(clamped, forDeviceUID: id)
+        }
+    }
+
+    public func endBTWizardTrimPreview(forDevice id: String, keepMs: Int?) {
+        if let keepMs {
+            setBTSyncTrim(keepMs, forDevice: id)
+        } else {
+            let stored = btSyncTrim(forDevice: id)
+            captureControlQueue.async { [weak self] in
+                self?.btSink?.setTrimMs(stored, forDeviceUID: id)
+            }
+        }
+    }
+
+    public func setBTWizardTickActive(_ active: Bool) {
+        captureCoordinator?.setAlignTickMode(active ? .wizard : .off)
     }
 }
 

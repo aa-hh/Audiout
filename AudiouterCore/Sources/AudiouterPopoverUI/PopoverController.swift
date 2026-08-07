@@ -797,13 +797,24 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     // MARK: Show / hide
 
-    /// Headless test seam: an `NSPopover` can never actually show under `swift
-    /// test`, so tests flip this to exercise the shown-path repaint semantics
-    /// (the view tree IS the test suite's rendering surface). Production code
-    /// never sets it. `toggle(relativeTo:)` and `setPopoverAnimates` still key
-    /// off the real `popover.isShown` — this only affects repaint routing.
+    /// Whether the HOST currently has this panel on screen. Owned by
+    /// ``surfaceDidShow()`` / ``surfaceDidHide()``, which the `NSPopover`
+    /// delegate forwards to — so today it tracks `popover.isShown`, and a
+    /// window host driving the same pair needs no popover at all.
+    private var hostIsShown = false
+
+    /// Headless test seam: no host can actually put the panel on screen under
+    /// `swift test`, so tests flip this to exercise the shown-path repaint
+    /// semantics (the view tree IS the test suite's rendering surface).
+    /// Production code never sets it. `toggle(relativeTo:)` and the `NSPopover`
+    /// branch of ``applySurfaceResize(animated:whileApplying:)`` still key off
+    /// the real `popover.isShown` — this only affects repaint routing.
     public var test_isShownOverride = false
-    private var isEffectivelyShown: Bool { popover.isShown || test_isShownOverride }
+
+    /// The ONE visibility question this controller asks. Every
+    /// skip-work-while-hidden gate reads this and never the `NSPopover`, which
+    /// is what lets a window host the same panel content.
+    private var isEffectivelyShown: Bool { hostIsShown || test_isShownOverride }
 
     /// Total `rebuild()` calls, for tests asserting a closed popover does NOT
     /// rebuild per backend event (audit B8).
@@ -834,20 +845,32 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         }
     }
 
-    /// Set the popover's resize animation for the NEXT `preferredContentSize`
-    /// change, then restore. The panel's resize primitive
+    /// The host's own resize behavior, substituted for the `NSPopover` one
+    /// below. A host assigns this to run `apply` (the `preferredContentSize`
+    /// assignment) inside whatever animation IT uses to follow the panel's new
+    /// size. `nil` (the default) keeps the popover behavior.
+    var surfaceResizer: ((_ animated: Bool, _ apply: () -> Void) -> Void)?
+
+    /// Apply the panel's next `preferredContentSize` change with the current
+    /// host's resize animation. The panel's resize primitive
     /// (`panelContentDidChangeHeight`) calls this so the DOCUMENTED
     /// `preferredContentSize` size channel animates (or not) exactly as the caller
-    /// asked — `NSPopover` animates a `preferredContentSize` change iff `animates`
-    /// is true (T-3, PLAN §E risk 1). The panel owns no `NSPopover` reference; this
-    /// controller does. Only meaningful while the popover is shown; a resize on a
-    /// hidden popover never animates, so this is a no-op then (and must NOT clobber
-    /// `animates`, which also gates the show/hide fade). The `apply` closure makes
-    /// the size assignment inside the temporarily-set flag.
-    func setPopoverAnimates(_ animates: Bool, whileApplying apply: () -> Void) {
+    /// asked; the panel itself holds no reference to any host.
+    ///
+    /// The default (no `surfaceResizer`) is the `NSPopover` one: it animates a
+    /// `preferredContentSize` change iff `animates` is true (T-3, PLAN §E risk 1),
+    /// so this toggles that flag around the assignment and restores it. Only
+    /// meaningful while the popover is shown; a resize on a hidden popover never
+    /// animates, so this is a plain `apply()` then (and must NOT clobber
+    /// `animates`, which also gates the show/hide fade).
+    func applySurfaceResize(animated: Bool, whileApplying apply: () -> Void) {
+        if let surfaceResizer {
+            surfaceResizer(animated, apply)
+            return
+        }
         guard popover.isShown else { apply(); return }
         let previous = popover.animates
-        popover.animates = animates
+        popover.animates = animated
         apply()
         popover.animates = previous
     }
@@ -2683,12 +2706,25 @@ extension PopoverController: AppRowView.Delegate {
     //      it — empty space, a device row, the header, etc. all deselect, like
     //      clicking away from a table row.
 
-    public func popoverDidShow(_ notification: Notification) {
+    public func popoverDidShow(_ notification: Notification) { surfaceDidShow() }
+
+    public func popoverDidClose(_ notification: Notification) { surfaceDidHide() }
+
+    /// The host just put the panel on screen. Records visibility (so every
+    /// skip-work-while-hidden gate opens), arms the deselect monitor, and turns
+    /// the backend's RMS computation on.
+    func surfaceDidShow() {
+        hostIsShown = true
         installDeselectMonitor()
         onMeteringActiveChange?(true)
     }
 
-    public func popoverDidClose(_ notification: Notification) {
+    /// The host just took the panel off screen. The mirror of
+    /// ``surfaceDidShow()``, plus the two things that must not survive a
+    /// session: the transient app-row selection, and every meter's last
+    /// reading (a reopen must never show a stale bar).
+    func surfaceDidHide() {
+        hostIsShown = false
         removeDeselectMonitor()
         selectedAppBundleID = nil
         for row in deviceRowsByID.values { row.resetLevel() }
@@ -2706,15 +2742,15 @@ extension PopoverController: AppRowView.Delegate {
     /// Push a live RMS reading for device `id` into its row's meter, and into
     /// the Main Out master meter when `id` is currently selected (Main Out
     /// shares the same level feed as its member device rows, task T4a).
-    /// Early-returns while the popover isn't shown — metering only matters
+    /// Early-returns while the panel isn't shown — metering only matters
     /// while a user can see it.
     public func updateLevel(_ rms: Float, for id: String) {
-        guard popover.isShown else { return }
+        guard isEffectivelyShown else { return }
         dispatchLevel(rms, for: id)
     }
 
-    /// Same dispatch as ``updateLevel(_:for:)`` but WITHOUT the `isShown`
-    /// gate — headless snapshots/tests never actually show the popover.
+    /// Same dispatch as ``updateLevel(_:for:)`` but WITHOUT the visibility
+    /// gate — headless snapshots/tests never actually show the panel.
     public func test_pushLevel(_ rms: Float, for id: String) {
         dispatchLevel(rms, for: id)
     }
@@ -2729,15 +2765,15 @@ extension PopoverController: AppRowView.Delegate {
     /// Push a live RMS reading for the app with `bundleID` into its
     /// Applications-row meter (task T5). Unlike device levels, an app level
     /// never feeds Main Out — Main Out mirrors the SELECTED DEVICE's level,
-    /// not any one app's contribution. Early-returns while the popover isn't
+    /// not any one app's contribution. Early-returns while the panel isn't
     /// shown, mirroring ``updateLevel(_:for:)``.
     public func updateAppLevel(_ rms: Float, for bundleID: String) {
-        guard popover.isShown else { return }
+        guard isEffectivelyShown else { return }
         dispatchAppLevel(rms, for: bundleID)
     }
 
-    /// Same dispatch as ``updateAppLevel(_:for:)`` but WITHOUT the `isShown`
-    /// gate — headless snapshots/tests never actually show the popover.
+    /// Same dispatch as ``updateAppLevel(_:for:)`` but WITHOUT the visibility
+    /// gate — headless snapshots/tests never actually show the panel.
     public func test_pushAppLevel(_ rms: Float, for bundleID: String) {
         dispatchAppLevel(rms, for: bundleID)
     }
@@ -2770,7 +2806,7 @@ extension PopoverController: AppRowView.Delegate {
     /// synchronous rebuild here would destroy the very view being clicked.
     private func deselectIfClickOutsideSelectedRow(_ event: NSEvent) {
         guard selectedAppBundleID != nil,
-              let window = popover.contentViewController?.view.window,
+              let window = panel.view.window,
               event.window === window else { return }
         let hit = window.contentView?.hitTest(event.locationInWindow)
         if let hit,

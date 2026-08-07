@@ -169,7 +169,9 @@ its scoped verification, then the full suite green, then one commit + push.
   segments sharing one glass lozenge, the selected segment getting the
   filled capsule (in the pinned title bar this is `NSToolbarItemGroup`
   with `selectionMode = .selectOne`; the unpinned header's custom row
-  mimics the same capsule geometry). And NO hard border/hairline on the
+  mimics the same capsule geometry — DECIDED 2026-08-07: the capsule row is
+  the ONE switcher in both modes, seated below the pinned title bar; no
+  NSToolbarItemGroup variant). And NO hard border/hairline on the
   glass tiers — Liquid Glass defines its edge by refraction, so stroked
   edges belong only to the opaque Reduce-Transparency fallback.
   `AppSettings` gains `surfacePinned`;

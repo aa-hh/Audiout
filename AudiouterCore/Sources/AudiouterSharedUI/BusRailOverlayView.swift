@@ -137,7 +137,11 @@ public final class BusRailOverlayView: NSView {
         // node and a small detoured non-member node cleanly at their true edges.
         let lw = PopoverColumnGrid.busLineWidth
         let cx = PopoverColumnGrid.railGutterCenterX
-        let originColor = plan.gold ? Tokens.Color.gold : Tokens.Color.ember
+        // The hook/terminus tone and the Main Audio ring's connected stroke come
+        // from the SAME resolution (`Tokens.Color.spineTone`), so the curve and
+        // the ring it lands on can never be two different colors — including
+        // mid-flight through an accent-dial change.
+        let originColor = Tokens.Color.spineTone(armed: plan.gold)
 
         switch plan.origin {
         case let .ring(ringCenterY, ringCenterX, ringRadius):
@@ -210,9 +214,9 @@ public final class BusRailOverlayView: NSView {
         // line down to the cut (the section's header, or the shrinking clip floor
         // mid-animation) and mark the stop with a terminus dot (behavior 1).
         if let terminusY = plan.terminusDotY {
-            (plan.gold ? Tokens.Color.gold : Tokens.Color.ember).setStroke()
+            originColor.setStroke()
             strokeVertical(from: currentY, to: terminusY, x: cx, lineWidth: lw)
-            (plan.gold ? Tokens.Color.gold : Tokens.Color.ember).setFill()
+            originColor.setFill()
             fillTerminusDot(atY: terminusY, x: cx)
         }
     }

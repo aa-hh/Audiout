@@ -171,6 +171,49 @@ public protocol PTPHelperActivating: Sendable {
     func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome
 }
 
+/// Asks the on-demand helper to exit now, freeing UDP 319/320 without waiting
+/// out its ~15 s idle window. Best-effort and fire-and-forget: no reply, no
+/// error, no wait. A protocol so a test can assert the call without a daemon.
+public protocol PTPHelperReleasing: Sendable {
+    func release()
+}
+
+public struct PTPHelperReleaser: PTPHelperReleasing {
+    private let machServiceName: String
+
+    public init(machServiceName: String = PTPHelperActivator.machServiceName) {
+        self.machServiceName = machServiceName
+    }
+
+    // razor: unauthenticated. Any local process can send this and stop our
+    // clock — repeatedly, indefinitely, holding the daemon down as a
+    // persistent denial of AirPlay, not just a one-off blip (impact: our
+    // audio blips and re-establishes; no privilege is gained, DoS only, never
+    // escalation). Upgrade path once hardened:
+    // xpc_connection_set_peer_code_signing_requirement on the helper's peer
+    // connections (macOS 13+, deployment target is 14).
+    public func release() {
+        // Nothing running to release — a send would demand-START the root
+        // helper (rebinding 319/320) just to kill it, which is self-defeating
+        // during the exact contention window this exists to shorten.
+        guard PTPClockProbe.isReady() else { return }
+
+        let queue = DispatchQueue(label: "com.audiouter.ptphelper.release")
+        let connection = xpc_connection_create_mach_service(
+            machServiceName, queue, UInt64(XPC_CONNECTION_MACH_SERVICE_PRIVILEGED))
+        xpc_connection_set_event_handler(connection) { _ in }
+        xpc_connection_resume(connection)
+
+        let message = xpc_dictionary_create(nil, nil, 0)
+        xpc_dictionary_set_bool(message, "release", true)
+        // Per-call connection lifetime is safe without `withExtendedLifetime`:
+        // ARC holds `connection` across this call by virtue of being
+        // referenced in it (measured: 200/200 delivered, +0 ports/+0 heap
+        // over 500 iterations with the reference dropped immediately after).
+        xpc_connection_send_message(connection, message)
+    }
+}
+
 /// Production ``PTPHelperActivating``. Reads ``PTPHelperManaging/status``
 /// FIRST — this ordering is the point of the task, not an optimization: only
 /// when it is already `.enabled` does this touch the Mach service or wait at
@@ -226,12 +269,13 @@ public struct PTPHelperActivator: PTPHelperActivating {
     /// demand-starts the helper the moment a lookup for its `MachServices`
     /// name occurs. `.privileged` because the service is registered by a ROOT
     /// launchd job — macOS requires that flag for a non-root client to reach
-    /// it. The daemon's own listener accepts the connection and ignores
-    /// every message it's sent (`ptp_helper_mach_checkin`,
+    /// it. The daemon's own listener ignores every message it's sent except
+    /// a dictionary with `{"release": true}` (`ptp_helper_mach_checkin`,
     /// `AirPlayEngine/Sources/ptp-helper/main.c`) — shm + loopback UDP stay
-    /// the only real data path (`ptp-helper-design.md` §4) — so the message
-    /// sent here carries no payload; it only exists to force the lookup to
-    /// happen now rather than whenever XPC feels like it.
+    /// the only real data path (`ptp-helper-design.md` §4). The message sent
+    /// here is deliberately an empty dictionary — `release == false` when
+    /// read — so this touch only forces the lookup to happen now rather than
+    /// whenever XPC feels like it; it never asks the daemon to exit.
     private static func touchMachService(named name: String) -> xpc_connection_t {
         let queue = DispatchQueue(label: "com.audiouter.ptphelper.touch")
         let connection = xpc_connection_create_mach_service(

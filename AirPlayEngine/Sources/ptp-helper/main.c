@@ -39,14 +39,20 @@
 //
 //   - Mach check-in: when AUDIOUTER_PTP_MACH_SERVICE names a launchd
 //     MachServices key, we open an XPC listener on it and hold it for process
-//     lifetime. It carries NO data and answers nothing — shm + loopback UDP
-//     stay the only transport (§4). Its sole job is to give launchd something
-//     to demand-start us on. Unset (dev/test) = no check-in at all.
+//     lifetime. It carries exactly one boolean shutdown trigger (see "Release
+//     verb" below) and otherwise answers nothing — shm + loopback UDP stay
+//     the only data transport (§4). Its main job is still to give launchd
+//     something to demand-start us on. Unset (dev/test) = no check-in at all.
 //   - Bind retry: the app switches the default output away from an AirPlay
 //     device in parallel, and macOS releases the ports a second or three
 //     later, so a single bind attempt would lose the race.
 //   - Idle exit: once no PTP peer has been active for a while, exit so
 //     launchd tears the ports back down and macOS AirPlay can have them.
+//   - Release verb: a peer connection may send a dictionary with
+//     {"release": true} to trigger the same clean exit immediately, so a
+//     seamless handoff can free 319/320 in ~1s instead of waiting out the
+//     idle window. Fire-and-forget, no reply — the idle path above remains
+//     the normal, unsolicited case.
 //
 // EXIT-CODE CONTRACT — load-bearing, because the launchd plist runs
 // KeepAlive={SuccessfulExit:false}: a non-zero exit is respawned immediately.
@@ -288,8 +294,15 @@ ptp_helper_mach_checkin(void)
       return; // Listener-level error object (e.g. XPC_ERROR_TERMINATION_IMMINENT).
 
     // Resume the peer so the client's connect() completes, then ignore
-    // everything it ever sends.
-    xpc_connection_set_event_handler((xpc_connection_t)peer, ^(xpc_object_t event) { (void)event; });
+    // everything it sends except the one recognized shutdown trigger below.
+    xpc_connection_set_event_handler((xpc_connection_t)peer, ^(xpc_object_t event) {
+      if (xpc_get_type(event) == XPC_TYPE_DICTIONARY &&
+          xpc_dictionary_get_bool(event, "release"))
+      {
+        ptp_helper_logmsg("ptp-helper: release requested - exiting so the PTP ports are freed");
+        ptp_helper_should_run = 0;
+      }
+    });
     xpc_connection_resume((xpc_connection_t)peer);
   });
 
@@ -462,7 +475,7 @@ ptp_helper_wait_until_idle_or_signal(struct airptp_handle *hdl)
     }
   }
 
-  return 0; // SIGTERM/SIGINT - an expected outcome.
+  return 0; // SIGTERM/SIGINT, or the release verb - all expected outcomes.
 }
 
 // MARK: - main

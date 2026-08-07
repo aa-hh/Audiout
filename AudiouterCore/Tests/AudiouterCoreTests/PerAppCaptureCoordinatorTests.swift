@@ -378,7 +378,7 @@ extension SerializedSharedState {
         #expect(coordinator.state(for: "com.example.silent") == .capturing(tap.format))
     }
 
-    // MARK: - Degenerate format (architecture review 2026-07-26, defect A):
+    // MARK: - Degenerate format:
     // a tap that hands back a non-positive sample rate must be rejected
     // BEFORE the coordinator commits it to `.capturing`, not left to trap
     // downstream — ported from NativeCaptureCoordinator's equivalent guard.

@@ -182,6 +182,29 @@ public enum BackendEvent: Sendable, Equatable {
     /// `OwnToneBackend` never do (no rebind-recovery machinery to observe).
     case streamHealth(id: String, recovering: Bool)
 
+    /// The public "Audiouter" aggregate's off-switch state (Wave 3, T5). `active:
+    /// true` means: this app is ACTIVELY ROUTING (at least one AirPlay output is
+    /// selected — the whole-system capture gate wants to run) **and** the Mac's
+    /// current default output device is NOT our aggregate
+    /// (``AggregateOutputDevice/productUID``). The whole-system tap follows the
+    /// Mac's default output device, so if that isn't the aggregate the captured
+    /// mix has nothing flowing into it and **nothing reaches the speakers** until
+    /// the user points the Mac's output back at Audiouter. This one flag covers
+    /// BOTH "the user deselected the aggregate in Sound settings mid-session"
+    /// (`.userDeselected`) and "the aggregate was never the default while routing"
+    /// (never-selected-while-active). `active: false` means the default IS our
+    /// aggregate again (`.stillOurs`) OR routing stopped: audio flows normally.
+    ///
+    /// The *only* signal for the popover's routing-blocked warning
+    /// (`PopoverController.setRoutingBlockedNeedsDefault`) — a whole-app condition
+    /// with no home on a single `Device`, same shape as
+    /// ``systemDefaultIsAirPlayActive(_:)``. Reflects STEADY STATE, not just the
+    /// transition edge, and the backend edge-de-duplicates it so it can never
+    /// thrash. Only ``NativeBackend`` emits it (the only backend that owns the
+    /// public aggregate + default-output writes); `MockBackend`/`OwnToneBackend`
+    /// never do.
+    case routingBlockedNeedsDefault(Bool)
+
     /// The takeover status strip (T6, PLAN-AIRPLAY-COEXISTENCE.md): a
     /// progressive explanation, alongside a connecting row, of what's
     /// happening while `convergeDevice` races macOS off the PTP timing ports

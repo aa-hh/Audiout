@@ -3,6 +3,10 @@ import Testing
 import AirPlayEngine
 @testable import AudiouterCore
 
+#if canImport(CoreAudio)
+import CoreAudio
+#endif
+
 /// T-BACKEND: hermetic tests for `NativeBackend`'s "play everywhere" enable/
 /// disable decision — Mac + ≥1 AirPlay device selected turns the delayed local
 /// sink on; anything else turns it off. No `AVAudioEngine`, no Core Audio tap,
@@ -85,13 +89,32 @@ import AirPlayEngine
         func stop() {}
     }
 
+    /// No-op ``AggregateDeviceControlling`` double: every read returns nil/empty
+    /// and create/destroy never run. `NativeBackend`'s default `aggregateControl`
+    /// param (`CoreAudioAggregateDeviceControl()`) would otherwise create/destroy
+    /// a REAL public "Audiouter" aggregate device in macOS Sound settings —
+    /// `.stop()` (every test here `defer`s it) calls `sweepOrphans()`
+    /// unconditionally, even on a backend that never called `.start()`. Never
+    /// touches the real HAL — mirrors `NativeBackendTests.NoOpAggregateControl`,
+    /// kept as its own copy here since this suite keeps its own private doubles.
+    private struct NoOpAggregateControl: AggregateDeviceControlling {
+        func resolveDeviceID(forUID uid: String) -> AudioObjectID? { nil }
+        func createAggregate(uid: String, name: String, subDeviceUID: String) -> AudioObjectID? { nil }
+        func destroyAggregate(_ deviceID: AudioObjectID) -> Bool { false }
+        func aggregateDeviceUIDs() -> [String] { [] }
+        func deviceUID(_ deviceID: AudioObjectID) -> String? { nil }
+        func builtInOutputDeviceUID() -> String? { nil }
+        func setDefaultOutputDevice(_ deviceID: AudioObjectID) -> Bool { false }
+    }
+
     // MARK: Helpers
 
     private func makeBackend(macSelectedByDefault: Bool = false) -> (NativeBackend, SpySyncedLocalSink, LockedBool) {
         let backend = NativeBackend(
             engineControl: NoOpEngine(),
             discoverySource: NoOpDiscovery(),
-            systemVolume: NoOpSystemVolume())
+            systemVolume: NoOpSystemVolume(),
+            aggregateControl: NoOpAggregateControl())
         let sink = SpySyncedLocalSink()
         backend.syncedLocalSinkFactory = { sink }
         let macSelected = LockedBool(macSelectedByDefault)
@@ -303,7 +326,8 @@ import AirPlayEngine
         let (controller, router) = makeRoutingBrain()
         let backend = NativeBackend(engineControl: NoOpEngine(),
                                     discoverySource: NoOpDiscovery(),
-                                    systemVolume: NoOpSystemVolume())
+                                    systemVolume: NoOpSystemVolume(),
+                                    aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let sink = SpySyncedLocalSink()
         backend.syncedLocalSinkFactory = { sink }
@@ -330,7 +354,8 @@ import AirPlayEngine
         let (controller, router) = makeRoutingBrain()
         let backend = NativeBackend(engineControl: NoOpEngine(),
                                     discoverySource: NoOpDiscovery(),
-                                    systemVolume: NoOpSystemVolume())
+                                    systemVolume: NoOpSystemVolume(),
+                                    aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let sink = SpySyncedLocalSink()
         backend.syncedLocalSinkFactory = { sink }
@@ -357,7 +382,8 @@ import AirPlayEngine
         let backend = NativeBackend(
             engineControl: NoOpEngine(),
             discoverySource: NoOpDiscovery(),
-            systemVolume: NoOpSystemVolume())
+            systemVolume: NoOpSystemVolume(),
+            aggregateControl: NoOpAggregateControl())
         backend.selectedDevicesQuery = { $0 == NativeBackend.localDeviceID }
         defer { backend.stop() }
 

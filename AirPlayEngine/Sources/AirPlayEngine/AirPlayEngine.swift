@@ -780,9 +780,8 @@ public actor AirPlayEngine {
     /// the return value is ``OutputBindResult/alreadyBound(streamId:)`` carrying
     /// the stream the live session is actually on, so a caller can tell "I bound
     /// it where I asked" from "the session never moved" instead of bookkeeping a
-    /// bind that didn't happen (architecture review 2026-07-26, defect B — audio
-    /// written to a stream the device never joined shows as routed and is
-    /// inaudible). To actually MOVE a live device, use
+    /// bind that didn't happen (audio written to a stream the device never
+    /// joined shows as routed and is inaudible). To actually MOVE a live device, use
     /// ``rebindOutput(_:toStreamId:)``.
     ///
     /// Deliberately still non-throwing on the already-bound path: existing

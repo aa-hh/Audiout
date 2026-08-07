@@ -332,6 +332,17 @@ the study found in OwnTone's own daemon (ptp-study §3). All shim work
 (T-SHIM-1) is engine-side, in
 `AirPlayEngine/Sources/CAirPlayEngine/shims/ptpd.c`.
 
+**One deliberate addition to the Mach service, for seamless handoff:** the
+per-peer XPC handler in `ptp_helper_mach_checkin()` recognizes exactly one
+message — a dictionary with `{"release": true}` — and treats it as a shutdown
+trigger, nothing more (no reply, no other key ever read). Without it, handing
+319/320 back to macOS means waiting out the ~15s idle-exit window (§2.4); the
+seamless-handoff feature needs that in ~1s, right when the app has already
+decided to give up the ports. This does not change the answer above: shm +
+loopback-UDP remain the only data path, and the release verb is a trigger, not
+a transport — the 15s idle path is still the normal, unsolicited case, this is
+just an accelerator for the one case where the app already knows it's time.
+
 ---
 
 ## 5. Threading / lifecycle

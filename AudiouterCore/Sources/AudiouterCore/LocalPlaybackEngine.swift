@@ -135,7 +135,7 @@ public enum LocalPlaybackError: Error, Equatable, Sendable {
 /// ## Re-resolve on default-output changes (BT connect/disconnect)
 /// A subscription on the process-wide ``DefaultOutputDeviceMonitor`` — the same
 /// shared owner of `kAudioHardwarePropertyDefaultOutputDevice` both capture taps
-/// subscribe to (architecture review 2026-07-26, defect D) — drives
+/// subscribe to — drives
 /// ``handleDefaultOutputChange()``, which re-resolves the target whenever the
 /// default output switches (headphones connect/disconnect). It applies the same
 /// compare-before-rebuild discipline the capture coordinator uses for its
@@ -272,8 +272,8 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
     public var test_startOverride: (() throws -> Void)?
 
     /// Subscription handle on the process-wide ``DefaultOutputDeviceMonitor``
-    /// (architecture review 2026-07-26, defect D — one owning component per
-    /// shared resource, instead of this engine installing its own separate HAL
+    /// (one owning component per shared resource, instead of this engine
+    /// installing its own separate HAL
     /// listener alongside the two capture taps' listeners on the same system
     /// object). Non-nil only when the real subscription is installed (the
     /// production init, macOS 14.2+) — the injected-resolver test init drives
@@ -1048,6 +1048,22 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
         return cf as String
     }
 
+    /// A device's `kAudioDevicePropertyDeviceUID`, or `nil` (used to recognize our
+    /// public aggregate device by UID in the loop guard).
+    static func deviceUID(_ device: AudioObjectID) -> String? {
+        var addr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var size = UInt32(MemoryLayout<CFString?>.size)
+        var uid: CFString?
+        let err = withUnsafeMutablePointer(to: &uid) { ptr -> OSStatus in
+            AudioObjectGetPropertyData(device, &addr, 0, nil, &size, ptr)
+        }
+        guard err == noErr, let uid else { return nil }
+        return uid as String
+    }
+
     /// Name prefixes the app builds its OWN aggregate devices with, so the loop
     /// guard can recognize one if it were ever the default output. Kept in sync
     /// with the creation sites:
@@ -1060,19 +1076,24 @@ public final class LocalPlaybackEngine: LocalPlaybackControlling, @unchecked Sen
 
     /// The loop guard: `true` if `device` is UNSAFE for local playback to follow —
     /// an AirPlay-class device (whole system may be streaming to it) or one of our
-    /// own tap aggregate devices. "AirPlay-class" is the same
+    /// own aggregate devices. "AirPlay-class" is the same
     /// `kAudioDeviceTransportTypeAirPlay` transport the rest of the app filters
     /// AirPlay outputs by; "our own aggregate" is `kAudioDeviceTransportTypeAggregate`
-    /// with a name carrying one of ``ownAggregateNamePrefixes``. A `nil` transport
-    /// (unreadable) is treated as NOT a loop risk (fall through to following it),
-    /// matching best-effort behavior elsewhere.
+    /// with a name carrying one of ``ownAggregateNamePrefixes`` OR a UID matching
+    /// our public "Audiouter" aggregate (`AggregateOutputDevice.productUID`). A
+    /// `nil` transport (unreadable) is treated as NOT a loop risk (fall through to
+    /// following it), matching best-effort behavior elsewhere.
     static func isLoopRiskDevice(_ device: AudioObjectID) -> Bool {
         guard let transport = transportType(device) else { return false }
         if transport == kAudioDeviceTransportTypeAirPlay { return true }
-        if transport == kAudioDeviceTransportTypeAggregate,
-           let name = deviceName(device),
-           ownAggregateNamePrefixes.contains(where: { name.hasPrefix($0) }) {
-            return true
+        if transport == kAudioDeviceTransportTypeAggregate {
+            if let name = deviceName(device),
+               ownAggregateNamePrefixes.contains(where: { name.hasPrefix($0) }) {
+                return true
+            }
+            if let uid = deviceUID(device), uid == AggregateOutputDevice.productUID {
+                return true
+            }
         }
         return false
     }

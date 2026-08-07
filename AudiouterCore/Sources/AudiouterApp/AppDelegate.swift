@@ -421,6 +421,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onOpenPTPHelperLoginItems = { [weak self] in
             self?.permissionProviders.ptpHelper.openSystemSettingsLoginItems()
         }
+        // Wave 3 T5 (routing-blocked warning's "Use Audiouter" button, Q6): the
+        // user's own click IS their intent, so re-selecting the public aggregate as
+        // the Mac's default output here is the ONLY sanctioned re-select — never
+        // programmatic (Q2). No-op on backends without the aggregate
+        // (`MockBackend`/`OwnToneBackend`), matching the other `NativeBackend`-only
+        // capability hooks above.
+        popoverController.onReselectAudiouter = { [weak self] in
+            (self?.backend as? NativeBackend)?.reselectAggregateAsDefault()
+        }
         // Metering-active gate (T-GATE): only compute/emit `.level` while the
         // popover is actually open. `backend as? MeteringControlling` is nil for
         // backends without the capability (`OwnToneBackend`), so this is a no-op
@@ -1383,6 +1392,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popoverController.setTakeoverStatus(status)
             log("event: \(describe(event))")
             return
+        case .routingBlockedNeedsDefault(let active):
+            // Wave 3 T5: the app is actively routing but the Mac's default output
+            // isn't our public aggregate, so audio is dead until the user switches
+            // back. Show or clear the popover's routing-blocked warning; a whole-app
+            // condition with no home on a `Device` — handle it and return.
+            popoverController.setRoutingBlockedNeedsDefault(active)
+            log("event: \(describe(event))")
+            return
         }
         // Establish the out-of-the-box default (current device selected ⇒
         // passthrough) once the fleet is known (SPEC §9b). No-op after the first
@@ -1431,6 +1448,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "streamHealth(\(id), recovering: \(recovering))"
         case .takeoverStatus(let status):
             return "takeoverStatus(\(status.map { "\($0)" } ?? "nil"))"
+        case .routingBlockedNeedsDefault(let active):
+            return "routingBlockedNeedsDefault(\(active)) — \(active ? "actively routing but the aggregate isn't the Mac's default output" : "aggregate is default again / routing stopped")"
         }
     }
 

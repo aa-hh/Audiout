@@ -1178,7 +1178,7 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         // Guard the sample rate before it reaches `Int(mSampleRate.rounded())`:
         // a misbehaving driver can hand back NaN/±inf, and `Int(Float.nan)`
         // TRAPS in Swift — ported from `NativeCaptureCoordinator.createTapAndReadFormat`'s
-        // identical guard (architecture review 2026-07-26, defect A). A
+        // identical guard. A
         // zero/negative rate is just as poisonous downstream (infinite resample
         // ratio, trapping `AVAudioFrameCount` conversion); fail loud into
         // `.formatReadFailed` instead.
@@ -1204,7 +1204,18 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
         let outputID: AudioObjectID
         let outputUID: String
         do {
-            outputID = try Self.defaultOutputDeviceID()
+            // A1 (spike §3, same fix as CoreAudioSystemTap.createAggregate): if the
+            // default output is our PUBLIC aggregate, an aggregate cannot nest in an
+            // aggregate — resolve THROUGH to the real device it wraps and build the
+            // per-app tap-aggregate on THAT device instead. Identity passthrough for
+            // every non-aggregate default, so per-app topology is unchanged unless
+            // the default is our aggregate. Reuses the pure resolver T2 added rather
+            // than a second copy of the same logic.
+            let rawDefault = try Self.defaultOutputDeviceID()
+            outputID = EffectiveCaptureDevice.resolve(
+                default: rawDefault,
+                uidOf: { try? CoreAudioSystemTap.readDeviceUID($0) },
+                mainSubDeviceOf: CoreAudioSystemTap.aggregateMainSubDeviceID)
             outputUID = try CoreAudioSystemTap.readDeviceUID(outputID)
         } catch {
             throw PerAppCaptureError.deviceLost(reason: String(describing: error))
@@ -1539,20 +1550,45 @@ final class CoreAudioProcessTap: ProcessAudioTap, @unchecked Sendable {
                     return DefaultOutputDeviceMonitor.Tracked(
                         deviceID: kAudioObjectUnknown, rate: 0)
                 }
+                // A1 (spike §3): the monitor reads the RAW default output, but
+                // `createAggregate` pins `tappedOutputDeviceID` through
+                // ``EffectiveCaptureDevice/resolve(default:uidOf:mainSubDeviceOf:)``,
+                // so while our PUBLIC aggregate is the default this tap is pinned to
+                // the real device it wraps. Reporting the pinned id raw would read
+                // aggregate ≠ pinned on EVERY notification, firing `onChange` for
+                // every subscriber storm the monitor exists to damp. Report the raw
+                // default whenever it still resolves to what this tap is pinned to —
+                // the guard then compares the same value the monitor just read and
+                // correctly no-ops. Identical shape to the whole-system tap's
+                // closure (`NativeCaptureCoordinator`); byte-identical to today for
+                // every non-aggregate default.
+                let pinned = self.tappedOutputDeviceID
+                let rawDefault = try? Self.defaultOutputDeviceID()
+                let reported: AudioObjectID
+                if let rawDefault, EffectiveCaptureDevice.resolve(
+                    default: rawDefault,
+                    uidOf: { try? CoreAudioSystemTap.readDeviceUID($0) },
+                    mainSubDeviceOf: CoreAudioSystemTap.aggregateMainSubDeviceID) == pinned {
+                    reported = rawDefault
+                } else {
+                    reported = pinned
+                }
                 return DefaultOutputDeviceMonitor.Tracked(
-                    deviceID: self.tappedOutputDeviceID, rate: self.format.sampleRate)
+                    deviceID: reported, rate: self.format.sampleRate)
             },
             onChange: { [weak self] snapshot in
                 guard let self else { return }
-                // The rebuild below is unconditional: the monitor only delivers
-                // here when a guard already said this tap diverged. The two
-                // Telemetry events are preserved verbatim from the rate listener
-                // this replaced (the live-diagnosis workflow greps them by name)
-                // and now distinguish WHICH divergence drove the delivery — a
-                // rate change, or a device-identity change at an unchanged rate.
-                // Never exercised by the hermetic suite (no live Core Audio) —
-                // see the coordinator-level emission in
-                // `handleDeviceChange(bundleID:)`, which is.
+                // A1 is handled in `tracked` above (the monitor's own
+                // compare-before-fire then does the right thing), so this body stays
+                // exactly as `main` wrote it — including both Telemetry event
+                // meanings, which the live-diagnosis workflow greps by name:
+                // `rate_rebuild` = the rate diverged; `rate_notification_skipped` =
+                // delivered for a device-identity change at an unchanged rate.
+                // Delivery is unconditional; the monitor already decided this
+                // subscriber needs to rebuild.
+                // Never exercised by the hermetic suite (no live Core Audio) — see
+                // the coordinator-level emission in `handleDeviceChange(bundleID:)`,
+                // which is.
                 let rate = self.format.sampleRate
                 let device = Self.telemetryDeviceLabel(self.tappedOutputDeviceID)
                 if CoreAudioSystemTap.shouldRebuildForNominalRate(

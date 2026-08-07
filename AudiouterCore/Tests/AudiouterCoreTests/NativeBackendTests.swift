@@ -557,6 +557,25 @@ extension SerializedSharedState {
         }
     }
 
+    /// No-op ``AggregateDeviceControlling`` double: every read returns nil/empty
+    /// and create/destroy never run, so `AggregateOutputDevice.sweepOrphans()`/
+    /// `adoptOrCreate()` — which `NativeBackend.start()` AND `.stop()` both call
+    /// unconditionally — are pure no-ops instead of hitting the real HAL.
+    /// Without this, `NativeBackend`'s default `aggregateControl` param
+    /// (`CoreAudioAggregateDeviceControl()`) creates/destroys a REAL public
+    /// "Audiouter" aggregate device in macOS Sound settings on every
+    /// `makeBackend()`/direct-construction call in this file. Never touches the
+    /// real HAL — same reason `FakeSystemVolume` above exists.
+    private struct NoOpAggregateControl: AggregateDeviceControlling {
+        func resolveDeviceID(forUID uid: String) -> AudioObjectID? { nil }
+        func createAggregate(uid: String, name: String, subDeviceUID: String) -> AudioObjectID? { nil }
+        func destroyAggregate(_ deviceID: AudioObjectID) -> Bool { false }
+        func aggregateDeviceUIDs() -> [String] { [] }
+        func deviceUID(_ deviceID: AudioObjectID) -> String? { nil }
+        func builtInOutputDeviceUID() -> String? { nil }
+        func setDefaultOutputDevice(_ deviceID: AudioObjectID) -> Bool { false }
+    }
+
     // MARK: Fixtures
 
     private func ap2Device(id: String = "AA:BB:CC:DD:EE:01", name: String = "Sonos Move", model: String = "S13") -> DiscoveredDevice {
@@ -605,8 +624,32 @@ extension SerializedSharedState {
             captureRetryMaxBackoff: captureRetryMaxBackoff,
             watchdogScheduler: watchdogScheduler,
             silenceFallbackDelay: silenceFallbackDelay,
-            systemDefaultOutputIsAirPlayClass: systemDefaultOutputIsAirPlayClass)
+            systemDefaultOutputIsAirPlayClass: systemDefaultOutputIsAirPlayClass,
+            aggregateControl: NoOpAggregateControl(),
+            // D7 (adversarial review, Seamless handoff T3): the real default
+            // factory posix_spawns `/usr/bin/log stream`. Every other collaborator
+            // this helper touches (`systemVolume`, `ptpHelperActivator`,
+            // `aggregateControl`, …) is already swapped for a hermetic fake for
+            // exactly this reason — this is that same convention, not a
+            // `HeadlessRuntime`-gated production default (there is no precedent in
+            // `NativeBackend`'s own init for auto-detecting tests at a production
+            // default; every other collaborator is always real in production and
+            // always swapped explicitly here).
+            handoffWatcherFactory: { onBlockedAttempt in
+                AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+            })
         return (backend, engine, discovery)
+    }
+
+    /// Inert `LogStreamSpawning` stand-in (D7): never spawns a real subprocess,
+    /// `isRunning` always false. Keeps this suite hermetic without exercising the
+    /// watcher's own logic — that's owed as a dedicated `AirPlayHandoffWatcherTests`
+    /// suite, out of scope here.
+    private final class NoOpLogStream: LogStreamSpawning, @unchecked Sendable {
+        func start(onLine: @escaping @Sendable (String) -> Void,
+                    onTermination: @escaping @Sendable () -> Void) throws {}
+        func stop() {}
+        var isRunning: Bool { false }
     }
 
     /// A scripted `AudioProcessEnumerating` fake: hands back a fixed process list
@@ -4228,7 +4271,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.3)
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.3,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:90", name: "Single-Flight Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -4292,7 +4336,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05)
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:91", name: "Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -4348,7 +4393,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05)
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:92", name: "Reverse-Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -4415,7 +4461,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5)
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Sleep-Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -4465,7 +4512,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5)
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Sleep-Badge Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -6058,7 +6106,8 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            processNotYetAudibleRetryDelay: 0.05, processNotYetAudibleMaxBackoff: 0.2)
+            processNotYetAudibleRetryDelay: 0.05, processNotYetAudibleMaxBackoff: 0.2,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:83", name: "Retry Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6096,7 +6145,8 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.08)
+            processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.08,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:85", name: "Unbounded Retry Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6130,7 +6180,8 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.05)
+            processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.05,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:86", name: "De-routed Retry Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6191,7 +6242,8 @@ extension SerializedSharedState {
             // A generous 0.3s delay (well past the 5ms poll granularity and the
             // sub-millisecond de-route call below) so the de-route deterministically
             // lands before the timer fires, rather than racing it.
-            processNotYetAudibleRetryDelay: 0.3, processNotYetAudibleMaxBackoff: 0.6)
+            processNotYetAudibleRetryDelay: 0.3, processNotYetAudibleMaxBackoff: 0.6,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:8A", name: "Orphan Race Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6259,7 +6311,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture)
+            processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:8C", name: "Toggle Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6335,7 +6388,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture)
+            processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Terminate Relaunch Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6408,7 +6462,8 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02)
+            maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:87", name: "Rebind Recovery Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6467,7 +6522,8 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            maxRebindRecoveryAttempts: 2, rebindRecoveryRetryDelay: 0.02)
+            maxRebindRecoveryAttempts: 2, rebindRecoveryRetryDelay: 0.02,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:88", name: "Gone Receiver")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6561,7 +6617,8 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02)
+            maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:89", name: "Telemetry Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -8559,7 +8616,8 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            processNotYetAudibleRetryDelay: 0.5, processNotYetAudibleMaxBackoff: 1.0)
+            processNotYetAudibleRetryDelay: 0.5, processNotYetAudibleMaxBackoff: 1.0,
+            aggregateControl: NoOpAggregateControl())
         let capture = FakeCapture()
         backend.captureCoordinator = capture
         defer { backend.stop() }

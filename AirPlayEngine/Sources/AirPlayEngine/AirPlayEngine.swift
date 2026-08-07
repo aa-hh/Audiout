@@ -1860,6 +1860,18 @@ extension TransportCommand {
 /// (never let one cancel the other — the plan explicitly wants both surfaced)
 /// while `lastGapSeconds` reports the instantaneous value.
 ///
+/// READING THESE NUMBERS: `deficitSeconds` alone is NOT the drift. It is a
+/// one-sided sum, and real scheduling jitter is symmetric — it lands in both
+/// buckets at the same rate, inflating each without a sample being lost. In
+/// live telemetry the two medians agree to three decimals. Read
+/// `netDriftSeconds` (deficit minus overrun); a deficit-only reading reports a
+/// steady slide that is not happening.
+///
+/// Gaps longer than `stallGapSeconds` are NOT cadence information — they are
+/// discontinuities (playback paused, the Mac slept, the tap was torn down and
+/// rebuilt) and land in `stalledSeconds`/`stallCount` instead. Charged to the
+/// deficit they dwarf everything else: one observed sleep contributed 173,750 s.
+///
 /// HOT-PATH CONTRACT: `record` is allocation-free — every field is a fixed-
 /// size scalar guarded by an `NSLock` (no arrays/dictionaries/closures
 /// created), matching the allocation-free requirement for `write(pcm:pts:)`,
@@ -1889,12 +1901,32 @@ final class WriteCadenceTracker: @unchecked Sendable {
     private var lastWriteMonotonic: Double?
     private var refusedWrites: UInt64 = 0
     private var refusedSeconds: Double = 0
+    private var stalledSeconds: Double = 0
+    private var stallCount: UInt64 = 0
 
     /// Deficit/overrun accumulated (independently) since the last threshold
     /// log, so repeated small gaps don't each re-trigger a log line.
     private var deficitSinceLog: Double = 0
     private var overrunSinceLog: Double = 0
     private static let logThresholdSeconds: Double = 0.25
+
+    /// A single gap longer than this is a discontinuity, not slow feeding, so
+    /// it is charged to `stalledSeconds` instead of `deficitSeconds`.
+    ///
+    /// razor: one flat threshold rather than a state machine consulting
+    /// playback/sleep/rebuild state. 5 s clears the worst gap still worth
+    /// measuring (a tap rebuild costs ~0.5 s of audio) by an order of
+    /// magnitude, and sits below the shortest idle gap seen in live telemetry
+    /// (8 s). Upgrade path if that margin ever closes: have the coordinator
+    /// call `reset()` on its own start/stop edges and drop the heuristic.
+    ///
+    /// Injectable so tests can cross it without a real five-second sleep;
+    /// production always takes the default.
+    private let stallGapSeconds: Double
+
+    init(stallGapSeconds: Double = 5.0) {
+        self.stallGapSeconds = stallGapSeconds
+    }
 
     /// Record one write's audio-time contribution against the wall clock.
     /// Called on every `write(pcm:pts:)` invocation, off the actor, possibly
@@ -1922,7 +1954,11 @@ final class WriteCadenceTracker: @unchecked Sendable {
         let gap = wallElapsed - audioSeconds
         lastGapSeconds = gap
 
-        if gap > 0 {
+        if gap > stallGapSeconds {
+            // A discontinuity, not slow feeding — see `stallGapSeconds`.
+            stalledSeconds += gap
+            stallCount &+= 1
+        } else if gap > 0 {
             deficitSeconds += gap
             deficitSinceLog += gap
         } else if gap < 0 {
@@ -1944,10 +1980,10 @@ final class WriteCadenceTracker: @unchecked Sendable {
     /// Record one write the backpressure guard REFUSED after `record` had
     /// already credited its audio time as delivered (see the call-site pairing
     /// in `AirPlayEngine.write(streams:pts:)`). Charges the refused audio back
-    /// into the cumulative deficit so `deficitSeconds` keeps equaling wall time
-    /// minus audio actually delivered (the receiver anchor slide), and tracks
-    /// the refusals separately so the engine's own drop-site contribution stays
-    /// distinguishable from a slow producer. Deliberately does NOT touch
+    /// into the cumulative deficit — refused audio is genuinely never delivered,
+    /// so it belongs in the drift — and tracks the refusals separately so the
+    /// engine's own drop-site contribution stays distinguishable from a slow
+    /// producer. Deliberately does NOT touch
     /// `deficitSinceLog` (no new os_log traffic from the hot path) nor
     /// `lastGapSeconds`/`lastWriteMonotonic` (the paired `record` already
     /// measured this write's producer gap). Same hot-path contract as `record`:
@@ -1970,7 +2006,9 @@ final class WriteCadenceTracker: @unchecked Sendable {
             overrunSeconds: overrunSeconds,
             lastGapSeconds: lastGapSeconds,
             refusedWrites: refusedWrites,
-            refusedSeconds: refusedSeconds
+            refusedSeconds: refusedSeconds,
+            stalledSeconds: stalledSeconds,
+            stallCount: stallCount
         )
     }
 
@@ -1988,6 +2026,8 @@ final class WriteCadenceTracker: @unchecked Sendable {
         overrunSinceLog = 0
         refusedWrites = 0
         refusedSeconds = 0
+        stalledSeconds = 0
+        stallCount = 0
     }
 
     /// `CLOCK_MONOTONIC_RAW` in seconds — immune to NTP/wall-clock slew,

@@ -3757,11 +3757,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         Telemetry.log(.airplay, "write_cadence_drift", [
             "path": "perApp",
             "writeCount": String(snap.writeCount),
+            // THE drift number — deficit and overrun are one-sided sums that
+            // both inflate under ordinary jitter; only their difference is real.
+            "netDriftTotalSeconds": String(format: "%.3f", snap.netDriftSeconds),
+            "netDriftDeltaSeconds": String(format: "%.3f", deficitDelta - overrunDelta),
             "deficitTotalSeconds": String(format: "%.3f", snap.deficitSeconds),
             "deficitDeltaSeconds": String(format: "%.3f", deficitDelta),
             "overrunTotalSeconds": String(format: "%.3f", snap.overrunSeconds),
             "overrunDeltaSeconds": String(format: "%.3f", overrunDelta),
             "lastGapSeconds": String(format: "%.4f", snap.lastGapSeconds),
+            // Pauses, sleeps and tap rebuilds — kept out of the drift totals.
+            "stalledTotalSeconds": String(format: "%.3f", snap.stalledSeconds),
+            "stallCount": String(snap.stallCount),
             // How much of the deficit is the ENGINE's own drop site (writes the
             // backpressure guard refused) rather than a slow producer.
             "refusedWrites": String(snap.refusedWrites),

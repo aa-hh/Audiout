@@ -181,6 +181,92 @@ import CAirPlayEngine
         #expect(cleared.refusedSeconds == 0)
         #expect(cleared.deficitSeconds == 0)
     }
+
+    /// Deficit and overrun are one-sided sums, so a feed that wobbles evenly
+    /// around real time drives BOTH up without losing a single sample. Reading
+    /// `deficitSeconds` alone therefore reports drift that is not happening;
+    /// `netDriftSeconds` must stay near zero across that same feed.
+    ///
+    /// Assertions are RELATIVE (net small *compared to* the buckets) rather
+    /// than absolute: `Thread.sleep` only ever overshoots, so each write adds a
+    /// little one-sided noise to the deficit side. The margin absorbs that
+    /// without hiding the bug — a one-sided sum mistaken for drift puts the net
+    /// at ~100% of a bucket, not under 30%.
+    @Test func symmetricJitterInflatesBucketsButNotNetDrift() {
+        let tracker = WriteCadenceTracker()
+        let sampleRate = 44100
+        let pauseSeconds = 0.05
+        // Alternate a write claiming ~2x the elapsed audio (runs ahead ->
+        // overrun) with one claiming almost none (runs behind -> deficit).
+        let aheadSamples = Int(pauseSeconds * 2 * Double(sampleRate))
+        let behindSamples = 64
+
+        tracker.record(samples: aheadSamples, sampleRate: sampleRate) // seed
+        for _ in 0..<8 {
+            Thread.sleep(forTimeInterval: pauseSeconds)
+            tracker.record(samples: aheadSamples, sampleRate: sampleRate)
+            Thread.sleep(forTimeInterval: pauseSeconds)
+            tracker.record(samples: behindSamples, sampleRate: sampleRate)
+        }
+
+        let snap = tracker.snapshot()
+        #expect(snap.deficitSeconds > 0.1, "the wobble must actually reach the deficit bucket")
+        #expect(snap.overrunSeconds > 0.1, "and the overrun bucket too")
+        let bucket = min(snap.deficitSeconds, snap.overrunSeconds)
+        #expect(abs(snap.netDriftSeconds) < 0.3 * bucket,
+                """
+                net drift \(snap.netDriftSeconds)s should be small beside \
+                deficit \(snap.deficitSeconds)s / overrun \(snap.overrunSeconds)s \
+                — symmetric jitter is not lost audio
+                """)
+        #expect(snap.stallCount == 0, "ordinary jitter is not a discontinuity")
+    }
+
+    /// A gap far longer than the audio it spans is a discontinuity — playback
+    /// paused, the Mac slept, the tap was rebuilt — not slow feeding. It must
+    /// land in `stalledSeconds`, leaving the drift totals alone: charged to the
+    /// deficit, a single sleep contributes more than every real gap combined.
+    @Test func longGapIsChargedToStallNotDrift() {
+        // Threshold injected so the discontinuity is reachable without a real
+        // five-second sleep; production keeps the default.
+        let tracker = WriteCadenceTracker(stallGapSeconds: 0.05)
+        let sampleRate = 44100
+
+        tracker.record(samples: 64, sampleRate: sampleRate) // seed
+        Thread.sleep(forTimeInterval: 0.15)                 // the "pause"
+        tracker.record(samples: 64, sampleRate: sampleRate)
+
+        let snap = tracker.snapshot()
+        #expect(snap.stallCount == 1)
+        #expect(snap.stalledSeconds > 0.05, "the whole gap belongs to the stall bucket")
+        #expect(snap.deficitSeconds == 0, "a discontinuity must not read as drift")
+        #expect(snap.netDriftSeconds == 0)
+
+        // A gap under the threshold still counts as ordinary deficit.
+        Thread.sleep(forTimeInterval: 0.01)
+        tracker.record(samples: 64, sampleRate: sampleRate)
+        #expect(tracker.snapshot().deficitSeconds > 0)
+        #expect(tracker.snapshot().stallCount == 1)
+
+        tracker.reset()
+        #expect(tracker.snapshot().stalledSeconds == 0)
+        #expect(tracker.snapshot().stallCount == 0)
+    }
+
+    /// Refused audio never reached the receiver, so unlike symmetric jitter it
+    /// is real loss and MUST move the net — the counter-check to
+    /// `symmetricJitterInflatesBucketsButNotNetDrift`.
+    @Test func refusedWriteMovesNetDrift() {
+        let tracker = WriteCadenceTracker()
+        let samples = 4410 // 0.1s
+        let audioSeconds = Double(samples) / 44100.0
+
+        tracker.record(samples: samples, sampleRate: 44100)
+        let before = tracker.snapshot().netDriftSeconds
+        tracker.recordRefused(samples: samples, sampleRate: 44100)
+
+        #expect(abs((tracker.snapshot().netDriftSeconds - before) - audioSeconds) <= 1e-9)
+    }
 }
 
 // MARK: - AirPlayEngine.write(pcm:pts:) end-to-end

@@ -180,6 +180,18 @@ This app must feel like a native macOS citizen, not a cross-platform port.
   Contrast variants plus a written contrast rationale before it lands.
 - **Respect system settings**: Reduce Motion, Increase Contrast, Reduce
   Transparency.
+- **Accessibility is a silent default, not a discussion — until it collides
+  with something.** New feature work follows
+  [`docs/accessibility/A11Y-GOLD-STANDARD.md`](docs/accessibility/A11Y-GOLD-STANDARD.md)
+  without being asked: VoiceOver labels/values/announcements, keyboard reach
+  and focus, contrast floors, Reduce Motion/Increase Contrast/Differentiate
+  Without Color. If a request — Alec's or your own proposed approach — would
+  violate it, stop and raise the conflict before building; never silently
+  comply (ships something inaccessible) and never silently override (ignores
+  what was asked without saying so). `docs/accessibility/A11Y-AUDIT-2026-08-01.md`
+  is the current findings record and `docs/plans/PLAN-ACCESSIBILITY.md` the
+  remediation waves for pre-existing gaps — don't re-audit, and don't treat
+  existing code as the bar for new code.
 - **"Match Control Center / System Settings" is retired as guidance.** For the
   sanctioned custom-drawn Warm Signal pieces (canvas, connection ring, signal
   dot, meter, bus control, fader skin, shell bubble fill) the design authority
@@ -202,3 +214,6 @@ This app must feel like a native macOS citizen, not a cross-platform port.
   7. No second token module, ever — `Tokens` is the one governed exception.
   8. Any other deviation from system chrome gets a documented "why" in the
      nearest AGENTS.md.
+  9. Accessibility (`docs/accessibility/A11Y-GOLD-STANDARD.md`) is
+     silent-by-default on new work — a conflict with it gets raised, never
+     resolved unilaterally in either direction.

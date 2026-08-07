@@ -203,6 +203,17 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   contract turns a second concurrent call into a clobbered/leaked waiter for the
   first, which is what caused a live regression (leaked `startOp` continuations,
   eventual disconnect) before this guard existed.
+- **There are TWO mute representations and only one path is allowed to touch
+  both.** `GroupController.setMuted` is volume-based (`explicitMute` plus a
+  stashed level, realized as `setVolume(0)`); `OutputBackend.setMuted` is the
+  backend's own, and the popover never reaches it. The single exception is
+  `GroupController.connect(_:at:)` with no level — a connect-muted speaker has no
+  volume to zero yet, so it engages the backend's mute as well. That is why the
+  unmute edge lifts the backend's mute before restoring the level, and why the
+  Mac is excluded from that lift (its backend mute is the machine's real hardware
+  mute). Engage the backend's mute anywhere else and you get a speaker whose
+  slider and mute button both lie: the backend stashes volume writes while muted,
+  so nothing the UI can send brings it back.
 - **Metering is THREE real sources, all on the same event channel, all
   popover-scoped (T3).** `setMeteringActive` fans the popover-visibility gate to
   the whole-system `captureCoordinator`, the `routeMixer`, AND the

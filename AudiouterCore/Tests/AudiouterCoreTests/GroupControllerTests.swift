@@ -1456,6 +1456,137 @@ import Testing
                 "the group's gain stage must reach the backend before the output set opens")
         #expect(backend.gainWrites.last?.group == 42, "the pushed gain reflects the NEW target's group stage")
     }
+
+    // MARK: The automation surface — connect(_:at:), disconnectAll(), Main on activation
+    //
+    // This is the only place the App Intents behaviour can be pinned: an intent
+    // itself runs in a live app process and Apple's harness needs a UI testing
+    // bundle, which SwiftPM has no equivalent of, so every intent is a translation
+    // layer with no logic of its own.
+
+    @Test func disconnectAllReturnsToTheLocalDeviceAndAnEmptyOutputSet() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        try controller.saveGroup(Group(id: "g1", name: "Evening", memberIDs: ["office"], memberVolumes: [:]))
+        _ = controller.setDeviceSelected("office", true)
+        _ = controller.setDeviceSelected("sonos-move", true)
+        backend.reset()
+
+        controller.disconnectAll()
+
+        #expect(controller.selectedDeviceIDs == ["local-mac"],
+                "there is no zero-selected state to land on — the Mac's own row is the resting one")
+        #expect(controller.isPassthrough)
+        #expect(backend.outputSetWrites.last == [], "nothing is left streaming")
+        #expect(controller.groups.count == 1, "saved groups keep their membership — this only stops streaming")
+        #expect(!backend.muteWrites.contains { $0.id == "local-mac" }, "the Mac is handed back the sound, not muted")
+    }
+
+    @Test func disconnectAllClearsAGroupTargetToo() async throws {
+        // Main Out on a GROUP is the state where speakers are actually streaming
+        // while `selectedDeviceIDs` names something else entirely, so clearing the
+        // selection alone would leave the group playing.
+        let (controller, backend) = try await makeRecordingController()
+        try controller.saveGroup(Group(id: "g1", name: "Evening", memberIDs: ["office"], memberVolumes: [:]))
+        controller.setMainOut(.group(id: "g1"))
+        backend.reset()
+
+        controller.disconnectAll()
+
+        #expect(controller.mainOut == .selectedDevices)
+        #expect(controller.selectedDeviceIDs == ["local-mac"])
+        #expect(backend.outputSetWrites.last == [])
+    }
+
+    @Test func disconnectAllIsANoOpWhenAlreadyPassthrough() async throws {
+        let (controller, backend) = try await makeRecordingController(systemOutputVolume: 40)
+        controller.ensureDefaultSelection()
+        backend.reset()
+
+        controller.disconnectAll()
+
+        #expect(backend.callOrder.isEmpty, "nothing to disconnect ⇒ nothing crosses the backend seam")
+        #expect(controller.selectedDeviceIDs == ["local-mac"])
+    }
+
+    @Test func connectAtALevelArmsTheBackendBeforeTheOutputSetOpens() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        backend.reset()
+
+        controller.connect("office", at: 40)
+
+        #expect(backend.callOrder == ["arm", "outputSet"],
+                "the level must be armed BEFORE the connect it belongs to, not corrected a beat after it")
+        #expect(backend.armWrites.count == 1)
+        #expect(backend.armWrites.first?.id == "office")
+        #expect(backend.armWrites.first?.volume == 40)
+        #expect(controller.isSpeakerSelected("office"))
+    }
+
+    /// The riskiest path in the whole feature: a connect with no level connects
+    /// MUTED, and mute lives in two independent places. If only the backend's is
+    /// engaged, the popover's mute button can never bring the speaker back — the
+    /// backend swallows the volume the unmute restores.
+    @Test func connectWithNoLevelMutesBothRepresentationsAndStaysRecoverable() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        backend.reset()
+
+        controller.connect("office", at: nil)
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(controller.isMuted("office"), "this controller's own mute — what the popover's button reads")
+        #expect(backend.muteWrites.contains { $0.id == "office" && $0.muted }, "…and the backend's own mute")
+        #expect(backend.devices.first { $0.id == "office" }?.isMuted == true)
+        #expect(backend.armWrites.isEmpty, "a blank level means silence, never the app-wide connect default")
+        #expect(backend.callOrder == ["muted", "outputSet"], "the silence lands as part of the connect")
+
+        // Now the ordinary popover path: a redundant mute (the row already reads
+        // muted), then unmute.
+        backend.reset()
+        controller.setMuted(true, for: "office")
+        controller.setMuted(false, for: "office")
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        #expect(!controller.isMuted("office"))
+        #expect(backend.devices.first { $0.id == "office" }?.isMuted == false, "the backend's mute came off too")
+        #expect(volume("office", in: backend) == 50, "and the level from before the silent connect came back")
+        #expect(backend.callOrder == ["muted", "volume"],
+                "the backend's mute must be lifted BEFORE the level goes back — while it holds, the backend stashes volume writes instead of pushing them")
+    }
+
+    /// A mute can only be armed on a DISCOVERED speaker: the backend keys its mute
+    /// on a live output id and drops the write when it has none, so arming one for
+    /// a device the fleet doesn't have would silently record a silence nothing can
+    /// see. Refusing here keeps the two representations from ever diverging.
+    @Test func connectingAnUndiscoveredSpeakerArmsNothing() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        backend.reset()
+
+        let result = controller.connect("no-such-speaker", at: nil)
+
+        #expect(result == .ok, "an unknown id is quietly ignored, not an error path")
+        #expect(!controller.isMuted("no-such-speaker"))
+        #expect(!controller.isSpeakerSelected("no-such-speaker"))
+        #expect(backend.callOrder.isEmpty, "nothing armed, nothing routed")
+    }
+
+    @Test func activatingAGroupWithAMainLevelPushesMainBeforeRouting() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        try controller.saveGroup(Group(id: "g1", name: "Evening", memberIDs: ["office"],
+                                       memberVolumes: ["office": 30], masterVolume: 80))
+        backend.reset()
+
+        controller.setMainOut(.group(id: "g1"), mainVolume: 55)
+
+        #expect(backend.callOrder.prefix(2).elementsEqual(["gain", "outputSet"]),
+                "Main must be in force before any member connects, or the first beat plays at the old level")
+        #expect(controller.mainOutMasterVolume == 55)
+        #expect(backend.gainWrites.last?.mainOut == 55)
+        #expect(backend.gainWrites.last?.group == 80, "the group's own stage rides the same push")
+        #expect(backend.gainWrites.last?.mirrorToSystemVolume == true,
+                "Main levels the Mac too — same as a fader drag")
+        #expect(backend.volumeWrites.contains { $0.id == "office" && $0.volume == 30 },
+                "each member's remembered level still applies underneath Main")
+    }
 }
 
 /// Wraps a real ``MockBackend`` — so `devices`, echoes and queue ordering behave
@@ -1472,8 +1603,11 @@ private final class RecordingBackend: OutputBackend {
     private(set) var volumeWrites: [(id: String, volume: Int)] = []
     private(set) var gainWrites: [(mainOut: Int, group: Int, mirrorToSystemVolume: Bool)] = []
     private(set) var outputSetWrites: [Set<String>] = []
-    /// Records "gain" / "outputSet" in the order the backend actually saw them —
-    /// e.g. proving a group's gain reaches the backend BEFORE its output set does.
+    private(set) var armWrites: [(id: String, volume: Int)] = []
+    private(set) var muteWrites: [(id: String, muted: Bool)] = []
+    /// Records "gain" / "outputSet" / "arm" / "muted" / "volume" in the order the
+    /// backend actually saw them — e.g. proving a group's gain reaches the backend
+    /// BEFORE its output set does.
     private(set) var callOrder: [String] = []
 
     var systemOutputVolume: Int?
@@ -1487,7 +1621,17 @@ private final class RecordingBackend: OutputBackend {
     func start() { inner.start() }
     func stop() { inner.stop() }
     func makeEventStream() -> AsyncStream<BackendEvent> { inner.makeEventStream() }
-    func setMuted(_ muted: Bool, for id: String) { inner.setMuted(muted, for: id) }
+    func setMuted(_ muted: Bool, for id: String) {
+        muteWrites.append((id: id, muted: muted))
+        callOrder.append("muted")
+        inner.setMuted(muted, for: id)
+    }
+
+    func armConnectVolume(_ volume: Int, for id: String) {
+        armWrites.append((id: id, volume: volume))
+        callOrder.append("arm")
+        inner.armConnectVolume(volume, for: id)
+    }
 
     func setOutputSet(_ ids: Set<String>) {
         outputSetWrites.append(ids)
@@ -1502,6 +1646,7 @@ private final class RecordingBackend: OutputBackend {
 
     func setVolume(_ volume: Int, for id: String) {
         volumeWrites.append((id: id, volume: volume))
+        callOrder.append("volume")
         inner.setVolume(volume, for: id)
     }
 
@@ -1514,7 +1659,10 @@ private final class RecordingBackend: OutputBackend {
     /// Forget everything recorded so far — fixture setup (selection, group
     /// activation) issues its own writes, and only what runs afterwards is
     /// under test.
-    func reset() { volumeWrites = []; gainWrites = []; outputSetWrites = []; callOrder = [] }
+    func reset() {
+        volumeWrites = []; gainWrites = []; outputSetWrites = []
+        armWrites = []; muteWrites = []; callOrder = []
+    }
 }
 
 private actor CountBox {

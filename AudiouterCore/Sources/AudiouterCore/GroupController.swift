@@ -46,6 +46,14 @@ public final class GroupController {
     // The stash is written only on the silence *edge* (a false→true transition),
     // so re-muting an already-muted member doesn't overwrite the original level.
     // (Solo was removed 2026-07-13 — see the type doc.)
+    //
+    // The backend's OWN mute (`OutputBackend.setMuted`) is a second, independent
+    // representation, and this volume-based one deliberately doesn't drive it —
+    // with one exception, ``connect(_:at:)``'s no-level arm, which has no volume to
+    // zero yet and so engages the backend's mute instead. Because that exception
+    // exists, the unmute edge lifts the backend's mute too: leaving it engaged
+    // makes the backend swallow the restore, and the speaker is then silent with no
+    // way back from the UI.
 
     private struct MemberState {
         var explicitMute = false
@@ -339,6 +347,50 @@ public final class GroupController {
         }
     }
 
+    /// Add `id` to Selected Devices with `level` attached to the connect that
+    /// starts — the automation entry point, where the caller states its own level
+    /// instead of inheriting the app-wide connect default.
+    ///
+    /// `level == nil` means SILENCE, never "whatever the default is" — an
+    /// automation that names no level must not be able to wake the house. It
+    /// connects the speaker MUTED, and that is arranged here because mute lives in
+    /// TWO places that have to agree: this controller's ``isMuted(_:)`` (what the
+    /// popover's mute button reads and writes) and the backend's own mute. Arm
+    /// only the backend's and the row renders unmuted while the speaker plays
+    /// nothing — and the backend then swallows the volume its unmute would restore,
+    /// so the button can never bring it back. ``setMuted(_:for:)`` lifts both.
+    ///
+    /// Nothing is armed for an undiscovered device: there is no connect to attach
+    /// it to (the backend keys its mute on a live output id, so the arm would land
+    /// nowhere), and the selection is already a no-op for an id the fleet doesn't
+    /// have.
+    @discardableResult
+    public func connect(_ id: String, at level: Int?) -> SelectionResult {
+        guard device(id) != nil else { return .ok }
+        // Either way, this runs BEFORE the selection: the level (or the silence)
+        // has to be part of the connect, not a correction landing a beat after it.
+        if let level {
+            backend.armConnectVolume(level, for: id)
+        } else {
+            armConnectMute(for: id)
+        }
+        return setDeviceSelected(id, true)
+    }
+
+    /// Drop every AirPlay speaker so the Mac's own output takes the sound back.
+    /// It stops streaming and nothing else: the Mac keeps playing at whatever
+    /// level it was, and saved groups keep their membership.
+    ///
+    /// The state it lands on is the app's ordinary resting one — {local} under
+    /// Selected Devices — because there is no zero-selected state to land on
+    /// instead (the current-device floor in ``setDeviceSelected(_:_:)``). No-op
+    /// when already there.
+    public func disconnectAll() {
+        guard !isPassthrough else { return }
+        selectedDeviceIDs = localDeviceID.map { [$0] } ?? []
+        setMainOut(.selectedDevices)
+    }
+
     /// Force a fresh connection attempt for `id` — what the diagnosis panel's
     /// "Try again" calls (R12/W2-T3).
     ///
@@ -424,9 +476,20 @@ public final class GroupController {
     /// Devices), and a device connected by `applyRouting()` while the previous —
     /// possibly louder — product was still in force would get one burst at the
     /// wrong level.
-    public func setMainOut(_ target: MainOutTarget) {
+    ///
+    /// `mainVolume` moves MAIN in the same gesture — what "activate this group at
+    /// this level" means for an automation: the number names the master, and each
+    /// member's remembered level still multiplies underneath it (`Main × Group ×
+    /// Device`). It rides that same pre-routing push, so it is in force before any
+    /// device connects, and it mirrors to the Mac's own output exactly as a Main
+    /// fader drag does — the Mac is one of the things Main levels.
+    public func setMainOut(_ target: MainOutTarget, mainVolume: Int? = nil) {
         mainOut = target
-        pushMasterGain(mirrorToSystemVolume: false)
+        if let mainVolume {
+            setMain(mainVolume, writeBackToSystem: true)
+        } else {
+            pushMasterGain(mirrorToSystemVolume: false)
+        }
         applyRouting()
         persistRouting()
     }
@@ -861,6 +924,26 @@ public final class GroupController {
         memberState[id]?.explicitMute ?? false
     }
 
+    /// Record the silence a ``connect(_:at:)`` with no level asks for, in both
+    /// places mute lives: this controller's own bookkeeping and the backend's mute.
+    ///
+    /// Deliberately NOT routed through ``applySilence(for:state:wasSilent:)``,
+    /// which realizes silence by writing volume 0 to something already streaming.
+    /// Here nothing is streaming yet, and that write would land in the backend's
+    /// mute stash — overwriting the very level the unmute is supposed to restore.
+    private func armConnectMute(for id: String) {
+        var state = memberState[id] ?? MemberState()
+        if !state.explicitMute {
+            // The same edge rule `applySilence` follows: stash the level to come
+            // back to only on the false→true transition — and read it before the
+            // backend's mute zeroes it.
+            state.priorVolume = device(id)?.volume
+            state.explicitMute = true
+            memberState[id] = state
+        }
+        backend.setMuted(true, for: id)
+    }
+
     // MARK: Master mute (SPEC §9 2026-07-14b — a "master" is muted iff ALL of the
     // target's members are muted; toggling drives every member together).
 
@@ -896,6 +979,14 @@ public final class GroupController {
         } else {
             let restored = state.priorVolume ?? device(id)?.volume ?? 0
             state.priorVolume = nil
+            // Lift the backend's own mute first, in case a connect-muted arm
+            // (``armConnectMute(for:)``) engaged one: while it holds, the backend
+            // stashes volume writes instead of pushing them, so restoring the
+            // level alone would leave a speaker silent that no amount of clicking
+            // mute could bring back. A no-op on any device it never held.
+            // The Mac is exempt — its backend mute is the machine's real hardware
+            // mute, which this volume-based path never sets and must not clear.
+            if device(id)?.isLocalDevice == false { backend.setMuted(false, for: id) }
             backend.setVolume(restored, for: id)
         }
     }

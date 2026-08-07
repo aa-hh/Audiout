@@ -289,9 +289,10 @@ final class PopoverPanelViewController: NSViewController {
     /// runs the resize animation). One channel, used consistently: PLAN §E risk 1
     /// "prefer the preferredContentSize channel".
     ///
-    /// `animated` selects the animation via `PopoverController.setPopoverAnimates`
-    /// (the controller owns the `NSPopover`): it toggles `popover.animates` around
-    /// the `preferredContentSize` assignment. The non-animated path is used for the
+    /// `animated` selects the animation via `PopoverController.applySurfaceResize`
+    /// (the controller, not the panel, knows the current host): under the popover
+    /// host that toggles `popover.animates` around the `preferredContentSize`
+    /// assignment. The non-animated path is used for the
     /// initial show and when `NSWorkspace.shared.accessibilityDisplayShouldReduceMotion`
     /// is true (the jank escape hatch); it applies the size with `animates` forced
     /// off so no frame animation runs. Because `NSPopover` retargets a
@@ -303,10 +304,10 @@ final class PopoverPanelViewController: NSViewController {
         let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         let wantsAnimation = animated && !reduceMotion
         let target = fittingSizeSettled()
-        // Assigning `preferredContentSize` is the sole size channel; NSPopover
-        // animates iff `popover.animates` is true when the assignment happens.
+        // Assigning `preferredContentSize` is the sole size channel; the
+        // controller decides how the current host animates the change.
         if let controller {
-            controller.setPopoverAnimates(wantsAnimation) { [weak self] in
+            controller.applySurfaceResize(animated: wantsAnimation) { [weak self] in
                 self?.preferredContentSize = target
             }
         } else {

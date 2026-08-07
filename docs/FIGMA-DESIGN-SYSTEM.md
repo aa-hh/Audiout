@@ -83,7 +83,7 @@ Variable names (each resolvable by name; IDs ledgered in the build state):
 | Atom · Feed | `45:14` |
 | Atom · Fader | `45:15` |
 | Atom · Fields | `45:16` |
-| Atom · Tabs | `45:17` |
+| Note · Tab views (no kit component) | `45:17` |
 | Atom · Shell | `45:18` |
 | Component · Device Row | `45:20` |
 | Component · Main Row | `45:21` |
@@ -117,8 +117,7 @@ Variable names (each resolvable by name; IDs ledgered in the build state):
 | GroupedSection | `52:5` | `AudiouterWindowUI/GroupedSectionView.swift` |
 | RoundedContainer | `52:7` | `AudiouterOnboardingUI/OnboardingViewController.swift` (permission card) |
 | Hairline | `52:9` | `AudiouterPopoverUI/CardView.swift` (card dividers) |
-| TabItem | `53:18` | `AudiouterSettingsUI/SettingsWindowController.swift` (code uses stock `NSTabViewController` `.toolbar`; Figma tabs follow Alec's custom spec) |
-| TabGroup | `53:49` | `AudiouterSettingsUI/SettingsWindowController.swift` |
+| ~~TabItem / TabGroup~~ | *deleted 2026-08-07* | See **Tab views** below — no component, by decision |
 | WarmNameField | `54:15` | `AudiouterSharedUI/WarmNameFieldCell.swift` |
 | DeviceIconWell | `54:70` | `AudiouterWindowUI/DeviceIconWellView.swift` |
 | PermissionIconTile | `54:111` | `AudiouterOnboardingUI/PermissionRowView.swift` |
@@ -213,6 +212,17 @@ b. **New custom-drawn view** → new *Atom · X* page; a component set with
 
 c. **New/changed stock-AppKit usage** → instance from the macOS 27 kit, tag the
    layer `SYSTEM` in its name, never rebuild or restyle it.
+   **If the kit has no equivalent, do NOT invent a component.** A hand-built
+   stand-in silently diverges from the real control, which is worse than having
+   nothing. Instead: leave a clearly-labelled positional placeholder in the
+   screen (position + real names only, no styling), and point at Apple's HIG as
+   the source of truth. **Tab views** are the known case — the kit ships none
+   (Segmented Control and Utility Panel Tab Bar are different controls), so the
+   Settings tab strip is a placeholder and the visual comes from
+   <https://developer.apple.com/design/human-interface-guidelines/tab-views> at
+   implementation time. TabItem/TabGroup components existed briefly on
+   2026-08-07 and were deleted for exactly this reason; see the Figma page
+   *Note · Tab views (no kit component)*. Don't rebuild them.
 
 d. **Screen change** → update the assembled screen from components. Code wins
    over spec; spec-only ideas go on the *Reference · Spec backlog* page.

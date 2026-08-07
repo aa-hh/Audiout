@@ -1045,9 +1045,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// Start/stop the align-by-ear tick (BT-OFFSET-UI). ADDITIVE seam only: it
     /// swaps one snapshot field, never touches the tap, the exclusion set, or
     /// the per-app routing state — the fragile parts of this coordinator stay
-    /// un-restructured. Idempotent per direction.
+    /// un-restructured. Idempotent per direction. `queue.sync` like
+    /// ``setBTSink(_:renderProcessPID:)``, so the very next delivered buffer
+    /// already carries (or has dropped) the tick.
     public func setAlignTick(_ active: Bool) {
-        queue.async {
+        queue.sync {
             guard (self.tickInjector != nil) != active else { return }
             self.tickInjector = active ? AlignmentTickInjector() : nil
             self.publishBufferSnapshot()

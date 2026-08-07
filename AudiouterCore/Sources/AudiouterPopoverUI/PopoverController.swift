@@ -955,6 +955,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         let bluetooth = orderedBluetoothDevices(in: allDevices)
         devicesPlaceholderShown = false
         renderedSubsectionTitles = []
+        renderedBluetoothOrder = bluetooth.map(\.id)
         // Combined header row: "Output Devices" title on the left, "VOLUME" over
         // the slider. The membership "Selected" column MOVED to the left spine
         // (v4 §Call-1), so this card no longer heads a membership column — but
@@ -1095,6 +1096,11 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// Subsection titles the LAST `rebuild()` actually rendered, in order —
     /// the hide-when-empty assertion surface (`test_subsectionTitles`).
     private var renderedSubsectionTitles: [String] = []
+
+    /// The Bluetooth subsection's device ids as the LAST `rebuild()` rendered
+    /// them, top to bottom — the recency-sort assertion surface
+    /// (`test_bluetoothRowOrder`). Empty when the subsection is hidden.
+    private var renderedBluetoothOrder: [String] = []
 
     /// `panel.addSubsectionHeader` + the rendered-titles record, so the test
     /// surface can never drift from what was actually mounted.
@@ -2635,6 +2641,10 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// The device id whose align-by-ear tick is currently running, if any
     /// (BT-OFFSET-UI) — asserts one-at-a-time + the close/auto-stop paths.
     public func test_alignTickDeviceID() -> String? { alignTickDeviceID }
+
+    /// The Bluetooth subsection's rendered row order (BT-UI ghost-pairing
+    /// sort), top to bottom; empty when the subsection is hidden.
+    public func test_bluetoothRowOrder() -> [String] { renderedBluetoothOrder }
 
     /// Simulate flipping a device row's membership switch through its delegate.
     /// Returns the model's `SelectionResult` so tests can assert refusal/auto-swap.

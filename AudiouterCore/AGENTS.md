@@ -321,7 +321,12 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   selection change), fed by the whole-system tap's `setBTSink` fan-out with
   the render process tap-excluded. Exclude BT from an engine-only path via
   `isBluetooth`, never `supportsAirPlay2` — AP1 receivers share that flag yet
-  ARE engine-driven. The silence fallback reads a BT id's audible fact from
+  ARE engine-driven. Pairedness truth is the enumerator's MERGED LIST: a known
+  `.bluetooth` row whose id is absent from the latest snapshot has lost its OS
+  pairing record, and `retryOutput` fails it FAST as
+  `ConnectionFailure.Cause.notPaired` (before any ~15 s baseband attempt);
+  never auto-purge such a row — re-pairing resurrects the same MAC-derived id
+  with its trim and membership. The silence fallback reads a BT id's audible fact from
   `isAvailable`, never `.connected` (`desiredDeviceAudibleLocked`): a BT id
   holds no engine session, so the `.connected` read would brand a healthy
   BT-only selection stranded and un-mute the Mac mid-playback. BT devices
@@ -600,6 +605,8 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `NativeDiscovery` | Bonjour discovery (AP2 + AP1). |
 | `BTDeviceEnumerator` | Bluetooth outputs: Core Audio BT transport merged with the TCC-gated IOBluetooth paired list; paired-but-disconnected speakers surface unavailable, with pairing recency kept for ghost-row filtering. |
 | `BTSyncedSink` | N-instance BT sink manager: per-device pinned engines, reference-timeline delay, pacing-clock drift correction. |
+| `BTSyncTrim` / `BTTrimStore` | The SYNC trim's shared clamp/step contract (±500 ms, 10 ms coarse) + versioned-JSON persistence per device UID; `NativeBackend` loads at init and re-pushes into the sink on every arm (`BTOutputControlling` is the UI seam). |
+| `AlignmentTickInjector` | Align-by-ear woodblock tick (72 BPM — beat spacing must exceed the ±500 ms trim range or offsets alias), mixed into the converted PCM in `NativeCaptureCoordinator.handleBuffer` BEFORE the engine write and both fan-outs, so every consumer renders the same tick through its own delay; self-limits to ~30 s. Playing it out loud can't work — the app's render processes are tap-excluded. |
 | `NativeCaptureCoordinator` | Whole-system Core Audio capture; excludes individually-routed + user-excluded apps. |
 | `PerAppCaptureCoordinator` | Per-process Core Audio capture taps, one per individually-routed app. |
 | `AudioProcessResolver` / `AudioProcessEnumerating` | Bundle ID → ALL its Core Audio process objects (main + helper/child processes) via four ANY-of attribution layers: own bundle id, responsible pid, bundle-path containment, parent-pid walk; the AppKit lookups (pid→bundle, bundle→`.app` path) are injected. `resolveWithAttribution(bundleID:)` (T2) is the diagnostic twin of `resolve(bundleID:)`, tagging each resolved process with its matching `AttributionLayer` for `Telemetry`. |

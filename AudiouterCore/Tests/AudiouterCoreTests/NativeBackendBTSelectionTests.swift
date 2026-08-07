@@ -121,6 +121,9 @@ import CoreAudio
         func setBTSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {
             lock.withLock { _ops.append(sink == nil ? "btDetach" : "btAttach:\(renderProcessPID ?? -1)") }
         }
+        func setAlignTick(_ active: Bool) {
+            lock.withLock { _ops.append(active ? "tickOn" : "tickOff") }
+        }
         var ops: [String] { lock.withLock { _ops } }
     }
 
@@ -149,11 +152,16 @@ import CoreAudio
         func setComposition(_ composition: BTGroupComposition) {
             lock.withLock { _calls.append("setComposition"); _compositions.append(composition) }
         }
+        func setTrimMs(_ ms: Int, forDeviceUID uid: String) {
+            lock.withLock { _calls.append("setTrimMs"); _trims.append((ms: ms, uid: uid)) }
+        }
         func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {}
 
         var calls: [String] { lock.withLock { _calls } }
         var deviceSets: [[BTSyncedSink.DeviceSpec]] { lock.withLock { _deviceSets } }
         var compositions: [BTGroupComposition] { lock.withLock { _compositions } }
+        private var _trims: [(ms: Int, uid: String)] = []
+        var trims: [(ms: Int, uid: String)] { lock.withLock { _trims } }
     }
 
     // MARK: Fixtures + helpers
@@ -592,5 +600,44 @@ import CoreAudio
         waitFor { sink.compositions.last?.airPlayPresent == true }
         #expect(backend.localSinkReferenceDelayMs() == backend.startBufferMs,
                 "AirPlay joining moves the local reference back to the start-buffer")
+    }
+
+    // MARK: SYNC trim → sink (BT-OFFSET-UI)
+
+    /// A trim set BEFORE any sink exists is re-pushed on arm (ahead of the
+    /// device set, so the first anchor already samples it), and a trim set
+    /// WHILE armed reaches the live sink — the reconnect-restore half of the
+    /// round-trip (the relaunch half is `NativeBackendBTDevicesTests`).
+    @Test func trimsReachTheSinkOnArmAndLive() {
+        let (backend, _, _, bt, sink, _) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+
+        backend.setBTSyncTrim(-120, forDevice: btMove.id)   // no sink yet — stored only
+        backend.setOutputSet([btMove.id])
+        waitFor { sink.calls.contains("start") }
+        #expect(sink.trims.contains { $0.ms == -120 && $0.uid == btMove.id },
+                "the stored trim is pushed when the sink arms")
+        if let trimIndex = sink.calls.firstIndex(of: "setTrimMs"),
+           let devicesIndex = sink.calls.firstIndex(of: "setDevices") {
+            #expect(trimIndex < devicesIndex, "trims land before the device set arms")
+        }
+
+        backend.setBTSyncTrim(60, forDevice: btMove.id)
+        waitFor { sink.trims.contains { $0.ms == 60 } }
+        #expect(sink.trims.last?.ms == 60, "a live edit reaches the armed sink directly")
+    }
+
+    /// The align-by-ear gate is a straight pass-through to the capture
+    /// coordinator's tick seam.
+    @Test func alignTickGateReachesTheCaptureCoordinator() {
+        let (backend, _, _, _, _, capture) = makeBackend()
+        defer { backend.stop() }
+        backend.setBTAlignTickActive(true)
+        #expect(capture.ops.contains("tickOn"))
+        backend.setBTAlignTickActive(false)
+        #expect(capture.ops.last == "tickOff")
     }
 }

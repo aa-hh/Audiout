@@ -228,6 +228,22 @@ import Testing
         #expect(controller.activeGroupID == "g1")
     }
 
+    /// BT-UI "click connects": `requestReconnect(for:)` is a membership-FREE
+    /// pass-through to `OutputBackend.retryOutput` — unlike
+    /// `retryConnection(for:)`, an UNSELECTED id is retried as-is, never
+    /// selected as a side effect (a greyed Bluetooth row's click must connect
+    /// the speaker without also pulling it into the mix).
+    @Test func requestReconnectRetriesWithoutInventingMembership() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        #expect(!controller.selectedDeviceIDs.contains("office"))
+        backend.reset()
+
+        controller.requestReconnect(for: "office")
+        #expect(backend.callOrder == ["retry"],
+                "a straight retry — no selection, no output-set, no gain writes")
+        #expect(!controller.selectedDeviceIDs.contains("office"), "membership is never invented")
+    }
+
     /// R12 adversarial-review fixup — `retryConnection(for:)` must decide its
     /// re-kick path off which routing is ACTUALLY active (`mainOut`), not off
     /// whichever membership set happens to contain `id` first.

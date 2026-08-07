@@ -102,12 +102,13 @@ import CoreAudio
 
     // MARK: Helpers
 
-    private func makeBackend() -> (NativeBackend, FakeBTEnumerator) {
+    private func makeBackend(trimStore: BTTrimStore? = nil) -> (NativeBackend, FakeBTEnumerator) {
         let bt = FakeBTEnumerator()
         let backend = NativeBackend(
             engineControl: NoOpEngine(),
             discoverySource: NoOpDiscovery(),
             btEnumerator: bt,
+            btTrimStore: trimStore,
             dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: NoOpSystemVolume(),
             aggregateControl: NoOpAggregateControl())
@@ -206,5 +207,79 @@ import CoreAudio
         backend.stop()
         #expect(bt.stopCount == 1)
         #expect(bt.onSnapshot == nil, "stop() must unwire the snapshot callback")
+    }
+
+    // MARK: "Not paired" tier (device-tier decision 2)
+
+    /// A BT row whose pairing record was deleted out from under the app (the
+    /// id left the enumerator's merged list, the row survives) fails FAST on
+    /// retry — `.notPaired`, no baseband attempt, and the copy names the
+    /// Bluetooth-Settings fix.
+    @Test func retryOnAnUnpairedRowFailsFastAsNotPaired() {
+        let (backend, bt) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+
+        bt.fire([sonos, flip])
+        waitFor { self.device(backend, self.sonos.id) != nil && self.device(backend, self.flip.id) != nil }
+
+        bt.fire([flip])   // sonos's pairing record is gone; its row survives
+        waitFor { self.device(backend, self.sonos.id)?.isAvailable == false }
+
+        backend.retryOutput(sonos.id)
+        waitFor {
+            if case .failed = self.device(backend, self.sonos.id)?.connectionState { return true }
+            return false
+        }
+        guard case .failed(let failure)? = device(backend, sonos.id)?.connectionState else {
+            Issue.record("expected a .failed state"); return
+        }
+        #expect(failure.cause == .notPaired)
+        #expect(failure.headline == "Not paired")
+        #expect(failure.suggestion.contains("Pair it again in Bluetooth Settings"))
+    }
+
+    /// A STILL-paired greyed row's retry is NOT misclassified: with no
+    /// connection manager wired, the retry is simply consumed (the BT arm owns
+    /// the id) and never lands `.notPaired`.
+    @Test func retryOnAPairedRowNeverClassifiesNotPaired() {
+        let (backend, bt) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+
+        bt.fire([sonos, flip])
+        waitFor { self.device(backend, self.flip.id) != nil }
+
+        backend.retryOutput(flip.id)   // flip IS in the merged list (paired)
+        waitFor(timeout: 0.3) { false }
+        if case .failed(let failure)? = device(backend, flip.id)?.connectionState {
+            #expect(failure.cause != .notPaired, "pairedness comes from the merged list, not availability")
+        }
+    }
+
+    // MARK: SYNC trim persistence (BT-OFFSET-UI)
+
+    /// `setBTSyncTrim` clamps to ±`BTSyncTrim.rangeMs`, and a NEW backend over
+    /// the same store reads the value back — the relaunch-restore half of the
+    /// round-trip (reconnect-restore is the sink re-push, covered in
+    /// `NativeBackendBTSelectionTests`).
+    @Test func trimRoundTripsThroughTheStoreAcrossBackendInstances() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bt-trims-\(UUID().uuidString)", isDirectory: true)
+        let store = BTTrimStore(directory: directory)
+
+        let (first, _) = makeBackend(trimStore: store)
+        first.setBTSyncTrim(620, forDevice: sonos.id)     // clamps to 500
+        first.setBTSyncTrim(-40, forDevice: flip.id)
+        #expect(first.btSyncTrim(forDevice: sonos.id) == 500)
+        #expect(first.btSyncTrim(forDevice: flip.id) == -40)
+        first.stop()
+
+        let (second, _) = makeBackend(trimStore: store)
+        #expect(second.btSyncTrim(forDevice: sonos.id) == 500,
+                "a relaunched backend restores the persisted trim")
+        #expect(second.btSyncTrim(forDevice: flip.id) == -40)
+        #expect(second.btSyncTrim(forDevice: "never-set:output") == 0)
+        second.stop()
     }
 }

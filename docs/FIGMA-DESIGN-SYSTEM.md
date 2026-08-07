@@ -257,6 +257,33 @@ Do not "fix" the code to match any of these; they are Figma stand-ins:
 - The **System accent dial** (accent-color multipliers) is documented text, not
   a variable mode.
 
+## Light mode = Circuit theme (decision, Alec 2026-08-07)
+
+The **Light and Light HC** mode values of the 18 scaffolding tokens below are
+**aliases into the `Theme · Circuit` collection** (`@sumup-oss/design-tokens`,
+kept in the Figma file). Dark modes stay pure Warm Signal, and the
+**instruments are NEVER Circuit-mapped in any mode** — gold, ember, glow,
+`spineTone`, meters incl. `meterTrack`, halo rings, `ringConnected`, armed dot,
+`dotSocket`, `failure`, `caution`, `faderThumb`, `faderRim`, permission hues.
+Circuit themes only scaffolding: canvas/rows, text, dividers, wells/text boxes,
+banners, sidebar. This is a color theme only — no Circuit UI components.
+
+| Warm Signal (Light alias) | Circuit token |
+|---|---|
+| `canvas`, `canvasHi` (gradient collapses flat), `panel`, `raised`, `underPageBackground`, `windowBackground` | `bg/normal` |
+| `well`, `sidebarWarmTint` | `bg/subtle` |
+| `hairline`, `separator` | `border/divider` |
+| `label` / `secondaryLabel` / `tertiaryLabel` | `fg/normal` / `fg/subtle` / `fg/placeholder` |
+| `quaternaryLabel`, `tertiarySystemFill` | `bg/highlight` |
+| `destructive` / `warning` | `fg/danger` / `fg/warning` |
+| `selectedContentBackground` (hover wash @10%) | `fg/normal` |
+
+`accent` deliberately KEEPS the macOS system accent in light (Alec's call).
+Any frame showing light mode must also pin `Theme · Circuit` → Light (`79:0`)
+so the alias chain resolves (all light twins already do). Pulling light values
+to code now means pulling the resolved Circuit hexes into `Tokens.swift`'s
+light/lightHC columns.
+
 ## Pull direction (Figma → code)
 
 A design change made in Figma names its own landing spot: read the changed

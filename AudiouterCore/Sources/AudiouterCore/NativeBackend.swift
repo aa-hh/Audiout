@@ -1445,6 +1445,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             btConnectionManager.onConnectionsChanged = { [weak self] in
                 self?.btEnumerator?.refresh()
             }
+            // Wave 4: the ~5 s "offer Bluetooth Settings" nudge. Telemetry-only
+            // until the UI wave hangs the row affordance off it
+            // (`SystemSettingsPane.bluetooth` is the destination).
+            btConnectionManager.onFallbackSuggested = { address in
+                Telemetry.log(.localPlayback, "bt_connect_fallback_suggested", ["address": address])
+            }
             btConnectionManager.startObservingConnections()
         }
 
@@ -2313,6 +2319,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     self.known[$0].map { !$0.isBluetooth && !$0.isLocalDevice } == true
                 },
                 macLocalPresent: macSelected)
+            // Wave-4 delay agreement: a BT presence/AirPlay-presence flip moves
+            // the LOCAL sink's reference too (`localSinkReferenceDelayMs`), so
+            // capture whether the reference input changed before overwriting.
+            let localReferenceMoved =
+                (wantBT != self.btSinkEnabled)
+                || (wantBT && composition.airPlayPresent != self.btComposition.airPlayPresent)
             if wantBT != self.btSinkEnabled || btUIDs != self.btSelectedUIDs
                 || (wantBT && composition != self.btComposition) {
                 self.btSinkEnabled = wantBT
@@ -2320,6 +2332,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.btComposition = composition
                 self.captureControlQueue.async { [weak self] in
                     self?.applyBTSinkTransition(enable: wantBT, uids: btUIDs, composition: composition)
+                }
+                if localReferenceMoved, self.syncedLocalSinkApplied {
+                    // Re-anchor the already-running local sink onto the new
+                    // reference. Same serial queue as its transitions, so this
+                    // can't race an enable/disable for the same sink; the
+                    // settle path re-samples the delay on its own when the
+                    // local sink is (re)built later.
+                    self.captureControlQueue.async { [weak self] in
+                        self?.syncedLocalSink?.requestReanchor(cause: "bt_composition_change")
+                    }
                 }
             }
 
@@ -2365,6 +2387,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // Same routing-action chokepoint discipline as `setOutputSet` (T6-rev):
         // a retry is a user routing gesture, and this must run OUTSIDE the lock.
         onRoutingAction?()
+        // BT-RECONNECT: a Bluetooth row's tap-to-reconnect takes a fully
+        // separate path — BT ids have no engine OutputID, and their "converge"
+        // is a baseband reconnect (`BTConnectionManager`), not an RTSP session.
+        if retryBTOutput(id) { return }
         let kick: OutputID? = stateQueue.sync {
             // Only a still-DESIRED id can be retried — intent lives in
             // `expectedSelected` (what the routing brain last asked for), and a
@@ -2394,6 +2420,81 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
         guard let kick else { return }
         Task { [weak self] in await self?.convergeDevice(id: id, outputID: kick) }
+    }
+
+    /// BT-RECONNECT (Wave 4): handle `retryOutput` for a `.bluetooth` id.
+    /// Returns `false` for non-BT ids (the AirPlay path below runs instead).
+    /// Unlike the AirPlay arm, membership is NOT required — Section D's
+    /// tap-to-reconnect applies to any paired row, and a selected id that comes
+    /// back re-enters the sink set via the reapply below.
+    private func retryBTOutput(_ id: String) -> Bool {
+        var address: String?
+        let isBT: Bool = stateQueue.sync {
+            guard let device = self.known[id], device.isBluetooth else { return false }
+            guard self.btConnectionManager != nil,
+                  device.connectionState != .connecting,
+                  let mac = BTConnectionManager.macAddress(fromUID: id) else { return true }
+            // Eager `.connecting`, mirroring the AirPlay arm: immediate spinner,
+            // and the `.failed → .connecting` edge marks a fresh user-initiated
+            // attempt for the row's failure-episode semantics.
+            self.setConnectionState(.connecting, for: id)
+            Telemetry.log(.localPlayback, "bt_connect_requested", ["device": id, "trigger": "retry"])
+            address = mac
+            return true
+        }
+        guard isBT else { return false }
+        guard let address, let manager = btConnectionManager else { return true }
+        Task { [weak self] in
+            let outcome = await manager.connect(address: address)
+            self?.finishBTReconnect(id: id, outcome: outcome)
+        }
+        return true
+    }
+
+    /// Fold one `BTConnectionManager.connect` outcome into the row's
+    /// connection state (and, on success, the sink set). Availability itself
+    /// still arrives via the enumerator refresh the connect notification fires —
+    /// this is the row's lifecycle answer, not a parallel availability source.
+    private func finishBTReconnect(id: String, outcome: BTConnectOutcome) {
+        stateQueue.async {
+            switch outcome {
+            case .connected:
+                self.setConnectionState(
+                    self.expectedSelected.contains(id) ? .connected : .off, for: id)
+                // Wave-3 known gap, closed: a SELECTED id that just came back
+                // re-enters the per-device sink set now, not at the next
+                // selection change.
+                self.reapplyBTSinkLocked()
+            case .unauthorized:
+                self.setConnectionState(.failed(ConnectionFailure(
+                    cause: .unknown, detail: "Bluetooth permission not granted")), for: id)
+            case .failed(let elapsed, let reason):
+                // Live-measured classification (bt-spike-findings-2026-08-07):
+                // a powered-off speaker holds the OS attempt ~15.4 s (both
+                // brands) or hits our 20 s ceiling; a speaker another host
+                // holds refuses fast.
+                let cause: ConnectionFailure.Cause =
+                    (reason == "timeout" || elapsed >= 10) ? .timedOut : .connectedElsewhere
+                self.setConnectionState(.failed(ConnectionFailure(
+                    cause: cause,
+                    detail: "\(reason) after \(String(format: "%.1f", elapsed))s")), for: id)
+            }
+        }
+    }
+
+    /// Wave-4 reconnect-reapply: re-run the CURRENT BT sink decision so a
+    /// selected device that just (re)appeared resolves a live `AudioObjectID`
+    /// and re-enters the per-device set (and one that vanished drops out). The
+    /// decision itself is unchanged — only the UID→device resolution is redone,
+    /// which `applyBTSinkTransition` performs fresh on every apply. On
+    /// `stateQueue`.
+    private func reapplyBTSinkLocked() {
+        guard btSinkEnabled else { return }
+        let uids = btSelectedUIDs
+        let composition = btComposition
+        captureControlQueue.async { [weak self] in
+            self?.applyBTSinkTransition(enable: true, uids: uids, composition: composition)
+        }
     }
 
     /// Execute the "play everywhere" enable/disable transition decided by
@@ -4962,6 +5063,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         stateQueue.sync { _startBufferMs }
     }
 
+    /// The reference delay (ms) the Mac-local sink renders on (Wave-4 delay
+    /// agreement). AirPlay in the selection (or no BT at all) → the live
+    /// start-buffer, same as always. BT+Mac with NO AirPlay → the BT-only
+    /// buffer, the same reference every BT sink uses — otherwise the Mac leads
+    /// each BT speaker by `startBufferMs − btOnlyBufferMs` in that composition.
+    func localSinkReferenceDelayMs() -> Int {
+        stateQueue.sync {
+            (btSinkEnabled && !btComposition.airPlayPresent)
+                ? BTSyncedSink.defaultBTOnlyBufferMs : _startBufferMs
+        }
+    }
+
     /// Seed the initial value without triggering an apply (`makeBackend` only —
     /// the engine was just constructed with this same value in its config).
     func seedStartBufferMs(_ ms: Int) {
@@ -6167,11 +6280,26 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 updated.name = snapshot.name
                 updated.isAvailable = snapshot.isConnected
                 if updated != existing {
-                    if updated.isAvailable != existing.isAvailable,
-                       expectedSelected.contains(id) {
+                    let availabilityMoved = updated.isAvailable != existing.isAvailable
+                    if availabilityMoved, expectedSelected.contains(id) {
                         desiredAvailabilityMoved = true
                     }
                     commitKnownDevice(id, updated)
+                    // BT-RECONNECT: the row's lifecycle follows the baseband
+                    // fact. A return while selected reads `.connected` (the
+                    // sink re-enters via the reapply below); a loss reads
+                    // `.off` — EXCEPT sticky-failed: a `.failed` story from a
+                    // user-initiated attempt survives until retry or return.
+                    if availabilityMoved {
+                        if updated.isAvailable {
+                            setConnectionState(
+                                expectedSelected.contains(id) ? .connected : .off, for: id)
+                        } else if case .failed = existing.connectionState {
+                            // keep the failure story
+                        } else {
+                            setConnectionState(.off, for: id)
+                        }
+                    }
                 }
             } else {
                 let device = Device(
@@ -6198,7 +6326,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // transitions; without this call a BT speaker powering off mid-play
         // would never arm the fallback, and one reconnecting would never
         // clear it.
-        if desiredAvailabilityMoved { reconcileSilenceWatchdog() }
+        // The reapply (Wave 4) is the other half: a selected id that just
+        // (re)appeared resolves a live device and re-enters the sink set
+        // without waiting for a selection change — and a vanished one drops.
+        if desiredAvailabilityMoved {
+            reconcileSilenceWatchdog()
+            reapplyBTSinkLocked()
+        }
     }
 
     // MARK: Engine state stream → deviceUpdated (push, no poll)
@@ -7595,9 +7729,17 @@ public protocol SyncedLocalSinkControlling: SyncedLocalPCMSink {
     /// Level this sink's output by `group × the Mac's own fader` (W1). Main is
     /// deliberately excluded — see ``NativeBackend``'s `pushSyncedLocalGain`.
     func setGain(_ gain: Float)
+
+    /// Wave-4 delay agreement: the reference timeline moved (AirPlay joined or
+    /// left a BT-containing selection) — rebuild so the fresh session anchor
+    /// re-samples the delay provider. Default no-op (spies).
+    func requestReanchor(cause: String)
 }
 
 extension SyncedLocalSinkControlling {
+    /// Default no-op — only the real ``SyncedLocalSink`` re-anchors.
+    public func requestReanchor(cause: String) {}
+
     /// Default no-op so a spy that only exercises the enable/disable lifecycle
     /// compiles unchanged; ``SyncedLocalSink`` provides the real one. (Same posture
     /// as ``CaptureControlling``'s defaults above.)

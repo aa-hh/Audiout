@@ -403,6 +403,10 @@ final class BTDeviceSink: @unchecked Sendable {
     private let clockQueue: DispatchQueue
     private var clockTimer: DispatchSourceTimer?
     private var nominalRate: Double
+    /// R-A2DP/HFP: `true` while the device's nominal rate reads narrowband
+    /// (≤ 24 kHz — the mic-open HFP collapse). Set on every (re)start from the
+    /// live rate; the rate listener's rebuild is what refreshes it both ways.
+    private(set) var hfpDegraded = false
     private let driftCorrector: BTDriftCorrector
     private var lastLoggedTrust: BTDriftCorrector.Trust = .settling
     private let installLock = NSLock()
@@ -499,6 +503,18 @@ final class BTDeviceSink: @unchecked Sendable {
         // exact device either way.
         try engine.outputNode.auAudioUnit.setDeviceID(deviceID)
         if let liveRate = Self.nominalSampleRate(deviceID) { nominalRate = liveRate }
+        // R-A2DP/HFP (Wave 4, detection only): a narrowband nominal rate means
+        // some app opened this device's MIC and macOS collapsed the link to
+        // HFP — audio is degraded until the mic closes, when the rate listener
+        // rebuilds us right back through here and the flag clears. The UI badge
+        // hangs off this in the UI wave; policy stays "keep playing, degraded"
+        // — silent rows read as broken, degraded ones read as a call.
+        hfpDegraded = nominalRate <= 24_000
+        if hfpDegraded {
+            Telemetry.log(.localPlayback, "bt_sink_hfp_degraded", [
+                "uid": deviceUID, "rate": "\(nominalRate)",
+            ])
+        }
 
         let node = sourceNode ?? makeSourceNode()
         sourceNode = node

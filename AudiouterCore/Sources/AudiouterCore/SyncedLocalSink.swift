@@ -382,6 +382,17 @@ public final class SyncedLocalSink: @unchecked Sendable {
         performLifecycleRebuild()
     }
 
+    /// Wave-4 delay agreement (BT-REFSEL follow-on): the REFERENCE TIMELINE
+    /// itself moved — e.g. AirPlay joined or left a BT+Mac selection, flipping
+    /// this sink's delay between the AirPlay start-buffer and the BT-only
+    /// buffer. Same full rebuild as a device change: the fresh session anchor
+    /// re-samples `presentationDelayMs`, which is what actually lands the new
+    /// reference.
+    public func requestReanchor(cause: String) {
+        Telemetry.log(.localPlayback, "synced_local_reanchor", ["cause": cause])
+        performLifecycleRebuild()
+    }
+
     /// Wired externally to `NSWorkspace.willSleepNotification`. `AudiouterCore`
     /// must never import AppKit (package rule, `AudiouterCore/AGENTS.md`), so —
     /// same idiom as ``OutputBackend/handleSystemWillSleep()`` — this is a plain

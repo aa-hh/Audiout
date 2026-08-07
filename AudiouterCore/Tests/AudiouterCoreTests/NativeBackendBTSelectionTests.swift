@@ -168,8 +168,30 @@ import CoreAudio
         return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: true)
     }
 
+    /// A `BTConnectionManaging` fake with a scriptable outcome (BT-RECONNECT).
+    private final class FakeBTConnectionManager: BTConnectionManaging, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _outcome: BTConnectOutcome = .connected
+        private var _connects: [String] = []
+        var onConnectionsChanged: (@Sendable () -> Void)?
+        var onFallbackSuggested: (@Sendable (String) -> Void)?
+        var outcome: BTConnectOutcome {
+            get { lock.withLock { _outcome } }
+            set { lock.withLock { _outcome = newValue } }
+        }
+        var connects: [String] { lock.withLock { _connects } }
+        func connect(address: String) async -> BTConnectOutcome {
+            lock.withLock { _connects.append(address) }
+            return outcome
+        }
+        func disconnect(address: String) {}
+        func startObservingConnections() {}
+        func stopObservingConnections() {}
+    }
+
     private func makeBackend(
-        silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay
+        silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
+        btConnection: BTConnectionManaging? = nil
     ) -> (NativeBackend, RecordingEngine, FakeDiscovery, FakeBTEnumerator, SpyBTSink, FakeCapture) {
         let engine = RecordingEngine()
         let discovery = FakeDiscovery()
@@ -178,6 +200,7 @@ import CoreAudio
             engineControl: engine,
             discoverySource: discovery,
             btEnumerator: bt,
+            btConnectionManager: btConnection,
             dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: NoOpSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
@@ -416,5 +439,125 @@ import CoreAudio
         waitFor { capture.ops.filter { $0 == "start" }.count >= 2 }
         #expect(capture.ops.filter { $0 == "start" }.count >= 2,
                 "the BT speaker returning re-engages the capture gate")
+    }
+
+    // MARK: - BT-RECONNECT (Wave 4)
+
+    /// `retryOutput` on a BT id runs the connect flow: eager `.connecting`,
+    /// then `.connected` on success — and the sink decision is re-applied so a
+    /// selected id re-enters the per-device set without a selection change.
+    @Test func btRetrySuccess_connectingThenConnected_andSinkReapplied() {
+        let manager = FakeBTConnectionManager()
+        let (backend, _, _, bt, sink, _) = makeBackend(btConnection: manager)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+        backend.setOutputSet([btMove.id])
+        waitFor { sink.calls.contains("start") }
+        let appliesBefore = sink.deviceSets.count
+
+        backend.retryOutput(btMove.id)
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
+
+        #expect(manager.connects == ["C4-38-75-0E-BF-4A"],
+                "the uid's :output suffix is stripped to the bare MAC")
+        #expect(device(backend, btMove.id)?.connectionState == .connected)
+        waitFor { sink.deviceSets.count > appliesBefore }
+        #expect(sink.deviceSets.count > appliesBefore,
+                "a successful reconnect re-applies the sink decision (Wave-3 gap closed)")
+    }
+
+    /// A FAST refusal is the live-measured signature of a speaker another host
+    /// holds — `.failed(.connectedElsewhere)`; the slow OS horizon (or our
+    /// ceiling) reads `.failed(.timedOut)`.
+    @Test func btRetryFailureClassification_fastVsSlow() {
+        let manager = FakeBTConnectionManager()
+        let (backend, _, _, bt, _, _) = makeBackend(btConnection: manager)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+
+        manager.outcome = .failed(elapsed: 1.2, reason: "0xe00002d6")
+        backend.retryOutput(btMove.id)
+        waitFor {
+            if case .failed(let f) = self.device(backend, self.btMove.id)?.connectionState {
+                return f.cause == .connectedElsewhere
+            }
+            return false
+        }
+        guard case .failed(let fast) = device(backend, btMove.id)?.connectionState else {
+            Issue.record("expected .failed"); return
+        }
+        #expect(fast.cause == .connectedElsewhere)
+
+        manager.outcome = .failed(elapsed: 15.4, reason: "0xe00002d6")
+        backend.retryOutput(btMove.id)
+        waitFor {
+            if case .failed(let f) = self.device(backend, self.btMove.id)?.connectionState {
+                return f.cause == .timedOut
+            }
+            return false
+        }
+        guard case .failed(let slow) = device(backend, btMove.id)?.connectionState else {
+            Issue.record("expected .failed"); return
+        }
+        #expect(slow.cause == .timedOut)
+    }
+
+    /// A selected BT id whose availability RETURNS via the enumerator (the
+    /// speaker auto-reconnected on its own) also re-applies the sink decision
+    /// and reads `.connected`; a loss reads `.off` — unless a `.failed` story
+    /// is standing (sticky-failed).
+    @Test func btAvailabilityEdges_driveStateAndSinkReapply() {
+        let (backend, _, _, bt, sink, _) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+        backend.setOutputSet([btMove.id])
+        waitFor { sink.calls.contains("start") }
+        let appliesBefore = sink.deviceSets.count
+
+        bt.fire([BTDeviceSnapshot(id: btMove.id, name: btMove.name, isConnected: false)])
+        waitFor { self.device(backend, self.btMove.id)?.isAvailable == false }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off)
+
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
+        #expect(device(backend, btMove.id)?.connectionState == .connected)
+        waitFor { sink.deviceSets.count > appliesBefore }
+        #expect(sink.deviceSets.count > appliesBefore,
+                "the return re-applies the sink decision so the device re-enters")
+    }
+
+    // MARK: - Wave-4 delay agreement (Mac + BT without AirPlay)
+
+    /// The LOCAL sink's reference delay follows the composition: BT-only (no
+    /// AirPlay) → the BT-only buffer both sink families share; AirPlay present
+    /// (or no BT) → the live start-buffer.
+    @Test func localSinkReferenceDelay_followsComposition() {
+        let (backend, engine, discovery, bt, sink, _) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+        let ap = ap2Device()
+        discovery.fire(.appeared(ap))
+        bt.fire([btMove])
+        waitFor { self.device(backend, ap.id) != nil && self.device(backend, self.btMove.id) != nil }
+        waitFor { engine.fedIDs.contains(ap.outputID) }
+
+        #expect(backend.localSinkReferenceDelayMs() == backend.startBufferMs,
+                "no BT selected → the start-buffer reference")
+
+        backend.setOutputSet([btMove.id])
+        waitFor { sink.calls.contains("start") }
+        #expect(backend.localSinkReferenceDelayMs() == BTSyncedSink.defaultBTOnlyBufferMs,
+                "BT without AirPlay → the shared BT-only reference")
+
+        backend.setOutputSet([btMove.id, ap.id])
+        waitFor { sink.compositions.last?.airPlayPresent == true }
+        #expect(backend.localSinkReferenceDelayMs() == backend.startBufferMs,
+                "AirPlay joining moves the local reference back to the start-buffer")
     }
 }

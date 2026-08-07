@@ -95,7 +95,7 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
     /// Open/focus the window, sized to its content and centered. The app is an
     /// accessory (no Dock icon), so activate explicitly to bring it forward.
     public func present() {
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp?.activate(ignoringOtherApps: true)
         contentVC.view.layoutSubtreeIfNeeded()
         window?.setContentSize(contentVC.view.fittingSize)
         window?.center()

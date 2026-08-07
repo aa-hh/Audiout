@@ -222,7 +222,7 @@ public final class SettingsWindowController: NSWindowController {
         // `onFittedContentSizeChange`.
         applyContentSize(rootVC.fittedContentSize)
         guard !HeadlessRuntime.isActive else { return }
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp?.activate(ignoringOtherApps: true)
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
     }

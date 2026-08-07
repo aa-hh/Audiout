@@ -451,7 +451,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         panel.setHeaderActions(
             onOpenGroupsEditor: { [weak self] in self?.onOpenMixer?() },
             onOpenSettings: { [weak self] in self?.onOpenSettings?() },
-            onQuit: { NSApp.terminate(nil) })
+            onQuit: { NSApp?.terminate(nil) })
         applicationsFooter.onAdd = { [weak self] in
             guard let self else { return }
             self.presentAddApplicationPicker(relativeTo: self.applicationsFooter)
@@ -829,7 +829,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             // `toggle()` (real presentation only happens from the live app's
             // status-item click), but gate it for defense-in-depth.
             guard !HeadlessRuntime.isActive else { return }
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp?.activate(ignoringOtherApps: true)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
     }

@@ -317,7 +317,7 @@ public final class AboutWindowController: NSWindowController {
         aboutVC.view.layoutSubtreeIfNeeded()
         window?.setContentSize(aboutVC.view.fittingSize)
         guard !HeadlessRuntime.isActive else { return }
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp?.activate(ignoringOtherApps: true)
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
     }

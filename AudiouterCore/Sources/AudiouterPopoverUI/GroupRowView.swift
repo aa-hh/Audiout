@@ -285,7 +285,7 @@ public final class GroupRowView: NSView {
 
     // STABILITY(D4): the drag flag clears only on the .leftMouseUp coincidence — a cancelled drag leaves it stuck and leaves GroupController's drag-ratio cache stale (end-drag never fires); see dev/notes/stability-audit-2026-07-18.md
     @objc private func masterChanged(_ sender: NSSlider) {
-        let event = NSApp.currentEvent
+        let event = NSApp?.currentEvent
         if !isDraggingMaster {
             isDraggingMaster = true
             delegate?.groupRowBeginMasterDrag(self, groupID: group.id)

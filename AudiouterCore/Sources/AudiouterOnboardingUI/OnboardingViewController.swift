@@ -127,7 +127,7 @@ public final class OnboardingViewController: NSViewController {
                     await self?.model.primeLocalNetwork()
                     // The browse may have surfaced the system prompt; pull the
                     // window back to the front like the audio grant does.
-                    NSApp.activate(ignoringOtherApps: true)
+                    NSApp?.activate(ignoringOtherApps: true)
                     self?.view.window?.makeKeyAndOrderFront(nil)
                 }
             },
@@ -328,7 +328,7 @@ public final class OnboardingViewController: NSViewController {
         // impression for a paid product. Fetched from the running app so it
         // tracks whatever icon ships, with no hardcoded asset name to go stale.
         let tile = NSImageView()
-        tile.image = NSApp.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
+        tile.image = NSApp?.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
         tile.imageScaling = .scaleProportionallyUpOrDown
         tile.setAccessibilityLabel("Audiouter")
         tile.translatesAutoresizingMaskIntoConstraints = false
@@ -541,7 +541,7 @@ public final class OnboardingViewController: NSViewController {
             // answers. When the probe returns, pull our window back to the front
             // and make the app active so the user lands right back on setup
             // instead of staring at whatever was behind it.
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp?.activate(ignoringOtherApps: true)
             view.window?.makeKeyAndOrderFront(nil)
         }
     }

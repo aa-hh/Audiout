@@ -315,7 +315,7 @@ public final class ControlPanelWindowController: NSWindowController {
         // for the run's duration. Everything else (frame math, model state)
         // still runs so headless assertions stay exactly as strong.
         if !HeadlessRuntime.isActive {
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp?.activate(ignoringOtherApps: true)
             panel.makeKeyAndOrderFront(nil)
         }
 

@@ -1500,7 +1500,7 @@ public final class DeviceRowView: NSView {
         // NSSlider continuous drag: mark drag in-progress so a concurrent
         // `deviceUpdated` echo doesn't yank the thumb back under the user.
         isDraggingSlider = true
-        let event = NSApp.currentEvent
+        let event = NSApp?.currentEvent
         if event?.type == .leftMouseUp { isDraggingSlider = false }
         // Keep the `%` readout live through the drag (change 4 — mirrors
         // MainOutRowView), since `apply` won't push the model value mid-drag.

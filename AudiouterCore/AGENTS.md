@@ -311,11 +311,22 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   2026-08-07). Every IOBluetooth touch must sit behind a `CBManager
   .authorization` check (a prompt-free read) and degrade to Core-Audio-only
   enumeration when ungranted; tests always inject the enumerator's seams and
-  never reach real IOBluetooth. Bluetooth devices are surfaced-only for now:
-  they never get an `outputIDs` entry, are never fed to the engine, and are
-  ineligible per-app route targets — routing them is BT-BACKEND's partition
-  (`docs/plans/PLAN-UNIVERSAL-SYNC.md`, risk R-partition), not a missing guard
-  here. `BTDeviceEnumerator.swift` and `BTSyncedSink.swift` are LICENSE-CLEAN
+  never reach real IOBluetooth. Bluetooth ids are ROUTED but never
+  engine-driven (BT-BACKEND, risk R-partition in
+  `docs/plans/PLAN-UNIVERSAL-SYNC.md`): `setOutputSet` partitions the
+  selection — AirPlay ids converge through the engine; `.bluetooth` ids (no
+  `outputIDs` entry, plus an explicit `isBluetooth` guard in the converge
+  loop) drive the `BTSyncedSink` manager via `applyBTSinkTransition`
+  (arm/disarm, per-device set, `BTGroupComposition` recomputed on every
+  selection change), fed by the whole-system tap's `setBTSink` fan-out with
+  the render process tap-excluded. Exclude BT from an engine-only path via
+  `isBluetooth`, never `supportsAirPlay2` — AP1 receivers share that flag yet
+  ARE engine-driven. The silence fallback reads a BT id's audible fact from
+  `isAvailable`, never `.connected` (`desiredDeviceAudibleLocked`): a BT id
+  holds no engine session, so the `.connected` read would brand a healthy
+  BT-only selection stranded and un-mute the Mac mid-playback. BT devices
+  remain ineligible per-app route targets. `BTDeviceEnumerator.swift` and
+  `BTSyncedSink.swift` are LICENSE-CLEAN
   like `SyncCore.swift` (no GPL header — see the header note in each file);
   never copy code into them from the GPL-headered `SyncedLocalSink.swift`.
 - **`TCCAccessPreflight` is cached for the CALLING process's whole lifetime**,

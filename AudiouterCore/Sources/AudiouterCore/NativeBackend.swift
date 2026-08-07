@@ -243,6 +243,37 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// simple, trailing-edge only, no leading-edge fast path).
     private static let syncedLocalSettleWindow: TimeInterval = 0.25
 
+    // MARK: Bluetooth outputs — sink-manager lifecycle (BT-BACKEND, R-partition)
+
+    /// Builds the N-instance Bluetooth sink manager the first time a BT output
+    /// is selected. `makeBackend(_:)` wires the production closure (a
+    /// ``BTSyncedSink`` reading this backend's live start-buffer value — plan
+    /// risk R4 forbids a stale copy); tests inject a spy conforming to
+    /// ``BTSyncedSinkControlling``. `nil` = BT playback inert (same posture as
+    /// a nil `syncedLocalSinkFactory`).
+    var btSyncedSinkFactory: (() -> BTSyncedSinkControlling)?
+
+    /// The constructed manager (real or spy), built lazily on first enable and
+    /// reused across disable/re-enable. Confined to `captureControlQueue`.
+    private var btSink: BTSyncedSinkControlling?
+
+    /// Test seam: a BT `Device.id` (its Core Audio UID) → the live
+    /// `AudioObjectID` a per-device sink pins its engine to. `nil` (production)
+    /// falls back to `aggregateControl.resolveDeviceID(forUID:)` — the HAL's
+    /// own translation. Resolved fresh at each apply, never cached: object ids
+    /// go stale across a disconnect/rejoin while UIDs don't.
+    var btDeviceIDForUID: (@Sendable (String) -> AudioObjectID?)?
+
+    /// The last BT decisions `setOutputSet` committed — enable, selected uids,
+    /// and group composition — so a routing call that changes none of them
+    /// re-applies nothing. All on `stateQueue`; the apply they gate runs on
+    /// `captureControlQueue` (the same decide/execute split as the capture
+    /// gate, and the same serial queue, so a BT transition can never race a
+    /// tap start/stop or a synced-local transition).
+    private var btSinkEnabled = false
+    private var btSelectedUIDs: [String] = []
+    private var btComposition = BTGroupComposition(airPlayPresent: false, macLocalPresent: false)
+
     // MARK: Per-app routing (T6)
     //
     // ADDITIVE to the whole-system "Selected Devices" path above. `captureCoordinator`
@@ -1766,6 +1797,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.syncedLocalCoalescedCount = 0
             self.syncedLocalSinkEnabled = false
             self.syncedLocalSinkApplied = false
+            // BT-BACKEND: reset the BT decisions; the disable itself is enqueued
+            // below alongside the capture stop, so the FIFO's last BT op is the
+            // stop (same ordering argument as the coordinator stop).
+            self.btSinkEnabled = false
+            self.btSelectedUIDs = []
+            self.btComposition = BTGroupComposition(airPlayPresent: false, macLocalPresent: false)
             self.suspended = false
             // Seamless handoff T3.8-3: reset the release flag and stop/nil the
             // watcher so no orphan `log` child survives quit (AppDelegate's quit
@@ -1791,6 +1828,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // Idempotent.
             if let coordinator = self.captureCoordinator {
                 self.captureControlQueue.async { coordinator.stop() }
+            }
+            self.captureControlQueue.async { [weak self] in
+                self?.applyBTSinkTransition(
+                    enable: false, uids: [],
+                    composition: BTGroupComposition(airPlayPresent: false, macLocalPresent: false))
             }
             let ids = self.order
             self.known.removeAll()
@@ -2117,9 +2159,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // is excluded (`isLocalDevice`, and it has no `outputIDs` entry); AP1
             // receivers are NOT excluded any more (they drive through the same
             // engine surface as AP2, `supportsAirPlay2` notwithstanding).
+            // `.bluetooth` ids are the OTHER side of the R-partition: they have
+            // no `outputIDs` entry either, and the explicit `isBluetooth` guard
+            // keeps that structural (a BT id must never reach the AirPlay
+            // engine even if it ever acquired a handle) — they drive the BT
+            // sink manager below instead.
             var kicks: [(String, OutputID)] = []
             for id in self.order {
                 guard let device = self.known[id], !device.isLocalDevice,
+                      !device.isBluetooth,
                       let outputID = self.outputIDs[id] else { continue }
                 let wantOn = ids.contains(id)
 
@@ -2226,6 +2274,32 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // the next `emitLevel` callback. Unconditional (not metering-
                 // gated), matching that same precedent.
                 self.emitCombinedLevel(forDevice: Self.localDeviceID)
+            }
+
+            // BT-BACKEND (R-partition): the other half of the partition the
+            // engine loop above skipped. Selected `.bluetooth` ids drive the BT
+            // sink manager — enable/disable on the empty↔non-empty edge, the
+            // per-device set reconciled, and the group composition (BT-REFSEL)
+            // recomputed on every selection change (AirPlay joining/leaving a
+            // BT-containing selection moves every BT delay to a new reference).
+            // Decided here under `stateQueue` like the capture gate and applied
+            // on `captureControlQueue`; unchanged decisions enqueue nothing, so
+            // unrelated routing traffic never touches the running sinks.
+            let btUIDs = ids.filter { self.known[$0]?.isBluetooth == true }.sorted()
+            let wantBT = !btUIDs.isEmpty
+            let composition = BTGroupComposition(
+                airPlayPresent: ids.contains {
+                    self.known[$0].map { !$0.isBluetooth && !$0.isLocalDevice } == true
+                },
+                macLocalPresent: macSelected)
+            if wantBT != self.btSinkEnabled || btUIDs != self.btSelectedUIDs
+                || (wantBT && composition != self.btComposition) {
+                self.btSinkEnabled = wantBT
+                self.btSelectedUIDs = btUIDs
+                self.btComposition = composition
+                self.captureControlQueue.async { [weak self] in
+                    self?.applyBTSinkTransition(enable: wantBT, uids: btUIDs, composition: composition)
+                }
             }
 
             // T4: log the selection diff + the resulting per-device convergence
@@ -2408,6 +2482,62 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.resetAirPlaySessionForWholeSystem()
             }
         }
+    }
+
+    // MARK: Bluetooth sink transitions (BT-BACKEND)
+
+    /// Execute the BT enable/disable/reconcile `setOutputSet` decided. Must run
+    /// on `captureControlQueue` — serial with the capture gate's start/stop and
+    /// the synced-local transitions, so nothing here can race a tap rebuild.
+    ///
+    /// Enable order: composition first (a fresh sink's one-time anchor samples
+    /// its delay provider, so the reference must already be right), then the
+    /// device set (the manager reconciles and starts new per-device sinks while
+    /// armed), then the fan-out attach, then `start()` (idempotent). Disable
+    /// mirrors it: stop → drop the per-device sinks (releases their
+    /// `AVAudioEngine`s; offsets/trims live in the manager's own tables and
+    /// survive) → detach the fan-out.
+    ///
+    /// No settle debounce, unlike the synced-local transition: attaching the BT
+    /// fan-out never rebuilds the tap (`setBTSink` is compare-before-rebuild
+    /// and the render pid is our own already-excluded process), so the storm
+    /// that debounce exists for cannot start here.
+    private func applyBTSinkTransition(enable: Bool, uids: [String], composition: BTGroupComposition) {
+        if enable {
+            let sink: BTSyncedSinkControlling
+            if let existing = btSink {
+                sink = existing
+            } else if let factory = btSyncedSinkFactory {
+                sink = factory()
+                btSink = sink
+            } else {
+                return   // no factory wired (tests / UI-only smoke) — inert
+            }
+            sink.setComposition(composition)
+            // UID → live AudioObjectID, resolved fresh per apply. A uid that no
+            // longer resolves (the speaker dropped between selection and apply)
+            // contributes no sink; it re-resolves on the next selection change
+            // (reconnect-driven re-application is BT-RECONNECT's, Wave 4).
+            sink.setDevices(uids.compactMap { uid in
+                let deviceID = btDeviceIDForUID?(uid) ?? aggregateControl.resolveDeviceID(forUID: uid)
+                return deviceID.map { BTSyncedSink.DeviceSpec(deviceID: $0, uid: uid) }
+            })
+            attachBTSink(sink)
+            sink.start()
+        } else {
+            guard let sink = btSink else { return }
+            sink.stop()
+            sink.setDevices([])
+            attachBTSink(nil)
+        }
+    }
+
+    /// Mirror of `attachSyncedLocalSink` for the BT fan-out: same render-process
+    /// identity (the per-device sinks are in-process `AVAudioEngine`s, so their
+    /// output is attributed to us), same echo-prevention contract (R-echo).
+    private func attachBTSink(_ sink: SyncedLocalPCMSink?) {
+        let renderProcessPID: pid_t? = (sink == nil) ? nil : getpid()
+        captureCoordinator?.setBTSink(sink, renderProcessPID: renderProcessPID)
     }
 
     // MARK: Per-app routing (T6 — ADDITIVE to the Selected Devices path above)
@@ -5303,8 +5433,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private func reconcileSilenceWatchdog() {   // on stateQueue
         let desiredNonLocal = expectedSelected.filter { known[$0]?.isLocalDevice == false }
         let wantsStream = !desiredNonLocal.isEmpty
-        let anyConnected = desiredNonLocal.contains { connectionState(of: $0) == .connected }
-        let stranded = !suspended && wantsStream && !anyConnected
+        let anyAudible = desiredNonLocal.contains { desiredDeviceAudibleLocked($0) }
+        let stranded = !suspended && wantsStream && !anyAudible
 
         if stranded {
             if silenceCaptureOverride { return }        // already audible on this Mac
@@ -5324,6 +5454,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 reconcileCaptureGate()                  // re-mute; stream resumes to device
             }
         }
+    }
+
+    /// Whether one DESIRED non-local id is audibly carrying audio, for the
+    /// stranded test above. AirPlay: a live engine session (`.connected`). A
+    /// `.bluetooth` id NEVER holds an engine session — its `connectionState`
+    /// stays `.off` — so the engine-lifecycle read would brand a BT-only
+    /// selection permanently stranded and the fallback would un-mute the Mac
+    /// ~10s into healthy playback (R-partition). A BT id's audible fact is its
+    /// Core Audio endpoint existing (`isAvailable`) — exactly what its sink
+    /// renders through; a selected-but-disconnected BT speaker therefore still
+    /// (correctly) counts as silence and falls back to the Mac. On `stateQueue`.
+    private func desiredDeviceAudibleLocked(_ id: String) -> Bool {   // on stateQueue
+        guard let device = known[id] else { return false }
+        if device.isBluetooth { return device.isAvailable }
+        return device.connectionState == .connected
     }
 
     /// Fix B: clear the silence-fallback override on a genuine true→false edge and
@@ -5375,8 +5520,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // Fix C: the restore decision has been made — the post-wake window is over.
         awaitingWakeReconnect = false
         let desiredNonLocal = expectedSelected.filter { known[$0]?.isLocalDevice == false }
-        let anyConnected = desiredNonLocal.contains { connectionState(of: $0) == .connected }
-        guard !suspended, !desiredNonLocal.isEmpty, !anyConnected else { return }
+        let anyAudible = desiredNonLocal.contains { desiredDeviceAudibleLocked($0) }
+        guard !suspended, !desiredNonLocal.isEmpty, !anyAudible else { return }
         silenceCaptureOverride = true
         reconcileCaptureGate()                          // un-gate → Mac becomes audible
         emit(.localFallbackActive(true))
@@ -5991,6 +6136,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// ``markDisappeared``. On `stateQueue`.
     private func applyBTSnapshots(_ snapshots: [BTDeviceSnapshot]) {
         var seen: Set<String> = []
+        var desiredAvailabilityMoved = false
         for snapshot in snapshots {
             let id = snapshot.id
             seen.insert(id)
@@ -5999,7 +6145,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 var updated = existing
                 updated.name = snapshot.name
                 updated.isAvailable = snapshot.isConnected
-                if updated != existing { commitKnownDevice(id, updated) }
+                if updated != existing {
+                    if updated.isAvailable != existing.isAvailable,
+                       expectedSelected.contains(id) {
+                        desiredAvailabilityMoved = true
+                    }
+                    commitKnownDevice(id, updated)
+                }
             } else {
                 let device = Device(
                     id: id,
@@ -6015,8 +6167,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         for id in order where known[id]?.kind == .bluetooth && !seen.contains(id) {
             guard var device = known[id], device.isAvailable else { continue }
             device.isAvailable = false
+            if expectedSelected.contains(id) { desiredAvailabilityMoved = true }
             commitKnownDevice(id, device)
         }
+        // BT-BACKEND: a SELECTED BT id's availability is its audible fact for
+        // the silence fallback (`desiredDeviceAudibleLocked` — BT ids never
+        // reach `.connected`), and this is the only place that fact changes.
+        // AirPlay ids get this re-evaluation from their connection-state
+        // transitions; without this call a BT speaker powering off mid-play
+        // would never arm the fallback, and one reconnecting would never
+        // clear it.
+        if desiredAvailabilityMoved { reconcileSilenceWatchdog() }
     }
 
     // MARK: Engine state stream → deviceUpdated (push, no poll)
@@ -7423,3 +7584,20 @@ extension SyncedLocalSinkControlling {
 }
 
 extension SyncedLocalSink: SyncedLocalSinkControlling {}
+
+/// The lifecycle surface BT-BACKEND drives on the Bluetooth sink manager: the
+/// fan-out feed itself (``SyncedLocalPCMSink``) plus arm/disarm, the selected
+/// per-device set, and the group composition (BT-REFSEL). Lets ``NativeBackend``
+/// own WHEN Bluetooth playback turns on/off against either the real
+/// ``BTSyncedSink`` or a test spy — the exact posture of
+/// ``SyncedLocalSinkControlling`` above. Internal on purpose: nothing outside
+/// this module constructs one (`makeBackend` wires production; tests are
+/// `@testable`).
+protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
+    func start()
+    func stop()
+    func setDevices(_ specs: [BTSyncedSink.DeviceSpec])
+    func setComposition(_ composition: BTGroupComposition)
+}
+
+extension BTSyncedSink: BTSyncedSinkControlling {}

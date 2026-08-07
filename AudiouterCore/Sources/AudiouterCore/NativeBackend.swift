@@ -2081,6 +2081,20 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             return
         }
         stateQueue.async {
+            // `.bluetooth` ids are the R-partition: no `outputIDs` entry, so the
+            // engine guard below would drop the write (the reason a BT slider did
+            // nothing). Same stash-under-mute semantics as the engine arm; the
+            // push is the composed sink gain instead of an engine volume.
+            if self.known[id]?.isBluetooth == true {
+                if self.muted.contains(id) {
+                    self.stashedVolume[id] = clamped
+                    self.applyLocal(id) { $0.volume = clamped }
+                } else {
+                    self.applyLocal(id) { $0.volume = clamped }
+                    self.pushBTSinkGainLocked(id)
+                }
+                return
+            }
             guard let outputID = self.outputIDs[id] else { return }
             // If the device is muted, remember the desired level; unmute restores
             // it. Otherwise push it now. Optimistically echo so the UI is snappy.
@@ -2109,6 +2123,23 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
         stateQueue.async {
             guard self.muted.contains(id) != muted else { return }
+            // BT arm: the same stash/restore shim as the engine arm below (the
+            // sink has no mute field either) — mute pushes the composed 0,
+            // unmute restores the stashed level and pushes its composed gain.
+            if self.known[id]?.isBluetooth == true {
+                if muted {
+                    self.muted.insert(id)
+                    if self.stashedVolume[id] == nil { self.stashedVolume[id] = self.known[id]?.volume ?? 0 }
+                    self.applyLocal(id) { $0.isMuted = true; $0.volume = 0 }
+                } else {
+                    self.muted.remove(id)
+                    let intended = self.stashedVolume[id] ?? self.known[id]?.volume ?? 0
+                    self.stashedVolume[id] = nil
+                    self.applyLocal(id) { $0.isMuted = false; $0.volume = intended }
+                }
+                self.pushBTSinkGainLocked(id)
+                return
+            }
             guard let outputID = self.outputIDs[id] else { return }
             if muted {
                 // Mute = volume 0 with the pre-mute value stashed (shim pattern,
@@ -2168,6 +2199,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.pushVolume(outputID, engineValue: self.engineVolume(
                     forID: id, uiVolume: self.known[id]?.volume ?? 0))
             }
+            // BT sinks carry the full `Main × Group × Device` product (unlike
+            // the Mac's own path below, they never see the system volume), so
+            // any master-stage move re-pushes every selected BT uid's composed
+            // gain. `pushBTSinkGainLocked` folds mute/hold in as 0, so this
+            // can't unmute or blow through a first-mix hold.
+            for uid in self.btSelectedUIDs { self.pushBTSinkGainLocked(uid) }
             // The Mac's own path carries `group × device` only (Main arrives there
             // through the system volume), so only a group change moves it.
             if groupChanged { self.pushSyncedLocalGain() }
@@ -2194,6 +2231,37 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private var syncedLocalGain: Float {   // on stateQueue
         let level = known[Self.localDeviceID]?.volume ?? 100
         return Float(Double(groupGain) / 100.0 * Double(level.clampedToVolume) / 100.0)
+    }
+
+    /// One BT device's composed sink gain: `Main × Group × Device` on the UI's
+    /// 0–100 scale — the same product `engineVolume(forID:uiVolume:)` forms for
+    /// AirPlay outputs, linear because the sink's mixer wants a 0…1 amplitude,
+    /// not a dB wire value — forced to 0 while the id is muted (the stash shim)
+    /// or first-mix-held (W3). ONE product, one writer: every gain that reaches
+    /// `BTSyncedSinkControlling/setGain(_:forDeviceUID:)` is computed here, so
+    /// user volume and the hold can never fight over the knob. Unlike the Mac's
+    /// `syncedLocalGain`, Main IS included — a BT sink renders through its own
+    /// device, which the Mac's system volume never touches. On `stateQueue`.
+    private func btSinkGain(forUID uid: String) -> Float {   // on stateQueue
+        if btAlignmentHeldUIDs.contains(uid) || muted.contains(uid) { return 0 }
+        let level = known[uid]?.volume ?? 100
+        return Float(masterGainFraction * Double(level.clampedToVolume) / 100.0)
+    }
+
+    /// Push one uid's composed gain to the live sink (a no-op before the sink
+    /// exists — `applyBTSinkTransition` seeds the same product on arm). Reads on
+    /// `stateQueue`, then hops to `captureControlQueue`, which owns `btSink`.
+    private func pushBTSinkGainLocked(_ uid: String) {   // on stateQueue
+        let gain = btSinkGain(forUID: uid)
+        captureControlQueue.async { [weak self] in
+            self?.btSink?.setGain(gain, forDeviceUID: uid)
+        }
+    }
+
+    /// The composed gain per selected BT uid, snapshotted under `stateQueue` for
+    /// a sink transition to apply on `captureControlQueue`. On `stateQueue`.
+    private func btSinkGains(forUIDs uids: [String]) -> [String: Float] {   // on stateQueue
+        Dictionary(uniqueKeysWithValues: uids.map { ($0, btSinkGain(forUID: $0)) })
     }
 
     /// Renders a set of device ids as `"[Name1,Name2]"` for a Telemetry field —
@@ -2438,8 +2506,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             }
             // A held id leaving the selection (or the whole BT side emptying)
             // releases its hold — the card is moot once nothing streams there,
-            // and the gain-1 push keeps the manager's remembered gain clean
-            // for the next, never-again-intercepted select.
+            // and the composed-gain push keeps the manager's remembered gain
+            // clean for the next, never-again-intercepted select.
             for uid in self.btAlignmentHeldUIDs.subtracting(wantBT ? Set(btUIDs) : []) {
                 self.releaseBTAlignmentHoldLocked(uid)
             }
@@ -2454,11 +2522,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.btSinkEnabled = wantBT
                 self.btSelectedUIDs = btUIDs
                 self.btComposition = composition
-                let held = self.btAlignmentHeldUIDs
+                let gains = self.btSinkGains(forUIDs: btUIDs)
                 self.captureControlQueue.async { [weak self] in
                     self?.applyBTSinkTransition(
                         enable: wantBT, uids: btUIDs, composition: composition,
-                        heldSilentUIDs: held)
+                        gains: gains)
                 }
                 if localReferenceMoved, self.syncedLocalSinkApplied {
                     // Re-anchor the already-running local sink onto the new
@@ -2641,10 +2709,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         guard btSinkEnabled else { return }
         let uids = btSelectedUIDs
         let composition = btComposition
-        let held = btAlignmentHeldUIDs
+        let gains = btSinkGains(forUIDs: uids)
         captureControlQueue.async { [weak self] in
             self?.applyBTSinkTransition(
-                enable: true, uids: uids, composition: composition, heldSilentUIDs: held)
+                enable: true, uids: uids, composition: composition, gains: gains)
         }
     }
 
@@ -2777,7 +2845,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// that debounce exists for cannot start here.
     private func applyBTSinkTransition(
         enable: Bool, uids: [String], composition: BTGroupComposition,
-        heldSilentUIDs: Set<String> = []
+        gains: [String: Float] = [:]
     ) {
         if enable {
             let sink: BTSyncedSinkControlling
@@ -2797,11 +2865,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             for (uid, ms) in btTrimLock.withLock({ btTrimsByUID }) {
                 sink.setTrimMs(ms, forDeviceUID: uid)
             }
-            // W3 hold-silent: gains land BEFORE the device set, so a sink
-            // created by `setDevices` below starts already muted (the manager
-            // remembers per-UID gains for exactly this ordering).
+            // Composed gains (`btSinkGain`: user volume × masters, 0 while
+            // held/muted) land BEFORE the device set, so a sink created by
+            // `setDevices` below starts at the user's level — or already muted
+            // for a W3 hold (the manager remembers per-UID gains for exactly
+            // this ordering), never at a hardcoded 1 or 0.
             for uid in uids {
-                sink.setGain(heldSilentUIDs.contains(uid) ? 0 : 1, forDeviceUID: uid)
+                sink.setGain(gains[uid] ?? 1, forDeviceUID: uid)
             }
             // UID → live AudioObjectID, resolved fresh per apply. A uid that no
             // longer resolves (the speaker dropped between selection and apply)
@@ -2842,9 +2912,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         btAlignmentHoldWatchdogs[uid]?.cancel()
         btAlignmentHoldWatchdogs[uid] = nil
         guard btAlignmentHeldUIDs.remove(uid) != nil else { return }
-        captureControlQueue.async { [weak self] in
-            self?.btSink?.setGain(1, forDeviceUID: uid)
-        }
+        // The release pushes the COMPOSED user gain (never a hardcoded 1) —
+        // releasing the hold must not blow away the user's volume, and the
+        // push (vs merely forgetting the hold) keeps the manager's remembered
+        // gain clean for the next select.
+        pushBTSinkGainLocked(uid)
     }
 
     // MARK: Bluetooth connect lifecycle (BT-LIFECYCLE)
@@ -8178,8 +8250,9 @@ protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
     /// lifecycle-only spies compile unchanged; ``BTSyncedSink`` provides the
     /// real one (same-value writes are already guarded there).
     func setTrimMs(_ ms: Int, forDeviceUID uid: String)
-    /// Per-device render gain (W3 hold-silent — the first-mix intercept's
-    /// mute). Same default-no-op posture as `setTrimMs`.
+    /// Per-device render gain: the backend's composed
+    /// `Main × Group × Device` product, 0 while muted or first-mix-held (W3).
+    /// Same default-no-op posture as `setTrimMs`.
     func setGain(_ gain: Float, forDeviceUID uid: String)
 }
 

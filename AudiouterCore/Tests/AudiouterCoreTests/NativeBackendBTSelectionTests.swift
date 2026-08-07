@@ -155,6 +155,9 @@ import CoreAudio
         func setTrimMs(_ ms: Int, forDeviceUID uid: String) {
             lock.withLock { _calls.append("setTrimMs"); _trims.append((ms: ms, uid: uid)) }
         }
+        func setGain(_ gain: Float, forDeviceUID uid: String) {
+            lock.withLock { _calls.append("setGain"); _gains.append((gain: gain, uid: uid)) }
+        }
         func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {}
 
         /// Which devices are "audible" right now — the test drives the render
@@ -171,6 +174,15 @@ import CoreAudio
         var compositions: [BTGroupComposition] { lock.withLock { _compositions } }
         private var _trims: [(ms: Int, uid: String)] = []
         var trims: [(ms: Int, uid: String)] { lock.withLock { _trims } }
+        private var _gains: [(gain: Float, uid: String)] = []
+        var gains: [(gain: Float, uid: String)] { lock.withLock { _gains } }
+        func lastGain(for uid: String) -> Float? {
+            lock.withLock { _gains.last { $0.uid == uid }?.gain }
+        }
+        /// Call order with the per-device gain seeds stripped — for the
+        /// lifecycle-order assertions, which don't care how many uids got a
+        /// gain pushed between `setComposition` and `setDevices`.
+        var lifecycleCalls: [String] { calls.filter { $0 != "setGain" } }
     }
 
     // MARK: Fixtures + helpers
@@ -265,7 +277,7 @@ import CoreAudio
         backend.setOutputSet([btMove.id])
         waitFor { sink.calls.contains("start") }
 
-        #expect(sink.calls == ["setComposition", "setDevices", "start"],
+        #expect(sink.lifecycleCalls == ["setComposition", "setDevices", "start"],
                 "enable order: reference first, then the device set, then start")
         #expect(sink.compositions.last == BTGroupComposition(airPlayPresent: false, macLocalPresent: false))
         #expect(sink.deviceSets.last?.map(\.uid) == [btMove.id])
@@ -290,7 +302,7 @@ import CoreAudio
         backend.setOutputSet([])
         waitFor { sink.calls.contains("stop") }
 
-        #expect(sink.calls == ["setComposition", "setDevices", "start", "stop", "setDevices"],
+        #expect(sink.lifecycleCalls == ["setComposition", "setDevices", "start", "stop", "setDevices"],
                 "disable mirrors enable: stop, then drop the per-device sinks")
         #expect(sink.deviceSets.last?.isEmpty == true)
         #expect(capture.ops.contains("stop"), "an empty selection releases the capture gate")
@@ -730,6 +742,120 @@ import CoreAudio
         waitFor { sink.compositions.last?.airPlayPresent == true }
         #expect(backend.localSinkReferenceDelayMs() == backend.startBufferMs,
                 "AirPlay joining moves the local reference back to the start-buffer")
+    }
+
+    // MARK: - BT volume/mute (composed sink gain, `Main × Group × Device`)
+
+    /// A BT slider write echoes optimistically (no snap-back — the old
+    /// `outputIDs` guard dropped it before the echo) and pushes the composed
+    /// `Main × Group × Device` gain to the live sink.
+    @Test func btSliderWriteEchoesAndPushesComposedGain() {
+        let (backend, engine, _, bt, sink, _) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+        backend.setOutputSet([btMove.id])
+        waitFor { sink.calls.contains("start") }
+
+        backend.setVolume(40, for: btMove.id)
+        waitFor { self.device(backend, self.btMove.id)?.volume == 40 }
+        #expect(device(backend, btMove.id)?.volume == 40, "the echo sticks — no snap-back to 50")
+        waitFor { sink.lastGain(for: self.btMove.id).map { abs($0 - 0.4) < 0.001 } == true }
+        #expect(sink.lastGain(for: btMove.id).map { abs($0 - 0.4) < 0.001 } == true,
+                "Main 100 × Group 100 × Device 40 → sink gain 0.4")
+        #expect(engine.addedIDs.isEmpty, "a BT volume write never invents an engine op")
+    }
+
+    /// Mute pushes the composed 0 (stashing the level); unmute restores the
+    /// stashed level and its composed gain — the engine arm's shim, mirrored.
+    @Test func btMutePushesZeroAndUnmuteRestoresStashedComposed() {
+        let (backend, _, _, bt, sink, _) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+        backend.setOutputSet([btMove.id])
+        waitFor { sink.calls.contains("start") }
+        backend.setVolume(40, for: btMove.id)
+        waitFor { self.device(backend, self.btMove.id)?.volume == 40 }
+
+        backend.setMuted(true, for: btMove.id)
+        waitFor { self.device(backend, self.btMove.id)?.isMuted == true }
+        #expect(device(backend, btMove.id)?.volume == 0, "muted reads as 0, like the engine arm")
+        waitFor { sink.lastGain(for: self.btMove.id) == 0 }
+        #expect(sink.lastGain(for: btMove.id) == 0)
+
+        backend.setMuted(false, for: btMove.id)
+        waitFor { self.device(backend, self.btMove.id)?.isMuted == false }
+        #expect(device(backend, btMove.id)?.volume == 40, "unmute restores the stashed level")
+        waitFor { sink.lastGain(for: self.btMove.id).map { abs($0 - 0.4) < 0.001 } == true }
+        #expect(sink.lastGain(for: btMove.id).map { abs($0 - 0.4) < 0.001 } == true)
+    }
+
+    /// A slider write WHILE muted stashes and echoes but pushes nothing; the
+    /// unmute pushes the new level's composed gain.
+    @Test func btVolumeWhileMutedStashesAndUnmutePushesIt() {
+        let (backend, _, _, bt, sink, _) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+        backend.setOutputSet([btMove.id])
+        waitFor { sink.calls.contains("start") }
+        backend.setMuted(true, for: btMove.id)
+        waitFor { sink.lastGain(for: self.btMove.id) == 0 }
+        let pushesWhileMuted = sink.gains.count
+
+        backend.setVolume(70, for: btMove.id)
+        waitFor { self.device(backend, self.btMove.id)?.volume == 70 }
+        #expect(sink.gains.count == pushesWhileMuted, "a muted device's slider pushes no gain")
+
+        backend.setMuted(false, for: btMove.id)
+        waitFor { sink.lastGain(for: self.btMove.id).map { abs($0 - 0.7) < 0.001 } == true }
+        #expect(sink.lastGain(for: btMove.id).map { abs($0 - 0.7) < 0.001 } == true)
+    }
+
+    /// A Main/Group master change re-pushes every selected BT uid's composed
+    /// gain — the `setMasterGain` re-push no longer stops at `outputIDs`.
+    @Test func masterGainChangeRePushesComposedToBT() {
+        let (backend, _, _, bt, sink, _) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+        backend.setVolume(100, for: btMove.id)
+        backend.setOutputSet([btMove.id])
+        waitFor { sink.calls.contains("start") }
+
+        backend.setMasterGain(mainOut: 50, group: 80, mirrorToSystemVolume: false)
+        waitFor { sink.lastGain(for: self.btMove.id).map { abs($0 - 0.4) < 0.001 } == true }
+        #expect(sink.lastGain(for: btMove.id).map { abs($0 - 0.4) < 0.001 } == true,
+                "Main 50 × Group 80 × Device 100 → 0.4")
+    }
+
+    /// Sink (re)arm seeds the composed gain, not 1: a level set before any
+    /// sink exists is in force from the first arm, and a deselect→reselect
+    /// (the reconnect shape) comes back at the user's level.
+    @Test func btEnableSeedsComposedGainAndReselectRestoresIt() {
+        let (backend, _, _, bt, sink, _) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+
+        backend.setVolume(40, for: btMove.id)   // no sink yet — state only
+        backend.setOutputSet([btMove.id])
+        waitFor { sink.calls.contains("start") }
+        #expect(sink.lastGain(for: btMove.id).map { abs($0 - 0.4) < 0.001 } == true,
+                "the arm seeds the composed gain, never a hardcoded 1")
+
+        backend.setOutputSet([])
+        waitFor { sink.calls.contains("stop") }
+        backend.setOutputSet([btMove.id])
+        waitFor { sink.gains.count >= 2 }
+        #expect(sink.lastGain(for: btMove.id).map { abs($0 - 0.4) < 0.001 } == true,
+                "a re-arm comes back at the user's level")
     }
 
     // MARK: SYNC trim → sink (BT-OFFSET-UI)

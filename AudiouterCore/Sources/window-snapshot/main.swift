@@ -1,18 +1,28 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// window-snapshot — offscreen PNG renderer for the "Groups" window (mirrors
+// window-snapshot — offscreen PNG renderer for the "Groups" screen (mirrors
 // `settings-snapshot`). The live window isn't visible to an agent shell, so
-// this assembles the REAL `MixerWindowController` against a MockBackend-backed
-// `GroupController` and renders the whole window frame (titlebar + toolbar +
-// split view) into an explicit @2x bitmap via `displayIgnoringOpacity(_:in:)`
-// (see `captureOnce` for why not `cacheDisplay(in:to:)`).
-// Also renders the control-panel shell (T11) hosting the same Groups content
-// in a sticky floating NSPanel with decorative beak chrome.
+// this assembles the REAL `MixerWindowController` (Groups content) against a
+// MockBackend-backed `GroupController`, hosts it in the REAL one-surface
+// shell (`AppSurfaceController`, PLAN-ONE-SURFACE-032 U3) — the same object
+// the shipping app builds — and renders the shell's whole frame (beak
+// backing bubble + native toolbar header + content) into an explicit @2x
+// bitmap via `displayIgnoringOpacity(_:in:)` (see `captureOnce` for why not
+// `cacheDisplay(in:to:)`). Every Groups-content state renders at the size the
+// surface really presents (`AppSurfaceController.groupsDefaultContentSize`,
+// 560×468 below the toolbar strip), never a synthetic plain-titled host: a
+// fixture built from a fake window carries none of the toolbar strip or beak
+// chrome the app actually wraps the screen in, so it can't show what a
+// sidebar layout regression would really look like on screen. `create-sheet`
+// and `icon-picker` still render standalone — they're anchored popovers with
+// no window chrome of their own to mismatch, so the synthetic-host question
+// never applied to them (see `snapshotStandaloneView`).
 //
-// States rendered (light + dark each):
+// States rendered (light + dark each), all through the real surface except
+// where noted:
 //   1. default      — fresh window, no groups saved (the state under critique)
 //   2. create-sheet — the `GroupCreationSheetController`'s own view, rendered
-//                      offscreen at its fitted size (`presentAsSheet` never
+//                      standalone at its fitted size (`presentAsSheet` never
 //                      actually draws in a headless run, so the window-frame
 //                      snapshot can't show it — this renders the sheet's view
 //                      directly instead)
@@ -23,10 +33,10 @@
 //                      hover step-up is forced visible via
 //                      `test_setOverlayVisible(true)` so the approved
 //                      custom-drawn element renders in the shot
-//   5. panel-chrome  — the control-panel shell (T11) hosting Groups content,
-//                      anchored to a mock menu-bar status item (top-right),
-//                      with the sticky NSPanel + decorative backing window
-//                      with beak, right-edge-aligned
+//   5. panel-chrome  — the same surface + device-detail selection as state 4,
+//                      captured again after the group is ACTIVATED (state 7
+//                      below) — the gold ring shows on the sidebar/detail
+//                      while the surface's toolbar+beak chrome is on screen
 //   6. icon-picker   — the icon-picker popover content (Warm Signal W3),
 //                      rendered standalone like the create sheet
 //                      (`presentIconPicker` never draws in a headless run),
@@ -167,52 +177,6 @@ func waitForFleet(_ backend: MockBackend, count: Int, timeout: TimeInterval = 3)
 @MainActor
 func drain(_ interval: TimeInterval = 0.15) {
     RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(interval))
-}
-
-/// Render the WHOLE window (titlebar + toolbar + content) by snapshotting the
-/// window frame view (the contentView's superview). The window is laid out but
-/// never ordered in.
-@MainActor
-func snapshotWindow(_ window: NSWindow, label: String, appearanceName: NSAppearance.Name, outDir: URL) {
-    let appearance = NSAppearance(named: appearanceName)
-    window.appearance = appearance
-    // Pin the titlebar separator OFF: AppKit decides it dynamically from the
-    // content's perceived scroll-under state, and even with `.line` it FADES
-    // the separator view in/out, settling differently run-to-run (a 1pt
-    // full-width line at the titlebar's bottom edge flickered in and out of
-    // dark captures). `.none` removes the separator view entirely — the only
-    // end state that can't race. NSSplitViewItem carries a per-pane override,
-    // so pin those too.
-    window.titlebarSeparatorStyle = .none
-    if let split = window.contentViewController as? NSSplitViewController {
-        for item in split.splitViewItems { item.titlebarSeparatorStyle = .none }
-    }
-    // Order the window in, invisibly (alpha 0). A window that is never
-    // ordered in leaves the titlebar machinery half-initialized, and its
-    // separator decision latches mid-flight — differently run-to-run. A full
-    // order-in lets AppKit finish the titlebar lifecycle so the pinned
-    // `.none` above is actually applied; alpha 0 keeps the run headless-quiet
-    // and `cacheDisplay` reads model values, unaffected by window alpha.
-    if !window.isVisible {
-        window.alphaValue = 0
-        // An alpha-0 window still HIT-TESTS against the real cursor on the
-        // live desktop it's ordered onto — if the pointer happens to rest
-        // over the sidebar, the outline's group-row hover "Show/Hide" button
-        // fades in mid-run and lands in the capture (observed once as a
-        // ~10x6pt glyph at the sidebar row's trailing edge). Opt the window
-        // out of mouse routing entirely so no tracking area can ever fire.
-        window.ignoresMouseEvents = true
-        window.orderFront(nil)
-        drain(0.1)
-    }
-    window.layoutIfNeeded()
-    window.contentView?.layoutSubtreeIfNeeded()
-    let frameView = window.contentView?.superview ?? window.contentView!
-    pinMaterialsWithinWindow(in: frameView)
-    hideNondeterministicChrome(in: frameView)
-    drain(0.1)
-    let suffix = appearanceName == .darkAqua ? "dark" : "light"
-    renderPNG(view: frameView, to: outDir.appendingPathComponent("mixer-\(label)-\(suffix).png"))
 }
 
 /// Remove overlay scrollers from a captured view subtree. Overlay scroller
@@ -556,25 +520,44 @@ func run() -> Int32 {
             print("SETUP FAIL: fleet did not fully discover"); return 2
         }
         windowController.update(devices: backend.devices)
-        // The controller owns no window any more (U6) — build a plain titled
-        // host so the frame snapshots still render the content in window
-        // chrome. Deliberate stand-in: these states document the Groups
-        // CONTENT; the shell chrome the app really wraps it in is state 5's
-        // job. 560×505 is the screen's designed size (plan 032 R2).
-        let window = NSWindow(
-            contentRect: NSRect(origin: .zero, size: NSSize(width: 560, height: 505)),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Groups"
-        window.contentViewController = windowController.contentController
-        window.setContentSize(NSSize(width: 560, height: 505))
-        drain()
+
+        // The controller owns no window any more (U6) — host every
+        // Groups-content state through the REAL one-surface shell
+        // (`AppSurfaceController`, U3), the same object the shipping app
+        // builds, anchored to a mock menu-bar status item (top-right). Built
+        // once per appearance and reused across states 1/3/4/5/7 —
+        // `groupsContent` is lazily resolved on the FIRST `.groups` select,
+        // so every later capture just reflects the shared `windowController`
+        // mutating underneath the same mounted content controller.
+        let surfacePopover = PopoverController(
+            appRouting: AppRoutingController(store: AppRouteStore(directory: tempDir()),
+                                             loadPersisted: false),
+            runningAppsProvider: { [] })
+        let surfaceSettings = AppSettings(
+            defaults: UserDefaults(suiteName: "window-snapshot-\(UUID().uuidString)")!)
+        let surface = AppSurfaceController(
+            popoverController: surfacePopover,
+            settings: surfaceSettings,
+            groupsContent: { windowController.contentController },
+            settingsContent: {
+                // Lazily built on first .settings selection — never reached
+                // in this render (only Groups is ever selected).
+                SettingsRootViewController(tabs: [], tabStyle: .segmentedControlOnTop)
+            },
+            frameAutosaveName: "WindowSnapshotSurface")
+        // `show` mounts + fronts (a no-op re-front once already shown);
+        // `select` is a no-op once Groups is already the selected screen —
+        // so calling this before every capture just guarantees the surface
+        // is showing Groups, without re-running the mount/resize dance.
+        let presentGroups: (NSRect?) -> Void = { anchor in
+            surface.show(anchorRect: anchor)
+            surface.select(.groups)
+        }
 
         // 1. Default state: no groups — the empty "No groups yet" pane (the
         //    mixer pane was removed by live-test feedback 2026-07-18).
-        snapshotWindow(window, label: "1-default", appearanceName: appearanceName, outDir: outDir)
+        snapshotControlPanel(surface.shell, label: "1-default", appearanceName: appearanceName,
+                            outDir: outDir, present: presentGroups)
 
         // 2. Create sheet: the sidebar "+" with nothing selected presents the
         // standard macOS "New Group" sheet. `presentAsSheet` doesn't actually
@@ -597,7 +580,8 @@ func run() -> Int32 {
             windowController.update(devices: backend.devices)
             windowController.test_select(.group(id: saved.id))
             drain()
-            snapshotWindow(window, label: "3-edit-group", appearanceName: appearanceName, outDir: outDir)
+            snapshotControlPanel(surface.shell, label: "3-edit-group", appearanceName: appearanceName,
+                                outDir: outDir, present: presentGroups)
 
             // 4. Device detail: select a device that's a member of the saved
             // group above (so "In groups" renders non-empty) and carries an
@@ -609,7 +593,8 @@ func run() -> Int32 {
             drain()
             windowController.test_detail.test_setOverlayVisible(true)
             drain()
-            snapshotWindow(window, label: "4-device-detail", appearanceName: appearanceName, outDir: outDir)
+            snapshotControlPanel(surface.shell, label: "4-device-detail", appearanceName: appearanceName,
+                                outDir: outDir, present: presentGroups)
 
             // 6. Icon picker (Warm Signal W3): the anchored popover content,
             // rendered standalone like the create sheet (`presentIconPicker`
@@ -637,43 +622,21 @@ func run() -> Int32 {
             windowController.update(devices: backend.devices)
             windowController.test_select(.group(id: saved.id))
             drain()
-            snapshotWindow(window, label: "7-edit-active-group",
-                           appearanceName: appearanceName, outDir: outDir)
+            snapshotControlPanel(surface.shell, label: "7-edit-active-group",
+                                appearanceName: appearanceName, outDir: outDir, present: presentGroups)
             // Back to the detail selection so the panel-chrome state below
             // renders the same content it always did.
             windowController.test_select(.device(id: "sonos-move"))
             windowController.test_detail.test_setOverlayVisible(true)
             drain()
 
-            // 5. Panel chrome: the ONE SURFACE hosting the Groups screen,
-            // anchored to a mock menu-bar status item (top-right) — the real
-            // shell + decorative beak PLUS the window's native unified
-            // toolbar header (live-review D1: tabs, centered app name, Pin,
-            // Quit), which a bare shell would not carry. This render is the
-            // standing offscreen proof that the toolbar actually draws on the
+            // 5. Panel chrome: the same surface + device-detail selection as
+            // state 4, captured again now that the group is ACTIVE (state 7
+            // above) — the standing offscreen proof that the toolbar +
+            // beak-backed bubble (live-review D1) actually draws on the
             // unpinned bubble.
-            let surfacePopover = PopoverController(
-                appRouting: AppRoutingController(store: AppRouteStore(directory: tempDir()),
-                                                 loadPersisted: false),
-                runningAppsProvider: { [] })
-            let surfaceSettings = AppSettings(
-                defaults: UserDefaults(suiteName: "window-snapshot-\(UUID().uuidString)")!)
-            let surface = AppSurfaceController(
-                popoverController: surfacePopover,
-                settings: surfaceSettings,
-                groupsContent: { windowController.contentController },
-                settingsContent: {
-                    // Lazily built on first .settings selection — never
-                    // reached in this render (only Groups is selected).
-                    SettingsRootViewController(tabs: [], tabStyle: .segmentedControlOnTop)
-                },
-                frameAutosaveName: "WindowSnapshotSurface")
             snapshotControlPanel(surface.shell, label: "5-panel-chrome",
-                                appearanceName: appearanceName, outDir: outDir,
-                                present: { anchor in
-                                    surface.show(anchorRect: anchor)
-                                    surface.select(.groups)
-                                })
+                                appearanceName: appearanceName, outDir: outDir, present: presentGroups)
         }
     }
 

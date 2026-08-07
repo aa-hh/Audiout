@@ -111,6 +111,32 @@ import AppKit
                 "…and it breathes iff Reduce Motion is off — greyed-ness never freezes it")
     }
 
+    /// The payoff of the backend's `.connecting` hold (BT-LIFECYCLE), on the
+    /// row that renders it: a SELECTED, AVAILABLE BT speaker breathes with a
+    /// dark dot and no meter while its audio is still in the delay line, and
+    /// flips to the solid ring + lit dot + visible meter the moment the backend
+    /// says it is audible. Spinner and meter are two halves of one predicate,
+    /// so they are pinned together.
+    @Test func selectedBTRowBreathesWithNoMeterThenArmsWhenConnected() {
+        let spy = SpyDelegate()
+        let row = makeRow(btDevice(state: .connecting), delegate: spy, selected: true)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 420, height: 44),
+                              styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView?.addSubview(row)
+
+        #expect(row.test_ringForm == .connecting)
+        #expect(row.test_ringIsDashed, "the hold reads as the breathing (dashed) ring")
+        #expect(!row.test_routeArmed, "…with the dot still dark")
+        #expect(!row.test_meterVisible, "…and no meter while nothing is audible yet")
+
+        row.apply(btDevice(state: .connected), selected: true, controllable: true)
+        #expect(row.test_ringForm == .connected)
+        #expect(row.test_routeArmed, "the audible edge lights the dot")
+        #expect(row.test_meterVisible, "…and mounts the meter")
+        row.setLevel(0.4)
+        #expect(row.test_meterLevel() == 0.4, "levels now land on a meter the user can see")
+    }
+
     // MARK: Failure headline (never instructional sublabels)
 
     @Test func failedRowRendersTheFailureHeadlineInTheFeedPill() {

@@ -157,6 +157,15 @@ import CoreAudio
         }
         func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {}
 
+        /// Which devices are "audible" right now — the test drives the render
+        /// signal a real `BTSyncedSink` reads off its per-device delay gates.
+        var renderingUIDs: Set<String> {
+            get { lock.withLock { _rendering } }
+            set { lock.withLock { _rendering = newValue } }
+        }
+        func renderingDeviceUIDs() -> Set<String> { renderingUIDs }
+        private var _rendering: Set<String> = []
+
         var calls: [String] { lock.withLock { _calls } }
         var deviceSets: [[BTSyncedSink.DeviceSpec]] { lock.withLock { _deviceSets } }
         var compositions: [BTGroupComposition] { lock.withLock { _compositions } }
@@ -199,7 +208,8 @@ import CoreAudio
 
     private func makeBackend(
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
-        btConnection: BTConnectionManaging? = nil
+        btConnection: BTConnectionManaging? = nil,
+        btRenderStartTimeout: TimeInterval = 6
     ) -> (NativeBackend, RecordingEngine, FakeDiscovery, FakeBTEnumerator, SpyBTSink, FakeCapture) {
         let engine = RecordingEngine()
         let discovery = FakeDiscovery()
@@ -220,6 +230,7 @@ import CoreAudio
             })
         let sink = SpyBTSink()
         backend.btSyncedSinkFactory = { sink }
+        backend.btRenderStartTimeout = btRenderStartTimeout
         // Deterministic UID → AudioObjectID mapping, no HAL: hash of the uid.
         backend.btDeviceIDForUID = { uid in AudioObjectID(1000 + UInt32(abs(uid.hashValue % 1000))) }
         let capture = FakeCapture()
@@ -452,8 +463,9 @@ import CoreAudio
     // MARK: - BT-RECONNECT (Wave 4)
 
     /// `retryOutput` on a BT id runs the connect flow: eager `.connecting`,
-    /// then `.connected` on success — and the sink decision is re-applied so a
-    /// selected id re-enters the per-device set without a selection change.
+    /// then `.connected` once the sink is audible — and the sink decision is
+    /// re-applied so a selected id re-enters the per-device set without a
+    /// selection change.
     @Test func btRetrySuccess_connectingThenConnected_andSinkReapplied() {
         let manager = FakeBTConnectionManager()
         let (backend, _, _, bt, sink, _) = makeBackend(btConnection: manager)
@@ -463,9 +475,19 @@ import CoreAudio
         waitFor { self.device(backend, self.btMove.id) != nil }
         backend.setOutputSet([btMove.id])
         waitFor { sink.calls.contains("start") }
+        // Let the SELECT's own hold settle first: a row that is already
+        // breathing refuses a retry (never two attempts in flight), so the
+        // retry path is only reachable from a settled row.
+        sink.renderingUIDs = [btMove.id]
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
+        sink.renderingUIDs = []
         let appliesBefore = sink.deviceSets.count
 
         backend.retryOutput(btMove.id)
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connecting }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connecting,
+                "a baseband connect is not yet audio — the row keeps breathing")
+        sink.renderingUIDs = [btMove.id]
         waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
 
         #expect(manager.connects == ["C4-38-75-0E-BF-4A"],
@@ -530,6 +552,7 @@ import CoreAudio
         waitFor { self.device(backend, self.btMove.id) != nil }
         backend.setOutputSet([btMove.id])
         waitFor { sink.calls.contains("start") }
+        sink.renderingUIDs = [btMove.id]
 
         // Power off: the row reads .off; the routing brain's deselect (the
         // popover's loss-edge reaction) reaches the backend as a plain drop.
@@ -566,6 +589,7 @@ import CoreAudio
         waitFor { self.device(backend, self.btMove.id) != nil }
         backend.setOutputSet([btMove.id])
         waitFor { sink.calls.contains("start") }
+        sink.renderingUIDs = [btMove.id]
 
         bt.fire([BTDeviceSnapshot(id: btMove.id, name: btMove.name, isConnected: false)])
         waitFor { self.device(backend, self.btMove.id)?.isAvailable == false }
@@ -576,6 +600,107 @@ import CoreAudio
         waitFor { sink.deviceSets.last?.map(\.uid) == [self.btMove.id] }
         #expect(sink.deviceSets.last?.map(\.uid) == [btMove.id],
                 "the reconnect-reapply re-enters the applied set")
+    }
+
+    // MARK: - BT-LIFECYCLE: breathing until the music starts
+
+    /// Selecting an ALREADY-AVAILABLE BT speaker still runs a full connect
+    /// story: the row breathes from the click until that device's own sink is
+    /// audible, then lands `.connected` — the state the armed dot and the meter
+    /// both gate on.
+    @Test func selectingAvailableBTBreathesUntilTheSinkRenders() {
+        let (backend, _, _, bt, sink, _) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id)?.isAvailable == true }
+
+        backend.setOutputSet([btMove.id])
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connecting }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connecting,
+                "the ring breathes from the click, not from a later edge")
+
+        // The engine being up is not yet audio: the hold survives a started
+        // sink and ends only when the delay gate opens.
+        waitFor(timeout: 0.3) { false }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connecting,
+                "a started-but-silent sink must not light the armed dot")
+
+        sink.renderingUIDs = [btMove.id]
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connected)
+    }
+
+    /// Only the device that is actually rendering is promoted — a second BT
+    /// speaker whose sink is still silent keeps breathing on its own.
+    @Test func onlyTheRenderingDeviceIsPromoted() {
+        let (backend, _, _, bt, sink, _) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove, btFlip])
+        waitFor { self.device(backend, self.btFlip.id)?.isAvailable == true }
+
+        backend.setOutputSet([btMove.id, btFlip.id])
+        sink.renderingUIDs = [btMove.id]
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
+        #expect(device(backend, btFlip.id)?.connectionState == ConnectionState.connecting,
+                "the silent speaker keeps its own spinner")
+    }
+
+    /// A successful connect on an UNSELECTED row goes straight to `.off`:
+    /// nothing will ever flow to it by design, so a hold could only spin
+    /// forever.
+    @Test func connectWhileUnselectedReadsOffNotConnecting() {
+        let manager = FakeBTConnectionManager()
+        let (backend, _, _, bt, _, _) = makeBackend(btConnection: manager)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+
+        backend.retryOutput(btMove.id)          // never selected
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .off }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off)
+        waitFor(timeout: 0.3) { false }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off,
+                "an unselected connect must never leave a row spinning")
+    }
+
+    /// The hold is capped: a sink that never starts rendering degrades to
+    /// `.failed` rather than spinning forever.
+    @Test func sinkThatNeverRendersDegradesToFailedWithinTheCap() {
+        let (backend, _, _, bt, _, _) = makeBackend(btRenderStartTimeout: 0.2)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id)?.isAvailable == true }
+
+        backend.setOutputSet([btMove.id])
+        waitFor {
+            if case .failed = self.device(backend, self.btMove.id)?.connectionState { return true }
+            return false
+        }
+        guard case .failed = device(backend, btMove.id)?.connectionState else {
+            Issue.record("expected the capped hold to degrade to .failed"); return
+        }
+    }
+
+    /// Deselecting mid-hold ends the spinner at once — the poll must not
+    /// resurrect it as either `.connected` or `.failed`.
+    @Test func deselectingMidHoldEndsTheSpinner() {
+        let (backend, _, _, bt, sink, _) = makeBackend(btRenderStartTimeout: 0.2)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id)?.isAvailable == true }
+
+        backend.setOutputSet([btMove.id])
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connecting }
+        backend.setOutputSet([])
+        sink.renderingUIDs = [btMove.id]        // the sink kept rendering briefly
+        waitFor(timeout: 0.5) { false }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.off,
+                "a deselected row is off — never connected, never failed")
     }
 
     // MARK: - Wave-4 delay agreement (Mac + BT without AirPlay)

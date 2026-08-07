@@ -2122,6 +2122,11 @@ public final class DeviceRowView: NSView {
     /// local-mix refusal reason on a BLOCKED row (spec §4.6, S4), `nil` elsewhere.
     public var test_accessibilityHint: String? { accessibilityHelp() }
 
+    /// Whether the under-name meter is on screen — the armed predicate's other
+    /// instrument, and the half `test_meterLevel()` can't see (a pushed level
+    /// on a hidden meter is invisible).
+    public var test_meterVisible: Bool { showsMeter && !meterView.isHidden }
+
     /// The meter's current ballistics TARGET — with ``test_meterDisplayed``,
     /// distinguishes the S3 mute DRAIN (target 0, displayed still easing down)
     /// from a hard reset (both 0 instantly).

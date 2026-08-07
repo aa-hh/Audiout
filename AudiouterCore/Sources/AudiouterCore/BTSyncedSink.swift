@@ -556,6 +556,15 @@ final class BTDeviceSink: @unchecked Sendable {
         }
     }
 
+    /// Whether the delay gate has OPENED — this device is emitting real audio,
+    /// not pre-release silence. A started engine is not yet audible (the gate
+    /// holds silence for the whole reference delay), so this, not `running`, is
+    /// the "music is playing here" fact the Bluetooth row's `.connecting →
+    /// .connected` promotion waits on. Read off the render thread; the render
+    /// path itself only ever takes `stateLock` non-blockingly, so this read
+    /// cannot stall it. A rebuild clears it along with the rest of the session.
+    var hasStartedRendering: Bool { stateLock.withLock { released } }
+
     /// Void the session (anchor, ring, resampler) AND the drift state. The
     /// render thread is stopped by every caller (engine down), so resetting the
     /// render-owned resampler is safe; the clock sampler is likewise stopped,
@@ -1002,6 +1011,15 @@ final class BTSyncedSink: @unchecked Sendable {
             return sinksByUID[uid]
         }
         sink?.requestRebuild(cause: "trim_change")
+    }
+
+    /// The UIDs whose delay gate has opened — the devices actually hearing
+    /// audio right now. A uid with no sink (its `AudioObjectID` never resolved)
+    /// or whose engine failed to start is simply absent, which is what makes
+    /// the caller's `.connecting` hold degrade instead of hang.
+    func renderingDeviceUIDs() -> Set<String> {
+        let sinks = tableLock.withLock { Array(sinksByUID.values) }
+        return Set(sinks.lazy.filter(\.hasStartedRendering).map(\.deviceUID))
     }
 
     // MARK: Feed

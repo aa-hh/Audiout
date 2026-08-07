@@ -261,6 +261,29 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// reused across disable/re-enable. Confined to `captureControlQueue`.
     private var btSink: BTSyncedSinkControlling?
 
+    // MARK: Bluetooth connect lifecycle (BT-LIFECYCLE)
+
+    /// Every BT id currently held at `.connecting`, with the instant its hold
+    /// expires. An entry exists ONLY while the row is breathing; the promotion
+    /// to `.connected` (or the degrade to `.failed`) removes it. On `stateQueue`.
+    private var btConnectingDeadlines: [String: Date] = [:]
+
+    /// The armed poll that asks the sink manager which devices have started
+    /// rendering. `nil` = nothing is breathing, so nothing is scheduled — the
+    /// poll exists only for the duration of a connect. On `stateQueue`.
+    private var btRenderPollWork: DispatchWorkItem?
+
+    /// How often the hold re-asks. Fast enough that the dot lands with the
+    /// first note rather than after it.
+    private static let btRenderPollInterval: TimeInterval = 0.1
+
+    /// Ceiling on the `.connecting` hold: engine start + the first captured
+    /// buffer + the reference delay (at most the AirPlay presentation delay).
+    /// Past it the row reads `.failed` — a spinner that never resolves is the
+    /// one outcome a connection indicator may never produce. Settable so tests
+    /// don't sleep through the real ceiling.
+    var btRenderStartTimeout: TimeInterval = 6
+
     // MARK: Bluetooth per-device sync trim (BT-OFFSET-UI)
 
     /// Persistence for the per-device SYNC trims. `nil` (most tests) = trims
@@ -1848,6 +1871,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.btSinkEnabled = false
             self.btSelectedUIDs = []
             self.btComposition = BTGroupComposition(airPlayPresent: false, macLocalPresent: false)
+            // BT-LIFECYCLE: drop every `.connecting` hold and its poll, so no
+            // spinner can outlive the backend that would have resolved it.
+            self.btRenderPollWork?.cancel()
+            self.btRenderPollWork = nil
+            self.btConnectingDeadlines.removeAll()
             self.suspended = false
             // Seamless handoff T3.8-3: reset the release flag and stop/nil the
             // watcher so no orphan `log` child survives quit (AppDelegate's quit
@@ -2332,6 +2360,26 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // unrelated routing traffic never touches the running sinks.
             let btUIDs = ids.filter { self.known[$0]?.isBluetooth == true }.sorted()
             let wantBT = !btUIDs.isEmpty
+            // BT-LIFECYCLE: the row's own connect story, the twin of the engine
+            // loop's eager `.connecting` above. A newly-selected AVAILABLE BT id
+            // breathes until its per-device sink is genuinely audible; a
+            // newly-selected UNAVAILABLE one stays `.off` (the greyed "play when
+            // up" select — nothing is connecting until it comes back, which the
+            // availability edge in `applyBTSnapshots` picks up). A deselect ends
+            // any hold at once, but leaves a `.failed` story standing: BT rows
+            // offer "Try again" regardless of membership, so the failure the
+            // button explains must survive the deselect the loss edge triggers.
+            for id in previouslySelected.symmetricDifference(ids)
+            where self.known[id]?.isBluetooth == true {
+                if ids.contains(id) {
+                    if self.known[id]?.isAvailable == true { self.beginBTConnectingLocked(id) }
+                } else {
+                    self.btConnectingDeadlines[id] = nil
+                    if case .failed = self.known[id]?.connectionState {} else {
+                        self.setConnectionState(.off, for: id)
+                    }
+                }
+            }
             let composition = BTGroupComposition(
                 airPlayPresent: ids.contains {
                     self.known[$0].map { !$0.isBluetooth && !$0.isLocalDevice } == true
@@ -2490,8 +2538,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         stateQueue.async {
             switch outcome {
             case .connected:
-                self.setConnectionState(
-                    self.expectedSelected.contains(id) ? .connected : .off, for: id)
+                // BT-LIFECYCLE: a baseband connect is not yet audio. A SELECTED
+                // id keeps breathing until its sink renders; an UNSELECTED one
+                // goes straight to `.off` — nothing will flow to it by design,
+                // so a hold there could only spin forever.
+                if self.expectedSelected.contains(id) {
+                    self.beginBTConnectingLocked(id)
+                } else {
+                    self.setConnectionState(.off, for: id)
+                }
                 // Wave-3 known gap, closed: a SELECTED id that just came back
                 // re-enters the per-device sink set now, not at the next
                 // selection change.
@@ -2692,6 +2747,73 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             sink.setDevices([])
             attachBTSink(nil)
         }
+    }
+
+    // MARK: Bluetooth connect lifecycle (BT-LIFECYCLE)
+
+    /// Start a selected BT id breathing and arm the watch that ends the hold.
+    ///
+    /// A BT id has no engine session, so no AirPlay-lifecycle transition can
+    /// ever move it off `.off` — this is the ONLY road to `.connected` for a
+    /// Bluetooth row, and `.connected` is what lights its armed dot and mounts
+    /// its meter. The hold ends on the device's own delay gate opening, not on
+    /// its engine starting: the engine is up long before a note comes out, so
+    /// promoting on "sink running" would put the dot ahead of the music.
+    ///
+    /// Callers own the precondition that a connect is even plausible — a
+    /// selected-but-unavailable row stays `.off` (nothing is connecting), while
+    /// a just-succeeded baseband connect arms regardless of whether the
+    /// enumerator snapshot has caught up yet. On `stateQueue`.
+    private func beginBTConnectingLocked(_ id: String) {   // on stateQueue
+        guard expectedSelected.contains(id), known[id]?.isBluetooth == true else { return }
+        setConnectionState(.connecting, for: id)
+        btConnectingDeadlines[id] = Date().addingTimeInterval(btRenderStartTimeout)
+        scheduleBTRenderPollLocked()
+    }
+
+    /// Arm the poll unless one is already in flight (or nothing is breathing).
+    /// On `stateQueue`.
+    private func scheduleBTRenderPollLocked() {   // on stateQueue
+        guard btRenderPollWork == nil, !btConnectingDeadlines.isEmpty else { return }
+        let work = DispatchWorkItem { [weak self] in self?.pollBTRenderStart() }
+        btRenderPollWork = work
+        stateQueue.asyncAfter(deadline: .now() + Self.btRenderPollInterval, execute: work)
+    }
+
+    /// Read the rendering set off `captureControlQueue` (which owns `btSink`)
+    /// and fold it back in on `stateQueue`. On `stateQueue` (scheduled there).
+    private func pollBTRenderStart() {   // on stateQueue
+        btRenderPollWork = nil
+        guard !btConnectingDeadlines.isEmpty else { return }
+        captureControlQueue.async { [weak self] in
+            guard let self else { return }
+            let rendering = self.btSink?.renderingDeviceUIDs() ?? []
+            self.stateQueue.async { self.applyBTRenderStart(rendering) }
+        }
+    }
+
+    /// End every hold that has an answer — rendering wins first, then the
+    /// ceiling — and re-arm the poll for whatever is still breathing. A row
+    /// deselected mid-hold just drops out: the deselect edge already wrote its
+    /// own `.off`. On `stateQueue`.
+    private func applyBTRenderStart(_ rendering: Set<String>) {   // on stateQueue
+        let now = Date()
+        for (id, deadline) in btConnectingDeadlines {
+            guard expectedSelected.contains(id) else {
+                btConnectingDeadlines[id] = nil
+                continue
+            }
+            if rendering.contains(id) {
+                btConnectingDeadlines[id] = nil
+                setConnectionState(.connected, for: id)
+            } else if now >= deadline {
+                btConnectingDeadlines[id] = nil
+                setConnectionState(.failed(ConnectionFailure(
+                    cause: .unknown, detail: "no audio started")), for: id)
+                Telemetry.log(.localPlayback, "bt_render_start_timeout", ["device": id])
+            }
+        }
+        scheduleBTRenderPollLocked()
     }
 
     /// Mirror of `attachSyncedLocalSink` for the BT fan-out: same render-process
@@ -5632,10 +5754,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     /// Whether one DESIRED non-local id is audibly carrying audio, for the
     /// stranded test above. AirPlay: a live engine session (`.connected`). A
-    /// `.bluetooth` id NEVER holds an engine session — its `connectionState`
-    /// stays `.off` — so the engine-lifecycle read would brand a BT-only
-    /// selection permanently stranded and the fallback would un-mute the Mac
-    /// ~10s into healthy playback (R-partition). A BT id's audible fact is its
+    /// `.bluetooth` id holds NO engine session, and its `.connected` means
+    /// something else entirely (BT-LIFECYCLE: its own sink started rendering) —
+    /// it arrives a whole reference delay late, so the engine-lifecycle read
+    /// would brand a healthy BT-only selection stranded and un-mute the Mac
+    /// mid-playback (R-partition). A BT id's audible fact is its
     /// Core Audio endpoint existing (`isAvailable`) — exactly what its sink
     /// renders through; a selected-but-disconnected BT speaker therefore still
     /// (correctly) counts as silence and falls back to the Mac. On `stateQueue`.
@@ -6349,10 +6472,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // attempt survives a loss until retry or return.
                     if availabilityMoved {
                         if updated.isAvailable {
-                            setConnectionState(
-                                expectedSelected.contains(id) ? .connected : .off,
-                                for: id)
+                            // BT-LIFECYCLE: the endpoint existing is not yet
+                            // audio — a selected row breathes until its sink
+                            // renders, exactly like a fresh select.
+                            if expectedSelected.contains(id) {
+                                beginBTConnectingLocked(id)
+                            } else {
+                                setConnectionState(.off, for: id)
+                            }
                         } else {
+                            btConnectingDeadlines[id] = nil
                             if case .failed = existing.connectionState {
                                 // keep the failure story
                             } else {
@@ -7871,6 +8000,9 @@ protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
     func stop()
     func setDevices(_ specs: [BTSyncedSink.DeviceSpec])
     func setComposition(_ composition: BTGroupComposition)
+    /// The UIDs whose per-device sink is emitting real audio right now — the
+    /// signal a Bluetooth row's `.connecting` hold ends on.
+    func renderingDeviceUIDs() -> Set<String>
     /// Per-device signed manual trim (BT-OFFSET-UI). Default no-op so
     /// lifecycle-only spies compile unchanged; ``BTSyncedSink`` provides the
     /// real one (same-value writes are already guarded there).

@@ -326,10 +326,17 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   pairing record, and `retryOutput` fails it FAST as
   `ConnectionFailure.Cause.notPaired` (before any ~15 s baseband attempt);
   never auto-purge such a row — re-pairing resurrects the same MAC-derived id
-  with its trim and membership. The silence fallback reads a BT id's audible fact from
-  `isAvailable`, never `.connected` (`desiredDeviceAudibleLocked`): a BT id
-  holds no engine session, so the `.connected` read would brand a healthy
-  BT-only selection stranded and un-mute the Mac mid-playback. BT devices
+  with its trim and membership. A BT row's `.connected` means something
+  different from an AirPlay row's: not a live engine session but that device's
+  own delay gate having opened (`BTDeviceSink.hasStartedRendering`) — the state
+  that lights the armed dot and mounts the meter. Never set a BT id
+  `.connected` from a connect outcome alone; select, reconnect and
+  availability-regained all hold `.connecting` until that signal or a timeout,
+  so the ring breathes until the music starts. The silence fallback therefore
+  reads a BT id's audible fact from `isAvailable`, never `.connected`
+  (`desiredDeviceAudibleLocked`): that signal lands a whole reference delay
+  late, so the `.connected` read would brand a healthy BT-only selection
+  stranded and un-mute the Mac mid-playback. BT devices
   remain ineligible per-app route targets. `BTDeviceEnumerator.swift` and
   `BTSyncedSink.swift` are LICENSE-CLEAN
   like `SyncCore.swift` (no GPL header — see the header note in each file);

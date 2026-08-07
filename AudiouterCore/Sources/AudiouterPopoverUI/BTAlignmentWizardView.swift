@@ -116,7 +116,13 @@ final class BTAlignmentWizardView: NSView {
 
     private func applyBackgroundTint() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            background.layer?.backgroundColor = Tokens.Color.panel.cgColor
+            // Inset containers use the well + hairline pair, never bare `panel`:
+            // panel vs canvas is ~1.06:1 dark / ~1.08:1 light — "effectively
+            // invisible as a boundary" (`MembershipWellContrastTests`, and the
+            // `GroupedSectionView` precedent this mirrors).
+            background.layer?.backgroundColor = Tokens.Color.well.cgColor
+            background.layer?.borderColor = Tokens.Color.hairline.cgColor
+            background.layer?.borderWidth = 1
         }
     }
 

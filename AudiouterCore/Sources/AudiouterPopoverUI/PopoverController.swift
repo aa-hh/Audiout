@@ -258,6 +258,19 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// then live only in `btTrimsByID` (mock/dev — nothing persists them).
     public var btTrimProvider: ((_ deviceID: String) -> Double)?
 
+    /// The usable trim range for a Bluetooth device id (D11/T3) — the
+    /// drawer's hard-stop, tighter than the nominal ±`BTSyncTrim.rangeMs`
+    /// whenever the device's real headroom is smaller. Wired to
+    /// `(backend as? BTOutputControlling)?.btUsableTrimRangeMs`. `nil` (mock/
+    /// dev builds, or no BT capability) means the full ±range.
+    ///
+    /// LIVE QUERY, same as the backend seam it wraps: the range moves
+    /// whenever AirPlay joins or leaves the group, so callers must invoke
+    /// this fresh every time they need it — never cache the result, not even
+    /// for the lifetime of one open drawer (T7 re-reads it on every
+    /// `update(devices:)`).
+    public var btTrimRangeProvider: ((_ deviceID: String) -> ClosedRange<Double>)?
+
     /// Called with `true`/`false` as the align-by-ear tick starts/stops
     /// (BT-OFFSET-UI). Wired to
     /// `(backend as? BTOutputControlling)?.setBTAlignTickActive`.

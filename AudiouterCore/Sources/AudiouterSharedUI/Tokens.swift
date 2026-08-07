@@ -727,6 +727,15 @@ public enum Tokens {
         /// The `.kern` value (in points) realizing the micro-label voice's
         /// +0.09 em tracking at ``microLabel``'s 8.5 pt size (0.09 × 8.5).
         public static var microLabelKern: CGFloat { 0.765 }
+        /// The BT sync drawer's big click-to-edit readout (PLAN-BT-SYNC-DRAWER
+        /// T5's "26 pt tabular-figures readout"). Monospaced digits so the
+        /// number doesn't change width as it changes — same rationale as
+        /// `BTSyncRulerView`'s tick labels, which face the identical problem
+        /// at a smaller size. Added with its sole consumer, the drawer's
+        /// value field.
+        public static var syncReadout: NSFont {
+            .monospacedDigitSystemFont(ofSize: 26, weight: .regular)
+        }
     }
 
     // MARK: - Layout

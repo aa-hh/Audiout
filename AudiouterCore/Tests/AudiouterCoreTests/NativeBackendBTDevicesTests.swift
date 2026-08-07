@@ -282,4 +282,15 @@ import CoreAudio
         #expect(second.btSyncTrim(forDevice: "never-set:output") == 0)
         second.stop()
     }
+
+    /// T3: with no `btSyncedSinkFactory` wired (this suite's posture — see
+    /// `makeBackend`), `btSink` never exists, so `btUsableTrimRangeMs` must
+    /// fall through to the protocol's own full-±range default rather than
+    /// crash or hang on the `captureControlQueue.sync` hop.
+    @Test func usableTrimRangeMsDefaultsToFullRangeWithNoBTSink() {
+        let (backend, _) = makeBackend()
+        #expect(backend.btUsableTrimRangeMs(forDevice: sonos.id)
+                == -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
+        backend.stop()
+    }
 }

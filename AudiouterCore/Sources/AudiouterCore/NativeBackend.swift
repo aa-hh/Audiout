@@ -687,6 +687,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Polls every ~5s while capture is active; cancelled on `stop()` or when
     /// capture goes idle. Used by T2 to bridge scheduling metrics to telemetry.
     private var schedulingSnapshotPollWork: DispatchWorkItem?
+    /// How many `send_sched` lines THIS backend has logged. Arming is not the
+    /// same observable: an arm whose poll then finds capture stopped logs
+    /// nothing, so the guard this counts for is "no second line per
+    /// capture-start episode". Counting the telemetry itself cannot work — the
+    /// sink is process-global and the event carries no backend identity, so
+    /// any other still-polling backend in the same test process lands lines in
+    /// the counting window.
+    private var schedulingSnapshotLogCount = 0
 
     // MARK: Per-device op serialization + coalescing (toggle-spam converge race)
     //
@@ -1059,6 +1067,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// edge, mirroring `test_hasPendingCaptureRetry()` above.
     func test_hasPendingSchedulingPoll() -> Bool {
         stateQueue.sync { schedulingSnapshotPollWork != nil }
+    }
+
+    /// Test-only (`@testable`): how many `send_sched` lines this backend has
+    /// logged. Proves "selecting a second device while already capturing must
+    /// not double the log rate" without reading the telemetry sink, which is
+    /// process-global and unattributable — see ``schedulingSnapshotLogCount``.
+    func test_schedulingPollLogCount() -> Int {
+        stateQueue.sync { schedulingSnapshotLogCount }
     }
 
     /// Test-only (`@testable`): the whole-system-tap retry attempt counter
@@ -6093,6 +6109,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
         // Format and log the three metric families (each with count, p50/p95/p99/max).
         // Using snake_case to match existing telemetry key conventions in this file.
+        self.schedulingSnapshotLogCount &+= 1
         Telemetry.log(.airplay, "send_sched", [
             "wake_count": "\(snapshot.wakeLatency.count)",
             "wake_p50_ms": String(format: "%.1f", snapshot.wakeLatency.p50Ms),
@@ -7928,6 +7945,25 @@ public protocol BTOutputControlling: AnyObject {
     /// Start/stop the align-by-ear tick in the captured feed (auto-limits to
     /// ~30 s of ticks on its own).
     func setBTAlignTickActive(_ active: Bool)
+    /// The usable trim range for a device (D11/T3) — the drawer's ruler and
+    /// numeric field hard-stop here instead of at the nominal ±`BTSyncTrim
+    /// .rangeMs`, because past this bound `SyncTiming.totalDelayNanos`'s ≥ 0
+    /// clamp already eats the change and the readout would be lying.
+    ///
+    /// LIVE QUERY — the range moves whenever an AirPlay device joins or
+    /// leaves the group (the reference term swaps between the fixed BT-only
+    /// buffer and the live AirPlay presentation delay), so a conformer must
+    /// answer fresh on every call, never from a value cached at some earlier
+    /// point (e.g. drawer-open time). The default implementation below
+    /// (full ±range) keeps mock/dev builds — which have no BT sink to ask —
+    /// working unchanged.
+    func btUsableTrimRangeMs(forDevice id: String) -> ClosedRange<Double>
+}
+
+extension BTOutputControlling {
+    public func btUsableTrimRangeMs(forDevice id: String) -> ClosedRange<Double> {
+        -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs
+    }
 }
 
 extension NativeBackend: BTOutputControlling {
@@ -7950,6 +7986,19 @@ extension NativeBackend: BTOutputControlling {
 
     public func setBTAlignTickActive(_ active: Bool) {
         captureCoordinator?.setAlignTick(active)
+    }
+
+    /// `btSink` is confined to `captureControlQueue` (every other touch in
+    /// this file reaches it only via `.async` there), so this hops in with
+    /// `.sync` rather than reading the property directly from whatever
+    /// thread the caller is on — the same synchronous-read-of-confined-state
+    /// pattern `stateQueue.sync` uses elsewhere in this file. The hop also
+    /// keeps the live-query contract honest: nothing here is cached on the
+    /// `NativeBackend` side to go stale between AirPlay joining/leaving.
+    public func btUsableTrimRangeMs(forDevice id: String) -> ClosedRange<Double> {
+        captureControlQueue.sync {
+            btSink?.usableTrimRangeMs(forDeviceUID: id) ?? (-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
+        }
     }
 }
 
@@ -8007,10 +8056,18 @@ protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
     /// no-op so lifecycle-only spies compile unchanged; ``BTSyncedSink``
     /// provides the real one (same-value writes are already guarded there).
     func setTrimMs(_ ms: Double, forDeviceUID uid: String)
+    /// The usable trim range for a device (D11/T3) — see
+    /// ``BTSyncedSink/usableTrimRangeMs(forDeviceUID:)``. Default returns the
+    /// full ±`BTSyncTrim.rangeMs` so lifecycle-only spies compile unchanged;
+    /// ``BTSyncedSink`` provides the live one.
+    func usableTrimRangeMs(forDeviceUID uid: String) -> ClosedRange<Double>
 }
 
 extension BTSyncedSinkControlling {
     func setTrimMs(_ ms: Double, forDeviceUID uid: String) {}
+    func usableTrimRangeMs(forDeviceUID uid: String) -> ClosedRange<Double> {
+        -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs
+    }
 }
 
 extension BTSyncedSink: BTSyncedSinkControlling {}

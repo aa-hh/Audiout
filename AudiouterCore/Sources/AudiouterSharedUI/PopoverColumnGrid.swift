@@ -652,6 +652,64 @@ public enum PopoverColumnGrid {
     /// fast drag covers setup-scale jumps in a handful of points (D5).
     public static let syncRulerFastMsPerPoint: CGFloat = 2.0
 
+    // MARK: SYNC drawer (PLAN-BT-SYNC-DRAWER T5 — `BTSyncDrawerView`)
+    //
+    // The panel that opens underneath a Bluetooth row: caption + big
+    // click-to-edit readout + −/+/align/revert buttons on top, the ruler
+    // below, a hint footer at the bottom. Named constants only — the Figma
+    // design-system contract mirrors this file.
+
+    /// Width of the drawer's left accent edge (the "engaged control"
+    /// stripe — `Tokens.Color.accent`, deliberately not gold; see
+    /// `BTSyncDrawerView`'s header comment).
+    public static let syncDrawerAccentEdgeWidth: CGFloat = 2
+    /// Horizontal inset of the drawer's content from its container edges,
+    /// measured past the accent edge on the leading side.
+    public static let syncDrawerHorizontalInset: CGFloat = 12
+    /// Vertical inset of the drawer's content from its top/bottom edges.
+    public static let syncDrawerVerticalInset: CGFloat = 10
+    /// Height of the "<device name> plays" caption line above the readout.
+    public static let syncDrawerCaptionHeight: CGFloat = 14
+    /// Gap between the caption and the readout row it sits above.
+    public static let syncDrawerCaptionToReadoutGap: CGFloat = 2
+    /// Height of the big readout row (`Tokens.Font.syncReadout` at 26 pt).
+    public static let syncDrawerReadoutHeight: CGFloat = 30
+    /// Gap between the readout's trailing edge and its "ms later"/"ms
+    /// earlier" suffix label.
+    public static let syncDrawerReadoutToSuffixGap: CGFloat = 4
+    /// The drawer's top band height (caption + gap + readout), derived so
+    /// resizing either part reflows the band in lockstep — the style of the
+    /// existing derived `syncClusterWidth`.
+    public static var syncDrawerTopBandHeight: CGFloat {
+        syncDrawerCaptionHeight + syncDrawerCaptionToReadoutGap + syncDrawerReadoutHeight
+    }
+    /// Height of the top band's − / + / align / revert buttons.
+    public static let syncDrawerButtonHeight: CGFloat = 22
+    /// Width of the − / + stepper buttons (icon-only, unlike the align/revert
+    /// buttons beside them, which size to their own text).
+    public static let syncDrawerStepperButtonWidth: CGFloat = 24
+    /// Horizontal gap between adjacent top-band buttons.
+    public static let syncDrawerButtonGap: CGFloat = 6
+    /// Gap between the top band's bottom edge and the ruler below it.
+    public static let syncDrawerRulerTopGap: CGFloat = 10
+    /// Gap between the ruler's bottom edge and the footer hint below it.
+    public static let syncDrawerRulerToFooterGap: CGFloat = 6
+    /// Height of the footer hint row ("Drag to nudge · hold ⌥ for finer").
+    public static let syncDrawerFooterHeight: CGFloat = 16
+    /// The drawer's total height, derived from its parts (top/bottom insets,
+    /// the top band, the ruler, and the footer) rather than a magic number —
+    /// the style of the existing derived `syncClusterWidth`. `PopoverController`
+    /// (T7) grows the popover by exactly this on expand and shrinks it back
+    /// by exactly this on collapse.
+    public static var syncDrawerHeight: CGFloat {
+        syncDrawerVerticalInset * 2
+            + syncDrawerTopBandHeight
+            + syncDrawerRulerTopGap
+            + syncRulerHeight
+            + syncDrawerRulerToFooterGap
+            + syncDrawerFooterHeight
+    }
+
     // MARK: Inter-column gaps
 
     /// Gap after the icon, before the name.

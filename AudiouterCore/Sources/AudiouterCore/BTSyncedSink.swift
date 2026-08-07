@@ -1013,6 +1013,47 @@ final class BTSyncedSink: @unchecked Sendable {
         sink?.requestRebuild(cause: "trim_change")
     }
 
+    /// D11/T3: the trim range this device's drawer may actually move within.
+    /// Below `lowerBound` (or above `upperBound`, which never moves — see
+    /// below) the ≥ 0 clamp inside `SyncTiming.totalDelayNanos` already eats
+    /// the change, so a ruler/field that let the value run further would be
+    /// showing motion that does nothing.
+    ///
+    /// Solves `delayNanos(forUID:)`'s own formula
+    /// (`reference − deviceOffset + trim`, clamped ≥ 0) for the trim that
+    /// lands exactly on zero: `lower = max(-rangeMs, -(reference −
+    /// deviceOffset))`. `upper` stays the plain `±rangeMs` ceiling — a large
+    /// *positive* trim is never the thing the zero clamp eats, only a large
+    /// negative one is.
+    ///
+    /// LIVE QUERY — do not cache the result. `reference` is
+    /// `presentationDelayMs()` (the live AirPlay figure) when the group's
+    /// composition currently includes AirPlay, else the fixed
+    /// `btOnlyBufferMs`; `BTReferenceTimeline` swaps between them on every
+    /// composition change (BT-REFSEL), so the floor genuinely moves the
+    /// instant an AirPlay device joins or leaves the selection. Callers must
+    /// re-read this every time they need it, never memoize it (e.g. at
+    /// drawer-open time).
+    ///
+    /// A uid with no sink — never selected, or already dropped — has no
+    /// device offset to solve against, so it gets the full ±`rangeMs`.
+    func usableTrimRangeMs(forDeviceUID uid: String) -> ClosedRange<Double> {
+        tableLock.lock()
+        guard sinksByUID[uid] != nil else {
+            tableLock.unlock()
+            return -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs
+        }
+        let currentComposition = composition
+        let offsetMs = offsetMsByUID[uid] ?? 0
+        let bufferMs = btOnlyBufferMs
+        tableLock.unlock()
+        let reference = currentComposition.airPlayPresent ? presentationDelayMs() : bufferMs
+        let lowerBound = Swift.min(
+            BTSyncTrim.rangeMs,
+            Swift.max(-BTSyncTrim.rangeMs, -(Double(reference) - Double(offsetMs))))
+        return lowerBound...BTSyncTrim.rangeMs
+    }
+
     /// The UIDs whose delay gate has opened — the devices actually hearing
     /// audio right now. A uid with no sink (its `AudioObjectID` never resolved)
     /// or whose engine failed to start is simply absent, which is what makes

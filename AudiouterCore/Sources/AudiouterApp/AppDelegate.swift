@@ -467,6 +467,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.btTrimProvider = { [weak self] deviceID in
             (self?.backend as? BTOutputControlling)?.btSyncTrim(forDevice: deviceID) ?? 0
         }
+        // BT-SYNC-DRAWER T3: the drawer's hard-stop range. `nil` fallback
+        // matches the protocol's own default (full ±range) so a MockBackend/
+        // OwnToneBackend popover keeps working with no BT capability at all.
+        popoverController.btTrimRangeProvider = { [weak self] deviceID in
+            (self?.backend as? BTOutputControlling)?.btUsableTrimRangeMs(forDevice: deviceID)
+                ?? (-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
+        }
         popoverController.onAlignTickActiveChange = { [weak self] active in
             (self?.backend as? BTOutputControlling)?.setBTAlignTickActive(active)
         }

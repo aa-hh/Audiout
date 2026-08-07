@@ -160,6 +160,50 @@ import Testing
                 "after the composition change the BT-only buffer must set the target")
     }
 
+    // MARK: - BT-SYNC-DRAWER T3: usable trim range (D11)
+
+    @Test func usableTrimRangeMs_btOnlyOffset400_flooredAtMinus100() {
+        let manager = BTSyncedSink(
+            renderSampleRate: Self.sampleRate, channelCount: 1,
+            presentationDelayMs: { 1_000 })
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        manager.setComposition(BTGroupComposition(airPlayPresent: false, macLocalPresent: false))
+        manager.setOffsetMs(400, forDeviceUID: "dev-a")
+
+        // 500 ms BT-only buffer − 400 ms device offset = 100 ms of headroom
+        // before the ≥ 0 clamp bites, so the floor sits at −100 (D11).
+        #expect(manager.usableTrimRangeMs(forDeviceUID: "dev-a") == -100...BTSyncTrim.rangeMs)
+    }
+
+    @Test func usableTrimRangeMs_movesLiveWhenAirPlayJoins() {
+        let manager = BTSyncedSink(
+            renderSampleRate: Self.sampleRate, channelCount: 1,
+            presentationDelayMs: { 1_000 })
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+        manager.setComposition(BTGroupComposition(airPlayPresent: false, macLocalPresent: false))
+        manager.setOffsetMs(400, forDeviceUID: "dev-a")
+        #expect(manager.usableTrimRangeMs(forDeviceUID: "dev-a") == -100...BTSyncTrim.rangeMs)
+
+        // AirPlay joins the group: the reference term swaps from the 500 ms
+        // BT-only buffer to the live 1000 ms presentation delay (the T3
+        // trap — this MUST be a live re-query against the SAME manager/sink,
+        // never a value cached at some earlier read).
+        manager.setComposition(BTGroupComposition(airPlayPresent: true, macLocalPresent: false))
+        let range = manager.usableTrimRangeMs(forDeviceUID: "dev-a")
+        // 1000 ms reference − 400 ms offset = 600 ms past the clamp, which
+        // overshoots the ±500 ms trim range entirely, so the floor pins at
+        // the full −500 — strictly lower than the BT-only −100 above.
+        #expect(range == -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
+    }
+
+    @Test func usableTrimRangeMs_unknownUID_yieldsFullRange() {
+        let manager = BTSyncedSink(
+            renderSampleRate: Self.sampleRate, channelCount: 1,
+            presentationDelayMs: { 1_000 })
+        #expect(manager.usableTrimRangeMs(forDeviceUID: "never-seen")
+                == -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
+    }
+
     // MARK: - BT-DRIFT: pacing-clock corrector with the adaptive settle gate
 
     /// Synthetic pacing clock: advances a device sample counter at a commanded

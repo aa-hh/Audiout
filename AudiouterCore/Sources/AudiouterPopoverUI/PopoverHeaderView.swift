@@ -3,239 +3,398 @@
 import AppKit
 import AudiouterSharedUI
 
-/// The popover's **header bar** (task A) — a borderless toolbar-style strip at
-/// the very top of the panel, above the System card, styled per the macOS HIG for
-/// borderless title-bar controls (like SoundSource's title-bar icons).
+/// The one-surface app's **header strip** (U3, PLAN-ONE-SURFACE-032 "End
+/// state" + owner addenda 2026-08-07): the floating controls layer of the
+/// single panel that hosts all three screens. Supersedes this view's previous
+/// life as the popover's title bar — the old "Open Groups editor" / "Settings"
+/// buttons became the switcher's Groups / Settings tabs, and the centered
+/// "Audiouter" title is gone (pinned mode's real window title bar carries the
+/// app name; the unpinned bubble needs none).
 ///
 /// Layout, left → right:
-/// - a **centered title** ("Audiouter", medium ~14pt, label color); and
-/// - three right-aligned, stock `NSButton` (`bezelStyle = .accessoryBar` — the
-///   system's borderless toolbar-glyph bezel: no outline at rest, a soft
-///   rounded-rect highlight on hover/press), image-only icon buttons:
-///   1. **Open Groups editor** — a system SF Symbol
-///      (`hifispeaker.and.homepod.mini.badge.plus.fill`, template-rendered,
-///      verified non-nil at runtime with graceful fallbacks).
-///      Opens the mixer window (where group membership editing lives) via the
-///      host's existing open-mixer path.
-///   2. **Settings** — SF Symbol `gearshape`. Wired to the Settings window
-///      by the host's `onOpenSettings` callback.
-///   3. **Quit** — SF Symbol `power`, the trailing-most button. Terminates
-///      the app via the host's `onQuit` callback.
+/// - a leading inset reserving the shell's standard close button, which the
+///   window draws as titlebar chrome ON TOP of this strip (without it the
+///   button lands on the Mixer tab — prototype-verified);
+/// - the **tab-bar switcher**: three icon-over-label tabs (Mixer / Groups /
+///   Settings) in the macOS toolbar-tabs idiom, rendered per the owner's
+///   Apple Music reference — capsule segments sharing one faint capsule
+///   lozenge, the SELECTED segment getting the filled (gold-washed) capsule.
+///   ⌘1/⌘2/⌘3 select them from the keyboard (stock `NSButton.keyEquivalent`,
+///   so the window's own key-equivalent dispatch does the routing — no event
+///   monitor);
+/// - trailing: **Pin** (`pin`/`pin.fill`, drives the shell's manner-profile
+///   flip through the host) and **Quit**.
 ///
-/// The title is *centered* over the whole bar while the buttons float on the
-/// trailing edge, so the title stays visually centered regardless of the button
-/// cluster width (the buttons overlap the centered title's layout region without
-/// shifting it).
+/// ## Three material tiers (owner addendum — translucent header)
 ///
-/// Pure UI: taps route back through callbacks so `PopoverController` wires them to
-/// `GroupController` / the app. The view never talks to a backend directly.
+/// The strip rides on one of three backgrounds, resolved live:
+/// 1. macOS 26+ — `NSGlassEffectView` with the controls row as its
+///    `contentView` (NEVER a sibling: the system owns the legibility
+///    treatment), corner radius matched to the shell bubble, and a subtle warm
+///    tint (gold at `glassTintAlpha` — the prototype's ~8% "read well").
+/// 2. macOS 14–15 — `NSVisualEffectView` with `blendingMode = .withinWindow`,
+///    frosting the app's own content under the strip. `.behindWindow` is
+///    deliberately NOT used: it composites the desktop through the window,
+///    which fights the opaque Warm Signal canvas and reads as a different
+///    effect entirely.
+/// 3. Reduce Transparency (any OS) — opaque warm fill (`canvasHi`) with a
+///    bottom hairline. Borders belong ONLY here: Liquid Glass defines its edge
+///    by refraction, so the translucent tiers draw NO hard border/hairline.
+///
+/// Tier 1 vs 2 is decided by the injected `osSupportsGlassHeader` seam (the
+/// `SidebarViewController.osSupportsLiquidGlassSidebar` idiom — both branches
+/// must be testable on any one machine); tier 3 re-resolves LIVE via
+/// `accessibilityDisplayOptionsDidChangeNotification` (the A1 idiom), plus a
+/// `test_reduceTransparencyOverride` seam for headless coverage of both sides.
+///
+/// Pure UI: taps route out through callbacks; the host (`AppSurfaceController`,
+/// or `PopoverController` pre-cutover) owns what a tab selection means.
 @MainActor
 final class PopoverHeaderView: NSView {
 
-    /// Square side length of each header icon button (task: header legibility pass,
-    /// 2026-07-22). The product owner's complaint was that the three icon
-    /// buttons (Groups/Settings/Quit) were hard to parse at a glance; he
-    /// suggested "bigger" as the likely fix even with the same glyphs. There is
-    /// no macOS HIG number for a borderless *accessoryBar* toolbar-glyph button
-    /// specifically (the HIG's 44×44pt minimum target is an iOS/touch figure,
-    /// not applicable to a pointer-driven desktop bar). Instead this sizes off
-    /// Apple's own first-party borderless-toolbar precedent: Control Center's
-    /// module tiles and Music.app's mini-player transport buttons both render
-    /// as ~28pt square hit boxes around a glyph that fills roughly half the
-    /// box, leaving even, generous padding on all sides. 28pt (up from the
-    /// previous 26×22 non-square box) is "slightly larger" per his ask while
-    /// staying a compact toolbar control, not a full-size button.
+    /// Header strip height: a 17pt symbol over an 11pt caption label with
+    /// breathing room — close to a stock toolbar-tabs row. Prototype-verified.
+    static let barHeight: CGFloat = 52
+
+    /// Leading inset of the tab row, reserving the shell's standard close
+    /// button (drawn by the window on top of this strip when unpinned).
+    static let closeButtonReserve: CGFloat = 46
+
+    /// The warm tint fed to `NSGlassEffectView` — gold at this alpha read well
+    /// in the prototype (~8%); anything stronger overpowers the refraction.
+    static let glassTintAlpha: CGFloat = 0.08
+
+    /// Fill of the SELECTED tab's capsule (gold wash). Follows the accent
+    /// dial automatically because it derives from `Tokens.Color.gold`.
+    static let selectedCapsuleAlpha: CGFloat = 0.16
+
+    /// Fill of the shared group lozenge behind all three tabs — the "one
+    /// glass lozenge" of the Apple Music idiom, faint enough to read as a
+    /// grouping wash, not a control.
+    static let groupLozengeAlpha: CGFloat = 0.05
+
+    /// Square side of the trailing Pin/Quit icon buttons (the popover header's
+    /// established 28pt hit box, unchanged from its previous life).
     static let iconButtonSide: CGFloat = 28
 
-    /// Horizontal gap between adjacent header icon buttons. Widened slightly
-    /// from the previous 2pt so three now-bigger 28pt squares still read as
-    /// discrete buttons rather than a fused strip.
-    static let iconButtonSpacing: CGFloat = 6
+    // MARK: Callbacks (host-owned meaning)
 
-    /// Inset of the trailing-most button (Quit) from the bar's trailing edge.
-    static let iconButtonTrailingInset: CGFloat = 10
-
-    /// Header bar height — compact toolbar strip. Grown from 34 to fit the
-    /// larger `iconButtonSide` (28pt) with even vertical padding above and
-    /// below the button cluster, matching the "square, evenly padded" ask:
-    /// `(barHeight - iconButtonSide) / 2` = 5pt of clearance on top and bottom.
-    static let barHeight: CGFloat = 38
-
-    /// Tapped the "Open Groups editor" button — the host opens the mixer window.
-    var onOpenGroupsEditor: (() -> Void)?
-    /// Tapped Settings — wired to open the Settings window.
-    var onOpenSettings: (() -> Void)?
-    /// Tapped Quit (far-right header button) — the host terminates the app.
+    /// A tab was clicked (or ⌘1/⌘2/⌘3 pressed). The host decides what a
+    /// selection means; this view does NOT flip its own selection state —
+    /// the host confirms via `setSelectedScreen` so header instances on other
+    /// screens stay in sync through one path.
+    var onSelectScreen: ((SurfaceScreen) -> Void)?
+    /// The Pin button was clicked. `nil` (the pre-cutover popover host) makes
+    /// the button inert.
+    var onTogglePin: (() -> Void)?
+    /// The Quit button was clicked.
     var onQuit: (() -> Void)?
 
-    private let titleLabel = NSTextField(labelWithString: "Audiouter")
-    private let groupsButton = NSButton()
-    private let settingsButton = NSButton()
-    private let quitButton = NSButton()
+    // MARK: State (pushed by the host)
 
-    init() {
+    private(set) var selectedScreen: SurfaceScreen = .mixer
+    private(set) var isPinned = false
+
+    // MARK: Views
+
+    private var tabButtons: [SurfaceScreen: NSButton] = [:]
+    private var tabCapsules: [SurfaceScreen: CapsuleFillView] = [:]
+    private let groupLozenge = CapsuleFillView()
+    private let pinButton = NSButton()
+    private let quitButton = NSButton()
+    /// The controls row, re-hosted FRAME-based (autoresizing) into whichever
+    /// material tier `rebuildBackgroundTier()` builds — constraints would
+    /// reference a stale superview across the re-host.
+    private let row = NSView()
+    private var backgroundView: NSView?
+
+    /// Whether THIS OS renders `NSGlassEffectView` (macOS 26+). Injected seam,
+    /// same shape as `SidebarViewController.osSupportsLiquidGlassSidebar`:
+    /// never read via a bare `#available` on the build path itself, so a test
+    /// can exercise the frost fallback on a ≥26 machine and vice versa. The
+    /// literal `#available` still guards the actual construction — a forced
+    /// `true` on an older OS falls back to frost rather than crashing.
+    nonisolated static var osSupportsGlassHeader: Bool {
+        if #available(macOS 26.0, *) { return true } else { return false }
+    }
+    private let osSupportsGlass: Bool
+
+    /// `nil` = read the live `accessibilityDisplayShouldReduceTransparency`.
+    /// Tests drive both tiers of the opaque fallback with this.
+    var test_reduceTransparencyOverride: Bool? {
+        didSet { rebuildBackgroundTier() }
+    }
+
+    init(osSupportsGlassHeader: Bool = PopoverHeaderView.osSupportsGlassHeader) {
+        self.osSupportsGlass = osSupportsGlassHeader
         super.init(frame: NSRect(x: 0, y: 0, width: 460, height: Self.barHeight))
         translatesAutoresizingMaskIntoConstraints = false
-        buildSubviews()
+        heightAnchor.constraint(equalToConstant: Self.barHeight).isActive = true
+        buildRow()
+        rebuildBackgroundTier()
+        applySelectionAppearance()
         configureAccessibility()
+
+        // Reduce Transparency (and Increase Contrast) arrive NEITHER through a
+        // model push nor `viewDidChangeEffectiveAppearance` — the A1 idiom:
+        // observe the workspace notification and re-resolve the tier live.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(accessibilityDisplayOptionsDidChange),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil)
+        // The accent dial remaps `Tokens.Color.gold` app-internally, which no
+        // AppKit appearance pass announces — instruments must repaint on the
+        // token module's own notification (AudiouterSharedUI/AGENTS.md).
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(accentStyleDidChange),
+            name: Tokens.accentStyleDidChangeNotification,
+            object: nil)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     // MARK: Build
 
-    private func buildSubviews() {
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        titleLabel.font = .systemFont(ofSize: 14, weight: .semibold)
-        titleLabel.textColor = Tokens.Color.label
-        titleLabel.alignment = .center
+    private func buildRow() {
+        row.autoresizingMask = [.width, .height]
 
-        configureIconButton(groupsButton,
-                            symbol: Self.groupsSymbolName,
-                            fallbacks: ["hifispeaker.and.homepod.fill",
-                                       "rectangle.3.group", "hifispeaker.2.fill"],
-                            accessibilityLabel: "Open Groups editor",
-                            action: #selector(groupsTapped))
-        configureIconButton(settingsButton,
-                            symbol: "gearshape.fill",
-                            fallbacks: ["gearshape", "gear"],
-                            accessibilityLabel: "Settings",
-                            action: #selector(settingsTapped))
-        configureIconButton(quitButton,
-                            symbol: "power",
-                            fallbacks: ["xmark.circle", "escape"],
-                            accessibilityLabel: "Quit",
-                            action: #selector(quitTapped))
+        let tabStack = NSStackView()
+        tabStack.orientation = .horizontal
+        tabStack.spacing = 2
+        tabStack.translatesAutoresizingMaskIntoConstraints = false
+        for screen in SurfaceScreen.allCases {
+            tabStack.addArrangedSubview(makeTab(screen))
+        }
 
-        addSubview(titleLabel)
-        addSubview(groupsButton)
-        addSubview(settingsButton)
-        addSubview(quitButton)
+        // The shared lozenge sits BEHIND the whole tab group (added before the
+        // stack so it composites underneath), hugging the group's bounds a
+        // touch taller than the buttons — the same ±3pt the selected capsule
+        // uses, so the two shapes nest concentrically.
+        groupLozenge.translatesAutoresizingMaskIntoConstraints = false
+        groupLozenge.fillProvider = { Tokens.Color.label.withAlphaComponent(Self.groupLozengeAlpha) }
+        row.addSubview(groupLozenge)
+        row.addSubview(tabStack)
+
+        configureTrailing(pinButton, symbol: "pin", accessibilityLabel: "Pin",
+                          action: #selector(pinTapped))
+        configureTrailing(quitButton, symbol: "power", accessibilityLabel: "Quit",
+                          action: #selector(quitTapped))
+        quitButton.toolTip = "Quit"
+        let trailingStack = NSStackView(views: [pinButton, quitButton])
+        trailingStack.orientation = .horizontal
+        trailingStack.spacing = 6
+        trailingStack.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(trailingStack)
 
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: Self.barHeight),
+            tabStack.leadingAnchor.constraint(equalTo: row.leadingAnchor,
+                                              constant: Self.closeButtonReserve),
+            tabStack.centerYAnchor.constraint(equalTo: row.centerYAnchor),
 
-            // Centered title over the whole bar.
-            titleLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
-            titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+            groupLozenge.leadingAnchor.constraint(equalTo: tabStack.leadingAnchor),
+            groupLozenge.trailingAnchor.constraint(equalTo: tabStack.trailingAnchor),
+            groupLozenge.topAnchor.constraint(equalTo: tabStack.topAnchor, constant: -3),
+            groupLozenge.bottomAnchor.constraint(equalTo: tabStack.bottomAnchor, constant: 3),
 
-            // Right-aligned icon cluster: groups · settings · quit (quit outermost).
-            // Each button is a fixed iconButtonSide×iconButtonSide square (not a
-            // wide-short rect) so the glyph reads as evenly padded on all four
-            // sides rather than floating off-center in a rectangle.
-            quitButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.iconButtonTrailingInset),
-            quitButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            quitButton.widthAnchor.constraint(equalToConstant: Self.iconButtonSide),
-            quitButton.heightAnchor.constraint(equalToConstant: Self.iconButtonSide),
-
-            settingsButton.trailingAnchor.constraint(equalTo: quitButton.leadingAnchor, constant: -Self.iconButtonSpacing),
-            settingsButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            settingsButton.widthAnchor.constraint(equalToConstant: Self.iconButtonSide),
-            settingsButton.heightAnchor.constraint(equalToConstant: Self.iconButtonSide),
-
-            groupsButton.trailingAnchor.constraint(equalTo: settingsButton.leadingAnchor, constant: -Self.iconButtonSpacing),
-            groupsButton.centerYAnchor.constraint(equalTo: centerYAnchor),
-            groupsButton.widthAnchor.constraint(equalToConstant: Self.iconButtonSide),
-            groupsButton.heightAnchor.constraint(equalToConstant: Self.iconButtonSide),
+            trailingStack.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -12),
+            trailingStack.centerYAnchor.constraint(equalTo: row.centerYAnchor),
         ])
     }
 
-    /// The chosen SF Symbol for "audio group" (task A; re-checked in the
-    /// header legibility pass, 2026-07-22). `hifispeaker.and.homepod.mini.badge.plus.fill`
-    /// depicts multiple speaker devices with an "add" badge — the clearest
-    /// "audio groups editor" metaphor of the candidates, but it's macOS-15+
-    /// only (resolves nil on this machine's macOS 14). Below macOS 15, the
-    /// choice is `hifispeaker.and.homepod.fill` (available back to macOS 14 —
-    /// verified on this machine); `rectangle.3.group` then `hifispeaker.2.fill`
-    /// remain as further fallbacks, verified non-nil at runtime in
-    /// `configureIconButton`, so the button is never blank.
-    ///
-    /// Re-litigated candidates before keeping this symbol: `rectangle.3.group[.fill]`
-    /// is Apple's own glyph for Stage Manager in System Settings, so reusing it
-    /// here risks the OPPOSITE problem (a clear glyph that means something else
-    /// already); `airplayaudio` reads as "pick a single AirPlay destination"
-    /// (the iOS Control Center metaphor), not "edit which devices are grouped
-    /// together," which is what this button actually opens (the mixer's group
-    /// membership editor); generic grid glyphs (`square.grid.2x2`) carry no
-    /// audio meaning at all. Nothing found clearly beats a speaker-with-plus
-    /// glyph for "manage speaker groups," so per the product owner's own framing
-    /// ("I defer to you... maybe if they were all just bigger... and a hover
-    /// tooltip") the fix here is sizing + tooltip, not a symbol swap.
-    static let groupsSymbolName = "hifispeaker.and.homepod.mini.badge.plus.fill"
+    /// One icon-over-label tab: a borderless `NSButton` (17pt symbol above an
+    /// 11pt caption) over its own selection capsule. The capsule is a separate
+    /// draw-based view rather than button state so the fill re-resolves from
+    /// `Tokens` on every repaint (appearance / Increase Contrast / accent dial
+    /// all land for free — the layer-stamp trap in AudiouterSharedUI/AGENTS.md).
+    private func makeTab(_ screen: SurfaceScreen) -> NSView {
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
 
-    /// Point size of each header glyph within its `iconButtonSide` square.
-    /// 16pt fills roughly half of the 28pt box on each axis (matching the
-    /// Control Center / Music.app mini-player proportion this button system is
-    /// modeled on, see `iconButtonSide`), leaving visibly even padding instead
-    /// of a glyph that nearly touches the button's edge.
-    private static let iconGlyphPointSize: CGFloat = 16
+        let capsule = CapsuleFillView()
+        capsule.translatesAutoresizingMaskIntoConstraints = false
+        capsule.fillProvider = { Tokens.Color.gold.withAlphaComponent(Self.selectedCapsuleAlpha) }
+        capsule.isFilled = false
 
-    /// Weight applied to every header glyph. `.medium` (up from `.regular`)
-    /// reads slightly bolder/larger at a glance without changing the point
-    /// size — part of the "make it bigger" fix — and is applied identically
-    /// to all three buttons so no one glyph looks heavier than its neighbors.
-    private static let iconGlyphWeight: NSFont.Weight = .medium
-
-    /// A stock `NSButton` with `bezelStyle = .accessoryBar` and
-    /// `showsBorderOnlyWhileMouseInside = true` — the system's borderless
-    /// toolbar-glyph convention (matches the icon buttons already used
-    /// elsewhere in this popover, e.g. `GroupRowView`/`DeviceRowView`): no
-    /// box at rest, a soft rounded-rect highlight only while the mouse is
-    /// over the button. The symbol is rendered with SF Symbols'
-    /// **hierarchical** color style (`NSImage.SymbolConfiguration(hierarchicalColor:)`),
-    /// which shades the glyph's sub-parts by depth for a less flat, more
-    /// "system" look than a single flat tint; verified non-nil at runtime,
-    /// falling back through `fallbacks` in order. All three buttons share the
-    /// exact same `symbolConfig` (size, weight, color style) and the same
-    /// `.scaleProportionallyDown` + fixed square frame, so even though the
-    /// three glyphs have different natural aspect ratios (a wide speaker glyph
-    /// vs. a roughly round gearshape vs. a roughly round power glyph), they
-    /// all render inside the same box at the same visual scale — "matched
-    /// proportions" per the product owner's ask.
-    ///
-    /// `button.toolTip` is set below to the same string passed for VoiceOver
-    /// (`accessibilityLabel`) as a complete phrase ("Open Groups editor" /
-    /// "Settings" / "Quit"), so a mouse-hover reveals in words exactly what the
-    /// icon-only button is unclear about on its own.
-    private func configureIconButton(_ button: NSButton,
-                                     symbol: String,
-                                     fallbacks: [String],
-                                     accessibilityLabel: String,
-                                     action: Selector) {
+        let button = NSButton()
+        button.title = screen.label
+        button.font = Tokens.Font.captionMedium
+        button.image = Self.resolveSymbol(screen.symbolName,
+                                          fallbacks: screen.fallbackSymbolNames,
+                                          accessibilityDescription: screen.label)
+        button.symbolConfiguration = .init(pointSize: 17, weight: .regular)
+        button.imagePosition = .imageAbove
+        button.imageScaling = .scaleNone
+        button.isBordered = false
+        button.target = self
+        button.action = #selector(tabTapped(_:))
+        button.tag = screen.rawValue
         button.translatesAutoresizingMaskIntoConstraints = false
+        // ⌘1/⌘2/⌘3: stock key-equivalent dispatch — the window routes the
+        // keystroke to the button while the surface is key, no monitor needed.
+        button.keyEquivalent = screen.keyEquivalent
+        button.keyEquivalentModifierMask = [.command]
+        button.setAccessibilityRole(.radioButton)
+        button.setAccessibilityLabel(screen.label)
+        button.toolTip = "\(screen.label) (⌘\(screen.keyEquivalent))"
+
+        container.addSubview(capsule)
+        container.addSubview(button)
+        NSLayoutConstraint.activate([
+            button.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            button.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            button.topAnchor.constraint(equalTo: container.topAnchor),
+            button.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 64),
+
+            capsule.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            capsule.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            capsule.topAnchor.constraint(equalTo: container.topAnchor, constant: -3),
+            capsule.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: 3),
+        ])
+        tabButtons[screen] = button
+        tabCapsules[screen] = capsule
+        return container
+    }
+
+    private func configureTrailing(_ button: NSButton, symbol: String,
+                                   accessibilityLabel: String, action: Selector) {
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.image = Self.resolveSymbol(symbol, fallbacks: [],
+                                          accessibilityDescription: accessibilityLabel)
+        button.symbolConfiguration = .init(pointSize: 13, weight: .regular)
+        button.imagePosition = .imageOnly
+        button.title = ""
         button.bezelStyle = .accessoryBar
         button.isBordered = true
         button.showsBorderOnlyWhileMouseInside = true
-        button.imagePosition = .imageOnly
-        button.imageScaling = .scaleProportionallyDown
         button.target = self
         button.action = action
+        button.setAccessibilityLabel(accessibilityLabel)
+        NSLayoutConstraint.activate([
+            button.widthAnchor.constraint(equalToConstant: Self.iconButtonSide),
+            button.heightAnchor.constraint(equalToConstant: Self.iconButtonSide),
+        ])
+    }
 
-        let symbolConfig = NSImage.SymbolConfiguration(pointSize: Self.iconGlyphPointSize, weight: Self.iconGlyphWeight)
-            .applying(.init(hierarchicalColor: Tokens.Color.secondaryLabel))
-        for name in [symbol] + fallbacks {
-            if let image = NSImage(systemSymbolName: name, accessibilityDescription: accessibilityLabel) {
-                if let hierarchical = image.withSymbolConfiguration(symbolConfig) {
-                    button.image = hierarchical
-                } else {
-                    image.isTemplate = true
-                    button.image = image
-                }
-                break
+    /// Resolve an SF Symbol, falling through `fallbacks` in order so a button
+    /// is never blank on an OS missing the first choice (all three tab symbols
+    /// are verified present back to the macOS 14 deployment target; the
+    /// fallbacks are defense in depth, same idiom as the previous header).
+    private static func resolveSymbol(_ name: String, fallbacks: [String],
+                                      accessibilityDescription: String) -> NSImage? {
+        for candidate in [name] + fallbacks {
+            if let image = NSImage(systemSymbolName: candidate,
+                                   accessibilityDescription: accessibilityDescription) {
+                return image
             }
         }
-        button.setAccessibilityLabel(accessibilityLabel)
-        button.toolTip = accessibilityLabel
+        return nil
+    }
+
+    // MARK: Material tiers
+
+    /// Which background the header is currently wearing.
+    enum MaterialTier { case glass, frost, opaque }
+
+    private var reduceTransparency: Bool {
+        test_reduceTransparencyOverride
+            ?? NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+    }
+
+    /// (Re)build the background for the current tier and re-host `row` inside
+    /// it. Runs on init and whenever Reduce Transparency flips.
+    private func rebuildBackgroundTier() {
+        backgroundView?.removeFromSuperview()
+        row.removeFromSuperview()
+
+        let background: NSView
+        if reduceTransparency {
+            // Tier 3: opaque warm fill + bottom hairline — the ONE tier that
+            // draws a border (glass defines its edge by refraction; a stroked
+            // edge on the translucent tiers is explicitly out, owner addendum).
+            let flat = OpaqueHeaderFillView()
+            flat.addSubview(row)
+            background = flat
+        } else if osSupportsGlass, #available(macOS 26.0, *) {
+            // Tier 1: Liquid Glass. Controls as `contentView`, never a
+            // sibling — the system needs to own legibility treatments.
+            let glass = NSGlassEffectView()
+            glass.cornerRadius = Tokens.Layout.panelCornerRadius
+            glass.tintColor = Tokens.Color.gold.withAlphaComponent(Self.glassTintAlpha)
+            glass.contentView = row
+            background = glass
+        } else {
+            // Tier 2: frost the app's own content scrolling under the strip.
+            let frost = NSVisualEffectView()
+            frost.material = .headerView
+            frost.blendingMode = .withinWindow
+            frost.state = .active
+            frost.addSubview(row)
+            background = frost
+        }
+
+        background.autoresizingMask = [.width, .height]
+        background.frame = bounds
+        addSubview(background)
+        row.frame = background.bounds
+        backgroundView = background
+    }
+
+    @objc private func accessibilityDisplayOptionsDidChange() {
+        rebuildBackgroundTier()
+        applySelectionAppearance()
+    }
+
+    /// The accent dial moved (`Tokens.accentStyle`): every gold-derived fill
+    /// and tint must repaint. Draw-based views need only invalidation; the
+    /// buttons re-apply their tints (which resolve through `Tokens` again).
+    @objc private func accentStyleDidChange() {
+        applySelectionAppearance()
+    }
+
+    // MARK: State pushed by the host
+
+    func setSelectedScreen(_ screen: SurfaceScreen) {
+        selectedScreen = screen
+        applySelectionAppearance()
+    }
+
+    func setPinned(_ pinned: Bool) {
+        isPinned = pinned
+        applySelectionAppearance()
+    }
+
+    private func applySelectionAppearance() {
+        for (screen, button) in tabButtons {
+            let isSelected = screen == selectedScreen
+            let tint = isSelected ? Tokens.Color.gold : Tokens.Color.secondaryLabel
+            button.contentTintColor = tint
+            button.attributedTitle = NSAttributedString(
+                string: screen.label,
+                attributes: [.font: Tokens.Font.captionMedium, .foregroundColor: tint])
+            button.state = isSelected ? .on : .off
+            tabCapsules[screen]?.isFilled = isSelected
+        }
+        pinButton.image = Self.resolveSymbol(isPinned ? "pin.fill" : "pin", fallbacks: ["pin"],
+                                             accessibilityDescription: isPinned ? "Unpin" : "Pin")
+        pinButton.contentTintColor = isPinned ? Tokens.Color.gold : Tokens.Color.secondaryLabel
+        pinButton.setAccessibilityLabel(isPinned ? "Unpin" : "Pin")
+        pinButton.toolTip = isPinned ? "Unpin — return to the menu bar"
+                                     : "Pin as a window"
+        quitButton.contentTintColor = Tokens.Color.secondaryLabel
+        groupLozenge.needsDisplay = true
     }
 
     // MARK: Actions
 
-    @objc private func groupsTapped() { onOpenGroupsEditor?() }
-
-    @objc private func settingsTapped() {
-        onOpenSettings?()
+    @objc private func tabTapped(_ sender: NSButton) {
+        guard let screen = SurfaceScreen(rawValue: sender.tag) else { return }
+        onSelectScreen?(screen)
     }
 
+    @objc private func pinTapped() { onTogglePin?() }
     @objc private func quitTapped() { onQuit?() }
 
     // MARK: Accessibility
@@ -248,33 +407,87 @@ final class PopoverHeaderView: NSView {
 
     // MARK: Test-support hooks
 
-    /// The header title string (task A literal).
-    var test_title: String { titleLabel.stringValue }
-    /// Whether the Groups-editor button resolved a non-nil system symbol image.
-    var test_groupsButtonHasImage: Bool { groupsButton.image != nil }
-    /// Whether the Settings button resolved a non-nil system symbol image.
-    var test_settingsButtonHasImage: Bool { settingsButton.image != nil }
-    /// Whether the Quit button resolved a non-nil system symbol image.
+    /// The material tier the header actually resolved to.
+    var test_materialTier: MaterialTier {
+        switch backgroundView {
+        case is OpaqueHeaderFillView: return .opaque
+        case is NSVisualEffectView: return .frost
+        default: return .glass
+        }
+    }
+    /// Whether every tab resolved a non-nil symbol image.
+    var test_allTabImagesResolved: Bool {
+        SurfaceScreen.allCases.allSatisfy { tabButtons[$0]?.image != nil }
+    }
+    /// Whether the Pin / Quit buttons resolved symbol images.
+    var test_pinButtonHasImage: Bool { pinButton.image != nil }
     var test_quitButtonHasImage: Bool { quitButton.image != nil }
-    /// Simulate tapping the Groups-editor button.
-    func test_tapGroupsEditor() { groupsTapped() }
-    /// Simulate tapping the Settings button.
-    func test_tapSettings() { settingsTapped() }
-    /// Simulate tapping the Quit button.
+    /// A tab's key equivalent, for the ⌘1/⌘2/⌘3 wiring assertions.
+    func test_tabKeyEquivalent(_ screen: SurfaceScreen) -> (key: String, modifiers: NSEvent.ModifierFlags)? {
+        guard let button = tabButtons[screen] else { return nil }
+        return (button.keyEquivalent, button.keyEquivalentModifierMask)
+    }
+    /// Whether a tab currently renders the filled selection capsule.
+    func test_isTabCapsuleFilled(_ screen: SurfaceScreen) -> Bool? {
+        tabCapsules[screen]?.isFilled
+    }
+    /// Fire a tab's real target/action, exactly as a click or ⌘-shortcut would.
+    func test_selectTab(_ screen: SurfaceScreen) {
+        guard let button = tabButtons[screen] else { return }
+        tabTapped(button)
+    }
+    /// Simulate tapping Pin / Quit.
+    func test_tapPin() { pinTapped() }
     func test_tapQuit() { quitTapped() }
-    /// The Groups-editor button's hover tooltip text (should be a complete
-    /// phrase, not just a one-word label — the whole point of the tooltip fix).
-    var test_groupsButtonToolTip: String? { groupsButton.toolTip }
-    /// The Settings button's hover tooltip text.
-    var test_settingsButtonToolTip: String? { settingsButton.toolTip }
-    /// The Quit button's hover tooltip text.
-    var test_quitButtonToolTip: String? { quitButton.toolTip }
-    /// Rendered frame size of each icon button, forcing layout first. Used to
-    /// confirm the buttons are actually square (width == height ==
-    /// `iconButtonSide`) after Auto Layout resolves, not just that the
-    /// constraints were authored that way.
-    func test_iconButtonFrames() -> (groups: NSRect, settings: NSRect, quit: NSRect) {
-        layoutSubtreeIfNeeded()
-        return (groupsButton.frame, settingsButton.frame, quitButton.frame)
+}
+
+// MARK: - CapsuleFillView
+
+/// A draw-based capsule fill (radius = half its height, so the shape stays a
+/// true capsule at any size). Draw-based rather than a stamped layer color so
+/// the `Tokens`-derived fill re-resolves every repaint — appearance flips,
+/// Increase Contrast, and the accent dial all land without a re-stamp path
+/// (the layer-color trap, AudiouterSharedUI/AGENTS.md). Non-interactive.
+@MainActor
+final class CapsuleFillView: NSView {
+    /// Resolves the fill at draw time. A provider, not a stored `NSColor`,
+    /// so alpha-derived token fills are re-derived per repaint too.
+    var fillProvider: (() -> NSColor)?
+    var isFilled = true { didSet { needsDisplay = true } }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard isFilled, let fill = fillProvider?() else { return }
+        fill.setFill()
+        NSBezierPath(roundedRect: bounds,
+                     xRadius: bounds.height / 2,
+                     yRadius: bounds.height / 2).fill()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+// MARK: - OpaqueHeaderFillView
+
+/// The Reduce-Transparency tier: an opaque warm fill (`canvasHi`) with a 1px
+/// bottom hairline — the ONLY header tier that draws a border. `draw(_:)`
+/// fills rather than layer colors so both resolve live against the current
+/// appearance and Increase Contrast variants.
+@MainActor
+final class OpaqueHeaderFillView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        Tokens.Color.canvasHi.setFill()
+        dirtyRect.fill()
+        Tokens.Color.hairline.setFill()
+        NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
     }
 }

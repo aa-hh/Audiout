@@ -285,37 +285,61 @@ public final class SettingsWindowController: NSWindowController {
     }
 }
 
-/// The tabbed content: one `NSTabViewItem` per settings pane, in toolbar style.
-/// Owns the window-sizing contract described on `SettingsWindowController` —
-/// every re-measure funnels through ``fittedContentSize`` and is published via
+/// The tabbed content: one `NSTabViewItem` per settings pane. Owns the
+/// host-sizing contract described on `SettingsWindowController` — every
+/// re-measure funnels through ``fittedContentSize`` and is published via
 /// ``onFittedContentSizeChange``, because `NSTabViewController` itself never
 /// resizes its window when the selected tab changes (trap 2).
+///
+/// Public since U3: the one-surface host (`AudiouterPopoverUI
+/// .AppSurfaceController`) hosts this directly as its Settings screen, with
+/// `tabStyle: .segmentedControlOnTop` so the tabs render IN the content,
+/// beneath the surface's own switcher. The standalone window keeps `.toolbar`
+/// (the default here) until U5 retires it — two hosts, one sizing contract.
 @MainActor
-final class SettingsRootViewController: NSTabViewController {
+public final class SettingsRootViewController: NSTabViewController {
 
     /// One tab's definition. The SF Symbol is required, not decorative: in
     /// toolbar style an item with no `image` renders as a blank toolbar slot.
-    struct Tab {
+    public struct Tab {
         let title: String
         let symbolName: String
         let viewController: NSViewController
+
+        public init(title: String, symbolName: String, viewController: NSViewController) {
+            self.title = title
+            self.symbolName = symbolName
+            self.viewController = viewController
+        }
     }
 
-    /// Fired with the size the window should adopt, whenever that size changes:
-    /// on a tab switch, and when the selected pane's own preferred size changes
-    /// at runtime. The window controller is the only listener.
-    var onFittedContentSizeChange: ((NSSize) -> Void)?
+    /// Fired with the size the host should adopt for the content, whenever
+    /// that size changes: on a tab switch, and when the selected pane's own
+    /// preferred size changes at runtime. One listener at a time — the
+    /// standalone window controller, or the surface (which takes it over).
+    public var onFittedContentSizeChange: ((NSSize) -> Void)?
 
     /// Re-measure trigger 3, held for the controller's lifetime — see the
     /// comment where they're installed for why this is KVO and not the
     /// documented AppKit callback.
     private var preferredSizeObservations: [NSKeyValueObservation] = []
 
-    init(tabs: [Tab]) {
+    /// Height of tab chrome drawn INSIDE the content (0 for `.toolbar`, whose
+    /// tab bar lives in the title-bar area). Measured at the end of `init`,
+    /// never hardcoded: probed 2026-08-07, `.segmentedControlOnTop` adds
+    /// exactly 30pt (a 24pt segmented control + 3pt above and below) on this
+    /// OS headlessly and identically per tab — but that is an AppKit-authored
+    /// layout that could drift, so it is read off the freshly-built view
+    /// (`view.fittingSize` minus the first pane's published height), at the
+    /// one moment nothing has stretched the panes (the same "fresh
+    /// controller" caveat `test_tabRootView` documents).
+    private var inContentTabChromeHeight: CGFloat = 0
+
+    public init(tabs: [Tab], tabStyle style: NSTabViewController.TabStyle = .toolbar) {
         super.init(nibName: nil, bundle: nil)
         // Set the style BEFORE mounting items: `addTabViewItem` loads the view,
         // and the style decides what that view is built as.
-        tabStyle = .toolbar
+        tabStyle = style
         for tab in tabs {
             let item = NSTabViewItem(viewController: tab.viewController)
             item.label = tab.title
@@ -340,11 +364,24 @@ final class SettingsRootViewController: NSTabViewController {
                 }
             }
         }
+
+        // Measure the in-content tab chrome (see `inContentTabChromeHeight`)
+        // off the freshly-built, never-shown view — the first pane is selected
+        // and unstretched, so `view.fittingSize` minus its height is exactly
+        // the segmented control's strip. Same published-height-else-fitting
+        // fallback `fittedContentSize` uses.
+        if style != .toolbar, let first = tabs.first {
+            view.layoutSubtreeIfNeeded()
+            let published = first.viewController.preferredContentSize.height
+            let paneHeight = published > 0 ? published
+                                           : first.viewController.view.fittingSize.height
+            inContentTabChromeHeight = max(0, view.fittingSize.height - paneHeight)
+        }
     }
 
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    override func viewDidLoad() {
+    public override func viewDidLoad() {
         super.viewDidLoad()
         // An explicit opaque, appearance-adaptive background behind the panes —
         // matching the popover's own convention of never relying on the ambient
@@ -419,12 +456,18 @@ final class SettingsRootViewController: NSTabViewController {
     ///
     /// The `fittingSize` fallback only covers a pane that never published a
     /// preferred size — better a rough measurement than a collapsed window.
-    var fittedContentSize: NSSize {
+    ///
+    /// In-content tab styles add `inContentTabChromeHeight` on top: the
+    /// segmented control lives INSIDE the content (unlike `.toolbar`, whose
+    /// tab bar costs zero content height), so the host must size for pane +
+    /// chrome or every pane gets squeezed by exactly the chrome's height.
+    public var fittedContentSize: NSSize {
         guard let child = selectedViewController else { return .zero }
         child.view.layoutSubtreeIfNeeded()
         let published = child.preferredContentSize.height
         let height = published > 0 ? published : child.view.fittingSize.height
-        return NSSize(width: SettingsForm.contentWidth, height: height)
+        return NSSize(width: SettingsForm.contentWidth,
+                      height: height + inContentTabChromeHeight)
     }
 
     /// The selected tab's view controller. `NSTabViewController` exposes only
@@ -448,15 +491,15 @@ final class SettingsRootViewController: NSTabViewController {
     }
 
     /// Select a tab through the real `NSTabView`, exactly as a toolbar click
-    /// does — so `tabView(_:didSelect:)` runs and the window resizes.
-    func selectTab(at index: Int) {
+    /// does — so `tabView(_:didSelect:)` runs and the host resizes.
+    public func selectTab(at index: Int) {
         tabView.selectTabViewItem(at: index)
     }
 
     /// Re-measure trigger 2. `NSTabViewController` does NOT resize its window on
     /// a tab switch (trap 2, probed: three panes of 200/480/700pt all left the
     /// window at 460×200) — this is where that resize comes from.
-    override func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
+    public override func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
         super.tabView(tabView, didSelect: tabViewItem)
         // Put the incoming pane back at the fixed content width first. On screen
         // it already is (the window is that wide); headless — tests and
@@ -476,7 +519,7 @@ final class SettingsRootViewController: NSTabViewController {
     /// actually carries a runtime growth to the window. Both funnel through the
     /// same publisher, and a duplicate `setContentSize` to the same size is a
     /// no-op, so it is harmless if a future macOS starts calling it.
-    override func preferredContentSizeDidChange(for viewController: NSViewController) {
+    public override func preferredContentSizeDidChange(for viewController: NSViewController) {
         super.preferredContentSizeDidChange(for: viewController)
         guard viewController === selectedViewController else { return }
         onFittedContentSizeChange?(fittedContentSize)

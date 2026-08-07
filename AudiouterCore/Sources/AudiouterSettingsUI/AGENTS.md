@@ -31,6 +31,22 @@ package layout and where the settings model types (`AppSettings`,
   the title-bar area, so it costs zero height inside the content rect — the
   window's content size IS the selected pane's fitting size, nothing to
   subtract.
+- **Two hosts, one root controller (U3).** `SettingsRootViewController` is
+  public and takes its tab style at init: the standalone window keeps
+  `.toolbar` (unchanged until U5 retires it), while the one-surface host
+  (`AudiouterPopoverUI.AppSurfaceController`) passes
+  `.segmentedControlOnTop` so the tabs render IN the content, beneath the
+  surface's own switcher. An in-content style puts the tab chrome INSIDE the
+  content rect, so `fittedContentSize` adds a chrome height it MEASURES off
+  the freshly-built view at init (probed 2026-08-07: exactly 30pt — a 24pt
+  segmented control + 3pt above and below — identical per tab, headless and
+  on screen; measured rather than hardcoded because the layout is
+  AppKit-authored and can drift). The four sizing traps below apply to
+  WHOEVER hosts these panes — the surface inherits all of them (plan R5),
+  and its per-tab resize rides the same `onFittedContentSizeChange`
+  publisher, which has ONE listener at a time: the surface takes it over,
+  so never hand the surface a root whose callback something else still
+  needs.
 - **The sizing trap — probe-confirmed AppKit facts. Do not weaken any of
   them.** An earlier tabbed build shipped a mostly-empty giant window on every
   tab, every launch; the one-screen rewrite dodged that bug rather than fixing
@@ -130,7 +146,7 @@ package layout and where the settings model types (`AppSettings`,
 | Type | What it is |
 |---|---|
 | `SettingsWindowController` | Owns the standalone titled window + its frame autosave, forwards `onThemeChanged`/`onExcludedAppsChanged`, applies the per-tab content size, exposes the `test_*` hooks. |
-| `SettingsRootViewController` | `NSTabViewController` (toolbar style) holding the three panes; measures `fittedContentSize` off the selected child and publishes it via `onFittedContentSizeChange`. |
+| `SettingsRootViewController` | Public `NSTabViewController` (style per host: toolbar window / in-content surface) holding the panes; measures `fittedContentSize` (pane + in-content chrome) and publishes it via `onFittedContentSizeChange`. |
 | `GeneralSettingsViewController` | Launch-at-login. |
 | `AppearanceSettingsViewController` | Theme tiles (warm product previews) + Accent dial. |
 | `AudioSettingsViewController` | Excluded-apps list + Advanced › Audio buffer (when `LatencyConfigurable`). |

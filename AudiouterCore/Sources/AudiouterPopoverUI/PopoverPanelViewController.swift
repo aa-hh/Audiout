@@ -90,9 +90,19 @@ final class PopoverPanelViewController: NSViewController {
     /// row (a header-only card has nothing to collapse until it has a body).
     private var pendingCollapsed: [String: Bool] = [:]
 
-    /// The header bar pinned above the scroll area (task A). Now also hosts the
-    /// **Quit** button (the footer was removed 2026-07-14).
+    /// The header bar pinned above the scroll area — since U3 the one-surface
+    /// tab-bar switcher strip (Mixer/Groups/Settings tabs + Pin + Quit). Lives
+    /// INSIDE the panel (unlike the other screens' container-owned headers) so
+    /// the Mixer's exact-fit height includes it for free.
     let header = PopoverHeaderView()
+
+    /// `header`'s top pin, kept so the surface can seat the whole content
+    /// below a pinned window's real title bar (`setHeaderTopInset`).
+    private var headerTopConstraint: NSLayoutConstraint?
+
+    /// The header's resting inset from the container top (breathing room the
+    /// original layout always had; the pinned chrome inset adds to it).
+    private static let headerRestingTopInset: CGFloat = 4
 
     /// Popover width — SoundSource-style proportions so the columns
     /// (name · Volume · Device) line up. Narrowed 2026-07-16 (change 5): the
@@ -168,6 +178,11 @@ final class PopoverPanelViewController: NSViewController {
         railOverlay.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(railOverlay)
 
+        // The header's top pin, kept for the surface's pinned-chrome inset.
+        let headerTop = header.topAnchor.constraint(equalTo: container.topAnchor,
+                                                    constant: Self.headerRestingTopInset)
+        headerTopConstraint = headerTop
+
         // The stack is pinned DIRECTLY inside the container — no `NSScrollView`, so
         // no scroller chrome can ever appear (T-3, PLAN-POPOVER-ROUTING.md §A: the
         // popover is exactly its content height and never scrolls). Pinning all four
@@ -191,8 +206,9 @@ final class PopoverPanelViewController: NSViewController {
             background.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             background.trailingAnchor.constraint(equalTo: container.trailingAnchor),
 
-            // Header bar pinned to the very top (task A), above the System card.
-            header.topAnchor.constraint(equalTo: container.topAnchor, constant: 4),
+            // Header bar pinned to the very top, above the System card (its
+            // top pin is `headerTop` above, kept for the pinned-chrome inset).
+            headerTop,
             header.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             header.trailingAnchor.constraint(equalTo: container.trailingAnchor),
 
@@ -902,14 +918,26 @@ final class PopoverPanelViewController: NSViewController {
     /// Test-only: simulate a click on the note's action button, if any.
     func test_tapSystemAirPlayNoteAction() { systemAirPlayNoteView?.test_tapActionButton() }
 
-    /// Wire the header bar's three icon buttons (task A + the Quit button that
-    /// replaced the removed footer, 2026-07-14).
-    func setHeaderActions(onOpenGroupsEditor: @escaping () -> Void,
-                          onOpenSettings: @escaping () -> Void,
+    /// Wire the header's switcher + Quit (U3). Pin is deliberately absent:
+    /// only the surface host has a pin concept, and it rewires the header
+    /// directly when it claims the panel (`AppSurfaceController.wireHeader`).
+    func setHeaderActions(onSelectScreen: @escaping (SurfaceScreen) -> Void,
                           onQuit: @escaping () -> Void) {
-        header.onOpenGroupsEditor = onOpenGroupsEditor
-        header.onOpenSettings = onOpenSettings
+        header.onSelectScreen = onSelectScreen
         header.onQuit = onQuit
+    }
+
+    /// Seat the whole content (header included — the card stack hangs off the
+    /// header's bottom) below a pinned surface window's title bar. The caller
+    /// republishes the exact-fit size afterward; this only moves the pin.
+    func setHeaderTopInset(_ inset: CGFloat) {
+        _ = view // ensure loadView ran so the constraint exists
+        headerTopConstraint?.constant = Self.headerRestingTopInset + inset
+    }
+
+    /// The header's current extra top inset (0 unpinned), for structural tests.
+    var test_headerTopInset: CGFloat {
+        (headerTopConstraint?.constant ?? Self.headerRestingTopInset) - Self.headerRestingTopInset
     }
 
     // MARK: Test-support

@@ -385,19 +385,23 @@ import AppKit
 
     // MARK: Layout overhaul (header / columns / member toggle / groups "+")
 
-    /// Task A — the header bar shows the "Audiouter" title and two icon
-    /// buttons that resolve system SF Symbols; the Groups-editor button opens the
-    /// mixer path.
-    @Test func headerTitleAndIconButtons() async throws {
+    /// U3 — the header is now the surface switcher: its three tabs resolve
+    /// system SF Symbols, and the PRE-CUTOVER wiring keeps the popover host
+    /// fully usable until U4 — the Groups tab opens the mixer path and the
+    /// Settings tab the settings path, exactly as the superseded icon
+    /// buttons did.
+    @Test func headerSwitcherTabsResolveAndKeepPreCutoverWiring() async throws {
         let (popover, _, _) = try await makePopover()
-        #expect(popover.test_headerTitle == "Audiouter")
-        #expect(popover.test_headerGroupsButtonHasImage, "Open-Groups-editor button resolved a system SF Symbol")
-        #expect(popover.test_headerSettingsButtonHasImage, "Settings button resolved a system SF Symbol")
+        #expect(popover.test_headerTabImagesResolved, "all three switcher tabs resolved system SF Symbols")
 
         var openedMixer = false
+        var openedSettings = false
         popover.onOpenMixer = { openedMixer = true }
-        popover.test_tapHeaderGroupsEditor()
-        #expect(openedMixer, "the header Groups-editor button opens the mixer path")
+        popover.onOpenSettings = { openedSettings = true }
+        popover.test_tapHeaderTab(.groups)
+        popover.test_tapHeaderTab(.settings)
+        #expect(openedMixer, "the header Groups tab opens the mixer path")
+        #expect(openedSettings, "the header Settings tab opens the settings path")
     }
 
     /// A Selected-Devices row for a device shows its on/off toggle.

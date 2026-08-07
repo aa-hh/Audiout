@@ -445,12 +445,21 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         popover.contentViewController = panel
         panel.controller = self
         mainOutRow.delegate = self
-        // Header bar actions (task A): the "Open Groups editor" button opens the
-        // mixer window (where group membership editing lives); Settings forwards
-        // to `onOpenSettings` (the app wires it to the Settings window).
+        // Header switcher actions, PRE-CUTOVER wiring (U3): while the popover
+        // is still the host, the Groups/Settings tabs open the same standalone
+        // windows their predecessor buttons did, so the app stays fully usable
+        // until U4 flips it to the one surface. The surface REPLACES this
+        // wiring when it claims the panel (a tab becomes the screen switch),
+        // and the Mixer tab/Pin are inert here — the popover has no screens
+        // to switch between and nothing to pin.
         panel.setHeaderActions(
-            onOpenGroupsEditor: { [weak self] in self?.onOpenMixer?() },
-            onOpenSettings: { [weak self] in self?.onOpenSettings?() },
+            onSelectScreen: { [weak self] screen in
+                switch screen {
+                case .mixer: break
+                case .groups: self?.onOpenMixer?()
+                case .settings: self?.onOpenSettings?()
+                }
+            },
             onQuit: { NSApp.terminate(nil) })
         applicationsFooter.onAdd = { [weak self] in
             guard let self else { return }
@@ -851,6 +860,19 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// size. `nil` (the default) keeps the popover behavior.
     var surfaceResizer: ((_ animated: Bool, _ apply: () -> Void) -> Void)?
 
+    /// Hand the panel to the one-surface host (U3, `AppSurfaceController`).
+    /// Releases the `NSPopover`'s claim on the panel FIRST: an `NSPopover`
+    /// silently reclaims its `contentViewController`'s view even while closed
+    /// (prototype-verified), so a window hosting the same controller without
+    /// this release loses the view tree out from under itself. After this,
+    /// `toggle(relativeTo:)` would show an empty popover — the app must be
+    /// EITHER a popover host or a surface host, never both; U7 deletes the
+    /// popover half entirely.
+    func claimPanelForSurfaceHosting() -> PopoverPanelViewController {
+        popover.contentViewController = nil
+        return panel
+    }
+
     /// Apply the panel's next `preferredContentSize` change with the current
     /// host's resize animation. The panel's resize primitive
     /// (`panelContentDidChangeHeight`) calls this so the DOCUMENTED
@@ -877,8 +899,11 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     /// Rebuild as an OPEN (T-5, PLAN §B): recompute every collapsible card's
     /// default and discard manual toggles from the previous open, THEN rebuild.
-    /// Shared by `toggle()`'s show path and `test_simulateOpen()`.
-    private func rebuildForOpen() {
+    /// Shared by `toggle()`'s show path, `test_simulateOpen()`, and — since U3
+    /// — the surface host's mount path (`AppSurfaceController`), which must
+    /// run the same open ritual before putting the panel on screen (hidden
+    /// means idle, so an open re-ingests everything that arrived meanwhile).
+    func rebuildForOpen() {
         isRebuildingForOpen = true
         transientCollapsed.removeAll()
         rebuild()
@@ -2349,14 +2374,13 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     public var test_saveCurrentSetupEnabled: Bool { canSaveCurrentSetup }
     public var test_headerHasQuit: Bool { panel.test_headerHasQuit }
 
-    // Header (task A) test hooks.
-    public var test_headerTitle: String { panel.header.test_title }
-    public var test_headerGroupsButtonHasImage: Bool { panel.header.test_groupsButtonHasImage }
-    public var test_headerSettingsButtonHasImage: Bool { panel.header.test_settingsButtonHasImage }
-    /// Simulate tapping the header's "Open Groups editor" button.
-    public func test_tapHeaderGroupsEditor() { panel.header.test_tapGroupsEditor() }
-    /// Simulate tapping the header's Settings button.
-    public func test_tapHeaderSettings() { panel.header.test_tapSettings() }
+    // Header switcher (U3) test hooks — public because `popover-harness`
+    // reads them through the non-testable import.
+    /// Whether every switcher tab resolved a non-nil SF Symbol image.
+    public var test_headerTabImagesResolved: Bool { panel.header.test_allTabImagesResolved }
+    /// Fire a header tab exactly as a click would (pre-cutover, Groups opens
+    /// the mixer path and Settings the settings path).
+    public func test_tapHeaderTab(_ screen: SurfaceScreen) { panel.header.test_selectTab(screen) }
 
     /// Count of device rows in the Selected Devices section.
     public var test_deviceSectionRowCount: Int { deviceRowsByID.count }

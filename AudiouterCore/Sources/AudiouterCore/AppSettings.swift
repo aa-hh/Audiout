@@ -72,6 +72,7 @@ public struct AppSettings {
         static let connectVolume = "audio.connectVolume"
         static let mainOutVolume = "audio.mainOutVolume"
         static let syncOffsetMs = "audio.syncOffsetMs"
+        static let surfacePinned = "surface.pinned"
     }
 
     /// The user-selectable sender start-buffer options in ms (Settings › Audio
@@ -257,5 +258,15 @@ public struct AppSettings {
         nonmutating set {
             defaults.set(min(max(newValue, Self.minSyncOffsetMs), Self.maxSyncOffsetMs), forKey: Keys.syncOffsetMs)
         }
+    }
+
+    /// Whether the one-surface panel is PINNED (an ordinary movable window)
+    /// rather than the transient menu-bar bubble. Written by the surface's Pin
+    /// button, restored when the surface is constructed — the manner survives
+    /// relaunch, matching the pinned window's own frame autosave. Defaults to
+    /// `false` (unset): a fresh install gets the transient bubble.
+    public var surfacePinned: Bool {
+        get { defaults.bool(forKey: Keys.surfacePinned) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.surfacePinned) }
     }
 }

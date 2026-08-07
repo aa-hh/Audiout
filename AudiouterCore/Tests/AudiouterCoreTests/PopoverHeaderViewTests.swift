@@ -5,96 +5,136 @@ import Testing
 import AppKit
 @testable import AudiouterPopoverUI
 
-/// Coverage for `PopoverHeaderView`'s icon-button system (header legibility
-/// pass, 2026-07-22): the three buttons must be square at the new, larger
-/// `iconButtonSide`, must resolve non-nil glyph images (with fallbacks), and
-/// must surface a complete-phrase hover tooltip — the product owner's fixes
-/// for "I can't tell what these buttons do."
+/// Coverage for `PopoverHeaderView` in its U3 role: the one-surface header
+/// strip — the three-tab capsule switcher, the trailing Pin/Quit pair, the
+/// ⌘1/⌘2/⌘3 key equivalents, and the three-tier material background
+/// (glass / frost / opaque) with its Reduce-Transparency and OS seams.
 @MainActor
 @Suite struct PopoverHeaderViewTests {
 
-    private func makeHeader() -> PopoverHeaderView {
-        let header = PopoverHeaderView()
-        // Give the view a window-less but laid-out frame so Auto Layout can
-        // resolve real frame sizes for the button-square assertions below.
-        header.frame = NSRect(x: 0, y: 0, width: 460, height: PopoverHeaderView.barHeight)
+    private func makeHeader(osSupportsGlass: Bool = true) -> PopoverHeaderView {
+        let header = PopoverHeaderView(osSupportsGlassHeader: osSupportsGlass)
+        header.frame = NSRect(x: 0, y: 0, width: 623, height: PopoverHeaderView.barHeight)
         return header
     }
 
-    // MARK: Sizing — square, evenly padded, "slightly larger"
+    // MARK: Tabs
 
-    @Test func iconButtonSideIsLargerThanThePreviousSizeAndSquare() {
-        // Previous shipped box was 26×22 (non-square). The new box must be
-        // strictly bigger on both axes and square (width == height), per the
-        // "bigger" + "perfectly even padding... square buttons" ask.
-        #expect(PopoverHeaderView.iconButtonSide > 26)
-        #expect(PopoverHeaderView.iconButtonSide > 22)
-    }
-
-    @Test func barHeightGivesEvenVerticalClearanceAroundTheButtonSquare() {
-        let clearance = PopoverHeaderView.barHeight - PopoverHeaderView.iconButtonSide
-        #expect(clearance > 0, "the bar must be taller than the button square")
-        #expect(clearance.truncatingRemainder(dividingBy: 2) == 0,
-                "an even total clearance splits into equal top/bottom padding")
-    }
-
-    @Test func allThreeIconButtonsRenderAtTheSameMatchedSize() {
-        // The Auto Layout constraints (asserted as authored in
-        // `iconButtonSideIsLargerThanThePreviousSizeAndSquare`) bind to
-        // each accessoryBar button's *alignment rect*, not its raw `.frame` —
-        // an `NSButton` bezel can carry a small asymmetric shadow/padding
-        // inset between the two, verified empirically here (a 28pt-square
-        // constraint resolves to a ~28×29pt frame, not exactly 28×28).
-        // What actually matters for "matched proportions" is that all three
-        // buttons resolve to the IDENTICAL frame size as each other, since
-        // they share one `iconButtonSide` constraint value and one bezel
-        // style — asserted directly rather than re-deriving AppKit's inset.
+    @Test func allTabsAndTrailingButtonsResolveSymbolImages() {
         let header = makeHeader()
-        let frames = header.test_iconButtonFrames()
-
-        #expect(frames.groups.size == frames.settings.size,
-                "groups and settings must render at the same size")
-        #expect(frames.settings.size == frames.quit.size,
-                "settings and quit must render at the same size")
-        #expect(abs(frames.groups.width - PopoverHeaderView.iconButtonSide) <= 1.5)
-        #expect(abs(frames.groups.height - PopoverHeaderView.iconButtonSide) <= 1.5)
-    }
-
-    // MARK: Glyphs resolve non-nil (matched proportions still needs an image)
-
-    @Test func allThreeIconButtonsResolveANonNilImage() {
-        let header = makeHeader()
-        #expect(header.test_groupsButtonHasImage)
-        #expect(header.test_settingsButtonHasImage)
+        #expect(header.test_allTabImagesResolved, "every switcher tab resolved a system SF Symbol")
+        #expect(header.test_pinButtonHasImage)
         #expect(header.test_quitButtonHasImage)
     }
 
-    // MARK: Hover tooltips — the other half of the legibility fix
-
-    @Test func hoverTooltipsAreCompletePhrasesNotBareLabels() {
+    @Test func tabTapsReportTheScreenButDoNotSelfSelect() {
+        // The host owns selection: a tap must fire the callback with the
+        // right screen, and the header must NOT flip its own state (the host
+        // confirms via `setSelectedScreen`, which keeps sibling headers on
+        // other screens in sync through one path).
         let header = makeHeader()
-        #expect(header.test_groupsButtonToolTip == "Open Groups editor")
-        #expect(header.test_settingsButtonToolTip == "Settings")
-        #expect(header.test_quitButtonToolTip == "Quit")
+        var reported: [SurfaceScreen] = []
+        header.onSelectScreen = { reported.append($0) }
+
+        header.test_selectTab(.groups)
+        header.test_selectTab(.settings)
+        header.test_selectTab(.mixer)
+
+        #expect(reported == [.groups, .settings, .mixer])
+        #expect(header.selectedScreen == .mixer, "selection unchanged until the host confirms")
+        #expect(header.test_isTabCapsuleFilled(.groups) == false)
     }
 
-    // MARK: Taps still route to the right callback (unaffected by the restyle)
-
-    @Test func tapsStillFireTheirCallbacks() {
+    @Test func hostConfirmedSelectionMovesTheFilledCapsule() {
         let header = makeHeader()
-        var openedGroups = false
-        var openedSettings = false
+        #expect(header.test_isTabCapsuleFilled(.mixer) == true, "Mixer starts selected")
+
+        header.setSelectedScreen(.settings)
+
+        #expect(header.selectedScreen == .settings)
+        #expect(header.test_isTabCapsuleFilled(.settings) == true)
+        #expect(header.test_isTabCapsuleFilled(.mixer) == false,
+                "exactly one capsule is filled — the selected segment")
+        #expect(header.test_isTabCapsuleFilled(.groups) == false)
+    }
+
+    // MARK: ⌘1 / ⌘2 / ⌘3
+
+    @Test func tabsCarryCommandNumberKeyEquivalentsInOrder() throws {
+        let header = makeHeader()
+        for (index, screen) in SurfaceScreen.allCases.enumerated() {
+            let wiring = try #require(header.test_tabKeyEquivalent(screen))
+            #expect(wiring.key == String(index + 1), "\(screen) is ⌘\(index + 1)")
+            #expect(wiring.modifiers == [.command])
+        }
+    }
+
+    // MARK: Pin / Quit
+
+    @Test func pinAndQuitFireTheirCallbacks() {
+        let header = makeHeader()
+        var pinned = false
         var quit = false
-        header.onOpenGroupsEditor = { openedGroups = true }
-        header.onOpenSettings = { openedSettings = true }
+        header.onTogglePin = { pinned = true }
         header.onQuit = { quit = true }
 
-        header.test_tapGroupsEditor()
-        header.test_tapSettings()
+        header.test_tapPin()
         header.test_tapQuit()
 
-        #expect(openedGroups)
-        #expect(openedSettings)
+        #expect(pinned)
         #expect(quit)
+    }
+
+    @Test func pinButtonReflectsThePinnedState() {
+        let header = makeHeader()
+        #expect(!header.isPinned)
+        header.setPinned(true)
+        #expect(header.isPinned)
+        #expect(header.test_pinButtonHasImage, "pin.fill resolved for the pinned state")
+        header.setPinned(false)
+        #expect(!header.isPinned)
+    }
+
+    // MARK: Material tiers
+
+    @Test func glassTierWhenTheOSSupportsIt() {
+        let header = makeHeader(osSupportsGlass: true)
+        header.test_reduceTransparencyOverride = false
+        // On a pre-26 host the #available guard demotes this to frost; the
+        // suite's own floor is macOS 14, so accept either only where the
+        // runtime genuinely lacks glass.
+        if #available(macOS 26.0, *) {
+            #expect(header.test_materialTier == .glass)
+        } else {
+            #expect(header.test_materialTier == .frost)
+        }
+    }
+
+    @Test func frostTierBelowGlassOS() {
+        let header = makeHeader(osSupportsGlass: false)
+        header.test_reduceTransparencyOverride = false
+        #expect(header.test_materialTier == .frost,
+                "macOS 14–15 fall back to the within-window frost")
+    }
+
+    @Test func reduceTransparencyForcesTheOpaqueTierOnAnyOS() {
+        for osSupportsGlass in [true, false] {
+            let header = makeHeader(osSupportsGlass: osSupportsGlass)
+            header.test_reduceTransparencyOverride = true
+            #expect(header.test_materialTier == .opaque,
+                    "Reduce Transparency wins over glass=\(osSupportsGlass)")
+        }
+    }
+
+    @Test func reduceTransparencyFlipRebuildsTheTierLive() {
+        let header = makeHeader(osSupportsGlass: false)
+        header.test_reduceTransparencyOverride = false
+        #expect(header.test_materialTier == .frost)
+
+        header.test_reduceTransparencyOverride = true
+        #expect(header.test_materialTier == .opaque, "mid-session RT on rebuilds the background")
+
+        header.test_reduceTransparencyOverride = false
+        #expect(header.test_materialTier == .frost, "mid-session RT off restores the translucent tier")
     }
 }

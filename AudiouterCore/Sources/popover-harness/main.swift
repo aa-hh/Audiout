@@ -71,18 +71,25 @@ func allLabelStrings(under view: NSView) -> [String] {
     return result
 }
 
-/// The top-level card containers directly under `panelView`: the outermost
-/// `NSStackView`'s arranged subviews (one per `beginCard` call), in the order
-/// they were added — i.e. rendering top-to-bottom.
+/// The top-level card containers directly under `panelView`: the CARD stack's
+/// arranged subviews (one per `beginCard` call), in the order they were added
+/// — i.e. rendering top-to-bottom.
+///
+/// Matched by class name (`RailStackView`, the panel's card stack) rather
+/// than "first `NSStackView` found": since U3 the header strip contains its
+/// own stack views (the switcher's tab row), and a first-stack walk finds one
+/// of those instead — the type is internal to `AudiouterPopoverUI`, and the
+/// name check keeps this tool on the public `test_panelView` surface.
 func topLevelCards(panelView: NSView) -> [NSView] {
-    func firstStackView(under view: NSView) -> NSStackView? {
-        if let stack = view as? NSStackView { return stack }
+    func cardStack(under view: NSView) -> NSStackView? {
+        if let stack = view as? NSStackView,
+           String(describing: type(of: stack)) == "RailStackView" { return stack }
         for sub in view.subviews {
-            if let found = firstStackView(under: sub) { return found }
+            if let found = cardStack(under: sub) { return found }
         }
         return nil
     }
-    guard let stack = firstStackView(under: panelView) else { return [] }
+    guard let stack = cardStack(under: panelView) else { return [] }
     return stack.arrangedSubviews
 }
 
@@ -238,17 +245,16 @@ func run() -> Int32 {
         checks.expectEqual(backend.devices.first { $0.id == target }?.volume, volBefore, "unmute restores")
     }
 
-    // --- 11. Header bar (task A): title + two system-symbol icon buttons.
+    // --- 11. Header bar (U3): the surface switcher's three tabs resolve
+    // system SF Symbols, and the pre-cutover wiring still opens the mixer
+    // path from the Groups tab.
     print("\n[11] Header bar")
-    checks.expectEqual(popover.test_headerTitle, "Audiouter", "header title is Audiouter")
-    checks.expect(popover.test_headerGroupsButtonHasImage,
-                  "Open-Groups-editor button resolved a system SF Symbol")
-    checks.expect(popover.test_headerSettingsButtonHasImage,
-                  "Settings button resolved a system SF Symbol")
+    checks.expect(popover.test_headerTabImagesResolved,
+                  "all three switcher tabs resolved system SF Symbols")
     var openedMixer = false
     popover.onOpenMixer = { openedMixer = true }
-    popover.test_tapHeaderGroupsEditor()
-    checks.expect(openedMixer, "header Groups-editor button opens the mixer path")
+    popover.test_tapHeaderTab(.groups)
+    checks.expect(openedMixer, "the header Groups tab opens the mixer path (pre-cutover)")
 
     // --- 12. A Selected-Devices row shows its on/off toggle. "airport-mixer" is
     // discovered but never grouped here.

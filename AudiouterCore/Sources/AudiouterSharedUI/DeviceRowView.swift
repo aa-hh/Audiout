@@ -1736,6 +1736,16 @@ public final class DeviceRowView: NSView {
         delegate?.deviceRow(self, didSetSyncTrimMs: clamped, for: device.id)
     }
 
+    /// W3 "Align with your music": route the user straight to the row's
+    /// manual SYNC affordance — focus the trim field for immediate typing /
+    /// arrow nudging. (The live scrubber is the touch-up track's; until it
+    /// lands, this field is the affordance.) No-op on non-sync rows and
+    /// headless (`window == nil`).
+    public func focusSyncTrimField() {
+        guard showsSyncControls, let window else { return }
+        window.makeFirstResponder(syncField)
+    }
+
     @objc private func alignTapped(_ sender: NSButton) {
         // `pushOnPushOff` has already flipped the state; land the tint now so
         // the toggle reads immediately, before the host's re-apply echoes it.

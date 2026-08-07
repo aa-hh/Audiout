@@ -470,6 +470,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onAlignTickActiveChange = { [weak self] active in
             (self?.backend as? BTOutputControlling)?.setBTAlignTickActive(active)
         }
+        // W3/W4 — the first-mix alignment intercept + wizard: the card's and
+        // panel's four backend actuators, capability-gated like everything
+        // above (nil casts on MockBackend/OwnToneBackend degrade to no-ops).
+        popoverController.onResolveBTAlignmentPrompt = { [weak self] deviceID, dismissed in
+            (self?.backend as? BTOutputControlling)?
+                .resolveBTAlignmentPrompt(forDevice: deviceID, dismissed: dismissed)
+        }
+        popoverController.onBTWizardTrimPreview = { [weak self] ms, deviceID in
+            (self?.backend as? BTOutputControlling)?
+                .setBTWizardTrimPreview(ms, forDevice: deviceID)
+        }
+        popoverController.onBTWizardEndPreview = { [weak self] deviceID, keepMs in
+            (self?.backend as? BTOutputControlling)?
+                .endBTWizardTrimPreview(forDevice: deviceID, keepMs: keepMs)
+        }
+        popoverController.onBTWizardTickActive = { [weak self] active in
+            (self?.backend as? BTOutputControlling)?.setBTWizardTickActive(active)
+        }
         // Excluded apps (Settings › Audio) are un-routable: the popover reads this
         // to drop them from the Applications picker + rows.
         popoverController.isAppExcluded = { [weak self] bundleID in
@@ -1425,6 +1443,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popoverController.setRoutingBlockedNeedsDefault(active)
             log("event: \(describe(event))")
             return
+        case .btFirstMixAlignmentPrompt(let deviceID):
+            // W3: a never-aligned BT speaker just joined its first mix and is
+            // being held silent — surface the anchored alignment card under its
+            // row. The popover controller resolves it back through
+            // `onResolveBTAlignmentPrompt`; no device model changed here.
+            popoverController.showBTAlignmentPrompt(deviceID: deviceID)
+            log("event: \(describe(event))")
+            return
         }
         // Establish the out-of-the-box default (current device selected ⇒
         // passthrough) once the fleet is known (SPEC §9b). No-op after the first
@@ -1475,6 +1501,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "takeoverStatus(\(status.map { "\($0)" } ?? "nil"))"
         case .routingBlockedNeedsDefault(let active):
             return "routingBlockedNeedsDefault(\(active)) — \(active ? "actively routing but the aggregate isn't the Mac's default output" : "aggregate is default again / routing stopped")"
+        case .btFirstMixAlignmentPrompt(let deviceID):
+            return "btFirstMixAlignmentPrompt(\(deviceID)) — never-aligned BT speaker held silent in its first mix"
         }
     }
 

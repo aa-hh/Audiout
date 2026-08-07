@@ -384,6 +384,8 @@ final class BTDeviceSink: @unchecked Sendable {
     private var sourceNode: AVAudioSourceNode?
     private let connectionFormat: AVAudioFormat
     private var running = false
+    /// Current render gain (graphQueue). 1 unless the hold-silent path set it.
+    private var gain: Float = 1
     private var configChangeObserver: NSObjectProtocol?
     private var rateListenerBlock: AudioObjectPropertyListenerBlock?
     private let listenerQueue: DispatchQueue
@@ -488,6 +490,20 @@ final class BTDeviceSink: @unchecked Sendable {
         graphQueue.async { self.rebuildLocked(cause: cause) }
     }
 
+    /// This device's render gain (W3 hold-silent + first-mix intercept):
+    /// applied to `mainMixerNode.outputVolume`, the stock AVAudioEngine level
+    /// stage between the source node and the pinned output — so 0 keeps the
+    /// whole session (anchor, delay gate, drift loop) running while the
+    /// speaker stays silent, and releasing the hold is a glitch-free property
+    /// write, not a rebuild. Stored so a rebuild's fresh `startLocked` pass
+    /// re-applies it.
+    func setGain(_ gain: Float) {
+        graphQueue.async {
+            self.gain = gain
+            self.engine.mainMixerNode.outputVolume = gain
+        }
+    }
+
     private func startLocked() throws {
         guard !running else { return }
         if let transport = Self.transportType(deviceID),
@@ -522,6 +538,7 @@ final class BTDeviceSink: @unchecked Sendable {
         try catchingObjCException {
             engine.connect(node, to: engine.mainMixerNode, format: connectionFormat)
         }
+        engine.mainMixerNode.outputVolume = gain
         engine.prepare()
         try engine.start()
         running = engine.isRunning
@@ -916,6 +933,7 @@ final class BTSyncedSink: @unchecked Sendable {
     private var composition = BTGroupComposition(airPlayPresent: false, macLocalPresent: false)
     private var offsetMsByUID: [String: Int] = [:]
     private var trimMsByUID: [String: Int] = [:]
+    private var gainByUID: [String: Float] = [:]
     private var desiredRunning = false
 
     init(
@@ -957,7 +975,7 @@ final class BTSyncedSink: @unchecked Sendable {
     /// while the manager is armed), vanished devices' sinks stop and drop.
     /// Unchanged devices are untouched — their sessions keep playing.
     func setDevices(_ specs: [DeviceSpec]) {
-        var added: [BTDeviceSink] = []
+        var added: [(sink: BTDeviceSink, gain: Float)] = []
         var removed: [BTDeviceSink] = []
         var shouldStart = false
         tableLock.lock()
@@ -969,14 +987,19 @@ final class BTSyncedSink: @unchecked Sendable {
         for (uid, spec) in wantedByUID where sinksByUID[uid] == nil {
             let sink = makeSink(spec)
             sinksByUID[uid] = sink
-            added.append(sink)
+            added.append((sink, gainByUID[uid] ?? 1))
         }
         shouldStart = desiredRunning
         tableLock.unlock()
 
         for sink in removed { sink.stop() }
+        for (sink, gain) in added where gain != 1 {
+            // A remembered hold (W3) applies BEFORE the engine starts, so a
+            // held device never gets an audible blip ahead of the mute.
+            sink.setGain(gain)
+        }
         if shouldStart {
-            for sink in added { startSink(sink) }
+            for (sink, _) in added { startSink(sink) }
         }
     }
 
@@ -1011,6 +1034,19 @@ final class BTSyncedSink: @unchecked Sendable {
             return sinksByUID[uid]
         }
         sink?.requestRebuild(cause: "trim_change")
+    }
+
+    /// Per-device render gain (W3 hold-silent): remembered in the table so a
+    /// sink created LATER (the usual first-mix case — the hold is decided in
+    /// the same selection change that creates the sink) starts at the held
+    /// level, never with an audible blip before the mute lands.
+    func setGain(_ gain: Float, forDeviceUID uid: String) {
+        let sink = tableLock.withLock { () -> BTDeviceSink? in
+            guard gainByUID[uid] != gain else { return nil }
+            gainByUID[uid] = gain
+            return sinksByUID[uid]
+        }
+        sink?.setGain(gain)
     }
 
     /// The UIDs whose delay gate has opened — the devices actually hearing

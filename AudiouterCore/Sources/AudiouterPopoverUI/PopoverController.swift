@@ -268,6 +268,34 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// a rebuild never has to round-trip the backend.
     private var btTrimsByID: [String: Int] = [:]
 
+    // MARK: First-mix alignment intercept + wizard (W3/W4)
+
+    /// Answers the card (all three actions release the backend's hold-silent;
+    /// `dismissed: true` records the FINAL "Not now"). Wired to
+    /// `(backend as? BTOutputControlling)?.resolveBTAlignmentPrompt`.
+    public var onResolveBTAlignmentPrompt: ((_ deviceID: String, _ dismissed: Bool) -> Void)?
+    /// The wizard's live candidate push (never persisted). Wired to
+    /// `setBTWizardTrimPreview`.
+    public var onBTWizardTrimPreview: ((_ ms: Int, _ deviceID: String) -> Void)?
+    /// End of a wizard preview: keep (persist) or restore. Wired to
+    /// `endBTWizardTrimPreview`.
+    public var onBTWizardEndPreview: ((_ deviceID: String, _ keepMs: Int?) -> Void)?
+    /// The wizard-shaped tick gate (continuous + wake preamble). Wired to
+    /// `setBTWizardTickActive`.
+    public var onBTWizardTickActive: ((_ active: Bool) -> Void)?
+
+    /// The device whose first-mix card should currently show (survives
+    /// rebuilds AND popover close/reopen — the backend's hold outlives a
+    /// click-away, so the offer must too).
+    private var btAlignmentPromptDeviceID: String?
+    private var btAlignmentPromptView: BTAlignmentPromptView?
+    /// The device whose wizard panel is open, its live session, and the panel.
+    /// Session lifetime == panel lifetime; `popoverDidClose` cancels both so
+    /// the wizard tick never outlives the surface.
+    private var btWizardDeviceID: String?
+    private var btWizardSession: BTAlignmentWizardSession?
+    private var btWizardView: BTAlignmentWizardView?
+
     /// The row whose align-by-ear tick is currently running, if any. One at a
     /// time: toggling another row's button moves the single tick.
     private var alignTickDeviceID: String?
@@ -619,6 +647,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                 // escalates to a rebuild exactly when the note must change.
                 refreshDeviceRowsReconcilingCardNote()
                 reconcileDiagnosisPanels(animated: true)
+                reconcileBTAlignmentPanels(animated: true)
             }
         }
         // Not shown: deliberately NO rebuild. Every open goes through
@@ -936,6 +965,11 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // (`openDiagnosisIDs`) survives and is re-applied below (brief §7.3 —
         // "rebuild() restores open panels").
         diagnosisPanelsByID.removeAll()
+        // Same lifetime rule for the W3 card / W4 wizard panel: the views die
+        // with the row tree here; the intent (`btAlignmentPromptDeviceID`,
+        // `btWizardSession`) survives and remounts below.
+        btAlignmentPromptView = nil
+        btWizardView = nil
         blockedNoteByID.removeAll()
         appRowsByBundleID.removeAll()
         panel.clearRows()
@@ -1093,6 +1127,9 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // (brief §7.3 — a failure that arrived while the popover was closed goes
         // through this path). Un-animated: the whole panel is being (re)built.
         reconcileDiagnosisPanels(animated: false)
+        // Same restore for the first-mix alignment card / wizard panel (W3/W4):
+        // their intent survives the rebuild; the mounted views don't.
+        reconcileBTAlignmentPanels(animated: false)
 
         // Re-pin the silence-fallback banner (R11) above the cards: `clearRows()`
         // above dropped it with everything else, so a rebuild that happens WHILE the
@@ -2777,6 +2814,162 @@ extension PopoverController: DeviceRowView.Delegate {
         }
         refreshDeviceRows()
     }
+
+    // MARK: First-mix alignment intercept + wizard (W3/W4)
+
+    /// A never-aligned BT device just joined its first mix and the backend is
+    /// holding it silent (`BackendEvent.btFirstMixAlignmentPrompt`): remember
+    /// the offer and mount the anchored card under its row. One card at a
+    /// time — a second device's prompt replaces the first, whose hold is
+    /// released un-recorded (the backend's once-per-run guard stops a
+    /// re-prompt; the row's metronome button stays the manual way back in).
+    public func showBTAlignmentPrompt(deviceID: String) {
+        guard btAlignmentPromptDeviceID != deviceID else { return }
+        if let previous = btAlignmentPromptDeviceID {
+            onResolveBTAlignmentPrompt?(previous, false)
+        }
+        // The old device's card (its actions are bound to the old id) never
+        // survives a replacement — unmount before the intent moves.
+        if let view = btAlignmentPromptView {
+            btAlignmentPromptView = nil
+            panel.removeRow(view, animated: true)
+        }
+        tearDownBTWizard()
+        btAlignmentPromptDeviceID = deviceID
+        reconcileBTAlignmentPanels(animated: true)
+    }
+
+    /// Mount/unmount the card and wizard panel to match the intent state —
+    /// the `reconcileDiagnosisPanels` idiom, called from the same rebuild
+    /// sites. A missing row (device gone / filtered) keeps the intent parked
+    /// until the row returns; a missing DEVICE drops the whole offer (the
+    /// backend released its hold on the deselect edge already).
+    private func reconcileBTAlignmentPanels(animated: Bool) {
+        // Prompt card.
+        if let id = btAlignmentPromptDeviceID, devicesByID[id] == nil {
+            btAlignmentPromptDeviceID = nil
+        }
+        if let view = btAlignmentPromptView, btAlignmentPromptDeviceID == nil {
+            btAlignmentPromptView = nil
+            panel.removeRow(view, animated: animated)
+        }
+        if let id = btAlignmentPromptDeviceID, btAlignmentPromptView == nil,
+           let row = deviceRowsByID[id], let device = devicesByID[id] {
+            let view = BTAlignmentPromptView(deviceName: device.name)
+            view.onAlignWithMusic = { [weak self] in self?.btAlignmentAlignWithMusic(id) }
+            view.onAlignWithTicks = { [weak self] in self?.btAlignmentAlignWithTicks(id) }
+            view.onNotNow = { [weak self] in self?.btAlignmentNotNow(id) }
+            btAlignmentPromptView = view
+            panel.insertRow(view, after: row, animated: animated)
+        }
+        // Wizard panel.
+        if let id = btWizardDeviceID, devicesByID[id] == nil {
+            tearDownBTWizard()
+        }
+        if let id = btWizardDeviceID, let session = btWizardSession,
+           let row = deviceRowsByID[id], btWizardView?.superview == nil {
+            if let stale = btWizardView { panel.removeRow(stale, animated: false) }
+            let view = BTAlignmentWizardView(session: session)
+            view.onFinished = { [weak self] in self?.finishBTWizard() }
+            btWizardView = view
+            panel.insertRow(view, after: row, animated: animated)
+        }
+    }
+
+    /// "Align with your music": unmute (release the hold) and route straight
+    /// to the row's existing manual SYNC control — the live scrubber is the
+    /// touch-up track's; until it lands, the trim field IS the affordance.
+    private func btAlignmentAlignWithMusic(_ id: String) {
+        onResolveBTAlignmentPrompt?(id, false)
+        clearBTAlignmentPrompt()
+        deviceRowsByID[id]?.focusSyncTrimField()
+    }
+
+    /// "Align with ticks": unmute (the wizard needs the device audible) and
+    /// open the wizard panel in the card's place.
+    private func btAlignmentAlignWithTicks(_ id: String) {
+        onResolveBTAlignmentPrompt?(id, false)
+        clearBTAlignmentPrompt()
+        startBTAlignmentWizard(deviceID: id)
+    }
+
+    /// "Not now": unmute and record the FINAL dismissal — never auto-prompted
+    /// again for this device.
+    private func btAlignmentNotNow(_ id: String) {
+        onResolveBTAlignmentPrompt?(id, true)
+        clearBTAlignmentPrompt()
+    }
+
+    private func clearBTAlignmentPrompt() {
+        btAlignmentPromptDeviceID = nil
+        reconcileBTAlignmentPanels(animated: true)
+    }
+
+    /// Open the wizard for `deviceID` — the card's ticks action AND (via the
+    /// same entry point) any future manual relaunch. Builds the session over
+    /// the row's freshest trim and mounts the panel under the row.
+    func startBTAlignmentWizard(deviceID: String) {
+        guard let device = devicesByID[deviceID] else { return }
+        tearDownBTWizard()
+        let base = btTrimsByID[deviceID] ?? btTrimProvider?(deviceID) ?? 0
+        // The single tick source: a running manual metronome would fight the
+        // wizard's own run.
+        setAlignTick(nil)
+        let session = BTAlignmentWizardSession(
+            deviceID: deviceID,
+            targetName: device.name,
+            referenceName: btWizardReferenceName(excluding: deviceID),
+            baseTrimMs: base,
+            applyPreviewTrim: { [weak self] ms in self?.onBTWizardTrimPreview?(ms, deviceID) },
+            endPreview: { [weak self] keepMs in
+                self?.onBTWizardEndPreview?(deviceID, keepMs)
+                if let keepMs {
+                    // Keep the row's SYNC display in step with the persisted
+                    // result (freshest-edit-wins cache, same as a manual edit).
+                    self?.btTrimsByID[deviceID] = keepMs
+                }
+            },
+            setTick: { [weak self] active in self?.onBTWizardTickActive?(active) })
+        btWizardDeviceID = deviceID
+        btWizardSession = session
+        reconcileBTAlignmentPanels(animated: true)
+    }
+
+    /// The which-side buttons name the ACTUAL devices: with exactly one other
+    /// audible member that member's name, else the honest plural.
+    private func btWizardReferenceName(excluding deviceID: String) -> String {
+        let others = devicesByID.values
+            .filter { $0.id != deviceID && wantsAudio($0.id) }
+            .map(\.name)
+        return others.count == 1 ? others[0] : "The other speakers"
+    }
+
+    /// The wizard's own close (Keep / Done / ✕): the session already committed
+    /// or restored; drop panel + session and repaint the row's trim display.
+    private func finishBTWizard() {
+        tearDownBTWizard()
+        refreshDeviceRows()
+    }
+
+    /// Cancel-and-unmount. The session's `cancel()` restores the prior trim
+    /// and silences the wizard tick unless Keep already ended it — safe on
+    /// every path (deinit would cancel too; explicit is clearer).
+    private func tearDownBTWizard() {
+        btWizardSession?.cancel()
+        btWizardSession = nil
+        btWizardDeviceID = nil
+        if let view = btWizardView {
+            btWizardView = nil
+            panel.removeRow(view, animated: true)
+        }
+    }
+
+    // MARK: Test hooks (W3/W4)
+
+    public func test_btAlignmentPromptDeviceID() -> String? { btAlignmentPromptDeviceID }
+    func test_btAlignmentPromptView() -> BTAlignmentPromptView? { btAlignmentPromptView }
+    func test_btWizardView() -> BTAlignmentWizardView? { btWizardView }
+    public func test_btWizardIsOpen() -> Bool { btWizardSession != nil }
 }
 
 // MARK: - ConnectionState helpers
@@ -2916,6 +3109,11 @@ extension PopoverController: AppRowView.Delegate {
         // The align-by-ear tick never outlives the surface that started it
         // (BT-OFFSET-UI click-away).
         setAlignTick(nil)
+        // Same rule for the wizard's tick (W4): a click-away cancels the run
+        // (prior trim restored). The first-mix CARD's intent deliberately
+        // survives the close — the backend's hold does too, so the offer
+        // remounts on the next open.
+        tearDownBTWizard()
     }
 
     // MARK: - Live level dispatch (task T5)

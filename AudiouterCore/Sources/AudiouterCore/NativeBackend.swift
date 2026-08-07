@@ -313,6 +313,27 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private var btSelectedUIDs: [String] = []
     private var btComposition = BTGroupComposition(airPlayPresent: false, macLocalPresent: false)
 
+    // MARK: First-mix alignment intercept (W3)
+
+    /// UIDs whose intercept the user answered "Not now" — FINAL, persisted in
+    /// the trim store's envelope, loaded at init. Guarded by `btTrimLock`
+    /// alongside the trims (the two records share the trigger predicate).
+    private var btAlignmentDismissedUIDs: Set<String> = []   // btTrimLock
+    /// UIDs currently HELD SILENT awaiting the card's answer. On `stateQueue`;
+    /// applied as a per-device sink gain of 0 on `captureControlQueue`.
+    private var btAlignmentHeldUIDs: Set<String> = []   // stateQueue
+    /// UIDs whose intercept already fired since launch — the once-ever guard's
+    /// in-memory half (the persistent half is a trim or dismissal record; an
+    /// abandoned, unanswered card leaves no record on purpose). On `stateQueue`.
+    private var btAlignmentPromptedUIDs: Set<String> = []   // stateQueue
+    /// Safety net: if no UI ever answers (surface never shown, event lost), a
+    /// held speaker un-mutes on its own after this long — a silent device with
+    /// no visible cause is this repo's most expensive failure shape. Settable
+    /// so tests don't wait out the real window.
+    var btAlignmentHoldTimeout: TimeInterval = 120
+    /// One pending watchdog per held uid. On `stateQueue`.
+    private var btAlignmentHoldWatchdogs: [String: DispatchWorkItem] = [:]
+
     // MARK: Per-app routing (T6)
     //
     // ADDITIVE to the whole-system "Selected Devices" path above. `captureCoordinator`
@@ -1263,6 +1284,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         if let loaded = (try? btTrimStore?.load()) ?? nil {
             self.btTrimsByUID = loaded.mapValues(BTSyncTrim.clamp)
         }
+        if let dismissed = try? btTrimStore?.loadDismissedUIDs() {
+            self.btAlignmentDismissedUIDs = dismissed
+        }
         self.dacpServer = dacpEndpoint
         self.systemVolume = systemVolume
         self.ptpHelperActivator = ptpHelperActivator
@@ -1876,6 +1900,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.btRenderPollWork?.cancel()
             self.btRenderPollWork = nil
             self.btConnectingDeadlines.removeAll()
+            // W3: drop the alignment holds too — the sinks are going away.
+            for work in self.btAlignmentHoldWatchdogs.values { work.cancel() }
+            self.btAlignmentHoldWatchdogs.removeAll()
+            self.btAlignmentHeldUIDs.removeAll()
             self.suspended = false
             // Seamless handoff T3.8-3: reset the release flag and stop/nil the
             // watcher so no orphan `log` child survives quit (AppDelegate's quit
@@ -2385,6 +2413,36 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     self.known[$0].map { !$0.isBluetooth && !$0.isLocalDevice } == true
                 },
                 macLocalPresent: macSelected)
+
+            // W3 — the first-mix alignment intercept. The trigger is exactly
+            // the locked spec's: a BT id in a MIX (any other member — another
+            // AirPlay/BT id, or the Mac itself) with NO saved trim and NO
+            // recorded dismissal, at most once per device per session. The
+            // device connects and streams normally below but is held at sink
+            // gain 0 until the card's answer arrives via
+            // `resolveBTAlignmentPrompt` (or the watchdog gives up waiting).
+            let mixPresent = ids.count >= 2 || (!ids.isEmpty && macSelected)
+            if wantBT, mixPresent {
+                let (trims, dismissed) = self.btTrimLock.withLock {
+                    (self.btTrimsByUID, self.btAlignmentDismissedUIDs)
+                }
+                for uid in btUIDs
+                where trims[uid] == nil && !dismissed.contains(uid)
+                    && !self.btAlignmentPromptedUIDs.contains(uid) {
+                    self.btAlignmentPromptedUIDs.insert(uid)
+                    self.btAlignmentHeldUIDs.insert(uid)
+                    self.scheduleBTAlignmentHoldWatchdogLocked(uid)
+                    Telemetry.log(.localPlayback, "bt_first_mix_intercept", ["device": uid])
+                    self.emit(.btFirstMixAlignmentPrompt(deviceID: uid))
+                }
+            }
+            // A held id leaving the selection (or the whole BT side emptying)
+            // releases its hold — the card is moot once nothing streams there,
+            // and the gain-1 push keeps the manager's remembered gain clean
+            // for the next, never-again-intercepted select.
+            for uid in self.btAlignmentHeldUIDs.subtracting(wantBT ? Set(btUIDs) : []) {
+                self.releaseBTAlignmentHoldLocked(uid)
+            }
             // Wave-4 delay agreement: a BT presence/AirPlay-presence flip moves
             // the LOCAL sink's reference too (`localSinkReferenceDelayMs`), so
             // capture whether the reference input changed before overwriting.
@@ -2396,8 +2454,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.btSinkEnabled = wantBT
                 self.btSelectedUIDs = btUIDs
                 self.btComposition = composition
+                let held = self.btAlignmentHeldUIDs
                 self.captureControlQueue.async { [weak self] in
-                    self?.applyBTSinkTransition(enable: wantBT, uids: btUIDs, composition: composition)
+                    self?.applyBTSinkTransition(
+                        enable: wantBT, uids: btUIDs, composition: composition,
+                        heldSilentUIDs: held)
                 }
                 if localReferenceMoved, self.syncedLocalSinkApplied {
                     // Re-anchor the already-running local sink onto the new
@@ -2580,8 +2641,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         guard btSinkEnabled else { return }
         let uids = btSelectedUIDs
         let composition = btComposition
+        let held = btAlignmentHeldUIDs
         captureControlQueue.async { [weak self] in
-            self?.applyBTSinkTransition(enable: true, uids: uids, composition: composition)
+            self?.applyBTSinkTransition(
+                enable: true, uids: uids, composition: composition, heldSilentUIDs: held)
         }
     }
 
@@ -2712,7 +2775,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// fan-out never rebuilds the tap (`setBTSink` is compare-before-rebuild
     /// and the render pid is our own already-excluded process), so the storm
     /// that debounce exists for cannot start here.
-    private func applyBTSinkTransition(enable: Bool, uids: [String], composition: BTGroupComposition) {
+    private func applyBTSinkTransition(
+        enable: Bool, uids: [String], composition: BTGroupComposition,
+        heldSilentUIDs: Set<String> = []
+    ) {
         if enable {
             let sink: BTSyncedSinkControlling
             if let existing = btSink {
@@ -2731,6 +2797,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             for (uid, ms) in btTrimLock.withLock({ btTrimsByUID }) {
                 sink.setTrimMs(ms, forDeviceUID: uid)
             }
+            // W3 hold-silent: gains land BEFORE the device set, so a sink
+            // created by `setDevices` below starts already muted (the manager
+            // remembers per-UID gains for exactly this ordering).
+            for uid in uids {
+                sink.setGain(heldSilentUIDs.contains(uid) ? 0 : 1, forDeviceUID: uid)
+            }
             // UID → live AudioObjectID, resolved fresh per apply. A uid that no
             // longer resolves (the speaker dropped between selection and apply)
             // contributes no sink; it re-resolves on the next selection change
@@ -2746,6 +2818,32 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             sink.stop()
             sink.setDevices([])
             attachBTSink(nil)
+        }
+    }
+
+    // MARK: First-mix alignment intercept (W3)
+
+    /// Arm (or re-arm) the give-up watchdog for one held uid. On `stateQueue`.
+    private func scheduleBTAlignmentHoldWatchdogLocked(_ uid: String) {   // on stateQueue
+        btAlignmentHoldWatchdogs[uid]?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.btAlignmentHeldUIDs.contains(uid) else { return }
+            Telemetry.log(.localPlayback, "bt_alignment_hold_timeout", ["device": uid])
+            self.releaseBTAlignmentHoldLocked(uid)
+        }
+        btAlignmentHoldWatchdogs[uid] = work
+        stateQueue.asyncAfter(deadline: .now() + btAlignmentHoldTimeout, execute: work)
+    }
+
+    /// Drop one uid's hold and un-mute its sink. Records nothing — recording
+    /// (a dismissal) is the RESOLVE path's business, not the release's. On
+    /// `stateQueue`; idempotent.
+    private func releaseBTAlignmentHoldLocked(_ uid: String) {   // on stateQueue
+        btAlignmentHoldWatchdogs[uid]?.cancel()
+        btAlignmentHoldWatchdogs[uid] = nil
+        guard btAlignmentHeldUIDs.remove(uid) != nil else { return }
+        captureControlQueue.async { [weak self] in
+            self?.btSink?.setGain(1, forDeviceUID: uid)
         }
     }
 
@@ -7958,6 +8056,15 @@ public protocol BTOutputControlling: AnyObject {
     /// ~3 s wake preamble (the Sonos amp-gate live finding, 2026-08-07) —
     /// distinct from the row button's ~30 s ``setBTAlignTickActive(_:)``.
     func setBTWizardTickActive(_ active: Bool)
+
+    // MARK: First-mix intercept (W3)
+
+    /// Answer a ``BackendEvent/btFirstMixAlignmentPrompt(deviceID:)``: release
+    /// the hold-silent (all three card actions unmute) and, for "Not now",
+    /// record the FINAL per-device dismissal so the intercept never auto-fires
+    /// for this device again. Also the abandon path (card torn down without an
+    /// answer) with `dismissed: false` — that leaves no record, by design.
+    func resolveBTAlignmentPrompt(forDevice id: String, dismissed: Bool)
 }
 
 extension NativeBackend: BTOutputControlling {
@@ -8002,6 +8109,18 @@ extension NativeBackend: BTOutputControlling {
 
     public func setBTWizardTickActive(_ active: Bool) {
         captureCoordinator?.setAlignTickMode(active ? .wizard : .off)
+    }
+
+    public func resolveBTAlignmentPrompt(forDevice id: String, dismissed: Bool) {
+        if dismissed {
+            let all: Set<String> = btTrimLock.withLock {
+                btAlignmentDismissedUIDs.insert(id)
+                return btAlignmentDismissedUIDs
+            }
+            try? btTrimStore?.saveDismissedUIDs(all)
+            Telemetry.log(.localPlayback, "bt_alignment_prompt_dismissed", ["device": id])
+        }
+        stateQueue.async { self.releaseBTAlignmentHoldLocked(id) }
     }
 }
 
@@ -8059,10 +8178,14 @@ protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
     /// lifecycle-only spies compile unchanged; ``BTSyncedSink`` provides the
     /// real one (same-value writes are already guarded there).
     func setTrimMs(_ ms: Int, forDeviceUID uid: String)
+    /// Per-device render gain (W3 hold-silent — the first-mix intercept's
+    /// mute). Same default-no-op posture as `setTrimMs`.
+    func setGain(_ gain: Float, forDeviceUID uid: String)
 }
 
 extension BTSyncedSinkControlling {
     func setTrimMs(_ ms: Int, forDeviceUID uid: String) {}
+    func setGain(_ gain: Float, forDeviceUID uid: String) {}
 }
 
 extension BTSyncedSink: BTSyncedSinkControlling {}

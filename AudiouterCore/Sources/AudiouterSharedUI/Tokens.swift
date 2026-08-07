@@ -44,7 +44,33 @@ public enum Tokens {
     /// next time AppKit asks — surfaces pick the new accent up on their next
     /// draw/rebuild with no color re-fetch needed. Main-thread-only by
     /// convention (same as every other AppKit token access here).
-    public static var accentStyle: AccentStyle = .fullGold
+    ///
+    /// Setting it BROADCASTS ``accentStyleDidChangeNotification`` — see there
+    /// for why a re-resolving `NSColor` is not enough for every instrument.
+    public static var accentStyle: AccentStyle = .fullGold {
+        didSet {
+            guard oldValue != accentStyle else { return }
+            NotificationCenter.default.post(name: Tokens.accentStyleDidChangeNotification,
+                                            object: nil)
+        }
+    }
+
+    /// Posted (on `NotificationCenter.default`) whenever ``accentStyle``
+    /// actually changes, from the property's own `didSet` — so a dial call
+    /// site cannot forget to announce it.
+    ///
+    /// A `draw(_:)`-based instrument needs nothing but an invalidation: it
+    /// re-reads its tokens every pass. A **layer-color** instrument does not —
+    /// it stamps a resolved `CGColor` onto a `CALayer` and keeps showing it
+    /// until something re-stamps. `viewDidChangeEffectiveAppearance` covers
+    /// light/dark and `NSWorkspace.accessibilityDisplayOptionsDidChangeNotification`
+    /// covers Increase Contrast, but the accent dial is neither — it is an
+    /// app-internal setting, so it needs its own broadcast (the live bug: the
+    /// Main Audio ring kept the old gold while the rail it joins had already
+    /// re-tinted). An instrument that stamps `gold`/`ember`/`glow` into a
+    /// layer must observe this the same way it observes the a11y notification.
+    public static let accentStyleDidChangeNotification =
+        Notification.Name("Audiouter.Tokens.accentStyleDidChange")
 
     // MARK: - Color
 
@@ -350,6 +376,19 @@ public enum Tokens {
                                                light: 0xAE9668, lightHighContrast: 0x8A744C),
                           systemAccentScale: 0.55)
         }
+
+        /// **The membership rail's SPINE TONE** — `gold` while the spine is
+        /// armed, its `ember` companion otherwise (Warm Signal v4 §Call-1
+        /// rail-segment tone).
+        ///
+        /// It exists so the rail's line/hook/terminus (`BusRailOverlayView`)
+        /// and the Main Audio ring the hook LANDS ON (`HaloRingView`'s
+        /// connected stroke) resolve their tone from ONE place: the two are
+        /// required to read as a single continuous line, and while each picked
+        /// `gold`/`ember` for itself that agreement was pure convention — the
+        /// accent dial moved one and not the other. Nothing else may consume
+        /// this; a non-rail instrument wanting gold asks for ``gold``.
+        public static func spineTone(armed: Bool) -> NSColor { armed ? gold : ember }
 
         // MARK: Signal-dot + meter instruments (spec §3.3 / §1, S2+S3)
         //

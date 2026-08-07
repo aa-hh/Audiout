@@ -222,6 +222,11 @@ d. **Screen change** → update the assembled screen from components. Code wins
    clones, NOT instances: mirror any screen edit into both, or re-clone and
    re-pin. Variable-bound fills re-theme themselves; only literals (computed
    blends, sidebar/menu chrome approximations) need hand-adjusting.
+   **Appearance is a variable MODE, never a variant axis** (decision, Alec
+   2026-08-07): do NOT add `Appearance=Light|Dark` variants to any component —
+   per-instance light mode = the Appearance panel (apply the Light modes to the
+   instance). An appearance variant axis would double every set and duplicate
+   all future edits. Demo + how-to live on the *Getting Started* Figma page.
 
 e. **Verify** against the checked-in snapshot PNGs under `dev/notes/*-snapshots/`
    (`popover-snapshots/`, `window-snapshots/`, `settings-snapshots/`,

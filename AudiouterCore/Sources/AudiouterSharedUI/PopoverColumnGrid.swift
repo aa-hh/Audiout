@@ -576,6 +576,52 @@ public enum PopoverColumnGrid {
     /// the thing it marks.
     public static let editAffordanceHoverAlpha: CGFloat = 1.0
 
+    // MARK: SYNC column (Bluetooth rows — BT-OFFSET-UI)
+    //
+    // Bluetooth rows carve a per-device SYNC cluster — compact − / bare-ms
+    // value / + stepper plus the align-by-ear (metronome) button — out of the
+    // LEFT portion of the reserved trailing-control slot: the slider/% columns
+    // keep their exact trailing anchors (cross-section alignment untouched),
+    // while the BT row's FEED pill right-aligns into `btFeedReserveWidth` at
+    // the far right (locked UI spec: "feed pill stays far right") instead of
+    // the AirPlay rows' left-aligned `feedColumnWidth`. Named constants only —
+    // the Figma design-system contract mirrors this file 1:1.
+
+    /// Width of each compact − / + stepper button.
+    public static let syncStepperButtonWidth: CGFloat = 15
+    /// Width of the editable bare-ms value field — sized for "−500".
+    public static let syncValueFieldWidth: CGFloat = 32
+    /// Gap between the stepper buttons and the value field between them.
+    public static let syncControlGap: CGFloat = 2
+    /// Width of the align-by-ear (metronome) toggle button.
+    public static let syncAlignButtonWidth: CGFloat = 18
+    /// Gap between the + button and the align button trailing it.
+    public static let syncAlignGap: CGFloat = 4
+    /// The BT row's FEED slot: the trailing-control column's far-right portion
+    /// the right-aligned feed pill keeps (an overlong pill clips at the slot's
+    /// edge via the feed stack's existing mask, exactly like overflow pills).
+    public static let btFeedReserveWidth: CGFloat = 48
+    /// Gap between the SYNC cluster's trailing edge and the BT feed slot.
+    public static let btFeedToSyncGap: CGFloat = 4
+    /// The SYNC cluster's total width (− · value · + ·· align), derived so a
+    /// button/field resize reflows the cluster in lockstep.
+    public static var syncClusterWidth: CGFloat {
+        syncStepperButtonWidth * 2 + syncValueFieldWidth + syncControlGap * 2
+            + syncAlignGap + syncAlignButtonWidth
+    }
+    /// Distance from the row trailing edge to the SYNC cluster's TRAILING edge
+    /// — the cluster sits immediately left of the BT feed slot.
+    public static var syncTrailing: CGFloat {
+        trailingInset + btFeedReserveWidth + btFeedToSyncGap
+    }
+    /// Distance from the row trailing edge to the SYNC cluster's CENTER, so
+    /// the Bluetooth subsection header can center its "SYNC" column title over
+    /// the cluster (the title lives in that subsection header ONLY — the card
+    /// header's VOLUME/FEED titles are untouched).
+    public static var syncCenterFromTrailing: CGFloat {
+        syncTrailing + syncClusterWidth / 2
+    }
+
     // MARK: Inter-column gaps
 
     /// Gap after the icon, before the name.

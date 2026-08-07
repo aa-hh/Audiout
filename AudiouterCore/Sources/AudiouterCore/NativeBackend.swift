@@ -261,6 +261,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// reused across disable/re-enable. Confined to `captureControlQueue`.
     private var btSink: BTSyncedSinkControlling?
 
+    // MARK: Bluetooth per-device sync trim (BT-OFFSET-UI)
+
+    /// Persistence for the per-device SYNC trims. `nil` (most tests) = trims
+    /// live for the session only.
+    private let btTrimStore: BTTrimStore?
+    /// Guards ``btTrimsByUID`` alone — read from the UI thread
+    /// (``btSyncTrim(forDevice:)``), written by ``setBTSyncTrim(_:forDevice:)``,
+    /// and snapshotted by `captureControlQueue` when a sink is (re)armed; a
+    /// dedicated lock keeps those reads off `stateQueue` entirely.
+    private let btTrimLock = NSLock()
+    private var btTrimsByUID: [String: Int] = [:]   // btTrimLock
+
     /// Test seam: a BT `Device.id` (its Core Audio UID) → the live
     /// `AudioObjectID` a per-device sink pins its engine to. `nil` (production)
     /// falls back to `aggregateControl.resolveDeviceID(forUID:)` — the HAL's
@@ -1143,6 +1155,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             discoverySource: discovery,
             btEnumerator: BTDeviceEnumerator(),
             btConnectionManager: BTConnectionManager(),
+            btTrimStore: BTTrimStore(),
             processResolver: processResolver,
             defaultOutputSwitcher: DefaultOutputSwitcher())
     }
@@ -1181,6 +1194,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         discoverySource: DiscoverySource,
         btEnumerator: BTDeviceEnumerating? = nil,
         btConnectionManager: BTConnectionManaging? = nil,
+        btTrimStore: BTTrimStore? = nil,
         dacpEndpoint: DACPEndpoint = DACPServer(),
         systemVolume: SystemVolumeControlling = SystemOutputVolume(),
         ptpHelperActivator: PTPHelperActivating = PTPHelperActivator(),
@@ -1222,6 +1236,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.discovery = discoverySource
         self.btEnumerator = btEnumerator
         self.btConnectionManager = btConnectionManager
+        self.btTrimStore = btTrimStore
+        if let loaded = (try? btTrimStore?.load()) ?? nil {
+            self.btTrimsByUID = loaded.mapValues(BTSyncTrim.clamp)
+        }
         self.dacpServer = dacpEndpoint
         self.systemVolume = systemVolume
         self.ptpHelperActivator = ptpHelperActivator
@@ -2666,6 +2684,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 return   // no factory wired (tests / UI-only smoke) — inert
             }
             sink.setComposition(composition)
+            // Persisted SYNC trims (BT-OFFSET-UI), re-pushed on every enable so
+            // a sink built after launch — or rebuilt after a reconnect — starts
+            // from the saved values. Idempotent: the sink ignores a same-value
+            // write, so this never forces a rebuild on its own.
+            for (uid, ms) in btTrimLock.withLock({ btTrimsByUID }) {
+                sink.setTrimMs(ms, forDeviceUID: uid)
+            }
             // UID → live AudioObjectID, resolved fresh per apply. A uid that no
             // longer resolves (the speaker dropped between selection and apply)
             // contributes no sink; it re-resolves on the next selection change
@@ -7741,6 +7766,11 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// contract as `setSyncedLocalSink`, one slot per consumer. Default no-op;
     /// ``NativeCaptureCoordinator`` provides the real one.
     func setBTSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?)
+
+    /// Start/stop the align-by-ear tick mixed into the captured feed
+    /// (BT-OFFSET-UI). Default no-op; ``NativeCaptureCoordinator`` provides
+    /// the real one.
+    func setAlignTick(_ active: Bool)
 }
 
 extension CaptureControlling {
@@ -7763,6 +7793,8 @@ extension CaptureControlling {
     func setSyncedLocalSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {}
     /// Default no-op (BT-FANOUT), same posture.
     func setBTSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {}
+    /// Default no-op (BT-OFFSET-UI align tick), same posture.
+    func setAlignTick(_ active: Bool) {}
 }
 
 extension NativeCaptureCoordinator: CaptureControlling {}
@@ -7776,9 +7808,39 @@ public protocol BTOutputControlling: AnyObject {
     /// When macOS last used each known BT pairing, keyed by `Device.id` — the
     /// popover's ghost-pairing sort input (stale pairings to the bottom).
     func lastUsedDatesForBTDevices() -> [String: Date]
+    /// Set a device's SYNC trim (ms, clamped to ±`BTSyncTrim.rangeMs`):
+    /// applied live to its `BTSyncedSink` delay and persisted per device UID.
+    func setBTSyncTrim(_ ms: Int, forDevice id: String)
+    /// The saved SYNC trim for a device (0 when none) — what a disconnected
+    /// row shows read-only, and what the stepper starts from.
+    func btSyncTrim(forDevice id: String) -> Int
+    /// Start/stop the align-by-ear tick in the captured feed (auto-limits to
+    /// ~30 s of ticks on its own).
+    func setBTAlignTickActive(_ active: Bool)
 }
 
-extension NativeBackend: BTOutputControlling {}
+extension NativeBackend: BTOutputControlling {
+
+    public func setBTSyncTrim(_ ms: Int, forDevice id: String) {
+        let clamped = BTSyncTrim.clamp(ms)
+        let all: [String: Int] = btTrimLock.withLock {
+            btTrimsByUID[id] = clamped
+            return btTrimsByUID
+        }
+        try? btTrimStore?.save(all)
+        captureControlQueue.async { [weak self] in
+            self?.btSink?.setTrimMs(clamped, forDeviceUID: id)
+        }
+    }
+
+    public func btSyncTrim(forDevice id: String) -> Int {
+        btTrimLock.withLock { btTrimsByUID[id] ?? 0 }
+    }
+
+    public func setBTAlignTickActive(_ active: Bool) {
+        captureCoordinator?.setAlignTick(active)
+    }
+}
 
 /// The full lifecycle surface T-BACKEND drives on the delayed local sink: the
 /// fan-out target itself (``SyncedLocalPCMSink``, T-FANOUT) plus start/stop and
@@ -7827,6 +7889,14 @@ protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
     func stop()
     func setDevices(_ specs: [BTSyncedSink.DeviceSpec])
     func setComposition(_ composition: BTGroupComposition)
+    /// Per-device signed manual trim (BT-OFFSET-UI). Default no-op so
+    /// lifecycle-only spies compile unchanged; ``BTSyncedSink`` provides the
+    /// real one (same-value writes are already guarded there).
+    func setTrimMs(_ ms: Int, forDeviceUID uid: String)
+}
+
+extension BTSyncedSinkControlling {
+    func setTrimMs(_ ms: Int, forDeviceUID uid: String) {}
 }
 
 extension BTSyncedSink: BTSyncedSinkControlling {}

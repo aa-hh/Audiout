@@ -246,6 +246,36 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// (mock/tests without the capability) sorts by name alone.
     public var btLastUsedProvider: (() -> [String: Date])?
 
+    /// Called when a Bluetooth row's SYNC trim changes (BT-OFFSET-UI), already
+    /// clamped. The app wires this to
+    /// `(backend as? BTOutputControlling)?.setBTSyncTrim` — live-applied to
+    /// that device's `BTSyncedSink` delay and persisted per device UID.
+    public var onSetBTTrim: ((_ ms: Int, _ deviceID: String) -> Void)?
+
+    /// The saved SYNC trim for a Bluetooth device id — seeds each row's value
+    /// (and the read-only display on a disconnected row). Wired to
+    /// `(backend as? BTOutputControlling)?.btSyncTrim`. `nil` = 0, and edits
+    /// then live only in `btTrimsByID` (mock/dev — nothing persists them).
+    public var btTrimProvider: ((_ deviceID: String) -> Int)?
+
+    /// Called with `true`/`false` as the align-by-ear tick starts/stops
+    /// (BT-OFFSET-UI). Wired to
+    /// `(backend as? BTOutputControlling)?.setBTAlignTickActive`.
+    public var onAlignTickActiveChange: ((_ active: Bool) -> Void)?
+
+    /// The freshest trim value per device id (the user's latest edit, or the
+    /// provider's persisted value on first read) — the rows' apply source, so
+    /// a rebuild never has to round-trip the backend.
+    private var btTrimsByID: [String: Int] = [:]
+
+    /// The row whose align-by-ear tick is currently running, if any. One at a
+    /// time: toggling another row's button moves the single tick.
+    private var alignTickDeviceID: String?
+    /// Auto-stop for the align tick (~30 s — mirrors the injector's own tick
+    /// budget so the button can't stay lit after the ticks end).
+    private var alignTickAutoStop: DispatchWorkItem?
+    static let alignTickAutoStopInterval: TimeInterval = 30
+
     /// Predicate: is `bundleID` excluded from capture (Settings › Audio, "never
     /// captured")? An excluded app is un-routable — dropped from the "+ Add
     /// application…" picker and its route row skipped in `rebuild` (defensive; the
@@ -976,9 +1006,13 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             }
             // Bluetooth subsection (BT-UI): HIDDEN entirely when no BT devices
             // exist — never an empty grouping label. Rows are ordinary rail
-            // rows; recency ordering is `orderedBluetoothDevices`.
+            // rows; recency ordering is `orderedBluetoothDevices`. The SYNC
+            // column title lives in THIS subsection's header line only, between
+            // VOLUME and FEED (BT-OFFSET-UI).
             if !bluetooth.isEmpty {
-                addSubsection(Self.bluetoothSubsectionTitle)
+                addSubsection(Self.bluetoothSubsectionTitle,
+                              columnTitle: "Sync",
+                              columnCenterFromTrailing: PopoverColumnGrid.syncCenterFromTrailing)
                 for device in bluetooth { panel.addRow(makeDeviceRow(device, indented: false)) }
             }
         }
@@ -1064,9 +1098,12 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     /// `panel.addSubsectionHeader` + the rendered-titles record, so the test
     /// surface can never drift from what was actually mounted.
-    private func addSubsection(_ title: String) {
+    private func addSubsection(_ title: String,
+                               columnTitle: String? = nil,
+                               columnCenterFromTrailing: CGFloat = 0) {
         renderedSubsectionTitles.append(title)
-        panel.addSubsectionHeader(title)
+        panel.addSubsectionHeader(title, columnTitle: columnTitle,
+                                  columnCenterFromTrailing: columnCenterFromTrailing)
     }
 
     /// The Bluetooth subsection's rows, recency-ordered (BT-UI ghost
@@ -1378,7 +1415,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // lives on underneath (§4.8). The mixer window / group members keep the
         // default `false` (plain switch), so their rendering is unchanged.
         let view = DeviceRowView(device: device, indented: indented, showsToggle: showsToggle,
-                                 paintsSelectionBackground: false, showsMeter: true, showsBus: true)
+                                 paintsSelectionBackground: false, showsMeter: true, showsBus: true,
+                                 showsSyncControls: device.isBluetooth)
         view.delegate = self
         applySelectionState(to: view, device: device)
         deviceRowsByID[device.id] = view
@@ -1485,7 +1523,9 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                       appTintColors: appTintColorsByName(),
                       mainOutTargetsGroupName: activeMainOutGroupName,
                       energizePending: energizePendingIDs.contains(device.id),
-                      iconSymbolName: deviceIconController?.symbolName(for: device))
+                      iconSymbolName: deviceIconController?.symbolName(for: device),
+                      syncTrimMs: btSyncTrim(for: device),
+                      alignTickActive: alignTickDeviceID == device.id)
             return
         }
         let selected = controller.isSpeakerSelected(device.id)
@@ -1540,7 +1580,21 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                   inActiveTarget: inActiveTarget,
                   mainOutTargetsGroupName: activeMainOutGroupName,
                   energizePending: energizePendingIDs.contains(device.id),
-                  iconSymbolName: deviceIconController?.symbolName(for: device))
+                  iconSymbolName: deviceIconController?.symbolName(for: device),
+                  syncTrimMs: btSyncTrim(for: device),
+                  alignTickActive: alignTickDeviceID == device.id)
+    }
+
+    /// A Bluetooth row's current SYNC trim: the session cache first (the
+    /// user's freshest edit), else the persisted value via `btTrimProvider`,
+    /// else 0. Non-BT devices short-circuit to 0 (their rows mount no SYNC
+    /// cluster and ignore the value anyway).
+    private func btSyncTrim(for device: Device) -> Int {
+        guard device.isBluetooth else { return 0 }
+        if let cached = btTrimsByID[device.id] { return cached }
+        let persisted = btTrimProvider?(device.id) ?? 0
+        btTrimsByID[device.id] = persisted
+        return persisted
     }
 
     private func refreshDeviceRows() {
@@ -2578,6 +2632,10 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// AppKit menu dispatch, per the row-selection lesson (never a bypass seam).
     public func test_outputDevicesPlusMenu() -> NSMenu { makeOutputDevicesPlusMenu() }
 
+    /// The device id whose align-by-ear tick is currently running, if any
+    /// (BT-OFFSET-UI) — asserts one-at-a-time + the close/auto-stop paths.
+    public func test_alignTickDeviceID() -> String? { alignTickDeviceID }
+
     /// Simulate flipping a device row's membership switch through its delegate.
     /// Returns the model's `SelectionResult` so tests can assert refusal/auto-swap.
     @discardableResult
@@ -2658,6 +2716,36 @@ extension PopoverController: DeviceRowView.Delegate {
     /// job, exactly like AirPlay rows).
     public func deviceRowDidRequestReconnect(_ row: DeviceRowView) {
         groupController?.requestReconnect(for: row.device.id)
+    }
+
+    public func deviceRow(_ row: DeviceRowView, didSetSyncTrimMs ms: Int, for id: String) {
+        btTrimsByID[id] = ms
+        onSetBTTrim?(ms, id)
+    }
+
+    public func deviceRow(_ row: DeviceRowView, didToggleAlignTick active: Bool, for id: String) {
+        setAlignTick(active ? id : nil)
+    }
+
+    /// Move/stop the single align-by-ear tick (BT-OFFSET-UI): one row at a
+    /// time, auto-stopped after ~30 s, and stopped by the popover closing
+    /// (the click-away). `refreshDeviceRows()` re-applies every row so exactly
+    /// the active row's button reads ON.
+    private func setAlignTick(_ id: String?) {
+        alignTickAutoStop?.cancel()
+        alignTickAutoStop = nil
+        let wasActive = alignTickDeviceID != nil
+        alignTickDeviceID = id
+        if id != nil {
+            onAlignTickActiveChange?(true)
+            let work = DispatchWorkItem { [weak self] in self?.setAlignTick(nil) }
+            alignTickAutoStop = work
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + Self.alignTickAutoStopInterval, execute: work)
+        } else if wasActive {
+            onAlignTickActiveChange?(false)
+        }
+        refreshDeviceRows()
     }
 }
 
@@ -2795,6 +2883,9 @@ extension PopoverController: AppRowView.Delegate {
         mainOutRow.resetLevel()
         for row in appRowsByBundleID.values { row.resetLevel() }
         onMeteringActiveChange?(false)
+        // The align-by-ear tick never outlives the surface that started it
+        // (BT-OFFSET-UI click-away).
+        setAlignTick(nil)
     }
 
     // MARK: - Live level dispatch (task T5)

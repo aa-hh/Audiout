@@ -66,6 +66,14 @@ public final class DeviceRowView: NSView {
         /// (`GroupController.requestReconnect` → `OutputBackend.retryOutput`);
         /// it never edits selection. Default no-op for non-BT hosts.
         func deviceRowDidRequestReconnect(_ row: DeviceRowView)
+        /// The user changed this Bluetooth row's SYNC trim (BT-OFFSET-UI) —
+        /// already clamped to ±`BTSyncTrim.rangeMs`. Fired by the − / +
+        /// stepper (`coarseStepMs` steps) and by typing in the value field
+        /// (1 ms). Default no-op for hosts without the SYNC column.
+        func deviceRow(_ row: DeviceRowView, didSetSyncTrimMs ms: Int, for id: String)
+        /// The user toggled this Bluetooth row's align-by-ear tick button
+        /// (BT-OFFSET-UI). Default no-op for hosts without the SYNC column.
+        func deviceRow(_ row: DeviceRowView, didToggleAlignTick active: Bool, for id: String)
     }
 
     /// Control-Center row density: comfortable height that seats a mini switch,
@@ -278,6 +286,29 @@ public final class DeviceRowView: NSView {
     /// the mixer window's existing layout is untouched; only the popover's
     /// Selected Devices rows and Main Out pass `true`.
     private let showsMeter: Bool
+
+    // MARK: Bluetooth SYNC cluster (BT-OFFSET-UI)
+
+    /// Whether this row carries the SYNC cluster — the popover passes `true`
+    /// for `.bluetooth` rows only. The cluster occupies the LEFT portion of
+    /// the reserved trailing slot; the FEED pill right-aligns into
+    /// `PopoverColumnGrid.btFeedReserveWidth` beside it (feed pill far right,
+    /// locked spec). Non-sync rows are byte-for-byte unchanged.
+    private let showsSyncControls: Bool
+    private let syncMinusButton = NSButton()
+    private let syncPlusButton = NSButton()
+    /// The editable bare-ms value field: − / + step by
+    /// `BTSyncTrim.coarseStepMs`; typing here commits at 1 ms (house rule —
+    /// bare numbers with units in numeric controls; the subsection header's
+    /// SYNC title + the field's tooltip carry the unit).
+    private let syncField = NSTextField()
+    /// The align-by-ear toggle (`metronome.fill`, outline fallback).
+    private let alignButton = NSButton()
+    /// The trim the host last applied (also the revert value for unparseable
+    /// typing).
+    private var syncTrimMs = 0
+    /// Which metronome SF Symbol actually resolved (fill preferred).
+    private var alignSymbolName = ""
     /// The most recently pushed meter level, for ``test_meterLevel()``. `0`
     /// when there's no meter or after a ``LevelMeterView/reset()``.
     private var lastMeterLevel: Float = 0
@@ -321,13 +352,14 @@ public final class DeviceRowView: NSView {
 
     public init(device: Device, indented: Bool = false, showsToggle: Bool = true,
                paintsSelectionBackground: Bool = true, showsMeter: Bool = false,
-               showsBus: Bool = false) {
+               showsBus: Bool = false, showsSyncControls: Bool = false) {
         self.device = device
         self.indented = indented
         self.showsToggle = showsToggle
         self.paintsSelectionBackground = paintsSelectionBackground
         self.showsMeter = showsMeter
         self.showsBus = showsBus
+        self.showsSyncControls = showsSyncControls
         super.init(frame: NSRect(x: 0, y: 0, width: 320, height: Self.rowHeight))
         // Fill the host's width, keep a fixed height (brief §2).
         autoresizingMask = [.width]
@@ -438,7 +470,9 @@ public final class DeviceRowView: NSView {
                       inActiveTarget: Bool? = nil,
                       mainOutTargetsGroupName: String? = nil,
                       energizePending: Bool = false,
-                      iconSymbolName: String? = nil) {
+                      iconSymbolName: String? = nil,
+                      syncTrimMs: Int = 0,
+                      alignTickActive: Bool = false) {
         self.device = device
         self.isSelectedInSet = selected
         self.isToggleBlocked = blocked
@@ -619,6 +653,27 @@ public final class DeviceRowView: NSView {
                 meterView.reset()
             }
             lastMeterLevel = 0
+        }
+
+        // Bluetooth SYNC cluster (BT-OFFSET-UI): show the host's trim value;
+        // a DISCONNECTED row keeps the saved value visible READ-ONLY (locked
+        // spec). Never stomp the field mid-edit — a background repaint while
+        // the user types would eat their keystrokes.
+        if showsSyncControls {
+            self.syncTrimMs = BTSyncTrim.clamp(syncTrimMs)
+            if syncField.currentEditor() == nil {
+                syncField.stringValue = "\(self.syncTrimMs)"
+            }
+            let adjustable = device.isAvailable
+            syncField.isEditable = adjustable
+            syncField.isSelectable = adjustable
+            syncField.textColor = adjustable ? Tokens.Color.label : Tokens.Color.tertiaryLabel
+            syncMinusButton.isEnabled = adjustable
+            syncPlusButton.isEnabled = adjustable
+            alignButton.isEnabled = adjustable
+            alignButton.state = alignTickActive ? .on : .off
+            alignButton.contentTintColor = alignTickActive
+                ? Tokens.Color.accent : Tokens.Color.secondaryLabel
         }
 
         // Membership bus (spec §4): re-derive the node from the freshly-applied
@@ -1372,6 +1427,15 @@ public final class DeviceRowView: NSView {
         addSubview(muteButton)
         // FEED column (v4.1 item 3): only a bus row has the free trailing slot.
         if busActive { addSubview(feedStack) }
+        // Bluetooth SYNC cluster (BT-OFFSET-UI), sharing that slot's left
+        // portion — sync rows re-anchor the FEED pill to the far right below.
+        if showsSyncControls {
+            configureSyncControls()
+            addSubview(syncMinusButton)
+            addSubview(syncField)
+            addSubview(syncPlusButton)
+            addSubview(alignButton)
+        }
 
         var constraints: [NSLayoutConstraint] = [
             heightAnchor.constraint(equalToConstant: Self.rowHeight),
@@ -1462,6 +1526,47 @@ public final class DeviceRowView: NSView {
                     equalToConstant: PopoverColumnGrid.busNodeDiameter + 8),
                 enableCheckbox.heightAnchor.constraint(
                     equalToConstant: PopoverColumnGrid.busNodeDiameter + 8),
+                feedStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            ])
+            if showsSyncControls {
+                // Bluetooth rows (BT-OFFSET-UI): the FEED pill hugs the FAR
+                // RIGHT of the slot (`btFeedReserveWidth` — locked spec) so
+                // the SYNC cluster can take the slot's left portion; the
+                // stack's existing mask clips an overlong pill at the reserve's
+                // edge, same honest-clipping fallback as elsewhere.
+                constraints.append(contentsOf: [
+                    feedStack.trailingAnchor.constraint(
+                        equalTo: trailingAnchor,
+                        constant: -PopoverColumnGrid.trailingInset),
+                    feedStack.widthAnchor.constraint(
+                        lessThanOrEqualToConstant: PopoverColumnGrid.btFeedReserveWidth),
+                    // The cluster, trailing→leading: align · + · value · −.
+                    alignButton.trailingAnchor.constraint(
+                        equalTo: trailingAnchor,
+                        constant: -PopoverColumnGrid.syncTrailing),
+                    alignButton.widthAnchor.constraint(
+                        equalToConstant: PopoverColumnGrid.syncAlignButtonWidth),
+                    alignButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+                    syncPlusButton.trailingAnchor.constraint(
+                        equalTo: alignButton.leadingAnchor,
+                        constant: -PopoverColumnGrid.syncAlignGap),
+                    syncPlusButton.widthAnchor.constraint(
+                        equalToConstant: PopoverColumnGrid.syncStepperButtonWidth),
+                    syncPlusButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+                    syncField.trailingAnchor.constraint(
+                        equalTo: syncPlusButton.leadingAnchor,
+                        constant: -PopoverColumnGrid.syncControlGap),
+                    syncField.widthAnchor.constraint(
+                        equalToConstant: PopoverColumnGrid.syncValueFieldWidth),
+                    syncField.centerYAnchor.constraint(equalTo: centerYAnchor),
+                    syncMinusButton.trailingAnchor.constraint(
+                        equalTo: syncField.leadingAnchor,
+                        constant: -PopoverColumnGrid.syncControlGap),
+                    syncMinusButton.widthAnchor.constraint(
+                        equalToConstant: PopoverColumnGrid.syncStepperButtonWidth),
+                    syncMinusButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+                ])
+            } else {
                 // FEED column: the trailing control column is otherwise empty
                 // on a bus row (the membership control moved to the left rail
                 // gutter above) — draw the pill row there. LEFT-ALIGNED
@@ -1472,13 +1577,14 @@ public final class DeviceRowView: NSView {
                 // — just anchored from its other end), so pills start flush
                 // left within the reserved column instead of hugging its
                 // trailing edge.
-                feedStack.leadingAnchor.constraint(
-                    equalTo: trailingAnchor,
-                    constant: -(PopoverColumnGrid.trailingControlTrailing + PopoverColumnGrid.trailingControlWidth)),
-                feedStack.widthAnchor.constraint(
-                    lessThanOrEqualToConstant: PopoverColumnGrid.trailingControlWidth),
-                feedStack.centerYAnchor.constraint(equalTo: centerYAnchor),
-            ])
+                constraints.append(contentsOf: [
+                    feedStack.leadingAnchor.constraint(
+                        equalTo: trailingAnchor,
+                        constant: -(PopoverColumnGrid.trailingControlTrailing + PopoverColumnGrid.trailingControlWidth)),
+                    feedStack.widthAnchor.constraint(
+                        lessThanOrEqualToConstant: PopoverColumnGrid.trailingControlWidth),
+                ])
+            }
         } else {
             constraints.append(contentsOf: [
                 enableCheckbox.centerXAnchor.constraint(
@@ -1528,6 +1634,97 @@ public final class DeviceRowView: NSView {
         button.contentTintColor = Tokens.Color.secondaryLabel
         button.target = self
         button.action = action
+    }
+
+    // MARK: Bluetooth SYNC cluster (BT-OFFSET-UI)
+
+    /// The align button's hover tooltip — the affordance is a bare glyph, so
+    /// the tooltip carries its whole story.
+    static let alignTooltip =
+        "Play alignment ticks on this speaker and the rest of the group — adjust sync until they land as one"
+
+    private func configureSyncControls() {
+        for (button, symbol, label, action) in [
+            (syncMinusButton, "minus", "Decrease sync offset", #selector(syncMinusTapped(_:))),
+            (syncPlusButton, "plus", "Increase sync offset", #selector(syncPlusTapped(_:))),
+        ] {
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.bezelStyle = .accessoryBar
+            button.isBordered = false
+            button.imagePosition = .imageOnly
+            let config = NSImage.SymbolConfiguration(pointSize: 9, weight: .medium)
+            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
+                .withSymbolConfiguration(config)
+            button.contentTintColor = Tokens.Color.secondaryLabel
+            button.setAccessibilityLabel(label)
+            button.target = self
+            button.action = action
+        }
+
+        syncField.translatesAutoresizingMaskIntoConstraints = false
+        syncField.controlSize = .small
+        syncField.font = Tokens.Font.caption
+        syncField.alignment = .center
+        syncField.bezelStyle = .roundedBezel
+        syncField.toolTip = "Sync offset in milliseconds"
+        syncField.setAccessibilityLabel("Sync offset in milliseconds")
+        syncField.target = self
+        syncField.action = #selector(syncFieldEdited(_:))
+
+        alignButton.translatesAutoresizingMaskIntoConstraints = false
+        alignButton.bezelStyle = .accessoryBar
+        alignButton.setButtonType(.pushOnPushOff)
+        alignButton.isBordered = false
+        alignButton.imagePosition = .imageOnly
+        // `metronome.fill` verified AppKit-resolvable; the outline `metronome`
+        // stays as the defensive fallback (locked spec's own contingency).
+        for name in ["metronome.fill", "metronome"] {
+            if let image = NSImage(systemSymbolName: name, accessibilityDescription: "Align by ear")?
+                .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)) {
+                alignButton.image = image
+                alignSymbolName = name
+                break
+            }
+        }
+        alignButton.contentTintColor = Tokens.Color.secondaryLabel
+        alignButton.toolTip = Self.alignTooltip
+        alignButton.setAccessibilityLabel("Align by ear")
+        alignButton.setAccessibilityHelp(Self.alignTooltip)
+        alignButton.target = self
+        alignButton.action = #selector(alignTapped(_:))
+    }
+
+    @objc private func syncMinusTapped(_ sender: NSButton) {
+        commitSyncTrim(syncTrimMs - BTSyncTrim.coarseStepMs)
+    }
+
+    @objc private func syncPlusTapped(_ sender: NSButton) {
+        commitSyncTrim(syncTrimMs + BTSyncTrim.coarseStepMs)
+    }
+
+    /// Enter/typing commit: parse a signed integer (a trailing "ms" or spaces
+    /// are tolerated); unparseable input reverts to the current value.
+    @objc private func syncFieldEdited(_ sender: NSTextField) {
+        let cleaned = sender.stringValue
+            .replacingOccurrences(of: "ms", with: "")
+            .trimmingCharacters(in: .whitespaces)
+            .replacingOccurrences(of: "−", with: "-")   // typography minus
+        commitSyncTrim(Int(cleaned) ?? syncTrimMs)
+    }
+
+    private func commitSyncTrim(_ ms: Int) {
+        let clamped = BTSyncTrim.clamp(ms)
+        syncTrimMs = clamped
+        syncField.stringValue = "\(clamped)"
+        delegate?.deviceRow(self, didSetSyncTrimMs: clamped, for: device.id)
+    }
+
+    @objc private func alignTapped(_ sender: NSButton) {
+        // `pushOnPushOff` has already flipped the state; land the tint now so
+        // the toggle reads immediately, before the host's re-apply echoes it.
+        alignButton.contentTintColor = sender.state == .on
+            ? Tokens.Color.accent : Tokens.Color.secondaryLabel
+        delegate?.deviceRow(self, didToggleAlignTick: sender.state == .on, for: device.id)
     }
 
     // MARK: Actions
@@ -1976,6 +2173,54 @@ public final class DeviceRowView: NSView {
     /// reports the host-driven dormancy input. `nil` when the row has no bus.
     public var test_busNodeDimmed: Bool? { busActive ? busView.test_dimmed : nil }
 
+    // MARK: Bluetooth SYNC cluster (BT-OFFSET-UI) test hooks
+
+    /// Whether this row mounts the SYNC cluster at all.
+    public var test_showsSyncControls: Bool { showsSyncControls }
+
+    /// The value field's CURRENTLY displayed text, or `nil` on a non-sync row.
+    public var test_syncTrimDisplayed: String? {
+        showsSyncControls ? syncField.stringValue : nil
+    }
+
+    /// Whether the cluster is currently adjustable (false = the disconnected
+    /// row's read-only saved value).
+    public var test_syncControlsEnabled: Bool {
+        showsSyncControls && syncField.isEditable
+            && syncMinusButton.isEnabled && syncPlusButton.isEnabled
+    }
+
+    /// Fire the − / + buttons through AppKit's own `performClick` — the real
+    /// target/action dispatch, mirroring `test_performEnableClick` (a no-op
+    /// while disabled, exactly like a live click).
+    public func test_fireSyncMinusClick() { syncMinusButton.performClick(nil) }
+    public func test_fireSyncPlusClick() { syncPlusButton.performClick(nil) }
+
+    /// Type into the value field and fire its OWN target/action — the real
+    /// Enter-commit dispatch (mirrors `test_fireSliderAction`'s house style).
+    public func test_commitSyncField(_ text: String) {
+        syncField.stringValue = text
+        guard let action = syncField.action,
+              let target = syncField.target as? NSObject else { return }
+        _ = target.perform(action, with: syncField)
+    }
+
+    /// Fire the align-by-ear toggle through `performClick` (real dispatch).
+    public func test_fireAlignClick() { alignButton.performClick(nil) }
+
+    /// Whether the align toggle currently reads ON.
+    public var test_alignTickOn: Bool { alignButton.state == .on }
+
+    /// Which metronome SF Symbol the align button resolved
+    /// ("metronome.fill", or the outline fallback), "" on a non-sync row.
+    public var test_alignSymbolName: String { alignSymbolName }
+
+    /// The align button's hover tooltip (locked spec: the glyph must explain
+    /// itself on hover).
+    public var test_alignTooltip: String? {
+        showsSyncControls ? alignButton.toolTip : nil
+    }
+
     /// Whether the host has raised the energize "press-play" pending beat on this
     /// row (item 9) — the drawing-only input, distinct from `test_busNode` which
     /// reads the RESOLVED node (the beat only becomes a `.pending` node while the
@@ -2410,6 +2655,10 @@ public extension DeviceRowView.Delegate {
     /// Default no-op — only the popover maps the greyed-BT-row click to a
     /// reconnect (BT-UI).
     func deviceRowDidRequestReconnect(_ row: DeviceRowView) {}
+    /// Default no-ops — only the popover hosts the Bluetooth SYNC column
+    /// (BT-OFFSET-UI).
+    func deviceRow(_ row: DeviceRowView, didSetSyncTrimMs ms: Int, for id: String) {}
+    func deviceRow(_ row: DeviceRowView, didToggleAlignTick active: Bool, for id: String) {}
 }
 
 // MARK: - Invisible switch cell (spec §4.8)

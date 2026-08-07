@@ -769,7 +769,14 @@ final class PopoverPanelViewController: NSViewController {
     /// 2026-07-18): a grouping label sits one step below the uppercase column
     /// headers (`makeColumnHeaderLabel`, still secondary), so it reads as a
     /// quieter sub-level in the hierarchy rather than competing with them.
-    func addSubsectionHeader(_ title: String) {
+    /// `columnTitle`/`columnCenterFromTrailing` optionally add ONE extra
+    /// uppercase column-header label on the same line, centered over a column
+    /// only this subsection's rows carry — the Bluetooth subsection's "SYNC"
+    /// title over its stepper cluster (BT-OFFSET-UI). Same
+    /// `makeColumnHeaderLabel` voice as the card header's VOLUME/FEED titles.
+    func addSubsectionHeader(_ title: String,
+                             columnTitle: String? = nil,
+                             columnCenterFromTrailing: CGFloat = 0) {
         let label = NSTextField(labelWithString: title)
         label.translatesAutoresizingMaskIntoConstraints = false
         label.font = Tokens.Font.captionMedium
@@ -786,6 +793,16 @@ final class PopoverPanelViewController: NSViewController {
                 constant: PopoverColumnGrid.firstElementLeading(indented: false)),
             label.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor, constant: -2),
         ])
+        if let columnTitle {
+            let columnLabel = Self.makeColumnHeaderLabel(columnTitle)
+            wrapper.addSubview(columnLabel)
+            NSLayoutConstraint.activate([
+                columnLabel.centerXAnchor.constraint(
+                    equalTo: wrapper.trailingAnchor,
+                    constant: -columnCenterFromTrailing),
+                columnLabel.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor, constant: -2),
+            ])
+        }
         addRow(wrapper)
     }
 

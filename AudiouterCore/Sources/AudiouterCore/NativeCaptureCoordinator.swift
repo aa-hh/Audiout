@@ -156,6 +156,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         let syncedLocalBaseResampler: SyncedLocalBaseResampler?
         let btSink: SyncedLocalPCMSink?
         let btBaseResampler: SyncedLocalBaseResampler?
+        let tickInjector: AlignmentTickInjector?
 
         /// The published value before anything has been started, and the value
         /// every teardown path returns to: no converter, so ``handleBuffer(_:)``
@@ -163,7 +164,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         static let empty = BufferSnapshot(
             converter: nil, meteringActive: false,
             syncedLocalSink: nil, syncedLocalBaseResampler: nil,
-            btSink: nil, btBaseResampler: nil)
+            btSink: nil, btBaseResampler: nil,
+            tickInjector: nil)
 
         init(
             converter: PCMConverting?,
@@ -171,7 +173,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             syncedLocalSink: SyncedLocalPCMSink?,
             syncedLocalBaseResampler: SyncedLocalBaseResampler?,
             btSink: SyncedLocalPCMSink?,
-            btBaseResampler: SyncedLocalBaseResampler?
+            btBaseResampler: SyncedLocalBaseResampler?,
+            tickInjector: AlignmentTickInjector?
         ) {
             self.converter = converter
             self.meteringActive = meteringActive
@@ -179,6 +182,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             self.syncedLocalBaseResampler = syncedLocalBaseResampler
             self.btSink = btSink
             self.btBaseResampler = btBaseResampler
+            self.tickInjector = tickInjector
         }
     }
 
@@ -271,6 +275,14 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     private var btSink: SyncedLocalPCMSink?
     private var btRenderPID: pid_t?
     private var btBaseResampler: SyncedLocalBaseResampler?
+
+    /// The align-by-ear tick source (BT-OFFSET-UI), mixed into the converted
+    /// PCM BEFORE the engine write and both fan-outs, so every consumer
+    /// renders the same tick through its own delay. Queue-confined here (set
+    /// via ``setAlignTick(_:)``), consumed only through the published
+    /// ``BufferSnapshot``. A fresh injector per activation restarts the beat
+    /// clock and its self-limiting tick budget.
+    private var tickInjector: AlignmentTickInjector?
 
     /// W1-T7 (Gap 1 + Fix 1): the excluded process-OBJECT set the CURRENT live tap
     /// was last built/recreated against — the compare-before-rebuild key for the
@@ -1023,10 +1035,23 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             syncedLocalSink: syncedLocalSink,
             syncedLocalBaseResampler: syncedLocalBaseResampler,
             btSink: btSink,
-            btBaseResampler: btBaseResampler)
+            btBaseResampler: btBaseResampler,
+            tickInjector: tickInjector)
         snapshotLock.lock()
         _bufferSnapshot = snapshot
         snapshotLock.unlock()
+    }
+
+    /// Start/stop the align-by-ear tick (BT-OFFSET-UI). ADDITIVE seam only: it
+    /// swaps one snapshot field, never touches the tap, the exclusion set, or
+    /// the per-app routing state — the fragile parts of this coordinator stay
+    /// un-restructured. Idempotent per direction.
+    public func setAlignTick(_ active: Bool) {
+        queue.async {
+            guard (self.tickInjector != nil) != active else { return }
+            self.tickInjector = active ? AlignmentTickInjector() : nil
+            self.publishBufferSnapshot()
+        }
     }
 
     /// Convert one captured buffer to the engine's fixed S16LE/44100/2ch format
@@ -1068,12 +1093,21 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         let baseResampler = snapshot.syncedLocalBaseResampler
         guard let converter = snapshot.converter else { return }
 
-        let pcm = converter.convertToAirPlayPCM(buffer)
+        let converted = converter.convertToAirPlayPCM(buffer)
         // Sampled AFTER the convert attempt and BEFORE the failure early-out,
         // so a converter dropping every buffer still surfaces its counters
         // (throttled + delta-gated inside — see `sampleConversionFailuresIfDue`).
         converter.sampleConversionFailuresIfDue()
-        guard let pcm, !pcm.isEmpty else { return }
+        guard var pcm = converted, !pcm.isEmpty else { return }
+
+        // Align-by-ear tick (BT-OFFSET-UI): mixed in HERE — after conversion,
+        // before the engine write and BOTH fan-outs — so the AirPlay engine,
+        // the synced-local sink, and every BT sink all render the identical
+        // tick through their own delays (that sameness is what makes nudging
+        // the trim until the flam collapses a truthful alignment).
+        if let tickInjector = snapshot.tickInjector {
+            tickInjector.mix(into: &pcm)
+        }
 
         // pts straight off the buffer's capture clock (mHostTime → timespec).
         sink.write(pcm: pcm, pts: buffer.pts)

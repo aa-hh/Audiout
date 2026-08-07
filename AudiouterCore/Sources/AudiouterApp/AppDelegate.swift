@@ -458,6 +458,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.btLastUsedProvider = { [weak self] in
             (self?.backend as? BTOutputControlling)?.lastUsedDatesForBTDevices() ?? [:]
         }
+        // BT-OFFSET-UI: the SYNC column's trim round-trip (live-applied to the
+        // device's BTSyncedSink delay + persisted per device UID) and the
+        // align-by-ear tick gate. Same capability posture as above.
+        popoverController.onSetBTTrim = { [weak self] ms, deviceID in
+            (self?.backend as? BTOutputControlling)?.setBTSyncTrim(ms, forDevice: deviceID)
+        }
+        popoverController.btTrimProvider = { [weak self] deviceID in
+            (self?.backend as? BTOutputControlling)?.btSyncTrim(forDevice: deviceID) ?? 0
+        }
+        popoverController.onAlignTickActiveChange = { [weak self] active in
+            (self?.backend as? BTOutputControlling)?.setBTAlignTickActive(active)
+        }
         // Excluded apps (Settings › Audio) are un-routable: the popover reads this
         // to drop them from the Applications picker + rows.
         popoverController.isAppExcluded = { [weak self] bundleID in

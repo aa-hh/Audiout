@@ -77,12 +77,31 @@ fi
 
 say() { echo "  housekeeping: $*" >&2; }
 
-# "Open" = any live process whose command line references this path — an
-# editor, a build, sourcekitd indexing it. pgrep -f treats the path as a
-# regex; the dots in usernames match-any is fine (over-matching only makes us
-# MORE conservative). $$-family excluded implicitly: our own command line only
-# names --current, which is protected before this check is ever consulted.
-in_use() { pgrep -f "$1" >/dev/null 2>&1; }
+# "Open" = a live process actually RUNNING OUT OF this path — a build, a
+# script, an app launched from it, an indexer sitting in it.
+#
+# `pgrep -f <path>` alone is NOT that test, and using it as one silently
+# disabled this whole sweep: it matches any process that merely NAMES the path
+# in an argument, so one `du .../failed-row-stack` from an agent's shell makes
+# that worktree look open for as long as that shell lives. Observed live —
+# every candidate was "in use", nothing was ever reclaimed, and the only
+# output was "still under the floor".
+#
+# So pgrep is used just to get cheap candidates, then each one must prove it
+# really lives here: the program being executed is inside the path (argv[0],
+# e.g. a built .app binary), or its working directory is (covers `/bin/sh
+# <script in tree>` and swift-frontend, whose argv[0] is the toolchain's).
+# Paths are compared with `case`, never split on whitespace — this repo's own
+# path contains a space.
+in_use() {
+    for pid in $(pgrep -f "$1" 2>/dev/null); do
+        cmd=$(ps -o command= -p "$pid" 2>/dev/null)
+        case "$cmd" in "$1"/*) return 0 ;; esac
+        cwd=$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p')
+        case "$cwd" in "$1" | "$1"/*) return 0 ;; esac
+    done
+    return 1
+}
 
 # --- A. prune flagged worktrees --------------------------------------------
 for wt in "$worktrees_dir"/*/; do
@@ -176,7 +195,24 @@ delete_caches() {  # $1 = unit, $2 = reason
         say "deleted build cache in $(basename "$1")${sz:+ (~$sz)} — $2 (regenerable)."
     fi
 }
-skippable() { [ "$1" = "$current" ] && return 1; in_use "$1" && return 1; return 0; }
+# Says WHY it is skipping. An unexplained "still under the floor" is
+# indistinguishable from the sweep being broken — which it silently was, until
+# in_use stopped counting "some shell mentioned this path" as in use.
+skippable() {
+    [ "$1" = "$current" ] && return 1
+    # The primary checkout is Alec's live workspace, and every worktree path
+    # sits under it — so the cwd test below would call it "in use" for the
+    # wrong reason. Protect it deliberately and say why.
+    if [ "$1" = "$primary" ]; then
+        say "keeping cache in the primary checkout (live workspace)."
+        return 1
+    fi
+    if in_use "$1"; then
+        say "keeping cache in $(basename "$1") — a process is running out of it."
+        return 1
+    fi
+    return 0
+}
 
 # Enumerate units (primary + every worktree) that have caches, oldest first —
 # the deletion order for both rules. Paths contain spaces, so the mtime sort

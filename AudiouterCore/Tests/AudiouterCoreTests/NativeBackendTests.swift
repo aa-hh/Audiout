@@ -467,10 +467,16 @@ private final class FakeSystemVolume: SystemVolumeControlling, @unchecked Sendab
     /// consults via `currentVolume()`/`currentMuted()`. Both default `nil` —
     /// the "unreadable control" case a real aggregate/HDMI output can hit,
     /// which exercises the `?? 65` / `?? false` fallback.
-    init(volume: Int? = nil, muted: Bool? = nil) {
+    /// `writable: false` is the readable-but-UNWRITABLE output (some USB DACs):
+    /// the write is accepted and silently changes nothing, which is exactly the
+    /// case an optimistic memo of the requested level gets wrong.
+    init(volume: Int? = nil, muted: Bool? = nil, writable: Bool = true) {
         _volume = volume
         _muted = muted
+        _writable = writable
     }
+
+    private var _writable: Bool
 
     func currentVolume() -> Int? { lock.withLock { _volume } }
     func currentMuted() -> Bool? { lock.withLock { _muted } }
@@ -482,8 +488,9 @@ private final class FakeSystemVolume: SystemVolumeControlling, @unchecked Sendab
     /// hardware where a read reflects the device's live level.)
     func scriptVolume(_ v: Int?) { lock.withLock { _volume = v } }
 
-    func setVolume(_ volume: Int) {
-        lock.withLock { _volumeCalls.append(volume) }
+    func setVolume(_ volume: Int, didWrite: (@Sendable (Bool) -> Void)?) {
+        let wrote = lock.withLock { _volumeCalls.append(volume); return _writable }
+        didWrite?(wrote)
     }
     func setMuted(_ muted: Bool) {
         lock.withLock { _mutedCalls.append(muted) }
@@ -1913,6 +1920,31 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         #expect(systemVolumeEvents(in: events) == [30],
                        "an external volume change must republish for the Main Out mirror")
+    }
+
+    /// A readable-but-UNWRITABLE default output (some USB DACs) accepts the mirror
+    /// write and changes nothing. Memoising the level we ASKED for would then make
+    /// a later genuine external change *to* that level compare equal to the memo
+    /// and be swallowed as our own echo — Main silently desyncs from the system.
+    /// Only a confirmed write may update the memo.
+    @Test func mirrorWriteThatDidNotLandDoesNotMemoiseTheRequestedLevel() async {
+        let volume = FakeSystemVolume(volume: 50, muted: false, writable: false)
+        let (backend, engine, _) = makeBackend(systemVolume: volume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        await pollUntil { backend.devices.contains { $0.isLocalDevice } }
+
+        // Mirror Main to hardware. The write no-ops, so the system is still at 50
+        // and nothing may be recorded as 70.
+        backend.setMasterGain(mainOut: 70, group: 100, mirrorToSystemVolume: true)
+        await pollUntil { volume.volumeCalls.contains(70) }
+
+        let events = await collect(from: backend) { events in
+            events.contains { if case .systemVolumeChanged = $0 { return true } else { return false } }
+        } after: { volume.fireExternalChange(volume: 70, muted: false) }
+
+        #expect(systemVolumeEvents(in: events) == [70],
+                "an external move to the level the failed write asked for is still news")
     }
 
     // MARK: Volume ownership — `BackendEvent.systemVolumeOwnershipChanged`

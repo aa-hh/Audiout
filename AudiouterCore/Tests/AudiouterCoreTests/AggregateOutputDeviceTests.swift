@@ -359,7 +359,7 @@ extension SerializedSharedState {
         private var _onExternalChange: (@Sendable (Int?, Bool?, Bool) -> Void)?
         func currentVolume() -> Int? { nil }
         func currentMuted() -> Bool? { nil }
-        func setVolume(_ volume: Int) {}
+        func setVolume(_ volume: Int, didWrite: (@Sendable (Bool) -> Void)?) { didWrite?(true) }
         func setMuted(_ muted: Bool) {}
         var onExternalChange: (@Sendable (Int?, Bool?, Bool) -> Void)? {
             get { lock.lock(); defer { lock.unlock() }; return _onExternalChange }

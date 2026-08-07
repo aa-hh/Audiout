@@ -69,6 +69,106 @@ Validates the **hardware DAC clock reading mechanism** on the built-in output de
 
 `--drift-selftest` confirms that at least one of these paths works on this Mac, and that the clock's sample-time and wall-time advance consistently. With real Bluetooth speakers, the interactive loop (`--drift-selftest` is orthogonal to it) will use whichever path succeeds and report the relative clock offset between speakers in ppm (parts per million).
 
+### Connect probe — `--connect-probe` (BT-SPIKE-CONNECT, hardware gate)
+
+Feasibility harness for `docs/plans/PLAN-UNIVERSAL-SYNC.md` §G: can
+`IOBluetoothDevice.openConnection()` reliably restore an already-paired but
+disconnected speaker — baseband link *and* the Core Audio output device
+(proof A2DP actually came back) — and how long does each stage take?
+
+```sh
+# List paired devices (name, address, connected, A2DP advertisement) + TCC status:
+.build/release/bt-multi-spike --connect-probe
+
+# Full probe: baseband connect, then wait for the Core Audio output to appear:
+.build/release/bt-multi-spike --connect-probe "JBL Flip 6"
+
+# Round-trip: drop the link, then wait for the Core Audio output to vanish:
+.build/release/bt-multi-spike --connect-probe "JBL Flip 6" --disconnect
+```
+
+The device argument matches the paired-device name (case-insensitive, or an
+unambiguous substring) or its address (`aa-bb-cc-dd-ee-ff`, separators
+optional). With no argument on a terminal it lists and asks for a number;
+with no terminal (launched via `open`) it lists and exits — pass the device
+as an argument in that case.
+
+Two timed stages per connect:
+
+1. **`openConnection()`** — restores the baseband link (20 s timeout; the
+   call blocks, so a hang is reported as a timeout rather than freezing).
+2. **Core Audio poll** — waits (30 s max, 0.5 s cadence) for the speaker to
+   appear as a Bluetooth output device via the same enumerator `--list` uses.
+
+`--disconnect` runs the mirror image (`closeConnection()` + wait-for-vanish)
+so one live session can repeat connect → disconnect → connect cycles.
+
+**Bluetooth TCC (~macOS 14+):** classic IOBluetooth calls are gated by the
+Bluetooth privacy permission (`kTCCServiceBluetoothAlways`). A bare CLI's
+grant is attributed to the RESPONSIBLE process — the app that launched it.
+Depending on that app, the first Bluetooth access either prompts on its
+behalf, silently returns an empty paired list, or — **verified live on this
+Mac (macOS 27.0)** — TCC **kills the process outright** (SIGABRT, "attempted
+to access privacy-sensitive data without a usage description") when the
+responsible process's Info.plist has no `NSBluetoothAlwaysUsageDescription`.
+The probe prints the current authorization status up front (read without
+prompting), warns before the first Bluetooth touch when running un-bundled,
+runs unbuffered so those lines survive a TCC kill, and explicitly diagnoses
+the empty-list-because-denied/undetermined cases. Expect the `.app` wrapper
+below to be the *reliable* path, not just a fallback.
+
+**Fallback when the bare CLI can't get a prompt** — wrap it in a minimal
+ad-hoc-signed `.app` whose Info.plist carries
+`NSBluetoothAlwaysUsageDescription`:
+
+```sh
+bash make-spike-app.sh
+# ALWAYS launch via `open` — a shell-launched binary (even the one inside the
+# bundle) inherits the terminal's TCC context and defeats the wrapper:
+open --stdout "$(tty)" --stderr "$(tty)" build/bt-multi-spike.app \
+  --args --connect-probe "JBL Flip 6"
+```
+
+`--stdout/--stderr "$(tty)"` route the probe's output back to your terminal
+(`open`-launched processes otherwise print to nowhere). There is no stdin
+through `open`, so always pass the device as an argument.
+
+**GOTCHA:** ad-hoc TCC grants pin to the exact binary's **cdhash**. After ANY
+rebuild, REMOVE the stale grant (System Settings → Privacy & Security →
+Bluetooth, the "−" button — toggling it is not enough) and let it re-prompt.
+
+### Pacing-clock probe — `--pacing-probe` (passive; no audio out)
+
+Empirical check of the research finding (`dev/notes/bt-output-research-2026-08-07.md`
+§3): on a Bluetooth device, `AudioDeviceGetCurrentTime` reads the **host-side
+BT stack's pacing clock**, not the speaker's remote DAC — and that clock is
+suspected to re-anchor (jump) when the stack re-buffers, e.g. during the
+fresh-connect warm-up window. The production drift loop needs to know whether
+to low-pass/slew or hard re-anchor; this probe produces that data.
+
+```sh
+.build/release/bt-multi-spike --pacing-probe "JBL Flip 6" --seconds 120
+```
+
+Samples the device clock at ~1 Hz for `--seconds` (default 60) using the same
+query-first / timing-only-IOProc-fallback mechanism as the drift readout,
+**without ever starting an audio graph** — nothing is rendered; worst case the
+fallback IOProc runs the device with silent zero-filled buffers.
+
+Per sample it logs the rate-normalized clock position vs host monotonic time
+(`dev=+0.420ms` = the device clock has gained 0.42 ms on the host since the
+baseline). A step > 2 ms between consecutive samples is reported immediately
+as a **JUMP** (re-anchor suspected); a backwards sample-time is reported as a
+clock restart. A mid-run nominal-rate change (rate renegotiation) restarts
+the measurement rather than printing garbage. The summary reports the ppm
+trend per steady segment — warm-up shows up as early segments drifting
+differently than late ones — plus every jump's timestamp and magnitude.
+
+If the device is idle (no IO running) its query clock may be frozen; the
+probe says so and waits. For a meaningful run, either let the IOProc fallback
+engage or play audio to the speaker from another terminal (the interactive
+loop) first.
+
 ### Interactive control loop (the hardware test)
 
 ```sh
@@ -271,6 +371,35 @@ Decision gates, tied to the four feasibility questions:
   - On the **tone**, beating is **imperceptible** or **very slow** (swell every ~7+ seconds) during a 2-minute play-through.
   - **Note:** --drift-selftest proves the mechanism on the built-in device, but only real Bluetooth hardware confirms the relative numbers and whether your BT stack accepts the lightweight query vs needs the IOProc fallback.
 
+### Wave 0 spike gates (PLAN-UNIVERSAL-SYNC §G — Alec checkpoint after each)
+
+**BT-SPIKE-CONNECT — GO means all of:**
+
+- [ ] On ≥ 2 speaker brands: `--connect-probe <device>` succeeds end to end —
+      `openConnection()` returns success AND the Core Audio output device
+      appears within ~10 s.
+- [ ] Repeatable: ≥ 3 connect → disconnect → connect round-trips per device
+      (`--disconnect` then plain) with **no System Settings visit** in between.
+- [ ] TCC behavior recorded: which macOS version gates it, whether the bare
+      CLI prompted (and which app the prompt named), and whether the `.app`
+      wrapper prompted/behaved correctly when launched via `open`.
+
+**NO-GO** (any of): `openConnection()` hangs or fails; the audio endpoint
+doesn't re-appear without a Settings trip; behavior differs wildly by brand.
+Consequence per the plan: production BT-CONNECT is **not built** — ship the
+`x-apple.systempreferences:com.apple.BluetoothSettings` deep-link + nudge
+instead. Either way: written finding + go/no-go, **Alec checkpoint before
+BT-CONNECT**.
+
+**Pacing-clock probe (not a plan gate — informs the BT drift-loop design):**
+
+- [ ] ppm trend + jump count/magnitudes recorded on ≥ 2 brands, including one
+      fresh-connect run (the warm-up window is where the Apple stack's latency
+      is documented to decay over the first ~20–30 min).
+- [ ] Verdict written down: are jumps rare and bounded (a low-pass/slewing
+      drift loop suffices) or frequent/large (the loop MUST have a hard
+      re-anchor path, same lesson as the FLUSH re-anchor work)?
+
 ### NO-GO criteria (design is not feasible at this time)
 
 ✗ **Any engine crashes or hangs** when a device is added (tool exits, freezes, or logs an error).
@@ -389,9 +518,12 @@ q
 
 - `main.swift`: CLI argument parsing, interactive control loop, terminal I/O (raw mode via termios).
 - `BTDeviceEnumerator.swift`: Core Audio device enumeration, filtering for Bluetooth output devices.
-- `BTOutputEngine.swift`: AVAudioEngine instance pinned to a single device; audio graph wiring (player → delay → mixer → output); render tap for RMS/frame counting.
+- `BTOutputEngine.swift`: AVAudioEngine instance pinned to a single device; audio graph wiring (player → delay → mixer → output); render tap for RMS/frame counting; real-DAC/pacing-clock reader.
 - `ToneSource.swift`: Shared 440 Hz sine tone and click pulse generators (non-real-time buffer synthesis).
 - `FlowCheck.swift`: Self-test runner, drift monitor.
+- `ConnectProbe.swift`: BT-SPIKE-CONNECT harness — IOBluetooth paired listing, timed connect/disconnect round-trip, TCC diagnosis.
+- `PacingProbe.swift`: passive ~1 Hz pacing-clock sampler — ppm trend + jump detection.
+- `make-spike-app.sh`: wraps the built CLI in a minimal ad-hoc-signed `.app` (Bluetooth TCC attribution fallback); launch via `open` only.
 - `Package.swift`: SwiftPM manifest.
 
 ---

@@ -107,6 +107,13 @@ final class BTOutputEngine {
         self.deviceID = deviceID
         self.deviceName = deviceName
         self.mode = mode
+        // Seed the device's real nominal rate at construction so PASSIVE users
+        // of currentDeviceClock() (--pacing-probe never start()s the engine)
+        // get the right denominator, not the tone default; pin time re-reads
+        // it as before.
+        if let rate = BTOutputEngine.readNominalSampleRate(deviceID) {
+            deviceNominalRate = rate
+        }
         buildGraph()
         observeConfigurationChanges()
     }
@@ -368,7 +375,9 @@ final class BTOutputEngine {
     // MARK: - Real-DAC-clock helpers
 
     /// The device's configured nominal sample rate, or nil if it can't be read.
-    private static func readNominalSampleRate(_ device: AudioObjectID) -> Double? {
+    /// Internal (not private) so PacingProbe can watch for a mid-run rate
+    /// renegotiation without duplicating the property plumbing.
+    static func readNominalSampleRate(_ device: AudioObjectID) -> Double? {
         var addr = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyNominalSampleRate,
             mScope: kAudioObjectPropertyScopeGlobal,

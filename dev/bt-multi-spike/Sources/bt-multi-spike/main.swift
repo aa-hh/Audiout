@@ -415,6 +415,17 @@ if args.contains("--list") {
     exit(0)
 }
 
+// MARK: - Wave 0 probes (BT-SPIKE-CONNECT + pacing-clock verification)
+// These take sub-arguments, so they strip their own flag and hand the rest on.
+
+if args.contains("--connect-probe") {
+    exit(ConnectProbe.run(args.filter { $0 != "--connect-probe" }))
+}
+
+if args.contains("--pacing-probe") {
+    exit(PacingProbe.run(args.filter { $0 != "--pacing-probe" }))
+}
+
 // MARK: - T5: --selftest (flow-proof against the built-in output device)
 
 if args.contains("--selftest") {
@@ -433,6 +444,8 @@ if args.contains("-h") || args.contains("--help") {
     print("       bt-multi-spike --list")
     print("       bt-multi-spike --selftest")
     print("       bt-multi-spike --drift-selftest")
+    print("       bt-multi-spike --connect-probe [name-or-address] [--disconnect]")
+    print("       bt-multi-spike --pacing-probe <name-or-uid> [--seconds N]")
     exit(0)
 }
 

@@ -165,7 +165,7 @@ import AppKit
 
         surface.select(.groups)
         #expect(window.frame.size == AppSurfaceController.groupsDefaultContentSize,
-                "Groups opens at its designed 560×516 (the split view's real minimum)")
+                "Groups opens at its designed 560×520 (derived so the 7-device editor fits)")
     }
 
     @Test func settingsSizesPerTabThroughTheFittedChannel() throws {
@@ -463,8 +463,7 @@ import AppKit
         let groups = MixerWindowController(
             groupController: GroupController(backend: backend,
                                              store: GroupStore(directory: scratchDir),
-                                             loadPersisted: false),
-            frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurfaceGroups")))
+                                             loadPersisted: false))
         let popover = PopoverController(
             appRouting: AppRoutingController(store: AppRouteStore(directory: scratchDir),
                                              loadPersisted: false),

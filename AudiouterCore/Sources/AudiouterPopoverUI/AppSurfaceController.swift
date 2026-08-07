@@ -54,8 +54,8 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
 /// - **Groups** — the caller-provided content controller
 ///   (`MixerWindowController.contentController` in the app), seated below a
 ///   header strip in a `SurfaceScreenViewController`. Fixed default
-///   560×516 — the split view's real minimum, measured in the prototype (the
-///   plan's 505 is too short) — and the one screen whose user-dragged size is
+///   560×520 — derived so the 7-device group editor fits (see
+///   `groupsDefaultContentSize`) — and the one screen whose user-dragged size is
 ///   remembered for the session (the shell's own drag-holds philosophy).
 /// - **Settings** — a caller-provided `SettingsRootViewController` (in-content
 ///   tabs, so they render beneath the switcher), same container. Per-tab
@@ -138,10 +138,14 @@ public final class AppSurfaceController {
     /// surface) never re-announces.
     private var publishedVisibleScreen: SurfaceScreen?
 
-    /// Groups' default content size: the split view's real minimum, measured
-    /// in the runnable prototype (560×505 per the plan is below the split
-    /// view's floor and it fights back — 516 is where it settles).
-    public static let groupsDefaultContentSize = NSSize(width: 560, height: 516)
+    /// Groups' default content size. The height is DERIVED, not picked: the
+    /// group editor pane has no scroll view, so a 7-device fleet's editor
+    /// (fitting height 440, measured — `MembershipRailTests`) plus the
+    /// screen's footer strip (28) plus the header strip (52) must all fit.
+    /// 516 (the split view's bare minimum, the prototype number) left the
+    /// editor 4pt short; 560×505 per the plan is below the split view's
+    /// floor entirely and it fights back.
+    public static let groupsDefaultContentSize = NSSize(width: 560, height: 520)
 
     /// The Mixer panel's width is fixed (623); height is always exact-fit, so
     /// this seed only positions the very first mount before the fit lands.
@@ -543,7 +547,8 @@ final class SurfaceScreenViewController: NSViewController {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override func loadView() {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 516))
+        let root = NSView(frame: NSRect(origin: .zero,
+                                        size: AppSurfaceController.groupsDefaultContentSize))
         let contentView = content.view
         contentView.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(contentView)

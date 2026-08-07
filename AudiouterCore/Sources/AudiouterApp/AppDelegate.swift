@@ -86,9 +86,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var groupController: GroupController!
 
     /// Owns the Groups screen's content (SPEC §9). Created lazily the first
-    /// time the Groups tab is visited, then reused; its own window is never
-    /// shown any more (U6 deletes that half). Holds the same `GroupController`
-    /// as the Mixer, so the two screens stay in lockstep.
+    /// time the Groups tab is visited, then reused; it is a pure content
+    /// controller (its standalone window was retired in U6). Holds the same
+    /// `GroupController` as the Mixer, so the two screens stay in lockstep.
     private var mixerWindowController: MixerWindowController?
 
     /// The one surface (U4): a single window hosting the Mixer, Groups and
@@ -997,15 +997,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// The Groups screen's content: `MixerWindowController`'s split view. The
-    /// controller is still the owner of the sidebar/editor plumbing — only its
-    /// window half is now unused (U6 deletes it). Built on the first visit to
-    /// the Groups tab and reused; seeded with the current device snapshot so
-    /// it is correct the instant it appears.
+    /// controller owns the sidebar/editor plumbing and nothing else. Built on
+    /// the first visit to the Groups tab and reused; seeded with the current
+    /// device snapshot so it is correct the instant it appears.
     @MainActor
     private func groupsScreenContent() -> NSViewController {
         let controller = mixerWindowController ?? MixerWindowController(
             groupController: groupController,
-            appRouting: appRouting,
             deviceIconController: deviceIconController)
         mixerWindowController = controller
         controller.update(devices: Array(devicesByID.values))

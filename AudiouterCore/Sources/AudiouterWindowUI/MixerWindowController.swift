@@ -4,29 +4,29 @@ import AppKit
 import AudiouterCore
 import AudiouterSharedUI
 
-/// The "Groups" window (design revamp): a CONFIGURATION-ONLY host for viewing
-/// and editing saved groups. Viewing or editing a group here NEVER activates it
-/// or moves audio — activation lives in the app's popover, not this window.
+/// The Groups SCREEN's content controller (one-surface app, roadmap 032): a
+/// CONFIGURATION-ONLY owner of the groups sidebar/editor plumbing. Viewing or
+/// editing a group here NEVER activates it or moves audio — activation lives
+/// in the Mixer screen.
 ///
-/// Live-test feedback 2026-07-18 removed the window's last two live-audio
-/// surfaces: the "All Devices" mixer pane and the toolbar master slider are
-/// GONE (volume lives in the popover). The window now owns:
-/// - an `NSWindow` (titled "Groups", no toolbar) with a `styleMask` including
-///   `.fullSizeContentView`;
-/// - an `NSSplitViewController` whose sidebar item is a source-list
-///   `NSOutlineView` (`SidebarViewController`) and whose content item is swapped
-///   between three panes: the group editor (`GroupEditorViewController`, when a
-///   group is selected), the read-only device detail pane
-///   (`DeviceDetailViewController`, when a device is selected), and an empty
-///   "No groups yet" pane (nothing to select).
+/// It owns an `NSSplitViewController` whose sidebar item is a source-list
+/// `NSOutlineView` (`SidebarViewController`) and whose content item is swapped
+/// between three panes: the group editor (`GroupEditorViewController`, when a
+/// group is selected), the read-only device detail pane
+/// (`DeviceDetailViewController`, when a device is selected), and an empty
+/// "No groups yet" pane (nothing to select). It owns NO window: the app's
+/// `AppSurfaceController` hosts `contentController` as the surface's Groups
+/// screen and tells this controller when that screen is visible via
+/// `setHostVisible(_:)` (the standalone Groups window was retired in U6).
 ///
-/// AUTO-SELECT: with no sidebar selection the window selects the FIRST saved
-/// group and shows its editor; with no groups at all it shows the empty pane.
-/// The content area is never a no-op view.
+/// AUTO-SELECT: with no sidebar selection the controller selects the FIRST
+/// saved group and shows its editor; with no groups at all it shows the empty
+/// pane. The content area is never a no-op view.
 ///
 /// Group creation is a standard macOS sheet (`GroupCreationSheetController`)
-/// presented over the window; creating a group never activates it either — the
-/// caller only selects the resolved group in the sidebar and opens its editor.
+/// presented over the hosting window; creating a group never activates it
+/// either — the caller only selects the resolved group in the sidebar and
+/// opens its editor.
 ///
 /// Device icons (per-device SF Symbol overrides) resolve through the injected
 /// `DeviceIconController`, shared with the sidebar, editor, creation sheet, and
@@ -34,47 +34,20 @@ import AudiouterSharedUI
 /// re-drives `refreshAll()` so a pick anywhere updates everywhere.
 ///
 /// Everything group-related goes through the injected `GroupController`
-/// (UI-agnostic, unit-tested in core) — the window never does mixer math and
-/// never calls `activateGroup`. `@MainActor` because it touches AppKit and the
-/// non-`Sendable` `GroupController` only on the main thread; the app folds
+/// (UI-agnostic, unit-tested in core) — this controller never does mixer math
+/// and never calls `activateGroup`. `@MainActor` because it touches AppKit and
+/// the non-`Sendable` `GroupController` only on the main thread; the app folds
 /// backend events on `MainActor` before calling `update(devices:)`.
 ///
-/// The window is `public` so both the app (`AppDelegate.openMixer()`) and the
-/// headless `window-harness` / tests can build it against a MockBackend-backed
-/// `GroupController` and assert its structure. The create sheet is
-/// fully constructible and drivable headless (see the `test_*` hooks).
+/// `public` so both the app and the headless `window-harness` / tests can
+/// build it against a MockBackend-backed `GroupController` and assert its
+/// structure. The create sheet is fully constructible and drivable headless
+/// (see the `test_*` hooks).
 @MainActor
-public final class MixerWindowController: NSWindowController {
-
-    /// The window's default CONTENT size — the size a first-ever launch opens
-    /// at. `.fullSizeContentView` means content fills the whole frame, so this
-    /// is also the frame size.
-    ///
-    /// Narrowed 720 → 560 (design review 2026-07-25) once the content panes
-    /// became elastic: at 720 the sections either stretched into a slab or hung
-    /// their intrinsic ~277 pt of content beside a dead strip. The HEIGHT is
-    /// the harder number — the editor pane has no scroll view, so a 7-device
-    /// fleet has to fit inside 505 minus the title bar minus the footer strip
-    /// (`MembershipRailTests.testEditorFitsTheHeightTheWindowActuallyGivesIt`).
-    public nonisolated static let defaultContentSize = NSSize(width: 560, height: 505)
-
-    /// The smallest the user may drag the window. Below this the sidebar and
-    /// the content pane start fighting for the same points.
-    public nonisolated static let minimumContentSize = NSSize(width: 480, height: 420)
-
-    /// The frame-autosave name the shipping app uses.
-    ///
-    /// BUMPED to `-v2` with the 560×505 default (design review 2026-07-25): an
-    /// existing install has a saved frame under the old name and would keep
-    /// opening at its saved 720-wide size forever, so the new default would
-    /// never be seen. A one-time key change makes every install adopt the new
-    /// default exactly once, then start saving under the new name. Tests pass
-    /// their own unique names (AppKit's autosave always writes
-    /// `UserDefaults.standard`, so a shared literal races under `swift test`).
-    public nonisolated static let defaultFrameAutosaveName: NSWindow.FrameAutosaveName = "MixerWindow-v2"
+public final class MixerWindowController {
 
     /// The UI-agnostic group model shared with the menu. Source of truth for
-    /// groups; the window reads it and writes through it, never around it.
+    /// groups; the screen reads it and writes through it, never around it.
     private let groupController: GroupController
 
     /// Resolves/persists per-device icon overrides, shared with every child
@@ -104,9 +77,8 @@ public final class MixerWindowController: NSWindowController {
     /// split view down to its own "New Group…" bar, with no footer stealing
     /// its bottom space (design review 2026-07-18: the footer used to wrap
     /// the whole split view, which left a gap above it under the sidebar
-    /// too). The footer is content, not chrome, so it is NEVER flag-gated by
-    /// `AIRPLAY_CONTROL_PANEL` and shows identically in the standalone window
-    /// and the control-panel shell. See `AudiouterWindowUI/AGENTS.md`.
+    /// too). The footer is content, not chrome — it ships wherever the
+    /// content is hosted. See `AudiouterWindowUI/AGENTS.md`.
     private let contentHostViewController = ContentPaneHostViewController()
 
     /// The content split item — wraps `contentHostViewController`, which is
@@ -115,15 +87,12 @@ public final class MixerWindowController: NSWindowController {
     private let contentSplitItem: NSSplitViewItem
 
     public init(groupController: GroupController,
-               appRouting: AppRoutingController = AppRoutingController(loadPersisted: false),
-               deviceIconController: DeviceIconController = DeviceIconController(loadPersisted: false),
-               frameAutosaveName: NSWindow.FrameAutosaveName = MixerWindowController.defaultFrameAutosaveName) {
+               deviceIconController: DeviceIconController = DeviceIconController(loadPersisted: false)) {
         self.groupController = groupController
         self.deviceIconController = deviceIconController
         self.sidebarViewController = SidebarViewController()
         self.editorViewController = GroupEditorViewController(groupController: groupController)
         self.detailViewController = DeviceDetailViewController(groupController: groupController)
-        _ = appRouting   // kept for call-site compatibility; the mixer pane that used it is gone
 
         // Share the one icon controller across every pane so a per-device
         // override picked anywhere renders identically everywhere.
@@ -149,36 +118,12 @@ public final class MixerWindowController: NSWindowController {
         splitViewController.addSplitViewItem(sidebarItem)
         splitViewController.addSplitViewItem(contentSplitItem)
 
-        // Window chrome: full-size content view, NO toolbar (the master slider
-        // left with the mixer pane — live-test feedback 2026-07-18). The split
-        // view IS the window's content controller now — the sidebar item runs
-        // the full window height; only the content item hosts the footer.
-        let (window, hasSavedFrame) = Self.makeContainer(autosaveName: frameAutosaveName)
-        // `setFrameAutosaveName` (inside `makeContainer()`) already restored the
-        // user's last frame into `window.frame` SYNCHRONOUSLY if one was saved —
-        // capture it now, before `contentViewController` is assigned, because
-        // assigning a content view controller whose view hasn't been laid out
-        // yet collapses the window to that view's near-zero intrinsic size.
-        // Re-apply the restored frame explicitly afterward so a real user's
-        // saved position/size survive a relaunch; only a truly first-ever
-        // window (no saved frame yet) falls back to the default size +
-        // `center()`. Skipping this check and unconditionally calling
-        // `setContentSize`/`center()` here silently discarded every restored
-        // frame on every launch — the window LOOKED like it remembered its
-        // position only because `AppDelegate` builds this controller once and
-        // reuses it for the rest of the process's life, so closing/reopening
-        // the window within one run never re-ran this code at all.
-        let restoredFrame = window.frame
-        window.contentViewController = splitViewController
-        if hasSavedFrame {
-            window.setFrame(restoredFrame, display: false)
-        } else {
-            window.setContentSize(Self.defaultContentSize)
-            window.center()
-        }
-        // No forced `NSAppearance` — dark/light "just work" (SPEC §9).
-
-        super.init(window: window)
+        // Load the split tree eagerly — the retired window's
+        // `contentViewController` assignment used to do this
+        // implicitly. The sidebar's outline view must exist before the first
+        // `refreshAll()`/auto-select runs, and those run on `update(devices:)`
+        // before any host has mounted the content.
+        splitViewController.loadViewIfNeeded()
 
         // Sidebar selection drives the content pane.
         sidebarViewController.onSelect = { [weak self] selection in
@@ -218,61 +163,19 @@ public final class MixerWindowController: NSWindowController {
         }
     }
 
-    public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    /// Build the shipping document-style `NSWindow` container. The control-panel
-    /// rollout hosts this same content in a sticky floating panel instead — that
-    /// shell (`ControlPanelWindowController` in `AudiouterSharedUI`) is a separate
-    /// type that hosts `contentViewController`; this controller only ever builds
-    /// the window.
-    ///
-    /// Returns whether a previously-saved frame under the given autosave
-    /// name was found and synchronously applied, so the caller knows whether
-    /// it's safe to fall back to the default size + `center()` — a caller that
-    /// unconditionally re-sizes/re-centers afterward silently throws the
-    /// restore away.
-    ///
-    /// Deliberately calls `setFrameUsingName` FIRST, not `setFrameAutosaveName`
-    /// alone: `setFrameAutosaveName`'s own Bool return is NOT a trustworthy
-    /// signal for "was a frame actually restored" — verified empirically, it
-    /// returns `true` even for a brand-new name with nothing ever saved (its
-    /// return value means something else undocumented, not "restored").
-    /// `setFrameUsingName` is the API that both restores a saved frame AND
-    /// reliably reports whether it found one. `setFrameAutosaveName` is called
-    /// afterward purely to ARM ongoing autosave-on-move/resize for this window
-    /// going forward; re-applying an already-restored frame is a harmless no-op.
-    private static func makeContainer(autosaveName: NSWindow.FrameAutosaveName) -> (window: NSWindow, hasSavedFrame: Bool) {
-        let window = NSWindow(
-            contentRect: NSRect(origin: .zero, size: defaultContentSize),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Groups"
-        window.contentMinSize = minimumContentSize
-        let hasSavedFrame = window.setFrameUsingName(autosaveName)
-        window.setFrameAutosaveName(autosaveName)
-        // Summon onto the CURRENT Space (and over a fullscreen app) instead of
-        // switching Spaces to the window's home — reopening a config window must
-        // not yank the user out of what they're doing (window-panel.md M1).
-        window.collectionBehavior.formUnion([.moveToActiveSpace, .fullScreenAuxiliary])
-        return (window, hasSavedFrame)
-    }
-
     // MARK: App integration
 
-    /// Test seam: simulate the window being visible so `update(devices:)`
+    /// Test seam: simulate the content being visible so `update(devices:)`
     /// exercises its refresh path headlessly (no real WindowServer window in
     /// `swift test`). Mirrors `PopoverController.test_isShownOverride` exactly
     /// (same B8 problem, same fix shape, one host each).
-    public var test_isWindowVisibleOverride = false
+    public var test_isVisibleOverride = false
 
     private var hostIsVisible = false
 
-    /// Set by a host that shows ``contentController`` WITHOUT ever ordering
-    /// this controller's own window (the one surface's Groups screen), so the
-    /// refresh gate below asks about the content the user is actually looking
-    /// at rather than about a window that will never appear. Turning it on
+    /// Set by the host showing ``contentController`` (the one surface's Groups
+    /// screen), so the refresh gate below asks about the content the user is
+    /// actually looking at. Turning it on
     /// refreshes immediately: `update(devices:)` kept storing snapshots while
     /// hidden, so there is always a current one to catch up to.
     /// `PopoverController.surfaceDidShow()` is the same idea, one host over.
@@ -282,63 +185,36 @@ public final class MixerWindowController: NSWindowController {
     }
 
     /// Whether the content should be treated as visible for refresh-gating
-    /// purposes — this controller's own window, a host showing its content, or
-    /// the test override. Mirrors `PopoverController.isEffectivelyShown`.
+    /// purposes — a host showing this content, or the test override. Mirrors
+    /// `PopoverController.isEffectivelyShown`.
     private var isEffectivelyVisible: Bool {
-        (window?.isVisible ?? false) || hostIsVisible || test_isWindowVisibleOverride
+        hostIsVisible || test_isVisibleOverride
     }
 
     /// Push the latest device snapshot. Refreshes the sidebar and the visible
     /// content pane (auto-selecting a group if nothing was selected yet) —
-    /// but ONLY while the window is actually visible (or the test override is
+    /// but ONLY while a host is showing the content (or the test override is
     /// set): this is called on every backend event for the app's entire
-    /// lifetime once the window has been opened once, so skipping the full
-    /// rebuild while closed avoids doing real work (sidebar node-tree rebuild
-    /// + `NSOutlineView` reload + content-pane re-render) that nobody can see
-    /// (B8, mirrors `PopoverController`'s identical fix for the same problem).
-    /// `showWindow()` below still refreshes unconditionally on open, so the
-    /// window always shows current data the moment it appears.
+    /// lifetime once the Groups screen has been built once, so skipping the
+    /// full rebuild while hidden avoids doing real work (sidebar node-tree
+    /// rebuild + `NSOutlineView` reload + content-pane re-render) that nobody
+    /// can see (B8, mirrors `PopoverController`'s identical fix for the same
+    /// problem). `setHostVisible(true)` still refreshes unconditionally, so
+    /// the screen always shows current data the moment it appears.
     public func update(devices: [Device]) {
         devicesByID = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0) })
         guard isEffectivelyVisible else { return }
         refreshAll()
     }
 
-    /// Bring the window to front (called from the popover's Groups button).
-    /// Never actually orders the window on screen under `swift test` or a
-    /// harness/snapshot tool (`HeadlessRuntime`) — those hold a real
-    /// WindowServer connection, so an un-gated order-front here would flash a
-    /// real, empty window on the developer's actual screen. `refreshAll()`
-    /// still runs so headless assertions stay exactly as strong.
-    public func showWindow() {
-        refreshAll()
-        guard !HeadlessRuntime.isActive else { return }
-        NSApp.activate(ignoringOtherApps: true)
-        showWindow(nil)
-        window?.makeKeyAndOrderFront(nil)
-    }
-
     /// The root content view controller — the split view (sidebar full-height
     /// + the footer-bearing content host swapping editor/detail/empty panes).
-    /// Exposed so the shared control-panel shell (`ControlPanelWindowController`)
-    /// can host the exact same content the standalone window shows — one
-    /// controller, two possible hosts, footer included in both (it is not
-    /// flag-gated; it lives under the content pane only, not the sidebar).
-    /// Refreshing the content before handing it off keeps a freshly-hosted
-    /// panel correct.
-    /// (Named `contentController`, not `contentViewController`, to avoid
-    /// overriding `NSWindowController`'s optional `contentViewController`.)
+    /// This is what the app's surface hosts as the Groups screen — one
+    /// controller, whatever the host, footer included. Refreshing the content
+    /// before handing it off keeps a freshly-hosted screen correct.
     public var contentController: NSViewController {
         refreshAll()
         return splitViewController
-    }
-
-    /// Open the window and immediately present the new-group creation sheet —
-    /// the public entry the popover's Groups "+" uses, reusing the exact same
-    /// sheet flow the sidebar "+" runs.
-    public func beginNewGroup() {
-        showWindow()
-        presentCreateSheet(preselected: [])
     }
 
     // MARK: Selection → content pane
@@ -348,7 +224,7 @@ public final class MixerWindowController: NSWindowController {
         case .group(let id):
             // Selecting a group ONLY shows its editor (rename / membership /
             // delete). CONFIG-ONLY: selection never activates the group or moves
-            // audio — activation lives in the popover, not this window.
+            // audio — activation lives in the Mixer screen, not here.
             showEditor(for: id)
             refreshSidebar()
         case .device(let id):
@@ -360,7 +236,7 @@ public final class MixerWindowController: NSWindowController {
         }
     }
 
-    /// The window's AUTO-SELECT rule (live-test feedback 2026-07-18): with no
+    /// The screen's AUTO-SELECT rule (live-test feedback 2026-07-18): with no
     /// explicit selection, select the first saved group and show its editor;
     /// with no groups at all, show the empty "No groups yet" pane.
     private func showDefaultContent() {
@@ -397,15 +273,15 @@ public final class MixerWindowController: NSWindowController {
     /// it undisturbed and tests can drive it. `nil` when no sheet is presenting.
     private var createSheetController: GroupCreationSheetController?
 
-    /// Present the standard macOS "New Group" sheet over the window (revamp:
-    /// replaces the old in-pane draft). The name is prefilled with the next
+    /// Present the standard macOS "New Group" sheet over the hosting window
+    /// (revamp: replaces the old in-pane draft). The name is prefilled with the next
     /// "Group N"; `preselected` seeds the membership checklist (from a device
     /// multi-selection, or empty). On create: refresh, select the resolved group
     /// in the sidebar, and open its editor — NO activation, CONFIG-ONLY.
     ///
     /// Fully constructible/drivable headless: the controller is built and its
     /// `onComplete` wired unconditionally, but the actual sheet is only
-    /// presented when the window is on screen. Headless tests reach the live
+    /// presented when the hosting window is on screen. Headless tests reach the live
     /// controller via `test_createSheet` and drive `test_commit()`/`test_cancel()`
     /// directly (the controller's `finish` skips `dismiss` when unhosted).
     private func presentCreateSheet(preselected: [String]) {
@@ -424,14 +300,11 @@ public final class MixerWindowController: NSWindowController {
         }
         createSheetController = sheet
         // Present the sheet over the split view controller so it re-parents to
-        // whichever window currently hosts the content — the standalone window
-        // OR the shared control-panel shell. Gate on the split VC's OWN host
-        // window (`view.window`), NOT `self.window?.isVisible`: when the content
-        // is hosted in the shell, this controller's own `window` is off screen
-        // but the content is on screen in the panel, so `self.window` is the
-        // wrong window to consult. An on-screen host means there's a real sheet
-        // parent; headless runs (host never shown) keep the reference and drive
-        // it via the test hooks instead.
+        // whichever window currently hosts the content (the one surface's
+        // shell). Gate on the split VC's OWN host window (`view.window`): an
+        // on-screen host means there's a real sheet parent; headless runs
+        // (host never shown) keep the reference and drive it via the test
+        // hooks instead.
         if let host = splitViewController.view.window, host.isVisible {
             splitViewController.presentAsSheet(sheet)
         }
@@ -478,7 +351,7 @@ public final class MixerWindowController: NSWindowController {
         } else {
             // Empty pane showing: AUTO-SELECT kicks in as soon as a group
             // exists (first launch with persisted groups, or one created from
-            // the popover's quick-save while this window sat empty).
+            // the popover's quick-save while this screen sat empty).
             if sidebarViewController.currentSelection == nil {
                 showDefaultContent()
             }
@@ -497,20 +370,10 @@ public final class MixerWindowController: NSWindowController {
 
     // MARK: Test-support hooks
     //
-    // The window isn't visible to a headless process, and AppKit won't
+    // The content isn't visible to a headless process, and AppKit won't
     // synthesize the clicks/drags a real interaction needs. These mirror exactly
-    // what the sidebar / editor actions call, so `window-harness` and XCTest can
-    // drive the same paths and assert structure + model state.
-
-    /// True when the window's `styleMask` includes `.fullSizeContentView`
-    /// (SPEC §9 window chrome).
-    public var test_hasFullSizeContentView: Bool {
-        window?.styleMask.contains(.fullSizeContentView) ?? false
-    }
-
-    /// True when the window mounts no toolbar (live-test feedback 2026-07-18:
-    /// the master slider left with the mixer pane — nothing here touches audio).
-    public var test_hasNoToolbar: Bool { window?.toolbar == nil }
+    // what the sidebar / editor actions call, so `window-harness` and the test
+    // suites can drive the same paths and assert structure + model state.
 
     /// The child controllers, for structural assertions.
     public var test_sidebar: SidebarViewController { sidebarViewController }
@@ -538,8 +401,8 @@ public final class MixerWindowController: NSWindowController {
         handleSidebarSelection(selection)
     }
 
-    /// Drive the new-group creation path directly (mirrors the sidebar "+" /
-    /// the empty pane's button and the popover's public `beginNewGroup()`).
+    /// Drive the new-group creation path directly (mirrors the sidebar "+" and
+    /// the empty pane's button).
     /// Builds and wires the sheet controller; headless it stays unpresented but
     /// fully drivable via `test_createSheet`.
     public func test_presentCreateSheet(preselected: [String]) {
@@ -557,39 +420,28 @@ public final class MixerWindowController: NSWindowController {
         createSheetController != nil
     }
 
-    /// The persistent footer caption's text (always present, window or panel,
-    /// scoped to the content pane — see `ContentPaneHostViewController`).
+    /// The persistent footer caption's text (always present, whatever hosts
+    /// the content — see `ContentPaneHostViewController`).
     public var test_footerText: String { contentHostViewController.test_footerText }
 
-    /// The height the persistent footer strip takes out of the window's
-    /// content, so a test can derive the budget a swapped content pane
-    /// actually gets: `content height − title bar − this`. The editor pane has
+    /// The height the persistent footer strip takes out of the screen's
+    /// content area, so a test can derive the budget a swapped content pane
+    /// actually gets: `screen content height − this`. The editor pane has
     /// no scroll view, so that budget is a hard ceiling, not a preference.
     public var test_contentPaneChromeHeight: CGFloat {
         contentHostViewController.test_chromeHeight
-    }
-
-    /// The window's title-bar height, measured off the REAL window rather than
-    /// assumed: `.fullSizeContentView` means the content view runs under the
-    /// title bar, so the pane's safe area — where the content panes actually
-    /// start — is this much lower than the frame's top.
-    public var test_titleBarHeight: CGFloat {
-        guard let window else { return 0 }
-        return window.frame.height - window.contentLayoutRect.height
     }
 }
 
 // MARK: - WarmPanelView
 
-/// The Groups window's CONTENT-PANE canvas (Warm Signal spec §5.3, decision
+/// The Groups screen's CONTENT-PANE canvas (Warm Signal spec §5.3, decision
 /// j: "content pane warm, chrome stock"): a flat, fully opaque fill of
 /// `Tokens.Color.panel` — the warm surface one rung LIGHTER than the
 /// popover's `canvas` gradient — with **no grain** (grain is the popover's
-/// density texture, §1.1; a configuration window doesn't carry it) and no
-/// gradient. The window CHROME around it (title bar, split view, sidebar
-/// material, sheets) stays fully native and untouched; because the window is
-/// `.fullSizeContentView`, the system title bar takes its tint from this
-/// warm surface beneath it, exactly the §5 "the shell samples us" mechanism.
+/// density texture, §1.1; a configuration screen doesn't carry it) and no
+/// gradient. The chrome around it (split view, sidebar material, sheets)
+/// stays fully native and untouched.
 ///
 /// A `draw(_:)` override — deliberately NOT a frozen layer color — so the
 /// token re-resolves live per appearance flip and Increase Contrast on every
@@ -646,7 +498,7 @@ final class HairlineView: NSView {
 final class ContentPaneHostViewController: NSViewController {
 
     /// Persistent secondary-color caption beneath the content pane. ALWAYS
-    /// visible — never gated by `AIRPLAY_CONTROL_PANEL`. Pairs with, but
+    /// visible. Pairs with, but
     /// doesn't duplicate, the empty state's lighter nudge
     /// (`GroupsEmptyStateViewController.subtitleLabel`): the footer is the one
     /// full teaching line; the empty-state subtitle is a shorter contextual
@@ -675,26 +527,26 @@ final class ContentPaneHostViewController: NSViewController {
         contentContainer.translatesAutoresizingMaskIntoConstraints = false
 
         // Warm Signal §5.3: the CONTENT pane (swapped pane + footer strip)
-        // sits on the warm `panel` canvas; the split view / sidebar / title
-        // bar around it stay stock. The root of this host is that canvas.
+        // sits on the warm `panel` canvas; the split view / sidebar / chrome
+        // around it stay stock. The root of this host is that canvas.
         let root = WarmPanelView()
-        // The seam between the stock title bar and this warm pane (design
+        // The seam between the chrome above and this warm pane (design
         // review 2026-07-25). Without it the two surfaces just abut: tolerable
-        // in light mode, where both are near-white, but in dark mode the title
-        // bar's COOL grey meets the pane's WARM near-black and the join reads
-        // muddy rather than deliberate. A hairline makes it an edge on purpose.
-        // Scoped to the content pane only — the sidebar runs full height under
-        // the title bar by design, so a border there would cut across it.
+        // in light mode, where both are near-white, but in dark mode the
+        // chrome's COOL grey meets the pane's WARM near-black and the join
+        // reads muddy rather than deliberate. A hairline makes it an edge on
+        // purpose. Scoped to the content pane only — the sidebar runs the full
+        // split-view height by design, so a border there would cut across it.
         let titleBarSeam = HairlineView()
         titleBarSeam.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(contentContainer)
         root.addSubview(footerLabel)
         root.addSubview(titleBarSeam)
         NSLayoutConstraint.activate([
-            // The SAFE-AREA top, not the root's: the window is
-            // `.fullSizeContentView`, so this pane extends UNDER the title bar
-            // and a seam at `root.topAnchor` would be hidden behind it. The
-            // safe-area edge is where the title bar actually ends.
+            // The SAFE-AREA top, not the root's: in a `.fullSizeContentView`
+            // host this pane extends UNDER the title bar and a seam at
+            // `root.topAnchor` would be hidden behind it; with no overlapping
+            // chrome the safe-area top IS the root's top.
             titleBarSeam.topAnchor.constraint(equalTo: root.safeAreaLayoutGuide.topAnchor),
             titleBarSeam.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             titleBarSeam.trailingAnchor.constraint(equalTo: root.trailingAnchor),
@@ -717,7 +569,7 @@ final class ContentPaneHostViewController: NSViewController {
     /// leaving the rest to the swapped content pane. Derived from the real
     /// caption's fitting height plus the two gaps its constraints use — the
     /// height budget a content pane has to fit inside is
-    /// `window height − title bar − THIS`.
+    /// `screen content height − THIS`.
     var test_chromeHeight: CGFloat {
         loadViewIfNeeded()
         view.layoutSubtreeIfNeeded()

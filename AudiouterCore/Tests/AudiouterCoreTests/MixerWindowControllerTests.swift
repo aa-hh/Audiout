@@ -7,14 +7,15 @@ import AppKit
 @testable import AudiouterSharedUI
 @testable import AudiouterWindowUI
 
-/// Structural + integration coverage for the "Groups" window (design revamp,
-/// SPEC §9). The window isn't visible to CI, so these assert the *built*
-/// window structure and that interactions call through the model — the same
+/// Structural + integration coverage for the Groups SCREEN's content
+/// controller (design revamp, SPEC §9; the standalone window was retired in
+/// U6). The content isn't visible to CI, so these assert the *built*
+/// structure and that interactions call through the model — the same
 /// checks the `window-harness` executable runs, folded into `swift test`.
 ///
-/// The window is CONFIGURATION-ONLY under the revamp: viewing/editing groups
+/// The screen is CONFIGURATION-ONLY under the revamp: viewing/editing groups
 /// here never activates them or moves audio (activation lives in the app's
-/// popover). Group creation is a standard macOS sheet
+/// Mixer screen). Group creation is a standard macOS sheet
 /// (`GroupCreationSheetController`), not an in-pane draft.
 ///
 /// `MixerWindowController` is `@MainActor`; these cases are `@MainActor` so they
@@ -31,11 +32,10 @@ import AppKit
         try await waitForFleet(backend, count: 7)
         let store = GroupStore(directory: tempDirectory())
         let controller = GroupController(backend: backend, store: store, loadPersisted: false)
-        let window = MixerWindowController(groupController: controller,
-                                           frameAutosaveName: mixerWindowAutosaveName)
-        // Headless test seam: simulate the window being visible so update(devices:)
+        let window = MixerWindowController(groupController: controller)
+        // Headless test seam: simulate the content being visible so update(devices:)
         // refreshes the UI tree (same pattern: PopoverController.test_isShownOverride / B8).
-        window.test_isWindowVisibleOverride = true
+        window.test_isVisibleOverride = true
         window.update(devices: backend.devices)
         return (window, controller, backend)
     }
@@ -85,11 +85,10 @@ import AppKit
         let controller = GroupController(backend: backend, store: store, loadPersisted: false)
         let iconController = DeviceIconController(store: DeviceIconStore(directory: tempDirectory()),
                                                    loadPersisted: false)
-        let window = MixerWindowController(groupController: controller, deviceIconController: iconController,
-                                           frameAutosaveName: mixerWindowAutosaveName)
-        // Headless test seam: simulate the window being visible so update(devices:)
+        let window = MixerWindowController(groupController: controller, deviceIconController: iconController)
+        // Headless test seam: simulate the content being visible so update(devices:)
         // refreshes the UI tree (same pattern: PopoverController.test_isShownOverride / B8).
-        window.test_isWindowVisibleOverride = true
+        window.test_isVisibleOverride = true
         window.update(devices: backend.devices)
         return (window, controller, backend, iconController)
     }
@@ -106,123 +105,8 @@ import AppKit
         try? await Task.sleep(nanoseconds: 150_000_000)
     }
 
-    // MARK: Window frame persistence (R2: reconciling the audit vs. the live test)
-    //
-    // `MixerWindowController` restores its frame via
-    // `NSWindow.setFrameAutosaveName("MixerWindow")`, which — per AppKit — finds
-    // and SYNCHRONOUSLY applies any previously-saved frame the instant it's
-    // called, before `init()` does anything else. A prior version of this
-    // controller unconditionally called `setContentSize`/`center()` right after
-    // that, silently discarding the restore on every construction. That bug was
-    // invisible to a live "move it, close it, reopen it" smoke test because
-    // `AppDelegate` builds this controller once per process and reuses it — a
-    // same-session close/reopen never re-runs `init()` at all. It only shows up
-    // across a genuine app relaunch, which is exactly when frame autosave is
-    // supposed to matter. These tests construct a fresh `MixerWindowController`
-    // under the REAL "MixerWindow" autosave name, standing in for "a fresh
-    // launch after a previous session saved a frame" — the case the live smoke
-    // test never actually exercised.
-
-    // A per-test-instance autosave name (via `IsolatedTestCase.uniqueName`), NOT
-    // the real "MixerWindow" the app ships. AppKit's `setFrameAutosaveName`
-    // always persists into `UserDefaults.standard`, so under `swift test
-    // --parallel` — where each test class runs in its own process — two suites
-    // sharing the literal "MixerWindow" key race and flake. A unique name per
-    // test isolates the key; the controller reads it back via its injectable
-    // `frameAutosaveName` init parameter (default "MixerWindow" in the real app).
-    private lazy var mixerWindowAutosaveName = NSWindow.FrameAutosaveName(uniqueName("MixerWindow"))
-    private var mixerWindowFrameDefaultsKey: String { "NSWindow Frame \(mixerWindowAutosaveName)" }
-
-    /// Simulate "a previous session left the window here": build a throwaway
-    /// window under the SAME "MixerWindow" autosave name `MixerWindowController`
-    /// itself uses, move it, and force-persist that frame — exactly what AppKit
-    /// does automatically as the user drags a real, autosave-named window.
-    private func seedSavedMixerWindowFrame(_ frame: NSRect) {
-        let seed = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 720, height: 460),
-                            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-                            backing: .buffered, defer: false)
-        seed.setFrameAutosaveName(mixerWindowAutosaveName)
-        seed.setFrame(frame, display: false)
-        seed.saveFrame(usingName: mixerWindowAutosaveName)
-    }
-
-    /// Clear this test's saved frame. The autosave name is unique per test
-    /// instance, so the key can't collide with another test — but AppKit's
-    /// `saveFrame` writes to `UserDefaults.standard` regardless of any suite, so
-    /// the clear has to target `.standard` under that unique key too.
-    private func clearSavedMixerWindowFrame() {
-        // isolation-ok: unique per-test autosave key; AppKit forces `.standard`.
-        UserDefaults.standard.removeObject(forKey: mixerWindowFrameDefaultsKey)
-    }
-
-    @Test func windowRestoresPreviouslySavedFrameInsteadOfRecentering() async throws {
-        clearSavedMixerWindowFrame()
-        defer { clearSavedMixerWindowFrame() }
-        let saved = NSRect(x: 133, y: 222, width: 900, height: 600)
-        seedSavedMixerWindowFrame(saved)
-
-        let (window, _, _) = try await makeWindow()
-
-        #expect(window.window?.frame == saved, "a frame saved by a previous session must be restored as-is on the next construction, not overwritten by the default-size/center() fallback — regression coverage for the R2 audit/live-test contradiction")
-    }
-
-    @Test func freshWindowWithNoSavedFrameFallsBackToDefaultSizeCentered() async throws {
-        clearSavedMixerWindowFrame()
-        defer { clearSavedMixerWindowFrame() }
-
-        let (window, _, _) = try await makeWindow()
-        let frame = try #require(window.window?.frame)
-        #expect(abs(frame.width - 560) <= 0.5,
-                Comment(rawValue: "narrowed 720 → 560 once the content panes became elastic (design review " +
-                "2026-07-25): at 720 the sections either stretched into a slab or hung " +
-                "their intrinsic ~277pt of content beside a dead strip"))
-        #expect(abs(frame.height - 505) <= 0.5,
-                Comment(rawValue: "505 = the exact content size — .fullSizeContentView means content fills the " +
-                "whole frame, no separate title-bar addition. Grew from 460 when the group " +
-                "editor gained its two bordered grouped sections (design review 2026-07-25); " +
-                "the pane's fitting height had been within 1pt of the old default"))
-        #expect(frame.size == MixerWindowController.defaultContentSize,
-                "the literals above and the shipping constant must be the same number")
-
-        let minSize = try #require(window.window?.contentMinSize)
-        #expect(minSize == MixerWindowController.minimumContentSize,
-                "the window refuses to be dragged smaller than its content can survive")
-
-        // AppKit's `center()` isn't the screen's exact geometric midpoint (it's
-        // nudged for visual balance), so compare against a same-size probe that
-        // also just calls `center()`, rather than hard-coding that offset.
-        let probe = NSWindow(contentRect: NSRect(origin: .zero, size: frame.size),
-                             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-                             backing: .buffered, defer: false)
-        probe.center()
-        #expect(frame.origin == probe.frame.origin, "with nothing saved yet, the window must still fall back to center() as before")
-    }
-
-    // MARK: Window chrome (SPEC §9 "Full window")
-
-    /// The shipping autosave name was BUMPED with the 560×505 default. Without
-    /// the bump an existing install keeps opening at whatever it saved under
-    /// the old key — the new default would never be seen on the one machine
-    /// that matters most, the developer's own.
-    @Test func shippingFrameAutosaveNameWasBumpedForTheNewDefaultSize() {
-        #expect(MixerWindowController.defaultFrameAutosaveName == "MixerWindow-v2",
-                Comment(rawValue: "a saved frame under the old \"MixerWindow\" key would pin every existing " +
-                "install to the old 720-wide default forever"))
-    }
-
-    @Test func windowChromeHasFullSizeContentAndNoToolbar() async throws {
-        let (window, _, _) = try await makeWindow()
-        #expect(window.test_hasFullSizeContentView)
-        #expect(window.test_hasNoToolbar, "the window mounts no toolbar (live-test feedback: no volume UI in a config-only window)")
-    }
-
-    @Test func windowTitleIsGroups() async throws {
-        let (window, _, _) = try await makeWindow()
-        #expect(window.window?.title == "Groups")
-    }
-
-    /// Hosted as the surface's Groups screen (U4) this controller's own window
-    /// is never ordered on screen, so `setHostVisible(_:)` is what tells it the
+    /// Hosted as the surface's Groups screen (U4) this controller owns no
+    /// window, so `setHostVisible(_:)` is what tells it the
     /// user is looking at its content. Turning it on must CATCH UP on whatever
     /// arrived while it was hidden — otherwise every speaker discovered before
     /// the Groups tab was first opened would be missing from the sidebar for
@@ -233,8 +117,7 @@ import AppKit
         try await waitForFleet(backend, count: 7)
         let store = GroupStore(directory: tempDirectory())
         let controller = GroupController(backend: backend, store: store, loadPersisted: false)
-        let window = MixerWindowController(groupController: controller,
-                                           frameAutosaveName: mixerWindowAutosaveName)
+        let window = MixerWindowController(groupController: controller)
 
         window.update(devices: backend.devices)
         #expect(window.test_sidebar.test_deviceRowCount == 0,
@@ -306,14 +189,6 @@ import AppKit
 
         #expect(window.test_createSheet != nil, "the '+' with no selection presents the New Group sheet")
         #expect(controller.groups.count == 0, "presenting the sheet creates nothing")
-    }
-
-    @Test func beginNewGroupPresentsCreationSheet() async throws {
-        let (window, _, _) = try await makeWindow()
-        window.beginNewGroup()
-        await drain()
-
-        #expect(window.test_isPresentingCreateSheet, "the popover's beginNewGroup() opens the same creation sheet")
     }
 
     @Test func createSheetPrefillsPreselectedMembersChecked() async throws {
@@ -723,23 +598,30 @@ import AppKit
     // real first responder to advance Tab FROM. `SidebarViewController`'s
     // `viewDidAppear()` override seeds the outline view as first responder
     // (see its doc comment for the full root-cause writeup); this asserts
-    // that seed fires exactly the way a real window appearing would trigger
-    // it, without needing an actual on-screen window (never available under
-    // `swift test`).
+    // that seed fires exactly the way a real hosting window appearing would
+    // trigger it, without needing an actual on-screen window (never available
+    // under `swift test`). The controller owns no window (U6), so the tests
+    // stand a plain host window in for the surface's shell.
 
-    @Test func windowHasNoFirstResponderBeforeItEverAppears() async throws {
+    @Test func contentHasNoFirstResponderBeforeItEverAppears() async throws {
         let (window, _, _) = try await makeWindow()
-        // Before `viewDidAppear()` has ever run, the window's first responder
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 505),
+                            styleMask: [.titled, .resizable], backing: .buffered, defer: true)
+        host.contentViewController = window.contentController
+        // Before `viewDidAppear()` has ever run, the host's first responder
         // is itself — nothing has claimed it. This is the exact state a live
         // Tab press found: nothing to advance from.
-        #expect(window.test_sidebar.view.window === window.window)
+        #expect(window.test_sidebar.view.window === host)
         #expect(!(window.test_sidebar.test_isOutlineViewFirstResponder))
     }
 
     @Test func sidebarViewDidAppearSeedsTheOutlineViewAsFirstResponder() async throws {
         let (window, _, _) = try await makeWindow()
+        let host = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 505),
+                            styleMask: [.titled, .resizable], backing: .buffered, defer: true)
+        host.contentViewController = window.contentController
         window.test_sidebar.test_simulateViewDidAppear()
-        #expect(window.test_sidebar.test_isOutlineViewFirstResponder, "the sidebar's outline view must become first responder once the window appears, or Tab has nothing to advance from")
+        #expect(window.test_sidebar.test_isOutlineViewFirstResponder, "the sidebar's outline view must become first responder once the content appears, or Tab has nothing to advance from")
     }
 }
 

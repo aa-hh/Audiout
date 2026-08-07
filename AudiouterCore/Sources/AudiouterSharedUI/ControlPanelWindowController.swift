@@ -3,14 +3,13 @@
 import AppKit
 import AudiouterCore
 
-/// Reusable "control panel" shell (control-panel rollout, `AIRPLAY_CONTROL_PANEL=1`):
-/// a sticky floating `NSPanel` that hosts an arbitrary content `NSViewController`.
-/// The shell hosts Groups only today — Settings is its own standalone
-/// window (`AudiouterSettingsUI.SettingsWindowController`), and Setup may
-/// return onto the shell later, so it stays content-agnostic: the app
-/// keeps exactly one `ControlPanelWindowController` alive and calls
-/// `setContent(_:)` to swap what it's showing rather than opening a
-/// second window.
+/// Reusable "control panel" shell: a sticky floating `NSPanel` that hosts an
+/// arbitrary content `NSViewController`. It is the ONE SURFACE's window (the
+/// old `AIRPLAY_CONTROL_PANEL` opt-in flag is retired — this shell always
+/// ships): `AppSurfaceController` keeps exactly one
+/// `ControlPanelWindowController` alive and calls `setContent(_:)` to swap
+/// between the Mixer/Groups/Settings screens rather than opening a second
+/// window. It stays content-agnostic — no screen concepts in here.
 ///
 /// Panel behavior (decided, do not drift):
 /// - ACTIVATING: takes focus on open. Deliberately NOT `.nonactivatingPanel` —
@@ -98,8 +97,7 @@ public final class ControlPanelWindowController: NSWindowController {
     /// The autosave name the PINNED profile persists its frame under. Injectable
     /// because `NSWindow.setFrameAutosaveName` always writes `UserDefaults
     /// .standard` no matter what defaults suite a caller uses — a per-test name
-    /// is the only way to keep a test from racing the shipping key (the same
-    /// reason `MixerWindowController` takes one).
+    /// is the only way to keep a test from racing the shipping key.
     private let frameAutosaveName: NSWindow.FrameAutosaveName
 
     /// Whether the panel is wearing the PINNED manner profile. Plain runtime
@@ -245,11 +243,11 @@ public final class ControlPanelWindowController: NSWindowController {
             panel.hasShadow = true
             panel.removeChildWindow(backingWindow)
             backingWindow.orderOut(nil)
-            // `setFrameUsingName` FIRST, then `setFrameAutosaveName` — the
-            // pattern (and the empirical reason) documented on
-            // `MixerWindowController.makeContainer`: `setFrameAutosaveName`'s
-            // own Bool return is not a trustworthy "was a frame restored"
-            // signal, so the restore goes through the API that both restores
+            // `setFrameUsingName` FIRST, then `setFrameAutosaveName`:
+            // `setFrameAutosaveName`'s own Bool return is not a trustworthy
+            // "was a frame restored" signal (verified empirically — it returns
+            // `true` even for a brand-new name with nothing ever saved), so
+            // the restore goes through the API that both restores
             // and reports; the autosave call afterward only ARMS ongoing
             // save-on-move/resize. With no saved frame this is a no-op and the
             // window pins exactly where it already sits; with one it returns
@@ -392,7 +390,7 @@ public final class ControlPanelWindowController: NSWindowController {
     /// Honors `test_isPanelVisibleOverride` so headless tests can drive the
     /// on-screen-only paths (`swift test` never orders a real window on
     /// screen), mirroring `PopoverController.test_isShownOverride` and
-    /// `MixerWindowController.test_isWindowVisibleOverride`.
+    /// `MixerWindowController.test_isVisibleOverride`.
     public var isPanelVisible: Bool { test_isPanelVisibleOverride ?? (window?.isVisible ?? false) }
 
     /// Close the panel exactly as the ✕ button or Escape would: routed through

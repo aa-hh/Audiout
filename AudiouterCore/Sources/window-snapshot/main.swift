@@ -534,28 +534,33 @@ func run() -> Int32 {
         let deviceIconController = DeviceIconController(loadPersisted: false)
         let windowController = MixerWindowController(groupController: controller,
                                                       deviceIconController: deviceIconController)
-        // `update(devices:)` now gates its sidebar/content refresh behind
-        // `isEffectivelyVisible` (real `window.isVisible` OR this override) —
-        // this tool never truly orders the window on screen under
+        // `update(devices:)` gates its sidebar/content refresh behind
+        // `isEffectivelyVisible` (host visibility OR this override) — this
+        // tool never truly puts the content on screen under
         // `AIRPLAY_HEADLESS=1`, so without it every `update(devices:)` below
         // silently no-ops and the sidebar renders empty (caught 2026-07-26:
         // mixer-1's device list vanished the moment this gate landed).
         // Mirrors `popover-harness/main.swift`'s identical
         // `popover.test_isShownOverride = true` for the same B8 gate.
-        windowController.test_isWindowVisibleOverride = true
+        windowController.test_isVisibleOverride = true
         backend.start()
         guard waitForFleet(backend, count: 7) else {
             print("SETUP FAIL: fleet did not fully discover"); return 2
         }
         windowController.update(devices: backend.devices)
-        guard let window = windowController.window else {
-            print("SETUP FAIL: no window"); return 2
-        }
-        // The SHIPPING default, not a hand-picked size: a golden rendered at a
-        // size the app never opens at can't show whether the content actually
-        // fits (it hid a pane overflowing its own window by ~22pt until the
-        // 2026-07-25 review).
-        window.setContentSize(MixerWindowController.defaultContentSize)
+        // The controller owns no window any more (U6) — build a plain titled
+        // host so the frame snapshots still render the content in window
+        // chrome. 560×505 is the retired standalone default, kept only so the
+        // goldens stay comparable until P4 re-renders them under the surface.
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: NSSize(width: 560, height: 505)),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Groups"
+        window.contentViewController = windowController.contentController
+        window.setContentSize(NSSize(width: 560, height: 505))
         drain()
 
         // 1. Default state: no groups — the empty "No groups yet" pane (the

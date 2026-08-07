@@ -269,9 +269,7 @@ import AppKit
     // MARK: 5. NEGATIVE — MixerWindowController's footer + empty-state pane
 
     private func makeMixerWindow() -> MixerWindowController {
-        let controller = makeGroupController()
-        return MixerWindowController(groupController: controller,
-                                     frameAutosaveName: uniqueName("GroupsWindowTextColorLockTests"))
+        MixerWindowController(groupController: makeGroupController())
     }
 
     @Test func mixerWindowFooterAndEmptyStateLabelsStayStock() {

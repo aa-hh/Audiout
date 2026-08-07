@@ -407,6 +407,31 @@ public final class ControlPanelWindowController: NSWindowController {
         window?.title = title
     }
 
+    /// Whether the panel currently offers the user a drag-resize handle/cursor.
+    /// The surface toggles this PER SCREEN (F3, live review): an exact-fit
+    /// screen re-sizes the window itself on every content change, so a manual
+    /// drag fights it — the drag sticks until the next content change, then
+    /// snaps back to the exact fit. Turning `.resizable` off for those screens
+    /// removes the affordance instead of leaving it to fight a resize the user
+    /// didn't ask for; Groups keeps it (its session drag-memory is deliberate,
+    /// U3). Only the `.resizable` bit moves — `.titled`/`.closable` never do
+    /// (R6), and `.resizable` is not one of them, so this is independent of
+    /// the pin-profile manner bits `applyPinProfile()` owns.
+    public func setUserResizable(_ resizable: Bool) {
+        guard let panel = window else { return }
+        if resizable {
+            panel.styleMask.insert(.resizable)
+        } else {
+            panel.styleMask.remove(.resizable)
+        }
+    }
+
+    /// Whether the panel's style mask currently carries `.resizable`, for
+    /// structural assertions.
+    public var isUserResizable: Bool {
+        window?.styleMask.contains(.resizable) ?? false
+    }
+
     /// The panel's pre-dispatch key-equivalent hook (see `ControlPanelPanel`).
     /// The surface installs its ⌘1/⌘2/⌘3 screen shortcuts here; the shell
     /// itself attaches no meaning to any key.

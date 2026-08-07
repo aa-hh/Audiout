@@ -339,6 +339,12 @@ public final class AppSurfaceController {
     /// back, then animate to the target (the prototype's proven dance).
     private func mount(_ screen: SurfaceScreen, animated: Bool) {
         let previousFrame = shell.window?.frame
+        // F3: only Groups is user-resizable — it's the one screen with
+        // session drag-memory (U3). Mixer and Settings re-size the window
+        // themselves on every content change (exact-fit), so a manual drag
+        // there would fight the next automatic resize; removing the
+        // affordance is the same rule pinned and unpinned.
+        shell.setUserResizable(screen == .groups)
         switch screen {
         case .mixer:
             let panel = claimedMixerPanel()

@@ -83,6 +83,29 @@ struct ControlPanelWindowControllerTests {
         #expect(panel.animationBehavior == .utilityWindow)
     }
 
+    /// F3: `setUserResizable` toggles ONLY the `.resizable` bit — the surface
+    /// uses it per-screen (exact-fit screens off, Groups on), and R6's
+    /// protected bits (`.titled`/`.closable`) must survive untouched either
+    /// way, same as a pin-profile flip.
+    @Test func userResizableTogglesOnlyThatBitBothDirections() throws {
+        let controller = makeController()
+        let panel = try #require(controller.test_panel)
+        #expect(controller.isUserResizable, "fresh panel starts resizable (Groups is the default)")
+
+        controller.setUserResizable(false)
+        #expect(!controller.isUserResizable)
+        #expect(!panel.styleMask.contains(.resizable))
+        #expect(panel.styleMask.contains(.titled))
+        #expect(panel.styleMask.contains(.closable))
+        #expect(panel.styleMask.contains(.fullSizeContentView))
+
+        controller.setUserResizable(true)
+        #expect(controller.isUserResizable)
+        #expect(panel.styleMask.contains(.resizable))
+        #expect(panel.styleMask.contains(.titled))
+        #expect(panel.styleMask.contains(.closable))
+    }
+
     @Test func showWithAnchorKeepsFrameInsideVisibleFrame() throws {
         let screen = try #require(NSScreen.main)
         let controller = makeController()

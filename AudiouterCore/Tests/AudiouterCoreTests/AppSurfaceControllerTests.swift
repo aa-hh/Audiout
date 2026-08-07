@@ -123,6 +123,33 @@ import AppKit
         #expect(surface.test_hostedContentViewController === surface.test_mixerPanel)
     }
 
+    /// F3: Mixer and Settings re-size the window themselves on every content
+    /// change (exact-fit), so a manual drag-resize there would fight the next
+    /// automatic resize — it stuck until the next content change, then
+    /// snapped back. Groups keeps its session drag-memory (U3) and stays
+    /// resizable. The rule is the same pinned and unpinned.
+    @Test func onlyGroupsStaysUserResizable() throws {
+        let (surface, _, _, _) = makeSurface()
+        surface.show(anchorRect: nil)
+        #expect(!surface.shell.isUserResizable, "Mixer opens exact-fit, not user-resizable")
+
+        surface.select(.groups)
+        #expect(surface.shell.isUserResizable, "Groups keeps its manual drag-resize")
+
+        surface.select(.settings)
+        #expect(!surface.shell.isUserResizable, "Settings is exact-fit, not user-resizable")
+
+        surface.select(.mixer)
+        #expect(!surface.shell.isUserResizable)
+
+        // Pinned and unpinned share the rule — it tracks the screen, not the
+        // manner profile.
+        surface.setPinned(true)
+        #expect(!surface.shell.isUserResizable, "still Mixer: pinning alone must not flip it")
+        surface.select(.groups)
+        #expect(surface.shell.isUserResizable, "Groups is resizable pinned too")
+    }
+
     @Test func selectingTheCurrentScreenIsANoOp() {
         let (surface, popover, _, _) = makeSurface()
         surface.show(anchorRect: nil)

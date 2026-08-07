@@ -2079,10 +2079,11 @@ import AppKit
         #expect(popover.test_deviceRow(for: "office")?.test_feedText == "Music", "the fixture's event reached the row via the same plumbing AppDelegate uses")
     }
 
-    // MARK: V2 — Devices card empty-state placeholder
+    // MARK: V2/V9 — Devices card empty-state placeholder
 
     /// With no devices discovered, the Devices card still builds and shows the
-    /// "Looking for devices…" placeholder; once devices arrive it disappears.
+    /// §5.9 "Looking for speakers…" placeholder; once devices arrive it
+    /// disappears.
     @Test func devicesCardEmptyStatePlaceholder() async throws {
         let (popover, _, backend) = try await makePopover()
         // Devices present initially ⇒ no placeholder, card exists.
@@ -2094,6 +2095,8 @@ import AppKit
         #expect(popover.test_isCardCollapsed(title: "Output Devices") != nil, "the Devices card is still built when empty (V2)")
         #expect(popover.test_devicesPlaceholderShown, "no devices ⇒ placeholder shown")
         #expect(popover.test_deviceSectionRowCount == 0, "no interactive device rows")
+        #expect(PopoverController.test_devicesPlaceholderText == "Looking for speakers…",
+                "pins the §5.9 locked copy")
 
         // Devices arrive again ⇒ placeholder gone.
         popover.update(devices: backend.devices)
@@ -2101,16 +2104,19 @@ import AppKit
         #expect(popover.test_deviceSectionRowCount == 7, "device rows restored")
     }
 
-    // MARK: V11 — Applications card empty-state placeholder
+    // MARK: V11/V9 — Applications card empty-state placeholder
 
-    /// With no rendered app routes the Applications card shows the "No apps
-    /// routed…" placeholder; adding a route removes it.
+    /// With no rendered app routes the Applications card shows the §5.9
+    /// "Route one app somewhere else…" placeholder; adding a route removes it.
     @Test func applicationsCardEmptyStatePlaceholder() async throws {
         let appRouting = tempAppRoutingController()
         let (popover, _, _) = try await makePopover(appRouting: appRouting,
                                                     runningAppsProvider: routedApps)
         #expect(popover.test_applicationsPlaceholderShown, "no routes ⇒ placeholder shown")
         #expect(popover.test_appRowCount == 0, "no app rows")
+        #expect(PopoverController.test_applicationsPlaceholderText ==
+                "Route one app somewhere else — music to the house, calls on your Mac. Use + to pick an app.",
+                "pins the §5.9 locked copy")
 
         popover.test_pickApp(bundleID: "com.example.music")
         #expect(!(popover.test_applicationsPlaceholderShown), "a route exists ⇒ placeholder gone")

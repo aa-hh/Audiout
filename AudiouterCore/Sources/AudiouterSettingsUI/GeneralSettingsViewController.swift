@@ -24,7 +24,7 @@ public final class GeneralSettingsViewController: NSViewController {
     private let aboutButton = NSButton()
     private let aboutWindowController: AboutWindowController
 
-    /// Fired when "Check Permissions…" is clicked, so the app can re-present the
+    /// Fired when "Open Setup…" is clicked, so the app can re-present the
     /// first-run onboarding/permission-priming flow. Nil (unset) leaves the
     /// button inert — the app layer wires it in `openSettings`.
     public var onRunSetupAgain: (() -> Void)?
@@ -34,7 +34,7 @@ public final class GeneralSettingsViewController: NSViewController {
     ///     the live app bundle (`AboutInfo.current()`), injected as a fixed
     ///     value in tests so the rendered version string never depends on how
     ///     the test binary was built.
-    ///   - openURL: opens the About window's "View Source Code" link; defaults
+    ///   - openURL: opens the About window's "View Source Code…" link; defaults
     ///     to `NSWorkspace`, injected as a recording closure in tests so a
     ///     test run never actually launches a browser.
     public init(loginItem: LoginItemManaging,
@@ -58,10 +58,10 @@ public final class GeneralSettingsViewController: NSViewController {
             subtitle: "Open Audiouter automatically when you log in.",
             control: launchSwitch)
 
-        // "Check Permissions…" re-opens the first-run permission-priming window —
-        // the way a user re-checks the System Audio / Local Network grants after
+        // "Open Setup…" re-opens the first-run permission-priming window — the
+        // way a user re-checks the System Audio / Local Network grants after
         // changing them in System Settings (the flow itself deep-links there).
-        setupButton.title = "Check Permissions…"
+        setupButton.title = "Open Setup…"
         setupButton.bezelStyle = .rounded
         setupButton.target = self
         setupButton.action = #selector(runSetupAgainTapped)
@@ -138,7 +138,7 @@ public final class GeneralSettingsViewController: NSViewController {
         launchToggled()
     }
 
-    /// Invoke "Check Permissions…" as a click would.
+    /// Invoke "Open Setup…" as a click would.
     public func test_tapRunSetupAgain() {
         _ = view
         runSetupAgainTapped()

@@ -35,7 +35,7 @@ to a backend directly.
   `ContentPaneHostViewController` — NOT `splitViewController` itself — which
   hosts the swapped editor/detail/empty pane on top and `footerLabel` pinned
   beneath it. The SIDEBAR split item is untouched by any of this and runs the
-  full height of the split view down to its own "New Group" bar (design
+  full height of the split view down to its own "New Group…" bar (design
   review 2026-07-18: the footer used to wrap the WHOLE split view via an outer
   `rootViewController`, which left a gap above it under the sidebar too —
   that outer wrapper is gone; `window.contentViewController` and the public
@@ -46,9 +46,10 @@ to a backend directly.
   window or handed to the control-panel shell — it is content, not chrome, so
   `AIRPLAY_CONTROL_PANEL` has no say over it. It teaches the config-vs-playback
   split ONCE as the full sentence; `GroupsEmptyStateViewController.subtitleLabel`
-  ("Play groups from the menu bar") is a shorter, lighter echo shown only when
-  the empty pane itself is up — don't duplicate the footer's exact wording
-  there. Test hook: `test_footerText` (reads through to
+  ("Save a set of speakers as a group, then switch to it in two clicks from
+  the menu bar" — §5.9's locked teaching line) is a separate, feature-level
+  nudge shown only when the empty pane itself is up — don't duplicate the
+  footer's exact wording there. Test hook: `test_footerText` (reads through to
   `ContentPaneHostViewController.test_footerText`).
 - **This controller only builds the shipping `NSWindow`; the control-panel
   shell is a separate host.** `makeContainer()` always builds the
@@ -81,8 +82,8 @@ to a backend directly.
   opens its editor.
 - **The sidebar always shows the Groups section** (design revamp: this window
   is groups-configuration only). When empty it displays "No groups yet"
-  (a non-selectable placeholder), plus a labeled "New Group" button at the
-  bottom. The Devices section appears whenever there is at least one device.
+  (a non-selectable placeholder), plus a labeled "New Group…" button at the
+  bottom. The Speakers section appears whenever there is at least one device.
 - **`SidebarViewController.viewDidAppear()` seeds Tab-key traversal for the
   WHOLE window (A11Y-GROUPS), not just the sidebar.** A live test found Tab
   did nothing anywhere in this window; root cause was that nothing in the
@@ -103,7 +104,7 @@ to a backend directly.
   carries no `children` anymore. Previewing a group's members happens in
   `GroupEditorViewController`'s own "Speakers" checklist, not by expanding the
   sidebar row, so the old nesting was pure duplication. Consequently the
-  **Devices section now lists EVERY device**, grouped or not — the old filter
+  **Speakers section now lists EVERY device**, grouped or not — the old filter
   that hid a device because it belonged to the (never-set, in this
   config-only window) active group is gone; hiding a device here would make
   it unreachable now that membership isn't previewed via expansion. Test
@@ -150,7 +151,7 @@ to a backend directly.
   (1) `railOverlay` must be re-pinned to the COLUMN, or the spine and the
   nodes separate by exactly the margin — `test_nodeCenterXInOverlaySpace` is
   the guard, and it must equal `PopoverColumnGrid.railGutterCenterX`;
-  (2) the "Delete group…" button's leading anchor must be re-based to the
+  (2) the "Delete Group…" button's leading anchor must be re-based to the
   column, or it drifts one margin left of everything it sits under.
 - **The editor pane has NO scroll view, so its fitting height is a hard
   budget — and the budget is NOT the window's height.** The window is
@@ -159,7 +160,7 @@ to a backend directly.
   content pane gets `MixerWindowController.defaultContentSize.height` minus
   both. A guard that compares against the whole window height passes while the
   pane overflows — which is exactly what happened: the pre-fix editor wanted
-  484pt of a 445pt budget (39pt of list and the "Delete group…" button below
+  484pt of a 445pt budget (39pt of list and the "Delete Group…" button below
   the window's edge) and the old `<= 505` assertion was green. Assert against
   `test_titleBarHeight` + `test_contentPaneChromeHeight`, both measured off
   the real window (`MembershipRailTests
@@ -177,9 +178,10 @@ to a backend directly.
   Anything that changes what you HEAR belongs in the popover.
 - **Auto-select, never a no-op pane.** With no sidebar selection the window
   selects the first saved group's editor; with zero groups it shows
-  `GroupsEmptyStateViewController` ("No groups yet" + a New Group button that
-  runs the same creation sheet). The empty-state subtitle is "Music first —
-  rooms can come later."
+  `GroupsEmptyStateViewController` ("No groups yet" + a New Group… button that
+  runs the same creation sheet). The empty-state subtitle is the §5.9 teaching
+  line: "Save a set of speakers as a group, then switch to it in two clicks
+  from the menu bar."
 - **Header parity is GEOMETRIC, and lives in `GroupsPaneLayout`.**
   `GroupEditorViewController` and `DeviceDetailViewController` swap places
   behind one sidebar, so their headers must land on the same pixels: same
@@ -265,7 +267,7 @@ to a backend directly.
 - **`IconPickerViewController` has no opinion on presentation.** It only
   builds a curated grid (`DeviceIcon.curated`, filtered through
   `DeviceIcon.isValid` so a stale curated name never renders a blank glyph)
-  plus one search field doing double duty, and a "Use default icon" button.
+  plus one search field doing double duty, and a "Use Default Icon" button.
   The search field (a) LIVE-FILTERS the curated grid by case-insensitive
   substring match on every keystroke — empty text shows the full curated
   set, a non-matching search shows an empty grid with a plain "No matches"
@@ -311,8 +313,8 @@ to a backend directly.
 |---|---|
 | `MixerWindowController` | Owns `NSWindow` (no toolbar), split-view, sheet; swaps content between editor/detail/empty panes inside `ContentPaneHostViewController`; auto-select rule. Exposes `contentController` (the split view controller) so the shared control-panel shell can host the same content. |
 | `ContentPaneHostViewController` | Wraps the swapped editor/detail/empty pane plus the persistent footer caption, scoped to the content split item only — the sidebar item is untouched and runs the full split-view height. |
-| `GroupsEmptyStateViewController` | "No groups yet" empty state: primary message + secondary subtitle ("Play groups from the menu bar") + New Group call-to-action. |
-| `SidebarViewController` | Source-list (Groups + Devices sections), both FLAT (no expand/collapse, no nested rows); selection drives the content pane. |
+| `GroupsEmptyStateViewController` | "No groups yet" empty state: primary message + §5.9 teaching-line subtitle + New Group… call-to-action. |
+| `SidebarViewController` | Source-list (Groups + Speakers sections), both FLAT (no expand/collapse, no nested rows); selection drives the content pane. |
 | `GroupEditorViewController` | Edit-only pane: rename, membership toggles, delete; no creation flow. |
 | `GroupCreationSheetController` | Standard macOS sheet for new groups; never activates. |
 | `DeviceDetailViewController` | Read-only device detail pane (name, status, volume, kind, groups); the one approved custom-drawn icon-edit badge lives on its icon well. |

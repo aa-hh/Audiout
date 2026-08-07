@@ -903,8 +903,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
         // 2. Selected Devices card — split into Current Device + AirPlay. ALWAYS
         // present now (V2): when no devices have been discovered yet the card
-        // still builds, showing a single non-interactive "Looking for devices…"
-        // placeholder so it never silently vanishes.
+        // still builds, showing a single non-interactive "Looking for
+        // speakers…" placeholder (§5.9) so it never silently vanishes.
         let locals = allDevices.filter(\.isLocalDevice)
         let airplay = allDevices.filter { !$0.isLocalDevice }
         devicesPlaceholderShown = false
@@ -938,7 +938,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             panel.addCardNote(note)
         }
         if locals.isEmpty && airplay.isEmpty {
-            panel.addRow(makePlaceholderRow(text: "Looking for devices…"))
+            panel.addRow(makePlaceholderRow(text: Self.devicesEmptyPlaceholderText))
             devicesPlaceholderShown = true
         } else {
             if !locals.isEmpty {
@@ -996,7 +996,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // show a single non-interactive placeholder BEFORE the ± footer.
         applicationsPlaceholderShown = false
         if renderedRoutes.isEmpty {
-            panel.addRow(makePlaceholderRow(text: "No apps routed — use + below to route an app."))
+            panel.addRow(makePlaceholderRow(text: Self.applicationsEmptyPlaceholderText))
             applicationsPlaceholderShown = true
         }
         applicationsFooter.isRemoveEnabled = selectedAppBundleID != nil
@@ -1042,6 +1042,16 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// The Applications card's title, so its default is keyed identically to
     /// every other card even though the card itself isn't built yet (T-8).
     static let applicationsCardTitle = "App Exceptions"
+
+    /// Warm Signal §5.9's locked empty-state copy for the Devices card. Shown
+    /// while nothing has been discovered yet; §5.9 also specs a distinguishable
+    /// "none found" resting state hinting at Local Network permission, but this
+    /// layer has no discovery-completion signal to tell "still looking" apart
+    /// from "genuinely none" — see the AGENTS.md note on this gap.
+    static let devicesEmptyPlaceholderText = "Looking for speakers…"
+    /// Warm Signal §5.9's locked empty-state copy for the Applications card.
+    static let applicationsEmptyPlaceholderText =
+        "Route one app somewhere else — music to the house, calls on your Mac. Use + to pick an app."
 
     /// The collapsed state `rebuild()` should hand `beginCard` for the card
     /// titled `title`: on an OPEN-triggered rebuild, the freshly computed
@@ -1547,8 +1557,9 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     }
 
     /// A non-interactive placeholder body row (V2 Devices empty state / V11
-    /// Applications empty state): `text` in a tertiary-label, row-height view
-    /// whose label leading edge aligns with the name column (past the icon).
+    /// Applications empty state; copy carried by both to the §5.9 spec text
+    /// under V9): `text` in a tertiary-label, row-height view whose label
+    /// leading edge aligns with the name column (past the icon).
     private func makePlaceholderRow(text: String) -> NSView {
         let label = NSTextField(labelWithString: text)
         label.translatesAutoresizingMaskIntoConstraints = false
@@ -2329,12 +2340,18 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     // MARK: Empty-state / card-note / accessory test hooks (V2 / V11 / A1 / F1)
 
-    /// Whether the Devices card's "Looking for devices…" placeholder is currently
+    /// Whether the Devices card's "Looking for speakers…" placeholder is currently
     /// mounted (V2).
     public var test_devicesPlaceholderShown: Bool { devicesPlaceholderShown }
-    /// Whether the Applications card's "No apps routed…" placeholder is currently
+    /// Whether the Applications card's empty-state placeholder is currently
     /// mounted (V11).
     public var test_applicationsPlaceholderShown: Bool { applicationsPlaceholderShown }
+    /// The Devices card's empty-state copy (§5.9) — pinned so a future edit
+    /// can't silently drift from the spec text.
+    public static var test_devicesPlaceholderText: String { devicesEmptyPlaceholderText }
+    /// The Applications card's empty-state copy (§5.9) — pinned so a future
+    /// edit can't silently drift from the spec text.
+    public static var test_applicationsPlaceholderText: String { applicationsEmptyPlaceholderText }
     /// The card-note texts (`addCardNote`) for `title`, in add order — the A1
     /// dormancy annotation's assertion surface.
     public func test_cardNoteTexts(title: String) -> [String] {

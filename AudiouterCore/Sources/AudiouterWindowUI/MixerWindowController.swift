@@ -101,7 +101,7 @@ public final class MixerWindowController: NSWindowController {
     /// Hosts the swapped content pane (editor / detail / empty) PLUS the
     /// persistent footer caption pinned beneath it. SCOPED TO THE CONTENT
     /// SPLIT ITEM ONLY — the sidebar split item runs the full height of the
-    /// split view down to its own "New Group" bar, with no footer stealing
+    /// split view down to its own "New Group…" bar, with no footer stealing
     /// its bottom space (design review 2026-07-18: the footer used to wrap
     /// the whole split view, which left a gap above it under the sidebar
     /// too). The footer is content, not chrome, so it is NEVER flag-gated by
@@ -198,7 +198,7 @@ public final class MixerWindowController: NSWindowController {
         emptyStateViewController.onNewGroup = { [weak self] in
             self?.presentCreateSheet(preselected: [])
         }
-        // The editor's "Delete group…" falls back to the default content (the
+        // The editor's "Delete Group…" falls back to the default content (the
         // next remaining group's editor, or the empty pane).
         editorViewController.onDidDeleteGroup = { [weak self] in
             self?.refreshAll()
@@ -737,19 +737,19 @@ final class ContentPaneHostViewController: NSViewController {
 // MARK: - GroupsEmptyStateViewController
 
 /// The "No groups yet" pane shown when there is nothing to select (stock
-/// AppKit): a centered primary message, a light secondary nudge in the
-/// Warm Signal house voice (§5.9's "warm, concrete, one idea per line"
-/// register), and a "New Group" button running the same creation sheet as
-/// the sidebar's bottom-bar button. The whole message block is one vertical
-/// stack centered on BOTH axes so it sits truly centered in the pane rather
-/// than hanging off a hand-tuned offset.
+/// AppKit): a centered primary message, a secondary line teaching the
+/// feature per §5.9's locked copy, and a "New Group…" button running the
+/// same creation sheet as the sidebar's bottom-bar button. The whole message
+/// block is one vertical stack centered on BOTH axes so it sits truly
+/// centered in the pane rather than hanging off a hand-tuned offset.
 public final class GroupsEmptyStateViewController: NSViewController {
 
     /// Fired when the call-to-action button is clicked.
     var onNewGroup: (() -> Void)?
 
     private let messageLabel = NSTextField(labelWithString: "No groups yet.")
-    private let subtitleLabel = NSTextField(labelWithString: "Music first — rooms can come later.")
+    private let subtitleLabel = NSTextField(labelWithString:
+        "Save a set of speakers as a group, then switch to it in two clicks from the menu bar.")
     private let newGroupButton = NSButton()
 
     public override func loadView() {
@@ -761,7 +761,7 @@ public final class GroupsEmptyStateViewController: NSViewController {
         subtitleLabel.textColor = Tokens.Color.tertiaryLabel
         subtitleLabel.alignment = .center
 
-        newGroupButton.title = "New Group"
+        newGroupButton.title = "New Group…"
         newGroupButton.bezelStyle = .rounded
         newGroupButton.target = self
         newGroupButton.action = #selector(newGroupTapped(_:))

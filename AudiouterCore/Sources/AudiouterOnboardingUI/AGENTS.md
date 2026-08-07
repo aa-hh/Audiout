@@ -56,9 +56,9 @@ behavior changes.
   `allowAudio()`/the network `onAllow` stay — they restore keyboard focus
   after a TCC prompt; floating only guarantees visibility.
 - `present()` sizes and centers on the FIRST call only — a re-present (the
-  `presentSetup` re-entry guard, "Run Setup Again…" while open) must not
+  `presentSetup` re-entry guard, "Open Setup…" while open) must not
   re-center a window the user moved.
-- Remote Control's "Open Settings" action re-fires the Accessibility system
+- Remote Control's "Open Settings…" action re-fires the Accessibility system
   PROMPT (`model.primeRemoteControl()`) rather than deep-linking to the pane —
   its own "Open System Settings" button is the only path that scrolls to/
   highlights Audiouter in the list; macOS gives no URL way to do that.

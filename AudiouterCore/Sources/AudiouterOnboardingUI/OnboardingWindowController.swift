@@ -17,9 +17,9 @@ import AudiouterCore
 /// run so the Local Network prompt is *primed* here rather than sprung at launch.
 /// Persisting "setup complete" is separate: only **Done** calls
 /// ``SetupModel/complete()``, so closing with the ✕ leaves the flow to reappear
-/// next launch (the user didn't finish). Re-running setup later ("Run Setup
-/// Again…" in Settings ▸ General) just constructs and presents this again — it
-/// never clears the completed flag.
+/// next launch (the user didn't finish). Re-running setup later ("Open
+/// Setup…" in Settings ▸ General) just constructs and presents this again —
+/// it never clears the completed flag.
 @MainActor
 public final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
 
@@ -57,7 +57,7 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
 
         let window = NSWindow(contentViewController: contentVC)
         window.styleMask = [.titled, .closable]
-        window.title = "Welcome"
+        window.title = "Setup"
         window.isRestorable = false   // fixed-size, centered; never restored
         // Appear on whatever Space the user is on (incl. over a fullscreen app)
         // when summoned/re-fronted, rather than Space-switching (window-panel.md M1).
@@ -114,7 +114,7 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
     /// Open/focus the window. The app is an accessory (no Dock icon), so
     /// activate explicitly to bring it forward. Sizing + centering happen on the
     /// first presentation only — a re-present (the `presentSetup` re-entry
-    /// guard's re-front, "Run Setup Again…" while already open) must not throw
+    /// guard's re-front, "Open Setup…" while already open) must not throw
     /// away a position the user chose (punch-list W6).
     public func present() {
         NSApp.activate(ignoringOtherApps: true)

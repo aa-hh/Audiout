@@ -14,15 +14,15 @@ public enum SidebarSelection: Equatable, Sendable {
 /// The mixer window's sidebar (SPEC §9 "Sidebar list": source-list
 /// `NSOutlineView`).
 ///
-/// Two top-level sections — **Groups** and **Devices** — exactly the "Groups"
-/// / "Devices" split the menu uses, in the documented source-list style
-/// (`selectionHighlightStyle = .sourceList`, header rows via
+/// Two top-level sections — **Groups** and **Speakers** — exactly the "Groups"
+/// / "Speakers" split the editor and creation sheet use, in the documented
+/// source-list style (`selectionHighlightStyle = .sourceList`, header rows via
 /// `isGroupItem`). Both sections are FLAT: a group row is a single leaf row
 /// (icon + name, same icon column as a device row) with no disclosure
 /// chevron and no child device rows — previewing a group's members happens in
 /// the group editor's own "Speakers" checklist, not by expanding the sidebar
 /// row, so nesting here was pure duplication (design review 2026-07-18). The
-/// Devices section lists every device, grouped or not, since membership is no
+/// Speakers section lists every device, grouped or not, since membership is no
 /// longer previewed via expansion. Selection is reported through `onSelect`.
 ///
 /// The outline model is still a small tree of reference-typed `Node`s (one
@@ -37,7 +37,7 @@ public final class SidebarViewController: NSViewController {
     /// on object identity.
     final class Node {
         enum Payload {
-            case header(String)             // "Groups" / "Devices" (isGroupItem)
+            case header(String)             // "Groups" / "Speakers" (isGroupItem)
             case group(Group)               // a saved group (flat leaf row)
             case device(Device)             // a device row (flat leaf row)
             case emptyState(String)         // non-selectable placeholder row (e.g. "No groups yet")
@@ -179,7 +179,7 @@ public final class SidebarViewController: NSViewController {
         scrollView.autohidesScrollers = true
         scrollView.translatesAutoresizingMaskIntoConstraints = false
 
-        // Bottom add bar with a labeled "New Group" affordance — the standard
+        // Bottom add bar with a labeled "New Group…" affordance — the standard
         // macOS source-list add control (SPEC.md §9), styled like Notes'
         // bottom-left "New Folder" button: borderless, system font, glyph +
         // title. Plain: new empty group. With devices selected: new group
@@ -189,11 +189,11 @@ public final class SidebarViewController: NSViewController {
         addButton.isBordered = false
         addButton.image = NSImage(systemSymbolName: "plus", accessibilityDescription: nil)
         addButton.imagePosition = .imageLeading
-        addButton.title = "New Group"
+        addButton.title = "New Group…"
         addButton.font = Tokens.Font.body
         addButton.target = self
         addButton.action = #selector(addTapped(_:))
-        addButton.toolTip = "New Group"
+        addButton.toolTip = "New Group…"
         addButton.setButtonType(.momentaryPushIn)
 
         let addBar = NSView()
@@ -289,10 +289,10 @@ public final class SidebarViewController: NSViewController {
         }
         newRoots.append(groupsHeader)
 
-        // 2. Devices section — every device, grouped or not, so it stays
+        // 2. Speakers section — every device, grouped or not, so it stays
         //    reachable now that membership isn't previewed via expansion.
         if !devices.isEmpty {
-            let devicesHeader = Node(.header("Devices"))
+            let devicesHeader = Node(.header("Speakers"))
             devicesHeader.children = devices.map { Node(.device($0)) }
             newRoots.append(devicesHeader)
         }
@@ -349,7 +349,7 @@ public final class SidebarViewController: NSViewController {
 
     // MARK: Test-support hooks
 
-    /// The section-header titles in order (e.g. ["Groups", "Devices"]).
+    /// The section-header titles in order (e.g. ["Groups", "Speakers"]).
     public var test_sectionTitles: [String] {
         roots.compactMap { if case .header(let t) = $0.payload { return t } else { return nil } }
     }
@@ -374,11 +374,11 @@ public final class SidebarViewController: NSViewController {
             }.count ?? 0
     }
 
-    /// Number of device rows under the "Devices" header. Lists every device
+    /// Number of device rows under the "Speakers" header. Lists every device
     /// (grouped or not) since the flat model no longer previews membership
     /// via expansion.
     public var test_deviceRowCount: Int {
-        roots.first { if case .header("Devices") = $0.payload { return true } else { return false } }?
+        roots.first { if case .header("Speakers") = $0.payload { return true } else { return false } }?
             .children.count ?? 0
     }
 
@@ -609,7 +609,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
         return cell
     }
 
-    /// Section header cell ("Groups" / "Devices") — a DIFFERENT cell shape
+    /// Section header cell ("Groups" / "Speakers") — a DIFFERENT cell shape
     /// from `makeLabel`/`newCell` on purpose (design feedback 2026-07-18c):
     /// Finder's own sidebar headers sit flush-left with the ICON column
     /// below them, not indented to the item TEXT column, and render slightly
@@ -644,7 +644,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
         NSLayoutConstraint.activate([
             // Flush with the ICON column start below it — NOT offset past an
             // icon width like an item row's text (that offset is what made
-            // "Devices" read as indented relative to the device icons under it).
+            // "Speakers" read as indented relative to the device icons under it).
             textField.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
             textField.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
             textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor),

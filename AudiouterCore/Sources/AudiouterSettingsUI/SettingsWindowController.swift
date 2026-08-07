@@ -129,7 +129,7 @@ public final class SettingsWindowController: NSWindowController {
         set { audioVC.onChange = newValue }
     }
 
-    /// Forwarded from the General tab: fired when "Check Permissions…" is
+    /// Forwarded from the General tab: fired when "Open Setup…" is
     /// clicked so the app can re-present the first-run onboarding flow.
     public var onRunSetupAgain: (() -> Void)? {
         get { generalVC.onRunSetupAgain }
@@ -142,7 +142,7 @@ public final class SettingsWindowController: NSWindowController {
     ///     `SMAppService` impl, injected as a fake in tests.
     ///   - excludedApps: the excluded-apps denylist model (Audio tab);
     ///     defaults to the on-disk store, injected over a temp store in tests.
-    ///   - runningAppsProvider: candidate list for the Audio "Add application…"
+    ///   - runningAppsProvider: candidate list for the Audio "Add App…"
     ///     picker; defaults to the real running apps, injected as a fixed list in
     ///     tests.
     ///   - latency: the Advanced › Audio buffer model (PLAN-LATENCY-SETTING.md);

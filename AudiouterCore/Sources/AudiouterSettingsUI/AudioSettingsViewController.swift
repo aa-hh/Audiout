@@ -433,7 +433,7 @@ public final class AudioSettingsViewController: NSViewController {
 
         if let envMs = latency.envOverrideMs {
             let note = SettingsForm.label(
-                "Overridden by AIRPLAY_START_BUFFER_MS (\(Self.msLabel(envMs))) for this launch.")
+                "Your buffer is locked to \(Self.msLabel(envMs)) by a launch option for this session.")
             note.font = Tokens.Font.caption
             note.textColor = Tokens.Color.warning
             note.lineBreakMode = .byWordWrapping
@@ -680,7 +680,7 @@ public final class AudioSettingsViewController: NSViewController {
         let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
         button.image = NSImage(systemSymbolName: "plus.circle", accessibilityDescription: nil)?
             .withSymbolConfiguration(config)
-        button.title = "Add app…"
+        button.title = "Add App…"
         button.contentTintColor = Tokens.Color.secondaryLabel
         button.target = self
         button.action = #selector(addTapped(_:))

@@ -85,7 +85,7 @@ import Testing
                                           onOpenSettings: { _ in }, onDone: {})
         vc.test_applyStatuses(audio: .denied, isProbingAudio: false, network: .unknown,
                               remoteControl: .unknown)
-        #expect(vc.test_audioRowButtonTitles == ["Open Settings"])
+        #expect(vc.test_audioRowButtonTitles == ["Open Settings…"])
     }
 
     @Test func primingNetworkShowsRequestedAndOpenSettings() async {
@@ -94,7 +94,7 @@ import Testing
                                           onOpenSettings: { _ in }, onDone: {})
         await vc.test_allowNetwork()
         #expect(vc.test_networkRow.lastStatus == .requested)
-        #expect(vc.test_networkRowButtonTitles == ["Open Settings"])
+        #expect(vc.test_networkRowButtonTitles == ["Open Settings…"])
     }
 
     @Test func primingRemoteControlShowsRequestedAndOpenSettings() {
@@ -102,7 +102,7 @@ import Testing
                                           onOpenSettings: { _ in }, onDone: {})
         vc.test_allowRemoteControl()
         #expect(vc.test_remoteControlRow.lastStatus == .requested)
-        #expect(vc.test_remoteControlRowButtonTitles == ["Open Settings"])
+        #expect(vc.test_remoteControlRowButtonTitles == ["Open Settings…"])
     }
 
     // MARK: Deep-link routing
@@ -119,7 +119,7 @@ import Testing
         vc.test_remoteControlRow.test_tapOpenSettings()
 
         // Audio + Local Network deep-link to their panes. Remote Control does NOT —
-        // its "Open Settings" re-fires the macOS Accessibility prompt (whose own
+        // its "Open Settings…" re-fires the macOS Accessibility prompt (whose own
         // button highlights the app), so it never routes through the deep-link opener.
         #expect(opened == [.screenAndSystemAudioRecording, .localNetwork])
     }

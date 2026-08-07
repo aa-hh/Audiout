@@ -59,7 +59,7 @@ import AppKit
         var fired = 0
         controller.onRunSetupAgain = { fired += 1 }
         controller.test_general.test_tapRunSetupAgain()
-        #expect(fired == 1, "Check Permissions… routes from the General pane out to the app")
+        #expect(fired == 1, "Open Setup… routes from the General pane out to the app")
     }
 
     /// Owner decision (AGENTS.md): the window never persists the last-viewed

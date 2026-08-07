@@ -122,7 +122,7 @@ public struct AppSettings {
     /// Whether the first-run setup/onboarding flow has been completed (the
     /// permission-priming window — ``SetupModel``). Defaults to `false` (unset),
     /// so a fresh install shows setup once; ``SetupModel/complete()`` flips it,
-    /// and "Check Permissions…" (Settings › General) never clears it — re-running
+    /// and "Open Setup…" (Settings › General) never clears it — re-running
     /// setup is a manual re-open, not a reset of this flag. A plain scalar bool,
     /// exactly what this store is for (see the type comment). The launch gate
     /// that reads this is ``SetupModel/shouldPresentOnLaunch(settings:backendKind:)``.

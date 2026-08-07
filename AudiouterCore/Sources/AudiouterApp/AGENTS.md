@@ -32,7 +32,7 @@ package layout, backends, and core types, see
   the backend's Bonjour discovery triggers the Local Network prompt, and priming
   means the setup screen explains it first. `startBackendIfNeeded()` runs from
   the window's `onFinished` (Done or ✕). Every non-native backend and every
-  later launch starts immediately. "Run Setup Again…" (Settings ▸ General) calls
+  later launch starts immediately. "Open Setup…" (Settings ▸ General) calls
   `presentSetup()` again; its `onFinished` is then a guarded no-op.
 - **`AIRPLAY_SETUP` overrides the first-run gate (testing knob).**
   `SetupPresentation.resolved` reads it: `skip` never presents (so repeated dev

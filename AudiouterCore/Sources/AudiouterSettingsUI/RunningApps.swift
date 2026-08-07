@@ -3,7 +3,7 @@
 import AppKit
 
 /// A plain-value snapshot of one pickable application for the Audio pane's
-/// "Add application…" picker. Deliberately its own small type (not the popover's
+/// "Add App…" picker. Deliberately its own small type (not the popover's
 /// `RunningAppInfo`) so `AudiouterSettingsUI` stays decoupled from
 /// `AudiouterPopoverUI` — the same isolation idiom the row views use
 /// against Core's models. Injectable so tests supply a fixed list.

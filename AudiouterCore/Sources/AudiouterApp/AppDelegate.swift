@@ -117,7 +117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let permissionProviders = PermissionMode.resolved().makeProviders()
 
     /// The first-run onboarding/permission-priming window, retained while open
-    /// (first launch, or "Check Permissions…" from Settings ▸ General).
+    /// (first launch, or "Open Setup…" from Settings ▸ General).
     private var onboardingWindowController: OnboardingWindowController?
 
     /// The `SetupModel` behind the last-presented onboarding window, kept alive
@@ -822,7 +822,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Build (or reuse) a ``SetupModel`` (production probes) + onboarding window
-    /// and present it. Used for first-run, "Check Permissions…", the automatic
+    /// and present it. Used for first-run, "Open Setup…", the automatic
     /// permission-revocation reopen (`auditRequiredPermissionsIfNeeded`), and the
     /// undetermined-verdict popover-open path (`onButtonClicked`). `onFinished`
     /// starts the backend if it hasn't already (first run) and is a guarded
@@ -840,7 +840,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// finish side effects (`startBackendIfNeeded`, `pushAppRoutesToBackend`,
     /// `showPopoverHome`) before the user had actually finished. Three of five
     /// call sites happened to already guard `onboardingWindowController == nil`
-    /// before calling this; "Check Permissions…" (`onRunSetupAgain`) did not,
+    /// before calling this; "Open Setup…" (`onRunSetupAgain`) did not,
     /// and the popover-open check this task adds would have been a sixth
     /// unguarded site — so the fix belongs HERE, unconditionally, rather than
     /// as yet another guard every caller has to remember to add. When a window
@@ -876,7 +876,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // == nil` pattern above). Both this branch and the memory-leak branch hit
         // this independently, which is how confident we are it's real: without the
         // guard, a second call while a first onboarding window is still open
-        // (reachable via Settings ▸ General's "Run Setup Again…" — the setup
+        // (reachable via Settings ▸ General's "Open Setup…" — the setup
         // window floats above Settings but doesn't block it, floating being
         // z-order not modality, so Settings stays clickable) silently overwrites
         // `onboardingWindowController`. Releasing the old controller fires its
@@ -1116,7 +1116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // update/rebuild (the popover rebuilds on every open).
             controller.onAccentChanged = { [weak self] _ in self?.repaintOpenWindowsForAccentChange() }
             controller.onExcludedAppsChanged = { [weak self] in self?.handleExcludedAppsChanged() }
-            // "Check Permissions…" (General pane) re-opens the first-run priming
+            // "Open Setup…" (General pane) re-opens the first-run priming
             // window; the backend is already running, so its onFinished is a
             // guarded no-op.
             controller.onRunSetupAgain = { [weak self] in self?.presentSetup() }

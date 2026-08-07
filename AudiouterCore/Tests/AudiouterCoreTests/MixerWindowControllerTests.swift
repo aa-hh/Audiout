@@ -223,9 +223,9 @@ import AppKit
 
     // MARK: Sidebar structure (config-only revamp: always both sections)
 
-    @Test func sidebarAlwaysShowsGroupsAndDevicesSections() async throws {
+    @Test func sidebarAlwaysShowsGroupsAndSpeakersSections() async throws {
         let (window, _, _) = try await makeWindow()
-        #expect(window.test_sidebar.test_sectionTitles == ["Groups", "Devices"])
+        #expect(window.test_sidebar.test_sectionTitles == ["Groups", "Speakers"])
         #expect(window.test_sidebar.test_hasGroupsEmptyStateRow, "zero saved groups shows the empty-state placeholder row")
         #expect(window.test_sidebar.test_deviceRowCount == 7)
         #expect(!(window.test_isShowingEditor))
@@ -261,7 +261,7 @@ import AppKit
         _ = try makeGroup1(controller)
         window.update(devices: backend.devices)
 
-        #expect(window.test_sidebar.test_sectionTitles == ["Groups", "Devices"])
+        #expect(window.test_sidebar.test_sectionTitles == ["Groups", "Speakers"])
         #expect(!(window.test_sidebar.test_hasGroupsEmptyStateRow))
         #expect(window.test_sidebar.test_groupRowCount == 1)
         #expect(window.test_sidebar.test_groupRowsAreFlat, "a group row is a flat leaf — no expandable member children (design review 2026-07-18)")

@@ -164,7 +164,7 @@ public final class AboutViewController: NSViewController {
         lockup.translatesAutoresizingMaskIntoConstraints = false
         rows.append(lockup)
 
-        sourceCodeButton.title = "View Source Code"
+        sourceCodeButton.title = "View Source Code…"
         sourceCodeButton.bezelStyle = .rounded
         sourceCodeButton.target = self
         sourceCodeButton.action = #selector(viewSourceCodeTapped)
@@ -270,7 +270,7 @@ public final class AboutViewController: NSViewController {
         return sourceCodeButton.title
     }
 
-    /// Invoke "View Source Code" as a click would — routes through the
+    /// Invoke "View Source Code…" as a click would — routes through the
     /// injected `openURL` seam, so this never launches a real browser in a test.
     public func test_tapViewSourceCode() {
         _ = view
@@ -296,7 +296,7 @@ public final class AboutWindowController: NSWindowController {
 
     /// - Parameters:
     ///   - info: the bundle-sourced identity; defaults to the live app bundle.
-    ///   - openURL: opens the "View Source Code" link; defaults to
+    ///   - openURL: opens the "View Source Code…" link; defaults to
     ///     `NSWorkspace`, injected as a recording closure in tests.
     public init(info: AboutInfo = .current(),
                 openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }) {

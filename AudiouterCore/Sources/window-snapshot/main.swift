@@ -586,7 +586,7 @@ func run() -> Int32 {
             snapshotWindow(window, label: "3-edit-group", appearanceName: appearanceName, outDir: outDir)
 
             // 4. Device detail: select a device that's a member of the saved
-            // group above (so "In groups:" renders non-empty) and carries an
+            // group above (so "In groups" renders non-empty) and carries an
             // icon OVERRIDE, with the edit badge's hover step-up forced visible so the
             // approved custom-drawn element (`../../AGENTS.md`) shows up in
             // the render.

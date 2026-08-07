@@ -100,12 +100,12 @@ func run() -> Int32 {
     // --- 1. Baseline sidebar: zero groups still shows BOTH sections (the
     //        Groups section carries an empty-state row instead of vanishing).
     print("\n[1] Baseline sidebar (zero groups)")
-    checks.expectEqual(window.test_sidebar.test_sectionTitles, ["Groups", "Devices"],
-                       "'Groups' and 'Devices' sections both present even with zero groups")
+    checks.expectEqual(window.test_sidebar.test_sectionTitles, ["Groups", "Speakers"],
+                       "'Groups' and 'Speakers' sections both present even with zero groups")
     checks.expect(window.test_sidebar.test_hasGroupsEmptyStateRow,
                   "the Groups section shows its empty-state row at zero groups")
     checks.expectEqual(window.test_sidebar.test_deviceRowCount, 7,
-                       "all 7 devices listed (Devices section lists every device, flat model)")
+                       "all 7 devices listed (Speakers section lists every device, flat model)")
     checks.expect(!window.test_isShowingEditor, "no editor shows with zero groups")
 
     // --- 2. Baseline content: with zero groups the AUTO-SELECT rule lands on
@@ -250,7 +250,7 @@ func run() -> Int32 {
     checks.expectEqual(window.test_detail.test_shownDeviceID, candidateA,
                        "detail pane is showing the selected device")
     checks.expectEqual(window.test_detail.test_groupMembershipText, "Whole House",
-                       "detail pane's 'In groups:' text names the device's saved group")
+                       "detail pane's 'In groups' text names the device's saved group")
     checks.expectEqual(controller.activeGroupID, nil,
                        "selecting a device in the sidebar does NOT activate any group")
     window.test_select(nil)

@@ -544,9 +544,9 @@ private extension AccentStyle {
     /// Radio title (spec §1.3's three dial names).
     var displayName: String {
         switch self {
-        case .fullGold:     return "Full gold"
+        case .fullGold:     return "Full Gold"
         case .subtle:       return "Subtle"
-        case .systemAccent: return "Follow system accent"
+        case .systemAccent: return "Follow System Accent"
         }
     }
 

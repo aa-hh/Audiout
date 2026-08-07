@@ -876,8 +876,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // == nil` pattern above). Both this branch and the memory-leak branch hit
         // this independently, which is how confident we are it's real: without the
         // guard, a second call while a first onboarding window is still open
-        // (reachable via Settings ▸ General's "Run Setup Again…" — the window is
-        // normal-level, so Settings stays clickable) silently overwrites
+        // (reachable via Settings ▸ General's "Run Setup Again…" — the setup
+        // window floats above Settings but doesn't block it, floating being
+        // z-order not modality, so Settings stays clickable) silently overwrites
         // `onboardingWindowController`. Releasing the old controller fires its
         // `windowWillClose` → `onFinished`, which nils the reference to the NEW
         // controller just stored, leaving it unretained so it deallocates and

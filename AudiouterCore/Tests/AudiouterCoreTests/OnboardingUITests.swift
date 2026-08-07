@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import AppKit
 import Foundation
 import Testing
 @testable import AudiouterCore
@@ -255,6 +256,55 @@ import Testing
                                             openSettings: { _ in },
                                             onFinished: {})
         #expect(!wc.test_contentViewController.test_showsPermissionLostBanner)
+    }
+
+    // MARK: Window level + presentation (punch-list W10/W6)
+
+    @Test func windowFloatsWhileOpen() {
+        let wc = OnboardingWindowController(model: makeModel(audio: .granted),
+                                            openSettings: { _ in },
+                                            onFinished: {})
+        #expect(wc.window?.level == .floating,
+                "owner decision 2026-08-07: setup stays above other windows for its whole open lifetime")
+    }
+
+    @Test func representDoesNotRecenterAMovedWindow() {
+        let wc = OnboardingWindowController(model: makeModel(audio: .granted),
+                                            openSettings: { _ in },
+                                            onFinished: {})
+        wc.present()
+        let moved = NSPoint(x: 13, y: 17)   // far from any plausible center
+        wc.window?.setFrameOrigin(moved)
+
+        wc.present()   // the presentSetup re-entry guard's re-front path
+
+        #expect(wc.window?.frame.origin == moved,
+                "a re-present must keep the position the user chose, not re-center")
+    }
+
+    @Test func reactivateDoesNotStealKeyFromASiblingWindow() {
+        let wc = OnboardingWindowController(model: makeModel(audio: .granted),
+                                            openSettings: { _ in },
+                                            onFinished: {})
+        let sibling = NSWindow()   // stands in for Settings holding key
+        wc.keyWindowProvider = { sibling }
+
+        wc.test_appDidBecomeActive()
+
+        #expect(wc.window?.isVisible == false,
+                "with another window key, the hook must not order setup in (visibility is the floating level's job)")
+    }
+
+    @Test func reactivateFrontsSetupWhenNothingHoldsKey() {
+        let wc = OnboardingWindowController(model: makeModel(audio: .granted),
+                                            openSettings: { _ in },
+                                            onFinished: {})
+        wc.keyWindowProvider = { nil }   // e.g. returning from a permission prompt
+
+        wc.test_appDidBecomeActive()
+
+        #expect(wc.window?.isVisible == true,
+                "with no key window, the hook re-fronts setup so the user lands back on it")
     }
 
     // MARK: Window controller dismissal contract

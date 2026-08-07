@@ -341,6 +341,20 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   `BTSyncedSink.swift` are LICENSE-CLEAN
   like `SyncCore.swift` (no GPL header — see the header note in each file);
   never copy code into them from the GPL-headered `SyncedLocalSink.swift`.
+- **A Bluetooth sink held at gain 0 must always have a live release path.**
+  The first-mix alignment intercept (W3) is the ONLY sanctioned writer of a
+  0 gain (`BTDeviceSink.setGain` → `mainMixerNode.outputVolume` — the session,
+  delay gate and drift loop keep running; un-muting is a property write, never
+  a rebuild). Every hold is released by exactly one of: the card's answer
+  (`resolveBTAlignmentPrompt` — all three actions unmute; only "Not now"
+  records, and that dismissal is FINAL by locked decision), the device leaving
+  the selection, backend `stop()`, or the hold watchdog
+  (`btAlignmentHoldTimeout`) — a silent speaker with no visible cause is this
+  repo's most expensive failure shape, so never add a mute that can strand.
+  The manager remembers per-UID gains precisely so a hold decided in the same
+  selection change that creates the sink lands BEFORE the engine starts; a
+  release therefore must push gain 1 (not merely forget the hold) or the
+  remembered 0 re-mutes the next select.
 - **`TCCAccessPreflight` is cached for the CALLING process's whole lifetime**,
   so a grant made after launch is invisible to any in-process read forever —
   and the `com.apple.tcc.access.changed` Darwin notification fires but does NOT
@@ -612,8 +626,10 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `NativeDiscovery` | Bonjour discovery (AP2 + AP1). |
 | `BTDeviceEnumerator` | Bluetooth outputs: Core Audio BT transport merged with the TCC-gated IOBluetooth paired list; paired-but-disconnected speakers surface unavailable, with pairing recency kept for ghost-row filtering. |
 | `BTSyncedSink` | N-instance BT sink manager: per-device pinned engines, reference-timeline delay, pacing-clock drift correction. |
-| `BTSyncTrim` / `BTTrimStore` | The SYNC trim's shared clamp/step contract (±500 ms, 10 ms coarse) + versioned-JSON persistence per device UID; `NativeBackend` loads at init and re-pushes into the sink on every arm (`BTOutputControlling` is the UI seam). |
-| `AlignmentTickInjector` | Align-by-ear woodblock tick (72 BPM — beat spacing must exceed the ±500 ms trim range or offsets alias), mixed into the converted PCM in `NativeCaptureCoordinator.handleBuffer` BEFORE the engine write and both fan-outs, so every consumer renders the same tick through its own delay; self-limits to ~30 s. Playing it out loud can't work — the app's render processes are tap-excluded. |
+| `BTSyncTrim` / `BTTrimStore` | The SYNC trim's shared clamp/step contract (±500 ms, 10 ms coarse) + versioned-JSON persistence per device UID; `NativeBackend` loads at init and re-pushes into the sink on every arm (`BTOutputControlling` is the UI seam). The same envelope carries the first-mix intercept's FINAL "Not now" dismissals — both saves are read-modify-write so neither record clobbers the other. |
+| `AlignmentTickInjector` | Align-by-ear woodblock tick (72 BPM — beat spacing must exceed the ±500 ms trim range or offsets alias), mixed into the converted PCM in `NativeCaptureCoordinator.handleBuffer` BEFORE the engine write and both fan-outs, so every consumer renders the same tick through its own delay; self-limits to ~30 s (`.manual`) / a long wizard budget (`.wizard`, via `AlignTickMode` on the `CaptureControlling` seam). Both modes ride a ~−47 dBFS low-passed noise bed (+ a ~3 s bed-only wake preamble in `.wizard`): the Sonos Move power-gates its amp after silence and swallows bare ticks. The bed is necessarily ONE shared bed — the injector mixes into the single feed pre-fan-out, so per-device uncorrelated beds are structurally impossible; correlated is fine at that level (its only job is keeping amps awake). Playing ticks out loud can't work — the app's render processes are tap-excluded. |
+| `BTAlignmentBisection` | Pure which-side bracket state machine for the alignment wizard (license-clean file): ±500 ms start (seedable), answers halve toward the named side; two consecutive disagreements → mean of the last two reversal midpoints; two consecutive can't-tells → graceful exit; ≤2 ms width floor. |
+| `BTAlignmentWizardSession` | One wizard run for one BT device (license-clean): drives the bisection over three injected closures — live trim previews relative to the session-start base (never persisted mid-run), the wizard tick, commit/restore. Every exit path (Keep/cancel/graceful/deinit) restores or persists explicitly and ends the tick. |
 | `NativeCaptureCoordinator` | Whole-system Core Audio capture; excludes individually-routed + user-excluded apps. |
 | `PerAppCaptureCoordinator` | Per-process Core Audio capture taps, one per individually-routed app. |
 | `AudioProcessResolver` / `AudioProcessEnumerating` | Bundle ID → ALL its Core Audio process objects (main + helper/child processes) via four ANY-of attribution layers: own bundle id, responsible pid, bundle-path containment, parent-pid walk; the AppKit lookups (pid→bundle, bundle→`.app` path) are injected. `resolveWithAttribution(bundleID:)` (T2) is the diagnostic twin of `resolve(bundleID:)`, tagging each resolved process with its matching `AttributionLayer` for `Telemetry`. |

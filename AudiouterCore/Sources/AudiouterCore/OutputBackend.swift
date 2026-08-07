@@ -428,10 +428,11 @@ public protocol LatencyConfigurable: AnyObject {
 
     /// Apply a new start buffer. If sessions are streaming this tears them ALL
     /// down, applies the value, and re-establishes the same set (brief audible
-    /// gap, ~3–5 s — which is why the UI gates it behind an explicit
-    /// "Apply & Reconnect" CTA); when idle it applies silently. Returns when
-    /// the re-add pass has completed (per-device failures follow the D4
-    /// best-effort rule: marked unavailable, the rest proceed).
+    /// gap, ~3–5 s — the pane's popup applies this immediately, and its hint
+    /// line states that cost up front rather than gating it behind a CTA);
+    /// when idle it applies silently. Returns when the re-add pass has
+    /// completed (per-device failures follow the D4 best-effort rule: marked
+    /// unavailable, the rest proceed).
     func applyStartBuffer(ms: Int) async
 }
 

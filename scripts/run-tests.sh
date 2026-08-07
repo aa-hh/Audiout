@@ -73,10 +73,12 @@ slots=${AUDIOUTER_TEST_SLOTS:-2}
 #   git config --global audiouter.remoteHost 'user@192.168.4.41'
 remote_host=${AUDIOUTER_TEST_REMOTE_HOST:-$(git config --get audiouter.remoteHost 2>/dev/null || true)}
 
-# Where the remote is used: "overflow" (default — local first, remote only when
-# every local slot is busy) or "prefer" (try remote FIRST, fall back to local).
-# "prefer" keeps this Mac free, which is the actual goal when several agents are
-# working; "overflow" keeps the shipping toolchain as the primary gate.
+# Where the remote is used: "local" (default — local first, remote only when
+# every local slot is busy), "remote" (try remote FIRST, fall back to local), or
+# "cpu" (probe both machines' current load and send the run to whichever is
+# less busy right now). "remote" keeps this Mac free unconditionally; "cpu" is
+# the better pick when the remote isn't reliably idle — e.g. it also gets used
+# directly, not just as this script's overflow target.
 #   git config --global audiouter.testPrefer remote
 remote_pref=${AUDIOUTER_TEST_PREFER:-$(git config --get audiouter.testPrefer 2>/dev/null || echo local)}
 # Deliberately RELATIVE to the remote home directory — no leading `~`. A tilde
@@ -99,6 +101,8 @@ remote_tried=0
 run_remote() {
     if [ "$remote_pref" = "remote" ]; then
         echo "  suite: sending to remote $remote_host (preferred) ..." >&2
+    elif [ "$remote_pref" = "cpu" ]; then
+        echo "  suite: sending to remote $remote_host (lower CPU load) ..." >&2
     else
         echo "  suite: local slots busy — trying remote $remote_host ..." >&2
     fi
@@ -184,6 +188,24 @@ run_remote() {
     return 0
 }
 
+# --- CPU-based selection (testPrefer=cpu) -----------------------------------
+# Load average alone isn't comparable across two machines with different core
+# counts, so normalise to "load per core, as a percent" on each side before
+# comparing. Values over 100 mean that machine is oversubscribed.
+local_load_pct() {
+    ncpu=$(sysctl -n hw.ncpu)
+    set -- $(sysctl -n vm.loadavg | tr -d '{}')
+    awk -v l="$1" -v n="$ncpu" 'BEGIN { printf "%d", (l / n) * 100 }'
+}
+
+# Empty output means unreachable — same short probe timeout as run_remote, and
+# the caller treats "couldn't check" the same as "don't prefer it".
+remote_load_pct() {
+    ssh -o BatchMode=yes -o ConnectTimeout="$remote_probe_timeout" \
+        -o StrictHostKeyChecking=accept-new "$remote_host" \
+        "n=\$(sysctl -n hw.ncpu); set -- \$(sysctl -n vm.loadavg | tr -d '{}'); awk -v l=\"\$1\" -v n=\"\$n\" 'BEGIN{printf \"%d\", (l/n)*100}'" 2>/dev/null
+}
+
 # Lock and cache live in /tmp on purpose: they must be shared by EVERY worktree
 # and every clone on this machine, so they cannot live under $repo_root (each
 # worktree has its own) or under .git (ditto).
@@ -225,11 +247,25 @@ fi
 
 # --- prefer-remote ----------------------------------------------------------
 # With `audiouter.testPrefer = remote`, go to the other Mac FIRST rather than
-# only on contention. This is the setting that actually keeps THIS machine free
-# — the stated goal — instead of merely rescheduling load on it. Local slots
-# remain the fallback, so an asleep or offline remote costs one 5s probe and
-# then behaves exactly as if no remote were configured.
-if [ "$remote_pref" = "remote" ] && [ -n "$remote_host" ] && [ "$remote_tried" -eq 0 ]; then
+# only on contention — this keeps THIS machine free unconditionally. With
+# `= cpu`, only go first if the other Mac is CURRENTLY less loaded — a straight
+# "remote" preference is wrong the moment the remote is the one that's busy
+# (another agent testing there, or just awake and doing something else). Local
+# slots remain the fallback either way, so an asleep/offline/unmeasurable
+# remote costs one 5s probe and behaves exactly as if none were configured.
+try_remote_first=0
+if [ "$remote_pref" = "remote" ]; then
+    try_remote_first=1
+elif [ "$remote_pref" = "cpu" ] && [ -n "$remote_host" ]; then
+    remote_load=$(remote_load_pct)
+    if [ -n "$remote_load" ]; then
+        local_load=$(local_load_pct)
+        echo "  suite: cpu check — local ${local_load}%/core, remote ${remote_load}%/core." >&2
+        [ "$remote_load" -lt "$local_load" ] && try_remote_first=1
+    fi
+fi
+
+if [ "$try_remote_first" -eq 1 ] && [ -n "$remote_host" ] && [ "$remote_tried" -eq 0 ]; then
     remote_tried=1
     # `|| rrc=$?` rather than a bare call: `set -e` would abort the script on any
     # non-zero return, and non-zero is the normal "fall back locally" signal.

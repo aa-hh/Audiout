@@ -184,12 +184,29 @@ than the fuse/split one. This probe measures your own number, with your own
 speakers, in your own room.
 
 ```sh
-# Learn what the cue sounds like first (not blind, nothing scored):
+# FIRST: 8-second audible plumbing check — 3 ticks on A alone, then 3 on B
+# alone, then exit. Non-interactive (no tty needed, nothing scored). Run this
+# before every session; silence from either side means stop and debug here.
+.build/release/bt-multi-spike --lateralization-probe 1 2 --smoke
+
+# Learn what the cue sounds like (not blind, nothing scored):
 .build/release/bt-multi-spike --lateralization-probe 1 2 --demo
 
 # The real, blind, scored run:
 .build/release/bt-multi-spike --lateralization-probe 1 2
 ```
+
+**How the audio is produced (and why):** each engine is started once and
+loops one silent 1.2 s buffer forever; every phase rewrites that buffer's
+samples in place. Nothing is ever scheduled at an absolute time. The first
+build scheduled each trial with `play(at: hostTime)` and the Bluetooth side
+was **silent** while the Mac ticked: on a BT device the host-time →
+sample-time mapping goes through the BT stack's pacing clock, which this
+branch's own `--pacing-probe` measured jumping ±5–100 ms for ~40 s after
+connect — a jump lands the scheduled buffer in the device's past and the
+player renders silence with no error. The two loops start with an
+arbitrary-but-constant skew; step 2 dials it out along with the device
+latency difference.
 
 `<A> <B>` are either the **index** printed by running the flag with no
 arguments, or part of a device name/uid. **A is the LEFT speaker, B the
@@ -205,10 +222,10 @@ and then silently renders nothing.
 
 #### The three steps
 
-**1. Level match (mandatory).** The two speakers tick alternately, once a
-second each. A loudness difference imitates a timing offset — the precedence
-effect survives about 10 dB of mismatch — so an unmatched pair measures
-loudness, not timing.
+**1. Level match (mandatory).** The two speakers tick alternately. A loudness
+difference imitates a timing offset — the precedence effect survives about
+10 dB of mismatch — so an unmatched pair measures loudness, not timing. If one
+side is silent here, quit and run `--smoke`.
 
 | Key | Does |
 |---|---|
@@ -231,9 +248,10 @@ tick sounds like it comes from *between* the speakers.
 | `space` | accept this as centre, start the run |
 | `q` | quit |
 
-**3. The blind run.** Each trial plays 5 ticks at 1.2 s with a randomly-signed
-offset. Answer which side they came from. **The answer is never revealed until
-the summary** — that is the whole point.
+**3. The blind run.** Each trial ticks steadily (one tick per 1.2 s) with a
+randomly-signed offset until you answer — listen as long as you need. Answer
+which side the ticks came from. **The answer is never revealed until the
+summary** — that is the whole point.
 
 | Key | Does |
 |---|---|
@@ -246,6 +264,11 @@ Staircase as built: start **8 ms**, 1-up/2-down (two right in a row → ×0.7,
 one wrong → ×1.6), floor **0.05 ms**, ceiling **30 ms**, stops at **24 trials
 or 8 reversals**, whichever comes first. "Can't tell" counts as wrong for the
 staircase and is tallied separately. Roughly 4 minutes end to end.
+
+If a device route changes mid-run (any output connects/disconnects), the
+engines' config-change recovery replaces the trial pattern with their own
+1 kHz click loop — you will hear the timbre change. The run is invalid at that
+point (the loop phases re-anchored); quit and re-run.
 
 #### Reading the summary
 

@@ -454,7 +454,7 @@ if args.contains("-h") || args.contains("--help") {
     print("       bt-multi-spike --drift-selftest")
     print("       bt-multi-spike --connect-probe [name-or-address] [--disconnect]")
     print("       bt-multi-spike --pacing-probe <name-or-uid> [--seconds N]")
-    print("       bt-multi-spike --lateralization-probe <A> <B> [--demo]")
+    print("       bt-multi-spike --lateralization-probe <A> <B> [--demo | --smoke]")
     exit(0)
 }
 

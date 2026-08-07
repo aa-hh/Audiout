@@ -19,14 +19,28 @@ import Foundation
 // number for one listener, one speaker pair, one room — before anyone builds
 // the wizard.
 //
-// Method: a blind 1-up/2-down forced-choice staircase. Each trial plays the
-// SAME tick burst on both devices with a randomly-signed offset; the operator
-// says which side it came from; the magnitude shrinks after two right answers
-// and grows after one wrong. The answer is NEVER revealed during the run —
-// blinding is the entire point — only in the final summary.
+// Method: a blind 1-up/2-down forced-choice staircase. Each trial ticks both
+// devices with a randomly-signed offset; the operator says which side it came
+// from; the magnitude shrinks after two right answers and grows after one
+// wrong. The answer is NEVER revealed during the run — blinding is the entire
+// point — only in the final summary.
 //
-// Traps respected (harness findings): the offset lives in the sample data, not
-// in AVAudioUnitDelay (whose resolution at 0.05 ms is unspecified); aggregate
+// AUDIO ARCHITECTURE (the live-found silent-BT lesson): each engine is started
+// ONCE and loops ONE long-lived buffer forever; every phase and every trial is
+// produced by rewriting that buffer's samples in place. There is NO per-trial
+// scheduling and NO absolute-time (`play(at:)`) scheduling anywhere — on a
+// Bluetooth device the host-time -> device-sample-time mapping goes through
+// the BT stack's pacing clock, which this branch's own --pacing-probe measured
+// jumping ±5-100 ms for ~40 s after connect; a jump can land a scheduled
+// buffer in the device's past and the player renders SILENCE with no error
+// (exactly what the first live run hit: Mac ticked, Sonos stayed mute). The
+// continuously-running loop is the July known-good path that live-streamed to
+// two Sonos for 60 s. The two loops start with an arbitrary-but-constant skew
+// (immediate play on two engines); the centre-the-image step absorbs it along
+// with the device latency difference.
+//
+// Other traps respected: the offset lives in the sample data, not in
+// AVAudioUnitDelay (whose resolution at 0.05 ms is unspecified); aggregate
 // devices are refused outright (AVAudioEngine silently no-ops on them);
 // BTOutputEngine does the device pinning, so setDeviceID still happens before
 // the first start and nothing ever taps outputNode.
@@ -45,21 +59,23 @@ enum LateralizationProbe {
     private static let maxReversals = 8
     private static let reversalsInThreshold = 6
 
-    private static let ticksPerBurst = 5
-    private static let tickIntervalSeconds = 1.2
+    /// One tick per loop pass — a steady ~0.8 Hz metronome while a pattern is
+    /// set. A trial keeps ticking until the operator answers (a superset of
+    /// the fixed 5-tick burst: same blind stimulus, listen as long as needed).
+    private static let loopSeconds = 1.2
+    /// The tick sits mid-loop so the centre step's ±500 ms and the staircase's
+    /// ±30 ms both stay inside the buffer (0.6 ± 0.53 s, tick ends < 1.2 s).
+    private static let baseTickSeconds = 0.6
+    private static let maxCentreMs = 500.0
     private static let tickDurationSeconds = 0.030
     private static let tickDecayTau = 0.006
-    /// How far ahead of "now" both devices are told to start, so each has time
-    /// to schedule against the same host time.
-    private static let scheduleLeadSeconds = 0.5
-    /// Extra wait after a burst's nominal end — a BT speaker's own output
-    /// latency lands the audio well after the scheduled host time.
-    private static let burstTailSeconds = 0.8
+    private static let interTrialGapSeconds = 0.6
 
     // MARK: - Entry point
 
     static func run(_ rawArgs: [String]) -> Int32 {
         let demo = rawArgs.contains("--demo")
+        let smoke = rawArgs.contains("--smoke")
         let positional = rawArgs.filter { !$0.hasPrefix("--") }
         let devices = BTDeviceEnumerator.listAllOutputDevices()
 
@@ -67,7 +83,7 @@ enum LateralizationProbe {
             printDeviceList(devices)
             elog("")
             elog("lateralization-probe: pick TWO output devices.")
-            elog("  usage: --lateralization-probe <A> <B> [--demo]")
+            elog("  usage: --lateralization-probe <A> <B> [--demo | --smoke]")
             elog("  <A>/<B> = the index from the list above, or part of the device name/uid.")
             elog("  A is treated as the LEFT speaker, B as the RIGHT one.")
             return 2
@@ -87,48 +103,39 @@ enum LateralizationProbe {
             elog("  it would look like it worked and you would hear silence. Pick the real outputs.")
             return 1
         }
-        guard isatty(STDIN_FILENO) != 0 else {
-            elog("lateralization-probe: needs a terminal (tty) — it reads single keypresses.")
+        guard smoke || isatty(STDIN_FILENO) != 0 else {
+            elog("lateralization-probe: needs a terminal (tty) — it reads single keypresses. (--smoke doesn't.)")
             return 1
         }
 
         print("lateralization-probe: A(left) = \"\(deviceA.name)\" [\(deviceA.transportLabel)]  B(right) = \"\(deviceB.name)\" [\(deviceB.transportLabel)]")
-        print("Put A physically on your left and B on your right, sit between them, and don't move your head during the run.")
 
-        let engineA = BTOutputEngine(deviceID: deviceA.id, deviceName: deviceA.name, mode: .click)
-        let engineB = BTOutputEngine(deviceID: deviceB.id, deviceName: deviceB.name, mode: .click)
-        engineA.setVolume(0.5)
-        engineB.setVolume(0.5)
-        do {
-            try engineA.start()
-            try engineB.start()
-        } catch {
-            elog("lateralization-probe: engine start FAILED: \(error)")
-            engineA.stop()
-            engineB.stop()
-            return 1
+        guard let stimulus = Stimulus(deviceA: deviceA, deviceB: deviceB) else { return 1 }
+        defer { stimulus.stop() }
+
+        if smoke {
+            return runSmoke(stimulus, nameA: deviceA.name, nameB: deviceB.name)
         }
 
+        print("Put A physically on your left and B on your right, sit between them, and don't move your head during the run.")
         installSignalHandlers()
         enableRawMode()
+        defer { restoreTerminal() }
 
-        var exitCode: Int32 = 0
-        if levelMatch(engineA, engineB, nameA: deviceA.name, nameB: deviceB.name) != nil,
-           let baseMs = coarseAlign(engineA, engineB, nameA: deviceA.name, nameB: deviceB.name) {
-            if demo {
-                runDemo(engineA, engineB, nameA: deviceA.name, nameB: deviceB.name, baseMs: baseMs)
-            } else {
-                runStaircase(engineA, engineB, nameA: deviceA.name, nameB: deviceB.name, baseMs: baseMs)
-            }
-        } else {
+        guard levelMatch(stimulus, nameA: deviceA.name, nameB: deviceB.name) else {
             print("\nlateralization-probe: aborted before the run started.")
-            exitCode = 1
+            return 1
         }
-
-        restoreTerminal()
-        engineA.stop()
-        engineB.stop()
-        return exitCode
+        guard let baseMs = coarseAlign(stimulus, nameA: deviceA.name, nameB: deviceB.name) else {
+            print("\nlateralization-probe: aborted before the run started.")
+            return 1
+        }
+        if demo {
+            runDemo(stimulus, nameA: deviceA.name, nameB: deviceB.name, baseMs: baseMs)
+        } else {
+            runStaircase(stimulus, nameA: deviceA.name, nameB: deviceB.name, baseMs: baseMs)
+        }
+        return 0
     }
 
     // MARK: - Device selection
@@ -158,72 +165,134 @@ enum LateralizationProbe {
         return match
     }
 
-    // MARK: - Stimulus construction
+    // MARK: - Stimulus: two forever-looping buffers, rewritten in place
 
-    /// One woodblock-ish transient: two decaying sine partials (1.8 kHz +
-    /// 2.9 kHz) under an exponential envelope with a half-millisecond attack
-    /// ramp. Sharper onset than ToneSource's raised-cosine click, which rises
-    /// over ~4 ms — far too soft when the whole experiment is about onset
-    /// timing.
-    private static func writeTick(_ data: UnsafeMutablePointer<Float>, at startFrame: Int, capacity: Int) {
-        let sr = ToneSource.sampleRate
-        let frames = Int(sr * tickDurationSeconds)
-        let attackFrames = max(1, Int(sr * 0.0005))
-        for i in 0..<frames {
-            let frame = startFrame + i
-            guard frame >= 0, frame < capacity else { continue }
-            let t = Double(i) / sr
-            let attack = i < attackFrames ? Double(i) / Double(attackFrames) : 1.0
-            let envelope = exp(-t / tickDecayTau)
-            let partials = sin(2 * .pi * 1800 * t) + 0.6 * sin(2 * .pi * 2900 * t)
-            data[frame] += Float(0.55 * attack * envelope * partials / 1.6)
-        }
-    }
+    /// Owns the two engines and the one looping buffer each plays for the
+    /// whole run. Patterns are changed by rewriting the buffers' samples —
+    /// the players are never stopped, never rescheduled. The render thread
+    /// may read a frame mid-rewrite; worst case is one partial-amplitude tick
+    /// on one loop pass, which is harmless here and vastly preferable to
+    /// rescheduling against a jumpy BT clock.
+    private final class Stimulus {
+        private let engineA: BTOutputEngine
+        private let engineB: BTOutputEngine
+        private let bufferA: AVAudioPCMBuffer
+        private let bufferB: AVAudioPCMBuffer
 
-    private static func makeTickBuffer(lengthSeconds: Double, tickOffsets: [Double]) -> AVAudioPCMBuffer {
-        let frameCount = AVAudioFrameCount(ToneSource.sampleRate * lengthSeconds)
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: ToneSource.format, frameCapacity: frameCount),
-              let channels = buffer.floatChannelData else {
-            fatalError("lateralization-probe: failed to allocate tick buffer")
+        init?(deviceA: BTOutputDevice, deviceB: BTOutputDevice) {
+            engineA = BTOutputEngine(deviceID: deviceA.id, deviceName: deviceA.name, mode: .click)
+            engineB = BTOutputEngine(deviceID: deviceB.id, deviceName: deviceB.name, mode: .click)
+            bufferA = Stimulus.makeSilentLoop()
+            bufferB = Stimulus.makeSilentLoop()
+            engineA.setVolume(0.5)
+            engineB.setVolume(0.5)
+            do {
+                try engineA.start()
+                try engineB.start()
+            } catch {
+                elog("lateralization-probe: engine start FAILED: \(error)")
+                engineA.stop()
+                engineB.stop()
+                return nil
+            }
+            // Replace the engines' own click loop with our silent loop, once.
+            // Immediate play() — the ONLY scheduling in the whole probe.
+            engineA.playLoopingBuffer(bufferA)
+            engineB.playLoopingBuffer(bufferB)
         }
-        buffer.frameLength = frameCount
-        for channel in 0..<Int(ToneSource.format.channelCount) {
-            for offset in tickOffsets {
-                writeTick(channels[channel], at: Int(ToneSource.sampleRate * offset), capacity: Int(frameCount))
+
+        func stop() {
+            engineA.stop()
+            engineB.stop()
+        }
+
+        func setGainA(_ gain: Float) { engineA.setVolume(gain) }
+        func setGainB(_ gain: Float) { engineB.setVolume(gain) }
+
+        func silence() {
+            write(tickSeconds: nil, into: bufferA)
+            write(tickSeconds: nil, into: bufferB)
+        }
+
+        /// Level-match pattern: A ticks, then B ticks half a loop later.
+        func setAlternating() {
+            write(tickSeconds: 0.15, into: bufferA)
+            write(tickSeconds: 0.15 + loopSeconds / 2, into: bufferB)
+        }
+
+        /// Only one side ticks (smoke check).
+        func setSolo(a: Bool) {
+            write(tickSeconds: a ? baseTickSeconds : nil, into: bufferA)
+            write(tickSeconds: a ? nil : baseTickSeconds, into: bufferB)
+        }
+
+        /// Both tick once per loop; `offsetMs` > 0 delays B (A leads, image
+        /// pulls toward A), < 0 delays A. Sample-accurate: the offset is in
+        /// the tick's frame position.
+        func setCentered(offsetMs: Double) {
+            write(tickSeconds: baseTickSeconds + max(0, -offsetMs) / 1000, into: bufferA)
+            write(tickSeconds: baseTickSeconds + max(0, offsetMs) / 1000, into: bufferB)
+        }
+
+        private static func makeSilentLoop() -> AVAudioPCMBuffer {
+            let frameCount = AVAudioFrameCount(ToneSource.sampleRate * loopSeconds)
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: ToneSource.format, frameCapacity: frameCount) else {
+                fatalError("lateralization-probe: failed to allocate loop buffer")
+            }
+            buffer.frameLength = frameCount // zero-filled on alloc
+            return buffer
+        }
+
+        /// Zero the whole loop, then (unless nil) write one tick at `tickSeconds`.
+        private func write(tickSeconds: Double?, into buffer: AVAudioPCMBuffer) {
+            guard let channels = buffer.floatChannelData else { return }
+            let frames = Int(buffer.frameLength)
+            for channel in 0..<Int(buffer.format.channelCount) {
+                let data = channels[channel]
+                data.update(repeating: 0, count: frames)
+                if let tickSeconds {
+                    writeTick(data, at: Int(ToneSource.sampleRate * tickSeconds), capacity: frames)
+                }
             }
         }
-        return buffer
+
+        /// One woodblock-ish transient: two decaying sine partials (1.8 kHz +
+        /// 2.9 kHz) under an exponential envelope with a half-millisecond
+        /// attack ramp. Sharper onset than ToneSource's raised-cosine click,
+        /// which rises over ~4 ms — far too soft when the whole experiment is
+        /// about onset timing.
+        private func writeTick(_ data: UnsafeMutablePointer<Float>, at startFrame: Int, capacity: Int) {
+            let sr = ToneSource.sampleRate
+            let frames = Int(sr * tickDurationSeconds)
+            let attackFrames = max(1, Int(sr * 0.0005))
+            for i in 0..<frames {
+                let frame = startFrame + i
+                guard frame >= 0, frame < capacity else { continue }
+                let t = Double(i) / sr
+                let attack = i < attackFrames ? Double(i) / Double(attackFrames) : 1.0
+                let envelope = exp(-t / tickDecayTau)
+                let partials = sin(2 * .pi * 1800 * t) + 0.6 * sin(2 * .pi * 2900 * t)
+                data[frame] += Float(0.55 * attack * envelope * partials / 1.6)
+            }
+        }
     }
 
-    /// Schedule a tick pattern on each engine, both starting at ONE shared host
-    /// time. Offsets are in seconds from that instant and are baked into the
-    /// sample data, so they are sample-accurate (±0.011 ms at 44.1 kHz).
-    private static func schedule(
-        _ engineA: BTOutputEngine, offsetsA: [Double],
-        _ engineB: BTOutputEngine, offsetsB: [Double],
-        lengthSeconds: Double, loops: Bool
-    ) {
-        let bufferA = makeTickBuffer(lengthSeconds: lengthSeconds, tickOffsets: offsetsA)
-        let bufferB = makeTickBuffer(lengthSeconds: lengthSeconds, tickOffsets: offsetsB)
-        let when = AVAudioTime(hostTime: mach_absolute_time() &+ AVAudioTime.hostTime(forSeconds: scheduleLeadSeconds))
-        engineA.playBuffer(bufferA, at: when, loops: loops)
-        engineB.playBuffer(bufferB, at: when, loops: loops)
-    }
+    // MARK: - Smoke check (non-interactive; no tty, no staircase)
 
-    /// Both devices play the same burst; `offsetMs` > 0 delays B (so A leads
-    /// and the image should pull toward A), < 0 delays A.
-    private static func playBurst(
-        _ engineA: BTOutputEngine, _ engineB: BTOutputEngine,
-        offsetMs: Double, tickCount: Int, loops: Bool
-    ) -> Double {
-        let leadA = max(0, -offsetMs) / 1000.0
-        let leadB = max(0, offsetMs) / 1000.0
-        let span = Double(tickCount) * tickIntervalSeconds + max(leadA, leadB) + 0.2
-        schedule(
-            engineA, offsetsA: (0..<tickCount).map { leadA + Double($0) * tickIntervalSeconds },
-            engineB, offsetsB: (0..<tickCount).map { leadB + Double($0) * tickIntervalSeconds },
-            lengthSeconds: span, loops: loops)
-        return span
+    /// Audible plumbing proof: 3 ticks on A alone, then 3 on B alone, exit.
+    /// Runnable from a script — this is the check that would have caught the
+    /// silent-Bluetooth scheduling bug before the operator sat down.
+    private static func runSmoke(_ stimulus: Stimulus, nameA: String, nameB: String) -> Int32 {
+        let perSide = 3.0 * loopSeconds + 0.3
+        print("smoke: 3 ticks on A = \"\(nameA)\" ...")
+        stimulus.setSolo(a: true)
+        Thread.sleep(forTimeInterval: perSide)
+        print("smoke: 3 ticks on B = \"\(nameB)\" ...")
+        stimulus.setSolo(a: false)
+        Thread.sleep(forTimeInterval: perSide)
+        stimulus.silence()
+        print("smoke: done — you should have heard ticks from BOTH devices, A first.")
+        return 0
     }
 
     // MARK: - Keyboard
@@ -263,22 +332,21 @@ enum LateralizationProbe {
 
     // MARK: - Step 1: level matching (MANDATORY)
 
-    /// Alternating ticks, A then B, one pair per second, with per-device gain
-    /// on the keys. A loudness difference between the speakers imitates a
-    /// timing offset — the precedence effect survives roughly 10 dB of level
-    /// mismatch — so an unmatched pair would measure loudness, not timing.
-    /// Returns the accepted gains, or nil if the operator quit.
-    private static func levelMatch(
-        _ engineA: BTOutputEngine, _ engineB: BTOutputEngine, nameA: String, nameB: String
-    ) -> (Float, Float)? {
+    /// Alternating ticks, A then B, with per-device gain on the keys. A
+    /// loudness difference between the speakers imitates a timing offset —
+    /// the precedence effect survives roughly 10 dB of level mismatch — so an
+    /// unmatched pair would measure loudness, not timing. Returns false if
+    /// the operator quit.
+    private static func levelMatch(_ stimulus: Stimulus, nameA: String, nameB: String) -> Bool {
         var gainA: Float = 0.5
         var gainB: Float = 0.5
         var selected = 0
-        schedule(engineA, offsetsA: [0], engineB, offsetsB: [0.5], lengthSeconds: 1.0, loops: true)
+        stimulus.setAlternating()
         print("""
 
         ---- step 1 of 3: LEVEL MATCH (mandatory) ----
-        A tick alternates: \(nameA), then \(nameB), once a second each.
+        A tick alternates: \(nameA), then \(nameB).
+        (No sound from one side = stop here; run --smoke to debug the plumbing.)
         Adjust until the two ticks sound EQUALLY LOUD from where you are sitting.
           1 / 2   pick which device you are adjusting (1=\(nameA), 2=\(nameB))
           ] / [   that device louder / quieter (0.02 steps)
@@ -287,13 +355,13 @@ enum LateralizationProbe {
         """)
         printGains(gainA, gainB, selected: selected, nameA: nameA, nameB: nameB)
         while true {
-            guard let key = readKey() else { return nil }
+            guard let key = readKey() else { return false }
             switch key {
             case .space:
                 print("[level] accepted — A=\(String(format: "%.2f", gainA)) B=\(String(format: "%.2f", gainB))")
-                return (gainA, gainB)
+                return true
             case .char("q"):
-                return nil
+                return false
             case .char("1"):
                 selected = 0
             case .char("2"):
@@ -302,10 +370,10 @@ enum LateralizationProbe {
                 let delta: Float = key == .char("]") ? 0.02 : -0.02
                 if selected == 0 {
                     gainA = min(1, max(0, gainA + delta))
-                    engineA.setVolume(gainA)
+                    stimulus.setGainA(gainA)
                 } else {
                     gainB = min(1, max(0, gainB + delta))
-                    engineB.setVolume(gainB)
+                    stimulus.setGainB(gainB)
                 }
             default:
                 continue
@@ -322,25 +390,24 @@ enum LateralizationProbe {
 
     // MARK: - Step 2: coarse alignment
 
-    /// Find the offset at which the fused tick sits in the MIDDLE. Two speakers
-    /// have wildly different output latencies (a BT speaker runs 150-250 ms
-    /// behind the built-in output), and that fixed offset would otherwise swamp
-    /// every trial. Whatever the operator centres here becomes the zero the
-    /// staircase measures around — which is the right zero, since the wizard
-    /// this probe informs would also work relative to a centred image.
+    /// Find the offset at which the fused tick sits in the MIDDLE. Two
+    /// speakers have wildly different output latencies (a BT speaker runs
+    /// 150-250 ms behind the built-in output), and the two loops also started
+    /// with an arbitrary-but-constant scheduling skew; both would otherwise
+    /// swamp every trial. Whatever the operator centres here becomes the zero
+    /// the staircase measures around — which is the right zero, since the
+    /// wizard this probe informs would also work relative to a centred image.
     /// Returns the accepted base offset in ms, or nil if the operator quit.
-    private static func coarseAlign(
-        _ engineA: BTOutputEngine, _ engineB: BTOutputEngine, nameA: String, nameB: String
-    ) -> Double? {
+    private static func coarseAlign(_ stimulus: Stimulus, nameA: String, nameB: String) -> Double? {
         var baseMs = 0.0
-        _ = playBurst(engineA, engineB, offsetMs: baseMs, tickCount: 1, loops: true)
+        stimulus.setCentered(offsetMs: baseMs)
         print("""
 
         ---- step 2 of 3: CENTRE THE IMAGE ----
-        Both speakers now tick together, once a second. Below a few milliseconds
-        you will hear ONE tick, not two — that is expected. Do not chase "one
-        tick": adjust until that single tick sounds like it comes from BETWEEN
-        the two speakers rather than out of one of them.
+        Both speakers now tick together. Below a few milliseconds you will hear
+        ONE tick, not two — that is expected. Do not chase "one tick": adjust
+        until that single tick sounds like it comes from BETWEEN the two
+        speakers rather than out of one of them.
           left / right arrow   shift 10 ms toward \(nameA) / \(nameB)
           [ / ]                shift 1 ms
           , / .                shift 0.1 ms
@@ -365,8 +432,8 @@ enum LateralizationProbe {
             case .char("."): delta = 0.1
             default: continue
             }
-            baseMs = min(500, max(-500, baseMs + delta))
-            _ = playBurst(engineA, engineB, offsetMs: baseMs, tickCount: 1, loops: true)
+            baseMs = min(maxCentreMs, max(-maxCentreMs, baseMs + delta))
+            stimulus.setCentered(offsetMs: baseMs)
             print(String(format: "[align] offset = %+.2f ms", baseMs))
         }
     }
@@ -380,13 +447,13 @@ enum LateralizationProbe {
     }
 
     private static func runStaircase(
-        _ engineA: BTOutputEngine, _ engineB: BTOutputEngine,
-        nameA: String, nameB: String, baseMs: Double
+        _ stimulus: Stimulus, nameA: String, nameB: String, baseMs: Double
     ) {
         print("""
 
         ---- step 3 of 3: THE BLIND RUN ----
-        Each trial plays \(ticksPerBurst) ticks. Say which side the ticks came from.
+        Each trial ticks steadily until you answer — listen as long as you need,
+        then say which side the ticks came from.
           left arrow    \(nameA)
           right arrow   \(nameB)
           space         can't tell
@@ -404,8 +471,7 @@ enum LateralizationProbe {
         while trials.count < maxTrials && reversals.count < maxReversals {
             let bLeads = Bool.random()
             let delta = bLeads ? -magnitude : magnitude
-            let span = playBurst(engineA, engineB, offsetMs: baseMs + delta, tickCount: ticksPerBurst, loops: false)
-            Thread.sleep(forTimeInterval: scheduleLeadSeconds + span + burstTailSeconds)
+            stimulus.setCentered(offsetMs: baseMs + delta)
 
             print("trial \(trials.count + 1)/\(maxTrials) — which side?  [<-] \(nameA)   [->] \(nameB)   [space] can't tell")
             var answer: Key?
@@ -417,7 +483,9 @@ enum LateralizationProbe {
                 default: continue
                 }
             }
+            stimulus.silence()
             if quitEarly { break }
+            Thread.sleep(forTimeInterval: interTrialGapSeconds)
 
             let cantTell = answer == .space
             let correct = !cantTell && ((bLeads && answer == .right) || (!bLeads && answer == .left))
@@ -449,8 +517,7 @@ enum LateralizationProbe {
     // MARK: - Step 3b: demo (NOT blind)
 
     private static func runDemo(
-        _ engineA: BTOutputEngine, _ engineB: BTOutputEngine,
-        nameA: String, nameB: String, baseMs: Double
+        _ stimulus: Stimulus, nameA: String, nameB: String, baseMs: Double
     ) {
         let script: [(Double, String)] = [
             (8, "+8 ms — \(nameB) delayed by 8 ms; should lean clearly toward \(nameA)"),
@@ -462,13 +529,15 @@ enum LateralizationProbe {
         print("""
 
         ---- DEMO (not blind) ----
-        Each offset is announced before it plays, so you learn what the cue
-        sounds like. Nothing here is scored.
+        Each offset is announced before it plays for ~6 seconds, so you learn
+        what the cue sounds like. Nothing here is scored.
         """)
         for (index, step) in script.enumerated() {
             print("demo \(index + 1)/\(script.count): \(step.1)")
-            let span = playBurst(engineA, engineB, offsetMs: baseMs + step.0, tickCount: ticksPerBurst, loops: false)
-            Thread.sleep(forTimeInterval: scheduleLeadSeconds + span + burstTailSeconds)
+            stimulus.setCentered(offsetMs: baseMs + step.0)
+            Thread.sleep(forTimeInterval: 5 * loopSeconds)
+            stimulus.silence()
+            Thread.sleep(forTimeInterval: interTrialGapSeconds)
         }
         print("demo: done. Re-run without --demo for the blind, scored staircase.")
     }
@@ -488,7 +557,7 @@ enum LateralizationProbe {
 
         print(String(format: "pair: A(left)=\"%@\"  B(right)=\"%@\"  centred at %+.2f ms", nameA, nameB, baseMs))
         print("staircase: start \(fmt(startMagnitudeMs)) ms, 1-up/2-down, x\(downFactor) down / x\(upFactor) up, floor \(fmt(floorMs)) ms, ceiling \(fmt(ceilingMs)) ms, stop at \(maxTrials) trials or \(maxReversals) reversals")
-        print("stimulus: \(ticksPerBurst) ticks at \(fmt(tickIntervalSeconds)) s, \(Int(tickDurationSeconds * 1000)) ms woodblock (1.8 + 2.9 kHz, exponential decay), offset baked into the samples")
+        print("stimulus: steady tick every \(fmt(loopSeconds)) s until answered, \(Int(tickDurationSeconds * 1000)) ms woodblock (1.8 + 2.9 kHz, exponential decay), offset baked into the samples of a continuously-looping buffer (no per-trial scheduling)")
 
         // Per-magnitude hit rate.
         var order: [String] = []

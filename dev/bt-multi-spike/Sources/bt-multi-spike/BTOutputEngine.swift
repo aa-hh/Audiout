@@ -284,21 +284,30 @@ final class BTOutputEngine {
     /// is dialed in), not the arbitrary gap between when each device was added.
     /// Safe to call while playing; a no-op if this engine isn't running.
     func restartLoop(at when: AVAudioTime) {
-        playBuffer(ToneSource.makeBuffer(for: mode), at: when, loops: true)
-    }
-
-    /// Replace whatever the player has queued with `buffer`, starting at `when`
-    /// — a host time shared across engines. The lateralization probe uses this
-    /// to put a sample-accurate tick pattern on each device: the inter-device
-    /// offset under test lives INSIDE the buffer, never in the delay AU, whose
-    /// parameter resolution is unspecified at the fractions of a millisecond
-    /// that probe measures. No-op if this engine isn't running.
-    func playBuffer(_ buffer: AVAudioPCMBuffer, at when: AVAudioTime, loops: Bool) {
         graphQueue.sync {
             guard isRunningTracked, engine.isRunning else { return }
             player.stop()
-            player.scheduleBuffer(buffer, at: nil, options: loops ? .loops : [], completionHandler: nil)
+            let buffer = ToneSource.makeBuffer(for: mode)
+            player.scheduleBuffer(buffer, at: nil, options: .loops, completionHandler: nil)
             player.play(at: when)
+        }
+    }
+
+    /// Replace whatever the player has queued with `buffer`, looping, starting
+    /// IMMEDIATELY — never at an absolute time. The lateralization probe
+    /// schedules exactly once per run and then rewrites the buffer's samples in
+    /// place: on a Bluetooth device, `play(at:)` maps the host time through the
+    /// device's pacing clock, and that clock was measured (this branch's
+    /// --pacing-probe) jumping ±5–100 ms for ~40 s after connect — a jump can
+    /// land the buffer in the device's past and the player renders silence with
+    /// no error. Immediate play + one long-lived loop is the July known-good
+    /// path. No-op if this engine isn't running.
+    func playLoopingBuffer(_ buffer: AVAudioPCMBuffer) {
+        graphQueue.sync {
+            guard isRunningTracked, engine.isRunning else { return }
+            player.stop()
+            player.scheduleBuffer(buffer, at: nil, options: .loops, completionHandler: nil)
+            player.play()
         }
     }
 

@@ -87,9 +87,34 @@ public struct AppSettings {
         nonmutating set { defaults.set(newValue, forKey: Keys.controlStripWrittenLayouts) }
     }
 
+    /// The Touch Bar presentation mode as it was before we borrowed it, and what
+    /// we replaced it with. A `nil` original is a real, meaningful state — the
+    /// user had never set one — which is why ``controlStripHoldsChanges`` and not
+    /// nil-ness is what says whether we hold anything.
+    public var controlStripOriginalMode: String? {
+        get { defaults.string(forKey: Keys.controlStripOriginalMode) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.controlStripOriginalMode) }
+    }
+
+    public var controlStripWrittenMode: String? {
+        get { defaults.string(forKey: Keys.controlStripWrittenMode) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.controlStripWrittenMode) }
+    }
+
+    /// Whether we currently hold ANY borrowed Control Strip setting. The single
+    /// crash-recovery latch: if this survives a launch, a previous run died
+    /// mid-borrow and the user must be put back before anything else happens.
+    public var controlStripHoldsChanges: Bool {
+        get { defaults.bool(forKey: Keys.controlStripHoldsChanges) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.controlStripHoldsChanges) }
+    }
+
     private enum Keys {
         static let controlStripOriginalLayouts = "controlStrip.originalLayouts"
         static let controlStripWrittenLayouts = "controlStrip.writtenLayouts"
+        static let controlStripOriginalMode = "controlStrip.originalMode"
+        static let controlStripWrittenMode = "controlStrip.writtenMode"
+        static let controlStripHoldsChanges = "controlStrip.holdsChanges"
         static let theme = "appearance.theme"
         static let density = "appearance.density"
         static let accentStyle = "appearance.accentStyle"

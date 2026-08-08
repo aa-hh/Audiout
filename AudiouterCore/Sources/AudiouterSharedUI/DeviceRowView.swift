@@ -76,6 +76,17 @@ public final class DeviceRowView: NSView {
         /// also where the align-by-ear toggle moved (D9). Default no-op for
         /// hosts without the SYNC column.
         func deviceRow(_ row: DeviceRowView, didToggleSyncDrawerFor id: String)
+        /// The row was right-clicked (or asked for its menu by VoiceOver). The
+        /// host returns the contextual menu to show, or `nil` for none — the
+        /// popover offers "Hide '<name>'", a DISPLAY-only action. Default `nil`
+        /// so hosts without a per-row menu are unaffected.
+        func deviceRowContextMenu(_ row: DeviceRowView, for id: String) -> NSMenu?
+    }
+
+    /// AppKit's own right-click seam, so the menu rides real event dispatch
+    /// (and VoiceOver's "show menu") instead of a hand-rolled `rightMouseDown`.
+    public override func menu(for event: NSEvent) -> NSMenu? {
+        delegate?.deviceRowContextMenu(self, for: device.id)
     }
 
     /// Control-Center row density: comfortable height that seats a mini switch,
@@ -2233,6 +2244,22 @@ public final class DeviceRowView: NSView {
     /// while disabled, exactly like a live click).
     public func test_fireSyncChipClick() { syncChipButton.performClick(nil) }
 
+    /// The contextual menu a real right-click on this row would show: a
+    /// synthesized `.rightMouseDown` through the same `menu(for:)` override
+    /// AppKit calls, never a direct delegate poke — a headless run can't
+    /// deliver a real click, and a hook that bypasses AppKit dispatch has
+    /// hidden a real break in this repo before. `nil` when the host offers no
+    /// menu.
+    public func test_contextMenu() -> NSMenu? {
+        guard let event = NSEvent.mouseEvent(with: .rightMouseDown,
+                                             location: NSPoint(x: bounds.midX, y: bounds.midY),
+                                             modifierFlags: [], timestamp: 0, windowNumber: 0,
+                                             context: nil, eventNumber: 0, clickCount: 1,
+                                             pressure: 1)
+        else { return nil }
+        return menu(for: event)
+    }
+
     /// The chip's spoken identity/value/expanded state and its hover tooltip.
     public var test_syncChipAXLabel: String? { syncChipButton.accessibilityLabel() }
     public var test_syncChipAXValue: String? { syncChipButton.accessibilityValue() as? String }
@@ -2750,6 +2777,8 @@ public extension DeviceRowView.Delegate {
     /// Default no-op — only the popover hosts the Bluetooth SYNC column, and
     /// only it can open a drawer (PLAN-BT-SYNC-DRAWER T6/T7).
     func deviceRow(_ row: DeviceRowView, didToggleSyncDrawerFor id: String) {}
+    /// Default `nil` — only the popover offers a per-row contextual menu.
+    func deviceRowContextMenu(_ row: DeviceRowView, for id: String) -> NSMenu? { nil }
 }
 
 // MARK: - Invisible switch cell (spec §4.8)

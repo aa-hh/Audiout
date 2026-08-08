@@ -864,9 +864,20 @@ final class PopoverPanelViewController: NSViewController {
     /// only this subsection's rows carry — the Bluetooth subsection's "SYNC"
     /// title over its stepper cluster (BT-OFFSET-UI). Same
     /// `makeColumnHeaderLabel` voice as the card header's VOLUME/FEED titles.
+    ///
+    /// `collapsible` reuses the card header's own affordance verbatim — the
+    /// leading `chevron.right`/`chevron.down` button, the whole-row click
+    /// recognizer (C4), and the same `chevronsByHeader`/
+    /// `headerClickRecognizersByHeader` registries, keyed by the SUBSECTION
+    /// title. A subsection has no body of its own to clip, so unlike a card it
+    /// carries no collapse END STATE here: the host renders or omits the member
+    /// rows and this method only builds the affordance.
     func addSubsectionHeader(_ title: String,
                              columnTitle: String? = nil,
-                             columnCenterFromTrailing: CGFloat = 0) {
+                             columnCenterFromTrailing: CGFloat = 0,
+                             collapsible: Bool = false,
+                             collapsed: Bool = false,
+                             onToggle: (() -> Void)? = nil) {
         let label = NSTextField(labelWithString: title)
         label.translatesAutoresizingMaskIntoConstraints = false
         label.font = Tokens.Font.captionMedium
@@ -874,13 +885,50 @@ final class PopoverPanelViewController: NSViewController {
         let wrapper = NSView()
         wrapper.translatesAutoresizingMaskIntoConstraints = false
         wrapper.addSubview(label)
+        // Align to the icon column (Warm Signal v4 §Call-1) — out of the rail
+        // gutter, directly above the device icons. A collapsible subsection puts
+        // its chevron on that anchor and the title follows, exactly like a card
+        // header.
+        let leadingInset = PopoverColumnGrid.firstElementLeading(indented: false)
+        var titleLeadingAnchor = wrapper.leadingAnchor
+        var titleLeadingConstant = leadingInset
+        if collapsible {
+            let chevron = NSButton()
+            chevron.translatesAutoresizingMaskIntoConstraints = false
+            chevron.bezelStyle = .accessoryBar
+            chevron.isBordered = false
+            chevron.imagePosition = .imageOnly
+            chevron.setContentHuggingPriority(.required, for: .horizontal)
+            chevron.contentTintColor = Tokens.Color.tertiaryLabel
+            chevron.setAccessibilityLabel(collapsed ? "Expand \(title)" : "Collapse \(title)")
+            let onChevron = ClosureActionTarget { onToggle?() }
+            chevron.target = onChevron
+            chevron.action = #selector(ClosureActionTarget.fire)
+            objc_setAssociatedObject(chevron, &Self.actionTargetKey, onChevron, .OBJC_ASSOCIATION_RETAIN)
+            wrapper.addSubview(chevron)
+            NSLayoutConstraint.activate([
+                chevron.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor,
+                                                 constant: leadingInset),
+                chevron.centerYAnchor.constraint(equalTo: label.centerYAnchor),
+                chevron.widthAnchor.constraint(equalToConstant: 16),
+            ])
+            titleLeadingAnchor = chevron.trailingAnchor
+            titleLeadingConstant = 4
+            chevronsByHeader[title] = chevron
+            assignChevron(chevron, collapsed: collapsed, for: title)
+
+            let onHeaderClick = ClosureActionTarget { onToggle?() }
+            let headerClick = NSClickGestureRecognizer(target: onHeaderClick,
+                                                        action: #selector(ClosureActionTarget.fire))
+            wrapper.addGestureRecognizer(headerClick)
+            objc_setAssociatedObject(wrapper, &Self.actionTargetKey, onHeaderClick,
+                                     .OBJC_ASSOCIATION_RETAIN)
+            headerClickRecognizersByHeader[title] = headerClick
+        }
         NSLayoutConstraint.activate([
             wrapper.heightAnchor.constraint(equalToConstant: 22),
-            // Align to the icon column (Warm Signal v4 §Call-1) — out of the rail
-            // gutter, directly above the device icons.
-            label.leadingAnchor.constraint(
-                equalTo: wrapper.leadingAnchor,
-                constant: PopoverColumnGrid.firstElementLeading(indented: false)),
+            label.leadingAnchor.constraint(equalTo: titleLeadingAnchor,
+                                           constant: titleLeadingConstant),
             label.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor, constant: -2),
         ])
         if let columnTitle {

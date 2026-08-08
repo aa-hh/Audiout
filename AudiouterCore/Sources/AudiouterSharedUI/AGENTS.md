@@ -12,6 +12,7 @@ SharedUI also now hosts shared WINDOW CHROME, not only row views: `ControlPanelW
 - Row geometry lives in `PopoverColumnGrid` (named constants, no magic numbers) — columns anchor to the row's *trailing* edge, so slider/status/trailing-control columns line up across sections despite different leading controls.
 - Hover state is transient, separate from selection, reconciled via an app-local `.mouseMoved` monitor cleared on every `apply` — an `NSTrackingArea` alone never fires `mouseExited` for a bottom-most row with an untracked dead-zone below it.
 - `DeviceRowView` computes `isInMenu` live from `enclosingMenuItem` to pick its drawing path and accessibility role — don't hardcode one path for both hosts.
+- The row's contextual menu goes through AppKit's own `menu(for:)` seam, delegating the CONTENT to the host — so right-click and VoiceOver's "show menu" share one path and the view still owns no policy. Don't hand-roll `rightMouseDown` beside it.
 - Each view exposes `test_*` hooks (`test_setVolume`, `test_toggleEnabled`, …) that must drive the exact same delegate path as the live control, since gestures can't be synthesized headlessly.
 - The device row's trailing control is an `NSButton` checkbox under a "Selected" header (membership in "Selected Devices"), not an `NSSwitch`; the column is not "Enabled".
 - `DeviceRowView.apply` takes `controllable` separate from `selected`: slider/mute enablement follows `controllable`, but the checkbox and the sublabel's "System" token follow `selected` alone.

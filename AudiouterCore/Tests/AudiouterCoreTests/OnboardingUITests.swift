@@ -39,18 +39,8 @@ import Testing
     }
     private final class ChangeCounter { var count = 0 }
 
-    private var suiteName: String
-    private var defaults: UserDefaults!
-
-    init() {
-        suiteName = "OnboardingUITests.\(UUID().uuidString)"
-        defaults = UserDefaults(suiteName: suiteName)
-        defaults.removePersistentDomain(forName: suiteName)
-    }
-
-    deinit {
-        defaults.removePersistentDomain(forName: suiteName)
-    }
+    private let isolation = TestIsolation(owner: "OnboardingUITests")
+    private var defaults: UserDefaults { isolation.isolatedDefaults }
 
     private func makeModel(audio: PermissionStatus,
                            ptpHelper: PTPHelperManaging = FakePTPHelper()) -> SetupModel {

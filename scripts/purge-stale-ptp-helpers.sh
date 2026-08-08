@@ -34,6 +34,7 @@
 # Usage:
 #   scripts/purge-stale-ptp-helpers.sh            # list candidates (dry run)
 #   scripts/purge-stale-ptp-helpers.sh --apply     # actually bootout each one
+#   scripts/purge-stale-ptp-helpers.sh --apply --keep com.audiouter.Audiouter.ptphelper
 #   scripts/purge-stale-ptp-helpers.sh --help
 # Every command below is a paste-proof one-liner — no backslash continuations.
 
@@ -41,7 +42,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: purge-stale-ptp-helpers.sh [--apply|--help]
+Usage: purge-stale-ptp-helpers.sh [--apply] [--keep LABEL]... [--help]
 
 Enumerates every root launchd daemon in the system domain whose label ends in
 ".ptphelper" (the PTP-helper daemon scripts/make-app.sh registers per
@@ -57,6 +58,10 @@ testing.
                live sudo timestamp. Best-effort: a label with no currently
                loaded job (override-only) is reported, not treated as a
                failure.
+  --keep LABEL Exclude one exact label from the sweep — it is skipped in the
+               listing and never booted out. Repeatable. Used by
+               scripts/purge-dev-installs.sh to spare the SHIPPING build's
+               helper while clearing every dev one.
   --help       Show this message.
 
 This is a dev-only tool. It is not run in CI and cannot run fully unattended
@@ -69,16 +74,34 @@ EOF
 LABEL_SUFFIX=".ptphelper"
 
 APPLY=0
-case "${1:-}" in
-  "") : ;;
-  --apply) APPLY=1 ;;
-  --help|-h) usage; exit 0 ;;
-  *)
-    echo "error: unknown argument '$1'" >&2
-    usage >&2
-    exit 1
-    ;;
-esac
+# Labels to spare. Newline-delimited rather than an array so the emptiness
+# check below stays a plain string test (see the bash 3.2 note further down on
+# why empty-array expansion under `set -u` is a trap worth designing around).
+KEEP_LABELS=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --apply) APPLY=1; shift ;;
+    --keep)
+      [ "$#" -ge 2 ] || { echo "error: --keep needs a label" >&2; exit 1; }
+      KEEP_LABELS="$KEEP_LABELS
+$2"
+      shift 2
+      ;;
+    --help|-h) usage; exit 0 ;;
+    *)
+      echo "error: unknown argument '$1'" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+# Exact whole-string match against the --keep list — a substring or prefix
+# match here would let one spared label accidentally shield its neighbours.
+is_kept() {
+  [ -n "$KEEP_LABELS" ] || return 1
+  printf '%s\n' "$KEEP_LABELS" | grep -qxF "$1"
+}
 
 # --- Enumerate: every label registered in the system (root) launchd domain --
 # `launchctl print system` dumps the whole system-domain state (loaded jobs in
@@ -113,13 +136,20 @@ CANDIDATES_RAW="$(
 # one at a time from an empty array is safe; only the later expansions need
 # the length-guard below.
 candidates=()
+spared=""
 if [ -n "$CANDIDATES_RAW" ]; then
   while IFS= read -r label; do
+    if is_kept "$label"; then
+      spared="$spared    keeping (--keep): $label
+"
+      continue
+    fi
     candidates+=("$label")
   done <<< "$CANDIDATES_RAW"
 fi
 
 echo "==> Scanning system launchd domain for labels ending in '$LABEL_SUFFIX'"
+[ -n "$spared" ] && printf '%s' "$spared"
 if [ "${#candidates[@]}" -eq 0 ]; then
   echo "==> No matching PTP-helper daemons found. Nothing to do."
   exit 0

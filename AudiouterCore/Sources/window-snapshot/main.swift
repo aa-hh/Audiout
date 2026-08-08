@@ -471,6 +471,20 @@ func snapshotControlPanel(_ controller: ControlPanelWindowController,
     renderPNG(view: container, to: outDir.appendingPathComponent("mixer-\(label)-\(suffix).png"))
 }
 
+/// Name of the throwaway defaults suite this tool's fixtures write to instead
+/// of the developer's real domain. FIXED, not per-run: `UserDefaults(suiteName:)`
+/// creates a real `~/Library/Preferences/<name>.plist`, so a `UUID` in the name
+/// leaves one behind on every run. One reused name plus a wipe before each use
+/// keeps the fixtures identical run to run at a cost of one plist, ever.
+let snapshotDefaultsSuite = "window-snapshot"
+
+@MainActor
+func makeSnapshotDefaults() -> UserDefaults {
+    let defaults = UserDefaults(suiteName: snapshotDefaultsSuite)!
+    defaults.removePersistentDomain(forName: snapshotDefaultsSuite)
+    return defaults
+}
+
 @MainActor
 func run() -> Int32 {
     // Never show a real window on the developer's screen while this
@@ -533,8 +547,7 @@ func run() -> Int32 {
             appRouting: AppRoutingController(store: AppRouteStore(directory: tempDir()),
                                              loadPersisted: false),
             runningAppsProvider: { [] })
-        let surfaceSettings = AppSettings(
-            defaults: UserDefaults(suiteName: "window-snapshot-\(UUID().uuidString)")!)
+        let surfaceSettings = AppSettings(defaults: makeSnapshotDefaults())
         let surface = AppSurfaceController(
             popoverController: surfacePopover,
             settings: surfaceSettings,

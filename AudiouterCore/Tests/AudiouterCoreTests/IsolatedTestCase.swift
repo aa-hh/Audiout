@@ -65,13 +65,12 @@ public final class TestIsolation {
     /// else. All isolation below is namespaced by it.
     public let isolationToken = UUID().uuidString
 
-    /// Human-readable owner, used only to make scratch paths and defaults suite
-    /// names legible when debugging. Callers pass `"\(Self.self)"`.
+    /// Human-readable owner, used only to make scratch paths legible when
+    /// debugging. Callers pass `"\(Self.self)"`.
     private let owner: String
 
     private var _scratchDir: URL?
     private var _isolatedDefaults: UserDefaults?
-    private var _suiteName: String?
 
     public init(owner: String) {
         self.owner = owner
@@ -88,18 +87,21 @@ public final class TestIsolation {
         return dir
     }
 
-    /// A `UserDefaults` isolated from `.standard` and from every other test.
-    /// Prefer this over `UserDefaults.standard`.
+    /// A `UserDefaults` isolated from `.standard` and from every other test,
+    /// and backed by memory rather than a `~/Library/Preferences` plist (see
+    /// `InMemoryDefaults`). Prefer this over `UserDefaults.standard`.
     public var isolatedDefaults: UserDefaults {
         if let existing = _isolatedDefaults { return existing }
-        let suite = "AudiouterTests.\(owner).\(isolationToken)"
-        // suiteName can only be nil for the reserved global/registration
-        // domains, which this never is — force-unwrap is the documented usage.
-        let defaults = UserDefaults(suiteName: suite)!
-        _suiteName = suite
+        let defaults = makeDefaults()
         _isolatedDefaults = defaults
         return defaults
     }
+
+    /// A brand-new store, distinct from `isolatedDefaults` and from every other
+    /// one this test asks for. For a fixture helper called several times in one
+    /// test, each call wanting an empty store — where sharing one would let the
+    /// first fixture's writes leak into the second's reads.
+    public func makeDefaults() -> UserDefaults { InMemoryDefaults() }
 
     /// A collision-proof variant of `base`, for APIs that persist to a global
     /// store no matter what (e.g. `NSWindow.setFrameAutosaveName`).
@@ -112,15 +114,50 @@ public final class TestIsolation {
         if let dir = _scratchDir {
             try? FileManager.default.removeItem(at: dir)
         }
-        if let suite = _suiteName {
-            _isolatedDefaults?.removePersistentDomain(forName: suite)
-        }
         _scratchDir = nil
         _isolatedDefaults = nil
-        _suiteName = nil
     }
 
     deinit { cleanUp() }
+}
+
+/// A `UserDefaults` that keeps everything in memory and never touches disk.
+///
+/// **Never reach for `UserDefaults(suiteName:)` in a test.** A suite IS a real
+/// `~/Library/Preferences/<name>.plist`, so a per-test suite name leaves a new
+/// file behind on every test, forever — this Mac measured 48,769 of them,
+/// ~200 MB, 98% of that directory, which `cfprefsd` and every `defaults`
+/// lookup walks past. There is no in-process way to take one back, and both
+/// halves of the obvious cleanup measure as failing: `removePersistentDomain
+/// (forName:)` empties the domain but leaves the file, and `cfprefsd` writes an
+/// empty plist back for any domain it still has cached AFTER the client process
+/// exits, so unlinking the file from the test that made it loses the race.
+///
+/// `object`/`set`/`removeObject` are `UserDefaults`' primitive methods — every
+/// typed accessor (`bool`, `integer`, `double`, `string`, …) and every typed
+/// setter is built on them, so overriding these three is the whole job.
+private final class InMemoryDefaults: UserDefaults {
+    // A test may hand its settings object to code that writes from a background
+    // queue, and `UserDefaults` itself is thread-safe — so this has to be too,
+    // or the substitution introduces a data race the real thing never had.
+    private let lock = NSLock()
+    private var store: [String: Any] = [:]
+
+    override func object(forKey key: String) -> Any? {
+        lock.withLock { store[key] }
+    }
+
+    override func set(_ value: Any?, forKey key: String) {
+        lock.withLock { store[key] = value }
+    }
+
+    override func removeObject(forKey key: String) {
+        lock.withLock { store[key] = nil }
+    }
+
+    override func dictionaryRepresentation() -> [String: Any] {
+        lock.withLock { store }
+    }
 }
 
 // MARK: - swift-testing base
@@ -132,8 +169,11 @@ public final class TestIsolation {
 /// toolchain: the suite instance is created fresh per test, `Self.self`
 /// resolves to the concrete subclass, and `deinit` fires after each test
 /// (subclass `deinit` first, then the base's, then stored properties release).
-/// A `struct` suite cannot be used here: `deinit` is a hard compile error on a
-/// struct, and there is no `tearDown` hook to fall back on.
+/// A `struct` suite cannot inherit this: `deinit` is a hard compile error on a
+/// struct, and there is no `tearDown` hook to fall back on. A struct suite
+/// instead holds `TestIsolation` as a stored property and reaches its members
+/// through it — the class is released when the per-test struct instance is,
+/// so its `deinit` cleans up on exactly the same schedule.
 ///
 /// ```swift
 /// @MainActor
@@ -186,6 +226,9 @@ open class IsolatedSuite {
     /// A `UserDefaults` isolated from `.standard` and from every other test.
     public var isolatedDefaults: UserDefaults { isolation.isolatedDefaults }
 
+    /// A fresh, empty, memory-backed defaults store per call.
+    public func makeDefaults() -> UserDefaults { isolation.makeDefaults() }
+
     /// A collision-proof variant of `base`, for APIs that persist globally.
     public func uniqueName(_ base: String) -> String { isolation.uniqueName(base) }
 }
@@ -210,6 +253,8 @@ open class IsolatedTestCase: XCTestCase {
     public var scratchDir: URL { isolation.scratchDir }
 
     public var isolatedDefaults: UserDefaults { isolation.isolatedDefaults }
+
+    public func makeDefaults() -> UserDefaults { isolation.makeDefaults() }
 
     public func uniqueName(_ base: String) -> String { isolation.uniqueName(base) }
 

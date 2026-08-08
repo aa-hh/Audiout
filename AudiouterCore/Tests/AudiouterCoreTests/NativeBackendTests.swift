@@ -1412,6 +1412,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 /// that touches either belongs in THAT suite, not this one.
 @Suite struct NativeBackendTests {
 
+    private let isolation = TestIsolation(owner: "NativeBackendTests")
+
     // MARK: AirPlay-1 perceptual volume curve (the "cliff at ~50%" fix, 2026-07-22)
 
     /// The AP1 curve must keep the WHOLE slider audible: it compresses UI 0–100
@@ -2026,7 +2028,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             // settings.mainOutVolume, so the default AppSettings() (UserDefaults.standard)
             // would pollute the real defaults domain. Both go to a per-test temp/suite.
             routingStore: RoutingStore(directory: isolatedDir),
-            settings: AppSettings(defaults: UserDefaults(suiteName: "test-\(UUID().uuidString)")!),
+            settings: AppSettings(defaults: isolation.makeDefaults()),
             loadPersisted: false)
         controller.ensureDefaultSelection()                     // {local} — passthrough
         _ = controller.setDeviceSelected(speaker.id, true)      // auto-swap drops local ⇒ streaming

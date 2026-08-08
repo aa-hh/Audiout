@@ -10,13 +10,8 @@ import Testing
     /// `AppSettings` wrapping THIS, or the Main Out master volume it persists
     /// reads/writes the developer's real defaults domain and tests flake against
     /// each other and against everything else in the suite.
-    private let isolatedDefaults: UserDefaults
-
-    init() {
-        let suiteName = "AudiouterTests.\(Self.self).\(UUID().uuidString)"
-        isolatedDefaults = UserDefaults(suiteName: suiteName)!
-        isolatedDefaults.removePersistentDomain(forName: suiteName)
-    }
+    private let isolation = TestIsolation(owner: "GroupControllerTests")
+    private var isolatedDefaults: UserDefaults { isolation.isolatedDefaults }
 
     /// Deterministic backend: no discovery stagger, no timers, pre-populated
     /// synchronously via a blocking discovery wait (mirrors MockBackendTests).

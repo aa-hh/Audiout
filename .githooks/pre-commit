@@ -76,7 +76,12 @@ fi
 # suites writing the same defaults key or temp filename race and flake. The
 # blessed fix is to subclass `IsolatedTestCase` (Tests/AudiouterCoreTests/
 # IsolatedTestCase.swift) and use `scratchDir` / `isolatedDefaults` /
-# `uniqueName(_:)` instead of the shared globals.
+# `makeDefaults()` / `uniqueName(_:)` instead of the shared globals.
+#
+# `UserDefaults(suiteName:)` is flagged too, for a different reason: it isolates
+# correctly but every distinct name is a permanent `~/Library/Preferences` plist
+# nothing can delete afterwards (see `InMemoryDefaults`) — measured at 48,769
+# files / 200 MB on one machine.
 #
 # This scans only the ADDED lines of staged test files, so it never nags about
 # pre-existing code — only newly introduced reaches. A line that genuinely must
@@ -88,7 +93,7 @@ for f in $staged_tests; do
     case "$f" in */IsolatedTestCase.swift) continue ;; esac
     added=$(git diff --cached -U0 -- "$f" 2>/dev/null | grep -E '^\+[^+]')
     bad=$(printf '%s\n' "$added" \
-        | grep -Ei 'UserDefaults\.standard|FileManager\.default\.temporaryDirectory' \
+        | grep -Ei 'UserDefaults\.standard|UserDefaults\(suiteName:|FileManager\.default\.temporaryDirectory' \
         | grep -vi 'isolation-ok')
     if [ -n "$bad" ]; then
         iso_hits="$iso_hits\n  $f:\n$(printf '%s\n' "$bad" | sed 's/^+/    /')"

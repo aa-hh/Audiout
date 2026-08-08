@@ -83,8 +83,22 @@ func renderPNG(view: NSView, to url: URL) {
     }
 }
 
+/// Name of the throwaway defaults suite these fixtures write to instead of the
+/// developer's real domain. FIXED, not per-run: `UserDefaults(suiteName:)`
+/// creates a real `~/Library/Preferences/<name>.plist`, so a `UUID` in the name
+/// leaves one behind on every run. One reused name plus a wipe before each use
+/// keeps the fixtures identical run to run at a cost of one plist, ever.
+let snapshotDefaultsSuite = "settings-snapshot"
+
+@MainActor
+func makeSnapshotDefaults() -> UserDefaults {
+    let defaults = UserDefaults(suiteName: snapshotDefaultsSuite)!
+    defaults.removePersistentDomain(forName: snapshotDefaultsSuite)
+    return defaults
+}
+
 /// Assembles a fresh `SettingsRootViewController` against fake seams — same
-/// fixtures every time (fresh `UserDefaults` suite, temp excluded-apps store
+/// fixtures every time (empty `UserDefaults` suite, temp excluded-apps store
 /// seeded with one entry so the Audio pane isn't captured in its empty
 /// state, a non-nil `LatencySettingModel` so the Audio pane's Advanced ›
 /// Audio buffer section renders).
@@ -95,8 +109,7 @@ func renderPNG(view: NSView, to url: URL) {
 /// reused across two snapshots.
 @MainActor
 func makeRoot() -> SettingsRootViewController {
-    let settingsDefaults = UserDefaults(suiteName: "settings-snapshot-\(UUID().uuidString)")!
-    let settings = AppSettings(defaults: settingsDefaults)
+    let settings = AppSettings(defaults: makeSnapshotDefaults())
     let excludedApps = ExcludedAppsController(store: ExcludedAppsStore(directory: tempDir()), loadPersisted: false)
     // Seed one excluded app so the Audio section shows a non-empty list, not
     // just the "Add application…" empty state.

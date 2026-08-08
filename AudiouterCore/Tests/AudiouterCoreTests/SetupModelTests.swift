@@ -79,18 +79,8 @@ extension SerializedSharedState {
 
     // MARK: Helpers
 
-    private var suiteName: String
-    private var defaults: UserDefaults!
-
-    init() {
-        suiteName = "AudioControlSetupTests.\(UUID().uuidString)"
-        defaults = UserDefaults(suiteName: suiteName)
-        defaults.removePersistentDomain(forName: suiteName)
-    }
-
-    deinit {
-        defaults.removePersistentDomain(forName: suiteName)
-    }
+    private let isolation = TestIsolation(owner: "SetupModelTests")
+    private var defaults: UserDefaults { isolation.isolatedDefaults }
 
     private func makeModel(audio: PermissionStatus,
                            localNetwork: SpyLocalNetwork = SpyLocalNetwork(),
@@ -500,7 +490,7 @@ extension SerializedSharedState {
         settings.hasCompletedSetup = true   // default gate would say "hide"
 
         // skip → never present (the testing default), even native + not completed.
-        let fresh = AppSettings(defaults: UserDefaults(suiteName: "\(suiteName).fresh")!)
+        let fresh = AppSettings(defaults: isolation.makeDefaults())
         for skip in ["skip", "off", "never", "0"] {
             #expect(!SetupModel.shouldPresentOnLaunch(
                 settings: fresh, backendKind: .native,

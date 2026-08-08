@@ -67,6 +67,37 @@ import AppKit
         window.contentController.view.layoutSubtreeIfNeeded()
     }
 
+    /// How far a HALF-POINT number can move when auto layout writes it into a
+    /// frame — normally 0, and 0.5 in a run whose rounding grid is whole points.
+    ///
+    /// Two of the numbers below are half points by design:
+    /// ``GroupsPaneLayout/contentLeadingInset`` is 38.5 (the rail node is 13 pt
+    /// across, so its radius lands on a half point), and the device pane's
+    /// 19 pt-tall title, centred on the 64 pt icon well, starts on one. Auto
+    /// layout snaps every frame onto a rounding grid, and that grid's pitch is a
+    /// property of the RUN, not of this layout: the same binary on the same Mac
+    /// lays a 38.5 pt constraint out at 38.5 in one run and 39.0 in the next,
+    /// while `convertToBacking` reports 2x in both — so it cannot be read off a
+    /// view or a screen, only measured. Hence the scratch view: pin one half a
+    /// point in and see where it lands.
+    ///
+    /// This is the ONLY slack these assertions carry, it is zero wherever half
+    /// points are representable, and even at its widest it is 45 times finer
+    /// than the ~22.5 pt drift the suite was written to catch.
+    private func halfPointSlack() -> CGFloat {
+        let host = NSView(frame: NSRect(x: 0, y: 0, width: 10, height: 10))
+        let probe = NSView()
+        probe.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(probe)
+        NSLayoutConstraint.activate([
+            probe.leadingAnchor.constraint(equalTo: host.leadingAnchor, constant: 0.5),
+            probe.widthAnchor.constraint(equalToConstant: 1),
+            probe.heightAnchor.constraint(equalToConstant: 1),
+        ])
+        host.layoutSubtreeIfNeeded()
+        return abs(probe.frame.minX - 0.5)
+    }
+
     // MARK: Parity
 
     @Test func bothPanesPutTheIconWellAndTitleAtTheSameGeometry() throws {
@@ -92,7 +123,7 @@ import AppKit
         #expect(abs(editorTitle.minX - detailTitle.minX) <= 0.01,
                 Comment(rawValue: "the title's leading edge (its ALIGNMENT rect — what auto layout pins) must " +
                 "match, even though one is an editable field and the other a plain label"))
-        #expect(abs(editorTitle.midY - detailTitle.midY) <= 0.01,
+        #expect(abs(editorTitle.midY - detailTitle.midY) <= 0.01 + halfPointSlack(),
                 "both titles are vertically centred on the icon well beside them")
         #expect(abs(editorHeader.height - detailHeader.height) <= 0.01,
                 "identical header BAND height, so the content below starts at the same y")
@@ -132,9 +163,10 @@ import AppKit
         let detailInset = window.test_detail.test_headerIconFrame.minX
             - window.test_detail.test_headerSectionFrame.minX
 
-        #expect(abs(editorInset - GroupsPaneLayout.contentLeadingInset) <= 0.01,
+        let slack = 0.01 + halfPointSlack()
+        #expect(abs(editorInset - GroupsPaneLayout.contentLeadingInset) <= slack,
                 "the icon starts past the rail gutter the editor reserves")
-        #expect(abs(detailInset - GroupsPaneLayout.contentLeadingInset) <= 0.01,
+        #expect(abs(detailInset - GroupsPaneLayout.contentLeadingInset) <= slack,
                 Comment(rawValue: "the detail pane reserves the same lane even though it draws no rail — " +
                 "alignment is worth more than reclaiming it"))
     }

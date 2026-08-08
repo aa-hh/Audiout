@@ -51,7 +51,12 @@ lives in the Mixer screen. All group logic goes through the shared
 - **Header parity is GEOMETRIC and lives in `GroupsPaneLayout`.** Editor and
   detail pane swap behind one sidebar; every shared number is read from that
   one enum — hand-copied literals once drifted ~22.5pt and made the header
-  jump. `GroupsHeaderParityTests` asserts real laid-out frames.
+  jump. `GroupsHeaderParityTests` asserts real laid-out frames. TRAP: some of
+  those numbers are HALF POINTS (`GroupsPaneLayout.contentLeadingInset` is
+  38.5), and auto layout snaps every frame onto a rounding grid whose pitch
+  varies BETWEEN RUNS of the same binary — so a 0.5pt failure there is the
+  run's grid, not a broken layout. Those assertions measure that grid and
+  allow exactly it; nothing else may.
 - **The content column is ELASTIC, with two anchoring traps:** the rail
   overlay and the "Delete Group…" button anchor to the COLUMN, not the
   container, or they drift by exactly the column margin.

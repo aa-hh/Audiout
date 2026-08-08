@@ -139,7 +139,13 @@ public struct ControlStripVolumeButtons: Sendable {
 
     /// Follow volume ownership: borrow while we own it, hand everything back
     /// when we don't.
-    public func apply(weOwnVolume: Bool) {
+    ///
+    /// Returns `true` when ControlStrip was reloaded. **The caller must then
+    /// re-assert any tray item it holds**: registrations live inside
+    /// ControlStrip's process, so reloading destroys them, and re-registering
+    /// before the respawn silently loses the race — the control never returns.
+    @discardableResult
+    public func apply(weOwnVolume: Bool) -> Bool {
         weOwnVolume ? borrow() : restore()
     }
 
@@ -147,13 +153,15 @@ public struct ControlStripVolumeButtons: Sendable {
     /// borrowing and restoring would otherwise strand the user in a Touch Bar
     /// mode they never chose, with nothing on screen to explain it. Call at
     /// launch, before ownership is known.
-    public func restoreIfStale() {
-        guard store.controlStripHoldsChanges else { return }
-        restore()
+    @discardableResult
+    public func restoreIfStale() -> Bool {
+        guard store.controlStripHoldsChanges else { return false }
+        return restore()
     }
 
-    private func borrow() {
-        guard control.hasTouchBar, !store.controlStripHoldsChanges else { return }
+    @discardableResult
+    private func borrow() -> Bool {
+        guard control.hasTouchBar, !store.controlStripHoldsChanges else { return false }
 
         var originalLayouts: [String: [String]] = [:]
         var writtenLayouts: [String: [String]] = [:]
@@ -167,7 +175,7 @@ public struct ControlStripVolumeButtons: Sendable {
 
         let currentMode = control.presentationMode
         let needsMode = currentMode != ControlStripLayout.appControlsMode
-        guard !originalLayouts.isEmpty || needsMode else { return }
+        guard !originalLayouts.isEmpty || needsMode else { return false }
 
         // Record BEFORE writing. A crash between the two must leave us able to
         // undo; the reverse order can strand the user permanently.
@@ -180,10 +188,12 @@ public struct ControlStripVolumeButtons: Sendable {
         for (key, items) in writtenLayouts { control.setLayout(items, forKey: key) }
         if needsMode { control.setPresentationMode(ControlStripLayout.appControlsMode) }
         control.reload()
+        return true
     }
 
-    private func restore() {
-        guard store.controlStripHoldsChanges else { return }
+    @discardableResult
+    private func restore() -> Bool {
+        guard store.controlStripHoldsChanges else { return false }
         let originalLayouts = store.controlStripOriginalLayouts
         let writtenLayouts = store.controlStripWrittenLayouts
 
@@ -211,6 +221,7 @@ public struct ControlStripVolumeButtons: Sendable {
         store.controlStripWrittenMode = nil
         store.controlStripHoldsChanges = false
         control.reload()
+        return true
     }
 }
 

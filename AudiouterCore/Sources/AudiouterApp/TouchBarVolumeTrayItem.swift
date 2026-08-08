@@ -45,6 +45,21 @@ final class TouchBarVolumeTrayItem {
         owns ? register() : unregister()
     }
 
+    /// Put our control back after ControlStrip restarts.
+    ///
+    /// Registrations live in ControlStrip's process, so `killall ControlStrip` —
+    /// which is how a Control Strip settings change is applied — destroys every
+    /// tray item including ours. Re-registering immediately loses the race
+    /// against the respawn and the control silently never returns (live-hit:
+    /// it appeared once, vanished on an output change, and never came back).
+    /// Callers that reload ControlStrip must call this afterwards.
+    func reassertAfterControlStripReload() {
+        guard let item, let setPresence = Self.setControlStripPresence else { return }
+        Self.addSystemTrayItem(item)
+        setPresence(identifier.rawValue as NSString, false)
+        setPresence(identifier.rawValue as NSString, true)
+    }
+
     private func register() {
         guard item == nil, let setPresence = Self.setControlStripPresence else { return }
 

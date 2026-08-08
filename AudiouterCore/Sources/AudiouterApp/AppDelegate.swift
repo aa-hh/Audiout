@@ -302,6 +302,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// reopen the window under them.
     private var didSurfaceAccessibilityGap = false
 
+    /// How long to let ControlStrip respawn before re-registering our tray item.
+    /// It is an on-demand LaunchAgent, so the restart is fast but not
+    /// instantaneous, and a registration that lands during the gap is dropped on
+    /// the floor with no error. Generous on purpose — the cost of waiting too
+    /// long is a beat before the button appears; too short and it never does.
+    private let controlStripRespawnDelay: TimeInterval = 1.5
+
     /// Control-panel prototype (design review 2026-07-18): route Groups through a
     /// sticky floating `NSPanel` anchored under the menu-bar item instead of a
     /// standalone window, gated by `AIRPLAY_CONTROL_PANEL=1`. Off by default, so
@@ -1482,8 +1489,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Order matters: prepare the strip (mode + clear out Apple's dead
             // audio items) BEFORE registering our control, so it lands in a
             // Control Strip that can actually render it.
-            controlStripVolumeButtons.apply(weOwnVolume: weOwnIt)
+            let reloaded = controlStripVolumeButtons.apply(weOwnVolume: weOwnIt)
             touchBarVolumeTrayItem.setOwnsVolume(weOwnIt)
+            if reloaded, weOwnIt {
+                // Preparing the strip reloads ControlStrip, which destroys every
+                // tray registration — including the one just made above. Put ours
+                // back once the respawn has settled, or the control appears once
+                // and never returns after an output change (live-hit).
+                DispatchQueue.main.asyncAfter(deadline: .now() + controlStripRespawnDelay) {
+                    [weak self] in self?.touchBarVolumeTrayItem.reassertAfterControlStripReload()
+                }
+            }
             log("event: \(describe(event))")
             return
         }

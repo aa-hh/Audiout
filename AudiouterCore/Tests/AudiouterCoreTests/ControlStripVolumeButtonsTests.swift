@@ -150,6 +150,33 @@ import Testing
         #expect(control.reloadCount == 1, "the second apply is a no-op, not a second reload")
     }
 
+    // MARK: - Reporting the reload
+
+    /// Reloading ControlStrip destroys every tray registration, including the
+    /// caller's. It has to learn that it happened, or our Touch Bar control
+    /// appears once and never comes back after an output change — the live bug
+    /// this return value exists to fix.
+    @Test func reportsWhetherControlStripWasReloaded() {
+        let borrowing = FakeControlStrip(
+            layouts: ["MiniCustomized": [slider]], mode: expandedMode)
+        let subject = ControlStripVolumeButtons(control: borrowing, store: FakeSwapStore())
+        #expect(subject.apply(weOwnVolume: true), "borrowing reloads ⇒ caller must re-assert")
+
+        let nothingToDo = FakeControlStrip(layouts: ["MiniCustomized": ["a"]], mode: appMode)
+        #expect(!ControlStripVolumeButtons(control: nothingToDo, store: FakeSwapStore())
+            .apply(weOwnVolume: true), "no change ⇒ no reload ⇒ nothing to re-assert")
+    }
+
+    @Test func restoringReportsItsReloadToo() {
+        let control = FakeControlStrip(layouts: ["MiniCustomized": [slider]], mode: expandedMode)
+        let store = FakeSwapStore()
+        let subject = ControlStripVolumeButtons(control: control, store: store)
+
+        subject.apply(weOwnVolume: true)
+        #expect(subject.apply(weOwnVolume: false))
+        #expect(!subject.apply(weOwnVolume: false), "nothing held ⇒ no second reload")
+    }
+
     // MARK: - Crash recovery
 
     /// A crash between borrowing and restoring leaves the latch set. The next

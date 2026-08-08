@@ -263,6 +263,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return interceptor
     }()
 
+    /// Swaps the Touch Bar's volume slider for its discrete −/+ buttons while we
+    /// own the volume. The slider goes dead on our aggregate and emits nothing
+    /// interceptable; only the buttons travel the HID path the tap can see. Undone
+    /// the moment we stop owning the volume — this never changes the user's
+    /// permanent setup.
+    private lazy var controlStripVolumeButtons = ControlStripVolumeButtons(
+        control: CoreFoundationControlStripControl(), store: settings)
+
     /// Control-panel prototype (design review 2026-07-18): route Groups through a
     /// sticky floating `NSPanel` anchored under the menu-bar item instead of a
     /// standalone window, gated by `AIRPLAY_CONTROL_PANEL=1`. Off by default, so
@@ -319,6 +327,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `Tokens.accentStyle` directly); this is the launch-time read of the
         // persisted choice.
         Tokens.accentStyle = settings.accentStyle
+
+        // Undo a Touch Bar swap a previous run was killed before restoring. Must
+        // happen BEFORE ownership is first evaluated, or a stale marker would make
+        // this launch's swap think it already holds one and skip.
+        controlStripVolumeButtons.restoreIfStale()
 
         // Status item first so there's immediate UI feedback that we launched.
         // The button's action toggles the popover (SPEC §9 revised) — EXCEPT while
@@ -1435,6 +1448,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // to match; no device model changed — handle it and return.
             volumeKeyInterceptor.setOwnsVolume(weOwnIt)
             volumeKeyInterceptor.setCurrentMainVolume(groupController.mainOutMasterVolume)
+            controlStripVolumeButtons.apply(weOwnVolume: weOwnIt)
             log("event: \(describe(event))")
             return
         }

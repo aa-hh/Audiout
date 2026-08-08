@@ -62,7 +62,34 @@ public struct AppSettings {
         self.defaults = defaults
     }
 
+    /// The Touch Bar Control Strip layouts we replaced, keyed by layout key
+    /// (``ControlStripVolumeButtons/layoutKeys``). Empty means we hold no swap.
+    ///
+    /// PERSISTED, not just held in memory, and that is the whole point: a crash or
+    /// force-quit while the swap is in force would otherwise strand the user on a
+    /// Touch Bar layout they never chose, with nothing on screen to explain it.
+    /// Surviving here lets the next launch put it back.
+    public var controlStripOriginalLayouts: [String: [String]] {
+        get {
+            defaults.dictionary(forKey: Keys.controlStripOriginalLayouts)
+                as? [String: [String]] ?? [:]
+        }
+        nonmutating set { defaults.set(newValue, forKey: Keys.controlStripOriginalLayouts) }
+    }
+
+    /// What we actually wrote, so a restore can tell our own value from one the
+    /// user has customized since — theirs must win.
+    public var controlStripWrittenLayouts: [String: [String]] {
+        get {
+            defaults.dictionary(forKey: Keys.controlStripWrittenLayouts)
+                as? [String: [String]] ?? [:]
+        }
+        nonmutating set { defaults.set(newValue, forKey: Keys.controlStripWrittenLayouts) }
+    }
+
     private enum Keys {
+        static let controlStripOriginalLayouts = "controlStrip.originalLayouts"
+        static let controlStripWrittenLayouts = "controlStrip.writtenLayouts"
         static let theme = "appearance.theme"
         static let density = "appearance.density"
         static let accentStyle = "appearance.accentStyle"

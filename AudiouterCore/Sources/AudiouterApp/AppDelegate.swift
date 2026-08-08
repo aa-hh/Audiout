@@ -274,12 +274,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return interceptor
     }()
 
-    /// Borrows the Touch Bar settings our own volume control needs — App-Controls
-    /// mode, and Apple's dead audio items out of the strip — and hands them back
-    /// the moment we stop owning the volume. Never a permanent change.
-    private lazy var controlStripVolumeButtons = ControlStripVolumeButtons(
-        control: CoreFoundationControlStripControl(), store: settings)
-
     /// Our own Touch Bar — the everyday Control Strip controls, but with volume
     /// buttons that work. Apple's grey out on our aggregate and post no event
     /// when tapped, so they can be neither intercepted nor revived; presenting a
@@ -308,22 +302,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// reopen the window under them.
     private var didSurfaceAccessibilityGap = false
 
-    /// Take our Touch Bar down and give the user's own settings back.
+    /// Take our Touch Bar down so the user's own comes back.
     ///
-    /// Idempotent, because the paths into it overlap: a Quit fires
-    /// `applicationShouldTerminate`, a logout may fire `willPowerOff` as well, and
-    /// `restore()` itself no-ops once it holds nothing.
+    /// Idempotent — the paths into it overlap (a Quit fires
+    /// `applicationShouldTerminate`; a logout may fire `willPowerOff` too).
+    /// Cheap insurance rather than load-bearing now that we persist nothing: a
+    /// missed call costs a stale bar until the process dies, not a setting the
+    /// user is stranded with.
     private func releaseTouchBar() {
         touchBarFullBar.setOwnsVolume(false)
-        controlStripVolumeButtons.apply(weOwnVolume: false)
     }
-
-    /// How long to let ControlStrip respawn before re-registering our tray item.
-    /// It is an on-demand LaunchAgent, so the restart is fast but not
-    /// instantaneous, and a registration that lands during the gap is dropped on
-    /// the floor with no error. Generous on purpose — the cost of waiting too
-    /// long is a beat before the button appears; too short and it never does.
-    private let controlStripRespawnDelay: TimeInterval = 1.5
 
     /// Control-panel prototype (design review 2026-07-18): route Groups through a
     /// sticky floating `NSPanel` anchored under the menu-bar item instead of a
@@ -382,14 +370,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // persisted choice.
         Tokens.accentStyle = settings.accentStyle
 
-        // Undo Touch Bar settings a previous run was killed before restoring. Must
-        // happen BEFORE ownership is first evaluated, or a stale marker would make
-        // this launch think it already holds them and skip.
-        controlStripVolumeButtons.restoreIfStale()
-
         // Logout, restart and shutdown do not always route through
-        // `applicationShouldTerminate`, and the Touch Bar setting outlives the
-        // process either way — so take the same exit here.
+        // `applicationShouldTerminate`, so take the same exit here.
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main
         ) { [weak self] _ in MainActor.assumeIsolated { self?.releaseTouchBar() } }
@@ -1517,20 +1499,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // to match; no device model changed — handle it and return.
             volumeKeyInterceptor.setOwnsVolume(weOwnIt)
             volumeKeyInterceptor.setCurrentMainVolume(groupController.mainOutMasterVolume)
-            // Order matters: put the Touch Bar into a mode that yields the whole
-            // bar BEFORE presenting ours, so it isn't fighting the system Control
-            // Strip for the same pixels.
-            let reloaded = controlStripVolumeButtons.apply(weOwnVolume: weOwnIt)
-            if reloaded, weOwnIt {
-                // The mode change reloads ControlStrip; presenting into it while
-                // it respawns loses the presentation the same way a tray
-                // registration was lost (live-hit). Wait it out.
-                DispatchQueue.main.asyncAfter(deadline: .now() + controlStripRespawnDelay) {
-                    [weak self] in self?.touchBarFullBar.setOwnsVolume(true)
-                }
-            } else {
-                touchBarFullBar.setOwnsVolume(weOwnIt)
-            }
+            touchBarFullBar.setOwnsVolume(weOwnIt)
             log("event: \(describe(event))")
             return
         }

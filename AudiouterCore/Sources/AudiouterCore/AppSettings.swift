@@ -62,59 +62,7 @@ public struct AppSettings {
         self.defaults = defaults
     }
 
-    /// The Touch Bar Control Strip layouts we replaced, keyed by layout key
-    /// (``ControlStripVolumeButtons/layoutKeys``). Empty means we hold no swap.
-    ///
-    /// PERSISTED, not just held in memory, and that is the whole point: a crash or
-    /// force-quit while the swap is in force would otherwise strand the user on a
-    /// Touch Bar layout they never chose, with nothing on screen to explain it.
-    /// Surviving here lets the next launch put it back.
-    public var controlStripOriginalLayouts: [String: [String]] {
-        get {
-            defaults.dictionary(forKey: Keys.controlStripOriginalLayouts)
-                as? [String: [String]] ?? [:]
-        }
-        nonmutating set { defaults.set(newValue, forKey: Keys.controlStripOriginalLayouts) }
-    }
-
-    /// What we actually wrote, so a restore can tell our own value from one the
-    /// user has customized since — theirs must win.
-    public var controlStripWrittenLayouts: [String: [String]] {
-        get {
-            defaults.dictionary(forKey: Keys.controlStripWrittenLayouts)
-                as? [String: [String]] ?? [:]
-        }
-        nonmutating set { defaults.set(newValue, forKey: Keys.controlStripWrittenLayouts) }
-    }
-
-    /// The Touch Bar presentation mode as it was before we borrowed it, and what
-    /// we replaced it with. A `nil` original is a real, meaningful state — the
-    /// user had never set one — which is why ``controlStripHoldsChanges`` and not
-    /// nil-ness is what says whether we hold anything.
-    public var controlStripOriginalMode: String? {
-        get { defaults.string(forKey: Keys.controlStripOriginalMode) }
-        nonmutating set { defaults.set(newValue, forKey: Keys.controlStripOriginalMode) }
-    }
-
-    public var controlStripWrittenMode: String? {
-        get { defaults.string(forKey: Keys.controlStripWrittenMode) }
-        nonmutating set { defaults.set(newValue, forKey: Keys.controlStripWrittenMode) }
-    }
-
-    /// Whether we currently hold ANY borrowed Control Strip setting. The single
-    /// crash-recovery latch: if this survives a launch, a previous run died
-    /// mid-borrow and the user must be put back before anything else happens.
-    public var controlStripHoldsChanges: Bool {
-        get { defaults.bool(forKey: Keys.controlStripHoldsChanges) }
-        nonmutating set { defaults.set(newValue, forKey: Keys.controlStripHoldsChanges) }
-    }
-
     private enum Keys {
-        static let controlStripOriginalLayouts = "controlStrip.originalLayouts"
-        static let controlStripWrittenLayouts = "controlStrip.writtenLayouts"
-        static let controlStripOriginalMode = "controlStrip.originalMode"
-        static let controlStripWrittenMode = "controlStrip.writtenMode"
-        static let controlStripHoldsChanges = "controlStrip.holdsChanges"
         static let theme = "appearance.theme"
         static let density = "appearance.density"
         static let accentStyle = "appearance.accentStyle"

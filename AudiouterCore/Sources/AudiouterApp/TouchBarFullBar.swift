@@ -56,7 +56,7 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
     }
 
     private func present() {
-        guard !presented, TouchBarPrivateAPI.isAvailable else { return }
+        guard !presented, TouchBarHardware.isPresent, TouchBarPrivateAPI.isAvailable else { return }
         // Install the dim handler BEFORE the first presentation: macOS dims the
         // bar on idle, sleep and lock, and a bar presented without this goes away
         // on the first dim and is never restored for us.

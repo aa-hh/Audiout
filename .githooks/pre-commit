@@ -178,8 +178,12 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
         echo "  (no scripts/run-tests.sh found — running unserialised)" >&2
         run_suite=""
     fi
+    # --build-system native matches scripts/run-tests.sh and scripts/make-app.sh
+    # — see the long note at run-tests.sh's `swift test` call. The engines keep
+    # separate cache trees, so a guard that disagreed with the runner would make
+    # every commit pay a cold rebuild.
     if ! { if [ -n "$run_suite" ]; then "$run_suite"; \
-           else ( cd "$repo_root/AudiouterCore" && swift test --parallel --num-workers 4 >&2 ); fi; }; then
+           else ( cd "$repo_root/AudiouterCore" && swift test --build-system native --parallel --num-workers 4 >&2 ); fi; }; then
         echo "" >&2
         echo "  REFUSED: full test suite failed. Fix the failures" >&2
         echo "  (or 'git commit --no-verify' for a real emergency)." >&2
@@ -251,7 +255,7 @@ if [ -n "$staged_airplayengine" ] && command -v swift >/dev/null 2>&1; then
     echo "" >&2
     echo "  Guard 6: AirPlayEngine Swift changed — running its test suite" >&2
     echo "  before commit. ~2s; --no-verify to skip." >&2
-    if ! ( cd "$repo_root/AirPlayEngine" && swift test >&2 ); then
+    if ! ( cd "$repo_root/AirPlayEngine" && swift test --build-system native >&2 ); then
         echo "" >&2
         echo "  REFUSED: AirPlayEngine test suite failed. Fix the failures" >&2
         echo "  (or 'git commit --no-verify' for a real emergency)." >&2

@@ -336,9 +336,18 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   pre-existing persisted group and means "use `Group.defaultIconSymbolName`."
   Resolution (including render-time fallback for a stale/unrecognized name)
   lives in `AudiouterSharedUI.DeviceIcon`, not here.
+- **Every `swift build` / `swift test` / `swift run` takes
+  `--build-system native`.** The default engine (`swiftbuild`) re-runs all 16
+  link tasks on every invocation — all 9 of this package's executables get
+  relinked even when nothing changed — and each engine keeps a separate ~800 MB
+  cache tree, so a single command left on the default forces a cold rebuild for
+  the next one. Measured: `--filter` inner loop 15.5s → 10.6s, no-op 5.0s →
+  0.76s. `scripts/run-tests.sh`, the pre-commit guards and `scripts/make-app.sh`
+  all pin it; a hand-typed command that omits it is what breaks the caching.
+  Full rationale at run-tests.sh's `swift test` call.
 - **Use `swift test --filter <Suite>` for the inner-loop feedback cycle**,
   not the full suite (874 tests). Scope to the test suite(s) touched by your
-  change, e.g. `swift test --filter PopoverControllerTests`.
+  change, e.g. `swift test --build-system native --filter PopoverControllerTests`.
 - **The full run is `scripts/run-tests.sh`**, never a bare `swift test` — it
   wraps `swift test --parallel` and adds the two things a bare run cannot do
   on a machine with several worktrees in flight:

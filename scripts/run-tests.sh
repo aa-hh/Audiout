@@ -154,7 +154,7 @@ run_remote() {
         "export PATH=/opt/homebrew/bin:\$PATH; \
          cd \"$rdir/AudiouterCore\" || exit 97; \
          command -v swift >/dev/null 2>&1 || exit 97; \
-         swift test $rargs $* ; echo \"REMOTE_EXIT:\$?\"" 2>&1)
+         swift test --build-system native $rargs $* ; echo \"REMOTE_EXIT:\$?\"" 2>&1)
     rc=$?
     printf '%s\n' "$out" | grep -v '^REMOTE_EXIT:' >&2
 
@@ -439,6 +439,31 @@ if [ "$acquired" -eq 1 ]; then
 fi
 
 # --- run --------------------------------------------------------------------
+# --build-system native: measured 2026-08-08 on this Mac, and the reason is a
+# concrete defect in the default engine rather than a preference. Under
+# `swiftbuild` EVERY invocation re-runs all 16 link tasks — all 9 executables in
+# this package get relinked even when nothing changed at all, verified by
+# comparing their mtimes across two back-to-back no-op builds. `native` link-
+# caches correctly and skips them.
+#
+#   no-op build                     swiftbuild 2.5-5.0s   native 0.76s
+#   edit one source file (private)  swiftbuild     4.7s   native  3.0s
+#   swift test --filter <Suite>     swiftbuild    15.5s   native 10.6s   (-32%)
+#
+# The engine must be the SAME here, in the pre-commit guards, and in
+# scripts/make-app.sh, because each engine keeps its own cache tree
+# (.build/out vs .build/arm64-apple-macosx). Mixing them means every worktree
+# carries two ~800 MB caches and every switch between commands pays a full cold
+# rebuild — strictly worse than either engine alone. make-app.sh already pins
+# native for an unrelated reason (it is the only engine that forwards the C
+# target's Homebrew header flags), so native is the one that makes them agree.
+#
+# Note it IS deprecated upstream. The exit is not a flag flip: it is fixing
+# AirPlayEngine/Package.swift's header search paths so `swiftbuild` can resolve
+# CAirPlayEngine, at which point make-app.sh stops needing native too. Until
+# then this project is pinned to native regardless, so the inner loop may as
+# well have the faster engine.
+#
 # `set -e` is off for this one command so a failure reaches the cache logic
 # (which must NOT write a stamp) and the trap, rather than exiting immediately.
 set +e
@@ -446,7 +471,7 @@ set +e
 # to nothing at all in serial mode). "$@" stays quoted so caller arguments with
 # spaces survive.
 # shellcheck disable=SC2086
-( cd "$core" && swift test $test_args "$@" ) >&2
+( cd "$core" && swift test --build-system native $test_args "$@" ) >&2
 status=$?
 set -e
 

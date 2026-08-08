@@ -25,9 +25,17 @@ Guards: **Guard 1** blocks direct commits on `main` (merges only). **Guard 4/6**
 
 ## Build & run
 
+**Always pass `--build-system native`** to every `swift build` / `swift test` /
+`swift run` in this repo. It is not a preference: the default engine
+(`swiftbuild`) relinks all 9 executables on *every* invocation even when nothing
+changed, and each engine keeps its own ~800 MB cache — so one command using the
+default undoes the caching for all the others. Measured: inner loop 15.5s → 10.6s,
+no-op build 5.0s → 0.76s. Full rationale at the `swift test` call in
+[`scripts/run-tests.sh`](scripts/run-tests.sh).
+
 ```bash
 # Offline UI work (no hardware, no TCC):
-AIRPLAY_BACKEND=mock swift run --package-path AudiouterCore AudiouterApp
+AIRPLAY_BACKEND=mock swift run --build-system native --package-path AudiouterCore AudiouterApp
 
 # Real hardware (needs a signed .app and TCC grant first):
 bash scripts/make-app.sh
@@ -38,7 +46,7 @@ open build/Audiouter.app
 
 ```bash
 # Inner loop — scope to the suite(s) you touched:
-swift test --package-path AudiouterCore --filter PopoverControllerTests
+swift test --build-system native --package-path AudiouterCore --filter PopoverControllerTests
 
 # Full suite (use this, not bare swift test):
 bash scripts/run-tests.sh

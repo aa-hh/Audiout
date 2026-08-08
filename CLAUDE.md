@@ -26,6 +26,9 @@ Guards: **Guard 1** blocks direct commits on `main` (merges only). **Guard 4/6**
 ## Build & run
 
 ```bash
+# Compile check — use this, not a bare `swift build`:
+bash scripts/build.sh
+
 # Offline UI work (no hardware, no TCC):
 AIRPLAY_BACKEND=mock swift run --package-path AudiouterCore AudiouterApp
 
@@ -33,6 +36,11 @@ AIRPLAY_BACKEND=mock swift run --package-path AudiouterCore AudiouterApp
 bash scripts/make-app.sh
 open build/Audiouter.app
 ```
+
+`build.sh` and `make-app.sh` route the compile to the second Mac under the same
+rule `run-tests.sh` uses (see Tests below). `make-app.sh` moves only the
+compile — assembly, dylib bundling and codesigning always happen locally, so the
+`.app` is identical either way. `AUDIOUTER_BUILD_LOCAL=1` forces local.
 
 **Every build handed over for testing gets its OWN bundle id and app name —
 every time, even for a one-line change.** Bump a version suffix on each
@@ -60,11 +68,11 @@ bash scripts/run-tests.sh --filter PopoverControllerTests
 bash scripts/run-tests.sh
 ```
 
-**Always go through `run-tests.sh`, never a bare `swift test`** — filtered runs
-included. The runner is the ONLY thing that knows about the second Mac, the
-machine-wide concurrency cap and the unchanged-sources cache; typing `swift
-test` directly opts out of all three and pins the work to this machine, which is
-also the one running every other agent.
+**Always go through `run-tests.sh` / `build.sh`, never a bare `swift test` or
+`swift build`** — filtered runs included. These wrappers are the ONLY things
+that know about the second Mac, the machine-wide concurrency cap and the
+unchanged-sources cache; typing the bare command opts out of all three and pins
+the work to this machine, which is also the one running every other agent.
 
 ## Critical workflow rules
 

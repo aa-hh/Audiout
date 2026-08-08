@@ -461,6 +461,40 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
     genuinely swamped" rather than "whichever is a hair quieter this second".
     Set `0` for the strict lower-load-wins comparison.
 
+    **These three settings govern BUILDS as well as tests.** The decision, the
+    sync and the run-there wrapper live in `scripts/lib/remote.sh`, sourced by
+    `run-tests.sh`, `build.sh` and `make-app.sh` alike — one answer to "which
+    machine", so a box judged too busy for a test run is not simultaneously
+    judged fine for a release build. The `AUDIOUTER_TEST_` prefix is kept for
+    compatibility with what is already configured; a parallel `AUDIOUTER_BUILD_`
+    family would only be a way for the two to disagree.
+
+    `make-app.sh` moves **only the compile**. Assembly, dylib bundling and
+    codesigning always run locally, and each of those independently rules the
+    remote out:
+    - `codesign --sign "Developer ID Application: …"` over a non-interactive ssh
+      session fails with `errSecInternalComponent` — the login keychain is
+      locked. The cert IS installed on the second Mac; unlocking it for
+      non-interactive use needs `security unlock-keychain` +
+      `security set-key-partition-list` run there with the keychain password.
+      Until then remote signing is impossible, and signing locally keeps the
+      artifact byte-identical to a fully local build (verified: Developer ID
+      authority, hardened runtime, `codesign --verify --deep --strict` clean,
+      arm64, `minos 14.0`).
+    - The `.app` has to exist HERE to be launched, TCC-granted and live-tested.
+    - `AUDIOUTER_BUNDLE_DYLIBS=1` walks `otool -L` and copies the referenced
+      Homebrew dylibs from the LOCAL `/opt/homebrew`. A binary linked on the
+      other Mac records that machine's formula versions, which may not exist
+      here — so **the bundling path opts out of the remote entirely** and builds
+      everything locally.
+
+    `AUDIOUTER_BUILD_LOCAL=1` forces a local compile for both `build.sh` and
+    `make-app.sh`. Note the toolchain skew is real (local Swift 6.4 / macOS 27
+    SDK vs remote 6.3.1 / macOS 26): a release link on the remote emits
+    `ld: warning: … built for newer version 26.0` for the Homebrew dylibs, which
+    is cosmetic. As with tests, a remote PASS is accepted and a remote FAILURE is
+    re-run locally before anyone acts on it.
+
     **A remote PASS is accepted; a remote FAILURE is re-run locally before it
     can block anything.** Guard 4 refuses commits on this result, and the remote
     is on a different Swift/SDK — a toolchain difference presenting as "your code
@@ -495,15 +529,15 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
     ~90-180s locally under contention), the audio gate skips its 7 correctly
     there, and overflow triggers only once both local slots are held. Sync of
     the whole tree takes ~1.6s over LAN.
-  - **KNOWN GAP — the cap only covers runs that go THROUGH this script.** An
+  - **KNOWN GAP — the cap only covers work that goes THROUGH these scripts.** An
     agent that types `swift test` or `swift build` directly bypasses it
     entirely, and that is the dominant real-world source of load: while
     measuring this, two other worktrees were independently running a full serial
     suite and a `-c release` product build, driving load average to 29 and
-    making an unrelated 4s filtered run take 117s. Prefer `scripts/run-tests.sh`
-    for any full run. This is convention, not enforcement (the PreToolUse nudge
-    hook that tried to enforce it was deliberately removed and must not be
-    rebuilt).
+    making an unrelated 4s filtered run take 117s. Use `scripts/run-tests.sh`
+    for every test run and `scripts/build.sh` for every compile check. This is
+    convention, not enforcement (the PreToolUse nudge hook that tried to enforce
+    it was deliberately removed and must not be rebuilt).
   - **A content-addressed pass cache**: if these exact sources already passed,
     the run is skipped. Agents routinely run the suite by hand and then
     commit, firing Guard 4 on byte-identical sources seconds later.

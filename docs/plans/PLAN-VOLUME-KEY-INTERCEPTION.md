@@ -425,17 +425,27 @@ Keep the CGEventTap plumbing a thin shell over pure, tested functions:
 
 ## 10. Sequencing
 
-| Wave | Work | Depends on |
+| Wave | Work | Status |
 |---|---|---|
-| W1 | Mode predicate + tests | — |
-| W2 | Event decode + step math + decision function, all pure + tests | — |
-| W3 | CGEventTap shell, run-loop source, disable/re-enable handling, wire W1+W2 | W1, W2 |
-| W4 | `syncedLocalGain` folds Main; `setVolume` reports success | W1 |
-| W5 | Control Strip swap/restore/crash-recovery + tests | W1 |
-| W6 | Revoked-Accessibility UI state | W3 |
-| W7 | Live checklist | all |
+| W1 | Mode predicate + tests | **done** — `bb3735ab` |
+| W2 | Event decode + step math + decision function, all pure + tests | **done** — `bb3735ab` |
+| W3 | CGEventTap shell, run-loop source, disable/re-enable handling, wire W1+W2 | **done** — `a2b8c6c8` |
+| W4 | `syncedLocalGain` folds Main; `setVolume` reports success | **done** — `9a2ee681` |
+| W5 | Control Strip swap/restore/crash-recovery + tests | **done** — `ce8827f3` |
+| W6 | Revoked-Accessibility UI state | **done** — `881f9ec7` |
+| W7 | Live checklist (§9) | **owed to Alec** — cannot be automated |
 
-W1/W2 are independent and parallelisable. W4 and W5 are independent of each other.
+Suite at W6: 1775 green.
+
+**One decision taken during W5, worth knowing before the live test.** The swap
+only transforms a layout it can READ. A user who has never opened Customize
+Control Strip has no stored `MiniCustomized`/`FullCustomized`, and the factory
+default lives in `ControlStrip.app`'s own code, published through no plist — so
+they are left alone rather than handed a strip we invented in slots that have
+nothing to do with volume (Alec's call). Alec's own Mac has `FullCustomized`
+carrying `com.apple.system.group.volume` already, so his expanded strip is
+already on buttons and the swap is a no-op for him — his live test exercises the
+interceptor, not the swap.
 
 ---
 

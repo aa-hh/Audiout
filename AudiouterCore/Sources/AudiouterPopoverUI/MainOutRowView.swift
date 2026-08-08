@@ -99,9 +99,15 @@ public final class MainOutRowView: NSView {
     /// coerces incoming meter pushes to 0 so the drained master meter stays
     /// down while muted (S3).
     private var isMasterMuted = false
-    /// Whether the Main Audio spine is armed (connected target ∧ unmuted) — the
-    /// continuous rail overlay reads this to tone the origin hook gold vs ember.
-    private var isArmed = false
+    /// Whether the Main Audio spine is LIVE — the continuous rail overlay reads
+    /// this to tone the origin hook AND the member segments below it, gold vs
+    /// ember. Live = the armed target (connected ∧ unmuted) **or** the
+    /// local-only `restingArmed` case, where audio genuinely plays through the
+    /// Mac and no remote handshake exists for `connectionState` to report. Both
+    /// carry real audio to a member node, so both must read live: the hook's
+    /// corner and the rail leaving it are one stroke, and a truth that covers
+    /// only the remote case draws them in two tones.
+    private var isSpineLive = false
     /// The System Audio row's item title — **"Main Audio"** (Warm Signal v4
     /// §Call-1), filling the shared name column so it aligns
     /// with the device rows below.
@@ -201,7 +207,7 @@ public final class MainOutRowView: NSView {
         let isConnected: Bool
         if case .connected = connectionState { isConnected = true } else { isConnected = false }
         let armed = isConnected && !isMuted
-        isArmed = armed
+        isSpineLive = armed || restingArmed
         // The ring's CONNECTED stroke wears the rail's own SPINE TONE (Warm
         // Signal nitpicks, "rail into the ring"), so the join reads as one
         // continuous line, not a gold line touching a hue-neutral ring. The
@@ -744,6 +750,6 @@ extension MainOutRowView: RailHookProviding {
         layoutSubtreeIfNeeded()
         let iconRectInSelf = iconView.convert(iconView.bounds, to: self)
         let iconCenter = convert(NSPoint(x: iconRectInSelf.midX, y: iconRectInSelf.midY), to: view)
-        return (iconCenter.y, iconCenter.x, PopoverColumnGrid.mainAudioRingDiameter / 2, isArmed)
+        return (iconCenter.y, iconCenter.x, PopoverColumnGrid.mainAudioRingDiameter / 2, isSpineLive)
     }
 }

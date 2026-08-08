@@ -54,11 +54,17 @@ live `/Applications` copy: never overwrite it for a test.
 
 ```bash
 # Inner loop — scope to the suite(s) you touched:
-swift test --package-path AudiouterCore --filter PopoverControllerTests
+bash scripts/run-tests.sh --filter PopoverControllerTests
 
-# Full suite (use this, not bare swift test):
+# Full suite:
 bash scripts/run-tests.sh
 ```
+
+**Always go through `run-tests.sh`, never a bare `swift test`** — filtered runs
+included. The runner is the ONLY thing that knows about the second Mac, the
+machine-wide concurrency cap and the unchanged-sources cache; typing `swift
+test` directly opts out of all three and pins the work to this machine, which is
+also the one running every other agent.
 
 ## Critical workflow rules
 

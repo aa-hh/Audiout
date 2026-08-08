@@ -372,10 +372,15 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   pre-existing persisted group and means "use `Group.defaultIconSymbolName`."
   Resolution (including render-time fallback for a stale/unrecognized name)
   lives in `AudiouterSharedUI.DeviceIcon`, not here.
-- **Use `swift test --filter <Suite>` for the inner-loop feedback cycle**,
-  not the full suite (874 tests). Scope to the test suite(s) touched by your
-  change, e.g. `swift test --filter PopoverControllerTests`.
-- **The full run is `scripts/run-tests.sh`**, never a bare `swift test` — it
+- **Use `scripts/run-tests.sh --filter <Suite>` for the inner-loop feedback
+  cycle**, not the full suite (874 tests). Scope to the test suite(s) touched by
+  your change, e.g. `scripts/run-tests.sh --filter PopoverControllerTests`. The
+  runner forwards every argument straight to `swift test` and keys its pass
+  cache on them, so a filtered run costs nothing extra — but it goes through the
+  remote-selection, cap and cache machinery that a bare `swift test` skips
+  entirely. Filtered runs are the COMMON case, so a bare-`swift test` inner loop
+  is why nearly all work ends up on this machine.
+- **Every run is `scripts/run-tests.sh`**, never a bare `swift test` — it
   wraps `swift test --parallel` and adds the two things a bare run cannot do
   on a machine with several worktrees in flight:
   - **A machine-wide concurrency CAP** (`AUDIOUTER_TEST_SLOTS`, default **2**) —
@@ -427,6 +432,7 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
     ```
     git config --local audiouter.remoteHost 'user@192.168.4.41'
     git config --local audiouter.testPrefer remote   # or: local (default), cpu
+    git config --local audiouter.testRemoteBias 40   # cpu mode only; see below
     ```
 
     This lands in `.git/config`, which is **not tracked** — so a personal
@@ -446,6 +452,14 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
     remote isn't reliably idle when you'd want to use it. Any of the three:
     an asleep/offline/unmeasurable remote costs one 5s probe and then behaves
     exactly as if none were configured.
+
+    `testRemoteBias` (default **40**, `cpu` mode only) is how many load-per-core
+    percentage points busier the remote may be and still win. It exists because
+    the two machines are NOT interchangeable: this one also carries the agents,
+    the editor and any app under live test, so its spare capacity is worth more.
+    With the bias, `cpu` mode reads as "remote first, local when the remote is
+    genuinely swamped" rather than "whichever is a hair quieter this second".
+    Set `0` for the strict lower-load-wins comparison.
 
     **A remote PASS is accepted; a remote FAILURE is re-run locally before it
     can block anything.** Guard 4 refuses commits on this result, and the remote

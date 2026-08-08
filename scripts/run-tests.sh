@@ -81,6 +81,17 @@ remote_host=${AUDIOUTER_TEST_REMOTE_HOST:-$(git config --get audiouter.remoteHos
 # directly, not just as this script's overflow target.
 #   git config --global audiouter.testPrefer remote
 remote_pref=${AUDIOUTER_TEST_PREFER:-$(git config --get audiouter.testPrefer 2>/dev/null || echo local)}
+# How much busier (in load-per-core percentage points) the remote is allowed to
+# be and still win the "cpu" comparison. A straight lower-load-wins rule sends
+# work to whichever machine happens to be a hair quieter this second, which is
+# not what we want: the two machines are NOT interchangeable. This Mac also runs
+# the agents, the editor, and the app under live test, so its spare capacity is
+# worth more than the other one's. The bias makes the remote the DEFAULT and
+# this machine the fallback, while still bailing out to local when the remote is
+# genuinely swamped (another agent testing there) rather than merely non-idle.
+# 0 restores the old strict lower-load-wins comparison.
+#   git config --global audiouter.testRemoteBias 40
+remote_bias=${AUDIOUTER_TEST_REMOTE_BIAS:-$(git config --get audiouter.testRemoteBias 2>/dev/null || echo 40)}
 # Deliberately RELATIVE to the remote home directory — no leading `~`. A tilde
 # survives neither quoting on the remote `cd` (it is not expanded inside quotes,
 # so `cd '~/foo'` fails) nor safe quoting of paths containing spaces. ssh starts
@@ -264,8 +275,8 @@ elif [ "$remote_pref" = "cpu" ] && [ -n "$remote_host" ]; then
     remote_load=$(remote_load_pct || true)
     if [ -n "$remote_load" ]; then
         local_load=$(local_load_pct)
-        echo "  suite: cpu check — local ${local_load}%/core, remote ${remote_load}%/core." >&2
-        [ "$remote_load" -lt "$local_load" ] && try_remote_first=1
+        echo "  suite: cpu check — local ${local_load}%/core, remote ${remote_load}%/core (remote allowed +${remote_bias})." >&2
+        [ "$remote_load" -lt "$((local_load + remote_bias))" ] && try_remote_first=1
     fi
 fi
 

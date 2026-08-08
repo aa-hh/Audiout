@@ -399,6 +399,29 @@ import CoreAudio
         #expect(sink.lastGain(for: btFlip.id) == 1)
     }
 
+    /// The wizard's entry release, end to end: the popover answers the prompt
+    /// with `dismissed: false` before the run starts, and the target must come
+    /// out of the hold AUDIBLE. A guided run against a gain-0 sink asks the
+    /// user which speaker ticked first while one of them is muted.
+    @Test func theWizardsReleaseLeavesTheTargetAudible() {
+        let (backend, bt, sink, events) = makeBackend()
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove, btFlip])
+        waitFor { self.device(backend, self.btFlip.id) != nil }
+        setFullVolume(backend, btMove.id, btFlip.id)
+
+        backend.setOutputSet([btMove.id, btFlip.id])
+        waitFor { events.promptedDeviceIDs().count == 2 }
+        waitFor { sink.lastGain(for: self.btMove.id) == 0 }
+
+        // What `PopoverController.startBTAlignmentWizard` sends on every door
+        // into the wizard.
+        backend.resolveBTAlignmentPrompt(forDevice: btMove.id, dismissed: false)
+        waitFor { sink.lastGain(for: self.btMove.id) == 1 }
+        #expect(sink.lastGain(for: btMove.id) == 1, "the wizard's target ticks audibly")
+    }
+
     // MARK: - Wizard preview plumbing (W2)
 
     /// A preview pushes the live trim but never the store; ending with `nil`

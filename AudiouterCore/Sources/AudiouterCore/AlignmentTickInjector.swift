@@ -64,19 +64,27 @@ final class AlignmentTickInjector: @unchecked Sendable {
         var maxTicks: Int = AlignmentTickInjector.defaultMaxTicks
         var preambleSeconds: Double = 0
         var bedEnabled: Bool = true
+        /// REPLACE the captured program instead of adding to it — the wizard
+        /// run only (owner's call): while the user is judging which speaker
+        /// ticked first, music underneath is what they are trying to hear
+        /// past. `.manual` stays additive because that IS the nudge-while-
+        /// listening case. Replacement ends with the tick budget, so the
+        /// music comes back the instant the run stops.
+        var replacesProgram: Bool = false
 
         /// The bed's target RMS. −47 dBFS: measured comfortably below
         /// music/ticks, still enough to defeat the Move's amp gate.
         static let bedRMSdBFS: Double = -47
 
         static let manual = Config()
-        static let wizard = Config(maxTicks: 360, preambleSeconds: 3)
+        static let wizard = Config(maxTicks: 360, preambleSeconds: 3, replacesProgram: true)
     }
 
     private let beatFrames: Int
     private let channels: Int
     private let maxTicks: Int
     private let preambleFrames: Int
+    private let replacesProgram: Bool
     /// The pre-rendered mono tick, added to every channel.
     private let tick: [Int32]
     /// Pre-rendered mono noise-bed loop (empty when the bed is disabled).
@@ -92,6 +100,7 @@ final class AlignmentTickInjector: @unchecked Sendable {
         self.channels = max(1, channels)
         self.maxTicks = config.maxTicks
         self.preambleFrames = max(0, Int((sampleRate * config.preambleSeconds).rounded()))
+        self.replacesProgram = config.replacesProgram
         self.bed = config.bedEnabled ? Self.renderBed(sampleRate: sampleRate) : []
 
         // Woodblock-ish transient: ~30 ms, two partials, exponential decay
@@ -144,6 +153,12 @@ final class AlignmentTickInjector: @unchecked Sendable {
     /// little-endian and so is every Apple-silicon/Intel Mac this runs on.
     /// Ticks start after the preamble (bed only) and stop after `maxTicks`
     /// beats; the bed stops with them, so an expired injector adds nothing.
+    ///
+    /// Under ``Config/replacesProgram`` the captured content is OVERWRITTEN for
+    /// the run's frames rather than summed, so the fan-out carries ticks and
+    /// bed alone. Frames past the budget are left untouched by the same
+    /// `endFrame` bound the additive path uses — that, and dropping the
+    /// injector, are the two ways the music comes back.
     func mix(into pcm: inout Data) {
         let bytesPerFrame = channels * MemoryLayout<Int16>.size
         guard bytesPerFrame > 0 else { return }
@@ -161,6 +176,12 @@ final class AlignmentTickInjector: @unchecked Sendable {
                 if position >= preambleFrames {
                     let phase = (position - preambleFrames) % beatFrames
                     if phase < tick.count { add += tick[phase] }
+                }
+                if replacesProgram {
+                    for ch in 0..<channels {
+                        samples[f * channels + ch] = Int16(clamping: add)
+                    }
+                    continue
                 }
                 guard add != 0 else { continue }
                 for ch in 0..<channels {

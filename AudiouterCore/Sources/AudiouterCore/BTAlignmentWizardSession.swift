@@ -37,11 +37,25 @@ public final class BTAlignmentWizardSession {
         case gracefulExit
     }
 
+    /// The speaker the target is compared against. Identity, not just a
+    /// display string: the host has to engage it (make it audible) for the
+    /// run and put the selection back afterwards.
+    public struct Reference: Equatable {
+        public let id: String
+        public let name: String
+        public init(id: String, name: String) {
+            self.id = id
+            self.name = name
+        }
+    }
+
     public let deviceID: String
-    /// Display names for the two which-side buttons — the ACTUAL devices,
+    /// Display name for the target's which-side button — the ACTUAL device,
     /// resolved by the host at launch.
     public let targetName: String
-    public let referenceName: String
+    /// `nil` when the host could not establish a second audible speaker: the
+    /// run is refused (``start()`` is inert) until the host picks one.
+    public private(set) var reference: Reference?
 
     /// Repainted on every transition (also fired by ``start()``).
     public var onScreenChange: ((Screen) -> Void)?
@@ -69,7 +83,7 @@ public final class BTAlignmentWizardSession {
     public init(
         deviceID: String,
         targetName: String,
-        referenceName: String,
+        reference: Reference?,
         baseTrimMs: Double,
         seedBracketMs: Double? = nil,
         applyPreviewTrim: @escaping (Double) -> Void,
@@ -78,7 +92,7 @@ public final class BTAlignmentWizardSession {
     ) {
         self.deviceID = deviceID
         self.targetName = targetName
-        self.referenceName = referenceName
+        self.reference = reference
         self.baseTrimMs = baseTrimMs
         self.seedBracketMs = seedBracketMs
         self.bisection = Self.makeBisection(seedBracketMs: seedBracketMs)
@@ -99,10 +113,30 @@ public final class BTAlignmentWizardSession {
 
     // MARK: Intents (host-called, main thread by convention)
 
+    /// A different speaker to compare against, chosen mid-flight. Every answer
+    /// so far was given against the OLD reference, so they are not evidence
+    /// about this one — the bisection restarts rather than folding them in.
+    public func setReference(_ reference: Reference?) {
+        guard !ended, reference != self.reference else { return }
+        self.reference = reference
+        switch screen {
+        case .intro:
+            // Nothing to reset yet; repaint the names and the Start gate.
+            transition(to: .intro)
+        case .question:
+            bisection = Self.makeBisection(seedBracketMs: seedBracketMs)
+            applyCurrentCandidate()
+            transition(to: questionScreen())
+        case .receipt, .gracefulExit:
+            break
+        }
+    }
+
     /// Intro's Start: tick on (the wake preamble runs while the first
-    /// question renders), first candidate applied.
+    /// question renders), first candidate applied. Refused without a
+    /// reference — there would be nothing to compare the target against.
     public func start() {
-        guard case .intro = screen, !ended else { return }
+        guard case .intro = screen, !ended, reference != nil else { return }
         setTick(true)
         applyCurrentCandidate()
         transition(to: questionScreen())

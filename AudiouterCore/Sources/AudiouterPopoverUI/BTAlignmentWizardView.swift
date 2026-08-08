@@ -17,6 +17,13 @@ import AudiouterSharedUI
 /// the surface.
 final class BTAlignmentWizardView: NSView {
 
+    /// One entry in the reference picker: another available speaker the target
+    /// can be compared against.
+    struct ReferenceOption: Equatable {
+        let id: String
+        let name: String
+    }
+
     // The locked copy.
     static let introCopy =
         "You'll hear ticks on both speakers — just say which one sounds first"
@@ -25,12 +32,32 @@ final class BTAlignmentWizardView: NSView {
     static let gracefulExitCopy =
         "These speakers are far apart — they're already as aligned as they need to be."
     static let educationCopy = "You can fine-tune anytime from the popover."
+    /// Shown in the reference line's place while no second speaker can be
+    /// established — Start stays disabled until one is.
+    static let noReferenceCopy = "Select another speaker to compare against"
+    static func comparingCopy(target: String) -> String { "Comparing \(target) against" }
 
     /// The wizard finished (Keep, graceful-exit Done, or the ✕): the host
     /// removes the panel and disposes of the session.
     var onFinished: (() -> Void)?
 
+    /// The user picked a different reference. The HOST owns the consequences —
+    /// engaging the new speaker, releasing the old, and telling the session to
+    /// restart — because only it can touch the selection.
+    var onSelectReference: ((String) -> Void)?
+
+    /// The picker's menu, pushed by the host on every reconcile so devices
+    /// coming and going are reflected. Repaints only on a real change.
+    var referenceOptions: [ReferenceOption] = [] {
+        didSet {
+            guard referenceOptions != oldValue else { return }
+            render(session.screen)
+        }
+    }
+
     private let session: BTAlignmentWizardSession
+    private weak var referencePopUp: NSPopUpButton?
+    private weak var startButton: NSButton?
 
     private static let horizontalInset: CGFloat = 10
     private static var leadingInset: CGFloat {
@@ -141,18 +168,24 @@ final class BTAlignmentWizardView: NSView {
         switch screen {
         case .intro:
             addBody(Self.introCopy)
-            addButtonRow([makeButton("Start", prominent: true, #selector(startClicked(_:)))])
+            addReferenceRow()
+            let start = makeButton("Start", prominent: true, #selector(startClicked(_:)))
+            start.isEnabled = session.reference != nil
+            startButton = start
+            addButtonRow([start])
             background.setAccessibilityLabel("Align \(session.targetName): \(Self.introCopy)")
         case .question(let progress, _):
+            let referenceName = session.reference?.name ?? ""
             addBody(Self.questionCopy)
+            addReferenceRow()
             addButtonRow([
                 makeButton(session.targetName, prominent: true, #selector(targetClicked(_:))),
-                makeButton(session.referenceName, prominent: true, #selector(referenceClicked(_:))),
+                makeButton(referenceName, prominent: true, #selector(referenceClicked(_:))),
                 makeButton(Self.cantTellTitle, prominent: false, #selector(cantTellClicked(_:))),
             ])
             addProgress(progress)
             background.setAccessibilityLabel(
-                "Which speaker ticked first: \(session.targetName) or \(session.referenceName)?")
+                "Which speaker ticked first: \(session.targetName) or \(referenceName)?")
         case .receipt(let trimMs):
             let wholeMs = Int(BTSyncTrim.quantise(trimMs))
             addBody("Aligned — \(wholeMs) ms")
@@ -179,6 +212,45 @@ final class BTAlignmentWizardView: NSView {
         label.font = .systemFont(ofSize: 11, weight: .semibold)
         label.preferredMaxLayoutWidth = 260
         contentStack.addArrangedSubview(label)
+    }
+
+    /// "Comparing <target> against [<reference> ▾]" — the second speaker is a
+    /// stock pop-up so the user can compare against something else. With no
+    /// reference established the line says so instead, and Start stays off.
+    private func addReferenceRow() {
+        let label = NSTextField(labelWithString:
+            session.reference == nil ? Self.noReferenceCopy
+                                     : Self.comparingCopy(target: session.targetName))
+        label.font = Tokens.Font.caption
+        label.textColor = Tokens.Color.secondaryLabel
+
+        let popUp = NSPopUpButton(frame: .zero, pullsDown: false)
+        popUp.translatesAutoresizingMaskIntoConstraints = false
+        popUp.controlSize = .small
+        popUp.font = Tokens.Font.caption
+        // Each item carries its own target/action + id, the idiom real menu
+        // tracking dispatches through (`MainOutRowMenuDispatchTests`): a
+        // pop-up-wide action would arrive with the wrong sender type.
+        for option in referenceOptions {
+            let item = NSMenuItem(title: option.name,
+                                  action: #selector(referencePicked(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = option.id
+            popUp.menu?.addItem(item)
+        }
+        popUp.isEnabled = !referenceOptions.isEmpty
+        if let id = session.reference?.id,
+           let index = referenceOptions.firstIndex(where: { $0.id == id }) {
+            popUp.selectItem(at: index)
+        }
+        popUp.setAccessibilityLabel("Compare against")
+        referencePopUp = popUp
+
+        let row = NSStackView(views: [label, popUp])
+        row.orientation = .horizontal
+        row.alignment = .firstBaseline
+        row.spacing = 6
+        contentStack.addArrangedSubview(row)
     }
 
     private func addEducationLine() {
@@ -244,6 +316,10 @@ final class BTAlignmentWizardView: NSView {
         session.cancel()
         onFinished?()
     }
+    @objc private func referencePicked(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        onSelectReference?(id)
+    }
 
     // MARK: Test-support hooks (performClick = real dispatch)
 
@@ -251,10 +327,27 @@ final class BTAlignmentWizardView: NSView {
     var test_bodyText: String? {
         (contentStack.arrangedSubviews.first as? NSTextField)?.stringValue
     }
-    var test_buttonTitles: [String] {
+    var test_buttonTitles: [String] { actionButtons.map(\.title) }
+    var test_referenceOptionTitles: [String] {
+        referencePopUp?.menu?.items.map(\.title) ?? []
+    }
+    var test_selectedReferenceTitle: String? { referencePopUp?.selectedItem?.title }
+    var test_referencePickerIsEnabled: Bool { referencePopUp?.isEnabled ?? false }
+    var test_startIsEnabled: Bool { startButton?.isEnabled ?? false }
+    var test_referenceLineText: String? {
         contentStack.arrangedSubviews
             .compactMap { $0 as? NSStackView }
-            .flatMap { $0.arrangedSubviews.compactMap { ($0 as? NSButton)?.title } }
+            .first { $0.arrangedSubviews.contains { $0 is NSPopUpButton } }?
+            .arrangedSubviews.compactMap { ($0 as? NSTextField)?.stringValue }.first
+    }
+    /// The screens' own buttons — an `NSPopUpButton` is an `NSButton` too, so
+    /// the reference picker has to be excluded or it answers to a device name.
+    private var actionButtons: [NSButton] {
+        contentStack.arrangedSubviews
+            .compactMap { $0 as? NSStackView }
+            .flatMap { $0.arrangedSubviews }
+            .compactMap { $0 as? NSButton }
+            .filter { !($0 is NSPopUpButton) }
     }
     var test_progressValue: Double? {
         contentStack.arrangedSubviews
@@ -266,13 +359,15 @@ final class BTAlignmentWizardView: NSView {
             .contains(Self.educationCopy)
     }
     private func clickButton(titled title: String) {
-        for case let row as NSStackView in contentStack.arrangedSubviews {
-            for case let button as NSButton in row.arrangedSubviews where button.title == title {
-                button.performClick(nil)
-                return
-            }
-        }
+        actionButtons.first { $0.title == title }?.performClick(nil)
     }
     func test_clickButton(titled title: String) { clickButton(titled: title) }
     func test_clickDismiss() { dismissButton.performClick(nil) }
+    /// Real menu dispatch: the item's OWN action on its OWN target, sender =
+    /// the item — exactly what AppKit menu tracking sends.
+    func test_selectReference(titled title: String) {
+        guard let item = referencePopUp?.menu?.items.first(where: { $0.title == title }),
+              let action = item.action, let target = item.target as? NSObject else { return }
+        _ = target.perform(action, with: item)
+    }
 }

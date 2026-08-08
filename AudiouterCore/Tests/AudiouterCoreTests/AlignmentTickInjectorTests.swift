@@ -94,6 +94,42 @@ import AudioToolbox
                 "on-beat samples are program + tick, never a replacement")
     }
 
+    /// The wizard's opposite rule (owner's call): while the guided run is
+    /// going the user is judging which speaker ticked first, so the music is
+    /// REPLACED rather than ticked over.
+    @Test func wizardModeReplacesTheProgramWithTicksOnly() {
+        let injector = AlignmentTickInjector(
+            sampleRate: 1_000,
+            config: .init(bpm: 600, maxTicks: 1, bedEnabled: false, replacesProgram: true))
+        var pcm = zeroBuffer(frames: 100)
+        pcm.withUnsafeMutableBytes { raw in
+            let p = raw.bindMemory(to: Int16.self)
+            for i in 0..<p.count { p[i] = 1_000 }   // flat program signal
+        }
+        injector.mix(into: &pcm)
+        let samples = channel0(pcm)
+        #expect(samples[50..<100].allSatisfy { $0 == 0 },
+                "off-beat frames carry no music — only the ticks are heard")
+        #expect(samples[1...29].contains { $0 != 0 }, "the ticks themselves are still there")
+    }
+
+    /// …and the music comes back the moment the run's budget runs out, without
+    /// anything having to switch the injector off.
+    @Test func theProgramReturnsPastTheWizardBudget() {
+        let injector = AlignmentTickInjector(
+            sampleRate: 1_000,
+            config: .init(bpm: 600, maxTicks: 1, bedEnabled: false, replacesProgram: true))
+        var pcm = zeroBuffer(frames: 200)
+        pcm.withUnsafeMutableBytes { raw in
+            let p = raw.bindMemory(to: Int16.self)
+            for i in 0..<p.count { p[i] = 1_000 }
+        }
+        injector.mix(into: &pcm)
+        let samples = channel0(pcm)
+        #expect(samples[100..<200].allSatisfy { $0 == 1_000 },
+                "past the last beat the captured program passes through untouched")
+    }
+
     // MARK: Keep-alive bed + wake preamble (W2 — the Sonos amp-gate fix)
 
     /// The bed rides under every active frame at ~−47 dBFS RMS — present, but
@@ -148,7 +184,10 @@ import AudioToolbox
         #expect(config.maxTicks == 360)
         #expect(config.preambleSeconds == 3)
         #expect(config.bedEnabled)
+        #expect(config.replacesProgram, "the guided run is ticks only")
         #expect(AlignmentTickInjector.Config.manual.preambleSeconds == 0)
+        #expect(AlignmentTickInjector.Config.manual.replacesProgram == false,
+                "the row's metronome is the nudge-while-listening case")
     }
 
     // MARK: Coordinator seam — one mixed feed, every consumer
@@ -174,6 +213,22 @@ import AudioToolbox
     private final class SilenceConverter: PCMConverting, @unchecked Sendable {
         func convertToAirPlayPCM(_ buffer: CapturedBuffer) -> Data? {
             Data(count: buffer.frameCount * 2 * MemoryLayout<Int16>.size)
+        }
+    }
+
+    /// Converts every captured buffer to a flat, obviously non-silent S16LE
+    /// program — so the DC level of a consumer's samples answers "is the
+    /// user's music still in this feed?" (a tick and the bed both average to
+    /// ~0; the program does not).
+    private final class ConstantConverter: PCMConverting, @unchecked Sendable {
+        static let level = 6_000
+        func convertToAirPlayPCM(_ buffer: CapturedBuffer) -> Data? {
+            var data = Data(count: buffer.frameCount * 2 * MemoryLayout<Int16>.size)
+            data.withUnsafeMutableBytes { raw in
+                let p = raw.bindMemory(to: Int16.self)
+                for i in 0..<p.count { p[i] = Int16(Self.level) }
+            }
+            return data
         }
     }
 
@@ -251,5 +306,46 @@ import AudioToolbox
         waitFor { engineSink.forwarded.count == 3 }
         #expect(channel0(engineSink.forwarded[2]).allSatisfy { $0 == 0 },
                 "disabling the tick restores the untouched feed")
+    }
+
+    /// The mode difference at the seam every consumer shares: the manual
+    /// metronome rides OVER the music, the wizard's run replaces it, and
+    /// switching off brings the music straight back.
+    @Test func wizardModeSilencesTheMusicInTheSharedFeedAndManualDoesNot() {
+        let tap = FakeTap()
+        let engineSink = SpyPCMSink()
+        let coordinator = NativeCaptureCoordinator(
+            makeTap: { tap },
+            sink: engineSink,
+            makeConverter: { _ in ConstantConverter() },
+            processResolver: AudioProcessResolver(enumerator: EmptyEnumerator()),
+            muteBehavior: .mutedWhenTapped)
+        coordinator.start()
+        waitFor {
+            if case .capturing = coordinator.state { return true }
+            return false
+        }
+        func meanOfNextBuffer(second: Int) -> Double {
+            let expected = engineSink.forwarded.count + 1
+            tap.deliverSilence(frames: 512, pts: timespec(tv_sec: second, tv_nsec: 0))
+            waitFor { engineSink.forwarded.count == expected }
+            let samples = channel0(engineSink.forwarded[expected - 1])
+            return samples.reduce(0.0) { $0 + Double($1) } / Double(samples.count)
+        }
+        let program = Double(ConstantConverter.level)
+
+        #expect(abs(meanOfNextBuffer(second: 1) - program) < 1, "idle: the music passes through")
+
+        coordinator.setAlignTickMode(.manual)
+        #expect(abs(meanOfNextBuffer(second: 2) - program) < 500,
+                "the manual metronome ticks OVER the music, which keeps playing")
+
+        coordinator.setAlignTickMode(.wizard)
+        #expect(abs(meanOfNextBuffer(second: 3)) < 500,
+                "the guided run is ticks only — the music is gone from the shared feed")
+
+        coordinator.setAlignTickMode(.off)
+        #expect(abs(meanOfNextBuffer(second: 4) - program) < 1,
+                "…and comes back the instant the run ends")
     }
 }

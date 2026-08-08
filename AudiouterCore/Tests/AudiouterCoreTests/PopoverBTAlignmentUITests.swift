@@ -69,8 +69,8 @@ import AppKit
         Device(id: "mac", name: "This Mac", kind: .localMac, isLocalDevice: true)
     }
 
-    private func airplay(_ id: String = "office") -> Device {
-        Device(id: id, name: "Office", kind: .homePod)
+    private func airplay(_ id: String = "office", name: String = "Office") -> Device {
+        Device(id: id, name: name, kind: .homePod)
     }
 
     private func bt(_ id: String = "bt-a:output", name: String = "Move 2",
@@ -217,7 +217,7 @@ import AppKit
             return
         }
         #expect(wizard?.test_bodyText == BTAlignmentWizardView.questionCopy)
-        #expect(wizard?.test_buttonTitles == ["Move 2", "Office", "Can't tell"],
+        #expect(wizard?.test_buttonTitles == ["Move 2", "This Mac", "Can't tell"],
                 "the which-side buttons carry the ACTUAL device names")
         #expect(wizard?.test_progressValue == 0)
     }
@@ -229,7 +229,7 @@ import AppKit
         wizard?.test_clickButton(titled: "Move 2")               // target first
         #expect(recorder.previews.map(\.ms) == [0, 250])
         #expect((wizard?.test_progressValue ?? 0) > 0, "the indicator narrows")
-        wizard?.test_clickButton(titled: "Office")               // reversal 1
+        wizard?.test_clickButton(titled: "This Mac")             // reversal 1
         wizard?.test_clickButton(titled: "Move 2")               // reversal 2 → converged
         #expect(wizard?.test_screen == .receipt(trimMs: 156.25))
         #expect(wizard?.test_bodyText == "Aligned — 156 ms", "the ms value is a receipt only")
@@ -246,7 +246,7 @@ import AppKit
         let wizard = openWizard(popover)
         wizard?.test_clickButton(titled: "Start")
         wizard?.test_clickButton(titled: "Move 2")
-        wizard?.test_clickButton(titled: "Office")
+        wizard?.test_clickButton(titled: "This Mac")
         wizard?.test_clickButton(titled: "Move 2")
         guard case .receipt(_)? = wizard?.test_screen else {
             Issue.record("expected receipt, got \(String(describing: wizard?.test_screen))")
@@ -369,6 +369,181 @@ import AppKit
         menu?.performActionForItem(at: 0)   // real AppKit menu dispatch
         #expect(popover.test_btWizardIsOpen(),
                 "the FINAL dismissal only silences the auto-prompt, never the manual way in")
+    }
+
+    // MARK: The target is audible whichever door the wizard came through
+
+    /// A relaunch reaching a device whose card still stands (the ⌥/menu route,
+    /// which never went through the card's own action) releases the backend
+    /// hold and takes the card's place. A wizard over a held-silent target is
+    /// a run with nothing to hear — the live 2026-08-08 report.
+    @Test func aRelaunchOverAStandingCardReleasesTheHoldAndReplacesIt() {
+        let (popover, recorder) = makePopover()
+        showPrompt(popover)
+        #expect(recorder.resolves.isEmpty, "the hold stands while the card is up")
+
+        let menu = popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()
+        menu?.performActionForItem(at: 0)   // real AppKit menu dispatch
+        #expect(popover.test_btWizardIsOpen())
+        #expect(recorder.resolves.map(\.id) == ["bt-a:output"])
+        #expect(recorder.resolves.map(\.dismissed) == [false],
+                "un-mute, and never record a dismissal the user didn't give")
+        #expect(popover.test_btAlignmentPromptView() == nil, "the wizard takes the card's place")
+        #expect(popover.test_btAlignmentPromptDeviceID() == nil)
+    }
+
+    /// A device waiting in the QUEUE gets the same treatment when the wizard
+    /// opens straight onto it — its hold would otherwise sit out the run.
+    @Test func aRelaunchOnAQueuedDeviceReleasesItsHoldAndDropsItFromTheQueue() {
+        let (popover, recorder) = showTwoPrompts()
+        #expect(popover.test_btAlignmentPromptQueue() == ["bt-b:output"])
+        popover.startBTAlignmentWizard(deviceID: "bt-b:output")
+        #expect(popover.test_btWizardIsOpen())
+        #expect(recorder.resolves.map(\.id) == ["bt-b:output"])
+        #expect(popover.test_btAlignmentPromptQueue().isEmpty)
+    }
+
+    // MARK: The reference speaker (default, engage, restore, change)
+
+    @Test func theMacIsTheDefaultReferenceAndTheIntroNamesIt() {
+        let (popover, _) = makePopover()
+        let wizard = openWizard(popover)
+        #expect(popover.test_btWizardReferenceID() == "mac",
+                "the Mac's own output is the default — always there, always in step")
+        #expect(wizard?.test_referenceLineText
+                == BTAlignmentWizardView.comparingCopy(target: "Move 2"))
+        #expect(wizard?.test_selectedReferenceTitle == "This Mac")
+        #expect(wizard?.test_startIsEnabled == true)
+        #expect(wizard?.test_referenceOptionTitles == ["This Mac", "Office"],
+                "every other available speaker is offered")
+    }
+
+    /// No Mac row in the fleet: the ONE other member the user already has
+    /// audio on becomes the reference rather than an arbitrary device.
+    @Test func withoutAMacTheSingleAudibleMemberIsTheReference() {
+        let fleet = [airplay("office"), airplay("kitchen", name: "Kitchen"), bt()]
+        let (popover, _) = makePopover(fleet: fleet)
+        popover.update(devices: fleet)
+        popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
+        #expect(popover.test_btWizardReferenceID() == "office")
+        #expect(popover.test_btWizardEngagedReferenceID() == nil,
+                "an already-audible reference is left exactly as the user had it")
+    }
+
+    /// Nothing else audible and no Mac: the first other AVAILABLE device is
+    /// taken and SELECTED for the run — the fix for a wizard that ticked into
+    /// a group of one and produced no comparison at all.
+    @Test func aSilentReferenceIsSelectedForTheRunAndRestoredAfterKeep() {
+        let fleet = [airplay("office"), bt()]
+        let (popover, _) = makePopover(fleet: fleet)
+        popover.update(devices: fleet)
+        popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
+        #expect(popover.test_isSpeakerSelected("office") == false)
+
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
+        #expect(popover.test_btWizardReferenceID() == "office")
+        #expect(popover.test_btWizardEngagedReferenceID() == "office")
+        #expect(popover.test_isSpeakerSelected("office"),
+                "the reference is made audible through GroupController, the one selection owner")
+
+        let wizard = popover.test_btWizardView()
+        wizard?.test_clickButton(titled: "Start")
+        wizard?.test_clickButton(titled: "Move 2")
+        wizard?.test_clickButton(titled: "Office")
+        wizard?.test_clickButton(titled: "Move 2")
+        wizard?.test_clickButton(titled: "Keep")
+        #expect(popover.test_btWizardIsOpen() == false)
+        #expect(popover.test_isSpeakerSelected("office") == false,
+                "Keep puts the user's Selected Devices set back")
+        #expect(popover.test_btWizardEngagedReferenceID() == nil)
+    }
+
+    /// The restore is not a Keep-only courtesy — it rides the one teardown
+    /// funnel, so every way out returns the selection.
+    private func exitPathRestoresTheReference(
+        _ exit: (PopoverController, BTAlignmentWizardView?) -> Void
+    ) {
+        let fleet = [airplay("office"), bt()]
+        let (popover, _) = makePopover(fleet: fleet)
+        popover.update(devices: fleet)
+        popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
+        let wizard = popover.test_btWizardView()
+        wizard?.test_clickButton(titled: "Start")
+        #expect(popover.test_isSpeakerSelected("office"))
+
+        exit(popover, wizard)
+        #expect(popover.test_btWizardIsOpen() == false)
+        #expect(popover.test_isSpeakerSelected("office") == false)
+        #expect(popover.test_btWizardEngagedReferenceID() == nil)
+    }
+
+    @Test func dismissRestoresTheEngagedReference() {
+        exitPathRestoresTheReference { _, wizard in wizard?.test_clickDismiss() }
+    }
+
+    @Test func popoverCloseRestoresTheEngagedReference() {
+        exitPathRestoresTheReference { popover, _ in popover.surfaceDidHide() }
+    }
+
+    @Test func aGracefulExitRestoresTheEngagedReference() {
+        exitPathRestoresTheReference { _, wizard in
+            wizard?.test_clickButton(titled: BTAlignmentWizardView.cantTellTitle)
+            wizard?.test_clickButton(titled: BTAlignmentWizardView.cantTellTitle)
+            wizard?.test_clickButton(titled: "Done")
+        }
+    }
+
+    @Test func losingTheTargetRestoresTheEngagedReference() {
+        exitPathRestoresTheReference { popover, _ in
+            popover.update(devices: [airplay("office"), bt(available: false)])
+        }
+    }
+
+    /// Real menu dispatch on the picker: the new reference is engaged, the old
+    /// one released, and the answers so far are DROPPED — they were given
+    /// against a different speaker.
+    @Test func changingTheReferenceMidRunSwapsTheSelectionAndResetsTheRun() {
+        let fleet = [local(), airplay("office"), bt()]
+        let (popover, recorder) = makePopover(fleet: fleet)
+        popover.update(devices: fleet)
+        popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
+        let wizard = popover.test_btWizardView()
+        wizard?.test_clickButton(titled: "Start")
+        wizard?.test_clickButton(titled: "Move 2")
+        #expect(recorder.previews.map(\.ms) == [0, 250])
+
+        wizard?.test_selectReference(titled: "Office")
+        #expect(popover.test_btWizardReferenceID() == "office")
+        #expect(popover.test_isSpeakerSelected("office"), "the new reference is engaged")
+        #expect(popover.test_isSpeakerSelected("mac") == false, "…and the old one released")
+        #expect(popover.test_btWizardEngagedReferenceID() == "office")
+        #expect(wizard?.test_screen == .question(progress: 0, answersSoFar: 0),
+                "the bisection restarts — the earlier answers are not evidence about Office")
+        #expect(recorder.previews.map(\.ms) == [0, 250, 0])
+        #expect(wizard?.test_buttonTitles == ["Move 2", "Office", "Can't tell"])
+    }
+
+    /// Nothing else to compare against: the wizard opens, says why, and Start
+    /// stays off rather than running a comparison that cannot be heard.
+    @Test func withNoOtherSpeakerTheIntroSaysSoAndStartIsDisabled() {
+        let fleet = [bt()]
+        let (popover, recorder) = makePopover(fleet: fleet)
+        popover.update(devices: fleet)
+        popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
+        let wizard = popover.test_btWizardView()
+        #expect(popover.test_btWizardReferenceID() == nil)
+        #expect(wizard?.test_referenceLineText == BTAlignmentWizardView.noReferenceCopy)
+        #expect(wizard?.test_referencePickerIsEnabled == false)
+        #expect(wizard?.test_startIsEnabled == false)
+
+        wizard?.test_clickButton(titled: "Start")   // performClick on a disabled button
+        #expect(wizard?.test_screen == .intro, "the run never begins")
+        #expect(recorder.ticks.isEmpty, "…and nothing ticks into a group of one")
     }
 
     // MARK: Wizard teardown on target loss (power-off keeps the row)

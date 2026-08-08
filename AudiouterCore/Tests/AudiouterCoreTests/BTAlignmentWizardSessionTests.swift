@@ -13,11 +13,13 @@ import Testing
         var ticks: [Bool] = []
         var screens: [BTAlignmentWizardSession.Screen] = []
 
-        func makeSession(baseTrimMs: Double = 0, seedBracketMs: Double? = nil) -> BTAlignmentWizardSession {
+        func makeSession(baseTrimMs: Double = 0, seedBracketMs: Double? = nil,
+                         reference: BTAlignmentWizardSession.Reference? =
+                            .init(id: "homepod", name: "Kitchen HomePod")) -> BTAlignmentWizardSession {
             let session = BTAlignmentWizardSession(
                 deviceID: "AA:BB:output",
                 targetName: "Move 2",
-                referenceName: "Kitchen HomePod",
+                reference: reference,
                 baseTrimMs: baseTrimMs,
                 seedBracketMs: seedBracketMs,
                 applyPreviewTrim: { [weak self] in self?.previews.append($0) },
@@ -157,6 +159,60 @@ import Testing
         session.start()
         session.answer(.target)
         #expect(recorder.previews == [0, 50], "a ±100 seed folds to 50, not 250")
+        session.cancel()
+    }
+
+    // MARK: Reference (the speaker the target is compared against)
+
+    @Test func startIsRefusedWithoutAReference() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(reference: nil)
+        session.start()
+        #expect(session.screen == .intro, "nothing to compare against — the run can't begin")
+        #expect(recorder.ticks.isEmpty)
+        #expect(recorder.previews.isEmpty)
+    }
+
+    @Test func namingAReferenceOnTheIntroEnablesTheRun() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(reference: nil)
+        session.setReference(.init(id: "mac", name: "This Mac"))
+        #expect(recorder.screens == [.intro], "the intro repaints with the new name")
+        session.start()
+        #expect(recorder.ticks == [true])
+        session.cancel()
+    }
+
+    @Test func changingTheReferenceMidRunResetsTheBisection() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(baseTrimMs: 20)
+        session.start()
+        session.answer(.target)
+        #expect(recorder.previews == [20, 270])
+        guard case .question(_, let before) = session.screen, before == 1 else {
+            Issue.record("expected one answer folded in, got \(session.screen)")
+            return
+        }
+
+        session.setReference(.init(id: "mac", name: "This Mac"))
+        #expect(session.reference?.name == "This Mac")
+        #expect(session.screen == .question(progress: 0, answersSoFar: 0),
+                "answers given against the old speaker are not evidence about this one")
+        #expect(recorder.previews.last == 20, "the run re-centres on the base trim")
+        session.cancel()
+    }
+
+    @Test func reSelectingTheSameReferenceChangesNothing() {
+        let recorder = Recorder()
+        let session = recorder.makeSession()
+        session.start()
+        session.answer(.target)
+        session.setReference(.init(id: "homepod", name: "Kitchen HomePod"))
+        guard case .question(_, let answers) = session.screen, answers == 1 else {
+            Issue.record("expected the run to continue, got \(session.screen)")
+            return
+        }
+        #expect(recorder.previews == [0, 250])
         session.cancel()
     }
 

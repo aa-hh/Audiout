@@ -368,6 +368,10 @@ public final class PopoverController: NSObject {
     private var btWizardDeviceID: String?
     private var btWizardSession: BTAlignmentWizardSession?
     private var btWizardView: BTAlignmentWizardView?
+    /// The reference device this run SELECTED for itself, so every exit path
+    /// can put the user's Selected Devices set back. `nil` when the reference
+    /// was already audible and nothing had to change.
+    private var btWizardEngagedReferenceID: String?
 
     /// The row whose align-by-ear tick is currently running, if any. One at a
     /// time: toggling another row's button moves the single tick.
@@ -2962,6 +2966,10 @@ public final class PopoverController: NSObject {
         return result
     }
 
+    public func test_isSpeakerSelected(_ id: String) -> Bool {
+        groupController?.isSpeakerSelected(id) ?? false
+    }
+
     public func test_toggleMute(deviceID: String, muted: Bool) {
         groupController?.setMuted(muted, for: deviceID)
     }
@@ -3169,12 +3177,22 @@ extension PopoverController: DeviceRowView.Delegate {
         }
         // Wizard panel (teardown ran first, above).
         if let id = btWizardDeviceID, let session = btWizardSession,
-           let row = deviceRowsByID[id], btWizardView?.superview == nil {
-            if let stale = btWizardView { panel.removeRow(stale, animated: false) }
-            let view = BTAlignmentWizardView(session: session)
-            view.onFinished = { [weak self] in self?.finishBTWizard() }
-            btWizardView = view
-            panel.insertRow(view, after: row, animated: animated)
+           let row = deviceRowsByID[id] {
+            if btWizardView?.superview == nil {
+                if let stale = btWizardView { panel.removeRow(stale, animated: false) }
+                let view = BTAlignmentWizardView(session: session)
+                view.onFinished = { [weak self] in self?.finishBTWizard() }
+                view.onSelectReference = { [weak self] referenceID in
+                    self?.setBTWizardReference(referenceID)
+                }
+                btWizardView = view
+                // Before the insert, so the panel measures the finished layout.
+                view.referenceOptions = btWizardReferenceOptions(excluding: id)
+                panel.insertRow(view, after: row, animated: animated)
+            } else {
+                // Devices come and go mid-run; the picker follows.
+                btWizardView?.referenceOptions = btWizardReferenceOptions(excluding: id)
+            }
         }
     }
 
@@ -3189,17 +3207,20 @@ extension PopoverController: DeviceRowView.Delegate {
         }
     }
 
-    /// "Align with ticks": unmute (the wizard needs the device audible) and
-    /// open the wizard panel in the card's place. The intent clears WITHOUT an
-    /// interim reconcile — reconciling before the wizard opens would hand the
-    /// freed slot to a queued device's card, mounting it alongside this
-    /// device's wizard.
+    /// "Align with ticks": open the wizard panel in the card's place. The
+    /// unmute and the card's unmount belong to `startBTAlignmentWizard` — EVERY
+    /// way into the wizard has to leave its target audible, not just this one.
+    /// Both clear the intent DIRECTLY rather than through a reconcile:
+    /// reconciling before the wizard opens would hand the freed slot to a
+    /// queued device's card, mounting it alongside this device's wizard.
     private func btAlignmentAlignWithTicks(_ id: String) {
-        onResolveBTAlignmentPrompt?(id, false)
-        btAlignmentPromptDeviceID = nil
         startBTAlignmentWizard(deviceID: id)
-        // A refused wizard start (target went un-live under the card) still
-        // needs the card unmounted; harmless after a successful start.
+        if btWizardDeviceID != id {
+            // Refused (the target went un-live under the card): the offer
+            // still has to be answered or the device stays held silent.
+            onResolveBTAlignmentPrompt?(id, false)
+            btAlignmentPromptDeviceID = nil
+        }
         reconcileBTAlignmentPanels(animated: true)
     }
 
@@ -3229,10 +3250,20 @@ extension PopoverController: DeviceRowView.Delegate {
         // The single tick source: a running manual metronome would fight the
         // wizard's own run.
         setAlignTick(nil)
+        // The wizard replaces this device's card (a manual relaunch can arrive
+        // while one stands) and releases its hold. A wizard over a held-silent
+        // target ticks into a muted speaker — `resolveBTAlignmentPrompt` is
+        // idempotent and records nothing at `dismissed: false`, so releasing
+        // here is safe even for a device that was never held.
+        btAlignmentPromptQueue.removeAll { $0 == deviceID }
+        if btAlignmentPromptDeviceID == deviceID { btAlignmentPromptDeviceID = nil }
+        onResolveBTAlignmentPrompt?(deviceID, false)
+        let reference = btWizardDefaultReference(excluding: deviceID)
+        if let reference { engageBTWizardReference(reference.id) }
         let session = BTAlignmentWizardSession(
             deviceID: deviceID,
             targetName: device.name,
-            referenceName: btWizardReferenceName(excluding: deviceID),
+            reference: reference.map { .init(id: $0.id, name: $0.name) },
             baseTrimMs: base,
             applyPreviewTrim: { [weak self] ms in self?.onBTWizardTrimPreview?(ms, deviceID) },
             endPreview: { [weak self] keepMs in
@@ -3247,15 +3278,75 @@ extension PopoverController: DeviceRowView.Delegate {
         btWizardDeviceID = deviceID
         btWizardSession = session
         reconcileBTAlignmentPanels(animated: true)
+        refreshDeviceRows()
     }
 
-    /// The which-side buttons name the ACTUAL devices: with exactly one other
-    /// audible member that member's name, else the honest plural.
-    private func btWizardReferenceName(excluding deviceID: String) -> String {
-        let others = devicesByID.values
-            .filter { $0.id != deviceID && wantsAudio($0.id) }
-            .map(\.name)
-        return others.count == 1 ? others[0] : "The other speakers"
+    /// Every other speaker the target could be compared against, in the order
+    /// the rows themselves render (locals, AirPlay, Bluetooth). Unavailable
+    /// devices are left out — a greyed row can't carry a tick.
+    private func btWizardReferenceOptions(excluding deviceID: String)
+        -> [BTAlignmentWizardView.ReferenceOption]
+    {
+        btWizardReferenceDevices(excluding: deviceID)
+            .map { .init(id: $0.id, name: $0.name) }
+    }
+
+    private func btWizardReferenceDevices(excluding deviceID: String) -> [Device] {
+        let ordered = orderedDevices().filter { $0.id != deviceID && $0.isAvailable }
+        return ordered.filter(\.isLocalDevice)
+            + ordered.filter { !$0.isLocalDevice && !$0.isBluetooth }
+            + orderedBluetoothDevices(in: ordered)
+    }
+
+    /// The speaker the run starts against. The Mac's own output first — it is
+    /// always present, always in step, and needs no second speaker set up
+    /// (owner's call); else the one other member the user already has audio
+    /// on; else anything else that is available. `nil` means there is nothing
+    /// to compare against and the wizard opens with Start disabled.
+    private func btWizardDefaultReference(excluding deviceID: String) -> Device? {
+        let candidates = btWizardReferenceDevices(excluding: deviceID)
+        if let local = candidates.first(where: \.isLocalDevice) { return local }
+        let audible = candidates.filter { wantsAudio($0.id) }
+        if audible.count == 1 { return audible[0] }
+        return candidates.first
+    }
+
+    /// Make the reference audible for the run, through the ONE selection owner
+    /// (`GroupController`) — never a parallel routing path. A reference the
+    /// user already had selected is left alone, and only a selection this
+    /// wizard MADE is remembered, so the restore can be exact.
+    private func engageBTWizardReference(_ id: String) {
+        guard !wantsAudio(id) else { return }
+        btWizardEngagedReferenceID = id
+        groupController?.setDeviceSelected(id, true)
+    }
+
+    /// Put the user's Selected Devices set back. Called from
+    /// ``tearDownBTWizard()``, which every exit path funnels through — Keep,
+    /// cancel, graceful exit, ✕, popover close, target lost — because a wizard
+    /// that silently leaves the group edited is worse than one that never ran.
+    private func releaseBTWizardReference() {
+        guard let id = btWizardEngagedReferenceID else { return }
+        btWizardEngagedReferenceID = nil
+        groupController?.setDeviceSelected(id, false)
+        refreshDeviceRows()
+    }
+
+    /// The picker's answer: engage the new reference, release the old, and let
+    /// the session restart. The answers so far were given against a DIFFERENT
+    /// speaker, so they are not evidence about this one — the session drops
+    /// them rather than folding them in.
+    private func setBTWizardReference(_ id: String) {
+        guard let session = btWizardSession, let device = devicesByID[id],
+              session.reference?.id != id else { return }
+        let previous = btWizardEngagedReferenceID
+        btWizardEngagedReferenceID = nil
+        engageBTWizardReference(id)
+        if let previous, previous != id {
+            groupController?.setDeviceSelected(previous, false)
+        }
+        session.setReference(.init(id: id, name: device.name))
+        refreshDeviceRows()
     }
 
     /// The wizard's own close (Keep / Done / ✕): the session already committed
@@ -3278,6 +3369,7 @@ extension PopoverController: DeviceRowView.Delegate {
             btWizardView = nil
             panel.removeRow(view, animated: true)
         }
+        releaseBTWizardReference()
     }
 
     // MARK: Test hooks (W3/W4)
@@ -3287,6 +3379,10 @@ extension PopoverController: DeviceRowView.Delegate {
     func test_btAlignmentPromptView() -> BTAlignmentPromptView? { btAlignmentPromptView }
     func test_btWizardView() -> BTAlignmentWizardView? { btWizardView }
     public func test_btWizardIsOpen() -> Bool { btWizardSession != nil }
+    public func test_btWizardReferenceID() -> String? { btWizardSession?.reference?.id }
+    /// The reference the RUN selected for itself (`nil` when it was already
+    /// audible) — the restore's ledger.
+    public func test_btWizardEngagedReferenceID() -> String? { btWizardEngagedReferenceID }
 }
 
 // MARK: - ConnectionState helpers

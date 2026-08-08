@@ -37,23 +37,29 @@ enum SyncTiming {
     /// 250 ms `AIRPLAY_AUDIO_LATENCY_MS` constant (plan risk R4): a later
     /// buffer-size tune must move both the AirPlay schedule and this one together.
     ///
-    /// `userOffsetMs` is the T-OFFSET-UI manual bias (Settings › Audio › Advanced,
-    /// ``AppSettings/syncOffsetMs``) — a static, user-set nudge added ON TOP of the
-    /// computed+corrected delay target (day-one escape hatch for devices that
-    /// misreport their own latency, plan risk R1). Signed: positive delays the
-    /// local speaker further, negative pulls it earlier. Applied INSIDE the same
-    /// zero-floor clamp as the computed terms, so a large negative offset can never
-    /// produce a negative delay — it only ever drives the total down to 0.
+    /// `userOffsetMs` is either the T-OFFSET-UI manual bias (Settings › Audio ›
+    /// Advanced, ``AppSettings/syncOffsetMs``) for the local sink, or the
+    /// BT-OFFSET-UI/BT-SYNC-DRAWER per-device ``BTSyncTrim`` for a Bluetooth
+    /// sink — a static, user-set nudge added ON TOP of the computed+corrected
+    /// delay target (day-one escape hatch for devices that misreport their own
+    /// latency, plan risk R1). Signed: positive delays the speaker further,
+    /// negative pulls it earlier. `Double` (not `Int`) so the Bluetooth caller
+    /// can pass 0.1 ms resolution straight through with no truncation — every
+    /// existing local-sink caller passes a whole-ms `Int` widened at the call
+    /// site, so this is a precision gain for them, not a behavior change.
+    /// Applied INSIDE the same zero-floor clamp as the computed terms, so a
+    /// large negative offset can never produce a negative delay — it only ever
+    /// drives the total down to 0.
     static func totalDelayNanos(
         presentationDelayMs: Int,
         localOutputLatencySeconds: Double,
         safetyMarginMs: Double,
-        userOffsetMs: Int = 0
+        userOffsetMs: Double = 0
     ) -> Int64 {
         let presentationNanos = Int64(presentationDelayMs) &* 1_000_000
         let latencyNanos = Int64((localOutputLatencySeconds * 1_000_000_000).rounded())
         let marginNanos = Int64((safetyMarginMs * 1_000_000).rounded())
-        let offsetNanos = Int64(userOffsetMs) &* 1_000_000
+        let offsetNanos = Int64((userOffsetMs * 1_000_000).rounded())
         return max(0, presentationNanos &- latencyNanos &- marginNanos &+ offsetNanos)
     }
 

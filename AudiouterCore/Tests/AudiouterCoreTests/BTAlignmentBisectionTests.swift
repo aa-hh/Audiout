@@ -11,12 +11,12 @@ import Testing
 
     /// Answer as a listener with a fixed true offset would: the target ticks
     /// first whenever the applied candidate under-delays it.
-    private func truthfulAnswer(trueOffsetMs: Int, candidateMs: Int) -> BTAlignmentBisection.Answer {
+    private func truthfulAnswer(trueOffsetMs: Double, candidateMs: Double) -> BTAlignmentBisection.Answer {
         trueOffsetMs > candidateMs ? .target : .reference
     }
 
     private func runToTerminal(
-        trueOffsetMs: Int, bracketMs: Int = BTSyncTrim.rangeMs
+        trueOffsetMs: Double, bracketMs: Double = BTSyncTrim.rangeMs
     ) -> (phase: BTAlignmentBisection.Phase, answers: Int) {
         var engine = BTAlignmentBisection(bracketMs: bracketMs)
         var answers = 0
@@ -101,12 +101,12 @@ import Testing
         var engine = BTAlignmentBisection(bracketMs: 500)
         engine.record(.target)      // low = 0, candidate 250
         engine.record(.reference)   // reversal #1: high = 250, midpoint 125
-        engine.record(.target)      // reversal #2: low = 125, midpoint 187
+        engine.record(.target)      // reversal #2: low = 125, midpoint 187.5
         guard case .converged(let result) = engine.phase else {
             Issue.record("expected convergence, got \(engine.phase)")
             return
         }
-        #expect(result == (125 + 187) / 2, "mean of the last two reversal midpoints")
+        #expect(result == (125 + 187.5) / 2, "mean of the last two reversal midpoints")
         #expect(engine.answerCount == 3)
     }
 

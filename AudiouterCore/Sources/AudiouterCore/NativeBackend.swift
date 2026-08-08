@@ -294,7 +294,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// and snapshotted by `captureControlQueue` when a sink is (re)armed; a
     /// dedicated lock keeps those reads off `stateQueue` entirely.
     private let btTrimLock = NSLock()
-    private var btTrimsByUID: [String: Int] = [:]   // btTrimLock
+    private var btTrimsByUID: [String: Double] = [:]   // btTrimLock
 
     /// Test seam: a BT `Device.id` (its Core Audio UID) → the live
     /// `AudioObjectID` a per-device sink pins its engine to. `nil` (production)
@@ -708,6 +708,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Polls every ~5s while capture is active; cancelled on `stop()` or when
     /// capture goes idle. Used by T2 to bridge scheduling metrics to telemetry.
     private var schedulingSnapshotPollWork: DispatchWorkItem?
+    /// How many `send_sched` lines THIS backend has logged. Arming is not the
+    /// same observable: an arm whose poll then finds capture stopped logs
+    /// nothing, so the guard this counts for is "no second line per
+    /// capture-start episode". Counting the telemetry itself cannot work — the
+    /// sink is process-global and the event carries no backend identity, so
+    /// any other still-polling backend in the same test process lands lines in
+    /// the counting window.
+    private var schedulingSnapshotLogCount = 0
 
     // MARK: Per-device op serialization + coalescing (toggle-spam converge race)
     //
@@ -1080,6 +1088,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// edge, mirroring `test_hasPendingCaptureRetry()` above.
     func test_hasPendingSchedulingPoll() -> Bool {
         stateQueue.sync { schedulingSnapshotPollWork != nil }
+    }
+
+    /// Test-only (`@testable`): how many `send_sched` lines this backend has
+    /// logged. Proves "selecting a second device while already capturing must
+    /// not double the log rate" without reading the telemetry sink, which is
+    /// process-global and unattributable — see ``schedulingSnapshotLogCount``.
+    func test_schedulingPollLogCount() -> Int {
+        stateQueue.sync { schedulingSnapshotLogCount }
     }
 
     /// Test-only (`@testable`): the whole-system-tap retry attempt counter
@@ -2958,7 +2974,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         captureControlQueue.async { [weak self] in
             guard let self else { return }
             let rendering = self.btSink?.renderingDeviceUIDs() ?? []
-            self.stateQueue.async { self.applyBTRenderStart(rendering) }
+            let anchored = self.btSink?.anchoredDeviceUIDs()
+            self.stateQueue.async { self.applyBTRenderStart(rendering, anchored: anchored) }
         }
     }
 
@@ -2966,7 +2983,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// ceiling — and re-arm the poll for whatever is still breathing. A row
     /// deselected mid-hold just drops out: the deselect edge already wrote its
     /// own `.off`. On `stateQueue`.
-    private func applyBTRenderStart(_ rendering: Set<String>) {   // on stateQueue
+    ///
+    /// The ceiling only means FAILURE for a device that was handed audio and
+    /// still never started playing it. A device that was handed nothing is
+    /// idle, not broken: with the Mac silent the capture fan-out never calls
+    /// `enqueue`, so no sink can anchor and none can ever render. Failing on
+    /// the ceiling alone reported "no audio started" for a perfectly healthy
+    /// speaker selected while paused — the link is up, and it will play the
+    /// moment there is anything to play. Whether sound is actually moving is
+    /// what the armed dot and the meter are for; the connection state must not
+    /// try to answer it too.
+    private func applyBTRenderStart(
+        _ rendering: Set<String>, anchored: Set<String>?
+    ) {   // on stateQueue
         let now = Date()
         for (id, deadline) in btConnectingDeadlines {
             guard expectedSelected.contains(id) else {
@@ -2978,6 +3007,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 setConnectionState(.connected, for: id)
             } else if now >= deadline {
                 btConnectingDeadlines[id] = nil
+                guard anchored?.contains(id) ?? true else {
+                    setConnectionState(.connected, for: id)
+                    Telemetry.log(.localPlayback, "bt_render_start_idle", ["device": id])
+                    continue
+                }
                 setConnectionState(.failed(ConnectionFailure(
                     cause: .unknown, detail: "no audio started")), for: id)
                 Telemetry.log(.localPlayback, "bt_render_start_timeout", ["device": id])
@@ -6263,6 +6297,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
         // Format and log the three metric families (each with count, p50/p95/p99/max).
         // Using snake_case to match existing telemetry key conventions in this file.
+        self.schedulingSnapshotLogCount &+= 1
         Telemetry.log(.airplay, "send_sched", [
             "wake_count": "\(snapshot.wakeLatency.count)",
             "wake_p50_ms": String(format: "%.1f", snapshot.wakeLatency.p50Ms),
@@ -7509,7 +7544,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// per-app meter) — and drives the metering-only tap lifecycle (the
     /// `.noRedirect` per-app meter): on `true`, start a dedicated `.unmuted` tap
     /// for every currently-eligible listed app; on `false`, stop them all.
-    /// `PopoverController` calls this on `popoverDidShow`/`popoverDidClose` via
+    /// `PopoverController` calls this on `surfaceDidShow`/`surfaceDidHide` via
     /// `backend as? MeteringControlling`. The `?` sub-components are `nil` in
     /// tests / the UI-only smoke path (harmless no-ops).
     public func setMeteringActive(_ active: Bool) {
@@ -8101,12 +8136,24 @@ public protocol BTOutputControlling: AnyObject {
     /// When macOS last used each known BT pairing, keyed by `Device.id` — the
     /// popover's ghost-pairing sort input (stale pairings to the bottom).
     func lastUsedDatesForBTDevices() -> [String: Date]
-    /// Set a device's SYNC trim (ms, clamped to ±`BTSyncTrim.rangeMs`):
-    /// applied live to its `BTSyncedSink` delay and persisted per device UID.
-    func setBTSyncTrim(_ ms: Int, forDevice id: String)
+    /// Set a device's SYNC trim (ms, snapped to `BTSyncTrim.resolutionMs` and
+    /// clamped to ±`BTSyncTrim.rangeMs`): applied live to its `BTSyncedSink`
+    /// delay, and written to disk only when `persist` is true.
+    ///
+    /// `persist: false` is the drawer's live SCRUB (D6): the ruler emits a new
+    /// value many times a second while the user drags, and every one of those
+    /// must reach the audio path — but writing the JSON store at that rate
+    /// would be absurd. The drag's END (and every discrete gesture: a stepper
+    /// click, a typed commit, Revert) arrives separately with `persist: true`.
+    func setBTSyncTrim(_ ms: Double, forDevice id: String, persist: Bool)
     /// The saved SYNC trim for a device (0 when none) — what a disconnected
-    /// row shows read-only, and what the stepper starts from.
-    func btSyncTrim(forDevice id: String) -> Int
+    /// row shows read-only, and what the drawer starts from.
+    func btSyncTrim(forDevice id: String) -> Double
+    /// Whether this device has a trim ENTRY at all — the honest answer to
+    /// D10's "tuned or never tuned?", which a value alone cannot give: a
+    /// device deliberately tuned to exactly 0.0 ms is tuned, and must not
+    /// read "Not set".
+    func btHasSyncTrim(forDevice id: String) -> Bool
     /// Start/stop the align-by-ear tick in the captured feed (auto-limits to
     /// ~30 s of ticks on its own).
     func setBTAlignTickActive(_ active: Bool)
@@ -8114,16 +8161,16 @@ public protocol BTOutputControlling: AnyObject {
     // MARK: Alignment wizard (W2)
 
     /// Push a CANDIDATE trim live to the device's sink — clamped like
-    /// ``setBTSyncTrim(_:forDevice:)`` but NEVER persisted and never entering
-    /// the stored trim table, so cancel can restore by re-pushing the store.
-    /// (A selection change mid-wizard re-pushes stored trims over the preview;
-    /// the wizard session re-applies on its next answer, so the stomp is a
-    /// beat, not a loss.)
-    func setBTWizardTrimPreview(_ ms: Int, forDevice id: String)
+    /// ``setBTSyncTrim(_:forDevice:persist:)`` but NEVER persisted and never
+    /// entering the stored trim table, so cancel can restore by re-pushing the
+    /// store. (A selection change mid-wizard re-pushes stored trims over the
+    /// preview; the wizard session re-applies on its next answer, so the stomp
+    /// is a beat, not a loss.)
+    func setBTWizardTrimPreview(_ ms: Double, forDevice id: String)
     /// End a preview: `keepMs` non-nil persists it (the wizard's Keep, via the
-    /// ordinary ``setBTSyncTrim(_:forDevice:)`` path); `nil` restores the
-    /// stored trim to the live sink (cancel / Try again / graceful exit).
-    func endBTWizardTrimPreview(forDevice id: String, keepMs: Int?)
+    /// ordinary ``setBTSyncTrim(_:forDevice:persist:)`` path); `nil` restores
+    /// the stored trim to the live sink (cancel / Try again / graceful exit).
+    func endBTWizardTrimPreview(forDevice id: String, keepMs: Double?)
     /// The wizard's continuous tick run: long budget plus the keep-alive bed's
     /// ~3 s wake preamble (the Sonos amp-gate live finding, 2026-08-07) —
     /// distinct from the row button's ~30 s ``setBTAlignTickActive(_:)``.
@@ -8137,40 +8184,72 @@ public protocol BTOutputControlling: AnyObject {
     /// for this device again. Also the abandon path (card torn down without an
     /// answer) with `dismissed: false` — that leaves no record, by design.
     func resolveBTAlignmentPrompt(forDevice id: String, dismissed: Bool)
+
+    /// The usable trim range for a device (D11/T3) — the drawer's ruler and
+    /// numeric field hard-stop here instead of at the nominal ±`BTSyncTrim
+    /// .rangeMs`, because past this bound `SyncTiming.totalDelayNanos`'s ≥ 0
+    /// clamp already eats the change and the readout would be lying.
+    ///
+    /// LIVE QUERY — the range moves whenever an AirPlay device joins or
+    /// leaves the group (the reference term swaps between the fixed BT-only
+    /// buffer and the live AirPlay presentation delay), so a conformer must
+    /// answer fresh on every call, never from a value cached at some earlier
+    /// point (e.g. drawer-open time). The default implementation below
+    /// (full ±range) keeps mock/dev builds — which have no BT sink to ask —
+    /// working unchanged.
+    func btUsableTrimRangeMs(forDevice id: String) -> ClosedRange<Double>
+}
+
+extension BTOutputControlling {
+    public func btUsableTrimRangeMs(forDevice id: String) -> ClosedRange<Double> {
+        -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs
+    }
 }
 
 extension NativeBackend: BTOutputControlling {
 
-    public func setBTSyncTrim(_ ms: Int, forDevice id: String) {
-        let clamped = BTSyncTrim.clamp(ms)
-        let all: [String: Int] = btTrimLock.withLock {
-            btTrimsByUID[id] = clamped
+    public func setBTSyncTrim(_ ms: Double, forDevice id: String, persist: Bool) {
+        // Quantise, not merely clamp (T7 §7): the ruler resolves 0.1 ms, so
+        // snapping here is what keeps the readout, the ruler and the persisted
+        // value from ever disagreeing about what "22.4" means.
+        let value = BTSyncTrim.quantise(ms)
+        let all: [String: Double] = btTrimLock.withLock {
+            btTrimsByUID[id] = value
             return btTrimsByUID
         }
-        try? btTrimStore?.save(all)
+        // The in-memory map updates on a scrub too — only the DISK write is
+        // skipped. `btSyncTrim`/`btHasSyncTrim` are read-back seams, and a
+        // reader mid-drag should see what the user is hearing.
+        if persist {
+            try? btTrimStore?.save(all)
+        }
         captureControlQueue.async { [weak self] in
-            self?.btSink?.setTrimMs(clamped, forDeviceUID: id)
+            self?.btSink?.setTrimMs(value, forDeviceUID: id)
         }
     }
 
-    public func btSyncTrim(forDevice id: String) -> Int {
+    public func btSyncTrim(forDevice id: String) -> Double {
         btTrimLock.withLock { btTrimsByUID[id] ?? 0 }
+    }
+
+    public func btHasSyncTrim(forDevice id: String) -> Bool {
+        btTrimLock.withLock { btTrimsByUID[id] != nil }
     }
 
     public func setBTAlignTickActive(_ active: Bool) {
         captureCoordinator?.setAlignTick(active)
     }
 
-    public func setBTWizardTrimPreview(_ ms: Int, forDevice id: String) {
+    public func setBTWizardTrimPreview(_ ms: Double, forDevice id: String) {
         let clamped = BTSyncTrim.clamp(ms)
         captureControlQueue.async { [weak self] in
             self?.btSink?.setTrimMs(clamped, forDeviceUID: id)
         }
     }
 
-    public func endBTWizardTrimPreview(forDevice id: String, keepMs: Int?) {
+    public func endBTWizardTrimPreview(forDevice id: String, keepMs: Double?) {
         if let keepMs {
-            setBTSyncTrim(keepMs, forDevice: id)
+            setBTSyncTrim(keepMs, forDevice: id, persist: true)
         } else {
             let stored = btSyncTrim(forDevice: id)
             captureControlQueue.async { [weak self] in
@@ -8193,6 +8272,19 @@ extension NativeBackend: BTOutputControlling {
             Telemetry.log(.localPlayback, "bt_alignment_prompt_dismissed", ["device": id])
         }
         stateQueue.async { self.releaseBTAlignmentHoldLocked(id) }
+    }
+
+    /// `btSink` is confined to `captureControlQueue` (every other touch in
+    /// this file reaches it only via `.async` there), so this hops in with
+    /// `.sync` rather than reading the property directly from whatever
+    /// thread the caller is on — the same synchronous-read-of-confined-state
+    /// pattern `stateQueue.sync` uses elsewhere in this file. The hop also
+    /// keeps the live-query contract honest: nothing here is cached on the
+    /// `NativeBackend` side to go stale between AirPlay joining/leaving.
+    public func btUsableTrimRangeMs(forDevice id: String) -> ClosedRange<Double> {
+        captureControlQueue.sync {
+            btSink?.usableTrimRangeMs(forDeviceUID: id) ?? (-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
+        }
     }
 }
 
@@ -8246,10 +8338,21 @@ protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
     /// The UIDs whose per-device sink is emitting real audio right now — the
     /// signal a Bluetooth row's `.connecting` hold ends on.
     func renderingDeviceUIDs() -> Set<String>
-    /// Per-device signed manual trim (BT-OFFSET-UI). Default no-op so
-    /// lifecycle-only spies compile unchanged; ``BTSyncedSink`` provides the
-    /// real one (same-value writes are already guarded there).
-    func setTrimMs(_ ms: Int, forDeviceUID uid: String)
+    /// The UIDs handed any captured audio at all — how the hold's ceiling tells
+    /// a silent Mac (idle, promote to `.connected`) from a device that got
+    /// audio and never played it (a real failure). `nil` means "can't tell",
+    /// which the caller reads as anchored: lifecycle-only spies then keep the
+    /// old fail-on-ceiling behaviour and their expectations are unchanged.
+    func anchoredDeviceUIDs() -> Set<String>?
+    /// Per-device signed manual trim (BT-OFFSET-UI/BT-SYNC-DRAWER). Default
+    /// no-op so lifecycle-only spies compile unchanged; ``BTSyncedSink``
+    /// provides the real one (same-value writes are already guarded there).
+    func setTrimMs(_ ms: Double, forDeviceUID uid: String)
+    /// The usable trim range for a device (D11/T3) — see
+    /// ``BTSyncedSink/usableTrimRangeMs(forDeviceUID:)``. Default returns the
+    /// full ±`BTSyncTrim.rangeMs` so lifecycle-only spies compile unchanged;
+    /// ``BTSyncedSink`` provides the live one.
+    func usableTrimRangeMs(forDeviceUID uid: String) -> ClosedRange<Double>
     /// Per-device render gain: the backend's composed
     /// `Main × Group × Device` product, 0 while muted or first-mix-held (W3).
     /// Same default-no-op posture as `setTrimMs`.
@@ -8257,7 +8360,11 @@ protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
 }
 
 extension BTSyncedSinkControlling {
-    func setTrimMs(_ ms: Int, forDeviceUID uid: String) {}
+    func anchoredDeviceUIDs() -> Set<String>? { nil }
+    func setTrimMs(_ ms: Double, forDeviceUID uid: String) {}
+    func usableTrimRangeMs(forDeviceUID uid: String) -> ClosedRange<Double> {
+        -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs
+    }
     func setGain(_ gain: Float, forDeviceUID uid: String) {}
 }
 

@@ -102,8 +102,11 @@ private final class ApplicationsFooterView: NSView {
     func test_tapRemove() { onRemove?() }
 }
 
-/// Builds and owns the status-item **`NSPopover`** dropdown (SPEC §9 revised —
-/// NSMenu → NSPopover; SoundSource-inspired Main Out model, 2026-07-14b).
+/// Builds and owns the **Mixer panel** (SPEC §9 revised — SoundSource-inspired
+/// Main Out model, 2026-07-14b). The panel is put on screen by the one-surface
+/// host (`AppSurfaceController`), which claims it via
+/// ``claimPanelForSurfaceHosting()``; this controller never presents anything
+/// itself.
 ///
 /// Structure, top to bottom:
 /// 1. **System section — a single "Main Out" row** (`MainOutRowView`): speaker
@@ -125,9 +128,7 @@ private final class ApplicationsFooterView: NSView {
 /// All group/master/mute/selection arithmetic goes through the injected
 /// `GroupController` (UI-agnostic, unit-tested in core). `@MainActor`.
 @MainActor
-public final class PopoverController: NSObject, NSPopoverDelegate {
-
-    public let popover = NSPopover()
+public final class PopoverController: NSObject {
 
     private var groupController: GroupController?
     private var devicesByID: [String: Device] = [:]
@@ -187,15 +188,6 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// updates, Main Out selection, etc.) leaves the transient state alone.
     private var isRebuildingForOpen = false
 
-    /// Called when the user picks "Open Mixer…", the header's "Open Groups editor"
-    /// button (task A — group membership editing lives in the mixer window), or
-    /// otherwise wants the mixer window shown.
-    public var onOpenMixer: (() -> Void)?
-
-    /// Called when the user taps the header's Settings button (task A). The app
-    /// wires this to open the Settings window.
-    public var onOpenSettings: (() -> Void)?
-
     /// Called when the user taps the takeover status strip's "Open Login
     /// Items…" button (T6, state 1). The app wires this to
     /// `PTPHelperManaging.openSystemSettingsLoginItems()` — the same seam
@@ -215,8 +207,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// the button, if ever rendered, taps into nothing.
     public var onReselectAudiouter: (() -> Void)?
 
-    /// Called with `true` on `popoverDidShow` and `false` on `popoverDidClose`
-    /// (T-GATE): the metering-active gate. The app wires this to
+    /// Called with `true` on `surfaceDidShow()` and `false` on
+    /// `surfaceDidHide()` (T-GATE): the metering-active gate. The app wires this to
     /// `(backend as? MeteringControlling)?.setMeteringActive(_:)` so the backend
     /// only computes/emits `.level` while a user can actually see a meter. `nil`
     /// means "no backend adopts the capability" — the popover works exactly the
@@ -246,17 +238,44 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// (mock/tests without the capability) sorts by name alone.
     public var btLastUsedProvider: (() -> [String: Date])?
 
-    /// Called when a Bluetooth row's SYNC trim changes (BT-OFFSET-UI), already
-    /// clamped. The app wires this to
+    /// Called when a Bluetooth device's SYNC trim changes, already quantised.
+    /// The app wires this to
     /// `(backend as? BTOutputControlling)?.setBTSyncTrim` — live-applied to
-    /// that device's `BTSyncedSink` delay and persisted per device UID.
-    public var onSetBTTrim: ((_ ms: Int, _ deviceID: String) -> Void)?
+    /// that device's `BTSyncedSink` delay, and written to disk only when
+    /// `persist` is true.
+    ///
+    /// `persist == false` is the drawer's live ruler scrub (D6): apply to
+    /// audio, do NOT write the JSON store. Every discrete gesture — drag end,
+    /// a stepper click, a typed commit, Revert — arrives with `true`.
+    public var onSetBTTrim: ((_ ms: Double, _ deviceID: String, _ persist: Bool) -> Void)?
 
     /// The saved SYNC trim for a Bluetooth device id — seeds each row's value
     /// (and the read-only display on a disconnected row). Wired to
     /// `(backend as? BTOutputControlling)?.btSyncTrim`. `nil` = 0, and edits
     /// then live only in `btTrimsByID` (mock/dev — nothing persists them).
-    public var btTrimProvider: ((_ deviceID: String) -> Int)?
+    public var btTrimProvider: ((_ deviceID: String) -> Double)?
+
+    /// Whether a Bluetooth device has a saved trim ENTRY at all — D10's
+    /// "tuned vs never tuned", which `btTrimProvider`'s value alone cannot
+    /// answer: a device deliberately tuned to exactly 0.0 ms is tuned, and
+    /// must read "0.0 ms", not "Not set". Wired to
+    /// `(backend as? BTOutputControlling)?.btHasSyncTrim`. `nil` = nothing is
+    /// persisted, so every chip starts untuned and only a live edit
+    /// (`btTunedDeviceIDs`) marks one tuned.
+    public var btTrimIsSetProvider: ((_ deviceID: String) -> Bool)?
+
+    /// The usable trim range for a Bluetooth device id (D11/T3) — the
+    /// drawer's hard-stop, tighter than the nominal ±`BTSyncTrim.rangeMs`
+    /// whenever the device's real headroom is smaller. Wired to
+    /// `(backend as? BTOutputControlling)?.btUsableTrimRangeMs`. `nil` (mock/
+    /// dev builds, or no BT capability) means the full ±range.
+    ///
+    /// LIVE QUERY, same as the backend seam it wraps: the range moves
+    /// whenever AirPlay joins or leaves the group, so callers must invoke
+    /// this fresh every time they need it — never cache the result, not even
+    /// for the lifetime of one open drawer (T7 re-reads it on every
+    /// `update(devices:)`).
+    public var btTrimRangeProvider: ((_ deviceID: String) -> ClosedRange<Double>)?
 
     /// Called with `true`/`false` as the align-by-ear tick starts/stops
     /// (BT-OFFSET-UI). Wired to
@@ -266,7 +285,55 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// The freshest trim value per device id (the user's latest edit, or the
     /// provider's persisted value on first read) — the rows' apply source, so
     /// a rebuild never has to round-trip the backend.
-    private var btTrimsByID: [String: Int] = [:]
+    private var btTrimsByID: [String: Double] = [:]
+
+    /// Device ids known to carry a deliberate trim (D10). Seeded from
+    /// `btTrimIsSetProvider` the first time a row reads its trim, and joined
+    /// by any device the user edits — an edit IS the act of tuning, so a
+    /// scrub down to exactly 0.0 leaves a tuned chip reading "0.0 ms", never
+    /// a chip that flips back to "Not set" under the user's hand.
+    private var btTunedDeviceIDs: Set<String> = []
+
+    /// The Bluetooth device whose SYNC drawer is currently open, or `nil`
+    /// (D2 — at most one, ever). This is the INTENT; it survives `rebuild()`,
+    /// which recreates rows, exactly like `openDiagnosisIDs`.
+    private var expandedSyncDeviceID: String?
+
+    /// The device the mounted drawer view currently sits under — the view-layer
+    /// mirror of `expandedSyncDeviceID`, rebuilt by `reconcileSyncDrawer`. A
+    /// separate field rather than reading `syncDrawer.superview`, because
+    /// `removeRow` defers its detach into an animation completion handler and
+    /// the superview lingers for the length of the fade.
+    private var mountedSyncDrawerID: String?
+
+    /// Whether the expanded drawer's device was selected the last time we
+    /// looked. This turns "is selected" into an EDGE: a drawer opened on an
+    /// available-but-unselected row (tuning a speaker before adding it to the
+    /// mix — the chip is live whenever the device is available) survives,
+    /// while a device the user drops OUT of the mix takes its drawer with it.
+    /// Same edge discipline as `update(devices:)`'s Bluetooth availability
+    /// deselect, and the mirror of the diagnosis panel's `wantsAudio` prune.
+    private var expandedSyncDeviceWasSelected = false
+
+    /// Set when a drawer is opened for a device, cleared once `noteOpened` has
+    /// seeded the Revert baseline (D8). `BTSyncDrawerView.configure` alone
+    /// cannot tell a fresh open from a routine refresh, and the ONE drawer
+    /// instance below is reconfigured across devices, so the distinction has
+    /// to live here.
+    private var syncDrawerNeedsOpenBaseline = false
+    /// Whether the drawer's value field was mid-edit when `rebuild()` detached
+    /// it, so `reconcileSyncDrawer` can hand focus back after re-mounting.
+    /// See the detach site in `rebuild()` for why this exists.
+    private var syncDrawerWasEditing = false
+
+    /// The single reused drawer (D2): one instance reconfigured across
+    /// devices, never one per row. Created lazily so a popover that never
+    /// meets a Bluetooth device never builds it.
+    private lazy var syncDrawer: BTSyncDrawerView = {
+        let view = BTSyncDrawerView()
+        view.delegate = self
+        return view
+    }()
 
     // MARK: First-mix alignment intercept + wizard (W3/W4)
 
@@ -276,10 +343,10 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     public var onResolveBTAlignmentPrompt: ((_ deviceID: String, _ dismissed: Bool) -> Void)?
     /// The wizard's live candidate push (never persisted). Wired to
     /// `setBTWizardTrimPreview`.
-    public var onBTWizardTrimPreview: ((_ ms: Int, _ deviceID: String) -> Void)?
+    public var onBTWizardTrimPreview: ((_ ms: Double, _ deviceID: String) -> Void)?
     /// End of a wizard preview: keep (persist) or restore. Wired to
     /// `endBTWizardTrimPreview`.
-    public var onBTWizardEndPreview: ((_ deviceID: String, _ keepMs: Int?) -> Void)?
+    public var onBTWizardEndPreview: ((_ deviceID: String, _ keepMs: Double?) -> Void)?
     /// The wizard-shaped tick gate (continuous + wake preamble). Wired to
     /// `setBTWizardTickActive`.
     public var onBTWizardTickActive: ((_ active: Bool) -> Void)?
@@ -423,8 +490,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     /// Active only while the popover is open: a local mouse-down monitor that
     /// clears `selectedAppBundleID` when the user clicks outside any app row or
-    /// the ± footer (deselect-on-outside-click). Installed in `popoverDidShow`,
-    /// removed in `popoverDidClose`.
+    /// the ± footer (deselect-on-outside-click). Installed in `surfaceDidShow()`,
+    /// removed in `surfaceDidHide()`.
     private var deselectClickMonitor: Any?
 
     /// The Applications card's ± footer row (T3, LOCKED DECISION — replaces
@@ -518,19 +585,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         self.appRouting = appRouting
         self.runningAppsProvider = runningAppsProvider
         super.init()
-        popover.behavior = .transient
-        popover.animates = true
-        popover.delegate = self
-        popover.contentViewController = panel
         panel.controller = self
         mainOutRow.delegate = self
-        // Header bar actions (task A): the "Open Groups editor" button opens the
-        // mixer window (where group membership editing lives); Settings forwards
-        // to `onOpenSettings` (the app wires it to the Settings window).
-        panel.setHeaderActions(
-            onOpenGroupsEditor: { [weak self] in self?.onOpenMixer?() },
-            onOpenSettings: { [weak self] in self?.onOpenSettings?() },
-            onQuit: { NSApp.terminate(nil) })
         applicationsFooter.onAdd = { [weak self] in
             guard let self else { return }
             self.presentAddApplicationPicker(relativeTo: self.applicationsFooter)
@@ -654,6 +710,11 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                 refreshDeviceRowsReconcilingCardNote()
                 reconcileDiagnosisPanels(animated: true)
                 reconcileBTAlignmentPanels(animated: true)
+                // Re-reads the usable range from the provider (T3's trap) and
+                // auto-collapses a drawer whose device has gone unavailable or
+                // left the mix. The rebuild branch above reaches the same call
+                // through `rebuild()`.
+                reconcileSyncDrawer(animated: true)
             }
         }
         // Not shown: deliberately NO rebuild. Every open goes through
@@ -897,65 +958,64 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     // MARK: Show / hide
 
-    /// Headless test seam: an `NSPopover` can never actually show under `swift
-    /// test`, so tests flip this to exercise the shown-path repaint semantics
-    /// (the view tree IS the test suite's rendering surface). Production code
-    /// never sets it. `toggle(relativeTo:)` and `setPopoverAnimates` still key
-    /// off the real `popover.isShown` — this only affects repaint routing.
+    /// Whether the HOST currently has this panel on screen. Owned by
+    /// ``surfaceDidShow()`` / ``surfaceDidHide()`` — the two calls a host makes
+    /// around putting the panel on/off screen.
+    private var hostIsShown = false
+
+    /// Headless test seam: no host can actually put the panel on screen under
+    /// `swift test`, so tests flip this to exercise the shown-path repaint
+    /// semantics (the view tree IS the test suite's rendering surface).
+    /// Production code never sets it.
     public var test_isShownOverride = false
-    private var isEffectivelyShown: Bool { popover.isShown || test_isShownOverride }
+
+    /// The ONE visibility question this controller asks. Every
+    /// skip-work-while-hidden gate reads this and nothing else, which is what
+    /// lets any host present the same panel content.
+    private var isEffectivelyShown: Bool { hostIsShown || test_isShownOverride }
 
     /// Total `rebuild()` calls, for tests asserting a closed popover does NOT
     /// rebuild per backend event (audit B8).
     public private(set) var test_rebuildCount = 0
 
-    public func toggle(relativeTo button: NSStatusBarButton) {
-        if popover.isShown {
-            popover.performClose(nil)
-        } else {
-            rebuildForOpen()
-            // Exact-fit initial size (T-3): settle layout and set the popover's
-            // content size while it is still HIDDEN, so it opens at exactly the
-            // content height with no scrollbar (PLAN-POPOVER-ROUTING.md §E risk 1 —
-            // non-animated path for initial show). A `preferredContentSize` change
-            // on a not-yet-shown popover never animates, so this is safe to do with
-            // `animates` left true — the show fade below still plays; only later,
-            // IN-PLACE resizes (T-4 expand/collapse) animate the frame.
-            panel.panelContentDidChangeHeight(animated: false)
-            // Never actually present under `swift test`/a headless tool
-            // (`HeadlessRuntime`) — those hold a real WindowServer connection,
-            // so an un-gated `popover.show` would flash a real window on the
-            // developer's actual screen. No test/tool currently calls
-            // `toggle()` (real presentation only happens from the live app's
-            // status-item click), but gate it for defense-in-depth.
-            guard !HeadlessRuntime.isActive else { return }
-            NSApp.activate(ignoringOtherApps: true)
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        }
+    /// The host's resize behavior. A host assigns this to run `apply` (the
+    /// `preferredContentSize` assignment) inside whatever animation IT uses to
+    /// follow the panel's new size — the surface assigns it at claim time to
+    /// resize its shell window. `nil` means NO host is following the panel
+    /// (pre-claim, or headless tests/tools): the size change applies
+    /// immediately with no animation, which is exactly right for a panel
+    /// nothing is showing.
+    var surfaceResizer: ((_ animated: Bool, _ apply: () -> Void) -> Void)?
+
+    /// Hand the panel to the one-surface host (U3, `AppSurfaceController`) —
+    /// the single door through which a host may take the panel. A plain
+    /// accessor today, but the name is the contract: taking the panel is a
+    /// CLAIM (the caller must install `surfaceResizer` and run the open
+    /// ritual), not a peek — so `panel` itself stays private.
+    func claimPanelForSurfaceHosting() -> PopoverPanelViewController {
+        panel
     }
 
-    /// Set the popover's resize animation for the NEXT `preferredContentSize`
-    /// change, then restore. The panel's resize primitive
+    /// Apply the panel's next `preferredContentSize` change with the current
+    /// host's resize animation. The panel's resize primitive
     /// (`panelContentDidChangeHeight`) calls this so the DOCUMENTED
     /// `preferredContentSize` size channel animates (or not) exactly as the caller
-    /// asked — `NSPopover` animates a `preferredContentSize` change iff `animates`
-    /// is true (T-3, PLAN §E risk 1). The panel owns no `NSPopover` reference; this
-    /// controller does. Only meaningful while the popover is shown; a resize on a
-    /// hidden popover never animates, so this is a no-op then (and must NOT clobber
-    /// `animates`, which also gates the show/hide fade). The `apply` closure makes
-    /// the size assignment inside the temporarily-set flag.
-    func setPopoverAnimates(_ animates: Bool, whileApplying apply: () -> Void) {
-        guard popover.isShown else { apply(); return }
-        let previous = popover.animates
-        popover.animates = animates
+    /// asked; the panel itself holds no reference to any host.
+    func applySurfaceResize(animated: Bool, whileApplying apply: () -> Void) {
+        if let surfaceResizer {
+            surfaceResizer(animated, apply)
+            return
+        }
         apply()
-        popover.animates = previous
     }
 
     /// Rebuild as an OPEN (T-5, PLAN §B): recompute every collapsible card's
     /// default and discard manual toggles from the previous open, THEN rebuild.
-    /// Shared by `toggle()`'s show path and `test_simulateOpen()`.
-    private func rebuildForOpen() {
+    /// Shared by `test_simulateOpen()` and the surface host's mount path
+    /// (`AppSurfaceController`), which must run this open ritual before
+    /// putting the panel on screen (hidden means idle, so an open re-ingests
+    /// everything that arrived meanwhile).
+    func rebuildForOpen() {
         isRebuildingForOpen = true
         transientCollapsed.removeAll()
         rebuild()
@@ -976,6 +1036,29 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // `btWizardSession`) survives and remounts below.
         btAlignmentPromptView = nil
         btWizardView = nil
+        // The ONE reused drawer view (D2) can't just be forgotten the way the
+        // per-id panels above are: `clearRows()` drops the cards, but the
+        // drawer stays parented to the orphaned body stack it was inserted
+        // into. Detach it explicitly; the INTENT (`expandedSyncDeviceID`)
+        // survives and `reconcileSyncDrawer` re-mounts it under the fresh row.
+        if mountedSyncDrawerID != nil {
+            // Detaching a view that is BEING EDITED ends its field-editor
+            // session and drops first responder back to the window (measured).
+            // The typed value still commits on the way out, so nothing is lost
+            // — but focus silently vanishes, and inside a `.transient` popover
+            // the user's NEXT Return then lands with no first responder and
+            // closes the whole surface. That is the live "Return closes the
+            // popover and my edit goes nowhere" report: not the field's key
+            // handling (which consumes Return correctly — proven by real event
+            // dispatch in `SyncValueFieldLiveKeyTests`), but a background
+            // repaint pulling the field out from under the user mid-type. Any
+            // structural repaint runs this: a device appearing, a route
+            // change, a valid-target flip. Remember the editing state here and
+            // restore it once `reconcileSyncDrawer` has re-mounted the drawer.
+            syncDrawerWasEditing = syncDrawer.isEditingValue
+            syncDrawer.removeFromSuperview()
+            mountedSyncDrawerID = nil
+        }
         blockedNoteByID.removeAll()
         appRowsByBundleID.removeAll()
         panel.clearRows()
@@ -1008,8 +1091,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
         // 2. Selected Devices card — split into Current Device + AirPlay. ALWAYS
         // present now (V2): when no devices have been discovered yet the card
-        // still builds, showing a single non-interactive "Looking for devices…"
-        // placeholder so it never silently vanishes.
+        // still builds, showing a single non-interactive "Looking for
+        // speakers…" placeholder (§5.9) so it never silently vanishes.
         let locals = allDevices.filter(\.isLocalDevice)
         let airplay = allDevices.filter { !$0.isLocalDevice && !$0.isBluetooth }
         let bluetooth = orderedBluetoothDevices(in: allDevices)
@@ -1047,7 +1130,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             panel.addCardNote(note)
         }
         if locals.isEmpty && airplay.isEmpty && bluetooth.isEmpty {
-            panel.addRow(makePlaceholderRow(text: "Looking for devices…"))
+            panel.addRow(makePlaceholderRow(text: Self.devicesEmptyPlaceholderText))
             devicesPlaceholderShown = true
         } else {
             if !locals.isEmpty {
@@ -1116,7 +1199,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // show a single non-interactive placeholder BEFORE the ± footer.
         applicationsPlaceholderShown = false
         if renderedRoutes.isEmpty {
-            panel.addRow(makePlaceholderRow(text: "No apps routed — use + below to route an app."))
+            panel.addRow(makePlaceholderRow(text: Self.applicationsEmptyPlaceholderText))
             applicationsPlaceholderShown = true
         }
         applicationsFooter.isRemoveEnabled = selectedAppBundleID != nil
@@ -1136,6 +1219,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // Same restore for the first-mix alignment card / wizard panel (W3/W4):
         // their intent survives the rebuild; the mounted views don't.
         reconcileBTAlignmentPanels(animated: false)
+        // Same restore for the SYNC drawer, and the same un-animated reasoning.
+        reconcileSyncDrawer(animated: false)
 
         // Re-pin the silence-fallback banner (R11) above the cards: `clearRows()`
         // above dropped it with everything else, so a rebuild that happens WHILE the
@@ -1203,6 +1288,16 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// The Applications card's title, so its default is keyed identically to
     /// every other card even though the card itself isn't built yet (T-8).
     static let applicationsCardTitle = "App Exceptions"
+
+    /// Warm Signal §5.9's locked empty-state copy for the Devices card. Shown
+    /// while nothing has been discovered yet; §5.9 also specs a distinguishable
+    /// "none found" resting state hinting at Local Network permission, but this
+    /// layer has no discovery-completion signal to tell "still looking" apart
+    /// from "genuinely none" — see the AGENTS.md note on this gap.
+    static let devicesEmptyPlaceholderText = "Looking for speakers…"
+    /// Warm Signal §5.9's locked empty-state copy for the Applications card.
+    static let applicationsEmptyPlaceholderText =
+        "Route one app somewhere else — music to the house, calls on your Mac. Use + to pick an app."
 
     /// The collapsed state `rebuild()` should hand `beginCard` for the card
     /// titled `title`: on an OPEN-triggered rebuild, the freshly computed
@@ -1594,7 +1689,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                       energizePending: energizePendingIDs.contains(device.id),
                       iconSymbolName: deviceIconController?.symbolName(for: device),
                       syncTrimMs: btSyncTrim(for: device),
-                      alignTickActive: alignTickDeviceID == device.id)
+                      syncTrimIsSet: btSyncTrimIsSet(for: device),
+                      syncDrawerExpanded: expandedSyncDeviceID == device.id)
             return
         }
         let selected = controller.isSpeakerSelected(device.id)
@@ -1651,19 +1747,162 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                   energizePending: energizePendingIDs.contains(device.id),
                   iconSymbolName: deviceIconController?.symbolName(for: device),
                   syncTrimMs: btSyncTrim(for: device),
-                  alignTickActive: alignTickDeviceID == device.id)
+                  syncTrimIsSet: btSyncTrimIsSet(for: device),
+                  syncDrawerExpanded: expandedSyncDeviceID == device.id)
     }
 
     /// A Bluetooth row's current SYNC trim: the session cache first (the
     /// user's freshest edit), else the persisted value via `btTrimProvider`,
     /// else 0. Non-BT devices short-circuit to 0 (their rows mount no SYNC
-    /// cluster and ignore the value anyway).
-    private func btSyncTrim(for device: Device) -> Int {
+    /// chip and ignore the value anyway).
+    private func btSyncTrim(for device: Device) -> Double {
         guard device.isBluetooth else { return 0 }
         if let cached = btTrimsByID[device.id] { return cached }
         let persisted = btTrimProvider?(device.id) ?? 0
         btTrimsByID[device.id] = persisted
+        if btTrimIsSetProvider?(device.id) == true { btTunedDeviceIDs.insert(device.id) }
         return persisted
+    }
+
+    /// Whether this Bluetooth device has been tuned at all (D10 — "Not set"
+    /// otherwise). Reads the trim first so both caches seed together on a
+    /// row's first paint.
+    private func btSyncTrimIsSet(for device: Device) -> Bool {
+        guard device.isBluetooth else { return false }
+        _ = btSyncTrim(for: device)
+        return btTunedDeviceIDs.contains(device.id)
+    }
+
+    // MARK: Bluetooth SYNC drawer (PLAN-BT-SYNC-DRAWER T7)
+    //
+    // An accordion under its own row: at most one open at a time (D2),
+    // inserted directly after the row it belongs to and pushing the rows below
+    // down (D1 — sync is a comparison AGAINST those rows, so a floating panel
+    // covering them would defeat the exercise). Mount/unmount ride
+    // `insertRow`/`removeRow`, which already own the animated
+    // `preferredContentSize` republish AND the Reduce Motion gate — so nothing
+    // here re-fits the popover itself (folder rule: callers must never add
+    // their own `panelContentDidChangeHeight`).
+
+    /// Open the drawer under `id`, or close it if it is already the open one.
+    /// Either way any OTHER open drawer closes first (D2).
+    private func toggleSyncDrawer(deviceID id: String, animated: Bool) {
+        let closingThisOne = expandedSyncDeviceID == id
+        closeSyncDrawerIntent()
+        if !closingThisOne {
+            expandedSyncDeviceID = id
+            expandedSyncDeviceWasSelected = groupController?.isSpeakerSelected(id) ?? false
+            syncDrawerNeedsOpenBaseline = true
+        }
+        reconcileSyncDrawer(animated: animated)
+        // Both chips repaint: the one losing its drawer drops back to its
+        // resting form, the one gaining it reads engaged.
+        refreshDeviceRows()
+    }
+
+    /// Retract the open-drawer INTENT, taking the align-by-ear tick with it —
+    /// a metronome ticking with no visible control to stop it is a bug. The
+    /// view itself is torn down by the next `reconcileSyncDrawer`.
+    private func closeSyncDrawerIntent() {
+        guard let id = expandedSyncDeviceID else { return }
+        expandedSyncDeviceID = nil
+        expandedSyncDeviceWasSelected = false
+        syncDrawerNeedsOpenBaseline = false
+        if alignTickDeviceID == id { setAlignTick(nil) }
+    }
+
+    /// Make the mounted drawer match `expandedSyncDeviceID`, first pruning the
+    /// intent against the three reasons a drawer must auto-collapse: its
+    /// device left the snapshot, stopped being an available Bluetooth row, or
+    /// was dropped out of the mix.
+    ///
+    /// Called from `rebuild()` (freshly built rows) and from
+    /// `update(devices:)`'s in-place repaint, so an open drawer re-reads its
+    /// device's usable range on EVERY snapshot — T3's trap: that range moves
+    /// whenever AirPlay joins or leaves the group, and a range captured at
+    /// open time would let the ruler run past a floor that had crept upward.
+    private func reconcileSyncDrawer(animated: Bool) {
+        if let id = expandedSyncDeviceID {
+            let selected = groupController?.isSpeakerSelected(id) ?? false
+            let rowIsLive = devicesByID[id].map { $0.isBluetooth && $0.isAvailable } == true
+                && deviceRowsByID[id] != nil
+            if !rowIsLive || (expandedSyncDeviceWasSelected && !selected) {
+                closeSyncDrawerIntent()
+            } else {
+                expandedSyncDeviceWasSelected = selected
+            }
+        }
+        guard let id = expandedSyncDeviceID,
+              let device = devicesByID[id],
+              let row = deviceRowsByID[id]
+        else {
+            unmountSyncDrawer(animated: animated)
+            return
+        }
+        if mountedSyncDrawerID != id {
+            // Un-animated on purpose when the drawer MOVES between rows: an
+            // animated removal fades the view and defers its detach, and this
+            // single reused instance is about to be re-parented — two
+            // animation groups would then fight over one view's `isHidden`.
+            // The insert below carries the visible transition instead.
+            unmountSyncDrawer(animated: false)
+            mountedSyncDrawerID = id
+            panel.insertRow(syncDrawer, after: row, animated: animated)
+        }
+        pushSyncDrawerState(device)
+        if syncDrawerNeedsOpenBaseline {
+            syncDrawerNeedsOpenBaseline = false
+            syncDrawer.noteOpened(trimMs: btSyncTrim(for: device))
+        }
+        if syncDrawerWasEditing {
+            syncDrawerWasEditing = false
+            // Give the field its editing session back — see the detach site
+            // in `rebuild()`.
+            syncDrawer.focusValueField()
+        }
+    }
+
+    /// Push one device's live sync state into the mounted drawer. Split out of
+    /// `reconcileSyncDrawer` so the align tick's own repaints (notably its
+    /// ~30 s auto-stop) can un-light the drawer's button without dragging a
+    /// whole mount/unmount reconcile behind them.
+    private func pushSyncDrawerState(_ device: Device) {
+        syncDrawer.configure(deviceName: device.name,
+                             trimMs: btSyncTrim(for: device),
+                             isSet: btSyncTrimIsSet(for: device),
+                             usableRangeMs: btUsableTrimRange(for: device.id),
+                             alignTickActive: alignTickDeviceID == device.id)
+    }
+
+    private func unmountSyncDrawer(animated: Bool) {
+        guard mountedSyncDrawerID != nil else { return }
+        mountedSyncDrawerID = nil
+        panel.removeRow(syncDrawer, animated: animated)
+    }
+
+    /// The drawer's hard stops (D11). Queried FRESH every time — never cached;
+    /// see `btTrimRangeProvider`.
+    private func btUsableTrimRange(for id: String) -> ClosedRange<Double> {
+        btTrimRangeProvider?(id) ?? (-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
+    }
+
+    /// Apply one trim edit from the drawer. `persist == false` is a live ruler
+    /// scrub (D6): the audio path takes it, the JSON store does not. The
+    /// session cache updates either way, so the row's chip tracks the scrub
+    /// digit by digit.
+    private func applyBTTrim(_ ms: Double, deviceID id: String, persist: Bool) {
+        let value = BTSyncTrim.quantise(ms)
+        btTrimsByID[id] = value
+        // Editing a device IS tuning it — a scrub that passes through exactly
+        // 0.0 must read "0.0 ms", never flip the chip back to "Not set".
+        btTunedDeviceIDs.insert(id)
+        onSetBTTrim?(value, id, persist)
+        // Repaint just this one row's chip. A scrub arrives dozens of times a
+        // second and `refreshDeviceRows()` would drag the rail extents and
+        // every other row through each one of them.
+        if let row = deviceRowsByID[id], let device = devicesByID[id] {
+            applySelectionState(to: row, device: device)
+        }
     }
 
     private func refreshDeviceRows() {
@@ -1769,8 +2008,9 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     }
 
     /// A non-interactive placeholder body row (V2 Devices empty state / V11
-    /// Applications empty state): `text` in a tertiary-label, row-height view
-    /// whose label leading edge aligns with the name column (past the icon).
+    /// Applications empty state; copy carried by both to the §5.9 spec text
+    /// under V9): `text` in a tertiary-label, row-height view whose label
+    /// leading edge aligns with the name column (past the icon).
     private func makePlaceholderRow(text: String) -> NSView {
         let label = NSTextField(labelWithString: text)
         label.translatesAutoresizingMaskIntoConstraints = false
@@ -2448,9 +2688,9 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         deviceRowsByID[id]
     }
 
-    /// Simulate the popover being opened (T-5): recomputes collapse defaults and
-    /// discards this open's manual toggles, exactly like `toggle()`'s show path,
-    /// without needing a real `NSStatusBarButton`/`NSPopover.show`.
+    /// Simulate the panel being opened (T-5): recomputes collapse defaults and
+    /// discards this open's manual toggles, exactly like the surface's Mixer
+    /// mount path, without needing a real host to show anything.
     public func test_simulateOpen() { rebuildForOpen() }
 
     // MARK: Running-app picker test hooks (T-7)
@@ -2538,28 +2778,29 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// Main Out selector's group-routing entries — a saved group becomes a
     /// destination even though the popover no longer renders a Groups section).
     public var test_saveCurrentSetupEnabled: Bool { canSaveCurrentSetup }
-    public var test_headerHasQuit: Bool { panel.test_headerHasQuit }
 
-    // Header (task A) test hooks.
-    public var test_headerTitle: String { panel.header.test_title }
-    public var test_headerGroupsButtonHasImage: Bool { panel.header.test_groupsButtonHasImage }
-    public var test_headerSettingsButtonHasImage: Bool { panel.header.test_settingsButtonHasImage }
-    /// Simulate tapping the header's "Open Groups editor" button.
-    public func test_tapHeaderGroupsEditor() { panel.header.test_tapGroupsEditor() }
-    /// Simulate tapping the header's Settings button.
-    public func test_tapHeaderSettings() { panel.header.test_tapSettings() }
+    /// The panel content's extra top inset (the surface seats the card stack
+    /// below the window's toolbar strip) — public because `popover-harness`
+    /// reads it through the non-testable import.
+    public var test_panelContentTopInset: CGFloat { panel.test_contentTopInset }
 
     /// Count of device rows in the Selected Devices section.
     public var test_deviceSectionRowCount: Int { deviceRowsByID.count }
 
     // MARK: Empty-state / card-note / accessory test hooks (V2 / V11 / A1 / F1)
 
-    /// Whether the Devices card's "Looking for devices…" placeholder is currently
+    /// Whether the Devices card's "Looking for speakers…" placeholder is currently
     /// mounted (V2).
     public var test_devicesPlaceholderShown: Bool { devicesPlaceholderShown }
-    /// Whether the Applications card's "No apps routed…" placeholder is currently
+    /// Whether the Applications card's empty-state placeholder is currently
     /// mounted (V11).
     public var test_applicationsPlaceholderShown: Bool { applicationsPlaceholderShown }
+    /// The Devices card's empty-state copy (§5.9) — pinned so a future edit
+    /// can't silently drift from the spec text.
+    public static var test_devicesPlaceholderText: String { devicesEmptyPlaceholderText }
+    /// The Applications card's empty-state copy (§5.9) — pinned so a future
+    /// edit can't silently drift from the spec text.
+    public static var test_applicationsPlaceholderText: String { applicationsEmptyPlaceholderText }
     /// The card-note texts (`addCardNote`) for `title`, in add order — the A1
     /// dormancy annotation's assertion surface.
     public func test_cardNoteTexts(title: String) -> [String] {
@@ -2747,6 +2988,38 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         }
         groupController?.setMainOutMasterVolume(value)
     }
+
+    // MARK: SYNC drawer seams (T7)
+    //
+    // These drive the SAME `toggleSyncDrawer` the chip's target/action reaches,
+    // but they do skip AppKit's own dispatch — a shortcut that has hidden real
+    // breaks in this file before. The chip's wiring is pinned separately, by
+    // tests that go through `DeviceRowView.test_fireSyncChipClick()`.
+
+    /// - Parameter animated: production always animates; tests pass `false`
+    ///   when they need `removeRow`'s deferred detach to happen synchronously
+    ///   (an animated removal keeps the row in the tree for the fade, so a
+    ///   height assertion taken right after would measure the old content).
+    public func test_toggleSyncDrawer(deviceID: String, animated: Bool = false) {
+        toggleSyncDrawer(deviceID: deviceID, animated: animated)
+    }
+
+    /// The device whose drawer is currently open (the intent), or `nil`.
+    public var test_expandedSyncDeviceID: String? { expandedSyncDeviceID }
+
+    /// Whether a drawer view is actually mounted in the row stack.
+    public var test_syncDrawerVisible: Bool { mountedSyncDrawerID != nil }
+
+    /// The mounted drawer itself, for driving its real controls; `nil` when
+    /// none is open.
+    public var test_syncDrawer: BTSyncDrawerView? {
+        mountedSyncDrawerID == nil ? nil : syncDrawer
+    }
+
+    /// The panel's settled content height — the value pushed into the
+    /// popover's `preferredContentSize`. Tests read it to pin the drawer's
+    /// exact expand/collapse delta.
+    public var test_panelContentHeight: CGFloat { panel.fittingSizeSettled().height }
 }
 
 // MARK: - DeviceRowView.Delegate
@@ -2794,26 +3067,24 @@ extension PopoverController: DeviceRowView.Delegate {
         groupController?.requestReconnect(for: row.device.id)
     }
 
-    public func deviceRow(_ row: DeviceRowView, didSetSyncTrimMs ms: Int, for id: String) {
-        btTrimsByID[id] = ms
-        onSetBTTrim?(ms, id)
+    /// The row's SYNC value chip (T6's only sync delegate method): the chip is
+    /// read-only, so the one gesture it reports is "show/hide my drawer".
+    public func deviceRow(_ row: DeviceRowView, didToggleSyncDrawerFor id: String) {
+        toggleSyncDrawer(deviceID: id, animated: true)
     }
 
-    /// ⌥-click on the metronome button / the "Align speaker…" context-menu
-    /// item: the manual way back into the guided wizard (the first-mix card's
-    /// "Not now" is final, so this stays reachable forever).
+    /// The "Align speaker…" context-menu item (and the drawer's ⌥-click on
+    /// the metronome button, via `syncDrawerDidRequestAlignmentWizard`): the
+    /// manual way back into the guided wizard (the first-mix card's "Not now"
+    /// is final, so this stays reachable forever).
     public func deviceRowDidRequestAlignmentWizard(_ row: DeviceRowView) {
         startBTAlignmentWizard(deviceID: row.device.id)
     }
 
-    public func deviceRow(_ row: DeviceRowView, didToggleAlignTick active: Bool, for id: String) {
-        setAlignTick(active ? id : nil)
-    }
-
-    /// Move/stop the single align-by-ear tick (BT-OFFSET-UI): one row at a
+    /// Move/stop the single align-by-ear tick (BT-OFFSET-UI): one device at a
     /// time, auto-stopped after ~30 s, and stopped by the popover closing
-    /// (the click-away). `refreshDeviceRows()` re-applies every row so exactly
-    /// the active row's button reads ON.
+    /// (the click-away) or by its drawer collapsing. `refreshDeviceRows()`
+    /// re-applies every row so the drawer's button reads the live state.
     private func setAlignTick(_ id: String?) {
         alignTickAutoStop?.cancel()
         alignTickAutoStop = nil
@@ -2829,6 +3100,11 @@ extension PopoverController: DeviceRowView.Delegate {
             onAlignTickActiveChange?(false)
         }
         refreshDeviceRows()
+        // The button lives in the drawer now (D9), so the drawer is what has
+        // to un-light when the 30 s auto-stop fires.
+        if let mounted = mountedSyncDrawerID, let device = devicesByID[mounted] {
+            pushSyncDrawerState(device)
+        }
     }
 
     // MARK: First-mix alignment intercept + wizard (W3/W4)
@@ -2903,12 +3179,14 @@ extension PopoverController: DeviceRowView.Delegate {
     }
 
     /// "Align with your music": unmute (release the hold) and route straight
-    /// to the row's existing manual SYNC control — the live scrubber is the
-    /// touch-up track's; until it lands, the trim field IS the affordance.
+    /// to the manual SYNC affordance — the row's sync drawer (BT-SYNC-DRAWER),
+    /// opened under the row so its steppers/field are immediately at hand.
     private func btAlignmentAlignWithMusic(_ id: String) {
         onResolveBTAlignmentPrompt?(id, false)
         clearBTAlignmentPrompt()
-        deviceRowsByID[id]?.focusSyncTrimField()
+        if expandedSyncDeviceID != id {
+            toggleSyncDrawer(deviceID: id, animated: true)
+        }
     }
 
     /// "Align with ticks": unmute (the wizard needs the device audible) and
@@ -3023,6 +3301,35 @@ private extension ConnectionState {
     }
 }
 
+// MARK: - BTSyncDrawerViewDelegate (T7)
+
+extension PopoverController: BTSyncDrawerViewDelegate {
+
+    public func syncDrawer(_ d: BTSyncDrawerView, didChangeTrimMs ms: Double, committed: Bool) {
+        guard let id = expandedSyncDeviceID else { return }
+        applyBTTrim(ms, deviceID: id, persist: committed)
+    }
+
+    public func syncDrawer(_ d: BTSyncDrawerView, didToggleAlignTick active: Bool) {
+        setAlignTick(active ? expandedSyncDeviceID : nil)
+    }
+
+    /// Escape inside the drawer — the same "close me" the chip performs.
+    public func syncDrawerDidRequestClose(_ d: BTSyncDrawerView) {
+        closeSyncDrawerIntent()
+        reconcileSyncDrawer(animated: true)
+        refreshDeviceRows()
+    }
+
+    /// ⌥-click on the drawer's metronome button (W4 relaunch): the guided
+    /// wizard for the device whose drawer is open — the seat the row-level
+    /// metronome ⌥-click moved to when the button moved into the drawer (D9).
+    public func syncDrawerDidRequestAlignmentWizard(_ d: BTSyncDrawerView) {
+        guard let id = expandedSyncDeviceID else { return }
+        startBTAlignmentWizard(deviceID: id)
+    }
+}
+
 // MARK: - MainOutRowView.Delegate
 
 extension PopoverController: MainOutRowView.Delegate {
@@ -3133,12 +3440,54 @@ extension PopoverController: AppRowView.Delegate {
     //      it — empty space, a device row, the header, etc. all deselect, like
     //      clicking away from a table row.
 
-    public func popoverDidShow(_ notification: Notification) {
+    /// The host just put the panel on screen. Records visibility (so every
+    /// skip-work-while-hidden gate opens), arms the deselect monitor, and turns
+    /// the backend's RMS computation on.
+    func surfaceDidShow() {
+        hostIsShown = true
         installDeselectMonitor()
         onMeteringActiveChange?(true)
     }
 
-    public func popoverDidClose(_ notification: Notification) {
+    /// **The surface must never close out from under someone typing.**
+    ///
+    /// Pressing Return in the sync drawer's value field was dismissing the
+    /// whole surface and losing the edit (live-reported, repeatedly). Two
+    /// separate investigations failed to reproduce it: the field editor
+    /// demonstrably consumes Return (proven with real synthesized events in
+    /// `SyncValueFieldLiveKeyTests`), nothing in the view tree claims Return as
+    /// a key equivalent, and no host window closes on it in a test. The one
+    /// thing those tests CANNOT exercise is AppKit's real window/popover key
+    /// handling, because the house rule bars putting a window on screen during
+    /// `swift test` — so the mechanism lives precisely in the gap the tests
+    /// can't reach.
+    ///
+    /// Rather than keep guessing at it, this closes the hole from the other
+    /// end: the host asks before dismissing, and is refused while the field
+    /// owns an editing session. Typing a number and pressing Return is the
+    /// single most predictable thing a user does with a text box, and it must
+    /// never dismiss the surface.
+    ///
+    /// This cannot strand the user. The edit is committed and first responder
+    /// released, so the session ends with the value APPLIED — the refusal is
+    /// one-shot by construction, and the very next dismiss request finds no
+    /// edit in flight and proceeds. A click OUTSIDE the surface ends editing on
+    /// its own before the dismiss is even evaluated, so the ordinary
+    /// click-away gesture is untouched.
+    ///
+    /// Returns `true` when the host may proceed with the dismissal.
+    public func surfaceShouldHide() -> Bool {
+        guard syncDrawer.isEditingValue else { return true }
+        syncDrawer.commitAndEndEditing()
+        return false
+    }
+
+    /// The host just took the panel off screen. The mirror of
+    /// ``surfaceDidShow()``, plus the two things that must not survive a
+    /// session: the transient app-row selection, and every meter's last
+    /// reading (a reopen must never show a stale bar).
+    func surfaceDidHide() {
+        hostIsShown = false
         removeDeselectMonitor()
         selectedAppBundleID = nil
         for row in deviceRowsByID.values { row.resetLevel() }
@@ -3146,7 +3495,10 @@ extension PopoverController: AppRowView.Delegate {
         for row in appRowsByBundleID.values { row.resetLevel() }
         onMeteringActiveChange?(false)
         // The align-by-ear tick never outlives the surface that started it
-        // (BT-OFFSET-UI click-away).
+        // (BT-OFFSET-UI click-away). Collapsing the drawer stops the tick on
+        // its own; the bare call after it covers a tick with no drawer left.
+        closeSyncDrawerIntent()
+        unmountSyncDrawer(animated: false)
         setAlignTick(nil)
         // Same rule for the wizard's tick (W4): a click-away cancels the run
         // (prior trim restored). The first-mix CARD's intent deliberately
@@ -3164,15 +3516,15 @@ extension PopoverController: AppRowView.Delegate {
     /// Push a live RMS reading for device `id` into its row's meter, and into
     /// the Main Out master meter when `id` is currently selected (Main Out
     /// shares the same level feed as its member device rows, task T4a).
-    /// Early-returns while the popover isn't shown — metering only matters
+    /// Early-returns while the panel isn't shown — metering only matters
     /// while a user can see it.
     public func updateLevel(_ rms: Float, for id: String) {
-        guard popover.isShown else { return }
+        guard isEffectivelyShown else { return }
         dispatchLevel(rms, for: id)
     }
 
-    /// Same dispatch as ``updateLevel(_:for:)`` but WITHOUT the `isShown`
-    /// gate — headless snapshots/tests never actually show the popover.
+    /// Same dispatch as ``updateLevel(_:for:)`` but WITHOUT the visibility
+    /// gate — headless snapshots/tests never actually show the panel.
     public func test_pushLevel(_ rms: Float, for id: String) {
         dispatchLevel(rms, for: id)
     }
@@ -3187,15 +3539,15 @@ extension PopoverController: AppRowView.Delegate {
     /// Push a live RMS reading for the app with `bundleID` into its
     /// Applications-row meter (task T5). Unlike device levels, an app level
     /// never feeds Main Out — Main Out mirrors the SELECTED DEVICE's level,
-    /// not any one app's contribution. Early-returns while the popover isn't
+    /// not any one app's contribution. Early-returns while the panel isn't
     /// shown, mirroring ``updateLevel(_:for:)``.
     public func updateAppLevel(_ rms: Float, for bundleID: String) {
-        guard popover.isShown else { return }
+        guard isEffectivelyShown else { return }
         dispatchAppLevel(rms, for: bundleID)
     }
 
-    /// Same dispatch as ``updateAppLevel(_:for:)`` but WITHOUT the `isShown`
-    /// gate — headless snapshots/tests never actually show the popover.
+    /// Same dispatch as ``updateAppLevel(_:for:)`` but WITHOUT the visibility
+    /// gate — headless snapshots/tests never actually show the panel.
     public func test_pushAppLevel(_ rms: Float, for bundleID: String) {
         dispatchAppLevel(rms, for: bundleID)
     }
@@ -3228,7 +3580,7 @@ extension PopoverController: AppRowView.Delegate {
     /// synchronous rebuild here would destroy the very view being clicked.
     private func deselectIfClickOutsideSelectedRow(_ event: NSEvent) {
         guard selectedAppBundleID != nil,
-              let window = popover.contentViewController?.view.window,
+              let window = panel.view.window,
               event.window === window else { return }
         let hit = window.contentView?.hitTest(event.locationInWindow)
         if let hit,

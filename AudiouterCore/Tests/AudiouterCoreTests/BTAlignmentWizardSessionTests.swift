@@ -8,12 +8,12 @@ import Testing
 @Suite final class BTAlignmentWizardSessionTests {
 
     private final class Recorder {
-        var previews: [Int] = []
-        var ends: [Int?] = []
+        var previews: [Double] = []
+        var ends: [Double?] = []
         var ticks: [Bool] = []
         var screens: [BTAlignmentWizardSession.Screen] = []
 
-        func makeSession(baseTrimMs: Int = 0, seedBracketMs: Int? = nil) -> BTAlignmentWizardSession {
+        func makeSession(baseTrimMs: Double = 0, seedBracketMs: Double? = nil) -> BTAlignmentWizardSession {
             let session = BTAlignmentWizardSession(
                 deviceID: "AA:BB:output",
                 targetName: "Move 2",
@@ -70,13 +70,13 @@ import Testing
         session.start()
         session.answer(.target)      // candidate 250
         session.answer(.reference)   // reversal 1 → 125
-        session.answer(.target)      // reversal 2 → converged (125+187)/2
+        session.answer(.target)      // reversal 2 → converged (125+187.5)/2
         guard case .receipt(let trimMs) = session.screen else {
             Issue.record("expected receipt, got \(session.screen)")
             return
         }
-        #expect(trimMs == 156)
-        #expect(recorder.previews.last == 156, "the result is applied live for the receipt audition")
+        #expect(trimMs == 156.25)
+        #expect(recorder.previews.last == 156.25, "the result is applied live for the receipt audition")
         #expect(recorder.ticks == [true, false], "the tick ends with the questions")
         #expect(recorder.ends.isEmpty, "nothing persisted or restored until Keep/Try again")
         session.cancel()
@@ -90,10 +90,10 @@ import Testing
         session.answer(.reference)
         session.answer(.target)
         session.keep()
-        #expect(recorder.ends == [156], "Keep commits the applied result")
+        #expect(recorder.ends == [156.25], "Keep commits the applied result")
         session.keep()
         session.cancel()
-        #expect(recorder.ends == [156], "terminal: neither a second Keep nor cancel does anything")
+        #expect(recorder.ends == [156.25], "terminal: neither a second Keep nor cancel does anything")
     }
 
     @Test func tryAgainRestoresThePriorTrimAndRestarts() {

@@ -154,13 +154,14 @@ final class BTAlignmentWizardView: NSView {
             background.setAccessibilityLabel(
                 "Which speaker ticked first: \(session.targetName) or \(session.referenceName)?")
         case .receipt(let trimMs):
-            addBody("Aligned — \(trimMs) ms")
+            let wholeMs = Int(BTSyncTrim.quantise(trimMs))
+            addBody("Aligned — \(wholeMs) ms")
             addButtonRow([
                 makeButton("Keep", prominent: true, #selector(keepClicked(_:))),
                 makeButton("Try again", prominent: false, #selector(tryAgainClicked(_:))),
             ])
             addEducationLine()
-            background.setAccessibilityLabel("Aligned at \(trimMs) milliseconds")
+            background.setAccessibilityLabel("Aligned at \(wholeMs) milliseconds")
         case .gracefulExit:
             addBody(Self.gracefulExitCopy)
             addButtonRow([makeButton("Done", prominent: true, #selector(doneClicked(_:)))])

@@ -257,7 +257,11 @@ try_remote_first=0
 if [ "$remote_pref" = "remote" ]; then
     try_remote_first=1
 elif [ "$remote_pref" = "cpu" ] && [ -n "$remote_host" ]; then
-    remote_load=$(remote_load_pct)
+    # `|| true` for the same reason the remote run below uses `|| rrc=$?`:
+    # under `set -e` an unreachable remote makes ssh exit non-zero, and a bare
+    # command substitution propagates that straight out of the script — killing
+    # the whole run with no output at all instead of falling back locally.
+    remote_load=$(remote_load_pct || true)
     if [ -n "$remote_load" ]; then
         local_load=$(local_load_pct)
         echo "  suite: cpu check — local ${local_load}%/core, remote ${remote_load}%/core." >&2

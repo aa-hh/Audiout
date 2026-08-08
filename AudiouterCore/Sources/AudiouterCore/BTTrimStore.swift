@@ -2,24 +2,54 @@
 
 import Foundation
 
-/// The SYNC column's shared numeric contract (BT-OFFSET-UI): a per-device
-/// signed manual trim in milliseconds, ±``rangeMs``, stepped by
-/// ``coarseStepMs`` from the − / + buttons (typing in the value field allows
-/// 1 ms). One clamp shared by the UI stepper and the backend write so the two
-/// can never disagree on the range.
+// razor: Revert targets the drawer's open-time value, not a calibrated
+// baseline — there is no calibration source yet. When the setup wizard
+// lands it should persist a per-device baseline alongside the trim and
+// Revert should prefer it.
+/// The SYNC column's shared numeric contract (BT-OFFSET-UI/BT-SYNC-DRAWER): a
+/// per-device signed manual trim in WHOLE milliseconds, ±``rangeMs``, changed
+/// by the drawer's dual steppers — ``coarseStepMs`` (±10) and ``fineStepMs``
+/// (±1) — or typed into the value field. One clamp shared by the UI and the
+/// backend write so they can never disagree on the range.
+///
+/// Whole ms, not tenths (live finding): within a couple of milliseconds two
+/// speakers sound identical (the ear can't resolve a flam below ~4 ms), so
+/// decimal precision was control-feel theatre with no audible payoff. The
+/// scrubbing ruler that decimals were built for was cut with them.
 public enum BTSyncTrim {
     /// The trim's absolute bound (± this many ms). Chosen with the align aid's
     /// beat spacing in mind: ticks at ~72 BPM (~833 ms) keep a fully-offset
     /// device from aliasing as aligned one beat late — 500 ms spacing would.
-    public static let rangeMs = 500
-    /// The − / + buttons' plain step. The field itself accepts 1 ms typing.
-    public static let coarseStepMs = 10
-    /// The fine step: ⌥-click on − / +, and the field's ↑/↓ arrow nudge —
-    /// 10 ms proved too coarse to collapse the flam by ear (live finding).
-    public static let fineStepMs = 1
+    public static let rangeMs: Double = 500
+    /// The coarse (±10) stepper's step — the "get close" control.
+    public static let coarseStepMs: Double = 10
+    /// The fine (±1) stepper's step, and the field's ↑/↓ arrow nudge — the
+    /// "settle it" control.
+    public static let fineStepMs: Double = 1
+    /// The smallest change the trim ever takes: one whole millisecond. Every
+    /// committed value is a whole multiple of this, so the readout, the
+    /// steppers, and the persisted value can never disagree.
+    public static let resolutionMs: Double = 1
 
-    public static func clamp(_ ms: Int) -> Int {
+    public static func clamp(_ ms: Double) -> Double {
         Swift.min(rangeMs, Swift.max(-rangeMs, ms))
+    }
+
+    /// Snap to whole ``resolutionMs`` milliseconds and clamp to ±``rangeMs``.
+    /// Rounds half away from zero; a typed "22.6" or an old 0.1 ms value from
+    /// disk both land on a clean integer.
+    public static func quantise(_ ms: Double) -> Double {
+        clamp((ms / resolutionMs).rounded(.toNearestOrAwayFromZero) * resolutionMs)
+    }
+
+    /// A spoken/hover description of a trim that spells out the direction
+    /// (D7 — never a bare signed number, which readers get backwards). Shared
+    /// by the row chip's tooltip and VoiceOver value and the drawer's field
+    /// value, so the two can never phrase it differently.
+    public static func spokenOffset(_ ms: Double) -> String {
+        let whole = Int(quantise(ms))
+        if whole == 0 { return "in sync" }
+        return whole > 0 ? "\(whole) milliseconds later" : "\(abs(whole)) milliseconds earlier"
     }
 }
 
@@ -34,7 +64,7 @@ public struct BTTrimStore: Sendable {
 
     struct Envelope: Codable {
         var schemaVersion: Int
-        var trims: [String: Int]
+        var trims: [String: Double]
         /// Device UIDs whose first-mix alignment intercept the user dismissed
         /// with "Not now" (W3) — FINAL, never auto-prompted again. Optional so
         /// a pre-existing file (and an old reader on a new file) decodes
@@ -43,6 +73,11 @@ public struct BTTrimStore: Sendable {
     }
 
     /// Bump when the on-disk shape changes in a way old readers can't parse.
+    /// NOT bumped for the `Int` → `Double` widening (BT-SYNC-DRAWER T1): a v1
+    /// file's values are bare JSON numbers (`22`), and `JSONDecoder` reads a
+    /// JSON integer straight into a `Double` field with no loss — the feature
+    /// had never shipped when this changed, so no on-disk file needed a
+    /// migration. Do not "fix" this into a version bump.
     static let currentSchemaVersion = 1
 
     private let fileURL: URL
@@ -62,13 +97,13 @@ public struct BTTrimStore: Sendable {
     /// Load the saved trims. Missing file → `nil` (first run — no trims). A
     /// file from a newer schema is treated as missing rather than crashing an
     /// older build.
-    public func load() throws -> [String: Int]? {
+    public func load() throws -> [String: Double]? {
         try loadEnvelope()?.trims
     }
 
     /// Overwrite the saved trims, creating the directory/file if needed.
     /// Read-modify-write so the dismissal record survives a trim save.
-    public func save(_ trims: [String: Int]) throws {
+    public func save(_ trims: [String: Double]) throws {
         var envelope = ((try? loadEnvelope()) ?? nil)
             ?? Envelope(schemaVersion: Self.currentSchemaVersion, trims: [:],
                         alignmentPromptDismissed: nil)

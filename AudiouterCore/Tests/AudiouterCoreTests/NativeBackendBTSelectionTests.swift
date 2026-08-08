@@ -152,7 +152,7 @@ import CoreAudio
         func setComposition(_ composition: BTGroupComposition) {
             lock.withLock { _calls.append("setComposition"); _compositions.append(composition) }
         }
-        func setTrimMs(_ ms: Int, forDeviceUID uid: String) {
+        func setTrimMs(_ ms: Double, forDeviceUID uid: String) {
             lock.withLock { _calls.append("setTrimMs"); _trims.append((ms: ms, uid: uid)) }
         }
         func setGain(_ gain: Float, forDeviceUID uid: String) {
@@ -168,12 +168,21 @@ import CoreAudio
         }
         func renderingDeviceUIDs() -> Set<String> { renderingUIDs }
         private var _rendering: Set<String> = []
+        /// `nil` (the protocol default) means "can't tell", which the backend
+        /// reads as anchored — set this to an explicit set to model a SILENT
+        /// Mac, where no sink is ever handed a buffer.
+        var anchoredUIDs: Set<String>? {
+            get { lock.withLock { _anchored } }
+            set { lock.withLock { _anchored = newValue } }
+        }
+        func anchoredDeviceUIDs() -> Set<String>? { anchoredUIDs }
+        private var _anchored: Set<String>?
 
         var calls: [String] { lock.withLock { _calls } }
         var deviceSets: [[BTSyncedSink.DeviceSpec]] { lock.withLock { _deviceSets } }
         var compositions: [BTGroupComposition] { lock.withLock { _compositions } }
-        private var _trims: [(ms: Int, uid: String)] = []
-        var trims: [(ms: Int, uid: String)] { lock.withLock { _trims } }
+        private var _trims: [(ms: Double, uid: String)] = []
+        var trims: [(ms: Double, uid: String)] { lock.withLock { _trims } }
         private var _gains: [(gain: Float, uid: String)] = []
         var gains: [(gain: Float, uid: String)] { lock.withLock { _gains } }
         func lastGain(for uid: String) -> Float? {
@@ -697,6 +706,27 @@ import CoreAudio
         }
     }
 
+    /// A speaker selected while the Mac is SILENT must land `.connected`, not
+    /// `.failed`. Nothing is playing, so the capture fan-out hands the sink no
+    /// buffers, so it can never anchor and can never render — the ceiling
+    /// expiring says only "there was nothing to play", which is an idle
+    /// speaker, not a broken one. Live-found: selecting a healthy, already
+    /// connected Move 2 with the Mac paused reported "no audio started" six
+    /// seconds later, every time.
+    @Test func speakerSelectedWithNothingPlayingLandsConnectedNotFailed() {
+        let (backend, _, _, bt, sink, _) = makeBackend(btRenderStartTimeout: 0.2)
+        defer { backend.stop() }
+        sink.anchoredUIDs = []            // a silent Mac: no sink ever anchors
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id)?.isAvailable == true }
+
+        backend.setOutputSet([btMove.id])
+        waitFor { self.device(backend, self.btMove.id)?.connectionState == .connected }
+        #expect(device(backend, btMove.id)?.connectionState == ConnectionState.connected,
+                "a silent Mac must not turn a healthy speaker into a failed row")
+    }
+
     /// Deselecting mid-hold ends the spinner at once — the poll must not
     /// resurrect it as either `.connected` or `.failed`.
     @Test func deselectingMidHoldEndsTheSpinner() {
@@ -871,7 +901,7 @@ import CoreAudio
         bt.fire([btMove])
         waitFor { self.device(backend, self.btMove.id) != nil }
 
-        backend.setBTSyncTrim(-120, forDevice: btMove.id)   // no sink yet — stored only
+        backend.setBTSyncTrim(-120, forDevice: btMove.id, persist: true)   // no sink yet — stored only
         backend.setOutputSet([btMove.id])
         waitFor { sink.calls.contains("start") }
         #expect(sink.trims.contains { $0.ms == -120 && $0.uid == btMove.id },
@@ -881,7 +911,7 @@ import CoreAudio
             #expect(trimIndex < devicesIndex, "trims land before the device set arms")
         }
 
-        backend.setBTSyncTrim(60, forDevice: btMove.id)
+        backend.setBTSyncTrim(60, forDevice: btMove.id, persist: true)
         waitFor { sink.trims.contains { $0.ms == 60 } }
         #expect(sink.trims.last?.ms == 60, "a live edit reaches the armed sink directly")
     }

@@ -98,21 +98,21 @@ import CoreAudio
     /// Records trims and per-device gains, in call order.
     private final class SpyBTSink: BTSyncedSinkControlling, @unchecked Sendable {
         private let lock = NSLock()
-        private var _trims: [(ms: Int, uid: String)] = []
+        private var _trims: [(ms: Double, uid: String)] = []
         private var _gains: [(gain: Float, uid: String)] = []
         func start() {}
         func stop() {}
         func setDevices(_ specs: [BTSyncedSink.DeviceSpec]) {}
         func setComposition(_ composition: BTGroupComposition) {}
         func renderingDeviceUIDs() -> Set<String> { [] }
-        func setTrimMs(_ ms: Int, forDeviceUID uid: String) {
+        func setTrimMs(_ ms: Double, forDeviceUID uid: String) {
             lock.withLock { _trims.append((ms, uid)) }
         }
         func setGain(_ gain: Float, forDeviceUID uid: String) {
             lock.withLock { _gains.append((gain, uid)) }
         }
         func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {}
-        var trims: [(ms: Int, uid: String)] { lock.withLock { _trims } }
+        var trims: [(ms: Double, uid: String)] { lock.withLock { _trims } }
         var gains: [(gain: Float, uid: String)] { lock.withLock { _gains } }
         func lastGain(for uid: String) -> Float? {
             lock.withLock { _gains.last { $0.uid == uid }?.gain }
@@ -250,7 +250,7 @@ import CoreAudio
     /// A device with a SAVED trim is aligned — never intercepted.
     @Test func alignedDeviceNeverFires() throws {
         let dir = scratchDir
-        var trims: [String: Int] = [:]
+        var trims: [String: Double] = [:]
         trims[btMove.id] = 80
         try BTTrimStore(directory: dir).save(trims)
 

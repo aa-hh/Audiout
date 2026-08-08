@@ -139,7 +139,7 @@ import AppKit
         }
     }
 
-    // MARK: "In groups:" membership text
+    // MARK: "In groups" membership text
 
     @Test func groupMembershipTextIsNoneWhenDeviceIsInNoGroup() {
         let detail = DeviceDetailViewController(groupController: makeController())

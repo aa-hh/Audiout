@@ -47,14 +47,14 @@ struct BTAlignmentBisection {
     }
 
     enum Phase: Equatable {
-        case asking(candidateMs: Int)
-        case converged(resultMs: Int)
+        case asking(candidateMs: Double)
+        case converged(resultMs: Double)
         case gracefulExit
     }
 
     /// Below this bracket width (ms) further halving is beyond by-ear
     /// resolution (the flam collapses around 10–20 ms; trims step 1 ms fine).
-    static let floorWidthMs = 2
+    static let floorWidthMs: Double = 2
 
     private(set) var phase: Phase
     /// Every "can't tell", consecutive or not — recorded separately from the
@@ -63,21 +63,21 @@ struct BTAlignmentBisection {
     /// Directional answers folded so far (drives the ~5-answer expectation).
     private(set) var answerCount = 0
 
-    private var lowMs: Int
-    private var highMs: Int
-    private let initialWidthMs: Int
+    private var lowMs: Double
+    private var highMs: Double
+    private let initialWidthMs: Double
     private var consecutiveCantTell = 0
     /// The previous directional answer, for reversal detection.
     private var lastDirection: Answer?
     /// Midpoints computed as each reversal folded, newest last.
-    private var reversalMidpoints: [Int] = []
+    private var reversalMidpoints: [Double] = []
     /// `true` while the newest entry of `reversalMidpoints` came from the
     /// immediately preceding answer — the "consecutive" half of the stop rule.
     private var lastAnswerWasReversal = false
 
     /// - Parameter bracketMs: half-width of the starting bracket. ±500 ms (the
     ///   trim range) unless a coarse pass already narrowed it.
-    init(bracketMs: Int = BTSyncTrim.rangeMs) {
+    init(bracketMs: Double = BTSyncTrim.rangeMs) {
         let bracket = max(Self.floorWidthMs, abs(bracketMs))
         self.lowMs = -bracket
         self.highMs = bracket
@@ -89,11 +89,11 @@ struct BTAlignmentBisection {
     /// answer advances it evenly (each fold halves the bracket).
     var progress: Double {
         guard case .asking = phase else { return 1 }
-        let width = Double(highMs - lowMs)
-        let floorWidth = Double(Self.floorWidthMs)
-        let total = log2(Double(initialWidthMs) / floorWidth)
+        let width = highMs - lowMs
+        let floorWidth = Self.floorWidthMs
+        let total = log2(initialWidthMs / floorWidth)
         guard total > 0 else { return 1 }
-        return min(1, max(0, log2(Double(initialWidthMs) / width) / total))
+        return min(1, max(0, log2(initialWidthMs / width) / total))
     }
 
     /// Fold one answer in. No-op unless currently ``Phase/asking(candidateMs:)``.
@@ -126,7 +126,7 @@ struct BTAlignmentBisection {
                 // Two consecutive disagreements: the mean of the last two
                 // reversal midpoints is the point of subjective equality.
                 let last = reversalMidpoints.suffix(2)
-                phase = .converged(resultMs: last.reduce(0, +) / last.count)
+                phase = .converged(resultMs: last.reduce(0, +) / Double(last.count))
                 return
             }
             lastAnswerWasReversal = true
@@ -143,5 +143,5 @@ struct BTAlignmentBisection {
 
     // MARK: Test seams (pure reads)
 
-    var test_bracket: (lowMs: Int, highMs: Int) { (lowMs, highMs) }
+    var test_bracket: (lowMs: Double, highMs: Double) { (lowMs, highMs) }
 }

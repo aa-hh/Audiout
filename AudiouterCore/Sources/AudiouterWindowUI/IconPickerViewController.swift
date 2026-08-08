@@ -28,10 +28,10 @@ import AudiouterSharedUI
 ///   the grid filtering above — a user can narrow the grid with a partial
 ///   name and tap a result, or type a full valid name and hit Apply
 ///   directly, in the same field;
-/// - a trailing "Use default icon" button that reports `nil` immediately
+/// - a trailing "Use Default Icon" button that reports `nil` immediately
 ///   (no Apply gate — resetting is always available).
 ///
-/// Every path — a grid tap, Apply, or "Use default icon" — funnels through
+/// Every path — a grid tap, Apply, or "Use Default Icon" — funnels through
 /// ``onPick``, then dismisses itself via `dismiss(self)` when actually
 /// presented (`view.window != nil`, the same live-vs-headless-test pattern
 /// `GroupCreationSheetController.finish` uses).
@@ -130,7 +130,7 @@ public final class IconPickerViewController: NSViewController {
         applyButton.isEnabled = false
 
         defaultButton.translatesAutoresizingMaskIntoConstraints = false
-        defaultButton.title = "Use default icon"
+        defaultButton.title = "Use Default Icon"
         defaultButton.bezelStyle = .rounded
         defaultButton.target = self
         defaultButton.action = #selector(defaultTapped(_:))
@@ -267,7 +267,9 @@ public final class IconPickerViewController: NSViewController {
     /// only re-resolves when asked under the right appearance).
     private func refreshSelectionRingColor() {
         guard let button = selectionRingButton, let layer = button.layer else { return }
-        let appearance = isViewLoaded ? view.effectiveAppearance : NSApp.effectiveAppearance
+        // `NSApp?.` per the UI-target rule in `AudiouterSharedUI/AGENTS.md`; the
+        // fallback covers a headless run with no NSApplication at all.
+        let appearance = isViewLoaded ? view.effectiveAppearance : (NSApp?.effectiveAppearance ?? .currentDrawing())
         appearance.performAsCurrentDrawingAppearance {
             layer.borderColor = Tokens.Color.gold.cgColor
         }
@@ -436,7 +438,7 @@ public final class IconPickerViewController: NSViewController {
         pick(name)
     }
 
-    /// Simulate clicking "Use default icon".
+    /// Simulate clicking "Use Default Icon".
     public func test_useDefault() { useDefault() }
 
     /// The curated symbol names actually offered as grid cells right now, in

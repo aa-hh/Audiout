@@ -58,7 +58,7 @@ enum BTReferenceTimeline {
         presentationDelayMs: Int,
         btOnlyBufferMs: Int,
         deviceOffsetMs: Int,
-        trimMs: Int
+        trimMs: Double
     ) -> Int64 {
         SyncTiming.totalDelayNanos(
             presentationDelayMs: composition.airPlayPresent ? presentationDelayMs : btOnlyBufferMs,
@@ -243,7 +243,7 @@ final class BTDriftCorrector {
 ///
 /// razor: no drop counters yet — BT-FANOUT (Wave 3), which owns the producer
 /// side for real, adds observability there if live use shows drops.
-private final class BTFrameRing {
+final class BTFrameRing {
     private let channelCount: Int
     private let capacityFrames: Int
     private let frameMask: Int
@@ -306,12 +306,200 @@ private final class BTFrameRing {
         return true
     }
 
+    /// Move the read position by `frames` (negative = replay history, positive
+    /// = skip ahead) and return the delta actually applied after clamping.
+    /// Backward it reaches as far as the intact history behind the read pointer
+    /// — `capacity − used`, which is real audio precisely because the producer
+    /// drops a chunk rather than overwrite unread data. Forward it stops at the
+    /// write pointer.
+    ///
+    /// CONSUMER THREAD ONLY. `readCounter` has exactly one writer — the
+    /// consumer — so moving it needs no lock and cannot race the producer,
+    /// which only ever reads it. A seek merely makes the ring look fuller
+    /// (backward) or emptier (forward), both of which the producer's existing
+    /// space check already handles.
+    @discardableResult
+    func seek(byFrames frames: Int) -> Int {
+        guard frames != 0 else { return 0 }
+        let r = readCounter.pointee
+        OSMemoryBarrier()                       // acquire: see the producer's counter
+        let used = writeCounter.pointee &- r
+        let applied = frames < 0
+            ? -min(-frames, capacityFrames &- used)
+            : min(frames, used)
+        guard applied != 0 else { return 0 }
+        OSMemoryBarrier()                       // release: reads land before the producer can reclaim
+        readCounter.pointee = r &+ applied
+        return applied
+    }
+
     /// Drop everything buffered. Only while neither thread is active (engine
     /// stopped / offline tests).
     func reset() {
         OSMemoryBarrier()
         readCounter.pointee = writeCounter.pointee
         OSMemoryBarrier()
+    }
+}
+
+/// The consumer's view of one device's delay line: the ring plus the seek and
+/// crossfade state that let a trim change land while the music plays.
+///
+/// The delay physically IS the audio piled up in the ring at the moment the
+/// release gate opened (PLAN-BT-SYNC-DRAWER §2), so once a device is audible
+/// the only lever left is the read position. This type owns that move and hides
+/// it behind the ring's own one-frame read, so `FractionalResampler.render`'s
+/// `pullFrame` closure never learns a seek happened.
+///
+/// Thread contract, an extension of the ring's own: `write` is producer-only,
+/// `readFrame` is consumer-only, `requestShift` is control-thread-only (one
+/// serial queue, so it is the single writer of its counter). `readFrame` runs
+/// on the render thread and is REAL-TIME: no allocation, no locks, no logging,
+/// no Obj-C messaging — the same contract `BTDeviceSink.render` documents.
+final class BTDelayLine {
+
+    /// 5 ms. Long enough that a splice in music is inaudible, short enough that
+    /// a fast scrub's overlapping shifts stay perceptually continuous.
+    static let crossfadeMs: Double = 5
+
+    private let ring: BTFrameRing
+    private let channelCount: Int
+    private let crossfadeFrames: Int
+
+    /// The output being faded OUT (captured from the pre-seek position), and
+    /// the buffer the next capture writes into. TWO buffers, swapped rather
+    /// than copied, so a shift arriving mid-fade can read the old tail and
+    /// write the new one in the same pass with no aliasing to reason about.
+    private var fadeOutFrames: UnsafeMutablePointer<Float>
+    private var captureFrames: UnsafeMutablePointer<Float>
+    /// How many frames of `fadeOutFrames` are valid, and how far through them
+    /// the fade has got. `fadeIndex == fadeLength` means no fade is running.
+    private var fadeLength = 0
+    private var fadeIndex = 0
+
+    /// Two monotonically-increasing words with exactly ONE writer each — the
+    /// same discipline as the ring's head/tail counters, and the reason this
+    /// needs no atomics. A single "pending" word that the control thread
+    /// accumulates into and the render thread zeroes would have two writers and
+    /// could silently swallow a shift mid-scrub; here the consumer only ever
+    /// advances its own word to a value it has already read.
+    private let requestedShiftFrames: UnsafeMutablePointer<Int>   // control-thread-owned
+    private let appliedShiftFrames: UnsafeMutablePointer<Int>     // consumer-owned
+
+    init(minimumCapacityFrames: Int, channelCount: Int, crossfadeFrames: Int) {
+        let channels = max(1, channelCount)
+        self.ring = BTFrameRing(
+            minimumCapacityFrames: minimumCapacityFrames, channelCount: channels)
+        self.channelCount = channels
+        self.crossfadeFrames = max(1, crossfadeFrames)
+        let sampleCount = self.crossfadeFrames * channels
+        self.fadeOutFrames = UnsafeMutablePointer<Float>.allocate(capacity: sampleCount)
+        self.captureFrames = UnsafeMutablePointer<Float>.allocate(capacity: sampleCount)
+        self.fadeOutFrames.initialize(repeating: 0, count: sampleCount)
+        self.captureFrames.initialize(repeating: 0, count: sampleCount)
+        self.requestedShiftFrames = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        self.appliedShiftFrames = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        self.requestedShiftFrames.initialize(to: 0)
+        self.appliedShiftFrames.initialize(to: 0)
+    }
+
+    deinit {
+        fadeOutFrames.deallocate()
+        captureFrames.deallocate()
+        requestedShiftFrames.deallocate()
+        appliedShiftFrames.deallocate()
+    }
+
+    /// Producer side; forwards straight to the ring.
+    @discardableResult
+    func write(interleavedFrames src: UnsafePointer<Float>, frameCount: Int) -> Bool {
+        ring.write(interleavedFrames: src, frameCount: frameCount)
+    }
+
+    /// Ask the render thread to move the read position by `frames` (negative =
+    /// replay history = a LONGER delay). Non-blocking and lossless: the word
+    /// only ever grows by the requested amount, so a fast scrub's shifts
+    /// accumulate instead of a newer one overwriting one not yet consumed.
+    /// Control thread ONLY.
+    func requestShift(frames: Int) {
+        guard frames != 0 else { return }
+        requestedShiftFrames.pointee = requestedShiftFrames.pointee &+ frames
+        OSMemoryBarrier()                       // release: publish before the consumer's acquire
+    }
+
+    /// Consumer side: exactly one interleaved frame, false on empty. Shaped for
+    /// `FractionalResampler.render`'s `pullFrame`, which is why the seek has to
+    /// live behind it rather than beside it.
+    func readFrame(into dst: UnsafeMutablePointer<Float>) -> Bool {
+        applyPendingShift()
+        let hasFrame = ring.readFrame(into: dst)
+        guard fadeIndex < fadeLength else { return hasFrame }
+        // Ring dry mid-fade: the new side contributes zero, so the crossfade
+        // degrades to a plain fade-out of the old tail. Still click-free, which
+        // returning `false` here (an abrupt cut) would not be.
+        if !hasFrame { dst.update(repeating: 0, count: channelCount) }
+        mixFadeStep(into: dst)
+        return true
+    }
+
+    /// Drop everything buffered and any un-consumed shift. Only while neither
+    /// thread is active (engine stopped / offline tests) — the ring's contract.
+    func reset() {
+        ring.reset()
+        appliedShiftFrames.pointee = requestedShiftFrames.pointee
+        fadeLength = 0
+        fadeIndex = 0
+    }
+
+    /// Take whatever shift the control thread has asked for since the last
+    /// call, move the read position by it, and arm the crossfade that hides the
+    /// splice.
+    private func applyPendingShift() {
+        OSMemoryBarrier()                       // acquire: see the control thread's word
+        let requested = requestedShiftFrames.pointee
+        let delta = requested &- appliedShiftFrames.pointee
+        guard delta != 0 else { return }
+        appliedShiftFrames.pointee = requested
+
+        // Capture what the output WOULD have been for the next `crossfadeFrames`
+        // frames — mixing any fade still in flight, so overlapping shifts during
+        // a fast scrub always fade from the real current output and never leave
+        // one half-applied — then rewind the peek before the real seek.
+        var captured = 0
+        while captured < crossfadeFrames {
+            let slot = captureFrames + captured * channelCount
+            guard ring.readFrame(into: slot) else { break }
+            if fadeIndex < fadeLength { mixFadeStep(into: slot) }
+            captured += 1
+        }
+        ring.seek(byFrames: -captured)          // rewind the peek
+        ring.seek(byFrames: delta)              // then the shift the user asked for
+
+        // Swapped by hand rather than with `swap(&_:&_:)`: that takes both
+        // properties `inout`, which on a class is an exclusivity-checked access,
+        // and this runs on the render thread.
+        let previousTail = fadeOutFrames
+        fadeOutFrames = captureFrames
+        captureFrames = previousTail
+        fadeLength = captured
+        fadeIndex = 0
+    }
+
+    /// One crossfade step, in place: `dst` holds the new (post-seek) side on
+    /// entry and the mixed output on exit. Caller has checked a fade is running.
+    ///
+    /// Equal-power (`cos² + sin² = 1`) rather than linear, because the two
+    /// sides are two different stretches of the same music and so are
+    /// uncorrelated: a linear pair sums to a 3 dB dip in the middle, which is
+    /// audible as a hole. The fade runs over `fadeLength`, not the nominal
+    /// `crossfadeFrames`, so a fade shortened by a near-dry ring still
+    /// completes instead of ending part-way up the curve.
+    private func mixFadeStep(into dst: UnsafeMutablePointer<Float>) {
+        let old = fadeOutFrames + fadeIndex * channelCount
+        let theta = Double.pi / 2 * Double(fadeIndex) / Double(fadeLength)
+        let fadeOut = Float(cos(theta)), fadeIn = Float(sin(theta))
+        for ch in 0..<channelCount { dst[ch] = old[ch] * fadeOut + dst[ch] * fadeIn }
+        fadeIndex += 1
     }
 }
 
@@ -362,17 +550,22 @@ final class BTDeviceSink: @unchecked Sendable {
     let renderSampleRate: Double
     private let channelCount: Int
     private let maxRenderFrames: Int
-    /// Sampled ONCE per session (at the anchor, on the enqueue thread) — never
-    /// on the render path. A delay change therefore lands via `rebuild(cause:)`
-    /// + re-anchor, not a live poke.
+    /// Sampled at the anchor (on the enqueue thread) and again on a pre-release
+    /// trim change (``applyTrimDelta(ms:)``) — never on the render path. A
+    /// structural delay change (offset, composition, rate) still lands via
+    /// `requestRebuild(cause:)` + re-anchor.
     private let delayNanosProvider: @Sendable () -> Int64
 
     // Producer/consumer state.
-    private let ring: BTFrameRing
+    private let delayLine: BTDelayLine
     private let resampler: FractionalResampler
     private let stateLock = NSLock()
     private var anchored = false
     private var released = false
+    /// The capture pts the session anchored on, kept so a pre-release trim
+    /// change can recompute the target through the same one expression the
+    /// anchor used instead of nudging the old value by hand.
+    private var anchorPtsNanos: Int64 = 0
     private var targetReleaseNanos: Int64 = 0
     /// Published by the clock sampler; snapshotted by the render path each
     /// cycle under the same non-blocking `stateLock.try()` as the gate.
@@ -440,11 +633,15 @@ final class BTDeviceSink: @unchecked Sendable {
         self.clockQueue = DispatchQueue(label: "com.audiouter.btsink.clock.\(deviceUID)")
         self.driftCorrector = BTDriftCorrector()
 
-        // The ring is the delay line: it must hold the full delay's worth of
-        // pre-roll (the BT-only buffer or the ~2 s AirPlay presentation delay).
-        self.ring = BTFrameRing(
+        // The delay line must hold the full delay's worth of pre-roll (the
+        // BT-only buffer or the ~2 s AirPlay presentation delay) AND, behind
+        // the read pointer, enough history for a live trim to seek back into.
+        // 8 s rounds up to 11.9 s of ring at 44.1 kHz, so a 500 ms delay still
+        // leaves ~11 s of replayable history — far more than the ±500 ms trim.
+        self.delayLine = BTDelayLine(
             minimumCapacityFrames: Int((maxBufferedSeconds * renderSampleRate).rounded()),
-            channelCount: channels)
+            channelCount: channels,
+            crossfadeFrames: Int((BTDelayLine.crossfadeMs / 1_000 * renderSampleRate).rounded()))
         self.resampler = FractionalResampler(channelCount: channels)
         self.scratchCapacity = self.maxRenderFrames * channels
         self.scratch = UnsafeMutablePointer<Float>.allocate(capacity: scratchCapacity)
@@ -582,6 +779,10 @@ final class BTDeviceSink: @unchecked Sendable {
     /// cannot stall it. A rebuild clears it along with the rest of the session.
     var hasStartedRendering: Bool { stateLock.withLock { released } }
 
+    /// Whether this sink has been handed any captured audio at all. False the
+    /// whole time the Mac is silent — see ``BTSyncedSink/anchoredDeviceUIDs()``.
+    var hasAnchored: Bool { stateLock.withLock { anchored } }
+
     /// Void the session (anchor, ring, resampler) AND the drift state. The
     /// render thread is stopped by every caller (engine down), so resetting the
     /// render-owned resampler is safe; the clock sampler is likewise stopped,
@@ -590,16 +791,17 @@ final class BTDeviceSink: @unchecked Sendable {
         stateLock.withLock {
             anchored = false
             released = false
+            anchorPtsNanos = 0
             targetReleaseNanos = 0
             driftPpm = 0
         }
-        ring.reset()
+        delayLine.reset()
         resampler.reset()
         driftCorrector.reset()
         lastLoggedTrust = .settling
     }
 
-    // MARK: Producer (capture → ring)
+    // MARK: Producer (capture → delay line)
 
     /// Enqueue one captured block of interleaved Float32 frames with its
     /// capture `pts` (`CLOCK_MONOTONIC` — the same `CapturedBuffer.pts`
@@ -613,16 +815,55 @@ final class BTDeviceSink: @unchecked Sendable {
         if stateLock.try() {
             if !anchored {
                 anchored = true
+                anchorPtsNanos = SyncTiming.monotonicNanos(pts)
                 targetReleaseNanos = SyncTiming.targetReleaseMonotonicNanos(
-                    anchorPtsNanos: SyncTiming.monotonicNanos(pts),
+                    anchorPtsNanos: anchorPtsNanos,
                     totalDelayNanos: delayNanosProvider())
             }
             stateLock.unlock()
         }
-        ring.write(interleavedFrames: interleavedFrames, frameCount: frameCount)
+        delayLine.write(interleavedFrames: interleavedFrames, frameCount: frameCount)
     }
 
-    // MARK: Consumer (ring → render)
+    /// Apply a live trim change of `deltaMs` (positive = this device plays
+    /// LATER). Called from the control queue; never rebuilds the sink, so the
+    /// music does not stop.
+    ///
+    /// Three cases, chosen by how far the session has got:
+    ///
+    ///  - **Not anchored** — nothing captured yet. The anchor has not sampled
+    ///    the delay, so it will pick the new trim up by itself; do nothing.
+    ///  - **Anchored, gate still closed** — silence so far, nothing emitted to
+    ///    be continuous with, so move the gate rather than the audio. Cheaper
+    ///    and exact.
+    ///  - **Released** — the delay IS the audio piled up behind the read
+    ///    pointer, so the read position is the only lever. A LARGER trim plays
+    ///    the device LATER ⇒ a LONGER delay ⇒ MORE audio must sit between read
+    ///    and write ⇒ the read pointer moves BACKWARD, replaying history.
+    ///    Hence the negation. (Plan trap 4.1: this is a 50/50 that compiles
+    ///    either way — `positiveTrimSeeksTheReadPointerBackward` pins it.)
+    ///
+    /// Deliberately does NOT run `clearSessionStateLocked`: a seek is not a new
+    /// clock context, so the drift corrector keeps the rate it has learned
+    /// (plan trap 4.3).
+    func applyTrimDelta(ms deltaMs: Double) {
+        let frames = Int((deltaMs / 1_000 * renderSampleRate).rounded())
+        stateLock.lock()
+        let isAnchored = anchored, hasReleased = released
+        if isAnchored, !hasReleased {
+            // Recomputed from the provider, not nudged by `deltaMs`, so this
+            // and the anchor can never drift apart. Taking `tableLock` (inside
+            // the provider) under `stateLock` is the sanctioned nesting — the
+            // manager drops its table lock before calling in here.
+            targetReleaseNanos = SyncTiming.targetReleaseMonotonicNanos(
+                anchorPtsNanos: anchorPtsNanos, totalDelayNanos: delayNanosProvider())
+        }
+        stateLock.unlock()
+        guard isAnchored, hasReleased, frames != 0 else { return }
+        delayLine.requestShift(frames: -frames)
+    }
+
+    // MARK: Consumer (delay line → render)
 
     private func makeSourceNode() -> AVAudioSourceNode {
         AVAudioSourceNode(format: connectionFormat) { [weak self] isSilence, timestamp, frameCount, audioBufferList in
@@ -709,7 +950,7 @@ final class BTDeviceSink: @unchecked Sendable {
             outFrames: frameCount - plan.silentFrames,
             ratio: ratio
         ) { frame in
-            self.ring.readFrame(into: frame)
+            self.delayLine.readFrame(into: frame)
         }
         return produced > 0
     }
@@ -932,7 +1173,7 @@ final class BTSyncedSink: @unchecked Sendable {
     private var sinksByUID: [String: BTDeviceSink] = [:]
     private var composition = BTGroupComposition(airPlayPresent: false, macLocalPresent: false)
     private var offsetMsByUID: [String: Int] = [:]
-    private var trimMsByUID: [String: Int] = [:]
+    private var trimMsByUID: [String: Double] = [:]
     private var gainByUID: [String: Float] = [:]
     private var desiredRunning = false
 
@@ -1026,14 +1267,69 @@ final class BTSyncedSink: @unchecked Sendable {
         sink?.requestRebuild(cause: "offset_change")
     }
 
-    /// The settable per-device signed manual trim (ms).
-    func setTrimMs(_ ms: Int, forDeviceUID uid: String) {
-        let sink = tableLock.withLock { () -> BTDeviceSink? in
-            guard trimMsByUID[uid] != ms else { return nil }
+    /// The settable per-device signed manual trim (ms), applied LIVE — while
+    /// the music plays, with no gap (PLAN-BT-SYNC-DRAWER D6: the whole point is
+    /// nudging by ear).
+    ///
+    /// A trim is NOT a structural change — same device, same rate, same
+    /// reference timeline — so unlike offset/composition/rate it must not
+    /// rebuild the sink. A rebuild re-arms the release gate and the device
+    /// falls silent for the whole delay, about half a second per edit, which is
+    /// what made the old stepper unusable for scrubbing.
+    ///
+    /// Sub-quantum float dust in `ms` cannot leak through: the delta is
+    /// converted to whole frames, and anything below half a frame rounds to a
+    /// no-op shift.
+    func setTrimMs(_ ms: Double, forDeviceUID uid: String) {
+        let change = tableLock.withLock { () -> (sink: BTDeviceSink, deltaMs: Double)? in
+            let previous = trimMsByUID[uid] ?? 0
+            guard previous != ms else { return nil }
             trimMsByUID[uid] = ms
-            return sinksByUID[uid]
+            guard let sink = sinksByUID[uid] else { return nil }
+            return (sink, ms - previous)
         }
-        sink?.requestRebuild(cause: "trim_change")
+        if let change { change.sink.applyTrimDelta(ms: change.deltaMs) }
+    }
+
+    /// D11/T3: the trim range this device's drawer may actually move within.
+    /// Below `lowerBound` (or above `upperBound`, which never moves — see
+    /// below) the ≥ 0 clamp inside `SyncTiming.totalDelayNanos` already eats
+    /// the change, so a ruler/field that let the value run further would be
+    /// showing motion that does nothing.
+    ///
+    /// Solves `delayNanos(forUID:)`'s own formula
+    /// (`reference − deviceOffset + trim`, clamped ≥ 0) for the trim that
+    /// lands exactly on zero: `lower = max(-rangeMs, -(reference −
+    /// deviceOffset))`. `upper` stays the plain `±rangeMs` ceiling — a large
+    /// *positive* trim is never the thing the zero clamp eats, only a large
+    /// negative one is.
+    ///
+    /// LIVE QUERY — do not cache the result. `reference` is
+    /// `presentationDelayMs()` (the live AirPlay figure) when the group's
+    /// composition currently includes AirPlay, else the fixed
+    /// `btOnlyBufferMs`; `BTReferenceTimeline` swaps between them on every
+    /// composition change (BT-REFSEL), so the floor genuinely moves the
+    /// instant an AirPlay device joins or leaves the selection. Callers must
+    /// re-read this every time they need it, never memoize it (e.g. at
+    /// drawer-open time).
+    ///
+    /// A uid with no sink — never selected, or already dropped — has no
+    /// device offset to solve against, so it gets the full ±`rangeMs`.
+    func usableTrimRangeMs(forDeviceUID uid: String) -> ClosedRange<Double> {
+        tableLock.lock()
+        guard sinksByUID[uid] != nil else {
+            tableLock.unlock()
+            return -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs
+        }
+        let currentComposition = composition
+        let offsetMs = offsetMsByUID[uid] ?? 0
+        let bufferMs = btOnlyBufferMs
+        tableLock.unlock()
+        let reference = currentComposition.airPlayPresent ? presentationDelayMs() : bufferMs
+        let lowerBound = Swift.min(
+            BTSyncTrim.rangeMs,
+            Swift.max(-BTSyncTrim.rangeMs, -(Double(reference) - Double(offsetMs))))
+        return lowerBound...BTSyncTrim.rangeMs
     }
 
     /// Per-device render gain (W3 hold-silent): remembered in the table so a
@@ -1056,6 +1352,25 @@ final class BTSyncedSink: @unchecked Sendable {
     func renderingDeviceUIDs() -> Set<String> {
         let sinks = tableLock.withLock { Array(sinksByUID.values) }
         return Set(sinks.lazy.filter(\.hasStartedRendering).map(\.deviceUID))
+    }
+
+    /// The UIDs that have been HANDED at least one captured buffer, whether or
+    /// not their delay gate has opened yet. This is the "is there anything to
+    /// wait for" question, and it is not the same as
+    /// ``renderingDeviceUIDs()``: with nothing playing on the Mac, the capture
+    /// fan-out never calls `enqueue`, so no sink ever anchors and none can ever
+    /// render. A caller holding a `.connecting` state must treat that as an
+    /// IDLE speaker (connected, nothing to play) rather than a failure —
+    /// otherwise selecting a healthy speaker while paused reports "no audio
+    /// started" once its ceiling expires.
+    /// Optional to MATCH ``BTSyncedSinkControlling``'s requirement exactly. A
+    /// non-optional return does not witness an optional requirement, so Swift
+    /// silently falls back to the protocol's "can't tell" default — the real
+    /// sink's answer never reaches the caller and nothing fails to compile.
+    /// This one always answers; only lifecycle-only spies return nil.
+    func anchoredDeviceUIDs() -> Set<String>? {
+        let sinks = tableLock.withLock { Array(sinksByUID.values) }
+        return Set(sinks.lazy.filter(\.hasAnchored).map(\.deviceUID))
     }
 
     // MARK: Feed

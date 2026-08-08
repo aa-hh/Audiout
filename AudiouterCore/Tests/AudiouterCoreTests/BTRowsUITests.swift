@@ -8,7 +8,7 @@ import AppKit
 
 /// BT-UI row behavior on `DeviceRowView` itself: the greyed-row
 /// click-connects branch, the reconnect node vocabulary, the failure-headline
-/// FEED pill, and the SYNC cluster's real-dispatch stepper/typing/align paths
+/// FEED pill, and the SYNC value chip's three states + real-dispatch toggle
 /// (this repo was bitten by test hooks bypassing AppKit dispatch — every
 /// interaction here rides `performClick`/the control's own target/action).
 @MainActor
@@ -17,8 +17,7 @@ import AppKit
     private final class SpyDelegate: DeviceRowView.Delegate {
         var toggles: [(on: Bool, id: String)] = []
         var reconnects: [String] = []
-        var trims: [(ms: Int, id: String)] = []
-        var alignToggles: [(active: Bool, id: String)] = []
+        var drawerToggles: [String] = []
         var wizardRequests: [String] = []
         func deviceRow(_ row: DeviceRowView, didSetVolume volume: Int, for id: String) {}
         func deviceRow(_ row: DeviceRowView, didToggleMute muted: Bool, for id: String) {}
@@ -29,11 +28,8 @@ import AppKit
         func deviceRowDidRequestReconnect(_ row: DeviceRowView) {
             reconnects.append(row.device.id)
         }
-        func deviceRow(_ row: DeviceRowView, didSetSyncTrimMs ms: Int, for id: String) {
-            trims.append((ms, id))
-        }
-        func deviceRow(_ row: DeviceRowView, didToggleAlignTick active: Bool, for id: String) {
-            alignToggles.append((active, id))
+        func deviceRow(_ row: DeviceRowView, didToggleSyncDrawerFor id: String) {
+            drawerToggles.append(id)
         }
         func deviceRowDidRequestAlignmentWizard(_ row: DeviceRowView) {
             wizardRequests.append(row.device.id)
@@ -46,16 +42,18 @@ import AppKit
                isAvailable: available, supportsAirPlay2: false, connectionState: state)
     }
 
-    /// The popover's real BT row shape: bus + meter + SYNC cluster.
+    /// The popover's real BT row shape: bus + meter + SYNC chip.
     private func makeRow(_ device: Device, delegate: SpyDelegate,
-                         syncTrimMs: Int = 0, alignTickActive: Bool = false,
+                         syncTrimMs: Double = 0, syncTrimIsSet: Bool = false,
+                         syncDrawerExpanded: Bool = false,
                          selected: Bool = false) -> DeviceRowView {
         let row = DeviceRowView(device: device, showsToggle: true,
                                 paintsSelectionBackground: false, showsMeter: true,
                                 showsBus: true, showsSyncControls: true)
         row.delegate = delegate
         row.apply(device, selected: selected, controllable: selected,
-                  syncTrimMs: syncTrimMs, alignTickActive: alignTickActive)
+                  syncTrimMs: syncTrimMs, syncTrimIsSet: syncTrimIsSet,
+                  syncDrawerExpanded: syncDrawerExpanded)
         return row
     }
 
@@ -159,120 +157,131 @@ import AppKit
         #expect(notPaired.test_statusText == nil, "no instructional sublabels — ever")
     }
 
-    // MARK: SYNC cluster — real dispatch
+    // MARK: SYNC value chip (PLAN-BT-SYNC-DRAWER T6) — three states + real dispatch
 
-    @Test func stepperStepsByTenAndClampsAtTheRange() {
-        let spy = SpyDelegate()
-        let row = makeRow(btDevice(), delegate: spy, syncTrimMs: 0)
-        row.test_fireSyncPlusClick()
-        row.test_fireSyncPlusClick()
-        row.test_fireSyncMinusClick()
-        #expect(spy.trims.map(\.ms) == [10, 20, 10], "− / + move in coarse 10 ms steps")
-        #expect(row.test_syncTrimDisplayed == "10")
-
-        let ceiling = makeRow(btDevice(), delegate: spy, syncTrimMs: 495)
-        ceiling.test_fireSyncPlusClick()
-        #expect(spy.trims.last?.ms == 500, "clamped at +\(BTSyncTrim.rangeMs)")
-        ceiling.test_fireSyncPlusClick()
-        #expect(spy.trims.last?.ms == 500)
-        #expect(ceiling.test_syncTrimDisplayed == "500")
+    @Test func tunedChipShowsTheValueWithACollapsedChevron() {
+        let row = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: 24, syncTrimIsSet: true)
+        #expect(row.test_syncChipTitle == "24 ms",
+                "the chip is a read-only summary of the trim, in whole ms")
+        #expect(row.test_syncChipChevronSymbolName == "chevron.right", "collapsed ⇒ chevron.right, the disclosure convention")
+        #expect(!row.test_syncChipIsDashed, "a tuned chip's border is solid")
+        #expect(!row.test_syncChipIsEngaged)
+        #expect(row.test_syncChipTitleColor == Tokens.Color.label)
+        #expect(row.test_syncChipEnabled)
     }
 
-    @Test func typingCommitsAtOneMillisecondAndClampsAndReverts() {
-        let spy = SpyDelegate()
-        let row = makeRow(btDevice(), delegate: spy, syncTrimMs: 0)
-        row.test_commitSyncField("37")
-        #expect(spy.trims.last?.ms == 37, "typing allows 1 ms precision")
-        row.test_commitSyncField("-1000")
-        #expect(spy.trims.last?.ms == -500, "typed values clamp to the range")
-        row.test_commitSyncField("abc")
-        #expect(spy.trims.last?.ms == -500, "unparseable input reverts to the current value")
-        #expect(row.test_syncTrimDisplayed == "-500")
+    @Test func negativeTrimReadsAsEarlierWhereverTheChipSpellsItOut() {
+        let row = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: -24, syncTrimIsSet: true)
+        #expect(row.test_syncChipTitle == "−24 ms", "typographic minus, not a hyphen")
+        #expect(row.test_syncChipTooltip?.contains("24 milliseconds earlier") == true,
+                "the chip is too narrow for D7's phrasing, so the tooltip carries the direction")
     }
 
-    @Test func optionClickOnTheSteppersStepsOneMillisecond() {
-        let spy = SpyDelegate()
-        let row = makeRow(btDevice(), delegate: spy, syncTrimMs: 0)
-        row.test_optionModifierOverride = true
-        row.test_fireSyncPlusClick()
-        #expect(spy.trims.last?.ms == 1, "⌥-click steps fine (1 ms)")
-        row.test_fireSyncMinusClick()
-        #expect(spy.trims.last?.ms == 0)
-        row.test_optionModifierOverride = false
-        row.test_fireSyncPlusClick()
-        #expect(spy.trims.last?.ms == 10, "a plain click keeps the coarse 10 ms step")
+    /// D10, the discoverability fix: an untuned speaker must not read "0.0 ms"
+    /// (which looks finished) — it reads "Not set" inside a DASHED outline,
+    /// which reads as an invitation.
+    @Test func untunedChipReadsNotSetInADashedTertiaryOutline() {
+        let row = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: 0, syncTrimIsSet: false)
+        #expect(row.test_syncChipTitle == "Not set")
+        #expect(row.test_syncChipIsDashed, "the dashed border IS the invitation")
+        #expect(row.test_syncChipTitleColor == Tokens.Color.tertiaryLabel)
+        #expect(row.test_syncChipBorderColor == Tokens.Color.tertiaryLabel,
+                "one de-emphasis tone, spoken by both the text and its outline")
     }
 
-    @Test func returnCommitsAndIsConsumedAndFocusLossCommitsToo() {
-        let spy = SpyDelegate()
-        let row = makeRow(btDevice(), delegate: spy, syncTrimMs: 0)
-        row.test_setSyncFieldText("42")
-        let consumed = row.test_performSyncFieldCommand(#selector(NSResponder.insertNewline(_:)))
-        #expect(consumed, "Return is CONSUMED — it must never bubble past the field and close the popover")
-        #expect(spy.trims.last?.ms == 42, "…and it COMMITS the typed value")
+    /// The engaged treatment is the MUTE PILL's recipe — a translucent accent
+    /// fill — never a solid gold fill: gold is the route-armed/primary
+    /// vocabulary, and a drawer disclosure is neither.
+    @Test func openDrawerChipWearsTheEngagedAccentTreatmentNotGold() {
+        let row = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: 24,
+                          syncTrimIsSet: true, syncDrawerExpanded: true)
+        #expect(row.test_syncChipChevronSymbolName == "chevron.down", "expanded ⇒ rotated down to reveal")
+        #expect(row.test_syncChipIsEngaged)
+        #expect(row.test_syncChipFill
+                == Tokens.Color.accent.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha),
+                "exactly the mute pill's engaged fill")
+        #expect(row.test_syncChipFill != Tokens.Color.gold, "…and never the gold accent")
+        #expect(row.test_syncChipTitleColor == Tokens.Color.accent)
+        #expect(row.test_syncChipBorderColor == Tokens.Color.accent)
 
-        row.test_setSyncFieldText("77")
-        row.test_endSyncFieldEditing()
-        #expect(spy.trims.last?.ms == 77, "focus loss commits the typed value too")
-        #expect(row.test_syncTrimDisplayed == "77")
-
-        row.test_setSyncFieldText("9999")
-        row.test_performSyncFieldCommand(#selector(NSResponder.insertNewline(_:)))
-        #expect(spy.trims.last?.ms == 500, "a Return-committed value still clamps")
+        let collapsed = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: 24,
+                                syncTrimIsSet: true)
+        #expect(collapsed.test_syncChipFill == nil, "a resting chip fills nothing")
     }
 
-    @Test func arrowKeysNudgeOneMillisecondOptionArrowsTen() {
+    @Test func chipClickAsksTheHostToToggleTheDrawerAndNeverEditsTheTrim() {
         let spy = SpyDelegate()
-        let row = makeRow(btDevice(), delegate: spy, syncTrimMs: 0)
-        row.test_optionModifierOverride = false
-        row.test_performSyncFieldCommand(#selector(NSResponder.moveUp(_:)))
-        #expect(spy.trims.last?.ms == 1, "↑ nudges fine — the by-ear granularity")
-        row.test_performSyncFieldCommand(#selector(NSResponder.moveDown(_:)))
-        #expect(spy.trims.last?.ms == 0)
-        row.test_performSyncFieldCommand(Selector(("moveToBeginningOfParagraph:")))
-        #expect(spy.trims.last?.ms == 10, "⌥↑ arrives as the paragraph binding and nudges coarse")
-        row.test_performSyncFieldCommand(Selector(("moveToEndOfParagraph:")))
-        #expect(spy.trims.last?.ms == 0, "⌥↓ likewise")
-
-        let ceiling = makeRow(btDevice(), delegate: spy, syncTrimMs: 500)
-        ceiling.test_optionModifierOverride = false
-        ceiling.test_performSyncFieldCommand(#selector(NSResponder.moveUp(_:)))
-        #expect(spy.trims.last?.ms == 500, "the clamp holds under arrow nudges")
+        let row = makeRow(btDevice(), delegate: spy, syncTrimMs: 24, syncTrimIsSet: true)
+        row.test_fireSyncChipClick()
+        row.test_fireSyncChipClick()
+        #expect(spy.drawerToggles == [btDevice().id, btDevice().id],
+                "each click is one toggle request — the host owns open/close (D2)")
+        #expect(row.test_syncChipTitle == "24 ms",
+                "the chip is read-only: clicking it never moves the value")
     }
 
-    @Test func disconnectedRowShowsTheSavedTrimReadOnly() {
+    @Test func disconnectedRowShowsTheSavedTrimOnADeadChip() {
         let spy = SpyDelegate()
-        let row = makeRow(btDevice(available: false), delegate: spy, syncTrimMs: -120)
-        #expect(row.test_syncTrimDisplayed == "-120", "the saved value stays visible")
-        #expect(!row.test_syncControlsEnabled)
-        row.test_fireSyncPlusClick()   // disabled button — a real click is a no-op
-        row.test_fireSyncMinusClick()
-        #expect(spy.trims.isEmpty, "no edits reach the delegate while disconnected")
+        let row = makeRow(btDevice(available: false), delegate: spy,
+                          syncTrimMs: -120, syncTrimIsSet: true)
+        #expect(row.test_syncChipTitle == "−120 ms", "the saved value stays visible")
+        #expect(!row.test_syncChipEnabled,
+                "…but there is nothing to tune while the speaker is away")
+        row.test_fireSyncChipClick()   // disabled button — a real click is a no-op
+        #expect(spy.drawerToggles.isEmpty, "no drawer opens for an absent speaker")
     }
 
-    @Test func alignButtonUsesTheFilledMetronomeWithTooltipAndRealDispatch() {
-        let spy = SpyDelegate()
-        let row = makeRow(btDevice(), delegate: spy)
-        #expect(row.test_alignSymbolName == "metronome.fill",
-                "the fill variant resolved (outline `metronome` is only the fallback)")
-        #expect(row.test_alignTooltip?.contains("alignment ticks") == true,
-                "the bare glyph explains itself on hover")
-        row.test_fireAlignClick()
-        #expect(spy.alignToggles.map(\.active) == [true])
-        #expect(row.test_alignTickOn)
-        row.test_fireAlignClick()
-        #expect(spy.alignToggles.map(\.active) == [true, false])
+    @Test func chipSpeaksItsOffsetAndItsExpandedState() {
+        let tuned = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: 24, syncTrimIsSet: true)
+        #expect(tuned.test_syncChipAXLabel == "Sync offset for Sonos Move 2")
+        #expect(tuned.test_syncChipAXValue == "24 milliseconds later",
+                "never a bare signed number (D7)")
+        #expect(tuned.test_syncChipAXExpanded == false)
+
+        let untuned = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimIsSet: false)
+        #expect(untuned.test_syncChipAXValue == "not set")
+
+        let open = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: -3,
+                           syncTrimIsSet: true, syncDrawerExpanded: true)
+        #expect(open.test_syncChipAXExpanded, "the drawer's state is spoken, not only drawn")
+        #expect(open.test_syncChipAXValue == "3 milliseconds earlier")
     }
 
-    @Test func optionClickOnTheMetronomeRequestsTheWizardNotTheTick() {
-        let spy = SpyDelegate()
-        let row = makeRow(btDevice(), delegate: spy)
-        row.test_optionModifierOverride = true
-        row.test_fireAlignClick()
-        #expect(spy.wizardRequests == [btDevice().id], "⌥-click asks for the guided wizard")
-        #expect(spy.alignToggles.isEmpty, "…never the manual tick")
-        #expect(!row.test_alignTickOn, "and the toggle never flips")
-        #expect(row.test_alignTooltip?.contains("⌥ for the guided alignment") == true,
+    /// The T6 regression guard from the other side: a non-BT row mounts no
+    /// chip at all, so nothing about the AirPlay row's trailing slot moved.
+    @Test func airPlayRowMountsNoSyncChip() {
+        let device = Device(id: "office", name: "Office", kind: .homePod)
+        let row = DeviceRowView(device: device, showsToggle: true,
+                                paintsSelectionBackground: false, showsMeter: true,
+                                showsBus: true)
+        row.apply(device, selected: false)
+        #expect(row.test_showsSyncControls == false)
+        #expect(row.test_syncChipTitle == nil)
+        #expect(row.test_syncChipEnabled == false)
+    }
+
+    /// The metronome button lives in the sync drawer now (D9); ⌥-click on it
+    /// is the wizard relaunch that used to sit on the row's own button.
+    @Test func optionClickOnTheDrawerMetronomeRequestsTheWizardNotTheTick() {
+        final class DrawerSpy: BTSyncDrawerViewDelegate {
+            var tickToggles: [Bool] = []
+            var wizardRequests = 0
+            func syncDrawer(_ d: BTSyncDrawerView, didChangeTrimMs ms: Double, committed: Bool) {}
+            func syncDrawer(_ d: BTSyncDrawerView, didToggleAlignTick active: Bool) {
+                tickToggles.append(active)
+            }
+            func syncDrawerDidRequestClose(_ d: BTSyncDrawerView) {}
+            func syncDrawerDidRequestAlignmentWizard(_ d: BTSyncDrawerView) { wizardRequests += 1 }
+        }
+        let spy = DrawerSpy()
+        let drawer = BTSyncDrawerView()
+        drawer.delegate = spy
+        drawer.test_optionModifierOverride = true
+        drawer.test_fireAlignClick()
+        #expect(spy.wizardRequests == 1, "⌥-click asks for the guided wizard")
+        #expect(spy.tickToggles.isEmpty, "…never the manual tick")
+        #expect(!drawer.test_alignActive, "and the toggle never flips")
+        #expect(DeviceRowView.alignTooltip.contains("⌥ for the guided alignment"),
                 "the tooltip teaches the invisible modifier")
     }
 
@@ -382,7 +391,7 @@ import AppKit
                 == ["bt-new:output", "bt-old:output", "bt-ghost:output"],
                 "most recent first; a pairing with no recency sinks to the bottom")
         #expect(popover.test_deviceRow(for: "bt-new:output")?.test_showsSyncControls == true,
-                "BT rows mount the SYNC cluster")
+                "BT rows mount the SYNC chip")
         #expect(popover.test_deviceRow(for: "office")?.test_showsSyncControls == false,
                 "AirPlay rows never do")
     }
@@ -402,39 +411,74 @@ import AppKit
         #expect(paired == 1)
     }
 
-    // MARK: SYNC plumbing — cache, closures, clamping
+    // MARK: SYNC plumbing — cache, closures, chip seeding
 
+    /// The chip is read-only (T6), so the edit ENTERS through the drawer. What
+    /// is pinned here is the host half: the closure fires, the session cache
+    /// outranks the provider, and the row's chip re-reads the freshest value
+    /// on a repaint.
     @Test func trimEditsFlowThroughTheClosureAndSurviveRepaints() {
         let (popover, _, _) = makePopover()
-        var written: [(ms: Int, id: String)] = []
+        var written: [(ms: Double, id: String, persist: Bool)] = []
         popover.btTrimProvider = { _ in 120 }
-        popover.onSetBTTrim = { ms, id in written.append((ms, id)) }
+        popover.btTrimIsSetProvider = { _ in true }
+        popover.onSetBTTrim = { ms, id, persist in written.append((ms, id, persist)) }
         let devices = [local(), bt("bt-a:output", name: "Speaker A")]
         popover.update(devices: devices)
 
         let row = popover.test_deviceRow(for: "bt-a:output")
-        #expect(row?.test_syncTrimDisplayed == "120", "rows seed from the persisted trim")
+        #expect(row?.test_syncChipTitle == "120 ms", "rows seed from the persisted trim")
+        #expect(row?.test_syncChipIsDashed == false, "a persisted trim is a TUNED chip")
 
-        row?.test_fireSyncPlusClick()
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        popover.test_syncDrawer?.test_shiftModifierOverride = true
+        popover.test_syncDrawer?.test_firePlusClick()        // ⇧+ = +10 ms, real target/action
         #expect(written.last?.ms == 130)
         #expect(written.last?.id == "bt-a:output")
+        #expect(written.last?.persist == true, "a stepper click is a committed gesture")
 
         // A repaint keeps the freshest edit — the cache outranks the provider.
         popover.update(devices: devices)
-        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncTrimDisplayed == "130")
+        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipTitle == "130 ms")
+    }
+
+    /// D10 at the popover level: a device with no persisted ENTRY reads "Not
+    /// set" on its chip, not "0.0 ms" — and a device deliberately tuned to
+    /// exactly 0.0 reads "0.0 ms", which the value alone could never tell
+    /// apart (T7 §6).
+    @Test func untunedChipTracksThePersistedENTRYNotTheValue() {
+        let (popover, _, _) = makePopover()
+        popover.btTrimProvider = { _ in 0 }
+        popover.btTrimIsSetProvider = { $0 == "bt-b:output" }
+        popover.update(devices: [local(),
+                                 bt("bt-a:output", name: "Speaker A"),
+                                 bt("bt-b:output", name: "Speaker B")])
+
+        let never = popover.test_deviceRow(for: "bt-a:output")
+        #expect(never?.test_syncChipTitle == "Not set")
+        #expect(never?.test_syncChipIsDashed == true)
+
+        let tunedToZero = popover.test_deviceRow(for: "bt-b:output")
+        #expect(tunedToZero?.test_syncChipTitle == "0 ms",
+                "a deliberate 0.0 is TUNED — the old value != 0 placeholder got this wrong")
+        #expect(tunedToZero?.test_syncChipIsDashed == false)
     }
 
     @Test func disconnectedRowShowsPersistedTrimReadOnly() {
         let (popover, _, _) = makePopover()
         popover.btTrimProvider = { _ in -50 }
+        popover.btTrimIsSetProvider = { _ in true }
         popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A", available: false)])
         let row = popover.test_deviceRow(for: "bt-a:output")
-        #expect(row?.test_syncTrimDisplayed == "-50")
-        #expect(row?.test_syncControlsEnabled == false)
+        #expect(row?.test_syncChipTitle == "−50 ms")
+        #expect(row?.test_syncChipEnabled == false)
     }
 
     // MARK: Align tick lifecycle — one at a time, stops on close
 
+    /// The align-by-ear BUTTON moved off the row into the drawer (D9), so the
+    /// gesture arrives at the host from there. The HOST's lifecycle rules —
+    /// one tick at a time, stopped by the popover closing — are unchanged.
     @Test func alignTickIsOneAtATimeAndStopsWhenThePopoverCloses() {
         let (popover, _, _) = makePopover()
         var gates: [Bool] = []
@@ -445,17 +489,20 @@ import AppKit
             bt("bt-b:output", name: "Speaker B"),
         ])
 
-        popover.test_deviceRow(for: "bt-a:output")?.test_fireAlignClick()
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        popover.test_syncDrawer?.test_fireAlignClick()
         #expect(popover.test_alignTickDeviceID() == "bt-a:output")
         #expect(gates.last == true)
-        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_alignTickOn == true)
 
-        popover.test_deviceRow(for: "bt-b:output")?.test_fireAlignClick()
+        // Opening B's drawer closes A's, which takes A's tick with it — the
+        // tick can only ever belong to the one visible control (T7 §3).
+        popover.test_toggleSyncDrawer(deviceID: "bt-b:output")
+        #expect(popover.test_alignTickDeviceID() == nil,
+                "a collapsing drawer stops its tick — no metronome without a control")
+        popover.test_syncDrawer?.test_fireAlignClick()
         #expect(popover.test_alignTickDeviceID() == "bt-b:output", "the single tick MOVES")
-        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_alignTickOn == false,
-                "the previous row's button drops on the re-apply")
 
-        popover.popoverDidClose(Notification(name: NSPopover.didCloseNotification))
+        popover.surfaceDidHide()
         #expect(popover.test_alignTickDeviceID() == nil, "click-away/close stops the tick")
         #expect(gates.last == false)
     }
@@ -516,5 +563,259 @@ import AppKit
         popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A", available: true)])
         popover.test_deviceRow(for: "bt-a:output")?.test_clickName()
         #expect(controller.selectedDeviceIDs.contains("bt-a:output"))
+    }
+}
+
+/// The SYNC drawer accordion (PLAN-BT-SYNC-DRAWER T7): one drawer at a time,
+/// mounted directly under its row, auto-collapsing with its device, and the
+/// live-scrub / committed-edit split that keeps a drag off the JSON store.
+@MainActor
+@Suite(.serialized) struct BTSyncDrawerAccordionTests {
+
+    private func tempDirectory() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    }
+
+    private func makePopover(fleet: [Device] = []) -> (PopoverController, GroupController) {
+        let backend = MockBackend(fleet: fleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        let controller = GroupController(backend: backend,
+                                         store: GroupStore(directory: tempDirectory()),
+                                         routingStore: RoutingStore(directory: tempDirectory()),
+                                         loadPersisted: false)
+        let popover = PopoverController()
+        popover.configure(groupController: controller)
+        popover.test_isShownOverride = true
+        if !fleet.isEmpty {
+            backend.start()
+            let deadline = Date().addingTimeInterval(5)
+            while Date() < deadline && backend.devices.count < fleet.count {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+            }
+        }
+        return (popover, controller)
+    }
+
+    private func local() -> Device {
+        Device(id: "mac", name: "This Mac", kind: .localMac, isLocalDevice: true)
+    }
+
+    private func airplay(_ id: String = "office") -> Device {
+        Device(id: id, name: "Office", kind: .homePod)
+    }
+
+    private func bt(_ id: String, name: String, available: Bool = true) -> Device {
+        Device(id: id, name: name, kind: .bluetooth,
+               isAvailable: available, supportsAirPlay2: false)
+    }
+
+    /// Every `BTSyncDrawerView` anywhere in the popover's view tree — the only
+    /// way to prove D2 ("at most one") rather than merely trusting the model
+    /// flag.
+    private func mountedDrawers(_ popover: PopoverController, reachableFrom id: String)
+        -> [BTSyncDrawerView] {
+        var root: NSView? = popover.test_deviceRow(for: id)
+        while let parent = root?.superview { root = parent }
+        guard let root else { return [] }
+        func collect(_ view: NSView) -> [BTSyncDrawerView] {
+            if let drawer = view as? BTSyncDrawerView { return [drawer] }
+            return view.subviews.flatMap(collect)
+        }
+        return collect(root)
+    }
+
+    /// Whether the mounted drawer sits in the very next stack slot after its
+    /// row (D1 — it opens in place, under the row it belongs to).
+    private func drawerFollowsRow(_ popover: PopoverController, _ id: String) -> Bool {
+        guard let row = popover.test_deviceRow(for: id),
+              let drawer = popover.test_syncDrawer,
+              let stack = row.superview as? NSStackView,
+              let rowIndex = stack.arrangedSubviews.firstIndex(of: row),
+              let drawerIndex = stack.arrangedSubviews.firstIndex(of: drawer)
+        else { return false }
+        return drawerIndex == rowIndex + 1
+    }
+
+    // MARK: The chip is really wired (the seam trap)
+
+    /// `test_*` hooks here bypass AppKit dispatch and have hidden real breaks
+    /// before, so this one goes through the chip's own target/action.
+    @Test func chipClickOpensAndClosesTheDrawerThroughItsRealAction() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+
+        popover.test_deviceRow(for: "bt-a:output")?.test_fireSyncChipClick()
+        #expect(popover.test_expandedSyncDeviceID == "bt-a:output")
+        #expect(popover.test_syncDrawerVisible)
+        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipIsEngaged == true)
+
+        popover.test_deviceRow(for: "bt-a:output")?.test_fireSyncChipClick()
+        #expect(popover.test_expandedSyncDeviceID == nil, "a second click closes it")
+        #expect(!popover.test_syncDrawerVisible)
+    }
+
+    // MARK: D2 — one drawer at a time
+
+    @Test func openingASecondDrawerLeavesExactlyOneAttachedToTheNewRow() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(),
+                                 bt("bt-a:output", name: "Speaker A"),
+                                 bt("bt-b:output", name: "Speaker B")])
+
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        #expect(drawerFollowsRow(popover, "bt-a:output"))
+
+        popover.test_toggleSyncDrawer(deviceID: "bt-b:output")
+        #expect(popover.test_expandedSyncDeviceID == "bt-b:output")
+        #expect(mountedDrawers(popover, reachableFrom: "bt-a:output").count == 1,
+                "opening B while A is open leaves exactly ONE drawer")
+        #expect(drawerFollowsRow(popover, "bt-b:output"), "…attached to B")
+        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipIsEngaged == false)
+        #expect(popover.test_deviceRow(for: "bt-b:output")?.test_syncChipIsEngaged == true)
+    }
+
+    // MARK: Auto-collapse
+
+    @Test func drawerCollapsesWhenItsDeviceIsDeselected() {
+        let (popover, controller) = makePopover(fleet: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.test_deviceRow(for: "bt-a:output")?.test_clickName()   // select
+        #expect(controller.selectedDeviceIDs.contains("bt-a:output"))
+
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        #expect(popover.test_syncDrawerVisible)
+
+        popover.test_deviceRow(for: "bt-a:output")?.test_clickName()   // deselect
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        #expect(popover.test_expandedSyncDeviceID == nil, "out of the mix ⇒ no drawer")
+        #expect(!popover.test_syncDrawerVisible)
+    }
+
+    /// A drawer opened on an available-but-UNSELECTED row (tuning a speaker
+    /// before adding it to the mix) has no selection to lose, so it survives
+    /// repaints — the collapse above is an EDGE, not a standing requirement.
+    @Test func drawerOpenedOnAnUnselectedRowSurvivesRepaints() {
+        let (popover, _) = makePopover()
+        let devices = [local(), bt("bt-a:output", name: "Speaker A")]
+        popover.update(devices: devices)
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+
+        popover.update(devices: devices)
+        #expect(popover.test_expandedSyncDeviceID == "bt-a:output")
+        #expect(popover.test_syncDrawerVisible)
+    }
+
+    @Test func drawerCollapsesWhenItsRowDisappearsOrGoesUnavailable() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        #expect(popover.test_syncDrawerVisible)
+
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A", available: false)])
+        #expect(popover.test_expandedSyncDeviceID == nil, "an unavailable row has nothing to tune")
+
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        #expect(popover.test_syncDrawerVisible)
+
+        popover.update(devices: [local()])            // the device vanishes entirely
+        #expect(popover.test_expandedSyncDeviceID == nil)
+        #expect(!popover.test_syncDrawerVisible)
+    }
+
+    @Test func popoverCloseCollapsesTheDrawer() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+
+        popover.surfaceDidHide()
+        #expect(popover.test_expandedSyncDeviceID == nil)
+        #expect(!popover.test_syncDrawerVisible)
+    }
+
+    // MARK: Stepper commits persist, and the chip tracks them (T7 §4)
+
+    @Test func eachStepperClickAppliesAndPersistsAndTheChipTracksIt() {
+        let (popover, _) = makePopover()
+        var applied: [(ms: Double, persist: Bool)] = []
+        popover.onSetBTTrim = { ms, _, persist in applied.append((ms, persist)) }
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+
+        // Three coarse (⇧) clicks: each is a complete gesture, so each applies
+        // AND persists (the scrubbing ruler and its apply-without-persist path
+        // were cut — every change the drawer now makes is discrete).
+        popover.test_syncDrawer!.test_shiftModifierOverride = true
+        popover.test_syncDrawer!.test_firePlusClick()
+        popover.test_syncDrawer!.test_firePlusClick()
+        popover.test_syncDrawer!.test_firePlusClick()
+        #expect(applied.count == 3)
+        #expect(applied.allSatisfy { $0.persist }, "a stepper click always writes the store")
+        #expect(applied.map(\.ms) == [10, 20, 30])
+        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipTitle == "30 ms",
+                "the chip tracks each committed step")
+    }
+
+    /// T7 §7: every value that reaches the host is quantised to whole ms, so
+    /// the chip, the field and the persisted value can never disagree.
+    @Test func committedTrimsAreQuantisedToWholeMilliseconds() {
+        let (popover, _) = makePopover()
+        var applied: [Double] = []
+        popover.onSetBTTrim = { ms, _, _ in applied.append(ms) }
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+
+        popover.syncDrawer(popover.test_syncDrawer!, didChangeTrimMs: 22.4, committed: true)
+        popover.syncDrawer(popover.test_syncDrawer!, didChangeTrimMs: 22.6, committed: true)
+        #expect(applied == [22, 23])
+    }
+
+    // MARK: Geometry + range
+
+    @Test func popoverGrowsByTheDrawerHeightAndReturnsExactlyOnCollapse() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        let collapsed = popover.test_panelContentHeight
+
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        #expect(popover.test_panelContentHeight
+                == collapsed + PopoverColumnGrid.syncDrawerHeight)
+
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        #expect(popover.test_panelContentHeight == collapsed, "…and returns exactly")
+    }
+
+    /// T3's trap: the usable range moves when AirPlay joins or leaves the
+    /// group, so an OPEN drawer must re-read it on every snapshot.
+    @Test func openDrawerReReadsTheUsableRangeOnEveryUpdate() {
+        let (popover, _) = makePopover()
+        var floor: Double = -100
+        popover.btTrimRangeProvider = { _ in floor...BTSyncTrim.rangeMs }
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        #expect(popover.test_syncDrawer?.test_usableRangeMs.lowerBound == -100)
+
+        floor = -420
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        #expect(popover.test_syncDrawer?.test_usableRangeMs.lowerBound == -420,
+                "the range is never cached at open time")
+    }
+
+    // MARK: AirPlay rows are untouched
+
+    @Test func airPlayRowsExposeNeitherChipNorDrawer() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), airplay(), bt("bt-a:output", name: "Speaker A")])
+
+        let airplayRow = popover.test_deviceRow(for: "office")
+        #expect(airplayRow?.test_showsSyncControls == false)
+        #expect(airplayRow?.test_syncChipTitle == nil)
+
+        popover.test_toggleSyncDrawer(deviceID: "office")
+        #expect(popover.test_expandedSyncDeviceID == nil,
+                "a non-Bluetooth row can never carry a drawer")
+        #expect(!popover.test_syncDrawerVisible)
     }
 }

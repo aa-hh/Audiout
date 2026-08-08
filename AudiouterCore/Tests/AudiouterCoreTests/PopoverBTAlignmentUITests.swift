@@ -60,8 +60,8 @@ import AppKit
 
     final class Recorder {
         var resolves: [(id: String, dismissed: Bool)] = []
-        var previews: [(ms: Int, id: String)] = []
-        var ends: [(id: String, keep: Int?)] = []
+        var previews: [(ms: Double, id: String)] = []
+        var ends: [(id: String, keep: Double?)] = []
         var ticks: [Bool] = []
     }
 
@@ -107,7 +107,7 @@ import AppKit
         popover.rebuild()
         #expect(popover.test_btAlignmentPromptView() != nil, "a rebuild remounts the card")
 
-        popover.popoverDidClose(Notification(name: NSPopover.didCloseNotification))
+        popover.surfaceDidHide()
         popover.rebuild()   // the next open's rebuildForOpen path
         #expect(popover.test_btAlignmentPromptView() != nil,
                 "the offer survives close/reopen — the backend's hold does too")
@@ -231,13 +231,13 @@ import AppKit
         #expect((wizard?.test_progressValue ?? 0) > 0, "the indicator narrows")
         wizard?.test_clickButton(titled: "Office")               // reversal 1
         wizard?.test_clickButton(titled: "Move 2")               // reversal 2 → converged
-        #expect(wizard?.test_screen == .receipt(trimMs: 156))
+        #expect(wizard?.test_screen == .receipt(trimMs: 156.25))
         #expect(wizard?.test_bodyText == "Aligned — 156 ms", "the ms value is a receipt only")
         #expect(wizard?.test_showsEducationLine == true)
         #expect(recorder.ticks == [true, false], "the tick ends with the questions")
 
         wizard?.test_clickButton(titled: "Keep")
-        #expect(recorder.ends.map(\.keep) == [156], "Keep persists the result")
+        #expect(recorder.ends.map(\.keep) == [156.25], "Keep persists the result")
         #expect(popover.test_btWizardIsOpen() == false, "…and closes the wizard")
     }
 
@@ -292,7 +292,7 @@ import AppKit
         let (popover, recorder) = makePopover()
         let wizard = openWizard(popover)
         wizard?.test_clickButton(titled: "Start")
-        popover.popoverDidClose(Notification(name: NSPopover.didCloseNotification))
+        popover.surfaceDidHide()
         #expect(recorder.ticks == [true, false], "the wizard tick never outlives the surface")
         #expect(recorder.ends.map(\.keep) == [nil], "…and the prior trim is restored")
         #expect(popover.test_btWizardIsOpen() == false)
@@ -303,7 +303,9 @@ import AppKit
         var manualGates: [Bool] = []
         popover.onAlignTickActiveChange = { manualGates.append($0) }
         showPrompt(popover)
-        popover.test_deviceRow(for: "bt-a:output")?.test_fireAlignClick()
+        // The metronome button lives in the sync drawer now (D9).
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        popover.test_syncDrawer?.test_fireAlignClick()
         #expect(manualGates == [true])
 
         popover.test_btAlignmentPromptView()?.test_clickAlignWithTicks()
@@ -314,8 +316,9 @@ import AppKit
 
     // MARK: Manual relaunch (the wizard outlives "Not now" — locked UX)
 
-    /// The mix-selected row without any card: ⌥-click on the metronome opens
-    /// the wizard; a plain click still runs the manual 30 s tick.
+    /// The mix-selected row without any card: ⌥-click on the DRAWER's
+    /// metronome opens the wizard; a plain click still runs the manual 30 s
+    /// tick (the button moved off the row into the drawer — D9).
     private func selectMixedBT(_ popover: PopoverController) -> DeviceRowView? {
         popover.update(devices: [local(), airplay(), bt()])
         popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
@@ -323,21 +326,23 @@ import AppKit
         return popover.test_deviceRow(for: "bt-a:output")
     }
 
-    @Test func optionClickOnTheMetronomeOpensTheWizardPlainClickKeepsTheManualTick() {
+    @Test func optionClickOnTheDrawerMetronomeOpensTheWizardPlainClickKeepsTheManualTick() {
         let (popover, _) = makePopover()
-        let row = selectMixedBT(popover)
-        row?.test_optionModifierOverride = false
-        row?.test_fireAlignClick()
+        _ = selectMixedBT(popover)
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        let drawer = popover.test_syncDrawer
+        drawer?.test_optionModifierOverride = false
+        drawer?.test_fireAlignClick()
         #expect(popover.test_alignTickDeviceID() == "bt-a:output",
                 "a plain click stays the manual tick")
         #expect(popover.test_btWizardIsOpen() == false)
 
-        row?.test_optionModifierOverride = true
-        row?.test_fireAlignClick()
+        drawer?.test_optionModifierOverride = true
+        drawer?.test_fireAlignClick()
         #expect(popover.test_btWizardIsOpen(), "⌥-click opens the guided wizard")
         #expect(popover.test_alignTickDeviceID() == nil,
                 "…which stops the running manual tick (one tick source)")
-        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_alignTickOn == false,
+        #expect(popover.test_syncDrawer?.test_alignActive == false,
                 "the toggle never flips on the ⌥ path")
     }
 
@@ -360,9 +365,8 @@ import AppKit
         popover.test_btAlignmentPromptView()?.test_clickNotNow()
         #expect(recorder.resolves.map(\.dismissed) == [true])
 
-        let row = popover.test_deviceRow(for: "bt-a:output")
-        row?.test_optionModifierOverride = true
-        row?.test_fireAlignClick()
+        let menu = popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()
+        menu?.performActionForItem(at: 0)   // real AppKit menu dispatch
         #expect(popover.test_btWizardIsOpen(),
                 "the FINAL dismissal only silences the auto-prompt, never the manual way in")
     }
@@ -399,9 +403,12 @@ import AppKit
         let (popover, _) = makePopover()
         _ = selectMixedBT(popover)
         popover.update(devices: [local(), airplay(), bt(available: false)])
-        let row = popover.test_deviceRow(for: "bt-a:output")
-        row?.test_optionModifierOverride = true
-        row?.test_fireAlignClick()
+        // The context item is disabled on a greyed row; real menu dispatch on
+        // a disabled item is a no-op. The direct call proves the guard too.
+        let menu = popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()
+        #expect(menu?.items.first?.isEnabled == false)
+        menu?.performActionForItem(at: 0)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
         #expect(popover.test_btWizardIsOpen() == false,
                 "an un-live target never opens — the same conditions that tear one down")
     }

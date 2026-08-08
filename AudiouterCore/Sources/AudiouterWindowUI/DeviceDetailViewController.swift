@@ -32,7 +32,7 @@ import AudiouterSharedUI
 ///   (renameable here) and a device's (not);
 /// - the read-only metadata in two grouped sections (secondary-colour captions
 ///   leading, values right-aligned into their own column): device STATE
-///   (Status, Available, Volume, Kind) in the first, MEMBERSHIP ("In groups:" —
+///   (Status, Available, Volume, Kind) in the first, MEMBERSHIP ("In groups" —
 ///   the saved groups from the injected `GroupController` whose `memberIDs`
 ///   contain this device) in the second. The sections' own inset hairlines
 ///   separate the rows; the old stock `NSBox` divider is gone (it drew a 185 pt
@@ -116,7 +116,7 @@ public final class DeviceDetailViewController: NSViewController {
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         // Device STATE (status, availability, volume, kind) in one section,
-        // MEMBERSHIP ("In groups:") in another — the two bounded sections are
+        // MEMBERSHIP ("In groups") in another — the two bounded sections are
         // what read as sectioning now, replacing the stock `NSBox` rule that
         // used to sit between them and stop a third of the way across the pane.
         stateStack.translatesAutoresizingMaskIntoConstraints = false
@@ -141,7 +141,7 @@ public final class DeviceDetailViewController: NSViewController {
         groupsStack.orientation = .vertical
         groupsStack.alignment = .leading
         groupsStack.spacing = 10
-        let membershipRow = makeMetadataRow(caption: "In groups:", valueLabel: groupsValueLabel)
+        let membershipRow = makeMetadataRow(caption: "In groups", valueLabel: groupsValueLabel)
         groupsStack.addArrangedSubview(membershipRow)
         membershipRow.widthAnchor.constraint(equalTo: groupsStack.widthAnchor).isActive = true
 
@@ -457,7 +457,7 @@ public final class DeviceDetailViewController: NSViewController {
         ]
     }
 
-    /// The "In groups:" value text ("None" when the device is in no saved group).
+    /// The "In groups" value text ("None" when the device is in no saved group).
     public var test_groupMembershipText: String { groupsValueLabel.stringValue }
 
     /// The minimal view-only hint's visible text — asserts it stays a single,

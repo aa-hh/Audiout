@@ -31,7 +31,7 @@ public final class BTAlignmentWizardSession {
         /// closing receipt only — locked UX).
         case question(progress: Double, answersSoFar: Int)
         /// The result, applied live and awaiting Keep / Try again.
-        case receipt(trimMs: Int)
+        case receipt(trimMs: Double)
         /// Two consecutive can't-tells: the speakers need no alignment the ear
         /// can find. The prior trim is already restored.
         case gracefulExit
@@ -48,11 +48,11 @@ public final class BTAlignmentWizardSession {
 
     public private(set) var screen: Screen = .intro
 
-    private let baseTrimMs: Int
+    private let baseTrimMs: Double
     private var bisection: BTAlignmentBisection
-    private let seedBracketMs: Int?
-    private let applyPreviewTrim: (Int) -> Void
-    private let endPreview: (_ keepMs: Int?) -> Void
+    private let seedBracketMs: Double?
+    private let applyPreviewTrim: (Double) -> Void
+    private let endPreview: (_ keepMs: Double?) -> Void
     private let setTick: (Bool) -> Void
     /// Set once a terminal intent (keep/cancel) ran, so deinit cleanup and
     /// double-clicks are inert.
@@ -70,10 +70,10 @@ public final class BTAlignmentWizardSession {
         deviceID: String,
         targetName: String,
         referenceName: String,
-        baseTrimMs: Int,
-        seedBracketMs: Int? = nil,
-        applyPreviewTrim: @escaping (Int) -> Void,
-        endPreview: @escaping (_ keepMs: Int?) -> Void,
+        baseTrimMs: Double,
+        seedBracketMs: Double? = nil,
+        applyPreviewTrim: @escaping (Double) -> Void,
+        endPreview: @escaping (_ keepMs: Double?) -> Void,
         setTick: @escaping (Bool) -> Void
     ) {
         self.deviceID = deviceID
@@ -93,7 +93,7 @@ public final class BTAlignmentWizardSession {
         cancel()
     }
 
-    private static func makeBisection(seedBracketMs: Int?) -> BTAlignmentBisection {
+    private static func makeBisection(seedBracketMs: Double?) -> BTAlignmentBisection {
         seedBracketMs.map { BTAlignmentBisection(bracketMs: $0) } ?? BTAlignmentBisection()
     }
 

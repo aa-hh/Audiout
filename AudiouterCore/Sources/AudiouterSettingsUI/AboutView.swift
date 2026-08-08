@@ -112,6 +112,9 @@ public final class AboutViewController: NSViewController {
     private let openURL: (URL) -> Void
     private let sourceCodeButton = NSButton()
     private let creditsTextView = NSTextView()
+    /// The background's Reduce Transparency cover (nil before `loadView`).
+    /// Public only for its `test_` seams.
+    public private(set) var backgroundFallback: ReduceTransparencyFallbackView?
 
     public init(info: AboutInfo, openURL: @escaping (URL) -> Void) {
         self.info = info
@@ -164,7 +167,7 @@ public final class AboutViewController: NSViewController {
         lockup.translatesAutoresizingMaskIntoConstraints = false
         rows.append(lockup)
 
-        sourceCodeButton.title = "View Source Code"
+        sourceCodeButton.title = "View Source Code…"
         sourceCodeButton.bezelStyle = .rounded
         sourceCodeButton.target = self
         sourceCodeButton.action = #selector(viewSourceCodeTapped)
@@ -205,6 +208,8 @@ public final class AboutViewController: NSViewController {
         background.blendingMode = .behindWindow
         background.state = .followsWindowActiveState
         background.translatesAutoresizingMaskIntoConstraints = false
+        // A1: opaque stand-in while Reduce Transparency is on, live-updating.
+        backgroundFallback = ReduceTransparencyFallbackView.install(in: background)
         let content = SettingsForm.paneView(rows: rows)
         background.addSubview(content)
         NSLayoutConstraint.activate([
@@ -270,7 +275,7 @@ public final class AboutViewController: NSViewController {
         return sourceCodeButton.title
     }
 
-    /// Invoke "View Source Code" as a click would — routes through the
+    /// Invoke "View Source Code…" as a click would — routes through the
     /// injected `openURL` seam, so this never launches a real browser in a test.
     public func test_tapViewSourceCode() {
         _ = view
@@ -278,15 +283,16 @@ public final class AboutViewController: NSViewController {
     }
 
     /// The laid-out content view, for offscreen snapshot rendering (mirrors
-    /// `SettingsWindowController.test_rootView`).
+    /// `SettingsRootViewController.tabRootView(at:)`).
     public var test_rootView: NSView {
         view.layoutSubtreeIfNeeded()
         return view
     }
 }
 
-/// The About window (Settings › General › "About Audiouter…"). Sibling to
-/// `SettingsWindowController`: same lazy-create-then-reuse lifecycle at the
+/// The About window (Settings › General › "About Audiouter…") — the one
+/// deliberate standalone-window exception in the one-surface app (owner call,
+/// PLAN-ONE-SURFACE-032.md). Lazy-create-then-reuse lifecycle at the
 /// `GeneralSettingsViewController` call site, a no-arg `show()`, and `test_`
 /// structure hooks (the window isn't visible to a headless harness).
 @MainActor
@@ -296,7 +302,7 @@ public final class AboutWindowController: NSWindowController {
 
     /// - Parameters:
     ///   - info: the bundle-sourced identity; defaults to the live app bundle.
-    ///   - openURL: opens the "View Source Code" link; defaults to
+    ///   - openURL: opens the "View Source Code…" link; defaults to
     ///     `NSWorkspace`, injected as a recording closure in tests.
     public init(info: AboutInfo = .current(),
                 openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }) {
@@ -309,7 +315,7 @@ public final class AboutWindowController: NSWindowController {
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    /// Open/focus the window (mirrors `SettingsWindowController.showWindow()`):
+    /// Open/focus the window:
     /// sizing always runs headlessly too, but the actual on-screen presentation
     /// is gated behind `HeadlessRuntime.isActive` so `swift test`/a headless
     /// tool never flashes a real window on the developer's screen.
@@ -317,7 +323,7 @@ public final class AboutWindowController: NSWindowController {
         aboutVC.view.layoutSubtreeIfNeeded()
         window?.setContentSize(aboutVC.view.fittingSize)
         guard !HeadlessRuntime.isActive else { return }
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp?.activate(ignoringOtherApps: true)
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
     }

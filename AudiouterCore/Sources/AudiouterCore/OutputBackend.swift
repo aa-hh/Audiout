@@ -442,17 +442,18 @@ public protocol LatencyConfigurable: AnyObject {
 
     /// Apply a new start buffer. If sessions are streaming this tears them ALL
     /// down, applies the value, and re-establishes the same set (brief audible
-    /// gap, ~3–5 s — which is why the UI gates it behind an explicit
-    /// "Apply & Reconnect" CTA); when idle it applies silently. Returns when
-    /// the re-add pass has completed (per-device failures follow the D4
-    /// best-effort rule: marked unavailable, the rest proceed).
+    /// gap, ~3–5 s — the pane's popup applies this immediately, and its hint
+    /// line states that cost up front rather than gating it behind a CTA);
+    /// when idle it applies silently. Returns when the re-add pass has
+    /// completed (per-device failures follow the D4 best-effort rule: marked
+    /// unavailable, the rest proceed).
     func applyStartBuffer(ms: Int) async
 }
 
 /// The optional metering-active capability (T-GATE, playback-meter-research.md).
 /// A backend that computes RMS just to feed `.level` adopts this so the work can
 /// be switched off while nobody's watching a meter — `PopoverController` flips it
-/// on `popoverDidShow`/`popoverDidClose` via `backend as? MeteringControlling`, so
+/// on `surfaceDidShow`/`surfaceDidHide` via `backend as? MeteringControlling`, so
 /// a backend without the concept (`OwnToneBackend`) never sees the call.
 /// Deliberately NOT part of ``OutputBackend``, mirroring ``LatencyConfigurable``:
 /// the base seam stays capability-free.

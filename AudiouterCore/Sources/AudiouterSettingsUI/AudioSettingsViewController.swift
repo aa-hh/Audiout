@@ -19,8 +19,8 @@ public struct LatencySettingModel {
     /// Non-nil when `AIRPLAY_START_BUFFER_MS` overrode the setting for this
     /// launch: the control renders disabled with an explanatory note.
     public let envOverrideMs: Int?
-    /// Whether any device is currently streaming — drives the CTA label
-    /// ("Apply & Reconnect" vs plain "Apply") and the reconnect status UI.
+    /// Whether any device is currently streaming — drives the reconnect status
+    /// UI ("Reconnecting speakers…" / "Speakers reconnected" vs plain "Applied").
     public let isStreaming: @MainActor () -> Bool
     /// Persist + apply the new value; returns when the reconnect pass is done.
     public let apply: @MainActor (Int) async -> Void
@@ -78,14 +78,14 @@ public struct WakeAudioRestoreModel {
 ///
 /// **Audio buffer (Advanced):** an `NSPopUpButton` of bare millisecond values
 /// (numeric by design — named presets with embedded delay text don't survive
-/// localization; the one localizable sentence is the caption) plus an explicit
-/// CTA. Changing the popup only ARMS the button; nothing applies until it's
-/// clicked ("Apply & Reconnect" while streaming — the apply tears down and
-/// re-establishes the live sessions, a ~3–5 s audible gap — or plain "Apply"
-/// when idle, instant). While reconnecting, a spinner + "Reconnecting
-/// speakers…" replaces the idle state; completion shows a transient
-/// confirmation. When `AIRPLAY_START_BUFFER_MS` overrode the setting at launch
-/// the control renders disabled with a note instead.
+/// localization; the one localizable sentence is the caption). Changing the
+/// popup applies immediately (V1, PLAN-ONE-SURFACE-032.md — no CTA): while
+/// streaming, the apply tears down and re-establishes the live sessions (a
+/// ~3–5 s audible gap), so a spinner + "Reconnecting speakers…" replaces the
+/// idle state; when idle it applies silently. Either way, completion shows a
+/// transient confirmation, and the hint line says up front that changing the
+/// value reconnects active speakers. When `AIRPLAY_START_BUFFER_MS` overrode
+/// the setting at launch the control renders disabled with a note instead.
 @MainActor
 public final class AudioSettingsViewController: NSViewController {
 
@@ -126,11 +126,11 @@ public final class AudioSettingsViewController: NSViewController {
     // feeds `SyncedLocalSink`, a native-only feature).
     private let syncOffsetSlider = NSSlider()
     private let syncOffsetValueLabel = NSTextField(labelWithString: "")
-    private let applyButton = NSButton()
+    // Apply-in-progress feedback for the buffer popup (V1: applies immediately,
+    // no CTA — see `applyBuffer(_:)`).
     private let applySpinner = NSProgressIndicator()
     private let applyStatusLabel = NSTextField(labelWithString: "")
     private var appliedMs = 0
-    private var pendingMs = 0
     private var isApplying = false
     private var statusResetWorkItem: DispatchWorkItem?
 
@@ -207,10 +207,10 @@ public final class AudioSettingsViewController: NSViewController {
         container.addSubview(column)
         NSLayoutConstraint.activate([
             container.widthAnchor.constraint(equalToConstant: SettingsForm.contentWidth),
-            column.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
-            column.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
-            column.topAnchor.constraint(equalTo: container.topAnchor, constant: 18),
-            column.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -18),
+            column.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: SettingsForm.horizontalPadding),
+            column.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -SettingsForm.horizontalPadding),
+            column.topAnchor.constraint(equalTo: container.topAnchor, constant: SettingsForm.verticalPadding),
+            column.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -SettingsForm.verticalPadding),
             subtitle.widthAnchor.constraint(equalTo: column.widthAnchor),
             listContainer.widthAnchor.constraint(equalTo: column.widthAnchor),
         ])
@@ -384,7 +384,7 @@ public final class AudioSettingsViewController: NSViewController {
     }
 
     /// The Advanced sub-section's stacked views: hairline + "Advanced" label +
-    /// the Audio buffer row (+ env-override note, or the Apply CTA row).
+    /// the Audio buffer row (+ env-override note, or the apply-feedback row).
     private func makeAdvancedSectionViews() -> [NSView] {
         guard let latency else { return [] }
         var views: [NSView] = []
@@ -410,7 +410,6 @@ public final class AudioSettingsViewController: NSViewController {
                 bufferPopup.addItem(withTitle: Self.msLabel(option))
             }
             appliedMs = latency.initialMs
-            pendingMs = latency.initialMs
             if let index = latency.optionsMs.firstIndex(of: latency.initialMs) {
                 bufferPopup.selectItem(at: index)
             }
@@ -424,15 +423,17 @@ public final class AudioSettingsViewController: NSViewController {
             control: bufferPopup))
 
         // Live hint (spec §5.2 — the "`Buffer: 120 ms — safe for Wi-Fi
-        // speakers`" pattern itself): re-written on every popup change, keyed
-        // on the PENDING value so it always describes what Apply would do.
+        // speakers`" pattern itself): re-written on every popup change,
+        // states the currently-applied value's consequence AND that changing
+        // it reconnects active speakers (V1: the popup applies immediately,
+        // there's no CTA to carry that warning instead).
         bufferHint.stringValue = Self.bufferHintLine(latency.envOverrideMs ?? latency.initialMs)
         views.append(bufferHint)
         views.append(contentsOf: makeSyncOffsetSectionViews())
 
         if let envMs = latency.envOverrideMs {
             let note = SettingsForm.label(
-                "Overridden by AIRPLAY_START_BUFFER_MS (\(Self.msLabel(envMs))) for this launch.")
+                "Your buffer is locked to \(Self.msLabel(envMs)) by a launch option for this session.")
             note.font = Tokens.Font.caption
             note.textColor = Tokens.Color.warning
             note.lineBreakMode = .byWordWrapping
@@ -443,21 +444,12 @@ public final class AudioSettingsViewController: NSViewController {
             // whole pane wider than the fixed content column.
             note.preferredMaxLayoutWidth = SettingsForm.contentWidth - 40
             views.append(note)
-            // The CTA never mounts in env mode; keep the (orphan) button's
-            // state honest for the test hooks all the same.
-            applyButton.isEnabled = false
             return views
         }
 
-        // The CTA row: [status spinner + label] … [Apply], trailing-aligned,
-        // fixed height so status transitions never resize the window.
-        applyButton.translatesAutoresizingMaskIntoConstraints = false
-        applyButton.bezelStyle = .push
-        applyButton.setButtonType(.momentaryPushIn)
-        applyButton.target = self
-        applyButton.action = #selector(applyTapped)
-        applyButton.setAccessibilityLabel("Apply audio buffer change")
-
+        // Apply-in-progress feedback: spinner + status label, fixed height so
+        // the transition never resizes the window. No button — picking a
+        // popup option applies it directly (`bufferOptionChanged`).
         applySpinner.translatesAutoresizingMaskIntoConstraints = false
         applySpinner.style = .spinning
         applySpinner.controlSize = .small
@@ -468,41 +460,25 @@ public final class AudioSettingsViewController: NSViewController {
         applyStatusLabel.textColor = Tokens.Color.secondaryLabel
         applyStatusLabel.isHidden = true
 
-        let ctaRow = NSView()
-        ctaRow.translatesAutoresizingMaskIntoConstraints = false
-        ctaRow.addSubview(applySpinner)
-        ctaRow.addSubview(applyStatusLabel)
-        ctaRow.addSubview(applyButton)
+        let statusRow = NSView()
+        statusRow.translatesAutoresizingMaskIntoConstraints = false
+        statusRow.addSubview(applySpinner)
+        statusRow.addSubview(applyStatusLabel)
         NSLayoutConstraint.activate([
-            ctaRow.heightAnchor.constraint(equalToConstant: 28),
-            applyButton.trailingAnchor.constraint(equalTo: ctaRow.trailingAnchor),
-            applyButton.centerYAnchor.constraint(equalTo: ctaRow.centerYAnchor),
-            applyStatusLabel.trailingAnchor.constraint(equalTo: applyButton.leadingAnchor, constant: -10),
-            applyStatusLabel.centerYAnchor.constraint(equalTo: ctaRow.centerYAnchor),
-            applySpinner.trailingAnchor.constraint(equalTo: applyStatusLabel.leadingAnchor, constant: -6),
-            applySpinner.centerYAnchor.constraint(equalTo: ctaRow.centerYAnchor),
+            statusRow.heightAnchor.constraint(equalToConstant: 20),
+            applySpinner.leadingAnchor.constraint(equalTo: statusRow.leadingAnchor),
+            applySpinner.centerYAnchor.constraint(equalTo: statusRow.centerYAnchor),
+            applyStatusLabel.leadingAnchor.constraint(equalTo: applySpinner.trailingAnchor, constant: 6),
+            applyStatusLabel.centerYAnchor.constraint(equalTo: statusRow.centerYAnchor),
         ])
-        views.append(ctaRow)
+        views.append(statusRow)
 
-        updateApplyState()
         return views
     }
 
-    /// Recompute the CTA's enabled/title/default-button state from the pending
-    /// vs applied values. The button is the window's default (blue, Return) only
-    /// while armed — an idle disabled button should not claim the key equivalent.
-    private func updateApplyState() {
-        guard let latency, latency.envOverrideMs == nil else { return }
-        let armed = pendingMs != appliedMs && !isApplying
-        applyButton.isEnabled = armed
-        applyButton.title = (armed && latency.isStreaming()) ? "Apply & Reconnect" : "Apply Settings"
-        applyButton.keyEquivalent = armed ? "\r" : ""
-        bufferPopup.isEnabled = !isApplying
-    }
-
-    /// The audio-buffer live hint: value + consequence. Banded on the value
-    /// (not the option index) so a future option list re-tune keeps honest
-    /// wording without touching this.
+    /// The audio-buffer live hint: value + consequence + the cost of changing
+    /// it. Banded on the value (not the option index) so a future option list
+    /// re-tune keeps honest wording without touching this.
     private static func bufferHintLine(_ ms: Int) -> String {
         let consequence: String
         switch ms {
@@ -510,33 +486,37 @@ public final class AudioSettingsViewController: NSViewController {
         case ..<1501: consequence = "extra cushion for busy Wi-Fi"
         default:      consequence = "slowest response, strongest against dropouts"
         }
-        return "Buffer: \(msLabel(ms)) — \(consequence)."
+        return "Buffer: \(msLabel(ms)) — \(consequence). Changing this reconnects your active speakers."
     }
 
     @objc private func bufferOptionChanged() {
-        guard let latency else { return }
+        guard let target = updateBufferHintAndResolveTarget() else { return }
+        Task { await applyBuffer(target) }
+    }
+
+    /// Reads the popup's current selection, refreshes the hint to describe it,
+    /// and clears any stale transient confirmation — every popup touch does
+    /// this, whether or not it results in an apply. Returns the value to
+    /// apply, or nil when it matches what's already applied (reselecting the
+    /// current value is a no-op, not a fresh apply).
+    private func updateBufferHintAndResolveTarget() -> Int? {
+        guard let latency else { return nil }
         let index = bufferPopup.indexOfSelectedItem
-        guard latency.optionsMs.indices.contains(index) else { return }
-        pendingMs = latency.optionsMs[index]
-        bufferHint.stringValue = Self.bufferHintLine(pendingMs)
+        guard latency.optionsMs.indices.contains(index) else { return nil }
+        let ms = latency.optionsMs[index]
+        bufferHint.stringValue = Self.bufferHintLine(ms)
         clearTransientStatus()
-        updateApplyState()
+        return ms == appliedMs ? nil : ms
     }
 
-    @objc private func applyTapped() {
-        Task { await performApply() }
-    }
-
-    /// The full apply flow, awaitable so tests drive it deterministically.
-    func performApply() async {
-        guard let latency, latency.envOverrideMs == nil,
-              !isApplying, pendingMs != appliedMs else { return }
-        let target = pendingMs
+    /// Apply a new buffer value — the flow a live popup selection triggers via
+    /// `bufferOptionChanged`, awaitable so tests can drive it deterministically.
+    private func applyBuffer(_ target: Int) async {
+        guard let latency, latency.envOverrideMs == nil, !isApplying else { return }
         let wasStreaming = latency.isStreaming()
 
         isApplying = true
-        clearTransientStatus()
-        updateApplyState()
+        bufferPopup.isEnabled = false
         if wasStreaming {
             applySpinner.startAnimation(nil)
             applyStatusLabel.stringValue = "Reconnecting speakers…"
@@ -547,13 +527,13 @@ public final class AudioSettingsViewController: NSViewController {
 
         appliedMs = target
         isApplying = false
+        bufferPopup.isEnabled = true
         applySpinner.stopAnimation(nil)
         applyStatusLabel.stringValue = wasStreaming ? "Speakers reconnected" : "Applied"
         applyStatusLabel.isHidden = false
-        updateApplyState()
 
         // Transient confirmation: fades after a beat (cancelled by any newer
-        // change/apply so a stale "reconnected" can't outlive a fresh arm).
+        // apply so a stale "reconnected" can't outlive a fresh one).
         let reset = DispatchWorkItem { [weak self] in
             self?.applyStatusLabel.isHidden = true
         }
@@ -573,10 +553,11 @@ public final class AudioSettingsViewController: NSViewController {
 
     /// The sync-offset sub-row: a slider (matching ``AppSettings/minSyncOffsetMs``…
     /// ``AppSettings/maxSyncOffsetMs``) + a bare "±N ms" value label, same layout
-    /// idiom as the connect-volume row above. Applies IMMEDIATELY on change
-    /// (persist only) — no CTA, unlike the Audio buffer control: this is a static
-    /// bias `SyncedLocalSink` re-reads live at its next connect/rebuild, not a
-    /// value that requires tearing down a live session to take effect.
+    /// idiom as the connect-volume row above. Applies immediately on change,
+    /// persist-only — unlike the Audio buffer control just above, this never
+    /// reconnects anything: it's a static bias `SyncedLocalSink` re-reads live
+    /// at its next connect/rebuild, not a value that requires tearing down a
+    /// live session to take effect.
     private func makeSyncOffsetSectionViews() -> [NSView] {
         syncOffsetSlider.translatesAutoresizingMaskIntoConstraints = false
         syncOffsetSlider.minValue = Double(AppSettings.minSyncOffsetMs)
@@ -619,13 +600,13 @@ public final class AudioSettingsViewController: NSViewController {
 
     /// Repopulate the list from the controller and resize the pane to fit.
     ///
-    /// Writing `preferredContentSize` is what makes the WINDOW grow too, but not
-    /// by itself: AppKit's tab controller never resizes its window (probed —
-    /// see the sizing-trap note on `SettingsWindowController`). The write below
-    /// reaches the window only because `SettingsRootViewController` overrides
-    /// `preferredContentSizeDidChange(for:)`, which AppKit calls on the parent,
-    /// and re-applies the content size from there. Without that override the
-    /// pane would silently clip when a user adds an excluded app.
+    /// Writing `preferredContentSize` is what makes the HOST grow too, but not
+    /// by itself: AppKit's tab controller never resizes its host (probed —
+    /// see the sizing-trap note on `SettingsRootViewController`). The write
+    /// below reaches the host only because `SettingsRootViewController`
+    /// observes each pane's `preferredContentSize` by KVO and republishes
+    /// `fittedContentSize` from there. Without that the pane would silently
+    /// clip when a user adds an excluded app.
     private func rebuildList() {
         for row in listStack.arrangedSubviews {
             listStack.removeArrangedSubview(row)
@@ -699,7 +680,7 @@ public final class AudioSettingsViewController: NSViewController {
         let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
         button.image = NSImage(systemSymbolName: "plus.circle", accessibilityDescription: nil)?
             .withSymbolConfiguration(config)
-        button.title = "Add app…"
+        button.title = "Add App…"
         button.contentTintColor = Tokens.Color.secondaryLabel
         button.target = self
         button.action = #selector(addTapped(_:))
@@ -890,12 +871,15 @@ public final class AudioSettingsViewController: NSViewController {
         return bufferPopup.itemTitles
     }
 
-    /// Simulate the user picking `ms` in the popup (arms the CTA).
-    public func test_selectLatencyOption(ms: Int) {
+    /// Simulate the user picking `ms` in the popup — applies immediately (V1),
+    /// same path a live selection takes. Awaitable so tests can assert the
+    /// post-apply state deterministically.
+    public func test_selectLatencyOption(ms: Int) async {
         _ = view
         guard let latency, let index = latency.optionsMs.firstIndex(of: ms) else { return }
         bufferPopup.selectItem(at: index)
-        bufferOptionChanged()
+        guard let target = updateBufferHintAndResolveTarget() else { return }
+        await applyBuffer(target)
     }
 
     /// The audio-buffer live hint line (W1, spec §5.2).
@@ -904,18 +888,10 @@ public final class AudioSettingsViewController: NSViewController {
         return bufferHint.stringValue
     }
 
-    public var test_applyButtonTitle: String { _ = view; return applyButton.title }
-    public var test_applyButtonEnabled: Bool { _ = view; return applyButton.isEnabled }
     public var test_bufferPopupEnabled: Bool { _ = view; return bufferPopup.isEnabled }
     public var test_applyStatusText: String? {
         _ = view
         return applyStatusLabel.isHidden ? nil : applyStatusLabel.stringValue
-    }
-
-    /// Run the same apply flow the CTA click starts, awaitable.
-    public func test_apply() async {
-        _ = view
-        await performApply()
     }
 
     // MARK: Test-support hooks (Advanced › Sync offset — T-OFFSET-UI)

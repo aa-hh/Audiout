@@ -90,9 +90,16 @@ final class PopoverPanelViewController: NSViewController {
     /// row (a header-only card has nothing to collapse until it has a body).
     private var pendingCollapsed: [String: Bool] = [:]
 
-    /// The header bar pinned above the scroll area (task A). Now also hosts the
-    /// **Quit** button (the footer was removed 2026-07-14).
-    let header = PopoverHeaderView()
+    /// The card stack's top pin, kept so the surface can seat the whole
+    /// content below the window's toolbar strip (`setContentTopInset` — the
+    /// one header lives on the WINDOW since the 2026-08-07 live review, so
+    /// the panel is pure content). The inset rides the exact-fit measure for
+    /// free because the pin is part of `contentContainer`'s required chain.
+    private var contentTopConstraint: NSLayoutConstraint?
+
+    /// The content's resting inset from the container top (breathing room the
+    /// original layout always had; the surface's chrome inset adds to it).
+    private static let contentRestingTopInset: CGFloat = 4
 
     /// Popover width — SoundSource-style proportions so the columns
     /// (name · Volume · Device) line up. Narrowed 2026-07-16 (change 5): the
@@ -112,17 +119,44 @@ final class PopoverPanelViewController: NSViewController {
     /// for the lifetime of its button (target/action holds `target` weakly).
     private static var actionTargetKey: UInt8 = 0
 
-    /// The popover's own warm CANVAS (spec §5.1) — the single continuous
-    /// surface every de-nested section sits directly on, filling `container`
-    /// behind everything else. Through 2026-07-21 this was a real,
-    /// `.behindWindow`-blended `NSVisualEffectView` (ahh asked, 2026-07-16, for
-    /// more translucency specifically here, distinct from the then-separate
-    /// card tiles). warm-signal-v2 replaces it with `WarmCanvasView` — the
-    /// spec'd `canvasHi → canvas` gradient (+ deterministic grain in dark
-    /// mode) instead of system vibrancy. Always fully opaque (V2 §D — no
-    /// Reduce-Transparency special case needed: unlike the vibrant view it
-    /// replaces, this one was never translucent).
-    private let background = WarmCanvasView()
+    /// How long a row takes to unfold into — or fold out of — the stack
+    /// (`insertRow` / `removeRow`), so an expand and its collapse are exact
+    /// mirrors of one another. 0.15s: Alec's live call on the previous 0.22s
+    /// ("it's also not that snappy"). Short enough to feel immediate, long
+    /// enough that the rows below still read as being PUSHED apart rather than
+    /// jumping to a new position.
+    static let rowRevealDuration: TimeInterval = 0.15
+
+    /// The panel height the most recent ANIMATED `insertRow` reveal starts FROM,
+    /// recorded once the collapsed start state is laid out. A reveal that starts
+    /// at the height it is growing TO has nothing left to animate, which is the
+    /// whole bug the layout commit in `insertRow` exists to prevent — so the
+    /// trajectory's start is worth pinning, exactly as `CardView` pins its
+    /// collapse's (`lastAnimatedStartHeight`). `nil` until the first animated
+    /// insert.
+    private(set) var test_rowRevealStartHeight: CGFloat?
+
+    /// Test seam for Reduce Motion (`nil` = the live system setting) — the
+    /// same override pattern `DeviceRowView` and `PopoverController` already
+    /// use. Both sides have to be drivable from a test: on a machine with
+    /// Reduce Motion switched ON every animated path below short-circuits, so
+    /// a regression test for the animated case would pass vacuously.
+    var test_reduceMotionOverride: Bool?
+
+    /// Whether motion should be flattened — System Settings › Accessibility ›
+    /// Display › Reduce Motion, through the seam above.
+    private var reduceMotion: Bool {
+        test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    /// The Mixer's canvas — the single continuous surface every de-nested
+    /// section sits directly on, filling `container` behind everything else.
+    /// Owner decision D2 (live build review 2026-08-07): every surface screen
+    /// sits on the GROUPS content pane's flat warm `panel` fill
+    /// (`WarmPanelView`), so this supersedes the spec-§5.1 `WarmCanvasView`
+    /// gradient+grain here (the Setup window keeps it). Always fully opaque —
+    /// no Reduce-Transparency special case needed.
+    private let background = WarmPanelView()
 
     /// The continuous membership-rail spine (Warm Signal v4 §Call-1): drawn once
     /// for the whole panel, ON TOP of every card + divider, so the rail is one
@@ -160,13 +194,17 @@ final class PopoverPanelViewController: NSViewController {
         stackView.spacing = 8
         stackView.edgeInsets = NSEdgeInsets(top: 12, left: 0, bottom: 12, right: 0)
 
-        container.addSubview(header)
         container.addSubview(stackView)
         // The rail overlay is added LAST so it composites ON TOP of the cards +
         // hairline dividers — the continuous spine reads unbroken where it would
         // otherwise be crossed. Non-interactive (`hitTest` returns nil).
         railOverlay.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(railOverlay)
+
+        // The stack's top pin, kept for the surface's toolbar chrome inset.
+        let contentTop = stackView.topAnchor.constraint(equalTo: container.topAnchor,
+                                                        constant: Self.contentRestingTopInset)
+        contentTopConstraint = contentTop
 
         // The stack is pinned DIRECTLY inside the container — no `NSScrollView`, so
         // no scroller chrome can ever appear (T-3, PLAN-POPOVER-ROUTING.md §A: the
@@ -191,14 +229,11 @@ final class PopoverPanelViewController: NSViewController {
             background.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             background.trailingAnchor.constraint(equalTo: container.trailingAnchor),
 
-            // Header bar pinned to the very top (task A), above the System card.
-            header.topAnchor.constraint(equalTo: container.topAnchor, constant: 4),
-            header.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            header.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-
-            // Stack pinned header-bottom → container-bottom, full width. The bottom
-            // pin is the anti-collapse guarantee (see the note above).
-            stackView.topAnchor.constraint(equalTo: header.bottomAnchor),
+            // Stack pinned container-top → container-bottom, full width (its
+            // top pin is `contentTop` above, kept for the surface's toolbar
+            // chrome inset). The bottom pin is the anti-collapse guarantee
+            // (see the note above).
+            contentTop,
             stackView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             stackView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             // The bottom pin, SPLIT (Alec's call, 2026-08-06). It used to be a
@@ -289,9 +324,10 @@ final class PopoverPanelViewController: NSViewController {
     /// runs the resize animation). One channel, used consistently: PLAN §E risk 1
     /// "prefer the preferredContentSize channel".
     ///
-    /// `animated` selects the animation via `PopoverController.setPopoverAnimates`
-    /// (the controller owns the `NSPopover`): it toggles `popover.animates` around
-    /// the `preferredContentSize` assignment. The non-animated path is used for the
+    /// `animated` selects the animation via `PopoverController.applySurfaceResize`
+    /// (the controller, not the panel, knows the current host): under the popover
+    /// host that toggles `popover.animates` around the `preferredContentSize`
+    /// assignment. The non-animated path is used for the
     /// initial show and when `NSWorkspace.shared.accessibilityDisplayShouldReduceMotion`
     /// is true (the jank escape hatch); it applies the size with `animates` forced
     /// off so no frame animation runs. Because `NSPopover` retargets a
@@ -300,13 +336,20 @@ final class PopoverPanelViewController: NSViewController {
     /// "retargetable rapid toggles"). T-4 animates a card's clip-height constraint
     /// alongside this so the panel and popover agree.
     func panelContentDidChangeHeight(animated: Bool) {
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        publishContentSize(fittingSizeSettled(), animated: animated)
+    }
+
+    /// Publish an ALREADY-MEASURED size through the same channel. Split out for
+    /// `insertRow`, which has to measure the row's final height while the row is
+    /// visible but publish it later, once the collapsed start state is laid out —
+    /// re-measuring at that point would read the collapsed height and tell the
+    /// popover to stay put.
+    private func publishContentSize(_ target: NSSize, animated: Bool) {
         let wantsAnimation = animated && !reduceMotion
-        let target = fittingSizeSettled()
-        // Assigning `preferredContentSize` is the sole size channel; NSPopover
-        // animates iff `popover.animates` is true when the assignment happens.
+        // Assigning `preferredContentSize` is the sole size channel; the
+        // controller decides how the current host animates the change.
         if let controller {
-            controller.setPopoverAnimates(wantsAnimation) { [weak self] in
+            controller.applySurfaceResize(animated: wantsAnimation) { [weak self] in
                 self?.preferredContentSize = target
             }
         } else {
@@ -474,12 +517,13 @@ final class PopoverPanelViewController: NSViewController {
             // The trailing header accessory (task D — the Groups "+"; F1 — the
             // button is kept alive and keyed by header title so the host can
             // enable/disable it in place later via `setAccessoryEnabled`, without
-            // rebuilding the card). Styled with the same stock bezel
-            // (`bezelStyle = .smallSquare`) as the header icon buttons
-            // (`PopoverHeaderView`).
+            // rebuilding the card). Styled with `.accessoryBar` bezel and
+            // hover-only border — the popover's one icon-button family.
             let button = NSButton()
             button.translatesAutoresizingMaskIntoConstraints = false
-            button.bezelStyle = .smallSquare
+            button.bezelStyle = .accessoryBar
+            button.isBordered = true
+            button.showsBorderOnlyWhileMouseInside = true
             button.imagePosition = .imageOnly
             button.imageScaling = .scaleProportionallyDown
             button.contentTintColor = Tokens.Color.secondaryLabel
@@ -617,7 +661,6 @@ final class PopoverPanelViewController: NSViewController {
     @discardableResult
     func setCardCollapsed(title: String, collapsed: Bool, animated: Bool) -> Bool {
         guard let card = cardsByHeader[title] else { return false }
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         let wantsAnimation = animated && !reduceMotion
 
         if let chevron = chevronsByHeader[title] {
@@ -690,27 +733,76 @@ final class PopoverPanelViewController: NSViewController {
         view.leadingAnchor.constraint(equalTo: stack.leadingAnchor).isActive = true
         view.trailingAnchor.constraint(equalTo: stack.trailingAnchor).isActive = true
 
-        // Republish the size HERE, not at the call site (found live 2026-08-06):
-        // mounting a row changes the panel's height, and every caller that forgot
-        // this left the popover sized for the old content. Auto Layout then has to
-        // reconcile a container whose height disagrees with its content, and the
-        // slack lands wherever nothing pins it — in practice the pinned banner,
-        // which balloons into a tall empty box. Measured BEFORE the `isHidden`
-        // animation dance below so the target is the row's final, visible height.
-        panelContentDidChangeHeight(animated: animated)
+        // The mounted row's END state is VISIBLE, and that has to be TRUE
+        // before the measurement below rather than a consequence of the
+        // animation that follows it (live bug, 2026-08-08 — the sync drawer
+        // "opens from the top of the screen after the first time"). An
+        // `NSStackView` gives a hidden arranged subview zero height, so
+        // measuring a row that arrives hidden publishes a size that leaves the
+        // row out entirely: the popover is told "no change", the content then
+        // grows underneath it, and the panel only catches up on some LATER
+        // unrelated re-fit — which lands as one disconnected lurch instead of
+        // the row opening.
+        //
+        // A REUSED row does arrive hidden. `removeRow`'s animated path hides
+        // the view and never un-hides it, and the BT sync drawer is a SINGLE
+        // instance re-parented under whichever row is open (`PopoverController`,
+        // D2) — so it is hidden on every mount after its first. That is exactly
+        // why the FIRST expansion behaved and the rest did not, and (via a
+        // rebuild landing mid-animation, which detaches a still-hidden drawer
+        // and re-mounts it un-animated) why it was intermittent even then.
+        view.isHidden = false
+
+        // The size the panel is GROWING TO, measured here (not at the call site —
+        // found live 2026-08-06): mounting a row changes the panel's height, and
+        // every caller that forgot to republish left the popover sized for the old
+        // content. Auto Layout then has to reconcile a container whose height
+        // disagrees with its content, and the slack lands wherever nothing pins it
+        // — in practice the pinned banner, which balloons into a tall empty box.
+        // Measuring needs the row VISIBLE (above), so the number is taken now and
+        // published below, once there is a start state to grow FROM.
+        let target = fittingSizeSettled()
 
         // Same Reduce Motion gate `setCardCollapsed` already applies (PLAN §E
         // risk 1 / house rule — "Respect system settings: Reduce Motion"):
         // re-derive `wantsAnimation` here rather than trusting the caller's
         // `animated` alone, since both call sites always pass `animated: true`.
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        guard animated && !reduceMotion else { return }
+        // Reduce Motion therefore leaves the row already mounted and VISIBLE
+        // (the `isHidden = false` above), at its published size — the end state,
+        // instantly.
+        guard animated && !reduceMotion else {
+            publishContentSize(target, animated: false)
+            return
+        }
+
+        // Hide the row again AND LAY THAT OUT — an animation cannot travel a
+        // distance the layout has already covered (live report, 2026-08-08:
+        // "collapsing: smooth. Expanding: abrupt"). `animator().isHidden`
+        // interpolates from the frames CURRENTLY laid out, and the measurement
+        // above settled every one of them at the FINAL height: without this
+        // commit the rows below arrive at their new places in that same turn,
+        // leaving the popover's frame animation as the only thing still moving.
+        // A collapse never had the problem — nothing measures it into place
+        // first, so it always had the whole row height to travel.
+        // `fittingSizeSettled` both runs the layout pass and returns the height
+        // it settles on, which is where the reveal starts.
         view.isHidden = true
+        test_rowRevealStartHeight = fittingSizeSettled().height
+
         NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.22
+            context.duration = Self.rowRevealDuration
             context.allowsImplicitAnimation = true
             view.animator().isHidden = false
             self.stackView.layoutSubtreeIfNeeded()
+            // Grow the SURFACE in the same turn as the row, from the height
+            // measured above — `removeRow` sets the precedent, and publishing the
+            // pre-measured number (rather than re-measuring) is what keeps the
+            // popover's target the row's full height while the content it is
+            // sizing to is still collapsed. This is the SAFE direction of the
+            // surplus shield: a popover briefly taller than its content shows
+            // inert canvas, where a popover shorter than its content is the
+            // unsatisfiable case that deforms it.
+            self.publishContentSize(target, animated: true)
         }, completionHandler: {
             view.isHidden = false
         })
@@ -733,15 +825,20 @@ final class PopoverPanelViewController: NSViewController {
         // nothing ever measured again once it did: the popover stayed permanently
         // taller than its content, one row's worth per removal. See `insertRow`.
         let detach = { [weak self] in
+            // The view may have LEFT this stack while the fade ran — a row
+            // that is a single reused instance (the BT sync drawer) can be
+            // re-mounted under a different sibling before this fires, and
+            // `removeArrangedSubview` on a stack the view no longer belongs to
+            // raises. Whoever re-parented it already republished the height.
+            guard view.superview === stack else { return }
             stack.removeArrangedSubview(view)
             view.removeFromSuperview()
             self?.panelContentDidChangeHeight(animated: false)
         }
         // Same Reduce Motion gate as `insertRow` above (and `setCardCollapsed`).
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         guard animated && !reduceMotion else { detach(); return }
         NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.22
+            context.duration = Self.rowRevealDuration
             context.allowsImplicitAnimation = true
             view.animator().isHidden = true
             self.stackView.layoutSubtreeIfNeeded()
@@ -922,21 +1019,21 @@ final class PopoverPanelViewController: NSViewController {
     /// Test-only: simulate a click on the note's action button, if any.
     func test_tapSystemAirPlayNoteAction() { systemAirPlayNoteView?.test_tapActionButton() }
 
-    /// Wire the header bar's three icon buttons (task A + the Quit button that
-    /// replaced the removed footer, 2026-07-14).
-    func setHeaderActions(onOpenGroupsEditor: @escaping () -> Void,
-                          onOpenSettings: @escaping () -> Void,
-                          onQuit: @escaping () -> Void) {
-        header.onOpenGroupsEditor = onOpenGroupsEditor
-        header.onOpenSettings = onOpenSettings
-        header.onQuit = onQuit
+    /// Seat the card stack below the surface window's toolbar strip. The
+    /// caller republishes the exact-fit size afterward; this only moves the
+    /// pin.
+    func setContentTopInset(_ inset: CGFloat) {
+        _ = view // ensure loadView ran so the constraint exists
+        contentTopConstraint?.constant = Self.contentRestingTopInset + inset
+    }
+
+    /// The content's current extra top inset, for structural tests.
+    var test_contentTopInset: CGFloat {
+        (contentTopConstraint?.constant ?? Self.contentRestingTopInset) - Self.contentRestingTopInset
     }
 
     // MARK: Test-support
 
-    /// Whether the header exposes a Quit button image (the footer Quit moved to
-    /// the header, 2026-07-14).
-    var test_headerHasQuit: Bool { header.test_quitButtonHasImage }
     /// Number of section cards currently mounted (footer card removed).
     var test_cardCount: Int {
         stackView.arrangedSubviews.compactMap { $0 as? CardView }.count

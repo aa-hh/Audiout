@@ -22,11 +22,10 @@ import AppKit
         return ExcludedAppsController(store: ExcludedAppsStore(directory: dir))
     }
 
+    private let isolation = TestIsolation(owner: "AudioSettingsSyncOffsetTests")
+
     private func makeSettings() -> AppSettings {
-        let suite = "AudiouterTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defaults.removePersistentDomain(forName: suite)
-        return AppSettings(defaults: defaults)
+        AppSettings(defaults: isolation.makeDefaults())
     }
 
     private func makePane(settings: AppSettings, withLatencyModel: Bool = true) -> AudioSettingsViewController {

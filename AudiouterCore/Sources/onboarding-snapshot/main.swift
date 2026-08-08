@@ -45,9 +45,23 @@ struct SnapshotPTPHelper: PTPHelperManaging {
     func unregister() async throws {}
 }
 
+/// Name of the throwaway defaults suite these fixtures write to instead of the
+/// developer's real domain. FIXED, not per-run: `UserDefaults(suiteName:)`
+/// creates a real `~/Library/Preferences/<name>.plist`, so a `UUID` in the name
+/// leaves one behind on every run. One reused name plus a wipe before each use
+/// keeps the fixtures identical run to run at a cost of one plist, ever.
+let snapshotDefaultsSuite = "onboarding-snapshot"
+
+@MainActor
+func makeSnapshotDefaults() -> UserDefaults {
+    let defaults = UserDefaults(suiteName: snapshotDefaultsSuite)!
+    defaults.removePersistentDomain(forName: snapshotDefaultsSuite)
+    return defaults
+}
+
 @MainActor
 func makeViewController() -> OnboardingViewController {
-    let suite = UserDefaults(suiteName: "onboarding-snapshot-\(UUID().uuidString)")!
+    let suite = makeSnapshotDefaults()
     let model = SetupModel(audioProbe: SnapshotAudioProbe(result: .granted),
                            localNetwork: SnapshotLocalNetwork(),
                            remoteControl: SnapshotRemoteControl(),

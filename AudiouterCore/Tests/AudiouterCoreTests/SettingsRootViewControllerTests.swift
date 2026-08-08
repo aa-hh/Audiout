@@ -39,11 +39,10 @@ import AudiouterSharedUI
         }
     }
 
+    private let isolation = TestIsolation(owner: "SettingsRootViewControllerTests")
+
     private func makeSettings() -> AppSettings {
-        let suite = "AudiouterTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defaults.removePersistentDomain(forName: suite)
-        return AppSettings(defaults: defaults)
+        AppSettings(defaults: isolation.makeDefaults())
     }
 
     /// An excluded-apps controller over a throwaway temp store (never the real

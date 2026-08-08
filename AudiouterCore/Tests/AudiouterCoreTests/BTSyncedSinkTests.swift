@@ -87,6 +87,63 @@ import Testing
         }
     }
 
+    // MARK: - BT-SINK: reconcile identity rules
+
+    /// A coalesced disconnect/reconnect keeps the UID but delivers a fresh
+    /// `AudioObjectID` — the sink must be recreated, or it stays pinned to the
+    /// stale object id forever.
+    @Test func sameUIDNewDeviceID_recreatesTheSink() throws {
+        let manager = BTSyncedSink(
+            renderSampleRate: Self.sampleRate, channelCount: 1,
+            presentationDelayMs: { 100 })
+        manager.setDevices([.init(deviceID: 41, uid: "dev-a")])
+        let original = try #require(manager.sinkForTesting(uid: "dev-a"))
+        #expect(original.deviceID == 41)
+
+        manager.setDevices([.init(deviceID: 42, uid: "dev-a")])
+        let recreated = try #require(manager.sinkForTesting(uid: "dev-a"))
+        #expect(recreated !== original, "a new object id must tear down and recreate")
+        #expect(recreated.deviceID == 42)
+    }
+
+    /// The counterpart guard: an unchanged spec must NOT recreate — the running
+    /// session (anchor, ring) keeps playing across a no-op reconcile.
+    @Test func unchangedSpec_keepsTheSameSink() throws {
+        let manager = BTSyncedSink(
+            renderSampleRate: Self.sampleRate, channelCount: 1,
+            presentationDelayMs: { 100 })
+        manager.setDevices([.init(deviceID: 7, uid: "dev-a")])
+        let original = try #require(manager.sinkForTesting(uid: "dev-a"))
+        manager.setDevices([
+            .init(deviceID: 7, uid: "dev-a"),
+            .init(deviceID: 8, uid: "dev-b"),
+        ])
+        #expect(manager.sinkForTesting(uid: "dev-a") === original)
+    }
+
+    /// The tap-thread fan-out must follow a reconcile: a removed device's sink
+    /// stops receiving, the kept one still releases audio from a post-reconcile
+    /// enqueue (the published-snapshot republish is what this exercises).
+    @Test func enqueueAfterReconcile_reachesExactlyTheCurrentSinks() throws {
+        let manager = BTSyncedSink(
+            renderSampleRate: Self.sampleRate, channelCount: 1,
+            presentationDelayMs: { 100 })
+        manager.setComposition(BTGroupComposition(airPlayPresent: true, macLocalPresent: false))
+        manager.setDevices([
+            .init(deviceID: 1, uid: "dev-a"),
+            .init(deviceID: 2, uid: "dev-b"),
+        ])
+        let dropped = try #require(manager.sinkForTesting(uid: "dev-b"))
+        manager.setDevices([.init(deviceID: 1, uid: "dev-a")])
+
+        Self.enqueueRamp(into: manager)
+        let kept = try #require(manager.sinkForTesting(uid: "dev-a"))
+        #expect(Self.firstNonSilence(of: kept, startNanos: Self.anchorNanos) != nil,
+                "the kept sink must still be fed after the reconcile")
+        #expect(Self.firstNonSilence(of: dropped, startNanos: Self.anchorNanos) == nil,
+                "the removed sink must no longer be fed")
+    }
+
     // MARK: - BT-REFSEL: reference selection per group composition
 
     @Test func btOnlyComposition_usesFixedBufferReference() {

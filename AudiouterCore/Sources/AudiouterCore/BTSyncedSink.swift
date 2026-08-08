@@ -438,6 +438,7 @@ final class BTDeviceSink: @unchecked Sendable {
         self.graphQueue = DispatchQueue(label: "com.audiouter.btsink.graph.\(deviceUID)")
         self.listenerQueue = DispatchQueue(label: "com.audiouter.btsink.listener.\(deviceUID)")
         self.clockQueue = DispatchQueue(label: "com.audiouter.btsink.clock.\(deviceUID)")
+        self.clockQueue.setSpecific(key: Self.clockQueueKey, value: ())
         self.driftCorrector = BTDriftCorrector()
 
         // The ring is the delay line: it must hold the full delay's worth of
@@ -760,13 +761,20 @@ final class BTDeviceSink: @unchecked Sendable {
         clockTimer = timer
     }
 
+    private static let clockQueueKey = DispatchSpecificKey<Void>()
+
     private func stopClockSamplerLocked() {
         guard let timer = clockTimer else { return }
         timer.cancel()
         clockTimer = nil
         // Drain any in-flight tick so corrector/nominalRate mutation after this
-        // point is exclusive.
-        clockQueue.sync {}
+        // point is exclusive — unless this call is ALREADY on clockQueue (deinit
+        // runs there when a tick's temporary strong reference was the last one):
+        // the tick body has finished by the time deinit fires, so exclusivity
+        // already holds and a `sync` here would self-deadlock.
+        if DispatchQueue.getSpecific(key: Self.clockQueueKey) == nil {
+            clockQueue.sync {}
+        }
     }
 
     private func sampleClockTick() {
@@ -900,7 +908,11 @@ final class BTDeviceSink: @unchecked Sendable {
 /// `@unchecked Sendable`: `tableLock` guards the tables below and is NEVER held
 /// across a call into a sink (sinks are collected under the lock, called after
 /// it drops) — the reverse order (a sink's anchor sampling its delay provider,
-/// which takes `tableLock`) is the sanctioned nesting.
+/// which takes `tableLock`) is the sanctioned nesting. It is also never held
+/// across sink CONSTRUCTION (`makeSink` allocates the multi-MB ring and an
+/// AVAudioEngine) — the tap-thread path reads the published `sinkSnapshot`
+/// under `snapshotLock` only, so a table mutation can never stall the capture
+/// IOProc.
 final class BTSyncedSink: @unchecked Sendable {
 
     struct DeviceSpec: Equatable, Sendable {
@@ -930,6 +942,17 @@ final class BTSyncedSink: @unchecked Sendable {
 
     private let tableLock = NSLock()
     private var sinksByUID: [String: BTDeviceSink] = [:]
+    /// Bumped on every table mutation; ``setDevices(_:)`` uses it to detect a
+    /// racing reconcile between its two locked passes.
+    private var tableGeneration = 0
+    /// The tap-thread view of the table (`NativeCaptureCoordinator
+    /// .publishBufferSnapshot`'s idiom): an immutable array republished under
+    /// `snapshotLock` (a few-instruction critical section) on every table
+    /// mutation, read by ``enqueue(interleavedFrames:frameCount:pts:)`` with a
+    /// non-blocking `try()` — a whole-reference swap, so a torn read is
+    /// structurally impossible and a missed `try()` just drops one buffer.
+    private let snapshotLock = NSLock()
+    private var sinkSnapshot: [BTDeviceSink] = []
     private var composition = BTGroupComposition(airPlayPresent: false, macLocalPresent: false)
     private var offsetMsByUID: [String: Int] = [:]
     private var trimMsByUID: [String: Int] = [:]
@@ -973,26 +996,51 @@ final class BTSyncedSink: @unchecked Sendable {
 
     /// Reconcile toward exactly `specs`: new devices get a sink (started only
     /// while the manager is armed), vanished devices' sinks stop and drop.
-    /// Unchanged devices are untouched — their sessions keep playing.
+    /// A kept uid whose `AudioObjectID` changed (a coalesced disconnect/
+    /// reconnect delivers the same UID under a fresh object id) is torn down
+    /// and recreated — the old sink is pinned to a stale id. Unchanged devices
+    /// are untouched — their sessions keep playing.
+    ///
+    /// Sink construction is heavyweight (the ring alone is megabytes, plus an
+    /// AVAudioEngine), so it happens OUTSIDE `tableLock`; the second locked
+    /// pass re-checks `tableGeneration` and discards every fresh sink
+    /// (un-started, so discard is free) if another reconcile raced in between —
+    /// the later call saw the sinks missing and creates its own.
     func setDevices(_ specs: [DeviceSpec]) {
-        var added: [(sink: BTDeviceSink, gain: Float)] = []
-        var removed: [BTDeviceSink] = []
-        var shouldStart = false
-        tableLock.lock()
         let wantedByUID = Dictionary(specs.map { ($0.uid, $0) }, uniquingKeysWith: { first, _ in first })
-        for (uid, sink) in sinksByUID where wantedByUID[uid] == nil {
+
+        // Pass 1 (locked): drop vanished and stale-object-id sinks, list what
+        // needs constructing.
+        var removed: [BTDeviceSink] = []
+        var toCreate: [DeviceSpec] = []
+        tableLock.lock()
+        for (uid, sink) in sinksByUID
+        where wantedByUID[uid].map({ $0.deviceID != sink.deviceID }) ?? true {
             sinksByUID[uid] = nil
             removed.append(sink)
         }
-        for (uid, spec) in wantedByUID where sinksByUID[uid] == nil {
-            let sink = makeSink(spec)
-            sinksByUID[uid] = sink
-            added.append((sink, gainByUID[uid] ?? 1))
-        }
-        shouldStart = desiredRunning
+        for (uid, spec) in wantedByUID where sinksByUID[uid] == nil { toCreate.append(spec) }
+        tableGeneration += 1
+        let generation = tableGeneration
+        publishSinkSnapshot()
         tableLock.unlock()
 
         for sink in removed { sink.stop() }
+
+        // Construct unlocked, then insert (or discard, on a raced generation).
+        let fresh = toCreate.map { (uid: $0.uid, sink: makeSink($0)) }
+        var added: [(sink: BTDeviceSink, gain: Float)] = []
+        var shouldStart = false
+        tableLock.lock()
+        if tableGeneration == generation {
+            for (uid, sink) in fresh {
+                sinksByUID[uid] = sink
+                added.append((sink, gainByUID[uid] ?? 1))
+            }
+            publishSinkSnapshot()
+        }
+        shouldStart = desiredRunning
+        tableLock.unlock()
         for (sink, gain) in added where gain != 1 {
             // A remembered hold (W3) applies BEFORE the engine starts, so a
             // held device never gets an audible blip ahead of the mute.
@@ -1061,16 +1109,39 @@ final class BTSyncedSink: @unchecked Sendable {
     // MARK: Feed
 
     /// Fan one captured block to every device's delay line. Called on the tap
-    /// delivery thread; the sink list is snapshotted under `tableLock`, the
-    /// per-sink work happens after it drops (lock-order rule above).
+    /// delivery thread — REAL-TIME PATH: never touches `tableLock`, never
+    /// allocates. The published `sinkSnapshot` is read with a non-blocking
+    /// `try()`; a miss (a mutation's few-instruction republish is in flight)
+    /// drops this one buffer, which is strictly better than parking the
+    /// capture IOProc behind a descheduled writer. A stale snapshot only means
+    /// this buffer misses a just-added sink (its gate hasn't opened anyway) or
+    /// feeds a just-removed one (whose stop clears the ring).
     func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {
-        let sinks = tableLock.withLock { Array(sinksByUID.values) }
+        let sinks: [BTDeviceSink]
+        if snapshotLock.try() {
+            sinks = sinkSnapshot
+            snapshotLock.unlock()
+        } else {
+            return
+        }
         for sink in sinks {
             sink.enqueue(interleavedFrames: interleavedFrames, frameCount: frameCount, pts: pts)
         }
     }
 
     // MARK: Internals
+
+    /// Freeze the current sink list into the published slot the tap thread
+    /// reads. MUST be called while holding `tableLock` (it reads the table) and
+    /// from EVERY site that mutates `sinksByUID`. The swap itself is one
+    /// reference store under `snapshotLock`; the read-side `try()` in
+    /// ``enqueue(interleavedFrames:frameCount:pts:)`` is the constrained half.
+    private func publishSinkSnapshot() {   // must hold `tableLock`
+        let snapshot = Array(sinksByUID.values)
+        snapshotLock.lock()
+        sinkSnapshot = snapshot
+        snapshotLock.unlock()
+    }
 
     private func makeSink(_ spec: DeviceSpec) -> BTDeviceSink {
         let uid = spec.uid

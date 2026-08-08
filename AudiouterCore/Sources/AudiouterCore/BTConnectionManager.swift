@@ -91,13 +91,27 @@ final class BTConnectionManager: BTConnectionManaging, @unchecked Sendable {
     private let lock = NSLock()
     private var _onConnectionsChanged: (@Sendable () -> Void)?
     private var _onFallbackSuggested: (@Sendable (String) -> Void)?
-    private var notificationTarget: ConnectionNotificationTarget?
-    private var connectNotification: IOBluetoothUserNotification?
+    /// `true` from the first authorized ``startObservingConnections()`` until
+    /// ``stopObservingConnections()`` — the idempotency claim, separate from
+    /// the cancel closure so the claim can be taken under `lock` while the
+    /// registration itself runs outside it.
+    private var observing = false
+    /// Tears down the live registration. Returned by the register seam; called
+    /// ONLY outside `lock` (see ``stopObservingConnections()``).
+    private var cancelObservation: (@Sendable () -> Void)?
 
     private let isBluetoothAuthorized: @Sendable () -> Bool
     private let openConnection: @Sendable (String) async -> Int32
     private let closeConnection: @Sendable (String) -> Void
     private let endpointExists: @Sendable (String) -> Bool
+    /// The IOBluetooth notification seam: given the change handler, registers
+    /// for connect notifications and returns the matching teardown (nil when
+    /// registration failed). BOTH directions may synchronously call the handler
+    /// (register replays every currently-connected device; unregister can
+    /// deliver a final edge), so the manager calls this seam — and the returned
+    /// teardown — strictly outside `lock`.
+    private let registerConnectNotifications:
+        @Sendable (@escaping @Sendable () -> Void) -> (@Sendable () -> Void)?
     private let connectTimeout: TimeInterval
     private let fallbackSuggestionDelay: TimeInterval
     private let endpointAppearWindow: TimeInterval
@@ -111,6 +125,8 @@ final class BTConnectionManager: BTConnectionManaging, @unchecked Sendable {
         openConnection: @escaping @Sendable (String) async -> Int32 = BTConnectionManager.systemOpenConnection,
         closeConnection: @escaping @Sendable (String) -> Void = BTConnectionManager.systemCloseConnection,
         endpointExists: @escaping @Sendable (String) -> Bool = BTConnectionManager.systemEndpointExists,
+        registerConnectNotifications: @escaping @Sendable (@escaping @Sendable () -> Void)
+            -> (@Sendable () -> Void)? = BTConnectionManager.systemRegisterConnectNotifications,
         connectTimeout: TimeInterval = BTConnectionManager.defaultConnectTimeout,
         fallbackSuggestionDelay: TimeInterval = BTConnectionManager.defaultFallbackSuggestionDelay,
         endpointAppearWindow: TimeInterval = BTConnectionManager.defaultEndpointAppearWindow,
@@ -120,6 +136,7 @@ final class BTConnectionManager: BTConnectionManaging, @unchecked Sendable {
         self.openConnection = openConnection
         self.closeConnection = closeConnection
         self.endpointExists = endpointExists
+        self.registerConnectNotifications = registerConnectNotifications
         self.connectTimeout = connectTimeout
         self.fallbackSuggestionDelay = fallbackSuggestionDelay
         self.endpointAppearWindow = endpointAppearWindow
@@ -213,14 +230,11 @@ final class BTConnectionManager: BTConnectionManaging, @unchecked Sendable {
     func startObservingConnections() {
         guard isBluetoothAuthorized() else { return }
         lock.lock()
-        guard notificationTarget == nil else {
+        guard !observing else {
             lock.unlock()
             return
         }
-        let target = ConnectionNotificationTarget { [weak self] in
-            self?.onConnectionsChanged?()
-        }
-        notificationTarget = target
+        observing = true
         lock.unlock()
         // The registration call must sit OUTSIDE the critical section:
         // IOBluetooth SYNCHRONOUSLY replays every currently-connected device
@@ -229,19 +243,23 @@ final class BTConnectionManager: BTConnectionManaging, @unchecked Sendable {
         // getter — same lock → main-thread deadlock before the status item
         // exists (live-hit 2026-08-07; only reachable once the Bluetooth TCC
         // grant lets the authorization guard above pass).
-        let note = IOBluetoothDevice.register(
-            forConnectNotifications: target,
-            selector: #selector(ConnectionNotificationTarget.deviceConnected(_:device:)))
-        lock.withLock { connectNotification = note }
+        let cancel = registerConnectNotifications { [weak self] in
+            self?.onConnectionsChanged?()
+        }
+        lock.withLock { cancelObservation = cancel }
     }
 
     func stopObservingConnections() {
         lock.lock()
-        defer { lock.unlock() }
-        connectNotification?.unregister()
-        connectNotification = nil
-        notificationTarget?.invalidate()
-        notificationTarget = nil
+        let cancel = cancelObservation
+        cancelObservation = nil
+        observing = false
+        lock.unlock()
+        // The teardown runs OUTSIDE the lock for the same reason `register`
+        // does (the register-side deadlock's exact mirror): IOBluetooth can
+        // synchronously deliver a final edge into the handler mid-unregister,
+        // re-entering this manager through the `onConnectionsChanged` getter.
+        cancel?()
     }
 
     // MARK: Address helpers
@@ -290,6 +308,21 @@ final class BTConnectionManager: BTConnectionManaging, @unchecked Sendable {
                 && BTDeviceEnumerator.macKey($0.uid) == key
         }
     }
+
+    /// Production register seam: the target/selector bridge into IOBluetooth's
+    /// notification API. The returned teardown retains the target and the
+    /// registration handle for the observation's whole lifetime.
+    private static let systemRegisterConnectNotifications:
+        @Sendable (@escaping @Sendable () -> Void) -> (@Sendable () -> Void)? = { onChange in
+            let target = ConnectionNotificationTarget(onChange: onChange)
+            let note = IOBluetoothDevice.register(
+                forConnectNotifications: target,
+                selector: #selector(ConnectionNotificationTarget.deviceConnected(_:device:)))
+            return {
+                note?.unregister()
+                target.invalidate()
+            }
+        }
 
     // MARK: Internals
 

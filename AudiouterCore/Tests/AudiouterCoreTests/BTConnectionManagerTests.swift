@@ -153,6 +153,76 @@ import Testing
         #expect(recorder.events == ["close:C4-38-75-0E-BF-4A"])
     }
 
+    // MARK: Observation lifecycle
+
+    /// IOBluetooth synchronously replays/delivers edges into the handler during
+    /// BOTH register and unregister; the handler re-enters the manager through
+    /// the `onConnectionsChanged` getter (same lock). This fake does exactly
+    /// that on both sides — a manager holding its lock across either call
+    /// deadlocks here instead of in a live session (the register-side deadlock
+    /// hit live, and its stop-side mirror).
+    @Test func observationRegisterAndTeardownSurviveSynchronousReentry() {
+        let recorder = Recorder()
+        let manager = BTConnectionManager(
+            isBluetoothAuthorized: { true },
+            openConnection: { _ in 0 },
+            closeConnection: { _ in },
+            endpointExists: { _ in true },
+            registerConnectNotifications: { onChange in
+                onChange()            // register-side synchronous replay
+                return { onChange() } // unregister-side synchronous final edge
+            })
+        manager.onConnectionsChanged = { recorder.record("changed") }
+
+        manager.startObservingConnections()
+        #expect(recorder.events == ["changed"], "the register-side replay reached the handler")
+        manager.stopObservingConnections()
+        #expect(recorder.events == ["changed", "changed"],
+                "the unregister-side edge reached the handler without deadlocking")
+
+        // Restart after stop must register again (observing was released).
+        manager.startObservingConnections()
+        #expect(recorder.events.count == 3)
+        manager.stopObservingConnections()
+    }
+
+    /// Idempotent while active: a second start never double-registers.
+    @Test func startObservingIsIdempotent() {
+        let recorder = Recorder()
+        let manager = BTConnectionManager(
+            isBluetoothAuthorized: { true },
+            openConnection: { _ in 0 },
+            closeConnection: { _ in },
+            endpointExists: { _ in true },
+            registerConnectNotifications: { _ in
+                recorder.record("register")
+                return { recorder.record("unregister") }
+            })
+        manager.startObservingConnections()
+        manager.startObservingConnections()
+        manager.stopObservingConnections()
+        manager.stopObservingConnections()
+        #expect(recorder.events == ["register", "unregister"])
+    }
+
+    /// Ungranted: the register seam is never touched (an ungranted IOBluetooth
+    /// call kills the process in production).
+    @Test func unauthorizedObserveNeverRegisters() {
+        let recorder = Recorder()
+        let manager = BTConnectionManager(
+            isBluetoothAuthorized: { false },
+            openConnection: { _ in 0 },
+            closeConnection: { _ in },
+            endpointExists: { _ in true },
+            registerConnectNotifications: { _ in
+                recorder.record("register")
+                return nil
+            })
+        manager.startObservingConnections()
+        manager.stopObservingConnections()
+        #expect(recorder.events.isEmpty)
+    }
+
     // MARK: Address derivation
 
     /// `Device.id` (Core Audio UID) → the bare MAC IOBluetooth wants, across

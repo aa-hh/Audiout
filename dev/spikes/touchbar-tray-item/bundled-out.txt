@@ -1,5 +1,0 @@
-bundle identifier: com.audiouter.spike.trayitem
-Item registered. LOOK AT YOUR TOUCH BAR — a −/+ control should now sit in
-the Control Strip (right side). Tap both halves a few times, including
-while the aggregate is your output. Each tap should print here instantly.
-Ctrl-C to quit (the control disappears with the process).

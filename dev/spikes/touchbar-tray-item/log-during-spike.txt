@@ -1,0 +1,2 @@
+2026-08-08 03:00:56.008 Df ControlStrip[882:1a40] [com.apple.xpc:connection] [0x778b9aa6c0] activating connection: mach=false listener=false peer=true name=com.apple.controlstrip.peer[6582].0x778b9aa6c0
+2026-08-08 03:00:59.674 Df log[6640:559e6a] [com.apple.log:] log run noninteractively, parent: 6580 (zsh), args: '/usr/bin/log' 'show' '--last' '8s' '--style' 'compact' '--predicate' '(process == "ControlStrip") || (eventMessage CONTAINS[c] "systemTray") || (eventMessage CONTAINS[c] "tray item") || (sender CONTAINS

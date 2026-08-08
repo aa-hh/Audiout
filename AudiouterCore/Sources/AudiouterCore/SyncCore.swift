@@ -1,7 +1,102 @@
-// SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 ahh and contributors.
+//
+// LICENSE-CLEAN by design (PLAN-UNIVERSAL-SYNC Decision 5): this file carries NO
+// GPL SPDX header, unlike its siblings. Everything in it is timing and
+// drift-control math ORIGINAL to this project (derived from the project's own
+// spike, `dev/phase-spike/`), kept free of GPL-derived code so the Apple-only
+// Bluetooth sender can share it. Do not add a GPL header to this file, and do
+// not move GPL-derived code into it.
 
 import Foundation
+
+// MARK: - SyncTiming
+
+/// Pure, hardware-free timing math for the synced local sink (T-SINK). Split out
+/// so the delay computation and the per-render-cycle release decision are
+/// unit-testable without an `AVAudioEngine` or any real audio device.
+///
+/// All time is `CLOCK_MONOTONIC`-based nanoseconds — the SAME timeline the
+/// AirPlay sessions' `pts` live on (`CapturedBuffer.pts`, produced by
+/// ``CoreAudioSystemTap/timespec(fromHostTime:)``). The render block rebases the
+/// output device's `mHostTime` (mach) into this timeline via that same helper
+/// before calling in here, so both sides of the comparison are one clock.
+enum SyncTiming {
+
+    static func monotonicNanos(_ ts: timespec) -> Int64 {
+        Int64(ts.tv_sec) &* 1_000_000_000 &+ Int64(ts.tv_nsec)
+    }
+
+    /// How long after a captured sample's `pts` the local speaker must emit it to
+    /// land level with the AirPlay receivers:
+    /// `presentationDelay − localOutputLatency − safetyMargin + userOffset`, clamped
+    /// ≥ 0.
+    ///
+    /// `presentationDelayMs` MUST come from the live engine value
+    /// (``AirPlayEngine/AirPlayEngine/currentPresentationDelayMs()`` /
+    /// ``EngineConfig/presentationDelayMs``) — never a hardcoded copy of the
+    /// 250 ms `AIRPLAY_AUDIO_LATENCY_MS` constant (plan risk R4): a later
+    /// buffer-size tune must move both the AirPlay schedule and this one together.
+    ///
+    /// `userOffsetMs` is either the T-OFFSET-UI manual bias (Settings › Audio ›
+    /// Advanced, ``AppSettings/syncOffsetMs``) for the local sink, or the
+    /// BT-OFFSET-UI/BT-SYNC-DRAWER per-device ``BTSyncTrim`` for a Bluetooth
+    /// sink — a static, user-set nudge added ON TOP of the computed+corrected
+    /// delay target (day-one escape hatch for devices that misreport their own
+    /// latency, plan risk R1). Signed: positive delays the speaker further,
+    /// negative pulls it earlier. `Double` (not `Int`) so the Bluetooth caller
+    /// can pass 0.1 ms resolution straight through with no truncation — every
+    /// existing local-sink caller passes a whole-ms `Int` widened at the call
+    /// site, so this is a precision gain for them, not a behavior change.
+    /// Applied INSIDE the same zero-floor clamp as the computed terms, so a
+    /// large negative offset can never produce a negative delay — it only ever
+    /// drives the total down to 0.
+    static func totalDelayNanos(
+        presentationDelayMs: Int,
+        localOutputLatencySeconds: Double,
+        safetyMarginMs: Double,
+        userOffsetMs: Double = 0
+    ) -> Int64 {
+        let presentationNanos = Int64(presentationDelayMs) &* 1_000_000
+        let latencyNanos = Int64((localOutputLatencySeconds * 1_000_000_000).rounded())
+        let marginNanos = Int64((safetyMarginMs * 1_000_000).rounded())
+        let offsetNanos = Int64((userOffsetMs * 1_000_000).rounded())
+        return max(0, presentationNanos &- latencyNanos &- marginNanos &+ offsetNanos)
+    }
+
+    static func targetReleaseMonotonicNanos(anchorPtsNanos: Int64, totalDelayNanos: Int64) -> Int64 {
+        anchorPtsNanos &+ totalDelayNanos
+    }
+
+    /// Where, within a render cycle that starts at `cycleStartMonotonicNanos` and
+    /// spans `frameCount` frames, the first non-silent frame falls.
+    ///
+    /// - `silentFrames == frameCount`, `releasesThisCycle == false`: the target is
+    ///   still in the future — this whole cycle is silent.
+    /// - `releasesThisCycle == true`: emit `silentFrames` of silence, then real
+    ///   audio for the remainder. `silentFrames` is the sub-buffer (frame-accurate)
+    ///   offset that keeps the released instant within one frame of the target,
+    ///   which is what makes the alignment tight rather than buffer-granular.
+    struct RenderPlan: Equatable {
+        let silentFrames: Int
+        let releasesThisCycle: Bool
+    }
+
+    static func plan(
+        cycleStartMonotonicNanos: Int64,
+        frameCount: Int,
+        sampleRate: Double,
+        targetReleaseMonotonicNanos: Int64
+    ) -> RenderPlan {
+        let deltaNanos = targetReleaseMonotonicNanos &- cycleStartMonotonicNanos
+        // At or past the target (including a cycle we were late to gate): release
+        // at frame 0; the residual is surfaced as the phase error, not hidden.
+        if deltaNanos <= 0 { return RenderPlan(silentFrames: 0, releasesThisCycle: true) }
+        let nsPerFrame = 1_000_000_000.0 / sampleRate
+        let offsetFrames = Int((Double(deltaNanos) / nsPerFrame).rounded())
+        if offsetFrames >= frameCount { return RenderPlan(silentFrames: frameCount, releasesThisCycle: false) }
+        return RenderPlan(silentFrames: offsetFrames, releasesThisCycle: true)
+    }
+}
 
 /// T-CORRECTION — the continuous phase-lock DSP for ``SyncedLocalSink``.
 ///

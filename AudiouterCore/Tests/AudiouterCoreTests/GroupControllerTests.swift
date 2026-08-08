@@ -228,6 +228,22 @@ import Testing
         #expect(controller.activeGroupID == "g1")
     }
 
+    /// BT-UI "click connects": `requestReconnect(for:)` is a membership-FREE
+    /// pass-through to `OutputBackend.retryOutput` — unlike
+    /// `retryConnection(for:)`, an UNSELECTED id is retried as-is, never
+    /// selected as a side effect (a greyed Bluetooth row's click must connect
+    /// the speaker without also pulling it into the mix).
+    @Test func requestReconnectRetriesWithoutInventingMembership() async throws {
+        let (controller, backend) = try await makeRecordingController()
+        #expect(!controller.selectedDeviceIDs.contains("office"))
+        backend.reset()
+
+        controller.requestReconnect(for: "office")
+        #expect(backend.callOrder == ["retry"],
+                "a straight retry — no selection, no output-set, no gain writes")
+        #expect(!controller.selectedDeviceIDs.contains("office"), "membership is never invented")
+    }
+
     /// R12 adversarial-review fixup — `retryConnection(for:)` must decide its
     /// re-kick path off which routing is ACTUALLY active (`mainOut`), not off
     /// whichever membership set happens to contain `id` first.
@@ -1455,6 +1471,105 @@ import Testing
         #expect(backend.callOrder == ["gain", "outputSet"],
                 "the group's gain stage must reach the backend before the output set opens")
         #expect(backend.gainWrites.last?.group == 42, "the pushed gain reflects the NEW target's group stage")
+    }
+
+    // MARK: BT-GROUPCTL — Bluetooth selection matrix (PLAN-UNIVERSAL-SYNC)
+    //
+    // A `.bluetooth` device is NON-LOCAL, so every rule above applies to it
+    // unchanged: it mixes freely (BT+AirPlay, BT+BT, BT+Mac), auto-swap and the
+    // current-device floor treat it exactly like an AirPlay id, and it rides in
+    // the `setOutputSet` ids this controller hands the backend — where
+    // `NativeBackend`'s partition (R-partition) routes it to the BT sink
+    // manager instead of the AirPlay engine. Nothing in THIS type may
+    // distinguish BT; these tests pin that.
+
+    /// `demoFleet` plus two `.bluetooth` outputs. A separate fleet (not folded
+    /// into `demoFleet`) for the same reason `demoFleetWithAP1Only` is: hardcoded
+    /// `count == 7` assertions elsewhere.
+    private var btFleet: [Device] {
+        Array<Device>.demoFleet + [
+            Device(id: "bt-move", name: "Move 2 (Bluetooth)", kind: .bluetooth, supportsAirPlay2: false),
+            Device(id: "bt-flip", name: "JBL Flip 5", kind: .bluetooth, supportsAirPlay2: false),
+        ]
+    }
+
+    // ADD a BT device while the Mac is the sole member → same auto-swap as an
+    // AirPlay add (BT is non-local; switching to a real output implies moving
+    // the audio there).
+    @Test func addBluetooth_whenMacIsSoleMember_autoDropsMac() async throws {
+        let (controller, _) = try await makeController(fleet: btFleet)
+        controller.ensureDefaultSelection()                       // S = {local-mac}
+        let r = controller.setDeviceSelected("bt-move", true)
+        #expect(r.applied)
+        #expect(r.refusalReason == nil)
+        #expect(r.autoSwappedCurrentDevice)
+        #expect(controller.selectedDeviceIDs == ["bt-move"])
+    }
+
+    // BT + AirPlay mixed selection → allowed, both applied to the output set.
+    @Test func btPlusAirPlaySelectionIsAllowed() async throws {
+        let (controller, backend) = try await makeController(fleet: btFleet)
+        controller.ensureDefaultSelection()
+        _ = controller.setDeviceSelected("bt-move", true)         // → {bt-move}
+        let r = controller.setDeviceSelected("office", true)
+        #expect(r.applied)
+        #expect(r.refusalReason == nil)
+        #expect(!r.autoSwappedCurrentDevice)
+        #expect(controller.selectedDeviceIDs == ["bt-move", "office"])
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(backend.devices.first { $0.id == "bt-move" }?.isSelected == true)
+        #expect(backend.devices.first { $0.id == "office" }?.isSelected == true)
+    }
+
+    // BT + BT → allowed (same-room drift is a stated quality-bar limitation,
+    // never a refusal).
+    @Test func btPlusBtSelectionIsAllowed() async throws {
+        let (controller, _) = try await makeController(fleet: btFleet)
+        controller.ensureDefaultSelection()
+        _ = controller.setDeviceSelected("bt-move", true)
+        let r = controller.setDeviceSelected("bt-flip", true)
+        #expect(r.applied)
+        #expect(controller.selectedDeviceIDs == ["bt-move", "bt-flip"])
+    }
+
+    // The Mac may join a BT set exactly as it joins an AirPlay set (Q5) — and
+    // the output set the backend receives still excludes the local device.
+    @Test func macMayJoinBtMixedSet() async throws {
+        let (controller, backend) = try await makeRecordingController(fleet: btFleet)
+        controller.ensureDefaultSelection()
+        _ = controller.setDeviceSelected("bt-move", true)         // → {bt-move}
+        let r = controller.setDeviceSelected("local-mac", true)
+        #expect(r.applied)
+        #expect(r.refusalReason == nil)
+        #expect(controller.selectedDeviceIDs == ["bt-move", "local-mac"])
+        #expect(backend.outputSetWrites.last == ["bt-move"],
+                "the BT id rides in the output set; the local Mac never does")
+    }
+
+    // DESELECT the last BT device → current-device floor restores {local-mac},
+    // same as removing the last AirPlay device.
+    @Test func deselectingLastBtRestoresCurrentDeviceFloor() async throws {
+        let (controller, _) = try await makeController(fleet: btFleet)
+        controller.ensureDefaultSelection()
+        _ = controller.setDeviceSelected("bt-move", true)         // → {bt-move}
+        let r = controller.setDeviceSelected("bt-move", false)
+        #expect(r.autoSwappedCurrentDevice, "the floor re-toggled the local row FOR the user")
+        #expect(controller.selectedDeviceIDs == ["local-mac"])
+    }
+
+    // A saved group mixing BT + AirPlay + the Mac activates with BOTH non-local
+    // members in the output set and the Mac filtered out — the misroute audit's
+    // `routableOutputs` site treats BT as just another non-local id, and the
+    // partition (which id drives which sender) belongs to the backend seam.
+    @Test func groupWithBtAirPlayAndMacRoutesOnlyNonLocalMembers() async throws {
+        let (controller, backend) = try await makeRecordingController(fleet: btFleet)
+        try controller.saveGroup(Group(id: "g1", name: "Everywhere",
+                                       memberIDs: ["bt-move", "office", "local-mac"],
+                                       memberVolumes: [:]))
+        backend.reset()
+        controller.setMainOut(.group(id: "g1"))
+        #expect(backend.outputSetWrites.last == ["bt-move", "office"],
+                "BT and AirPlay members route; the Mac is filtered out")
     }
 }
 

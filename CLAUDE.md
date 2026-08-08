@@ -34,6 +34,22 @@ bash scripts/make-app.sh
 open build/Audiouter.app
 ```
 
+**Every build handed over for testing gets its OWN bundle id and app name —
+every time, even for a one-line change.** Bump a version suffix on each
+rebuild; never reuse an id that has already been launched:
+
+```bash
+APP_NAME="Audiouter Sync v2" BUNDLE_ID="com.audiouter.Audiouter.syncv2" bash scripts/make-app.sh
+```
+
+macOS pins TCC grants (system audio capture, Bluetooth, local network) to the
+bundle id AND the code signature. Re-signing the same id with changed code
+invalidates the grant, and the failure mode is erratic — stale grants, silent
+denials, sometimes no prompt at all — so the tester ends up debugging
+permissions instead of the feature. A fresh id always gets a clean prompt.
+Bare `make-app.sh` builds the DEFAULT `com.audiouter.Audiouter`, which is the
+live `/Applications` copy: never overwrite it for a test.
+
 ## Tests
 
 ```bash

@@ -149,7 +149,7 @@ import AudiouterCore
         #expect(!row.test_isBrightening, "a failure edge never brightens — it stays muted")
         #expect(row.test_controlsMuted, "failed rows stay in the muted-unconnected treatment")
         #expect(row.test_feedIsErrorColored, "the FEED shows the red error, not a dimmed composite")
-        #expect(row.test_feedText == "Couldn't connect")
+        #expect(row.test_feedText == "Didn't respond")
     }
 
     @Test func connectedToFailedNeverBrightens() {

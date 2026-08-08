@@ -778,6 +778,16 @@ public enum Tokens {
         /// The `.kern` value (in points) realizing the micro-label voice's
         /// +0.09 em tracking at ``microLabel``'s 8.5 pt size (0.09 × 8.5).
         public static var microLabelKern: CGFloat { 0.765 }
+        /// The BT sync drawer's click-to-edit value field. Monospaced digits
+        /// so the number keeps its width as it steps. Sized to sit with the
+        /// row's own controls, not to shout — two live findings cut it down in
+        /// turn (a 26 pt version dwarfed everything around it and clipped
+        /// "−410" to "−41"; a 15 pt one still overhung the small buttons it now
+        /// shares a band with). One point over ``caption``, medium weight, is
+        /// enough for the editable number to read as the focal control.
+        public static var syncReadout: NSFont {
+            .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize + 1, weight: .medium)
+        }
     }
 
     // MARK: - Layout

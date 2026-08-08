@@ -305,6 +305,42 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   `.selectedDevices` `isMainOutMember` and `isSpeakerSelected` are
   *provably* the same read (`mainOutMemberIDs` is `Array(selectedDeviceIDs)`
   in that branch) — so this only changes behavior on the group path.
+- **Never touch IOBluetooth outside `BTDeviceEnumerator`'s authorization gate.**
+  On macOS 27 an IOBluetooth call from a process without the Bluetooth TCC
+  grant KILLS the process — SIGABRT, no prompt, no error (live-verified
+  2026-08-07). Every IOBluetooth touch must sit behind a `CBManager
+  .authorization` check (a prompt-free read) and degrade to Core-Audio-only
+  enumeration when ungranted; tests always inject the enumerator's seams and
+  never reach real IOBluetooth. Bluetooth ids are ROUTED but never
+  engine-driven (BT-BACKEND, risk R-partition in
+  `docs/plans/PLAN-UNIVERSAL-SYNC.md`): `setOutputSet` partitions the
+  selection — AirPlay ids converge through the engine; `.bluetooth` ids (no
+  `outputIDs` entry, plus an explicit `isBluetooth` guard in the converge
+  loop) drive the `BTSyncedSink` manager via `applyBTSinkTransition`
+  (arm/disarm, per-device set, `BTGroupComposition` recomputed on every
+  selection change), fed by the whole-system tap's `setBTSink` fan-out with
+  the render process tap-excluded. Exclude BT from an engine-only path via
+  `isBluetooth`, never `supportsAirPlay2` — AP1 receivers share that flag yet
+  ARE engine-driven. Pairedness truth is the enumerator's MERGED LIST: a known
+  `.bluetooth` row whose id is absent from the latest snapshot has lost its OS
+  pairing record, and `retryOutput` fails it FAST as
+  `ConnectionFailure.Cause.notPaired` (before any ~15 s baseband attempt);
+  never auto-purge such a row — re-pairing resurrects the same MAC-derived id
+  with its trim and membership. A BT row's `.connected` means something
+  different from an AirPlay row's: not a live engine session but that device's
+  own delay gate having opened (`BTDeviceSink.hasStartedRendering`) — the state
+  that lights the armed dot and mounts the meter. Never set a BT id
+  `.connected` from a connect outcome alone; select, reconnect and
+  availability-regained all hold `.connecting` until that signal or a timeout,
+  so the ring breathes until the music starts. The silence fallback therefore
+  reads a BT id's audible fact from `isAvailable`, never `.connected`
+  (`desiredDeviceAudibleLocked`): that signal lands a whole reference delay
+  late, so the `.connected` read would brand a healthy BT-only selection
+  stranded and un-mute the Mac mid-playback. BT devices
+  remain ineligible per-app route targets. `BTDeviceEnumerator.swift` and
+  `BTSyncedSink.swift` are LICENSE-CLEAN
+  like `SyncCore.swift` (no GPL header — see the header note in each file);
+  never copy code into them from the GPL-headered `SyncedLocalSink.swift`.
 - **`TCCAccessPreflight` is cached for the CALLING process's whole lifetime**,
   so a grant made after launch is invisible to any in-process read forever —
   and the `com.apple.tcc.access.changed` Darwin notification fires but does NOT
@@ -574,6 +610,10 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `NativeBackend` | Shipping backend; drives `AirPlayEngine`, owns capture gate, owns aggregate device lifecycle. |
 | `AggregateOutputDevice` | Lifecycle owner (adopt-or-create/off-switch/orphan sweep) for the PUBLIC, Sound-settings-visible "Audiouter" aggregate (UID `com.audiouter.Audiouter.aggregate`); thin CoreAudio shell wired by `NativeBackend`. Becomes Mac default when whole-system routing arms; restore-prior-default-then-destroy on quit; echo-guarded. New `BackendEvent` case `routingBlockedNeedsDefault(Bool)` signals when the app can't route because its aggregate isn't the Mac's default output. |
 | `NativeDiscovery` | Bonjour discovery (AP2 + AP1). |
+| `BTDeviceEnumerator` | Bluetooth outputs: Core Audio BT transport merged with the TCC-gated IOBluetooth paired list; paired-but-disconnected speakers surface unavailable, with pairing recency kept for ghost-row filtering. |
+| `BTSyncedSink` | N-instance BT sink manager: per-device pinned engines, reference-timeline delay, pacing-clock drift correction. |
+| `BTSyncTrim` / `BTTrimStore` | The SYNC trim's shared clamp/step contract (±500 ms, 10 ms coarse) + versioned-JSON persistence per device UID; `NativeBackend` loads at init and re-pushes into the sink on every arm (`BTOutputControlling` is the UI seam). |
+| `AlignmentTickInjector` | Align-by-ear woodblock tick (72 BPM — beat spacing must exceed the ±500 ms trim range or offsets alias), mixed into the converted PCM in `NativeCaptureCoordinator.handleBuffer` BEFORE the engine write and both fan-outs, so every consumer renders the same tick through its own delay; self-limits to ~30 s. Playing it out loud can't work — the app's render processes are tap-excluded. |
 | `NativeCaptureCoordinator` | Whole-system Core Audio capture; excludes individually-routed + user-excluded apps. |
 | `PerAppCaptureCoordinator` | Per-process Core Audio capture taps, one per individually-routed app. |
 | `AudioProcessResolver` / `AudioProcessEnumerating` | Bundle ID → ALL its Core Audio process objects (main + helper/child processes) via four ANY-of attribution layers: own bundle id, responsible pid, bundle-path containment, parent-pid walk; the AppKit lookups (pid→bundle, bundle→`.app` path) are injected. `resolveWithAttribution(bundleID:)` (T2) is the diagnostic twin of `resolve(bundleID:)`, tagging each resolved process with its matching `AttributionLayer` for `Telemetry`. |

@@ -418,6 +418,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             (self?.backend as? AppRouteConfiguring)?.setLocalPlaybackVolume(
                 volume: volume, bundleID: bundleID)
         }
+        // BT-UI: the OUTPUT DEVICES "+" menu's "Pair a Bluetooth speaker…" —
+        // pairing is Apple-owned, so the one-tap Settings trip is the whole
+        // affordance; the fresh row auto-appears on return (connect
+        // notification → enumerator refresh).
+        popoverController.onPairBluetoothSpeaker = {
+            NSWorkspace.shared.open(SystemSettingsPane.bluetooth.url)
+        }
+        // BT-UI ghost pairings: recency feed for the Bluetooth subsection's
+        // stale-to-the-bottom sort. Capability-gated like the hooks above —
+        // nil on MockBackend/OwnToneBackend, which sorts by name alone.
+        popoverController.btLastUsedProvider = { [weak self] in
+            (self?.backend as? BTOutputControlling)?.lastUsedDatesForBTDevices() ?? [:]
+        }
+        // BT-OFFSET-UI: the SYNC column's trim round-trip (live-applied to the
+        // device's BTSyncedSink delay + persisted per device UID) and the
+        // align-by-ear tick gate. Same capability posture as above.
+        popoverController.onSetBTTrim = { [weak self] ms, deviceID, persist in
+            (self?.backend as? BTOutputControlling)?
+                .setBTSyncTrim(ms, forDevice: deviceID, persist: persist)
+        }
+        popoverController.btTrimProvider = { [weak self] deviceID in
+            (self?.backend as? BTOutputControlling)?.btSyncTrim(forDevice: deviceID) ?? 0
+        }
+        // BT-SYNC-DRAWER T7: D10's real "tuned or never tuned" signal. `false`
+        // without the capability, so a mock/dev popover starts every chip at
+        // "Not set" and only the user's own edits mark one tuned.
+        popoverController.btTrimIsSetProvider = { [weak self] deviceID in
+            (self?.backend as? BTOutputControlling)?.btHasSyncTrim(forDevice: deviceID) ?? false
+        }
+        // BT-SYNC-DRAWER T3: the drawer's hard-stop range. `nil` fallback
+        // matches the protocol's own default (full ±range) so a MockBackend/
+        // OwnToneBackend popover keeps working with no BT capability at all.
+        popoverController.btTrimRangeProvider = { [weak self] deviceID in
+            (self?.backend as? BTOutputControlling)?.btUsableTrimRangeMs(forDevice: deviceID)
+                ?? (-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
+        }
+        popoverController.onAlignTickActiveChange = { [weak self] active in
+            (self?.backend as? BTOutputControlling)?.setBTAlignTickActive(active)
+        }
         // Excluded apps (Settings › Audio) are un-routable: the popover reads this
         // to drop them from the Applications picker + rows.
         popoverController.isAppExcluded = { [weak self] bundleID in

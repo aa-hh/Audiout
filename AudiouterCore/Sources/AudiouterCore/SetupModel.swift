@@ -102,6 +102,11 @@ public enum SystemSettingsPane: Sendable {
     case screenAndSystemAudioRecording
     case localNetwork
     case accessibility
+    /// Not a Privacy anchor — the Bluetooth pane itself. The BT-CONNECT
+    /// fallback (PLAN-UNIVERSAL-SYNC Decision 3): when a programmatic
+    /// reconnect doesn't resolve, one tap lands the user where pairing and
+    /// manual connect live.
+    case bluetooth
 
     /// The `x-apple.systempreferences:` URL that opens this pane.
     public var url: URL {
@@ -112,6 +117,8 @@ public enum SystemSettingsPane: Sendable {
             return Self.make("Privacy_LocalNetwork")
         case .accessibility:
             return Self.make("Privacy_Accessibility")
+        case .bluetooth:
+            return URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings")!
         }
     }
 

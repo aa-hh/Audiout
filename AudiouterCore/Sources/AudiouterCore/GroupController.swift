@@ -375,6 +375,17 @@ public final class GroupController {
         return setDeviceSelected(id, true)
     }
 
+    /// A membership-FREE reconnect kick (BT-UI): clicking a greyed
+    /// paired-but-disconnected Bluetooth row connects it (the macOS
+    /// Bluetooth-menu behavior) WITHOUT selecting it — `retryConnection(for:)`
+    /// above would fall through to `setDeviceSelected`, inventing membership
+    /// the click never asked for. `NativeBackend.retryOutput`'s BT arm
+    /// deliberately requires no membership (Section D tap-to-reconnect), so
+    /// this is a straight pass-through.
+    public func requestReconnect(for id: String) {
+        backend.retryOutput(id)
+    }
+
     /// Whether the local Mac may currently be toggled ON. Always `true` now: with
     /// the synced local sink the Mac may join any (including mixed) Selected
     /// Devices set (Q5 / T-GROUPCTL), so the pre-engine local-mix block is gone.

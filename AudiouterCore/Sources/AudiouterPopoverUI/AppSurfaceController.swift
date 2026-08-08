@@ -228,7 +228,14 @@ public final class AppSurfaceController {
 
     /// Close through the shell's real-close path (`windowWillClose` →
     /// `handleShellClosed`), exactly as ✕/Esc would.
-    public func performClose() { shell.performClose() }
+    /// Close the shell — unless the Mixer's sync drawer is mid-edit, in which
+    /// case the edit is committed and the dismissal refused for this one
+    /// request (see `PopoverController.surfaceShouldHide()`). Typing a value
+    /// and pressing Return must set it, never dismiss the surface.
+    public func performClose() {
+        guard popoverController.surfaceShouldHide() else { return }
+        shell.performClose()
+    }
 
     private func handleShellClosed() {
         if isShown, selectedScreen == .mixer {

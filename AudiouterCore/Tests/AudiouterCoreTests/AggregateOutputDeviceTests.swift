@@ -1098,3 +1098,35 @@ extension SerializedSharedState {
 }
 
 } // extension SerializedSharedState
+
+/// The public aggregate is a SYSTEM-WIDE object destroyed by UID on teardown,
+/// so its UID must follow the bundle id. Live-found: with one hardcoded UID,
+/// quitting a side-by-side test build swept the "Audiouter" output device out
+/// of Sound settings while the other copy was still running.
+@Suite struct AggregateOutputDeviceIdentityTests {
+
+    @Test func theShippingBundleKeepsItsPersistedUIDAndName() {
+        #expect(AggregateOutputDevice.shippingUID == "com.audiouter.Audiouter.aggregate",
+                "coreaudiod keys its persisted entry by this exact string — changing it orphans every existing entry")
+        #expect(AggregateOutputDevice.shippingBundleID == "com.audiouter.Audiouter")
+    }
+
+    /// A side-by-side test build must own a DIFFERENT UID, because
+    /// `sweepOrphans()` destroys by UID on teardown — sharing one meant
+    /// quitting either copy deleted the other's device.
+    @Test func aSideBuildOwnsItsOwnAggregateUID() {
+        let sideUID = AggregateOutputDevice.productUID(forBundleID: "com.audiouter.Audiouter.syncv2")
+        #expect(sideUID == "com.audiouter.Audiouter.syncv2.aggregate")
+        #expect(sideUID != AggregateOutputDevice.shippingUID,
+                "a side build must never own the shipping aggregate UID")
+    }
+
+    /// An unbundled run (`swift run`) is the same app, so it keeps the
+    /// shipping identity rather than inventing a third device.
+    @Test func anUnbundledRunKeepsTheShippingUID() {
+        #expect(AggregateOutputDevice.productUID(forBundleID: nil)
+                == AggregateOutputDevice.shippingUID)
+        #expect(AggregateOutputDevice.productUID(forBundleID: "com.audiouter.Audiouter")
+                == AggregateOutputDevice.shippingUID)
+    }
+}

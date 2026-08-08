@@ -223,6 +223,126 @@ public final class PopoverController: NSObject {
     /// ID with no live local stream, so the popover needs no destination knowledge.
     public var onSetLocalPlaybackVolume: ((_ volume: Int, _ bundleID: String) -> Void)?
 
+    /// Called when the user picks "Pair a Bluetooth speaker…" from the OUTPUT
+    /// DEVICES header's "+" menu (BT-UI, device-tier decision 3: never-paired
+    /// speakers get NO rows — pairing is a one-tap Settings trip). The app
+    /// wires this to open `SystemSettingsPane.bluetooth`; the fresh row then
+    /// auto-appears on return via the enumerator refresh. `nil` = the menu
+    /// item still renders but taps into nothing (tests wire a spy).
+    public var onPairBluetoothSpeaker: (() -> Void)?
+
+    /// When macOS last used each Bluetooth pairing, keyed by device id — the
+    /// Bluetooth subsection's ghost-pairing sort input (stale pairings sink to
+    /// the BOTTOM; sort-only in v1, nothing is hidden). The app wires this to
+    /// `(backend as? BTOutputControlling)?.lastUsedDatesForBTDevices`. `nil`
+    /// (mock/tests without the capability) sorts by name alone.
+    public var btLastUsedProvider: (() -> [String: Date])?
+
+    /// Called when a Bluetooth device's SYNC trim changes, already quantised.
+    /// The app wires this to
+    /// `(backend as? BTOutputControlling)?.setBTSyncTrim` — live-applied to
+    /// that device's `BTSyncedSink` delay, and written to disk only when
+    /// `persist` is true.
+    ///
+    /// `persist == false` is the drawer's live ruler scrub (D6): apply to
+    /// audio, do NOT write the JSON store. Every discrete gesture — drag end,
+    /// a stepper click, a typed commit, Revert — arrives with `true`.
+    public var onSetBTTrim: ((_ ms: Double, _ deviceID: String, _ persist: Bool) -> Void)?
+
+    /// The saved SYNC trim for a Bluetooth device id — seeds each row's value
+    /// (and the read-only display on a disconnected row). Wired to
+    /// `(backend as? BTOutputControlling)?.btSyncTrim`. `nil` = 0, and edits
+    /// then live only in `btTrimsByID` (mock/dev — nothing persists them).
+    public var btTrimProvider: ((_ deviceID: String) -> Double)?
+
+    /// Whether a Bluetooth device has a saved trim ENTRY at all — D10's
+    /// "tuned vs never tuned", which `btTrimProvider`'s value alone cannot
+    /// answer: a device deliberately tuned to exactly 0.0 ms is tuned, and
+    /// must read "0.0 ms", not "Not set". Wired to
+    /// `(backend as? BTOutputControlling)?.btHasSyncTrim`. `nil` = nothing is
+    /// persisted, so every chip starts untuned and only a live edit
+    /// (`btTunedDeviceIDs`) marks one tuned.
+    public var btTrimIsSetProvider: ((_ deviceID: String) -> Bool)?
+
+    /// The usable trim range for a Bluetooth device id (D11/T3) — the
+    /// drawer's hard-stop, tighter than the nominal ±`BTSyncTrim.rangeMs`
+    /// whenever the device's real headroom is smaller. Wired to
+    /// `(backend as? BTOutputControlling)?.btUsableTrimRangeMs`. `nil` (mock/
+    /// dev builds, or no BT capability) means the full ±range.
+    ///
+    /// LIVE QUERY, same as the backend seam it wraps: the range moves
+    /// whenever AirPlay joins or leaves the group, so callers must invoke
+    /// this fresh every time they need it — never cache the result, not even
+    /// for the lifetime of one open drawer (T7 re-reads it on every
+    /// `update(devices:)`).
+    public var btTrimRangeProvider: ((_ deviceID: String) -> ClosedRange<Double>)?
+
+    /// Called with `true`/`false` as the align-by-ear tick starts/stops
+    /// (BT-OFFSET-UI). Wired to
+    /// `(backend as? BTOutputControlling)?.setBTAlignTickActive`.
+    public var onAlignTickActiveChange: ((_ active: Bool) -> Void)?
+
+    /// The freshest trim value per device id (the user's latest edit, or the
+    /// provider's persisted value on first read) — the rows' apply source, so
+    /// a rebuild never has to round-trip the backend.
+    private var btTrimsByID: [String: Double] = [:]
+
+    /// Device ids known to carry a deliberate trim (D10). Seeded from
+    /// `btTrimIsSetProvider` the first time a row reads its trim, and joined
+    /// by any device the user edits — an edit IS the act of tuning, so a
+    /// scrub down to exactly 0.0 leaves a tuned chip reading "0.0 ms", never
+    /// a chip that flips back to "Not set" under the user's hand.
+    private var btTunedDeviceIDs: Set<String> = []
+
+    /// The Bluetooth device whose SYNC drawer is currently open, or `nil`
+    /// (D2 — at most one, ever). This is the INTENT; it survives `rebuild()`,
+    /// which recreates rows, exactly like `openDiagnosisIDs`.
+    private var expandedSyncDeviceID: String?
+
+    /// The device the mounted drawer view currently sits under — the view-layer
+    /// mirror of `expandedSyncDeviceID`, rebuilt by `reconcileSyncDrawer`. A
+    /// separate field rather than reading `syncDrawer.superview`, because
+    /// `removeRow` defers its detach into an animation completion handler and
+    /// the superview lingers for the length of the fade.
+    private var mountedSyncDrawerID: String?
+
+    /// Whether the expanded drawer's device was selected the last time we
+    /// looked. This turns "is selected" into an EDGE: a drawer opened on an
+    /// available-but-unselected row (tuning a speaker before adding it to the
+    /// mix — the chip is live whenever the device is available) survives,
+    /// while a device the user drops OUT of the mix takes its drawer with it.
+    /// Same edge discipline as `update(devices:)`'s Bluetooth availability
+    /// deselect, and the mirror of the diagnosis panel's `wantsAudio` prune.
+    private var expandedSyncDeviceWasSelected = false
+
+    /// Set when a drawer is opened for a device, cleared once `noteOpened` has
+    /// seeded the Revert baseline (D8). `BTSyncDrawerView.configure` alone
+    /// cannot tell a fresh open from a routine refresh, and the ONE drawer
+    /// instance below is reconfigured across devices, so the distinction has
+    /// to live here.
+    private var syncDrawerNeedsOpenBaseline = false
+    /// Whether the drawer's value field was mid-edit when `rebuild()` detached
+    /// it, so `reconcileSyncDrawer` can hand focus back after re-mounting.
+    /// See the detach site in `rebuild()` for why this exists.
+    private var syncDrawerWasEditing = false
+
+    /// The single reused drawer (D2): one instance reconfigured across
+    /// devices, never one per row. Created lazily so a popover that never
+    /// meets a Bluetooth device never builds it.
+    private lazy var syncDrawer: BTSyncDrawerView = {
+        let view = BTSyncDrawerView()
+        view.delegate = self
+        return view
+    }()
+
+    /// The row whose align-by-ear tick is currently running, if any. One at a
+    /// time: toggling another row's button moves the single tick.
+    private var alignTickDeviceID: String?
+    /// Auto-stop for the align tick (~30 s — mirrors the injector's own tick
+    /// budget so the button can't stay lit after the ticks end).
+    private var alignTickAutoStop: DispatchWorkItem?
+    static let alignTickAutoStopInterval: TimeInterval = 30
+
     /// Predicate: is `bundleID` excluded from capture (Settings › Audio, "never
     /// captured")? An excluded app is un-routable — dropped from the "+ Add
     /// application…" picker and its route row skipped in `rebuild` (defensive; the
@@ -451,7 +571,27 @@ public final class PopoverController: NSObject {
     /// Push the latest device snapshot and repaint. Re-derives active-group state
     /// (defensive under a group target) and repaints mounted rows in place.
     public func update(devices: [Device]) {
+        let previousDevices = devicesByID
         devicesByID = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0) })
+        // A SELECTED Bluetooth device that LOSES availability is DESELECTED
+        // (Alec's call — off = unselected, replacing the backend's power-off
+        // park). Both loss paths — a listed-but-disconnected snapshot AND a
+        // vanish (unpair mid-session, sleep) — reach this surface as the same
+        // availability edge on a kept row, so one edge covers them. Routed
+        // through `setDeviceSelected` (the one selection owner — persist,
+        // re-route, current-device floor), the same path a user's toggle-off
+        // takes; the mirror of `handleDeviceDisappeared`'s route reset below.
+        // Edge-only on purpose: a selection made ON an already-greyed row
+        // ("play when up") has no edge and survives, so it still auto-starts
+        // on connect; and a `.failed` story alone never deselects (R12) — only
+        // the availability fact does.
+        if let controller = groupController {
+            for device in devices where device.isBluetooth && !device.isAvailable {
+                guard previousDevices[device.id]?.isAvailable == true,
+                      controller.isSpeakerSelected(device.id) else { continue }
+                _ = controller.setDeviceSelected(device.id, false)
+            }
+        }
         // Drop any live-streaming entry (T9) for a device that vanished from the
         // snapshot entirely. Defensive: a normal route-change already clears the
         // entry itself (a redirect leaving X emits `.routedApps(X, [])`), but a
@@ -535,6 +675,11 @@ public final class PopoverController: NSObject {
                 // escalates to a rebuild exactly when the note must change.
                 refreshDeviceRowsReconcilingCardNote()
                 reconcileDiagnosisPanels(animated: true)
+                // Re-reads the usable range from the provider (T3's trap) and
+                // auto-collapses a drawer whose device has gone unavailable or
+                // left the mix. The rebuild branch above reaches the same call
+                // through `rebuild()`.
+                reconcileSyncDrawer(animated: true)
             }
         }
         // Not shown: deliberately NO rebuild. Every open goes through
@@ -851,6 +996,29 @@ public final class PopoverController: NSObject {
         // (`openDiagnosisIDs`) survives and is re-applied below (brief §7.3 —
         // "rebuild() restores open panels").
         diagnosisPanelsByID.removeAll()
+        // The ONE reused drawer view (D2) can't just be forgotten the way the
+        // per-id panels above are: `clearRows()` drops the cards, but the
+        // drawer stays parented to the orphaned body stack it was inserted
+        // into. Detach it explicitly; the INTENT (`expandedSyncDeviceID`)
+        // survives and `reconcileSyncDrawer` re-mounts it under the fresh row.
+        if mountedSyncDrawerID != nil {
+            // Detaching a view that is BEING EDITED ends its field-editor
+            // session and drops first responder back to the window (measured).
+            // The typed value still commits on the way out, so nothing is lost
+            // — but focus silently vanishes, and inside a `.transient` popover
+            // the user's NEXT Return then lands with no first responder and
+            // closes the whole surface. That is the live "Return closes the
+            // popover and my edit goes nowhere" report: not the field's key
+            // handling (which consumes Return correctly — proven by real event
+            // dispatch in `SyncValueFieldLiveKeyTests`), but a background
+            // repaint pulling the field out from under the user mid-type. Any
+            // structural repaint runs this: a device appearing, a route
+            // change, a valid-target flip. Remember the editing state here and
+            // restore it once `reconcileSyncDrawer` has re-mounted the drawer.
+            syncDrawerWasEditing = syncDrawer.isEditingValue
+            syncDrawer.removeFromSuperview()
+            mountedSyncDrawerID = nil
+        }
         blockedNoteByID.removeAll()
         appRowsByBundleID.removeAll()
         panel.clearRows()
@@ -886,23 +1054,27 @@ public final class PopoverController: NSObject {
         // still builds, showing a single non-interactive "Looking for
         // speakers…" placeholder (§5.9) so it never silently vanishes.
         let locals = allDevices.filter(\.isLocalDevice)
-        let airplay = allDevices.filter { !$0.isLocalDevice }
+        let airplay = allDevices.filter { !$0.isLocalDevice && !$0.isBluetooth }
+        let bluetooth = orderedBluetoothDevices(in: allDevices)
         devicesPlaceholderShown = false
+        renderedSubsectionTitles = []
+        renderedBluetoothOrder = bluetooth.map(\.id)
         // Combined header row: "Output Devices" title on the left, "VOLUME" over
         // the slider. The membership "Selected" column MOVED to the left spine
         // (v4 §Call-1), so this card no longer heads a membership column — but
         // its device rows' trailing dropdown column, once left empty, now
         // fills the FEED composite (v4.1 item 3), so the header names it
         // "Feed" (`DeviceRowView.updateFeedText`/`feedStack`). The trailing
-        // accessory (F1) saves the current Selected Devices set as a group;
-        // its enabled state tracks `canSaveCurrentSetup`, kept fresh via
-        // `refreshDevicesAccessory()` on selection repaints.
+        // "+" accessory is a MENU now (BT-UI): "Save Selected Devices as
+        // group" (enabled iff `canSaveCurrentSetup` — the gating moved off the
+        // button onto the item) and "Pair a Bluetooth speaker…", so the button
+        // itself stays always-enabled.
         panel.beginCard(header: Self.outputDevicesCardTitle, volumeTitle: "Volume", trailingTitle: "Feed",
                         trailingAccessory: PopoverPanelViewController.HeaderAccessory(
                             symbol: "plus",
-                            label: "Save Selected Devices as group",
-                            action: { [weak self] in self?.saveCurrentSetup() },
-                            isEnabled: canSaveCurrentSetup),
+                            label: "Save the Selected Devices as a group, or pair a Bluetooth speaker",
+                            action: { [weak self] in self?.presentOutputDevicesPlusMenu() },
+                            isEnabled: true),
                         collapsible: true,
                         collapsed: collapsedState(for: Self.outputDevicesCardTitle, default: false),
                         onToggle: { [weak self] in self?.toggleCard(Self.outputDevicesCardTitle) })
@@ -917,7 +1089,7 @@ public final class PopoverController: NSObject {
         if let note = devicesCardNote {
             panel.addCardNote(note)
         }
-        if locals.isEmpty && airplay.isEmpty {
+        if locals.isEmpty && airplay.isEmpty && bluetooth.isEmpty {
             panel.addRow(makePlaceholderRow(text: Self.devicesEmptyPlaceholderText))
             devicesPlaceholderShown = true
         } else {
@@ -929,12 +1101,23 @@ public final class PopoverController: NSObject {
                 // the row under it still shows the real underlying device name
                 // (e.g. "MacBook Pro Speakers", via `currentOutputDeviceName`, which
                 // resolves through the aggregate to the wrapped speakers).
-                panel.addSubsectionHeader("This Mac")
+                addSubsection("This Mac")
                 for device in locals { panel.addRow(makeDeviceRow(device, indented: false)) }
             }
             if !airplay.isEmpty {
-                panel.addSubsectionHeader("AirPlay Devices")
+                addSubsection("AirPlay Devices")
                 for device in airplay { panel.addRow(makeDeviceRow(device, indented: false)) }
+            }
+            // Bluetooth subsection (BT-UI): HIDDEN entirely when no BT devices
+            // exist — never an empty grouping label. Rows are ordinary rail
+            // rows; recency ordering is `orderedBluetoothDevices`. The SYNC
+            // column title lives in THIS subsection's header line only, between
+            // VOLUME and FEED (BT-OFFSET-UI).
+            if !bluetooth.isEmpty {
+                addSubsection(Self.bluetoothSubsectionTitle,
+                              columnTitle: "Sync",
+                              columnCenterFromTrailing: PopoverColumnGrid.syncCenterFromTrailing)
+                for device in bluetooth { panel.addRow(makeDeviceRow(device, indented: false)) }
             }
         }
         // Set each row's rail extent + feed the continuous rail overlay: the
@@ -993,6 +1176,8 @@ public final class PopoverController: NSObject {
         // (brief §7.3 — a failure that arrived while the popover was closed goes
         // through this path). Un-animated: the whole panel is being (re)built.
         reconcileDiagnosisPanels(animated: false)
+        // Same restore for the SYNC drawer, and the same un-animated reasoning.
+        reconcileSyncDrawer(animated: false)
 
         // Re-pin the silence-fallback banner (R11) above the cards: `clearRows()`
         // above dropped it with everything else, so a rebuild that happens WHILE the
@@ -1007,6 +1192,44 @@ public final class PopoverController: NSObject {
 
     private func orderedDevices() -> [Device] {
         devicesByID.values.sorted { ($0.name, $0.id) < ($1.name, $1.id) }
+    }
+
+    /// The Bluetooth subsection's grouping label (BT-UI) — a constant because,
+    /// like the card titles, tests key off the rendered string.
+    static let bluetoothSubsectionTitle = "Bluetooth Devices"
+
+    /// Subsection titles the LAST `rebuild()` actually rendered, in order —
+    /// the hide-when-empty assertion surface (`test_subsectionTitles`).
+    private var renderedSubsectionTitles: [String] = []
+
+    /// The Bluetooth subsection's device ids as the LAST `rebuild()` rendered
+    /// them, top to bottom — the recency-sort assertion surface
+    /// (`test_bluetoothRowOrder`). Empty when the subsection is hidden.
+    private var renderedBluetoothOrder: [String] = []
+
+    /// `panel.addSubsectionHeader` + the rendered-titles record, so the test
+    /// surface can never drift from what was actually mounted.
+    private func addSubsection(_ title: String,
+                               columnTitle: String? = nil,
+                               columnCenterFromTrailing: CGFloat = 0) {
+        renderedSubsectionTitles.append(title)
+        panel.addSubsectionHeader(title, columnTitle: columnTitle,
+                                  columnCenterFromTrailing: columnCenterFromTrailing)
+    }
+
+    /// The Bluetooth subsection's rows, recency-ordered (BT-UI ghost
+    /// pairings): most-recently-used pairing first, so a years-dead ghost
+    /// sinks to the BOTTOM — sort only, nothing hidden in v1. A device with
+    /// no known `lastUsed` sorts below every dated one; name (then id) breaks
+    /// ties deterministically.
+    private func orderedBluetoothDevices(in devices: [Device]) -> [Device] {
+        let lastUsed = btLastUsedProvider?() ?? [:]
+        return devices.filter(\.isBluetooth).sorted { a, b in
+            let ua = lastUsed[a.id] ?? .distantPast
+            let ub = lastUsed[b.id] ?? .distantPast
+            if ua != ub { return ua > ub }
+            return (a.name, a.id) < (b.name, b.id)
+        }
     }
 
     // MARK: Collapse-default policy (T-5, PLAN §B)
@@ -1313,7 +1536,8 @@ public final class PopoverController: NSObject {
         // lives on underneath (§4.8). The mixer window / group members keep the
         // default `false` (plain switch), so their rendering is unchanged.
         let view = DeviceRowView(device: device, indented: indented, showsToggle: showsToggle,
-                                 paintsSelectionBackground: false, showsMeter: true, showsBus: true)
+                                 paintsSelectionBackground: false, showsMeter: true, showsBus: true,
+                                 showsSyncControls: device.isBluetooth)
         view.delegate = self
         applySelectionState(to: view, device: device)
         deviceRowsByID[device.id] = view
@@ -1420,7 +1644,10 @@ public final class PopoverController: NSObject {
                       appTintColors: appTintColorsByName(),
                       mainOutTargetsGroupName: activeMainOutGroupName,
                       energizePending: energizePendingIDs.contains(device.id),
-                      iconSymbolName: deviceIconController?.symbolName(for: device))
+                      iconSymbolName: deviceIconController?.symbolName(for: device),
+                      syncTrimMs: btSyncTrim(for: device),
+                      syncTrimIsSet: btSyncTrimIsSet(for: device),
+                      syncDrawerExpanded: expandedSyncDeviceID == device.id)
             return
         }
         let selected = controller.isSpeakerSelected(device.id)
@@ -1475,7 +1702,164 @@ public final class PopoverController: NSObject {
                   inActiveTarget: inActiveTarget,
                   mainOutTargetsGroupName: activeMainOutGroupName,
                   energizePending: energizePendingIDs.contains(device.id),
-                  iconSymbolName: deviceIconController?.symbolName(for: device))
+                  iconSymbolName: deviceIconController?.symbolName(for: device),
+                  syncTrimMs: btSyncTrim(for: device),
+                  syncTrimIsSet: btSyncTrimIsSet(for: device),
+                  syncDrawerExpanded: expandedSyncDeviceID == device.id)
+    }
+
+    /// A Bluetooth row's current SYNC trim: the session cache first (the
+    /// user's freshest edit), else the persisted value via `btTrimProvider`,
+    /// else 0. Non-BT devices short-circuit to 0 (their rows mount no SYNC
+    /// chip and ignore the value anyway).
+    private func btSyncTrim(for device: Device) -> Double {
+        guard device.isBluetooth else { return 0 }
+        if let cached = btTrimsByID[device.id] { return cached }
+        let persisted = btTrimProvider?(device.id) ?? 0
+        btTrimsByID[device.id] = persisted
+        if btTrimIsSetProvider?(device.id) == true { btTunedDeviceIDs.insert(device.id) }
+        return persisted
+    }
+
+    /// Whether this Bluetooth device has been tuned at all (D10 — "Not set"
+    /// otherwise). Reads the trim first so both caches seed together on a
+    /// row's first paint.
+    private func btSyncTrimIsSet(for device: Device) -> Bool {
+        guard device.isBluetooth else { return false }
+        _ = btSyncTrim(for: device)
+        return btTunedDeviceIDs.contains(device.id)
+    }
+
+    // MARK: Bluetooth SYNC drawer (PLAN-BT-SYNC-DRAWER T7)
+    //
+    // An accordion under its own row: at most one open at a time (D2),
+    // inserted directly after the row it belongs to and pushing the rows below
+    // down (D1 — sync is a comparison AGAINST those rows, so a floating panel
+    // covering them would defeat the exercise). Mount/unmount ride
+    // `insertRow`/`removeRow`, which already own the animated
+    // `preferredContentSize` republish AND the Reduce Motion gate — so nothing
+    // here re-fits the popover itself (folder rule: callers must never add
+    // their own `panelContentDidChangeHeight`).
+
+    /// Open the drawer under `id`, or close it if it is already the open one.
+    /// Either way any OTHER open drawer closes first (D2).
+    private func toggleSyncDrawer(deviceID id: String, animated: Bool) {
+        let closingThisOne = expandedSyncDeviceID == id
+        closeSyncDrawerIntent()
+        if !closingThisOne {
+            expandedSyncDeviceID = id
+            expandedSyncDeviceWasSelected = groupController?.isSpeakerSelected(id) ?? false
+            syncDrawerNeedsOpenBaseline = true
+        }
+        reconcileSyncDrawer(animated: animated)
+        // Both chips repaint: the one losing its drawer drops back to its
+        // resting form, the one gaining it reads engaged.
+        refreshDeviceRows()
+    }
+
+    /// Retract the open-drawer INTENT, taking the align-by-ear tick with it —
+    /// a metronome ticking with no visible control to stop it is a bug. The
+    /// view itself is torn down by the next `reconcileSyncDrawer`.
+    private func closeSyncDrawerIntent() {
+        guard let id = expandedSyncDeviceID else { return }
+        expandedSyncDeviceID = nil
+        expandedSyncDeviceWasSelected = false
+        syncDrawerNeedsOpenBaseline = false
+        if alignTickDeviceID == id { setAlignTick(nil) }
+    }
+
+    /// Make the mounted drawer match `expandedSyncDeviceID`, first pruning the
+    /// intent against the three reasons a drawer must auto-collapse: its
+    /// device left the snapshot, stopped being an available Bluetooth row, or
+    /// was dropped out of the mix.
+    ///
+    /// Called from `rebuild()` (freshly built rows) and from
+    /// `update(devices:)`'s in-place repaint, so an open drawer re-reads its
+    /// device's usable range on EVERY snapshot — T3's trap: that range moves
+    /// whenever AirPlay joins or leaves the group, and a range captured at
+    /// open time would let the ruler run past a floor that had crept upward.
+    private func reconcileSyncDrawer(animated: Bool) {
+        if let id = expandedSyncDeviceID {
+            let selected = groupController?.isSpeakerSelected(id) ?? false
+            let rowIsLive = devicesByID[id].map { $0.isBluetooth && $0.isAvailable } == true
+                && deviceRowsByID[id] != nil
+            if !rowIsLive || (expandedSyncDeviceWasSelected && !selected) {
+                closeSyncDrawerIntent()
+            } else {
+                expandedSyncDeviceWasSelected = selected
+            }
+        }
+        guard let id = expandedSyncDeviceID,
+              let device = devicesByID[id],
+              let row = deviceRowsByID[id]
+        else {
+            unmountSyncDrawer(animated: animated)
+            return
+        }
+        if mountedSyncDrawerID != id {
+            // Un-animated on purpose when the drawer MOVES between rows: an
+            // animated removal fades the view and defers its detach, and this
+            // single reused instance is about to be re-parented — two
+            // animation groups would then fight over one view's `isHidden`.
+            // The insert below carries the visible transition instead.
+            unmountSyncDrawer(animated: false)
+            mountedSyncDrawerID = id
+            panel.insertRow(syncDrawer, after: row, animated: animated)
+        }
+        pushSyncDrawerState(device)
+        if syncDrawerNeedsOpenBaseline {
+            syncDrawerNeedsOpenBaseline = false
+            syncDrawer.noteOpened(trimMs: btSyncTrim(for: device))
+        }
+        if syncDrawerWasEditing {
+            syncDrawerWasEditing = false
+            // Give the field its editing session back — see the detach site
+            // in `rebuild()`.
+            syncDrawer.focusValueField()
+        }
+    }
+
+    /// Push one device's live sync state into the mounted drawer. Split out of
+    /// `reconcileSyncDrawer` so the align tick's own repaints (notably its
+    /// ~30 s auto-stop) can un-light the drawer's button without dragging a
+    /// whole mount/unmount reconcile behind them.
+    private func pushSyncDrawerState(_ device: Device) {
+        syncDrawer.configure(deviceName: device.name,
+                             trimMs: btSyncTrim(for: device),
+                             isSet: btSyncTrimIsSet(for: device),
+                             usableRangeMs: btUsableTrimRange(for: device.id),
+                             alignTickActive: alignTickDeviceID == device.id)
+    }
+
+    private func unmountSyncDrawer(animated: Bool) {
+        guard mountedSyncDrawerID != nil else { return }
+        mountedSyncDrawerID = nil
+        panel.removeRow(syncDrawer, animated: animated)
+    }
+
+    /// The drawer's hard stops (D11). Queried FRESH every time — never cached;
+    /// see `btTrimRangeProvider`.
+    private func btUsableTrimRange(for id: String) -> ClosedRange<Double> {
+        btTrimRangeProvider?(id) ?? (-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
+    }
+
+    /// Apply one trim edit from the drawer. `persist == false` is a live ruler
+    /// scrub (D6): the audio path takes it, the JSON store does not. The
+    /// session cache updates either way, so the row's chip tracks the scrub
+    /// digit by digit.
+    private func applyBTTrim(_ ms: Double, deviceID id: String, persist: Bool) {
+        let value = BTSyncTrim.quantise(ms)
+        btTrimsByID[id] = value
+        // Editing a device IS tuning it — a scrub that passes through exactly
+        // 0.0 must read "0.0 ms", never flip the chip back to "Not set".
+        btTunedDeviceIDs.insert(id)
+        onSetBTTrim?(value, id, persist)
+        // Repaint just this one row's chip. A scrub arrives dozens of times a
+        // second and `refreshDeviceRows()` would drag the rail extents and
+        // every other row through each one of them.
+        if let row = deviceRowsByID[id], let device = devicesByID[id] {
+            applySelectionState(to: row, device: device)
+        }
     }
 
     private func refreshDeviceRows() {
@@ -1505,7 +1889,11 @@ public final class PopoverController: NSObject {
     /// `rebuild()`.
     private func updateBusRailExtents() {
         let ordered = orderedDevices()
-        let renderOrder = ordered.filter(\.isLocalDevice) + ordered.filter { !$0.isLocalDevice }
+        // Must match `rebuild()`'s render order exactly: locals, AirPlay, then
+        // the recency-ordered Bluetooth subsection (BT-UI).
+        let renderOrder = ordered.filter(\.isLocalDevice)
+            + ordered.filter { !$0.isLocalDevice && !$0.isBluetooth }
+            + orderedBluetoothDevices(in: ordered)
         let lastSelected = renderOrder.lastIndex {
             groupController?.isSpeakerSelected($0.id) ?? false
         }
@@ -1530,10 +1918,50 @@ public final class PopoverController: NSObject {
                           deviceCardTitle: Self.outputDevicesCardTitle)
     }
 
-    /// Sync the Devices card's "Save Selected Devices as group" accessory enabled
-    /// state with `canSaveCurrentSetup` in place — no-op if the card isn't built.
+    /// The Devices card's "+" button stays ALWAYS enabled now that it fronts a
+    /// menu (BT-UI): the "Pair a Bluetooth speaker…" item must be reachable
+    /// even when nothing is selected, so `canSaveCurrentSetup` gates only the
+    /// save ITEM (`makeOutputDevicesPlusMenu` re-reads it per presentation).
     private func refreshDevicesAccessory() {
-        panel.setAccessoryEnabled(title: Self.outputDevicesCardTitle, enabled: canSaveCurrentSetup)
+        panel.setAccessoryEnabled(title: Self.outputDevicesCardTitle, enabled: true)
+    }
+
+    // MARK: OUTPUT DEVICES "+" menu (BT-UI)
+
+    /// Build the "+" affordance's menu FRESH per presentation — two items
+    /// dispatching through real `NSMenuItem` target/action (tests drive them
+    /// via `NSMenu.performActionForItem(at:)`, never a bypass seam):
+    /// "Save Selected Devices as group" (enabled iff `canSaveCurrentSetup`)
+    /// and "Pair a Bluetooth speaker…" (device-tier decision 3 — never-paired
+    /// speakers get NO rows; pairing is a one-tap Settings trip).
+    func makeOutputDevicesPlusMenu() -> NSMenu {
+        let menu = NSMenu(title: "Add")
+        menu.autoenablesItems = false
+        let save = NSMenuItem(title: "Save Selected Devices as group",
+                              action: #selector(plusMenuSaveGroup(_:)), keyEquivalent: "")
+        save.target = self
+        save.isEnabled = canSaveCurrentSetup
+        menu.addItem(save)
+        let pair = NSMenuItem(title: "Pair a Bluetooth speaker…",
+                              action: #selector(plusMenuPairBluetooth(_:)), keyEquivalent: "")
+        pair.target = self
+        menu.addItem(pair)
+        return menu
+    }
+
+    @objc private func plusMenuSaveGroup(_ sender: Any?) { saveCurrentSetup() }
+    @objc private func plusMenuPairBluetooth(_ sender: Any?) { onPairBluetoothSpeaker?() }
+
+    /// The "+" button's click: pop the menu just under the button. The actual
+    /// on-screen pop is gated on `HeadlessRuntime.isActive` (house rule — a
+    /// blocking `popUp` under `swift test` would also hang the runner);
+    /// headless callers assert via `test_outputDevicesPlusMenu()` instead.
+    private func presentOutputDevicesPlusMenu() {
+        guard !HeadlessRuntime.isActive,
+              let button = panel.accessoryButton(title: Self.outputDevicesCardTitle)
+        else { return }
+        makeOutputDevicesPlusMenu().popUp(
+            positioning: nil, at: NSPoint(x: 0, y: button.bounds.maxY + 4), in: button)
     }
 
     /// A non-interactive placeholder body row (V2 Devices empty state / V11
@@ -2462,6 +2890,23 @@ public final class PopoverController: NSObject {
 
     public func test_saveCurrentSetup() { saveCurrentSetup() }
 
+    /// Subsection titles the LAST rebuild actually rendered, in order —
+    /// asserts the Bluetooth subsection's hide-when-empty rule (BT-UI).
+    public func test_subsectionTitles() -> [String] { renderedSubsectionTitles }
+
+    /// The OUTPUT DEVICES "+" menu, built exactly as a live click builds it.
+    /// Tests dispatch its items via `NSMenu.performActionForItem(at:)` — real
+    /// AppKit menu dispatch, per the row-selection lesson (never a bypass seam).
+    public func test_outputDevicesPlusMenu() -> NSMenu { makeOutputDevicesPlusMenu() }
+
+    /// The device id whose align-by-ear tick is currently running, if any
+    /// (BT-OFFSET-UI) — asserts one-at-a-time + the close/auto-stop paths.
+    public func test_alignTickDeviceID() -> String? { alignTickDeviceID }
+
+    /// The Bluetooth subsection's rendered row order (BT-UI ghost-pairing
+    /// sort), top to bottom; empty when the subsection is hidden.
+    public func test_bluetoothRowOrder() -> [String] { renderedBluetoothOrder }
+
     /// Simulate flipping a device row's membership switch through its delegate.
     /// Returns the model's `SelectionResult` so tests can assert refusal/auto-swap.
     @discardableResult
@@ -2497,6 +2942,38 @@ public final class PopoverController: NSObject {
         }
         groupController?.setMainOutMasterVolume(value)
     }
+
+    // MARK: SYNC drawer seams (T7)
+    //
+    // These drive the SAME `toggleSyncDrawer` the chip's target/action reaches,
+    // but they do skip AppKit's own dispatch — a shortcut that has hidden real
+    // breaks in this file before. The chip's wiring is pinned separately, by
+    // tests that go through `DeviceRowView.test_fireSyncChipClick()`.
+
+    /// - Parameter animated: production always animates; tests pass `false`
+    ///   when they need `removeRow`'s deferred detach to happen synchronously
+    ///   (an animated removal keeps the row in the tree for the fade, so a
+    ///   height assertion taken right after would measure the old content).
+    public func test_toggleSyncDrawer(deviceID: String, animated: Bool = false) {
+        toggleSyncDrawer(deviceID: deviceID, animated: animated)
+    }
+
+    /// The device whose drawer is currently open (the intent), or `nil`.
+    public var test_expandedSyncDeviceID: String? { expandedSyncDeviceID }
+
+    /// Whether a drawer view is actually mounted in the row stack.
+    public var test_syncDrawerVisible: Bool { mountedSyncDrawerID != nil }
+
+    /// The mounted drawer itself, for driving its real controls; `nil` when
+    /// none is open.
+    public var test_syncDrawer: BTSyncDrawerView? {
+        mountedSyncDrawerID == nil ? nil : syncDrawer
+    }
+
+    /// The panel's settled content height — the value pushed into the
+    /// popover's `preferredContentSize`. Tests read it to pin the drawer's
+    /// exact expand/collapse delta.
+    public var test_panelContentHeight: CGFloat { panel.fittingSizeSettled().height }
 }
 
 // MARK: - DeviceRowView.Delegate
@@ -2534,6 +3011,47 @@ extension PopoverController: DeviceRowView.Delegate {
         presentRefusal(reason)
         toggleBlockedNote(for: row.device.id, reason: reason)
     }
+
+    /// A greyed Bluetooth row's click (BT-UI "click connects"): a
+    /// membership-FREE reconnect kick — `requestReconnect` goes straight to
+    /// `OutputBackend.retryOutput`, never editing selection (selecting a
+    /// greyed row separately means "play when up" and stays the node/checkbox's
+    /// job, exactly like AirPlay rows).
+    public func deviceRowDidRequestReconnect(_ row: DeviceRowView) {
+        groupController?.requestReconnect(for: row.device.id)
+    }
+
+    /// The row's SYNC value chip (T6's only sync delegate method): the chip is
+    /// read-only, so the one gesture it reports is "show/hide my drawer".
+    public func deviceRow(_ row: DeviceRowView, didToggleSyncDrawerFor id: String) {
+        toggleSyncDrawer(deviceID: id, animated: true)
+    }
+
+    /// Move/stop the single align-by-ear tick (BT-OFFSET-UI): one device at a
+    /// time, auto-stopped after ~30 s, and stopped by the popover closing
+    /// (the click-away) or by its drawer collapsing. `refreshDeviceRows()`
+    /// re-applies every row so the drawer's button reads the live state.
+    private func setAlignTick(_ id: String?) {
+        alignTickAutoStop?.cancel()
+        alignTickAutoStop = nil
+        let wasActive = alignTickDeviceID != nil
+        alignTickDeviceID = id
+        if id != nil {
+            onAlignTickActiveChange?(true)
+            let work = DispatchWorkItem { [weak self] in self?.setAlignTick(nil) }
+            alignTickAutoStop = work
+            DispatchQueue.main.asyncAfter(
+                deadline: .now() + Self.alignTickAutoStopInterval, execute: work)
+        } else if wasActive {
+            onAlignTickActiveChange?(false)
+        }
+        refreshDeviceRows()
+        // The button lives in the drawer now (D9), so the drawer is what has
+        // to un-light when the 30 s auto-stop fires.
+        if let mounted = mountedSyncDrawerID, let device = devicesByID[mounted] {
+            pushSyncDrawerState(device)
+        }
+    }
 }
 
 // MARK: - ConnectionState helpers
@@ -2545,6 +3063,27 @@ private extension ConnectionState {
     var isFailedState: Bool {
         if case .failed = self { return true }
         return false
+    }
+}
+
+// MARK: - BTSyncDrawerViewDelegate (T7)
+
+extension PopoverController: BTSyncDrawerViewDelegate {
+
+    public func syncDrawer(_ d: BTSyncDrawerView, didChangeTrimMs ms: Double, committed: Bool) {
+        guard let id = expandedSyncDeviceID else { return }
+        applyBTTrim(ms, deviceID: id, persist: committed)
+    }
+
+    public func syncDrawer(_ d: BTSyncDrawerView, didToggleAlignTick active: Bool) {
+        setAlignTick(active ? expandedSyncDeviceID : nil)
+    }
+
+    /// Escape inside the drawer — the same "close me" the chip performs.
+    public func syncDrawerDidRequestClose(_ d: BTSyncDrawerView) {
+        closeSyncDrawerIntent()
+        reconcileSyncDrawer(animated: true)
+        refreshDeviceRows()
     }
 }
 
@@ -2667,6 +3206,39 @@ extension PopoverController: AppRowView.Delegate {
         onMeteringActiveChange?(true)
     }
 
+    /// **The surface must never close out from under someone typing.**
+    ///
+    /// Pressing Return in the sync drawer's value field was dismissing the
+    /// whole surface and losing the edit (live-reported, repeatedly). Two
+    /// separate investigations failed to reproduce it: the field editor
+    /// demonstrably consumes Return (proven with real synthesized events in
+    /// `SyncValueFieldLiveKeyTests`), nothing in the view tree claims Return as
+    /// a key equivalent, and no host window closes on it in a test. The one
+    /// thing those tests CANNOT exercise is AppKit's real window/popover key
+    /// handling, because the house rule bars putting a window on screen during
+    /// `swift test` — so the mechanism lives precisely in the gap the tests
+    /// can't reach.
+    ///
+    /// Rather than keep guessing at it, this closes the hole from the other
+    /// end: the host asks before dismissing, and is refused while the field
+    /// owns an editing session. Typing a number and pressing Return is the
+    /// single most predictable thing a user does with a text box, and it must
+    /// never dismiss the surface.
+    ///
+    /// This cannot strand the user. The edit is committed and first responder
+    /// released, so the session ends with the value APPLIED — the refusal is
+    /// one-shot by construction, and the very next dismiss request finds no
+    /// edit in flight and proceeds. A click OUTSIDE the surface ends editing on
+    /// its own before the dismiss is even evaluated, so the ordinary
+    /// click-away gesture is untouched.
+    ///
+    /// Returns `true` when the host may proceed with the dismissal.
+    public func surfaceShouldHide() -> Bool {
+        guard syncDrawer.isEditingValue else { return true }
+        syncDrawer.commitAndEndEditing()
+        return false
+    }
+
     /// The host just took the panel off screen. The mirror of
     /// ``surfaceDidShow()``, plus the two things that must not survive a
     /// session: the transient app-row selection, and every meter's last
@@ -2679,6 +3251,12 @@ extension PopoverController: AppRowView.Delegate {
         mainOutRow.resetLevel()
         for row in appRowsByBundleID.values { row.resetLevel() }
         onMeteringActiveChange?(false)
+        // The align-by-ear tick never outlives the surface that started it
+        // (BT-OFFSET-UI click-away). Collapsing the drawer stops the tick on
+        // its own; the bare call after it covers a tick with no drawer left.
+        closeSyncDrawerIntent()
+        unmountSyncDrawer(animated: false)
+        setAlignTick(nil)
     }
 
     // MARK: - Live level dispatch (task T5)

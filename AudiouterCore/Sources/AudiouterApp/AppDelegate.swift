@@ -308,6 +308,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// reopen the window under them.
     private var didSurfaceAccessibilityGap = false
 
+    /// Take our Touch Bar down and give the user's own settings back.
+    ///
+    /// Idempotent, because the paths into it overlap: a Quit fires
+    /// `applicationShouldTerminate`, a logout may fire `willPowerOff` as well, and
+    /// `restore()` itself no-ops once it holds nothing.
+    private func releaseTouchBar() {
+        touchBarFullBar.setOwnsVolume(false)
+        controlStripVolumeButtons.apply(weOwnVolume: false)
+    }
+
     /// How long to let ControlStrip respawn before re-registering our tray item.
     /// It is an on-demand LaunchAgent, so the restart is fast but not
     /// instantaneous, and a registration that lands during the gap is dropped on
@@ -372,10 +382,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // persisted choice.
         Tokens.accentStyle = settings.accentStyle
 
-        // Undo a Touch Bar swap a previous run was killed before restoring. Must
+        // Undo Touch Bar settings a previous run was killed before restoring. Must
         // happen BEFORE ownership is first evaluated, or a stale marker would make
-        // this launch's swap think it already holds one and skip.
+        // this launch think it already holds them and skip.
         controlStripVolumeButtons.restoreIfStale()
+
+        // Logout, restart and shutdown do not always route through
+        // `applicationShouldTerminate`, and the Touch Bar setting outlives the
+        // process either way — so take the same exit here.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main
+        ) { [weak self] _ in MainActor.assumeIsolated { self?.releaseTouchBar() } }
 
         // Status item first so there's immediate UI feedback that we launched.
         // The button's action toggles the popover (SPEC §9 revised) — EXCEPT while
@@ -1335,6 +1352,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         eventTask?.cancel()
         eventTask = nil
         backend.stop()
+        // Hand the user's Touch Bar back BEFORE anything that can block. While we
+        // own the volume the Mac is in "App Controls only" mode, so a quit that
+        // skipped this leaves no Control Strip and no app to draw controls — the
+        // Touch Bar goes blank but for the emoji key, with nothing on screen
+        // explaining it and no way for the user to know which setting to undo
+        // (hit live 2026-08-08). Restoring at the next launch is not enough: the
+        // next launch may never come precisely because the app looks broken.
+        releaseTouchBar()
         log("Audiouter terminating")
 
         // Only show the indicator if the wait is actually slow (~300ms) — an instant

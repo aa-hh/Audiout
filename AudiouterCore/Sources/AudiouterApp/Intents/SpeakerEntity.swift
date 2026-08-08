@@ -18,10 +18,16 @@ struct SpeakerEntity: AppEntity {
     /// `LocalizedStringResource(stringLiteral:)`, NOT the `"\(name)"`
     /// interpolation the AppIntents samples use. The interpolating form builds
     /// a format-string-plus-arguments resource, and a speaker's name is DATA,
-    /// not a translatable template — crossing to the Shortcuts process it came
-    /// back cut short ("Alec's MacBook Pro" listed as "Alec's"). The literal
-    /// form carries the string whole. Never interpolate a device-supplied name
-    /// into a `LocalizedStringResource` here.
+    /// not a translatable template — so the literal form is the right one on
+    /// its own merits, regardless of the below.
+    ///
+    /// UNVERIFIED, and deliberately recorded as such: this was changed after a
+    /// live report that the Shortcuts picker showed names cut short ("Alec's
+    /// MacBook Pro" listed as "Alec's"). Whether the interpolating form CAUSED
+    /// that was never confirmed — the names were never checked against what the
+    /// popover shows for the same devices, so they may simply have been short.
+    /// Treat the truncation explanation as a hypothesis; the literal form stands
+    /// either way.
     var displayRepresentation: DisplayRepresentation {
         DisplayRepresentation(title: LocalizedStringResource(stringLiteral: name))
     }

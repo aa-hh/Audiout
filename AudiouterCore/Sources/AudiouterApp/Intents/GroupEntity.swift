@@ -13,8 +13,9 @@ struct GroupEntity: AppEntity {
     let name: String
 
     /// Literal, not interpolated — same reason as ``SpeakerEntity``: a
-    /// user-chosen group name is data, and the interpolating form came back
-    /// truncated across the process boundary into Shortcuts.
+    /// user-chosen group name is data, not a translatable template. The
+    /// truncation report that prompted the change is unverified; see the
+    /// fuller note on ``SpeakerEntity``.
     var displayRepresentation: DisplayRepresentation {
         DisplayRepresentation(title: LocalizedStringResource(stringLiteral: name))
     }

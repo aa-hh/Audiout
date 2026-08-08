@@ -172,6 +172,85 @@ if [ -x "$SCRIPT_DIR/housekeeping.sh" ]; then
   "$SCRIPT_DIR/housekeeping.sh" --current "$(cd "$SCRIPT_DIR/.." && pwd)" || true
 fi
 
+# --- Where to compile ------------------------------------------------------
+# The three release compiles below are the expensive part of this script, and
+# they answer to the SAME local-vs-remote rule as scripts/run-tests.sh — one
+# shared decision in scripts/lib/remote.sh, so a machine judged too busy for a
+# test run is not simultaneously judged fine for a release build.
+#
+# ONLY the compile moves. Assembly, dylib bundling and codesigning always happen
+# here, for three separate reasons, each of which independently rules the remote
+# out:
+#   - Codesigning needs the login keychain, and over a non-interactive ssh
+#     session `codesign --sign "Developer ID Application: ..."` fails with
+#     errSecInternalComponent (keychain locked). Signing here keeps the identity
+#     resolution above authoritative and the artifact byte-identical to a fully
+#     local build.
+#   - The .app has to exist on THIS machine to be launched, TCC-granted and
+#     live-tested anyway.
+#   - AUDIOUTER_BUNDLE_DYLIBS=1 walks `otool -L` and copies the referenced
+#     Homebrew dylibs from the LOCAL /opt/homebrew. A binary linked on the other
+#     Mac records that machine's formula versions, which may not exist here — so
+#     the bundling path opts out of the remote entirely (the condition below).
+REMOTE_BUILT=0
+# shellcheck source=lib/remote.sh
+. "$SCRIPT_DIR/lib/remote.sh"
+if [ "${AUDIOUTER_BUILD_LOCAL:-0}" != "1" ] &&
+   [ "${AUDIOUTER_BUNDLE_DYLIBS:-0}" != "1" ] &&
+   remote_wins; then
+  echo "==> Compiling on remote $remote_host (assembly + signing stay here)"
+  # Built from the repo root with --package-path, mirroring the local commands
+  # below exactly. The products are staged into .remote-products/ inside the
+  # synced tree so they can be fetched by a KNOWN relative path — parsing the
+  # remote's --show-bin-path output would bake in an architecture triple.
+  # \$ escapes keep PWD/BIN/HBIN for the remote shell; $EXECUTABLE and friends
+  # expand here.
+  REMOTE_CMD="R=\$PWD; \
+swift build --build-system native --package-path AudiouterCore -c release --product $EXECUTABLE && \
+swift build --build-system native --package-path AudiouterCore -c release --product $TCC_PROBE_EXECUTABLE && \
+BIN=\$(swift build --build-system native --package-path AudiouterCore -c release --show-bin-path) && \
+swift build --build-system native --package-path AirPlayEngine -c release --product $HELPER_EXECUTABLE \
+  -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker \"\$R/scripts/ptp-helper-info.plist\" && \
+HBIN=\$(swift build --build-system native --package-path AirPlayEngine -c release --show-bin-path) && \
+rm -rf .remote-products && mkdir -p .remote-products && \
+cp \"\$BIN/$EXECUTABLE\" \"\$BIN/$TCC_PROBE_EXECUTABLE\" \"\$HBIN/$HELPER_EXECUTABLE\" .remote-products/"
+
+  RRC=0
+  remote_run "$REPO_ROOT" "$REMOTE_CMD" || RRC=$?
+  if [ "$RRC" -eq 0 ]; then
+    STAGE="$OUTPUT_DIR/.remote-products"
+    rm -rf "$STAGE"
+    mkdir -p "$STAGE"
+    # Fetched release binaries are ~6.5 MB and are dead the moment they have
+    # been copied into the bundle. Disk pressure is a recurring problem on this
+    # machine (scripts/housekeeping.sh exists for it), so clear them on EVERY
+    # exit path rather than leaving a copy behind per build.
+    trap 'rm -rf "$STAGE"' EXIT HUP INT TERM
+    if remote_fetch "$REPO_ROOT" ".remote-products/$EXECUTABLE" "$STAGE/$EXECUTABLE" &&
+       remote_fetch "$REPO_ROOT" ".remote-products/$TCC_PROBE_EXECUTABLE" "$STAGE/$TCC_PROBE_EXECUTABLE" &&
+       remote_fetch "$REPO_ROOT" ".remote-products/$HELPER_EXECUTABLE" "$STAGE/$HELPER_EXECUTABLE"; then
+      BUILT_BINARY="$STAGE/$EXECUTABLE"
+      BUILT_TCC_PROBE="$STAGE/$TCC_PROBE_EXECUTABLE"
+      BUILT_HELPER="$STAGE/$HELPER_EXECUTABLE"
+      chmod +x "$BUILT_BINARY" "$BUILT_TCC_PROBE" "$BUILT_HELPER"
+      REMOTE_BUILT=1
+      echo "==> Fetched 3 products from $remote_host"
+    else
+      echo "==> Could not fetch products back — building locally instead" >&2
+    fi
+  elif [ "$RRC" -eq 2 ]; then
+    # Compiled and FAILED there. Never report that as this build's verdict: the
+    # toolchains differ (local Swift 6.4 / macOS 27 SDK vs remote 6.3.1 /
+    # macOS 26), so a remote-only error is as likely to be skew as a real break.
+    # Same asymmetry run-tests.sh uses — accept a remote pass, re-confirm a
+    # remote failure here.
+    echo "==> Remote compile reported ERRORS — rebuilding locally to confirm" >&2
+  else
+    echo "==> Remote unavailable — building locally" >&2
+  fi
+fi
+
+if [ "$REMOTE_BUILT" -eq 0 ]; then
 echo "==> Building $EXECUTABLE (release)"
 # --build-system native: Xcode 26+/27 made the new "swiftbuild" engine the
 # default for `swift build`, but it doesn't forward a C target's cSettings
@@ -210,6 +289,13 @@ swift build --build-system native --package-path "$ENGINE_PACKAGE_DIR" -c releas
 HELPER_BIN_DIR="$(swift build --build-system native --package-path "$ENGINE_PACKAGE_DIR" -c release --show-bin-path)"
 BUILT_HELPER="$HELPER_BIN_DIR/$HELPER_EXECUTABLE"
 test -x "$BUILT_HELPER" || { echo "error: built helper not found at $BUILT_HELPER" >&2; exit 1; }
+fi  # REMOTE_BUILT
+
+# Whichever machine compiled them, the three products must now exist here — the
+# rest of this script only ever refers to these three paths.
+test -x "$BUILT_BINARY"    || { echo "error: app binary not found at $BUILT_BINARY" >&2; exit 1; }
+test -x "$BUILT_TCC_PROBE" || { echo "error: tcc-probe not found at $BUILT_TCC_PROBE" >&2; exit 1; }
+test -x "$BUILT_HELPER"    || { echo "error: ptp-helper not found at $BUILT_HELPER" >&2; exit 1; }
 
 # --- Assemble the bundle --------------------------------------------------
 echo "==> Assembling $APP_BUNDLE"

@@ -372,10 +372,15 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   pre-existing persisted group and means "use `Group.defaultIconSymbolName`."
   Resolution (including render-time fallback for a stale/unrecognized name)
   lives in `AudiouterSharedUI.DeviceIcon`, not here.
-- **Use `swift test --filter <Suite>` for the inner-loop feedback cycle**,
-  not the full suite (874 tests). Scope to the test suite(s) touched by your
-  change, e.g. `swift test --filter PopoverControllerTests`.
-- **The full run is `scripts/run-tests.sh`**, never a bare `swift test` — it
+- **Use `scripts/run-tests.sh --filter <Suite>` for the inner-loop feedback
+  cycle**, not the full suite (874 tests). Scope to the test suite(s) touched by
+  your change, e.g. `scripts/run-tests.sh --filter PopoverControllerTests`. The
+  runner forwards every argument straight to `swift test` and keys its pass
+  cache on them, so a filtered run costs nothing extra — but it goes through the
+  remote-selection, cap and cache machinery that a bare `swift test` skips
+  entirely. Filtered runs are the COMMON case, so a bare-`swift test` inner loop
+  is why nearly all work ends up on this machine.
+- **Every run is `scripts/run-tests.sh`**, never a bare `swift test` — it
   wraps `swift test --parallel` and adds the two things a bare run cannot do
   on a machine with several worktrees in flight:
   - **A machine-wide concurrency CAP** (`AUDIOUTER_TEST_SLOTS`, default **2**) —
@@ -427,6 +432,7 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
     ```
     git config --local audiouter.remoteHost 'user@192.168.4.41'
     git config --local audiouter.testPrefer remote   # or: local (default), cpu
+    git config --local audiouter.testRemoteBias 40   # cpu mode only; see below
     ```
 
     This lands in `.git/config`, which is **not tracked** — so a personal
@@ -446,6 +452,48 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
     remote isn't reliably idle when you'd want to use it. Any of the three:
     an asleep/offline/unmeasurable remote costs one 5s probe and then behaves
     exactly as if none were configured.
+
+    `testRemoteBias` (default **40**, `cpu` mode only) is how many load-per-core
+    percentage points busier the remote may be and still win. It exists because
+    the two machines are NOT interchangeable: this one also carries the agents,
+    the editor and any app under live test, so its spare capacity is worth more.
+    With the bias, `cpu` mode reads as "remote first, local when the remote is
+    genuinely swamped" rather than "whichever is a hair quieter this second".
+    Set `0` for the strict lower-load-wins comparison.
+
+    **These three settings govern BUILDS as well as tests.** The decision, the
+    sync and the run-there wrapper live in `scripts/lib/remote.sh`, sourced by
+    `run-tests.sh`, `build.sh` and `make-app.sh` alike — one answer to "which
+    machine", so a box judged too busy for a test run is not simultaneously
+    judged fine for a release build. The `AUDIOUTER_TEST_` prefix is kept for
+    compatibility with what is already configured; a parallel `AUDIOUTER_BUILD_`
+    family would only be a way for the two to disagree.
+
+    `make-app.sh` moves **only the compile**. Assembly, dylib bundling and
+    codesigning always run locally, and each of those independently rules the
+    remote out:
+    - `codesign --sign "Developer ID Application: …"` over a non-interactive ssh
+      session fails with `errSecInternalComponent` — the login keychain is
+      locked. The cert IS installed on the second Mac; unlocking it for
+      non-interactive use needs `security unlock-keychain` +
+      `security set-key-partition-list` run there with the keychain password.
+      Until then remote signing is impossible, and signing locally keeps the
+      artifact byte-identical to a fully local build (verified: Developer ID
+      authority, hardened runtime, `codesign --verify --deep --strict` clean,
+      arm64, `minos 14.0`).
+    - The `.app` has to exist HERE to be launched, TCC-granted and live-tested.
+    - `AUDIOUTER_BUNDLE_DYLIBS=1` walks `otool -L` and copies the referenced
+      Homebrew dylibs from the LOCAL `/opt/homebrew`. A binary linked on the
+      other Mac records that machine's formula versions, which may not exist
+      here — so **the bundling path opts out of the remote entirely** and builds
+      everything locally.
+
+    `AUDIOUTER_BUILD_LOCAL=1` forces a local compile for both `build.sh` and
+    `make-app.sh`. Note the toolchain skew is real (local Swift 6.4 / macOS 27
+    SDK vs remote 6.3.1 / macOS 26): a release link on the remote emits
+    `ld: warning: … built for newer version 26.0` for the Homebrew dylibs, which
+    is cosmetic. As with tests, a remote PASS is accepted and a remote FAILURE is
+    re-run locally before anyone acts on it.
 
     **A remote PASS is accepted; a remote FAILURE is re-run locally before it
     can block anything.** Guard 4 refuses commits on this result, and the remote
@@ -481,15 +529,15 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
     ~90-180s locally under contention), the audio gate skips its 7 correctly
     there, and overflow triggers only once both local slots are held. Sync of
     the whole tree takes ~1.6s over LAN.
-  - **KNOWN GAP — the cap only covers runs that go THROUGH this script.** An
+  - **KNOWN GAP — the cap only covers work that goes THROUGH these scripts.** An
     agent that types `swift test` or `swift build` directly bypasses it
     entirely, and that is the dominant real-world source of load: while
     measuring this, two other worktrees were independently running a full serial
     suite and a `-c release` product build, driving load average to 29 and
-    making an unrelated 4s filtered run take 117s. Prefer `scripts/run-tests.sh`
-    for any full run. This is convention, not enforcement (the PreToolUse nudge
-    hook that tried to enforce it was deliberately removed and must not be
-    rebuilt).
+    making an unrelated 4s filtered run take 117s. Use `scripts/run-tests.sh`
+    for every test run and `scripts/build.sh` for every compile check. This is
+    convention, not enforcement (the PreToolUse nudge hook that tried to enforce
+    it was deliberately removed and must not be rebuilt).
   - **A content-addressed pass cache**: if these exact sources already passed,
     the run is skipped. Agents routinely run the suite by hand and then
     commit, firing Guard 4 on byte-identical sources seconds later.

@@ -49,55 +49,18 @@ lock_timeout=${AUDIOUTER_TEST_LOCK_TIMEOUT:-1800}
 # Raise for a beefier box, set to 1 for strict one-at-a-time.
 slots=${AUDIOUTER_TEST_SLOTS:-2}
 
-# --- remote overflow --------------------------------------------------------
-# Optional second Mac used ONLY as overflow: when every local slot is busy, hand
-# the run there instead of sitting in a queue. Unset by default — this does
-# nothing until you point it at a host.
-#
-#   AUDIOUTER_TEST_REMOTE_HOST=user@192.168.4.41
-#   AUDIOUTER_TEST_REMOTE_ROOT=~/audiouter-remote-tests   (per-worktree dirs live here)
-#
-# The probe timeout is short ON PURPOSE. The known failure mode of this
-# particular machine is sleeping: it answers ping (sleep proxy) but refuses TCP,
-# so a generous timeout would stall every contended run behind a host that is
-# never going to answer. 5s fails fast and falls back to the local queue.
-# Host resolution: env var first, then `git config`. The git-config path is the
-# one to actually use, for two reasons:
-#   - It is NOT committed. It lives in ~/.gitconfig (--global) or .git/config
-#     (--local), so a personal username and LAN address never enter the repo.
-#   - It does not depend on the shell. A git hook runs non-interactively, and a
-#     non-interactive zsh does NOT source ~/.zshrc — so an export there would
-#     reach some runs and not others depending on how the caller's shell was
-#     started. `git config` is read by git itself, identically every time.
-#
-#   git config --global audiouter.remoteHost 'user@192.168.4.41'
-remote_host=${AUDIOUTER_TEST_REMOTE_HOST:-$(git config --get audiouter.remoteHost 2>/dev/null || true)}
-
-# Where the remote is used: "local" (default — local first, remote only when
-# every local slot is busy), "remote" (try remote FIRST, fall back to local), or
-# "cpu" (probe both machines' current load and send the run to whichever is
-# less busy right now). "remote" keeps this Mac free unconditionally; "cpu" is
-# the better pick when the remote isn't reliably idle — e.g. it also gets used
-# directly, not just as this script's overflow target.
-#   git config --global audiouter.testPrefer remote
-remote_pref=${AUDIOUTER_TEST_PREFER:-$(git config --get audiouter.testPrefer 2>/dev/null || echo local)}
-# Deliberately RELATIVE to the remote home directory — no leading `~`. A tilde
-# survives neither quoting on the remote `cd` (it is not expanded inside quotes,
-# so `cd '~/foo'` fails) nor safe quoting of paths containing spaces. ssh starts
-# in $HOME, so a relative path is both simpler and correct.
-remote_root=${AUDIOUTER_TEST_REMOTE_ROOT:-audiouter-remote-tests}
-remote_probe_timeout=${AUDIOUTER_TEST_REMOTE_TIMEOUT:-5}
+# --- remote machine ---------------------------------------------------------
+# Host resolution, the local-vs-remote decision, sync and the run-there wrapper
+# all live in scripts/lib/remote.sh, shared with scripts/build.sh and
+# scripts/make-app.sh so tests and builds cannot drift apart on where work goes.
+# Resolved beside THIS script rather than from $repo_root: Guard 4 runs a
+# worktree's hook against the primary checkout's scripts/ when the worktree
+# predates them, and the library must travel with the script that sources it.
+. "$(cd "$(dirname "$0")" && pwd)/lib/remote.sh"
 remote_tried=0
 
-# Returns 0 only if the suite ACTUALLY RAN remotely (with $status set to its
-# result). Returns 1 for every "couldn't use the remote" case, so the caller
-# falls back to the local queue.
-#
-# The distinction matters more than it looks: a remote that cannot be reached,
-# cannot sync, or cannot build must NEVER surface as "your tests failed". The
-# toolchains differ (local Swift 6.4 / macOS 27 SDK vs remote 6.3.1 / macOS 26),
-# and an agent that reads an infrastructure failure as a code failure will chase
-# a bug that does not exist.
+# Thin test-specific wrapper over remote_run. Return codes are remote_run's:
+#   0 = passed remotely   1 = could not use the remote   2 = ran and FAILED
 run_remote() {
     if [ "$remote_pref" = "remote" ]; then
         echo "  suite: sending to remote $remote_host (preferred) ..." >&2
@@ -105,32 +68,6 @@ run_remote() {
         echo "  suite: sending to remote $remote_host (lower CPU load) ..." >&2
     else
         echo "  suite: local slots busy — trying remote $remote_host ..." >&2
-    fi
-    if ! ssh -o BatchMode=yes -o ConnectTimeout="$remote_probe_timeout" \
-             -o StrictHostKeyChecking=accept-new \
-             "$remote_host" true >/dev/null 2>&1; then
-        echo "  suite: remote unreachable (asleep or offline) — queueing locally instead." >&2
-        return 1
-    fi
-
-    rdir="$remote_root/$(basename "$repo_root")"
-    # rsync parses "host:path" ITSELF, before any shell (local or remote) gets
-    # involved — normal shell quoting around the whole argument does not protect
-    # spaces inside the path portion. The primary checkout's own directory is
-    # "AirPlay Controller" (a space in its basename), so $rdir for a run from
-    # there needs its spaces escaped for rsync's remote-path parser specifically,
-    # not just quoted for this local shell. Confirmed broken without this: rsync
-    # errors "server receiver mode requires two argument" and the whole overflow
-    # path silently fell back to local for every run from the main checkout.
-    rdir_escaped=$(printf '%s' "$rdir" | sed 's/ /\\ /g')
-    # Source only: .build is per-machine (absolute paths baked in) and .git is
-    # not needed to compile. Tracked sources are ~20MB/445 files, so after the
-    # first sync this ships only the handful of files an agent actually edited.
-    if ! rsync -az --delete --timeout=30 \
-            --exclude '.build/' --exclude '.git/' --exclude '.claude/' \
-            "$repo_root/" "$remote_host:$rdir_escaped/" >/dev/null 2>&1; then
-        echo "  suite: rsync to remote failed — queueing locally instead." >&2
-        return 1
     fi
 
     # Mode for the REMOTE run is decided independently of the local machine:
@@ -142,68 +79,22 @@ run_remote() {
         *)      rargs="--parallel --num-workers $workers" ;;
     esac
 
-    # PATH is set explicitly: a non-interactive ssh shell often lacks
-    # /opt/homebrew/bin, and Package.swift shells out to `brew --prefix` to find
-    # the keg-only C dependencies.
-    # Exit 97 is a private sentinel for "the remote ENVIRONMENT is wrong"
-    # (directory missing, no swift) as opposed to "the tests failed". Without
-    # it, a broken remote reports as a test failure — which is exactly the
-    # confusion this whole function is supposed to prevent, and which a missing
-    # directory produced in testing.
-    out=$(ssh -o BatchMode=yes "$remote_host" \
-        "export PATH=/opt/homebrew/bin:\$PATH; \
-         cd \"$rdir/AudiouterCore\" || exit 97; \
-         command -v swift >/dev/null 2>&1 || exit 97; \
-         swift test $rargs $* ; echo \"REMOTE_EXIT:\$?\"" 2>&1)
-    rc=$?
-    printf '%s\n' "$out" | grep -v '^REMOTE_EXIT:' >&2
-
-    marker=$(printf '%s\n' "$out" | grep '^REMOTE_EXIT:' | tail -1 | cut -d: -f2)
-    if [ "$rc" -eq 97 ]; then
-        # The sentinel above: environment wrong, tests never ran. Infrastructure,
-        # not code — fall back locally rather than accusing the caller's changes.
-        echo "  suite: remote environment not usable (missing dir or toolchain) — queueing locally." >&2
-        return 1
-    fi
-    if [ "$rc" -eq 255 ] || [ -z "$marker" ]; then
-        # 255 is ssh's own error code, and a missing marker means the command
-        # never completed — either way the suite did not produce a verdict.
-        echo "  suite: remote run did not complete (connection dropped) — queueing locally." >&2
-        return 1
-    fi
-
-    status="$marker"
-    if [ "$status" -ne 0 ]; then
-        # Return 2 = "ran, but failed". The caller re-runs locally rather than
-        # trusting this verdict. A machine on a different Swift/SDK must never be
-        # what REFUSES a commit: Guard 4 blocks on this result, and a toolchain
-        # difference presenting as "your code is broken" would send an agent
-        # hunting a bug that does not exist. A remote PASS is still accepted —
-        # the asymmetry is deliberate, since the expensive error is a false
-        # refusal, not a false pass on identical code paths.
+    rrc=0
+    remote_run "$repo_root" "cd AudiouterCore && swift test $rargs $*" || rrc=$?
+    if [ "$rrc" -eq 2 ]; then
+        # "Ran, but failed" — re-run locally rather than trusting the verdict. A
+        # machine on a different Swift/SDK must never be what REFUSES a commit:
+        # Guard 4 blocks on this result, and a toolchain difference presenting
+        # as "your code is broken" would send an agent hunting a bug that does
+        # not exist. A remote PASS is still accepted — the asymmetry is
+        # deliberate, since the expensive error is a false refusal.
         echo "  suite: remote reported FAILURES — re-running locally to confirm." >&2
         return 2
     fi
+    [ "$rrc" -ne 0 ] && return 1
+    status=$remote_status
     echo "  suite: passed on remote $remote_host." >&2
     return 0
-}
-
-# --- CPU-based selection (testPrefer=cpu) -----------------------------------
-# Load average alone isn't comparable across two machines with different core
-# counts, so normalise to "load per core, as a percent" on each side before
-# comparing. Values over 100 mean that machine is oversubscribed.
-local_load_pct() {
-    ncpu=$(sysctl -n hw.ncpu)
-    set -- $(sysctl -n vm.loadavg | tr -d '{}')
-    awk -v l="$1" -v n="$ncpu" 'BEGIN { printf "%d", (l / n) * 100 }'
-}
-
-# Empty output means unreachable — same short probe timeout as run_remote, and
-# the caller treats "couldn't check" the same as "don't prefer it".
-remote_load_pct() {
-    ssh -o BatchMode=yes -o ConnectTimeout="$remote_probe_timeout" \
-        -o StrictHostKeyChecking=accept-new "$remote_host" \
-        "n=\$(sysctl -n hw.ncpu); set -- \$(sysctl -n vm.loadavg | tr -d '{}'); awk -v l=\"\$1\" -v n=\"\$n\" 'BEGIN{printf \"%d\", (l/n)*100}'" 2>/dev/null
 }
 
 # Lock and cache live in /tmp on purpose: they must be shared by EVERY worktree
@@ -253,23 +144,12 @@ fi
 # (another agent testing there, or just awake and doing something else). Local
 # slots remain the fallback either way, so an asleep/offline/unmeasurable
 # remote costs one 5s probe and behaves exactly as if none were configured.
+# `|| true` under `set -e`: "stay local" is a non-zero return from remote_wins,
+# and a bare call would abort the whole script instead of falling through.
 try_remote_first=0
-if [ "$remote_pref" = "remote" ]; then
-    try_remote_first=1
-elif [ "$remote_pref" = "cpu" ] && [ -n "$remote_host" ]; then
-    # `|| true` for the same reason the remote run below uses `|| rrc=$?`:
-    # under `set -e` an unreachable remote makes ssh exit non-zero, and a bare
-    # command substitution propagates that straight out of the script — killing
-    # the whole run with no output at all instead of falling back locally.
-    remote_load=$(remote_load_pct || true)
-    if [ -n "$remote_load" ]; then
-        local_load=$(local_load_pct)
-        echo "  suite: cpu check — local ${local_load}%/core, remote ${remote_load}%/core." >&2
-        [ "$remote_load" -lt "$local_load" ] && try_remote_first=1
-    fi
-fi
+remote_wins && try_remote_first=1 || true
 
-if [ "$try_remote_first" -eq 1 ] && [ -n "$remote_host" ] && [ "$remote_tried" -eq 0 ]; then
+if [ "$try_remote_first" -eq 1 ] && [ "$remote_tried" -eq 0 ]; then
     remote_tried=1
     # `|| rrc=$?` rather than a bare call: `set -e` would abort the script on any
     # non-zero return, and non-zero is the normal "fall back locally" signal.

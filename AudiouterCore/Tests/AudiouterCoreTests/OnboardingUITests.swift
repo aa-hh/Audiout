@@ -272,6 +272,11 @@ import Testing
         let wc = OnboardingWindowController(model: makeModel(audio: .granted),
                                             openSettings: { _ in },
                                             onFinished: {})
+        // `present()` really does put the floating Setup window on the tester's
+        // screen: left open it parks above every other window, un-clickable (the
+        // test process is not a foreground app), until the whole run ends. Same
+        // for the reactivate test below.
+        defer { wc.window?.close() }
         wc.present()
         let moved = NSPoint(x: 13, y: 17)   // far from any plausible center
         wc.window?.setFrameOrigin(moved)
@@ -299,6 +304,7 @@ import Testing
         let wc = OnboardingWindowController(model: makeModel(audio: .granted),
                                             openSettings: { _ in },
                                             onFinished: {})
+        defer { wc.window?.close() }
         wc.keyWindowProvider = { nil }   // e.g. returning from a permission prompt
 
         wc.test_appDidBecomeActive()

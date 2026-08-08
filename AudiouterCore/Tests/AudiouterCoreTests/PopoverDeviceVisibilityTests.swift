@@ -1,0 +1,266 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+import Testing
+import AppKit
+@testable import AudiouterCore
+@testable import AudiouterPopoverUI
+@testable import AudiouterSharedUI
+
+/// Device-list visibility in the popover: the per-device-TYPE subsection
+/// collapse, and the per-DEVICE hide/show pair. Both are DISPLAY actions —
+/// what is asserted throughout is that neither ever moves selection,
+/// membership or a diagnosis-panel intent, and that the surfaces which depend
+/// on "what is actually on screen" (the sync drawer, the rail terminus, the
+/// empty-state copy) follow. Every interaction rides a real path: the panel's
+/// own header gesture recognizer, `NSMenu.performActionForItem(at:)`, and
+/// `DeviceRowView.menu(for:)`.
+@MainActor
+@Suite(.serialized) struct PopoverDeviceVisibilityTests {
+
+    private func tempDirectory() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    }
+
+    private func makePopover(fleet: [Device] = []) -> (PopoverController, GroupController) {
+        let backend = MockBackend(fleet: fleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        let controller = GroupController(backend: backend,
+                                         store: GroupStore(directory: tempDirectory()),
+                                         routingStore: RoutingStore(directory: tempDirectory()),
+                                         loadPersisted: false)
+        let popover = PopoverController()
+        popover.configure(groupController: controller)
+        popover.test_isShownOverride = true
+        if !fleet.isEmpty {
+            backend.start()
+            let deadline = Date().addingTimeInterval(5)
+            while Date() < deadline && backend.devices.count < fleet.count {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+            }
+        }
+        return (popover, controller)
+    }
+
+    private func local() -> Device {
+        Device(id: "mac", name: "This Mac", kind: .localMac, isLocalDevice: true)
+    }
+
+    private func airplay(_ id: String = "office", name: String = "Office") -> Device {
+        Device(id: id, name: name, kind: .homePod)
+    }
+
+    private func bt(_ id: String, name: String, available: Bool = true) -> Device {
+        Device(id: id, name: name, kind: .bluetooth,
+               isAvailable: available, supportsAirPlay2: false)
+    }
+
+    private let airPlayTitle = PopoverController.airPlaySubsectionTitle
+    private let bluetoothTitle = PopoverController.bluetoothSubsectionTitle
+
+    // MARK: Feature A — collapsible device-type subsections
+
+    @Test func subsectionHeaderClickCollapsesOnlyItsOwnRowsAndFlipsTheChevron() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), airplay(), bt("bt-a:output", name: "Speaker A")])
+        #expect(popover.test_cardChevronSymbolName(title: airPlayTitle) == "chevron.down")
+
+        popover.test_fireSubsectionHeaderClick(title: airPlayTitle)
+
+        #expect(popover.test_isSubsectionCollapsed(title: airPlayTitle))
+        #expect(popover.test_renderedDeviceIDs() == ["mac", "bt-a:output"])
+        #expect(popover.test_deviceRow(for: "office") == nil)
+        #expect(popover.test_cardChevronSymbolName(title: airPlayTitle) == "chevron.right")
+        #expect(popover.test_subsectionTitles()
+                == ["This Mac", airPlayTitle, bluetoothTitle],
+                "a collapsed subsection keeps its header — only the rows go")
+
+        popover.test_fireSubsectionHeaderClick(title: airPlayTitle)
+        #expect(popover.test_deviceRow(for: "office") != nil)
+    }
+
+    /// Same two rebuild flavors the cards obey: a manual toggle is transient
+    /// within one open and `rebuildForOpen()` resets it to the expanded default.
+    @Test func subsectionCollapseSurvivesRebuildButResetsOnOpen() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), airplay()])
+        popover.test_fireSubsectionHeaderClick(title: airPlayTitle)
+
+        popover.rebuild()
+        #expect(popover.test_isSubsectionCollapsed(title: airPlayTitle),
+                "a mid-open repaint preserves the user's toggle")
+
+        popover.test_simulateOpen()
+        #expect(!popover.test_isSubsectionCollapsed(title: airPlayTitle),
+                "every open recomputes the default (expanded)")
+        #expect(popover.test_deviceRow(for: "office") != nil)
+    }
+
+    /// A drawer under a row that is no longer rendered must not survive, and
+    /// the align-by-ear tick must stop with it.
+    @Test func collapsingTheBluetoothSubsectionClosesAnOpenSyncDrawer() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        popover.test_syncDrawer?.test_fireAlignClick()
+        #expect(popover.test_expandedSyncDeviceID == "bt-a:output")
+        #expect(popover.test_alignTickDeviceID() == "bt-a:output")
+
+        popover.test_fireSubsectionHeaderClick(title: bluetoothTitle)
+
+        #expect(popover.test_expandedSyncDeviceID == nil)
+        #expect(!popover.test_syncDrawerVisible)
+        #expect(popover.test_alignTickDeviceID() == nil,
+                "no metronome without a visible control to stop it")
+    }
+
+    /// Collapse is DISPLAY, not membership: the diagnosis panel simply isn't
+    /// rendered while collapsed, and comes back on expand because its open
+    /// intent was never touched.
+    @Test func collapseHidesADiagnosisPanelWithoutClearingItsIntent() {
+        let (popover, controller) = makePopover(fleet: [local(), airplay()])
+        controller.setDeviceSelected("office", true)
+        let failure = ConnectionFailure(cause: .unknown, detail: nil)
+        var failed = airplay()
+        failed.connectionState = .failed(failure)
+        popover.update(devices: [local(), failed])
+        #expect(popover.test_diagnosisPanel(for: "office") != nil)
+
+        popover.test_fireSubsectionHeaderClick(title: airPlayTitle)
+        #expect(popover.test_diagnosisPanel(for: "office") == nil, "not rendered while collapsed")
+        #expect(controller.selectedDeviceIDs.contains("office"), "membership is untouched")
+
+        popover.test_fireSubsectionHeaderClick(title: airPlayTitle)
+        #expect(popover.test_diagnosisPanel(for: "office") != nil,
+                "the episode is still open, so the panel returns")
+    }
+
+    // MARK: Feature B — per-device visibility
+
+    /// The whole hide path through real AppKit dispatch: the row's own
+    /// `menu(for:)` override, then `performActionForItem`.
+    @Test func rowContextMenuHidesTheDeviceWithoutTouchingSelection() {
+        let (popover, controller) = makePopover(fleet: [local(), airplay()])
+        controller.setDeviceSelected("office", true)
+        popover.update(devices: [local(), airplay()])
+
+        let menu = popover.test_deviceRow(for: "office")?.test_contextMenu()
+        #expect(menu?.items.map(\.title) == ["Hide 'Office'"])
+        menu?.performActionForItem(at: 0)
+
+        #expect(popover.test_deviceRow(for: "office") == nil, "the row is gone")
+        #expect(popover.test_renderedDeviceIDs() == ["mac"])
+        #expect(controller.selectedDeviceIDs.contains("office"),
+                "hiding is display only — selection, membership and routing are untouched")
+        #expect(popover.test_hiddenDeviceNames() == ["office": "Office"])
+    }
+
+    @Test func plusMenuListsHiddenDevicesAndShowingOneRestoresItsRow() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), airplay(), airplay("attic", name: "Attic")])
+        #expect(popover.test_outputDevicesPlusMenu().items.map(\.title)
+                == ["Save Selected Devices as group", "Pair a Bluetooth speaker…"],
+                "no Hidden Devices section until something is hidden")
+
+        popover.test_deviceRow(for: "office")?.test_contextMenu()?.performActionForItem(at: 0)
+        popover.test_deviceRow(for: "attic")?.test_contextMenu()?.performActionForItem(at: 0)
+
+        var menu = popover.test_outputDevicesPlusMenu()
+        #expect(menu.items.map(\.title) == ["Save Selected Devices as group",
+                                            "Pair a Bluetooth speaker…",
+                                            "", "Hidden Devices",
+                                            "Show 'Attic'", "Show 'Office'"],
+                "sorted by the stored name, under a disabled section header")
+        #expect(menu.items[3].isEnabled == false)
+
+        menu.performActionForItem(at: 5)
+        #expect(popover.test_deviceRow(for: "office") != nil)
+        menu = popover.test_outputDevicesPlusMenu()
+        #expect(menu.items.map(\.title).contains("Show 'Office'") == false)
+    }
+
+    /// A hidden device the backend can no longer see is still listed, still
+    /// named — that is what the stored name is for.
+    @Test func anUndiscoveredHiddenDeviceIsStillListedAndStillNamed() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), airplay()])
+        popover.test_deviceRow(for: "office")?.test_contextMenu()?.performActionForItem(at: 0)
+
+        popover.update(devices: [local()])
+        let menu = popover.test_outputDevicesPlusMenu()
+        #expect(menu.items.map(\.title).contains("Show 'Office'"))
+    }
+
+    @Test func theHiddenSetRoundTripsThroughItsStore() {
+        let store = HiddenDeviceStore(directory: tempDirectory())
+        let (first, _) = makePopover()
+        first.hiddenDeviceStore = store
+        first.update(devices: [local(), airplay()])
+        first.test_deviceRow(for: "office")?.test_contextMenu()?.performActionForItem(at: 0)
+
+        // A second launch over the same store.
+        let (second, _) = makePopover()
+        second.hiddenDeviceStore = store
+        second.update(devices: [local(), airplay()])
+        #expect(second.test_hiddenDeviceNames() == ["office": "Office"])
+        #expect(second.test_deviceRow(for: "office") == nil)
+
+        second.test_outputDevicesPlusMenu().performActionForItem(at: 4)
+        let (third, _) = makePopover()
+        third.hiddenDeviceStore = store
+        #expect(third.test_hiddenDeviceNames().isEmpty, "showing it again persists too")
+    }
+
+    @Test func hidingTheDeviceWhoseDrawerIsOpenClosesTheDrawer() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        #expect(popover.test_expandedSyncDeviceID == "bt-a:output")
+
+        popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()?.performActionForItem(at: 0)
+        #expect(popover.test_expandedSyncDeviceID == nil)
+        #expect(!popover.test_syncDrawerVisible)
+    }
+
+    @Test func aSubsectionWhoseDevicesAreAllHiddenDisappearsEntirely() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), airplay(), bt("bt-a:output", name: "Speaker A")])
+        popover.test_deviceRow(for: "office")?.test_contextMenu()?.performActionForItem(at: 0)
+        #expect(popover.test_subsectionTitles() == ["This Mac", bluetoothTitle],
+                "an all-hidden subsection reads exactly like an empty one")
+    }
+
+    /// "Looking for devices…" would be a lie once the devices exist and are
+    /// merely hidden.
+    @Test func theEmptyStateDistinguishesNoDevicesFromAllHidden() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [])
+        #expect(popover.test_devicesPlaceholderText() == "Looking for devices…")
+
+        popover.update(devices: [local(), airplay()])
+        #expect(popover.test_devicesPlaceholderText() == nil)
+
+        popover.test_deviceRow(for: "mac")?.test_contextMenu()?.performActionForItem(at: 0)
+        popover.test_deviceRow(for: "office")?.test_contextMenu()?.performActionForItem(at: 0)
+        #expect(popover.test_devicesPlaceholderText() == "All devices hidden")
+    }
+
+    // MARK: The rail follows what is on screen
+
+    /// The spine's terminus is the lowest selected VISIBLE node: hiding the
+    /// bottom selected device pulls it up rather than leaving the row above it
+    /// carrying a through-rail to nothing.
+    @Test func theRailTerminatesAtTheLowestVISIBLESelectedNode() {
+        let (popover, controller) = makePopover(fleet: [local(), airplay(), airplay("zed", name: "Zed")])
+        controller.setDeviceSelected("office", true)
+        controller.setDeviceSelected("zed", true)
+        popover.update(devices: [local(), airplay(), airplay("zed", name: "Zed")])
+        #expect(popover.test_deviceRow(for: "office")?.test_busRailBelow == true,
+                "the rail runs on past Office to Zed")
+
+        popover.test_deviceRow(for: "zed")?.test_contextMenu()?.performActionForItem(at: 0)
+        #expect(popover.test_deviceRow(for: "office")?.test_busRailBelow == false,
+                "with Zed off screen the rail ends at Office")
+        #expect(controller.selectedDeviceIDs.contains("zed"), "Zed is still in the mix")
+    }
+}

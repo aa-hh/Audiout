@@ -44,10 +44,11 @@ public enum ControlStripLayout {
         discreteItems.union([sliderItem, buttonGroupItem, muteItem])
     }
 
-    /// "App Controls with Control Strip" — the only presentation mode a
-    /// third-party tray item renders in (live-verified: invisible in
-    /// `fullControlStrip`).
-    public static let appControlsMode = "appWithControlStrip"
+    /// "App Controls" — no system Control Strip, which is what a full-width
+    /// custom bar needs: our bar carries its own volume controls, so leaving
+    /// Apple's greyed ones on screen beside them is the exact confusion this
+    /// design removes.
+    public static let appControlsMode = "app"
 
     /// `items` with Apple's dead audio controls removed, or `nil` when there
     /// were none — nothing to do, and no marker should be taken.

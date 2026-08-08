@@ -280,12 +280,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var controlStripVolumeButtons = ControlStripVolumeButtons(
         control: CoreFoundationControlStripControl(), store: settings)
 
-    /// The app's own −/+ control in the Control Strip. Apple's greys out on our
-    /// aggregate and posts no event when tapped, so there is nothing to intercept
-    /// there — drawing our own is the only way a Touch Bar user gets volume.
-    private lazy var touchBarVolumeTrayItem: TouchBarVolumeTrayItem = {
-        let tray = TouchBarVolumeTrayItem()
-        tray.onStep = { [weak self] up in
+    /// Our own Touch Bar — the everyday Control Strip controls, but with volume
+    /// buttons that work. Apple's grey out on our aggregate and post no event
+    /// when tapped, so they can be neither intercepted nor revived; presenting a
+    /// whole bar means every control on it is one we drive.
+    private lazy var touchBarFullBar: TouchBarFullBar = {
+        let bar = TouchBarFullBar()
+        bar.onVolumeStep = { [weak self] up in
             guard let self else { return }
             // Same step feel as the volume keys — one shared definition, so the
             // Touch Bar and the keyboard can never drift apart.
@@ -294,7 +295,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.groupController.applyExternalSystemVolume(target)
             self.repaintFromCurrentState()
         }
-        return tray
+        bar.onToggleMute = { [weak self] in
+            guard let self else { return }
+            self.groupController.setMainOutMuted(!self.groupController.isMainOutMuted)
+            self.repaintFromCurrentState()
+        }
+        return bar
     }()
 
     /// True once we've sent the user to the permission rows over a missing
@@ -1486,19 +1492,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // to match; no device model changed — handle it and return.
             volumeKeyInterceptor.setOwnsVolume(weOwnIt)
             volumeKeyInterceptor.setCurrentMainVolume(groupController.mainOutMasterVolume)
-            // Order matters: prepare the strip (mode + clear out Apple's dead
-            // audio items) BEFORE registering our control, so it lands in a
-            // Control Strip that can actually render it.
+            // Order matters: put the Touch Bar into a mode that yields the whole
+            // bar BEFORE presenting ours, so it isn't fighting the system Control
+            // Strip for the same pixels.
             let reloaded = controlStripVolumeButtons.apply(weOwnVolume: weOwnIt)
-            touchBarVolumeTrayItem.setOwnsVolume(weOwnIt)
             if reloaded, weOwnIt {
-                // Preparing the strip reloads ControlStrip, which destroys every
-                // tray registration — including the one just made above. Put ours
-                // back once the respawn has settled, or the control appears once
-                // and never returns after an output change (live-hit).
+                // The mode change reloads ControlStrip; presenting into it while
+                // it respawns loses the presentation the same way a tray
+                // registration was lost (live-hit). Wait it out.
                 DispatchQueue.main.asyncAfter(deadline: .now() + controlStripRespawnDelay) {
-                    [weak self] in self?.touchBarVolumeTrayItem.reassertAfterControlStripReload()
+                    [weak self] in self?.touchBarFullBar.setOwnsVolume(true)
                 }
+            } else {
+                touchBarFullBar.setOwnsVolume(weOwnIt)
             }
             log("event: \(describe(event))")
             return

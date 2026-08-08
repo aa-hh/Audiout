@@ -22,6 +22,16 @@ public protocol BTSyncDrawerViewDelegate: AnyObject {
     /// drawer has no visible close affordance of its own (T6's row chip
     /// owns opening/closing); the host decides how — or whether — to react.
     func syncDrawerDidRequestClose(_ d: BTSyncDrawerView)
+    /// ⌥-click on the align-by-ear (metronome) button: the guided alignment
+    /// wizard instead of the manual tick (W4 relaunch — the first-mix card's
+    /// "Not now" is final, so this stays reachable forever). The row's
+    /// "Align speaker…" context-menu item is the discoverable twin.
+    func syncDrawerDidRequestAlignmentWizard(_ d: BTSyncDrawerView)
+}
+
+public extension BTSyncDrawerViewDelegate {
+    /// Default no-op — only the popover hosts the alignment wizard.
+    func syncDrawerDidRequestAlignmentWizard(_ d: BTSyncDrawerView) {}
 }
 
 /// The **BT sync drawer** (PLAN-BT-SYNC-DRAWER §3 T5): the panel that opens
@@ -418,6 +428,13 @@ public final class BTSyncDrawerView: NSView {
     }
 
     @objc private func alignTapped(_ sender: NSButton) {
+        if optionIsHeld {
+            // ⌥-click asks for the guided wizard instead of the manual tick —
+            // undo the `pushOnPushOff` flip so the toggle never moves.
+            sender.state = sender.state == .on ? .off : .on
+            delegate?.syncDrawerDidRequestAlignmentWizard(self)
+            return
+        }
         // `pushOnPushOff` has already flipped the state; land the tint now
         // so the toggle reads immediately, before the host's re-apply echoes
         // it — mirrors `DeviceRowView.alignTapped` exactly.
@@ -491,6 +508,13 @@ public final class BTSyncDrawerView: NSView {
 
     private var shiftIsHeld: Bool {
         test_shiftModifierOverride ?? (NSApp?.currentEvent?.modifierFlags.contains(.shift) ?? false)
+    }
+
+    /// Same seam for ⌥ (the align button's wizard relaunch).
+    public var test_optionModifierOverride: Bool?
+
+    private var optionIsHeld: Bool {
+        test_optionModifierOverride ?? (NSApp?.currentEvent?.modifierFlags.contains(.option) ?? false)
     }
 
     // MARK: Test hooks — real dispatch through the exact delegate/action seam

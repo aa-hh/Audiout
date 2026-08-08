@@ -65,6 +65,11 @@ public struct BTTrimStore: Sendable {
     struct Envelope: Codable {
         var schemaVersion: Int
         var trims: [String: Double]
+        /// Device UIDs whose first-mix alignment intercept the user dismissed
+        /// with "Not now" (W3) — FINAL, never auto-prompted again. Optional so
+        /// a pre-existing file (and an old reader on a new file) decodes
+        /// cleanly; no schema bump needed.
+        var alignmentPromptDismissed: [String]?
     }
 
     /// Bump when the on-disk shape changes in a way old readers can't parse.
@@ -93,18 +98,46 @@ public struct BTTrimStore: Sendable {
     /// file from a newer schema is treated as missing rather than crashing an
     /// older build.
     public func load() throws -> [String: Double]? {
+        try loadEnvelope()?.trims
+    }
+
+    /// Overwrite the saved trims, creating the directory/file if needed.
+    /// Read-modify-write so the dismissal record survives a trim save.
+    public func save(_ trims: [String: Double]) throws {
+        var envelope = ((try? loadEnvelope()) ?? nil)
+            ?? Envelope(schemaVersion: Self.currentSchemaVersion, trims: [:],
+                        alignmentPromptDismissed: nil)
+        envelope.schemaVersion = Self.currentSchemaVersion
+        envelope.trims = trims
+        try write(envelope)
+    }
+
+    /// Device UIDs whose first-mix intercept was dismissed ("Not now" — final).
+    public func loadDismissedUIDs() throws -> Set<String> {
+        Set((try loadEnvelope())?.alignmentPromptDismissed ?? [])
+    }
+
+    /// Overwrite the dismissal set, preserving trims (read-modify-write).
+    public func saveDismissedUIDs(_ uids: Set<String>) throws {
+        var envelope = ((try? loadEnvelope()) ?? nil)
+            ?? Envelope(schemaVersion: Self.currentSchemaVersion, trims: [:],
+                        alignmentPromptDismissed: nil)
+        envelope.schemaVersion = Self.currentSchemaVersion
+        envelope.alignmentPromptDismissed = uids.sorted()
+        try write(envelope)
+    }
+
+    private func loadEnvelope() throws -> Envelope? {
         guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
         let data = try Data(contentsOf: fileURL)
         let envelope = try decoder.decode(Envelope.self, from: data)
         guard envelope.schemaVersion <= Self.currentSchemaVersion else { return nil }
-        return envelope.trims
+        return envelope
     }
 
-    /// Overwrite the saved trims, creating the directory/file if needed.
-    public func save(_ trims: [String: Double]) throws {
+    private func write(_ envelope: Envelope) throws {
         let directory = fileURL.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let envelope = Envelope(schemaVersion: Self.currentSchemaVersion, trims: trims)
         let data = try encoder.encode(envelope)
         try data.write(to: fileURL, options: .atomic)
     }

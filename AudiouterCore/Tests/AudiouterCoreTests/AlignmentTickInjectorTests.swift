@@ -42,7 +42,7 @@ import AudioToolbox
     @Test func ticksLandOnTheConfiguredBeatAndNowhereElse() {
         // Small synthetic clock so one buffer spans several beats: 1 kHz,
         // 600 BPM → a tick every 100 frames; the tick itself is 30 frames.
-        let injector = AlignmentTickInjector(sampleRate: 1_000, bpm: 600, maxTicks: 3)
+        let injector = AlignmentTickInjector(sampleRate: 1_000, config: .init(bpm: 600, maxTicks: 3, bedEnabled: false))
         #expect(injector.test_beatFrames == 100)
         var pcm = zeroBuffer(frames: 250)
         injector.mix(into: &pcm)
@@ -56,7 +56,7 @@ import AudioToolbox
     }
 
     @Test func beatClockCarriesAcrossBufferBoundaries() {
-        let injector = AlignmentTickInjector(sampleRate: 1_000, bpm: 600, maxTicks: 4)
+        let injector = AlignmentTickInjector(sampleRate: 1_000, config: .init(bpm: 600, maxTicks: 4, bedEnabled: false))
         // Deliver 60 + 60 frames: the second tick starts at absolute frame 100,
         // i.e. 40 frames INTO the second buffer.
         var first = zeroBuffer(frames: 60)
@@ -69,7 +69,7 @@ import AudioToolbox
     }
 
     @Test func stopsEmittingAfterMaxTicks() {
-        let injector = AlignmentTickInjector(sampleRate: 1_000, bpm: 600, maxTicks: 2)
+        let injector = AlignmentTickInjector(sampleRate: 1_000, config: .init(bpm: 600, maxTicks: 2, bedEnabled: false))
         var pcm = zeroBuffer(frames: 400)
         injector.mix(into: &pcm)
         let samples = channel0(pcm)
@@ -80,7 +80,7 @@ import AudioToolbox
     }
 
     @Test func mixAddsOntoProgramAudioInsteadOfReplacingIt() {
-        let injector = AlignmentTickInjector(sampleRate: 1_000, bpm: 600, maxTicks: 1)
+        let injector = AlignmentTickInjector(sampleRate: 1_000, config: .init(bpm: 600, maxTicks: 1, bedEnabled: false))
         var pcm = zeroBuffer(frames: 100)
         pcm.withUnsafeMutableBytes { raw in
             let p = raw.bindMemory(to: Int16.self)
@@ -92,6 +92,102 @@ import AudioToolbox
                 "off-beat samples keep the program audio untouched")
         #expect(samples[1...29].contains { $0 != 1_000 },
                 "on-beat samples are program + tick, never a replacement")
+    }
+
+    /// The wizard's opposite rule (owner's call): while the guided run is
+    /// going the user is judging which speaker ticked first, so the music is
+    /// REPLACED rather than ticked over.
+    @Test func wizardModeReplacesTheProgramWithTicksOnly() {
+        let injector = AlignmentTickInjector(
+            sampleRate: 1_000,
+            config: .init(bpm: 600, maxTicks: 1, bedEnabled: false, replacesProgram: true))
+        var pcm = zeroBuffer(frames: 100)
+        pcm.withUnsafeMutableBytes { raw in
+            let p = raw.bindMemory(to: Int16.self)
+            for i in 0..<p.count { p[i] = 1_000 }   // flat program signal
+        }
+        injector.mix(into: &pcm)
+        let samples = channel0(pcm)
+        #expect(samples[50..<100].allSatisfy { $0 == 0 },
+                "off-beat frames carry no music — only the ticks are heard")
+        #expect(samples[1...29].contains { $0 != 0 }, "the ticks themselves are still there")
+    }
+
+    /// …and the music comes back the moment the run's budget runs out, without
+    /// anything having to switch the injector off.
+    @Test func theProgramReturnsPastTheWizardBudget() {
+        let injector = AlignmentTickInjector(
+            sampleRate: 1_000,
+            config: .init(bpm: 600, maxTicks: 1, bedEnabled: false, replacesProgram: true))
+        var pcm = zeroBuffer(frames: 200)
+        pcm.withUnsafeMutableBytes { raw in
+            let p = raw.bindMemory(to: Int16.self)
+            for i in 0..<p.count { p[i] = 1_000 }
+        }
+        injector.mix(into: &pcm)
+        let samples = channel0(pcm)
+        #expect(samples[100..<200].allSatisfy { $0 == 1_000 },
+                "past the last beat the captured program passes through untouched")
+    }
+
+    // MARK: Keep-alive bed + wake preamble (W2 — the Sonos amp-gate fix)
+
+    /// The bed rides under every active frame at ~−47 dBFS RMS — present, but
+    /// far below the tick.
+    @Test func bedIsPresentAtTheTargetLevel() {
+        let injector = AlignmentTickInjector(
+            sampleRate: 1_000, config: .init(bpm: 600, maxTicks: 4))
+        var pcm = zeroBuffer(frames: 100)
+        injector.mix(into: &pcm)
+        let samples = channel0(pcm)
+        // Between ticks (frames 30..<100) only the bed plays.
+        let bedOnly = samples[30..<100].map { Double($0) / 32_768.0 }
+        #expect(bedOnly.contains { $0 != 0 }, "the bed keeps signal flowing between ticks")
+        let rms = (bedOnly.map { $0 * $0 }.reduce(0, +) / Double(bedOnly.count)).squareRoot()
+        let dBFS = 20 * log10(max(rms, 1e-12))
+        #expect(dBFS > -53 && dBFS < -41, "bed ≈ −47 dBFS RMS, measured \(dBFS)")
+    }
+
+    /// The wizard's wake preamble: bed only — no tick — for the configured
+    /// stretch, then the first tick lands on already-awake amps.
+    @Test func preambleIsBedOnlyBeforeTheFirstTick() {
+        let injector = AlignmentTickInjector(
+            sampleRate: 1_000,
+            config: .init(bpm: 600, maxTicks: 2, preambleSeconds: 0.2))
+        #expect(injector.test_preambleFrames == 200)
+        var pcm = zeroBuffer(frames: 300)
+        injector.mix(into: &pcm)
+        let samples = channel0(pcm)
+        let tickPeak = Double(0.35 * 0.7 * 32_767)   // the tick's first partial scale
+        #expect(samples[0..<200].allSatisfy { abs(Double($0)) < tickPeak / 8 },
+                "the preamble carries only the quiet bed, never a tick")
+        #expect(samples[200...229].contains { abs(Double($0)) > tickPeak / 8 },
+                "the first tick starts right after the preamble")
+    }
+
+    /// The bed stops WITH the tick budget — an expired injector adds nothing,
+    /// so a forgotten switch-off leaks silence, not hiss.
+    @Test func bedStopsWhenTheTickBudgetExpires() {
+        let injector = AlignmentTickInjector(
+            sampleRate: 1_000, config: .init(bpm: 600, maxTicks: 2))
+        var pcm = zeroBuffer(frames: 400)
+        injector.mix(into: &pcm)
+        let samples = channel0(pcm)
+        #expect(samples[0..<200].contains { $0 != 0 })
+        #expect(samples[200..<400].allSatisfy { $0 == 0 },
+                "past the budget, neither tick nor bed is emitted")
+    }
+
+    /// The wizard config: long budget, ~3 s preamble, bed on.
+    @Test func wizardConfigShape() {
+        let config = AlignmentTickInjector.Config.wizard
+        #expect(config.maxTicks == 360)
+        #expect(config.preambleSeconds == 3)
+        #expect(config.bedEnabled)
+        #expect(config.replacesProgram, "the guided run is ticks only")
+        #expect(AlignmentTickInjector.Config.manual.preambleSeconds == 0)
+        #expect(AlignmentTickInjector.Config.manual.replacesProgram == false,
+                "the row's metronome is the nudge-while-listening case")
     }
 
     // MARK: Coordinator seam — one mixed feed, every consumer
@@ -117,6 +213,22 @@ import AudioToolbox
     private final class SilenceConverter: PCMConverting, @unchecked Sendable {
         func convertToAirPlayPCM(_ buffer: CapturedBuffer) -> Data? {
             Data(count: buffer.frameCount * 2 * MemoryLayout<Int16>.size)
+        }
+    }
+
+    /// Converts every captured buffer to a flat, obviously non-silent S16LE
+    /// program — so the DC level of a consumer's samples answers "is the
+    /// user's music still in this feed?" (a tick and the bed both average to
+    /// ~0; the program does not).
+    private final class ConstantConverter: PCMConverting, @unchecked Sendable {
+        static let level = 6_000
+        func convertToAirPlayPCM(_ buffer: CapturedBuffer) -> Data? {
+            var data = Data(count: buffer.frameCount * 2 * MemoryLayout<Int16>.size)
+            data.withUnsafeMutableBytes { raw in
+                let p = raw.bindMemory(to: Int16.self)
+                for i in 0..<p.count { p[i] = Int16(Self.level) }
+            }
+            return data
         }
     }
 
@@ -194,5 +306,46 @@ import AudioToolbox
         waitFor { engineSink.forwarded.count == 3 }
         #expect(channel0(engineSink.forwarded[2]).allSatisfy { $0 == 0 },
                 "disabling the tick restores the untouched feed")
+    }
+
+    /// The mode difference at the seam every consumer shares: the manual
+    /// metronome rides OVER the music, the wizard's run replaces it, and
+    /// switching off brings the music straight back.
+    @Test func wizardModeSilencesTheMusicInTheSharedFeedAndManualDoesNot() {
+        let tap = FakeTap()
+        let engineSink = SpyPCMSink()
+        let coordinator = NativeCaptureCoordinator(
+            makeTap: { tap },
+            sink: engineSink,
+            makeConverter: { _ in ConstantConverter() },
+            processResolver: AudioProcessResolver(enumerator: EmptyEnumerator()),
+            muteBehavior: .mutedWhenTapped)
+        coordinator.start()
+        waitFor {
+            if case .capturing = coordinator.state { return true }
+            return false
+        }
+        func meanOfNextBuffer(second: Int) -> Double {
+            let expected = engineSink.forwarded.count + 1
+            tap.deliverSilence(frames: 512, pts: timespec(tv_sec: second, tv_nsec: 0))
+            waitFor { engineSink.forwarded.count == expected }
+            let samples = channel0(engineSink.forwarded[expected - 1])
+            return samples.reduce(0.0) { $0 + Double($1) } / Double(samples.count)
+        }
+        let program = Double(ConstantConverter.level)
+
+        #expect(abs(meanOfNextBuffer(second: 1) - program) < 1, "idle: the music passes through")
+
+        coordinator.setAlignTickMode(.manual)
+        #expect(abs(meanOfNextBuffer(second: 2) - program) < 500,
+                "the manual metronome ticks OVER the music, which keeps playing")
+
+        coordinator.setAlignTickMode(.wizard)
+        #expect(abs(meanOfNextBuffer(second: 3)) < 500,
+                "the guided run is ticks only — the music is gone from the shared feed")
+
+        coordinator.setAlignTickMode(.off)
+        #expect(abs(meanOfNextBuffer(second: 4) - program) < 1,
+                "…and comes back the instant the run ends")
     }
 }

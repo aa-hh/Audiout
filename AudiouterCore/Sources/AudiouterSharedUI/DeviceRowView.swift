@@ -66,6 +66,11 @@ public final class DeviceRowView: NSView {
         /// (`GroupController.requestReconnect` → `OutputBackend.retryOutput`);
         /// it never edits selection. Default no-op for non-BT hosts.
         func deviceRowDidRequestReconnect(_ row: DeviceRowView)
+        /// The user asked for the guided alignment wizard on this Bluetooth
+        /// row — the "Align speaker…" context-menu item (the metronome button
+        /// moved into the sync drawer, whose ⌥-click is the other route).
+        /// Default no-op for hosts without the wizard.
+        func deviceRowDidRequestAlignmentWizard(_ row: DeviceRowView)
         /// The user clicked this Bluetooth row's SYNC value chip
         /// (PLAN-BT-SYNC-DRAWER T6). The chip is READ-ONLY — it neither edits
         /// nor clamps a trim; it asks the host to open (or, on a second
@@ -1630,7 +1635,7 @@ public final class DeviceRowView: NSView {
     /// the module's one copy: ``BTSyncDrawerView`` reads it rather than
     /// re-authoring the sentence.
     static let alignTooltip =
-        "Play alignment ticks on this speaker and the rest of the group — adjust sync until they land as one"
+        "Play alignment ticks on this speaker and the rest of the group — adjust sync until they land as one (⌥ for the guided alignment)"
 
     /// The chip's tabular-figures label font: monospaced DIGITS so a stepper
     /// change can't make the chip's number jitter in width under the fixed
@@ -1717,6 +1722,33 @@ public final class DeviceRowView: NSView {
     /// one-at-a-time rule). It never edits the trim itself.
     @objc private func syncChipTapped(_ sender: NSButton) {
         delegate?.deviceRow(self, didToggleSyncDrawerFor: device.id)
+    }
+
+    // MARK: Context menu (BT rows)
+    //
+    // The discoverable route to the guided wizard — ⌥-click alone is
+    // invisible. AppKit calls `menu(for:)` for a right-click landing anywhere
+    // in the row that no subview's own menu claims (the `AppRowView` idiom).
+
+    public override func menu(for event: NSEvent) -> NSMenu? {
+        guard showsSyncControls else { return super.menu(for: event) }
+        return buildContextMenu()
+    }
+
+    private func buildContextMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let align = NSMenuItem(title: "Align speaker…",
+                               action: #selector(alignSpeakerMenuItemSelected(_:)),
+                               keyEquivalent: "")
+        align.target = self
+        align.isEnabled = device.isAvailable
+        menu.addItem(align)
+        return menu
+    }
+
+    @objc private func alignSpeakerMenuItemSelected(_ sender: NSMenuItem) {
+        delegate?.deviceRowDidRequestAlignmentWizard(self)
     }
 
     // MARK: Actions
@@ -2232,6 +2264,13 @@ public final class DeviceRowView: NSView {
     /// target/action dispatch, mirroring `test_performEnableClick` (a no-op
     /// while disabled, exactly like a live click).
     public func test_fireSyncChipClick() { syncChipButton.performClick(nil) }
+
+    /// The row's context menu exactly as `menu(for:)` builds it — `nil` on a
+    /// non-sync row. Tests dispatch items via `performActionForItem(at:)`
+    /// (real AppKit menu dispatch), never the delegate shortcut.
+    public func test_contextMenu() -> NSMenu? {
+        showsSyncControls ? buildContextMenu() : nil
+    }
 
     /// The chip's spoken identity/value/expanded state and its hover tooltip.
     public var test_syncChipAXLabel: String? { syncChipButton.accessibilityLabel() }
@@ -2753,6 +2792,8 @@ public extension DeviceRowView.Delegate {
     /// Default no-op — only the popover hosts the Bluetooth SYNC column, and
     /// only it can open a drawer (PLAN-BT-SYNC-DRAWER T6/T7).
     func deviceRow(_ row: DeviceRowView, didToggleSyncDrawerFor id: String) {}
+    /// Default no-op — only the popover hosts the alignment wizard.
+    func deviceRowDidRequestAlignmentWizard(_ row: DeviceRowView) {}
 }
 
 // MARK: - Invisible switch cell (spec §4.8)

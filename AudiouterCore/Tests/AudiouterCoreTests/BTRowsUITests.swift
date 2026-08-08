@@ -18,6 +18,7 @@ import AppKit
         var toggles: [(on: Bool, id: String)] = []
         var reconnects: [String] = []
         var drawerToggles: [String] = []
+        var wizardRequests: [String] = []
         func deviceRow(_ row: DeviceRowView, didSetVolume volume: Int, for id: String) {}
         func deviceRow(_ row: DeviceRowView, didToggleMute muted: Bool, for id: String) {}
         func deviceRow(_ row: DeviceRowView, didToggleEnabled on: Bool, for id: String) {
@@ -29,6 +30,9 @@ import AppKit
         }
         func deviceRow(_ row: DeviceRowView, didToggleSyncDrawerFor id: String) {
             drawerToggles.append(id)
+        }
+        func deviceRowDidRequestAlignmentWizard(_ row: DeviceRowView) {
+            wizardRequests.append(row.device.id)
         }
     }
 
@@ -254,6 +258,52 @@ import AppKit
         #expect(row.test_showsSyncControls == false)
         #expect(row.test_syncChipTitle == nil)
         #expect(row.test_syncChipEnabled == false)
+    }
+
+    /// The metronome button lives in the sync drawer now (D9); ⌥-click on it
+    /// is the wizard relaunch that used to sit on the row's own button.
+    @Test func optionClickOnTheDrawerMetronomeRequestsTheWizardNotTheTick() {
+        final class DrawerSpy: BTSyncDrawerViewDelegate {
+            var tickToggles: [Bool] = []
+            var wizardRequests = 0
+            func syncDrawer(_ d: BTSyncDrawerView, didChangeTrimMs ms: Double, committed: Bool) {}
+            func syncDrawer(_ d: BTSyncDrawerView, didToggleAlignTick active: Bool) {
+                tickToggles.append(active)
+            }
+            func syncDrawerDidRequestClose(_ d: BTSyncDrawerView) {}
+            func syncDrawerDidRequestAlignmentWizard(_ d: BTSyncDrawerView) { wizardRequests += 1 }
+        }
+        let spy = DrawerSpy()
+        let drawer = BTSyncDrawerView()
+        drawer.delegate = spy
+        drawer.test_optionModifierOverride = true
+        drawer.test_fireAlignClick()
+        #expect(spy.wizardRequests == 1, "⌥-click asks for the guided wizard")
+        #expect(spy.tickToggles.isEmpty, "…never the manual tick")
+        #expect(!drawer.test_alignActive, "and the toggle never flips")
+        #expect(DeviceRowView.alignTooltip.contains("⌥ for the guided alignment"),
+                "the tooltip teaches the invisible modifier")
+    }
+
+    @Test func contextMenuCarriesAlignSpeakerOnBTRowsThroughRealMenuDispatch() {
+        let spy = SpyDelegate()
+        let row = makeRow(btDevice(), delegate: spy)
+        let menu = row.test_contextMenu()
+        #expect(menu?.items.map(\.title) == ["Align speaker…"])
+        #expect(menu?.items.first?.isEnabled == true)
+        menu?.performActionForItem(at: 0)   // real AppKit menu dispatch
+        #expect(spy.wizardRequests == [btDevice().id])
+
+        let plain = DeviceRowView(device: btDevice(), showsToggle: true,
+                                  paintsSelectionBackground: false, showsMeter: true,
+                                  showsBus: true, showsSyncControls: false)
+        #expect(plain.test_contextMenu() == nil, "non-sync rows carry no alignment menu")
+    }
+
+    @Test func contextMenuAlignItemDisablesOnAGreyedRow() {
+        let row = makeRow(btDevice(available: false), delegate: SpyDelegate())
+        #expect(row.test_contextMenu()?.items.first?.isEnabled == false,
+                "no wizard offer over a silent target")
     }
 }
 

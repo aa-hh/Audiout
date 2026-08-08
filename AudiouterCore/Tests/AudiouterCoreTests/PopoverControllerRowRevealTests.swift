@@ -53,11 +53,18 @@ import Foundation
         return (panel, rows, panel.fittingSizeSettled().height)
     }
 
-    /// Let an `NSAnimationContext` group's implicit animations apply. Their
-    /// COMPLETION handlers never fire for a view that is in no window, so
-    /// nothing here may depend on `removeRow`'s deferred detach.
-    private func runAnimations() {
-        RunLoop.current.run(until: Date().addingTimeInterval(0.4))
+    /// Spin the run loop until `condition` holds — the reveal's constraint
+    /// animation is timer-driven, so under parallel-suite CPU contention it
+    /// owns no fixed pace and a single fixed sleep flakes (the roadmap-023
+    /// lesson). A missed deadline falls through to the caller's assertion,
+    /// which then reports the real value. COMPLETION handlers still never fire
+    /// for a view that is in no window, so nothing here may depend on
+    /// `removeRow`'s deferred detach.
+    private func settle(until condition: () -> Bool) {
+        let deadline = Date().addingTimeInterval(5)
+        while !condition() && Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+        }
     }
 
     // MARK: The published height
@@ -70,7 +77,7 @@ import Foundation
 
         #expect(panel.preferredContentSize.height == collapsed + Self.drawerHeight,
                 "the popover has to be told the FINAL height up front — it is what grows the window while the row unfolds into it")
-        runAnimations()
+        settle { panel.fittingSizeSettled().height == panel.preferredContentSize.height }
         #expect(drawer.isHidden == false, "the row ends the animation visible")
         #expect(panel.fittingSizeSettled().height == panel.preferredContentSize.height,
                 "content and published size agree once the animation settles")
@@ -88,7 +95,7 @@ import Foundation
 
         #expect(panel.preferredContentSize.height == collapsed + Self.drawerHeight,
                 "a re-mounted row must publish its height like a fresh one; measuring it while hidden published \(collapsed) and let the content overflow the popover")
-        runAnimations()
+        settle { drawer.isHidden == false }
         #expect(drawer.isHidden == false)
     }
 
@@ -168,5 +175,34 @@ import Foundation
 
         #expect(topOffsets() == before, "the collapse brings every row back to where it started")
         #expect(panel.preferredContentSize.height == beforeHeight)
+    }
+
+    // MARK: Re-mount during an animated close
+
+    /// The reused drawer's nastiest window (D2): an animated close's detach is
+    /// DEFERRED into its completion handler, so a re-open landing inside
+    /// `rowRevealDuration` finds the row still mounted in the CLOSING clip.
+    /// `insertRow` must evict that clip — left in place, its mid-close height
+    /// pollutes the fresh measurement (a residue nothing ever re-publishes
+    /// away), and its deferred detach would later rip the row back out of the
+    /// new mount. Headless is exactly the right harness here: the pending
+    /// completion never fires, so this pins the state the eviction must be
+    /// correct in.
+    @Test func reMountingDuringAnAnimatedCloseEvictsTheStaleClip() {
+        let (panel, rows, collapsed) = makePanel(rowCount: 2, reduceMotion: false)
+        let drawer = FixedRow(height: Self.drawerHeight)
+        panel.insertRow(drawer, after: rows[0], animated: true)
+        panel.removeRow(drawer, animated: true)     // detach stays pending headlessly
+
+        panel.insertRow(drawer, after: rows[1], animated: true)
+
+        let stack = rows[0].superview as? NSStackView
+        #expect(drawer.superview is RowClipView)
+        #expect(drawer.superview?.superview === stack,
+                "the drawer remounts under its NEW sibling, back in the body stack")
+        #expect(stack?.arrangedSubviews.filter { $0 is RowClipView }.count == 1,
+                "the closing clip was evicted — exactly one clip remains mounted")
+        #expect(panel.preferredContentSize.height == collapsed + Self.drawerHeight,
+                "the published height carries no residue from the evicted clip")
     }
 }

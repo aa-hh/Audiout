@@ -719,6 +719,21 @@ final class PopoverPanelViewController: NSViewController {
     /// assuming a fixed stack, so the row always lands where its sibling
     /// actually lives.
     func insertRow(_ view: NSView, after sibling: NSView, animated: Bool) {
+        // The single reused drawer (D2) can arrive still mounted in a CLOSING
+        // clip — `removeRow` defers its detach into the collapse's completion
+        // handler. Evict both NOW (before `sibling`'s index is read: the stale
+        // clip may sit ABOVE it in the same stack, and removing it shifts every
+        // index after it): left in place, the stale clip would sit in its old
+        // stack at its mid-close height while `fittingSizeSettled` below
+        // measures the panel (a residue nothing ever re-publishes away), and
+        // its deferred detach would later find the row still its child and rip
+        // it back out of THIS mount. Emptied and un-stacked, that closure's
+        // guards make it a no-op instead.
+        if let staleClip = view.superview as? RowClipView {
+            view.removeFromSuperview()
+            (staleClip.superview as? NSStackView)?.removeArrangedSubview(staleClip)
+            staleClip.removeFromSuperview()
+        }
         guard let stack = sibling.superview as? NSStackView,
               let index = stack.arrangedSubviews.firstIndex(of: sibling)
         else { return }
@@ -792,8 +807,11 @@ final class PopoverPanelViewController: NSViewController {
             self.publishContentSize(target, animated: true)
         }, completionHandler: {
             // Let the row flex with its own content again once it has arrived
-            // (a mounted drawer/panel can re-lay itself out while open).
-            clip.heightConstraint.isActive = false
+            // (a mounted drawer/panel can re-lay itself out while open) —
+            // unless a close has since begun on this clip: deactivating the
+            // very constraint the close is animating would pop the row back
+            // open mid-collapse.
+            if !clip.isClosing { clip.heightConstraint.isActive = false }
         })
     }
 
@@ -815,12 +833,14 @@ final class PopoverPanelViewController: NSViewController {
         // nothing ever measured again once it did: the popover stayed permanently
         // taller than its content, one row's worth per removal. See `insertRow`.
         let detach = { [weak self] in
-            // The clip may have LEFT this stack while the collapse ran — a row
-            // that is a single reused instance (the BT sync drawer) can be
-            // re-mounted under a different sibling before this fires, and
-            // `removeArrangedSubview` on a stack the view no longer belongs to
-            // raises. Whoever re-parented it already republished the height.
-            guard clip.superview === stack else { return }
+            // The clip may have LEFT this stack while the collapse ran (a
+            // re-mount's eviction in `insertRow`, or the whole card torn down
+            // by a rebuild), and the ROW may have left the clip (`rebuild()`'s
+            // explicit drawer detach) — `removeArrangedSubview` against a stack
+            // the view no longer belongs to raises, and touching `view` once it
+            // is someone else's child would rip it out of its new mount.
+            // Whoever moved either of them already owns the height.
+            guard clip.superview === stack, view.superview === clip else { return }
             // Hand the row back detached and un-hidden — it is reusable, and the
             // clip is not (a fresh mount builds its own).
             view.removeFromSuperview()
@@ -830,6 +850,10 @@ final class PopoverPanelViewController: NSViewController {
         }
         // Same Reduce Motion gate as `insertRow` above (and `setCardCollapsed`).
         guard animated && !reduceMotion else { detach(); return }
+        // Marks the clip for `insertRow`'s completion handler: a reveal that
+        // finishes after this close began must not deactivate the constraint
+        // the close is animating.
+        clip.isClosing = true
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = Self.rowRevealDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
@@ -1202,6 +1226,11 @@ final class RowClipView: NSView {
     /// The animated height. Active only while a reveal/collapse is in flight or
     /// pinned at 0; inactive once expanded, so the row flexes with its content.
     private(set) var heightConstraint: NSLayoutConstraint!
+
+    /// Set by `removeRow` the moment an animated close begins, so a still-
+    /// pending reveal completion knows not to deactivate `heightConstraint`
+    /// out from under the close. Never reset — every mount builds a new clip.
+    var isClosing = false
 
     init(row: NSView) {
         super.init(frame: .zero)

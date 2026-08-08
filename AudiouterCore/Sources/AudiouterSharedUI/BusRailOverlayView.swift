@@ -173,7 +173,11 @@ public final class BusRailOverlayView: NSView {
             let onSpine = Self.onSpine(stop.node)
             let stopR = MembershipBusView.nodeRadius(for: stop.node)
             // Segment tone (Warm Signal v4 §Call-1 + v4.1 items 3/4/9):
-            //   • member (connected)  → GOLD (the lit spine at rest),
+            //   • member (connected)  → the SPINE TONE (`originColor`) — gold on
+            //     a live spine, ember on a dormant one. It reuses the HOOK's own
+            //     resolution rather than naming `gold` again, because the hook's
+            //     corner and the line leaving it are one continuous stroke: a
+            //     second call site here can pick a tone the corner didn't,
             //   • pending / connecting → ember (the energize "coming online" sweep),
             //   • FAILED               → DIM (item 9 — the red node carries failure),
             //   • dormant-divergent    → DIM (the §4.7 tint the node uses).
@@ -181,7 +185,7 @@ public final class BusRailOverlayView: NSView {
             if stop.dimmed || stop.node == .failed {
                 segColor = Tokens.Color.tertiaryLabel
             } else if stop.node == .member {
-                segColor = Tokens.Color.gold
+                segColor = originColor
             } else {
                 segColor = Tokens.Color.ember
             }

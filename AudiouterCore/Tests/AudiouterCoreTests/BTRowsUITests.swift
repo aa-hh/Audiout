@@ -307,18 +307,20 @@ import AppKit
         Device(id: id, name: "Office", kind: .homePod)
     }
 
-    private func bt(_ id: String, name: String, available: Bool = true) -> Device {
+    private func bt(_ id: String, name: String, available: Bool = true,
+                    state: ConnectionState = .off) -> Device {
         Device(id: id, name: name, kind: .bluetooth,
-               isAvailable: available, supportsAirPlay2: false)
+               isAvailable: available, supportsAirPlay2: false, connectionState: state)
     }
 
-    // MARK: Subsection — hide-when-empty + recency sort
+    // MARK: Subsection — always renders (BT-LIST) + recency sort
 
-    @Test func bluetoothSubsectionIsHiddenWhenNoBTDeviceExists() {
+    @Test func bluetoothSubsectionHeaderAlwaysRendersWithAConnectRowWhenEmpty() {
         let (popover, _, _) = makePopover()
         popover.update(devices: [local(), airplay()])
-        #expect(popover.test_subsectionTitles() == ["This Mac", "AirPlay Devices"])
+        #expect(popover.test_subsectionTitles() == ["This Mac", "AirPlay Devices", "Bluetooth Devices"])
         #expect(popover.test_bluetoothRowOrder().isEmpty)
+        #expect(popover.test_bluetoothConnectRowShown())
     }
 
     @Test func bluetoothSubsectionRendersAfterAirPlaySortedByRecency() {
@@ -329,11 +331,13 @@ import AppKit
              "bt-new:output": now]
             // "bt-ghost:output" has no recency at all — the deadest pairing.
         }
+        // All three must be AVAILABLE (BT-LIST is connected-only) or the
+        // unlisted two would have no row to sort at all.
         popover.update(devices: [
             local(), airplay(),
-            bt("bt-ghost:output", name: "Ancient Speaker", available: false),
+            bt("bt-ghost:output", name: "Ancient Speaker"),
             bt("bt-new:output", name: "Zed Speaker"),
-            bt("bt-old:output", name: "Attic Speaker", available: false),
+            bt("bt-old:output", name: "Attic Speaker"),
         ])
         #expect(popover.test_subsectionTitles()
                 == ["This Mac", "AirPlay Devices", "Bluetooth Devices"])
@@ -415,9 +419,13 @@ import AppKit
     }
 
     @Test func disconnectedRowShowsPersistedTrimReadOnly() {
-        let (popover, _, _) = makePopover()
+        // BT-LIST: a disconnected row only renders while it is IN THE MIX, so
+        // it must be selected ("play when up") before going unavailable.
+        let (popover, _, _) = makePopover(fleet: [local(), bt("bt-a:output", name: "Speaker A")])
         popover.btTrimProvider = { _ in -50 }
         popover.btTrimIsSetProvider = { _ in true }
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A", available: false)])
+        _ = popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
         popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A", available: false)])
         let row = popover.test_deviceRow(for: "bt-a:output")
         #expect(row?.test_syncChipTitle == "−50 ms")
@@ -473,7 +481,8 @@ import AppKit
         popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A", available: false)])
         #expect(!controller.selectedDeviceIDs.contains("bt-a:output"),
                 "availability loss deselects — the row reads what's true")
-        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_isEnabledOn == false)
+        #expect(popover.test_deviceRow(for: "bt-a:output") == nil,
+                "BT-LIST: delisted, not greyed — deselect and delist are the same edge now")
 
         // Return: available, still unselected, NOT playing.
         popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
@@ -489,6 +498,9 @@ import AppKit
     /// The edge-only guard: a selection made ON an already-greyed row ("play
     /// when up") has no loss edge, so it SURVIVES repaints while the device is
     /// still away — that deliberate intent is what auto-starts on connect.
+    /// BT-LIST: this greyed-select entry point now only exists for IN-MIX rows
+    /// (`wantsAudio`/`isMainOutMember` keep `isBluetoothRowListed` true) — the
+    /// row stays on screen the whole time, never delisted mid-selection.
     @Test func selectionMadeOnAGreyedRowSurvivesWhileStillUnavailable() {
         let (popover, controller, _) = makePopover(fleet: [local(), bt("bt-a:output", name: "Speaker A")])
         popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A", available: false)])
@@ -498,18 +510,30 @@ import AppKit
         popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A", available: false)])
         #expect(controller.selectedDeviceIDs.contains("bt-a:output"),
                 "no availability EDGE ⇒ the held intent survives every repaint")
+        #expect(popover.test_deviceRow(for: "bt-a:output") != nil,
+                "in-mix keeps the row even while unavailable")
     }
 
     // MARK: Greyed-row click keeps membership honest end-to-end
 
     @Test func greyedBTRowClickNeverEditsSelection() {
         let (popover, controller, _) = makePopover(fleet: [local(), bt("bt-a:output", name: "Speaker A")])
+        // BT-LIST: a greyed row only renders while the user still intends audio
+        // on it — here, in the mix "play when up" — since a plain unselected/
+        // unavailable BT device has no row at all any more (a sticky `.failed`
+        // does NOT list one either; see `isBluetoothRowListed`).
         popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A", available: false)])
+        _ = popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A", available: false)])
+        #expect(popover.test_deviceRow(for: "bt-a:output") != nil,
+                "the select must have remounted the row, or this test checks nothing")
         popover.test_deviceRow(for: "bt-a:output")?.test_clickName()
-        #expect(!controller.selectedDeviceIDs.contains("bt-a:output"),
+        #expect(controller.selectedDeviceIDs.contains("bt-a:output"),
                 "click-connects is membership-free (requestReconnect, never setDeviceSelected)")
 
-        // An AVAILABLE BT row's click selects — exactly like AirPlay rows.
+        // An AVAILABLE BT row's click selects — exactly like AirPlay rows. The
+        // checkbox (not the click under test) clears the held intent first.
+        _ = popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: false)
         popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A", available: true)])
         popover.test_deviceRow(for: "bt-a:output")?.test_clickName()
         #expect(controller.selectedDeviceIDs.contains("bt-a:output"))

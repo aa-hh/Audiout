@@ -40,9 +40,7 @@ final class PopoverPanelViewController: NSViewController {
         let label: String
         /// Tapped handler.
         let action: () -> Void
-        /// Whether the accessory button starts enabled (F1 support — a card's
-        /// accessory can go inert in place, later, via
-        /// `setAccessoryEnabled(title:enabled:)`, without rebuilding the card).
+        /// Whether the accessory button starts enabled (F1 support).
         /// Defaults to `true` so existing call sites are unaffected.
         let isEnabled: Bool
 
@@ -76,8 +74,7 @@ final class PopoverPanelViewController: NSViewController {
     /// entire `headerWrap` row is a collapse click target, not just the
     /// chevron + title; kept for the `test_fireHeaderClick` hook).
     private var headerClickRecognizersByHeader: [String: NSClickGestureRecognizer] = [:]
-    /// Header accessory buttons keyed by section title (F1 — so the host can
-    /// enable/disable one in place via `setAccessoryEnabled` without a rebuild).
+    /// Header accessory buttons keyed by section title (F1).
     private var accessoryButtonsByHeader: [String: NSButton] = [:]
     /// Card-note labels (`addCardNote`) keyed by section title, in add order
     /// (A1 test hook).
@@ -309,60 +306,43 @@ final class PopoverPanelViewController: NSViewController {
         return contentContainer.fittingSize
     }
 
-    /// The single resize primitive (T-3 → consumed by the collapsible-sections task
-    /// T-4). Settle layout, then publish the new size through the popover's
-    /// DOCUMENTED size channel: `contentViewController.preferredContentSize`.
-    /// `NSPopover` observes this property and, when `popover.animates` is true,
-    /// animates the frame change ON ITS OWN — so we do NOT set `popover.contentSize`
-    /// directly, and we do NOT wrap the assignment in an `NSAnimationContext`
-    /// (there is no `animator()` proxy on `NSViewController`; the popover, not us,
-    /// runs the resize animation). One channel, used consistently: PLAN §E risk 1
-    /// "prefer the preferredContentSize channel".
-    ///
-    /// `animated` selects the animation via `PopoverController.setPopoverAnimates`
-    /// (the controller owns the `NSPopover`): it toggles `popover.animates` around
-    /// the `preferredContentSize` assignment. The non-animated path is used for the
-    /// initial show and when `NSWorkspace.shared.accessibilityDisplayShouldReduceMotion`
-    /// is true (the jank escape hatch); it applies the size with `animates` forced
-    /// off so no frame animation runs. Because `NSPopover` retargets a
-    /// `preferredContentSize` change mid-flight against its own running animation,
-    /// rapid expand/collapse toggles glide rather than fight (PLAN §E risk 1
-    /// "retargetable rapid toggles"). T-4 animates a card's clip-height constraint
-    /// alongside this so the panel and popover agree.
-    func panelContentDidChangeHeight(animated: Bool) {
-        publishContentSize(fittingSizeSettled(), animated: animated)
+    /// The single resize primitive: settle layout, then publish the exact-fit
+    /// size through `contentViewController.preferredContentSize`. **The
+    /// surface never animates its own resize.** `NSPopover` animates a size
+    /// change whenever `animates` is true (`NSPopover.h`) and offers no
+    /// `animator()` proxy to pace it, so an animated resize is a second,
+    /// un-cancellable writer of the popover's frame — a publish that lands
+    /// while one is in flight leaves the surface travelling to a superseded
+    /// target, and a surface shorter than its content is the unsatisfiable
+    /// direction of the surplus shield (`loadView`): Auto Layout deforms the
+    /// CONTENT. That was the live "a second quick click shoves everything
+    /// up" (subsection toggle) and the drawer's judder, 2026-08-08. The
+    /// timing instead lives in the direction of the publish: a GROW
+    /// publishes the final size up front, so the surface leads and is only
+    /// ever taller than its content while the clip unfolds into it; a
+    /// SHRINK publishes once the content has settled, so the surface trails.
+    func panelContentDidChangeHeight() {
+        publishContentSize(fittingSizeSettled())
     }
 
-    /// Publish an ALREADY-MEASURED size through the same channel. Split out for
-    /// `insertRow`, which has to measure the row's final height while the row is
-    /// visible but publish it later, once the collapsed start state is laid out —
-    /// re-measuring at that point would read the collapsed height and tell the
-    /// popover to stay put.
-    private func publishContentSize(_ target: NSSize, animated: Bool) {
-        let wantsAnimation = animated && !reduceMotion
-        // Assigning `preferredContentSize` is the sole size channel; NSPopover
-        // animates iff `popover.animates` is true when the assignment happens.
-        if let controller {
-            // …but that animation runs on a timeline of the popover's own
-            // choosing, which on screen read as the surface's bottom edge
-            // SNAPPING while the row itself glided (live report, 2026-08-08:
-            // "the bottom kind of doesn't animate, it just shifts"). When a
-            // caller is already inside an animation group, hand the frame
-            // travel to the controller so it inherits THAT duration and curve
-            // and the whole surface moves as one.
-            if wantsAnimation {
-                controller.animatePopoverContentSize(to: target) { [weak self] in
-                    self?.preferredContentSize = target
-                }
-                return
-            }
-            controller.setPopoverAnimates(wantsAnimation) { [weak self] in
-                self?.preferredContentSize = target
-            }
-        } else {
+    /// Publish an ALREADY-MEASURED size through the popover's documented size
+    /// channel. Split out for `insertRow`, which has to measure the row's final
+    /// height while the row is visible but publish it later, once the collapsed
+    /// start state is laid out — re-measuring at that point would read the
+    /// collapsed height and tell the popover to stay put.
+    ///
+    /// The surface NEVER animates its own resize: `animates` is forced off for
+    /// the assignment, so the popover is simply told the size and takes it. All
+    /// motion lives in the content clips.
+    private func publishContentSize(_ target: NSSize) {
+        guard let controller else {
             // No controller (offscreen harness/snapshot): still publish the size so
             // `fittingSize`/`preferredContentSize` are exact for the render.
             preferredContentSize = target
+            return
+        }
+        controller.setPopoverAnimates(false) { [weak self] in
+            self?.preferredContentSize = target
         }
     }
 
@@ -522,11 +502,9 @@ final class PopoverPanelViewController: NSViewController {
 
         if let accessory {
             // The trailing header accessory (task D — the Groups "+"; F1 — the
-            // button is kept alive and keyed by header title so the host can
-            // enable/disable it in place later via `setAccessoryEnabled`, without
-            // rebuilding the card). Styled with the same stock bezel
-            // (`bezelStyle = .smallSquare`) as the header icon buttons
-            // (`PopoverHeaderView`).
+            // button is kept alive and keyed by header title). Styled with the
+            // same stock bezel (`bezelStyle = .smallSquare`) as the header icon
+            // buttons (`PopoverHeaderView`).
             let button = NSButton()
             button.translatesAutoresizingMaskIntoConstraints = false
             button.bezelStyle = .smallSquare
@@ -618,20 +596,6 @@ final class PopoverPanelViewController: NSViewController {
         if collapsible { pendingCollapsed[header] = collapsed }
     }
 
-    /// Enable/disable the header accessory button for `title` in place (F1 — a
-    /// card's accessory, e.g. the Groups "+", can go inert while its action's
-    /// precondition isn't met), without rebuilding the card. No-op if `title`
-    /// has no accessory button.
-    func setAccessoryEnabled(title: String, enabled: Bool) {
-        accessoryButtonsByHeader[title]?.isEnabled = enabled
-    }
-
-    /// The header accessory button for `title`, if the card has one — the
-    /// anchor view for an accessory that fronts a menu (the Devices "+").
-    func accessoryButton(title: String) -> NSButton? {
-        accessoryButtonsByHeader[title]
-    }
-
     /// Add a content row (Main Out row, group header, device row) into the
     /// current card's COLLAPSIBLE body, full card width. On the first body row of
     /// a card that opened collapsed, apply the initial collapsed end state (no
@@ -661,7 +625,7 @@ final class PopoverPanelViewController: NSViewController {
     /// programmatic) applies both end states synchronously. Flips the chevron
     /// symbol to match. No-op if `title` isn't a collapsible card.
     ///
-    /// The popover resize runs via `panelContentDidChangeHeight(animated:)`, which
+    /// The popover resize runs via `panelContentDidChangeHeight()`, which
     /// already gates itself on `accessibilityDisplayShouldReduceMotion`; the card
     /// animation is gated the same way here so both honor Reduce Motion together.
     @discardableResult
@@ -678,12 +642,12 @@ final class PopoverPanelViewController: NSViewController {
             // Republish the exact-fit size once the card settles (non-animated tail
             // for the completion; the in-flight popover resize below already tracked
             // the animation).
-            if !wantsAnimation { self?.panelContentDidChangeHeight(animated: false) }
+            if !wantsAnimation { self?.panelContentDidChangeHeight() }
         }
         // Kick the popover resize in the SAME turn as the card animation so both
         // run together (NSPopover animates its `preferredContentSize` change at its
         // own pace; matching 0.2s keeps them in step — PLAN §E risk 1).
-        if wantsAnimation { panelContentDidChangeHeight(animated: true) }
+        if wantsAnimation { panelContentDidChangeHeight() }
         return true
     }
 
@@ -789,7 +753,7 @@ final class PopoverPanelViewController: NSViewController {
         // (the `isHidden = false` above), at its published size — the end state,
         // instantly.
         guard animated && !reduceMotion else {
-            publishContentSize(target, animated: false)
+            publishContentSize(target)
             return
         }
 
@@ -811,13 +775,14 @@ final class PopoverPanelViewController: NSViewController {
             clip.heightConstraint.animator().constant = revealHeight
             self.stackView.layoutSubtreeIfNeeded()
             // Grow the SURFACE in the same turn, to the height measured above.
-            // The clip's height is now a genuinely INTERPOLATED quantity, so the
-            // content trails the popover's own (shorter, for a row-sized delta)
-            // frame animation the whole way — the SAFE direction of the surplus
-            // shield: a popover briefly taller than its content shows inert
-            // canvas, where a popover shorter than its content is the
-            // unsatisfiable case that deforms it.
-            self.publishContentSize(target, animated: true)
+            // `publishContentSize` forces `animates = false`, so the surface
+            // jumps to `target` immediately — only the clip's height constraint
+            // is genuinely INTERPOLATED, unfolding the row under a surface
+            // that's already at its final size. That's the SAFE direction of
+            // the surplus shield: a popover briefly taller than its content
+            // shows inert canvas, where a popover shorter than its content is
+            // the unsatisfiable case that deforms it.
+            self.publishContentSize(target)
         }, completionHandler: {
             // Let the row flex with its own content again once it has arrived
             // (a mounted drawer/panel can re-lay itself out while open) —
@@ -836,7 +801,7 @@ final class PopoverPanelViewController: NSViewController {
         guard let clip = view.superview as? RowClipView,
               let stack = clip.superview as? NSStackView else {
             view.removeFromSuperview()
-            panelContentDidChangeHeight(animated: animated)
+            panelContentDidChangeHeight()
             return
         }
         // The detach is DEFERRED into the animation's completion handler, so the
@@ -859,7 +824,7 @@ final class PopoverPanelViewController: NSViewController {
             view.removeFromSuperview()
             stack.removeArrangedSubview(clip)
             clip.removeFromSuperview()
-            self?.panelContentDidChangeHeight(animated: false)
+            self?.panelContentDidChangeHeight()
         }
         // Same Reduce Motion gate as `insertRow` above (and `setCardCollapsed`).
         guard animated && !reduceMotion else { detach(); return }
@@ -879,11 +844,11 @@ final class PopoverPanelViewController: NSViewController {
             clip.heightConstraint.isActive = true
             self.stackView.layoutSubtreeIfNeeded()
             clip.heightConstraint.animator().constant = 0
-            // Kick the popover resize in the SAME turn as the clip's close so the
-            // two glide together rather than the panel snapping shut after it (the
-            // precedent `setCardCollapsed` sets). The `detach` above then publishes
-            // the exact end state, so a mid-flight mismeasure can't persist.
-            self.panelContentDidChangeHeight(animated: true)
+            // Re-fit in the same turn; the clip has not shrunk yet, so this
+            // republishes the CURRENT height. The `detach` above publishes the
+            // shrunk end state once the row is actually gone — the surface
+            // trails a shrink.
+            self.panelContentDidChangeHeight()
         }, completionHandler: detach)
     }
 
@@ -1206,6 +1171,12 @@ final class PopoverPanelViewController: NSViewController {
     /// if none were added or `title` isn't a card.
     func test_cardNotes(title: String) -> [NSTextField] {
         notesByHeader[title] ?? []
+    }
+
+    /// The body rows of card `title` in display order. Empty if `title` isn't a
+    /// card — the assertion surface for a row's POSITION within its card.
+    func test_cardRows(title: String) -> [NSView] {
+        cardsByHeader[title]?.test_bodyRows ?? []
     }
 }
 

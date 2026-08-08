@@ -26,14 +26,21 @@ public struct RunningAppInfo: Equatable {
     }
 }
 
-/// The Applications card's **± footer** (T3, LOCKED DECISION): a single
-/// `NSSegmentedControl` (`.momentaryAccelerator`) with two segments — "plus"
-/// opens the existing running-app picker, "minus" removes the currently
-/// selected app row. Pure UI: both actions route back through `onAdd`/
-/// `onRemove` closures so `PopoverController` stays the only thing that talks
-/// to `AppRoutingController`. Replaces the retired full-width "Add
-/// application…" row as the card's sole add affordance.
-private final class ApplicationsFooterView: NSView {
+/// A card's bottom **± footer strip** (T3, LOCKED DECISION): a single
+/// `NSSegmentedControl` (`.momentaryAccelerator`) pinned to the card's leading
+/// inset — the macOS list-management shape (System Settings / Contacts /
+/// Keychain sidebars), never a full-width labelled button. Pure UI: both
+/// actions route back through `onAdd`/`onRemove` closures so
+/// `PopoverController` stays the only thing that talks to the controllers.
+///
+/// Two users, ONE construction so the popover has a single "add a thing to
+/// this list" affordance: Applications takes both segments ("+" opens the
+/// running-app picker, "−" removes the selected row); OUTPUT DEVICES takes
+/// `showsRemove: false` — its "+" fronts the add MENU and there is no
+/// remove (a device leaves the list by going away, never by a button).
+/// Segment metrics are identical either way, so the two "+" glyphs sit on the
+/// same left edge at the same size.
+private final class CardFooterView: NSView {
 
     private enum Segment: Int { case add = 0, remove = 1 }
 
@@ -41,8 +48,10 @@ private final class ApplicationsFooterView: NSView {
     var onRemove: (() -> Void)?
 
     private let segmented = NSSegmentedControl()
+    private let showsRemove: Bool
 
-    init() {
+    init(showsRemove: Bool = true) {
+        self.showsRemove = showsRemove
         super.init(frame: NSRect(x: 0, y: 0, width: 320,
                                  height: PopoverColumnGrid.applicationsFooterRowHeight))
         autoresizingMask = [.width]
@@ -53,19 +62,22 @@ private final class ApplicationsFooterView: NSView {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     private func buildSubviews() {
+        let segmentWidth = PopoverColumnGrid.applicationsFooterControlWidth / 2
         segmented.translatesAutoresizingMaskIntoConstraints = false
         segmented.segmentStyle = .texturedRounded
         segmented.trackingMode = .momentaryAccelerator
-        segmented.segmentCount = 2
-        let addSymbol = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add application")
-        let removeSymbol = NSImage(systemSymbolName: "minus", accessibilityDescription: "Remove application")
+        segmented.segmentCount = showsRemove ? 2 : 1
+        let addSymbol = NSImage(systemSymbolName: "plus", accessibilityDescription: "Add")
         segmented.setImage(addSymbol, forSegment: Segment.add.rawValue)
-        segmented.setImage(removeSymbol, forSegment: Segment.remove.rawValue)
-        segmented.setWidth(PopoverColumnGrid.applicationsFooterControlWidth / 2, forSegment: Segment.add.rawValue)
-        segmented.setWidth(PopoverColumnGrid.applicationsFooterControlWidth / 2, forSegment: Segment.remove.rawValue)
+        segmented.setWidth(segmentWidth, forSegment: Segment.add.rawValue)
+        if showsRemove {
+            let removeSymbol = NSImage(systemSymbolName: "minus", accessibilityDescription: "Remove")
+            segmented.setImage(removeSymbol, forSegment: Segment.remove.rawValue)
+            segmented.setWidth(segmentWidth, forSegment: Segment.remove.rawValue)
+        }
         segmented.target = self
         segmented.action = #selector(segmentTapped(_:))
-        segmented.setAccessibilityLabel("Add or remove application")
+        segmented.setAccessibilityLabel(showsRemove ? "Add or remove application" : "Add a device")
 
         addSubview(segmented)
 
@@ -74,7 +86,8 @@ private final class ApplicationsFooterView: NSView {
             segmented.leadingAnchor.constraint(equalTo: leadingAnchor,
                                                constant: PopoverColumnGrid.leadingInset),
             segmented.centerYAnchor.constraint(equalTo: centerYAnchor),
-            segmented.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.applicationsFooterControlWidth),
+            segmented.widthAnchor.constraint(
+                equalToConstant: showsRemove ? segmentWidth * 2 : segmentWidth),
             segmented.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.applicationsFooterControlHeight),
         ])
     }
@@ -376,55 +389,6 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         }
     }
 
-    // MARK: Per-device visibility (display only)
-
-    /// The devices the user has hidden from the popover, `id -> last-known
-    /// name`. DISPLAY ONLY — hiding never touches selection, group membership
-    /// or routing (the R12 spirit: a display action never edits routing
-    /// intent), so a hidden device keeps streaming and keeps its checkbox
-    /// state. The name is stored alongside the id so the restore menu can name
-    /// a device that isn't currently discovered.
-    private var hiddenDeviceNames: [String: String] = [:]
-
-    /// Persistence for `hiddenDeviceNames`. `nil` (the default) keeps hiding
-    /// session-only, so tests and the dev harnesses never read or write the
-    /// real Application Support file; the app injects the on-disk store.
-    /// Assigning one loads it and rebuilds.
-    public var hiddenDeviceStore: HiddenDeviceStore? {
-        didSet {
-            hiddenDeviceNames = ((try? hiddenDeviceStore?.load()) ?? nil) ?? [:]
-            // Hidden means idle (B8): the app assigns the store at launch with
-            // the popover closed (and before `configure`), and every open runs
-            // `rebuildForOpen()` over the loaded set anyway.
-            guard isEffectivelyShown else { return }
-            rebuild()
-        }
-    }
-
-    /// A stored hide only TAKES EFFECT while the device is out of the mix.
-    /// Enforcing it in the predicate rather than at the menu is what makes it
-    /// an invariant: the row can also become live without any hide decision
-    /// being made — routing an app straight at a hidden speaker does it — and
-    /// a playing device with no row means no volume, no mute, and no way to
-    /// stop it. The stored intent survives, so the row hides itself again once
-    /// it leaves the mix.
-    private func isDeviceHidden(_ id: String) -> Bool {
-        hiddenDeviceNames[id] != nil && !wantsAudio(id)
-    }
-
-    /// Keep each hidden device's stored name current while it is still
-    /// discovered, so the restore menu can't offer a name the device has since
-    /// been renamed away from. Only a real change writes to disk.
-    private func refreshHiddenDeviceNames() {
-        var changed = false
-        for (id, name) in hiddenDeviceNames {
-            guard let current = devicesByID[id]?.name, current != name else { continue }
-            hiddenDeviceNames[id] = current
-            changed = true
-        }
-        if changed { try? hiddenDeviceStore?.save(hiddenDeviceNames) }
-    }
-
     private let panel = PopoverPanelViewController()
 
     /// The single System-section Main Out row.
@@ -460,6 +424,22 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// The mounted `ConnectionDiagnosisView` per device id — the view-layer
     /// mirror of `openDiagnosisIDs`, rebuilt by `reconcileDiagnosisPanels`.
     private var diagnosisPanelsByID: [String: ConnectionDiagnosisView] = [:]
+
+    /// Bluetooth devices the user explicitly asked to connect from the "+" menu
+    /// during THIS popover session — listed while the attempt is in flight and
+    /// while its outcome is still on screen, then dropped on close.
+    ///
+    /// This is why the listing predicate does NOT simply take any device whose
+    /// `connectionState != .off`. `.failed` is STICKY and clears only on an
+    /// availability edge or a full disappearance, and a paired Bluetooth device
+    /// reaches neither: macOS keeps pairing records forever. A failed attempt — an
+    /// off speaker, a deleted pairing's `.notPaired`, `.unauthorized` with no
+    /// Bluetooth grant — would mint a row that never leaves, and one carrying no
+    /// diagnosis panel either (that intent is pruned for anything failing
+    /// `wantsAudio`), so the user could neither understand it nor dismiss it.
+    /// Session-scoped instead: the outcome is visible while you are looking at
+    /// it, and the list is clean again on the next open.
+    private var btConnectAttemptIDs: Set<String> = []
 
     // MARK: Energize (Warm Signal v4.1 item 9 — source-switch "press-play")
 
@@ -519,17 +499,14 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
 
     /// The Applications card's ± footer row (T3, LOCKED DECISION — replaces
     /// the retired "+ Add application…" row as the card's add affordance).
-    private let applicationsFooter = ApplicationsFooterView()
+    private let applicationsFooter = CardFooterView()
 
-    /// Whether the LAST `rebuild()` mounted the Devices card's "Looking for
-    /// devices…" empty-state placeholder (V2) — recorded per rebuild so tests can
-    /// assert it appears with no devices and vanishes once devices arrive.
-    private var devicesPlaceholderShown = false
-
-    /// The placeholder copy the last `rebuild()` actually mounted (`nil` =
-    /// none). Two strings share the slot — "Looking for devices…" and the
-    /// all-hidden state — and only one of them is ever honest.
-    private var renderedDevicesPlaceholderText: String?
+    /// The OUTPUT DEVICES card's footer row: the "+" that fronts
+    /// `makeOutputDevicesPlusMenu()`. Lives at the BOTTOM of the card, below
+    /// every subsection (Alec's call, 2026-08-08 — a list-management control
+    /// belongs under the list, not in the column-title header row). Add-only:
+    /// nothing removes a device from the list.
+    private let devicesFooter = CardFooterView(showsRemove: false)
 
     /// Whether the LAST `rebuild()` mounted the Applications card's "No apps
     /// routed…" empty-state placeholder (V11).
@@ -631,6 +608,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             self.presentAddApplicationPicker(relativeTo: self.applicationsFooter)
         }
         applicationsFooter.onRemove = { [weak self] in self?.removeSelectedApp() }
+        devicesFooter.onAdd = { [weak self] in self?.presentOutputDevicesPlusMenu() }
         rebuild()
     }
 
@@ -646,7 +624,6 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     public func update(devices: [Device]) {
         let previousDevices = devicesByID
         devicesByID = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0) })
-        refreshHiddenDeviceNames()
         // A SELECTED Bluetooth device that LOSES availability is DESELECTED
         // (Alec's call — off = unselected, replacing the backend's power-off
         // park). Both loss paths — a listed-but-disconnected snapshot AND a
@@ -738,19 +715,21 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // the menus go stale until the next reopen.
         // STABILITY(D4): this full rebuild can run mid-slider-drag and detach the row under the cursor — skip or defer while any row's drag flag is live; see dev/notes/stability-audit-2026-07-18.md
         // Compared against what SHOULD render, not against every known device:
-        // a hidden device (or one in a collapsed subsection) deliberately has no
-        // row, and comparing the whole fleet would read that as a permanent
-        // structural change and rebuild on every backend event. Headers are
-        // structure too: a COLLAPSED subsection contributes no rows to the
-        // compare, but its header must still appear the moment its type gains
-        // a first device, and go when the last one does.
-        let expectedSubsections = deviceSections().filter { !$0.devices.isEmpty }.map(\.title)
+        // an unlisted Bluetooth device (or one in a collapsed subsection)
+        // deliberately has no row, and comparing the whole fleet would read
+        // that as a permanent structural change and rebuild on every backend
+        // event. Headers are structure too: a COLLAPSED subsection contributes
+        // no rows to the compare, but its header must still appear the moment
+        // its type gains a first device, and go when the last one does — and
+        // Bluetooth's header is ALWAYS expected (`rendersHeader`), never only
+        // when it has rows.
+        let expectedSubsections = deviceSections().filter { rendersHeader($0) }.map(\.title)
         let deviceSetChanged = Set(renderedDeviceOrder().map(\.id)) != Set(deviceRowsByID.keys)
             || expectedSubsections != renderedSubsectionTitles
         if isEffectivelyShown {
             if routesChanged || deviceSetChanged || validTargetsChanged || mainOutMembersChanged {
                 rebuild()
-                panel.panelContentDidChangeHeight(animated: true)
+                panel.panelContentDidChangeHeight()
             } else {
                 // A failure auto-deselect (handleConnectionTransitions above) can
                 // change the checked set under a group target, flipping the
@@ -811,7 +790,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // is preserved — same discipline as `applyRoutedApps`.
         if isEffectivelyShown {
             rebuild()
-            panel.panelContentDidChangeHeight(animated: false)
+            panel.panelContentDidChangeHeight()
         }
     }
 
@@ -835,7 +814,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             // Update the banner in place and re-fit; not a full rebuild — the cards are
             // unchanged, only the pinned banner appears/disappears.
             panel.setBanner(active ? Self.localFallbackBannerText : nil)
-            panel.panelContentDidChangeHeight(animated: true)
+            panel.panelContentDidChangeHeight()
         }
         // When not shown, the next `rebuildForOpen()` re-applies it from
         // `localFallbackActive` (see the tail of `rebuild()`).
@@ -926,7 +905,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         guard isEffectivelyShown else { return }
         let note = resolvedSystemAirPlayNote
         panel.setSystemAirPlayNote(note.text, action: note.action, severity: note.severity)
-        panel.panelContentDidChangeHeight(animated: true)
+        panel.panelContentDidChangeHeight()
         // When not shown, the next `rebuildForOpen()` re-applies this from the
         // tail of `rebuild()`.
     }
@@ -1030,7 +1009,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
             // on a not-yet-shown popover never animates, so this is safe to do with
             // `animates` left true — the show fade below still plays; only later,
             // IN-PLACE resizes (T-4 expand/collapse) animate the frame.
-            panel.panelContentDidChangeHeight(animated: false)
+            panel.panelContentDidChangeHeight()
             // Never actually present under `swift test`/a headless tool
             // (`HeadlessRuntime`) — those hold a real WindowServer connection,
             // so an un-gated `popover.show` would flash a real window on the
@@ -1059,65 +1038,6 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         popover.animates = animates
         apply()
         popover.animates = previous
-    }
-
-    /// The in-flight surface resize, if any. Kept so a second resize retargets
-    /// from wherever the first one had reached instead of two of them fighting
-    /// over `contentSize` (rapid drawer toggles do exactly this).
-    private var contentSizeTravel: Timer?
-
-    /// Publish a new size and walk the popover's own frame to it over the
-    /// CALLER's animation duration, so the surface's bottom edge travels with
-    /// the content instead of arriving before it.
-    ///
-    /// Live report, 2026-08-08: the sync drawer glided open while "the bottom
-    /// kind of doesn't animate, it just shifts". `preferredContentSize` is the
-    /// documented size channel and the popover does resize from it, but on a
-    /// pacing of its own that no ambient `NSAnimationContext` reaches — and
-    /// `NSPopover`, unlike a view or a window, is NOT an
-    /// `NSAnimatablePropertyContainer`, so there is no `animator()` proxy to
-    /// borrow the caller's timing with. Stepping `contentSize` ourselves is the
-    /// remaining way to make the whole surface move as one motion.
-    ///
-    /// `preferredContentSize` is still published UP FRONT, with the popover's
-    /// own animation suppressed. It stays the size of record, the panel's
-    /// measurements read it, and it decides where any AppKit-initiated layout
-    /// mid-travel would land — on the TARGET, i.e. this animation's end state.
-    /// That ordering is deliberate: if AppKit ever overrides the steps, the
-    /// failure is the instant shift we already had, never a jump backwards.
-    ///
-    /// The curve is smoothstep, which tracks `easeInEaseOut` closely enough at
-    /// this duration to read as one motion with the row's real animation.
-    /// razor: a timer, not a display link — a row-sized resize is ~9 frames.
-    func animatePopoverContentSize(to target: NSSize, publish: () -> Void) {
-        contentSizeTravel?.invalidate()
-        contentSizeTravel = nil
-        guard popover.isShown else { publish(); return }
-        // Read the START before publishing: the assignment below snaps the
-        // popover to `target`, and the travel has to begin where it actually
-        // was. Both land in one turn, so no frame renders between them.
-        let start = popover.contentSize
-        let duration = NSAnimationContext.current.duration
-        setPopoverAnimates(false, whileApplying: publish)
-        guard duration > 0, start.height != target.height else { return }
-        popover.contentSize = start
-
-        let began = Date()
-        let travel = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
-            guard let self, self.popover.isShown else { timer.invalidate(); return }
-            let t = min(1, Date().timeIntervalSince(began) / duration)
-            let eased = t * t * (3 - 2 * t)
-            self.popover.contentSize = NSSize(
-                width: target.width,
-                height: start.height + (target.height - start.height) * eased)
-            guard t >= 1 else { return }
-            timer.invalidate()
-            self.contentSizeTravel = nil
-        }
-        // `.common` so the travel keeps running while a menu or a slider drag
-        // has the run loop in a tracking mode.
-        RunLoop.main.add(travel, forMode: .common)
-        contentSizeTravel = travel
     }
 
     /// Rebuild as an OPEN (T-5, PLAN §B): recompute every collapsible card's
@@ -1193,29 +1113,26 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         refreshMainOutRow()
 
         // 2. Selected Devices card — split into Current Device + AirPlay. ALWAYS
-        // present now (V2): when no devices have been discovered yet the card
-        // still builds, showing a single non-interactive "Looking for devices…"
-        // placeholder so it never silently vanishes.
+        // present now (V2): with an empty fleet the card still builds, and the
+        // always-rendered Bluetooth subsection's own Connect affordance is the
+        // card's empty-state message — no separate placeholder row (a "Looking
+        // for devices…" line above an actionable Connect button said two
+        // contradictory things at once; removed 2026-08-08).
         let sections = deviceSections()
-        devicesPlaceholderShown = false
         renderedSubsectionTitles = []
         renderedBluetoothOrder = []
+        renderedBTConnectShown = false
+        bluetoothConnectButton = nil
         // Combined header row: "Output Devices" title on the left, "VOLUME" over
         // the slider. The membership "Selected" column MOVED to the left spine
         // (v4 §Call-1), so this card no longer heads a membership column — but
         // its device rows' trailing dropdown column, once left empty, now
         // fills the FEED composite (v4.1 item 3), so the header names it
-        // "Feed" (`DeviceRowView.updateFeedText`/`feedStack`). The trailing
-        // "+" accessory is a MENU now (BT-UI): "Save Selected Devices as
-        // group" (enabled iff `canSaveCurrentSetup` — the gating moved off the
-        // button onto the item) and "Pair a Bluetooth speaker…", so the button
-        // itself stays always-enabled.
+        // "Feed" (`DeviceRowView.updateFeedText`/`feedStack`). The header row
+        // carries NO accessory: the "+" that fronts the add MENU is the card's
+        // bottom footer strip now (`devicesFooter`, added after every
+        // subsection below).
         panel.beginCard(header: Self.outputDevicesCardTitle, volumeTitle: "Volume", trailingTitle: "Feed",
-                        trailingAccessory: PopoverPanelViewController.HeaderAccessory(
-                            symbol: "plus",
-                            label: "Save the Selected Devices as a group, or pair a Bluetooth speaker",
-                            action: { [weak self] in self?.presentOutputDevicesPlusMenu() },
-                            isEnabled: true),
                         collapsible: true,
                         collapsed: collapsedState(for: Self.outputDevicesCardTitle, default: false),
                         onToggle: { [weak self] in self?.toggleCard(Self.outputDevicesCardTitle) })
@@ -1230,33 +1147,36 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         if let note = devicesCardNote {
             panel.addCardNote(note)
         }
-        renderedDevicesPlaceholderText = nil
-        if sections.allSatisfy({ $0.devices.isEmpty }) {
-            // "Looking for devices…" would LIE once the user has hidden the only
-            // devices there are — nothing is being looked for, they're just not
-            // on screen (the "+" menu's Hidden Devices section brings them back).
-            let text = allDevices.isEmpty ? "Looking for devices…" : "All devices hidden"
-            renderedDevicesPlaceholderText = text
-            panel.addRow(makePlaceholderRow(text: text))
-            devicesPlaceholderShown = true
-        } else {
-            // A subsection is HIDDEN entirely when it has no rows to show —
-            // never an empty grouping label. That covers both "no BT device
-            // exists" (BT-UI) and "the user hid every device in it". A
-            // COLLAPSED one keeps its header and renders no rows.
-            for section in sections where !section.devices.isEmpty {
-                let bluetooth = section.title == Self.bluetoothSubsectionTitle
-                let collapsed = addSubsection(
-                    section.title,
-                    // The SYNC column title lives in the Bluetooth subsection's
-                    // header line only, between VOLUME and FEED (BT-OFFSET-UI).
-                    columnTitle: bluetooth ? "Sync" : nil,
-                    columnCenterFromTrailing: bluetooth ? PopoverColumnGrid.syncCenterFromTrailing : 0)
-                guard !collapsed else { continue }
-                if bluetooth { renderedBluetoothOrder = section.devices.map(\.id) }
-                for device in section.devices { panel.addRow(makeDeviceRow(device, indented: false)) }
+        // A subsection is HIDDEN entirely when it has no rows to show — never
+        // an empty grouping label — except Bluetooth, whose header always
+        // renders (BT-LIST): its empty body IS content, the Connect
+        // affordance (`rendersHeader`). A COLLAPSED one keeps its header and
+        // renders no rows.
+        for section in sections where rendersHeader(section) {
+            let bluetooth = section.title == Self.bluetoothSubsectionTitle
+            let collapsed = addSubsection(
+                section.title,
+                // The SYNC column title lives in the Bluetooth subsection's
+                // header line only, between VOLUME and FEED (BT-OFFSET-UI).
+                columnTitle: bluetooth ? "Sync" : nil,
+                columnCenterFromTrailing: bluetooth ? PopoverColumnGrid.syncCenterFromTrailing : 0)
+            guard !collapsed else { continue }
+            if bluetooth {
+                renderedBluetoothOrder = section.devices.map(\.id)
+                if section.devices.isEmpty {
+                    panel.addRow(makeBluetoothConnectRow())
+                    renderedBTConnectShown = true
+                    continue
+                }
             }
+            for device in section.devices { panel.addRow(makeDeviceRow(device, indented: false)) }
         }
+        // The "+" footer belongs to the CARD, not to any one subsection, so it
+        // is added after ALL of them (This Mac / AirPlay / Bluetooth) — last
+        // thing in the card body, and hidden with it when the card collapses.
+        // A sync drawer opens via `insertRow` directly under ITS device row, so
+        // it can never land below this strip.
+        panel.addRow(devicesFooter)
         // Set each row's rail extent + feed the continuous rail overlay: the
         // spine runs Main Audio → the LOWEST SELECTED node; rows below it render
         // BARE (no rail) — spec v4 §Call-1. Runs even with no devices (the overlay
@@ -1341,18 +1261,26 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     static let airPlaySubsectionTitle = "AirPlay Devices"
     static let bluetoothSubsectionTitle = "Bluetooth Devices"
 
-    /// One device-type subsection and the rows it would render, hidden devices
-    /// already dropped.
+    /// One device-type subsection and the rows it would render, the Bluetooth
+    /// connected-only filter already applied.
     private struct DeviceSection {
         let title: String
         let devices: [Device]
     }
 
+    /// Bluetooth renders its header even with nothing listed — its empty
+    /// state IS content (the Connect affordance). The other two stay
+    /// hidden-when-empty.
+    private func rendersHeader(_ section: DeviceSection) -> Bool {
+        !section.devices.isEmpty || section.title == Self.bluetoothSubsectionTitle
+    }
+
     /// The three subsections in RENDER order — the one place the order and the
-    /// hidden filter are expressed, so the rail's render order can never drift
-    /// from the rows' (the terminus would land on the wrong row).
+    /// BT-LIST connected-only filter are expressed, so the rail's render order
+    /// can never drift from the rows' (the terminus would land on the wrong
+    /// row).
     private func deviceSections() -> [DeviceSection] {
-        let visible = orderedDevices().filter { !isDeviceHidden($0.id) }
+        let visible = orderedDevices().filter { !$0.isBluetooth || isBluetoothRowListed($0) }
         return [
             DeviceSection(title: Self.thisMacSubsectionTitle,
                           devices: visible.filter(\.isLocalDevice)),
@@ -1383,6 +1311,14 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// them, top to bottom — the recency-sort assertion surface
     /// (`test_bluetoothRowOrder`). Empty when the subsection is hidden.
     private var renderedBluetoothOrder: [String] = []
+
+    /// Whether the LAST `rebuild()` mounted the Bluetooth empty-state Connect
+    /// row (BT-LIST) — `test_bluetoothConnectRowShown()`.
+    private var renderedBTConnectShown = false
+
+    /// The mounted Bluetooth empty-state Connect button, for
+    /// `test_fireBluetoothConnectClick()` to drive real target/action dispatch.
+    private weak var bluetoothConnectButton: NSButton?
 
     /// `panel.addSubsectionHeader` + the rendered-titles record, so the test
     /// surface can never drift from what was actually mounted. Returns whether
@@ -1423,12 +1359,13 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         let collapsed = !isSubsectionCollapsed(title)
         transientCollapsed[title] = collapsed
         rebuild()
-        // Collapse may animate — the popover shrinking down to already-shrunk
-        // content is the surplus shield's safe direction. Expand must NOT: the
-        // rebuild has already mounted the rows at full height, and animating
-        // the window up to them leaves content taller than the surface — the
-        // exact deformation the downward-reveal clip removed for single rows.
-        panel.panelContentDidChangeHeight(animated: collapsed)
+        // `rebuild()` has already put the content at its final height in BOTH
+        // directions, so the surface is told that height straight away. It must not
+        // animate to it: an in-flight travel that a quick second click supersedes
+        // keeps driving the surface to the old target, and a surface shorter than
+        // its content deforms the content (the live "a second quick click shoves
+        // everything up", 2026-08-08).
+        panel.panelContentDidChangeHeight()
     }
 
     /// The Bluetooth subsection's rows, recency-ordered (BT-UI ghost
@@ -1438,12 +1375,18 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// ties deterministically.
     private func orderedBluetoothDevices(in devices: [Device]) -> [Device] {
         let lastUsed = btLastUsedProvider?() ?? [:]
-        return devices.filter(\.isBluetooth).sorted { a, b in
-            let ua = lastUsed[a.id] ?? .distantPast
-            let ub = lastUsed[b.id] ?? .distantPast
-            if ua != ub { return ua > ub }
-            return (a.name, a.id) < (b.name, b.id)
-        }
+        return devices.filter(\.isBluetooth).sorted { byBTRecency($0, $1, lastUsed: lastUsed) }
+    }
+
+    /// The Bluetooth recency comparator, shared by the subsection's row order
+    /// and the "+" menu's unlisted-pairings Connect section (BT-LIST): a device
+    /// with no known `lastUsed` sorts below every dated one; name (then id)
+    /// breaks ties deterministically.
+    private func byBTRecency(_ a: Device, _ b: Device, lastUsed: [String: Date]) -> Bool {
+        let ua = lastUsed[a.id] ?? .distantPast
+        let ub = lastUsed[b.id] ?? .distantPast
+        if ua != ub { return ua > ub }
+        return (a.name, a.id) < (b.name, b.id)
     }
 
     // MARK: Collapse-default policy (T-5, PLAN §B)
@@ -1811,7 +1754,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     private func refreshDeviceRowsReconcilingCardNote() {
         if devicesCardNoteText() != renderedDevicesCardNote {
             rebuild()
-            panel.panelContentDidChangeHeight(animated: true)
+            panel.panelContentDidChangeHeight()
         } else {
             refreshDeviceRows()
             refreshMainOutRow()
@@ -2079,9 +2022,6 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // The rail extent tracks the checked set, which a mid-open toggle can
         // change (v4 §Call-1), so recompute it on every in-place repaint too.
         updateBusRailExtents()
-        // F1: keep the Devices "Save as group" accessory's enabled state fresh on
-        // in-place repaints (a rebuild sets it from `canSaveCurrentSetup` too).
-        refreshDevicesAccessory()
     }
 
     /// Set each mounted device row's membership-rail extent (Warm Signal v4
@@ -2122,22 +2062,16 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                           deviceCardTitle: Self.outputDevicesCardTitle)
     }
 
-    /// The Devices card's "+" button stays ALWAYS enabled now that it fronts a
-    /// menu (BT-UI): the "Pair a Bluetooth speaker…" item must be reachable
-    /// even when nothing is selected, so `canSaveCurrentSetup` gates only the
-    /// save ITEM (`makeOutputDevicesPlusMenu` re-reads it per presentation).
-    private func refreshDevicesAccessory() {
-        panel.setAccessoryEnabled(title: Self.outputDevicesCardTitle, enabled: true)
-    }
-
-    // MARK: OUTPUT DEVICES "+" menu (BT-UI)
+    // MARK: OUTPUT DEVICES "+" menu (BT-UI / BT-LIST)
 
     /// Build the "+" affordance's menu FRESH per presentation — two items
     /// dispatching through real `NSMenuItem` target/action (tests drive them
     /// via `NSMenu.performActionForItem(at:)`, never a bypass seam):
-    /// "Save Selected Devices as group" (enabled iff `canSaveCurrentSetup`)
-    /// and "Pair a Bluetooth speaker…" (device-tier decision 3 — never-paired
-    /// speakers get NO rows; pairing is a one-tap Settings trip).
+    /// "Save Selected Devices as group" (enabled iff `canSaveCurrentSetup`),
+    /// "Pair a Bluetooth speaker…" (device-tier decision 3 — never-paired
+    /// speakers get NO rows; pairing is a one-tap Settings trip), and — the
+    /// BT-LIST connected-only list's history surface — one "Connect '<name>'"
+    /// item per paired-but-unlisted Bluetooth device.
     func makeOutputDevicesPlusMenu() -> NSMenu {
         let menu = NSMenu(title: "Add")
         menu.autoenablesItems = false
@@ -2150,110 +2084,52 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
                               action: #selector(plusMenuPairBluetooth(_:)), keyEquivalent: "")
         pair.target = self
         menu.addItem(pair)
-        // The restore path for per-device visibility, present only when
-        // something is actually hidden. Sorted by the STORED name so an
-        // undiscovered device is still listed and still named.
-        // Only what is genuinely OFF SCREEN: a stored hide whose device is back
-        // in the mix renders a row again (see `isDeviceHidden`), and offering
-        // to "Show" something already visible would be a lie. Keyed on the
-        // rendered rows rather than the predicate so a hidden device that is
-        // selected but NOT currently discovered — no row either way — is still
-        // listed and still restorable.
-        let rendered = Set(renderedDeviceOrder().map(\.id))
-        let restorable = hiddenDeviceNames.filter { !rendered.contains($0.key) }
-        if !restorable.isEmpty {
+        // Connect items for the pairing HISTORY the list no longer shows (BT-LIST):
+        // every known-but-unlisted BT device, most recent first — the same
+        // membership-free reconnect a greyed row's click fires, so the attempt
+        // surfaces as a live `.connecting` row and resolves to connected or failed.
+        let lastUsed = btLastUsedProvider?() ?? [:]
+        let unlisted = devicesByID.values
+            .filter { $0.isBluetooth && !isBluetoothRowListed($0) }
+            .sorted { byBTRecency($0, $1, lastUsed: lastUsed) }
+        if !unlisted.isEmpty {
             menu.addItem(.separator())
-            let header = NSMenuItem(title: "Hidden Devices", action: nil, keyEquivalent: "")
+            let header = NSMenuItem(title: "Bluetooth Pairings", action: nil, keyEquivalent: "")
             header.isEnabled = false
             menu.addItem(header)
-            for (id, name) in restorable.sorted(by: { ($0.value, $0.key) < ($1.value, $1.key) }) {
-                let item = NSMenuItem(title: "Show '\(name)'",
-                                      action: #selector(menuShowDevice(_:)), keyEquivalent: "")
+            for device in unlisted {
+                let item = NSMenuItem(title: "Connect '\(device.name)'",
+                                      action: #selector(menuConnectBluetoothDevice(_:)), keyEquivalent: "")
                 item.target = self
-                item.representedObject = id
+                item.representedObject = device.id
                 menu.addItem(item)
             }
         }
         return menu
     }
 
-    /// A device row's contextual menu (right-click / VoiceOver "show menu"):
-    /// one "Hide '<name>'" item, dispatched through real `NSMenuItem`
-    /// target/action.
-    ///
-    /// Hiding is BLUETOOTH-ONLY (Alec's call, live review). The Bluetooth list
-    /// is a pairing HISTORY — every speaker the Mac has ever met, most of them
-    /// long gone — so curating it is expected. AirPlay rows are live
-    /// discoveries and the reason the app exists: a hidden one reads as a bug
-    /// ("where did my speaker go"), so they carry no menu at all. Neither does
-    /// This Mac, which is a single row that can't be unruly.
-    ///
-    /// A device that WANTS AUDIO is never hideable — the same
-    /// selected-or-app-target predicate the rest of this file uses. Hiding the
-    /// row for something actively playing would take away the only volume and
-    /// mute control for a speaker still making noise. The item stays visible
-    /// but disabled rather than vanishing, so the action's existence is still
-    /// discoverable from the row it applies to; dropping it out of the mix
-    /// enables it.
-    func makeDeviceRowMenu(for id: String) -> NSMenu? {
-        guard let device = devicesByID[id], device.isBluetooth else { return nil }
-        let menu = NSMenu(title: device.name)
-        menu.autoenablesItems = false
-        let hide = NSMenuItem(title: "Hide '\(device.name)'",
-                              action: #selector(menuHideDevice(_:)), keyEquivalent: "")
-        hide.target = self
-        hide.representedObject = id
-        hide.isEnabled = !wantsAudio(id)
-        if !hide.isEnabled {
-            hide.toolTip = "\(device.name) is part of the mix. Remove it to hide the row."
-        }
-        menu.addItem(hide)
-        return menu
-    }
-
     @objc private func plusMenuSaveGroup(_ sender: Any?) { saveCurrentSetup() }
     @objc private func plusMenuPairBluetooth(_ sender: Any?) { onPairBluetoothSpeaker?() }
-    @objc private func menuHideDevice(_ sender: NSMenuItem) {
+    @objc private func menuConnectBluetoothDevice(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
-        setDeviceHidden(true, id: id)
-    }
-    @objc private func menuShowDevice(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String else { return }
-        setDeviceHidden(false, id: id)
-    }
-
-    /// Hide/show a device row. DISPLAY ONLY: nothing here reaches
-    /// `GroupController` or the backend, so the device's selection, group
-    /// membership and audio are all exactly as they were. Hiding a device whose
-    /// sync drawer is open takes the row away, and `reconcileSyncDrawer` (via
-    /// `rebuild()`) retracts the drawer intent plus its align tick; a mounted
-    /// diagnosis panel goes with the row while its open/dismissed intent
-    /// survives untouched, so unhiding restores it iff the episode is still open.
-    private func setDeviceHidden(_ hidden: Bool, id: String) {
-        if hidden {
-            guard let device = devicesByID[id] else { return }
-            hiddenDeviceNames[id] = device.name
-        } else {
-            guard hiddenDeviceNames.removeValue(forKey: id) != nil else { return }
-        }
-        try? hiddenDeviceStore?.save(hiddenDeviceNames)
+        // List the row BEFORE the attempt so the outcome has somewhere to land.
+        // Un-animated: a GROW publishes instantly (house rule — rows mounted at
+        // full height while the surface animates up to them deform the content).
+        btConnectAttemptIDs.insert(id)
+        groupController?.requestReconnect(for: id)
         rebuild()
-        // Same direction rule as `toggleSubsection`: shrinking (a hide) may
-        // animate; growing (a show) publishes instantly or the just-mounted
-        // row deforms the content while the window catches up.
-        panel.panelContentDidChangeHeight(animated: hidden)
+        panel.panelContentDidChangeHeight()
     }
 
-    /// The "+" button's click: pop the menu just under the button. The actual
-    /// on-screen pop is gated on `HeadlessRuntime.isActive` (house rule — a
-    /// blocking `popUp` under `swift test` would also hang the runner);
-    /// headless callers assert via `test_outputDevicesPlusMenu()` instead.
+    /// The footer "+"'s click: pop the menu off the footer strip, the same way
+    /// the Applications "+" pops its picker. The actual on-screen pop is gated
+    /// on `HeadlessRuntime.isActive` (house rule — a blocking `popUp` under
+    /// `swift test` would also hang the runner); headless callers assert via
+    /// `test_outputDevicesPlusMenu()` instead.
     private func presentOutputDevicesPlusMenu() {
-        guard !HeadlessRuntime.isActive,
-              let button = panel.accessoryButton(title: Self.outputDevicesCardTitle)
-        else { return }
+        guard !HeadlessRuntime.isActive else { return }
         makeOutputDevicesPlusMenu().popUp(
-            positioning: nil, at: NSPoint(x: 0, y: button.bounds.maxY + 4), in: button)
+            positioning: nil, at: NSPoint(x: 0, y: devicesFooter.bounds.height), in: devicesFooter)
     }
 
     /// A non-interactive placeholder body row (V2 Devices empty state / V11
@@ -2280,6 +2156,31 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         ])
         return wrapper
     }
+
+    /// The Bluetooth subsection's empty state (BT-LIST): pairing/connecting is
+    /// Apple-owned, so the affordance is the Settings trip — the fresh row then
+    /// arrives through the ordinary connected-only listing.
+    private func makeBluetoothConnectRow() -> NSView {
+        let button = NSButton(title: "Connect a Bluetooth device…",
+                              target: self, action: #selector(bluetoothConnectRowClicked(_:)))
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        bluetoothConnectButton = button
+        let wrapper = NSView()
+        wrapper.translatesAutoresizingMaskIntoConstraints = false
+        wrapper.addSubview(button)
+        let nameColumnLeading = PopoverColumnGrid.leadingInset
+            + PopoverColumnGrid.iconWidth + PopoverColumnGrid.iconToName
+        NSLayoutConstraint.activate([
+            wrapper.heightAnchor.constraint(equalToConstant: DeviceRowView.rowHeight),
+            button.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: nameColumnLeading),
+            button.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),
+        ])
+        return wrapper
+    }
+
+    @objc private func bluetoothConnectRowClicked(_ sender: Any?) { onPairBluetoothSpeaker?() }
 
     // MARK: Blocked local-mix refusal note (spec §4.6)
 
@@ -2423,6 +2324,23 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// that doesn't loses it.
     private func wantsAudio(_ id: String) -> Bool {
         (groupController?.isSpeakerSelected(id) ?? false) || isRedirectTarget(id)
+    }
+
+    /// BT-LIST (connected-only): a Bluetooth row renders iff the device can carry
+    /// audio right now, the user explicitly asked to connect it while the popover
+    /// has been open (`btConnectAttemptIDs`, cleared on close — scoped that way
+    /// rather than to "state != .off", because `.failed` is sticky and never
+    /// clears for a paired device, so a failed attempt would mint a permanent
+    /// unexplained row), or the user still
+    /// intends audio on it (Selected Devices, app-redirect, or the active Main Out
+    /// group — `isMainOutMember`, the group-aware read `wantsAudio` lacks). The
+    /// paired-but-idle history macOS keeps forever stays off screen — the "+"
+    /// menu's Connect items are its surface.
+    private func isBluetoothRowListed(_ device: Device) -> Bool {
+        device.isAvailable
+            || btConnectAttemptIDs.contains(device.id)
+            || wantsAudio(device.id)
+            || (groupController?.isMainOutMember(device.id) ?? false)
     }
 
     /// Make the mounted panel views match `openDiagnosisIDs`: tear down panels
@@ -3019,6 +2937,17 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// behavior).
     public func test_tapApplicationsFooterRemove() { applicationsFooter.test_tapRemove() }
 
+    /// Whether the OUTPUT DEVICES card's "+" footer strip is currently mounted
+    /// as the LAST row of that card — the assertion surface for the strip's
+    /// position (it moved out of the header row, 2026-08-08).
+    public var test_devicesFooterIsLastCardRow: Bool {
+        panel.test_cardRows(title: Self.outputDevicesCardTitle).last === devicesFooter
+    }
+
+    /// Simulate tapping the OUTPUT DEVICES footer's "+" — the same closure a
+    /// real click fires (the on-screen `popUp` itself stays headless-gated).
+    public func test_tapDevicesFooterAdd() { devicesFooter.test_tapAdd() }
+
     /// Whether saving the current selection as a group is possible (this backs the
     /// Main Out selector's group-routing entries — a saved group becomes a
     /// destination even though the popover no longer renders a Groups section).
@@ -3037,11 +2966,8 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// Count of device rows in the Selected Devices section.
     public var test_deviceSectionRowCount: Int { deviceRowsByID.count }
 
-    // MARK: Empty-state / card-note / accessory test hooks (V2 / V11 / A1 / F1)
+    // MARK: Empty-state / card-note / accessory test hooks (V11 / A1 / F1)
 
-    /// Whether the Devices card's "Looking for devices…" placeholder is currently
-    /// mounted (V2).
-    public var test_devicesPlaceholderShown: Bool { devicesPlaceholderShown }
     /// Whether the Applications card's "No apps routed…" placeholder is currently
     /// mounted (V11).
     public var test_applicationsPlaceholderShown: Bool { applicationsPlaceholderShown }
@@ -3128,7 +3054,7 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     }
     /// Drive the resize primitive directly (offscreen; no live popover) so tests can
     /// assert the published size equals the content's fitting height.
-    public func test_applyExactFitSize() { panel.panelContentDidChangeHeight(animated: false) }
+    public func test_applyExactFitSize() { panel.panelContentDidChangeHeight() }
 
     /// The collapse-reactive rail geometry the overlay resolves from the current
     /// laid-out frames (origin at ring vs collapsed header, the terminus dot, the
@@ -3201,13 +3127,6 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// order — the visibility/collapse assertion surface.
     public func test_renderedDeviceIDs() -> [String] { renderedDeviceOrder().map(\.id) }
 
-    /// The hidden set as it currently stands (`id -> stored name`).
-    public func test_hiddenDeviceNames() -> [String: String] { hiddenDeviceNames }
-
-    /// The placeholder copy the last rebuild actually mounted on the Devices
-    /// card, or `nil` when it mounted rows.
-    public func test_devicesPlaceholderText() -> String? { renderedDevicesPlaceholderText }
-
     /// The OUTPUT DEVICES "+" menu, built exactly as a live click builds it.
     /// Tests dispatch its items via `NSMenu.performActionForItem(at:)` — real
     /// AppKit menu dispatch, per the row-selection lesson (never a bypass seam).
@@ -3220,6 +3139,14 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// The Bluetooth subsection's rendered row order (BT-UI ghost-pairing
     /// sort), top to bottom; empty when the subsection is hidden.
     public func test_bluetoothRowOrder() -> [String] { renderedBluetoothOrder }
+
+    /// Whether the last rebuild mounted the Bluetooth empty-state Connect row
+    /// (BT-LIST).
+    public func test_bluetoothConnectRowShown() -> Bool { renderedBTConnectShown }
+
+    /// Fire the Bluetooth empty-state Connect button through real AppKit
+    /// target/action dispatch (never a bypass seam).
+    public func test_fireBluetoothConnectClick() { bluetoothConnectButton?.performClick(nil) }
 
     /// Simulate flipping a device row's membership switch through its delegate.
     /// Returns the model's `SelectionResult` so tests can assert refusal/auto-swap.
@@ -3339,11 +3266,6 @@ extension PopoverController: DeviceRowView.Delegate {
     /// read-only, so the one gesture it reports is "show/hide my drawer".
     public func deviceRow(_ row: DeviceRowView, didToggleSyncDrawerFor id: String) {
         toggleSyncDrawer(deviceID: id, animated: true)
-    }
-
-    /// The row's right-click menu: "Hide '<name>'", a display-only action.
-    public func deviceRowContextMenu(_ row: DeviceRowView, for id: String) -> NSMenu? {
-        makeDeviceRowMenu(for: id)
     }
 
     /// Move/stop the single align-by-ear tick (BT-OFFSET-UI): one device at a
@@ -3566,6 +3488,10 @@ extension PopoverController: AppRowView.Delegate {
         closeSyncDrawerIntent()
         unmountSyncDrawer(animated: false)
         setAlignTick(nil)
+        // "+"-menu connect attempts are session-scoped (BT-LIST): `.failed` is
+        // sticky and never clears for a paired device, so keeping these would
+        // leave a permanent dead row on the next open.
+        btConnectAttemptIDs.removeAll()
     }
 
     // MARK: - Live level dispatch (task T5)
@@ -3646,7 +3572,7 @@ extension PopoverController: AppRowView.Delegate {
         let hit = window.contentView?.hitTest(event.locationInWindow)
         if let hit,
            enclosingView(of: hit, ofType: AppRowView.self) != nil
-               || enclosingView(of: hit, ofType: ApplicationsFooterView.self) != nil {
+               || enclosingView(of: hit, ofType: CardFooterView.self) === applicationsFooter {
             return
         }
         selectedAppBundleID = nil

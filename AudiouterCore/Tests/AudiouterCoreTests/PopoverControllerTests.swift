@@ -2082,28 +2082,6 @@ import AppKit
         #expect(popover.test_deviceRow(for: "office")?.test_feedText == "Music", "the fixture's event reached the row via the same plumbing AppDelegate uses")
     }
 
-    // MARK: V2 — Devices card empty-state placeholder
-
-    /// With no devices discovered, the Devices card still builds and shows the
-    /// "Looking for devices…" placeholder; once devices arrive it disappears.
-    @Test func devicesCardEmptyStatePlaceholder() async throws {
-        let (popover, _, backend) = try await makePopover()
-        // Devices present initially ⇒ no placeholder, card exists.
-        #expect(!(popover.test_devicesPlaceholderShown), "devices present ⇒ no placeholder")
-        #expect(popover.test_isCardCollapsed(title: "Output Devices") != nil, "the Devices card exists")
-
-        // Clear the fleet ⇒ card still present, placeholder shown.
-        popover.update(devices: [])
-        #expect(popover.test_isCardCollapsed(title: "Output Devices") != nil, "the Devices card is still built when empty (V2)")
-        #expect(popover.test_devicesPlaceholderShown, "no devices ⇒ placeholder shown")
-        #expect(popover.test_deviceSectionRowCount == 0, "no interactive device rows")
-
-        // Devices arrive again ⇒ placeholder gone.
-        popover.update(devices: backend.devices)
-        #expect(!(popover.test_devicesPlaceholderShown), "devices arrived ⇒ placeholder gone")
-        #expect(popover.test_deviceSectionRowCount == 7, "device rows restored")
-    }
-
     // MARK: V11 — Applications card empty-state placeholder
 
     /// With no rendered app routes the Applications card shows the "No apps
@@ -2555,17 +2533,27 @@ import AppKit
         #expect(popover.test_diagnosisPanel(for: "office") != nil, "the retry failing again re-surfaces the panel")
     }
 
-    // MARK: F1 — Devices "+" header accessory (a menu since BT-UI)
+    // MARK: F1 — Devices "+" footer strip (a menu since BT-UI)
 
-    /// The Devices card's "+" fronts a MENU now: its save item creates a group
+    /// The "+" lives in the card's BOTTOM footer strip, not the header row
+    /// (2026-08-08): no header accessory exists, and the strip is the last row
+    /// of the card — below every subsection.
+    @Test func devicesPlusIsTheCardsLastRowNotAHeaderAccessory() async throws {
+        let (popover, _, _) = try await makePopover()
+        #expect(popover.test_cardAccessoryEnabled(title: "Output Devices") == nil,
+                "the header row carries no accessory any more")
+        #expect(popover.test_devicesFooterIsLastCardRow,
+                "the + strip is the last row of the Output Devices card")
+        popover.test_tapDevicesFooterAdd()   // headless: the popUp itself is gated
+    }
+
+    /// The Devices card's "+" fronts a MENU: its save item creates a group
     /// through real `NSMenu` dispatch, never collapses the card, and the item's
-    /// enabled state (not the button's — the button stays always-enabled so
-    /// "Pair a Bluetooth speaker…" is always reachable) tracks
-    /// `canSaveCurrentSetup`.
+    /// enabled state tracks `canSaveCurrentSetup` (the "+" itself never
+    /// disables, so "Pair a Bluetooth speaker…" is always reachable).
     @Test func devicesSaveGroupAccessoryCreatesGroupWithoutCollapsing() async throws {
         let (popover, controller, _) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        #expect(popover.test_cardAccessoryEnabled(title: "Output Devices") == true, "the + button itself stays enabled — it fronts a menu")
         var menu = popover.test_outputDevicesPlusMenu()
         #expect(menu.items.first?.isEnabled == true, "a non-empty, not-yet-saved selection ⇒ save item enabled")
         let wasCollapsed = popover.test_isCardCollapsed(title: "Output Devices")
@@ -2576,7 +2564,6 @@ import AppKit
         // The just-saved selection now equals a group ⇒ the save ITEM disables.
         menu = popover.test_outputDevicesPlusMenu()
         #expect(menu.items.first?.isEnabled == false, "selection already saved as a group ⇒ save item disables")
-        #expect(popover.test_cardAccessoryEnabled(title: "Output Devices") == true, "the + button never disables")
     }
 
     // MARK: V14 — keyboard selection movement (host half)

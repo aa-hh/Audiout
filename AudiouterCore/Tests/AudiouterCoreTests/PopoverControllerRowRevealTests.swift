@@ -155,7 +155,7 @@ import Foundation
         }
         func topOffsets() -> [CGFloat] { settle(); return rows.map(topOffset) }
 
-        panel.panelContentDidChangeHeight(animated: false)
+        panel.panelContentDidChangeHeight()
         let before = topOffsets()
         let beforeHeight = panel.preferredContentSize.height
 

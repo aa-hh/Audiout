@@ -412,7 +412,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         popoverController = PopoverController(appRouting: appRouting)
         popoverController.deviceIconController = deviceIconController
-        popoverController.hiddenDeviceStore = HiddenDeviceStore()
         popoverController.configure(groupController: groupController)
         popoverController.onOpenMixer = { [weak self] in self?.openMixer() }
         popoverController.onOpenSettings = { [weak self] in self?.openSettings() }

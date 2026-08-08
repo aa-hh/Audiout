@@ -143,6 +143,10 @@ final class CardView: NSView {
         view.trailingAnchor.constraint(equalTo: bodyStack.trailingAnchor).isActive = true
     }
 
+    /// Test hook: the body rows in display order. An `insertRow` row appears as
+    /// its `RowClipView` wrapper, not the row itself.
+    var test_bodyRows: [NSView] { bodyStack.arrangedSubviews }
+
     /// Mount `bodyClip` as an arranged subview of `contentStack` on first use, and
     /// create its animated height constraint. Deferred so a card with header rows
     /// only (no body) never introduces the clip container.

@@ -7,13 +7,13 @@ import AppKit
 @testable import AudiouterSharedUI
 
 /// Device-list visibility in the popover: the per-device-TYPE subsection
-/// collapse, and the per-DEVICE hide/show pair. Both are DISPLAY actions —
-/// what is asserted throughout is that neither ever moves selection,
-/// membership or a diagnosis-panel intent, and that the surfaces which depend
-/// on "what is actually on screen" (the sync drawer, the rail terminus, the
-/// empty-state copy) follow. Every interaction rides a real path: the panel's
-/// own header gesture recognizer, `NSMenu.performActionForItem(at:)`, and
-/// `DeviceRowView.menu(for:)`.
+/// collapse, and the Bluetooth connected-only listing (BT-LIST). Both are
+/// DISPLAY actions — what is asserted throughout is that neither ever moves
+/// selection, membership or a diagnosis-panel intent, and that the surfaces
+/// which depend on "what is actually on screen" (the sync drawer, the rail
+/// terminus, the empty-state copy) follow. Every interaction rides a real
+/// path: the panel's own header gesture recognizer, `NSMenu
+/// .performActionForItem(at:)`, and `DeviceRowView.menu(for:)`.
 @MainActor
 @Suite(.serialized) struct PopoverDeviceVisibilityTests {
 
@@ -50,9 +50,10 @@ import AppKit
         Device(id: id, name: name, kind: .homePod)
     }
 
-    private func bt(_ id: String, name: String, available: Bool = true) -> Device {
+    private func bt(_ id: String, name: String, available: Bool = true,
+                    state: ConnectionState = .off) -> Device {
         Device(id: id, name: name, kind: .bluetooth,
-               isAvailable: available, supportsAirPlay2: false)
+               isAvailable: available, supportsAirPlay2: false, connectionState: state)
     }
 
     private let airPlayTitle = PopoverController.airPlaySubsectionTitle
@@ -135,165 +136,143 @@ import AppKit
                 "the episode is still open, so the panel returns")
     }
 
-    // MARK: Feature B — per-device visibility
+    // MARK: Feature B — Bluetooth connected-only listing (BT-LIST)
 
-    /// The whole hide path through real AppKit dispatch: the row's own
-    /// `menu(for:)` override, then `performActionForItem`.
-    @Test func rowContextMenuHidesTheDeviceWithoutTouchingSelection() {
-        let (popover, controller) = makePopover(fleet: [local(), bt("bt-a:output", name: "Speaker A")])
-        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
-
-        let menu = popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()
-        #expect(menu?.items.map(\.title) == ["Hide 'Speaker A'"])
-        menu?.performActionForItem(at: 0)
-
-        #expect(popover.test_deviceRow(for: "bt-a:output") == nil, "the row is gone")
-        #expect(popover.test_renderedDeviceIDs() == ["mac"])
-        #expect(controller.selectedDeviceIDs.contains("bt-a:output") == false)
-        #expect(popover.test_hiddenDeviceNames() == ["bt-a:output": "Speaker A"])
-    }
-
-    // MARK: Only Bluetooth is curatable, and never what is playing
-
-    /// AirPlay rows are live discoveries and the point of the app — a hidden
-    /// one reads as a bug, so they offer no menu at all. Neither does the Mac.
-    @Test func onlyBluetoothRowsOfferAHideMenu() {
+    /// The headline rule: a paired-but-disconnected Bluetooth device — no
+    /// connection story, out of the mix — gets no row at all. macOS keeps
+    /// every pairing forever, so this is what keeps the list from being a
+    /// wall of dead rows.
+    @Test func pairedButDisconnectedBluetoothDevicesAreNotListed() {
         let (popover, _) = makePopover()
-        popover.update(devices: [local(), airplay(), bt("bt-a:output", name: "Speaker A")])
-
-        #expect(popover.test_deviceRow(for: "office")?.test_contextMenu() == nil,
-                "an AirPlay row is never hideable")
-        #expect(popover.test_deviceRow(for: "mac")?.test_contextMenu() == nil,
-                "nor the single This Mac row")
-        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu() != nil)
+        popover.update(devices: [
+            local(),
+            bt("bt-live:output", name: "Live Speaker"),
+            bt("bt-dead-1:output", name: "Dead One", available: false),
+            bt("bt-dead-2:output", name: "Dead Two", available: false),
+        ])
+        #expect(popover.test_renderedDeviceIDs() == ["mac", "bt-live:output"])
+        #expect(popover.test_bluetoothRowOrder() == ["bt-live:output"])
+        #expect(popover.test_subsectionTitles()
+                == ["This Mac", bluetoothTitle],
+                "the Bluetooth header still renders for the one listed row")
     }
 
-    /// Hiding the row for something still making noise would take away its
-    /// only volume and mute control.
-    @Test func aDeviceInTheMixCannotBeHidden() {
-        let (popover, controller) = makePopover(fleet: [local(), bt("bt-a:output", name: "Speaker A")])
-        controller.setDeviceSelected("bt-a:output", true)
-        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
-
-        let item = popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()?.items.first
-        #expect(item?.title == "Hide 'Speaker A'", "the action stays discoverable on its own row")
-        #expect(item?.isEnabled == false, "…but not while the device is in the mix")
-    }
-
-    /// The invariant, not just the menu gate: a stored hide takes effect only
-    /// while the device is OUT of the mix, so a device that becomes live again
-    /// — here by being selected, in the app by an app route pointed straight at
-    /// it — gets its row back, and hides itself again when it leaves.
-    @Test func aHiddenDeviceThatRejoinsTheMixGetsItsRowBack() {
-        let (popover, controller) = makePopover(fleet: [local(), bt("bt-a:output", name: "Speaker A")])
-        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
-        popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()?.performActionForItem(at: 0)
-        #expect(popover.test_deviceRow(for: "bt-a:output") == nil)
-
-        controller.setDeviceSelected("bt-a:output", true)
-        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
-        #expect(popover.test_deviceRow(for: "bt-a:output") != nil,
-                "a playing device always has a row")
-        #expect(popover.test_hiddenDeviceNames().keys.contains("bt-a:output"),
-                "the hide INTENT survives — it is suspended, not forgotten")
-        #expect(popover.test_outputDevicesPlusMenu().items.map(\.title)
-                    .contains("Show 'Speaker A'") == false,
-                "and it is not offered for restore while it is on screen")
-
-        controller.setDeviceSelected("bt-a:output", false)
-        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
-        #expect(popover.test_deviceRow(for: "bt-a:output") == nil, "and it hides itself again")
-    }
-
-    @Test func plusMenuListsHiddenDevicesAndShowingOneRestoresItsRow() {
+    /// When the connected-only list has nothing to show, the subsection's
+    /// empty body IS the Connect affordance — and it opens the same Settings
+    /// trip pairing already uses.
+    @Test func emptyBluetoothSectionShowsTheConnectButtonAndItOpensSettings() {
         let (popover, _) = makePopover()
-        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A"),
-                                 bt("bt-z:output", name: "Zed Box")])
-        #expect(popover.test_outputDevicesPlusMenu().items.map(\.title)
-                == ["Save Selected Devices as group", "Pair a Bluetooth speaker…"],
-                "no Hidden Devices section until something is hidden")
+        popover.update(devices: [local(), airplay()])
+        #expect(popover.test_bluetoothConnectRowShown())
+        #expect(popover.test_subsectionTitles() == ["This Mac", airPlayTitle, bluetoothTitle])
 
-        popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()?.performActionForItem(at: 0)
-        popover.test_deviceRow(for: "bt-z:output")?.test_contextMenu()?.performActionForItem(at: 0)
+        var pairTaps = 0
+        popover.onPairBluetoothSpeaker = { pairTaps += 1 }
+        popover.test_fireBluetoothConnectClick()
+        #expect(pairTaps == 1)
 
-        var menu = popover.test_outputDevicesPlusMenu()
-        #expect(menu.items.map(\.title) == ["Save Selected Devices as group",
-                                            "Pair a Bluetooth speaker…",
-                                            "", "Hidden Devices",
-                                            "Show 'Speaker A'", "Show 'Zed Box'"],
-                "sorted by the stored name, under a disabled section header")
-        #expect(menu.items[3].isEnabled == false)
-
-        menu.performActionForItem(at: 4)
-        #expect(popover.test_deviceRow(for: "bt-a:output") != nil)
-        menu = popover.test_outputDevicesPlusMenu()
-        #expect(menu.items.map(\.title).contains("Show 'Speaker A'") == false)
+        popover.update(devices: [local(), airplay(), bt("bt-live:output", name: "Live Speaker")])
+        #expect(!popover.test_bluetoothConnectRowShown(),
+                "a connected device replaces the empty state")
     }
 
-    /// A hidden device the backend can no longer see is still listed, still
-    /// named — that is what the stored name is for.
-    @Test func anUndiscoveredHiddenDeviceIsStillListedAndStillNamed() {
-        let (popover, _) = makePopover()
-        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
-        popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()?.performActionForItem(at: 0)
+    /// An explicit "+"-menu Connect attempt is listed for the REST OF THE
+    /// SESSION and no longer: `.failed` is sticky and, for a paired Bluetooth
+    /// device, never clears (macOS keeps pairing records forever), so a state
+    /// alone must not list a row — that would be a permanent dead row with no
+    /// diagnosis panel and no way to dismiss it.
+    @Test func aFailedAttemptIsListedForTheSessionThenDropped() {
+        let (popover, _) = makePopover(fleet: [local(), bt("bt-a:output", name: "Speaker A")])
+        let failed = bt("bt-a:output", name: "Speaker A", available: false,
+                        state: .failed(.init(cause: .unknown)))
+        popover.update(devices: [local(), failed])
+        #expect(popover.test_deviceRow(for: "bt-a:output") == nil,
+                "a sticky `.failed` alone never lists a row")
 
-        popover.update(devices: [local()])
         let menu = popover.test_outputDevicesPlusMenu()
-        #expect(menu.items.map(\.title).contains("Show 'Speaker A'"))
+        let index = menu.items.map(\.title).firstIndex(of: "Connect 'Speaker A'")
+        #expect(index != nil, "the unlisted pairing is offered in the + menu")
+        menu.performActionForItem(at: index!)   // real AppKit menu dispatch
+        #expect(popover.test_deviceRow(for: "bt-a:output") != nil,
+                "the explicit attempt's outcome is on screen while you look at it")
+
+        popover.popoverDidClose(Notification(name: NSPopover.didCloseNotification))
+        popover.update(devices: [local(), failed])
+        #expect(popover.test_deviceRow(for: "bt-a:output") == nil,
+                "…and the list is clean again on the next open")
     }
 
-    @Test func theHiddenSetRoundTripsThroughItsStore() {
-        let store = HiddenDeviceStore(directory: tempDirectory())
-        let fleet = [local(), bt("bt-a:output", name: "Speaker A")]
-        let (first, _) = makePopover()
-        first.hiddenDeviceStore = store
-        first.update(devices: fleet)
-        first.test_deviceRow(for: "bt-a:output")?.test_contextMenu()?.performActionForItem(at: 0)
+    /// An IN-MIX disconnected Bluetooth device — selected while already
+    /// greyed ("play when up") — keeps its row: the tension between
+    /// keep-intent and connected-only resolves by never delisting a device
+    /// the user still intends audio on.
+    @Test func anInMixDisconnectedBluetoothDeviceKeepsItsGreyedRow() {
+        let (popover, controller) = makePopover(fleet: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A", available: false)])
+        _ = popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)   // "play when up"
+        #expect(controller.selectedDeviceIDs.contains("bt-a:output"))
 
-        // A second launch over the same store.
-        let (second, _) = makePopover()
-        second.hiddenDeviceStore = store
-        second.update(devices: fleet)
-        #expect(second.test_hiddenDeviceNames() == ["bt-a:output": "Speaker A"])
-        #expect(second.test_deviceRow(for: "bt-a:output") == nil)
-
-        second.test_outputDevicesPlusMenu().performActionForItem(at: 4)
-        let (third, _) = makePopover()
-        third.hiddenDeviceStore = store
-        #expect(third.test_hiddenDeviceNames().isEmpty, "showing it again persists too")
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A", available: false)])
+        #expect(popover.test_deviceRow(for: "bt-a:output") != nil,
+                "in-mix keeps the row visible even while unavailable")
+        #expect(controller.selectedDeviceIDs.contains("bt-a:output"), "selection is untouched")
     }
 
-    @Test func hidingTheDeviceWhoseDrawerIsOpenClosesTheDrawer() {
-        let (popover, _) = makePopover()
-        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
-        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
-        #expect(popover.test_expandedSyncDeviceID == "bt-a:output")
+    /// The "+" menu's Connect section is the history's surface (BT-LIST): a
+    /// paired-but-unlisted Bluetooth device gets a one-click "Connect '<name>'"
+    /// item, most recent first, dispatching through the same membership-free
+    /// reconnect a greyed row's click fires.
+    @Test func plusMenuOffersConnectForUnlistedPairingsByRecency() {
+        let backend = RecordingRetryBackend(MockBackend(
+            fleet: [local(), bt("bt-old:output", name: "Attic Speaker", available: false),
+                    bt("bt-new:output", name: "Zed Speaker", available: false)],
+            staggerDiscovery: false, emitsLevels: false, simulatesDropouts: false))
+        let controller = GroupController(backend: backend,
+                                         store: GroupStore(directory: tempDirectory()),
+                                         routingStore: RoutingStore(directory: tempDirectory()),
+                                         loadPersisted: false)
+        let popover = PopoverController()
+        popover.configure(groupController: controller)
+        popover.test_isShownOverride = true
+        backend.start()
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline && backend.devices.count < 3 {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+        }
 
-        popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()?.performActionForItem(at: 0)
-        #expect(popover.test_expandedSyncDeviceID == nil)
-        #expect(!popover.test_syncDrawerVisible)
+        let now = Date()
+        popover.btLastUsedProvider = {
+            ["bt-old:output": now.addingTimeInterval(-86_400 * 400), "bt-new:output": now]
+        }
+        popover.update(devices: [local(),
+                                 bt("bt-old:output", name: "Attic Speaker", available: false),
+                                 bt("bt-new:output", name: "Zed Speaker", available: false)])
+
+        let menu = popover.test_outputDevicesPlusMenu()
+        let titles = menu.items.map(\.title)
+        #expect(titles.contains(""), "a separator precedes the Connect section")
+        #expect(menu.item(withTitle: "Bluetooth Pairings")?.isEnabled == false,
+                "the section header is a disabled label, not an action")
+        let newIndex = titles.firstIndex(of: "Connect 'Zed Speaker'")
+        let oldIndex = titles.firstIndex(of: "Connect 'Attic Speaker'")
+        #expect(newIndex != nil && oldIndex != nil && newIndex! < oldIndex!,
+                "most recent first")
+
+        menu.performActionForItem(at: newIndex!)
+        #expect(backend.retriedIDs == ["bt-new:output"])
+        #expect(!controller.selectedDeviceIDs.contains("bt-new:output"), "selection is untouched")
     }
 
-    @Test func aSubsectionWhoseDevicesAreAllHiddenDisappearsEntirely() {
-        let (popover, _) = makePopover()
-        popover.update(devices: [local(), airplay(), bt("bt-a:output", name: "Speaker A")])
-        popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()?.performActionForItem(at: 0)
-        #expect(popover.test_subsectionTitles() == ["This Mac", airPlayTitle],
-                "an all-hidden subsection reads exactly like an empty one")
-    }
-
-    /// "Looking for devices…" would be a lie once the devices exist and are
-    /// merely hidden.
-    @Test func theEmptyStateDistinguishesNoDevicesFromAllHidden() {
+    @Test func theEmptyFleetShowsOnlyTheBluetoothConnectAffordance() {
+        // No separate "Looking for devices…" placeholder (removed 2026-08-08 —
+        // it contradicted the always-rendered Bluetooth Connect affordance
+        // directly below it). The Connect row IS the empty-state message.
         let (popover, _) = makePopover()
         popover.update(devices: [])
-        #expect(popover.test_devicesPlaceholderText() == "Looking for devices…")
-
-        popover.update(devices: [bt("bt-a:output", name: "Speaker A")])
-        #expect(popover.test_devicesPlaceholderText() == nil)
-
-        popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()?.performActionForItem(at: 0)
-        #expect(popover.test_devicesPlaceholderText() == "All devices hidden")
+        #expect(popover.test_subsectionTitles() == ["Bluetooth Devices"],
+                "an empty fleet renders only the always-on Bluetooth subsection")
+        #expect(popover.test_bluetoothConnectRowShown(),
+                "the Bluetooth section's own Connect affordance still renders")
     }
 
     // MARK: The rail follows what is on screen
@@ -317,5 +296,30 @@ import AppKit
                 "with the Bluetooth rows collapsed away the rail ends at Office")
         #expect(controller.selectedDeviceIDs.contains("bt-z:output"),
                 "collapse is display only — Zed Box is still in the mix")
+    }
+}
+
+/// Wraps a real ``MockBackend`` and records every id `retryOutput` was called
+/// with, so `plusMenuOffersConnectForUnlistedPairingsByRecency` can assert the
+/// "+" menu's Connect item dispatches the real membership-free reconnect
+/// (`GroupController.requestReconnect` → `OutputBackend.retryOutput`) without
+/// touching selection. Mirrors `GroupControllerTests.RecordingBackend`.
+private final class RecordingRetryBackend: OutputBackend {
+    private let inner: MockBackend
+    private(set) var retriedIDs: [String] = []
+
+    init(_ inner: MockBackend) { self.inner = inner }
+
+    var devices: [Device] { inner.devices }
+    func start() { inner.start() }
+    func stop() { inner.stop() }
+    func makeEventStream() -> AsyncStream<BackendEvent> { inner.makeEventStream() }
+    func setMuted(_ muted: Bool, for id: String) { inner.setMuted(muted, for: id) }
+    func setOutputSet(_ ids: Set<String>) { inner.setOutputSet(ids) }
+    func setVolume(_ volume: Int, for id: String) { inner.setVolume(volume, for: id) }
+
+    func retryOutput(_ id: String) {
+        retriedIDs.append(id)
+        inner.retryOutput(id)
     }
 }

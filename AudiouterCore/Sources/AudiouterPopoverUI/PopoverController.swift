@@ -401,7 +401,16 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         }
     }
 
-    private func isDeviceHidden(_ id: String) -> Bool { hiddenDeviceNames[id] != nil }
+    /// A stored hide only TAKES EFFECT while the device is out of the mix.
+    /// Enforcing it in the predicate rather than at the menu is what makes it
+    /// an invariant: the row can also become live without any hide decision
+    /// being made — routing an app straight at a hidden speaker does it — and
+    /// a playing device with no row means no volume, no mute, and no way to
+    /// stop it. The stored intent survives, so the row hides itself again once
+    /// it leaves the mix.
+    private func isDeviceHidden(_ id: String) -> Bool {
+        hiddenDeviceNames[id] != nil && !wantsAudio(id)
+    }
 
     /// Keep each hidden device's stored name current while it is still
     /// discovered, so the restore menu can't offer a name the device has since
@@ -1050,6 +1059,65 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         popover.animates = animates
         apply()
         popover.animates = previous
+    }
+
+    /// The in-flight surface resize, if any. Kept so a second resize retargets
+    /// from wherever the first one had reached instead of two of them fighting
+    /// over `contentSize` (rapid drawer toggles do exactly this).
+    private var contentSizeTravel: Timer?
+
+    /// Publish a new size and walk the popover's own frame to it over the
+    /// CALLER's animation duration, so the surface's bottom edge travels with
+    /// the content instead of arriving before it.
+    ///
+    /// Live report, 2026-08-08: the sync drawer glided open while "the bottom
+    /// kind of doesn't animate, it just shifts". `preferredContentSize` is the
+    /// documented size channel and the popover does resize from it, but on a
+    /// pacing of its own that no ambient `NSAnimationContext` reaches — and
+    /// `NSPopover`, unlike a view or a window, is NOT an
+    /// `NSAnimatablePropertyContainer`, so there is no `animator()` proxy to
+    /// borrow the caller's timing with. Stepping `contentSize` ourselves is the
+    /// remaining way to make the whole surface move as one motion.
+    ///
+    /// `preferredContentSize` is still published UP FRONT, with the popover's
+    /// own animation suppressed. It stays the size of record, the panel's
+    /// measurements read it, and it decides where any AppKit-initiated layout
+    /// mid-travel would land — on the TARGET, i.e. this animation's end state.
+    /// That ordering is deliberate: if AppKit ever overrides the steps, the
+    /// failure is the instant shift we already had, never a jump backwards.
+    ///
+    /// The curve is smoothstep, which tracks `easeInEaseOut` closely enough at
+    /// this duration to read as one motion with the row's real animation.
+    /// razor: a timer, not a display link — a row-sized resize is ~9 frames.
+    func animatePopoverContentSize(to target: NSSize, publish: () -> Void) {
+        contentSizeTravel?.invalidate()
+        contentSizeTravel = nil
+        guard popover.isShown else { publish(); return }
+        // Read the START before publishing: the assignment below snaps the
+        // popover to `target`, and the travel has to begin where it actually
+        // was. Both land in one turn, so no frame renders between them.
+        let start = popover.contentSize
+        let duration = NSAnimationContext.current.duration
+        setPopoverAnimates(false, whileApplying: publish)
+        guard duration > 0, start.height != target.height else { return }
+        popover.contentSize = start
+
+        let began = Date()
+        let travel = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] timer in
+            guard let self, self.popover.isShown else { timer.invalidate(); return }
+            let t = min(1, Date().timeIntervalSince(began) / duration)
+            let eased = t * t * (3 - 2 * t)
+            self.popover.contentSize = NSSize(
+                width: target.width,
+                height: start.height + (target.height - start.height) * eased)
+            guard t >= 1 else { return }
+            timer.invalidate()
+            self.contentSizeTravel = nil
+        }
+        // `.common` so the travel keeps running while a menu or a slider drag
+        // has the run loop in a tracking mode.
+        RunLoop.main.add(travel, forMode: .common)
+        contentSizeTravel = travel
     }
 
     /// Rebuild as an OPEN (T-5, PLAN §B): recompute every collapsible card's
@@ -2085,12 +2153,20 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // The restore path for per-device visibility, present only when
         // something is actually hidden. Sorted by the STORED name so an
         // undiscovered device is still listed and still named.
-        if !hiddenDeviceNames.isEmpty {
+        // Only what is genuinely OFF SCREEN: a stored hide whose device is back
+        // in the mix renders a row again (see `isDeviceHidden`), and offering
+        // to "Show" something already visible would be a lie. Keyed on the
+        // rendered rows rather than the predicate so a hidden device that is
+        // selected but NOT currently discovered — no row either way — is still
+        // listed and still restorable.
+        let rendered = Set(renderedDeviceOrder().map(\.id))
+        let restorable = hiddenDeviceNames.filter { !rendered.contains($0.key) }
+        if !restorable.isEmpty {
             menu.addItem(.separator())
             let header = NSMenuItem(title: "Hidden Devices", action: nil, keyEquivalent: "")
             header.isEnabled = false
             menu.addItem(header)
-            for (id, name) in hiddenDeviceNames.sorted(by: { ($0.value, $0.key) < ($1.value, $1.key) }) {
+            for (id, name) in restorable.sorted(by: { ($0.value, $0.key) < ($1.value, $1.key) }) {
                 let item = NSMenuItem(title: "Show '\(name)'",
                                       action: #selector(menuShowDevice(_:)), keyEquivalent: "")
                 item.target = self
@@ -2104,14 +2180,33 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// A device row's contextual menu (right-click / VoiceOver "show menu"):
     /// one "Hide '<name>'" item, dispatched through real `NSMenuItem`
     /// target/action.
+    ///
+    /// Hiding is BLUETOOTH-ONLY (Alec's call, live review). The Bluetooth list
+    /// is a pairing HISTORY — every speaker the Mac has ever met, most of them
+    /// long gone — so curating it is expected. AirPlay rows are live
+    /// discoveries and the reason the app exists: a hidden one reads as a bug
+    /// ("where did my speaker go"), so they carry no menu at all. Neither does
+    /// This Mac, which is a single row that can't be unruly.
+    ///
+    /// A device that WANTS AUDIO is never hideable — the same
+    /// selected-or-app-target predicate the rest of this file uses. Hiding the
+    /// row for something actively playing would take away the only volume and
+    /// mute control for a speaker still making noise. The item stays visible
+    /// but disabled rather than vanishing, so the action's existence is still
+    /// discoverable from the row it applies to; dropping it out of the mix
+    /// enables it.
     func makeDeviceRowMenu(for id: String) -> NSMenu? {
-        guard let device = devicesByID[id] else { return nil }
+        guard let device = devicesByID[id], device.isBluetooth else { return nil }
         let menu = NSMenu(title: device.name)
         menu.autoenablesItems = false
         let hide = NSMenuItem(title: "Hide '\(device.name)'",
                               action: #selector(menuHideDevice(_:)), keyEquivalent: "")
         hide.target = self
         hide.representedObject = id
+        hide.isEnabled = !wantsAudio(id)
+        if !hide.isEnabled {
+            hide.toolTip = "\(device.name) is part of the mix. Remove it to hide the row."
+        }
         menu.addItem(hide)
         return menu
     }

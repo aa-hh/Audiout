@@ -343,6 +343,19 @@ final class PopoverPanelViewController: NSViewController {
         // Assigning `preferredContentSize` is the sole size channel; NSPopover
         // animates iff `popover.animates` is true when the assignment happens.
         if let controller {
+            // …but that animation runs on a timeline of the popover's own
+            // choosing, which on screen read as the surface's bottom edge
+            // SNAPPING while the row itself glided (live report, 2026-08-08:
+            // "the bottom kind of doesn't animate, it just shifts"). When a
+            // caller is already inside an animation group, hand the frame
+            // travel to the controller so it inherits THAT duration and curve
+            // and the whole surface moves as one.
+            if wantsAnimation {
+                controller.animatePopoverContentSize(to: target) { [weak self] in
+                    self?.preferredContentSize = target
+                }
+                return
+            }
             controller.setPopoverAnimates(wantsAnimation) { [weak self] in
                 self?.preferredContentSize = target
             }

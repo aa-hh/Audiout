@@ -140,70 +140,122 @@ import AppKit
     /// The whole hide path through real AppKit dispatch: the row's own
     /// `menu(for:)` override, then `performActionForItem`.
     @Test func rowContextMenuHidesTheDeviceWithoutTouchingSelection() {
-        let (popover, controller) = makePopover(fleet: [local(), airplay()])
-        controller.setDeviceSelected("office", true)
-        popover.update(devices: [local(), airplay()])
+        let (popover, controller) = makePopover(fleet: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
 
-        let menu = popover.test_deviceRow(for: "office")?.test_contextMenu()
-        #expect(menu?.items.map(\.title) == ["Hide 'Office'"])
+        let menu = popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()
+        #expect(menu?.items.map(\.title) == ["Hide 'Speaker A'"])
         menu?.performActionForItem(at: 0)
 
-        #expect(popover.test_deviceRow(for: "office") == nil, "the row is gone")
+        #expect(popover.test_deviceRow(for: "bt-a:output") == nil, "the row is gone")
         #expect(popover.test_renderedDeviceIDs() == ["mac"])
-        #expect(controller.selectedDeviceIDs.contains("office"),
-                "hiding is display only — selection, membership and routing are untouched")
-        #expect(popover.test_hiddenDeviceNames() == ["office": "Office"])
+        #expect(controller.selectedDeviceIDs.contains("bt-a:output") == false)
+        #expect(popover.test_hiddenDeviceNames() == ["bt-a:output": "Speaker A"])
+    }
+
+    // MARK: Only Bluetooth is curatable, and never what is playing
+
+    /// AirPlay rows are live discoveries and the point of the app — a hidden
+    /// one reads as a bug, so they offer no menu at all. Neither does the Mac.
+    @Test func onlyBluetoothRowsOfferAHideMenu() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), airplay(), bt("bt-a:output", name: "Speaker A")])
+
+        #expect(popover.test_deviceRow(for: "office")?.test_contextMenu() == nil,
+                "an AirPlay row is never hideable")
+        #expect(popover.test_deviceRow(for: "mac")?.test_contextMenu() == nil,
+                "nor the single This Mac row")
+        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu() != nil)
+    }
+
+    /// Hiding the row for something still making noise would take away its
+    /// only volume and mute control.
+    @Test func aDeviceInTheMixCannotBeHidden() {
+        let (popover, controller) = makePopover(fleet: [local(), bt("bt-a:output", name: "Speaker A")])
+        controller.setDeviceSelected("bt-a:output", true)
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+
+        let item = popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()?.items.first
+        #expect(item?.title == "Hide 'Speaker A'", "the action stays discoverable on its own row")
+        #expect(item?.isEnabled == false, "…but not while the device is in the mix")
+    }
+
+    /// The invariant, not just the menu gate: a stored hide takes effect only
+    /// while the device is OUT of the mix, so a device that becomes live again
+    /// — here by being selected, in the app by an app route pointed straight at
+    /// it — gets its row back, and hides itself again when it leaves.
+    @Test func aHiddenDeviceThatRejoinsTheMixGetsItsRowBack() {
+        let (popover, controller) = makePopover(fleet: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()?.performActionForItem(at: 0)
+        #expect(popover.test_deviceRow(for: "bt-a:output") == nil)
+
+        controller.setDeviceSelected("bt-a:output", true)
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        #expect(popover.test_deviceRow(for: "bt-a:output") != nil,
+                "a playing device always has a row")
+        #expect(popover.test_hiddenDeviceNames().keys.contains("bt-a:output"),
+                "the hide INTENT survives — it is suspended, not forgotten")
+        #expect(popover.test_outputDevicesPlusMenu().items.map(\.title)
+                    .contains("Show 'Speaker A'") == false,
+                "and it is not offered for restore while it is on screen")
+
+        controller.setDeviceSelected("bt-a:output", false)
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        #expect(popover.test_deviceRow(for: "bt-a:output") == nil, "and it hides itself again")
     }
 
     @Test func plusMenuListsHiddenDevicesAndShowingOneRestoresItsRow() {
         let (popover, _) = makePopover()
-        popover.update(devices: [local(), airplay(), airplay("attic", name: "Attic")])
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A"),
+                                 bt("bt-z:output", name: "Zed Box")])
         #expect(popover.test_outputDevicesPlusMenu().items.map(\.title)
                 == ["Save Selected Devices as group", "Pair a Bluetooth speaker…"],
                 "no Hidden Devices section until something is hidden")
 
-        popover.test_deviceRow(for: "office")?.test_contextMenu()?.performActionForItem(at: 0)
-        popover.test_deviceRow(for: "attic")?.test_contextMenu()?.performActionForItem(at: 0)
+        popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()?.performActionForItem(at: 0)
+        popover.test_deviceRow(for: "bt-z:output")?.test_contextMenu()?.performActionForItem(at: 0)
 
         var menu = popover.test_outputDevicesPlusMenu()
         #expect(menu.items.map(\.title) == ["Save Selected Devices as group",
                                             "Pair a Bluetooth speaker…",
                                             "", "Hidden Devices",
-                                            "Show 'Attic'", "Show 'Office'"],
+                                            "Show 'Speaker A'", "Show 'Zed Box'"],
                 "sorted by the stored name, under a disabled section header")
         #expect(menu.items[3].isEnabled == false)
 
-        menu.performActionForItem(at: 5)
-        #expect(popover.test_deviceRow(for: "office") != nil)
+        menu.performActionForItem(at: 4)
+        #expect(popover.test_deviceRow(for: "bt-a:output") != nil)
         menu = popover.test_outputDevicesPlusMenu()
-        #expect(menu.items.map(\.title).contains("Show 'Office'") == false)
+        #expect(menu.items.map(\.title).contains("Show 'Speaker A'") == false)
     }
 
     /// A hidden device the backend can no longer see is still listed, still
     /// named — that is what the stored name is for.
     @Test func anUndiscoveredHiddenDeviceIsStillListedAndStillNamed() {
         let (popover, _) = makePopover()
-        popover.update(devices: [local(), airplay()])
-        popover.test_deviceRow(for: "office")?.test_contextMenu()?.performActionForItem(at: 0)
+        popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
+        popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()?.performActionForItem(at: 0)
 
         popover.update(devices: [local()])
         let menu = popover.test_outputDevicesPlusMenu()
-        #expect(menu.items.map(\.title).contains("Show 'Office'"))
+        #expect(menu.items.map(\.title).contains("Show 'Speaker A'"))
     }
 
     @Test func theHiddenSetRoundTripsThroughItsStore() {
         let store = HiddenDeviceStore(directory: tempDirectory())
+        let fleet = [local(), bt("bt-a:output", name: "Speaker A")]
         let (first, _) = makePopover()
         first.hiddenDeviceStore = store
-        first.update(devices: [local(), airplay()])
-        first.test_deviceRow(for: "office")?.test_contextMenu()?.performActionForItem(at: 0)
+        first.update(devices: fleet)
+        first.test_deviceRow(for: "bt-a:output")?.test_contextMenu()?.performActionForItem(at: 0)
 
         // A second launch over the same store.
         let (second, _) = makePopover()
         second.hiddenDeviceStore = store
-        second.update(devices: [local(), airplay()])
-        #expect(second.test_hiddenDeviceNames() == ["office": "Office"])
-        #expect(second.test_deviceRow(for: "office") == nil)
+        second.update(devices: fleet)
+        #expect(second.test_hiddenDeviceNames() == ["bt-a:output": "Speaker A"])
+        #expect(second.test_deviceRow(for: "bt-a:output") == nil)
 
         second.test_outputDevicesPlusMenu().performActionForItem(at: 4)
         let (third, _) = makePopover()
@@ -225,8 +277,8 @@ import AppKit
     @Test func aSubsectionWhoseDevicesAreAllHiddenDisappearsEntirely() {
         let (popover, _) = makePopover()
         popover.update(devices: [local(), airplay(), bt("bt-a:output", name: "Speaker A")])
-        popover.test_deviceRow(for: "office")?.test_contextMenu()?.performActionForItem(at: 0)
-        #expect(popover.test_subsectionTitles() == ["This Mac", bluetoothTitle],
+        popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()?.performActionForItem(at: 0)
+        #expect(popover.test_subsectionTitles() == ["This Mac", airPlayTitle],
                 "an all-hidden subsection reads exactly like an empty one")
     }
 
@@ -237,30 +289,33 @@ import AppKit
         popover.update(devices: [])
         #expect(popover.test_devicesPlaceholderText() == "Looking for devices…")
 
-        popover.update(devices: [local(), airplay()])
+        popover.update(devices: [bt("bt-a:output", name: "Speaker A")])
         #expect(popover.test_devicesPlaceholderText() == nil)
 
-        popover.test_deviceRow(for: "mac")?.test_contextMenu()?.performActionForItem(at: 0)
-        popover.test_deviceRow(for: "office")?.test_contextMenu()?.performActionForItem(at: 0)
+        popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()?.performActionForItem(at: 0)
         #expect(popover.test_devicesPlaceholderText() == "All devices hidden")
     }
 
     // MARK: The rail follows what is on screen
 
-    /// The spine's terminus is the lowest selected VISIBLE node: hiding the
-    /// bottom selected device pulls it up rather than leaving the row above it
+    /// The spine's terminus is the lowest selected VISIBLE node. Collapse is
+    /// the case that can strand it — a hidden device is by definition out of
+    /// the mix, but a COLLAPSED subsection takes selected rows off screen —
+    /// and it must pull the terminus up rather than leave the row above it
     /// carrying a through-rail to nothing.
     @Test func theRailTerminatesAtTheLowestVISIBLESelectedNode() {
-        let (popover, controller) = makePopover(fleet: [local(), airplay(), airplay("zed", name: "Zed")])
+        let fleet = [local(), airplay(), bt("bt-z:output", name: "Zed Box")]
+        let (popover, controller) = makePopover(fleet: fleet)
         controller.setDeviceSelected("office", true)
-        controller.setDeviceSelected("zed", true)
-        popover.update(devices: [local(), airplay(), airplay("zed", name: "Zed")])
+        controller.setDeviceSelected("bt-z:output", true)
+        popover.update(devices: fleet)
         #expect(popover.test_deviceRow(for: "office")?.test_busRailBelow == true,
-                "the rail runs on past Office to Zed")
+                "the rail runs on past Office to the Bluetooth box below it")
 
-        popover.test_deviceRow(for: "zed")?.test_contextMenu()?.performActionForItem(at: 0)
+        popover.test_fireSubsectionHeaderClick(title: bluetoothTitle)
         #expect(popover.test_deviceRow(for: "office")?.test_busRailBelow == false,
-                "with Zed off screen the rail ends at Office")
-        #expect(controller.selectedDeviceIDs.contains("zed"), "Zed is still in the mix")
+                "with the Bluetooth rows collapsed away the rail ends at Office")
+        #expect(controller.selectedDeviceIDs.contains("bt-z:output"),
+                "collapse is display only — Zed Box is still in the mix")
     }
 }

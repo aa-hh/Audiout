@@ -39,10 +39,6 @@ final class VolumeKeyInterceptor {
     /// a real system dialog during an automated run.
     private let remoteControl: RemoteControlPriming
 
-    /// True once we've shown the Accessibility prompt this launch, so repeatedly
-    /// entering the mode can't stack system dialogs.
-    private var didRequestAccessibility = false
-
     private var runLoopSource: CFRunLoopSource?
 
     /// Called on the main actor with what an intercepted key should do. Set by
@@ -96,8 +92,12 @@ final class VolumeKeyInterceptor {
         // Unlike `MediaKeyController`'s posting — which merely no-ops without the
         // grant — a tap cannot be CREATED at all untrusted, so the grant stops
         // being optional the moment the aggregate goes live.
+        //
+        // Reporting is all this does: the prompt belongs to whoever handles the
+        // report, which puts the permission row's own "Allow…" behind it. Priming
+        // here as well would throw the system dialog and that window up together
+        // off a single keypress.
         guard remoteControl.isTrusted() else {
-            requestAccessibilityOnce()
             onAccessibilityMissing?()
             return
         }
@@ -152,21 +152,6 @@ final class VolumeKeyInterceptor {
         state.tap = nil
     }
 
-    // MARK: - Accessibility
-
-    /// Ask for Accessibility once per launch. `prime()` is
-    /// `AXIsProcessTrustedWithOptions([prompt: true])` behind the seam, which both
-    /// registers the app in the Accessibility list and shows the standard dialog.
-    private func requestAccessibilityOnce() {
-        guard !didRequestAccessibility else { return }
-        didRequestAccessibility = true
-        remoteControl.prime()
-
-        let message = "[Audiouter] The volume keys need Accessibility access while Audiouter is "
-            + "your output device — prompted. Grant it in System Settings › Privacy & Security › "
-            + "Accessibility, then the volume keys will drive Main Out.\n"
-        FileHandle.standardError.write(Data(message.utf8))
-    }
 }
 
 // MARK: - Callback-side state

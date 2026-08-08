@@ -624,11 +624,14 @@ import AppKit
 
         let stack = try #require(row.superview as? NSStackView,
                                   "the device row itself must be mounted in a stack")
-        #expect(stack.arrangedSubviews.contains(panel),
-                "the diagnosis panel's VIEW must actually be attached in the row's own stack, not just recorded in diagnosisPanelsByID")
-        #expect(panel.superview === stack, "the panel mounts in the SAME stack as its device row")
+        // An inserted row is mounted inside its own reveal clip (`RowClipView`),
+        // the view whose height the downward reveal animates; the clip is what
+        // lands in the stack.
+        let clip = try #require(panel.superview as? RowClipView,
+                                 "the diagnosis panel's VIEW must actually be attached, inside its reveal clip, not just recorded in diagnosisPanelsByID")
+        #expect(clip.superview === stack, "the panel's clip mounts in the SAME stack as its device row")
         let rowIndex = try #require(stack.arrangedSubviews.firstIndex(of: row))
-        let panelIndex = try #require(stack.arrangedSubviews.firstIndex(of: panel))
+        let panelIndex = try #require(stack.arrangedSubviews.firstIndex(of: clip))
         #expect(panelIndex == rowIndex + 1, "the panel sits directly UNDER its failed device row")
 
         // Reconnecting must detach the VIEW from the tree too, not just clear the

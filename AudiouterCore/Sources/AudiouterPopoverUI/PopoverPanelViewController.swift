@@ -699,13 +699,13 @@ final class PopoverPanelViewController: NSViewController {
 
     /// Insert `view` as a row directly UNDER `sibling` (a row already mounted in
     /// one of the cards) — the inline diagnosis panel expanding under a failed
-    /// device row (connection-status brief §7.2). `animated` reuses the
-    /// group-expansion animation approach (the popover's original NSMenu →
-    /// NSPopover motivation): animate the row's `isHidden` inside an
-    /// `NSAnimationContext` group with implicit animation on, laying out the
-    /// stack so siblings slide apart, then pin the final state in the completion
-    /// handler. No-op if `sibling` isn't currently mounted (i.e. its own
-    /// superview isn't a stack).
+    /// device row (connection-status brief §7.2), and the BT sync drawer. The row
+    /// is mounted inside its own `RowClipView`, and `animated` unfolds it
+    /// DOWNWARD out of `sibling` by animating that clip's height 0 → natural —
+    /// the same clip-height choreography `CardView.setBodyCollapsed` uses for a
+    /// whole card's body, and what makes the panel's height an interpolated
+    /// quantity the popover's own resize can lead (see `RowClipView`). No-op if
+    /// `sibling` isn't currently mounted (i.e. its own superview isn't a stack).
     ///
     /// **Trap (found live, 2026-07-19 — C1):** this used to search
     /// `card.contentStack.arrangedSubviews` for `sibling`, but a device row (or
@@ -722,9 +722,12 @@ final class PopoverPanelViewController: NSViewController {
         guard let stack = sibling.superview as? NSStackView,
               let index = stack.arrangedSubviews.firstIndex(of: sibling)
         else { return }
-        stack.insertArrangedSubview(view, at: index + 1)
-        view.leadingAnchor.constraint(equalTo: stack.leadingAnchor).isActive = true
-        view.trailingAnchor.constraint(equalTo: stack.trailingAnchor).isActive = true
+        let clip = RowClipView(row: view)
+        stack.insertArrangedSubview(clip, at: index + 1)
+        NSLayoutConstraint.activate([
+            clip.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
+            clip.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
+        ])
 
         // The mounted row's END state is VISIBLE, and that has to be TRUE
         // before the measurement below rather than a consequence of the
@@ -734,16 +737,9 @@ final class PopoverPanelViewController: NSViewController {
         // measuring a row that arrives hidden publishes a size that leaves the
         // row out entirely: the popover is told "no change", the content then
         // grows underneath it, and the panel only catches up on some LATER
-        // unrelated re-fit — which lands as one disconnected lurch instead of
-        // the row opening.
-        //
-        // A REUSED row does arrive hidden. `removeRow`'s animated path hides
-        // the view and never un-hides it, and the BT sync drawer is a SINGLE
-        // instance re-parented under whichever row is open (`PopoverController`,
-        // D2) — so it is hidden on every mount after its first. That is exactly
-        // why the FIRST expansion behaved and the rest did not, and (via a
-        // rebuild landing mid-animation, which detaches a still-hidden drawer
-        // and re-mounts it un-animated) why it was intermittent even then.
+        // unrelated re-fit — one disconnected lurch instead of the row opening.
+        // The BT sync drawer is a SINGLE reused instance (`PopoverController`,
+        // D2), so whatever state a previous mount left on it arrives here.
         view.isHidden = false
 
         // The size the panel is GROWING TO, measured here (not at the call site —
@@ -752,9 +748,10 @@ final class PopoverPanelViewController: NSViewController {
         // content. Auto Layout then has to reconcile a container whose height
         // disagrees with its content, and the slack lands wherever nothing pins it
         // — in practice the pinned banner, which balloons into a tall empty box.
-        // Measuring needs the row VISIBLE (above), so the number is taken now and
-        // published below, once there is a start state to grow FROM.
+        // Measured with the clip at its NATURAL height, so this is both the
+        // panel's final height and (via the clip's frame) the reveal's target.
         let target = fittingSizeSettled()
+        let revealHeight = clip.frame.height
 
         // Same Reduce Motion gate `setCardCollapsed` already applies (PLAN §E
         // risk 1 / house rule — "Respect system settings: Reduce Motion"):
@@ -768,36 +765,35 @@ final class PopoverPanelViewController: NSViewController {
             return
         }
 
-        // Hide the row again AND LAY THAT OUT — an animation cannot travel a
+        // Collapse the clip AND LAY THAT OUT — an animation cannot travel a
         // distance the layout has already covered (live report, 2026-08-08:
-        // "collapsing: smooth. Expanding: abrupt"). `animator().isHidden`
-        // interpolates from the frames CURRENTLY laid out, and the measurement
-        // above settled every one of them at the FINAL height: without this
-        // commit the rows below arrive at their new places in that same turn,
-        // leaving the popover's frame animation as the only thing still moving.
-        // A collapse never had the problem — nothing measures it into place
-        // first, so it always had the whole row height to travel.
-        // `fittingSizeSettled` both runs the layout pass and returns the height
-        // it settles on, which is where the reveal starts.
-        view.isHidden = true
+        // "collapsing smooth, expanding abrupt"). The measurement above settled
+        // every row below at its FINAL position; without this commit the reveal
+        // would start already arrived. `fittingSizeSettled` both runs the layout
+        // pass and returns the height it settles on, which is where the reveal
+        // starts.
+        clip.heightConstraint.constant = 0
+        clip.heightConstraint.isActive = true
         test_rowRevealStartHeight = fittingSizeSettled().height
 
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = Self.rowRevealDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             context.allowsImplicitAnimation = true
-            view.animator().isHidden = false
+            clip.heightConstraint.animator().constant = revealHeight
             self.stackView.layoutSubtreeIfNeeded()
-            // Grow the SURFACE in the same turn as the row, from the height
-            // measured above — `removeRow` sets the precedent, and publishing the
-            // pre-measured number (rather than re-measuring) is what keeps the
-            // popover's target the row's full height while the content it is
-            // sizing to is still collapsed. This is the SAFE direction of the
-            // surplus shield: a popover briefly taller than its content shows
-            // inert canvas, where a popover shorter than its content is the
+            // Grow the SURFACE in the same turn, to the height measured above.
+            // The clip's height is now a genuinely INTERPOLATED quantity, so the
+            // content trails the popover's own (shorter, for a row-sized delta)
+            // frame animation the whole way — the SAFE direction of the surplus
+            // shield: a popover briefly taller than its content shows inert
+            // canvas, where a popover shorter than its content is the
             // unsatisfiable case that deforms it.
             self.publishContentSize(target, animated: true)
         }, completionHandler: {
-            view.isHidden = false
+            // Let the row flex with its own content again once it has arrived
+            // (a mounted drawer/panel can re-lay itself out while open).
+            clip.heightConstraint.isActive = false
         })
     }
 
@@ -806,37 +802,48 @@ final class PopoverPanelViewController: NSViewController {
     /// as the insert), then detaches it in the completion handler; un-animated
     /// removal detaches immediately.
     func removeRow(_ view: NSView, animated: Bool) {
-        guard let stack = view.superview as? NSStackView else {
+        guard let clip = view.superview as? RowClipView,
+              let stack = clip.superview as? NSStackView else {
             view.removeFromSuperview()
             panelContentDidChangeHeight(animated: animated)
             return
         }
         // The detach is DEFERRED into the animation's completion handler, so the
-        // row is still in the tree while the fade runs — which is exactly why the
-        // re-fit has to live in here too (found live 2026-08-06). Measuring at the
-        // call site sized the popover for a row that was about to leave, and
+        // row is still in the tree while the clip closes — which is exactly why
+        // the re-fit has to live in here too (found live 2026-08-06). Measuring at
+        // the call site sized the popover for a row that was about to leave, and
         // nothing ever measured again once it did: the popover stayed permanently
         // taller than its content, one row's worth per removal. See `insertRow`.
         let detach = { [weak self] in
-            // The view may have LEFT this stack while the fade ran — a row
+            // The clip may have LEFT this stack while the collapse ran — a row
             // that is a single reused instance (the BT sync drawer) can be
             // re-mounted under a different sibling before this fires, and
             // `removeArrangedSubview` on a stack the view no longer belongs to
             // raises. Whoever re-parented it already republished the height.
-            guard view.superview === stack else { return }
-            stack.removeArrangedSubview(view)
+            guard clip.superview === stack else { return }
+            // Hand the row back detached and un-hidden — it is reusable, and the
+            // clip is not (a fresh mount builds its own).
             view.removeFromSuperview()
+            stack.removeArrangedSubview(clip)
+            clip.removeFromSuperview()
             self?.panelContentDidChangeHeight(animated: false)
         }
         // Same Reduce Motion gate as `insertRow` above (and `setCardCollapsed`).
         guard animated && !reduceMotion else { detach(); return }
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = Self.rowRevealDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             context.allowsImplicitAnimation = true
-            view.animator().isHidden = true
+            // Seed the clip with its CURRENT height before retargeting to 0, and
+            // lay that seed out — an inactive (or stale) constraint would
+            // otherwise animate 0 → 0 and the row would snap shut (`CardView`'s
+            // first-collapse trap, same fix).
+            clip.heightConstraint.constant = clip.frame.height
+            clip.heightConstraint.isActive = true
             self.stackView.layoutSubtreeIfNeeded()
-            // Kick the popover resize in the SAME turn as the row's fade so the two
-            // glide together rather than the panel snapping shut after it (the
+            clip.heightConstraint.animator().constant = 0
+            // Kick the popover resize in the SAME turn as the clip's close so the
+            // two glide together rather than the panel snapping shut after it (the
             // precedent `setCardCollapsed` sets). The `detach` above then publishes
             // the exact end state, so a mid-flight mismeasure can't persist.
             self.panelContentDidChangeHeight(animated: true)
@@ -1177,4 +1184,42 @@ private final class HairlineView: NSView {
         super.viewDidChangeEffectiveAppearance()
         layer?.backgroundColor = Tokens.Color.hairline.cgColor
     }
+}
+
+/// The clipping host one `insertRow` row unfolds inside — `CardView`'s
+/// collapsible body, per row.
+///
+/// The row is pinned to the clip's TOP strongly and to its bottom only at
+/// `.defaultHigh`, so an active height-0 constraint overrides the bottom pin
+/// instead of squeezing the row: the row holds its place at the top and is
+/// revealed downward from under the sibling above it as the clip's height
+/// grows, pushing every row below it down by the same amount. That height is
+/// the ONE animated dimension, and it is what makes the panel's height a
+/// genuinely interpolated quantity — the popover, told its final size up front,
+/// then leads the content the whole way rather than being asked to hold content
+/// it has not grown to yet.
+final class RowClipView: NSView {
+    /// The animated height. Active only while a reveal/collapse is in flight or
+    /// pinned at 0; inactive once expanded, so the row flexes with its content.
+    private(set) var heightConstraint: NSLayoutConstraint!
+
+    init(row: NSView) {
+        super.init(frame: .zero)
+        heightConstraint = heightAnchor.constraint(equalToConstant: 0)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        layer?.masksToBounds = true      // mask the part of the row not yet revealed
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
+        let bottomPin = row.bottomAnchor.constraint(equalTo: bottomAnchor)
+        bottomPin.priority = .defaultHigh
+        NSLayoutConstraint.activate([
+            row.topAnchor.constraint(equalTo: topAnchor),
+            row.leadingAnchor.constraint(equalTo: leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor),
+            bottomPin,
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }

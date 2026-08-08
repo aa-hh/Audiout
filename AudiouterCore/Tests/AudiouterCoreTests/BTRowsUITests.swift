@@ -576,13 +576,15 @@ import AppKit
     }
 
     /// Whether the mounted drawer sits in the very next stack slot after its
-    /// row (D1 — it opens in place, under the row it belongs to).
+    /// row (D1 — it opens in place, under the row it belongs to). An inserted
+    /// row lives inside its own reveal clip, and the clip is what the stack
+    /// arranges.
     private func drawerFollowsRow(_ popover: PopoverController, _ id: String) -> Bool {
         guard let row = popover.test_deviceRow(for: id),
-              let drawer = popover.test_syncDrawer,
+              let clip = popover.test_syncDrawer?.superview,
               let stack = row.superview as? NSStackView,
               let rowIndex = stack.arrangedSubviews.firstIndex(of: row),
-              let drawerIndex = stack.arrangedSubviews.firstIndex(of: drawer)
+              let drawerIndex = stack.arrangedSubviews.firstIndex(of: clip)
         else { return false }
         return drawerIndex == rowIndex + 1
     }

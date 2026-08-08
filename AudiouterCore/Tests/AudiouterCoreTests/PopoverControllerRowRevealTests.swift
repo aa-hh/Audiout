@@ -126,26 +126,31 @@ import Foundation
 
     // MARK: It expands out of its own row
 
-    /// The drawer's whole point (PLAN-BT-SYNC-DRAWER D1): it opens out of the
-    /// row it belongs to and pushes the rows BELOW down. Everything above it —
-    /// which, with the panel's content chain hanging from its top edge, means
-    /// everything between it and the panel's top edge — must not move at all.
-    @Test func expandingHoldsTheRowsAboveAndPushesTheOnesBelowDown() {
+    /// The drawer's whole point (PLAN-BT-SYNC-DRAWER D1): it opens DOWNWARD out
+    /// of the row it belongs to and pushes the rows BELOW down. Everything above
+    /// it — which, with the panel's content chain hanging from its top edge,
+    /// means everything between it and the panel's top edge — must not move at
+    /// all, and the collapse puts every one of them back.
+    @Test func expandingOpensDownwardOutOfItsRowAndCollapsingReturns() {
         let (panel, rows, _) = makePanel(rowCount: 3, reduceMotion: true)
         let drawer = FixedRow(height: Self.drawerHeight)
 
-        /// Each row's distance from the panel's TOP edge, laid out at whatever
+        /// A view's distance from the panel's TOP edge, laid out at whatever
         /// height the panel has just published — the popover sizes its content
-        /// view to exactly that, so this is the row's real on-screen offset
+        /// view to exactly that, so this is the view's real on-screen offset
         /// from the fixed top of the surface.
-        func topOffsets() -> [CGFloat] {
+        func topOffset(_ view: NSView) -> CGFloat {
+            panel.view.frame.height - panel.view.convert(view.bounds, from: view).maxY
+        }
+        func settle() {
             panel.view.frame = NSRect(origin: .zero, size: panel.preferredContentSize)
             panel.view.layoutSubtreeIfNeeded()
-            return rows.map { panel.view.frame.height - panel.view.convert($0.bounds, from: $0).maxY }
         }
+        func topOffsets() -> [CGFloat] { settle(); return rows.map(topOffset) }
 
         panel.panelContentDidChangeHeight(animated: false)
         let before = topOffsets()
+        let beforeHeight = panel.preferredContentSize.height
 
         panel.insertRow(drawer, after: rows[1], animated: true)
         let after = topOffsets()
@@ -154,5 +159,14 @@ import Foundation
         #expect(after[1] == before[1], "nor the row the drawer belongs to — it is the anchor the drawer opens out of")
         #expect(after[2] == before[2] + Self.drawerHeight,
                 "the row below is pushed down by exactly the drawer's height")
+        #expect(topOffset(drawer) == before[1] + 30,
+                "the drawer sits directly under its own row (30pt tall), not somewhere else in the stack")
+        #expect(panel.preferredContentSize.height == beforeHeight + Self.drawerHeight,
+                "and the published height grew by exactly the same amount")
+
+        panel.removeRow(drawer, animated: true)
+
+        #expect(topOffsets() == before, "the collapse brings every row back to where it started")
+        #expect(panel.preferredContentSize.height == beforeHeight)
     }
 }

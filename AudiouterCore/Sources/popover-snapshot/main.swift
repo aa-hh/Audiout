@@ -903,18 +903,11 @@ func snapshotLocalMixBlocked(appearanceName: NSAppearance.Name, label: String, o
         print("  SETUP FAIL: no local-mac row mounted"); return
     }
     localRow.test_simulateBlockedBodyClick()
-    // `insertRow(animated: true)` mounts the note HIDDEN and un-hides it in a
-    // 0.22 s fade's completion handler — but with no on-screen window there is
-    // no display refresh to drive the fade, so the completion never fires
-    // headlessly and the note would stay hidden (zero-height) in the capture.
-    // Settle the animation's END STATE synchronously instead (the same
-    // discipline `snapshotMeters` uses via `test_setDisplayedLevel`): un-hide
-    // every arranged row in the local row's body stack — a no-op for the
-    // already-visible device rows, and exactly what the fade's completion
-    // handler would have done to the note.
-    if let bodyStack = localRow.superview as? NSStackView {
-        for arranged in bodyStack.arrangedSubviews { arranged.isHidden = false }
-    }
+    // `insertRow(animated: true)` mounts the note at its full height straight
+    // away — its reveal clip's height constraint takes the grown value the
+    // moment the animator retargets it, so the capture needs no end-state
+    // settling of its own even though a windowless view never fires the
+    // animation's completion handler.
     drain(0.1)
 
     let appearance = NSAppearance(named: appearanceName)

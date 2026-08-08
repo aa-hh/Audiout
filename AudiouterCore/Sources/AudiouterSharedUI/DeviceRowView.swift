@@ -1632,10 +1632,9 @@ public final class DeviceRowView: NSView {
     static let alignTooltip =
         "Play alignment ticks on this speaker and the rest of the group — adjust sync until they land as one"
 
-    /// The chip's tabular-figures label font: monospaced DIGITS so a live
-    /// scrub can't make the chip's number jitter in width under the fixed
-    /// `syncChipWidth` column — the same problem (and answer) as
-    /// `BTSyncRulerView`'s tick labels and the drawer's big readout.
+    /// The chip's tabular-figures label font: monospaced DIGITS so a stepper
+    /// change can't make the chip's number jitter in width under the fixed
+    /// `syncChipWidth` column — the same answer the drawer's value field uses.
     private static let syncChipFont =
         NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
 
@@ -1687,7 +1686,7 @@ public final class DeviceRowView: NSView {
         syncChipButton.attributedTitle = NSAttributedString(
             string: title,
             attributes: [.font: Self.syncChipFont, .foregroundColor: color])
-        syncChipChevronName = engaged ? "chevron.up" : "chevron.down"
+        syncChipChevronName = engaged ? "chevron.down" : "chevron.right"
         syncChipButton.image = NSImage(systemSymbolName: syncChipChevronName,
                                        accessibilityDescription: nil)?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 8, weight: .semibold))
@@ -1699,19 +1698,18 @@ public final class DeviceRowView: NSView {
         // the ambiguity D7 warns about — so hover (and VoiceOver, below) spell
         // it out while the chip itself stays a compact summary.
         syncChipButton.toolTip = syncTrimIsSet
-            ? "Sync offset — \(BTSyncRulerView.accessibilityValueDescription(for: syncTrimMs)). Click to adjust."
+            ? "Sync offset — \(BTSyncTrim.spokenOffset(syncTrimMs)). Click to adjust."
             : "This speaker has never been tuned. Click to adjust its sync offset."
         syncChipButton.setNeedsDisplay(syncChipButton.bounds)
     }
 
-    /// The chip's compact value text: one decimal place always, so the digit
-    /// count (and therefore the chip's optical weight) doesn't flicker between
-    /// "22" and "22.4" during a scrub. A negative value uses the typographic
-    /// MINUS (U+2212) rather than a hyphen — it sits on the digit's own width
-    /// in a monospaced-digit font.
+    /// The chip's compact value text: whole milliseconds (decimals were cut —
+    /// see `BTSyncTrim`). A negative value uses the typographic MINUS (U+2212)
+    /// rather than a hyphen — it sits on the digit's own width in a
+    /// monospaced-digit font.
     private static func syncChipTrimText(_ ms: Double) -> String {
-        let magnitude = String(format: "%.1f", abs(ms))
-        return "\(BTSyncTrim.quantise(ms) < 0 ? "−" : "")\(magnitude) ms"
+        let whole = Int(BTSyncTrim.quantise(ms))
+        return "\(whole < 0 ? "−" : "")\(abs(whole)) ms"
     }
 
     /// The chip's one job: ask the host to open — or, on a second click,
@@ -2195,8 +2193,10 @@ public final class DeviceRowView: NSView {
             .attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
     }
 
-    /// Which chevron the chip resolved: `chevron.down` collapsed,
-    /// `chevron.up` while its drawer is open. `nil` on a non-sync row.
+    /// Which chevron the chip resolved: `chevron.right` collapsed,
+    /// `chevron.down` while its drawer is open — the disclosure convention
+    /// (pointing AT the closed thing, rotating down to reveal it), not an
+    /// up/down toggle. `nil` on a non-sync row.
     public var test_syncChipChevronSymbolName: String? {
         showsSyncControls ? syncChipChevronName : nil
     }
@@ -2592,7 +2592,7 @@ public final class DeviceRowView: NSView {
             syncChipButton.setAccessibilityLabel("Sync offset for \(device.name)")
             syncChipButton.setAccessibilityValue(
                 syncTrimIsSet
-                    ? BTSyncRulerView.accessibilityValueDescription(for: syncTrimMs)
+                    ? BTSyncTrim.spokenOffset(syncTrimMs)
                     : "not set")
             syncChipButton.setAccessibilityExpanded(syncDrawerExpanded)
         }

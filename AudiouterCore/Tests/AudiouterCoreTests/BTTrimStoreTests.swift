@@ -20,12 +20,13 @@ import Testing
         #expect(try store.load() == trims)
     }
 
-    /// BT-SYNC-DRAWER T1: the whole point of the `Int` → `Double` widening —
-    /// a fractional trim must survive the round trip exactly, not just a
-    /// whole-ms one.
-    @Test func roundTripSavesAndLoadsAFractionalTrimExactly() throws {
+    /// The store holds a raw `Double` — quantisation to whole ms happens above
+    /// it, in the backend, before a write — so it must round-trip any value it
+    /// is handed byte-for-byte, including a stale fractional one written by an
+    /// older build (which the field's tolerant parse then snaps on next edit).
+    @Test func roundTripSavesAndLoadsAnyValueExactly() throws {
         let store = store()
-        let trims: [String: Double] = ["C4-38-75-0E-BF-4A:output": 22.4, "70-99-1C-51-8F-A8:output": -0.3]
+        let trims: [String: Double] = ["C4-38-75-0E-BF-4A:output": 24, "70-99-1C-51-8F-A8:output": -0.3]
         try store.save(trims)
         #expect(try store.load() == trims)
     }
@@ -73,12 +74,13 @@ import Testing
         #expect(BTSyncTrim.clamp(0) == 0)
     }
 
-    // MARK: BTSyncTrim.quantise — the ruler's 0.1 ms snap (BT-SYNC-DRAWER T1)
+    // MARK: BTSyncTrim.quantise — whole-ms snap (BT-SYNC-DRAWER; decimals cut)
 
-    @Test func quantiseSnapsToOneDecimalPlaceRoundingHalfAwayFromZero() {
-        #expect(BTSyncTrim.quantise(22.44) == 22.4)
-        #expect(BTSyncTrim.quantise(22.45) == 22.5)
-        #expect(BTSyncTrim.quantise(-22.45) == -22.5)
+    @Test func quantiseSnapsToWholeMillisecondsRoundingHalfAwayFromZero() {
+        #expect(BTSyncTrim.quantise(22.4) == 22)
+        #expect(BTSyncTrim.quantise(22.5) == 23)
+        #expect(BTSyncTrim.quantise(-22.5) == -23)
+        #expect(BTSyncTrim.quantise(24) == 24)
     }
 
     @Test func quantiseClampsToTheRange() {
@@ -86,12 +88,11 @@ import Testing
         #expect(BTSyncTrim.quantise(-600) == -500)
     }
 
-    /// The dust-free requirement: two inputs that are decimal-equal but
-    /// bit-different going in (a classic binary-float artifact) must land on
-    /// the exact same `Double` coming out — not merely an equal-looking one.
-    @Test func quantiseOutputIsFreeOfBinaryFloatDust() {
-        let fromMultiplication = BTSyncTrim.quantise(0.1 * 3)
-        let fromLiteral = BTSyncTrim.quantise(0.3)
-        #expect(fromMultiplication.bitPattern == fromLiteral.bitPattern)
+    /// Direction phrasing shared by the row chip and the drawer (D7 — never a
+    /// bare signed number).
+    @Test func spokenOffsetSpellsOutDirection() {
+        #expect(BTSyncTrim.spokenOffset(24) == "24 milliseconds later")
+        #expect(BTSyncTrim.spokenOffset(-24) == "24 milliseconds earlier")
+        #expect(BTSyncTrim.spokenOffset(0) == "in sync")
     }
 }

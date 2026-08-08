@@ -562,3 +562,23 @@ extension SerializedSharedState {
         }
     }
 }
+
+/// A non-optional witness does not satisfy an optional protocol requirement:
+/// Swift takes the default implementation instead, silently, with no compile
+/// error. `BTSyncedSink.anchoredDeviceUIDs()` was written that way, so the
+/// backend always saw the "can't tell" default and the idle-speaker fix it
+/// feeds never ran at all. These assertions go THROUGH the protocol, which is
+/// the only place the mismatch is observable.
+@Suite struct BTSyncedSinkProtocolWitnessTests {
+
+    @Test func theRealSinkAnswersAnchoredThroughTheProtocol() {
+        let sink: BTSyncedSinkControlling = BTSyncedSink(presentationDelayMs: { 250 })
+        #expect(sink.anchoredDeviceUIDs() != nil,
+                "the real sink must answer, not fall through to the protocol's can't-tell default")
+    }
+
+    @Test func aSinkWithNoDevicesAnchorsNothing() {
+        let sink: BTSyncedSinkControlling = BTSyncedSink(presentationDelayMs: { 250 })
+        #expect(sink.anchoredDeviceUIDs() == [])
+    }
+}

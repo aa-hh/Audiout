@@ -22,9 +22,10 @@ public protocol SyncValueFieldEditorDelegate: AnyObject {
 /// fine per the plan.
 ///
 /// Two behaviours the row's field never needed, both required here:
-/// - **Decimals.** The row's field parses `Int(...)` (its steppers only ever
-///   produce whole-ms values); this one parses `Double(...)` and quantises
-///   through `BTSyncTrim.quantise`, since the drawer resolves to 0.1 ms.
+/// - **Tolerant parsing.** Parses `Double(...)` and quantises through
+///   `BTSyncTrim.quantise`, so a typed "22.6" (or a stale 0.1 ms value read
+///   from an older on-disk store) snaps cleanly to whole ms rather than being
+///   rejected. The drawer resolves to whole milliseconds.
 /// - **Escape reverts.** The row's field had no call site that ever needed
 ///   it (Return/blur were the only exits). A free-typing readout does: typed
 ///   text the user changed their mind about must not evaporate silently on
@@ -81,9 +82,43 @@ public final class SyncValueFieldEditor: NSObject, NSTextFieldDelegate {
     /// format to a plain signed number and select it all, so typing
     /// immediately replaces it — the click-to-edit affordance the drawer's
     /// visual contract calls for.
+    ///
+    /// **TRAP — AppKit posts this notification from INSIDE the first text
+    /// change, so the swap must never run synchronously here.** At this
+    /// instant the field editor still holds the host's resting string and is
+    /// part-way through replacing a range of it with the character the user
+    /// just typed. Rewriting the text now shortens the storage under that
+    /// range ("Not set" → "0"), and AppKit's completion of the same keystroke
+    /// then reads it back and aborts the process:
+    /// `NSRangeException … Range {0, 7} out of bounds; string length 1`.
+    /// Nothing done inside this call can repair that — the range was captured
+    /// before the delegate ran — so the swap is deferred one turn instead, by
+    /// which point the keystroke has landed.
+    ///
+    /// Deferring costs nothing: if the user typed, AppKit's own replacement
+    /// already put the typed characters in place of the resting text, which is
+    /// exactly what the swap existed to arrange, and the guard below leaves
+    /// them alone. If they only clicked in, the text is untouched and the swap
+    /// runs a frame later. `test_beginEditing()` applies it synchronously —
+    /// there is no in-flight change to stay out of the way of.
     public func controlTextDidBeginEditing(_ obj: Notification) {
         guard (obj.object as? NSTextField) === field else { return }
-        field.stringValue = Self.signedText(committedMs)
+        let resting = field.stringValue
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let editor = self.field.currentEditor(),
+                  editor.string == resting else { return }
+            self.applyEditingForm()
+        }
+    }
+
+    /// Replace the host's resting text with the plain signed number and select
+    /// it, so the next character typed replaces it. A no-op when the resting
+    /// text already IS that number — the drawer's ordinary case — so a live
+    /// selection is never disturbed for nothing.
+    private func applyEditingForm() {
+        let signed = Self.signedText(committedMs)
+        guard field.stringValue != signed else { return }
+        field.stringValue = signed
         field.currentEditor()?.selectAll(nil)
     }
 
@@ -93,10 +128,17 @@ public final class SyncValueFieldEditor: NSObject, NSTextFieldDelegate {
     /// - Return COMMITS and returns `true`: consumed, so the key never
     ///   bubbles past the field (un-consumed it closes the host popover with
     ///   the edit lost — the row field's own live finding, BT-OFFSET-UI).
-    /// - ↑/↓ nudge by `resolutionMs` (0.1 ms); ⌥↑/↓ by `coarseStepMs`.
-    ///   ⌥-arrows can arrive as the PARAGRAPH selectors (Cocoa's standard key
-    ///   bindings) instead of `moveUp`/`moveDown` with a modifier — the row
-    ///   field handles both spellings, so this does too.
+    /// - ↑/↓ nudge by `resolutionMs` (1 ms); ⇧↑/↓ by `coarseStepMs` (10 ms) —
+    ///   ⇧ is macOS's standard 10× stepper modifier, and the drawer's −/+
+    ///   buttons take the same modifier for the same step, so one gesture
+    ///   never means two things inside one control.
+    ///   ⇧-arrows arrive as the SELECTION-MODIFYING selectors (Cocoa's
+    ///   standard key bindings: in a text view ⇧↑ extends the selection), not
+    ///   as `moveUp:`/`moveDown:` carrying the modifier — so those spellings
+    ///   are the live path and must be intercepted, or ⇧↑ silently selects
+    ///   text instead of nudging. The plain `moveUp:`/`moveDown:` limbs still
+    ///   consult the modifier, since a remapped key binding can deliver
+    ///   either.
     /// - Escape REVERTS the typed-but-uncommitted text back to the last
     ///   committed value (still in its signed editing form, since focus
     ///   remains) and returns `true`: consumed, so it does not also bubble
@@ -112,15 +154,15 @@ public final class SyncValueFieldEditor: NSObject, NSTextFieldDelegate {
             commit(parsing: field.stringValue)
             return true
         case #selector(NSResponder.moveUp(_:)):
-            nudge(by: optionIsHeld ? BTSyncTrim.coarseStepMs : BTSyncTrim.resolutionMs)
+            nudge(by: shiftIsHeld ? BTSyncTrim.coarseStepMs : BTSyncTrim.resolutionMs)
             return true
         case #selector(NSResponder.moveDown(_:)):
-            nudge(by: -(optionIsHeld ? BTSyncTrim.coarseStepMs : BTSyncTrim.resolutionMs))
+            nudge(by: -(shiftIsHeld ? BTSyncTrim.coarseStepMs : BTSyncTrim.resolutionMs))
             return true
-        case Selector(("moveToBeginningOfParagraph:")):
+        case #selector(NSResponder.moveUpAndModifySelection(_:)):
             nudge(by: BTSyncTrim.coarseStepMs)
             return true
-        case Selector(("moveToEndOfParagraph:")):
+        case #selector(NSResponder.moveDownAndModifySelection(_:)):
             nudge(by: -BTSyncTrim.coarseStepMs)
             return true
         case #selector(NSResponder.cancelOperation(_:)):
@@ -166,18 +208,20 @@ public final class SyncValueFieldEditor: NSObject, NSTextFieldDelegate {
     }
 
     private static func signedText(_ ms: Double) -> String {
-        String(format: "%.1f", ms)
+        String(format: "%.0f", ms)   // whole ms — decimals were cut (see BTSyncTrim)
     }
 
-    // MARK: ⌥ modifier seam (mirrors `BTSyncRulerView.test_optionModifierOverride`
-    // / `DeviceRowView.test_optionModifierOverride`: a headless key event
-    // carries no real `NSApp.currentEvent`, and in a narrowly filtered
-    // `swift test` run `NSApp` itself — an implicitly-unwrapped optional —
-    // can still be nil, so this reads it via `?`, never force-unwrapped.)
-    public var test_optionModifierOverride: Bool?
+    // MARK: ⇧ modifier seam. Even a REAL key event dispatched through
+    // `NSWindow.sendEvent(_:)` leaves `NSApp.currentEvent` unset — it is
+    // populated by the run loop's `nextEventMatchingMask:`, not by delivery —
+    // and in a narrowly filtered `swift test` run `NSApp` itself (an
+    // implicitly-unwrapped optional) can still be nil, so this reads it via
+    // `?` and never force-unwraps. The override is how a headless test drives
+    // the modifier limb at all.
+    public var test_shiftModifierOverride: Bool?
 
-    private var optionIsHeld: Bool {
-        test_optionModifierOverride ?? (NSApp?.currentEvent?.modifierFlags.contains(.option) ?? false)
+    private var shiftIsHeld: Bool {
+        test_shiftModifierOverride ?? (NSApp?.currentEvent?.modifierFlags.contains(.shift) ?? false)
     }
 
     // MARK: Test hooks — real dispatch through the exact delegate seam
@@ -187,12 +231,11 @@ public final class SyncValueFieldEditor: NSObject, NSTextFieldDelegate {
 
     public func test_setFieldText(_ text: String) { field.stringValue = text }
 
-    /// Drives `controlTextDidBeginEditing` with the real field — the "user
-    /// clicked in" transition.
-    public func test_beginEditing() {
-        controlTextDidBeginEditing(Notification(
-            name: NSControl.textDidBeginEditingNotification, object: field))
-    }
+    /// The "user clicked in" transition, applied SYNCHRONOUSLY. It runs the
+    /// same `applyEditingForm()` the notification path ends at, minus that
+    /// path's one-turn deferral — which exists only to stay out of AppKit's
+    /// in-flight keystroke and has nothing to stay out of the way of here.
+    public func test_beginEditing() { applyEditingForm() }
 
     /// Drives `control(_:textView:doCommandBy:)` with the real field — the
     /// identical call the field editor makes for Return/arrows/Escape.

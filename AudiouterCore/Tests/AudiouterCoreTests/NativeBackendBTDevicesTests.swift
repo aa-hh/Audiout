@@ -286,17 +286,20 @@ import CoreAudio
         second.stop()
     }
 
-    /// T7 §4: a live scrub reaches the audio path but must not touch the JSON
-    /// store — the drag's end is what persists.
-    @Test func liveScrubUpdatesInMemoryButNeverWritesTheStore() throws {
+    /// The backend still supports an apply-without-persist write (`persist:
+    /// false`) even though the drawer's only controls are now committing
+    /// steppers — the seam is kept for a future live control and must behave:
+    /// the value updates in memory (quantised to whole ms on the way in, T7
+    /// §7) but nothing reaches the JSON store, so a relaunch sees no trim.
+    @Test func applyWithoutPersistUpdatesInMemoryButNeverWritesTheStore() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("bt-trims-\(UUID().uuidString)", isDirectory: true)
         let store = BTTrimStore(directory: directory)
 
         let (first, _) = makeBackend(trimStore: store)
-        first.setBTSyncTrim(31.24, forDevice: sonos.id, persist: false)
-        #expect(first.btSyncTrim(forDevice: sonos.id) == 31.2,
-                "quantised on the way in (T7 §7), and readable mid-drag")
+        first.setBTSyncTrim(31.6, forDevice: sonos.id, persist: false)
+        #expect(first.btSyncTrim(forDevice: sonos.id) == 32,
+                "quantised to whole ms on the way in (T7 §7), and readable immediately")
         first.stop()
 
         let (second, _) = makeBackend(trimStore: store)

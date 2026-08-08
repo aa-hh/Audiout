@@ -632,92 +632,57 @@ public enum PopoverColumnGrid {
         syncTrailing + syncChipWidth / 2
     }
 
-    // MARK: SYNC ruler (PLAN-BT-SYNC-DRAWER T4 — `BTSyncRulerView`)
-    //
-    // The fine-adjustment ruler is a ticked tape sliding under a FIXED centre
-    // pointer (D3), not a slider with a travelling thumb — it must not be
-    // mistaken for the row's volume sliders. Sized for the drawer's ~380 pt
-    // width: at that width `syncRulerVisibleSpanMs` (±6 ms, D4) works out to
-    // roughly 3 pt of travel per 0.1 ms, the smallest movement worth feeling
-    // by hand — a wider span would make the decimal digit a lie. Named
-    // constants only — the Figma design-system contract mirrors this file.
-
-    /// Height of the ruler view.
-    public static let syncRulerHeight: CGFloat = 40
-    /// Total visible span of the tape, in milliseconds (±half this around the
-    /// current value) — D4's ±6 ms window.
-    public static let syncRulerVisibleSpanMs: CGFloat = 12
-    /// Height of a minor (1 ms) tick.
-    public static let syncRulerMinorTickHeight: CGFloat = 6
-    /// Height of a major (5 ms, numeric-labeled) tick.
-    public static let syncRulerMajorTickHeight: CGFloat = 12
-    /// Width of the fixed centre pointer's vertical accent line.
-    public static let syncRulerPointerWidth: CGFloat = 2
-    /// Slowest drag gearing (at or below `BTSyncRulerView`'s ≤1 pt/event
-    /// speed floor): 0.1 ms of value change per roughly 3 pt of drag, so a
-    /// deliberate slow drag can land exact 0.1 ms steps by feel (D5). Also
-    /// the gearing a held ⌥ forces regardless of the actual drag speed.
-    public static let syncRulerSlowMsPerPoint: CGFloat = 0.1 / 3
-    /// Fastest drag gearing (at or above the ≥40 pt/event speed ceiling): a
-    /// fast drag covers setup-scale jumps in a handful of points (D5).
-    public static let syncRulerFastMsPerPoint: CGFloat = 2.0
-
     // MARK: SYNC drawer (PLAN-BT-SYNC-DRAWER T5 — `BTSyncDrawerView`)
     //
-    // The panel that opens underneath a Bluetooth row: caption + big
-    // click-to-edit readout + −/+/align/revert buttons on top, the ruler
-    // below, a hint footer at the bottom. Named constants only — the Figma
-    // design-system contract mirrors this file.
+    // The panel that opens underneath a Bluetooth row: ONE horizontal band,
+    //
+    //     [♪ Align by ear] [Revert]     hold ⇧ for 10 ms   [ − | −414 ms | + ]
+    //
+    // The align/revert pair sits at the far LEADING edge, deliberately as far
+    // as the band allows from the steppers, so Revert cannot be mis-tapped
+    // mid-adjustment. The value cluster hugs the TRAILING edge so it lands
+    // directly beneath the SYNC chip that opened the drawer. Everything in the
+    // band shares ``syncDrawerControlHeight`` and is vertically centred, sized
+    // to sit WITH the row's own controls — two earlier versions were redone for
+    // being oversized. Named constants only — the Figma design-system contract
+    // mirrors this file.
 
-    /// Width of the drawer's left accent edge (the "engaged control"
-    /// stripe — `Tokens.Color.accent`, deliberately not gold; see
-    /// `BTSyncDrawerView`'s header comment).
-    public static let syncDrawerAccentEdgeWidth: CGFloat = 2
-    /// Horizontal inset of the drawer's content from its container edges,
-    /// measured past the accent edge on the leading side.
+    /// Horizontal inset of the drawer's content from its container edges. No
+    /// accent edge or border (live feedback — see `BTSyncDrawerView`'s header).
     public static let syncDrawerHorizontalInset: CGFloat = 12
     /// Vertical inset of the drawer's content from its top/bottom edges.
-    public static let syncDrawerVerticalInset: CGFloat = 10
-    /// Height of the "<device name> plays" caption line above the readout.
-    public static let syncDrawerCaptionHeight: CGFloat = 14
-    /// Gap between the caption and the readout row it sits above.
-    public static let syncDrawerCaptionToReadoutGap: CGFloat = 2
-    /// Height of the big readout row (`Tokens.Font.syncReadout` at 26 pt).
-    public static let syncDrawerReadoutHeight: CGFloat = 30
-    /// Gap between the readout's trailing edge and its "ms later"/"ms
-    /// earlier" suffix label.
-    public static let syncDrawerReadoutToSuffixGap: CGFloat = 4
-    /// The drawer's top band height (caption + gap + readout), derived so
-    /// resizing either part reflows the band in lockstep — the style of the
-    /// derived `syncCenterFromTrailing` above.
-    public static var syncDrawerTopBandHeight: CGFloat {
-        syncDrawerCaptionHeight + syncDrawerCaptionToReadoutGap + syncDrawerReadoutHeight
-    }
-    /// Height of the top band's − / + / align / revert buttons.
-    public static let syncDrawerButtonHeight: CGFloat = 22
-    /// Width of the − / + stepper buttons (icon-only, unlike the align/revert
-    /// buttons beside them, which size to their own text).
-    public static let syncDrawerStepperButtonWidth: CGFloat = 24
-    /// Horizontal gap between adjacent top-band buttons.
+    public static let syncDrawerVerticalInset: CGFloat = 12
+    /// The ONE height every element of the band shares — the align and revert
+    /// buttons and the whole value cluster. Sized to a `.rounded`-bezel
+    /// `.small` `NSButton`'s natural height, so the pair reads as stock chrome
+    /// rather than a stretched bezel.
+    public static let syncDrawerControlHeight: CGFloat = 22
+    /// Width of the align-by-ear toggle — fits "Align by ear" with its leading
+    /// metronome glyph at ``Tokens/Font/caption``.
+    public static let syncDrawerAlignButtonWidth: CGFloat = 104
+    /// Width of the Revert push button.
+    public static let syncDrawerRevertButtonWidth: CGFloat = 58
+    /// Gap between the align toggle and the Revert button beside it — they are
+    /// one pair, so this is tight.
     public static let syncDrawerButtonGap: CGFloat = 6
-    /// Gap between the top band's bottom edge and the ruler below it.
-    public static let syncDrawerRulerTopGap: CGFloat = 10
-    /// Gap between the ruler's bottom edge and the footer hint below it.
-    public static let syncDrawerRulerToFooterGap: CGFloat = 6
-    /// Height of the footer hint row ("Drag to nudge · hold ⌥ for finer").
-    public static let syncDrawerFooterHeight: CGFloat = 16
-    /// The drawer's total height, derived from its parts (top/bottom insets,
-    /// the top band, the ruler, and the footer) rather than a magic number —
-    /// the style of the derived `syncCenterFromTrailing`. `PopoverController`
-    /// (T7) grows the popover by exactly this on expand and shrinks it back
-    /// by exactly this on collapse.
+    /// Gap between the "hold ⇧" hint and the value cluster it describes.
+    public static let syncDrawerHintToClusterGap: CGFloat = 12
+    /// Width of the `−` / `+` buttons flanking the value field.
+    public static let syncDrawerStepperButtonWidth: CGFloat = 26
+    /// Width of the editable value field — sized for the widest RESTING
+    /// reading, "−500 ms", at ``Tokens/Font/syncReadout`` inside a stock bezel.
+    /// The unit lives in the field's own text rather than in a label beside it,
+    /// so the box has to hold both.
+    public static let syncDrawerValueFieldWidth: CGFloat = 78
+    /// Gap between `−` and the value field. Wider than the unit gap on purpose:
+    /// `−` crowding the digits made the minus read as part of the NUMBER rather
+    /// than as a button (live-found).
+    public static let syncDrawerStepperToValueGap: CGFloat = 8
+    /// The drawer's total height: one band plus the top and bottom insets.
+    /// `PopoverController` (T7) grows the popover by exactly this on expand and
+    /// shrinks back by it on collapse.
     public static var syncDrawerHeight: CGFloat {
-        syncDrawerVerticalInset * 2
-            + syncDrawerTopBandHeight
-            + syncDrawerRulerTopGap
-            + syncRulerHeight
-            + syncDrawerRulerToFooterGap
-            + syncDrawerFooterHeight
+        syncDrawerVerticalInset * 2 + syncDrawerControlHeight
     }
 
     // MARK: Inter-column gaps

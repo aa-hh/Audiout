@@ -329,6 +329,10 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
     /// instance below is reconfigured across devices, so the distinction has
     /// to live here.
     private var syncDrawerNeedsOpenBaseline = false
+    /// Whether the drawer's value field was mid-edit when `rebuild()` detached
+    /// it, so `reconcileSyncDrawer` can hand focus back after re-mounting.
+    /// See the detach site in `rebuild()` for why this exists.
+    private var syncDrawerWasEditing = false
 
     /// The single reused drawer (D2): one instance reconfigured across
     /// devices, never one per row. Created lazily so a popover that never
@@ -1018,6 +1022,20 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         // into. Detach it explicitly; the INTENT (`expandedSyncDeviceID`)
         // survives and `reconcileSyncDrawer` re-mounts it under the fresh row.
         if mountedSyncDrawerID != nil {
+            // Detaching a view that is BEING EDITED ends its field-editor
+            // session and drops first responder back to the window (measured).
+            // The typed value still commits on the way out, so nothing is lost
+            // — but focus silently vanishes, and inside a `.transient` popover
+            // the user's NEXT Return then lands with no first responder and
+            // closes the whole surface. That is the live "Return closes the
+            // popover and my edit goes nowhere" report: not the field's key
+            // handling (which consumes Return correctly — proven by real event
+            // dispatch in `SyncValueFieldLiveKeyTests`), but a background
+            // repaint pulling the field out from under the user mid-type. Any
+            // structural repaint runs this: a device appearing, a route
+            // change, a valid-target flip. Remember the editing state here and
+            // restore it once `reconcileSyncDrawer` has re-mounted the drawer.
+            syncDrawerWasEditing = syncDrawer.isEditingValue
             syncDrawer.removeFromSuperview()
             mountedSyncDrawerID = nil
         }
@@ -1802,6 +1820,12 @@ public final class PopoverController: NSObject, NSPopoverDelegate {
         if syncDrawerNeedsOpenBaseline {
             syncDrawerNeedsOpenBaseline = false
             syncDrawer.noteOpened(trimMs: btSyncTrim(for: device))
+        }
+        if syncDrawerWasEditing {
+            syncDrawerWasEditing = false
+            // Give the field its editing session back — see the detach site
+            // in `rebuild()`.
+            syncDrawer.focusValueField()
         }
     }
 
@@ -3184,6 +3208,38 @@ extension PopoverController: AppRowView.Delegate {
     public func popoverDidShow(_ notification: Notification) {
         installDeselectMonitor()
         onMeteringActiveChange?(true)
+    }
+
+    /// **The popover never closes out from under someone typing.**
+    ///
+    /// Pressing Return in the sync drawer's field was closing the whole
+    /// popover and losing the edit (live-reported, repeatedly). Two separate
+    /// investigations failed to reproduce it: the field editor demonstrably
+    /// consumes Return (proven with real synthesized events in
+    /// `SyncValueFieldLiveKeyTests`), nothing in the view tree claims Return
+    /// as a key equivalent, and neither host window closes on it in a test.
+    /// The one thing those tests CANNOT exercise is AppKit's real
+    /// `_NSPopoverWindow`, because the house rule bars putting a window on
+    /// screen during `swift test` — so the mechanism lives precisely in the
+    /// gap the tests can't reach.
+    ///
+    /// Rather than keep guessing at it, this closes the hole from the other
+    /// end: whatever asks the popover to close, it is refused while the
+    /// drawer's value field owns an editing session. Typing a number and
+    /// pressing Return is the single most predictable thing a user does with
+    /// a text box, and it must never dismiss the surface.
+    ///
+    /// This cannot strand the user. The edit is committed here and first
+    /// responder released, so the session ends with the value applied — the
+    /// veto is one-shot by construction, and the very next close request
+    /// (clicking away, the status item, Escape) finds no edit in flight and
+    /// proceeds normally. A click OUTSIDE the popover ends editing on its own
+    /// before the close is even evaluated, so the ordinary dismiss gesture is
+    /// untouched.
+    public func popoverShouldClose(_ popover: NSPopover) -> Bool {
+        guard syncDrawer.isEditingValue else { return true }
+        syncDrawer.commitAndEndEditing()
+        return false
     }
 
     public func popoverDidClose(_ notification: Notification) {

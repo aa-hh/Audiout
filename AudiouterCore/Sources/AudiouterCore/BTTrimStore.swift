@@ -7,38 +7,49 @@ import Foundation
 // lands it should persist a per-device baseline alongside the trim and
 // Revert should prefer it.
 /// The SYNC column's shared numeric contract (BT-OFFSET-UI/BT-SYNC-DRAWER): a
-/// per-device signed manual trim in milliseconds, ±``rangeMs``, stepped by
-/// ``coarseStepMs`` from the − / + buttons (typing in the value field allows
-/// 1 ms) and resolved to ``resolutionMs`` by the drawer's ruler. One clamp
-/// shared by the UI and the backend write so they can never disagree on the
-/// range.
+/// per-device signed manual trim in WHOLE milliseconds, ±``rangeMs``, changed
+/// by the drawer's dual steppers — ``coarseStepMs`` (±10) and ``fineStepMs``
+/// (±1) — or typed into the value field. One clamp shared by the UI and the
+/// backend write so they can never disagree on the range.
+///
+/// Whole ms, not tenths (live finding): within a couple of milliseconds two
+/// speakers sound identical (the ear can't resolve a flam below ~4 ms), so
+/// decimal precision was control-feel theatre with no audible payoff. The
+/// scrubbing ruler that decimals were built for was cut with them.
 public enum BTSyncTrim {
     /// The trim's absolute bound (± this many ms). Chosen with the align aid's
     /// beat spacing in mind: ticks at ~72 BPM (~833 ms) keep a fully-offset
     /// device from aliasing as aligned one beat late — 500 ms spacing would.
     public static let rangeMs: Double = 500
-    /// The − / + buttons' plain step. The field itself accepts 1 ms typing.
+    /// The coarse (±10) stepper's step — the "get close" control.
     public static let coarseStepMs: Double = 10
-    /// The fine step: ⌥-click on − / +, and the field's ↑/↓ arrow nudge —
-    /// 10 ms proved too coarse to collapse the flam by ear (live finding).
+    /// The fine (±1) stepper's step, and the field's ↑/↓ arrow nudge — the
+    /// "settle it" control.
     public static let fineStepMs: Double = 1
-    /// The scrub's quantum. Every committed trim is a whole multiple of this,
-    /// so the readout, the ruler, and the persisted value can never disagree
-    /// about what "22.4" means.
-    public static let resolutionMs: Double = 0.1
+    /// The smallest change the trim ever takes: one whole millisecond. Every
+    /// committed value is a whole multiple of this, so the readout, the
+    /// steppers, and the persisted value can never disagree.
+    public static let resolutionMs: Double = 1
 
     public static func clamp(_ ms: Double) -> Double {
         Swift.min(rangeMs, Swift.max(-rangeMs, ms))
     }
 
-    /// Snap to ``resolutionMs`` and clamp to ±``rangeMs``. Scales up by 10
-    /// (not down by 0.1 — division amplifies the input's own binary-float
-    /// dust) before rounding half-away-from-zero, so two values that are
-    /// decimal-equal but bit-different going in (`0.1 * 3` vs `0.3`) always
-    /// land on the exact same `Double` coming out.
+    /// Snap to whole ``resolutionMs`` milliseconds and clamp to ±``rangeMs``.
+    /// Rounds half away from zero; a typed "22.6" or an old 0.1 ms value from
+    /// disk both land on a clean integer.
     public static func quantise(_ ms: Double) -> Double {
-        let snapped = (ms * 10).rounded(.toNearestOrAwayFromZero) / 10
-        return clamp(snapped)
+        clamp((ms / resolutionMs).rounded(.toNearestOrAwayFromZero) * resolutionMs)
+    }
+
+    /// A spoken/hover description of a trim that spells out the direction
+    /// (D7 — never a bare signed number, which readers get backwards). Shared
+    /// by the row chip's tooltip and VoiceOver value and the drawer's field
+    /// value, so the two can never phrase it differently.
+    public static func spokenOffset(_ ms: Double) -> String {
+        let whole = Int(quantise(ms))
+        if whole == 0 { return "in sync" }
+        return whole > 0 ? "\(whole) milliseconds later" : "\(abs(whole)) milliseconds earlier"
     }
 }
 

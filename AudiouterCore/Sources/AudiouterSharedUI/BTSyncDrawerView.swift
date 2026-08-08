@@ -6,11 +6,12 @@ import AudiouterCore
 /// Reports every gesture out of a ``BTSyncDrawerView`` (PLAN-BT-SYNC-DRAWER
 /// T5) back to its host.
 public protocol BTSyncDrawerViewDelegate: AnyObject {
-    /// `committed == false` during a live ruler scrub: apply to audio, do
-    /// NOT persist. `committed == true` on drag end, a stepper click, a
-    /// typed field commit, or Revert: apply **and** persist. The split
-    /// exists so a scrub does not write the JSON trim store dozens of times
-    /// a second.
+    /// A committed trim change — a stepper click, a typed field commit, or
+    /// Revert. Apply AND persist. (There is no longer a live-scrub /
+    /// don't-persist case: the scrubbing ruler that needed it was cut. Every
+    /// change the drawer now makes is a discrete, complete gesture, so
+    /// `committed` is always true — the parameter stays for the host's
+    /// existing wiring and in case a live control returns later.)
     func syncDrawer(_ d: BTSyncDrawerView, didChangeTrimMs ms: Double, committed: Bool)
     /// The align-by-ear (metronome) toggle, moved off the row into the
     /// drawer (D9).
@@ -24,46 +25,75 @@ public protocol BTSyncDrawerViewDelegate: AnyObject {
 }
 
 /// The **BT sync drawer** (PLAN-BT-SYNC-DRAWER §3 T5): the panel that opens
-/// underneath a Bluetooth row when its SYNC value chip (T6) is clicked.
-/// Composes T4's ``BTSyncRulerView`` with the big click-to-edit readout,
-/// −/+ steppers, the align-by-ear toggle (D9, moved off the row), and Revert
-/// (D8). `PopoverController` (T7) owns opening/closing/reuse — one drawer
-/// instance is reconfigured across devices rather than one per row — and
-/// inserts this view into the row stack; this view only renders one
-/// device's sync state and reports gestures out through
-/// ``BTSyncDrawerViewDelegate``.
+/// underneath a Bluetooth row when its SYNC value chip (T6) is clicked. ONE
+/// horizontal band:
 ///
-/// **Colour (resolved by the product owner — the plan's own draft named a
-/// `Tokens.Color.controlBackground` that was never a real token):** the
-/// background is ``Tokens/Color/well`` — the recessed/inset fill already
-/// used behind slider troughs, darker than the row card in BOTH themes,
-/// which is what "opens downward" needs to read. The left edge is
-/// ``Tokens/Color/accent`` — the SYSTEM accent, deliberately NOT `gold`: a
-/// gold route-armed rail may sit immediately to this edge's left, and two
-/// golds side by side is too much. `gold` stays the ruler's alone (its
-/// centre pointer, `BTSyncRulerView`'s own header comment). The align-by-ear
-/// button keeps the exact accent/secondaryLabel treatment it already has on
-/// the row today (`DeviceRowView.alignTapped`) — this task does not touch
-/// that vocabulary.
+///     [♪ Align by ear] [Revert]      hold ⇧ for 10 ms   [ − | −414 ms | + ]
 ///
-/// Background + accent edge are drawn in `draw(_:)`, not stamped into a
-/// `CALayer`, so both re-resolve live on every pass with no
-/// `viewDidChangeEffectiveAppearance` observer needed — same reasoning as
-/// `BTSyncRulerView`'s header comment. Square corners throughout (house
-/// rule: no rounded corners on a single-sided border).
+/// **Why the two halves sit at opposite ends.** Align-by-ear and Revert lead
+/// the band; the value cluster hugs the trailing edge so it lands directly
+/// beneath the chip that opened the drawer. Revert is destructive-ish and its
+/// natural moment comes *after* a run of stepper clicks, so it is parked as
+/// far from the steppers as the band allows — a Revert adjacent to `−` is one
+/// slipped click away from discarding the adjustment in progress.
+///
+/// **Why the value cluster is one bound box.** A stepper has to read as
+/// attached to the number it changes (Apple's own steppers are welded to their
+/// field). The version this replaces spread four loose `[−10] [−1] value [+1]
+/// [+10]` pills across the band, and nothing said which pill drove which
+/// number. Here `−`, the field and `+` sit adjacent, each on its own stock
+/// bezel — fusing them inside one flat outline was tried and read as a single
+/// dead slab with the buttons dissolved into it (live-found). The ±10 pills are
+/// gone entirely: ⇧ makes the same two buttons step ten, announced by the quiet
+/// hint beside them. Every element of the band shares one height and is
+/// vertically centred, sized to sit WITH the row's controls rather than above
+/// them — the field included, so the box and the buttons match.
+///
+/// **Why buttons and not a scrubber** (live-found, and the reason the ±10
+/// pills existed at all): a drag-to-scrub ruler draft failed the one test that
+/// matters — a first-time user dragged it and couldn't tell they had to cover
+/// ~400 ms coarsely before the fine end mattered. Auto-repeating buttons cover
+/// that distance with no hidden gesture, which is what lets ⇧ absorb the
+/// coarse step now. Whole ms is enough resolution: the ear can't resolve a
+/// flam below ~4 ms, so `BTSyncTrim.resolutionMs` is 1.
+///
+/// **Colour:** the background is ``Tokens/Color/well`` — the recessed/inset
+/// fill already used behind slider troughs, darker than the row card in BOTH
+/// themes, which is what "opens downward" needs to read. No drawn edge or
+/// border (live feedback): the well fill alone reads as a recess belonging to
+/// the row above. The align-by-ear button keeps the exact
+/// accent/secondaryLabel treatment it has on the row today
+/// (`DeviceRowView.alignTapped`). The background is drawn in `draw(_:)`, not
+/// stamped into a `CALayer`, so it re-resolves live on every pass with no
+/// `viewDidChangeEffectiveAppearance` observer needed. Every control in the
+/// band carries its own STOCK bezel, so AppKit re-resolves all of that chrome
+/// per appearance too.
 public final class BTSyncDrawerView: NSView {
+
+    // MARK: Auto-repeat timing
+    //
+    // Timing, not geometry: `PopoverColumnGrid` is the Figma contract's mirror
+    // and holds METRICS, so these live with the control they time. Matched to
+    // the platform's own key-repeat feel — long enough that a deliberate
+    // single click never repeats, fast enough that holding covers the ±500 ms
+    // range (with ⇧, ~7 s end to end) without becoming a drag race.
+
+    /// How long `−`/`+` must be held before the value starts stepping on its
+    /// own. `Float` seconds — the unit `NSButtonCell.setPeriodicDelay` takes.
+    private static let stepperRepeatDelay: Float = 0.4
+    /// The interval between steps once auto-repeat has started.
+    private static let stepperRepeatInterval: Float = 0.06
+    /// SF-Symbol point size of the `−`/`+` glyphs.
+    private static let stepperGlyphPointSize: CGFloat = 10
 
     // MARK: Subviews
 
-    private let captionLabel = NSTextField(labelWithString: "")
-    private let valueField = NSTextField()
-    private let suffixLabel = NSTextField(labelWithString: "")
-    private let minusButton = NSButton()
-    private let plusButton = NSButton()
     private let alignButton = NSButton()
     private let revertButton = NSButton()
-    private let ruler = BTSyncRulerView()
-    private let hintLabel = NSTextField(labelWithString: "Drag to nudge · hold ⌥ for finer")
+    private let hintLabel = NSTextField(labelWithString: "")
+    private let minusButton = NSButton()
+    private let plusButton = NSButton()
+    private let valueField = NSTextField()
 
     private lazy var valueFieldEditor = SyncValueFieldEditor(field: valueField, initialValue: 0)
 
@@ -79,6 +109,11 @@ public final class BTSyncDrawerView: NSView {
     private var isSet = false
     private var openTimeMs: Double = 0
     private var usableRangeMs: ClosedRange<Double> = -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs
+    /// The direction-spelled value last pushed to the field's accessibility
+    /// value (D7). Mirrored here because `NSTextField.accessibilityValue()`
+    /// does not reliably read back what `setAccessibilityValue` wrote in a
+    /// headless test — this is the source of truth the hook reads.
+    private var spokenValue = ""
 
     public init() {
         super.init(frame: .zero)
@@ -100,12 +135,17 @@ public final class BTSyncDrawerView: NSView {
         // constraint is load-bearing, not decoration.
         heightAnchor.constraint(equalToConstant: PopoverColumnGrid.syncDrawerHeight).isActive = true
 
-        configureLabels()
         configureValueField()
         configureButtons()
-        configureRuler()
-        for subview in [captionLabel, valueField, suffixLabel, minusButton,
-                        plusButton, alignButton, revertButton, ruler, hintLabel] {
+        configureLabels()
+        for subview in [minusButton, plusButton, valueField,
+                        alignButton, revertButton, hintLabel] as [NSView] {
+            // ONE place, unskippable, for every present and future subview.
+            // Live-found: labels that missed this flag kept their translated
+            // mask constraints (position 0,0), which fought the explicit chain
+            // — Auto Layout settled the conflict by collapsing views to ZERO
+            // height, an empty drawer with no error anywhere.
+            subview.translatesAutoresizingMaskIntoConstraints = false
             addSubview(subview)
         }
         installConstraints()
@@ -122,57 +162,83 @@ public final class BTSyncDrawerView: NSView {
         refreshDisplay()
     }
 
-    private func configureLabels() {
-        captionLabel.font = Tokens.Font.caption
-        captionLabel.textColor = Tokens.Color.tertiaryLabel
-        // Composed into `valueField`'s single accessibility value/label
-        // instead (house convention, `AudiouterSharedUI/AGENTS.md`: "each
-        // channel spoken exactly ONCE, never duplicated across label/value").
-        captionLabel.setAccessibilityElement(false)
 
-        suffixLabel.font = Tokens.Font.body
-        suffixLabel.textColor = Tokens.Color.secondaryLabel
-        suffixLabel.setAccessibilityElement(false)
-
-        hintLabel.font = Tokens.Font.caption
-        hintLabel.textColor = Tokens.Color.tertiaryLabel
-    }
-
+    /// The value field is a stock bezeled `NSTextField`
+    /// treatment (raised fill, hairline border, trailing pencil) already used
+    /// by the Groups window's rename field. A bare number on the drawer's
+    /// background gave no hint it could be typed into; this one looks like a
+    /// box you click.
     private func configureValueField() {
-        valueField.translatesAutoresizingMaskIntoConstraints = false
+        // STOCK bezeled field, deliberately not a custom drawing cell. An
+        // earlier version wore `WarmNameFieldCell` (the Groups rename field's
+        // treatment) for its "click to type" pencil, and every one of that
+        // cell's traits turned out wrong here (all live-found):
+        //   · the pencil fades in on hover and RESERVES trailing width, so the
+        //     number visibly jumped sideways as the pointer crossed the field;
+        //   · that reserved gutter pushed the "ms" suffix away from the digits
+        //     it belongs to, leaving it stranded beside the pencil;
+        //   · the cell centres text horizontally but not VERTICALLY, so the
+        //     digits sat high in the box;
+        //   · a flat custom fill on a flat drawer read as one dead slab.
+        // A stock bezel fixes all four for free: AppKit centres the text in
+        // the bezel, the field is visibly inset against the drawer's `well`
+        // background, and there is no hover chrome to shift anything. It is
+        // also the plainest possible "this is a text field" signal, which was
+        // the original goal.
+        valueField.isEditable = true
+        valueField.isSelectable = true
+        valueField.isBezeled = true
+        valueField.controlSize = .small
+        valueField.bezelStyle = .squareBezel
+        valueField.usesSingleLineMode = true
         valueField.font = Tokens.Font.syncReadout
         valueField.textColor = Tokens.Color.label
-        valueField.isBordered = false
-        valueField.isBezeled = false
-        valueField.drawsBackground = false
-        valueField.alignment = .left
-        valueField.toolTip = "Click to type an exact value — \(Self.stepDescription)"
-        // The composed D7 phrase ("22.4 milliseconds later" / "Not set")
-        // lives here as ONE accessibility value; `captionLabel`/`suffixLabel`
-        // opt out above rather than duplicate it.
+        valueField.alignment = .center
+        valueField.toolTip = "Click to type an exact value in whole milliseconds"
         valueField.setAccessibilityLabel("Sync offset")
     }
 
     private func configureButtons() {
-        for (button, symbol, label) in [(minusButton, "minus", "Decrease sync offset"),
-                                         (plusButton, "plus", "Increase sync offset")] {
-            button.translatesAutoresizingMaskIntoConstraints = false
-            button.bezelStyle = .accessoryBar
-            button.isBordered = false
-            button.imagePosition = .imageOnly
-            let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .medium)
-            button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: label)?
-                .withSymbolConfiguration(config)
-            button.contentTintColor = Tokens.Color.secondaryLabel
+        // `−` and `+`, one step each, ten while ⇧ is held. SF Symbols, not
+        // text titles: the amounts moved off the buttons and onto the modifier,
+        // so each one now says only its direction — which is exactly what a
+        // glyph says best. (The four labelled `[−10] [−1] [+1] [+10]` pills
+        // this replaces had to spell their amounts out, and that is what made
+        // them too wide to bind to the value.)
+        let steppers: [(button: NSButton, symbol: String, fallback: String, label: String)] = [
+            (minusButton, "minus", "\u{2212}", "Decrease sync offset"),
+            (plusButton, "plus", "+", "Increase sync offset"),
+        ]
+        for (button, symbol, fallback, label) in steppers {
+            // BEZELED, not borderless (live-found): borderless glyphs on the
+            // drawer's flat `well` fill had no edge of their own and simply
+            // dissolved into the background — they did not read as buttons at
+            // all. The stock bezel gives them the same raised, hit-me presence
+            // the align/revert buttons beside them already have.
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            if let image = Self.stepperImage(symbol) {
+                button.image = image
+                button.imagePosition = .imageOnly
+            } else {
+                button.font = Tokens.Font.caption
+                button.title = fallback
+            }
+            button.contentTintColor = Tokens.Color.label
             button.setAccessibilityLabel(label)
-            button.toolTip = Self.stepDescription
+            let help = "\(label) by 1 millisecond. Hold Shift to step 10."
+            button.setAccessibilityHelp(help)
+            button.toolTip = help
+            // Press-and-hold auto-repeats, so covering the ±500 ms range never
+            // needs 500 clicks — the job the cut coarse buttons used to do.
+            button.isContinuous = true
+            (button.cell as? NSButtonCell)?.setPeriodicDelay(Self.stepperRepeatDelay,
+                                                             interval: Self.stepperRepeatInterval)
+            button.target = self
         }
-        minusButton.target = self
-        minusButton.action = #selector(minusTapped(_:))
-        plusButton.target = self
-        plusButton.action = #selector(plusTapped(_:))
+        minusButton.action = #selector(minusTapped)
+        plusButton.action = #selector(plusTapped)
 
-        alignButton.translatesAutoresizingMaskIntoConstraints = false
         alignButton.bezelStyle = .rounded
         alignButton.controlSize = .small
         alignButton.font = Tokens.Font.caption
@@ -198,7 +264,6 @@ public final class BTSyncDrawerView: NSView {
         alignButton.target = self
         alignButton.action = #selector(alignTapped(_:))
 
-        revertButton.translatesAutoresizingMaskIntoConstraints = false
         revertButton.bezelStyle = .rounded
         revertButton.controlSize = .small
         revertButton.font = Tokens.Font.caption
@@ -208,75 +273,80 @@ public final class BTSyncDrawerView: NSView {
         revertButton.action = #selector(revertTapped(_:))
     }
 
-    private func configureRuler() {
-        ruler.translatesAutoresizingMaskIntoConstraints = false
-        ruler.delegate = self
+    private func configureLabels() {
+        // The ⇧ hint sits next to the buttons it modifies, not in a tooltip:
+        // a coarse step is the second thing anyone needs here, and a modifier
+        // nobody is told about does not exist.
+        hintLabel.stringValue = "hold \u{21E7} for 10 ms"
+        hintLabel.font = Tokens.Font.caption
+        hintLabel.textColor = Tokens.Color.tertiaryLabel
+
+    }
+
+    private static func stepperImage(_ symbolName: String) -> NSImage? {
+        NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)?
+            .withSymbolConfiguration(
+                NSImage.SymbolConfiguration(pointSize: stepperGlyphPointSize, weight: .medium))
     }
 
     private func installConstraints() {
-        let contentLeading = PopoverColumnGrid.syncDrawerAccentEdgeWidth
-            + PopoverColumnGrid.syncDrawerHorizontalInset
+        let inset = PopoverColumnGrid.syncDrawerHorizontalInset
+        let controlH = PopoverColumnGrid.syncDrawerControlHeight
+        let stepperW = PopoverColumnGrid.syncDrawerStepperButtonWidth
 
         NSLayoutConstraint.activate([
-            captionLabel.topAnchor.constraint(equalTo: topAnchor,
-                                              constant: PopoverColumnGrid.syncDrawerVerticalInset),
-            captionLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: contentLeading),
+            // LEADING half: the align/revert pair, together, as far from the
+            // steppers as the band allows (see the type's header comment).
+            alignButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: inset),
+            alignButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            alignButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.syncDrawerAlignButtonWidth),
+            alignButton.heightAnchor.constraint(equalToConstant: controlH),
 
-            valueField.topAnchor.constraint(equalTo: captionLabel.bottomAnchor,
-                                            constant: PopoverColumnGrid.syncDrawerCaptionToReadoutGap),
-            valueField.leadingAnchor.constraint(equalTo: leadingAnchor, constant: contentLeading),
+            revertButton.leadingAnchor.constraint(equalTo: alignButton.trailingAnchor,
+                                                  constant: PopoverColumnGrid.syncDrawerButtonGap),
+            revertButton.centerYAnchor.constraint(equalTo: alignButton.centerYAnchor),
+            revertButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.syncDrawerRevertButtonWidth),
+            revertButton.heightAnchor.constraint(equalToConstant: controlH),
 
-            suffixLabel.leadingAnchor.constraint(equalTo: valueField.trailingAnchor,
-                                                 constant: PopoverColumnGrid.syncDrawerReadoutToSuffixGap),
-            suffixLabel.firstBaselineAnchor.constraint(equalTo: valueField.firstBaselineAnchor),
+            // TRAILING half, laid out trailing→leading so it lands directly
+            // beneath the SYNC chip that opened the drawer: `+`, the unit, the
+            // typeable box, `−`. Each control carries its OWN stock bezel — an
+            // earlier version fused all three inside one hairline `NSBox`, and
+            // on the drawer's flat fill that read as a single dead slab with
+            // the buttons dissolved into it (live-found). Separate bezels give
+            // each control its own edge, which is what makes them look
+            // pressable; adjacency alone still binds them to the number.
+            plusButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -inset),
+            plusButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            plusButton.widthAnchor.constraint(equalToConstant: stepperW),
+            plusButton.heightAnchor.constraint(equalToConstant: controlH),
 
-            revertButton.trailingAnchor.constraint(equalTo: trailingAnchor,
-                                                   constant: -PopoverColumnGrid.syncDrawerHorizontalInset),
-            revertButton.centerYAnchor.constraint(equalTo: valueField.centerYAnchor),
-            revertButton.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.syncDrawerButtonHeight),
+            valueField.trailingAnchor.constraint(equalTo: plusButton.leadingAnchor,
+                                                 constant: -PopoverColumnGrid.syncDrawerStepperToValueGap),
+            valueField.centerYAnchor.constraint(equalTo: centerYAnchor),
+            valueField.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.syncDrawerValueFieldWidth),
+            valueField.heightAnchor.constraint(equalToConstant: controlH),
 
-            alignButton.trailingAnchor.constraint(equalTo: revertButton.leadingAnchor,
-                                                  constant: -PopoverColumnGrid.syncDrawerButtonGap),
-            alignButton.centerYAnchor.constraint(equalTo: valueField.centerYAnchor),
-            alignButton.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.syncDrawerButtonHeight),
+            minusButton.trailingAnchor.constraint(equalTo: valueField.leadingAnchor,
+                                                  constant: -PopoverColumnGrid.syncDrawerStepperToValueGap),
+            minusButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            minusButton.widthAnchor.constraint(equalToConstant: stepperW),
+            minusButton.heightAnchor.constraint(equalToConstant: controlH),
 
-            plusButton.trailingAnchor.constraint(equalTo: alignButton.leadingAnchor,
-                                                 constant: -PopoverColumnGrid.syncDrawerButtonGap),
-            plusButton.centerYAnchor.constraint(equalTo: valueField.centerYAnchor),
-            plusButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.syncDrawerStepperButtonWidth),
-            plusButton.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.syncDrawerButtonHeight),
-
-            minusButton.trailingAnchor.constraint(equalTo: plusButton.leadingAnchor,
-                                                  constant: -PopoverColumnGrid.syncDrawerButtonGap),
-            minusButton.centerYAnchor.constraint(equalTo: valueField.centerYAnchor),
-            minusButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.syncDrawerStepperButtonWidth),
-            minusButton.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.syncDrawerButtonHeight),
-
-            ruler.topAnchor.constraint(equalTo: valueField.bottomAnchor,
-                                       constant: PopoverColumnGrid.syncDrawerRulerTopGap),
-            ruler.leadingAnchor.constraint(equalTo: leadingAnchor, constant: contentLeading),
-            ruler.trailingAnchor.constraint(equalTo: trailingAnchor,
-                                            constant: -PopoverColumnGrid.syncDrawerHorizontalInset),
-            ruler.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.syncRulerHeight),
-
-            hintLabel.topAnchor.constraint(equalTo: ruler.bottomAnchor,
-                                           constant: PopoverColumnGrid.syncDrawerRulerToFooterGap),
-            hintLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: contentLeading),
+            hintLabel.trailingAnchor.constraint(equalTo: minusButton.leadingAnchor,
+                                                constant: -PopoverColumnGrid.syncDrawerHintToClusterGap),
+            hintLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
-    // MARK: Drawing — background + accent edge (see header comment for the
-    // colour rationale)
+    // MARK: Drawing — background only, no border (see header comment)
 
     public override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        let b = bounds
         Tokens.Color.well.setFill()
-        b.fill()
-        Tokens.Color.accent.setFill()
-        NSRect(x: b.minX, y: b.minY,
-               width: PopoverColumnGrid.syncDrawerAccentEdgeWidth, height: b.height).fill()
+        bounds.fill()
     }
+
 
     // MARK: Public API (T7)
 
@@ -296,10 +366,37 @@ public final class BTSyncDrawerView: NSView {
         refreshDisplay()
     }
 
-    /// Captures `trimMs` as the value Revert restores (D8). Call this
-    /// exactly once, right when the drawer opens for a device — `configure`
-    /// alone can't tell a fresh open from a routine refresh of an
-    /// already-open drawer.
+    /// Captures `trimMs` as the value Revert restores (D8). Call this exactly
+    /// once, right when the drawer opens for a device — `configure` alone
+    /// can't tell a fresh open from a routine refresh of an already-open
+    /// drawer.
+    /// Whether the value field currently owns a live editing session — i.e.
+    /// the user is typing in it right now. The host reads this before a
+    /// structural repaint detaches this view, because detaching mid-edit ends
+    /// the session and drops first responder (see `PopoverController.rebuild`).
+    public var isEditingValue: Bool { valueField.currentEditor() != nil }
+
+    /// Hand the value field its editing session back after the host re-mounts
+    /// this view. Paired with ``isEditingValue`` across a repaint so a
+    /// background device snapshot cannot silently steal focus from someone
+    /// mid-type.
+    /// Commit whatever is typed and end the editing session, leaving the field
+    /// with no field editor. The host calls this when something tries to close
+    /// the surface mid-edit: the value lands, the session ends, and the next
+    /// close request goes through unimpeded. Ending editing by moving first
+    /// responder is what fires `controlTextDidEndEditing`, which is the
+    /// commit — so the value is applied by the same path a click-away uses,
+    /// not by a second, divergent copy of the commit logic.
+    public func commitAndEndEditing() {
+        guard let window, valueField.currentEditor() != nil else { return }
+        window.makeFirstResponder(window)
+    }
+
+    public func focusValueField() {
+        guard let window, window.firstResponder !== valueField.currentEditor() else { return }
+        window.makeFirstResponder(valueField)
+    }
+
     public func noteOpened(trimMs: Double) {
         openTimeMs = trimMs
         refreshDisplay()
@@ -307,12 +404,13 @@ public final class BTSyncDrawerView: NSView {
 
     // MARK: Actions
 
-    @objc private func minusTapped(_ sender: NSButton) {
-        stepTrim(by: -(optionIsHeld ? BTSyncTrim.fineStepMs : BTSyncTrim.coarseStepMs))
-    }
+    @objc private func minusTapped() { stepTrim(by: -stepAmountMs) }
+    @objc private func plusTapped() { stepTrim(by: stepAmountMs) }
 
-    @objc private func plusTapped(_ sender: NSButton) {
-        stepTrim(by: optionIsHeld ? BTSyncTrim.fineStepMs : BTSyncTrim.coarseStepMs)
+    /// One millisecond, or ten while ⇧ is held — the coarse/fine pair the two
+    /// cut `±10` buttons used to carry.
+    private var stepAmountMs: Double {
+        shiftIsHeld ? BTSyncTrim.coarseStepMs : BTSyncTrim.fineStepMs
     }
 
     private func stepTrim(by deltaMs: Double) {
@@ -334,41 +432,20 @@ public final class BTSyncDrawerView: NSView {
 
     /// Escape, anywhere in the drawer other than an in-progress field edit
     /// (which `SyncValueFieldEditor` consumes for its own revert — see its
-    /// header comment). Standard AppKit key-binding translation: an
-    /// unhandled Escape is delivered up the responder chain as this action
-    /// message (`ControlPanelWindowController.cancelOperation` is the same
-    /// codebase idiom for "Escape closes this").
+    /// header comment). Standard AppKit key-binding translation: an unhandled
+    /// Escape is delivered up the responder chain as this action message.
     public override func cancelOperation(_ sender: Any?) {
         delegate?.syncDrawerDidRequestClose(self)
     }
 
-    /// Whether ⌥ is held for the current stepper click — mirrors
-    /// `DeviceRowView.optionIsHeld` / `BTSyncRulerView.optionIsHeld`.
-    private var optionIsHeld: Bool {
-        test_optionModifierOverride ?? (NSApp?.currentEvent?.modifierFlags.contains(.option) ?? false)
-    }
-
-    /// Modifier seam for the stepper tests — same idiom as
-    /// `DeviceRowView.test_optionModifierOverride`; `nil` (default) reads
-    /// the live event.
-    public var test_optionModifierOverride: Bool?
-
-    // MARK: Commit / scrub plumbing
+    // MARK: Commit plumbing
 
     private func clampToUsableRange(_ ms: Double) -> Double {
         Swift.min(usableRangeMs.upperBound, Swift.max(usableRangeMs.lowerBound, ms))
     }
 
-    /// A live ruler scrub (D6): apply to audio, do not persist.
-    private func applyScrub(_ ms: Double) {
-        trimMs = ms
-        isSet = true
-        refreshDisplay()
-        delegate?.syncDrawer(self, didChangeTrimMs: ms, committed: false)
-    }
-
-    /// A discrete, complete gesture (drag end, stepper click, typed commit,
-    /// Revert): apply AND persist.
+    /// A discrete, complete gesture (stepper click, typed commit, Revert):
+    /// apply AND persist.
     private func applyCommit(_ ms: Double) {
         trimMs = ms
         isSet = true
@@ -377,33 +454,43 @@ public final class BTSyncDrawerView: NSView {
     }
 
     private func refreshDisplay() {
-        captionLabel.stringValue = "\(deviceName) plays"
-        valueFieldEditor.setCommittedValue(trimMs, displayText: Self.magnitudeText(trimMs, isSet: isSet))
-        suffixLabel.stringValue = Self.suffixText(trimMs, isSet: isSet)
-        ruler.usableRangeMs = usableRangeMs
-        ruler.valueMs = trimMs
+        valueFieldEditor.setCommittedValue(trimMs, displayText: Self.fieldText(trimMs))
         revertButton.isEnabled = BTSyncTrim.quantise(trimMs) != BTSyncTrim.quantise(openTimeMs)
+        // D7 (never a bare signed number with no direction) lives in the
+        // spoken value and the field's tooltip — the visible number carries
+        // its sign, and the row chip above the drawer states "N ms" for
+        // context. The drawer stays compact (live feedback), so there is no
+        // visible caption sentence.
+        spokenValue = isSet ? BTSyncTrim.spokenOffset(trimMs) : "Not set"
         valueField.setAccessibilityLabel("Sync offset for \(deviceName)")
-        valueField.setAccessibilityValue(isSet ? BTSyncRulerView.accessibilityValueDescription(for: trimMs) : "Not set")
+        valueField.setAccessibilityValue(spokenValue)
+        valueField.toolTip = "\(deviceName): \(isSet ? BTSyncTrim.spokenOffset(trimMs) : "not tuned yet"). Type an exact value in whole milliseconds."
     }
 
-    /// D7's split visual format: the value field shows only the MAGNITUDE
-    /// (never a bare signed number — the suffix label carries direction).
-    /// D10: an untuned device reads "Not set" here instead of a number.
-    private static func magnitudeText(_ ms: Double, isSet: Bool) -> String {
-        guard isSet else { return "Not set" }
-        return String(format: "%.1f", abs(ms))
+    /// The value field's resting text: a bare signed whole number the field
+    /// editor round-trips unchanged (it shows this at rest and an identical
+    /// signed number while editing, so a no-op edit can't flip the sign). No
+    /// The field's RESTING text carries the unit — "−414 ms" — so the box
+    /// reads as a complete value rather than a bare number needing a label
+    /// beside it. The "ms" is undeletable by construction, not by policing
+    /// keystrokes: `SyncValueFieldEditor` swaps the whole string for a bare
+    /// signed number the instant editing begins, and strips any "ms" it finds
+    /// when parsing, so the suffix simply cannot be edited — it is re-rendered
+    /// here on every commit.
+    private static func fieldText(_ ms: Double) -> String {
+        "\(Int(BTSyncTrim.quantise(ms))) ms"
     }
 
-    private static func suffixText(_ ms: Double, isSet: Bool) -> String {
-        guard isSet else { return "" }
-        let quantised = BTSyncTrim.quantise(ms)
-        if quantised == 0 { return "ms" }
-        return quantised > 0 ? "ms later" : "ms earlier"
-    }
+    // MARK: ⇧ modifier seam (mirrors `SyncValueFieldEditor
+    // .test_optionModifierOverride`: a headless click carries no real
+    // `NSApp.currentEvent`, and in a narrowly filtered `swift test` run `NSApp`
+    // itself — an implicitly-unwrapped optional — can still be nil, so this
+    // reads it via `?`, never force-unwrapped.)
 
-    private static var stepDescription: String {
-        "\(String(format: "%g", BTSyncTrim.coarseStepMs)) ms steps — hold ⌥ for \(String(format: "%g", BTSyncTrim.fineStepMs)) ms"
+    public var test_shiftModifierOverride: Bool?
+
+    private var shiftIsHeld: Bool {
+        test_shiftModifierOverride ?? (NSApp?.currentEvent?.modifierFlags.contains(.shift) ?? false)
     }
 
     // MARK: Test hooks — real dispatch through the exact delegate/action seam
@@ -411,31 +498,33 @@ public final class BTSyncDrawerView: NSView {
 
     public var test_trimMs: Double { trimMs }
     public var test_isSet: Bool { isSet }
+    public var test_usableRangeMs: ClosedRange<Double> { usableRangeMs }
     public var test_revertEnabled: Bool { revertButton.isEnabled }
     public var test_alignActive: Bool { alignButton.state == .on }
+    public var test_valueField: NSTextField { valueField }
     public var test_valueFieldText: String { valueField.stringValue }
-    public var test_suffixText: String { suffixLabel.stringValue }
-    public var test_captionText: String { captionLabel.stringValue }
-    public var test_ruler: BTSyncRulerView { ruler }
+    public var test_valueFieldIsBezeled: Bool { valueField.isBezeled }
+    public var test_stepperButtonsAreBezeled: Bool {
+        minusButton.isBordered && plusButton.isBordered
+    }
+    public var test_valueFieldAXValue: String { spokenValue }
     public var test_valueFieldEditor: SyncValueFieldEditor { valueFieldEditor }
+    public var test_hintText: String { hintLabel.stringValue }
+    /// True once the value field wears the house click-to-type skin.
+    /// Whether `−`/`+` auto-repeat while held, and how fast.
+    public var test_stepperRepeat: (isContinuous: Bool, delay: Float, interval: Float)? {
+        guard let cell = plusButton.cell as? NSButtonCell else { return nil }
+        var delay: Float = 0
+        var interval: Float = 0
+        cell.getPeriodicDelay(&delay, interval: &interval)
+        return (plusButton.isContinuous, delay, interval)
+    }
 
     public func test_fireMinusClick() { minusButton.performClick(nil) }
     public func test_firePlusClick() { plusButton.performClick(nil) }
     public func test_fireAlignClick() { alignButton.performClick(nil) }
     public func test_fireRevertClick() { revertButton.performClick(nil) }
     public func test_fireCancelOperation() { cancelOperation(nil) }
-}
-
-// MARK: - BTSyncRulerViewDelegate (T4 composition)
-
-extension BTSyncDrawerView: BTSyncRulerViewDelegate {
-    public func syncRuler(_ ruler: BTSyncRulerView, didScrubTo ms: Double) {
-        applyScrub(ms)
-    }
-
-    public func syncRulerDidEndScrub(_ ruler: BTSyncRulerView) {
-        applyCommit(ruler.valueMs)
-    }
 }
 
 // MARK: - SyncValueFieldEditorDelegate

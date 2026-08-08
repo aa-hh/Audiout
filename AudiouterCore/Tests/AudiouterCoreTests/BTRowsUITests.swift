@@ -156,10 +156,10 @@ import AppKit
     // MARK: SYNC value chip (PLAN-BT-SYNC-DRAWER T6) — three states + real dispatch
 
     @Test func tunedChipShowsTheValueWithACollapsedChevron() {
-        let row = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: 22.4, syncTrimIsSet: true)
-        #expect(row.test_syncChipTitle == "22.4 ms",
-                "the chip is a read-only summary of the trim, one decimal place")
-        #expect(row.test_syncChipChevronSymbolName == "chevron.down", "collapsed ⇒ chevron.down")
+        let row = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: 24, syncTrimIsSet: true)
+        #expect(row.test_syncChipTitle == "24 ms",
+                "the chip is a read-only summary of the trim, in whole ms")
+        #expect(row.test_syncChipChevronSymbolName == "chevron.right", "collapsed ⇒ chevron.right, the disclosure convention")
         #expect(!row.test_syncChipIsDashed, "a tuned chip's border is solid")
         #expect(!row.test_syncChipIsEngaged)
         #expect(row.test_syncChipTitleColor == Tokens.Color.label)
@@ -167,9 +167,9 @@ import AppKit
     }
 
     @Test func negativeTrimReadsAsEarlierWhereverTheChipSpellsItOut() {
-        let row = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: -22.4, syncTrimIsSet: true)
-        #expect(row.test_syncChipTitle == "−22.4 ms", "typographic minus, not a hyphen")
-        #expect(row.test_syncChipTooltip?.contains("22.4 milliseconds earlier") == true,
+        let row = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: -24, syncTrimIsSet: true)
+        #expect(row.test_syncChipTitle == "−24 ms", "typographic minus, not a hyphen")
+        #expect(row.test_syncChipTooltip?.contains("24 milliseconds earlier") == true,
                 "the chip is too narrow for D7's phrasing, so the tooltip carries the direction")
     }
 
@@ -189,9 +189,9 @@ import AppKit
     /// fill — never a solid gold fill: gold is the route-armed/primary
     /// vocabulary, and a drawer disclosure is neither.
     @Test func openDrawerChipWearsTheEngagedAccentTreatmentNotGold() {
-        let row = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: 22.4,
+        let row = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: 24,
                           syncTrimIsSet: true, syncDrawerExpanded: true)
-        #expect(row.test_syncChipChevronSymbolName == "chevron.up", "expanded ⇒ chevron.up")
+        #expect(row.test_syncChipChevronSymbolName == "chevron.down", "expanded ⇒ rotated down to reveal")
         #expect(row.test_syncChipIsEngaged)
         #expect(row.test_syncChipFill
                 == Tokens.Color.accent.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha),
@@ -200,19 +200,19 @@ import AppKit
         #expect(row.test_syncChipTitleColor == Tokens.Color.accent)
         #expect(row.test_syncChipBorderColor == Tokens.Color.accent)
 
-        let collapsed = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: 22.4,
+        let collapsed = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: 24,
                                 syncTrimIsSet: true)
         #expect(collapsed.test_syncChipFill == nil, "a resting chip fills nothing")
     }
 
     @Test func chipClickAsksTheHostToToggleTheDrawerAndNeverEditsTheTrim() {
         let spy = SpyDelegate()
-        let row = makeRow(btDevice(), delegate: spy, syncTrimMs: 22.4, syncTrimIsSet: true)
+        let row = makeRow(btDevice(), delegate: spy, syncTrimMs: 24, syncTrimIsSet: true)
         row.test_fireSyncChipClick()
         row.test_fireSyncChipClick()
         #expect(spy.drawerToggles == [btDevice().id, btDevice().id],
                 "each click is one toggle request — the host owns open/close (D2)")
-        #expect(row.test_syncChipTitle == "22.4 ms",
+        #expect(row.test_syncChipTitle == "24 ms",
                 "the chip is read-only: clicking it never moves the value")
     }
 
@@ -220,7 +220,7 @@ import AppKit
         let spy = SpyDelegate()
         let row = makeRow(btDevice(available: false), delegate: spy,
                           syncTrimMs: -120, syncTrimIsSet: true)
-        #expect(row.test_syncChipTitle == "−120.0 ms", "the saved value stays visible")
+        #expect(row.test_syncChipTitle == "−120 ms", "the saved value stays visible")
         #expect(!row.test_syncChipEnabled,
                 "…but there is nothing to tune while the speaker is away")
         row.test_fireSyncChipClick()   // disabled button — a real click is a no-op
@@ -228,9 +228,9 @@ import AppKit
     }
 
     @Test func chipSpeaksItsOffsetAndItsExpandedState() {
-        let tuned = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: 22.4, syncTrimIsSet: true)
+        let tuned = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: 24, syncTrimIsSet: true)
         #expect(tuned.test_syncChipAXLabel == "Sync offset for Sonos Move 2")
-        #expect(tuned.test_syncChipAXValue == "22.4 milliseconds later",
+        #expect(tuned.test_syncChipAXValue == "24 milliseconds later",
                 "never a bare signed number (D7)")
         #expect(tuned.test_syncChipAXExpanded == false)
 
@@ -240,7 +240,7 @@ import AppKit
         let open = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: -3,
                            syncTrimIsSet: true, syncDrawerExpanded: true)
         #expect(open.test_syncChipAXExpanded, "the drawer's state is spoken, not only drawn")
-        #expect(open.test_syncChipAXValue == "3.0 milliseconds earlier")
+        #expect(open.test_syncChipAXValue == "3 milliseconds earlier")
     }
 
     /// The T6 regression guard from the other side: a non-BT row mounts no
@@ -377,18 +377,19 @@ import AppKit
         popover.update(devices: devices)
 
         let row = popover.test_deviceRow(for: "bt-a:output")
-        #expect(row?.test_syncChipTitle == "120.0 ms", "rows seed from the persisted trim")
+        #expect(row?.test_syncChipTitle == "120 ms", "rows seed from the persisted trim")
         #expect(row?.test_syncChipIsDashed == false, "a persisted trim is a TUNED chip")
 
         popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
-        popover.test_syncDrawer?.test_firePlusClick()      // +10 ms, real target/action
+        popover.test_syncDrawer?.test_shiftModifierOverride = true
+        popover.test_syncDrawer?.test_firePlusClick()        // ⇧+ = +10 ms, real target/action
         #expect(written.last?.ms == 130)
         #expect(written.last?.id == "bt-a:output")
         #expect(written.last?.persist == true, "a stepper click is a committed gesture")
 
         // A repaint keeps the freshest edit — the cache outranks the provider.
         popover.update(devices: devices)
-        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipTitle == "130.0 ms")
+        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipTitle == "130 ms")
     }
 
     /// D10 at the popover level: a device with no persisted ENTRY reads "Not
@@ -408,7 +409,7 @@ import AppKit
         #expect(never?.test_syncChipIsDashed == true)
 
         let tunedToZero = popover.test_deviceRow(for: "bt-b:output")
-        #expect(tunedToZero?.test_syncChipTitle == "0.0 ms",
+        #expect(tunedToZero?.test_syncChipTitle == "0 ms",
                 "a deliberate 0.0 is TUNED — the old value != 0 placeholder got this wrong")
         #expect(tunedToZero?.test_syncChipIsDashed == false)
     }
@@ -419,7 +420,7 @@ import AppKit
         popover.btTrimIsSetProvider = { _ in true }
         popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A", available: false)])
         let row = popover.test_deviceRow(for: "bt-a:output")
-        #expect(row?.test_syncChipTitle == "−50.0 ms")
+        #expect(row?.test_syncChipTitle == "−50 ms")
         #expect(row?.test_syncChipEnabled == false)
     }
 
@@ -684,46 +685,41 @@ import AppKit
         #expect(!popover.test_syncDrawerVisible)
     }
 
-    // MARK: Live scrub vs saved commit (D6 / T7 §4)
+    // MARK: Stepper commits persist, and the chip tracks them (T7 §4)
 
-    @Test func aScrubAppliesManyTimesAndPersistsExactlyOnce() {
+    @Test func eachStepperClickAppliesAndPersistsAndTheChipTracksIt() {
         let (popover, _) = makePopover()
         var applied: [(ms: Double, persist: Bool)] = []
         popover.onSetBTTrim = { ms, _, persist in applied.append((ms, persist)) }
         popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
         popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
 
-        let ruler = popover.test_syncDrawer!.test_ruler
-        ruler.test_beginScrub()
-        for _ in 0..<12 { ruler.test_scrub(byPoints: 4, speed: 4) }
-
-        // Mid-drag: the audio path has taken every tick, the store none of
-        // them, and the row's chip is already showing what the ear is hearing.
-        #expect(applied.count >= 5, "every scrub tick reaches the audio path")
-        #expect(applied.allSatisfy { !$0.persist }, "a live scrub never writes the store")
-        let scrubbed = popover.test_syncDrawer!.test_trimMs
-        #expect(scrubbed != 0, "the scrub moved the value")
-        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipTitle?
-                    .contains(String(format: "%.1f", abs(scrubbed))) == true,
-                "the chip tracks the SCRUB, not just the commit")
-
-        ruler.test_endScrub()
-        #expect(applied.filter(\.persist).count == 1, "exactly one persist, at drag end")
-        #expect(applied.last?.persist == true)
+        // Three coarse (⇧) clicks: each is a complete gesture, so each applies
+        // AND persists (the scrubbing ruler and its apply-without-persist path
+        // were cut — every change the drawer now makes is discrete).
+        popover.test_syncDrawer!.test_shiftModifierOverride = true
+        popover.test_syncDrawer!.test_firePlusClick()
+        popover.test_syncDrawer!.test_firePlusClick()
+        popover.test_syncDrawer!.test_firePlusClick()
+        #expect(applied.count == 3)
+        #expect(applied.allSatisfy { $0.persist }, "a stepper click always writes the store")
+        #expect(applied.map(\.ms) == [10, 20, 30])
+        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipTitle == "30 ms",
+                "the chip tracks each committed step")
     }
 
-    /// T7 §7: every value that reaches the host is quantised, so the readout,
-    /// the ruler and the persisted value can never disagree.
-    @Test func committedTrimsAreQuantisedToTheResolution() {
+    /// T7 §7: every value that reaches the host is quantised to whole ms, so
+    /// the chip, the field and the persisted value can never disagree.
+    @Test func committedTrimsAreQuantisedToWholeMilliseconds() {
         let (popover, _) = makePopover()
         var applied: [Double] = []
         popover.onSetBTTrim = { ms, _, _ in applied.append(ms) }
         popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
         popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
 
-        popover.syncDrawer(popover.test_syncDrawer!, didChangeTrimMs: 22.44, committed: true)
-        popover.syncDrawer(popover.test_syncDrawer!, didChangeTrimMs: 22.45, committed: true)
-        #expect(applied == [22.4, 22.5])
+        popover.syncDrawer(popover.test_syncDrawer!, didChangeTrimMs: 22.4, committed: true)
+        popover.syncDrawer(popover.test_syncDrawer!, didChangeTrimMs: 22.6, committed: true)
+        #expect(applied == [22, 23])
     }
 
     // MARK: Geometry + range
@@ -749,11 +745,11 @@ import AppKit
         popover.btTrimRangeProvider = { _ in floor...BTSyncTrim.rangeMs }
         popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
         popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
-        #expect(popover.test_syncDrawer?.test_ruler.usableRangeMs.lowerBound == -100)
+        #expect(popover.test_syncDrawer?.test_usableRangeMs.lowerBound == -100)
 
         floor = -420
         popover.update(devices: [local(), bt("bt-a:output", name: "Speaker A")])
-        #expect(popover.test_syncDrawer?.test_ruler.usableRangeMs.lowerBound == -420,
+        #expect(popover.test_syncDrawer?.test_usableRangeMs.lowerBound == -420,
                 "the range is never cached at open time")
     }
 

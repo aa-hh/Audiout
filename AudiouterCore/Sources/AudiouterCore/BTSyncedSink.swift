@@ -1327,7 +1327,12 @@ final class BTSyncedSink: @unchecked Sendable {
     /// IDLE speaker (connected, nothing to play) rather than a failure —
     /// otherwise selecting a healthy speaker while paused reports "no audio
     /// started" once its ceiling expires.
-    func anchoredDeviceUIDs() -> Set<String> {
+    /// Optional to MATCH ``BTSyncedSinkControlling``'s requirement exactly. A
+    /// non-optional return does not witness an optional requirement, so Swift
+    /// silently falls back to the protocol's "can't tell" default — the real
+    /// sink's answer never reaches the caller and nothing fails to compile.
+    /// This one always answers; only lifecycle-only spies return nil.
+    func anchoredDeviceUIDs() -> Set<String>? {
         let sinks = tableLock.withLock { Array(sinksByUID.values) }
         return Set(sinks.lazy.filter(\.hasAnchored).map(\.deviceUID))
     }

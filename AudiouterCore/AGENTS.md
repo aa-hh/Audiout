@@ -564,11 +564,24 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   the current set with `git grep IsolatedTestCase`); nothing currently forces
   its removal, so it stays deliberately until the last such file converts. Both
   bases expose the identical member set — `scratchDir` (per-test temp dir),
-  `isolatedDefaults` (per-test suite), `uniqueName(_:)` (for APIs like
-  `NSWindow.setFrameAutosaveName` that always write `.standard`) — instead of
-  the shared globals. `.githooks/pre-commit` Guard 3 warns when a newly added
-  test line reaches those globals; a line that genuinely must touch one takes a
-  trailing `isolation-ok` comment.
+  `isolatedDefaults` (per-test store), `makeDefaults()` (another empty store,
+  for a fixture helper called several times in one test), `uniqueName(_:)` (for
+  APIs like `NSWindow.setFrameAutosaveName` that always write `.standard`) —
+  instead of the shared globals. A struct `@Suite` can't inherit either base,
+  so it holds `TestIsolation` as a stored property and reaches the same members
+  through it. `.githooks/pre-commit` Guard 3 warns when a newly added test line
+  reaches those globals; a line that genuinely must touch one takes a trailing
+  `isolation-ok` comment.
+- **A test must never call `UserDefaults(suiteName:)`** — Guard 3 flags it. It
+  isolates correctly, but a suite IS a real `~/Library/Preferences/<name>.plist`
+  and a per-test name therefore leaves a new file behind on every test forever —
+  this Mac measured 48,769 of them, ~200 MB, 98% of that directory. Such a file
+  cannot be cleaned up from the test that made it — `removePersistentDomain
+  (forName:)` empties the domain but leaves the file, and `cfprefsd` writes an
+  empty plist back for any domain it still has cached AFTER the client process
+  exits, so unlinking the file loses the race (both measured). The stores the
+  isolation bases hand out are memory-backed for exactly this reason and touch
+  no disk at all.
 - **`Telemetry.log(...)` is always-on** (gated only by `HeadlessRuntime.isActive`,
   never an env var), non-blocking, and must never call back into a caller. Never
   call it from the IOProc/render path — only from the (non-realtime) decision

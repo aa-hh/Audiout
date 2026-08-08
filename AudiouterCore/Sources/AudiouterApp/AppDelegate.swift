@@ -258,7 +258,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.repaintFromCurrentState()
         }
         interceptor.onAccessibilityMissing = { [weak self] in
-            self?.log("volume keys: Accessibility not granted — they stay dead until it is")
+            guard let self else { return }
+            self.log("volume keys: Accessibility not granted — they stay dead until it is")
+            // A log line is not a user-visible state, and this failure is
+            // otherwise completely silent: macOS has already stopped handling the
+            // volume keys (that is what made us take over), so the user just finds
+            // dead keys with nothing to explain them. Send them to the permission
+            // rows, which read the live grant and offer the prompt. Once per
+            // launch — this fires on every ownership change, and a window that
+            // reopens each time would be its own bug.
+            guard !self.didSurfaceAccessibilityGap else { return }
+            self.didSurfaceAccessibilityGap = true
+            self.presentSetup()
         }
         return interceptor
     }()
@@ -270,6 +281,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// permanent setup.
     private lazy var controlStripVolumeButtons = ControlStripVolumeButtons(
         control: CoreFoundationControlStripControl(), store: settings)
+
+    /// True once we've sent the user to the permission rows over a missing
+    /// Accessibility grant this launch, so repeated ownership changes can't
+    /// reopen the window under them.
+    private var didSurfaceAccessibilityGap = false
 
     /// Control-panel prototype (design review 2026-07-18): route Groups through a
     /// sticky floating `NSPanel` anchored under the menu-bar item instead of a

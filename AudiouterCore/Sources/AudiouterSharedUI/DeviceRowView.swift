@@ -137,6 +137,15 @@ public final class DeviceRowView: NSView {
     /// pointer leaves the popover without a matching `mouseExited` (T-U8 bug).
     private var isHovered: Bool = false
 
+    /// Transient pointer-hover over the NODE's own gutter hit zone, kept apart
+    /// from the row-wide `isHovered` above: the node is the primary
+    /// "put this speaker in the mix" control, and until this landed it had no
+    /// affordance of its own at all — only the row wash, which says nothing
+    /// about the node. While set, ``draw(_:)`` rings the node with an ember
+    /// halo. Reset on the same occasions `isHovered` is (any `apply`, a window
+    /// change), so a rebuilt row can never keep a stale halo.
+    private var isNodeHovered: Bool = false
+
     /// The PRIMARY "Selected Devices" membership control (SPEC §9b device-row
     /// toggle). An `NSButton` **checkbox** (`.switch` button type, empty title)
     /// under the "Selected" column header. `.state` is `.on`/`.off`, identical
@@ -206,7 +215,7 @@ public final class DeviceRowView: NSView {
     /// pills (`FeedPillView`, one per visible feed value — the product
     /// owner's ported-verbatim call against the old single packed-string
     /// composite joined by " · "), hosted in a plain horizontal `NSStackView`.
-    /// The neutral main-mix segment (``mainMixSourceName``, "System" or the
+    /// The neutral main-mix segment (``mainMixSourceName``, "Main" or the
     /// active group's name) gets a plain pill; one tinted pill per redirected
     /// app (``feedAppNames``) carries the derived-colour `FeedChip` square
     /// INSIDE it, beside the name. A `.failed`/unavailable device OVERRIDES
@@ -222,7 +231,7 @@ public final class DeviceRowView: NSView {
     private let feedStack = NSStackView()
     /// The FEED column's main-mix segment text, or `nil` when this row is not
     /// currently a member of the ACTIVE main-mix target (a redirect-only row
-    /// can still show app segments alone). "System" for a manual Selected-
+    /// can still show app segments alone). "Main" for a manual Selected-
     /// Devices member, the active group's name when Main Out targets a saved
     /// group (``apply``'s `mainOutTargetsGroupName`). Recomputed every
     /// `apply`; read by both ``updateFeedText()`` and the VoiceOver feed
@@ -422,7 +431,7 @@ public final class DeviceRowView: NSView {
     ///     callers are unaffected.
     ///   - routedAppNames: the bypassed-app display names routed to THIS device
     ///     (the routing set's app tokens only, in stable route order). Does NOT
-    ///     include the "System" token — the view synthesizes "System" itself from
+    ///     include the "Main" token — the view synthesizes "Main" itself from
     ///     `selected`. This is INTENT (config), not a playback claim — see
     ///     `liveAppNames` below for the confirmed signal. Drives the routing
     ///     sublabel (see the precedence ladder in
@@ -451,11 +460,11 @@ public final class DeviceRowView: NSView {
     ///   - mainOutTargetsGroupName: the ACTIVE Main Out target's saved-group
     ///     name when it currently targets a group, else `nil` (targets
     ///     Selected Devices). Drives the FEED column's main-mix segment
-    ///     wording (Warm Signal v4.1 item 3): "System" when `nil`, the
+    ///     wording (Warm Signal v4.1 item 3): "Main" when `nil`, the
     ///     group's name when non-nil — applied ONLY on a row that is a member
     ///     of that active target (`inActiveTarget`); a non-member shows no
     ///     main-mix segment regardless of this value. Defaults to `nil` so
-    ///     every existing caller keeps showing "System", unchanged.
+    ///     every existing caller keeps showing "Main", unchanged.
     ///   - iconSymbolName: an explicit SF Symbol name override for the icon
     ///     glyph, resolved through ``DeviceIcon/resolve(_:default:)`` (so an
     ///     unknown/invalid name falls back to `device.kind.symbolName`).
@@ -497,6 +506,7 @@ public final class DeviceRowView: NSView {
         // row can't keep a stale hover wash after the pointer left the popover
         // (T-U8 root-cause fix — hover is transient, selection is model-driven).
         self.isHovered = false
+        self.isNodeHovered = false
 
         // Primary membership control: ON iff the device is in the Selected
         // Devices set. Don't fight a live toggle animation. Group-member rows
@@ -569,12 +579,17 @@ public final class DeviceRowView: NSView {
         isRouteArmed = mainMixArmed || hasLiveFeeds
         armedDotView.apply(armed: isRouteArmed)
 
-        // FEED column (v4.1 item 3): main-mix segment wording — "System" for a
-        // manual member, the active group's name for a group-target member;
-        // `nil` for a non-member (no main-mix segment; a redirect-only row may
-        // still show app segments alone). Stored so `updateFeedText()`/the
-        // VoiceOver feed clause share one source of truth.
-        self.mainMixSourceName = activeMember ? (mainOutTargetsGroupName ?? "System") : nil
+        // FEED column (v4.1 item 3): main-mix segment wording — the neutral
+        // token is **"Main"** for a manual member, the active group's name for
+        // a group-target member; `nil` for a non-member (no main-mix segment; a
+        // redirect-only row may still show app segments alone). "Main" and not
+        // "System": the row it names IS the Main Audio row, and the popover's
+        // membership vocabulary (the checkbox's "Include … in main audio", the
+        // row label's "in main audio") already says main everywhere else — the
+        // pill was the last place still calling the same thing "System".
+        // Stored so `updateFeedText()`/the VoiceOver feed clause share one
+        // source of truth.
+        self.mainMixSourceName = activeMember ? (mainOutTargetsGroupName ?? Self.mainMixToken) : nil
         self.feedAppNames = liveAppNames.isEmpty ? routedAppNames : liveAppNames
         self.appTintColors = appTintColors
         // The fader's engaged (gold) fill reuses the EXACT same predicate the
@@ -633,7 +648,7 @@ public final class DeviceRowView: NSView {
         }
         // The volume slider + mute are usable whenever the device is available
         // and controllable (selected member OR an app-redirect target) — kept
-        // SEPARATE from `selected` so the "System" routing token stays keyed off
+        // SEPARATE from `selected` so the "Main" routing token stays keyed off
         // set membership only.
         //
         // A5: mute ≠ frozen volume — a muted device's slider stays draggable
@@ -642,6 +657,26 @@ public final class DeviceRowView: NSView {
         // the instant they mute.
         slider.isEnabled = device.isAvailable && controllable
         muteButton.isEnabled = device.isAvailable && controllable
+        // …and a row with NOTHING behind those controls hides them outright
+        // rather than parking a permanently-dead pair on the row: an
+        // unselected, un-redirected device is the popover's most common row, so
+        // greying-not-hiding put several dead control clusters in the default
+        // render. `controllable` alone gates this — availability does NOT: a
+        // selected row that is unavailable or `.failed` stays controllable
+        // (R12 keeps the user's intent through a failure), so it keeps its
+        // controls, disabled, exactly as before.
+        //
+        // The GRID SLOTS stay reserved by construction, so nothing shifts: the
+        // slider is anchored a fixed `sliderTrailing` off the row's TRAILING
+        // edge, the mute hangs off the slider's leading anchor and the `%`
+        // readout off its trailing anchor — Auto Layout keeps resolving a
+        // hidden view's frame, so every column lands at the same x it always
+        // did (the whole point of trailing-anchored columns). `isHidden` also
+        // takes the two controls out of the accessibility tree and the key-view
+        // loop; the row's own composed label still speaks the remembered
+        // volume, which the `%` readout keeps showing.
+        slider.isHidden = !controllable
+        muteButton.isHidden = !controllable
         muteButton.state = device.isMuted ? .on : .off
         updateMuteTint()
         // V7 + v4 §Call-1: the `%` readout dims in lockstep with the slider's
@@ -874,6 +909,13 @@ public final class DeviceRowView: NSView {
     /// Separator joining routing-line tokens: space, U+00B7 MIDDLE DOT, space.
     private static let routingTokenSeparator = " · "
 
+    /// The NEUTRAL main-mix token — the word a row shows when what feeds it is
+    /// the main mix itself rather than a named group or a redirected app. One
+    /// declaration, read by the FEED pill, the legacy sublabel and the spoken
+    /// feed clause, so the three can never disagree. A saved group's name
+    /// always wins over it (see `mainOutTargetsGroupName`).
+    static let mainMixToken = "Main"
+
     // `apply` drives `HaloRingView.apply(_:)` directly — same idempotent reset,
     // so a repeated `apply` can't leave a stale breathing animation running —
     // and routes every sublabel through `resolveSublabel()`'s ladder (failed =
@@ -935,7 +977,7 @@ public final class DeviceRowView: NSView {
     }
 
     /// `mainMixSourceName` + `feedAppNames` joined exactly as the retired
-    /// routing line used to (`"System · <apps>"`) — the non-bus host's own
+    /// routing line used to (`"Main · <apps>"`) — the non-bus host's own
     /// composite, kept separate from the FEED column's segment/color
     /// machinery since it renders as plain text on one label.
     private func legacyRoutingLine() -> String? {
@@ -963,10 +1005,11 @@ public final class DeviceRowView: NSView {
 
     /// Show the sublabel as `MUTED · <feeds>` — the non-bus host's own rung,
     /// unchanged from pre-v4.1: the leading MUTED token in the micro-label
-    /// voice with the feed list continuing in the sublabel's own 10 pt voice.
+    /// voice with the feed list continuing in the sublabel's own
+    /// ``Tokens/Font/caption`` voice.
     private func showLegacyMutedSublabel(feeds: String) {
         statusLabel.isHidden = false
-        let bodyFont = statusLabel.font ?? .systemFont(ofSize: 10)
+        let bodyFont = statusLabel.font ?? Tokens.Font.caption
         let composed = NSMutableAttributedString(
             string: "MUTED",
             attributes: [.font: Tokens.Font.microLabel,
@@ -988,7 +1031,7 @@ public final class DeviceRowView: NSView {
     /// live-vs-intent precedence stays covered by its own focused test.
     private func routingLine(routedAppNames: [String], liveAppNames: [String]) -> String? {
         var tokens: [String] = []
-        if isSelectedInSet { tokens.append("System") }
+        if isSelectedInSet { tokens.append(Self.mainMixToken) }
         tokens.append(contentsOf: liveAppNames.isEmpty ? routedAppNames : liveAppNames)
         guard !tokens.isEmpty else { return nil }
         return tokens.joined(separator: Self.routingTokenSeparator)
@@ -1308,7 +1351,14 @@ public final class DeviceRowView: NSView {
         enableCheckbox.controlSize = .regular
         enableCheckbox.target = self
         enableCheckbox.action = #selector(enableToggled(_:))
-        enableCheckbox.setContentHuggingPriority(.required, for: .horizontal)
+        // A BUS row sizes this control explicitly — its frame is the gutter hit
+        // zone (see the constraints below), deliberately far wider than the
+        // switch cell's own intrinsic width — and REQUIRED hugging is exactly
+        // the constraint that caps a view at that intrinsic width, so the two
+        // would fight. Non-bus hosts keep it: there the checkbox draws its real
+        // switch and must not stretch across the trailing column.
+        enableCheckbox.setContentHuggingPriority(busActive ? .defaultLow : .required,
+                                                 for: .horizontal)
 
         // Bus node/rail overlay (spec §4): non-interactive, spans the full row
         // height at the node column, drawing this row's node + rail segment. Added
@@ -1343,7 +1393,7 @@ public final class DeviceRowView: NSView {
         // (failed / unavailable / routing). Small and secondary; `resolveSublabel`
         // shows/hides it and `applyNameStackLayout` centers the name accordingly.
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        statusLabel.font = .systemFont(ofSize: 10)
+        statusLabel.font = Tokens.Font.caption
         statusLabel.textColor = Tokens.Color.secondaryLabel
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
@@ -1525,12 +1575,18 @@ public final class DeviceRowView: NSView {
                 enableCheckbox.centerXAnchor.constraint(
                     equalTo: leadingAnchor, constant: PopoverColumnGrid.railGutterCenterX),
                 enableCheckbox.centerYAnchor.constraint(equalTo: centerYAnchor),
-                // A deterministic hit area over the node (the no-op cell draws
-                // nothing; without an explicit size its hit target is undefined).
+                // The node's hit zone is the WHOLE GUTTER COLUMN × the row's
+                // height, not the drawn node: this is the popover's primary
+                // "put this speaker in the mix" control, and the disc it draws
+                // (`busNodeDiameter*`, 11–15 pt) is well under the ~24 pt
+                // comfortable pointer target. Only the CONTROL's frame grows —
+                // `MembershipBusView` still draws the same small node at the
+                // same centre, so nothing on screen moves (R7). The centre is
+                // unchanged too, so `InvisibleSwitchCell`'s focus ring (a
+                // circle on the cell frame's midpoint) still hugs the node.
                 enableCheckbox.widthAnchor.constraint(
-                    equalToConstant: PopoverColumnGrid.busNodeDiameter + 8),
-                enableCheckbox.heightAnchor.constraint(
-                    equalToConstant: PopoverColumnGrid.busNodeDiameter + 8),
+                    equalToConstant: PopoverColumnGrid.busColumnWidth),
+                enableCheckbox.heightAnchor.constraint(equalTo: heightAnchor),
                 feedStack.centerYAnchor.constraint(equalTo: centerYAnchor),
             ])
             if showsSyncControls {
@@ -1980,7 +2036,7 @@ public final class DeviceRowView: NSView {
         statusLabel.isHidden ? nil : statusLabel.textColor
     }
 
-    /// The composed routing sublabel string ("System …" joined by " · "), or
+    /// The composed routing sublabel string ("Main …" joined by " · "), or
     /// `nil` when the routing set is empty — for asserting the routing line in
     /// isolation from the failed/unavailable precedence. `liveAppNames`
     /// defaults to empty so existing intent-only callers are unaffected; pass it
@@ -2172,6 +2228,61 @@ public final class DeviceRowView: NSView {
     /// controllability/unsupported-ness gate it.
     public var test_isSliderEnabled: Bool { slider.isEnabled }
 
+    /// Whether the volume slider is currently ON SCREEN. An UNCONTROLLABLE row
+    /// hides it outright (nothing to control) instead of showing a permanently
+    /// dead one; an unavailable-but-controllable row still shows it, disabled.
+    public var test_isSliderVisible: Bool { !slider.isHidden }
+
+    /// Whether the mute button is currently ON SCREEN — the slider's twin under
+    /// the same rule.
+    public var test_isMuteVisible: Bool { !muteButton.isHidden }
+
+    /// The `%` readout's current text — kept on an uncontrollable row as the
+    /// REMEMBERED level, after its slider and mute have been hidden.
+    public var test_readoutText: String { readoutLabel.stringValue }
+
+    /// The laid-out frames of the three trailing-column controls, in this row's
+    /// own coordinates. This is the RESERVED-SLOT proof: hiding the slider and
+    /// mute must not move anything, because every one of these is anchored a
+    /// fixed distance off the row's trailing edge (directly, or off a
+    /// neighbour's anchor) and Auto Layout keeps resolving a hidden view's
+    /// frame just the same.
+    public func test_columnFrames() -> (slider: NSRect, mute: NSRect, readout: NSRect) {
+        layoutSubtreeIfNeeded()
+        return (convert(slider.bounds, from: slider),
+                convert(muteButton.bounds, from: muteButton),
+                convert(readoutLabel.bounds, from: readoutLabel))
+    }
+
+    /// The membership control's REAL hit-target size once laid out — the
+    /// transparent gutter zone, which must clear the comfortable pointer target
+    /// even though the DRAWN node is only `busNodeDiameter*` across. `nil` off
+    /// a bus row (where the checkbox draws its own switch and AppKit sizes it).
+    public func test_membershipHitZoneSize() -> NSSize? {
+        guard busActive else { return nil }
+        layoutSubtreeIfNeeded()
+        return enableCheckbox.frame.size
+    }
+
+    /// Whether the node's ember hover halo is currently drawn — the gutter
+    /// zone's own pointer affordance, distinct from the row-wide
+    /// ``test_isHovered`` wash.
+    public var test_isNodeHovered: Bool { isNodeHovered }
+
+    /// Drive the gutter-zone hover through the same private path the gutter
+    /// tracking area uses (a real pointer crossing can't be synthesized
+    /// headlessly). Any later `apply(...)` or window re-attach clears it,
+    /// exactly like a live hover.
+    public func test_setNodeHovered(_ hovered: Bool) { setNodeHovered(hovered) }
+
+    /// The node hit zone's rect in this row's coordinates — what the gutter
+    /// tracking area covers and what `enableCheckbox` is sized to.
+    public func test_busNodeHitZone() -> NSRect? {
+        guard busActive else { return nil }
+        layoutSubtreeIfNeeded()
+        return busNodeHitZone
+    }
+
     /// Whether the "Selected Devices" membership is currently rendered dimmed (A1
     /// / §4.7) — a visual de-emphasis that does NOT disable the control. For a
     /// non-bus row this is the checkbox alpha (~0.4); for a BUS row it's the node
@@ -2342,10 +2453,54 @@ public final class DeviceRowView: NSView {
             options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
             owner: self
         ))
+        // A SECOND area over the node's gutter hit zone alone, so the node's
+        // halo lights only while the pointer is actually on the control —
+        // moving along the row's name/slider must not light it. `.inVisibleRect`
+        // is deliberately ABSENT here: it makes AppKit ignore `rect` entirely
+        // and track the whole visible view, which would make this area a
+        // duplicate of the row-wide one above.
+        guard busActive else { return }
+        addTrackingArea(NSTrackingArea(
+            rect: busNodeHitZone,
+            options: [.mouseEnteredAndExited, .activeInActiveApp],
+            owner: self,
+            userInfo: [Self.busZoneTrackingKey: true]
+        ))
     }
 
-    public override func mouseEntered(with event: NSEvent) { setHovered(true) }
-    public override func mouseExited(with event: NSEvent) { setHovered(false) }
+    /// Marks the gutter tracking area's `userInfo` so one owner can tell the
+    /// two areas' enter/exit events apart.
+    private static let busZoneTrackingKey = "busNodeZone"
+
+    /// The node's transparent hit zone in this row's coordinates: the full rail
+    /// gutter column (`busColumnWidth`) × the row's height — the same box
+    /// `enableCheckbox` is constrained to, expressed once so the tracking area
+    /// and the tests read the constraint's own intent rather than a copy of it.
+    private var busNodeHitZone: NSRect {
+        NSRect(x: PopoverColumnGrid.railGutterCenterX - PopoverColumnGrid.busColumnWidth / 2,
+               y: 0,
+               width: PopoverColumnGrid.busColumnWidth,
+               height: bounds.height)
+    }
+
+    private func isBusZoneEvent(_ event: NSEvent) -> Bool {
+        event.trackingArea?.userInfo?[Self.busZoneTrackingKey] != nil
+    }
+
+    public override func mouseEntered(with event: NSEvent) {
+        if isBusZoneEvent(event) { setNodeHovered(true) } else { setHovered(true) }
+    }
+
+    public override func mouseExited(with event: NSEvent) {
+        if isBusZoneEvent(event) {
+            setNodeHovered(false)
+        } else {
+            // Leaving the ROW leaves the gutter too — clear both, or a pointer
+            // that exits sideways off the node keeps the halo lit.
+            setHovered(false)
+            setNodeHovered(false)
+        }
+    }
 
     /// A click on the BODY of a BLOCKED row (spec §4.6) surfaces the refusal note
     /// — the reachable trigger the disabled checkbox + tooltip alone lacked
@@ -2398,13 +2553,21 @@ public final class DeviceRowView: NSView {
         setNeedsDisplay(bounds)
     }
 
-    /// True iff the pointer is currently inside this row's bounds. Used by the
-    /// mouse-moved monitor to clear a hover the tracking area failed to exit.
-    private func pointerIsInside() -> Bool {
-        guard let window = window else { return false }
-        let windowPoint = window.mouseLocationOutsideOfEventStream
-        let local = convert(windowPoint, from: nil)
-        return bounds.contains(local)
+    /// Set the transient NODE-hover flag (the gutter hit zone) and repaint only
+    /// when it actually changes. Separate from ``setHovered(_:)`` because the
+    /// two zones nest: the pointer can be on the row without being on the node.
+    private func setNodeHovered(_ hovered: Bool) {
+        guard isNodeHovered != hovered else { return }
+        isNodeHovered = hovered
+        setNeedsDisplay(bounds)
+    }
+
+    /// The pointer's current position in this row's coordinates, or `nil` when
+    /// the row is in no window. Used by the mouse-moved monitor to reconcile a
+    /// hover the tracking areas failed to exit.
+    private func pointerLocation() -> NSPoint? {
+        guard let window = window else { return nil }
+        return convert(window.mouseLocationOutsideOfEventStream, from: nil)
     }
 
     /// Re-evaluate hover from the *actual* pointer position. This is the general
@@ -2414,7 +2577,15 @@ public final class DeviceRowView: NSView {
     /// the card's bottom padding, the inter-card gap and the footer, none of them
     /// tracked) never receives an exit. Driving hover off the real pointer
     /// position makes the highlight clear for ANY row, last or not.
-    private func refreshHoverFromPointer() { setHovered(pointerIsInside()) }
+    private func refreshHoverFromPointer() {
+        guard let local = pointerLocation() else {
+            setHovered(false)
+            setNodeHovered(false)
+            return
+        }
+        setHovered(bounds.contains(local))
+        setNodeHovered(busActive && busNodeHitZone.contains(local))
+    }
 
     /// Belt-and-suspenders against a sticky hover: whenever the row is added to /
     /// removed from a window (a popover rebuild, scroll, or close), drop any
@@ -2424,6 +2595,7 @@ public final class DeviceRowView: NSView {
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         isHovered = false
+        isNodeHovered = false
         setNeedsDisplay(bounds)
         if window != nil {
             installMouseMovedMonitor()
@@ -2479,9 +2651,37 @@ public final class DeviceRowView: NSView {
                 Tokens.Color.selectedContentBackground.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha).setFill()
                 path.fill()
             }
+            drawNodeHoverHalo()
         }
         nameLabel.textColor = rowTextColor
         super.draw(dirtyRect)
+    }
+
+    /// The node's pointer affordance: an ember halo ringing the bus node while
+    /// the pointer is anywhere in its gutter hit zone. Without it the row's
+    /// PRIMARY control announced itself with nothing but the row-wide wash,
+    /// which is shared with the name, the fader and the mute.
+    ///
+    /// Drawn HERE (behind every subview) rather than on `MembershipBusView`, so
+    /// the halo sits under the node's own disc and the two share one centre by
+    /// construction — the ring's radius comes off the same
+    /// `MembershipBusView.nodeRadius(for:)` the node itself draws at, so a node
+    /// that changes size (selected vs not) takes its halo with it.
+    ///
+    /// Steady drawing, never an animation: there is nothing for Reduce Motion
+    /// to strip, and a render with no pointer over the row is byte-identical to
+    /// before (hover defaults off, and every `apply` clears it), so the checked-
+    /// in snapshots are untouched.
+    private func drawNodeHoverHalo() {
+        guard isNodeHovered, busActive else { return }
+        let r = MembershipBusView.nodeRadius(for: busView.test_node)
+            + PopoverColumnGrid.busNodeHoverRingGap
+        let cx = PopoverColumnGrid.railGutterCenterX
+        let cy = bounds.midY
+        let ring = NSBezierPath(ovalIn: NSRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2))
+        ring.lineWidth = PopoverColumnGrid.busNodeHoverRingWidth
+        Tokens.Color.ember.setStroke()
+        ring.stroke()
     }
 
     // MARK: Attention flash (A4)

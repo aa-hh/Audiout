@@ -209,7 +209,7 @@ final class BTAlignmentWizardView: NSView {
 
     private func addBody(_ text: String) {
         let label = NSTextField(wrappingLabelWithString: text)
-        label.font = .systemFont(ofSize: 11, weight: .semibold)
+        label.font = Tokens.Font.captionEmphasized
         label.preferredMaxLayoutWidth = 260
         contentStack.addArrangedSubview(label)
     }
@@ -255,7 +255,7 @@ final class BTAlignmentWizardView: NSView {
 
     private func addEducationLine() {
         let label = NSTextField(wrappingLabelWithString: Self.educationCopy)
-        label.font = .systemFont(ofSize: 11)
+        label.font = Tokens.Font.caption
         label.textColor = Tokens.Color.secondaryLabel
         label.preferredMaxLayoutWidth = 260
         contentStack.addArrangedSubview(label)
@@ -288,7 +288,10 @@ final class BTAlignmentWizardView: NSView {
         button.title = title
         button.bezelStyle = .rounded
         button.controlSize = prominent ? .regular : .small
-        button.font = prominent ? .systemFont(ofSize: 12) : Tokens.Font.caption
+        // `subtitleLarge` (`systemFontSize - 1`, regular weight) already IS
+        // this exact font value — reused rather than minting a same-valued
+        // second token under a new name.
+        button.font = prominent ? Tokens.Font.subtitleLarge : Tokens.Font.caption
         button.target = self
         button.action = action
         button.setContentHuggingPriority(.required, for: .horizontal)

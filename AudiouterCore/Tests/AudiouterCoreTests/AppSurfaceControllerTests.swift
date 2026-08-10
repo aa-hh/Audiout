@@ -674,6 +674,39 @@ import AppKit
                 "one announcement per real change — a re-front or a no-op switch is not one")
     }
 
+    // MARK: Mixer height budget (height-overflow rule, 2026-08-10)
+
+    /// The panel caps itself, but only the HOST knows which screen the surface
+    /// is anchored to and how much of the window is chrome — so the budget has
+    /// to arrive through the same push the chrome inset does, on the same
+    /// mount. Asserted as an EQUALITY against the host's own measurement rather
+    /// than a number, so the test says the same thing on a machine with no
+    /// screen at all (both sides `nil`) as on one with a 27" display.
+    @Test func mountingTheMixerPushesTheScreenHeightBudgetIntoThePanel() throws {
+        let (surface, _, _, _) = makeSurface()
+        surface.show(anchorRect: NSRect(x: 900, y: 1000, width: 30, height: 24))
+
+        let panel = try #require(surface.test_mixerPanel)
+        #expect(panel.test_maxContentHeight == surface.test_mixerContentHeightBudget,
+                "the panel is capped at exactly the budget the host measured")
+    }
+
+    /// Sanity on the measurement itself: a budget must leave room for the
+    /// screen margins, the shell's beak and the window's frame chrome, so it can
+    /// never be the full `visibleFrame` height — a cap that equals the screen is
+    /// no cap at all.
+    @Test func theHeightBudgetLeavesRoomForTheScreenMarginsAndChrome() throws {
+        let (surface, _, _, _) = makeSurface()
+        surface.show(anchorRect: nil)
+        let window = try #require(surface.shell.window)
+        guard let budget = surface.test_mixerContentHeightBudget,
+              let screen = window.screen ?? NSScreen.main else { return }   // no display: nothing to assert
+
+        #expect(budget < screen.visibleFrame.height,
+                "the surface never fills the visible frame edge to edge")
+        #expect(budget > 0)
+    }
+
     @Test func aScreenSwitchWhileClosedAnnouncesNothing() {
         let (surface, _, _, _) = makeSurface()
         var published: [SurfaceScreen?] = []

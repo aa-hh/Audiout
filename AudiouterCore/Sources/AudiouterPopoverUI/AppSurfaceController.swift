@@ -159,6 +159,17 @@ public final class AppSurfaceController {
     /// this seed only positions the very first mount before the fit lands.
     static let mixerSeedContentSize = NSSize(width: 623, height: 623)
 
+    /// The gap the surface keeps between itself and the top/bottom edges of the
+    /// screen's `visibleFrame` — the SAME 8pt `applyWindowContentSize` already
+    /// clamps its origin to, named once so the height budget below and the
+    /// clamp can never disagree.
+    private static let surfaceScreenMargin: CGFloat = 8
+
+    /// The floor the Mixer's height budget can never go under, however small a
+    /// screen reports. A pathologically short display must still leave a usable
+    /// panel rather than a sliver; nothing in the product reaches it.
+    private static let minimumMixerContentHeight: CGFloat = 200
+
     public init(popoverController: PopoverController,
                 settings: AppSettings = AppSettings(),
                 groupsContent: @escaping () -> NSViewController,
@@ -369,6 +380,14 @@ public final class AppSurfaceController {
             // surfaceResizer assigned at claim time turns it into the shell
             // resize (animated or snap).
             panel.panelContentDidChangeHeight(animated: animated)
+            // Every OPEN of the Mixer starts at the top of the fleet. Only
+            // meaningful when the content overflows its screen budget, but it
+            // is unconditional on purpose: this is the same "an open is a fresh
+            // start" ritual `rebuildForOpen()` above performs for collapse
+            // state, and a conditional reset would be one more state to reason
+            // about. Runs AFTER the size lands so the offset clamps against the
+            // final geometry.
+            panel.scrollContentToTop()
         case .groups:
             let screenVC = builtGroupsScreen()
             applyChromeTopInset()
@@ -477,6 +496,45 @@ public final class AppSurfaceController {
         mixerPanel?.setContentTopInset(inset)
         groupsScreen?.setContentTopInset(inset)
         settingsScreen?.setContentTopInset(inset)
+        // The Mixer is the one exact-fit screen with UNBOUNDED content (a
+        // fleet + drawers + diagnosis panels), so it is the one that needs a
+        // ceiling. Pushed from the same place, and at the same moments, as the
+        // chrome inset: both are measurements of THIS window on THIS screen,
+        // and the panel folds both into one published height.
+        mixerPanel?.setMaxContentHeight(mixerContentHeightBudget())
+    }
+
+    /// The tallest window CONTENT height the Mixer may publish on the screen the
+    /// surface is currently anchored to — the panel caps itself there and scrolls
+    /// the overflow (`PopoverPanelViewController.setMaxContentHeight`).
+    ///
+    /// `nil` (no window, no screen) means UNCAPPED, which is what every headless
+    /// render must see: an offscreen snapshot has no anchor screen and must not
+    /// suddenly grow a scroller.
+    ///
+    /// Three subtractions, all of them things the panel's own height cannot see:
+    /// the 8pt margins `applyWindowContentSize` clamps to at both ends, the beak
+    /// the shell reserves ABOVE the panel (`ControlPanelBackingView.beakHeight` —
+    /// without it a full-height panel anchored at the menu bar trips AppKit's
+    /// silent re-constrain and desyncs the decorative backing window), and the
+    /// window's own frame chrome, since the budget has to come back out in
+    /// CONTENT units.
+    ///
+    /// razor: measured only when the chrome inset is (mount, pin flip), not on a
+    /// live screen change — dragging a PINNED surface to a shorter display keeps
+    /// the old budget until the next mount. Upgrade path: observe
+    /// `NSWindow.didChangeScreenNotification` and re-push.
+    private func mixerContentHeightBudget() -> CGFloat? {
+        guard let window = shell.window,
+              let screen = window.screen ?? NSScreen.main else { return nil }
+        let probe = NSRect(origin: .zero,
+                           size: NSSize(width: Self.mixerSeedContentSize.width, height: 100))
+        let windowChrome = window.frameRect(forContentRect: probe).height - probe.height
+        let budget = screen.visibleFrame.height
+            - Self.surfaceScreenMargin * 2
+            - ControlPanelBackingView.beakHeight
+            - windowChrome
+        return max(Self.minimumMixerContentHeight, budget)
     }
 
     private func reapplyCurrentScreenSize() {
@@ -556,6 +614,8 @@ public final class AppSurfaceController {
     var test_settingsRoot: SettingsRootViewController? { settingsRoot }
     /// The chrome inset screens are currently seated below (0 unpinned).
     var test_chromeTopInset: CGFloat { chromeTopInset }
+    /// The Mixer's screen-derived height budget (`nil` = uncapped).
+    var test_mixerContentHeightBudget: CGFloat? { mixerContentHeightBudget() }
 }
 
 // MARK: - SurfaceScreenViewController

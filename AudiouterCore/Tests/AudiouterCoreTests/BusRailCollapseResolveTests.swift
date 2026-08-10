@@ -71,7 +71,7 @@ import Testing
 
     @Test func collapsedOriginSectionMovesOriginToHeaderDot() {
         var input = expandedInput()
-        // Origin (System Audio) body collapsed: clip shrank past the ring, so the
+        // Origin (Main Audio) body collapsed: clip shrank past the ring, so the
         // ring is no longer inside the band → origin snaps to the header dot.
         input.originSectionCollapsed = true
         input.originClipBand = 558...560          // ring (500) now BELOW the band

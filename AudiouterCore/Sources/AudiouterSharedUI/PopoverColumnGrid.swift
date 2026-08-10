@@ -4,7 +4,7 @@ import AppKit
 
 /// The **shared column grid** every popover row type lays out against so the
 /// volume-slider column and the trailing-control column line up vertically across
-/// all three sections — System (`MainOutRowView`), Selected Devices
+/// all three sections — Main Audio (`MainOutRowView`), Selected Devices
 /// (`DeviceRowView`) and Groups (`GroupRowView`). This vertical consistency is
 /// the core of the popover layout overhaul (task B).
 ///
@@ -213,7 +213,7 @@ public enum PopoverColumnGrid {
     /// tight — the FEED column's `feedColumnWidth` is unchanged by this
     /// task, so a multi-segment composite's existing STATIC "+N" overflow
     /// threshold must not shift just because a chip was added to it (a
-    /// two-chip composite like "System · Music · Safari" measured ~119pt of
+    /// two-chip composite like "Main · Music · Safari" measured ~119pt of
     /// ~136pt available before chips; each chip's `feedChipSize + feedChipGap`
     /// eats straight into that ~17pt margin).
     public static let feedChipGap: CGFloat = 2
@@ -448,6 +448,19 @@ public enum PopoverColumnGrid {
     /// without clipping. Spans the full row height so stacked rows' rail segments
     /// read as one continuous line.
     public static let busColumnWidth: CGFloat = 30
+    /// Gap between the DRAWN node's edge and the HOVER halo ring around it.
+    /// The node is the popover's primary "put this speaker in the mix" control,
+    /// and at `busNodeDiameter*` it is far below the ~24 pt comfortable target
+    /// — so its real hit zone is the whole `busColumnWidth` gutter column × the
+    /// row height (`DeviceRowView` sizes the checkbox to exactly that), and
+    /// this ring is what tells the pointer it found that zone. Sized so the
+    /// ring's outer edge stays inside `busColumnWidth` at the LARGEST node
+    /// (`busNodeDiameterSelected`) and still clears the icon column.
+    public static let busNodeHoverRingGap: CGFloat = 3.5
+    /// Stroke width of the node's hover halo ring — the same hairline band as
+    /// `busNodeRimWidth`, so the affordance reads as a companion to the node's
+    /// own rim rather than a second, heavier object.
+    public static let busNodeHoverRingWidth: CGFloat = 1.5
     /// Diameter of the small filled dot the rail draws where it is CUT SHORT by a
     /// collapsed (or mid-collapse clipping) section — the terminus marker that
     /// says "the rail stops HERE, at this section's header, nothing below it is

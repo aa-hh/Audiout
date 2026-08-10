@@ -35,7 +35,7 @@ public final class BusRailOverlayView: NSView {
     /// overlay reads each one's live frame + rail state every draw.
     public var deviceRows: [RailNodeProviding] = []
     /// The collapsible section that HOLDS the origin (the Main Audio row) — the
-    /// "System Audio" card. When it collapses, the Main Audio ring clips away and
+    /// "Main Audio" card. When it collapses, the Main Audio ring clips away and
     /// the rail's ORIGIN moves up to sit at this section's own header (a dot),
     /// per the collapse-reactive contract (behavior 2). `nil` when the origin is
     /// not inside a collapsible section (e.g. a host that never collapses it).
@@ -161,7 +161,7 @@ public final class BusRailOverlayView: NSView {
             originColor.setStroke()
             hook.stroke()
         case let .headerDot(y):
-            // The origin section (System Audio) is collapsed: the Main Audio ring
+            // The origin section (Main Audio) is collapsed: the Main Audio ring
             // is hidden, so the rail simply BEGINS at that collapsed header with a
             // small gutter dot (behavior 2 — the origin moves up to the header).
             originColor.setFill()
@@ -422,7 +422,7 @@ public protocol RailHookProviding: AnyObject {
     func railHookAnchor(in view: NSView) -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, gold: Bool)?
 }
 
-/// A collapsible section the rail passes through (the origin's "System Audio"
+/// A collapsible section the rail passes through (the origin's "Main Audio"
 /// card, or the device rows' "Output Devices" card), so `BusRailOverlayView` can
 /// react to its collapse (collapse-reactive rail, 2026-07-22):
 ///

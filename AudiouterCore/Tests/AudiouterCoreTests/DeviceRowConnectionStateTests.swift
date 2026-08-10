@@ -212,10 +212,10 @@ import AudiouterCore
 
         row.apply(makeDevice(connectionState: .connected), selected: true)
         #expect(row.test_statusKind == .connected)
-        // Selected + no routed apps → routing sublabel is the bare "System" token
+        // Selected + no routed apps → routing sublabel is the bare "Main" token
         // (a selected device is always in the routing set). The badge, not the
         // sublabel, is what this test exercises re-deriving.
-        #expect(row.test_statusText == "System")
+        #expect(row.test_statusText == "Main")
     }
 
     @Test func repeatedApplyClearsSublabelWhenLeavingFailed() {
@@ -239,28 +239,28 @@ import AudiouterCore
 
     // MARK: Routing sublabel precedence ladder (2026-07-17)
     //
-    // failed "Couldn't connect" > "Unavailable" > routing line ("System" +
+    // failed "Couldn't connect" > "Unavailable" > routing line ("Main" +
     // bypassed app names joined by " · ") > no sublabel. Composed from
-    // `selected` (the "System" token) + `routedAppNames` (Wiring-supplied).
+    // `selected` (the "Main" token) + `routedAppNames` (Wiring-supplied).
 
-    @Test func sourceLineIsSystemOnlyWhenSelectedWithNoRoutedApps() {
+    @Test func sourceLineIsMainOnlyWhenSelectedWithNoRoutedApps() {
         let row = DeviceRowView(device: makeDevice())
         row.apply(makeDevice(), selected: true, routedAppNames: [])
-        #expect(row.test_statusText == "System")
+        #expect(row.test_statusText == "Main")
     }
 
-    @Test func sourceLineIsSystemPlusAppsWhenSelectedWithRoutedApps() {
+    @Test func sourceLineIsMainPlusAppsWhenSelectedWithRoutedApps() {
         let row = DeviceRowView(device: makeDevice())
         row.apply(makeDevice(), selected: true, routedAppNames: ["Music", "Safari"])
-        #expect(row.test_statusText == "System · Music · Safari",
-                       "System always leads, tokens joined by ' · '")
+        #expect(row.test_statusText == "Main · Music · Safari",
+                       "Main always leads, tokens joined by ' · '")
     }
 
     @Test func sourceLineIsBareAppNamesWhenNotSelectedWithRoutedApps() {
         let row = DeviceRowView(device: makeDevice())
         row.apply(makeDevice(), selected: false, routedAppNames: ["Spotify"])
         #expect(row.test_statusText == "Spotify",
-                       "not selected: no 'System' token, just the bypassed app(s)")
+                       "not selected: no 'Main' token, just the bypassed app(s)")
     }
 
     @Test func sourceLineIsHiddenWhenNotSelectedWithNoRoutedApps() {
@@ -316,12 +316,12 @@ import AudiouterCore
                        "nothing confirmed streaming yet: falls back to the intent-based label")
     }
 
-    @Test func liveAppNamesStillLeadWithSystemTokenWhenSelected() {
+    @Test func liveAppNamesStillLeadWithMainTokenWhenSelected() {
         let row = DeviceRowView(device: makeDevice())
         row.apply(makeDevice(), selected: true,
                   routedAppNames: ["Spotify"], liveAppNames: ["Music", "Safari"])
-        #expect(row.test_statusText == "System · Music · Safari",
-                       "'System' still leads off `selected`; the live set replaces the app tokens")
+        #expect(row.test_statusText == "Main · Music · Safari",
+                       "'Main' still leads off `selected`; the live set replaces the app tokens")
     }
 
     @Test func clearingLiveAppNamesOnReapplyRevertsToRoutedAppNames() {
@@ -485,16 +485,16 @@ import AudiouterCore
     // MARK: `controllable` — slider/mute enable independent of `selected` (Q2)
 
     /// A redirect-only device: `selected: false, controllable: true` — the
-    /// checkbox stays OFF and there is NO "System" token in the sublabel, but the
+    /// checkbox stays OFF and there is NO "Main" token in the sublabel, but the
     /// slider/mute must be enabled.
-    @Test func redirectOnlyDeviceHasSliderMuteEnabledCheckboxOffNoSystemToken() {
+    @Test func redirectOnlyDeviceHasSliderMuteEnabledCheckboxOffNoMainToken() {
         let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod)
         let row = DeviceRowView(device: device)
         row.apply(device, selected: false, controllable: true, routedAppNames: ["Music"])
 
         #expect(!row.test_isEnabledOn, "checkbox stays OFF — this device isn't in Selected Devices")
         #expect(row.test_statusText == "Music",
-                       "no 'System' token: the routing line is bare app names, keyed off `selected`")
+                       "no 'Main' token: the routing line is bare app names, keyed off `selected`")
     }
 
     /// `selected: true, controllable: false` documents the back-compat footgun:
@@ -506,18 +506,83 @@ import AudiouterCore
         row.apply(device, selected: true, controllable: false)
 
         #expect(row.test_isEnabledOn, "checkbox reflects `selected`, independent of `controllable`")
-        #expect(row.test_statusText == "System", "the 'System' token is keyed off `selected`, not `controllable`")
+        #expect(row.test_statusText == "Main", "the 'Main' token is keyed off `selected`, not `controllable`")
     }
 
     /// A normal selected + controllable device: checkbox ON, slider/mute
-    /// enabled, "System" token present — the ordinary in-Selected-Devices case.
-    @Test func selectedAndControllableShowsSystemTokenWithCheckboxOn() {
+    /// enabled, "Main" token present — the ordinary in-Selected-Devices case.
+    @Test func selectedAndControllableShowsMainTokenWithCheckboxOn() {
         let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod)
         let row = DeviceRowView(device: device)
         row.apply(device, selected: true, controllable: true, routedAppNames: ["Safari"])
 
         #expect(row.test_isEnabledOn)
-        #expect(row.test_statusText == "System · Safari")
+        #expect(row.test_statusText == "Main · Safari")
+    }
+
+    // MARK: `controllable == false` HIDES the dead controls, never greys them
+    //
+    // An unselected, un-redirected device is the popover's most common row, so
+    // a permanently-disabled slider + mute on it was several dead control
+    // clusters in the default render. The `%` readout stays — it is the
+    // REMEMBERED level, and the row's spoken label keeps carrying it too.
+
+    @Test func uncontrollableRowHidesItsSliderAndMuteButKeepsTheReadout() {
+        let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod, volume: 40)
+        let row = DeviceRowView(device: device)
+        row.apply(device, selected: false, controllable: false)
+
+        #expect(!row.test_isSliderVisible, "nothing to control ⇒ no slider on the row at all")
+        #expect(!row.test_isMuteVisible, "…and no mute button either")
+        #expect(row.test_readoutText == "40%", "the remembered level survives as the readout")
+        #expect(row.test_accessibilityLabel?.contains("volume 40 percent") ?? false,
+                "the composed row label still speaks the remembered volume")
+    }
+
+    @Test func controllableRowShowsItsSliderAndMute() {
+        let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod, volume: 40)
+        let row = DeviceRowView(device: device)
+        row.apply(device, selected: true, controllable: true)
+
+        #expect(row.test_isSliderVisible)
+        #expect(row.test_isMuteVisible)
+        #expect(row.test_isSliderEnabled)
+    }
+
+    @Test func aFailedSelectedRowKeepsItsControls() {
+        // R12: a failure never drops the user's intent, so the host keeps
+        // passing `controllable: true` — the row must keep its controls,
+        // DISABLED by the availability loss, not hidden. Hiding them here would
+        // strip the volume the user set from the one row they're troubleshooting.
+        let failed = Device(id: "dev-1", name: "Test Speaker", kind: .homePod,
+                            isAvailable: false, volume: 40,
+                            connectionState: .failed(.init(cause: .notResponding)))
+        let row = DeviceRowView(device: failed)
+        row.apply(failed, selected: true, controllable: true)
+
+        #expect(row.test_isSliderVisible, "a failure row keeps its controls…")
+        #expect(row.test_isMuteVisible)
+        #expect(!row.test_isSliderEnabled, "…disabled, because the device isn't reachable")
+    }
+
+    @Test func hidingTheControlsLeavesEveryColumnSlotWhereItWas() {
+        // The reserved-slot guarantee: every right-hand column is anchored a
+        // fixed distance off the row's TRAILING edge (directly, or off a
+        // neighbour's anchor), so Auto Layout keeps resolving the hidden views'
+        // frames and the visible `%` column lands at the same x it always did.
+        let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod, volume: 40)
+        let live = DeviceRowView(device: device)
+        live.apply(device, selected: true, controllable: true)
+
+        let dead = DeviceRowView(device: device)
+        dead.apply(device, selected: false, controllable: false)
+
+        let a = live.test_columnFrames()
+        let b = dead.test_columnFrames()
+        #expect(a.readout.minX == b.readout.minX,
+                "the % column holds its slot whether or not a slider is drawn beside it")
+        #expect(a.slider == b.slider, "the hidden slider still resolves to its reserved slot")
+        #expect(a.mute == b.mute, "…and so does the hidden mute button")
     }
 
     // MARK: V1 — mute tint (accent while muted, secondary otherwise)

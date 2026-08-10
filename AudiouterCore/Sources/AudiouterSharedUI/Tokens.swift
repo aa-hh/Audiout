@@ -311,13 +311,19 @@ public enum Tokens {
         /// ring, the failed row's sublabel, and the diagnosis panel — never a
         /// meter (meters top out at `caution`, not here) and never remapped by
         /// the accent dial (spec §1.3: red stays red in every mode). CONTRAST
-        /// RATIONALE: spec ≥3:1 floor vs `panel`. Measured: dark `#D9564A` =
-        /// 4.48:1 vs `panel` / 4.18:1 vs `raised`; light `#BB3A2F` = 5.27:1 vs
-        /// `panel` — both clear the floor as spec'd. IC variants raise contrast
-        /// further while keeping the hue red (dark `#F26B5C` = 5.85:1; light
-        /// `#A62A20` = 6.66:1).
+        /// RATIONALE: the general instrument floor is ≥3:1 vs `panel`, but this
+        /// token also renders TEXT (the diagnosis headline/sublabel, the failed
+        /// row's sublabel), which needs WCAG AA's 4.5:1 text floor against BOTH
+        /// `panel` and `raised` — the original dark `#D9564A` cleared only
+        /// 4.48:1 vs `panel` / 4.18:1 vs `raised` (design-critique finding,
+        /// 2026-08-10), under the floor on both. Nudged to `#DC6257` (same hue,
+        /// HSL lightness +0.03 — the minimal shift that clears both): measured
+        /// 4.93:1 vs `panel` / 4.61:1 vs `raised`. Light `#BB3A2F` already
+        /// clears both (5.27:1 vs `panel`) — left unchanged. IC variants raise
+        /// contrast further while keeping the hue red (dark `#F26B5C` = 5.85:1
+        /// vs `panel` / 5.47:1 vs `raised`; light `#A62A20` = 6.66:1).
         public static var failure: NSColor {
-            warmDynamic(name: "failure", dark: 0xD9564A, darkHighContrast: 0xF26B5C,
+            warmDynamic(name: "failure", dark: 0xDC6257, darkHighContrast: 0xF26B5C,
                        light: 0xBB3A2F, lightHighContrast: 0xA62A20)
         }
 
@@ -759,6 +765,16 @@ public enum Tokens {
         public static var captionEmphasized: NSFont {
             .systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)
         }
+        /// Caption text, BOLD weight — heavier than ``captionEmphasized``'s
+        /// semibold. The connection-diagnosis panel's failure headline is the
+        /// one caller (design-critique pass, 2026-08-10, replacing its own
+        /// hand-rolled `.boldSystemFont(ofSize: 11)`): a failure headline
+        /// wants more visual weight than a routine caption-emphasis row
+        /// title, so this stays a distinct case rather than folding into
+        /// ``captionEmphasized``.
+        public static var captionBold: NSFont {
+            .boldSystemFont(ofSize: NSFont.smallSystemFontSize)
+        }
         /// The stock menu-item font, used where inline attributed text must
         /// match a real `NSMenuItem`'s rendering (`AppRowView`). Alias of
         /// `NSFont.menuFont(ofSize: 0)`.
@@ -767,7 +783,7 @@ public enum Tokens {
         /// weight 700, UPPERCASE, tracked +0.09–0.11 em — the small-caps state
         /// vocabulary (`LIVE`/`MUTED`/`IDLE`) and section captions. 8.5 pt is
         /// the bottom of the spec's band, sized to ride as a leading token
-        /// INSIDE the existing 10 pt sublabel line without changing its height
+        /// INSIDE the existing sublabel line (caption-token size) without changing its height
         /// (§3.5 no-reflow rule). The +0.09 em tracking rides alongside as
         /// ``microLabelKern`` (an `NSAttributedString.Key.kern` value, since
         /// tracking isn't a font attribute in AppKit). The first spec-named

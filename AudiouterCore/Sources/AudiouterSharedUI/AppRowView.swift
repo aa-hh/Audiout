@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
+import UniformTypeIdentifiers
 
 /// A single row of the popover's **Applications** card
 /// (PLAN-POPOVER-ROUTING.md §A/§C task T-6): app icon · truncating name ·
@@ -104,6 +105,10 @@ public final class AppRowView: NSView {
         public let name: String
         /// The app's icon, supplied by the HOST (`NSWorkspace`/`NSRunningApplication`
         /// live upstream of this view — T-6 forbids this view from touching them).
+        /// Ignored for a NOT-RUNNING row — `apply(_:)` substitutes
+        /// ``AppRowView/notRunningPlaceholderIcon`` instead, so a stale or
+        /// placeholder icon the host resolved for a quit app never has to be
+        /// "the right one."
         public let icon: NSImage?
         public let volume: Int
         /// The currently selected destination id (matches one entry in `destinations`).
@@ -146,6 +151,18 @@ public final class AppRowView: NSView {
     /// — a deliberate density unification: one shared height with every other
     /// popover row.
     public static let rowHeight: CGFloat = PopoverColumnGrid.bodyRowHeight
+
+    /// The standard macOS generic-application icon (`UTType.application`'s
+    /// resolved icon), shown in place of whatever `Configuration.icon` carries
+    /// for a NOT-RUNNING row (design-critique finding, 2026-08-10): the host's
+    /// `PopoverController.appIcon(for:)` resolves the same generic icon for a
+    /// routed-but-quit app (it used to fall back to an `app.dashed` SF Symbol,
+    /// which read as a failed image load). This view
+    /// already owns the not-running signal (`Configuration.isRunning`) and
+    /// already dims the icon for it (`alphaValue` below), so it substitutes
+    /// the real system placeholder itself rather than trusting whatever the
+    /// host resolved — a not-running row's `icon` is effectively unused.
+    private static let notRunningPlaceholderIcon: NSImage = NSWorkspace.shared.icon(for: .applicationBundle)
 
     public weak var delegate: Delegate?
     public private(set) var appID: String = ""
@@ -254,7 +271,7 @@ public final class AppRowView: NSView {
         self.isSelected = false
         self.isHovered = false
 
-        iconView.image = configuration.icon
+        iconView.image = configuration.isRunning ? configuration.icon : Self.notRunningPlaceholderIcon
         self.appName = configuration.name
         self.isRunning = configuration.isRunning
 
@@ -1076,6 +1093,12 @@ public final class AppRowView: NSView {
     /// Whether the offline badge (T4) is currently visible — true when the
     /// routed app's process is not running.
     public var test_isOfflineBadgeVisible: Bool { !offlineBadge.isHidden }
+    /// Whether the icon currently rendered is the generic macOS
+    /// not-running placeholder (design-critique finding, 2026-08-10) rather
+    /// than whatever `Configuration.icon` the host supplied.
+    public var test_isShowingGenericPlaceholderIcon: Bool {
+        iconView.image === Self.notRunningPlaceholderIcon
+    }
     /// The last level pushed to the leading VU meter via ``setLevel(_:)`` — `0`
     /// when the row has no meter (`showsMeter == false`) or after a
     /// ``resetLevel()``. Mirrors `DeviceRowView.test_meterLevel()`.

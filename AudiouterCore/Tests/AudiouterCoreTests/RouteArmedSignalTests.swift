@@ -260,7 +260,7 @@ import AudiouterCore
     @Test func mutedRowWithFeedsGainsLeadingMutedToken() {
         let row = DeviceRowView(device: makeDevice(isMuted: true))
         row.apply(makeDevice(isMuted: true), selected: true, controllable: true)
-        #expect(row.test_statusText == "MUTED · System", "the MUTED token leads an EXISTING feed sublabel")
+        #expect(row.test_statusText == "MUTED · Main", "the MUTED token leads an EXISTING feed sublabel")
     }
 
     @Test func mutedRedirectTargetPrependsTokenToFeedList() {
@@ -282,16 +282,16 @@ import AudiouterCore
         // Out pill carries master mute; member sublabels stay clean).
         let row = DeviceRowView(device: makeDevice(isMuted: true))
         row.apply(makeDevice(isMuted: true), selected: true, controllable: true, masterMuted: true)
-        #expect(row.test_statusText == "System", "no MUTED token under MASTER mute")
+        #expect(row.test_statusText == "Main", "no MUTED token under MASTER mute")
     }
 
     @Test func unmutingRestoresThePlainSublabel() {
         let row = DeviceRowView(device: makeDevice(isMuted: true))
         row.apply(makeDevice(isMuted: true), selected: true, controllable: true)
-        #expect(row.test_statusText == "MUTED · System")
+        #expect(row.test_statusText == "MUTED · Main")
 
         row.apply(makeDevice(isMuted: false), selected: true, controllable: true)
-        #expect(row.test_statusText == "System", "unmute restores the plain feed line")
+        #expect(row.test_statusText == "Main", "unmute restores the plain feed line")
     }
 
     @Test func failureOutranksTheMutedToken() {

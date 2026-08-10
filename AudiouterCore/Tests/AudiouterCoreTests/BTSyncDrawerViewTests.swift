@@ -198,6 +198,21 @@ import AppKit
         #expect(drawer.test_trimMs == -414, "a no-op edit through the suffix round-trips exactly")
     }
 
+    // MARK: Stepper accessibility (design-critique finding, 2026-08-10) — the
+    // drawer's own D7 "later"/"earlier" vocabulary, not a direction-neutral
+    // "Decrease/Increase sync offset".
+
+    @Test func minusButtonLabelSaysPlayEarlier() {
+        let (drawer, _) = makeDrawer()
+        #expect(drawer.test_minusButtonAccessibilityLabel == "Play earlier",
+                "minus subtracts from trimMs, and a negative trim speaks as 'earlier'")
+    }
+
+    @Test func plusButtonLabelSaysPlayLater() {
+        let (drawer, _) = makeDrawer()
+        #expect(drawer.test_plusButtonAccessibilityLabel == "Play later")
+    }
+
     @Test func theCoarseModifierIsAdvertisedInTheBand() {
         let (drawer, _) = makeDrawer()
         #expect(drawer.test_hintText.contains("10 ms"),

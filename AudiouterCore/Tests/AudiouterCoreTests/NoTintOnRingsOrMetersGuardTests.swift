@@ -150,7 +150,7 @@ import AudiouterCore
         row.apply(makeDevice(), selected: true, controllable: true)
 
         #expect(row.test_feedText != nil)
-        #expect(row.test_feedText?.contains("System") ?? false, "Neutral segment is System")
+        #expect(row.test_feedText?.contains("Main") ?? false, "Neutral segment is Main")
     }
 
     // MARK: - Multi-app: meters stay warm, feed shows tints

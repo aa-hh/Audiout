@@ -3,6 +3,7 @@
 import AppKit
 import AudiouterCore
 import AudiouterSharedUI
+import UniformTypeIdentifiers
 
 /// A plain-value snapshot of one running application, for the "+ Add
 /// application…" picker (T-7, PLAN-POPOVER-ROUTING.md decision 6). Kept
@@ -122,7 +123,7 @@ private final class CardFooterView: NSView {
 /// itself.
 ///
 /// Structure, top to bottom:
-/// 1. **System section — a single "Main Out" row** (`MainOutRowView`): speaker
+/// 1. **Main Audio section — a single "Main Out" row** (`MainOutRowView`): speaker
 ///    icon · "Main Out" · master gain slider + `%` · a trailing
 ///    `NSPopUpButton` device selector. The selector is THE routing decision, with
 ///    two sections: "Selected Devices" and each saved Output Group.
@@ -421,7 +422,7 @@ public final class PopoverController: NSObject {
 
     private let panel = PopoverPanelViewController()
 
-    /// The single System-section Main Out row.
+    /// The single Main Audio-section Main Out row.
     private let mainOutRow = MainOutRowView()
 
     private var deviceRowsByID: [String: DeviceRowView] = [:]
@@ -596,10 +597,12 @@ public final class PopoverController: NSObject {
         resumeDestinationIDPrefix + deviceID
     }
 
-    /// The SF Symbol shown for a routed app that isn't currently running (its icon
-    /// can't be resolved) — routes persist across app quits (T-8, PLAN §C). A
-    /// documented AppKit-usable symbol.
-    static let missingAppIconSymbolName = "app.dashed"
+    /// The icon shown for a routed app that isn't currently running (its icon
+    /// can't be resolved) — routes persist across app quits (T-8, PLAN §C).
+    /// The system generic-application icon, NOT an `app.dashed` SF Symbol
+    /// (design-critique finding, 2026-08-10): the dashed outline reads as a
+    /// failed image load, not an intentional "not running" state.
+    static let missingAppIcon: NSImage = NSWorkspace.shared.icon(for: .applicationBundle)
 
     /// The most recent local-mix refusal reason surfaced to the user (so the app
     /// / tests can assert the block was presented). Cleared on the next
@@ -1177,11 +1180,19 @@ public final class PopoverController: NSObject {
         // affordance (`rendersHeader`). A COLLAPSED one keeps its header and
         // renders no rows.
         for section in sections where rendersHeader(section) {
-            let bluetooth = section.title == Self.bluetoothSubsectionTitle
+            // The SYNC column title lives in the Bluetooth subsection's header
+            // line only, between VOLUME and FEED (BT-OFFSET-UI) — but ONLY when
+            // the section actually has rows under it. Bluetooth's header always
+            // renders even with zero listed devices (BT-LIST, `rendersHeader`
+            // above), and that empty body is the Connect affordance, not a
+            // column of rows — a "Sync" title floating over "Connect a
+            // Bluetooth device…" names a column that doesn't exist (design
+            // critique P3). `section.devices.isEmpty` is the same devices list
+            // `addSubsectionRows` checks to decide between the Connect row and
+            // real rows, so the two can never disagree.
+            let bluetooth = section.title == Self.bluetoothSubsectionTitle && !section.devices.isEmpty
             let collapsed = addSubsection(
                 section.title,
-                // The SYNC column title lives in the Bluetooth subsection's
-                // header line only, between VOLUME and FEED (BT-OFFSET-UI).
                 columnTitle: bluetooth ? "Sync" : nil,
                 columnCenterFromTrailing: bluetooth ? PopoverColumnGrid.syncCenterFromTrailing : 0)
             guard !collapsed else { continue }
@@ -1466,12 +1477,15 @@ public final class PopoverController: NSObject {
     // MARK: Collapse-default policy (T-5, PLAN §B)
 
     /// The three card titles — Warm Signal §5.1's silkscreen vocabulary
-    /// ("SYSTEM AUDIO" / "OUTPUT DEVICES" / "APP EXCEPTIONS"; the panel uppercases
+    /// ("MAIN AUDIO" / "OUTPUT DEVICES" / "APP EXCEPTIONS"; the panel uppercases
     /// the displayed header, the title-case copy lives here). Named constants
-    /// because the title string IS the card's lookup/collapse key. The System
-    /// Audio card was "Main Audio" pre-v4 (§Call-1 renamed the SECTION header to
-    /// "System Audio"; the ROW inside it is now titled "Main Audio").
-    static let mainAudioCardTitle = "System Audio"
+    /// because the title string IS the card's lookup/collapse key. Unified onto
+    /// one name (design-critique P1, 2026-08-10): the card header, the row
+    /// inside it, and the FEED pill token were four different names for the
+    /// same concept ("System Audio" card / "Main Audio" row / "System" pill /
+    /// "Selected Devices" dropdown value); all but the dropdown value (which
+    /// names a destination CHOICE, not this concept) now say "Main Audio".
+    static let mainAudioCardTitle = "Main Audio"
     static let outputDevicesCardTitle = "Output Devices"
     /// The Applications card's title, so its default is keyed identically to
     /// every other card even though the card itself isn't built yet (T-8).
@@ -1480,6 +1494,15 @@ public final class PopoverController: NSObject {
     /// Warm Signal §5.9's locked empty-state copy for the Applications card.
     static let applicationsEmptyPlaceholderText =
         "Route one app somewhere else — music to the house, calls on your Mac. Use + to pick an app."
+
+    /// Design-critique P2 (discoverability): the Output Devices card's rail
+    /// nodes are the add-a-speaker control, and a first-run mix (nothing but
+    /// the Mac itself, `GroupController.localRowDrivesMain`) shows a wall of
+    /// hollow circles with no invitation. Shown through the SAME card-note slot
+    /// `devicesCardNoteText()` uses for the dormancy annotation — it disappears
+    /// the moment any real speaker joins the mix (state-driven on rebuild, no
+    /// persistence, no one-time flag).
+    static let emptyMixHintText = "Click a circle to send audio to that speaker."
 
     /// The collapsed state `rebuild()` should hand `beginCard` for the card
     /// titled `title`: on an OPEN-triggered rebuild, the freshly computed
@@ -1810,11 +1833,27 @@ public final class PopoverController: NSObject {
         return DevicesCardDivergence(groupName: group.name, targetMemberIDs: target)
     }
 
-    /// The "Inactive" card note the Devices card should currently show, or `nil`
-    /// (spec §4.7: the note appears only under genuine divergence — the derived
-    /// case posts none).
+    /// The card note the Devices card should currently show, or `nil`. Two
+    /// mutually-exclusive reasons, checked in order:
+    ///
+    /// 1. Genuine divergence (spec §4.7: the note appears only under genuine
+    ///    divergence — the derived case posts none) — "Inactive — Main Audio
+    ///    is using '<group>'".
+    /// 2. No divergence AND no real speaker in the mix (design-critique P2):
+    ///    `localRowDrivesMain` is the same "nothing but the Mac" predicate the
+    ///    passthrough-volume overlay above already keys off, so this can never
+    ///    disagree with the row that reads as Main Out's master. A diverging
+    ///    Mac-only GROUP target still reports via reason 1 instead — the user
+    ///    already gets an explanation there, and doesn't also need the
+    ///    first-run invitation.
     private func devicesCardNoteText() -> String? {
-        devicesCardDivergence().map { "Inactive — Main Audio is using '\($0.groupName)'" }
+        if let divergence = devicesCardDivergence() {
+            return "Inactive — Main Audio is using '\(divergence.groupName)'"
+        }
+        if groupController?.localRowDrivesMain == true {
+            return Self.emptyMixHintText
+        }
+        return nil
     }
 
     /// The note text the LAST `rebuild()` actually rendered onto the Devices card
@@ -1842,7 +1881,7 @@ public final class PopoverController: NSObject {
     /// The ACTIVE Main Out target's saved-group name, when it currently
     /// targets a group — `nil` when it targets Selected Devices. Feeds
     /// `DeviceRowView.apply`'s `mainOutTargetsGroupName` (Warm Signal v4.1
-    /// item 3 FEED column wording: "System" for a manual member, the group's
+    /// item 3 FEED column wording: "Main" for a manual member, the group's
     /// name for a group-target member).
     private var activeMainOutGroupName: String? {
         guard let controller = groupController, case .group(let id) = controller.mainOut else { return nil }
@@ -2755,9 +2794,7 @@ public final class PopoverController: NSObject {
         // Not currently running (route persisted across a quit) — generic
         // placeholder (PLAN §C: "a routed app that is NOT currently running shows a
         // generic placeholder").
-        let config = NSImage.SymbolConfiguration(pointSize: 18, weight: .regular)
-        return NSImage(systemSymbolName: Self.missingAppIconSymbolName, accessibilityDescription: nil)?
-            .withSymbolConfiguration(config)
+        return Self.missingAppIcon
     }
 
     /// This app's `AppTetherColor` tint (Warm Signal v4.1 CORRECTIONS,
@@ -3049,6 +3086,9 @@ public final class PopoverController: NSObject {
     /// The Applications card's empty-state copy (§5.9) — pinned so a future
     /// edit can't silently drift from the spec text.
     public static var test_applicationsPlaceholderText: String { applicationsEmptyPlaceholderText }
+    /// The Output Devices card's first-run "add a speaker" hint copy (design
+    /// critique P2) — pinned so a future edit can't silently drift from it.
+    public static var test_emptyMixHintText: String { emptyMixHintText }
     /// The card-note texts (`addCardNote`) for `title`, in add order — the A1
     /// dormancy annotation's assertion surface.
     public func test_cardNoteTexts(title: String) -> [String] {
@@ -3101,6 +3141,9 @@ public final class PopoverController: NSObject {
     /// clipping, no scrollbar).
     public var test_panelFittingSize: NSSize { panel.fittingSizeSettled() }
     public var test_preferredContentSize: NSSize { panel.preferredContentSize }
+    /// Whether the panel's conditionally-active overflow scroller is mounted —
+    /// false whenever content fits the screen budget (the exact-fit contract).
+    public var test_panelHasVerticalScroller: Bool { panel.test_hasVerticalScroller }
 
     // MARK: Collapsible-card test hooks (T-4)
 
@@ -3225,6 +3268,19 @@ public final class PopoverController: NSObject {
     /// Fire the Bluetooth empty-state Connect button through real AppKit
     /// target/action dispatch (never a bypass seam).
     public func test_fireBluetoothConnectClick() { bluetoothConnectButton?.performClick(nil) }
+
+    /// Whether the Bluetooth subsection header currently renders the "SYNC"
+    /// column title (design critique P3) — gated on the section actually
+    /// having rows, so it must be `false` whenever `test_bluetoothConnectRowShown()`
+    /// is `true` (BT-LIST's always-on empty header IS the Connect affordance,
+    /// not a column of rows). Walks the card's rendered rows rather than
+    /// keying off a stored flag, so a rendering regression the gate itself
+    /// misses would still show up here.
+    public func test_bluetoothSyncColumnTitleShown() -> Bool {
+        panel.test_cardRows(title: Self.outputDevicesCardTitle).contains { row in
+            row.subviews.contains { ($0 as? NSTextField)?.stringValue == "SYNC" }
+        }
+    }
 
     /// Simulate flipping a device row's membership switch through its delegate.
     /// Returns the model's `SelectionResult` so tests can assert refusal/auto-swap.

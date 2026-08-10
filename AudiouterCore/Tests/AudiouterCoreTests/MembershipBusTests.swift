@@ -185,6 +185,62 @@ import AudiouterCore
                        "the label is identical checked and unchecked — the value carries the state")
     }
 
+    // MARK: Hit zone + hover affordance — the node IS the primary control
+    //
+    // The node is how a speaker joins the mix, but it DRAWS at 11–15 pt
+    // (`busNodeDiameter*`), well under the comfortable pointer target, and it
+    // carries no label. So the real control's frame is the whole gutter column
+    // × the row height, and a hover halo tells the pointer it found it. Only
+    // the frame and the halo are new — the drawn node is untouched (R7), which
+    // `nodeColumnXIsFixedAcrossToggles` above already pins.
+
+    @Test func nodeHitZoneFillsTheGutterColumnAndTheRowHeight() throws {
+        let row = makeBusRow()
+        row.apply(makeDevice(), selected: false)
+        let size = try #require(row.test_membershipHitZoneSize())
+        #expect(size.width >= PopoverColumnGrid.busColumnWidth - 0.01,
+                "the click target spans the whole rail gutter, not just the drawn disc")
+        #expect(size.height >= DeviceRowView.rowHeight - 0.01,
+                "…and the row's full height, so the gutter has no dead bands")
+        #expect(min(size.width, size.height) >= 24,
+                "clears the comfortable pointer target the drawn node can never meet")
+    }
+
+    @Test func theHoveredGutterZoneIsExactlyTheControlsOwnFrame() throws {
+        let row = makeBusRow()
+        row.apply(makeDevice(), selected: true, controllable: true)
+        let zone = try #require(row.test_busNodeHitZone())
+        let size = try #require(row.test_membershipHitZoneSize())
+        #expect(abs(zone.width - size.width) <= 0.01)
+        #expect(abs(zone.height - size.height) <= 0.01)
+        #expect(abs(zone.midX - PopoverColumnGrid.railGutterCenterX) <= 0.01,
+                "the hovered zone is centred on the drawn node, never offset from it")
+    }
+
+    @Test func nodeHoverHaloIsOffByDefaultAndSeparateFromTheRowWash() {
+        let row = makeBusRow()
+        row.apply(makeDevice(), selected: true, controllable: true)
+        #expect(!row.test_isNodeHovered,
+                "a render with no pointer over it draws no halo — snapshots unchanged")
+
+        row.test_setNodeHovered(true)
+        #expect(row.test_isNodeHovered)
+        #expect(!row.test_isHovered,
+                "the node's affordance is its own, never borrowed from the row-wide wash")
+
+        row.apply(makeDevice(), selected: true, controllable: true)
+        #expect(!row.test_isNodeHovered,
+                "a model refresh clears the transient halo, exactly like the row wash (T-U8)")
+    }
+
+    @Test func aNonBusRowHasNoNodeHitZoneAtAll() {
+        // The mixer-window host keeps its real drawn checkbox in the trailing
+        // column; there is no gutter to grow and nothing to halo.
+        let row = DeviceRowView(device: makeDevice())
+        #expect(row.test_membershipHitZoneSize() == nil)
+        #expect(row.test_busNodeHitZone() == nil)
+    }
+
     @Test func nonBusCheckboxKeepsItsLegacyVoiceOverLabel() {
         // Non-bus hosts (mixer window) are byte-for-byte unchanged.
         let row = DeviceRowView(device: makeDevice())

@@ -641,6 +641,27 @@ import AppKit
         #expect(row.test_idleSuffixColor == nil)
     }
 
+    // MARK: Not-running icon placeholder (design-critique finding, 2026-08-10)
+    //
+    // A not-running row used to render whatever icon the HOST resolved — in
+    // practice `PopoverController.appIcon(for:)`'s `app.dashed` SF Symbol,
+    // which read as a failed image load rather than an intentional "not
+    // running" state. This view now substitutes the real macOS generic-app
+    // icon itself for any not-running row, regardless of what `Configuration
+    // .icon` carries.
+
+    @Test func notRunningRowShowsGenericPlaceholderRegardlessOfSuppliedIcon() {
+        let row = makeThreeStateRow(selected: "no-redirect", isRunning: false)
+        #expect(row.test_isShowingGenericPlaceholderIcon,
+                "a not-running row must show the real system placeholder, not whatever the host resolved")
+    }
+
+    @Test func runningRowKeepsTheHostSuppliedIconNotThePlaceholder() {
+        let row = makeThreeStateRow(selected: "no-redirect", isRunning: true)
+        #expect(!row.test_isShowingGenericPlaceholderIcon,
+                "a running row's real icon must never be swapped for the placeholder")
+    }
+
     // MARK: Tether chip (Warm Signal v4.1 CORRECTIONS, extending item 7)
 
     private func makeThreeStateRow(selected: String, isRunning: Bool, tetherColor: NSColor?) -> AppRowView {

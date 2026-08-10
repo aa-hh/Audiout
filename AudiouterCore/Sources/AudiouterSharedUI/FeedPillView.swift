@@ -12,7 +12,7 @@ import AppKit
 /// A pill hosts a text label — optionally prefixed with the same
 /// derived-colour `FeedChip` square a redirected app's tether wears elsewhere
 /// — inside a rounded rect with a subtle border and a very slightly filled
-/// background, so even a short value like "System" reads as a small object
+/// background, so even a short value like "Main" reads as a small object
 /// instead of floating in empty space. The neutral main-mix segment (and the
 /// failure-red "Couldn't connect"/"Unavailable" override, and the "+N"
 /// overflow pill) carry NO chip — only a redirected app's own pill does.

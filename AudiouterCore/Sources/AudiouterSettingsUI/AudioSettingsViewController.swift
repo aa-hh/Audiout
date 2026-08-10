@@ -706,9 +706,10 @@ public final class AudioSettingsViewController: NSViewController {
            let icon = app.icon {
             return icon
         }
-        let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
-        return NSImage(systemSymbolName: "app.dashed", accessibilityDescription: nil)?
-            .withSymbolConfiguration(config)
+        // Generic system app icon, not `app.dashed` — the dashed outline reads
+        // as a failed image load (same design-critique finding as the popover's
+        // Applications card, 2026-08-10).
+        return NSWorkspace.shared.icon(for: .applicationBundle)
     }
 
     // MARK: Actions

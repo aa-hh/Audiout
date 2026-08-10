@@ -411,6 +411,13 @@ public final class GroupRowView: NSView {
         chevronButton.setAccessibilityLabel(isExpanded ? "Collapse \(group.name)" : "Expand \(group.name)")
         masterSlider.setAccessibilityRole(.slider)
         masterSlider.setAccessibilityLabel("\(group.name) master volume")
+        // Image-only push-on-push-off button: the group name has to land in the
+        // LABEL itself (mirrors `DeviceRowView.muteButton`'s exact phrasing) —
+        // the state-aware wording ("Mute"/"Unmute") is what tells VoiceOver
+        // whether the group is currently muted, since a plain "Mute group"
+        // label never changes across the toggle.
+        muteButton.setAccessibilityLabel(
+            muteButton.state == .on ? "Unmute \(group.name)" : "Mute \(group.name)")
     }
 
     // MARK: Test-support hooks
@@ -422,6 +429,11 @@ public final class GroupRowView: NSView {
 
     /// Whether the group master-mute button is in its muted (on) state.
     var test_isMuted: Bool { muteButton.state == .on }
+
+    /// The mute button's live VoiceOver label — state-aware ("Mute
+    /// \(group.name)" / "Unmute \(group.name)"), design-critique finding
+    /// 2026-08-10.
+    var test_muteButtonAccessibilityLabel: String? { muteButton.accessibilityLabel() }
 
     /// Whether a transient hover wash is currently active.
     var test_isHovered: Bool { isHovered }

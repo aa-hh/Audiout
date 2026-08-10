@@ -46,6 +46,14 @@ public final class ConnectionDiagnosisView: NSView {
     private static let buttonSpacing: CGFloat = 8
     /// Inset of the dismiss button from the tinted background's top-trailing corner.
     private static let dismissButtonInset: CGFloat = 6
+    /// The dismiss button's HIT-AREA side length — deliberately larger than
+    /// the 9.5pt glyph it centers (design-critique finding, 2026-08-10): with
+    /// no explicit size the button hugged the glyph, giving a target well
+    /// under a comfortable click/tap size. `imageScaling = .scaleProportionallyDown`
+    /// only ever scales the glyph DOWN to fit, never up, so widening the
+    /// button's own frame grows the invisible padding around the glyph, not
+    /// the glyph itself.
+    private static let dismissButtonHitSize: CGFloat = 20
 
     /// Called when the user clicks "Try Again". The host owns the actual retry
     /// (re-adding the device to the Selected Devices set — brief §7.3).
@@ -118,12 +126,12 @@ public final class ConnectionDiagnosisView: NSView {
         addSubview(background)
 
         headlineLabel.translatesAutoresizingMaskIntoConstraints = false
-        headlineLabel.font = .boldSystemFont(ofSize: 11)
+        headlineLabel.font = Tokens.Font.captionBold
         headlineLabel.lineBreakMode = .byTruncatingTail
         background.addSubview(headlineLabel)
 
         suggestionLabel.translatesAutoresizingMaskIntoConstraints = false
-        suggestionLabel.font = .systemFont(ofSize: 11)
+        suggestionLabel.font = Tokens.Font.caption
         suggestionLabel.textColor = Tokens.Color.secondaryLabel
         background.addSubview(suggestionLabel)
 
@@ -147,6 +155,8 @@ public final class ConnectionDiagnosisView: NSView {
             dismissButton.topAnchor.constraint(equalTo: background.topAnchor, constant: Self.dismissButtonInset),
             dismissButton.trailingAnchor.constraint(
                 equalTo: background.trailingAnchor, constant: -Self.dismissButtonInset),
+            dismissButton.widthAnchor.constraint(equalToConstant: Self.dismissButtonHitSize),
+            dismissButton.heightAnchor.constraint(equalToConstant: Self.dismissButtonHitSize),
 
             headlineLabel.topAnchor.constraint(equalTo: background.topAnchor, constant: Self.contentPadding),
             headlineLabel.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: Self.contentPadding),
@@ -186,16 +196,22 @@ public final class ConnectionDiagnosisView: NSView {
     /// The quiet dismiss ("x") control pinned to the tinted background's
     /// top-trailing corner: `bezelStyle = .accessoryBar` + `isBordered = false`
     /// (no box at rest, matching the popover's borderless icon-glyph
-    /// convention — e.g. the card accessory buttons), a small bold glyph,
-    /// and `.tertiaryLabelColor` so it reads as a quiet affordance rather than
-    /// competing with "Try Again"/"Copy Details".
+    /// convention — e.g. the card accessory buttons), a small bold glyph at
+    /// `.secondaryLabelColor` — one contrast step up from the `.tertiaryLabelColor`
+    /// this replaced (design-critique finding, 2026-08-10: tertiary read as
+    /// too faint to notice at all) — so it stays low-key without competing
+    /// with "Try Again"/"Copy Details". The glyph itself stays 9.5pt; only the
+    /// button's own frame (`dismissButtonHitSize`) grows the click/tap target.
+    /// The real accessibility label is set in `configureAccessibility()` (it
+    /// needs `deviceName`); this one is just the image's own description, a
+    /// harmless fallback for any AX path that reads the image directly.
     private func configureDismissButton() {
         dismissButton.translatesAutoresizingMaskIntoConstraints = false
         dismissButton.bezelStyle = .accessoryBar
         dismissButton.isBordered = false
         dismissButton.imagePosition = .imageOnly
         dismissButton.imageScaling = .scaleProportionallyDown
-        dismissButton.contentTintColor = Tokens.Color.tertiaryLabel
+        dismissButton.contentTintColor = Tokens.Color.secondaryLabel
         dismissButton.target = self
         dismissButton.action = #selector(dismissClicked(_:))
 
@@ -204,7 +220,6 @@ public final class ConnectionDiagnosisView: NSView {
             .withSymbolConfiguration(symbolConfig) {
             dismissButton.image = image
         }
-        dismissButton.setAccessibilityLabel("Dismiss")
     }
 
     /// Fraction of the failure-exclusive red mixed into the panel seat —
@@ -279,7 +294,7 @@ public final class ConnectionDiagnosisView: NSView {
 
         retryButton.setAccessibilityLabel("Try again connecting to \(deviceName)")
         copyDetailsButton.setAccessibilityLabel("Copy connection details for \(deviceName)")
-        dismissButton.setAccessibilityLabel("Dismiss")
+        dismissButton.setAccessibilityLabel("Dismiss connection problem for \(deviceName)")
     }
 
     // MARK: Test-support hooks
@@ -295,6 +310,21 @@ public final class ConnectionDiagnosisView: NSView {
 
     /// Whether the dismiss button is present and has a resolved image (never blank).
     public var test_hasDismissButton: Bool { dismissButton.image != nil }
+    /// The dismiss button's live VoiceOver label — must include the device
+    /// name, mirroring "Try again connecting to X"/"Copy connection details
+    /// for X" (design-critique finding, 2026-08-10).
+    public var test_dismissButtonAccessibilityLabel: String? { dismissButton.accessibilityLabel() }
+    /// The dismiss button's laid-out hit-area size — must be ≥20×20pt even
+    /// though the glyph it centers stays 9.5pt (design-critique finding,
+    /// 2026-08-10).
+    public var test_dismissButtonHitSize: NSSize {
+        layoutSubtreeIfNeeded()
+        return dismissButton.frame.size
+    }
+    /// The dismiss glyph's tint — one contrast step up from `tertiaryLabel`
+    /// (design-critique finding, 2026-08-10: tertiary read as too faint to
+    /// notice).
+    public var test_dismissButtonTintColor: NSColor? { dismissButton.contentTintColor }
 
     /// Simulate a "Try Again" click.
     public func test_tapRetry() { retryClicked(retryButton) }

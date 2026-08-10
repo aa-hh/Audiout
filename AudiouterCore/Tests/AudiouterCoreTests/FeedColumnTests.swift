@@ -30,13 +30,13 @@ import AudiouterCore
 
     // MARK: Multi-source composite — never collapses to one reason
 
-    @Test func manualMemberAloneShowsSystem() {
+    @Test func manualMemberAloneShowsMain() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true)
-        #expect(row.test_feedText == "System")
+        #expect(row.test_feedText == "Main")
     }
 
-    @Test func groupMemberShowsTheGroupNameInsteadOfSystem() {
+    @Test func groupMemberShowsTheGroupNameInsteadOfMain() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: false, inActiveTarget: true,
                   mainOutTargetsGroupName: "Downstairs")
@@ -52,7 +52,7 @@ import AudiouterCore
     @Test func manualMemberPlusOneApp() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
-        #expect(row.test_feedText == "System · Music")
+        #expect(row.test_feedText == "Main · Music")
     }
 
     @Test func groupMemberPlusOneApp() {
@@ -62,20 +62,21 @@ import AudiouterCore
         #expect(row.test_feedText == "Downstairs · Music")
     }
 
-    @Test func manualMemberPlusTwoApps() {
-        // Pre-pill this fit at the same `feedColumnWidth` as one packed
-        // string; each value now carries its own bordered-pill chrome
-        // (padding + border + inter-pill gap), so three short values plus
-        // two chips no longer fit in the same reserved width and the
-        // STATIC "+N" overflow correctly kicks in one segment sooner. The
-        // "never collapses to one reason" behavior is unchanged — it just
-        // shows 2 pills + "+1" instead of 3 pills at this exact width; see
-        // `testManualMemberPlusOneApp`/`testGroupMemberPlusOneApp` for the
-        // still-uncapped two-pill case.
+    @Test func manualMemberPlusSeveralAppsDropsFromTheTailWithAStaticPlusN() {
+        // The STATIC overflow rule: whole pills drop from the TAIL, the
+        // leading values keep their own pills, and a trailing "+N" carries
+        // the count — never a mid-string cut and never one collapsed reason.
+        //
+        // Three values are DELIBERATELY not the input here. Whether N pills
+        // fit `feedColumnWidth` is a measured, font- and word-dependent fact,
+        // and the neutral token's own width is part of it (the "Main"
+        // unification shortened it), so a case sitting a few points either
+        // side of the boundary pins an accident rather than the rule. Four
+        // values overflow by a wide margin in any of those spellings.
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true,
-                  routedAppNames: ["Music", "Safari"])
-        #expect(row.test_feedText == "System · Music · +1")
+                  routedAppNames: ["Music", "Safari", "Podcasts"])
+        #expect(row.test_feedText == "Main · Music · +2")
         #expect(row.test_feedHasOverflow)
     }
 
@@ -118,7 +119,7 @@ import AudiouterCore
         // normally (no "connecting…" word duplicated here).
         let row = makeBusRow()
         row.apply(makeDevice(connectionState: .connecting), selected: true, controllable: true)
-        #expect(row.test_feedText == "System")
+        #expect(row.test_feedText == "Main")
         #expect(!(row.test_feedIsErrorColored))
     }
 
@@ -127,7 +128,7 @@ import AudiouterCore
         muted.isMuted = true
         let row = makeBusRow()
         row.apply(muted, selected: true, controllable: true, routedAppNames: ["Music"])
-        #expect(row.test_feedText == "System · Music", "muted is not represented in the FEED column at all")
+        #expect(row.test_feedText == "Main · Music", "muted is not represented in the FEED column at all")
         #expect(row.test_statusText == "MUTED", "…it lives on the sublabel/mute-pill instead")
     }
 
@@ -137,7 +138,7 @@ import AudiouterCore
         let row = makeBusRow()
         row.apply(makeDevice(supportsAirPlay2: false), selected: true, controllable: true)
         #expect(row.test_feedHasAP1Tag)
-        #expect(row.test_feedText == "AP1 System")
+        #expect(row.test_feedText == "AP1 Main")
     }
 
     @Test func aP2DeviceNeverGetsATag() {
@@ -201,19 +202,17 @@ import AudiouterCore
     }
 
     @Test func appRedirectSegmentsWearAChipMainMixSegmentDoesNot() {
-        // Three pills' worth of bordered chrome (System + 2 app pills, 2 of
-        // them chipped) no longer fits `feedColumnWidth` at this exact width
-        // — see the note on `testManualMemberPlusTwoApps` — so Safari's pill
-        // overflows to the static "+1" here too. The chip-per-segment rule
-        // this test exists to pin is still exercised on the VISIBLE pills:
-        // "System" (no chip) and "Music" (chip); `testAppOnlyRedirectFeedStillWearsItsChip`
-        // separately covers a chip surviving as the SOLE visible app pill.
+        // The rule: one chip per app pill, none on the neutral main-mix pill.
+        // Kept to a two-pill composite that fits `feedColumnWidth` with room
+        // to spare, so the assertion pins the chip rule and not the overflow
+        // measurement (`manualMemberPlusSeveralAppsDropsFromTheTailWithAStaticPlusN`
+        // owns that one).
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true,
-                  routedAppNames: ["Music", "Safari"],
-                  appTintColors: ["Music": .systemGreen, "Safari": .systemTeal])
-        #expect(row.test_feedText == "System · Music · +1")
-        #expect(row.test_feedChipCount == 1, "one chip per VISIBLE app segment; the neutral 'System' segment wears none")
+                  routedAppNames: ["Music"],
+                  appTintColors: ["Music": .systemGreen])
+        #expect(row.test_feedText == "Main · Music")
+        #expect(row.test_feedChipCount == 1, "one chip on the app pill; the neutral 'Main' pill wears none")
     }
 
     @Test func appOnlyRedirectFeedStillWearsItsChip() {
@@ -239,7 +238,7 @@ import AudiouterCore
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true, routedAppNames: ["Music"])
         let label = row.test_accessibilityLabel ?? ""
-        #expect(label.hasSuffix(", feeding System, Music"), "the feed clause trails the rest of the composed announcement")
+        #expect(label.hasSuffix(", feeding Main, Music"), "the feed clause trails the rest of the composed announcement")
         #expect(label.components(separatedBy: "feeding").count - 1 == 1, "spoken exactly once")
     }
 

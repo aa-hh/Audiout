@@ -352,12 +352,17 @@ import AppKit
         #expect(row.test_iconTint == .secondaryLabelColor, "icon is always neutral")
 
         // Toggle it OFF — the row must return to the unselected appearance.
+        // Re-fetch the row: deselecting the last speaker empties the mix, which
+        // flips the Devices card's empty-mix hint on — a structural card-note
+        // change that `refreshDeviceRowsReconcilingCardNote()` resolves with a
+        // full `rebuild()`, replacing the row instances.
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false)
-        #expect(!(row.isSelectedInSet), "not selected after OFF")
-        #expect(!(row.test_isShowingSelectedBackground), "deselected row paints NO selected background (no stale highlight)")
-        #expect(!(row.test_isHovered), "no stale hover wash after deselect")
-        #expect(!(row.test_isEnabledOn), "switch returned to OFF")
-        #expect(row.test_iconTint == .secondaryLabelColor, "icon tint stays neutral (always secondary)")
+        let rowAfterOff = try #require(popover.test_deviceRow(for: "office"))
+        #expect(!(rowAfterOff.isSelectedInSet), "not selected after OFF")
+        #expect(!(rowAfterOff.test_isShowingSelectedBackground), "deselected row paints NO selected background (no stale highlight)")
+        #expect(!(rowAfterOff.test_isHovered), "no stale hover wash after deselect")
+        #expect(!(rowAfterOff.test_isEnabledOn), "switch returned to OFF")
+        #expect(rowAfterOff.test_iconTint == .secondaryLabelColor, "icon tint stays neutral (always secondary)")
     }
 
     /// T-U9a — the last-row sticky-highlight bug. A row hovered by the pointer
@@ -580,9 +585,10 @@ import AppKit
         let row = try #require(popover.test_deviceRow(for: "office"))
         #expect(row.test_statusKind == .connected)
         // The retried device is a selected member with no routed apps, so its
-        // FEED column is the bare "System" token (selected ⇒ in the set; v4.1
-        // item 3 moved this off the sublabel).
-        #expect(row.test_feedText == "System", "selected device shows the System FEED token")
+        // FEED column is the bare "Main" token (selected ⇒ in the set; v4.1
+        // item 3 moved this off the sublabel; renamed from "System" alongside
+        // the "Main Audio" unification — DeviceRowView.swift owns the literal).
+        #expect(row.test_feedText == "Main", "selected device shows the Main FEED token")
         #expect(row.test_isEnabledOn, "the honest toggle now rests ON")
     }
 
@@ -905,20 +911,18 @@ import AppKit
     // `testClickingTheLocalRowCheckboxThroughRealDispatchJoinsAMixedSet` above.
 
     /// T-3 — exact-fit sizing: the popover is exactly its visible content height,
-    /// with no `NSScrollView` and no clipping. The resize primitive publishes the
-    /// panel's settled `fittingSize` through `preferredContentSize` (the documented
-    /// `NSPopover` size channel), so after a rebuild the two must be equal and the
-    /// height must cover the full stack (header + both cards). No scroller can
-    /// appear because the panel contains no scroll view at all.
+    /// with no clipping and no ACTIVE scroller. Since the overflow work
+    /// (design-critique batch, 2026-08-10) the panel hosts a conditionally-active
+    /// `NSScrollView`, but while content fits the screen budget it must behave
+    /// exactly as the scroll-free panel did: no scroller chrome mounted, and the
+    /// resize primitive publishes the panel's settled `fittingSize` through
+    /// `preferredContentSize` unchanged (see `PopoverPanelOverflowTests` for the
+    /// overflow half of the contract).
     @Test func exactFitSizeMatchesContentNoScroll() async throws {
         let (popover, _, _) = try await makePopover()
 
-        // No NSScrollView anywhere in the panel view tree ⇒ no scroller chrome ever.
-        func containsScrollView(_ v: NSView) -> Bool {
-            if v is NSScrollView { return true }
-            return v.subviews.contains(where: containsScrollView)
-        }
-        #expect(!(containsScrollView(popover.test_panelView)), "the popover panel contains no NSScrollView (exact-fit, no scrollbar ever)")
+        // Content fits ⇒ the conditionally-active scroller is NOT mounted.
+        #expect(!(popover.test_panelHasVerticalScroller), "a fitting panel mounts no scroller chrome")
 
         // Publish the exact-fit size, then the tracked content size must equal the
         // panel's settled fitting size — no clipping, nothing cut off.
@@ -964,7 +968,7 @@ import AppKit
     /// expanded ⇄ `chevron.right` collapsed — GroupRowView precedent).
     @Test func toggleFlipsChevronSymbol() async throws {
         let (popover, _, _) = try await makePopover()
-        let title = "System Audio"
+        let title = "Main Audio"
         #expect(popover.test_cardChevronSymbolName(title: title) == "chevron.down", "expanded card shows the down chevron")
         popover.test_toggleCard(title: title)
         #expect(popover.test_cardChevronSymbolName(title: title) == "chevron.right", "collapsed card shows the right chevron")
@@ -1053,7 +1057,7 @@ import AppKit
         }
     }
 
-    /// Behavior 2 (origin end): collapsing the ORIGIN card ("System Audio") hides
+    /// Behavior 2 (origin end): collapsing the ORIGIN card ("Main Audio") hides
     /// the Main Audio ring, so the rail's origin moves UP to that card's header
     /// dot — a different resolution than collapsing the device card.
     @Test func collapsingOriginCardMovesOriginToHeaderDot() async throws {
@@ -1065,7 +1069,7 @@ import AppKit
             return
         }
 
-        popover.test_toggleCard(title: "System Audio", animated: false)
+        popover.test_toggleCard(title: "Main Audio", animated: false)
         popover.test_applyExactFitSize()
 
         let collapsed = try #require(popover.test_railPlan())
@@ -1111,6 +1115,29 @@ import AppKit
         #expect(plan.terminusDotY != nil, "…terminus dot already resolved, no animation tail")
     }
 
+    // MARK: Design critique P3 — orphan SYNC column header
+
+    /// The "SYNC" column title lives on the Bluetooth subsection's header
+    /// line — but BT-LIST keeps that header rendering even with zero listed
+    /// devices (its empty body IS the Connect affordance), so the title must
+    /// be gated on the section actually having rows: otherwise "SYNC" floats
+    /// above "Connect a Bluetooth device…", naming a column that isn't there.
+    @Test func syncColumnTitleOnlyRendersWhenBluetoothHasRows() async throws {
+        let (popover, _, backend) = try await makePopover()
+        // The default fleet has no Bluetooth device: the subsection renders
+        // its empty-state Connect row, and the title must not float above it.
+        #expect(popover.test_bluetoothConnectRowShown(), "no BT device in the default fleet ⇒ the Connect affordance is the empty body")
+        #expect(!popover.test_bluetoothSyncColumnTitleShown(), "no rows under the Bluetooth header ⇒ no SYNC column title")
+
+        // A listed Bluetooth device gives the subsection real rows: the title
+        // must now render.
+        let bt = Device(id: "bt-speaker", name: "BT Speaker", kind: .bluetooth,
+                        supportsAirPlay2: false, isSelected: false)
+        popover.update(devices: backend.devices + [bt])
+        #expect(!popover.test_bluetoothConnectRowShown(), "a listed device replaces the empty-state Connect row")
+        #expect(popover.test_bluetoothSyncColumnTitleShown(), "the Bluetooth subsection now has rows, so the SYNC column title renders")
+    }
+
     @Test func muteDrivesVolumeToZeroAndRestores() async throws {
         let (popover, controller, backend) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
@@ -1128,12 +1155,12 @@ import AppKit
 
     // MARK: T-5 — collapse-default policy (PLAN §B)
 
-    /// Opening the popover applies fresh defaults: System + Selected Devices
+    /// Opening the popover applies fresh defaults: Main Audio + Output Devices
     /// both start expanded.
     @Test func collapseDefaultsAppliedOnOpen() async throws {
         let (popover, _, _) = try await makePopover()
         popover.test_simulateOpen()
-        #expect(popover.test_isCardCollapsed(title: "System Audio") == false)
+        #expect(popover.test_isCardCollapsed(title: "Main Audio") == false)
         #expect(popover.test_isCardCollapsed(title: "Output Devices") == false)
     }
 
@@ -2172,6 +2199,51 @@ import AppKit
         popover.test_selectMainOut(.selectedDevices); await drain()
         #expect(popover.test_cardNoteTexts(title: "Output Devices") == [], "no dormancy note under Selected Devices")
         #expect(popover.test_deviceRowSelectionDimmed(id: "office") == false, "no dim under Selected Devices")
+    }
+
+    // MARK: Design critique P2 — empty-mix "add a speaker" hint
+
+    /// The Output Devices card's rail nodes are the app's add-a-speaker
+    /// control and nothing labels them — a first-run mix (nothing but the Mac
+    /// itself, `GroupController.localRowDrivesMain`) shows the hint through
+    /// the SAME card-note slot the §4.7 dormancy note uses. It is
+    /// state-driven on rebuild (no persistence, no one-time flag): it
+    /// disappears the instant a real speaker joins the mix and reappears the
+    /// instant the mix returns to zero speakers.
+    @Test func emptyMixHintShownOnlyWithNoSpeakerInTheMix() async throws {
+        let (popover, _, _) = try await makePopover()
+        // Default selection is {local-mac} only — no speaker in the mix yet.
+        #expect(popover.test_cardNoteTexts(title: "Output Devices")
+                == [PopoverController.test_emptyMixHintText], "first-run passthrough invites the click")
+
+        // Selecting a real speaker clears the hint live.
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        #expect(popover.test_cardNoteTexts(title: "Output Devices") == [], "a real speaker in the mix clears the hint")
+
+        // Deselecting back to {local-mac} only brings it back — no flag holds
+        // it off once shown.
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false)
+        #expect(popover.test_cardNoteTexts(title: "Output Devices")
+                == [PopoverController.test_emptyMixHintText], "returning to zero speakers re-shows the hint")
+    }
+
+    /// A diverging saved-GROUP target that also happens to have no non-local
+    /// member still reports through the §4.7 dormancy note, not the empty-mix
+    /// hint — the user already gets an explanation there ("Inactive — Main
+    /// Audio is using '<group>'") and showing both would be noise.
+    @Test func dormancyNoteTakesPrecedenceOverEmptyMixHint() async throws {
+        let (popover, controller, _) = try await makePopover()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        popover.test_saveCurrentSetup(); await drain()
+        let group = controller.groups[0]
+
+        // Target the group, then diverge back to zero speakers (local-mac
+        // only) while the group itself still names a real member.
+        popover.test_selectMainOut(.group(id: group.id)); await drain()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false); await drain()
+        #expect(popover.test_cardNoteTexts(title: "Output Devices")
+                == ["Inactive — Main Audio is using '\(group.name)'"],
+                "the dormancy note wins over the empty-mix hint")
     }
 
     // MARK: Decision m — count-free "Selected Devices" title

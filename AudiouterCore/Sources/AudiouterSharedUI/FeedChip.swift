@@ -18,7 +18,7 @@ import AppKit
 /// as `WarmFaderCell`/`HaloRingView`, so light/dark and Increase Contrast track
 /// for free and `cacheDisplay` output stays deterministic for a fixed input.
 ///
-/// A neutral segment (the main-mix "System"/group-name text, or a failure-red
+/// A neutral segment (the main-mix "Main"/group-name text, or a failure-red
 /// error word) never gets a chip — callers only invoke this for a tinted app
 /// segment, per the "neutral segments + error words untinted/red" house rule.
 enum FeedChip {

@@ -116,6 +116,27 @@ import AudiouterSharedUI
         #expect(view.test_hasDismissButton)
     }
 
+    // MARK: Dismiss button polish (design-critique findings, 2026-08-10)
+
+    @Test func dismissButtonLabelNamesTheDeviceAndTheProblem() {
+        let view = ConnectionDiagnosisView(failure: ConnectionFailure(cause: .vanished), deviceName: "Yard")
+        #expect(view.test_dismissButtonAccessibilityLabel == "Dismiss connection problem for Yard",
+                "mirrors the sibling buttons' own device-named phrasing")
+    }
+
+    @Test func dismissButtonHitAreaIsAtLeastTwentyPointsSquare() {
+        let view = ConnectionDiagnosisView(failure: ConnectionFailure(cause: .vanished), deviceName: "Yard")
+        let size = view.test_dismissButtonHitSize
+        #expect(size.width >= 20, "the hit area must grow even though the 9.5pt glyph doesn't")
+        #expect(size.height >= 20)
+    }
+
+    @Test func dismissButtonTintIsSecondaryNotTertiary() {
+        let view = ConnectionDiagnosisView(failure: ConnectionFailure(cause: .vanished), deviceName: "Yard")
+        #expect(view.test_dismissButtonTintColor == Tokens.Color.secondaryLabel,
+                "tertiaryLabel read as too faint to notice at all")
+    }
+
     // MARK: Appearance adaptivity — the tint is a static CGColor on the layer
 
     @Test func backgroundTintReResolvesOnAppearanceChange() {

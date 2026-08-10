@@ -215,9 +215,17 @@ public final class BTSyncDrawerView: NSView {
         // glyph says best. (The four labelled `[−10] [−1] [+1] [+10]` pills
         // this replaces had to spell their amounts out, and that is what made
         // them too wide to bind to the value.)
+        // Labels use the drawer's own D7 spoken-offset vocabulary
+        // ("22 milliseconds later"/"earlier", `BTSyncTrim.spokenOffset`) rather
+        // than the direction-neutral "Decrease/Increase sync offset" this
+        // replaced — a generic offset label doesn't say which way is which
+        // without sighted context, and `−`/`+` map onto EARLIER/LATER exactly
+        // (minus subtracts from `trimMs`, and a negative trim is `spokenOffset`'s
+        // "earlier"; plus is the mirror). "Play" matches the row/field's own
+        // framing (`DeviceRowView`'s sync tooltip, `BTTrimStore.spokenOffset`).
         let steppers: [(button: NSButton, symbol: String, fallback: String, label: String)] = [
-            (minusButton, "minus", "\u{2212}", "Decrease sync offset"),
-            (plusButton, "plus", "+", "Increase sync offset"),
+            (minusButton, "minus", "\u{2212}", "Play earlier"),
+            (plusButton, "plus", "+", "Play later"),
         ]
         for (button, symbol, fallback, label) in steppers {
             // BEZELED, not borderless (live-found): borderless glyphs on the
@@ -534,6 +542,12 @@ public final class BTSyncDrawerView: NSView {
     public var test_valueFieldAXValue: String { spokenValue }
     public var test_valueFieldEditor: SyncValueFieldEditor { valueFieldEditor }
     public var test_hintText: String { hintLabel.stringValue }
+    /// The steppers' live VoiceOver labels — the drawer's D7 spoken-offset
+    /// vocabulary ("Play earlier"/"Play later"), design-critique finding
+    /// 2026-08-10, replacing the direction-neutral "Decrease/Increase sync
+    /// offset" that gave no clue which button meant which without sight.
+    public var test_minusButtonAccessibilityLabel: String? { minusButton.accessibilityLabel() }
+    public var test_plusButtonAccessibilityLabel: String? { plusButton.accessibilityLabel() }
     /// True once the value field wears the house click-to-type skin.
     /// Whether `−`/`+` auto-repeat while held, and how fast.
     public var test_stepperRepeat: (isContinuous: Bool, delay: Float, interval: Float)? {

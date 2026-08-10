@@ -4,7 +4,7 @@ import AppKit
 import AudiouterCore
 import AudiouterSharedUI
 
-/// The single **"Main Out"** row in the popover's System card — styled after
+/// The single **"Main Out"** row in the popover's Main Audio card — styled after
 /// macOS Control Center's **Sound module** (SPEC §9, T-U9b). Laid out against the
 /// shared popover column grid (task B). Left to right: a leading speaker icon ·
 /// name-less flexible zone · a horizontal `NSSlider` (the master volume, stock
@@ -108,9 +108,10 @@ public final class MainOutRowView: NSView {
     /// corner and the rail leaving it are one stroke, and a truth that covers
     /// only the remote case draws them in two tones.
     private var isSpineLive = false
-    /// The System Audio row's item title — **"Main Audio"** (Warm Signal v4
-    /// §Call-1), filling the shared name column so it aligns
-    /// with the device rows below.
+    /// The Main Audio row's item title — **"Main Audio"** (Warm Signal v4
+    /// §Call-1; unified across card header/row/FEED pill as the app's one name
+    /// for this concept, design-critique P1), filling the shared name column so
+    /// it aligns with the device rows below.
     private let nameLabel = NSTextField(labelWithString: "Main Audio")
     /// The name cluster: **name over meter**, exactly the device-row anatomy
     /// (Warm Signal v4.1 CORRECTIONS, item 1). Left-aligned,
@@ -339,7 +340,7 @@ public final class MainOutRowView: NSView {
             }
         }
         // Match device row icon styling (2026-07-17): neutral gray, not accent.
-        // Consistency across System and Devices sections — all icons are identity
+        // Consistency across Main Audio and Devices sections — all icons are identity
         // only, connection status lives on the icon as a corner badge.
         iconView.contentTintColor = Tokens.Color.secondaryLabel
         iconView.setContentHuggingPriority(.required, for: .horizontal)
@@ -599,7 +600,7 @@ public final class MainOutRowView: NSView {
         readoutLabel.stringValue = "\(sender.integerValue)%"
     }
 
-    // The Main Out row lives INSIDE the System card (T-U8), so it paints no fill
+    // The Main Out row lives INSIDE the Main Audio card (T-U8), so it paints no fill
     // of its own — the card provides the module surface.
 
     // MARK: Accessibility

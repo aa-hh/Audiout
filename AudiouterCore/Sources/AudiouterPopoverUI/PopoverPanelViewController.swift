@@ -22,13 +22,26 @@ import AudiouterSharedUI
 /// vertical `stackView` holds the cards.
 ///
 /// **Exact-fit sizing (T-3, PLAN-POPOVER-ROUTING.md §A/§E risk 1, 2026-07-16):**
-/// there is **no `NSScrollView`** — the stack is pinned directly inside the
-/// container (header bottom → container bottom), so no scroller chrome can ever
-/// appear. The popover is exactly the height of its visible content and
-/// grows/shrinks as sections expand or collapse. The size flows out through
+/// the popover is exactly the height of its visible content and grows/shrinks
+/// as sections expand or collapse. The size flows out through
 /// `preferredContentSize` (the DOCUMENTED `NSPopover` channel — it tracks
 /// `contentViewController.preferredContentSize` and animates on its own when
 /// `popover.animates` is true; see `panelContentDidChangeHeight`).
+///
+/// **Height overflow (2026-08-10, owner-approved — this SUPERSEDES the original
+/// "no `NSScrollView`, ever" rule):** exact fit has no answer for content taller
+/// than the screen, and a realistic fleet (10+ device rows + an open sync drawer
+/// + diagnosis panels) reaches it — the bottom cards simply became unreachable.
+/// The card stack now lives in a **document view inside `contentScrollView`**,
+/// and the ONE thing that changes in overflow is that scroll view's own height:
+/// it hugs its document (`.defaultHigh`) so a fitting content stays byte-identical
+/// to the pre-scroll design, and a REQUIRED `<=` cap — the screen budget the host
+/// pushes in through `setMaxContentHeight(_:)` — takes over only once the content
+/// outgrows the screen. No budget (headless, snapshot tools, any host that never
+/// pushes one) means no cap and therefore never a scroller. Everything the rows
+/// depend on — the clip-height reveals, the collapse machinery, and the rail
+/// overlay — lives INSIDE the document, so it all scrolls together and none of it
+/// had to learn about scrolling.
 @MainActor
 final class PopoverPanelViewController: NSViewController {
 
@@ -116,6 +129,17 @@ final class PopoverPanelViewController: NSViewController {
     /// original layout always had; the surface's chrome inset adds to it).
     private static let contentRestingTopInset: CGFloat = 4
 
+    /// The gap the card stack leaves above the container's bottom edge. Split
+    /// out of the old `stackView.bottom == container.bottom - 12` because the
+    /// scroll view now carries that pin, and the height cap has to subtract the
+    /// same number to convert a WINDOW-content budget into a scroll-view height.
+    private static let contentBottomMargin: CGFloat = 12
+
+    /// The floor the screen budget can never push the scrollable region below —
+    /// a pathologically short screen must still leave a usable band rather than
+    /// collapsing the panel to its chrome. Nothing in the product reaches it.
+    private static let minimumScrollableHeight: CGFloat = 120
+
     /// Popover width — SoundSource-style proportions so the columns
     /// (name · Volume · Device) line up. Narrowed 2026-07-16 (change 5): the
     /// flexible name column was over-wide, so `panelWidth` drops from 690 to 623,
@@ -194,6 +218,32 @@ final class PopoverPanelViewController: NSViewController {
     /// priority tried, and with no pin at all).
     private let contentContainer = NSView()
 
+    /// The scrolling host wrapped around the card stack (height-overflow rule,
+    /// class doc). Its own height is the only quantity overflow changes; the
+    /// document inside it keeps its natural height either way, so every row's
+    /// geometry, every clip animation and the rail are untouched by the cap.
+    private let contentScrollView = NSScrollView()
+
+    /// The scrolled document: the card stack AND the rail overlay together, in
+    /// exactly the z-order and the pinning they had inside `contentContainer`
+    /// before the scroll view existed. The overlay MUST live in here — it draws
+    /// one continuous spine through row frames it converts out of their own
+    /// coordinate space, so a spine left outside the document would keep the
+    /// last painted figure while the rows slid under it (the same displacement
+    /// the 2026-08-06 invalidation bug produced, but permanent).
+    private let scrollDocument = FlippedDocumentView()
+
+    /// `contentScrollView.height <= budget`, REQUIRED — the cap half, active
+    /// only while a host has pushed a screen budget (`setMaxContentHeight`).
+    /// Inactive is the pre-scroll behavior exactly: pure exact fit.
+    private var scrollHeightCap: NSLayoutConstraint?
+
+    /// The tallest window CONTENT height this panel may publish, as measured by
+    /// its host against the anchor screen. `nil` — the default, and what every
+    /// headless/offscreen render sees — means UNCAPPED: no cap constraint, no
+    /// scroller, byte-identical exact fit.
+    private var maxContentHeight: CGFloat?
+
     override func loadView() {
         let container = contentContainer
         stackView.railOverlay = railOverlay
@@ -214,31 +264,66 @@ final class PopoverPanelViewController: NSViewController {
         stackView.spacing = 8
         stackView.edgeInsets = NSEdgeInsets(top: 12, left: 0, bottom: 12, right: 0)
 
-        container.addSubview(stackView)
+        scrollDocument.translatesAutoresizingMaskIntoConstraints = false
+        scrollDocument.addSubview(stackView)
         // The rail overlay is added LAST so it composites ON TOP of the cards +
         // hairline dividers — the continuous spine reads unbroken where it would
-        // otherwise be crossed. Non-interactive (`hitTest` returns nil).
+        // otherwise be crossed. Non-interactive (`hitTest` returns nil). It is a
+        // sibling of the stack INSIDE the scrolled document (see the property's
+        // note), not of the scroll view.
         railOverlay.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(railOverlay)
+        scrollDocument.addSubview(railOverlay)
 
-        // The stack's top pin, kept for the surface's toolbar chrome inset.
-        let contentTop = stackView.topAnchor.constraint(equalTo: container.topAnchor,
-                                                        constant: Self.contentRestingTopInset)
+        configureContentScrollView()
+        contentScrollView.documentView = scrollDocument
+        container.addSubview(contentScrollView)
+
+        // The stack's top pin, kept for the surface's toolbar chrome inset —
+        // now carried by the scroll view, which is what sits where the stack
+        // used to. `setContentTopInset` still moves exactly this constraint,
+        // and it still rides the exact-fit measure.
+        let contentTop = contentScrollView.topAnchor.constraint(
+            equalTo: container.topAnchor, constant: Self.contentRestingTopInset)
         contentTopConstraint = contentTop
 
-        // The stack is pinned DIRECTLY inside the container — no `NSScrollView`, so
-        // no scroller chrome can ever appear (T-3, PLAN-POPOVER-ROUTING.md §A: the
-        // popover is exactly its content height and never scrolls). Pinning all four
-        // edges (header bottom → container bottom) makes the container's height a
-        // pure function of the stack's fitting height.
+        // "Hug the content": an `NSScrollView` has NO intrinsic size, so without
+        // this the whole panel collapses to zero under `fittingSize` (the same
+        // pair `GroupCreationSheetController`'s membership checklist relies on).
+        // Below required so the cap can out-vote it in overflow — and BELOW the
+        // rows' 750 compression resistance, or the broken hug drags the DOCUMENT
+        // down to the budget with it (a 750-vs-750 tie the engine resolved by
+        // compressing the content, so a capped panel clipped instead of
+        // scrolling). 600 keeps it above the ~500 floor `fittingSize` honors.
+        let hug = contentScrollView.heightAnchor.constraint(
+            equalTo: scrollDocument.heightAnchor)
+        hug.priority = NSLayoutConstraint.Priority(600)
+        // Built inactive: no host has pushed a budget yet, and a panel with no
+        // budget must behave exactly as it did before this scroll view existed.
+        let cap = contentScrollView.heightAnchor.constraint(
+            lessThanOrEqualToConstant: Self.minimumScrollableHeight)
+        cap.isActive = false
+        scrollHeightCap = cap
+
+        // The stack is pinned to all four edges of the scrolled DOCUMENT, and the
+        // document's height is the scroll view's (via `hug`) unless the cap takes
+        // over. That keeps the container's height a pure function of the stack's
+        // fitting height in the fitting case — the original exact fit, one view
+        // deeper.
         //
         // EMPTY-POPOVER AUTO-LAYOUT TRAP (preserved from the pre-scroll design,
         // T-U8: MUST NOT regress): the stack MUST be pinned top AND bottom so its
-        // intrinsic content height drives the container. Historically the scroll
+        // intrinsic content height drives its host. Historically the scroll
         // area was under-constrained and Auto Layout collapsed it to ~0, hiding
-        // every card. Here the same guarantee comes from the bottom pin below —
-        // without `stackView.bottomAnchor == container.bottomAnchor` the stack
-        // would be free to collapse to zero height and silently hide all cards.
+        // every card. Here the same guarantee comes from the stack's bottom pin
+        // to `scrollDocument` below — without it the stack would be free to
+        // collapse to zero height and silently hide all cards, and the document
+        // would have no height to give the scroll view either.
+        //
+        // The document is pinned to the scroll view only on the NON-scrolling
+        // axis (`width == scrollView.width`) — the recipe
+        // `GroupCreationSheetController` already proves in this codebase.
+        // Constraining it to the clip view's top/bottom instead would fight the
+        // clip's bounds-origin scrolling.
         NSLayoutConstraint.activate([
             container.widthAnchor.constraint(equalToConstant: panelWidth),
 
@@ -249,13 +334,12 @@ final class PopoverPanelViewController: NSViewController {
             background.leadingAnchor.constraint(equalTo: container.leadingAnchor),
             background.trailingAnchor.constraint(equalTo: container.trailingAnchor),
 
-            // Stack pinned container-top → container-bottom, full width (its
-            // top pin is `contentTop` above, kept for the surface's toolbar
-            // chrome inset). The bottom pin is the anti-collapse guarantee
-            // (see the note above).
+            // The scroll view sits exactly where the stack used to: container-top
+            // (`contentTop`, kept for the surface's toolbar chrome inset) →
+            // container-bottom less `contentBottomMargin`, full width.
             contentTop,
-            stackView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            stackView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            contentScrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            contentScrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
             // The bottom pin, SPLIT (Alec's call, 2026-08-06). It used to be a
             // single required `==`, which made a container taller than its content
             // unsatisfiable — so Auto Layout deformed the content instead, dumping
@@ -264,14 +348,24 @@ final class PopoverPanelViewController: NSViewController {
             // pushed every card below it down (the live report). The re-fit in
             // `insertRow`/`removeRow` stops the mismatch arising, but this makes the
             // failure mode boring rather than broken if one ever does:
-            stackView.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
+            contentScrollView.bottomAnchor.constraint(
+                equalTo: container.bottomAnchor, constant: -Self.contentBottomMargin),
+            hug,
 
-            // The rail overlay spans the whole panel (it reads row frames in its
-            // own coordinate space and draws the spine in the left gutter).
-            railOverlay.topAnchor.constraint(equalTo: container.topAnchor),
-            railOverlay.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            railOverlay.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            railOverlay.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            scrollDocument.widthAnchor.constraint(equalTo: contentScrollView.widthAnchor),
+
+            stackView.topAnchor.constraint(equalTo: scrollDocument.topAnchor),
+            stackView.leadingAnchor.constraint(equalTo: scrollDocument.leadingAnchor),
+            stackView.trailingAnchor.constraint(equalTo: scrollDocument.trailingAnchor),
+            stackView.bottomAnchor.constraint(equalTo: scrollDocument.bottomAnchor),
+
+            // The rail overlay spans the whole DOCUMENT (it reads row frames in
+            // its own coordinate space and draws the spine in the left gutter),
+            // so the spine travels with the rows it runs through.
+            railOverlay.topAnchor.constraint(equalTo: scrollDocument.topAnchor),
+            railOverlay.leadingAnchor.constraint(equalTo: scrollDocument.leadingAnchor),
+            railOverlay.trailingAnchor.constraint(equalTo: scrollDocument.trailingAnchor),
+            railOverlay.bottomAnchor.constraint(equalTo: scrollDocument.bottomAnchor),
         ])
         // SURPLUS SHIELD (Alec's resilience call, 2026-08-06). The content keeps
         // its original, fully-REQUIRED constraint chain — that rigidity is what
@@ -302,6 +396,105 @@ final class PopoverPanelViewController: NSViewController {
         view = wrapper
     }
 
+    // MARK: Height overflow (2026-08-10, owner-approved)
+
+    /// Configure the scroll view so that, while the content FITS, it is
+    /// invisible in every sense that matters: no background of its own (the warm
+    /// canvas behind it is the one surface fill), no bezel, no content-inset
+    /// adjustment, no scroller and no elasticity — a trackpad flick on a fitting
+    /// panel must not shift a pixel. `applyOverflowState()` turns the last two on
+    /// only while the content actually overflows. The scroller style is pinned to
+    /// `.overlay` so it can never claim layout WIDTH: the panel's 623pt column is
+    /// a fixed grid and a legacy scroller gutter would reflow every row.
+    private func configureContentScrollView() {
+        contentScrollView.translatesAutoresizingMaskIntoConstraints = false
+        contentScrollView.drawsBackground = false
+        contentScrollView.contentView.drawsBackground = false
+        contentScrollView.borderType = .noBorder
+        contentScrollView.automaticallyAdjustsContentInsets = false
+        contentScrollView.scrollerStyle = .overlay
+        contentScrollView.autohidesScrollers = true
+        contentScrollView.hasHorizontalScroller = false
+        contentScrollView.horizontalScrollElasticity = .none
+        contentScrollView.hasVerticalScroller = false
+        contentScrollView.verticalScrollElasticity = .none
+    }
+
+    /// The tallest window CONTENT height this panel may publish, as measured by
+    /// its host against the anchor screen — or `nil` for UNCAPPED.
+    ///
+    /// The host owns this because the host is the only thing that knows which
+    /// screen the surface is anchored to and how much of the window is chrome
+    /// (`AppSurfaceController.mixerContentHeightBudget`). Nothing pushes one
+    /// headlessly, so `swift test` and the offscreen snapshot tools render the
+    /// full natural height and never scroll.
+    func setMaxContentHeight(_ height: CGFloat?) {
+        _ = view   // ensure `loadView` ran so the cap constraint exists
+        guard maxContentHeight != height else { return }
+        maxContentHeight = height
+        updateContentHeightCap()
+    }
+
+    /// Re-derive the scroll view's REQUIRED height cap from the current budget.
+    /// The budget is a window-CONTENT height; the scrollable region is what is
+    /// left after the container's own top inset (which the surface's toolbar
+    /// chrome inflates) and its bottom margin — so this has to re-run whenever
+    /// EITHER the budget or `setContentTopInset` changes.
+    private func updateContentHeightCap() {
+        guard let cap = scrollHeightCap else { return }
+        guard let budget = maxContentHeight else {
+            cap.isActive = false
+            applyOverflowState()
+            return
+        }
+        let chrome = (contentTopConstraint?.constant ?? Self.contentRestingTopInset)
+            + Self.contentBottomMargin
+        cap.constant = max(Self.minimumScrollableHeight, budget - chrome)
+        cap.isActive = true
+        applyOverflowState()
+    }
+
+    /// Whether the card stack is currently taller than the capped region can
+    /// show — the single predicate the scroller, the elasticity and the
+    /// scroll-into-view of an inserted row all read. Always `false` uncapped.
+    var isContentOverflowing: Bool {
+        guard maxContentHeight != nil, let cap = scrollHeightCap, cap.isActive else { return false }
+        return scrollDocument.fittingSize.height > cap.constant + 0.5
+    }
+
+    /// Turn the scroller and vertical elasticity on exactly while the content
+    /// overflows. Called from `publishContentSize` — the one funnel every size
+    /// change already goes through — so the affordance can never lag the content
+    /// that produced it.
+    private func applyOverflowState() {
+        let overflowing = isContentOverflowing
+        contentScrollView.hasVerticalScroller = overflowing
+        contentScrollView.verticalScrollElasticity = overflowing ? .allowed : .none
+    }
+
+    /// Put the scrolled content back at the top. Every OPEN of the Mixer starts
+    /// there (`AppSurfaceController.mount`, right after the open ritual) — a
+    /// reopen that resumed someone's old scroll offset would show a fleet from
+    /// the middle with no explanation. The document is flipped, so `.zero` IS
+    /// the top.
+    func scrollContentToTop() {
+        _ = view   // ensure `loadView` ran
+        let clip = contentScrollView.contentView
+        clip.scroll(to: .zero)
+        contentScrollView.reflectScrolledClipView(clip)
+    }
+
+    /// Bring a just-inserted row into the visible band when the panel is capped.
+    /// A sync drawer or diagnosis panel that unfolds BELOW the fold is worse
+    /// than no cap at all — the user clicked a control and nothing appeared to
+    /// happen. No-op while the content fits (there is nothing to scroll) and
+    /// while the row has already left the tree.
+    private func revealInScrollableArea(_ target: NSView) {
+        guard isContentOverflowing, target.superview != nil else { return }
+        scrollDocument.layoutSubtreeIfNeeded()
+        _ = target.scrollToVisible(target.bounds)
+    }
+
     /// Point the continuous rail overlay at the current Main Audio row + device
     /// rows (top-to-bottom display order) AND the two collapsible cards the rail
     /// spans (the origin card holding Main Audio, the device card holding the
@@ -326,6 +519,12 @@ final class PopoverPanelViewController: NSViewController {
     /// `fittingSize`. Callers push this into `preferredContentSize` so the popover
     /// resizes to exactly the visible content (PLAN-POPOVER-ROUTING.md §E risk 1 —
     /// "layout settled synchronously before animating").
+    ///
+    /// The CAP is already folded in, and deliberately so: the scroll view's
+    /// REQUIRED `<=` out-votes its `.defaultHigh` hug, so this returns
+    /// `min(natural, budget)` without any caller having to know a budget exists.
+    /// The DOCUMENT still measures its full natural height — which is why
+    /// `insertRow`'s `clip.frame.height` reveal target stays correct in overflow.
     func fittingSizeSettled() -> NSSize {
         _ = view   // ensure `loadView` ran
         view.layoutSubtreeIfNeeded()
@@ -366,6 +565,9 @@ final class PopoverPanelViewController: NSViewController {
     /// popover to stay put.
     private func publishContentSize(_ target: NSSize, animated: Bool) {
         let wantsAnimation = animated && !reduceMotion
+        // The scroller follows the size that is being published, in the same
+        // turn — this is the one funnel every size change reaches.
+        applyOverflowState()
         // Assigning `preferredContentSize` is the sole size channel; the
         // controller decides how the current host animates the change.
         if let controller {
@@ -459,11 +661,16 @@ final class PopoverPanelViewController: NSViewController {
         // title on the left, column headers centered over their columns on the
         // right. Height ~28pt (change 1 — one row instead of title + header).
         // The section title DISPLAYS uppercased (Warm Signal §5.1 silkscreen
-        // vocabulary / v4 §Call-1 "SYSTEM AUDIO"); the `header` argument stays the
+        // vocabulary / v4 §Call-1 "MAIN AUDIO"); the `header` argument stays the
         // title-case lookup/collapse KEY.
         let label = NSTextField(labelWithString: header.uppercased())
         label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = .systemFont(ofSize: 14, weight: .medium)
+        // The nearest existing token for "emphasized heading at the standard
+        // size" — the hand-rolled 14pt/medium it replaces was the last
+        // hardcoded font in this file. NOTE the small delta: `bodyEmphasized`
+        // is 13pt semibold, so the section title reads one point smaller and a
+        // shade heavier than before.
+        label.font = Tokens.Font.bodyEmphasized
         label.textColor = Tokens.Color.label
         let headerWrap = NSView()
         headerWrap.translatesAutoresizingMaskIntoConstraints = false
@@ -940,6 +1147,7 @@ final class PopoverPanelViewController: NSViewController {
         // instantly.
         guard animated && !reduceMotion else {
             publishContentSize(target, animated: false)
+            revealInScrollableArea(clip)
             return
         }
 
@@ -967,13 +1175,16 @@ final class PopoverPanelViewController: NSViewController {
             // shows inert canvas, where a surface shorter than its content is
             // the unsatisfiable case that deforms it.
             self.publishContentSize(target, animated: true)
-        }, completionHandler: {
+        }, completionHandler: { [weak self] in
             // Let the row flex with its own content again once it has arrived
             // (a mounted drawer/panel can re-lay itself out while open) —
             // unless a close has since begun on this clip: deactivating the
             // very constraint the close is animating would pop the row back
             // open mid-collapse.
             if !clip.isClosing { clip.heightConstraint.isActive = false }
+            // Only once the row has its real height is there anything to bring
+            // into view; while the panel is uncapped this is a no-op.
+            self?.revealInScrollableArea(clip)
         })
     }
 
@@ -1180,7 +1391,9 @@ final class PopoverPanelViewController: NSViewController {
         guard let card = currentCard else { return }
         let label = NSTextField(labelWithString: text)
         label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = .systemFont(ofSize: 11)
+        // `Tokens.Font.caption` IS `systemFont(ofSize: NSFont.smallSystemFontSize)`
+        // = the 11pt this line hardcoded — a rename, not a restyle.
+        label.font = Tokens.Font.caption
         label.textColor = Tokens.Color.tertiaryLabel
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1
@@ -1289,10 +1502,12 @@ final class PopoverPanelViewController: NSViewController {
 
     /// Seat the card stack below the surface window's toolbar strip. The
     /// caller republishes the exact-fit size afterward; this only moves the
-    /// pin.
+    /// pin — and re-derives the height cap, which is expressed against the
+    /// SCROLLABLE region and so shrinks by whatever this inset takes.
     func setContentTopInset(_ inset: CGFloat) {
         _ = view // ensure loadView ran so the constraint exists
         contentTopConstraint?.constant = Self.contentRestingTopInset + inset
+        updateContentHeightCap()
     }
 
     /// The content's current extra top inset, for structural tests.
@@ -1396,6 +1611,45 @@ final class PopoverPanelViewController: NSViewController {
     func test_cardRows(title: String) -> [NSView] {
         cardsByHeader[title]?.test_bodyRows ?? []
     }
+
+    // MARK: Height-overflow test hooks
+
+    /// The budget a host has pushed (`nil` = uncapped, the headless default).
+    var test_maxContentHeight: CGFloat? { maxContentHeight }
+    /// Whether the vertical scroller is currently mounted — the "conditionally
+    /// active" half of the rule. `false` whenever the content fits.
+    var test_hasVerticalScroller: Bool { contentScrollView.hasVerticalScroller }
+    /// The card stack's NATURAL height, ignoring any cap — what the panel would
+    /// have published before this rule existed.
+    var test_documentNaturalHeight: CGFloat {
+        view.layoutSubtreeIfNeeded()
+        return scrollDocument.fittingSize.height
+    }
+    /// The clip's current scroll offset (0 = top; the document is flipped).
+    var test_scrollOffsetY: CGFloat { contentScrollView.contentView.bounds.origin.y }
+    /// Drive a scroll exactly as a trackpad would, so a test can prove the reset
+    /// actually moves something. Interactive scrolling runs through
+    /// `NSClipView.constrainBoundsRect` — a bare programmatic `scroll(to:)` does
+    /// NOT, so this hook constrains explicitly or a fitting panel would happily
+    /// hold an out-of-range offset no flick could ever produce.
+    func test_scrollContent(toY y: CGFloat) {
+        let clip = contentScrollView.contentView
+        view.layoutSubtreeIfNeeded()
+        var target = clip.bounds
+        target.origin.y = y
+        clip.scroll(to: clip.constrainBoundsRect(target).origin)
+        contentScrollView.reflectScrolledClipView(clip)
+    }
+}
+
+/// The scroll view's document view. Flipped so a document SHORTER than its clip
+/// (every transient moment during a resize) hangs from the TOP rather than the
+/// bottom, and so "scrolled to the top" is simply `bounds.origin == .zero`.
+/// Flipping the document does NOT flip the card stack or the rail overlay — both
+/// keep their own coordinate systems, and every rail measurement already goes
+/// through `convert(_:from:)`, which is flip-aware.
+private final class FlippedDocumentView: NSView {
+    override var isFlipped: Bool { true }
 }
 
 /// The card stack (Warm Signal v4 §Call-1), which also repaints the continuous

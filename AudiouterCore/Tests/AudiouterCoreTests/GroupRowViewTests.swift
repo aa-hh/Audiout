@@ -98,6 +98,30 @@ import AppKit
                        "a hovered group row must share DeviceRowView/AppRowView's hover wash alpha, not its own one-off value")
     }
 
+    // MARK: Mute button accessibility (design-critique finding, 2026-08-10) —
+    // an image-only push-on-push-off button whose label must both name the
+    // group AND change with the toggle, mirroring `DeviceRowView.muteButton`.
+
+    @Test func muteButtonLabelNamesTheGroupWhenUnmuted() {
+        let group = Group(id: "group-1", name: "Whole House", memberIDs: ["office"], memberVolumes: ["office": 40])
+        let row = GroupRowView(group: group, isActive: false, isExpanded: false, masterVolume: 50, isMuted: false)
+        #expect(row.test_muteButtonAccessibilityLabel == "Mute Whole House")
+    }
+
+    @Test func muteButtonLabelIsStateAwareWhenMuted() {
+        let group = Group(id: "group-1", name: "Whole House", memberIDs: ["office"], memberVolumes: ["office": 40])
+        let row = GroupRowView(group: group, isActive: false, isExpanded: false, masterVolume: 50, isMuted: true)
+        #expect(row.test_muteButtonAccessibilityLabel == "Unmute Whole House")
+    }
+
+    @Test func muteButtonLabelTracksReappliedMuteState() {
+        let group = Group(id: "group-1", name: "Kitchen", memberIDs: ["office"], memberVolumes: ["office": 40])
+        let row = GroupRowView(group: group, isActive: false, isExpanded: false, masterVolume: 50, isMuted: false)
+        #expect(row.test_muteButtonAccessibilityLabel == "Mute Kitchen")
+        row.apply(group: group, isActive: false, isExpanded: false, masterVolume: 50, isMuted: true)
+        #expect(row.test_muteButtonAccessibilityLabel == "Unmute Kitchen")
+    }
+
     /// A minimal synthetic left-mouse-down event — `GroupRowView.mouseDown`
     /// never reads any field off it, so an otherwise-empty event (same
     /// factory `AppRowView`'s own tests use) is enough to drive the real

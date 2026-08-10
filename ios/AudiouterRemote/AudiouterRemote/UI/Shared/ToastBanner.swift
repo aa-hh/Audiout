@@ -7,6 +7,10 @@ import SwiftUI
 struct ToastBanner: View {
     let event: ToastEvent
 
+    /// The banner's rise is its only motion; with Reduce Motion on it fades in
+    /// where it lands instead.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         Text(event.message)
             .font(.subheadline)
@@ -16,7 +20,9 @@ struct ToastBanner: View {
             .background(.regularMaterial, in: Capsule())
             .shadow(radius: 4)
             .padding(.bottom, 24)
-            .transition(.move(edge: .bottom).combined(with: .opacity))
+            .transition(reduceMotion
+                        ? .opacity
+                        : .move(edge: .bottom).combined(with: .opacity))
     }
 }
 

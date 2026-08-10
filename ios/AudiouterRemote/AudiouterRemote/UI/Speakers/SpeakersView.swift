@@ -147,6 +147,11 @@ private struct SpeakerConsole: View {
     /// between the two grounds — 0.4 black over paper is a smudge, not height.
     @Environment(\.colorScheme) private var colorScheme
 
+    /// The drawer is the one thing on this screen that travels. With Reduce
+    /// Motion on it crossfades in place instead — same state change, no slide,
+    /// no spring overshoot.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     /// The room the list leaves at the bottom for the deck it scrolls under.
     private static let deckHeight: CGFloat = 116
 
@@ -194,16 +199,24 @@ private struct SpeakerConsole: View {
             .padding(.bottom, Self.deckHeight + 16)
         }
         .scrollIndicators(.hidden)
+        // The scrim takes every touch that lands on the list, so VoiceOver must
+        // not keep offering the rows underneath it — a double tap there would
+        // arm a speaker no finger can reach. The deck stays live either way:
+        // it draws OVER the scrim and is not dimmed by it.
+        .accessibilityHidden(drawerOpen)
         .overlay { if drawerOpen { scrim } }
         .overlay(alignment: .bottom) { deck }
         .overlay(alignment: .bottom) {
             if drawerOpen {
                 drawer
                     .padding(.bottom, Self.deckHeight)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .transition(reduceMotion
+                                ? .opacity
+                                : .move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .animation(.spring(duration: 0.25), value: drawerOpen)
+        .animation(reduceMotion ? .easeInOut(duration: 0.2) : .spring(duration: 0.25),
+                   value: drawerOpen)
     }
 
     // MARK: Sections
@@ -258,7 +271,11 @@ private struct SpeakerConsole: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
-        .accessibilityHint(collapsed.contains(section.id) ? "Double tap to expand" : "Double tap to collapse")
+        // State, not instructions: the button trait already tells VoiceOver a
+        // double tap does something, so a hint saying so is read on every
+        // header for nothing. What it CAN'T infer is which way this one is
+        // pointing — the chevron is the only cue, and it is decorative.
+        .accessibilityValue(collapsed.contains(section.id) ? "Collapsed" : "Expanded")
     }
 
     // MARK: Main Out deck

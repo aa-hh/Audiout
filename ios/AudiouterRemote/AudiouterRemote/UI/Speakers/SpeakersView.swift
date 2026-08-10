@@ -47,9 +47,10 @@ struct SpeakersView: View {
     private var header: some View {
         HStack(alignment: .bottom, spacing: 10) {
             VStack(alignment: .leading, spacing: 5) {
-                Text("CONNECTED TO")
+                Text(eyebrowText)
                     .microLabel()
                     .foregroundStyle(WarmSignal.label2)
+                    .lineLimit(1)
                 Text("Speakers")
                     .font(.system(size: titleSize, weight: .bold))
                     .tracking(-0.7)
@@ -86,13 +87,17 @@ struct SpeakersView: View {
 
     private var isLive: Bool { session.connectionStatus == .live }
 
-    /// The Mac's name once there is one, and the connection's own words
-    /// whenever there isn't. Demo rides on the same pill rather than a second
-    /// badge.
+    /// Whose speakers these are — the one thing the title can't say. With no
+    /// Mac there is no name to give, so it says what the connection is doing.
+    private var eyebrowText: String {
+        guard isLive, let name = session.snapshot?.serverName, !name.isEmpty else { return statusText }
+        return "Connected to \(name)"
+    }
+
+    /// The connection's own words, and Demo when this is the demo Mac. Naming
+    /// the Mac is the eyebrow's job, so the pill never repeats it.
     private var pillText: String {
-        guard isLive else { return statusText }
-        let name = session.snapshot?.serverName ?? "No Mac"
-        return session.isDemo ? name + " · Demo" : name
+        session.isDemo ? statusText + " · Demo" : statusText
     }
 
     private var statusText: String {
@@ -109,7 +114,7 @@ struct SpeakersView: View {
 // MARK: - The console
 
 /// One section of the speaker list. `devices` is what renders; `placeholder`
-/// is the honest empty state for the two sections that are structurally always
+/// is the honest empty state for the one section that is structurally always
 /// empty, and is never anything a user could mistake for a real speaker.
 private struct SpeakerSectionSpec: Identifiable {
     let id: String
@@ -147,17 +152,18 @@ private struct SpeakerConsole: View {
 
     // MARK: Derived
 
-    private var armedDevices: [DeviceState] { snapshot.devices.filter { $0.isSelected && $0.isAvailable } }
-    private var armedCount: Int { armedDevices.count }
+    private var playingDevices: [DeviceState] { snapshot.devices.filter { $0.isSelected && $0.isAvailable } }
+    private var playingCount: Int { playingDevices.count }
     private var master: Int { snapshot.mainOutMasterVolume }
 
-    /// doc:2000-2006. Exactly five, always all five, in this order.
+    /// doc:2000-2006 minus PINNED: nothing in the protocol carries a pin, so
+    /// that section could only ever draw its own "no pinned speakers" — an
+    /// empty heading first on the screen, above the speakers themselves. The
+    /// remaining four, always all four, in this order.
     private var sections: [SpeakerSectionSpec] {
         [
-            SpeakerSectionSpec(id: "pinned", title: "PINNED", tint: WarmSignal.goldText,
-                               devices: [], placeholder: "NO PINNED SPEAKERS"),
-            SpeakerSectionSpec(id: "live", title: "ARMED / LIVE", tint: WarmSignal.goldText,
-                               devices: armedDevices, placeholder: nil),
+            SpeakerSectionSpec(id: "live", title: "PLAYING", tint: WarmSignal.goldText,
+                               devices: playingDevices, placeholder: nil),
             SpeakerSectionSpec(id: "airplay", title: "AIRPLAY", tint: WarmSignal.label2,
                                devices: snapshot.devices.filter { !$0.isSelected && $0.isAvailable },
                                placeholder: nil),
@@ -294,7 +300,7 @@ private struct SpeakerConsole: View {
             MainOutPicker(snapshot: snapshot, session: session)
                 .fixedSize()
 
-            Text("\(armedCount) ARMED")
+            Text("\(playingCount) PLAYING")
                 .microLabel()
                 .foregroundStyle(WarmSignal.label2)
                 .fixedSize()
@@ -333,7 +339,7 @@ private struct SpeakerConsole: View {
                 .padding(.bottom, 14)
 
             HStack(spacing: 8) {
-                Text("ACTIVE DEVICES")
+                Text("PLAYING")
                     .microLabel()
                     .foregroundStyle(WarmSignal.goldText)
                 Spacer(minLength: 8)
@@ -346,9 +352,9 @@ private struct SpeakerConsole: View {
 
             VStack(spacing: 4) {
                 // The design's own drawer list is its pinned device plus the
-                // armed ones (doc:2007); PINNED is always empty here, so that
-                // reduces to the armed ones.
-                ForEach(armedDevices, id: \.id) { device in
+                // playing ones (doc:2007); there is no PINNED section here, so
+                // that reduces to the playing ones.
+                ForEach(playingDevices, id: \.id) { device in
                     MainOutDrawerRow(device: device, session: session)
                 }
             }

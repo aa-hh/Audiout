@@ -30,7 +30,7 @@ output. You want a single app that:
 | Remote control | **Mac only** (no phone app) | No companion app / network server needed. Simpler. |
 | Device types | **AirPlay only** | No Bluetooth/Sonos-native/wired in v1. (Sonos speakers are used *via their AirPlay 2 support*, not the Sonos API.) |
 | Distribution | **Direct download; OPEN SOURCE (decided 2026-07-13)** | ahh may redistribute → project licensed GPL-2.0-or-later (required by the vendored AirPlay-2 sender cluster from OwnTone, which is GPL; libairptp/pair_ap are MIT, evrtsp BSD — kept separately marked). No App Store. |
-| Extra controls | Per-device **mute/solo**, **master volume**, **EQ/balance** | Mixer-style UI. |
+| Extra controls | Per-device **mute**, **master volume**, **EQ/balance** | Mixer-style UI. |
 | Power features | **Per-app routing**, **auto-reconnect** | Route Spotify→kitchen while Zoom stays local; re-activate groups when devices reappear. |
 
 ---
@@ -41,7 +41,7 @@ output. You want a single app that:
 - Discover AirPlay / AirPlay 2 receivers on the network (Bonjour).
 - Select multiple devices; stream **all system audio** to them.
 - **Synchronized** playback across selected devices.
-- Per-device **volume** + **mute/solo**; **master** volume.
+- Per-device **volume** + **mute**; **master** volume.
 - Menu-bar panel with the device list + sliders.
 - Save/activate **named groups** with remembered volumes.
 
@@ -506,7 +506,8 @@ trailing control, a device-selector dropdown as THE routing control.
 
 **Rules:**
 - **Mute stays secondary** on device rows (session-preserving quick silence).
-  Solo remains removed.
+  Solo remains removed (owner decision 2026-08-10: rejected for good — isolating
+  a speaker is deselection, not a transport mode; roadmap 049).
 - **Master math is a gain chain** (REVISED — supersedes the proportional master):
   `Main × Group × Device`, each stage its own stored 0–100 value. There are no
   ratio snapshots and no drag protocol: moving a master moves nothing but itself,
@@ -584,7 +585,7 @@ each group, each individual speaker, and **"This Mac (don't stream)"**. A final
 | Name click | `NSClickGestureRecognizer` on the name label | Clicking the device NAME toggles the ENABLED switch (same delegate path as the switch); a no-op when the switch is disabled (local-mix block / unavailable). The switch stays the authoritative accessibility control. For a `.failed` device this re-enables it (= retry). |
 | Enable toggle | `NSButton`, .switch button type | **REVISED 2026-07-18:** checkbox (NSButton, .switch button type, empty title) shipped as the SELECTED column control and is the canonical implementation; replaces the earlier NSSwitch design. HIG-sanctioned checkbox in grouped form settings. Never in toolbar/status areas (HIG). |
 | Volume | `NSSlider(value:minValue:maxValue:target:action:)`, horizontal | `isContinuous = true` for live drag feedback (HIG sliders: live feedback required). Min at leading edge, speaker icons at ends per HIG. (HIG's "don't use a slider for volume" is iOS-only — macOS's own Sound menu is a slider.) |
-| Mute / Solo | `NSButton`, `bezelStyle = .accessoryBar`, `setButtonType(.pushOnPushOff)` | `.accessoryBar` is documented for on/off-style buttons; NOT `NSSwitch` (HIG: switches only for emphasized settings, don't replace checkbox-like toggles). SF Symbols `speaker.slash.fill` / `headphones`. |
+| Mute | `NSButton`, `bezelStyle = .accessoryBar`, `setButtonType(.pushOnPushOff)` | `.accessoryBar` is documented for on/off-style buttons; NOT `NSSwitch` (HIG: switches only for emphasized settings, don't replace checkbox-like toggles). SF Symbol `speaker.slash.fill`. |
 | Level meter | `NSLevelIndicator`, `.discreteCapacity` | Docs describe this style as "similar to audio level indicators in audio playback applications" — with `warningValue`/`criticalValue` for free green/yellow/red. Display-only. |
 | Status sublabel (2026-07-16; failed-only 2026-07-17) | Second `NSTextField` under the device name, `systemFont(ofSize: 10)` | Shown ONLY for `.failed`: "Couldn't connect" in `.systemOrange`. `.failed` is the only two-line row (name raised a half-line so the pair centers); every other state (`.off`/`.connecting`/`.reconnecting`/`.connected`) is single-line with the name centered — the on-icon dot carries their status. Retired 2026-07-17: the right-side status slot + the `ArcSpinnerView` arc spinner (both replaced by the on-icon corner dot above). |
 | Diagnosis panel (2026-07-16) | Custom `NSView` (`ConnectionDiagnosisView`) inserted as its own stack-view row directly under the failed device's row, `NSColor.systemOrange.withAlphaComponent(0.12)` rounded background | Headline + wrapping suggestion body + "Try again"/"Copy details" (`NSButton`, `bezelStyle = .rounded`, `.small`). Inserted/removed with the same animated approach as group expansion. Auto-expands once per failure episode and auto-collapses when the device leaves `.failed`; purely auto-driven off the connection-state transitions since the manual warning-button toggle was retired 2026-07-17. |
@@ -608,7 +609,7 @@ each group, each individual speaker, and **"This Mac (don't stream)"**. A final
   menu proves genuinely too constrained).
 - `NSVisualEffectView` legacy materials (`.light`, `.dark`, …) — semantic
   materials only, and `NSMenu`/sidebar supply their own automatically.
-- Switches for mute/solo, switches in toolbars (HIG toggles).
+- Switches for mute, switches in toolbars (HIG toggles).
 - Cell-based `NSTableView` (view-based only).
 
 ### Connection status & diagnostics (2026-07-16)

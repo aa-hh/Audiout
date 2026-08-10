@@ -775,10 +775,15 @@ public enum Tokens {
         public static var captionBold: NSFont {
             .boldSystemFont(ofSize: NSFont.smallSystemFontSize)
         }
-        /// The stock menu-item font, used where inline attributed text must
-        /// match a real `NSMenuItem`'s rendering (`AppRowView`). Alias of
-        /// `NSFont.menuFont(ofSize: 0)`.
-        public static var menuItem: NSFont { .menuFont(ofSize: 0) }
+        /// The ROW-IDENTITY register: every row's name text (device rows, the
+        /// Main Audio row, app rows, placeholder rows) plus the attributed
+        /// name strings composed around them. Alias of `NSFont.menuFont(ofSize:
+        /// 0)`: rows can be menu-hosted (`DeviceRowView.isInMenu`), and one
+        /// metric keeps an in-menu row and its in-panel twin identical.
+        /// Renamed from `menuItem` (typeset pass 2026-08-10): naming the token
+        /// for one host instead of the role invited one-off drift back to
+        /// `body` (`MainOutRowView` had already drifted).
+        public static var rowName: NSFont { .menuFont(ofSize: 0) }
         /// The **micro-label voice** (Warm Signal v3 §2): SF Mono, ~8.5–11 pt,
         /// weight 700, UPPERCASE, tracked +0.09–0.11 em — the small-caps state
         /// vocabulary (`LIVE`/`MUTED`/`IDLE`) and section captions. 8.5 pt is
@@ -803,6 +808,26 @@ public enum Tokens {
         /// enough for the editable number to read as the focal control.
         public static var syncReadout: NSFont {
             .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize + 1, weight: .medium)
+        }
+
+        /// The volume "%" readouts (Main Audio, device and app rows): ``caption``'s
+        /// size with MONOSPACED DIGITS, so a live scrub re-rendering "41%" → "42%"
+        /// keeps every digit column in place (proportional digit widths differ, and
+        /// right-alignment only pins the trailing edge — the leading edge hopped).
+        /// The sync chip and ``syncReadout`` already made this call; this token
+        /// closes the one numeric family that skipped it (typeset pass 2026-08-10).
+        public static var percentReadout: NSFont {
+            .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
+        }
+
+        /// Tracking for text the UI DISPLAYS uppercased (card titles, column
+        /// titles, menu section headers). Bare `.uppercased()` sets capitals on
+        /// lowercase spacing metrics and reads cramped at 11–13 pt; +0.05 em opens
+        /// it the same way ``microLabelKern`` (+0.09 em) already does for the
+        /// 8.5 pt silkscreen tokens — smaller here because larger caps need
+        /// proportionally less air. Returns POINTS for `NSAttributedString.Key.kern`.
+        public static func uppercaseKern(for font: NSFont) -> CGFloat {
+            font.pointSize * 0.05
         }
     }
 

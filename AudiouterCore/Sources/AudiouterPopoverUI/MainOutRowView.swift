@@ -385,7 +385,7 @@ public final class MainOutRowView: NSView {
         muteButton.setContentHuggingPriority(.required, for: .horizontal)
 
         readoutLabel.translatesAutoresizingMaskIntoConstraints = false
-        readoutLabel.font = Tokens.Font.caption
+        readoutLabel.font = Tokens.Font.percentReadout
         readoutLabel.textColor = Tokens.Color.secondaryLabel
         readoutLabel.alignment = .right
         readoutLabel.setContentHuggingPriority(.required, for: .horizontal)
@@ -405,7 +405,7 @@ public final class MainOutRowView: NSView {
         destinationPopUp.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
-        nameLabel.font = Tokens.Font.body
+        nameLabel.font = Tokens.Font.rowName
         nameLabel.textColor = Tokens.Color.label
         nameLabel.lineBreakMode = .byTruncatingTail
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)

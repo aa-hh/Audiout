@@ -669,9 +669,18 @@ final class PopoverPanelViewController: NSViewController {
         // size" — the hand-rolled 14pt/medium it replaces was the last
         // hardcoded font in this file. NOTE the small delta: `bodyEmphasized`
         // is 13pt semibold, so the section title reads one point smaller and a
-        // shade heavier than before.
+        // shade heavier than before. Displayed-uppercase text carries the
+        // shared `uppercaseKern` (bare `.uppercased()` sets caps on lowercase
+        // spacing metrics and reads cramped).
         label.font = Tokens.Font.bodyEmphasized
         label.textColor = Tokens.Color.label
+        label.attributedStringValue = NSAttributedString(
+            string: header.uppercased(),
+            attributes: [
+                .font: Tokens.Font.bodyEmphasized,
+                .kern: Tokens.Font.uppercaseKern(for: Tokens.Font.bodyEmphasized),
+                .foregroundColor: Tokens.Color.label,
+            ])
         let headerWrap = NSView()
         headerWrap.translatesAutoresizingMaskIntoConstraints = false
         headerWrap.autoresizingMask = [.width]
@@ -1255,6 +1264,19 @@ final class PopoverPanelViewController: NSViewController {
         label.font = Tokens.Font.captionMedium
         label.textColor = Tokens.Color.secondaryLabel
         label.alignment = .center
+        // Displayed-uppercase text carries the shared `uppercaseKern`; the
+        // paragraph style re-states the centering because an attributed value
+        // renders with ITS alignment, not the field's.
+        let centered = NSMutableParagraphStyle()
+        centered.alignment = .center
+        label.attributedStringValue = NSAttributedString(
+            string: text.uppercased(),
+            attributes: [
+                .font: Tokens.Font.captionMedium,
+                .kern: Tokens.Font.uppercaseKern(for: Tokens.Font.captionMedium),
+                .foregroundColor: Tokens.Color.secondaryLabel,
+                .paragraphStyle: centered,
+            ])
         return label
     }
 

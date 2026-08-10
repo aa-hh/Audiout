@@ -320,7 +320,7 @@ public final class AppRowView: NSView {
         // TEXT color logic below at all — the chip is a separate, additive
         // glyph, never a substitute for it.
         let chipPrefix: NSAttributedString? = configuration.tetherColor.map {
-            FeedChip.attachmentString(color: $0, font: Tokens.Font.menuItem)
+            FeedChip.attachmentString(color: $0, font: Tokens.Font.rowName)
         }
         if showsIdleSuffix {
             let truncatingTail = NSMutableParagraphStyle()
@@ -330,14 +330,14 @@ public final class AppRowView: NSView {
             composed.append(NSAttributedString(
                 string: configuration.name,
                 attributes: [
-                    .font: Tokens.Font.menuItem,
+                    .font: Tokens.Font.rowName,
                     .foregroundColor: Tokens.Color.secondaryLabel,
                     .paragraphStyle: truncatingTail,
                 ]))
             composed.append(NSAttributedString(
                 string: " (idle)",
                 attributes: [
-                    .font: Tokens.Font.menuItem,
+                    .font: Tokens.Font.rowName,
                     .foregroundColor: Tokens.Color.tertiaryLabel,
                     .paragraphStyle: truncatingTail,
                 ]))
@@ -347,13 +347,13 @@ public final class AppRowView: NSView {
             composed.append(NSAttributedString(
                 string: configuration.name,
                 attributes: [
-                    .font: Tokens.Font.menuItem,
+                    .font: Tokens.Font.rowName,
                     .foregroundColor: (isRouted && isRunning) ? Tokens.Color.label : Tokens.Color.secondaryLabel,
                 ]))
             nameLabel.attributedStringValue = composed
         } else {
             nameLabel.stringValue = configuration.name
-            nameLabel.font = Tokens.Font.menuItem
+            nameLabel.font = Tokens.Font.rowName
             nameLabel.textColor = (isRouted && isRunning)
                 ? Tokens.Color.label : Tokens.Color.secondaryLabel
         }
@@ -443,6 +443,7 @@ public final class AppRowView: NSView {
                 string: title.uppercased(),
                 attributes: [
                     .font: Tokens.Font.captionEmphasized,
+                    .kern: Tokens.Font.uppercaseKern(for: Tokens.Font.captionEmphasized),
                     .foregroundColor: Tokens.Color.tertiaryLabel,
                 ])
             menu.addItem(item)
@@ -512,7 +513,7 @@ public final class AppRowView: NSView {
             if allowsAttributedSubtitle {
                 let attributedTitle = NSMutableAttributedString(
                     string: entry.title,
-                    attributes: [.font: Tokens.Font.menuItem])
+                    attributes: [.font: Tokens.Font.rowName])
                 attributedTitle.append(NSAttributedString(string: "\n"))
                 attributedTitle.append(NSAttributedString(
                     string: subtitle,
@@ -536,7 +537,7 @@ public final class AppRowView: NSView {
         iconView.setContentHuggingPriority(.required, for: .horizontal)
 
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
-        nameLabel.font = Tokens.Font.menuItem
+        nameLabel.font = Tokens.Font.rowName
         nameLabel.lineBreakMode = .byTruncatingTail
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -554,7 +555,7 @@ public final class AppRowView: NSView {
         slider.action = #selector(volumeChanged(_:))
 
         readoutLabel.translatesAutoresizingMaskIntoConstraints = false
-        readoutLabel.font = Tokens.Font.caption
+        readoutLabel.font = Tokens.Font.percentReadout
         readoutLabel.textColor = Tokens.Color.secondaryLabel
         readoutLabel.alignment = .right
         readoutLabel.setContentHuggingPriority(.required, for: .horizontal)

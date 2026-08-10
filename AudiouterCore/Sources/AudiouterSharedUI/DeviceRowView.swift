@@ -1384,7 +1384,7 @@ public final class DeviceRowView: NSView {
         armedDotView.translatesAutoresizingMaskIntoConstraints = false
 
         nameLabel.translatesAutoresizingMaskIntoConstraints = false
-        nameLabel.font = Tokens.Font.menuItem
+        nameLabel.font = Tokens.Font.rowName
         nameLabel.lineBreakMode = .byTruncatingTail   // task B: "…" tail
         nameLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
@@ -1437,7 +1437,7 @@ public final class DeviceRowView: NSView {
         // `%` readout, right-aligned, small secondary — hangs off the slider's
         // trailing edge (change 4) so the number reads tight against the slider.
         readoutLabel.translatesAutoresizingMaskIntoConstraints = false
-        readoutLabel.font = Tokens.Font.caption
+        readoutLabel.font = Tokens.Font.percentReadout
         readoutLabel.textColor = Tokens.Color.secondaryLabel
         readoutLabel.alignment = .right
         readoutLabel.setContentHuggingPriority(.required, for: .horizontal)

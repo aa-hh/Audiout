@@ -259,11 +259,19 @@ public final class ConnectionDiagnosisView: NSView {
     // wrapped height (a wrapping `NSTextField` needs a fixed width to report an
     // intrinsic content size at all).
 
+    /// Cap on the suggestion text's wrap width: ~65 characters per line at the
+    /// caption size. Unclamped, the full 623pt panel let lines run ~103
+    /// characters — far past the 45–75ch band a reader can track comfortably,
+    /// on the popover's one multi-line prose block (typeset pass 2026-08-10).
+    private static let suggestionMaxReadableWidth: CGFloat = 380
+
     public override func layout() {
         // Leading and trailing insets are NOT symmetric (see `leadingInset`), so
         // this sums the two rather than doubling one — getting it wrong overstates
         // the wrap width and the suggestion text clips.
-        let available = bounds.width - Self.leadingInset - Self.horizontalInset - 2 * Self.contentPadding
+        let available = min(
+            bounds.width - Self.leadingInset - Self.horizontalInset - 2 * Self.contentPadding,
+            Self.suggestionMaxReadableWidth)
         if available > 0, suggestionWidthConstraint?.constant != available {
             suggestionWidthConstraint?.constant = available
         }

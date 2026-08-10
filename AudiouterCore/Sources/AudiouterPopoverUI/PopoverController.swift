@@ -2254,7 +2254,7 @@ public final class PopoverController: NSObject {
     private func makePlaceholderRow(text: String) -> NSView {
         let label = NSTextField(labelWithString: text)
         label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = Tokens.Font.menuItem
+        label.font = Tokens.Font.rowName
         label.textColor = Tokens.Color.tertiaryLabel
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1

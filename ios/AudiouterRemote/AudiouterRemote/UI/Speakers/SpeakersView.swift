@@ -106,14 +106,47 @@ struct SpeakersView: View {
 // MARK: - The console
 
 /// One section of the speaker list. `devices` is what renders; `placeholder`
-/// is the honest empty state for the two sections that are structurally always
-/// empty, and is never anything a user could mistake for a real speaker.
+/// is the honest empty state for the one section that is structurally always
+/// empty (PINNED), and is never anything a user could mistake for a real
+/// speaker.
 private struct SpeakerSectionSpec: Identifiable {
     let id: String
     let title: String
     let tint: Color
     let devices: [DeviceState]
     let placeholder: String?
+}
+
+/// Section membership for the device-backed sections, split out of the view so
+/// the rules are testable — the same seam idiom as
+/// ``DeviceRowView/isControllable(_:appRoutes:)``.
+///
+/// Bluetooth rows are CONNECTED-ONLY: a Bluetooth device gets a row exactly
+/// while `isAvailable` is true, which on the wire is
+/// the Mac's "a Core Audio output endpoint exists right now". A disconnected
+/// Bluetooth device shows NO row anywhere — not even under UNAVAILABLE, whose
+/// grey-but-kept rows are an AirPlay notion (expected back on the network).
+/// Never key a Bluetooth row's existence off `connection.state`: a failed
+/// attempt is sticky on the Mac and would pin a row for a speaker that's gone.
+enum SpeakerSections {
+    /// `Device.Kind.bluetooth.rawValue` on the Mac side.
+    static func isBluetooth(_ device: DeviceState) -> Bool { device.kind == "bluetooth" }
+
+    static func armed(_ devices: [DeviceState]) -> [DeviceState] {
+        devices.filter { $0.isSelected && $0.isAvailable }
+    }
+
+    static func airplay(_ devices: [DeviceState]) -> [DeviceState] {
+        devices.filter { !$0.isSelected && $0.isAvailable && !isBluetooth($0) }
+    }
+
+    static func bluetooth(_ devices: [DeviceState]) -> [DeviceState] {
+        devices.filter { !$0.isSelected && $0.isAvailable && isBluetooth($0) }
+    }
+
+    static func unavailable(_ devices: [DeviceState]) -> [DeviceState] {
+        devices.filter { !$0.isAvailable && !isBluetooth($0) }
+    }
 }
 
 /// Which way a finger committed. Shared by the deck fader and the drawer rows;
@@ -144,11 +177,13 @@ private struct SpeakerConsole: View {
 
     // MARK: Derived
 
-    private var armedDevices: [DeviceState] { snapshot.devices.filter { $0.isSelected && $0.isAvailable } }
+    private var armedDevices: [DeviceState] { SpeakerSections.armed(snapshot.devices) }
     private var armedCount: Int { armedDevices.count }
     private var master: Int { snapshot.mainOutMasterVolume }
 
-    /// doc:2000-2006. Exactly five, always all five, in this order.
+    /// doc:2000-2006. Exactly five, always all five, in this order. Membership
+    /// rules (including the Bluetooth connected-only rule) live on
+    /// ``SpeakerSections``.
     private var sections: [SpeakerSectionSpec] {
         [
             SpeakerSectionSpec(id: "pinned", title: "PINNED", tint: WarmSignal.gold,
@@ -156,13 +191,13 @@ private struct SpeakerConsole: View {
             SpeakerSectionSpec(id: "live", title: "ARMED / LIVE", tint: WarmSignal.gold,
                                devices: armedDevices, placeholder: nil),
             SpeakerSectionSpec(id: "airplay", title: "AIRPLAY", tint: WarmSignal.label2,
-                               devices: snapshot.devices.filter { !$0.isSelected && $0.isAvailable },
+                               devices: SpeakerSections.airplay(snapshot.devices),
                                placeholder: nil),
-            // razor: structural placeholder only. Nothing on the wire ever reports a Bluetooth output — DeviceState.kind is a free-form String (AudiouterProtocol CompanionSnapshot.swift:42) and the Mac never sends one. Tracked as roadmap 004.
             SpeakerSectionSpec(id: "bluetooth", title: "BLUETOOTH", tint: WarmSignal.label2,
-                               devices: [], placeholder: "BLUETOOTH OUTPUT NOT AVAILABLE YET"),
+                               devices: SpeakerSections.bluetooth(snapshot.devices),
+                               placeholder: nil),
             SpeakerSectionSpec(id: "unavailable", title: "UNAVAILABLE", tint: WarmSignal.label2,
-                               devices: snapshot.devices.filter { !$0.isAvailable },
+                               devices: SpeakerSections.unavailable(snapshot.devices),
                                placeholder: nil),
         ]
     }

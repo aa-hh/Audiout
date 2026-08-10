@@ -114,8 +114,9 @@ final class DemoMacSession: MacSessionProtocol {
 
     /// A believable small fleet: this Mac + a HomePod + a stereo Sonos pair
     /// (pre-grouped as "Living Room" above, so the Groups tab isn't empty on
-    /// first launch) + one offline fixture so the failure-status UI is
-    /// demoable without touching a control.
+    /// first launch) + a connected Bluetooth speaker (so the BLUETOOTH section
+    /// is demoable) + one offline fixture so the failure-status UI is demoable
+    /// without touching a control.
     private static func seedFleet() -> [DeviceRecord] {
         [
             DeviceRecord(id: "local-mac", name: "This Mac", kind: "localMac",
@@ -130,6 +131,14 @@ final class DemoMacSession: MacSessionProtocol {
             DeviceRecord(id: "demo-sonos-right", name: "Sonos One (Right)", kind: "sonos",
                          iconSymbolName: "hifispeaker.fill", isAvailable: true,
                          supportsAirPlay2: true, isLocalDevice: false, volume: 55, failure: nil),
+            // "bluetooth" kind + hifispeaker.2.fill mirror the Mac side's
+            // Device.Kind.bluetooth and its symbolName; supportsAirPlay2 is
+            // always false for BT there. Connected-only rule: this record is
+            // listed BECAUSE isAvailable is true — flipped false it must
+            // vanish, not grey out (SpeakerSections).
+            DeviceRecord(id: "demo-bt-flip", name: "JBL Flip 6", kind: "bluetooth",
+                         iconSymbolName: "hifispeaker.2.fill", isAvailable: true,
+                         supportsAirPlay2: false, isLocalDevice: false, volume: 45, failure: nil),
             // Text mirrors ConnectionFailure.Cause.vanished's real headline/suggestion
             // (Device/ConnectionState.swift) so the demo failure card reads exactly
             // like the live one.

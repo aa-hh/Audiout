@@ -4,6 +4,7 @@ import Testing
 import Foundation
 import AppKit
 @testable import AudiouterCore
+@testable import AudiouterPopoverUI
 @testable import AudiouterSharedUI
 @testable import AudiouterWindowUI
 
@@ -42,22 +43,28 @@ import AppKit
         Device(id: id, name: name, kind: .generic, isAvailable: available)
     }
 
-    /// Both panes, laid out inside the SAME window at its shipping default —
-    /// the only honest way to compare them, since a pane's width comes from the
-    /// split view, not from a frame a test picked.
+    /// Both panes, laid out inside the SAME content tree at the Groups
+    /// screen's shipping content area — the only honest way to compare them,
+    /// since a pane's width comes from the split view, not from a frame a test
+    /// picked. The controller owns no window (U6): the split view is laid out
+    /// directly at the area the surface's Groups screen gives it
+    /// (`AppSurfaceController.groupsDefaultContentSize` minus the header strip).
     private func makeWindow() throws -> (MixerWindowController, GroupController, [Device], Group) {
         let devices = (0..<7).map { makeDevice(id: "d\($0)", name: "Device \($0)") }
         let controller = makeController()
         let group = try controller.createGroup(name: "Downstairs", memberIDs: ["d0"],
                                                memberVolumes: [:]).group
-        let window = MixerWindowController(groupController: controller,
-                                           frameAutosaveName: uniqueName("GroupsHeaderParityTests"))
+        let window = MixerWindowController(groupController: controller)
+        window.setHostVisible(true)
         window.update(devices: devices)
+        // `groupsDefaultContentSize` IS the content area below the window's
+        // toolbar strip (live-review D1), so no header subtraction remains.
+        window.contentController.view.setFrameSize(AppSurfaceController.groupsDefaultContentSize)
         return (window, controller, devices, group)
     }
 
     private func settle(_ window: MixerWindowController) {
-        window.window?.contentView?.layoutSubtreeIfNeeded()
+        window.contentController.view.layoutSubtreeIfNeeded()
     }
 
     // MARK: Parity
@@ -178,7 +185,7 @@ import AppKit
         let (window, _, _, group) = try makeWindow()
         window.test_select(.group(id: group.id))
         // A pane far wider than the cap: the section must stop stretching.
-        window.window?.setContentSize(NSSize(width: 1200, height: 700))
+        window.contentController.view.setFrameSize(NSSize(width: 1200, height: 700))
         settle(window)
 
         #expect(abs(window.test_editor.test_headerSectionFrame.width

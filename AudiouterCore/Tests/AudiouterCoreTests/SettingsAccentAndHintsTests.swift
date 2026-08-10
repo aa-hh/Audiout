@@ -165,7 +165,7 @@ extension SerializedSharedState {
                           "the consequence wording must follow the value band")
     }
 
-    @Test func bufferHintTracksTheSelection() {
+    @Test func bufferHintTracksTheSelection() async {
         let latency = LatencySettingModel(optionsMs: AppSettings.startBufferOptionsMs,
                                           initialMs: 1000,
                                           envOverrideMs: nil,
@@ -176,7 +176,7 @@ extension SerializedSharedState {
                       "hint must state the current value: \(pane.test_bufferHint)")
         let initialHint = pane.test_bufferHint
 
-        pane.test_selectLatencyOption(ms: 2250)
+        await pane.test_selectLatencyOption(ms: 2250)
         #expect(pane.test_bufferHint.contains("2,250 ms") || pane.test_bufferHint.contains("2250 ms"))
         #expect(pane.test_bufferHint != initialHint)
     }

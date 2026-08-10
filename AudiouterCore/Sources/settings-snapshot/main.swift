@@ -1,22 +1,22 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// settings-snapshot — offscreen PNG renderer for the Settings window (mirrors
-// `popover-snapshot`). The live window isn't visible to an agent shell — and
+// settings-snapshot — offscreen PNG renderer for the Settings panes (mirrors
+// `popover-snapshot`). The live surface isn't visible to an agent shell — and
 // this app is a menu-bar accessory (`.accessory` activation policy, no Dock
 // icon), which also puts it outside computer-use's app resolver — so this
-// assembles the REAL `SettingsWindowController` against fake seams (never
-// touching the real login item or `~/Library/Application Support`), sizes it
-// to its own fitted content, and renders it via
-// `bitmapImageRepForCachingDisplay(in:)` + `cacheDisplay(in:)`, writing a PNG
-// to `dev/notes/settings-snapshots/` in both light and dark appearances.
+// assembles the REAL `SettingsRootViewController` against fake seams (never
+// touching the real login item or `~/Library/Application Support`) and
+// renders each pane via a pinned-scale bitmap rep + `cacheDisplay(in:)`,
+// writing a PNG to `dev/notes/settings-snapshots/` in both light and dark
+// appearances.
 //
-// Settings is now a TABBED window (General / Appearance / Audio,
-// `tabStyle = .toolbar`). With `.toolbar` style the tab bar renders as window
-// CHROME (the title-bar toolbar area), not content — it is deliberately
-// absent from every render below. These goldens verify each pane's own
-// layout and dark-mode appearance; the tab bar itself (labels, symbols,
-// selection) is covered by `SettingsWindowController`'s live `test_*` hooks,
-// not a pixel snapshot.
+// Settings is TABBED content (General / Appearance / Audio) hosted on the
+// one-surface shell with `tabStyle = .segmentedControlOnTop`. Each render
+// below is the PANE only — the in-content tab strip and the surface's own
+// chrome are deliberately absent. These goldens verify each pane's own
+// layout and dark-mode appearance; the tab strip itself (labels, symbols,
+// selection) is covered by the `SettingsRootViewController` tests, not a
+// pixel snapshot.
 //
 // One PNG per (tab × appearance) — six total:
 //   settings-{general,appearance,audio}-{light,dark}.png
@@ -83,20 +83,33 @@ func renderPNG(view: NSView, to url: URL) {
     }
 }
 
-/// Assembles a fresh `SettingsWindowController` against fake seams — same
-/// fixtures every time (fresh `UserDefaults` suite, temp excluded-apps store
+/// Name of the throwaway defaults suite these fixtures write to instead of the
+/// developer's real domain. FIXED, not per-run: `UserDefaults(suiteName:)`
+/// creates a real `~/Library/Preferences/<name>.plist`, so a `UUID` in the name
+/// leaves one behind on every run. One reused name plus a wipe before each use
+/// keeps the fixtures identical run to run at a cost of one plist, ever.
+let snapshotDefaultsSuite = "settings-snapshot"
+
+@MainActor
+func makeSnapshotDefaults() -> UserDefaults {
+    let defaults = UserDefaults(suiteName: snapshotDefaultsSuite)!
+    defaults.removePersistentDomain(forName: snapshotDefaultsSuite)
+    return defaults
+}
+
+/// Assembles a fresh `SettingsRootViewController` against fake seams — same
+/// fixtures every time (empty `UserDefaults` suite, temp excluded-apps store
 /// seeded with one entry so the Audio pane isn't captured in its empty
 /// state, a non-nil `LatencySettingModel` so the Audio pane's Advanced ›
 /// Audio buffer section renders).
 ///
-/// A NEW controller per call is required, not an optimization: T2's
-/// `test_tabRootView(at:)` must run before the controller has ever shown a
-/// window or selected a tab (see `snapshotTab` below), so no controller here
-/// is ever reused across two snapshots.
+/// A NEW controller per call is required, not an optimization:
+/// `tabRootView(at:)` must run before the controller has ever been shown or
+/// selected a tab (see `snapshotTab` below), so no controller here is ever
+/// reused across two snapshots.
 @MainActor
-func makeController() -> SettingsWindowController {
-    let settingsDefaults = UserDefaults(suiteName: "settings-snapshot-\(UUID().uuidString)")!
-    let settings = AppSettings(defaults: settingsDefaults)
+func makeRoot() -> SettingsRootViewController {
+    let settings = AppSettings(defaults: makeSnapshotDefaults())
     let excludedApps = ExcludedAppsController(store: ExcludedAppsStore(directory: tempDir()), loadPersisted: false)
     // Seed one excluded app so the Audio section shows a non-empty list, not
     // just the "Add application…" empty state.
@@ -112,12 +125,19 @@ func makeController() -> SettingsWindowController {
         isStreaming: { false },
         apply: { _ in })
 
-    return SettingsWindowController(
-        settings: settings,
-        loginItem: SnapshotLoginItem(),
-        excludedApps: excludedApps,
-        runningAppsProvider: { [] },
-        latency: latency)
+    // Tab order/labels/symbols mirror the app's own assembly
+    // (`AppDelegate.makeSettingsRoot`) exactly, including the shipping
+    // `.segmentedControlOnTop` style.
+    return SettingsRootViewController(tabs: [
+        .init(title: "General", symbolName: "gearshape",
+              viewController: GeneralSettingsViewController(loginItem: SnapshotLoginItem())),
+        .init(title: "Appearance", symbolName: "paintpalette",
+              viewController: AppearanceSettingsViewController(settings: settings)),
+        .init(title: "Audio", symbolName: "speaker.wave.2",
+              viewController: AudioSettingsViewController(excluded: excludedApps,
+                                                          runningAppsProvider: { [] },
+                                                          latency: latency)),
+    ], tabStyle: .segmentedControlOnTop)
 }
 
 /// Resolve every wrapping label's `preferredMaxLayoutWidth` from the width it
@@ -156,16 +176,16 @@ func resolveWrapWidths(_ view: NSView) {
 /// before the wrap resolves reports a pane 561pt wide — wider than the window
 /// it ships in.
 ///
-/// A fresh controller per snapshot (see `makeController()`) keeps each render
+/// A fresh controller per snapshot (see `makeRoot()`) keeps each render
 /// independent of tab order and of any size a previous tab left behind.
 @MainActor
 func snapshotTab(index: Int, tabLabel: String, appearanceName: NSAppearance.Name, appearanceLabel: String, outDir: URL) {
     // Mirrors `SettingsForm.contentWidth`, which is internal to
     // AudiouterSettingsUI. Any drift shows up at once as a changed golden width.
     let contentWidth: CGFloat = 460
-    let controller = makeController()
+    let root = makeRoot()
     let appearance = NSAppearance(named: appearanceName)
-    let paneView = controller.test_tabRootView(at: index)
+    let paneView = root.tabRootView(at: index)
     paneView.removeFromSuperview()
 
     // Mirror `SettingsRootViewController`'s opaque, appearance-adaptive
@@ -243,8 +263,7 @@ func run() -> Int32 {
         try? FileManager.default.removeItem(at: outDir.appendingPathComponent(stale))
     }
 
-    // Tab order/labels mirror `SettingsWindowController.init`'s
-    // `rootVC = SettingsRootViewController(tabs: [...])` literal exactly.
+    // Tab order/labels mirror `makeRoot()`'s tabs literal exactly.
     let tabs: [(index: Int, label: String)] = [
         (0, "general"),
         (1, "appearance"),

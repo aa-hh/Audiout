@@ -71,7 +71,7 @@ import Foundation
         for offsetMs in [-200, -1, 1, 42, 400] {
             let shifted = SyncTiming.totalDelayNanos(
                 presentationDelayMs: 300, localOutputLatencySeconds: 0.005, safetyMarginMs: 3,
-                userOffsetMs: offsetMs)
+                userOffsetMs: Double(offsetMs))
             #expect(shifted == base + Int64(offsetMs) * 1_000_000)
         }
     }

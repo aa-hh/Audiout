@@ -167,9 +167,16 @@ let package = Package(
         // hosted in an `NSPopover`. A *library* (not folded into the executable)
         // so both the app AND the headless `popover-harness` / tests can link it
         // and assert the built panel structure. Reuses the shared `DeviceRowView`.
+        //
+        // Since U3 (one-surface app) this target also hosts
+        // `AppSurfaceController`, which composes ALL THREE screens — hence the
+        // deps on AudiouterWindowUI (Groups content) and AudiouterSettingsUI
+        // (Settings screen). One-directional on purpose: neither of those
+        // targets may ever depend back on this one.
         .target(
             name: "AudiouterPopoverUI",
-            dependencies: ["AudiouterCore", "AudiouterSharedUI"],
+            dependencies: ["AudiouterCore", "AudiouterSharedUI",
+                           "AudiouterWindowUI", "AudiouterSettingsUI"],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // The pure-AppKit mixer window (SPEC §9 "Full window"): a
@@ -184,13 +191,12 @@ let package = Package(
             dependencies: ["AudiouterCore", "AudiouterSharedUI"],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
-        // The pure-AppKit Settings window (the header gear's destination): a
-        // `SettingsWindowController` hosting a `.toolbar`-style
-        // `NSTabViewController`, one pane per tab (General, Appearance, …). A
-        // *library* so the app AND tests can link it and assert the built window
-        // structure, exactly like the popover/mixer UI libs. Only needs Core (the
-        // `AppSettings` scalar store + appearance/density enums) — no shared rows
-        // yet.
+        // The pure-AppKit Settings content: a `SettingsRootViewController`
+        // (an `NSTabViewController`, one pane per tab — General, Appearance, …)
+        // hosted on the one-surface shell. A *library* so the app AND tests can
+        // link it and assert the built structure, exactly like the popover/mixer
+        // UI libs. Only needs Core (the `AppSettings` scalar store +
+        // appearance/density enums) — no shared rows yet.
         .target(
             name: "AudiouterSettingsUI",
             // AudiouterSharedUI: the Tokens design-token layer (Wave 2 of the
@@ -267,7 +273,10 @@ let package = Package(
         // review) — see the product comment in window-snapshot/main.swift.
         .executableTarget(
             name: "window-snapshot",
-            dependencies: ["AudiouterCore", "AudiouterWindowUI", "AudiouterSharedUI"],
+            // AudiouterPopoverUI + AudiouterSettingsUI: state 5 renders the
+            // REAL one-surface host (toolbar header + shell), not a bare shell.
+            dependencies: ["AudiouterCore", "AudiouterPopoverUI", "AudiouterSettingsUI",
+                           "AudiouterWindowUI", "AudiouterSharedUI"],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // Silent read-only diagnostic for enumerating Core Audio process objects

@@ -383,21 +383,28 @@ import AppKit
         }
     }
 
-    // MARK: Layout overhaul (header / columns / member toggle / groups "+")
+    // MARK: Layout overhaul (columns / member toggle / groups "+")
 
-    /// Task A — the header bar shows the "Audiouter" title and two icon
-    /// buttons that resolve system SF Symbols; the Groups-editor button opens the
-    /// mixer path.
-    @Test func headerTitleAndIconButtons() async throws {
+    /// Live-review D1 — the switcher moved to the surface window's native
+    /// toolbar, so the panel is pure content that a surface seats below the
+    /// toolbar strip via `setContentTopInset`. The inset must ride the
+    /// exact-fit measure (it is part of the required content chain), or a
+    /// seated panel would publish a size one strip too short and the last
+    /// card would clip.
+    @Test func surfaceContentInsetRidesTheExactFitMeasure() async throws {
         let (popover, _, _) = try await makePopover()
-        #expect(popover.test_headerTitle == "Audiouter")
-        #expect(popover.test_headerGroupsButtonHasImage, "Open-Groups-editor button resolved a system SF Symbol")
-        #expect(popover.test_headerSettingsButtonHasImage, "Settings button resolved a system SF Symbol")
+        let panel = popover.claimPanelForSurfaceHosting()
+        #expect(popover.test_panelContentTopInset == 0, "unclaimed resting state carries no inset")
+        let restingHeight = panel.fittingSizeSettled().height
 
-        var openedMixer = false
-        popover.onOpenMixer = { openedMixer = true }
-        popover.test_tapHeaderGroupsEditor()
-        #expect(openedMixer, "the header Groups-editor button opens the mixer path")
+        panel.setContentTopInset(52)
+
+        #expect(popover.test_panelContentTopInset == 52)
+        #expect(panel.fittingSizeSettled().height == restingHeight + 52,
+                "the seated inset grows the exact-fit height by exactly itself")
+
+        panel.setContentTopInset(0)
+        #expect(panel.fittingSizeSettled().height == restingHeight, "and it is fully reversible")
     }
 
     /// A Selected-Devices row for a device shows its on/off toggle.
@@ -868,7 +875,7 @@ import AppKit
 
         #expect(popover.test_cardNoteTexts(title: "Output Devices") == [], "R12: a failure keeps intent, so the checked set never diverged and there is no dormancy note to show")
         #expect(popover.test_deviceRow(for: "office")?.test_busNodeDimmed == false, "the FAILED member never tints — failure outranks configuration (R2)")
-        #expect(popover.test_deviceRow(for: "office")?.test_feedText == "Couldn't connect", "the failure FEED override renders at full emphasis")
+        #expect(popover.test_deviceRow(for: "office")?.test_feedText == "Took too long", "the failure FEED override renders the failure's own headline at full emphasis")
         #expect(popover.test_diagnosisPanel(for: "office") != nil, "the diagnosis panel attaches normally")
         #expect(controller.selectedDeviceIDs.contains("office"), "R12: the failed device stays SELECTED — the failure must not rewrite what the user chose")
 
@@ -1930,14 +1937,14 @@ import AppKit
         #expect(popover.test_deviceRow(for: "local-mac")?.test_meterLevel() == 0.55)
     }
 
-    /// `popoverDidClose` zeroes every device row's meter (the reopen-never-shows-
+    /// `surfaceDidHide` zeroes every device row's meter (the reopen-never-shows-
     /// a-stale-bar discipline documented at the call site).
     @Test func popoverDidCloseZeroesAllDeviceRowMeters() async throws {
         let (popover, _, _) = try await makePopover()
         popover.test_pushLevel(0.7, for: "local-mac")
         #expect(popover.test_deviceRow(for: "local-mac")?.test_meterLevel() == 0.7)
 
-        popover.popoverDidClose(Notification(name: Notification.Name("test")))
+        popover.surfaceDidHide()
         #expect(popover.test_deviceRow(for: "local-mac")?.test_meterLevel() == 0, "closing the popover must reset every row's meter, not just the one just pushed to")
     }
 
@@ -1956,7 +1963,7 @@ import AppKit
         #expect(popover.test_appRow(for: "com.example.music")?.test_meterLevel() == 0.55)
     }
 
-    /// `popoverDidClose` zeroes every app row's meter too (not just device rows
+    /// `surfaceDidHide` zeroes every app row's meter too (not just device rows
     /// and Main Out), so a reopen never shows a stale app-row bar either.
     @Test func popoverDidCloseZeroesAllAppRowMeters() async throws {
         let appRouting = tempAppRoutingController()
@@ -1967,7 +1974,7 @@ import AppKit
         popover.test_pushAppLevel(0.7, for: "com.example.music")
         #expect(popover.test_appRow(for: "com.example.music")?.test_meterLevel() == 0.7)
 
-        popover.popoverDidClose(Notification(name: Notification.Name("test")))
+        popover.surfaceDidHide()
         #expect(popover.test_appRow(for: "com.example.music")?.test_meterLevel() == 0, "closing the popover must reset every app row's meter, not just the one just pushed to")
     }
 
@@ -2079,10 +2086,11 @@ import AppKit
         #expect(popover.test_deviceRow(for: "office")?.test_feedText == "Music", "the fixture's event reached the row via the same plumbing AppDelegate uses")
     }
 
-    // MARK: V2 — Devices card empty-state placeholder
+    // MARK: V2/V9 — Devices card empty-state placeholder
 
     /// With no devices discovered, the Devices card still builds and shows the
-    /// "Looking for devices…" placeholder; once devices arrive it disappears.
+    /// §5.9 "Looking for speakers…" placeholder; once devices arrive it
+    /// disappears.
     @Test func devicesCardEmptyStatePlaceholder() async throws {
         let (popover, _, backend) = try await makePopover()
         // Devices present initially ⇒ no placeholder, card exists.
@@ -2094,6 +2102,8 @@ import AppKit
         #expect(popover.test_isCardCollapsed(title: "Output Devices") != nil, "the Devices card is still built when empty (V2)")
         #expect(popover.test_devicesPlaceholderShown, "no devices ⇒ placeholder shown")
         #expect(popover.test_deviceSectionRowCount == 0, "no interactive device rows")
+        #expect(PopoverController.test_devicesPlaceholderText == "Looking for speakers…",
+                "pins the §5.9 locked copy")
 
         // Devices arrive again ⇒ placeholder gone.
         popover.update(devices: backend.devices)
@@ -2101,16 +2111,19 @@ import AppKit
         #expect(popover.test_deviceSectionRowCount == 7, "device rows restored")
     }
 
-    // MARK: V11 — Applications card empty-state placeholder
+    // MARK: V11/V9 — Applications card empty-state placeholder
 
-    /// With no rendered app routes the Applications card shows the "No apps
-    /// routed…" placeholder; adding a route removes it.
+    /// With no rendered app routes the Applications card shows the §5.9
+    /// "Route one app somewhere else…" placeholder; adding a route removes it.
     @Test func applicationsCardEmptyStatePlaceholder() async throws {
         let appRouting = tempAppRoutingController()
         let (popover, _, _) = try await makePopover(appRouting: appRouting,
                                                     runningAppsProvider: routedApps)
         #expect(popover.test_applicationsPlaceholderShown, "no routes ⇒ placeholder shown")
         #expect(popover.test_appRowCount == 0, "no app rows")
+        #expect(PopoverController.test_applicationsPlaceholderText ==
+                "Route one app somewhere else — music to the house, calls on your Mac. Use + to pick an app.",
+                "pins the §5.9 locked copy")
 
         popover.test_pickApp(bundleID: "com.example.music")
         #expect(!(popover.test_applicationsPlaceholderShown), "a route exists ⇒ placeholder gone")
@@ -2552,22 +2565,28 @@ import AppKit
         #expect(popover.test_diagnosisPanel(for: "office") != nil, "the retry failing again re-surfaces the panel")
     }
 
-    // MARK: F1 — Devices "Save as group" header accessory
+    // MARK: F1 — Devices "+" header accessory (a menu since BT-UI)
 
-    /// The Devices card's accessory saves the current selection as a group; firing
-    /// it never collapses the card, and its enabled state tracks
+    /// The Devices card's "+" fronts a MENU now: its save item creates a group
+    /// through real `NSMenu` dispatch, never collapses the card, and the item's
+    /// enabled state (not the button's — the button stays always-enabled so
+    /// "Pair a Bluetooth speaker…" is always reachable) tracks
     /// `canSaveCurrentSetup`.
     @Test func devicesSaveGroupAccessoryCreatesGroupWithoutCollapsing() async throws {
         let (popover, controller, _) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        #expect(popover.test_cardAccessoryEnabled(title: "Output Devices") == true, "a non-empty, not-yet-saved selection ⇒ accessory enabled")
+        #expect(popover.test_cardAccessoryEnabled(title: "Output Devices") == true, "the + button itself stays enabled — it fronts a menu")
+        var menu = popover.test_outputDevicesPlusMenu()
+        #expect(menu.items.first?.isEnabled == true, "a non-empty, not-yet-saved selection ⇒ save item enabled")
         let wasCollapsed = popover.test_isCardCollapsed(title: "Output Devices")
 
-        #expect(popover.test_fireCardAccessory(title: "Output Devices"), "the accessory fired")
-        #expect(controller.groups.count == 1, "firing the accessory created a group")
-        #expect(popover.test_isCardCollapsed(title: "Output Devices") == wasCollapsed, "the accessory click did NOT collapse the card")
-        // The just-saved selection now equals a group ⇒ accessory disables (dedup).
-        #expect(popover.test_cardAccessoryEnabled(title: "Output Devices") == false, "selection already saved as a group ⇒ accessory disables in place")
+        menu.performActionForItem(at: 0)   // real AppKit menu dispatch
+        #expect(controller.groups.count == 1, "the save item created a group")
+        #expect(popover.test_isCardCollapsed(title: "Output Devices") == wasCollapsed, "the menu action did NOT collapse the card")
+        // The just-saved selection now equals a group ⇒ the save ITEM disables.
+        menu = popover.test_outputDevicesPlusMenu()
+        #expect(menu.items.first?.isEnabled == false, "selection already saved as a group ⇒ save item disables")
+        #expect(popover.test_cardAccessoryEnabled(title: "Output Devices") == true, "the + button never disables")
     }
 
     // MARK: V14 — keyboard selection movement (host half)

@@ -360,7 +360,7 @@ import CoreAudio
                                          // settings.mainOutVolume, so the default
                                          // AppSettings() (.standard) would make the seed
                                          // depend on the dev's real defaults domain.
-                                         settings: AppSettings(defaults: UserDefaults(suiteName: "test-\(UUID().uuidString)")!),
+                                         settings: AppSettings(defaults: makeDefaults()),
                                          loadPersisted: false)
         return (controller, router)
     }

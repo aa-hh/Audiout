@@ -329,7 +329,7 @@ quiet backdrops, not signal-bearers. Circuit's own text tokens all pass body
 contrast (fg/normal 16.4, fg/subtle 5.48, fg/placeholder 4.67).
 
 **Two NEW tokens the code does not have yet** (added 2026-08-07 fixing a measured
-FEED-pill contrast failure; both carry iOS code syntax and land with roadmap 033):
+FEED-pill contrast failure; both carry iOS code syntax and land with roadmap 035):
 
 - `feedPillFill` — dark `#38322B` / dark-HC `#423B33`, light aliases Circuit
   `border/normal`, light-HC `bg/neutral-strong`. Replaces

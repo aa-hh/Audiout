@@ -493,7 +493,9 @@ public enum PopoverColumnGrid {
     // The Applications card's single-selection model (± footer controls,
     // context-menu remove, Delete/Backspace) needs a selected-row highlight
     // distinct from `DeviceRowView`'s membership/hover pill. Named here per
-    // house rule (no magic numbers) even though today only `AppRowView` draws it.
+    // house rule (no magic numbers) — `DeviceRowView` and `GroupRowView`'s own
+    // hover/selection pills (V10) now also draw from these same constants
+    // instead of retyping the same numbers.
 
     /// Horizontal/vertical inset of the selection-highlight rounded rect from
     /// the row's bounds — matches `DeviceRowView`'s hover/selection pill inset.
@@ -575,6 +577,115 @@ public enum PopoverColumnGrid {
     /// Alpha of an edit affordance while the pointer (or keyboard focus) is on
     /// the thing it marks.
     public static let editAffordanceHoverAlpha: CGFloat = 1.0
+
+    // MARK: SYNC column (Bluetooth rows — BT-OFFSET-UI, chip since T6)
+    //
+    // Bluetooth rows carve a per-device SYNC control out of the LEFT portion
+    // of the reserved trailing-control slot: the slider/% columns keep their
+    // exact trailing anchors (cross-section alignment untouched), while the BT
+    // row's FEED pill right-aligns into `btFeedReserveWidth` at the far right
+    // (locked UI spec: "feed pill stays far right") instead of the AirPlay
+    // rows' left-aligned `feedColumnWidth`. Named constants only — the Figma
+    // design-system contract mirrors this file 1:1.
+    //
+    // PLAN-BT-SYNC-DRAWER T6 replaced the old four-control cluster (− / value
+    // field / + / metronome) with ONE read-only value chip that opens the
+    // drawer; the stepper/field/align geometry is gone with it, and the
+    // drawer's own metrics live in the "SYNC drawer" section below.
+
+    /// Width of the row's SYNC value chip. Sized for the widest label the chip
+    /// can ever show — "−500.0 ms" at `DeviceRowView`'s tabular-figures
+    /// caption font — plus its trailing chevron and the chip's own side
+    /// padding, so the number never truncates at either end of the range.
+    public static let syncChipWidth: CGFloat = 84
+    /// Height of the SYNC value chip: tall enough to read as a control on a
+    /// body row without crowding the row's vertical rhythm.
+    public static let syncChipHeight: CGFloat = 18
+    /// Corner radius of the SYNC value chip. A soft rounded rect ("this is a
+    /// control you can press"), deliberately NOT the fully-rounded capsule —
+    /// that shape means "control engaged" (`mutePillCornerRadius`) and the
+    /// chip is a resting affordance, not an engaged state.
+    public static let syncChipCornerRadius: CGFloat = 5
+    /// Stroke width of the chip's border, solid (tuned) or dashed (untuned).
+    public static let syncChipBorderWidth: CGFloat = 1
+    /// Dash ON length of the UNTUNED chip's border (D10's discoverability
+    /// affordance: "Not set" inside a dashed outline reads as an invitation,
+    /// where a solid box would read as a finished value).
+    public static let syncChipDashLength: CGFloat = 3
+    /// Dash OFF length of that same untuned border.
+    public static let syncChipDashGap: CGFloat = 2
+    /// The BT row's FEED slot: the trailing-control column's far-right portion
+    /// the right-aligned feed pill keeps (an overlong pill clips at the slot's
+    /// edge via the feed stack's existing mask, exactly like overflow pills).
+    public static let btFeedReserveWidth: CGFloat = 48
+    /// Gap between the SYNC chip's trailing edge and the BT feed slot.
+    public static let btFeedToSyncGap: CGFloat = 4
+    /// Distance from the row trailing edge to the SYNC chip's TRAILING edge
+    /// — the chip sits immediately left of the BT feed slot.
+    public static var syncTrailing: CGFloat {
+        trailingInset + btFeedReserveWidth + btFeedToSyncGap
+    }
+    /// Distance from the row trailing edge to the SYNC chip's CENTER, so the
+    /// Bluetooth subsection header can center its "SYNC" column title over the
+    /// chip (the title lives in that subsection header ONLY — the card
+    /// header's VOLUME/FEED titles are untouched). Derived from the chip's own
+    /// width, so re-sizing the chip re-centres the title in lockstep.
+    public static var syncCenterFromTrailing: CGFloat {
+        syncTrailing + syncChipWidth / 2
+    }
+
+    // MARK: SYNC drawer (PLAN-BT-SYNC-DRAWER T5 — `BTSyncDrawerView`)
+    //
+    // The panel that opens underneath a Bluetooth row: ONE horizontal band,
+    //
+    //     [♪ Align by ear] [Revert]     hold ⇧ for 10 ms   [ − | −414 ms | + ]
+    //
+    // The align/revert pair sits at the far LEADING edge, deliberately as far
+    // as the band allows from the steppers, so Revert cannot be mis-tapped
+    // mid-adjustment. The value cluster hugs the TRAILING edge so it lands
+    // directly beneath the SYNC chip that opened the drawer. Everything in the
+    // band shares ``syncDrawerControlHeight`` and is vertically centred, sized
+    // to sit WITH the row's own controls — two earlier versions were redone for
+    // being oversized. Named constants only — the Figma design-system contract
+    // mirrors this file.
+
+    /// Horizontal inset of the drawer's content from its container edges. No
+    /// accent edge or border (live feedback — see `BTSyncDrawerView`'s header).
+    public static let syncDrawerHorizontalInset: CGFloat = 12
+    /// Vertical inset of the drawer's content from its top/bottom edges.
+    public static let syncDrawerVerticalInset: CGFloat = 12
+    /// The ONE height every element of the band shares — the align and revert
+    /// buttons and the whole value cluster. Sized to a `.rounded`-bezel
+    /// `.small` `NSButton`'s natural height, so the pair reads as stock chrome
+    /// rather than a stretched bezel.
+    public static let syncDrawerControlHeight: CGFloat = 22
+    /// Width of the align-by-ear toggle — fits "Align by ear" with its leading
+    /// metronome glyph at ``Tokens/Font/caption``.
+    public static let syncDrawerAlignButtonWidth: CGFloat = 104
+    /// Width of the Revert push button.
+    public static let syncDrawerRevertButtonWidth: CGFloat = 58
+    /// Gap between the align toggle and the Revert button beside it — they are
+    /// one pair, so this is tight.
+    public static let syncDrawerButtonGap: CGFloat = 6
+    /// Gap between the "hold ⇧" hint and the value cluster it describes.
+    public static let syncDrawerHintToClusterGap: CGFloat = 12
+    /// Width of the `−` / `+` buttons flanking the value field.
+    public static let syncDrawerStepperButtonWidth: CGFloat = 26
+    /// Width of the editable value field — sized for the widest RESTING
+    /// reading, "−500 ms", at ``Tokens/Font/syncReadout`` inside a stock bezel.
+    /// The unit lives in the field's own text rather than in a label beside it,
+    /// so the box has to hold both.
+    public static let syncDrawerValueFieldWidth: CGFloat = 78
+    /// Gap between `−` and the value field. Wider than the unit gap on purpose:
+    /// `−` crowding the digits made the minus read as part of the NUMBER rather
+    /// than as a button (live-found).
+    public static let syncDrawerStepperToValueGap: CGFloat = 8
+    /// The drawer's total height: one band plus the top and bottom insets.
+    /// `PopoverController` (T7) grows the popover by exactly this on expand and
+    /// shrinks back by it on collapse.
+    public static var syncDrawerHeight: CGFloat {
+        syncDrawerVerticalInset * 2 + syncDrawerControlHeight
+    }
 
     // MARK: Inter-column gaps
 

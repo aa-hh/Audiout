@@ -683,7 +683,7 @@ public final class AppRowView: NSView {
     // STABILITY(D4): the drag flag clears only when the last change callback coincides with .leftMouseUp — Esc/cancelled drags leave it stuck and the row ignores model updates; see dev/notes/stability-audit-2026-07-18.md
     @objc private func volumeChanged(_ sender: NSSlider) {
         isDraggingSlider = true
-        let event = NSApp.currentEvent
+        let event = NSApp?.currentEvent
         if event?.type == .leftMouseUp { isDraggingSlider = false }
         readoutLabel.stringValue = "\(sender.integerValue)%"
         delegate?.appRow(self, didSetVolume: sender.integerValue, for: appID)

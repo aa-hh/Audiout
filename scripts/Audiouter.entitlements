@@ -16,5 +16,12 @@
     <false/>
     <key>com.apple.security.cs.allow-jit</key>
     <false/>
+    <!-- Bluetooth (BT-CONNECT, PLAN-UNIVERSAL-SYNC section K). This key is
+         App-Sandbox-scoped, so it is inert while the app ships unsandboxed;
+         the runtime gate that actually matters today is the Bluetooth TCC
+         grant via NSBluetoothAlwaysUsageDescription (see make-app.sh). Listed
+         now so a future sandbox adoption cannot silently strip IOBluetooth. -->
+    <key>com.apple.security.device.bluetooth</key>
+    <true/>
 </dict>
 </plist>

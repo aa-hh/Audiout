@@ -27,7 +27,7 @@ struct PermissionRowContent {
 /// (the "please do this" CTA) WITHOUT making it the window's Return-default —
 /// a screen can have several such buttons, and a window has only one keyboard
 /// default (Done). Non-prominent is a plain gray button for a secondary
-/// "Open Settings"/"Open Login Items…" fallback.
+/// "Open Settings…"/"Open Login Items…" fallback.
 func onboardingRowActionButton(title: String, prominent: Bool,
                                target: AnyObject, action: Selector) -> NSButton {
     if prominent {
@@ -255,14 +255,14 @@ final class PermissionRowView: NSView {
                                                      symbol: "checkmark.circle",
                                                      tint: .secondaryLabelColor))
             accessory.addArrangedSubview(onboardingRowActionButton(
-                title: "Open Settings", prominent: false,
+                title: "Open Settings…", prominent: false,
                 target: self, action: #selector(openSettingsTapped)))
         case .denied:
             accessory.addArrangedSubview(onboardingRowStatusLabel("Denied",
                                                      symbol: "exclamationmark.triangle.fill",
                                                      tint: .systemOrange))
             accessory.addArrangedSubview(onboardingRowActionButton(
-                title: "Open Settings", prominent: false,
+                title: "Open Settings…", prominent: false,
                 target: self, action: #selector(openSettingsTapped)))
         case .unsupported:
             accessory.addArrangedSubview(onboardingRowStatusLabel("Requires macOS 14.2 or later",
@@ -494,7 +494,7 @@ final class RoundedContainerView: NSView {
 
     init(fill: NSColor = Tokens.Color.panel,
          border: NSColor = Tokens.Color.hairline,
-         radius: CGFloat = 10) {
+         radius: CGFloat = Tokens.Layout.groupedSectionCornerRadius) {
         self.fill = fill
         self.border = border
         self.radius = radius

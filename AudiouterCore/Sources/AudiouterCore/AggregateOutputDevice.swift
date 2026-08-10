@@ -80,15 +80,48 @@ protocol AggregateDeviceControlling: Sendable {
 /// seam, defaulting to ``CoreAudioAggregateDeviceControl`` in production.
 public struct AggregateOutputDevice: Sendable {
 
-    /// LOCKED FOREVER — coreaudiod keys its persisted entry (the on-disk
-    /// `com.apple.audio.SystemSettings.plist` `MetaDevice.<uid>` block, spike
-    /// §1) by this UID. Changing it orphans every previously-created entry on
-    /// every machine that has ever run this app (spike A5).
-    public static let productUID = "com.audiouter.Audiouter.aggregate"
+    /// The shipping build's bundle id, and the aggregate UID derived from it.
+    /// LOCKED FOREVER for that build — coreaudiod keys its persisted entry (the
+    /// on-disk `com.apple.audio.SystemSettings.plist` `MetaDevice.<uid>` block,
+    /// spike §1) by this UID, so changing it orphans every previously-created
+    /// entry on every machine that has ever run this app (spike A5).
+    static let shippingBundleID = "com.audiouter.Audiouter"
+    static let shippingUID = "com.audiouter.Audiouter.aggregate"
+
+    /// The UID this COPY of the app owns, derived from its bundle id.
+    ///
+    /// A side-by-side test build carries its own bundle id (house rule: every
+    /// build handed over for testing gets a fresh one, so macOS issues it clean
+    /// TCC grants). The aggregate has to follow, because ``sweepOrphans()``
+    /// destroys BY UID and runs on teardown: with one hardcoded UID, quitting
+    /// any copy tore the system's "Audiouter" output device out from under
+    /// every other running copy — the device simply vanished from Sound
+    /// settings while an app was still open (live-found). Deriving it means two
+    /// copies own two devices and neither can sweep the other's.
+    ///
+    /// The shipping bundle id keeps ``shippingUID`` byte-for-byte, so the
+    /// installed app adopts its existing persisted entry exactly as before.
+    public static var productUID: String { productUID(forBundleID: Bundle.main.bundleIdentifier) }
+
+    /// The pure derivation behind ``productUID``. A `nil` bundle id (a bare
+    /// `swift run` of the executable, or a test host) is treated as the
+    /// shipping app: it IS the same app, just unbundled.
+    static func productUID(forBundleID bundleID: String?) -> String {
+        let id = bundleID ?? shippingBundleID
+        return id == shippingBundleID ? shippingUID : "\(id).aggregate"
+    }
+
     /// Rendered name of the public aggregate in Sound settings, Audio MIDI
     /// Setup, and `system_profiler` (spike §1, §6 — both read the same
-    /// `kAudioObjectPropertyName`).
-    public static let productName = "Audiouter"
+    /// `kAudioObjectPropertyName`). A side build takes its own display name so
+    /// two entries in Sound settings are tellable apart; the shipping build
+    /// stays "Audiouter".
+    public static var productName: String {
+        guard Bundle.main.bundleIdentifier != nil,
+              Bundle.main.bundleIdentifier != shippingBundleID
+        else { return "Audiouter" }
+        return Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Audiouter"
+    }
 
     /// The spike tool's own aggregate UID (`dev/spikes/aggregate-device/aggtool.swift`).
     /// Alec ran that tool directly on his machines during the spike, so a

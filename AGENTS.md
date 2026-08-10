@@ -107,7 +107,26 @@ symbol you cannot find in source, believe the source and fix the doc.
   `sudo`, so it prompts and cannot run unattended — an agent runs it only where a
   human can enter the password. Never `--apply` while a live Audiouter session is
   actively streaming: it unloads the running helper too. It only ever touches
-  `*.ptphelper` jobs.
+  `*.ptphelper` jobs. `--keep <label>` spares one exact label.
+- **Uninstall dead hand-off builds with `scripts/purge-dev-installs.sh`.** The
+  one-bundle-id-per-build rule above is correct and stays, but each throwaway id
+  leaves permanent residue that trashing the `.app` does not remove: a
+  preferences domain, TCC grants (a dead row in System Settings › Privacy &
+  Security forever), a PUBLIC aggregate audio device that keeps appearing in
+  Sound settings, and a root PTP-helper daemon. This script finds every
+  non-shipping `com.audiouter.*` identity across all four surfaces, unions
+  them, and removes the lot — plus the preference domains leaked by the test
+  suites (`swift test` creates a per-test `UserDefaults` suite and never
+  removes it; this had reached **48,769 plists**, 98% of everything in
+  `~/Library/Preferences`). Dry-run by default; `--apply` to act. The shipping
+  id is a hardcoded literal it refuses to touch, and
+  `~/Library/Application Support/Audiouter/` (the real saved groups and routes)
+  is never in scope. Two traps it already handles, both learned the hard way:
+  CoreAudio silently refuses to destroy an aggregate that is the current system
+  output — it returns `noErr` and the device is still there — so the script
+  switches the system back to the built-in speakers first; and `cfprefsd`
+  rewrites deleted plists from its in-memory cache, so `defaults delete`
+  precedes every file removal and the daemon is restarted at the end.
 
 ## `main` is MERGE-ONLY (HARD RULE)
 

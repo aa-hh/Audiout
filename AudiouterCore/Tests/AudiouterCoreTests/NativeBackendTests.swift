@@ -1423,6 +1423,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 /// that touches either belongs in THAT suite, not this one.
 @Suite struct NativeBackendTests {
 
+    private let isolation = TestIsolation(owner: "NativeBackendTests")
+
     // MARK: AirPlay-1 perceptual volume curve (the "cliff at ~50%" fix, 2026-07-22)
 
     /// The AP1 curve must keep the WHOLE slider audible: it compresses UI 0–100
@@ -2109,7 +2111,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             // settings.mainOutVolume, so the default AppSettings() (UserDefaults.standard)
             // would pollute the real defaults domain. Both go to a per-test temp/suite.
             routingStore: RoutingStore(directory: isolatedDir),
-            settings: AppSettings(defaults: UserDefaults(suiteName: "test-\(UUID().uuidString)")!),
+            settings: AppSettings(defaults: isolation.makeDefaults()),
             loadPersisted: false)
         controller.ensureDefaultSelection()                     // {local} — passthrough
         _ = controller.setDeviceSelected(speaker.id, true)      // auto-swap drops local ⇒ streaming
@@ -8138,10 +8140,17 @@ extension SerializedSharedState {
     /// Selecting a SECOND device while already capturing (captureRunning
     /// stays true->true) must NOT re-arm the poll a second time —
     /// `reconcileCaptureGate`'s own `want != captureRunning` guard must
-    /// short-circuit before reaching the new arm/cancel code, so at most one
-    /// immediate `send_sched` line lands per capture-start episode, not one
-    /// per device added while already streaming (which would double the log
-    /// rate every time a second speaker joins an already-playing session).
+    /// short-circuit before reaching the new arm/cancel code, so the poll arms
+    /// once per capture-start episode, not once per device added while already
+    /// streaming (which would double the `send_sched` log rate every time a
+    /// second speaker joins an already-playing session).
+    ///
+    /// Asserted on the backend's own log count rather than on the emitted
+    /// `send_sched` lines: the telemetry sink is process-global and the event
+    /// carries no backend identity, so a still-polling backend left over from
+    /// any other test in the process lands extra lines in the counting window.
+    /// Note the poll can ARM twice here — a re-arm that finds capture already
+    /// stopped logs nothing — so arming is not the observable this guards.
     @Test func wholeSystemCaptureSelectingSecondDeviceDoesNotDoubleArmSchedulingPoll() async {
         let (backend, engine, discovery) = makeBackend()
         let capture = FakeCapture()
@@ -8158,21 +8167,16 @@ extension SerializedSharedState {
             events.contains { if case .deviceAdded(let d) = $0 { return d.id == deviceB.id } else { return false } }
         } after: { discovery.fire(.appeared(deviceB)) }
 
-        let box = TelemetryLineBox()
-        Telemetry._installTestSink { box.append($0) }
-        defer { Telemetry._installTestSink(nil) }
-        func sendSchedCount() -> Int { box.snapshot().filter { $0.contains("\"evt\":\"send_sched\"") }.count }
-
         backend.setOutputSet([deviceA.id])
         await pollUntil { capture.isCapturing }
-        await pollUntil { sendSchedCount() == 1 }
+        await pollUntil { backend.test_schedulingPollLogCount() == 1 }
 
         // Adding a second already-streaming device: captureRunning stays
         // true->true, so `reconcileCaptureGate`'s own guard must return before
-        // ever reaching the arm/cancel code — no second immediate poll.
+        // ever reaching the arm/cancel code — no second arm.
         backend.setOutputSet([deviceA.id, deviceB.id])
-        try? await Task.sleep(nanoseconds: 150_000_000)
-        #expect(sendSchedCount() == 1, "selecting an additional device while already capturing must not re-arm (double-log) the scheduling poll")
+        await pollUntil { engine.addedIDs.count == 2 }
+        #expect(backend.test_schedulingPollLogCount() == 1, "selecting an additional device while already capturing must not double the scheduling-poll log rate")
     }
 
     // MARK: Write-cadence drift sampling (T-ENG-CADENCE-1, whole-system-

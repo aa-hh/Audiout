@@ -226,6 +226,20 @@ public enum BackendEvent: Sendable, Equatable {
     /// never do.
     case routingBlockedNeedsDefault(Bool)
 
+    /// The first-mix alignment intercept (W3, PLAN-UNIVERSAL-SYNC "ALIGNMENT
+    /// WIZARD UX LOCKED"): the selection that FIRST puts a never-aligned
+    /// Bluetooth speaker (no saved SYNC trim, no recorded "Not now") into a
+    /// mix with any other device connected it and started its stream but is
+    /// HOLDING IT SILENT; the UI answers with an anchored card offering
+    /// align-with-music / align-with-ticks / Not now, each resolving through
+    /// ``BTOutputControlling/resolveBTAlignmentPrompt(forDevice:dismissed:)``
+    /// (which releases the hold). The backend re-emits at most once per device
+    /// per launch and never again once a trim or dismissal is recorded; a
+    /// backend-side watchdog releases an unanswered hold so a surfacing
+    /// failure can never strand a speaker silent. Only ``NativeBackend``
+    /// emits it — it's the only backend with Bluetooth sinks.
+    case btFirstMixAlignmentPrompt(deviceID: String)
+
     /// The takeover status strip (T6, PLAN-AIRPLAY-COEXISTENCE.md): a
     /// progressive explanation, alongside a connecting row, of what's
     /// happening while `convergeDevice` races macOS off the PTP timing ports
@@ -449,17 +463,18 @@ public protocol LatencyConfigurable: AnyObject {
 
     /// Apply a new start buffer. If sessions are streaming this tears them ALL
     /// down, applies the value, and re-establishes the same set (brief audible
-    /// gap, ~3–5 s — which is why the UI gates it behind an explicit
-    /// "Apply & Reconnect" CTA); when idle it applies silently. Returns when
-    /// the re-add pass has completed (per-device failures follow the D4
-    /// best-effort rule: marked unavailable, the rest proceed).
+    /// gap, ~3–5 s — the pane's popup applies this immediately, and its hint
+    /// line states that cost up front rather than gating it behind a CTA);
+    /// when idle it applies silently. Returns when the re-add pass has
+    /// completed (per-device failures follow the D4 best-effort rule: marked
+    /// unavailable, the rest proceed).
     func applyStartBuffer(ms: Int) async
 }
 
 /// The optional metering-active capability (T-GATE, playback-meter-research.md).
 /// A backend that computes RMS just to feed `.level` adopts this so the work can
 /// be switched off while nobody's watching a meter — `PopoverController` flips it
-/// on `popoverDidShow`/`popoverDidClose` via `backend as? MeteringControlling`, so
+/// on `surfaceDidShow`/`surfaceDidHide` via `backend as? MeteringControlling`, so
 /// a backend without the concept (`OwnToneBackend`) never sees the call.
 /// Deliberately NOT part of ``OutputBackend``, mirroring ``LatencyConfigurable``:
 /// the base seam stays capability-free.

@@ -940,8 +940,26 @@ public func makeBackend(
             return SyncedLocalSink(
                 renderSampleRate: deviceNativeRate,
                 channelCount: 2,
-                presentationDelayMs: { [weak nativeBackend] in nativeBackend?.startBufferMs ?? startBufferMs },
+                // Wave-4 delay agreement: composition-aware — the start-buffer
+                // when AirPlay is in the selection (or no BT), the BT-only
+                // buffer in a BT+Mac-without-AirPlay selection, so both sink
+                // families share one reference.
+                presentationDelayMs: { [weak nativeBackend] in
+                    nativeBackend?.localSinkReferenceDelayMs() ?? startBufferMs
+                },
                 userOffsetMs: { AppSettings().syncOffsetMs })
+        }
+        // BT-BACKEND: the N-instance Bluetooth sink manager, reading the SAME
+        // live start-buffer value the synced-local sink reads (risk R4: one
+        // buffer tune must move the AirPlay schedule, the Mac sink, and every
+        // BT sink together). Rendered at the manager's 44.1 kHz default — the
+        // airplay feed's own rate, so the fan-out's base resample is identity
+        // and each per-device `AVAudioEngine` bridges to its speaker's real
+        // rate itself. Per-device offsets/trims stay at the manager's 0
+        // defaults until BT-OFFSET-UI persists real ones.
+        nativeBackend.btSyncedSinkFactory = {
+            BTSyncedSink(
+                presentationDelayMs: { [weak nativeBackend] in nativeBackend?.startBufferMs ?? startBufferMs })
         }
         return nativeBackend
     }

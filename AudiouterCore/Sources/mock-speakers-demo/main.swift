@@ -78,6 +78,10 @@ func describe(_ event: BackendEvent) -> String? {
         // Native-only (Wave 3 T5 public-aggregate off-switch warning); never under
         // mock. Handled so the switch stays exhaustive.
         return "⚠ routing blocked needs default: \(active)"
+    case .btFirstMixAlignmentPrompt(let deviceID):
+        // Native-only (W3 first-mix alignment intercept); never under mock.
+        // Handled so the switch stays exhaustive.
+        return "♪ first-mix alignment prompt \(deviceID)"
     }
 }
 

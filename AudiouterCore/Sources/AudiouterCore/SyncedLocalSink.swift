@@ -11,86 +11,9 @@ import AVFoundation
 import AudioToolbox
 #endif
 
-/// Pure, hardware-free timing math for the synced local sink (T-SINK). Split out
-/// so the delay computation and the per-render-cycle release decision are
-/// unit-testable without an `AVAudioEngine` or any real audio device.
-///
-/// All time is `CLOCK_MONOTONIC`-based nanoseconds — the SAME timeline the
-/// AirPlay sessions' `pts` live on (`CapturedBuffer.pts`, produced by
-/// ``CoreAudioSystemTap/timespec(fromHostTime:)``). The render block rebases the
-/// output device's `mHostTime` (mach) into this timeline via that same helper
-/// before calling in here, so both sides of the comparison are one clock.
-enum SyncTiming {
-
-    static func monotonicNanos(_ ts: timespec) -> Int64 {
-        Int64(ts.tv_sec) &* 1_000_000_000 &+ Int64(ts.tv_nsec)
-    }
-
-    /// How long after a captured sample's `pts` the local speaker must emit it to
-    /// land level with the AirPlay receivers:
-    /// `presentationDelay − localOutputLatency − safetyMargin + userOffset`, clamped
-    /// ≥ 0.
-    ///
-    /// `presentationDelayMs` MUST come from the live engine value
-    /// (``AirPlayEngine/AirPlayEngine/currentPresentationDelayMs()`` /
-    /// ``EngineConfig/presentationDelayMs``) — never a hardcoded copy of the
-    /// 250 ms `AIRPLAY_AUDIO_LATENCY_MS` constant (plan risk R4): a later
-    /// buffer-size tune must move both the AirPlay schedule and this one together.
-    ///
-    /// `userOffsetMs` is the T-OFFSET-UI manual bias (Settings › Audio › Advanced,
-    /// ``AppSettings/syncOffsetMs``) — a static, user-set nudge added ON TOP of the
-    /// computed+corrected delay target (day-one escape hatch for devices that
-    /// misreport their own latency, plan risk R1). Signed: positive delays the
-    /// local speaker further, negative pulls it earlier. Applied INSIDE the same
-    /// zero-floor clamp as the computed terms, so a large negative offset can never
-    /// produce a negative delay — it only ever drives the total down to 0.
-    static func totalDelayNanos(
-        presentationDelayMs: Int,
-        localOutputLatencySeconds: Double,
-        safetyMarginMs: Double,
-        userOffsetMs: Int = 0
-    ) -> Int64 {
-        let presentationNanos = Int64(presentationDelayMs) &* 1_000_000
-        let latencyNanos = Int64((localOutputLatencySeconds * 1_000_000_000).rounded())
-        let marginNanos = Int64((safetyMarginMs * 1_000_000).rounded())
-        let offsetNanos = Int64(userOffsetMs) &* 1_000_000
-        return max(0, presentationNanos &- latencyNanos &- marginNanos &+ offsetNanos)
-    }
-
-    static func targetReleaseMonotonicNanos(anchorPtsNanos: Int64, totalDelayNanos: Int64) -> Int64 {
-        anchorPtsNanos &+ totalDelayNanos
-    }
-
-    /// Where, within a render cycle that starts at `cycleStartMonotonicNanos` and
-    /// spans `frameCount` frames, the first non-silent frame falls.
-    ///
-    /// - `silentFrames == frameCount`, `releasesThisCycle == false`: the target is
-    ///   still in the future — this whole cycle is silent.
-    /// - `releasesThisCycle == true`: emit `silentFrames` of silence, then real
-    ///   audio for the remainder. `silentFrames` is the sub-buffer (frame-accurate)
-    ///   offset that keeps the released instant within one frame of the target,
-    ///   which is what makes the alignment tight rather than buffer-granular.
-    struct RenderPlan: Equatable {
-        let silentFrames: Int
-        let releasesThisCycle: Bool
-    }
-
-    static func plan(
-        cycleStartMonotonicNanos: Int64,
-        frameCount: Int,
-        sampleRate: Double,
-        targetReleaseMonotonicNanos: Int64
-    ) -> RenderPlan {
-        let deltaNanos = targetReleaseMonotonicNanos &- cycleStartMonotonicNanos
-        // At or past the target (including a cycle we were late to gate): release
-        // at frame 0; the residual is surfaced as the phase error, not hidden.
-        if deltaNanos <= 0 { return RenderPlan(silentFrames: 0, releasesThisCycle: true) }
-        let nsPerFrame = 1_000_000_000.0 / sampleRate
-        let offsetFrames = Int((Double(deltaNanos) / nsPerFrame).rounded())
-        if offsetFrames >= frameCount { return RenderPlan(silentFrames: frameCount, releasesThisCycle: false) }
-        return RenderPlan(silentFrames: offsetFrames, releasesThisCycle: true)
-    }
-}
+// The pure timing math (`SyncTiming`) and the T-CORRECTION DSP
+// (`FractionalResampler` + `PhaseController`) live in `SyncCore.swift` — the
+// deliberately license-clean shared core (PLAN-UNIVERSAL-SYNC Decision 5).
 
 #if canImport(AVFoundation)
 
@@ -106,7 +29,7 @@ enum SyncTiming {
 /// ## Scope
 /// The frame-accurate release gate, the T-LIFECYCLE device-change /
 /// sleep-wake rebuild ("MARK: T-LIFECYCLE" below), the T-CORRECTION
-/// continuous drift correction (`PhaseController.swift`'s resampler + PI
+/// continuous drift correction (`SyncCore.swift`'s resampler + PI
 /// loop, driven from `renderInterleaved`), and the T-OFFSET-UI user bias
 /// (`userOffsetMs`) all live here. The tap self-exclude that prevents an
 /// echo feedback loop is the fan-out's job (T-FANOUT), not this file's.
@@ -169,7 +92,7 @@ public final class SyncedLocalSink: @unchecked Sendable {
     private let deinterleaveScratch: UnsafeMutablePointer<Float>
     private let deinterleaveScratchCapacity: Int
 
-    // T-CORRECTION — continuous phase-lock DSP (see `PhaseController.swift`). Both
+    // T-CORRECTION — continuous phase-lock DSP (see `SyncCore.swift`). Both
     // are touched only by the single render (consumer) thread while streaming, and
     // reset only while the engine is stopped (`clearSessionState`), so they follow
     // the same single-consumer, no-render-thread-lock contract as the ring read.
@@ -342,7 +265,10 @@ public final class SyncedLocalSink: @unchecked Sendable {
             presentationDelayMs: presentationDelayMs(),
             localOutputLatencySeconds: localOutputLatency()?.totalSeconds ?? 0,
             safetyMarginMs: safetyMarginMs,
-            userOffsetMs: userOffsetMs())
+            // `userOffsetMs` stays a whole-ms `Int` here (T-OFFSET-UI owns no
+            // fractional resolution) — widened only at this call, matching
+            // `totalDelayNanos`'s now-`Double` parameter (BT-SYNC-DRAWER T1).
+            userOffsetMs: Double(userOffsetMs()))
     }
 
     /// Just the engine-level teardown half of `stop()` — no session-state reset.
@@ -459,6 +385,17 @@ public final class SyncedLocalSink: @unchecked Sendable {
         performLifecycleRebuild()
     }
 
+    /// Wave-4 delay agreement (BT-REFSEL follow-on): the REFERENCE TIMELINE
+    /// itself moved — e.g. AirPlay joined or left a BT+Mac selection, flipping
+    /// this sink's delay between the AirPlay start-buffer and the BT-only
+    /// buffer. Same full rebuild as a device change: the fresh session anchor
+    /// re-samples `presentationDelayMs`, which is what actually lands the new
+    /// reference.
+    public func requestReanchor(cause: String) {
+        Telemetry.log(.localPlayback, "synced_local_reanchor", ["cause": cause])
+        performLifecycleRebuild()
+    }
+
     /// Wired externally to `NSWorkspace.willSleepNotification`. `AudiouterCore`
     /// must never import AppKit (package rule, `AudiouterCore/AGENTS.md`), so —
     /// same idiom as ``OutputBackend/handleSystemWillSleep()`` — this is a plain
@@ -544,7 +481,7 @@ public final class SyncedLocalSink: @unchecked Sendable {
                     presentationDelayMs: presentationDelayMs(),
                     localOutputLatencySeconds: localOutputLatency()?.totalSeconds ?? 0,
                     safetyMarginMs: safetyMarginMs,
-                    userOffsetMs: userOffsetMs())
+                    userOffsetMs: Double(userOffsetMs()))
                 cachedTotalDelayNanos = delay
                 anchored = true
                 targetReleaseNanos = SyncTiming.targetReleaseMonotonicNanos(

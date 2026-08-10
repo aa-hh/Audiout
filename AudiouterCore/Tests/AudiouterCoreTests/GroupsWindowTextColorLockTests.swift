@@ -269,9 +269,7 @@ import AppKit
     // MARK: 5. NEGATIVE — MixerWindowController's footer + empty-state pane
 
     private func makeMixerWindow() -> MixerWindowController {
-        let controller = makeGroupController()
-        return MixerWindowController(groupController: controller,
-                                     frameAutosaveName: uniqueName("GroupsWindowTextColorLockTests"))
+        MixerWindowController(groupController: makeGroupController())
     }
 
     @Test func mixerWindowFooterAndEmptyStateLabelsStayStock() {
@@ -289,7 +287,8 @@ import AppKit
         assertAllLabelsFrozen(in: content.view, host: "MixerWindowController content (footer + empty state)")
         #expect(window.test_isShowingEmptyState, "expected the empty state pane with zero groups/devices")
         #expect(window.test_emptyState.test_messageText == "No groups yet.")
-        #expect(window.test_emptyState.test_subtitleText == "Music first — rooms can come later.")
+        #expect(window.test_emptyState.test_subtitleText ==
+                "Save a set of speakers as a group, then switch to it in two clicks from the menu bar.")
     }
 
     // MARK: 6. NEGATIVE — IconPickerViewController

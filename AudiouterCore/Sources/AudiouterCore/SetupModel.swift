@@ -107,6 +107,11 @@ public enum SystemSettingsPane: Sendable {
     case screenAndSystemAudioRecording
     case localNetwork
     case accessibility
+    /// Not a Privacy anchor — the Bluetooth pane itself. The BT-CONNECT
+    /// fallback (PLAN-UNIVERSAL-SYNC Decision 3): when a programmatic
+    /// reconnect doesn't resolve, one tap lands the user where pairing and
+    /// manual connect live.
+    case bluetooth
 
     /// The `x-apple.systempreferences:` URL that opens this pane.
     public var url: URL {
@@ -117,6 +122,8 @@ public enum SystemSettingsPane: Sendable {
             return Self.make("Privacy_LocalNetwork")
         case .accessibility:
             return Self.make("Privacy_Accessibility")
+        case .bluetooth:
+            return URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings")!
         }
     }
 
@@ -458,7 +465,7 @@ public final class SetupModel {
     /// it just adds a disabled entry to Login Items. The user-facing step is
     /// the *approval* afterwards, which `.requiresApproval` surfaces. Called
     /// once, at onboarding load (mirrors the design doc's "at first launch").
-    /// Idempotent — safe to call again (e.g. "Check Permissions…").
+    /// Idempotent — safe to call again (e.g. "Open Setup…").
     ///
     /// NOTE (Developer-ID gating): under this branch's ad-hoc signing,
     /// `register()` cannot validate and this will not progress past

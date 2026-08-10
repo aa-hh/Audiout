@@ -79,18 +79,8 @@ extension SerializedSharedState {
 
     // MARK: Helpers
 
-    private var suiteName: String
-    private var defaults: UserDefaults!
-
-    init() {
-        suiteName = "AudioControlSetupTests.\(UUID().uuidString)"
-        defaults = UserDefaults(suiteName: suiteName)
-        defaults.removePersistentDomain(forName: suiteName)
-    }
-
-    deinit {
-        defaults.removePersistentDomain(forName: suiteName)
-    }
+    private let isolation = TestIsolation(owner: "SetupModelTests")
+    private var defaults: UserDefaults { isolation.isolatedDefaults }
 
     private func makeModel(audio: PermissionStatus,
                            localNetwork: SpyLocalNetwork = SpyLocalNetwork(),
@@ -126,7 +116,7 @@ extension SerializedSharedState {
     /// On macOS < 15 there is no Local Network privacy permission, so the model is
     /// constructed with `localNetworkGated: false`: it must start `.granted`, never
     /// run a Bonjour browse, and never surface as a missing required permission
-    /// (which is what produced the dead-end "Open Settings" → nonexistent pane).
+    /// (which is what produced the dead-end "Open Settings…" → nonexistent pane).
     private func makeUngatedModel(localNetwork net: SpyLocalNetwork) -> SetupModel {
         SetupModel(audioProbe: CannedAudioProbe(result: .granted),
                    localNetwork: net,
@@ -500,7 +490,7 @@ extension SerializedSharedState {
         settings.hasCompletedSetup = true   // default gate would say "hide"
 
         // skip → never present (the testing default), even native + not completed.
-        let fresh = AppSettings(defaults: UserDefaults(suiteName: "\(suiteName).fresh")!)
+        let fresh = AppSettings(defaults: isolation.makeDefaults())
         for skip in ["skip", "off", "never", "0"] {
             #expect(!SetupModel.shouldPresentOnLaunch(
                 settings: fresh, backendKind: .native,

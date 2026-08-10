@@ -71,6 +71,17 @@ struct DeviceRowView: View {
         device.connection.state == "failed"
     }
 
+    /// Whether a bare tap on the row toggles play. A failure card's row must
+    /// not: Diagnose and Try Again sit inside the same gesture subtree, so the
+    /// tap that presses them ALSO lands here — and a `"failed"` device can
+    /// still be `isAvailable`, so the old availability guard let a Diagnose
+    /// press silently start or stop the speaker. VoiceOver already can't
+    /// toggle a failed row (``combined(_:)`` gives it no action); this makes
+    /// touch agree.
+    static func tapTogglesPlay(_ device: DeviceState) -> Bool {
+        device.isAvailable && !showsFailureCard(device)
+    }
+
     /// The Mac's rule for the volume slider and the mute button, mirrored
     /// exactly (AudiouterSharedUI/DeviceRowView: `device.isAvailable &&
     /// controllable`, where `PopoverController` passes `controllable` =
@@ -601,7 +612,7 @@ struct DeviceRowView: View {
                 case .vertical:
                     return                               // the ScrollView handled it
                 case nil:
-                    guard device.isAvailable else { return }
+                    guard Self.tapTogglesPlay(device) else { return }
                     toggleSelected()                     // doc:1792
                 }
             }

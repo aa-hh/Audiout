@@ -170,6 +170,17 @@ import AudiouterProtocol
     }
 
     @MainActor
+    @Test func aTapOnAFailureCardNeverTogglesPlay() {
+        // Diagnose and Try Again share the row's gesture subtree, and a
+        // "failed" device can still be isAvailable — so the tap rule, not the
+        // availability rule, is what keeps a Diagnose press from silently
+        // starting the speaker.
+        #expect(!DeviceRowView.tapTogglesPlay(makeDevice(isSelected: true, connectionState: "failed")))
+        #expect(!DeviceRowView.tapTogglesPlay(makeDevice(isAvailable: false)))
+        #expect(DeviceRowView.tapTogglesPlay(makeDevice()))
+    }
+
+    @MainActor
     @Test func muteNeverFreezesTheLevel() {
         #expect(DeviceRowView.isControllable(makeDevice(isSelected: true, isMuted: true), appRoutes: []))
     }

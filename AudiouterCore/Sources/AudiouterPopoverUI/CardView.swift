@@ -30,9 +30,12 @@ final class CardView: NSView {
     // on collapse and back to the body's fitting height on expand. Clipping (not
     // just hiding) is what makes the collapse animate smoothly: the rows slide up
     // behind the clip's top edge while the constraint shrinks, and only the
-    // container's own height changes drive the card's — and the popover's — size
-    // (PLAN §E risk 1: "clip + fade instead of hide"). `bodyClip` is an arranged
-    // subview of `contentStack`, so an empty (header-only) card still lays out.
+    // container's own height changes drive the card's — and the surface's — size
+    // (PLAN §E risk 1: clip instead of hide). The clip height is the ONLY animated
+    // dimension: the body does not fade (live report 2026-08-10 — a fade the row
+    // reveal and the subsection collapse don't do is what made the cards read as a
+    // different, less pretty system). `bodyClip` is an arranged subview of
+    // `contentStack`, so an empty (header-only) card still lays out.
 
     /// The clip container that masks the collapsing body. Its height is the single
     /// animated dimension; `bodyStack` is pinned inside it (top-anchored, so the
@@ -66,10 +69,6 @@ final class CardView: NSView {
     /// always begins at the expanded height (`target`), never a stale `0` (see
     /// `setBodyCollapsed`'s collapse branch). `nil` until the first animated toggle.
     private(set) var lastAnimatedStartHeight: CGFloat?
-
-    /// Collapse/expand animation duration — matches the popover's own resize pace
-    /// (PLAN §E risk 1: "match your 0.2s so they track").
-    static let collapseAnimationDuration: TimeInterval = 0.2
 
     init() {
         super.init(frame: .zero)
@@ -191,16 +190,16 @@ final class CardView: NSView {
 
     /// Set the collapsed state.
     ///
-    /// Choreography (PLAN §E risk 1):
+    /// Choreography (PLAN §E risk 1) — a clip height and nothing else, exactly
+    /// like a subsection collapse and a row reveal:
     /// - **collapse:** SEED the clip-height constraint with the current expanded
     ///   height BEFORE animating it to 0 (symmetric with expand's explicit floor),
-    ///   fade the body out in the same `NSAnimationContext` group, and set
-    ///   `isHidden` on the body ONLY in the completion handler (so it stays
-    ///   rendered — and fading — throughout). The seed is what makes the FIRST
-    ///   collapse of a never-toggled card animate rather than snap (see the branch).
-    /// - **expand:** clear `isHidden` and restore `alphaValue` to 1 BEFORE
-    ///   animating, then animate the clip height from 0 up to the body's fitting
-    ///   height (deactivating the pinned-0 constraint at the end).
+    ///   and set `isHidden` on the body ONLY in the completion handler (so it
+    ///   stays rendered throughout). The seed is what makes the FIRST collapse of
+    ///   a never-toggled card animate rather than snap (see the branch).
+    /// - **expand:** clear `isHidden` BEFORE animating, then animate the clip
+    ///   height from 0 up to the body's fitting height (deactivating the pinned-0
+    ///   constraint at the end).
     ///
     /// `animated == false` (initial build + Reduce Motion) applies the end state
     /// synchronously with no animation. All constraint changes go through the
@@ -234,11 +233,9 @@ final class CardView: NSView {
             if collapsed {
                 bodyHeightConstraint.constant = 0
                 bodyHeightConstraint.isActive = true
-                bodyStack.alphaValue = 0
                 bodyClip.isHidden = true
             } else {
                 bodyClip.isHidden = false
-                bodyStack.alphaValue = 1
                 bodyHeightConstraint.isActive = false
             }
             onComplete?()
@@ -248,7 +245,7 @@ final class CardView: NSView {
         collapseGeneration += 1
         let generation = collapseGeneration
         NSAnimationContext.runAnimationGroup({ context in
-            context.duration = Self.collapseAnimationDuration
+            context.duration = PopoverPanelViewController.collapseRevealDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             context.allowsImplicitAnimation = true
             if collapsed {
@@ -260,9 +257,9 @@ final class CardView: NSView {
                 // a side effect of a prior EXPAND animation, so on a never-expanded
                 // card activating it here pins the clip to 0 IMMEDIATELY while
                 // `animator().constant = 0` animates 0→0 (a no-op) — the body height
-                // SNAPS shut (only its alpha fades), and the rail overlay, which
-                // tracks the live clip floor every layout pass, snaps with it. That
-                // was the visible "content jumps on the first collapse only" glitch.
+                // SNAPS shut, and the rail overlay, which tracks the live clip floor
+                // every layout pass, snaps with it. That was the visible "content
+                // jumps on the first collapse only" glitch.
                 // Seeding `target` gives the first collapse the identical target→0
                 // travel every later collapse already gets (a prior expand left the
                 // constant at `target`), so all collapses squeeze identically.
@@ -271,10 +268,9 @@ final class CardView: NSView {
                 layoutSubtreeIfNeeded()
                 lastAnimatedStartHeight = target
                 bodyHeightConstraint.animator().constant = 0
-                bodyStack.animator().alphaValue = 0
             } else {
-                // Clear hidden + restore alpha BEFORE animating up to the fitting
-                // height, then let the pinned constraint go inactive at the end.
+                // Clear hidden BEFORE animating up to the fitting height, then let
+                // the pinned constraint go inactive at the end.
                 bodyClip.isHidden = false
                 // Start from 0 explicitly so the up-animation has a floor even if a
                 // prior expand left the constraint inactive.
@@ -283,7 +279,6 @@ final class CardView: NSView {
                 layoutSubtreeIfNeeded()
                 lastAnimatedStartHeight = 0
                 bodyHeightConstraint.animator().constant = target
-                bodyStack.animator().alphaValue = 1
             }
             layoutSubtreeIfNeeded()
         }, completionHandler: { [weak self] in

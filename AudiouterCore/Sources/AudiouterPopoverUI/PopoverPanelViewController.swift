@@ -134,13 +134,18 @@ final class PopoverPanelViewController: NSViewController {
     /// for the lifetime of its button (target/action holds `target` weakly).
     private static var actionTargetKey: UInt8 = 0
 
-    /// How long a row takes to unfold into — or fold out of — the stack
-    /// (`insertRow` / `removeRow`), so an expand and its collapse are exact
-    /// mirrors of one another. 0.15s: Alec's live call on the previous 0.22s
-    /// ("it's also not that snappy"). Short enough to feel immediate, long
+    /// How long ANY collapsible element in this surface takes to unfold into —
+    /// or fold out of — its host: an inserted row (`insertRow`/`removeRow`), a
+    /// device-type subsection, and a card's body (`CardView.setBodyCollapsed`).
+    /// ONE value and one curve (`.easeInEaseOut`) for all three, so an expand
+    /// and its collapse are exact mirrors and the three read as a single motion
+    /// language; a second constant kept in step by hand would silently drift
+    /// (the card's own 0.2s was exactly that, live report 2026-08-10 — the cards
+    /// "don't follow the same system"). 0.15s: Alec's live call on the previous
+    /// 0.22s ("it's also not that snappy"). Short enough to feel immediate, long
     /// enough that the rows below still read as being PUSHED apart rather than
     /// jumping to a new position.
-    static let rowRevealDuration: TimeInterval = 0.15
+    static let collapseRevealDuration: TimeInterval = 0.15
 
     /// The panel height the most recent ANIMATED `insertRow` reveal starts FROM,
     /// recorded once the collapsed start state is laid out. A reveal that starts
@@ -673,19 +678,24 @@ final class PopoverPanelViewController: NSViewController {
     // MARK: Collapse / expand (T-4, PLAN decision 5 + §E risk 1)
 
     /// Set a card's collapsed state by section title and follow it with the
-    /// popover resize. Drives the card's clip-height animation and the popover's
-    /// `preferredContentSize` change in lockstep at the same 0.2s pace so the panel
-    /// and popover track (PLAN §E risk 1). `animated == false` (Reduce Motion or
-    /// programmatic) applies both end states synchronously. Flips the chevron
-    /// symbol to match. No-op if `title` isn't a collapsible card.
+    /// surface resize. Drives the card's clip-height animation and the published
+    /// content size in lockstep — the body clips at `collapseRevealDuration`, the
+    /// same duration and curve a subsection and an inserted row travel on, so
+    /// every collapsible thing on this surface reads as one motion language.
+    /// `animated == false` (Reduce Motion, headless or programmatic) applies both
+    /// end states synchronously. Flips the chevron symbol to match. No-op if
+    /// `title` isn't a collapsible card.
     ///
-    /// The popover resize runs via `panelContentDidChangeHeight(animated:)`, which
+    /// The surface resize runs via `panelContentDidChangeHeight(animated:)`, which
     /// already gates itself on `accessibilityDisplayShouldReduceMotion`; the card
     /// animation is gated the same way here so both honor Reduce Motion together.
     @discardableResult
     func setCardCollapsed(title: String, collapsed: Bool, animated: Bool) -> Bool {
         guard let card = cardsByHeader[title] else { return false }
-        let wantsAnimation = animated && !reduceMotion
+        // Reduce Motion AND headless resolve instantly and completely, exactly as
+        // `setSubsectionCollapsed` does: an `NSAnimationContext` completion handler
+        // never fires for a view in no window.
+        let wantsAnimation = animated && !reduceMotion && !HeadlessRuntime.isActive
 
         if let chevron = chevronsByHeader[title] {
             assignChevron(chevron, collapsed: collapsed, for: title)
@@ -698,9 +708,11 @@ final class PopoverPanelViewController: NSViewController {
             // the animation).
             if !wantsAnimation { self?.panelContentDidChangeHeight(animated: false) }
         }
-        // Kick the popover resize in the SAME turn as the card animation so both
-        // run together (NSPopover animates its `preferredContentSize` change at its
-        // own pace; matching 0.2s keeps them in step — PLAN §E risk 1).
+        // Kick the surface resize in the SAME turn as the card animation so both
+        // run together: `animator().constant` sets the model value immediately, so
+        // this re-fit measures where the body is GOING and the window travels with
+        // it rather than after it (`AppSurfaceController.applyWindowContentSize`
+        // runs its own frame animation) — the subsection collapse's rule exactly.
         if wantsAnimation { panelContentDidChangeHeight(animated: true) }
         return true
     }
@@ -718,7 +730,7 @@ final class PopoverPanelViewController: NSViewController {
 
     /// Collapse/expand a device-type SUBSECTION by animating its body clip's
     /// height — `insertRow`/`removeRow`'s choreography applied to the whole group
-    /// of rows a subsection holds, at the same `rowRevealDuration` and curve, so
+    /// of rows a subsection holds, at the same `collapseRevealDuration` and curve, so
     /// a drawer and a section read as one motion language. Flips the chevron to
     /// match. `false` if `title` has no mounted subsection body.
     ///
@@ -780,7 +792,7 @@ final class PopoverPanelViewController: NSViewController {
             return
         }
         NSAnimationContext.runAnimationGroup({ context in
-            context.duration = Self.rowRevealDuration
+            context.duration = Self.collapseRevealDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             context.allowsImplicitAnimation = true
             clip.heightConstraint.constant = clip.frame.height
@@ -822,7 +834,7 @@ final class PopoverPanelViewController: NSViewController {
         clip.heightConstraint.isActive = true
         _ = fittingSizeSettled()   // commit the START state; the reveal needs the distance
         NSAnimationContext.runAnimationGroup({ context in
-            context.duration = Self.rowRevealDuration
+            context.duration = Self.collapseRevealDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             context.allowsImplicitAnimation = true
             clip.heightConstraint.animator().constant = revealHeight
@@ -943,7 +955,7 @@ final class PopoverPanelViewController: NSViewController {
         test_rowRevealStartHeight = fittingSizeSettled().height
 
         NSAnimationContext.runAnimationGroup({ context in
-            context.duration = Self.rowRevealDuration
+            context.duration = Self.collapseRevealDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             context.allowsImplicitAnimation = true
             clip.heightConstraint.animator().constant = revealHeight
@@ -1005,7 +1017,7 @@ final class PopoverPanelViewController: NSViewController {
         // the close is animating.
         clip.isClosing = true
         NSAnimationContext.runAnimationGroup({ context in
-            context.duration = Self.rowRevealDuration
+            context.duration = Self.collapseRevealDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
             context.allowsImplicitAnimation = true
             // Seed the clip with its CURRENT height before retargeting to 0, and

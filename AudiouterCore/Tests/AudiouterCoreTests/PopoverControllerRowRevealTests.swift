@@ -181,7 +181,7 @@ import Foundation
 
     /// The reused drawer's nastiest window (D2): an animated close's detach is
     /// DEFERRED into its completion handler, so a re-open landing inside
-    /// `rowRevealDuration` finds the row still mounted in the CLOSING clip.
+    /// `collapseRevealDuration` finds the row still mounted in the CLOSING clip.
     /// `insertRow` must evict that clip — left in place, its mid-close height
     /// pollutes the fresh measurement (a residue nothing ever re-publishes
     /// away), and its deferred detach would later rip the row back out of the

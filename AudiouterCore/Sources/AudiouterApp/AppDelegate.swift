@@ -1385,6 +1385,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 log("level: \(id) rms \(rms)")
             }
             popoverController.updateLevel(rms, for: id)
+            // Drives our Touch Bar's play/pause glyph. Real now-playing state is
+            // gated (MediaRemote never calls back on macOS 27), and this is the
+            // one playback fact we own: we are tapping the audio, so we know
+            // whether any is flowing.
+            touchBarFullBar.noteAudioLevel(rms)
             return
         case .appLevel(let bundleID, let rms):
             popoverController.updateAppLevel(rms, for: bundleID)

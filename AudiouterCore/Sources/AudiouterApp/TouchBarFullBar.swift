@@ -47,6 +47,12 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
 
     private var presented = false
 
+    /// The play/pause button, held so its icon can follow what's actually
+    /// playing rather than sitting on one static glyph.
+    private weak var playPauseButton: NSButton?
+    private var isPlaying = false
+    private var silenceTimer: Timer?
+
     // MARK: - Presenting
 
     /// Follow volume ownership. Shown only while we own the volume, so the user's
@@ -81,6 +87,44 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
         TouchBarPrivateAPI.presentFullWidth(makeBar())
     }
 
+    // MARK: - Play/pause state
+
+    /// Feed the app's own audio level so the play/pause icon reflects reality:
+    /// the pause glyph while sound is flowing, play while it isn't.
+    ///
+    /// WHY THIS SIGNAL: the honest one — now-playing state — is unreachable.
+    /// `MediaRemote`'s symbols still resolve on macOS 27, but
+    /// `MRMediaRemoteGetNowPlayingApplicationIsPlaying` never calls back; Apple
+    /// gated it. We are already tapping the system audio to route it, so "is
+    /// sound actually coming out" is a fact we own outright and costs nothing.
+    ///
+    /// KNOWN IMPRECISION, and it is inherent to the proxy rather than a bug: it
+    /// tracks AUDIBLE OUTPUT, not transport state. A notification chime while
+    /// the music is paused reads briefly as playing, and audio from a non-media
+    /// app counts too. It is right in the case that matters — press pause, the
+    /// icon becomes play — and no better signal exists to us.
+    func noteAudioLevel(_ rms: Float) {
+        // Above the noise floor of a silent tap, well below normal programme
+        // level, so a quiet passage doesn't read as a stop.
+        guard rms > 0.002 else { return }
+        silenceTimer?.invalidate()
+        // Hysteresis: brief gaps between tracks, or a quiet beat, must not flap
+        // the icon. Only a sustained silence counts as "stopped".
+        silenceTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.setPlaying(false) }
+        }
+        setPlaying(true)
+    }
+
+    private func setPlaying(_ playing: Bool) {
+        guard playing != isPlaying else { return }
+        isPlaying = playing
+        playPauseButton?.image = NSImage(
+            systemSymbolName: playPauseSymbol, accessibilityDescription: "Play or pause")
+    }
+
+    private var playPauseSymbol: String { isPlaying ? "pause.fill" : "play.fill" }
+
     // MARK: - The bar
 
     private func makeBar() -> NSTouchBar {
@@ -106,19 +150,23 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
                   makeItemForIdentifier identifier: NSTouchBarItem.Identifier) -> NSTouchBarItem? {
         switch identifier {
         case ItemID.brightnessDown:
-            return button(identifier, symbol: "sun.min", label: "Brightness down") {
+            return button(identifier, symbol: "sun.min", label: "Brightness down",
+                          repeatsWhenHeld: true) {
                 SystemAuxKey.brightnessDown.post()
             }
         case ItemID.brightnessUp:
-            return button(identifier, symbol: "sun.max", label: "Brightness up") {
+            return button(identifier, symbol: "sun.max", label: "Brightness up",
+                          repeatsWhenHeld: true) {
                 SystemAuxKey.brightnessUp.post()
             }
         case ItemID.illuminationDown:
-            return button(identifier, symbol: "light.min", label: "Keyboard brightness down") {
+            return button(identifier, symbol: "light.min", label: "Keyboard brightness down",
+                          repeatsWhenHeld: true) {
                 SystemAuxKey.illuminationDown.post()
             }
         case ItemID.illuminationUp:
-            return button(identifier, symbol: "light.max", label: "Keyboard brightness up") {
+            return button(identifier, symbol: "light.max", label: "Keyboard brightness up",
+                          repeatsWhenHeld: true) {
                 SystemAuxKey.illuminationUp.post()
             }
         case ItemID.previous:
@@ -126,9 +174,11 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
                 SystemAuxKey.previous.post()
             }
         case ItemID.playPause:
-            return button(identifier, symbol: "playpause", label: "Play or pause") {
+            let item = button(identifier, symbol: playPauseSymbol, label: "Play or pause") {
                 SystemAuxKey.playPause.post()
             }
+            playPauseButton = item.view as? NSButton
+            return item
         case ItemID.next:
             return button(identifier, symbol: "forward.end", label: "Next") {
                 SystemAuxKey.next.post()
@@ -140,11 +190,13 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
                 self?.onToggleMute?()
             }
         case ItemID.volumeDown:
-            return button(identifier, symbol: "speaker.wave.1", label: "Volume down") { [weak self] in
+            return button(identifier, symbol: "speaker.wave.1", label: "Volume down",
+                          repeatsWhenHeld: true) { [weak self] in
                 self?.onVolumeStep?(false)
             }
         case ItemID.volumeUp:
-            return button(identifier, symbol: "speaker.wave.3", label: "Volume up") { [weak self] in
+            return button(identifier, symbol: "speaker.wave.3", label: "Volume up",
+                          repeatsWhenHeld: true) { [weak self] in
                 self?.onVolumeStep?(true)
             }
         default:
@@ -152,14 +204,25 @@ final class TouchBarFullBar: NSObject, NSTouchBarDelegate {
         }
     }
 
+    /// - Parameter repeatsWhenHeld: `true` for the stepping controls (volume,
+    ///   brightness, backlight) — a real function key repeats while held, and
+    ///   without this the user has to tap once per step, which is what Alec hit.
+    ///   Left `false` for toggles: a repeating mute would flap on and off.
     private func button(_ identifier: NSTouchBarItem.Identifier,
                         symbol: String, label: String,
+                        repeatsWhenHeld: Bool = false,
                         action: @escaping () -> Void) -> NSCustomTouchBarItem {
         let item = NSCustomTouchBarItem(identifier: identifier)
         let button = NSButton(
             image: NSImage(systemSymbolName: symbol, accessibilityDescription: label)
                 ?? NSImage(),
             target: ActionProxy.shared, action: #selector(ActionProxy.fire(_:)))
+        if repeatsWhenHeld {
+            button.isContinuous = true
+            // Roughly the system key-repeat feel: a pause long enough that a
+            // single tap is unambiguously one step, then steady repeats.
+            button.setPeriodicDelay(0.4, interval: 0.1)
+        }
         ActionProxy.shared.register(button, action)
         button.setAccessibilityLabel(label)
         item.view = button

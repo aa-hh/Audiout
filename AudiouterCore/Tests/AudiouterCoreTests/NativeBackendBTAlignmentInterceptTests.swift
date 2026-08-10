@@ -67,7 +67,9 @@ import CoreAudio
         var onExternalChange: (@Sendable (Int?, Bool?, Bool) -> Void)?
         func currentVolume() -> Int? { nil }
         func currentMuted() -> Bool? { nil }
-        func setVolume(_ volume: Int) {}
+        // Reports the write as landed: these suites describe an ordinary
+        // settable output, not the unwritable case the flag exists for.
+        func setVolume(_ volume: Int, didWrite: (@Sendable (Bool) -> Void)?) { didWrite?(true) }
         func setMuted(_ muted: Bool) {}
         func start() {}
         func stop() {}

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import Foundation
 import SwiftUI
 import AudiouterProtocol
 
@@ -40,6 +41,15 @@ struct DeviceRowView: View {
     @State private var localVolume: Double?   // in-drag echo
     @State private var showFailureDetail = false
     @State private var rowWidth: CGFloat = 0  // the fader track
+    @State private var fingerDown = false     // touch-down, before the latch
+
+    /// The tap's own echo: what the row shows between the finger and the Mac's
+    /// answer. Bounded exactly the way ``MainOutRow``'s `localVolume` is — the
+    /// next snapshot that moves `isSelected` clears it, and if none ever comes
+    /// (the Mac refused the write, and said so in a toast) the two-second
+    /// timeout below clears it instead, so the row falls back to the truth
+    /// rather than sitting on a state nobody granted.
+    @State private var pendingSelection: Bool?
 
     @ScaledMetric(relativeTo: .body) private var nameSize: CGFloat = 16.5
     @ScaledMetric(relativeTo: .body) private var glyphSize: CGFloat = 17
@@ -101,12 +111,25 @@ struct DeviceRowView: View {
         return device.isAvailable ? "not selected for Main Out" : "unavailable"
     }
 
+    /// What the row SHOWS as its armed state: the tap the finger just made,
+    /// until the Mac confirms it or the echo times out; the Mac's own answer
+    /// whenever no tap is in flight. Same shape as
+    /// ``MainOutRow/thumbValue(local:server:)``, for the same reason.
+    static func selectionEcho(pending: Bool?, server: Bool) -> Bool {
+        pending ?? server
+    }
+
     /// What VoiceOver reads as the row's value. Armed state first, then the two
     /// states the row otherwise carries in colour alone — the `MUTED` sub-label
     /// and ``routedDot``, an 11 pt disc on a hidden halo. Comma-separated:
     /// the row is one element, so it gets one value.
-    static func spokenValue(for device: DeviceState, isRouted: Bool) -> String {
-        var parts = [device.isSelected ? "Armed" : "Not armed"]
+    ///
+    /// `isSelected` is passed rather than read off `device`, because the row
+    /// may be showing a tap the Mac hasn't answered yet
+    /// (``selectionEcho(pending:server:)``) — and what the screen shows and
+    /// what VoiceOver says have to be the same thing.
+    static func spokenValue(for device: DeviceState, isSelected: Bool, isRouted: Bool) -> String {
+        var parts = [isSelected ? "Armed" : "Not armed"]
         if device.isMuted { parts.append("Muted") }
         if isRouted { parts.append("App audio routed here") }
         return parts.joined(separator: ", ")
@@ -125,14 +148,26 @@ struct DeviceRowView: View {
 
     private var isConnecting: Bool { device.connection.state == "connecting" }
 
+    /// The armed state the row draws and speaks — the Mac's, or the tap that
+    /// is still on its way there.
+    private var selected: Bool {
+        Self.selectionEcho(pending: pendingSelection, server: device.isSelected)
+    }
+
     /// doc:1828 — armed, present, and nothing in the way.
     private var isLive: Bool {
-        device.isSelected && device.isAvailable && !isFailed && !isConnecting
+        selected && device.isAvailable && !isFailed && !isConnecting
     }
 
     /// doc:1826 — the row only reads as "dragging" once the finger has
     /// committed horizontally.
     private var dragging: Bool { axis == .horizontal }
+
+    /// Touch-down, before the gesture has decided what it is. It ends the
+    /// moment the finger commits — a horizontal drag has its own tint, and a
+    /// vertical one belongs to the ScrollView, not to this row. Never on a
+    /// row a tap can't act on: a flash is a promise.
+    private var pressed: Bool { fingerDown && axis == nil && device.isAvailable }
 
     private var displayVolume: Int { Int((localVolume ?? Double(device.volume)).rounded()) }
 
@@ -160,11 +195,9 @@ struct DeviceRowView: View {
                 .accessibilityElement(children: .ignore)
                 .accessibilityAddTraits(.isButton)
                 .accessibilityLabel(device.name)
-                .accessibilityValue(Self.spokenValue(for: device, isRouted: isRouted))
+                .accessibilityValue(Self.spokenValue(for: device, isSelected: selected, isRouted: isRouted))
                 .accessibilityHint(hint)
-                .accessibilityAction {
-                    session.setDeviceSelected(id: device.id, selected: !device.isSelected)
-                }
+                .accessibilityAction { toggleSelected() }
                 .accessibilityAdjustableAction { direction in
                     guard controlsEnabled else { return }
                     session.setDeviceVolume(
@@ -182,6 +215,16 @@ struct DeviceRowView: View {
         }
         .padding(.bottom, 2)
         .opacity(device.isAvailable ? 1 : 0.45)
+        // The bound on the echo: any snapshot that moves this device's armed
+        // state ends it, whichever way it moved.
+        .onChange(of: device.isSelected) { pendingSelection = nil }
+        // And the other bound, for the write that never lands: a refusal
+        // changes nothing on the wire, so nothing above would ever fire.
+        .task(id: pendingSelection) {
+            guard pendingSelection != nil else { return }
+            do { try await Task.sleep(for: .seconds(2)) } catch { return }
+            pendingSelection = nil
+        }
     }
 
     // MARK: - The row itself
@@ -192,7 +235,7 @@ struct DeviceRowView: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(device.name)
-                    .font(.system(size: nameSize, weight: device.isSelected ? .semibold : .regular))
+                    .font(.system(size: nameSize, weight: selected ? .semibold : .regular))
                     .tracking(-0.2)
                     .lineLimit(1)
                     .foregroundStyle(nameTint)
@@ -210,11 +253,23 @@ struct DeviceRowView: View {
         .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
         .background(alignment: .leading) { wash }
         .overlay(alignment: .leading) { edgeLine }
-        .background(dragging ? WarmSignal.gold.opacity(0.06) : Color.clear)   // doc:1851
+        .background(touchTint)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: pressed)
         .clipShape(RoundedRectangle(cornerRadius: WarmSignal.Radius.row, style: .continuous))
         .contentShape(Rectangle())
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { rowWidth = $0 }
         .simultaneousGesture(dragGesture)
+    }
+
+    /// doc:1851's drag tint, and under it the touch-down flash that answers
+    /// the finger before anything else can: the arm write round-trips to the
+    /// Mac, and the drag needs 5 pt before it means anything, so without this
+    /// the row's first response to being touched is nothing at all. Same gold
+    /// as the wash it is about to raise — the acknowledgment and the result
+    /// are one material.
+    private var touchTint: Color {
+        if dragging { return WarmSignal.gold.opacity(0.06) }
+        return pressed ? WarmSignal.gold.opacity(0.10) : .clear
     }
 
     /// doc:1853 — the level, drawn as light rather than as a control.
@@ -333,7 +388,7 @@ struct DeviceRowView: View {
         // sits in, the deck's count and the drawer all say PLAYING too. READY
         // rather than IDLE for its opposite — the speaker is fine, it just
         // isn't getting the Mac's sound.
-        if device.isSelected { return "PLAYING" }
+        if selected { return "PLAYING" }
         return "READY"
     }
 
@@ -342,7 +397,7 @@ struct DeviceRowView: View {
         if !device.isAvailable { return WarmSignal.label3 }
         if isConnecting { return WarmSignal.ring }
         if device.isMuted { return WarmSignal.label2 }
-        if device.isSelected { return WarmSignal.goldText }
+        if selected { return WarmSignal.goldText }
         return WarmSignal.label3
     }
 
@@ -364,7 +419,7 @@ struct DeviceRowView: View {
     /// sighted user is horizontal (``dragGesture``), so any wording here is
     /// either a duplicate or a lie to one of the two audiences.
     private var hint: String {
-        let base = "Double tap to \(device.isSelected ? "disarm" : "arm")."
+        let base = "Double tap to \(selected ? "disarm" : "arm")."
         guard controlsEnabled else {
             return [base, Self.disabledReason(for: device, controllable: false)]
                 .compactMap { $0 }
@@ -381,6 +436,14 @@ struct DeviceRowView: View {
     private var dragGesture: some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
+                // Touch-down. `minimumDistance: 0` means this first tick
+                // arrives with no translation at all, which is exactly the
+                // moment the pressed state is for — and taking it from the
+                // gesture that is already here leaves the arbitration with
+                // the ScrollView untouched. Assigned once rather than on
+                // every tick: `@State` invalidates on assignment, not on
+                // change, and the ticks keep coming for the whole scroll.
+                if !fingerDown { fingerDown = true }
                 let w = value.translation.width, h = value.translation.height
                 if axis == nil {
                     // 5 pt slop (doc:1739, doc:1773), then commit to one axis for
@@ -396,7 +459,7 @@ struct DeviceRowView: View {
                 session.setDeviceVolume(id: device.id, volume: v, isFinal: false)
             }
             .onEnded { _ in
-                defer { axis = nil; dragStartVolume = nil }
+                defer { axis = nil; dragStartVolume = nil; fingerDown = false }
                 switch axis {
                 case .horizontal:
                     guard controlsEnabled else { return }
@@ -404,13 +467,60 @@ struct DeviceRowView: View {
                                             volume: Int((localVolume ?? Double(device.volume)).rounded()),
                                             isFinal: true)
                     localVolume = nil                    // clear on release, unlike MainOutRow
+                    SpeakerCoach.learned(.drag)          // a drag that actually set a level
                 case .vertical:
                     return                               // the ScrollView handled it
                 case nil:
                     guard device.isAvailable else { return }
-                    session.setDeviceSelected(id: device.id, selected: !device.isSelected)  // doc:1792
+                    toggleSelected()                     // doc:1792
                 }
             }
+    }
+
+    /// The one place a tap arms or disarms — the touch path and VoiceOver's
+    /// action both come through here, so the echo, the write and the coach's
+    /// memory can never disagree about what a tap did.
+    private func toggleSelected() {
+        let next = !selected
+        pendingSelection = next
+        session.setDeviceSelected(id: device.id, selected: next)
+        SpeakerCoach.learned(.tap)
+    }
+}
+
+// MARK: - The one-time gesture coach
+
+/// What the phone knows about whether its two invisible gestures have been
+/// found yet. Both of the screen's core interactions — tap a row to play it,
+/// drag across it to set its level — are unlabelled by design (the row IS the
+/// fader), so the screen owes a first-timer one line of coaching and owes a
+/// returning user silence.
+///
+/// The two flags are UI preference, not routing state, so `@AppStorage` is
+/// allowed here (Model/MacSessionProtocol.swift:21-23 covers the latter). They
+/// are written from the row that performs the gesture and read by
+/// ``SpeakersView``'s console, which is why they live in neither.
+enum SpeakerCoach {
+    /// One of the two gestures the coach line teaches.
+    enum Gesture: String {
+        case tap = "speakers.coach.learnedTap"
+        case drag = "speakers.coach.learnedDrag"
+    }
+
+    /// The coach's whole rule: it goes away for good once the user has done
+    /// both things it describes — one of them is no evidence for the other.
+    static func isVisible(learnedTap: Bool, learnedDrag: Bool) -> Bool {
+        !(learnedTap && learnedDrag)
+    }
+
+    static func learned(_ gesture: Gesture, in defaults: UserDefaults = .standard) {
+        defaults.set(true, forKey: gesture.rawValue)
+    }
+
+    /// The explicit dismiss: whoever taps it is telling us they know both.
+    static func dismiss(in defaults: UserDefaults = .standard) {
+        learned(.tap, in: defaults)
+        learned(.drag, in: defaults)
     }
 }
 

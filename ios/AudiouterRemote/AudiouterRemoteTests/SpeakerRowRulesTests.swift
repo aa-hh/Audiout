@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import Foundation
 import Testing
 import SwiftUI
 import AudiouterProtocol
@@ -201,9 +202,9 @@ import AudiouterProtocol
     @MainActor
     @Test func theRowSpeaksItsArmedState() {
         #expect(DeviceRowView.spokenValue(
-            for: makeDevice(isSelected: true), isRouted: false) == "Armed")
+            for: makeDevice(isSelected: true), isSelected: true, isRouted: false) == "Armed")
         #expect(DeviceRowView.spokenValue(
-            for: makeDevice(isSelected: false), isRouted: false) == "Not armed")
+            for: makeDevice(isSelected: false), isSelected: false, isRouted: false) == "Not armed")
     }
 
     @MainActor
@@ -212,14 +213,73 @@ import AudiouterProtocol
         // the row hides from VoiceOver — colour and position only. The value
         // is the one place either of them is spoken.
         #expect(DeviceRowView.spokenValue(
-            for: makeDevice(isSelected: true, isMuted: true), isRouted: false) == "Armed, Muted")
+            for: makeDevice(isSelected: true, isMuted: true),
+            isSelected: true, isRouted: false) == "Armed, Muted")
         #expect(DeviceRowView.spokenValue(
-            for: makeDevice(isSelected: true), isRouted: true) == "Armed, App audio routed here")
+            for: makeDevice(isSelected: true),
+            isSelected: true, isRouted: true) == "Armed, App audio routed here")
         #expect(DeviceRowView.spokenValue(
-            for: makeDevice(isSelected: true, isMuted: true), isRouted: true)
+            for: makeDevice(isSelected: true, isMuted: true), isSelected: true, isRouted: true)
             == "Armed, Muted, App audio routed here")
         // A route can point at a device nobody armed — the value says both.
         #expect(DeviceRowView.spokenValue(
-            for: makeDevice(isSelected: false), isRouted: true) == "Not armed, App audio routed here")
+            for: makeDevice(isSelected: false),
+            isSelected: false, isRouted: true) == "Not armed, App audio routed here")
+    }
+
+    // MARK: - Device row: the tap's local echo
+
+    @MainActor
+    @Test func aTappedRowShowsTheTapUntilTheMacAnswers() {
+        // The tap has to change something on screen before the Mac's snapshot
+        // comes back ~100-300ms later, so the row renders the pending value
+        // while one is in flight — the same shape as the Main Out thumb's echo.
+        #expect(DeviceRowView.selectionEcho(pending: true, server: false))
+        #expect(!DeviceRowView.selectionEcho(pending: false, server: true))
+    }
+
+    @MainActor
+    @Test func aRowWithNoTapInFlightShowsTheMacsAnswer() {
+        // Both bounds land here: the snapshot that confirms the tap clears the
+        // echo, and so does the two-second timeout behind a refused write —
+        // after either, the row is back on the Mac's own state.
+        #expect(DeviceRowView.selectionEcho(pending: nil, server: true))
+        #expect(!DeviceRowView.selectionEcho(pending: nil, server: false))
+    }
+
+    @MainActor
+    @Test func theSpokenValueFollowsTheEchoRatherThanTheSnapshot() {
+        // What the screen shows and what VoiceOver says are the same state,
+        // pending or not — which is why the flag is a parameter.
+        #expect(DeviceRowView.spokenValue(
+            for: makeDevice(isSelected: false), isSelected: true, isRouted: false) == "Armed")
+    }
+
+    // MARK: - The one-time gesture coach
+
+    @Test func theCoachStaysUntilBothGesturesHaveBeenUsed() {
+        // One gesture is no evidence for the other: a user who has tapped a
+        // row still has no way of knowing the row is also a fader.
+        #expect(SpeakerCoach.isVisible(learnedTap: false, learnedDrag: false))
+        #expect(SpeakerCoach.isVisible(learnedTap: true, learnedDrag: false))
+        #expect(SpeakerCoach.isVisible(learnedTap: false, learnedDrag: true))
+        #expect(!SpeakerCoach.isVisible(learnedTap: true, learnedDrag: true))
+    }
+
+    @Test func learningAGestureAndDismissingBothPersist() throws {
+        let suite = "SpeakerCoachTests-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        SpeakerCoach.learned(.tap, in: defaults)
+        #expect(defaults.bool(forKey: SpeakerCoach.Gesture.tap.rawValue))
+        #expect(!defaults.bool(forKey: SpeakerCoach.Gesture.drag.rawValue))
+
+        // GOT IT is the user saying they know both, so it has to answer the
+        // rule the same way using both gestures would.
+        SpeakerCoach.dismiss(in: defaults)
+        #expect(!SpeakerCoach.isVisible(
+            learnedTap: defaults.bool(forKey: SpeakerCoach.Gesture.tap.rawValue),
+            learnedDrag: defaults.bool(forKey: SpeakerCoach.Gesture.drag.rawValue)))
     }
 }

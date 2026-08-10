@@ -147,10 +147,20 @@ private struct SpeakerConsole: View {
     /// between the two grounds — 0.4 black over paper is a smudge, not height.
     @Environment(\.colorScheme) private var colorScheme
 
-    /// The drawer is the one thing on this screen that travels. With Reduce
-    /// Motion on it crossfades in place instead — same state change, no slide,
-    /// no spring overshoot.
+    /// The drawer and the row that moves between sections are the two things
+    /// on this screen that travel. With Reduce Motion on they crossfade in
+    /// place instead — same state change, no slide, no spring overshoot.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// One namespace for the row that moves between AIRPLAY and PLAYING: the
+    /// two `ForEach`es render the same device id, so the row can travel
+    /// between them instead of vanishing from one and appearing in the other.
+    @Namespace private var rowMove
+
+    /// Has the user found tap-to-play and drag-to-set-level yet. Written by
+    /// ``DeviceRowView`` as each gesture happens; see ``SpeakerCoach``.
+    @AppStorage(SpeakerCoach.Gesture.tap.rawValue) private var learnedTap = false
+    @AppStorage(SpeakerCoach.Gesture.drag.rawValue) private var learnedDrag = false
 
     /// The room the list leaves at the bottom for the deck it scrolls under.
     private static let deckHeight: CGFloat = 116
@@ -160,6 +170,29 @@ private struct SpeakerConsole: View {
     private var playingDevices: [DeviceState] { snapshot.devices.filter { $0.isSelected && $0.isAvailable } }
     private var playingCount: Int { playingDevices.count }
     private var master: Int { snapshot.mainOutMasterVolume }
+
+    /// One motion for the whole screen: the drawer's rise and a row's move
+    /// between sections run on the same curve for the same length, so the
+    /// surface has a single tempo rather than one per animated thing.
+    /// `spring(duration:)` is bounce-free by default — this is deceleration,
+    /// not overshoot.
+    private var motion: Animation {
+        reduceMotion ? .easeInOut(duration: 0.2) : .spring(duration: 0.25)
+    }
+
+    /// What the row move animates against. The membership of PLAYING is the
+    /// state change the move explains, and it changes only when the Mac says
+    /// so — never under a finger, so the drag latch is never animated.
+    private var playingIDs: [String] { playingDevices.map(\.id) }
+
+    /// Where the one-time coach line hangs: under the first row a user can
+    /// actually see, so the sentence sits next to the thing it describes.
+    /// Collapsing that section moves the coach along with it rather than
+    /// taking it away.
+    private var coachAnchorID: String? {
+        guard SpeakerCoach.isVisible(learnedTap: learnedTap, learnedDrag: learnedDrag) else { return nil }
+        return sections.first { !collapsed.contains($0.id) && !$0.devices.isEmpty }?.devices.first?.id
+    }
 
     /// doc:2000-2006 minus PINNED: nothing in the protocol carries a pin, so
     /// that section could only ever draw its own "no pinned speakers" — an
@@ -197,6 +230,10 @@ private struct SpeakerConsole: View {
             }
             .padding(.horizontal, 14)
             .padding(.bottom, Self.deckHeight + 16)
+            // Arming re-sorts the row out of AIRPLAY and into PLAYING. Without
+            // this the row teleports and the user has to find it again; with
+            // it the row is the same object in a new place, which is the truth.
+            .animation(motion, value: playingIDs)
         }
         .scrollIndicators(.hidden)
         // The scrim takes every touch that lands on the list, so VoiceOver must
@@ -215,8 +252,7 @@ private struct SpeakerConsole: View {
                                 : .move(edge: .bottom).combined(with: .opacity))
             }
         }
-        .animation(reduceMotion ? .easeInOut(duration: 0.2) : .spring(duration: 0.25),
-                   value: drawerOpen)
+        .animation(motion, value: drawerOpen)
     }
 
     // MARK: Sections
@@ -229,6 +265,16 @@ private struct SpeakerConsole: View {
             if !collapsed.contains(section.id) {
                 ForEach(section.devices, id: \.id) { device in
                     DeviceRowView(device: device, session: session)
+                        // The row leaves one section and enters another as two
+                        // separate views; this is what makes them one row.
+                        .modifier(TravelsBetweenSections(id: device.id,
+                                                         namespace: rowMove,
+                                                         travels: !reduceMotion))
+                        // Reduce Motion's version of the same move: the row
+                        // crossfades where it lands instead of flying there.
+                        .transition(.opacity)
+
+                    if device.id == coachAnchorID { gestureCoach }
                 }
 
                 if let placeholder = section.placeholder {
@@ -276,6 +322,42 @@ private struct SpeakerConsole: View {
         // header for nothing. What it CAN'T infer is which way this one is
         // pointing — the chevron is the only cue, and it is decorative.
         .accessibilityValue(collapsed.contains(section.id) ? "Collapsed" : "Expanded")
+    }
+
+    // MARK: The one-time coach
+
+    /// The screen's two core gestures, said once, under the first row. Inline
+    /// and skippable rather than a modal or a spotlight tour: nothing here
+    /// needs protecting from the user, and a first tap that starts music in
+    /// another room is a thing to warn about, not to interrupt for.
+    ///
+    /// It leaves for good once both gestures have been used (or on GOT IT) —
+    /// see ``SpeakerCoach``.
+    private var gestureCoach: some View {
+        HStack(spacing: 0) {
+            Text("TAP TO PLAY · DRAG TO SET LEVEL")
+                .microLabel()
+                .foregroundStyle(WarmSignal.label2)
+                // On screen it is the same micro voice as the drawer's own
+                // "DRAG TO ADJUST"; spoken, capitals and a middle dot are
+                // noise, so VoiceOver gets the sentence instead.
+                .accessibilityLabel("Tap a speaker to play it. Drag across a speaker to set its level.")
+
+            Spacer(minLength: 8)
+
+            Text("GOT IT")
+                .microLabel()
+                .foregroundStyle(WarmSignal.goldText)
+                .padding(.horizontal, 10)
+                .frame(height: WarmSignal.hitTarget)
+                .contentShape(Rectangle())
+                .onTapGesture { SpeakerCoach.dismiss() }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel("Got it")
+                .accessibilityHint("Hides this tip")
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 2)
     }
 
     // MARK: Main Out deck
@@ -379,6 +461,26 @@ private struct SpeakerConsole: View {
         .padding(EdgeInsets(top: 16, leading: 14, bottom: 12, trailing: 14))
         .glassPanel(cornerRadius: WarmSignal.Radius.panel, fill: WarmSignal.panel)
         .padding(.horizontal, 10)
+    }
+}
+
+/// Gives a device row one identity across the two sections it can be rendered
+/// in, so arming it moves the row rather than replacing it. Applied
+/// conditionally because Reduce Motion asks for no travel at all, and the way
+/// to have none is not to match the geometry in the first place — the row then
+/// falls back to the plain crossfade its transition already specifies.
+private struct TravelsBetweenSections: ViewModifier {
+    let id: String
+    let namespace: Namespace.ID
+    let travels: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if travels {
+            content.matchedGeometryEffect(id: id, in: namespace)
+        } else {
+            content
+        }
     }
 }
 

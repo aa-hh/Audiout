@@ -667,7 +667,9 @@ Expect exactly the baseline: `Test run with 110 tests in 6 suites failed ... wit
 
 *Merge note for whoever lands this branch:* main's roadmap currently uses `024`–`032` and `034`–`039` for different tasks, so ids `024`–`031` here **will** collide at merge and need renumbering. Re-derive main's id set at merge time — other sessions keep adding.
 
-**5. Nothing committed** — `git -C "$WT" log --oneline -1` still `381a0f63`, plus `git -C "$WT" status --short`.
+**5. Nothing committed** — `git -C "$WT" log --oneline -1` must still be **`383c92e2`** ("Scoped, spec-checked handoff…"), the docs-and-roadmap commit that created this handoff. That is your baseline, not `381a0f63`. Paste it plus `git -C "$WT" status --short`, which should list only the files Tracks A and C touched, all unstaged.
+
+*If this worktree directory ever disappears, nothing is lost — the branch is on `origin`. Recreate it with `git worktree add .claude/worktrees/ios-warm-signal-2a claude/ios-warm-signal-2a` from the main checkout.*
 
 Done = 1–5 all produced in the executor's session, with output pasted.
 

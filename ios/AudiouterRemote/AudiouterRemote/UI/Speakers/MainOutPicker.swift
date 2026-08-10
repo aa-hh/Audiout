@@ -44,6 +44,13 @@ struct MainOutPicker: View {
         .labelsHidden()
         .tint(WarmSignal.label)
         .font(.system(size: 15, weight: .semibold))
+        // The menu label draws ~20 pt tall, under the 44 pt floor, and it is
+        // taken there the way every other sub-44 control on this screen is:
+        // pad out, claim, pad back in. A `minHeight` frame reaches the same
+        // floor but grows the deck header — and the list's bottom inset is a
+        // constant (`SpeakerConsole.deckHeight`), so a taller deck buries the
+        // last section rather than making room for itself.
+        .hittable(drawn: 20)
         .accessibilityHint("Choose which speakers Main Out sends to")
     }
 }

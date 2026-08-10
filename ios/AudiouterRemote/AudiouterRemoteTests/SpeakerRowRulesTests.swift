@@ -195,4 +195,31 @@ import AudiouterProtocol
         #expect(DeviceRowView.disabledReason(
             for: makeDevice(isAvailable: false), controllable: false) == "unavailable")
     }
+
+    // MARK: - Device row: what VoiceOver reads as the value
+
+    @MainActor
+    @Test func theRowSpeaksItsArmedState() {
+        #expect(DeviceRowView.spokenValue(
+            for: makeDevice(isSelected: true), isRouted: false) == "Armed")
+        #expect(DeviceRowView.spokenValue(
+            for: makeDevice(isSelected: false), isRouted: false) == "Not armed")
+    }
+
+    @MainActor
+    @Test func theRowSpeaksTheStatesItOtherwiseShowsInColourAlone() {
+        // On screen these are a tinted sub-label and an 11 pt dot on a halo
+        // the row hides from VoiceOver — colour and position only. The value
+        // is the one place either of them is spoken.
+        #expect(DeviceRowView.spokenValue(
+            for: makeDevice(isSelected: true, isMuted: true), isRouted: false) == "Armed, Muted")
+        #expect(DeviceRowView.spokenValue(
+            for: makeDevice(isSelected: true), isRouted: true) == "Armed, App audio routed here")
+        #expect(DeviceRowView.spokenValue(
+            for: makeDevice(isSelected: true, isMuted: true), isRouted: true)
+            == "Armed, Muted, App audio routed here")
+        // A route can point at a device nobody armed — the value says both.
+        #expect(DeviceRowView.spokenValue(
+            for: makeDevice(isSelected: false), isRouted: true) == "Not armed, App audio routed here")
+    }
 }

@@ -41,6 +41,8 @@ struct DeviceRowView: View {
     @State private var showFailureDetail = false
     @State private var rowWidth: CGFloat = 0  // the fader track
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     /// D9's failure card takes the whole control slot: a `"failed"` device
     /// gets headline / details / Try Again INSTEAD of volume + mute. This is
     /// where the phone's row deliberately parts from the Mac's, which keeps a
@@ -95,6 +97,17 @@ struct DeviceRowView: View {
         return device.isAvailable ? "not selected for Main Out" : "unavailable"
     }
 
+    /// What VoiceOver reads as the row's value. Armed state first, then the two
+    /// states the row otherwise carries in colour alone — the `MUTED` sub-label
+    /// and ``routedDot``, an 11 pt disc on a hidden halo. Comma-separated:
+    /// the row is one element, so it gets one value.
+    static func spokenValue(for device: DeviceState, isRouted: Bool) -> String {
+        var parts = [device.isSelected ? "Armed" : "Not armed"]
+        if device.isMuted { parts.append("Muted") }
+        if isRouted { parts.append("App audio routed here") }
+        return parts.joined(separator: ", ")
+    }
+
     // MARK: - Derived state
 
     /// This row's answer to that rule. No snapshot yet means no known routes,
@@ -143,7 +156,7 @@ struct DeviceRowView: View {
                 .accessibilityElement(children: .ignore)
                 .accessibilityAddTraits(.isButton)
                 .accessibilityLabel(device.name)
-                .accessibilityValue(device.isSelected ? "Armed" : "Not armed")
+                .accessibilityValue(Self.spokenValue(for: device, isRouted: isRouted))
                 .accessibilityHint(hint)
                 .accessibilityAction {
                     session.setDeviceSelected(id: device.id, selected: !device.isSelected)
@@ -276,7 +289,7 @@ struct DeviceRowView: View {
             Text(device.isAvailable ? String(displayVolume) : "—")
                 .readout(dragging ? 22 : 13)
                 .foregroundStyle(isLive ? WarmSignal.gold : WarmSignal.label3)
-                .animation(.easeOut(duration: 0.12), value: dragging)
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: dragging)
         }
     }
 
@@ -334,8 +347,11 @@ struct DeviceRowView: View {
         return isLive ? WarmSignal.label : WarmSignal.label2
     }
 
-    /// A row the rule won't let you adjust must not advertise a swipe that
-    /// does nothing, and must say why — so the reason rides on the hint.
+    /// A row the rule won't let you adjust must say why — so the reason rides
+    /// on the hint. The volume gesture does NOT: VoiceOver announces an
+    /// adjustable element's own swipe, and the touch path this row offers a
+    /// sighted user is horizontal (``dragGesture``), so any wording here is
+    /// either a duplicate or a lie to one of the two audiences.
     private var hint: String {
         let base = "Double tap to \(device.isSelected ? "disarm" : "arm")."
         guard controlsEnabled else {
@@ -343,7 +359,7 @@ struct DeviceRowView: View {
                 .compactMap { $0 }
                 .joined(separator: " ")
         }
-        return base + " Swipe up or down to change volume."
+        return base
     }
 
     // MARK: - Gesture

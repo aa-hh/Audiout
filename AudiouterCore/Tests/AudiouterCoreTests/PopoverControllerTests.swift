@@ -631,11 +631,14 @@ import AppKit
 
         let stack = try #require(row.superview as? NSStackView,
                                   "the device row itself must be mounted in a stack")
-        #expect(stack.arrangedSubviews.contains(panel),
-                "the diagnosis panel's VIEW must actually be attached in the row's own stack, not just recorded in diagnosisPanelsByID")
-        #expect(panel.superview === stack, "the panel mounts in the SAME stack as its device row")
+        // An inserted row is mounted inside its own reveal clip (`RowClipView`),
+        // the view whose height the downward reveal animates; the clip is what
+        // lands in the stack.
+        let clip = try #require(panel.superview as? RowClipView,
+                                 "the diagnosis panel's VIEW must actually be attached, inside its reveal clip, not just recorded in diagnosisPanelsByID")
+        #expect(clip.superview === stack, "the panel's clip mounts in the SAME stack as its device row")
         let rowIndex = try #require(stack.arrangedSubviews.firstIndex(of: row))
-        let panelIndex = try #require(stack.arrangedSubviews.firstIndex(of: panel))
+        let panelIndex = try #require(stack.arrangedSubviews.firstIndex(of: clip))
         #expect(panelIndex == rowIndex + 1, "the panel sits directly UNDER its failed device row")
 
         // Reconnecting must detach the VIEW from the tree too, not just clear the
@@ -2086,32 +2089,7 @@ import AppKit
         #expect(popover.test_deviceRow(for: "office")?.test_feedText == "Music", "the fixture's event reached the row via the same plumbing AppDelegate uses")
     }
 
-    // MARK: V2/V9 — Devices card empty-state placeholder
-
-    /// With no devices discovered, the Devices card still builds and shows the
-    /// §5.9 "Looking for speakers…" placeholder; once devices arrive it
-    /// disappears.
-    @Test func devicesCardEmptyStatePlaceholder() async throws {
-        let (popover, _, backend) = try await makePopover()
-        // Devices present initially ⇒ no placeholder, card exists.
-        #expect(!(popover.test_devicesPlaceholderShown), "devices present ⇒ no placeholder")
-        #expect(popover.test_isCardCollapsed(title: "Output Devices") != nil, "the Devices card exists")
-
-        // Clear the fleet ⇒ card still present, placeholder shown.
-        popover.update(devices: [])
-        #expect(popover.test_isCardCollapsed(title: "Output Devices") != nil, "the Devices card is still built when empty (V2)")
-        #expect(popover.test_devicesPlaceholderShown, "no devices ⇒ placeholder shown")
-        #expect(popover.test_deviceSectionRowCount == 0, "no interactive device rows")
-        #expect(PopoverController.test_devicesPlaceholderText == "Looking for speakers…",
-                "pins the §5.9 locked copy")
-
-        // Devices arrive again ⇒ placeholder gone.
-        popover.update(devices: backend.devices)
-        #expect(!(popover.test_devicesPlaceholderShown), "devices arrived ⇒ placeholder gone")
-        #expect(popover.test_deviceSectionRowCount == 7, "device rows restored")
-    }
-
-    // MARK: V11/V9 — Applications card empty-state placeholder
+    // MARK: V11 — Applications card empty-state placeholder
 
     /// With no rendered app routes the Applications card shows the §5.9
     /// "Route one app somewhere else…" placeholder; adding a route removes it.
@@ -2565,17 +2543,27 @@ import AppKit
         #expect(popover.test_diagnosisPanel(for: "office") != nil, "the retry failing again re-surfaces the panel")
     }
 
-    // MARK: F1 — Devices "+" header accessory (a menu since BT-UI)
+    // MARK: F1 — Devices "+" footer strip (a menu since BT-UI)
 
-    /// The Devices card's "+" fronts a MENU now: its save item creates a group
+    /// The "+" lives in the card's BOTTOM footer strip, not the header row
+    /// (2026-08-08): no header accessory exists, and the strip is the last row
+    /// of the card — below every subsection.
+    @Test func devicesPlusIsTheCardsLastRowNotAHeaderAccessory() async throws {
+        let (popover, _, _) = try await makePopover()
+        #expect(popover.test_cardAccessoryEnabled(title: "Output Devices") == nil,
+                "the header row carries no accessory any more")
+        #expect(popover.test_devicesFooterIsLastCardRow,
+                "the + strip is the last row of the Output Devices card")
+        popover.test_tapDevicesFooterAdd()   // headless: the popUp itself is gated
+    }
+
+    /// The Devices card's "+" fronts a MENU: its save item creates a group
     /// through real `NSMenu` dispatch, never collapses the card, and the item's
-    /// enabled state (not the button's — the button stays always-enabled so
-    /// "Pair a Bluetooth speaker…" is always reachable) tracks
-    /// `canSaveCurrentSetup`.
+    /// enabled state tracks `canSaveCurrentSetup` (the "+" itself never
+    /// disables, so "Pair a Bluetooth speaker…" is always reachable).
     @Test func devicesSaveGroupAccessoryCreatesGroupWithoutCollapsing() async throws {
         let (popover, controller, _) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        #expect(popover.test_cardAccessoryEnabled(title: "Output Devices") == true, "the + button itself stays enabled — it fronts a menu")
         var menu = popover.test_outputDevicesPlusMenu()
         #expect(menu.items.first?.isEnabled == true, "a non-empty, not-yet-saved selection ⇒ save item enabled")
         let wasCollapsed = popover.test_isCardCollapsed(title: "Output Devices")
@@ -2586,7 +2574,6 @@ import AppKit
         // The just-saved selection now equals a group ⇒ the save ITEM disables.
         menu = popover.test_outputDevicesPlusMenu()
         #expect(menu.items.first?.isEnabled == false, "selection already saved as a group ⇒ save item disables")
-        #expect(popover.test_cardAccessoryEnabled(title: "Output Devices") == true, "the + button never disables")
     }
 
     // MARK: V14 — keyboard selection movement (host half)

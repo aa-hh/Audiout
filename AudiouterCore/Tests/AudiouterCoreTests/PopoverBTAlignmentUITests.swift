@@ -578,11 +578,12 @@ import AppKit
         let (popover, _) = makePopover()
         _ = selectMixedBT(popover)
         popover.update(devices: [local(), airplay(), bt(available: false)])
-        // The context item is disabled on a greyed row; real menu dispatch on
-        // a disabled item is a no-op. The direct call proves the guard too.
-        let menu = popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()
-        #expect(menu?.items.first?.isEnabled == false)
-        menu?.performActionForItem(at: 0)
+        // Losing availability DESELECTS a Bluetooth device on the edge, and a
+        // deselected disconnected pairing is not listed (BT-LIST) — so there is
+        // no row and no context item left to dispatch. The direct call is what
+        // proves the guard now.
+        #expect(popover.test_deviceRow(for: "bt-a:output") == nil,
+                "the un-live target is off the list entirely")
         popover.startBTAlignmentWizard(deviceID: "bt-a:output")
         #expect(popover.test_btWizardIsOpen() == false,
                 "an un-live target never opens — the same conditions that tear one down")

@@ -35,15 +35,21 @@ final class ToastCenter {
     private(set) var current: ToastEvent?
     private var dismissTask: Task<Void, Never>?
 
-    /// How long a toast stays up before auto-dismissing.
-    static let displayDuration: Duration = .seconds(3)
+    /// How long a toast stays up before auto-dismissing — long enough to read
+    /// what it says. A refusal carries the Mac's own sentence, which can run
+    /// twice the length of "Unknown device.", and three seconds is a glance,
+    /// not a read. Base plus a beat per ~20 characters, capped so a long one
+    /// still can't camp on the screen.
+    static func displayDuration(for message: String) -> Duration {
+        .milliseconds(min(6000, 3000 + message.count * 25))
+    }
 
     func show(_ kind: ToastEvent.Kind) {
         dismissTask?.cancel()
         let event = ToastEvent(kind: kind)
         current = event
         dismissTask = Task { [weak self] in
-            try? await Task.sleep(for: Self.displayDuration)
+            try? await Task.sleep(for: Self.displayDuration(for: event.message))
             guard !Task.isCancelled else { return }
             self?.dismiss(event.id)
         }

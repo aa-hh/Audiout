@@ -94,14 +94,24 @@ struct SpeakersView: View {
     /// Whose speakers these are — the one thing the title can't say. With no
     /// Mac there is no name to give, so it says what the connection is doing.
     private var eyebrowText: String {
-        guard isLive, let name = session.snapshot?.serverName, !name.isEmpty else { return statusText }
+        guard let name = namedMac else { return statusText }
         return "Connected to \(name)"
     }
 
-    /// The connection's own words, and Demo when this is the demo Mac. Naming
-    /// the Mac is the eyebrow's job, so the pill never repeats it.
+    /// The Mac the eyebrow can name, or nil when there isn't one to name.
+    private var namedMac: String? {
+        guard isLive, let name = session.snapshot?.serverName, !name.isEmpty else { return nil }
+        return name
+    }
+
+    /// The pill is the glanceable state; the eyebrow is the identity. So once
+    /// the eyebrow has said "Connected to Demo Mac", the pill saying
+    /// "Connected · Demo" is the same two facts a second time, three words
+    /// wider. It drops to the one thing the eyebrow doesn't carry — that the
+    /// link is up right now — and the lit dot beside it says the rest.
     private var pillText: String {
-        session.isDemo ? statusText + " · Demo" : statusText
+        if namedMac != nil { return "Live" }
+        return session.isDemo ? statusText + " · Demo" : statusText
     }
 
     private var statusText: String {
@@ -166,8 +176,16 @@ private struct SpeakerConsole: View {
     @AppStorage(SpeakerCoach.Gesture.tap.rawValue) private var learnedTap = false
     @AppStorage(SpeakerCoach.Gesture.drag.rawValue) private var learnedDrag = false
 
-    /// The room the list leaves at the bottom for the deck it scrolls under.
-    private static let deckHeight: CGFloat = 116
+    /// The room the list leaves at the bottom for the deck it scrolls under —
+    /// measured, not assumed. The deck's interior is all Dynamic Type, so at
+    /// accessibility sizes it grows well past any constant and buries the last
+    /// section it is supposed to float over.
+    @State private var deckHeight: CGFloat = initialDeckHeight
+
+    /// What the list clears before the deck has been laid out once. The deck's
+    /// height at the default text size, so the first frame is already right for
+    /// most readers and the measurement only corrects the rest.
+    private static let initialDeckHeight: CGFloat = 116
 
     // MARK: Derived
 
@@ -233,7 +251,7 @@ private struct SpeakerConsole: View {
                 }
             }
             .padding(.horizontal, 14)
-            .padding(.bottom, Self.deckHeight + 16)
+            .padding(.bottom, deckHeight + 16)
             // Arming re-sorts the row out of AIRPLAY and into PLAYING. Without
             // this the row teleports and the user has to find it again; with
             // it the row is the same object in a new place, which is the truth.
@@ -250,7 +268,7 @@ private struct SpeakerConsole: View {
         .overlay(alignment: .bottom) {
             if drawerOpen {
                 drawer
-                    .padding(.bottom, Self.deckHeight)
+                    .padding(.bottom, deckHeight)
                     .transition(reduceMotion
                                 ? .opacity
                                 : .move(edge: .bottom).combined(with: .opacity))
@@ -315,9 +333,14 @@ private struct SpeakerConsole: View {
         // target would only shrink the strip a finger already has.
         .frame(height: WarmSignal.hitTarget)
         .contentShape(Rectangle())
+        // On the screen's one curve, like the drawer and the travelling row —
+        // it was the last state change here that simply cut. `motion` is
+        // already the Reduce Motion branch, so this needs no gate of its own.
         .onTapGesture {
-            if collapsed.contains(section.id) { collapsed.remove(section.id) }
-            else { collapsed.insert(section.id) }
+            withAnimation(motion) {
+                if collapsed.contains(section.id) { collapsed.remove(section.id) }
+                else { collapsed.insert(section.id) }
+            }
         }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
@@ -388,6 +411,11 @@ private struct SpeakerConsole: View {
         .shadow(color: elevation.color, radius: elevation.radius, y: elevation.y)
         .padding(.horizontal, 14)
         .padding(.bottom, 8)
+        // Measured at the end of the chain, so the number is everything the
+        // deck occupies — its own bottom padding included — and both the
+        // list's bottom inset and the drawer's offset are driven by the same
+        // one. Nothing the list does changes this height, so there is no loop.
+        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { deckHeight = $0 }
     }
 
     private var deckHeader: some View {
@@ -443,8 +471,9 @@ private struct SpeakerConsole: View {
             .accessibilityAction { drawerOpen = false }
     }
 
-    /// doc:188-217 — every armed device's own level, and the per-device mute
-    /// the row gave up.
+    /// doc:188-217 — every armed device's own level and mute, gathered in one
+    /// place: the row carries the same mute (``DeviceRowView/muteControl``),
+    /// but the drawer is where the whole set is adjustable without scrolling.
     private var drawer: some View {
         VStack(spacing: 0) {
             Capsule()
@@ -699,8 +728,9 @@ struct MainOutRow: View {
 // MARK: - Drawer row
 
 /// One armed device inside the Main Out drawer (doc:200-215): its own level,
-/// dragged the same way, plus the mute button ``DeviceRowView`` gave up — so
-/// mute stays two taps away and that row's `MUTED` sub-label stays actionable.
+/// dragged the same way, plus the same mute button the row itself carries
+/// (``DeviceRowView/muteControl``) — parity in both directions, so whichever
+/// surface the user is on, mute is where they are.
 private struct MainOutDrawerRow: View {
     let device: DeviceState
     let session: any MacSessionProtocol
@@ -758,7 +788,11 @@ private struct MainOutDrawerRow: View {
             .gesture(dragGesture)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(device.name)
-            .accessibilityValue("\(displayVolume) percent")
+            // The mute button beside this one says which way it will go, not
+            // which way the speaker currently is — so the state has to be here
+            // or it is nowhere in the drawer at all.
+            .accessibilityValue(device.isMuted ? "\(displayVolume) percent, Muted"
+                                               : "\(displayVolume) percent")
             .accessibilityAdjustableAction { direction in
                 guard controlsEnabled else { return }
                 session.setDeviceVolume(

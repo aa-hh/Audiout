@@ -199,16 +199,83 @@ import AudiouterProtocol
             for: makeDevice(isAvailable: false), controllable: false) == "This speaker isn't on the network.")
     }
 
+    // MARK: - Device row: the dead drag answers back
+
+    @MainActor
+    @Test func aDragOnARowThatCannotBeAdjustedRaisesTheRowsOwnReason() throws {
+        // The screen's coach promises "DRAG TO SET LEVEL" on every row, so a
+        // row the rule won't adjust owes an answer rather than silence. It is
+        // the SAME sentence the disabled control already speaks — one reason,
+        // two audiences — and it goes out on the same channel the Mac's own
+        // refusals arrive on, so a refused write and a write that never left
+        // look alike from the finger's side.
+        let center = ToastCenter()
+        let ready = makeDevice(isSelected: false)
+        #expect(!DeviceRowView.isControllable(ready, appRoutes: []))
+
+        let reason = try #require(DeviceRowView.disabledReason(for: ready, controllable: false))
+        center.show(.refusal(reason: reason))
+        #expect(center.current?.message == "Its level can be set once it's playing.")
+
+        center.show(.refusal(reason: try #require(
+            DeviceRowView.disabledReason(for: makeDevice(isAvailable: false), controllable: false))))
+        #expect(center.current?.message == "This speaker isn't on the network.")
+    }
+
+    @MainActor
+    @Test func aRowThatCanBeAdjustedHasNothingToRefuse() {
+        // The other half of the trigger: the toast is raised only where the
+        // reason exists, so a live row's drag stays silent and just moves.
+        #expect(DeviceRowView.disabledReason(
+            for: makeDevice(isSelected: true), controllable: true) == nil)
+    }
+
+    @MainActor
+    @Test func aLongerRefusalStaysUpLongEnoughToRead() {
+        // Three seconds is a glance. The refusals this channel carries are
+        // whole sentences — the Mac's own — so the dwell grows with the
+        // message, and stops growing before anything can camp on the screen.
+        #expect(ToastCenter.displayDuration(for: "Unknown device.")
+                < ToastCenter.displayDuration(for: "Its level can be set once it's playing."))
+        #expect(ToastCenter.displayDuration(for: "") == .milliseconds(3000))
+        #expect(ToastCenter.displayDuration(for: String(repeating: "x", count: 500))
+                == .milliseconds(6000))
+    }
+
     // MARK: - Device row: what VoiceOver reads as the value
 
     @MainActor
     @Test func theRowSpeaksItsPlayingState() {
         // The word on the screen, spoken: the sub-label says PLAYING and the
         // section it sits in is titled PLAYING, so the value cannot say ARMED.
+        // Its opposite is READY on screen, so it is "Ready" in the ear too —
+        // one word per state, not one per audience.
         #expect(DeviceRowView.spokenValue(
             for: makeDevice(isSelected: true), isSelected: true, isRouted: false) == "Playing")
         #expect(DeviceRowView.spokenValue(
-            for: makeDevice(isSelected: false), isSelected: false, isRouted: false) == "Not playing")
+            for: makeDevice(isSelected: false), isSelected: false, isRouted: false) == "Ready")
+    }
+
+    @MainActor
+    @Test func theRowSpeaksTheStatesThatReplaceReadyOnScreen() {
+        // `subLabel`'s branch order, in the ear: a speaker that is off the
+        // network or still connecting says so instead of claiming to be READY,
+        // which is specifically the word for a speaker that is fine and idle.
+        #expect(DeviceRowView.spokenValue(
+            for: makeDevice(connectionState: "connecting"), isSelected: false, isRouted: false)
+            == "Connecting")
+        // The echo can say PLAYING while the connection is still coming up;
+        // the screen shows CONNECTING… in that beat, so the value does too.
+        #expect(DeviceRowView.spokenValue(
+            for: makeDevice(isSelected: true, connectionState: "connecting"),
+            isSelected: true, isRouted: false) == "Connecting")
+        #expect(DeviceRowView.spokenValue(
+            for: makeDevice(isAvailable: false), isSelected: false, isRouted: false)
+            == "Unavailable")
+        // Unavailability outranks everything, exactly as it does on screen.
+        #expect(DeviceRowView.spokenValue(
+            for: makeDevice(isAvailable: false, isSelected: true, connectionState: "connecting"),
+            isSelected: true, isRouted: false) == "Unavailable")
     }
 
     @MainActor
@@ -228,7 +295,7 @@ import AudiouterProtocol
         // A route can point at a device nobody started — the value says both.
         #expect(DeviceRowView.spokenValue(
             for: makeDevice(isSelected: false),
-            isSelected: false, isRouted: true) == "Not playing, App audio routed here")
+            isSelected: false, isRouted: true) == "Ready, App audio routed here")
     }
 
     // MARK: - Device row: the tap's local echo

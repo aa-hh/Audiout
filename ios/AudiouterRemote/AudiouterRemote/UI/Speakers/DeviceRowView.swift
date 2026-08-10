@@ -6,9 +6,12 @@ import AudiouterProtocol
 
 /// One speaker, drawn as its own fader (doc:84-105, doc:1823-1866): tapping
 /// the row starts or stops it, dragging horizontally sets its volume, and the
-/// gold wash behind the content IS the level. Per-device mute lives in the
-/// Main Out drawer (``SpeakersView``), which is what the `MUTED` sub-label
-/// below points at.
+/// gold wash behind the content IS the level. A playing row also carries its
+/// own mute button (``muteControl``) — a deliberate departure from the design
+/// document, which moved mute to the Main Out drawer alone: sound is live in
+/// another room while this screen is used, and the one control that stops it
+/// may not be behind a chevron a first-timer has no reason to open. The
+/// drawer keeps its copy; the two are the same button, in both places.
 ///
 /// Volume policy: while dragging, the wash and the readout track `localVolume`
 /// (set on every tick) rather than `device.volume` from the snapshot, because
@@ -55,6 +58,8 @@ struct DeviceRowView: View {
     @ScaledMetric(relativeTo: .body) private var nameSize: CGFloat = 16.5
     @ScaledMetric(relativeTo: .body) private var glyphSize: CGFloat = 17
     @ScaledMetric(relativeTo: .footnote) private var diagnoseSize: CGFloat = 12.5
+    /// The drawer mute button's glyph size, because this is that button.
+    @ScaledMetric(relativeTo: .caption) private var muteIconSize: CGFloat = 12
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -104,9 +109,10 @@ struct DeviceRowView: View {
     /// composes this reason into its row's own label (the membership clause in
     /// `AudiouterSharedUI/DeviceRowView.configureAccessibility`); the phone has
     /// no row-level label — each control is its own element — so the clause
-    /// rides on the two controls the rule disables instead. Worded in the one
-    /// vocabulary the screen shows — PLAYING / READY / UNAVAILABLE, never
-    /// "armed" or "selected" — and spoken exactly once, never onto a hint too.
+    /// rides on the row's hint instead, and on the toast a dead drag raises
+    /// (``refuseAdjustment()``) — the same sentence to the finger. Worded in
+    /// the one vocabulary the screen shows — PLAYING / READY / UNAVAILABLE,
+    /// never "armed" or "selected".
     static func disabledReason(for device: DeviceState, controllable: Bool) -> String? {
         if controllable { return nil }
         return device.isAvailable
@@ -122,21 +128,33 @@ struct DeviceRowView: View {
         pending ?? server
     }
 
-    /// What VoiceOver reads as the row's value. Playing state first — the same
-    /// word the row's own sub-label and the section above it show — then the
-    /// two states the row otherwise carries in colour alone: the `MUTED`
-    /// sub-label and ``routedDot``, an 11 pt disc on a hidden halo.
-    /// Comma-separated: the row is one element, so it gets one value.
+    /// What VoiceOver reads as the row's value. Playing state first — spoken
+    /// as the same word the row's own sub-label shows, in the same branch
+    /// order (``subLabel``), so READY is heard as "Ready" and a speaker that
+    /// is still connecting says so at all. Then the two states the row
+    /// otherwise carries in colour alone: the `MUTED` sub-label and
+    /// ``routedDot``, an 11 pt disc on a hidden halo. Comma-separated: the row
+    /// is one element, so it gets one value.
+    ///
+    /// The one place it says MORE than the sub-label does: mute and the route
+    /// are appended rather than substituted, because a value has room for
+    /// three clauses and a 40 pt strip of text does not.
     ///
     /// `isSelected` is passed rather than read off `device`, because the row
     /// may be showing a tap the Mac hasn't answered yet
     /// (``selectionEcho(pending:server:)``) — and what the screen shows and
     /// what VoiceOver says have to be the same thing.
     static func spokenValue(for device: DeviceState, isSelected: Bool, isRouted: Bool) -> String {
-        var parts = [isSelected ? "Playing" : "Not playing"]
+        var parts = [playingWord(for: device, isSelected: isSelected)]
         if device.isMuted { parts.append("Muted") }
         if isRouted { parts.append("App audio routed here") }
         return parts.joined(separator: ", ")
+    }
+
+    private static func playingWord(for device: DeviceState, isSelected: Bool) -> String {
+        if !device.isAvailable { return "Unavailable" }
+        if device.connection.state == "connecting" { return "Connecting" }
+        return isSelected ? "Playing" : "Ready"
     }
 
     // MARK: - Derived state
@@ -211,15 +229,22 @@ struct DeviceRowView: View {
 
     // MARK: - Body
 
-    @ViewBuilder
     var body: some View {
+        content
+    }
+
+    /// The row as one VoiceOver element — everything except the mute button,
+    /// which is a control of its own and stays reachable as the row's sibling
+    /// (see ``muteControl``).
+    ///
+    /// A failed row is the exception and gets nothing: collapsing it would
+    /// swallow Diagnose and Try Again, and it has no volume to adjust anyway.
+    @ViewBuilder
+    private func combined(_ row: some View) -> some View {
         if isFailed {
-            // A failed row keeps its children as ordinary elements: collapsing
-            // it would swallow Diagnose and Try Again, and it has no volume to
-            // adjust anyway.
-            content
+            row
         } else {
-            content
+            row
                 .accessibilityElement(children: .ignore)
                 .accessibilityAddTraits(.isButton)
                 .accessibilityLabel(device.name)
@@ -227,7 +252,7 @@ struct DeviceRowView: View {
                 .accessibilityHint(hint)
                 .accessibilityAction { toggleSelected() }
                 .accessibilityAdjustableAction { direction in
-                    guard controlsEnabled else { return }
+                    guard controlsEnabled else { return refuseAdjustment() }
                     session.setDeviceVolume(
                         id: device.id,
                         volume: min(100, max(0, device.volume + (direction == .increment ? 5 : -5))),
@@ -257,27 +282,34 @@ struct DeviceRowView: View {
     // MARK: - The row itself
 
     private var faderRow: some View {
-        HStack(spacing: 12) {
-            halo.opacity(identityDim)
+        combined(
+            HStack(spacing: 12) {
+                halo.opacity(identityDim)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text(device.name)
-                    .font(.system(size: nameSize, weight: selected ? .semibold : .regular))
-                    .tracking(-0.2)
-                    .lineLimit(1)
-                    .foregroundStyle(nameTint)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(device.name)
+                        .font(.system(size: nameSize, weight: selected ? .semibold : .regular))
+                        .tracking(-0.2)
+                        .lineLimit(1)
+                        .foregroundStyle(nameTint)
 
-                Text(subLabel)
-                    .microLabel()
-                    .foregroundStyle(subTint)
+                    Text(subLabel)
+                        .microLabel()
+                        .foregroundStyle(subTint)
+                }
+
+                Spacer(minLength: 8)
+
+                trailingSlot
+
+                // The room the mute button occupies. The button itself is an
+                // overlay (see below), which reserves nothing, so the readout
+                // would slide under it without this.
+                if showsMute { Color.clear.frame(width: Self.muteSize, height: Self.muteSize) }
             }
-
-            Spacer(minLength: 8)
-
-            trailingSlot
-        }
-        .padding(.horizontal, 12)
-        .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
+        )
         .background(alignment: .leading) { wash }
         .overlay(alignment: .leading) { edgeLine }
         .background(touchTint)
@@ -293,6 +325,48 @@ struct DeviceRowView: View {
         // nothing fires for the continuous middle of a drag.
         .sensoryFeedback(trigger: pendingSelection) { _, new in new == nil ? nil : .selection }
         .sensoryFeedback(trigger: rail) { _, new in new == nil ? nil : .impact(weight: .light) }
+        // Mute is confirmed rather than optimistic, exactly as it is in the
+        // drawer, so the tick rides the Mac's answer.
+        .sensoryFeedback(.impact(weight: .light), trigger: device.isMuted)
+        // An OVERLAY, and applied after the gesture on purpose: a `Button`
+        // inside `faderRow` would sit under `.simultaneousGesture`, which
+        // means both fire — every mute tap would also stop the speaker. Out
+        // here the button is not in the gesture's subtree, so it takes its own
+        // taps and nothing else sees them. It is also outside ``combined``,
+        // which is what keeps it reachable as its own VoiceOver element.
+        .overlay(alignment: .trailing) { muteControl }
+    }
+
+    /// Only on a row that is actually making sound: a mute button on a silent
+    /// speaker is a control with nothing to stop.
+    private var showsMute: Bool { isLive }
+
+    /// What the button paints; the ``hittable(drawn:)`` floor is 44 either way.
+    private static let muteSize: CGFloat = 28
+
+    /// The drawer's mute button (``MainOutDrawerRow``), on the row: same well,
+    /// same rim, same glyph pair, same gold-when-muted. One control drawn one
+    /// way in the two places it appears, so neither has to be learned twice.
+    @ViewBuilder
+    private var muteControl: some View {
+        if showsMute {
+            Button {
+                session.setDeviceMuted(id: device.id, muted: !device.isMuted)
+            } label: {
+                Image(systemName: device.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                    .font(.system(size: muteIconSize))
+                    .foregroundStyle(device.isMuted ? WarmSignal.gold : WarmSignal.label2)
+                    .frame(width: Self.muteSize, height: Self.muteSize)
+                    .background(RoundedRectangle(cornerRadius: WarmSignal.Radius.control, style: .continuous)
+                        .fill(WarmSignal.well))
+                    .overlay(RoundedRectangle(cornerRadius: WarmSignal.Radius.control, style: .continuous)
+                        .strokeBorder(WarmSignal.rim, lineWidth: 0.5))
+            }
+            .buttonStyle(.plain)
+            .hittable(drawn: Self.muteSize)
+            .padding(.trailing, 12)
+            .accessibilityLabel(device.isMuted ? "Unmute \(device.name)" : "Mute \(device.name)")
+        }
     }
 
     /// doc:1851's drag tint, and under it the touch-down flash that answers
@@ -499,7 +573,15 @@ struct DeviceRowView: View {
                     // enclosing ScrollView keeps the pan.
                     guard max(abs(w), abs(h)) >= 5 else { return }
                     axis = abs(w) > abs(h) ? .horizontal : .vertical
-                    if axis == .horizontal { dragStartVolume = device.volume }
+                    if axis == .horizontal {
+                        dragStartVolume = device.volume
+                        // The coach promised this gesture, so a row that can't
+                        // answer it has to say why rather than swallow it. At
+                        // the latch, which is the moment the drag became a
+                        // volume drag — once per gesture, and before the finger
+                        // has travelled far enough to expect a number to move.
+                        if !controlsEnabled { refuseAdjustment() }
+                    }
                 }
                 guard axis == .horizontal, controlsEnabled, let start = dragStartVolume else { return }
                 let v = WarmSignal.faderValue(start: start, translationWidth: w, trackWidth: rowWidth)
@@ -523,6 +605,17 @@ struct DeviceRowView: View {
                     toggleSelected()                     // doc:1792
                 }
             }
+    }
+
+    /// What the row says when the level gesture lands somewhere it can't act.
+    /// The same sentence the disabled control already speaks
+    /// (``disabledReason(for:controllable:)``), through the same channel the
+    /// Mac's own refusals come back on (``ToastCenter``) — so a refused write
+    /// and a write that never left look and sound alike, which is what they
+    /// are from the finger's side.
+    private func refuseAdjustment() {
+        guard let reason = Self.disabledReason(for: device, controllable: false) else { return }
+        session.toasts.show(.refusal(reason: reason))
     }
 
     /// The one place a tap starts or stops a speaker — the touch path and

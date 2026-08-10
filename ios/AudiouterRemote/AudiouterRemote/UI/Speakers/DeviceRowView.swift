@@ -272,10 +272,13 @@ struct DeviceRowView: View {
                     .foregroundStyle(WarmSignal.gold)
                     .hittable(drawn: 20)
             }
-        } else {
-            Text(device.isAvailable ? String(displayVolume) : "—")
+        } else if isLive {
+            // A number with no wash behind it is a quantity of nothing, so the
+            // readout follows the same rule `volumeFraction` does (doc:1852):
+            // both appear together, or neither does.
+            Text(String(displayVolume))
                 .readout(dragging ? 22 : 13)
-                .foregroundStyle(isLive ? WarmSignal.gold : WarmSignal.label3)
+                .foregroundStyle(WarmSignal.gold)
                 .animation(.easeOut(duration: 0.12), value: dragging)
         }
     }
@@ -309,8 +312,12 @@ struct DeviceRowView: View {
         if !device.isAvailable { return "UNAVAILABLE" }
         if isConnecting { return "CONNECTING…" }
         if device.isMuted { return "MUTED" }
-        if device.isSelected { return "LIVE" }
-        return "IDLE"
+        // One word for the state everywhere it appears: the section this row
+        // sits in, the deck's count and the drawer all say PLAYING too. READY
+        // rather than IDLE for its opposite — the speaker is fine, it just
+        // isn't getting the Mac's sound.
+        if device.isSelected { return "PLAYING" }
+        return "READY"
     }
 
     private var subTint: Color {

@@ -73,15 +73,19 @@ struct SpeakersView: View {
 
             Text(pillText)
                 .font(.system(size: pillTextSize, weight: .medium))
-                .foregroundStyle(WarmSignal.label)
+                .foregroundStyle(WarmSignal.label2)
                 .lineLimit(1)
         }
-        .padding(.leading, 8)
-        .padding(.trailing, 10)
-        .padding(.vertical, 5)
-        // A badge, not a control: it stays a lozenge rather than taking a
-        // radius off the scale, which would square it off at this height.
-        .glassPanel(cornerRadius: 999)
+        // No lozenge, and no glass. Frosted material at a capsule radius is
+        // what the Main Out deck and every button on this screen are made of,
+        // so wearing it here promises a press that does nothing — and the
+        // press a reader would expect (jump to the Connection tab) is a real
+        // screen this view has no route to. A lit dot and a word in the
+        // header's secondary ink says the same thing and promises nothing.
+        //
+        // razor: it stays a badge. Making it a real shortcut needs a tab
+        // binding threaded down from RootView; do that and it can take an
+        // affordance back.
         .accessibilityElement(children: .combine)
     }
 
@@ -410,20 +414,31 @@ private struct SpeakerConsole: View {
                 .hittable(drawn: 9)
                 .onTapGesture { drawerOpen.toggle() }
                 .accessibilityAddTraits(.isButton)
-                .accessibilityLabel(drawerOpen ? "Hide active devices" : "Show active devices")
+                .accessibilityLabel(drawerOpen ? "Hide playing speakers" : "Show playing speakers")
         }
         .lineLimit(1)
+        .contentShape(Rectangle())
+        // The whole strip opens the drawer, not the 9 pt chevron alone: the
+        // label, the count and the gap between them sit over a control the
+        // chevron only points at, and 9 pt is not where a thumb aims.
+        //
+        // `.onTapGesture` on the container, deliberately — a gesture on a
+        // child outranks one on its ancestor, so the picker's UIKit menu keeps
+        // every tap that lands on the picker (including the 12 pt its
+        // `.hittable` claims past its glyph) and this takes the rest. A
+        // `.simultaneousGesture` would fire both and open a menu into a moving
+        // drawer.
+        .onTapGesture { drawerOpen.toggle() }
     }
 
     // MARK: Drawer
 
     private var scrim: some View {
-        Color(red: 8 / 255, green: 6 / 255, blue: 4 / 255)
-            .opacity(0.5)
+        WarmSignal.scrim
             .ignoresSafeArea()
             .onTapGesture { drawerOpen = false }
             .transition(.opacity)
-            .accessibilityLabel("Close active devices")
+            .accessibilityLabel("Hide playing speakers")
             .accessibilityAddTraits(.isButton)
             .accessibilityAction { drawerOpen = false }
     }
@@ -573,6 +588,13 @@ struct MainOutRow: View {
             // round trip, and the thumb goes back to following the Mac.
             guard !isDragging else { return }
             localVolume = nil
+        }
+        // Mute is confirmed rather than optimistic here — the icon flips when
+        // the Mac says it did — so the tick rides the confirmation, which is
+        // the moment the thing actually happened.
+        .sensoryFeedback(.impact(weight: .light), trigger: isMuted)
+        .sensoryFeedback(trigger: WarmSignal.faderRail(value, dragging: isDragging)) { _, new in
+            new == nil ? nil : .impact(weight: .light)
         }
     }
 
@@ -751,10 +773,19 @@ private struct MainOutDrawerRow: View {
             Rectangle()
                 .fill(LinearGradient(colors: [WarmSignal.ember, WarmSignal.gold],
                                      startPoint: .leading, endPoint: .trailing))
-                .opacity(0.30)
+                // The same step down ``DeviceRowView/washOpacity`` takes, so a
+                // muted speaker reads as muted in both places it is drawn. The
+                // edge line and the readout keep the level.
+                .opacity(device.isMuted ? 0.09 : 0.30)
                 .frame(width: max(0, CGFloat(displayVolume) / 100 * rowWidth))
         }
         .overlay(alignment: .leading) {
+            // razor: at rest this measures 1.36:1 light / 2.14:1 dark, under
+            // the 3:1 non-text floor ``DeviceRowView/edgeLine`` is held to.
+            // It is not the sole carrier of the level here — the drawer row
+            // also states it as a number — and this row's wash is 0.30 against
+            // that row's 0.14, so no single opacity clears both sides of the
+            // line. Fixing it means restyling the drawer row's wash.
             Rectangle()
                 .fill(WarmSignal.glow)
                 .frame(width: 2.5)
@@ -766,6 +797,10 @@ private struct MainOutDrawerRow: View {
         .overlay(RoundedRectangle(cornerRadius: WarmSignal.Radius.row, style: .continuous)
             .strokeBorder(WarmSignal.rim, lineWidth: 0.5))
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { rowWidth = $0 }
+        .sensoryFeedback(.impact(weight: .light), trigger: device.isMuted)
+        .sensoryFeedback(trigger: WarmSignal.faderRail(displayVolume, dragging: dragging)) { _, new in
+            new == nil ? nil : .impact(weight: .light)
+        }
     }
 
     private var dragGesture: some Gesture {

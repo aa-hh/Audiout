@@ -191,20 +191,24 @@ import AudiouterProtocol
         // control adds nothing.
         #expect(DeviceRowView.disabledReason(
             for: makeDevice(isSelected: true), controllable: true) == nil)
+        // One vocabulary: the screen never says "armed" or "selected", so
+        // neither does the reason a control gives for being off.
         #expect(DeviceRowView.disabledReason(
-            for: makeDevice(), controllable: false) == "not selected for Main Out")
+            for: makeDevice(), controllable: false) == "Its level can be set once it's playing.")
         #expect(DeviceRowView.disabledReason(
-            for: makeDevice(isAvailable: false), controllable: false) == "unavailable")
+            for: makeDevice(isAvailable: false), controllable: false) == "This speaker isn't on the network.")
     }
 
     // MARK: - Device row: what VoiceOver reads as the value
 
     @MainActor
-    @Test func theRowSpeaksItsArmedState() {
+    @Test func theRowSpeaksItsPlayingState() {
+        // The word on the screen, spoken: the sub-label says PLAYING and the
+        // section it sits in is titled PLAYING, so the value cannot say ARMED.
         #expect(DeviceRowView.spokenValue(
-            for: makeDevice(isSelected: true), isSelected: true, isRouted: false) == "Armed")
+            for: makeDevice(isSelected: true), isSelected: true, isRouted: false) == "Playing")
         #expect(DeviceRowView.spokenValue(
-            for: makeDevice(isSelected: false), isSelected: false, isRouted: false) == "Not armed")
+            for: makeDevice(isSelected: false), isSelected: false, isRouted: false) == "Not playing")
     }
 
     @MainActor
@@ -214,17 +218,17 @@ import AudiouterProtocol
         // is the one place either of them is spoken.
         #expect(DeviceRowView.spokenValue(
             for: makeDevice(isSelected: true, isMuted: true),
-            isSelected: true, isRouted: false) == "Armed, Muted")
+            isSelected: true, isRouted: false) == "Playing, Muted")
         #expect(DeviceRowView.spokenValue(
             for: makeDevice(isSelected: true),
-            isSelected: true, isRouted: true) == "Armed, App audio routed here")
+            isSelected: true, isRouted: true) == "Playing, App audio routed here")
         #expect(DeviceRowView.spokenValue(
             for: makeDevice(isSelected: true, isMuted: true), isSelected: true, isRouted: true)
-            == "Armed, Muted, App audio routed here")
-        // A route can point at a device nobody armed — the value says both.
+            == "Playing, Muted, App audio routed here")
+        // A route can point at a device nobody started — the value says both.
         #expect(DeviceRowView.spokenValue(
             for: makeDevice(isSelected: false),
-            isSelected: false, isRouted: true) == "Not armed, App audio routed here")
+            isSelected: false, isRouted: true) == "Not playing, App audio routed here")
     }
 
     // MARK: - Device row: the tap's local echo
@@ -252,7 +256,34 @@ import AudiouterProtocol
         // What the screen shows and what VoiceOver says are the same state,
         // pending or not — which is why the flag is a parameter.
         #expect(DeviceRowView.spokenValue(
-            for: makeDevice(isSelected: false), isSelected: true, isRouted: false) == "Armed")
+            for: makeDevice(isSelected: false), isSelected: true, isRouted: false) == "Playing")
+    }
+
+    // MARK: - The fader rail (the boundary tick's trigger)
+
+    @Test func aFaderOnlyReportsARailWhileAFingerIsOnIt() {
+        // The tick marks the end of the travel, so it needs a finger doing the
+        // travelling: a snapshot that happens to arrive at 0 or 100 is not a
+        // rail hit, and the resting rows must never buzz.
+        #expect(WarmSignal.faderRail(0, dragging: false) == nil)
+        #expect(WarmSignal.faderRail(100, dragging: false) == nil)
+        #expect(WarmSignal.faderRail(0, dragging: true) == 0)
+        #expect(WarmSignal.faderRail(100, dragging: true) == 100)
+    }
+
+    @Test func theMiddleOfADragIsNeverARail() {
+        // Nothing continuous: everything between the two ends is silent, which
+        // is what keeps `.sensoryFeedback` from firing on every tick.
+        for value in [1, 25, 50, 75, 99] {
+            #expect(WarmSignal.faderRail(value, dragging: true) == nil)
+        }
+    }
+
+    @Test func theTwoRailsAreDistinctSoCrossingTheTrackTicksTwice() {
+        // The trigger is the rail's identity, not a flag: dragging 0 → 100
+        // changes it nil → 0 → nil → 100, so both ends are felt. A Bool would
+        // have gone true → false → true and said the same thing at both ends.
+        #expect(WarmSignal.faderRail(0, dragging: true) != WarmSignal.faderRail(100, dragging: true))
     }
 
     // MARK: - The one-time gesture coach

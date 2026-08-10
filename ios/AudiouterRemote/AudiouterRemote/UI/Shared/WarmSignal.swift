@@ -99,6 +99,11 @@ enum WarmSignal {
 
     // MARK: Glass
 
+    /// What the drawer puts between itself and the list it covers. The same
+    /// near-black in both appearances on purpose: a scrim is an absence of
+    /// light, and the paper ground needs it more than the dark one does.
+    static let scrim = Color(UIColor(rgb: 0x080604, alpha: 0.5))
+
     static let glass     = warm(light: 0xFAF7EE, dark: 0x342D25, lightAlpha: 0.66, darkAlpha: 0.52)
     static let glassEdge = warm(light: 0x1E1C1C, dark: 0xFFFFFF, lightAlpha: 0.10, darkAlpha: 0.11)
     static let glassHi   = warm(light: 0xFFFFFF, dark: 0xFFFFFF, lightAlpha: 0.80, darkAlpha: 0.10)
@@ -154,6 +159,21 @@ enum WarmSignal {
     static func faderValue(start: Int, translationWidth: CGFloat, trackWidth: CGFloat) -> Int {
         guard trackWidth > 0 else { return start }
         return min(100, max(0, Int((Double(start) + (translationWidth / trackWidth) * 100).rounded())))
+    }
+
+    /// The rail a fader is currently pinned against, or `nil`. All three faders
+    /// clamp through ``faderValue(start:translationWidth:trackWidth:)``, so
+    /// past either end the value simply stops moving and the finger gets no
+    /// answer at all — this is what the boundary tick is triggered off.
+    ///
+    /// It is a `nil`-able identity rather than a `Bool` so that
+    /// `.sensoryFeedback(trigger:)` sees a change on every ARRIVAL at a rail
+    /// (nil → 0, nil → 100) and none while sitting on one. Off a rail there is
+    /// nothing to feel, which is also why nothing fires for the middle of a
+    /// drag: the tick marks the end of the travel, not the travel.
+    static func faderRail(_ value: Int, dragging: Bool) -> Int? {
+        guard dragging, value == 0 || value == 100 else { return nil }
+        return value
     }
 }
 

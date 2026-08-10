@@ -21,15 +21,25 @@ struct StatusBanners: View {
     var body: some View {
         if let snapshot {
             VStack(spacing: 8) {
+                // Two tints, both from the palette: `caution` for the one
+                // thing actually going wrong, and the secondary ink for the
+                // two that are notes. System `.orange`/`.blue` would be the
+                // only hues on the screen Warm Signal never chose, and on iOS
+                // `.blue` reads as a link. There is no third status hue to
+                // reach for and this does not invent one — the icons already
+                // tell the three banners apart.
                 if snapshot.localFallbackActive {
-                    banner(text: Self.localFallbackText, symbol: "speaker.slash.circle.fill", tint: .orange)
+                    banner(text: Self.localFallbackText, symbol: "speaker.slash.circle.fill",
+                           tint: WarmSignal.caution)
                 }
                 if let takeoverStatus = snapshot.takeoverStatus {
-                    banner(text: takeoverStatus, symbol: "arrow.triangle.2.circlepath.circle.fill", tint: .blue)
+                    banner(text: takeoverStatus, symbol: "arrow.triangle.2.circlepath.circle.fill",
+                           tint: WarmSignal.label2)
                 }
                 // `nil` means "not reported" — treat as false (protocol doc comment).
                 if snapshot.systemDefaultIsAirPlayActive == true {
-                    banner(text: Self.systemAirPlayNoteText, symbol: "info.circle.fill", tint: .blue)
+                    banner(text: Self.systemAirPlayNoteText, symbol: "info.circle.fill",
+                           tint: WarmSignal.label2)
                 }
             }
             .padding([.horizontal, .top])

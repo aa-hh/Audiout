@@ -5,7 +5,7 @@ import SwiftUI
 import AudiouterProtocol
 
 /// One speaker, drawn as its own fader (doc:84-105, doc:1823-1866): tapping
-/// the row arms or disarms it, dragging horizontally sets its volume, and the
+/// the row starts or stops it, dragging horizontally sets its volume, and the
 /// gold wash behind the content IS the level. Per-device mute lives in the
 /// Main Out drawer (``SpeakersView``), which is what the `MUTED` sub-label
 /// below points at.
@@ -18,12 +18,13 @@ import AudiouterProtocol
 /// value for that one beat, which ``MainOutRow`` deliberately does not.
 ///
 /// The drag is enabled by the same rule the Mac's own row uses (see
-/// ``isControllable``); arming is enabled by the Mac's separate, weaker
-/// checkbox rule (availability alone). `isAvailable == false` means the device
-/// is gone from the network entirely (distinct from `connection.state`, which
-/// can be "failed"/"off" while still `isAvailable`) — dimmed AND inert, since
-/// there's nothing on the other end to apply anything to. A row the rule can't
-/// adjust says WHY when VoiceOver reads it, on the row's own hint (see
+/// ``isControllable``); starting a speaker is enabled by the Mac's separate,
+/// weaker checkbox rule (availability alone). `isAvailable == false` means the
+/// device is gone from the network entirely (distinct from `connection.state`,
+/// which can be "failed"/"off" while still `isAvailable`) — inert, and drawn
+/// recessive by its own tints, with the opacity dim reaching the halo and
+/// nothing else (see ``identityDim``). A row the rule can't adjust says WHY
+/// when VoiceOver reads it, on the row's own hint (see
 /// ``disabledReason(for:controllable:)``).
 struct DeviceRowView: View {
     let device: DeviceState
@@ -103,15 +104,17 @@ struct DeviceRowView: View {
     /// composes this reason into its row's own label (the membership clause in
     /// `AudiouterSharedUI/DeviceRowView.configureAccessibility`); the phone has
     /// no row-level label — each control is its own element — so the clause
-    /// rides on the two controls the rule disables instead. Worded in the
-    /// phone's own vocabulary ("Select", "Main Out" — what its visible
-    /// controls say), and spoken exactly once, never duplicated onto a hint.
+    /// rides on the two controls the rule disables instead. Worded in the one
+    /// vocabulary the screen shows — PLAYING / READY / UNAVAILABLE, never
+    /// "armed" or "selected" — and spoken exactly once, never onto a hint too.
     static func disabledReason(for device: DeviceState, controllable: Bool) -> String? {
         if controllable { return nil }
-        return device.isAvailable ? "not selected for Main Out" : "unavailable"
+        return device.isAvailable
+            ? "Its level can be set once it's playing."
+            : "This speaker isn't on the network."
     }
 
-    /// What the row SHOWS as its armed state: the tap the finger just made,
+    /// What the row SHOWS as its playing state: the tap the finger just made,
     /// until the Mac confirms it or the echo times out; the Mac's own answer
     /// whenever no tap is in flight. Same shape as
     /// ``MainOutRow/thumbValue(local:server:)``, for the same reason.
@@ -119,17 +122,18 @@ struct DeviceRowView: View {
         pending ?? server
     }
 
-    /// What VoiceOver reads as the row's value. Armed state first, then the two
-    /// states the row otherwise carries in colour alone — the `MUTED` sub-label
-    /// and ``routedDot``, an 11 pt disc on a hidden halo. Comma-separated:
-    /// the row is one element, so it gets one value.
+    /// What VoiceOver reads as the row's value. Playing state first — the same
+    /// word the row's own sub-label and the section above it show — then the
+    /// two states the row otherwise carries in colour alone: the `MUTED`
+    /// sub-label and ``routedDot``, an 11 pt disc on a hidden halo.
+    /// Comma-separated: the row is one element, so it gets one value.
     ///
     /// `isSelected` is passed rather than read off `device`, because the row
     /// may be showing a tap the Mac hasn't answered yet
     /// (``selectionEcho(pending:server:)``) — and what the screen shows and
     /// what VoiceOver says have to be the same thing.
     static func spokenValue(for device: DeviceState, isSelected: Bool, isRouted: Bool) -> String {
-        var parts = [isSelected ? "Armed" : "Not armed"]
+        var parts = [isSelected ? "Playing" : "Not playing"]
         if device.isMuted { parts.append("Muted") }
         if isRouted { parts.append("App audio routed here") }
         return parts.joined(separator: ", ")
@@ -148,13 +152,13 @@ struct DeviceRowView: View {
 
     private var isConnecting: Bool { device.connection.state == "connecting" }
 
-    /// The armed state the row draws and speaks — the Mac's, or the tap that
+    /// The playing state the row draws and speaks — the Mac's, or the tap that
     /// is still on its way there.
     private var selected: Bool {
         Self.selectionEcho(pending: pendingSelection, server: device.isSelected)
     }
 
-    /// doc:1828 — armed, present, and nothing in the way.
+    /// doc:1828 — playing, present, and nothing in the way.
     private var isLive: Bool {
         selected && device.isAvailable && !isFailed && !isConnecting
     }
@@ -169,10 +173,34 @@ struct DeviceRowView: View {
     /// row a tap can't act on: a flash is a promise.
     private var pressed: Bool { fingerDown && axis == nil && device.isAvailable }
 
+    /// The unavailable row's dim, and the one thing it may touch: the halo.
+    ///
+    /// Nothing interactive, ever. A `failed` device can also be unavailable,
+    /// and then the failure card's Diagnose and Try Again are the row's only
+    /// live controls — 0.45 puts Diagnose at 1.88:1, and a control you can
+    /// press has to be a control you can read.
+    ///
+    /// No text either. `nameTint`, `glyphTint` and `subTint` all already
+    /// answer unavailability by dropping to `WarmSignal.label3`, which is the
+    /// dim; multiplying 0.45 on top of it lands the name and `UNAVAILABLE` at
+    /// 1.98:1 against 6.09:1 for the tint alone. That leaves the halo, which
+    /// is a graphic, carries no text, and is the strongest of the three
+    /// signals anyway.
+    private var identityDim: Double { device.isAvailable ? 1 : 0.45 }
+
+    /// Muting doesn't move the fader, so the level stays where it is — but a
+    /// muted speaker must not glow like a playing one. The wash steps down to
+    /// a fixed fraction of itself while the readout, the leading edge line and
+    /// the `MUTED` sub-label all keep saying exactly where the level sits.
+    private var washOpacity: Double { device.isMuted ? 0.3 : 1 }
+
     private var displayVolume: Int { Int((localVolume ?? Double(device.volume)).rounded()) }
 
-    /// doc:1852 — an unarmed row shows no level at all, so the wash is the
-    /// arming signal as much as the volume one.
+    /// The rail the finger is currently pinned against, for the boundary tick.
+    private var rail: Int? { WarmSignal.faderRail(displayVolume, dragging: dragging) }
+
+    /// doc:1852 — a row that isn't playing shows no level at all, so the wash
+    /// is the playing signal as much as the volume one.
     private var volumeFraction: CGFloat { isLive ? CGFloat(displayVolume) / 100 : 0 }
 
     private var isRouted: Bool {
@@ -214,8 +242,7 @@ struct DeviceRowView: View {
             if isFailed { failureControls }
         }
         .padding(.bottom, 2)
-        .opacity(device.isAvailable ? 1 : 0.45)
-        // The bound on the echo: any snapshot that moves this device's armed
+        // The bound on the echo: any snapshot that moves this device's playing
         // state ends it, whichever way it moved.
         .onChange(of: device.isSelected) { pendingSelection = nil }
         // And the other bound, for the write that never lands: a refusal
@@ -231,7 +258,7 @@ struct DeviceRowView: View {
 
     private var faderRow: some View {
         HStack(spacing: 12) {
-            halo
+            halo.opacity(identityDim)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(device.name)
@@ -259,6 +286,13 @@ struct DeviceRowView: View {
         .contentShape(Rectangle())
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { rowWidth = $0 }
         .simultaneousGesture(dragGesture)
+        // Two ticks, and only two. The tap's, fired off the local echo so it
+        // lands with the finger rather than a round trip later — and only on
+        // the echo being SET, never on the snapshot clearing it. And the
+        // rails, so the end of the travel is felt rather than looked for;
+        // nothing fires for the continuous middle of a drag.
+        .sensoryFeedback(trigger: pendingSelection) { _, new in new == nil ? nil : .selection }
+        .sensoryFeedback(trigger: rail) { _, new in new == nil ? nil : .impact(weight: .light) }
     }
 
     /// doc:1851's drag tint, and under it the touch-down flash that answers
@@ -282,17 +316,31 @@ struct DeviceRowView: View {
                 startPoint: .leading,
                 endPoint: .trailing))
             .frame(width: max(0, volumeFraction * rowWidth))
+            .opacity(washOpacity)
     }
 
-    /// doc:1854-1856 — the bright leading edge of the wash, only where there
-    /// is a level to show.
+    /// doc:1854-1856 — the leading edge of the wash, only where there is a
+    /// level to show, and at rest the only mark on the row that says where
+    /// that level is: the light wash is a ~10-RGB-point delta on paper, so
+    /// this line alone has to carry the 3:1 non-text floor.
+    ///
+    /// Which is why it takes `WarmSignal.goldText` rather than `gold` — in
+    /// light, a dark mark is what reads on paper; in dark the two are the same
+    /// hex — and sits at 0.85 at rest: 3.56:1 light / 6.92:1 dark against the
+    /// washed ground under it, 3.73:1 / 7.52:1 against bare canvas past the
+    /// level. Dragging takes it to full (4.17:1 / 7.12:1), so the drag stays
+    /// the louder of the two states.
+    ///
+    /// It holds that strength while muted, where the wash behind it does not
+    /// (``washOpacity``): dimming the level's only precise mark to make a
+    /// point about mute would trade one honesty for another.
     @ViewBuilder
     private var edgeLine: some View {
         if isLive {
             Rectangle()
-                .fill(WarmSignal.gold)
+                .fill(WarmSignal.goldText)
                 .frame(width: 2)
-                .opacity(dragging ? 1 : 0.4)
+                .opacity(dragging ? 1 : 0.85)
                 .offset(x: max(0, volumeFraction * rowWidth - 1))
         }
     }
@@ -419,7 +467,7 @@ struct DeviceRowView: View {
     /// sighted user is horizontal (``dragGesture``), so any wording here is
     /// either a duplicate or a lie to one of the two audiences.
     private var hint: String {
-        let base = "Double tap to \(selected ? "disarm" : "arm")."
+        let base = "Double tap to \(selected ? "stop" : "play")."
         guard controlsEnabled else {
             return [base, Self.disabledReason(for: device, controllable: false)]
                 .compactMap { $0 }
@@ -477,9 +525,9 @@ struct DeviceRowView: View {
             }
     }
 
-    /// The one place a tap arms or disarms — the touch path and VoiceOver's
-    /// action both come through here, so the echo, the write and the coach's
-    /// memory can never disagree about what a tap did.
+    /// The one place a tap starts or stops a speaker — the touch path and
+    /// VoiceOver's action both come through here, so the echo, the write and
+    /// the coach's memory can never disagree about what a tap did.
     private func toggleSelected() {
         let next = !selected
         pendingSelection = next

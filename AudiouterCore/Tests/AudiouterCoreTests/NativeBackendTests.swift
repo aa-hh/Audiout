@@ -8625,6 +8625,15 @@ extension SerializedSharedState {
         await pollUntil { backend.test_scopeConflict(deviceID: device.id) == nil }
         #expect(backend.test_scopeConflict(deviceID: device.id) == nil,
                 "the conflict record must clear on disengage")
+        // Polled like every other assertion here: `Telemetry.log` is
+        // non-blocking, so the line lands on its own queue some time after the
+        // state change that emitted it — reading the box once races it (this
+        // flaked under a loaded suite), and the `_installTestSink(nil)` flush
+        // barrier only runs in the `defer` above, i.e. after this expectation.
+        await pollUntil {
+            telemetryLines(box, evt: "scope_conflict", device: device.id)
+                .contains { $0["stage"] as? String == "routeRestored" }
+        }
         #expect(telemetryLines(box, evt: "scope_conflict", device: device.id)
                     .contains { $0["stage"] as? String == "routeRestored" },
                 "the disengage must be loud too")

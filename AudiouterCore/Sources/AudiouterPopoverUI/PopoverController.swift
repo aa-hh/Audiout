@@ -1185,21 +1185,16 @@ public final class PopoverController: NSObject {
                 columnTitle: bluetooth ? "Sync" : nil,
                 columnCenterFromTrailing: bluetooth ? PopoverColumnGrid.syncCenterFromTrailing : 0)
             guard !collapsed else { continue }
-            if bluetooth {
-                renderedBluetoothOrder = section.devices.map(\.id)
-                if section.devices.isEmpty {
-                    panel.addRow(makeBluetoothConnectRow())
-                    renderedBTConnectShown = true
-                    continue
-                }
-            }
-            for device in section.devices { panel.addRow(makeDeviceRow(device, indented: false)) }
+            addSubsectionRows(section)
         }
         // The "+" footer belongs to the CARD, not to any one subsection, so it
         // is added after ALL of them (This Mac / AirPlay / Bluetooth) — last
         // thing in the card body, and hidden with it when the card collapses.
-        // A sync drawer opens via `insertRow` directly under ITS device row, so
-        // it can never land below this strip.
+        // `endSubsection()` is what keeps it out of the last subsection's clip,
+        // where collapsing Bluetooth would take the strip with it. A sync drawer
+        // opens via `insertRow` directly under ITS device row, so it can never
+        // land below this strip.
+        panel.endSubsection()
         panel.addRow(devicesFooter)
         // Set each row's rail extent + feed the continuous rail overlay: the
         // spine runs Main Audio → the LOWEST SELECTED node; rows below it render
@@ -1368,30 +1363,83 @@ public final class PopoverController: NSObject {
         return collapsed
     }
 
+    /// Build one subsection's rows into the panel — the Bluetooth empty state's
+    /// Connect affordance (BT-LIST) or one `DeviceRowView` per member. Shared by
+    /// `rebuild()` and the EXPAND half of `toggleSubsection`, so a section built
+    /// by a toggle can never differ from the same section built by a rebuild.
+    private func addSubsectionRows(_ section: DeviceSection) {
+        if section.title == Self.bluetoothSubsectionTitle {
+            renderedBluetoothOrder = section.devices.map(\.id)
+            if section.devices.isEmpty {
+                panel.addRow(makeBluetoothConnectRow())
+                renderedBTConnectShown = true
+                return
+            }
+        }
+        for device in section.devices { panel.addRow(makeDeviceRow(device, indented: false)) }
+    }
+
     /// Chevron/header click on a device-type subsection: flip the TRANSIENT
-    /// collapse state and rebuild. Unlike a card — which clips a body it still
-    /// holds — a subsection's rows are simply not built while collapsed, so
-    /// there is no body to animate and a rebuild is the whole mechanism. The
-    /// re-fit is explicit here for the same reason `rebuild()`'s other callers
-    /// do it: `rebuild()` itself never republishes the size.
+    /// collapse state, then let the subsection's own clip carry the travel
+    /// (`setSubsectionCollapsed` — the row-reveal mechanism over a GROUP of
+    /// rows, at the same duration and curve). Never a `rebuild()`: a rebuild
+    /// puts the content at its final size instantly, leaving only the surface
+    /// animating — the live snap/judder report.
     ///
-    /// Consequences that fall out of the rows not existing, both intended: an
-    /// open sync drawer under a now-unbuilt row loses its row, so
-    /// `reconcileSyncDrawer` retracts the drawer INTENT and stops the
-    /// align-by-ear tick with it; and a diagnosis panel simply isn't mounted,
-    /// while its open/dismissed INTENT is untouched — collapse is a display
-    /// action, never a membership one, so the panel returns on expand if its
-    /// episode is still open.
+    /// The MODEL flips on the click even though the collapsed rows' views only
+    /// leave when the clip finishes closing: `renderedDeviceOrder()` feeds the
+    /// rail terminus, `update(devices:)`'s structural compare and the drawer
+    /// reconcile, and none of them may wait on an animation.
+    ///
+    /// Consequences of the rows leaving, both intended: an open sync drawer
+    /// under one of them loses its row, so `reconcileSyncDrawer` retracts the
+    /// drawer INTENT and stops the align-by-ear tick with it; and a diagnosis
+    /// panel is simply unmounted, while its open/dismissed INTENT is untouched —
+    /// collapse is a display action, never a membership one, so the panel
+    /// returns on expand if its episode is still open.
     private func toggleSubsection(_ title: String) {
         let collapsed = !isSubsectionCollapsed(title)
         transientCollapsed[title] = collapsed
-        rebuild()
-        // `rebuild()` has already put the content at its final height in BOTH
-        // directions; the surface glides to it, the same way a card collapse
-        // does (`toggleCard` → `setCardCollapsed(animated:)`). The window's
-        // frame animation retargets cleanly, so a quick second click supersedes
-        // the travel rather than fighting it.
-        panel.panelContentDidChangeHeight(animated: true)
+        guard let section = deviceSections().first(where: { $0.title == title }) else { return }
+        if collapsed {
+            dropSubsectionRowModel(section)
+            reconcileSyncDrawer(animated: false)
+            updateBusRailExtents()
+        }
+        panel.setSubsectionCollapsed(title: title, collapsed: collapsed, animated: true) {
+            // EXPAND only, and before the panel measures: the rows, then the
+            // panels whose intent survived the collapse, so the clip's natural
+            // height is the whole subsection's.
+            addSubsectionRows(section)
+            reconcileDiagnosisPanels(animated: false)
+            reconcileBTAlignmentPanels(animated: false)
+            reconcileSyncDrawer(animated: false)
+            updateBusRailExtents()
+        }
+    }
+
+    /// Drop the MODEL for a subsection collapsing away: its rows, the panels
+    /// mounted under them, and the ONE reused sync drawer (D2), which — exactly
+    /// as in `rebuild()` — cannot be left parented to a tree that is about to be
+    /// torn down. The INTENTS (`openDiagnosisIDs`, `btAlignmentPromptDeviceID`,
+    /// `btWizardSession`) are deliberately untouched: collapse is display only,
+    /// and the expand's reconcile remounts from them.
+    private func dropSubsectionRowModel(_ section: DeviceSection) {
+        for device in section.devices {
+            deviceRowsByID.removeValue(forKey: device.id)
+            diagnosisPanelsByID.removeValue(forKey: device.id)
+            if btAlignmentPromptDeviceID == device.id { btAlignmentPromptView = nil }
+            if btWizardDeviceID == device.id { btWizardView = nil }
+            if mountedSyncDrawerID == device.id {
+                mountedSyncDrawerID = nil
+                syncDrawer.removeFromSuperview()
+            }
+        }
+        if section.title == Self.bluetoothSubsectionTitle {
+            renderedBluetoothOrder = []
+            renderedBTConnectShown = false
+            bluetoothConnectButton = nil
+        }
     }
 
     /// The Bluetooth subsection's rows, recency-ordered (BT-UI ghost

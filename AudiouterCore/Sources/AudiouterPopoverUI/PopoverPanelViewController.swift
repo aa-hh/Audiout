@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
+import AudiouterCore
 import AudiouterSharedUI
 
 /// The panel hosted inside the popover's `contentViewController` (SPEC §9
@@ -86,6 +87,23 @@ final class PopoverPanelViewController: NSViewController {
     /// Initial collapse states recorded in `beginCard`, applied on the first body
     /// row (a header-only card has nothing to collapse until it has a body).
     private var pendingCollapsed: [String: Bool] = [:]
+
+    // MARK: Collapsible SUBSECTION bookkeeping
+
+    /// A device-type subsection's body: the rows in a stack of their own, inside
+    /// a `RowClipView` whose height is the ONE animated dimension of a collapse
+    /// (`setSubsectionCollapsed`) — `insertRow`'s choreography applied to a
+    /// GROUP of rows instead of one.
+    private struct SubsectionBody {
+        let clip: RowClipView
+        let stack: NSStackView
+    }
+    /// Subsection bodies keyed by subsection title, so a toggle can find the
+    /// clip to animate without the host holding a view reference.
+    private var subsectionBodies: [String: SubsectionBody] = [:]
+    /// The subsection `addRow` is currently filling. `nil` between subsections,
+    /// where rows go into the card body instead (`endSubsection`).
+    private weak var currentSubsectionStack: NSStackView?
 
     /// The card stack's top pin, kept so the surface can seat the whole
     /// content below the window's toolbar strip (`setContentTopInset` — the
@@ -365,6 +383,8 @@ final class PopoverPanelViewController: NSViewController {
             v.removeFromSuperview()
         }
         currentCard = nil
+        currentSubsectionStack = nil
+        subsectionBodies.removeAll()
         cardsByHeader.removeAll()
         chevronsByHeader.removeAll()
         chevronSymbolByHeader.removeAll()
@@ -426,6 +446,9 @@ final class PopoverPanelViewController: NSViewController {
         let card = CardView()
         card.translatesAutoresizingMaskIntoConstraints = false
         cardsByHeader[header] = card
+        // A new card ends any subsection still being filled — its rows belong to
+        // the card body, never to the previous card's last subsection clip.
+        currentSubsectionStack = nil
 
         // The combined header row is the FIRST element inside the tile: section
         // title on the left, column headers centered over their columns on the
@@ -613,11 +636,29 @@ final class PopoverPanelViewController: NSViewController {
     /// current card's COLLAPSIBLE body, full card width. On the first body row of
     /// a card that opened collapsed, apply the initial collapsed end state (no
     /// animation).
+    ///
+    /// While a subsection is open (`addSubsectionHeader` → `endSubsection`) the
+    /// row lands in THAT subsection's clip instead, so collapsing the subsection
+    /// takes it with it.
     func addRow(_ view: NSView) {
+        if let stack = currentSubsectionStack {
+            stack.addArrangedSubview(view)
+            NSLayoutConstraint.activate([
+                view.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
+                view.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
+            ])
+            return
+        }
         guard let card = currentCard else { return }
         card.addBodyRow(view)
         applyPendingCollapseIfNeeded(card)
     }
+
+    /// Close the subsection currently being filled: later `addRow` calls go back
+    /// into the CARD's body. The Devices card's "+" footer strip belongs to the
+    /// card, not to the last subsection above it — collapsing Bluetooth must not
+    /// take the strip away with it.
+    func endSubsection() { currentSubsectionStack = nil }
 
     /// Apply a card's deferred initial collapse (recorded in `beginCard`) once its
     /// body exists. Synchronous end state, no animation (PLAN §E risk 1 — initial
@@ -673,6 +714,126 @@ final class PopoverPanelViewController: NSViewController {
         let next = !card.isBodyCollapsed
         setCardCollapsed(title: title, collapsed: next, animated: animated)
         return next
+    }
+
+    /// Collapse/expand a device-type SUBSECTION by animating its body clip's
+    /// height — `insertRow`/`removeRow`'s choreography applied to the whole group
+    /// of rows a subsection holds, at the same `rowRevealDuration` and curve, so
+    /// a drawer and a section read as one motion language. Flips the chevron to
+    /// match. `false` if `title` has no mounted subsection body.
+    ///
+    /// This deliberately does NOT rebuild: a rebuild puts the content at its
+    /// final size instantly and leaves only the SURFACE animating, which is the
+    /// mismatch the live report called a snap/judder.
+    ///
+    /// `buildRows` runs on an EXPAND only, and BEFORE the measure — rows added
+    /// inside it land in this subsection's clip, so the clip's natural height
+    /// (and the panel's published height) already includes them. On a COLLAPSE
+    /// the rows are torn down when the clip finishes closing; the host is
+    /// expected to have dropped them from its MODEL on the click itself, since
+    /// no completion handler ever fires for a view in no window.
+    @discardableResult
+    func setSubsectionCollapsed(title: String, collapsed: Bool, animated: Bool,
+                                buildRows: () -> Void) -> Bool {
+        guard let body = subsectionBodies[title] else { return false }
+        if let chevron = chevronsByHeader[title] {
+            assignChevron(chevron, collapsed: collapsed, for: title)
+            chevron.setAccessibilityLabel(collapsed ? "Expand \(title)" : "Collapse \(title)")
+        }
+        // Reduce Motion AND headless resolve instantly and completely: an
+        // `NSAnimationContext` completion handler never fires for a view in no
+        // window, so a deferred teardown would leave the rows mounted forever.
+        let wantsAnimation = animated && !reduceMotion && !HeadlessRuntime.isActive
+        if collapsed {
+            collapseSubsection(body, animated: wantsAnimation)
+        } else {
+            expandSubsection(body, animated: wantsAnimation, buildRows: buildRows)
+        }
+        return true
+    }
+
+    /// Fold a subsection shut: seed the clip with its current height, lay THAT
+    /// out, then animate it to 0 — the exact mirror of the expand below, and of
+    /// `removeRow` for a single row (an inactive or stale constraint would
+    /// otherwise animate 0 → 0 and the rows would snap shut). The shrunk size is
+    /// published in the same turn: `animator().constant = 0` sets the model value
+    /// immediately, so the re-fit measures where the content is GOING and the
+    /// surface travels with it rather than after it.
+    private func collapseSubsection(_ body: SubsectionBody, animated: Bool) {
+        let clip = body.clip
+        clip.isClosing = true
+        // Tear down only the rows THIS collapse hid: a re-expand inside the
+        // animation's own duration refills the stack, and that expand's rows
+        // must survive this (now superseded) completion.
+        let doomed = body.stack.arrangedSubviews
+        let teardown = {
+            for row in doomed where row.superview === body.stack {
+                body.stack.removeArrangedSubview(row)
+                row.removeFromSuperview()
+            }
+        }
+        guard animated else {
+            teardown()
+            clip.heightConstraint.constant = 0
+            clip.heightConstraint.isActive = true
+            panelContentDidChangeHeight(animated: false)
+            return
+        }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = Self.rowRevealDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            context.allowsImplicitAnimation = true
+            clip.heightConstraint.constant = clip.frame.height
+            clip.heightConstraint.isActive = true
+            self.stackView.layoutSubtreeIfNeeded()
+            clip.heightConstraint.animator().constant = 0
+            self.panelContentDidChangeHeight(animated: true)
+        }, completionHandler: teardown)
+    }
+
+    /// Unfold a subsection: build its rows so the clip has a natural height,
+    /// measure the grown panel, THEN hand the collapsed start state back and lay
+    /// it out before animating — the measure settles every row below at its final
+    /// position, so without that second layout pass the reveal starts already
+    /// arrived (`insertRow`'s documented trap, same fix).
+    private func expandSubsection(_ body: SubsectionBody, animated: Bool,
+                                  buildRows: () -> Void) {
+        let clip = body.clip
+        // A collapse whose deferred teardown has not run yet leaves its rows in
+        // the stack; they are already out of the host's model, so this expand
+        // owns the stack and starts it empty.
+        for row in body.stack.arrangedSubviews {
+            body.stack.removeArrangedSubview(row)
+            row.removeFromSuperview()
+        }
+        clip.isClosing = false
+        currentSubsectionStack = body.stack
+        buildRows()
+        currentSubsectionStack = nil
+        // Natural height governs while the rows are measured.
+        clip.heightConstraint.isActive = false
+        let target = fittingSizeSettled()
+        let revealHeight = clip.frame.height
+        guard animated else {
+            publishContentSize(target, animated: false)
+            return
+        }
+        clip.heightConstraint.constant = 0
+        clip.heightConstraint.isActive = true
+        _ = fittingSizeSettled()   // commit the START state; the reveal needs the distance
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = Self.rowRevealDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            context.allowsImplicitAnimation = true
+            clip.heightConstraint.animator().constant = revealHeight
+            self.stackView.layoutSubtreeIfNeeded()
+            self.publishContentSize(target, animated: true)
+        }, completionHandler: {
+            // Let the rows flex with their own content again once they have
+            // arrived — unless a collapse has since begun on this clip, whose
+            // height constraint deactivating here would pop the section back open.
+            if !clip.isClosing { clip.heightConstraint.isActive = false }
+        })
     }
 
     /// Assign the disclosure chevron image for a collapse state (GroupRowView
@@ -889,9 +1050,13 @@ final class PopoverPanelViewController: NSViewController {
     /// leading `chevron.right`/`chevron.down` button, the whole-row click
     /// recognizer (C4), and the same `chevronsByHeader`/
     /// `headerClickRecognizersByHeader` registries, keyed by the SUBSECTION
-    /// title. A subsection has no body of its own to clip, so unlike a card it
-    /// carries no collapse END STATE here: the host renders or omits the member
-    /// rows and this method only builds the affordance.
+    /// title.
+    ///
+    /// The header is followed by the subsection's own BODY CLIP (`RowClipView`),
+    /// which every row added until the next `addSubsectionHeader`/`endSubsection`
+    /// goes into — the height a collapse animates (`setSubsectionCollapsed`). The
+    /// clip is built even when `collapsed` (empty, pinned to 0), so a later
+    /// expand has a clip to fill and travel.
     func addSubsectionHeader(_ title: String,
                              columnTitle: String? = nil,
                              columnCenterFromTrailing: CGFloat = 0,
@@ -961,7 +1126,37 @@ final class PopoverPanelViewController: NSViewController {
                 columnLabel.bottomAnchor.constraint(equalTo: wrapper.bottomAnchor, constant: -2),
             ])
         }
+        // The header itself is a CARD-body row (it stays visible when the
+        // subsection collapses), so close any previous subsection first.
+        currentSubsectionStack = nil
         addRow(wrapper)
+        currentSubsectionStack = mountSubsectionBody(title, collapsed: collapsed)
+    }
+
+    /// Build a subsection's body clip + row stack and mount it under the header
+    /// just added. The stack is the clip's single "row" — pinned top, bottom at
+    /// `.defaultHigh` (`RowClipView`), so an active height-0 constraint wins
+    /// without deforming the rows: they hold their place at the top and are
+    /// revealed downward as the height grows.
+    private func mountSubsectionBody(_ title: String, collapsed: Bool) -> NSStackView {
+        let stack = NSStackView()
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.distribution = .fill
+        stack.spacing = 0
+        let clip = RowClipView(row: stack)
+        subsectionBodies[title] = SubsectionBody(clip: clip, stack: stack)
+        if collapsed {
+            // The collapsed END STATE, applied synchronously — the host builds no
+            // rows for a collapsed subsection, so this clip stays empty until an
+            // expand fills it.
+            clip.isClosing = true
+            clip.heightConstraint.constant = 0
+            clip.heightConstraint.isActive = true
+        }
+        addRow(clip)
+        return stack
     }
 
     /// Render a small single-line annotation row INSIDE the current card — e.g.
@@ -1270,9 +1465,11 @@ final class RowClipView: NSView {
     /// pinned at 0; inactive once expanded, so the row flexes with its content.
     private(set) var heightConstraint: NSLayoutConstraint!
 
-    /// Set by `removeRow` the moment an animated close begins, so a still-
-    /// pending reveal completion knows not to deactivate `heightConstraint`
-    /// out from under the close. Never reset — every mount builds a new clip.
+    /// Set the moment an animated close begins (`removeRow`, or a subsection's
+    /// `collapseSubsection`), so a still-pending reveal completion knows not to
+    /// deactivate `heightConstraint` out from under the close. A row's clip never
+    /// clears it — every mount builds a new one — but a SUBSECTION's clip
+    /// outlives its rows and is reset by the next expand.
     var isClosing = false
 
     init(row: NSView) {

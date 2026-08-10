@@ -80,6 +80,39 @@ import AppKit
         #expect(popover.test_deviceRow(for: "office") != nil)
     }
 
+    /// The collapse's SIZE contract — the number the surface is told to travel
+    /// to. The subsection's rows fold into their own clip, so the panel must
+    /// publish exactly their height less, and the expand must put every point
+    /// of it back. Headless takes the synchronous path (an `NSAnimationContext`
+    /// completion handler never fires for a view in no window), so this pins the
+    /// end states, not the interpolation — whether the two read as one motion is
+    /// a live judgement.
+    @Test func collapsingASubsectionPublishesExactlyItsRowsHeightLess() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), airplay("office", name: "Office"),
+                                 airplay("kitchen", name: "Kitchen")])
+        _ = popover.test_panelFittingSize   // settle Auto Layout before reading frames
+        let rowsHeight = ["office", "kitchen"]
+            .compactMap { popover.test_deviceRow(for: $0)?.frame.height }
+            .reduce(0, +)
+        #expect(rowsHeight > 0)
+        let expanded = popover.test_preferredContentSize.height
+
+        popover.test_fireSubsectionHeaderClick(title: airPlayTitle)
+
+        #expect(popover.test_deviceRow(for: "office") == nil)
+        #expect(popover.test_deviceRow(for: "kitchen") == nil)
+        #expect(popover.test_preferredContentSize.height == expanded - rowsHeight,
+                "the published height loses exactly the collapsed rows — no residue, no over-shrink")
+
+        popover.test_fireSubsectionHeaderClick(title: airPlayTitle)
+
+        #expect(popover.test_deviceRow(for: "office") != nil)
+        #expect(popover.test_deviceRow(for: "kitchen") != nil)
+        #expect(popover.test_preferredContentSize.height == expanded,
+                "and the expand puts every point of it back")
+    }
+
     /// Same two rebuild flavors the cards obey: a manual toggle is transient
     /// within one open and `rebuildForOpen()` resets it to the expanded default.
     @Test func subsectionCollapseSurvivesRebuildButResetsOnOpen() {

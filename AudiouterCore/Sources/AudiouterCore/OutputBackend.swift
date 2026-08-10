@@ -83,6 +83,27 @@ public enum BackendEvent: Sendable, Equatable {
     /// - **A real move.** Never emitted when the volume didn't actually change
     ///   (e.g. only mute did).
     case systemVolumeChanged(volume: Int)
+
+    /// Whether the app — not macOS — is now responsible for moving the volume,
+    /// per ``VolumeOwnership/weOwnVolume(defaultOutputUID:systemOutputVolume:)``.
+    ///
+    /// `true` means the Mac's default output cannot take a volume write, so the
+    /// hardware volume keys are dead (macOS draws the crossed-out HUD) and the
+    /// app must intercept them itself. That is the state our own aggregate puts
+    /// the Mac into, and it is also plain HDMI's resting state.
+    ///
+    /// Emitted once at `start()` and again on every default-output change,
+    /// including the echo of our OWN switch to the aggregate — gaining ownership
+    /// by taking over the default output is exactly as newsworthy as losing it.
+    /// Consumers may receive the same value twice; treat it as a level, not an
+    /// edge.
+    ///
+    /// Same layering as ``systemVolumeChanged(volume:)`` and for the same reason:
+    /// only ``NativeBackend`` can know this (it owns the system-volume listener
+    /// and the aggregate), but it sits BELOW the routing brain, so it states the
+    /// fact and lets `AppDelegate` decide what to do about it.
+    case systemVolumeOwnershipChanged(Bool)
+
     /// A routed app's process lifecycle changed — it quit (`isRunning == false`)
     /// or relaunched (`isRunning == true`). Only emitted for apps that currently
     /// have an active `.device(id:)` route in the backend's last route table;

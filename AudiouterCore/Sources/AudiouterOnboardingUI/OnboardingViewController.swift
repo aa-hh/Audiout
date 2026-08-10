@@ -137,18 +137,23 @@ public final class OnboardingViewController: NSViewController {
             },
             onOpenSettings: { [weak self] in self?.onOpenSettings(.localNetwork) })
 
-        // Primed ahead of a not-yet-shipped feature (speaker-side transport
-        // controls simulating Mac media keys) — see SetupModel's
-        // RemoteControlPriming doc comment. Included now so the grant is already
-        // in place once that feature merges, instead of a cold THIRD prompt later.
+        // Asked for up front so neither consumer springs a cold THIRD prompt
+        // later: speaker-side transport controls simulating Mac media keys, and
+        // the volume-key interceptor. Only the second one HAS to have it — a
+        // CGEventTap can't be created untrusted, where posting merely no-ops.
+        // See SetupModel's `SetupPermission.remoteControl`.
         remoteControlRow = PermissionRowView(
             content: PermissionRowContent(
                 symbolName: "accessibility",
                 title: "Remote Control",
                 // Outcome first, then name the OS's own label for the
-                // permission so the System Settings pane is recognisable.
-                detail: "Press play or pause on a speaker and your Mac follows. "
-                    + "macOS calls this Accessibility.",
+                // permission so the System Settings pane is recognisable. The
+                // volume keys lead: macOS refuses to move the volume while
+                // Audiouter is the output device, so without this grant they do
+                // nothing at all — a far more visible loss than transport keys.
+                detail: "Use your volume keys while Audiouter is your output "
+                    + "device, and press play or pause on a speaker to control "
+                    + "your Mac. macOS calls this Accessibility.",
                 allowButtonTitle: "Allow…",
                 iconColor: Tokens.Color.permissionRemoteControl),
             onAllow: { [weak self] in self?.model.primeRemoteControl() },

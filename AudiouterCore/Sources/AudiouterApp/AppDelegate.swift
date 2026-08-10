@@ -237,6 +237,84 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var mediaKeyController = MediaKeyController(
         remoteControl: permissionProviders.remoteControl)
 
+    /// Catches the hardware volume keys while the Mac's default output cannot take
+    /// a volume write — our aggregate, or plain HDMI — and drives Main Out with
+    /// them, because macOS's own key handling is dead in exactly that state.
+    /// Installed and torn down by `.systemVolumeOwnershipChanged`; shares the
+    /// Accessibility seam with `mediaKeyController` so there is one grant path.
+    private lazy var volumeKeyInterceptor: VolumeKeyInterceptor = {
+        let interceptor = VolumeKeyInterceptor(remoteControl: permissionProviders.remoteControl)
+        interceptor.onAction = { [weak self] action in
+            guard let self else { return }
+            switch action {
+            case .setMainVolume(let volume):
+                // The read-back arm: bring Main into agreement and re-push every
+                // dependent gain, writing NO hardware — which is right here, since
+                // the premise is that this output cannot take a volume write.
+                self.groupController.applyExternalSystemVolume(volume)
+            case .toggleMainMute:
+                self.groupController.setMainOutMuted(!self.groupController.isMainOutMuted)
+            }
+            // This path never enters the backend event stream, so nothing else
+            // will repaint the master readout for it.
+            self.repaintFromCurrentState()
+        }
+        interceptor.onAccessibilityMissing = { [weak self] in
+            guard let self else { return }
+            self.log("volume keys: Accessibility not granted — they stay dead until it is")
+            // A log line is not a user-visible state, and this failure is
+            // otherwise completely silent: macOS has already stopped handling the
+            // volume keys (that is what made us take over), so the user just finds
+            // dead keys with nothing to explain them. Send them to the permission
+            // rows, which read the live grant and offer the prompt. Once per
+            // launch — this fires on every ownership change, and a window that
+            // reopens each time would be its own bug.
+            guard !self.didSurfaceAccessibilityGap else { return }
+            self.didSurfaceAccessibilityGap = true
+            self.presentSetup()
+        }
+        return interceptor
+    }()
+
+    /// Our own Touch Bar — the everyday Control Strip controls, but with volume
+    /// buttons that work. Apple's grey out on our aggregate and post no event
+    /// when tapped, so they can be neither intercepted nor revived; presenting a
+    /// whole bar means every control on it is one we drive.
+    private lazy var touchBarFullBar: TouchBarFullBar = {
+        let bar = TouchBarFullBar()
+        bar.onVolumeStep = { [weak self] up in
+            guard let self else { return }
+            // Same step feel as the volume keys — one shared definition, so the
+            // Touch Bar and the keyboard can never drift apart.
+            let target = VolumeStep.next(
+                from: self.groupController.mainOutMasterVolume, up: up, fineStep: false)
+            self.groupController.applyExternalSystemVolume(target)
+            self.repaintFromCurrentState()
+        }
+        bar.onToggleMute = { [weak self] in
+            guard let self else { return }
+            self.groupController.setMainOutMuted(!self.groupController.isMainOutMuted)
+            self.repaintFromCurrentState()
+        }
+        return bar
+    }()
+
+    /// True once we've sent the user to the permission rows over a missing
+    /// Accessibility grant this launch, so repeated ownership changes can't
+    /// reopen the window under them.
+    private var didSurfaceAccessibilityGap = false
+
+    /// Take our Touch Bar down so the user's own comes back.
+    ///
+    /// Idempotent — the paths into it overlap (a Quit fires
+    /// `applicationShouldTerminate`; a logout may fire `willPowerOff` too).
+    /// Cheap insurance rather than load-bearing now that we persist nothing: a
+    /// missed call costs a stale bar until the process dies, not a setting the
+    /// user is stranded with.
+    private func releaseTouchBar() {
+        touchBarFullBar.setOwnsVolume(false)
+    }
+
     /// Set once `applicationShouldTerminate` has begun tearing down (C1). A second
     /// Quit while the first is still waiting on `stopAndWait` must not re-enter
     /// `backend.stop()` or reply to `NSApp` a second time — AppKit only expects one
@@ -279,6 +357,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `Tokens.accentStyle` directly); this is the launch-time read of the
         // persisted choice.
         Tokens.accentStyle = settings.accentStyle
+
+        // Logout, restart and shutdown do not always route through
+        // `applicationShouldTerminate`, so take the same exit here.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main
+        ) { [weak self] _ in MainActor.assumeIsolated { self?.releaseTouchBar() } }
 
         // Status item first so there's immediate UI feedback that we launched.
         // The button's action drives the one surface (SPEC §9) through the
@@ -1236,6 +1320,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         eventTask?.cancel()
         eventTask = nil
         backend.stop()
+        // Hand the user's Touch Bar back BEFORE anything that can block. While we
+        // own the volume the Mac is in "App Controls only" mode, so a quit that
+        // skipped this leaves no Control Strip and no app to draw controls — the
+        // Touch Bar goes blank but for the emoji key, with nothing on screen
+        // explaining it and no way for the user to know which setting to undo
+        // (hit live 2026-08-08). Restoring at the next launch is not enough: the
+        // next launch may never come precisely because the app looks broken.
+        releaseTouchBar()
         log("Audiouter terminating")
 
         // Only show the indicator if the wait is actually slow (~300ms) — an instant
@@ -1293,6 +1385,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 log("level: \(id) rms \(rms)")
             }
             popoverController.updateLevel(rms, for: id)
+            // Drives our Touch Bar's play/pause glyph. Real now-playing state is
+            // gated (MediaRemote never calls back on macOS 27), and this is the
+            // one playback fact we own: we are tapping the audio, so we know
+            // whether any is flowing.
+            touchBarFullBar.noteAudioLevel(rms)
             return
         case .appLevel(let bundleID, let rms):
             popoverController.updateAppLevel(rms, for: bundleID)
@@ -1386,6 +1483,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popoverController.setRoutingBlockedNeedsDefault(active)
             log("event: \(describe(event))")
             return
+        case .systemVolumeOwnershipChanged(let weOwnIt):
+            // The Mac's default output can no longer take a volume write (our
+            // aggregate, or plain HDMI), so macOS's own key handling is dead and
+            // the app has to catch the keys itself. Install or tear down the tap
+            // and our Touch Bar to match; no device model changed — handle it
+            // and return.
+            volumeKeyInterceptor.setOwnsVolume(weOwnIt)
+            volumeKeyInterceptor.setCurrentMainVolume(groupController.mainOutMasterVolume)
+            touchBarFullBar.setOwnsVolume(weOwnIt)
+            log("event: \(describe(event))")
+            return
         case .btFirstMixAlignmentPrompt(let deviceID):
             // W3: a never-aligned BT speaker just joined its first mix and is
             // being held silent — surface the anchored alignment card under its
@@ -1395,6 +1503,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             log("event: \(describe(event))")
             return
         }
+        repaintFromCurrentState()
+    }
+
+    /// Push the current model out to every surface that shows it. The tail of
+    /// `apply(_:)` for most events, and also what the volume-key interceptor calls
+    /// after moving Main — that path never enters the event stream, so without
+    /// this the readouts would sit stale until the next unrelated backend event.
+    private func repaintFromCurrentState() {
         // Establish the out-of-the-box default (current device selected ⇒
         // passthrough) once the fleet is known (SPEC §9b). No-op after the first
         // time / if a persisted selection was loaded.
@@ -1407,6 +1523,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // and the symbol goes accent-coloured while anything is actually leaving
         // the Mac (Main Out membership OR a live per-app redirect).
         statusItemController.updateMasterVolume(popoverController.statusMasterVolume)
+        // Keep the interceptor's step-from value current. It can't read Main
+        // synchronously from a tap callback, so the value has to be pushed, and
+        // this repaint already runs on every event that could have moved it.
+        volumeKeyInterceptor.setCurrentMainVolume(groupController.mainOutMasterVolume)
         statusItemController.updateStreamingState(devices: devices, liveRoutedAppNames: routedAppNamesByDeviceID)
         // Keep the Groups screen in lockstep with the same snapshot. Nil until
         // that tab has been visited, and its own hidden-means-idle gate drops
@@ -1431,6 +1551,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "appLevel(\(bundleID), \(rms))"
         case .systemVolumeChanged(let volume):
             return "systemVolumeChanged(\(volume)) — syncing Main Out"
+        case .systemVolumeOwnershipChanged(let weOwnIt):
+            return weOwnIt
+                ? "systemVolumeOwnershipChanged(true) — output takes no volume write, intercepting the keys"
+                : "systemVolumeOwnershipChanged(false) — macOS owns the keys again, tap removed"
         case .routedApps(let deviceID, let appNames):
             return "routedApps(\(deviceID), [\(appNames.joined(separator: ", "))])"
         case .routedAppRunning(let bundleID, let isRunning):

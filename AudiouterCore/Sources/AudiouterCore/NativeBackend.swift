@@ -1441,6 +1441,35 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         stateQueue.sync { lastSeenSystemVolume }
     }
 
+    /// Publish who owns the volume right now (``BackendEvent/systemVolumeOwnershipChanged(_:)``).
+    ///
+    /// MUST be called on `stateQueue` — it reads `lastSeenSystemVolume`, which is
+    /// only ever mutated there. Takes the default-output UID as a parameter
+    /// rather than reading it, so callers that already resolved it (the
+    /// default-changed path has it in hand) don't pay for a second HAL round trip.
+    private func publishVolumeOwnershipLocked(defaultOutputUID: String?) {
+        let owned = VolumeOwnership.weOwnVolume(
+            defaultOutputUID: defaultOutputUID,
+            systemOutputVolume: lastSeenSystemVolume)
+        emit(.systemVolumeOwnershipChanged(owned))
+
+        guard owned != weOwnSystemVolume else { return }
+        weOwnSystemVolume = owned
+        // Main has just moved into or out of the Mac's sink gain, so the gain the
+        // sink is holding is now computed by the wrong formula. Nothing else will
+        // notice — re-push it here or the Mac keeps playing at the old level until
+        // some unrelated change happens to push again.
+        pushSyncedLocalGain()
+    }
+
+    /// Whether we — not macOS — own the volume, mirroring the last published
+    /// ``BackendEvent/systemVolumeOwnershipChanged(_:)``. On `stateQueue`.
+    ///
+    /// Read by ``syncedLocalGain``: while this is true the Mac's own output sits
+    /// behind our aggregate, so the system volume no longer applies Main to it and
+    /// Main has to be folded into the sink gain instead.
+    private var weOwnSystemVolume = false
+
     public func makeEventStream() -> AsyncStream<BackendEvent> {
         AsyncStream { continuation in
             let key = UUID()
@@ -1498,6 +1527,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.priorDefaultUID = nil
             self.expectedDefaultWriteUID = nil
             self.routingBlockedEmitted = false
+
+            // Seed volume ownership. Without this the only signal is a default-
+            // output CHANGE, so an aggregate left as the default by a previous
+            // session would never announce itself and the key interceptor would
+            // never install — dead volume keys for the whole launch. Safe here and
+            // nowhere earlier: `lastSeenSystemVolume` was populated above, so the
+            // nil arm of the predicate can't misfire on a launch transient.
+            self.publishVolumeOwnershipLocked(
+                defaultOutputUID: self.currentDefaultOutputUIDProvider())
         }
 
         // 1. Wire discovery → the app model + the engine descriptor feed. Every
@@ -1605,12 +1643,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 if !defaultDeviceChanged, let volume, volume != previousVolume {
                     self.emit(.systemVolumeChanged(volume: volume))
                 }
-                // razor: the volume/media KEYS themselves are still delivered by
-                // macOS to whatever the current default output is — they are NOT
-                // intercepted here. A CGEventTap key interceptor that gates on
-                // `AggregateOutputDevice.productUID` (so the keys drive Main Out only
-                // while Audiouter is the Mac's output) is a SEPARATE project,
-                // `docs/plans/PLAN-VOLUME-KEY-INTERCEPTION.md` — not this file's job.
+                // The volume/media KEYS themselves are not intercepted here, and
+                // must not be: the CGEventTap lives in the app target, because a
+                // tap needs a run loop and an Accessibility grant that this layer
+                // has no business owning. What this file DOES owe it is the gate —
+                // `.systemVolumeOwnershipChanged`, published below on every
+                // default-output change. See
+                // `docs/plans/PLAN-VOLUME-KEY-INTERCEPTION.md`.
 
                 // 1d. W3-T3: the default output device itself may have just BECOME (or
                 //     stopped being) AirPlay-class — re-evaluate the double-path guard.
@@ -1630,6 +1669,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     //     it against the aggregate and (re)emit the routing-blocked
                     //     warning for the new steady state.
                     let newDefaultUID = self.currentDefaultOutputUIDProvider()
+
+                    // Volume ownership turns on exactly this UID, so republish it
+                    // BEFORE the echo test below. Our own switch to the aggregate
+                    // is consumed as an echo down there, but it is precisely the
+                    // moment we GAIN ownership — skipping it would leave the keys
+                    // dead through the whole takeover we just performed.
+                    self.publishVolumeOwnershipLocked(defaultOutputUID: newDefaultUID)
+
                     if let pending = self.expectedDefaultWriteUID, pending == newDefaultUID {
                         self.expectedDefaultWriteUID = nil
                     } else {
@@ -2180,25 +2227,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let main = mainOut.clampedToVolume
         let newGroup = group.clampedToVolume
         stateQueue.async {
-            // When we mirror to hardware, the system volume is about to become `main`,
-            // so record it as the last system level we've seen — BEFORE the
-            // gain-changed guard below, which would otherwise skip this on a
-            // same-value re-push. `SystemOutputVolume` suppresses the echo of that
-            // write, so `onExternalChange` never delivers it to update the memo for
-            // us; without this, a later genuine external change back to the
-            // pre-drag value compares equal to a stale memo and is silently dropped
-            // (Main desyncs from the system). Owned by `stateQueue`, like the memo.
-            //
-            // razor: KNOWN EDGE — a readable-but-UNWRITABLE default output (some USB
-            // DACs) no-ops the write below, so the system is NOT at `main`, yet this
-            // memo says it is; a later external change *to `main`* would then be
-            // dropped. Can't gate on the result — `setVolume` is fire-and-forget async
-            // (SystemOutputVolume.swift:369). This line fixes the COMMON settable case
-            // (the one the original bug bit); the writability-aware sync for unsettable
-            // outputs belongs to the follow-up (PLAN-VOLUME-KEY-INTERCEPTION §0b).
-            if mirrorToSystemVolume { self.lastSeenSystemVolume = main }
             guard main != self.mainOutGain || newGroup != self.groupGain else { return }
             let groupChanged = newGroup != self.groupGain
+            let mainChanged = main != self.mainOutGain
             self.mainOutGain = main
             self.groupGain = newGroup
 
@@ -2221,20 +2252,38 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // gain. `pushBTSinkGainLocked` folds mute/hold in as 0, so this
             // can't unmute or blow through a first-mix hold.
             for uid in self.btSelectedUIDs { self.pushBTSinkGainLocked(uid) }
-            // The Mac's own path carries `group × device` only (Main arrives there
-            // through the system volume), so only a group change moves it.
-            if groupChanged { self.pushSyncedLocalGain() }
+            // The Mac's own path carries `group × device`, and Main too whenever we
+            // own the volume — there it is the ONLY thing applying Main to the Mac,
+            // so a Main-only move has to re-push as well. When macOS owns the
+            // volume, Main still arrives through the system-volume write instead and
+            // only a group change moves this.
+            if groupChanged || (mainChanged && self.weOwnSystemVolume) {
+                self.pushSyncedLocalGain()
+            }
         }
         // The hardware system-volume write is now the Main path's ALONE
         // (`setVolume`'s local branch no longer does it), and only when the caller
         // asked to mirror. Off `stateQueue`, like every other `systemVolume` write.
-        if mirrorToSystemVolume { systemVolume.setVolume(main) }
+        if mirrorToSystemVolume {
+            // Memoise the system level ONLY once the hardware confirms it took the
+            // write. `SystemOutputVolume` suppresses the echo of its own writes, so
+            // `onExternalChange` never delivers this value back to update the memo
+            // for us — but memoising optimistically is worse than not memoising: a
+            // readable-but-UNWRITABLE output (some USB DACs) no-ops the write, and
+            // the memo would then claim a level the system never reached, so a later
+            // genuine external change *to* that level compares equal and is silently
+            // dropped. The callback runs on the helper's own queue before any
+            // notification the write provoked, so this can't be overtaken by it.
+            systemVolume.setVolume(main) { [weak self] wrote in
+                guard let self, wrote else { return }
+                self.stateQueue.async { self.lastSeenSystemVolume = main }
+            }
+        }
     }
 
-    /// Push `group × the Mac's own fader` to the delayed local sink (W1's
-    /// ``SyncedLocalSink/setGain(_:)``). **Main is deliberately EXCLUDED**: the Mac's
-    /// own system volume already applies Main to that output, so including it here
-    /// would square the master on the Mac path. Reads state on `stateQueue`, then
+    /// Push ``syncedLocalGain`` to the delayed local sink (W1's
+    /// ``SyncedLocalSink/setGain(_:)``) — `group × the Mac's own fader`, and Main
+    /// too while we own the volume. Reads state on `stateQueue`, then
     /// hops to `captureControlQueue`, which owns `syncedLocalSink`. A no-op before
     /// the sink is built — `applySyncedLocalSinkTransition` applies the current gain
     /// as it starts, so a trim made while "play everywhere" was off is not lost.
@@ -2243,10 +2292,20 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         captureControlQueue.async { [weak self] in self?.syncedLocalSink?.setGain(gain) }
     }
 
-    /// `group × the Mac's own fader` as a 0.0…1.0 `Float`. On `stateQueue`.
+    /// `group × the Mac's own fader` as a 0.0…1.0 `Float` — times Main as well
+    /// while ``weOwnSystemVolume``. On `stateQueue`.
+    ///
+    /// Main is normally EXCLUDED because the Mac's system volume already applies it
+    /// to that output, so including it would square the master on the Mac path.
+    /// That premise dies exactly when we own the volume: the default output is our
+    /// aggregate, `setMasterGain`'s mirror write silently no-ops against it, and
+    /// nothing else is applying Main to the Mac at all. Without this arm, pulling
+    /// Main down would quieten the AirPlay speakers while the Mac's own output
+    /// stayed at full — the master control visibly failing on the commonest setup.
     private var syncedLocalGain: Float {   // on stateQueue
         let level = known[Self.localDeviceID]?.volume ?? 100
-        return Float(Double(groupGain) / 100.0 * Double(level.clampedToVolume) / 100.0)
+        let main = weOwnSystemVolume ? Double(mainOutGain) / 100.0 : 1.0
+        return Float(main * Double(groupGain) / 100.0 * Double(level.clampedToVolume) / 100.0)
     }
 
     /// One BT device's composed sink gain: `Main × Group × Device` on the UI's

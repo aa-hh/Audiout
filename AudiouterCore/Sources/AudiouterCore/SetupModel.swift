@@ -71,11 +71,16 @@ public enum SetupPermission: CaseIterable, Sendable {
     case audioCapture
     /// "Local Network" — gates the Bonjour discovery that finds AirPlay speakers.
     case localNetwork
-    /// "Accessibility" — gates simulating Mac media-key presses from the
-    /// speaker's own transport controls. Primed here AHEAD of the feature that
-    /// consumes it (speaker-side remote control isn't merged yet — see
-    /// ``RemoteControlPriming``'s doc comment) so the grant is already in place
-    /// once it lands.
+    /// "Accessibility" — gates two things now, and the second one is the reason
+    /// this stopped being a nicety: simulating Mac media-key presses from the
+    /// speaker's own transport controls (``MediaKeyController``), and INTERCEPTING
+    /// the volume keys while our aggregate is the Mac's default output
+    /// (`AudiouterApp/VolumeKeyInterceptor.swift`).
+    ///
+    /// The difference matters. Posting merely no-ops untrusted; a `CGEventTap`
+    /// cannot be created at all. So without this grant the volume keys are dead in
+    /// exactly the state where macOS has already stopped handling them itself —
+    /// see `docs/plans/PLAN-VOLUME-KEY-INTERCEPTION.md`.
     case remoteControl
 }
 

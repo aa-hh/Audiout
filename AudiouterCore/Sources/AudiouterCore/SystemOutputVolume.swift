@@ -28,9 +28,17 @@ public protocol SystemVolumeControlling: Sendable {
     /// control.
     func currentMuted() -> Bool?
 
-    /// Set the output volume (0–100, clamped). Silently no-ops when the device
-    /// has no settable volume control.
-    func setVolume(_ volume: Int)
+    /// Set the output volume (0–100, clamped). No-ops when the device has no
+    /// settable volume control.
+    ///
+    /// `didWrite` reports whether anything actually reached the hardware, because
+    /// "no settable control" is invisible otherwise and callers memoise the value
+    /// they *asked* for. A readable-but-UNWRITABLE output (some USB DACs) accepts
+    /// the call, changes nothing, and leaves a caller believing the system sits at
+    /// a level it never reached — so a later genuine external change back *to* that
+    /// level compares equal to the stale memo and is silently dropped. Fires on the
+    /// implementation's own queue, before any notification that write provoked.
+    func setVolume(_ volume: Int, didWrite: (@Sendable (Bool) -> Void)?)
 
     /// Set the mute state. Silently no-ops when the device has no settable mute
     /// control.
@@ -69,6 +77,12 @@ public protocol SystemVolumeControlling: Sendable {
 
     /// Stop observing and remove every listener. Idempotent.
     func stop()
+}
+
+public extension SystemVolumeControlling {
+    /// Fire-and-forget write, for the callers that have nothing to memoise and so
+    /// don't care whether the hardware took it.
+    func setVolume(_ volume: Int) { setVolume(volume, didWrite: nil) }
 }
 
 /// ``SystemVolumeControlling`` over Core Audio's default output device.
@@ -366,22 +380,30 @@ public final class SystemOutputVolume: SystemVolumeControlling, @unchecked Senda
 
     // MARK: Writes (serialized on `queue`)
 
-    public func setVolume(_ volume: Int) {
+    public func setVolume(_ volume: Int, didWrite: (@Sendable (Bool) -> Void)?) {
         let clamped = volume.clampedToVolume
         queue.async {
             let deviceID = Self.currentDefaultOutputDevice()
-            guard deviceID != AudioObjectID(kAudioObjectUnknown) else { return }
+            guard deviceID != AudioObjectID(kAudioObjectUnknown) else {
+                didWrite?(false)
+                return
+            }
             // Record the intended value before writing: the notifications this
             // write provokes are dispatched to this same serial queue, so they
             // cannot be observed before `lastKnownVolume` is in place.
             self.lastKnownVolume = clamped
-            if !Self.writeVolume(clamped, to: deviceID) {
+            let wrote = Self.writeVolume(clamped, to: deviceID)
+            if !wrote {
                 // Nothing was written (read-only/absent control), so the system is
                 // NOT at `clamped`. Re-seed from the hardware — leaving the wishful
                 // value here would make us mistake a later genuine external change
                 // *to that value* for an echo and swallow it.
                 self.lastKnownVolume = Self.readVolume(deviceID)
             }
+            // Still on `queue`, so this lands before any notification the write
+            // provoked — a caller memoising on success can't be overtaken by the
+            // echo of the very write it's waiting on.
+            didWrite?(wrote)
         }
     }
 

@@ -296,7 +296,7 @@ public enum AppTetherColor {
         // Legibility floor: after every darkening step (warm-paper drop,
         // gold-steer, Increase-Contrast) a tint must still read as a coloured
         // dot, never as black. The darkest stack-ups — a cool-family hue on
-        // warm paper (0.66 − 0.28 = 0.38), or a gold-steered warm tone likewise
+        // the light ground (0.66 − 0.40 = 0.26), or a gold-steered warm tone likewise
         // dropped and IC-darkened (~0.33) — would otherwise fall dark enough to
         // vanish into the near-black canvas at the 5pt chip size (see
         // ``minimumLegibleBrightness``). Applied last so it caps the whole chain.
@@ -472,7 +472,13 @@ public enum AppTetherColor {
     private static let saturationFloorOut: CGFloat = 0.38
     private static let lightSaturationBoost: CGFloat = 0.07
     private static let lightSaturationCap: CGFloat = 0.70
-    private static let lightBrightnessDrop: CGFloat = 0.28
+    /// RAISED 0.28 → 0.40 with the Circuit light theme (roadmap 035): the FEED
+    /// pill's fill went from a near-invisible quaternary wash to the stronger
+    /// Circuit `feedPillFill` `#D0CDC3`, so a light tint must carry against
+    /// that fill, not just the canvas — the deeper drop (mostly landing on
+    /// ``minimumLegibleBrightness``'s 0.50 cap) measures 3.94–4.87:1 across
+    /// the brand-hue sample on Circuit `bg/normal`.
+    private static let lightBrightnessDrop: CGFloat = 0.40
     private static let goldSteeredBrightnessScale: CGFloat = 0.88
 
     /// Floor on the emitted brightness so no derived tint can render dark enough

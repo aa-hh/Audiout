@@ -68,6 +68,9 @@ final class BTAlignmentWizardView: NSView {
     private static let backgroundCornerRadius: CGFloat = 7
     private static let rowSpacing: CGFloat = 8
     private static let dismissButtonInset: CGFloat = 6
+    /// The ✕ glyph is 9.5pt; the clickable area is padded out to a comfortable
+    /// target so the hit area never hugs the glyph.
+    private static let dismissButtonHitSize: CGFloat = 20
 
     private let background = NSView()
     private let contentStack = NSStackView()
@@ -106,13 +109,14 @@ final class BTAlignmentWizardView: NSView {
         dismissButton.bezelStyle = .accessoryBar
         dismissButton.isBordered = false
         dismissButton.imagePosition = .imageOnly
-        dismissButton.contentTintColor = Tokens.Color.tertiaryLabel
+        dismissButton.imageScaling = .scaleProportionallyDown
+        dismissButton.contentTintColor = Tokens.Color.secondaryLabel
         dismissButton.target = self
         dismissButton.action = #selector(dismissClicked(_:))
         let symbolConfig = NSImage.SymbolConfiguration(pointSize: 9.5, weight: .bold)
         dismissButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss")?
             .withSymbolConfiguration(symbolConfig)
-        dismissButton.setAccessibilityLabel("Dismiss")
+        dismissButton.setAccessibilityLabel("Dismiss alignment wizard for \(session.targetName)")
         background.addSubview(dismissButton)
 
         NSLayoutConstraint.activate([
@@ -125,6 +129,8 @@ final class BTAlignmentWizardView: NSView {
                 equalTo: background.topAnchor, constant: Self.dismissButtonInset),
             dismissButton.trailingAnchor.constraint(
                 equalTo: background.trailingAnchor, constant: -Self.dismissButtonInset),
+            dismissButton.widthAnchor.constraint(equalToConstant: Self.dismissButtonHitSize),
+            dismissButton.heightAnchor.constraint(equalToConstant: Self.dismissButtonHitSize),
 
             contentStack.topAnchor.constraint(
                 equalTo: background.topAnchor, constant: Self.contentPadding),
@@ -363,6 +369,12 @@ final class BTAlignmentWizardView: NSView {
     }
     func test_clickButton(titled title: String) { clickButton(titled: title) }
     func test_clickDismiss() { dismissButton.performClick(nil) }
+    var test_dismissAccessibilityLabel: String? { dismissButton.accessibilityLabel() }
+    var test_dismissTintColor: NSColor? { dismissButton.contentTintColor }
+    var test_dismissHitSize: NSSize {
+        layoutSubtreeIfNeeded()
+        return dismissButton.frame.size
+    }
     /// Real menu dispatch: the item's OWN action on its OWN target, sender =
     /// the item — exactly what AppKit menu tracking sends.
     func test_selectReference(titled title: String) {

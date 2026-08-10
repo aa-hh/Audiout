@@ -588,4 +588,28 @@ import AppKit
         #expect(popover.test_btWizardIsOpen() == false,
                 "an un-live target never opens — the same conditions that tear one down")
     }
+
+    // MARK: Dismiss button chrome (design-critique parity with ConnectionDiagnosisView)
+
+    @Test func dismissLabelNamesTheDeviceBeingAligned() {
+        let (popover, _) = makePopover()
+        let wizard = openWizard(popover)
+        #expect(wizard?.test_dismissAccessibilityLabel == "Dismiss alignment wizard for Move 2",
+                "a bare \"Dismiss\" gives VoiceOver no context; the label names the target")
+    }
+
+    @Test func dismissHitAreaMeetsTheComfortableTarget() {
+        let (popover, _) = makePopover()
+        let wizard = openWizard(popover)
+        let size = wizard?.test_dismissHitSize ?? .zero
+        #expect(size.width >= 20 && size.height >= 20,
+                "the click target must not hug the 9.5pt glyph, got \(size)")
+    }
+
+    @Test func dismissTintIsSecondaryNotTertiary() {
+        let (popover, _) = makePopover()
+        let wizard = openWizard(popover)
+        #expect(wizard?.test_dismissTintColor == Tokens.Color.secondaryLabel,
+                "tertiaryLabel reads as too faint to notice")
+    }
 }

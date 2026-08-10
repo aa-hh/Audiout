@@ -143,6 +143,22 @@ public enum Tokens {
 
         // MARK: Warm Signal custom palette (V2, spec §1)
         //
+        // LIGHT MODE = CIRCUIT (decision, Alec 2026-08-07 — see
+        // docs/FIGMA-DESIGN-SYSTEM.md "Light mode = Circuit theme"): the
+        // SCAFFOLDING tokens' light/lightHC values below are the resolved
+        // hexes of the `Theme · Circuit` collection (`@sumup-oss/design-tokens`
+        // light theme), pulled across from the Figma proposal. Instruments
+        // (gold family, `failure`, `caution`, rings, meters incl. `meterTrack`,
+        // fader hardware, permission hues) are NEVER Circuit-mapped in any
+        // mode — they keep their authored Warm Signal values. Dark modes stay
+        // pure Warm Signal. NOTE ON OLDER LIGHT RATIOS: rationales below that
+        // measured a light instrument against the warm-paper grounds
+        // (`#F4EFE7` canvas / `#FBF8F2` panel / `#ECE5D8` well) predate this
+        // mapping; the Circuit grounds are LIGHTER, so every such
+        // dark-instrument-on-light-ground ratio only improves (re-measured
+        // values: docs/FIGMA-DESIGN-SYSTEM.md "Contrast, measured
+        // 2026-08-07").
+        //
         // The ONE place a custom (non-semantic) RGB value may live, per root
         // AGENTS.md's governance rule ("Every `Tokens.Color` case ships
         // light + dark + Increase Contrast variants with a documented
@@ -164,24 +180,29 @@ public enum Tokens {
         /// (`ControlPanelBackingView.draw`, §5.4 — W8) so shell chrome and
         /// hosted transparent content read as one warm shape. No stated
         /// contrast floor (it's a background, not a foreground instrument),
-        /// so no separate Increase Contrast value.
+        /// so no separate Increase Contrast value. Light = Circuit
+        /// `bg/normal` `#FBFBF9`.
         public static var canvas: NSColor {
-            warmDynamic(name: "canvas", dark: 0x16130F, light: 0xF4EFE7)
+            warmDynamic(name: "canvas", dark: 0x16130F, light: 0xFBFBF9)
         }
         /// Canvas gradient top (§1.1/§1.2), paired with `canvas` by
         /// `WarmCanvasView`'s vertical gradient. No stated contrast floor.
+        /// Light = Circuit `bg/normal`, SAME as `canvas` — the gradient
+        /// deliberately collapses flat in light mode (Circuit decision).
         public static var canvasHi: NSColor {
-            warmDynamic(name: "canvasHi", dark: 0x1B1712, light: 0xF7F3EC)
+            warmDynamic(name: "canvasHi", dark: 0x1B1712, light: 0xFBFBF9)
         }
         /// Card/panel fill — "the reference canvas a ring sits on" (§1).
-        /// No stated contrast floor.
+        /// No stated contrast floor. Light = Circuit `bg/normal` (surface
+        /// separation in light comes from hairlines, not fill steps).
         public static var panel: NSColor {
-            warmDynamic(name: "panel", dark: 0x1D1915, light: 0xFBF8F2)
+            warmDynamic(name: "panel", dark: 0x1D1915, light: 0xFBFBF9)
         }
         /// Raised well fill (icon well, blocked-checkbox fill, §1). No
-        /// stated contrast floor.
+        /// stated contrast floor. Light = Circuit `bg/normal`, flush with
+        /// the flat Circuit ground.
         public static var raised: NSColor {
-            warmDynamic(name: "raised", dark: 0x241F1A, light: 0xFFFFFF)
+            warmDynamic(name: "raised", dark: 0x241F1A, light: 0xFBFBF9)
         }
         /// Inset well fill (slider track trough, dropdown fill, §1). First
         /// consumer: `WarmFaderCell`'s recessed trough. CONTRAST RATIONALE
@@ -192,13 +213,18 @@ public enum Tokens {
         /// than `canvas` (1.05:1, a true recess whose edge the `faderRim`
         /// carries) — which lifts every fill drawn on it (measured, WCAG
         /// relative luminance: `ringConnected` 4.82:1, `faderThumb` 4.44:1,
-        /// `ember` 3.86:1, `gold` 10.51:1). Light `#ECE5D8` is unchanged
-        /// (the spec hex; darkening it would LOWER the light thumb/fill
-        /// ratios, which run darker than the well). Backgrounds carry no IC
-        /// variant (same precedent as `canvas`/`panel`/`raised`); the fills
-        /// and rim drawn on the well brighten under IC instead.
+        /// `ember` 3.86:1, `gold` 10.51:1). Light = Circuit `bg/highlight`
+        /// `#E8E6DC` rather than `bg/subtle` (Alec's call on the Circuit
+        /// pull): `bg/subtle` measured 1.06:1 vs the flat Circuit `panel`,
+        /// under the membership checklist's locked 1.10:1 surface-separation
+        /// floor (`MembershipWellContrastTests`) — `bg/highlight` holds it at
+        /// 1.20:1 while staying a Circuit-family hex, and every dark fill
+        /// drawn in the well keeps its headroom (`faderThumb` 3.33:1).
+        /// Backgrounds carry no IC variant (same precedent as
+        /// `canvas`/`panel`/`raised`); the fills and rim drawn on the well
+        /// brighten under IC instead.
         public static var well: NSColor {
-            warmDynamic(name: "well", dark: 0x100D0A, light: 0xECE5D8)
+            warmDynamic(name: "well", dark: 0x100D0A, light: 0xE8E6DC)
         }
         /// 1px section-divider hairline (§5.1 — the ONLY visual separation
         /// between de-nested cards now that they no longer draw their own
@@ -215,12 +241,18 @@ public enum Tokens {
         /// sweep's job, not V2's — V2 only has to make Increase Contrast
         /// itself clear the floor. Light's table entry states NO floor
         /// ("—"), but house rule 3 requires every case to ship an IC variant
-        /// regardless, so a symmetrical darkened warm-tan (`#9B8768`,
-        /// ≈3.25:1 vs light `panel` `#FBF8F2`) is used there too — the
-        /// quietest reasonable choice, not a spec requirement.
+        /// regardless. Light base is Circuit `border/normal` `#D0CDC3`
+        /// rather than `border/divider` (Alec's call on the Circuit pull:
+        /// `border/divider` measured 1.21:1 vs the flat Circuit `panel`,
+        /// under the checklist's locked 1.25:1 separator floor —
+        /// `border/normal` holds it at 1.53:1, still a Circuit-family hex);
+        /// light IC is Circuit `fg/placeholder` `#76716B` (≈4.7:1 vs
+        /// `bg/normal` `#FBFBF9`) — a hue-consistent Circuit greige, since a
+        /// warm-tan divider would read off-family on the neutral Circuit
+        /// ground.
         public static var hairline: NSColor {
             warmDynamic(name: "hairline", dark: 0x3A332B, darkHighContrast: 0x786B5A,
-                       light: 0xE2DACC, lightHighContrast: 0x9B8768)
+                       light: 0xD0CDC3, lightHighContrast: 0x76716B)
         }
 
         /// The under-name level meter's EMPTY-track fill (`LevelMeterView`'s
@@ -276,7 +308,7 @@ public enum Tokens {
         /// `panel`).
         public static var sidebarWarmTint: NSColor {
             warmDynamic(name: "sidebarWarmTint", dark: 0x1F1A15, darkHighContrast: 0x2A241C,
-                       light: 0xF2EBDC, lightHighContrast: 0xE9DFC9)
+                       light: 0xF5F4ED, lightHighContrast: 0xE8E6DC)
         }
 
         // MARK: Connection-ring instruments (spec §3.2, S1)
@@ -339,13 +371,13 @@ public enum Tokens {
         // light `gold` `#A97F1E` ≈ 3.6:1 vs `panel` `#FBF8F2` (the deepened
         // paper-gold, spec §1.2's stated floor pick). `ember` is dimmer by design
         // (it's the connecting line, not the node): dark `#8A6A2F` ≈ 3.5:1 vs
-        // `panel`; light `#C2A05A` ≈ 2.0:1 vs `panel` — BELOW the 3:1 instrument
-        // floor as a hairline, but `ember` here is a 2 pt LINE paired with the
-        // high-contrast `gold` nodes it connects, and spec §1.2 lists `ember` at
-        // exactly this hex; per the spec's escape valve the Increase-Contrast
-        // variant is brightened/deepened to clear the floor (light IC `#9A7A2E`
-        // ≈ 3.4:1) while the base stays the spec hex (Wave-5 sweep owns any base
-        // re-tune). IC variants (my picks, flagged for the Wave-5 sweep like
+        // `panel`; light `#AC8C46` ≈ 3.07:1 vs Circuit `bg/normal` `#FBFBF9` —
+        // deeper than the spec's `#C2A05A` (≈2.4:1 on this ground, the one
+        // instrument the Circuit decision flagged as worth darkening), so it
+        // clears the floor while staying dimmer than light `gold` (`#A97F1E`,
+        // 3.53:1 on the same ground) and preserving the node/line hierarchy.
+        // The Increase-Contrast variant pushes further (light IC `#9A7A2E`
+        // ≈ 3.9:1). IC variants (my picks, flagged for the Wave-5 sweep like
         // `ringConnected`): dark `gold` `#F2C75E`, dark `ember` `#A5824A`, light
         // `gold` `#8A6614`, light `ember` `#9A7A2E`.
 
@@ -385,7 +417,7 @@ public enum Tokens {
         public static var ember: NSColor {
             accentDynamic(name: "ember",
                           full: WarmVariants(dark: 0x8A6A2F, darkHighContrast: 0xA5824A,
-                                             light: 0xC2A05A, lightHighContrast: 0x9A7A2E),
+                                             light: 0xAC8C46, lightHighContrast: 0x9A7A2E),
                           subtle: WarmVariants(dark: 0x6D5B34, darkHighContrast: 0x877146,
                                                light: 0xAE9668, lightHighContrast: 0x8A744C),
                           systemAccentScale: 0.55)
@@ -703,6 +735,48 @@ public enum Tokens {
                                                  light: 0x8F634A, lightHighContrast: 0x613D29),
                               subtle: WarmVariants(dark: 0x876A59, darkHighContrast: 0xA88672,
                                                    light: 0x796356, lightHighContrast: 0x524036))
+        }
+
+        // MARK: FEED-pill instruments (Circuit light pass, 2026-08-07 decision)
+        //
+        // The two tokens `FeedPillView` needs now that the pill reads by FILL
+        // ALONE (its border measured 1.14:1 dark / 1.00:1 light vs its own
+        // fill — decorative in both modes, so it was removed rather than
+        // tuned). First consumer: `FeedPillView` (fill) + `DeviceRowView`'s
+        // segment composition (text), replacing the stock
+        // `NSColor.quaternaryLabelColor` wash that measured a near-invisible
+        // 1.31:1 dark / 1.21:1 light vs `canvas`.
+
+        /// The FEED pill's fill (`FeedPillView`'s background) — a quiet but
+        /// PRESENT wash so a short value like "System" reads as a small
+        /// object. CONTRAST RATIONALE (measured for the 2026-08-07 decision):
+        /// dark `#38322B` = 1.46:1 vs `canvas` `#16130F` (was 1.31 on the
+        /// quaternary wash); light = Circuit `border/normal` `#D0CDC3` =
+        /// 1.54:1 vs `bg/normal` `#FBFBF9` (was 1.21). No instrument floor —
+        /// the pill's TEXT carries the signal; the failure-red error text
+        /// measures 3.24:1 on the dark fill and 3.50:1 on the light fill, so
+        /// an error still clears the graphical-object bar on the fill itself.
+        /// IC variants deepen the wash for definition (dark `#423B33`; light
+        /// = Circuit `bg/neutral-strong` `#C7C3B3`).
+        public static var feedPillFill: NSColor {
+            warmDynamic(name: "feedPillFill", dark: 0x38322B, darkHighContrast: 0x423B33,
+                       light: 0xD0CDC3, lightHighContrast: 0xC7C3B3)
+        }
+
+        /// The FEED pill's NEUTRAL text tone — mode-aware rather than a
+        /// forked component (design-system rule: "when one token cannot serve
+        /// both grounds, make it mode-aware"): resolves ``secondaryLabel`` in
+        /// dark but ``label`` in light, because secondary text on the light
+        /// `feedPillFill` measured 4.54:1 (barely body-passing) while `label`
+        /// lifts it to 10.66:1. Dark keeps the quieter secondary voice, which
+        /// already clears body contrast on the dark fill. App-tinted segments
+        /// keep their tether colors; this covers the neutral main-mix word,
+        /// the "+N" overflow pill, and the AP1 micro-tag.
+        public static var feedPillText: NSColor {
+            NSColor(name: NSColor.Name("WarmSignal.feedPillText")) { appearance in
+                let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                return isDark ? .secondaryLabelColor : .labelColor
+            }
         }
     }
 

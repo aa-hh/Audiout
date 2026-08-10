@@ -11,9 +11,12 @@ import AppKit
 ///
 /// A pill hosts a text label — optionally prefixed with the same
 /// derived-colour `FeedChip` square a redirected app's tether wears elsewhere
-/// — inside a rounded rect with a subtle border and a very slightly filled
-/// background, so even a short value like "System" reads as a small object
-/// instead of floating in empty space. The neutral main-mix segment (and the
+/// — inside a filled rounded rect, so even a short value like "System" reads
+/// as a small object instead of floating in empty space. The pill reads by
+/// FILL ALONE — no border: a 1 px hairline outline measures 1.14:1 dark /
+/// 1.00:1 light against the pill's own fill, decorative in both modes — and
+/// an error pill signals via its failure-red TEXT (3.24:1 on the dark fill),
+/// not an outline. The neutral main-mix segment (and the
 /// failure-red "Couldn't connect"/"Unavailable" override, and the "+N"
 /// overflow pill) carry NO chip — only a redirected app's own pill does.
 ///
@@ -29,16 +32,10 @@ final class FeedPillView: NSView {
 
     private let label = NSTextField(labelWithString: "")
 
-    /// Whether this pill is CURRENTLY rendering the failure-red error
-    /// override ("Couldn't connect" / "Unavailable") — drives the border
-    /// tone. Set by ``configure(attributedText:isError:)``.
-    private var isError = false
-
     init() {
         super.init(frame: .zero)
         wantsLayer = true
         layer?.cornerRadius = PopoverColumnGrid.feedPillCornerRadius
-        layer?.borderWidth = PopoverColumnGrid.feedPillBorderWidth
 
         label.translatesAutoresizingMaskIntoConstraints = false
         label.lineBreakMode = .byClipping
@@ -70,31 +67,22 @@ final class FeedPillView: NSView {
     /// Push this pill's content. `attributedText` is pre-composed by the row
     /// (already carrying a leading `FeedChip` attachment when the segment is
     /// a redirected app, and/or the leading AP1 micro-tag prefix on the FIRST
-    /// visible pill) — this view only draws the border/fill chrome around it.
+    /// visible pill) — this view only draws the fill chrome around it. An
+    /// error pill differs only in its (pre-composed) failure-red text; the
+    /// fill is one token for every pill.
     func configure(attributedText: NSAttributedString, isError: Bool) {
         label.attributedStringValue = attributedText
-        self.isError = isError
         updateAppearance()
     }
 
-    /// The border/fill are static `CGColor`s on the layer, so a live light/
-    /// dark or Increase-Contrast switch needs a manual re-stamp (same
-    /// discipline as `DeviceRowView.updateMuteTint()`). The fill uses the
-    /// stock semantic `NSColor.quaternaryLabelColor` — AppKit's own "very
-    /// subtle wash" token — rather than a bespoke alpha blend, per the house
-    /// rule to reach for a stock semantic color before inventing one; the
-    /// border uses the existing `Tokens.Color.hairline` token (already tuned
-    /// for a subtle-but-legible divider in both themes) so the pill's outline
-    /// reads as a sibling of the row's other hairline strokes. The failure-red
-    /// override pill borders in a dimmed `Tokens.Color.failure` instead, so
-    /// its outline still reads as an error without competing with the ring.
+    /// The fill is a static `CGColor` on the layer, so a live light/dark or
+    /// Increase-Contrast switch needs a manual re-stamp (same discipline as
+    /// `DeviceRowView.updateMuteTint()`). `Tokens.Color.feedPillFill` is the
+    /// pill's dedicated wash — a stock `quaternaryLabelColor` wash measures a
+    /// near-invisible 1.31:1 dark / 1.21:1 light against the canvas.
     private func updateAppearance() {
-        let borderColor = isError
-            ? Tokens.Color.failure.withAlphaComponent(0.5)
-            : Tokens.Color.hairline
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            layer?.borderColor = borderColor.cgColor
-            layer?.backgroundColor = NSColor.quaternaryLabelColor.cgColor
+            layer?.backgroundColor = Tokens.Color.feedPillFill.cgColor
         }
     }
 

@@ -244,10 +244,6 @@ public enum PopoverColumnGrid {
     /// capsule (deliberately distinct from the mute button's fuller-rounded
     /// `mutePillCornerRadius`, which signals "engaged control," not "value").
     public static let feedPillCornerRadius: CGFloat = 5
-    /// Stroke width of a FEED pill's border — subtle, not heavy (the mock's
-    /// "soft rounded-rect outline"), landing in the same 1–1.5 pt hairline
-    /// band as `statusDotBorderWidth`/`busNodeRimWidth`.
-    public static let feedPillBorderWidth: CGFloat = 1
     /// Horizontal gap between adjacent FEED pills — the mock's "small gap
     /// between pills," replacing the retired `feedSegmentSeparator` middle
     /// dot as the thing that visually separates one feed value from the next.

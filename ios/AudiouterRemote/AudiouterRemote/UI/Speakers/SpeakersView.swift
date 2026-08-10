@@ -13,6 +13,9 @@ import AudiouterProtocol
 struct SpeakersView: View {
     let session: any MacSessionProtocol
 
+    @ScaledMetric(relativeTo: .title2) private var titleSize: CGFloat = 26
+    @ScaledMetric(relativeTo: .caption) private var pillTextSize: CGFloat = 12
+
     var body: some View {
         ZStack {
             WarmSignal.canvasGradient.ignoresSafeArea()
@@ -48,7 +51,7 @@ struct SpeakersView: View {
                     .microLabel()
                     .foregroundStyle(WarmSignal.label2)
                 Text("Speakers")
-                    .font(.system(size: 26, weight: .bold))
+                    .font(.system(size: titleSize, weight: .bold))
                     .tracking(-0.7)
                     .foregroundStyle(WarmSignal.label)
             }
@@ -68,7 +71,7 @@ struct SpeakersView: View {
                 .frame(width: 6, height: 6)
 
             Text(pillText)
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: pillTextSize, weight: .medium))
                 .foregroundStyle(WarmSignal.label)
                 .lineLimit(1)
         }
@@ -151,9 +154,9 @@ private struct SpeakerConsole: View {
     /// doc:2000-2006. Exactly five, always all five, in this order.
     private var sections: [SpeakerSectionSpec] {
         [
-            SpeakerSectionSpec(id: "pinned", title: "PINNED", tint: WarmSignal.gold,
+            SpeakerSectionSpec(id: "pinned", title: "PINNED", tint: WarmSignal.goldText,
                                devices: [], placeholder: "NO PINNED SPEAKERS"),
-            SpeakerSectionSpec(id: "live", title: "ARMED / LIVE", tint: WarmSignal.gold,
+            SpeakerSectionSpec(id: "live", title: "ARMED / LIVE", tint: WarmSignal.goldText,
                                devices: armedDevices, placeholder: nil),
             SpeakerSectionSpec(id: "airplay", title: "AIRPLAY", tint: WarmSignal.label2,
                                devices: snapshot.devices.filter { !$0.isSelected && $0.isAvailable },
@@ -282,7 +285,7 @@ private struct SpeakerConsole: View {
         HStack(spacing: 10) {
             Text("MAIN OUT")
                 .microLabel()
-                .foregroundStyle(WarmSignal.gold)
+                .foregroundStyle(WarmSignal.goldText)
 
             // A menu picker's label is drawn by UIKit and ignores `.lineLimit`,
             // so the only way to stop it wrapping is to let it take its ideal
@@ -292,7 +295,7 @@ private struct SpeakerConsole: View {
                 .fixedSize()
 
             Text("\(armedCount) ARMED")
-                .microLabel(9)
+                .microLabel()
                 .foregroundStyle(WarmSignal.label2)
                 .fixedSize()
 
@@ -332,10 +335,10 @@ private struct SpeakerConsole: View {
             HStack(spacing: 8) {
                 Text("ACTIVE DEVICES")
                     .microLabel()
-                    .foregroundStyle(WarmSignal.gold)
+                    .foregroundStyle(WarmSignal.goldText)
                 Spacer(minLength: 8)
                 Text("DRAG TO ADJUST")
-                    .microLabel(9)
+                    .microLabel()
                     .foregroundStyle(WarmSignal.label2)
             }
             .padding(.horizontal, 4)
@@ -404,6 +407,8 @@ struct MainOutRow: View {
     @State private var axis: DragAxis?
     @State private var dragStartVolume: Int?
 
+    @ScaledMetric(relativeTo: .subheadline) private var muteIconSize: CGFloat = 15
+
     /// What the thumb shows: the finger while a drag is in flight (and the
     /// value it was released at until the Mac echoes it back), the Mac's
     /// value whenever neither applies.
@@ -418,7 +423,7 @@ struct MainOutRow: View {
         HStack(spacing: 12) {
             Button(action: onToggleMute) {
                 Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                    .font(.system(size: 15))
+                    .font(.system(size: muteIconSize))
                     .foregroundStyle(WarmSignal.label2)
                     .frame(width: 38, height: 38)
                     .background(RoundedRectangle(cornerRadius: WarmSignal.Radius.control, style: .continuous)
@@ -434,7 +439,7 @@ struct MainOutRow: View {
 
             Text(String(value))
                 .readout(16)
-                .foregroundStyle(WarmSignal.gold)
+                .foregroundStyle(WarmSignal.goldText)
                 .frame(width: 26, alignment: .trailing)
         }
         .onChange(of: masterVolume) {
@@ -558,6 +563,9 @@ private struct MainOutDrawerRow: View {
     @State private var localVolume: Double?
     @State private var rowWidth: CGFloat = 0
 
+    @ScaledMetric(relativeTo: .caption) private var muteIconSize: CGFloat = 12
+    @ScaledMetric(relativeTo: .subheadline) private var nameSize: CGFloat = 14.5
+
     private var displayVolume: Int { Int((localVolume ?? Double(device.volume)).rounded()) }
     private var dragging: Bool { axis == .horizontal }
     private var controlsEnabled: Bool {
@@ -570,7 +578,7 @@ private struct MainOutDrawerRow: View {
                 session.setDeviceMuted(id: device.id, muted: !device.isMuted)
             } label: {
                 Image(systemName: device.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                    .font(.system(size: 12))
+                    .font(.system(size: muteIconSize))
                     .foregroundStyle(device.isMuted ? WarmSignal.gold : WarmSignal.label2)
                     .frame(width: 28, height: 28)
                     .background(RoundedRectangle(cornerRadius: WarmSignal.Radius.control, style: .continuous)
@@ -589,7 +597,7 @@ private struct MainOutDrawerRow: View {
                     .accessibilityHidden(true)
 
                 Text(device.name)
-                    .font(.system(size: 14.5, weight: .medium))
+                    .font(.system(size: nameSize, weight: .medium))
                     .foregroundStyle(WarmSignal.label)
                     .lineLimit(1)
 
@@ -597,7 +605,7 @@ private struct MainOutDrawerRow: View {
 
                 Text(String(displayVolume))
                     .readout(14)
-                    .foregroundStyle(WarmSignal.gold)
+                    .foregroundStyle(WarmSignal.goldText)
             }
             .contentShape(Rectangle())
             .gesture(dragGesture)

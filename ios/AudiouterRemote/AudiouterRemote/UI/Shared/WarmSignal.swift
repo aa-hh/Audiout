@@ -61,13 +61,25 @@ enum WarmSignal {
     /// The design's third ink (doc:16) is 28% white on the dark ground, which
     /// measures 1.93:1 — unreadable, and it carries the `IDLE` sub-labels and
     /// both empty-state placeholders. Lifted to the 4.5:1 floor in both grounds
-    /// (45% white → 4.56:1; `#5F5A54` on paper → 6.59:1). Deliberately off-spec:
-    /// the document set a value, not a contrast target.
-    static let label3 = warm(light: 0x5F5A54, dark: 0xFFFFFF, darkAlpha: 0.45)
+    /// (`#5F5A54` on paper → 6.59:1). The dark alpha was 0.45 (4.47:1 on
+    /// `panel` — 0.03 under floor); nudged to 0.47 → 4.76:1 on `panel`.
+    /// Deliberately off-spec: the document set a value, not a contrast target.
+    static let label3 = warm(light: 0x5F5A54, dark: 0xFFFFFF, darkAlpha: 0.47)
 
     // MARK: Signal
 
     static let gold    = warm(light: 0xA97F1E, dark: 0xE8B84B)
+
+    /// Light-mode `gold` measures 3.04–3.53:1 against every surface it sits
+    /// on as text (canvas 3.26:1, well 3.04:1, deckFill 3.38:1, panel
+    /// 3.53:1) — all fail the 4.5:1 text floor, even though the same hex
+    /// clears 3:1 everywhere as a graphic (fader fill, wash, dots), so only
+    /// text uses need to move. `#866210` clears 4.5:1 against all four
+    /// (well is the tightest: 4.64:1; canvas 4.97:1, deckFill 5.15:1, panel
+    /// 5.38:1) while staying in the same hue family. Dark is untouched —
+    /// dark `gold` already clears 7.4–10.5:1 everywhere. Use this instead of
+    /// `gold` for any text, at or below 16 pt, that must read as gold.
+    static let goldText = warm(light: 0x866210, dark: 0xE8B84B)
     static let ember   = warm(light: 0xC2A05A, dark: 0x8A6A2F)
     static let glow    = warm(light: 0xE8B84B, dark: 0xFFD97A)
     static let ring    = warm(light: 0xA08C66, dark: 0x8D7D5E)
@@ -148,30 +160,49 @@ enum WarmSignal {
 // MARK: - Type primitives
 
 /// The design's micro-label voice (doc:36): monospaced, uppercase, tracked out.
-/// 9.5 pt is the common size (doc:57, doc:72-73, doc:124, doc:195); the two
-/// places that use 9 (doc:126, doc:197) pass it.
-/// Sizes are `relativeTo:` so every one of them follows the reading size the
-/// user set. Hard point sizes look identical at the default and then strand
-/// anyone who moved the slider.
+/// 11 pt is the HIG floor for any text, and also the default size here — the
+/// design's own values (doc:57, doc:72-73, doc:124, doc:126, doc:195, doc:197)
+/// run 9–9.5 pt, all under that floor, so no call site should pass anything
+/// smaller than the default.
+///
+/// Scales with `@ScaledMetric`, not `.custom("", size:relativeTo:)`: an empty
+/// font name has no documented meaning, and nothing verifies it carries
+/// weight or the monospaced trait through Dynamic Type scaling. A plain
+/// `@ScaledMetric` point size composed with an explicit
+/// `.system(size:weight:design:)` guarantees both.
 struct MicroLabel: ViewModifier {
-    let size: CGFloat
+    @ScaledMetric private var scaledSize: CGFloat
+    private let baseSize: CGFloat
+
+    init(size: CGFloat) {
+        self.baseSize = size
+        self._scaledSize = ScaledMetric(wrappedValue: size, relativeTo: .caption2)
+    }
 
     func body(content: Content) -> some View {
         content
-            .font(.custom("", size: size, relativeTo: .caption2).weight(.bold).monospaced())
-            .tracking(size * 0.09)
+            .font(.system(size: scaledSize, weight: .bold, design: .monospaced))
+            // Tracking stays keyed to the base size, not the scaled one: it's
+            // a fixed proportion of the label's design size, not something
+            // that should itself expand further as the label already grows.
+            .tracking(baseSize * 0.09)
             .textCase(.uppercase)
     }
 }
 
 /// A numeric readout: monospaced, tight, so the digits don't shuffle as the
-/// value changes under a finger.
+/// value changes under a finger. See ``MicroLabel`` for why this scales via
+/// `@ScaledMetric` rather than the old empty-name `.custom(...)` hack.
 struct Readout: ViewModifier {
-    let size: CGFloat
+    @ScaledMetric private var scaledSize: CGFloat
+
+    init(size: CGFloat) {
+        self._scaledSize = ScaledMetric(wrappedValue: size, relativeTo: .body)
+    }
 
     func body(content: Content) -> some View {
         content
-            .font(.custom("", size: size, relativeTo: .body).weight(.bold).monospaced())
+            .font(.system(size: scaledSize, weight: .bold, design: .monospaced))
             .tracking(-0.4)
             .monospacedDigit()
     }
@@ -216,7 +247,7 @@ extension View {
             .padding(-pad)
     }
 
-    func microLabel(_ size: CGFloat = 9.5) -> some View { modifier(MicroLabel(size: size)) }
+    func microLabel(_ size: CGFloat = 11) -> some View { modifier(MicroLabel(size: size)) }
 
     func readout(_ size: CGFloat) -> some View { modifier(Readout(size: size)) }
 

@@ -10,6 +10,8 @@ struct MainOutPicker: View {
     let snapshot: Snapshot
     let session: any MacSessionProtocol
 
+    @ScaledMetric(relativeTo: .subheadline) private var pickerTextSize: CGFloat = 15
+
     private enum Target: Hashable {
         case selectedSpeakers
         case group(String)
@@ -43,7 +45,7 @@ struct MainOutPicker: View {
         .pickerStyle(.menu)
         .labelsHidden()
         .tint(WarmSignal.label)
-        .font(.system(size: 15, weight: .semibold))
+        .font(.system(size: pickerTextSize, weight: .semibold))
         .accessibilityHint("Choose which speakers Main Out sends to")
     }
 }

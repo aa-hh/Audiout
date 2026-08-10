@@ -41,6 +41,10 @@ struct DeviceRowView: View {
     @State private var showFailureDetail = false
     @State private var rowWidth: CGFloat = 0  // the fader track
 
+    @ScaledMetric(relativeTo: .body) private var nameSize: CGFloat = 16.5
+    @ScaledMetric(relativeTo: .body) private var glyphSize: CGFloat = 17
+    @ScaledMetric(relativeTo: .footnote) private var diagnoseSize: CGFloat = 12.5
+
     /// D9's failure card takes the whole control slot: a `"failed"` device
     /// gets headline / details / Try Again INSTEAD of volume + mute. This is
     /// where the phone's row deliberately parts from the Mac's, which keeps a
@@ -175,7 +179,7 @@ struct DeviceRowView: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(device.name)
-                    .font(.system(size: 16.5, weight: device.isSelected ? .semibold : .regular))
+                    .font(.system(size: nameSize, weight: device.isSelected ? .semibold : .regular))
                     .tracking(-0.2)
                     .lineLimit(1)
                     .foregroundStyle(nameTint)
@@ -230,7 +234,7 @@ struct DeviceRowView: View {
             Circle().fill(WarmSignal.raised)
             ring
             Image(systemName: device.iconSymbolName)
-                .font(.system(size: 17))
+                .font(.system(size: glyphSize))
                 .foregroundStyle(glyphTint)
         }
         .frame(width: 44, height: 44)
@@ -268,14 +272,14 @@ struct DeviceRowView: View {
             if device.connection.failureSuggestion != nil {
                 Button("Diagnose") { showFailureDetail.toggle() }
                     .buttonStyle(.plain)
-                    .font(.system(size: 12.5, weight: .semibold))
-                    .foregroundStyle(WarmSignal.gold)
+                    .font(.system(size: diagnoseSize, weight: .semibold))
+                    .foregroundStyle(WarmSignal.goldText)
                     .hittable(drawn: 20)
             }
         } else {
             Text(device.isAvailable ? String(displayVolume) : "—")
                 .readout(dragging ? 22 : 13)
-                .foregroundStyle(isLive ? WarmSignal.gold : WarmSignal.label3)
+                .foregroundStyle(isLive ? WarmSignal.goldText : WarmSignal.label3)
                 .animation(.easeOut(duration: 0.12), value: dragging)
         }
     }
@@ -318,7 +322,7 @@ struct DeviceRowView: View {
         if !device.isAvailable { return WarmSignal.label3 }
         if isConnecting { return WarmSignal.ring }
         if device.isMuted { return WarmSignal.label2 }
-        if device.isSelected { return WarmSignal.gold }
+        if device.isSelected { return WarmSignal.goldText }
         return WarmSignal.label3
     }
 

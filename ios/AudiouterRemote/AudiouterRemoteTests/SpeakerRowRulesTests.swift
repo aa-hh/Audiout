@@ -72,15 +72,6 @@ import AudiouterProtocol
         }
     }
 
-    @MainActor
-    @Test func zzDebugDump() {
-        let row = Mirror(reflecting: MainOutRow(masterVolume: 40, isMuted: false, session: DemoMacSession()))
-        let rowDesc = row.children.map { "\($0.label ?? "nil")::\(type(of: $0.value))" }.joined(separator: " | ")
-        let sv = Mirror(reflecting: SpeakersView(session: DemoMacSession()))
-        let svDesc = sv.children.map { "\($0.label ?? "nil")::\(type(of: $0.value))" }.joined(separator: " | ")
-        #expect(Bool(false), "ROW[\(rowDesc)] SPEAKERS[\(svDesc)]")
-    }
-
     // MARK: - Main Out thumb
 
     @MainActor

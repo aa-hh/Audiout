@@ -70,10 +70,25 @@ final class CompanionSmokeUITests: XCTestCase {
     /// substring, rather than an exact static-text label, is what keeps
     /// this test from being coupled to exactly how each view merges its
     /// children.
+    /// Scoped by element type on purpose. `descendants(matching: .any)` walks
+    /// the WHOLE accessibility tree and ships every element across the XPC
+    /// boundary before the predicate is applied here, so its cost grows with
+    /// everything on screen rather than with what is being looked for — eight
+    /// calls of it were the entire runtime of this test.
+    ///
+    /// Rows and headers carry `.isButton`; the rest of what this looks for is
+    /// plain text. Two narrow queries beat one walk of the tree.
+    /// Each query builds its own `NSPredicate`: the type is not `Sendable`, so
+    /// reusing one instance across two queries is a strict-concurrency error.
     private func anyElement(containing text: String) -> XCUIElement {
-        app.descendants(matching: .any)
-            .matching(NSPredicate(format: "label CONTAINS[c] %@", text))
-            .firstMatch
+        func match(_ query: XCUIElementQuery) -> XCUIElement {
+            query.matching(NSPredicate(format: "label CONTAINS[c] %@", text)).firstMatch
+        }
+        for query in [app.buttons, app.staticTexts, app.otherElements] {
+            let element = match(query)
+            if element.exists { return element }
+        }
+        return match(app.otherElements)
     }
 
     private func attachAndSaveScreenshot(name: String, filename: String) {

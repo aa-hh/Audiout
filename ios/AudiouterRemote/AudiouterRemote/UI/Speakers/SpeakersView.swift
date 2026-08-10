@@ -66,7 +66,6 @@ struct SpeakersView: View {
             Circle()
                 .fill(isLive ? WarmSignal.gold : WarmSignal.label3)
                 .frame(width: 6, height: 6)
-                .shadow(color: isLive ? WarmSignal.glow : .clear, radius: isLive ? 6 : 0)
 
             Text(pillText)
                 .font(.system(size: 12, weight: .medium))
@@ -76,7 +75,9 @@ struct SpeakersView: View {
         .padding(.leading, 8)
         .padding(.trailing, 10)
         .padding(.vertical, 5)
-        .glassPanel(cornerRadius: 20)
+        // A badge, not a control: it stays a lozenge rather than taking a
+        // radius off the scale, which would square it off at this height.
+        .glassPanel(cornerRadius: 999)
         .accessibilityElement(children: .combine)
     }
 
@@ -133,6 +134,10 @@ private struct SpeakerConsole: View {
     @State private var drawerOpen = false            // has no init(), so without it `collapsed`
                                                      // becomes a memberwise-init parameter and
                                                      // SpeakerConsole(snapshot:session:) won't compile
+
+    /// The deck's shadow is the one elevation in the screen, and it differs
+    /// between the two grounds — 0.4 black over paper is a smudge, not height.
+    @Environment(\.colorScheme) private var colorScheme
 
     /// The room the list leaves at the bottom for the deck it scrolls under.
     private static let deckHeight: CGFloat = 116
@@ -234,7 +239,9 @@ private struct SpeakerConsole: View {
                 .fill(WarmSignal.hairline)
                 .frame(height: 1)
         }
-        .frame(height: 34)
+        // A full-width row, so the 44 pt floor is a height floor — a square
+        // target would only shrink the strip a finger already has.
+        .frame(height: WarmSignal.hitTarget)
         .contentShape(Rectangle())
         .onTapGesture {
             if collapsed.contains(section.id) { collapsed.remove(section.id) }
@@ -251,7 +258,8 @@ private struct SpeakerConsole: View {
     /// so content keeps passing under the frosted glass instead of stopping
     /// above it.
     private var deck: some View {
-        VStack(spacing: 11) {
+        let elevation = WarmSignal.deckShadow(colorScheme)
+        return VStack(spacing: 11) {
             deckHeader
 
             MainOutRow(masterVolume: master,
@@ -261,14 +269,11 @@ private struct SpeakerConsole: View {
                        onIdlePress: { drawerOpen.toggle() })
         }
         .padding(EdgeInsets(top: 13, leading: 15, bottom: 14, trailing: 15))
-        .glassPanel(cornerRadius: 26, fill: WarmSignal.deckFill)
-        .overlay {
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .strokeBorder(WarmSignal.glassHi, lineWidth: 1)
-                .mask(LinearGradient(colors: [.white, .clear], startPoint: .top, endPoint: .bottom))
-                .allowsHitTesting(false)
-        }
-        .shadow(color: .black.opacity(0.4), radius: 17, y: -10)
+        // One edge, drawn by `glassPanel` itself. The second `glassHi` stroke
+        // that used to sit over it was a highlight on top of an edge, and at
+        // this radius the two read as a single thick, slightly muddy border.
+        .glassPanel(cornerRadius: WarmSignal.Radius.panel, fill: WarmSignal.deckFill)
+        .shadow(color: elevation.color, radius: elevation.radius, y: elevation.y)
         .padding(.horizontal, 14)
         .padding(.bottom, 8)
     }
@@ -294,7 +299,7 @@ private struct SpeakerConsole: View {
             Spacer(minLength: 0)
 
             warmChevron(drawerOpen ? 135 : -45)
-                .contentShape(Rectangle())
+                .hittable(drawn: 9)
                 .onTapGesture { drawerOpen.toggle() }
                 .accessibilityAddTraits(.isButton)
                 .accessibilityLabel(drawerOpen ? "Hide active devices" : "Show active devices")
@@ -346,7 +351,7 @@ private struct SpeakerConsole: View {
             }
         }
         .padding(EdgeInsets(top: 16, leading: 14, bottom: 12, trailing: 14))
-        .glassPanel(cornerRadius: 28, fill: WarmSignal.panel)
+        .glassPanel(cornerRadius: WarmSignal.Radius.panel, fill: WarmSignal.panel)
         .padding(.horizontal, 10)
     }
 }
@@ -416,12 +421,13 @@ struct MainOutRow: View {
                     .font(.system(size: 15))
                     .foregroundStyle(WarmSignal.label2)
                     .frame(width: 38, height: 38)
-                    .background(RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .background(RoundedRectangle(cornerRadius: WarmSignal.Radius.control, style: .continuous)
                         .fill(WarmSignal.well))
-                    .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .overlay(RoundedRectangle(cornerRadius: WarmSignal.Radius.control, style: .continuous)
                         .strokeBorder(WarmSignal.rim, lineWidth: 0.5))
             }
             .buttonStyle(.plain)
+            .hittable(drawn: 38)
             .accessibilityLabel(isMuted ? "Unmute Main Out" : "Mute Main Out")
 
             fader
@@ -440,27 +446,50 @@ struct MainOutRow: View {
         }
     }
 
+    /// The track's rim, and so also the inset its fill has to keep.
+    private static let rimWidth: CGFloat = 1
+
+    /// Narrow on purpose: the cap's width is the precision of the value it
+    /// marks, and the 44 pt hit slab around it is what the finger actually gets.
+    private static let capWidth: CGFloat = 22
+
     /// doc:130-141 — a 44 pt hit slab (doc:1036) around an 18 pt track.
     private var fader: some View {
         ZStack(alignment: .leading) {
             Capsule()
                 .fill(WarmSignal.well)
                 .frame(height: 18)
-                .overlay(Capsule().strokeBorder(WarmSignal.rim, lineWidth: 1).frame(height: 18))
+                .overlay(Capsule().strokeBorder(WarmSignal.rim, lineWidth: Self.rimWidth).frame(height: 18))
 
+            // Inset by the rim at both ends. Sharing x = 0 with the track put
+            // the fill's rounded cap exactly on top of the rim's leading arc,
+            // so the track's own edge was hidden at every value including 0.
             Capsule()
-                .fill(LinearGradient(colors: [WarmSignal.ember, WarmSignal.gold],
-                                     startPoint: .leading, endPoint: .trailing))
-                .frame(width: max(0, fraction * trackWidth), height: 16)
+                .fill(WarmSignal.gold)
+                .frame(width: max(0, fraction * (trackWidth - 2 * Self.rimWidth)), height: 16)
+                .offset(x: Self.rimWidth)
 
-            RoundedRectangle(cornerRadius: 13, style: .continuous)
-                .fill(LinearGradient(colors: [WarmSignal.thumb, WarmSignal.thumbLow],
-                                     startPoint: .top, endPoint: .bottom))
-                .frame(width: 38, height: 38)
-                .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .strokeBorder(WarmSignal.rim, lineWidth: 1))
-                .shadow(color: .black.opacity(0.55), radius: 3.5, y: 2)
-                .offset(x: max(0, min(trackWidth - 38, fraction * trackWidth - 19)))
+            // A fader cap, not a button. Narrow across the travel so the value
+            // it marks is precise, tall across the track so it reads as an
+            // instrument, and carrying a gold index bar down its centre — the
+            // signal continuing through the cap, and the exact point the value
+            // sits at. A capsule rather than a scale radius, for the same
+            // reason the status pill is one: the shape is the point.
+            //
+            // Depth is the rim and the silhouette, never a fill treatment. The
+            // document's brass gradient (doc:138, doc:366) measures 1.07:1
+            // against the fill it sits on, where a control needs 3:1.
+            ZStack {
+                Capsule()
+                    .fill(WarmSignal.raised)
+                    .overlay(Capsule().strokeBorder(WarmSignal.rim, lineWidth: 1))
+                Capsule()
+                    .fill(WarmSignal.gold)
+                    .frame(width: 3, height: 16)
+            }
+            .frame(width: Self.capWidth, height: 34)
+            .offset(x: max(0, min(trackWidth - Self.capWidth,
+                                  fraction * trackWidth - Self.capWidth / 2)))
         }
         .frame(height: 44)
         .contentShape(Rectangle())
@@ -544,12 +573,13 @@ private struct MainOutDrawerRow: View {
                     .font(.system(size: 12))
                     .foregroundStyle(device.isMuted ? WarmSignal.gold : WarmSignal.label2)
                     .frame(width: 28, height: 28)
-                    .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .background(RoundedRectangle(cornerRadius: WarmSignal.Radius.control, style: .continuous)
                         .fill(WarmSignal.well))
-                    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .overlay(RoundedRectangle(cornerRadius: WarmSignal.Radius.control, style: .continuous)
                         .strokeBorder(WarmSignal.rim, lineWidth: 0.5))
             }
             .buttonStyle(.plain)
+            .hittable(drawn: 28)
             .accessibilityLabel(device.isMuted ? "Unmute \(device.name)" : "Mute \(device.name)")
 
             HStack(spacing: 10) {
@@ -599,8 +629,8 @@ private struct MainOutDrawerRow: View {
                 .offset(x: max(0, CGFloat(displayVolume) / 100 * rowWidth - 1.25))
         }
         .background(WarmSignal.well)
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+        .clipShape(RoundedRectangle(cornerRadius: WarmSignal.Radius.row, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: WarmSignal.Radius.row, style: .continuous)
             .strokeBorder(WarmSignal.rim, lineWidth: 0.5))
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { rowWidth = $0 }
     }

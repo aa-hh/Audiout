@@ -194,7 +194,7 @@ struct DeviceRowView: View {
         .background(alignment: .leading) { wash }
         .overlay(alignment: .leading) { edgeLine }
         .background(dragging ? WarmSignal.gold.opacity(0.06) : Color.clear)   // doc:1851
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: WarmSignal.Radius.row, style: .continuous))
         .contentShape(Rectangle())
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { rowWidth = $0 }
         .simultaneousGesture(dragGesture)
@@ -250,13 +250,14 @@ struct DeviceRowView: View {
         }
     }
 
-    /// doc:92, doc:1849-1850 — lit when an app route points here.
+    /// doc:92, doc:1849-1850 — lit when an app route points here. The gold fill
+    /// against the unlit `socket` colour IS the signal; the document's glow was
+    /// a zero-offset coloured halo, which is decoration rather than depth.
     private var routedDot: some View {
         Circle()
             .fill(isRouted ? WarmSignal.gold : WarmSignal.socket)
             .frame(width: 11, height: 11)
             .overlay(Circle().strokeBorder(WarmSignal.canvas, lineWidth: 1.5))
-            .shadow(color: isRouted ? WarmSignal.glow : .clear, radius: isRouted ? 8 : 0)
             .offset(x: 1, y: 1)
     }
 
@@ -269,6 +270,7 @@ struct DeviceRowView: View {
                     .buttonStyle(.plain)
                     .font(.system(size: 12.5, weight: .semibold))
                     .foregroundStyle(WarmSignal.gold)
+                    .hittable(drawn: 20)
             }
         } else {
             Text(device.isAvailable ? String(displayVolume) : "—")
@@ -292,6 +294,7 @@ struct DeviceRowView: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
+            .hittable(drawn: 28)
             .accessibilityHint("Retry connecting to \(device.name)")
         }
         .padding(.horizontal, 12)

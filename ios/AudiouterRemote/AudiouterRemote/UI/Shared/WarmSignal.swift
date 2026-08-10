@@ -34,18 +34,36 @@ enum WarmSignal {
 
     // MARK: Grounds
 
-    static let canvas   = warm(light: 0xFBFBF9, dark: 0x16130F)
-    static let canvasHi = warm(light: 0xFBFBF9, dark: 0x1B1712)
-    static let panel    = warm(light: 0xFBFBF9, dark: 0x1D1915)
-    static let raised   = warm(light: 0xFBFBF9, dark: 0x241F1A)
-    static let well     = warm(light: 0xF5F4ED, dark: 0x100D0A)
+    /// Four grounds and a well, and in BOTH appearances they are four different
+    /// values. The document gives light one paper colour for all of them
+    /// (`#FBFBF9` at doc:1693-1699), which leaves the light build with no
+    /// elevation at all: a speaker's halo, a panel and the screen behind them
+    /// are the same pixel, so instruments float on nothing while dark mode
+    /// reads as built.
+    ///
+    /// The fix is the one paper actually uses, and the one iOS uses for grouped
+    /// tables: move the GROUND down rather than pushing surfaces up, so a
+    /// raised thing can be paper-white and still lift. The steps are small on
+    /// purpose — 1.12:1 from canvas to raised, about what `systemGroupedBackground`
+    /// gives a white cell. Elevation you can see is not elevation you notice.
+    static let canvas   = warm(light: 0xF4F2EA, dark: 0x16130F)
+    static let canvasHi = warm(light: 0xF7F5EF, dark: 0x1B1712)
+    static let panel    = warm(light: 0xFCFBF7, dark: 0x1D1915)
+    static let raised   = warm(light: 0xFFFFFF, dark: 0x241F1A)
+    static let well     = warm(light: 0xEDEAE0, dark: 0x100D0A)
     static let hairline = warm(light: 0xE7E6DF, dark: 0x3A332B)
 
     // MARK: Ink
 
     static let label  = warm(light: 0x1E1C1C, dark: 0xFFFFFF, darkAlpha: 0.92)
     static let label2 = warm(light: 0x706464, dark: 0xFFFFFF, darkAlpha: 0.55)
-    static let label3 = warm(light: 0x76716B, dark: 0xFFFFFF, darkAlpha: 0.28)
+
+    /// The design's third ink (doc:16) is 28% white on the dark ground, which
+    /// measures 1.93:1 — unreadable, and it carries the `IDLE` sub-labels and
+    /// both empty-state placeholders. Lifted to the 4.5:1 floor in both grounds
+    /// (45% white → 4.56:1; `#5F5A54` on paper → 6.59:1). Deliberately off-spec:
+    /// the document set a value, not a contrast target.
+    static let label3 = warm(light: 0x5F5A54, dark: 0xFFFFFF, darkAlpha: 0.45)
 
     // MARK: Signal
 
@@ -58,10 +76,11 @@ enum WarmSignal {
 
     // MARK: Instruments
 
-    /// The fader thumb's gradient stops (doc:138 dark, doc:366 light).
-    static let thumb    = warm(light: 0x9E8D6B, dark: 0x857762)
-    static let thumbLow = warm(light: 0x8A7A62, dark: 0x5F5546)
-    static let rim      = warm(light: 0x9E8D6B, dark: 0x6B5F4E)
+    /// The fader cap takes ``raised`` and is defined by its rim and its
+    /// silhouette. The document draws it as a brass gradient (doc:138,
+    /// doc:366), which puts two muted tans against each other: 1.07:1 against
+    /// the fill in light, 1.49:1 in dark, where a control needs 3:1.
+    static let rim = warm(light: 0x8A7A62, dark: 0x8D7D5E)
     static let meter    = warm(light: 0xCBBEA1, dark: 0x4E463A)
     static let pill     = warm(light: 0xD0CDC3, dark: 0x38322B)
     static let socket   = warm(light: 0xE0D8C6, dark: 0x34302A)
@@ -71,6 +90,35 @@ enum WarmSignal {
     static let glass     = warm(light: 0xFAF7EE, dark: 0x342D25, lightAlpha: 0.66, darkAlpha: 0.52)
     static let glassEdge = warm(light: 0x1E1C1C, dark: 0xFFFFFF, lightAlpha: 0.10, darkAlpha: 0.11)
     static let glassHi   = warm(light: 0xFFFFFF, dark: 0xFFFFFF, lightAlpha: 0.80, darkAlpha: 0.10)
+
+    // MARK: Metrics
+
+    /// Three corner radii, and nothing between them: small controls, list rows,
+    /// floating panels. The screen had eight before, which is what a set of
+    /// individually-plausible guesses looks like once they're counted.
+    enum Radius {
+        static let control: CGFloat = 10
+        static let row: CGFloat     = 16
+        static let panel: CGFloat   = 26
+    }
+
+    /// The 44 pt floor every tappable control is given, however small it draws.
+    static let hitTarget: CGFloat = 44
+
+    // MARK: Elevation
+
+    /// One shadow in the whole screen, and it belongs to the Main Out deck,
+    /// because that is the only thing genuinely floating over moving content.
+    /// Everything else separates with a hairline. A drawn edge is cheaper than
+    /// a shadow and does not smear across a paper ground.
+    ///
+    /// Lighter in light: 0.4 black at 17 pt over `#FBFBF9` reads as a grey
+    /// smudge rather than as height.
+    static func deckShadow(_ scheme: ColorScheme) -> (color: Color, radius: CGFloat, y: CGFloat) {
+        scheme == .dark
+            ? (.black.opacity(0.28), 24, -6)
+            : (.black.opacity(0.08), 18, -4)
+    }
 
     // MARK: Composites
 
@@ -102,12 +150,15 @@ enum WarmSignal {
 /// The design's micro-label voice (doc:36): monospaced, uppercase, tracked out.
 /// 9.5 pt is the common size (doc:57, doc:72-73, doc:124, doc:195); the two
 /// places that use 9 (doc:126, doc:197) pass it.
+/// Sizes are `relativeTo:` so every one of them follows the reading size the
+/// user set. Hard point sizes look identical at the default and then strand
+/// anyone who moved the slider.
 struct MicroLabel: ViewModifier {
     let size: CGFloat
 
     func body(content: Content) -> some View {
         content
-            .font(.system(size: size, weight: .bold, design: .monospaced))
+            .font(.custom("", size: size, relativeTo: .caption2).weight(.bold).monospaced())
             .tracking(size * 0.09)
             .textCase(.uppercase)
     }
@@ -120,8 +171,9 @@ struct Readout: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .font(.system(size: size, weight: .bold, design: .monospaced))
+            .font(.custom("", size: size, relativeTo: .body).weight(.bold).monospaced())
             .tracking(-0.4)
+            .monospacedDigit()
     }
 }
 
@@ -150,6 +202,20 @@ struct GlassPanel: ViewModifier {
 }
 
 extension View {
+    /// Expands the tap area to the 44 pt floor without moving anything: pad
+    /// out, claim the padded rect, pad back in. A `minWidth`/`minHeight` frame
+    /// would reach the same floor but push its container out with it — a 28 pt
+    /// mute button would take its drawer row from 48 pt to 64.
+    ///
+    /// `drawn` is the size the control actually paints, so the padding can be
+    /// exactly what the floor needs and no more.
+    func hittable(drawn: CGFloat) -> some View {
+        let pad = max(0, (WarmSignal.hitTarget - drawn) / 2)
+        return padding(pad)
+            .contentShape(Rectangle())
+            .padding(-pad)
+    }
+
     func microLabel(_ size: CGFloat = 9.5) -> some View { modifier(MicroLabel(size: size)) }
 
     func readout(_ size: CGFloat) -> some View { modifier(Readout(size: size)) }

@@ -3,36 +3,26 @@
 import SwiftUI
 import AudiouterProtocol
 
-/// Tab 1: which Mac is connected, Main Out (picker + master volume/mute),
-/// and every speaker. This view owns no local state at all — every value it
-/// renders comes straight from `session.snapshot`. The in-drag slider echoes
-/// live one level down, in ``MainOutRow`` and ``DeviceRowView``, so each dies
-/// with the list it's in.
+/// Tab 1: which Mac is connected, every speaker as its own fader, and the
+/// floating Main Out deck. This view owns no local state at all — every value
+/// it renders comes straight from `session.snapshot`. The in-drag echoes live
+/// one level down, in ``MainOutRow`` and ``DeviceRowView``, and the screen's
+/// presentation state (which sections are collapsed, whether the drawer is up)
+/// lives in ``SpeakerConsole``, which only exists while a snapshot does — so
+/// each dies with the list it belongs to.
 struct SpeakersView: View {
     let session: any MacSessionProtocol
 
     var body: some View {
-        NavigationStack {
+        ZStack {
+            WarmSignal.canvasGradient.ignoresSafeArea()
+
             VStack(spacing: 0) {
                 header
                 StatusBanners(snapshot: session.snapshot)
 
                 if let snapshot = session.snapshot {
-                    List {
-                        Section("Main Out") {
-                            MainOutPicker(snapshot: snapshot, session: session)
-                            MainOutRow(masterVolume: snapshot.mainOutMasterVolume,
-                                       isMuted: snapshot.mainOutMuted,
-                                       session: session)
-                        }
-
-                        Section("Speakers") {
-                            ForEach(snapshot.devices, id: \.id) { device in
-                                DeviceRowView(device: device, session: session)
-                            }
-                        }
-                    }
-                    .listStyle(.insetGrouped)
+                    SpeakerConsole(snapshot: snapshot, session: session)
                 } else {
                     Spacer()
                     ContentUnavailableView(
@@ -43,43 +33,62 @@ struct SpeakersView: View {
                     Spacer()
                 }
             }
-            .navigationTitle("Speakers")
-            .navigationBarTitleDisplayMode(.inline)
         }
         .toastOverlay(session.toasts)
     }
 
     // MARK: Header
 
+    /// doc:55-65. The design draws its own header, so there's no
+    /// `NavigationStack` or navigation title here.
     private var header: some View {
-        HStack(spacing: 10) {
-            Image(systemName: statusSymbol)
-                .foregroundStyle(statusColor)
-                .accessibilityHidden(true)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(session.snapshot?.serverName ?? "No Mac")
-                    .font(.headline)
-                Text(statusText)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+        HStack(alignment: .bottom, spacing: 10) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("CONNECTED TO")
+                    .microLabel()
+                    .foregroundStyle(WarmSignal.label2)
+                Text("Speakers")
+                    .font(.system(size: 26, weight: .bold))
+                    .tracking(-0.7)
+                    .foregroundStyle(WarmSignal.label)
             }
 
-            Spacer()
+            Spacer(minLength: 8)
 
-            if session.isDemo {
-                Text("Demo")
-                    .font(.caption2.weight(.semibold))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Capsule().fill(Color.yellow.opacity(0.25)))
-                    .foregroundStyle(.orange)
-                    .accessibilityLabel("Demo mode active")
-            }
+            statusPill
         }
-        .padding(.horizontal)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 18)
+        .padding(.bottom, 10)
+    }
+
+    private var statusPill: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(isLive ? WarmSignal.gold : WarmSignal.label3)
+                .frame(width: 6, height: 6)
+                .shadow(color: isLive ? WarmSignal.glow : .clear, radius: isLive ? 6 : 0)
+
+            Text(pillText)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(WarmSignal.label)
+                .lineLimit(1)
+        }
+        .padding(.leading, 8)
+        .padding(.trailing, 10)
+        .padding(.vertical, 5)
+        .glassPanel(cornerRadius: 20)
         .accessibilityElement(children: .combine)
+    }
+
+    private var isLive: Bool { session.connectionStatus == .live }
+
+    /// The Mac's name once there is one, and the connection's own words
+    /// whenever there isn't. Demo rides on the same pill rather than a second
+    /// badge.
+    private var pillText: String {
+        guard isLive else { return statusText }
+        let name = session.snapshot?.serverName ?? "No Mac"
+        return session.isDemo ? name + " · Demo" : name
     }
 
     private var statusText: String {
@@ -91,22 +100,268 @@ struct SpeakersView: View {
         case .disconnected: return "Disconnected"
         }
     }
+}
 
-    private var statusSymbol: String {
-        switch session.connectionStatus {
-        case .live: return "checkmark.circle.fill"
-        case .connecting, .handshaking, .awaitingApproval: return "arrow.triangle.2.circlepath.circle.fill"
-        case .idle, .disconnected: return "xmark.circle.fill"
-        }
+// MARK: - The console
+
+/// One section of the speaker list. `devices` is what renders; `placeholder`
+/// is the honest empty state for the two sections that are structurally always
+/// empty, and is never anything a user could mistake for a real speaker.
+private struct SpeakerSectionSpec: Identifiable {
+    let id: String
+    let title: String
+    let tint: Color
+    let devices: [DeviceState]
+    let placeholder: String?
+}
+
+/// Which way a finger committed. Shared by the deck fader and the drawer rows;
+/// ``DeviceRowView`` declares its own, because the only symbol these three
+/// gestures deliberately share is `WarmSignal.faderValue`.
+private enum DragAxis { case horizontal, vertical }
+
+/// The sections, the floating Main Out deck and its drawer. Split out of
+/// ``SpeakersView`` so this screen's presentation state has a legal home: it is
+/// only ever constructed when a snapshot exists, so its state dies with the
+/// snapshot exactly the way ``MainOutRow``'s echo does.
+private struct SpeakerConsole: View {
+    let snapshot: Snapshot
+    let session: any MacSessionProtocol
+
+    // razor: collapse state is in-memory only. The design wants it remembered per Mac (doc:1046), but the phone may not persist routing state (Model/MacSessionProtocol.swift:21-23); revisit if that rule changes.
+    @State private var collapsed: Set<String> = []   // the `= []` is required: State<Set<String>>
+    @State private var drawerOpen = false            // has no init(), so without it `collapsed`
+                                                     // becomes a memberwise-init parameter and
+                                                     // SpeakerConsole(snapshot:session:) won't compile
+
+    /// The room the list leaves at the bottom for the deck it scrolls under.
+    private static let deckHeight: CGFloat = 116
+
+    // MARK: Derived
+
+    private var armedDevices: [DeviceState] { snapshot.devices.filter { $0.isSelected && $0.isAvailable } }
+    private var armedCount: Int { armedDevices.count }
+    private var master: Int { snapshot.mainOutMasterVolume }
+
+    /// doc:2000-2006. Exactly five, always all five, in this order.
+    private var sections: [SpeakerSectionSpec] {
+        [
+            SpeakerSectionSpec(id: "pinned", title: "PINNED", tint: WarmSignal.gold,
+                               devices: [], placeholder: "NO PINNED SPEAKERS"),
+            SpeakerSectionSpec(id: "live", title: "ARMED / LIVE", tint: WarmSignal.gold,
+                               devices: armedDevices, placeholder: nil),
+            SpeakerSectionSpec(id: "airplay", title: "AIRPLAY", tint: WarmSignal.label2,
+                               devices: snapshot.devices.filter { !$0.isSelected && $0.isAvailable },
+                               placeholder: nil),
+            // razor: structural placeholder only. Nothing on the wire ever reports a Bluetooth output — DeviceState.kind is a free-form String (AudiouterProtocol CompanionSnapshot.swift:42) and the Mac never sends one. Tracked as roadmap 004.
+            SpeakerSectionSpec(id: "bluetooth", title: "BLUETOOTH", tint: WarmSignal.label2,
+                               devices: [], placeholder: "BLUETOOTH OUTPUT NOT AVAILABLE YET"),
+            SpeakerSectionSpec(id: "unavailable", title: "UNAVAILABLE", tint: WarmSignal.label2,
+                               devices: snapshot.devices.filter { !$0.isAvailable },
+                               placeholder: nil),
+        ]
     }
 
-    private var statusColor: Color {
-        switch session.connectionStatus {
-        case .live: return .green
-        case .connecting, .handshaking, .awaitingApproval: return .yellow
-        case .idle, .disconnected: return .secondary
+    // MARK: Body
+
+    var body: some View {
+        // ScrollView + LazyVStack, not List: every row is fully custom-drawn,
+        // and List's cell chrome, separators and swipe handling would fight
+        // both the wash and DeviceRowView's horizontal drag. The
+        // `.simultaneousGesture` arbitration there is specified against this
+        // container.
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                ForEach(sections) { section in
+                    sectionView(section)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.bottom, Self.deckHeight + 16)
         }
+        .scrollIndicators(.hidden)
+        .overlay { if drawerOpen { scrim } }
+        .overlay(alignment: .bottom) { deck }
+        .overlay(alignment: .bottom) {
+            if drawerOpen {
+                drawer
+                    .padding(.bottom, Self.deckHeight)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.spring(duration: 0.25), value: drawerOpen)
     }
+
+    // MARK: Sections
+
+    @ViewBuilder
+    private func sectionView(_ section: SpeakerSectionSpec) -> some View {
+        VStack(spacing: 0) {
+            sectionHeader(section)
+
+            if !collapsed.contains(section.id) {
+                ForEach(section.devices, id: \.id) { device in
+                    DeviceRowView(device: device, session: session)
+                }
+
+                if let placeholder = section.placeholder {
+                    Text(placeholder)
+                        .microLabel()
+                        .foregroundStyle(WarmSignal.label3)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 34)
+                }
+            }
+        }
+        .padding(.bottom, 4)
+    }
+
+    /// doc:70-75 — chevron, title, count, then a hairline rule to the edge.
+    private func sectionHeader(_ section: SpeakerSectionSpec) -> some View {
+        HStack(spacing: 8) {
+            warmChevron(collapsed.contains(section.id) ? 135 : -45)
+                .padding(.leading, 4)
+
+            Text(section.title)
+                .microLabel()
+                .foregroundStyle(section.tint)
+
+            Text(String(section.devices.count))
+                .microLabel()
+                .foregroundStyle(WarmSignal.label3)
+
+            Rectangle()
+                .fill(WarmSignal.hairline)
+                .frame(height: 1)
+        }
+        .frame(height: 34)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            if collapsed.contains(section.id) { collapsed.remove(section.id) }
+            else { collapsed.insert(section.id) }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityHint(collapsed.contains(section.id) ? "Double tap to expand" : "Double tap to collapse")
+    }
+
+    // MARK: Main Out deck
+
+    /// doc:121-142. Floats over the list — `.overlay`, never `.safeAreaInset`,
+    /// so content keeps passing under the frosted glass instead of stopping
+    /// above it.
+    private var deck: some View {
+        VStack(spacing: 11) {
+            deckHeader
+
+            MainOutRow(masterVolume: master,
+                       isMuted: snapshot.mainOutMuted,
+                       session: session,
+                       onToggleMute: { session.setMainOutMuted(!snapshot.mainOutMuted) },
+                       onIdlePress: { drawerOpen.toggle() })
+        }
+        .padding(EdgeInsets(top: 13, leading: 15, bottom: 14, trailing: 15))
+        .glassPanel(cornerRadius: 26, fill: WarmSignal.deckFill)
+        .overlay {
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .strokeBorder(WarmSignal.glassHi, lineWidth: 1)
+                .mask(LinearGradient(colors: [.white, .clear], startPoint: .top, endPoint: .bottom))
+                .allowsHitTesting(false)
+        }
+        .shadow(color: .black.opacity(0.4), radius: 17, y: -10)
+        .padding(.horizontal, 14)
+        .padding(.bottom, 8)
+    }
+
+    private var deckHeader: some View {
+        HStack(spacing: 10) {
+            Text("MAIN OUT")
+                .microLabel()
+                .foregroundStyle(WarmSignal.gold)
+
+            // A menu picker's label is drawn by UIKit and ignores `.lineLimit`,
+            // so the only way to stop it wrapping is to let it take its ideal
+            // width. Without this the deck header grows to four lines and the
+            // deck buries the last section (doc:123-128 is one line).
+            MainOutPicker(snapshot: snapshot, session: session)
+                .fixedSize()
+
+            Text("\(armedCount) ARMED")
+                .microLabel(9)
+                .foregroundStyle(WarmSignal.label2)
+                .fixedSize()
+
+            Spacer(minLength: 0)
+
+            warmChevron(drawerOpen ? 135 : -45)
+                .contentShape(Rectangle())
+                .onTapGesture { drawerOpen.toggle() }
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel(drawerOpen ? "Hide active devices" : "Show active devices")
+        }
+        .lineLimit(1)
+    }
+
+    // MARK: Drawer
+
+    private var scrim: some View {
+        Color(red: 8 / 255, green: 6 / 255, blue: 4 / 255)
+            .opacity(0.5)
+            .ignoresSafeArea()
+            .onTapGesture { drawerOpen = false }
+            .transition(.opacity)
+            .accessibilityLabel("Close active devices")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction { drawerOpen = false }
+    }
+
+    /// doc:188-217 — every armed device's own level, and the per-device mute
+    /// the row gave up.
+    private var drawer: some View {
+        VStack(spacing: 0) {
+            Capsule()
+                .fill(WarmSignal.label3)
+                .frame(width: 38, height: 4)
+                .padding(.bottom, 14)
+
+            HStack(spacing: 8) {
+                Text("ACTIVE DEVICES")
+                    .microLabel()
+                    .foregroundStyle(WarmSignal.gold)
+                Spacer(minLength: 8)
+                Text("DRAG TO ADJUST")
+                    .microLabel(9)
+                    .foregroundStyle(WarmSignal.label2)
+            }
+            .padding(.horizontal, 4)
+            .padding(.bottom, 12)
+
+            VStack(spacing: 4) {
+                // The design's own drawer list is its pinned device plus the
+                // armed ones (doc:2007); PINNED is always empty here, so that
+                // reduces to the armed ones.
+                ForEach(armedDevices, id: \.id) { device in
+                    MainOutDrawerRow(device: device, session: session)
+                }
+            }
+        }
+        .padding(EdgeInsets(top: 16, leading: 14, bottom: 12, trailing: 14))
+        .glassPanel(cornerRadius: 28, fill: WarmSignal.panel)
+        .padding(.horizontal, 10)
+    }
+}
+
+/// doc:70-75, doc:129 — the design's chevron is a 9×9 box with two 1.8 pt
+/// borders, rotated. `-45°` points it down, `135°` points it right.
+private func warmChevron(_ degrees: Double) -> some View {
+    Path { path in
+        path.move(to: CGPoint(x: 0.9, y: 0))
+        path.addLine(to: CGPoint(x: 0.9, y: 8.1))
+        path.addLine(to: CGPoint(x: 9, y: 8.1))
+    }
+    .stroke(WarmSignal.label2, style: StrokeStyle(lineWidth: 1.8, lineCap: .butt, lineJoin: .miter))
+    .frame(width: 9, height: 9)
+    .rotationEffect(.degrees(degrees))
 }
 
 // MARK: - Main Out master row
@@ -125,16 +380,24 @@ struct SpeakersView: View {
 /// disconnect or a tab change takes the whole list, and this view with it. The
 /// other three sliders still clear on release; this is the one that was
 /// reported.
+///
+/// The fader is drawn (doc:130-141) and runs under the same axis latch
+/// ``DeviceRowView`` uses, which is what sets `isDragging`.
 struct MainOutRow: View {
     let masterVolume: Int
     let isMuted: Bool
     let session: any MacSessionProtocol
+    var onToggleMute: () -> Void = {}   // defaulted → the 3-arg init still compiles
+    var onIdlePress: () -> Void = {}    // a press with no movement — raises the drawer
 
     @State private var localVolume: Double?
     /// True from the drag's first tick to its release. While it's true the
     /// Mac's echoes must NOT clear `localVolume` — they arrive ~50ms behind
     /// the finger and would drag the thumb backwards under it.
     @State private var isDragging = false
+    @State private var trackWidth: CGFloat = 0
+    @State private var axis: DragAxis?
+    @State private var dragStartVolume: Int?
 
     /// What the thumb shows: the finger while a drag is in flight (and the
     /// value it was released at until the Mac echoes it back), the Mac's
@@ -143,50 +406,227 @@ struct MainOutRow: View {
         local ?? Double(server)
     }
 
+    private var value: Int { Int(Self.thumbValue(local: localVolume, server: masterVolume).rounded()) }
+    private var fraction: CGFloat { CGFloat(value) / 100 }
+
     var body: some View {
         HStack(spacing: 12) {
-            Button {
-                session.setMainOutMuted(!isMuted)
-            } label: {
+            Button(action: onToggleMute) {
                 Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                    .font(.system(size: 15))
+                    .foregroundStyle(WarmSignal.label2)
+                    .frame(width: 38, height: 38)
+                    .background(RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .fill(WarmSignal.well))
+                    .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .strokeBorder(WarmSignal.rim, lineWidth: 0.5))
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .accessibilityLabel(isMuted ? "Unmute Main Out" : "Mute Main Out")
 
-            Slider(
-                value: Binding(
-                    get: { Self.thumbValue(local: localVolume, server: masterVolume) },
-                    set: { newValue in
-                        localVolume = newValue
-                        session.setMainOutMasterVolume(Int(newValue.rounded()), isFinal: false)
+            fader
+
+            Text(String(value))
+                .readout(16)
+                .foregroundStyle(WarmSignal.gold)
+                .frame(width: 26, alignment: .trailing)
+        }
+        .onChange(of: masterVolume) {
+            // The bound on the hold: any snapshot that moves Main Out ends
+            // it, so a released — or stranded — echo can never outlive one
+            // round trip, and the thumb goes back to following the Mac.
+            guard !isDragging else { return }
+            localVolume = nil
+        }
+    }
+
+    /// doc:130-141 — a 44 pt hit slab (doc:1036) around an 18 pt track.
+    private var fader: some View {
+        ZStack(alignment: .leading) {
+            Capsule()
+                .fill(WarmSignal.well)
+                .frame(height: 18)
+                .overlay(Capsule().strokeBorder(WarmSignal.rim, lineWidth: 1).frame(height: 18))
+
+            Capsule()
+                .fill(LinearGradient(colors: [WarmSignal.ember, WarmSignal.gold],
+                                     startPoint: .leading, endPoint: .trailing))
+                .frame(width: max(0, fraction * trackWidth), height: 16)
+
+            RoundedRectangle(cornerRadius: 13, style: .continuous)
+                .fill(LinearGradient(colors: [WarmSignal.thumb, WarmSignal.thumbLow],
+                                     startPoint: .top, endPoint: .bottom))
+                .frame(width: 38, height: 38)
+                .overlay(RoundedRectangle(cornerRadius: 13, style: .continuous)
+                    .strokeBorder(WarmSignal.rim, lineWidth: 1))
+                .shadow(color: .black.opacity(0.55), radius: 3.5, y: 2)
+                .offset(x: max(0, min(trackWidth - 38, fraction * trackWidth - 19)))
+        }
+        .frame(height: 44)
+        .contentShape(Rectangle())
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { trackWidth = $0 }
+        .gesture(dragGesture)
+        .accessibilityElement()
+        .accessibilityLabel("Main Out volume")
+        .accessibilityValue("\(Int(Self.thumbValue(local: localVolume, server: masterVolume))) percent")
+        .accessibilityAdjustableAction { direction in
+            let next = min(100, max(0, value + (direction == .increment ? 5 : -5)))
+            session.setMainOutMasterVolume(next, isFinal: true)
+        }
+    }
+
+    /// doc:1730-1749 — the same axis latch ``DeviceRowView`` uses. A press
+    /// that never commits raises the drawer instead of moving anything.
+    private var dragGesture: some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { gestureValue in
+                let w = gestureValue.translation.width, h = gestureValue.translation.height
+                if axis == nil {
+                    guard max(abs(w), abs(h)) >= 5 else { return }
+                    axis = abs(w) > abs(h) ? .horizontal : .vertical
+                    if axis == .horizontal {
+                        dragStartVolume = value
+                        // The only writer of `isDragging`. Without it the echo
+                        // below clears mid-drag and the thumb rubber-bands
+                        // under the finger.
+                        isDragging = true
                     }
-                ),
-                in: 0...100,
-                step: 1,
-                onEditingChanged: { editing in
-                    // Local echo while dragging, coalesced sends, always send
-                    // the release value — no drag bracket (Main is a
-                    // stateless set).
-                    isDragging = editing
-                    guard !editing else { return }
-                    let final = Int(Self.thumbValue(local: localVolume, server: masterVolume).rounded())
-                    session.setMainOutMasterVolume(final, isFinal: true)
-                    // The echo is ~50ms behind, so clearing the echo HERE (as
-                    // the other rows still do) rubber-bands the thumb to the
-                    // pre-release value for that beat. Hold it instead and let
-                    // the snapshot below clear it.
                 }
-            )
-            .onChange(of: masterVolume) {
-                // The bound on the hold: any snapshot that moves Main Out ends
-                // it, so a released — or stranded — echo can never outlive one
-                // round trip, and the thumb goes back to following the Mac.
-                guard !isDragging else { return }
+                guard axis == .horizontal, let start = dragStartVolume else { return }
+                let v = WarmSignal.faderValue(start: start, translationWidth: w, trackWidth: trackWidth)
+                localVolume = Double(v)
+                session.setMainOutMasterVolume(v, isFinal: false)
+            }
+            .onEnded { _ in
+                defer { axis = nil; dragStartVolume = nil; isDragging = false }
+                switch axis {
+                case .horizontal:
+                    session.setMainOutMasterVolume(value, isFinal: true)
+                    // The echo is ~50ms behind, so clearing it HERE (as the
+                    // other rows still do) rubber-bands the thumb to the
+                    // pre-release value for that beat. Hold it instead and let
+                    // the snapshot above clear it.
+                case .vertical:
+                    return
+                case nil:
+                    onIdlePress()
+                }
+            }
+    }
+}
+
+// MARK: - Drawer row
+
+/// One armed device inside the Main Out drawer (doc:200-215): its own level,
+/// dragged the same way, plus the mute button ``DeviceRowView`` gave up — so
+/// mute stays two taps away and that row's `MUTED` sub-label stays actionable.
+private struct MainOutDrawerRow: View {
+    let device: DeviceState
+    let session: any MacSessionProtocol
+
+    @State private var axis: DragAxis?
+    @State private var dragStartVolume: Int?
+    @State private var localVolume: Double?
+    @State private var rowWidth: CGFloat = 0
+
+    private var displayVolume: Int { Int((localVolume ?? Double(device.volume)).rounded()) }
+    private var dragging: Bool { axis == .horizontal }
+    private var controlsEnabled: Bool {
+        DeviceRowView.isControllable(device, appRoutes: session.snapshot?.appRoutes ?? [])
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button {
+                session.setDeviceMuted(id: device.id, muted: !device.isMuted)
+            } label: {
+                Image(systemName: device.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                    .font(.system(size: 12))
+                    .foregroundStyle(device.isMuted ? WarmSignal.gold : WarmSignal.label2)
+                    .frame(width: 28, height: 28)
+                    .background(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(WarmSignal.well))
+                    .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .strokeBorder(WarmSignal.rim, lineWidth: 0.5))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(device.isMuted ? "Unmute \(device.name)" : "Mute \(device.name)")
+
+            HStack(spacing: 10) {
+                Circle()
+                    .strokeBorder(WarmSignal.ring, lineWidth: 2)
+                    .frame(width: 24, height: 24)
+                    .accessibilityHidden(true)
+
+                Text(device.name)
+                    .font(.system(size: 14.5, weight: .medium))
+                    .foregroundStyle(WarmSignal.label)
+                    .lineLimit(1)
+
+                Spacer(minLength: 8)
+
+                Text(String(displayVolume))
+                    .readout(14)
+                    .foregroundStyle(WarmSignal.gold)
+            }
+            .contentShape(Rectangle())
+            .gesture(dragGesture)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(device.name)
+            .accessibilityValue("\(displayVolume) percent")
+            .accessibilityAdjustableAction { direction in
+                guard controlsEnabled else { return }
+                session.setDeviceVolume(
+                    id: device.id,
+                    volume: min(100, max(0, device.volume + (direction == .increment ? 5 : -5))),
+                    isFinal: true)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(alignment: .leading) {
+            Rectangle()
+                .fill(LinearGradient(colors: [WarmSignal.ember, WarmSignal.gold],
+                                     startPoint: .leading, endPoint: .trailing))
+                .opacity(0.30)
+                .frame(width: max(0, CGFloat(displayVolume) / 100 * rowWidth))
+        }
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(WarmSignal.glow)
+                .frame(width: 2.5)
+                .opacity(dragging ? 1 : 0.4)
+                .offset(x: max(0, CGFloat(displayVolume) / 100 * rowWidth - 1.25))
+        }
+        .background(WarmSignal.well)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .strokeBorder(WarmSignal.rim, lineWidth: 0.5))
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { rowWidth = $0 }
+    }
+
+    private var dragGesture: some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { gestureValue in
+                let w = gestureValue.translation.width, h = gestureValue.translation.height
+                if axis == nil {
+                    guard max(abs(w), abs(h)) >= 5 else { return }
+                    axis = abs(w) > abs(h) ? .horizontal : .vertical
+                    if axis == .horizontal { dragStartVolume = device.volume }
+                }
+                guard axis == .horizontal, controlsEnabled, let start = dragStartVolume else { return }
+                let v = WarmSignal.faderValue(start: start, translationWidth: w, trackWidth: rowWidth)
+                localVolume = Double(v)
+                session.setDeviceVolume(id: device.id, volume: v, isFinal: false)
+            }
+            .onEnded { _ in
+                defer { axis = nil; dragStartVolume = nil }
+                guard axis == .horizontal, controlsEnabled else { return }
+                session.setDeviceVolume(id: device.id,
+                                        volume: Int((localVolume ?? Double(device.volume)).rounded()),
+                                        isFinal: true)
                 localVolume = nil
             }
-            .accessibilityLabel("Main Out volume")
-            .accessibilityValue("\(Int(Self.thumbValue(local: localVolume, server: masterVolume))) percent")
-        }
     }
 }
 

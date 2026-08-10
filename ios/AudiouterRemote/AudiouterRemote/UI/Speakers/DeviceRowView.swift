@@ -3,32 +3,43 @@
 import SwiftUI
 import AudiouterProtocol
 
-/// One speaker row: icon (D5 — the Mac's resolved custom icon, read-only),
-/// name/kind, select toggle, volume + mute, and — per D9 full status parity —
-/// a failure card (headline / expandable suggestion / Try Again) whenever
-/// `connection.state == "failed"`, independent of `isAvailable`.
+/// One speaker, drawn as its own fader (doc:84-105, doc:1823-1866): tapping
+/// the row arms or disarms it, dragging horizontally sets its volume, and the
+/// gold wash behind the content IS the level. Per-device mute lives in the
+/// Main Out drawer (``SpeakersView``), which is what the `MUTED` sub-label
+/// below points at.
 ///
-/// Volume slider policy: while dragging, the thumb tracks `localVolume` (set
-/// on every tick) rather than `device.volume` from the snapshot, because
+/// Volume policy: while dragging, the wash and the readout track `localVolume`
+/// (set on every tick) rather than `device.volume` from the snapshot, because
 /// device-volume effects come back through the ~50ms coalescer and would
 /// otherwise fight the user's finger. `localVolume` clears on release, so the
-/// slider reconciles from the next snapshot — and rubber-bands to the
-/// pre-release value for that one beat, which ``MainOutRow`` no longer does.
+/// row reconciles from the next snapshot — and rubber-bands to the pre-release
+/// value for that one beat, which ``MainOutRow`` deliberately does not.
 ///
-/// Volume and mute are enabled by the same rule the Mac's own row uses (see
-/// ``isControllable``); the select toggle is enabled by the Mac's separate,
-/// weaker checkbox rule (availability alone). `isAvailable == false` means the
-/// device is gone from the network entirely (distinct from
-/// `connection.state`, which can be "failed"/"off" while still `isAvailable`)
-/// — dimmed AND everything disabled, since there's nothing on the other end
-/// to apply them. A control the rule disables says WHY when VoiceOver reads
-/// it (see ``disabledReason(for:controllable:)``).
+/// The drag is enabled by the same rule the Mac's own row uses (see
+/// ``isControllable``); arming is enabled by the Mac's separate, weaker
+/// checkbox rule (availability alone). `isAvailable == false` means the device
+/// is gone from the network entirely (distinct from `connection.state`, which
+/// can be "failed"/"off" while still `isAvailable`) — dimmed AND inert, since
+/// there's nothing on the other end to apply anything to. A row the rule can't
+/// adjust says WHY when VoiceOver reads it, on the row's own hint (see
+/// ``disabledReason(for:controllable:)``).
 struct DeviceRowView: View {
     let device: DeviceState
     let session: any MacSessionProtocol
 
-    @State private var localVolume: Double?
+    /// Which way the finger committed. SwiftUI has no equivalent of the
+    /// design's CSS `touch-action: pan-y` (doc:79), and a plain drag gesture
+    /// on a row inside a `ScrollView` wins arbitration outright and kills
+    /// vertical scrolling. Latching to one axis after 5 pt of slop, and
+    /// leaving vertical inert, gives the scroll view its pan back.
+    private enum DragAxis { case horizontal, vertical }
+
+    @State private var axis: DragAxis?        // nil until the gesture commits
+    @State private var dragStartVolume: Int?  // captured at commit — doc:1755-1765
+    @State private var localVolume: Double?   // in-drag echo
     @State private var showFailureDetail = false
+    @State private var rowWidth: CGFloat = 0  // the fader track
 
     /// D9's failure card takes the whole control slot: a `"failed"` device
     /// gets headline / details / Try Again INSTEAD of volume + mute. This is
@@ -37,8 +48,6 @@ struct DeviceRowView: View {
     static func showsFailureCard(_ device: DeviceState) -> Bool {
         device.connection.state == "failed"
     }
-
-    private var isFailed: Bool { Self.showsFailureCard(device) }
 
     /// The Mac's rule for the volume slider and the mute button, mirrored
     /// exactly (AudiouterSharedUI/DeviceRowView: `device.isAvailable &&
@@ -86,6 +95,8 @@ struct DeviceRowView: View {
         return device.isAvailable ? "not selected for Main Out" : "unavailable"
     }
 
+    // MARK: - Derived state
+
     /// This row's answer to that rule. No snapshot yet means no known routes,
     /// so the redirect half is false — never assume controllable, that would
     /// be inventing state.
@@ -93,120 +104,187 @@ struct DeviceRowView: View {
         Self.isControllable(device, appRoutes: session.snapshot?.appRoutes ?? [])
     }
 
-    /// The reason as a trailing label clause, matching how the Mac appends its
-    /// own clauses (`", \(state)"`). Empty when there's nothing to explain.
-    private var disabledClause: String {
-        Self.disabledReason(for: device, controllable: controlsEnabled)
-            .map { ", \($0)" } ?? ""
+    private var isFailed: Bool { Self.showsFailureCard(device) }
+
+    private var isConnecting: Bool { device.connection.state == "connecting" }
+
+    /// doc:1828 — armed, present, and nothing in the way.
+    private var isLive: Bool {
+        device.isSelected && device.isAvailable && !isFailed && !isConnecting
     }
 
+    /// doc:1826 — the row only reads as "dragging" once the finger has
+    /// committed horizontally.
+    private var dragging: Bool { axis == .horizontal }
+
+    private var displayVolume: Int { Int((localVolume ?? Double(device.volume)).rounded()) }
+
+    /// doc:1852 — an unarmed row shows no level at all, so the wash is the
+    /// arming signal as much as the volume one.
+    private var volumeFraction: CGFloat { isLive ? CGFloat(displayVolume) / 100 : 0 }
+
+    private var isRouted: Bool {
+        session.snapshot?.appRoutes.contains {
+            $0.destinationKind == "device" && $0.deviceID == device.id
+        } == true
+    }
+
+    // MARK: - Body
+
+    @ViewBuilder
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 12) {
-                Image(systemName: device.iconSymbolName)
-                    .font(.title3)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 28)
-                    .accessibilityHidden(true)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(device.name)
-                        .font(.body)
-                    Text(kindLabel)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+        if isFailed {
+            // A failed row keeps its children as ordinary elements: collapsing
+            // it would swallow Diagnose and Try Again, and it has no volume to
+            // adjust anyway.
+            content
+        } else {
+            content
+                .accessibilityElement(children: .ignore)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityLabel(device.name)
+                .accessibilityValue(device.isSelected ? "Armed" : "Not armed")
+                .accessibilityHint(hint)
+                .accessibilityAction {
+                    session.setDeviceSelected(id: device.id, selected: !device.isSelected)
                 }
-
-                Spacer()
-
-                Toggle(isOn: Binding(
-                    get: { device.isSelected },
-                    set: { session.setDeviceSelected(id: device.id, selected: $0) }
-                )) {
-                    EmptyView()
+                .accessibilityAdjustableAction { direction in
+                    guard controlsEnabled else { return }
+                    session.setDeviceVolume(
+                        id: device.id,
+                        volume: min(100, max(0, device.volume + (direction == .increment ? 5 : -5))),
+                        isFinal: true)
                 }
-                .labelsHidden()
-                .disabled(!device.isAvailable)
-                .accessibilityLabel("Select \(device.name)")
-            }
-
-            if isFailed {
-                failureCard
-            } else {
-                controlsRow
-            }
         }
-        .padding(.vertical, 4)
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            faderRow
+            if isFailed { failureControls }
+        }
+        .padding(.bottom, 2)
         .opacity(device.isAvailable ? 1 : 0.45)
     }
 
-    private var kindLabel: String {
-        switch device.kind {
-        case "localMac": return "This Mac"
-        case "homePod": return "HomePod"
-        case "appleTV": return "Apple TV"
-        case "airportExpress": return "AirPort Express"
-        case "sonos": return "Sonos"
-        default: return device.kind.capitalized
-        }
-    }
+    // MARK: - The row itself
 
-    private var controlsRow: some View {
+    private var faderRow: some View {
         HStack(spacing: 12) {
-            Button {
-                session.setDeviceMuted(id: device.id, muted: !device.isMuted)
-            } label: {
-                Image(systemName: device.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-            }
-            .buttonStyle(.borderless)
-            .disabled(!controlsEnabled)
-            .accessibilityLabel(
-                (device.isMuted ? "Unmute \(device.name)" : "Mute \(device.name)") + disabledClause)
+            halo
 
-            Slider(
-                value: Binding(
-                    get: { localVolume ?? Double(device.volume) },
-                    set: { newValue in
-                        localVolume = newValue
-                        session.setDeviceVolume(id: device.id, volume: Int(newValue.rounded()), isFinal: false)
-                    }
-                ),
-                in: 0...100,
-                step: 1,
-                onEditingChanged: { editing in
-                    guard !editing else { return }
-                    let final = Int((localVolume ?? Double(device.volume)).rounded())
-                    session.setDeviceVolume(id: device.id, volume: final, isFinal: true)
-                    localVolume = nil
-                }
-            )
-            .disabled(!controlsEnabled)
-            .accessibilityLabel("\(device.name) volume\(disabledClause)")
-            .accessibilityValue("\(Int(localVolume ?? Double(device.volume))) percent")
+            VStack(alignment: .leading, spacing: 4) {
+                Text(device.name)
+                    .font(.system(size: 16.5, weight: device.isSelected ? .semibold : .regular))
+                    .tracking(-0.2)
+                    .lineLimit(1)
+                    .foregroundStyle(nameTint)
+
+                Text(subLabel)
+                    .microLabel()
+                    .foregroundStyle(subTint)
+            }
+
+            Spacer(minLength: 8)
+
+            trailingSlot
         }
-        // SwiftUI's own disabled tint on a Slider is nearly invisible, so the
-        // rule above read as "nothing changed" on a real screen. Dim to match
-        // the Mac's desaturated row. Only when the device is available: an
-        // unavailable one is already dimmed by the row-level opacity below,
-        // and both paths should land on the same 0.45 rather than compound.
-        .opacity(device.isAvailable && !controlsEnabled ? 0.45 : 1)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
+        .background(alignment: .leading) { wash }
+        .overlay(alignment: .leading) { edgeLine }
+        .background(dragging ? WarmSignal.gold.opacity(0.06) : Color.clear)   // doc:1851
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .contentShape(Rectangle())
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { rowWidth = $0 }
+        .simultaneousGesture(dragGesture)
     }
 
-    private var failureCard: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label(device.connection.failureHeadline ?? "Connection failed", systemImage: "exclamationmark.triangle.fill")
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.orange)
+    /// doc:1853 — the level, drawn as light rather than as a control.
+    @ViewBuilder
+    private var wash: some View {
+        Rectangle()
+            .fill(LinearGradient(
+                colors: [WarmSignal.gold.opacity(dragging ? 0.30 : 0.14),
+                         WarmSignal.gold.opacity(dragging ? 0.17 : 0.06)],
+                startPoint: .leading,
+                endPoint: .trailing))
+            .frame(width: max(0, volumeFraction * rowWidth))
+    }
 
-            if let suggestion = device.connection.failureSuggestion {
-                DisclosureGroup(isExpanded: $showFailureDetail) {
-                    Text(suggestion)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                } label: {
-                    Text("Details")
-                        .font(.footnote)
-                }
+    /// doc:1854-1856 — the bright leading edge of the wash, only where there
+    /// is a level to show.
+    @ViewBuilder
+    private var edgeLine: some View {
+        if isLive {
+            Rectangle()
+                .fill(WarmSignal.gold)
+                .frame(width: 2)
+                .opacity(dragging ? 1 : 0.4)
+                .offset(x: max(0, volumeFraction * rowWidth - 1))
+        }
+    }
+
+    private var halo: some View {
+        ZStack {
+            Circle().fill(WarmSignal.raised)
+            ring
+            Image(systemName: device.iconSymbolName)
+                .font(.system(size: 17))
+                .foregroundStyle(glyphTint)
+        }
+        .frame(width: 44, height: 44)
+        .overlay(alignment: .bottomTrailing) { routedDot }
+        .accessibilityHidden(true)
+    }
+
+    /// doc:1829-1832.
+    @ViewBuilder
+    private var ring: some View {
+        if isFailed {
+            Circle().strokeBorder(WarmSignal.fail, lineWidth: 2.8)
+        } else if isConnecting {
+            Circle().strokeBorder(WarmSignal.ring, style: StrokeStyle(lineWidth: 2.5, dash: [4, 3]))
+        } else if isLive {
+            Circle().strokeBorder(WarmSignal.ring, lineWidth: 2.5)
+        }
+    }
+
+    /// doc:92, doc:1849-1850 — lit when an app route points here.
+    private var routedDot: some View {
+        Circle()
+            .fill(isRouted ? WarmSignal.gold : WarmSignal.socket)
+            .frame(width: 11, height: 11)
+            .overlay(Circle().strokeBorder(WarmSignal.canvas, lineWidth: 1.5))
+            .shadow(color: isRouted ? WarmSignal.glow : .clear, radius: isRouted ? 8 : 0)
+            .offset(x: 1, y: 1)
+    }
+
+    /// doc:1861-1863, and the failure affordance that replaces the number.
+    @ViewBuilder
+    private var trailingSlot: some View {
+        if isFailed {
+            if device.connection.failureSuggestion != nil {
+                Button("Diagnose") { showFailureDetail.toggle() }
+                    .buttonStyle(.plain)
+                    .font(.system(size: 12.5, weight: .semibold))
+                    .foregroundStyle(WarmSignal.gold)
+            }
+        } else {
+            Text(device.isAvailable ? String(displayVolume) : "—")
+                .readout(dragging ? 22 : 13)
+                .foregroundStyle(isLive ? WarmSignal.gold : WarmSignal.label3)
+                .animation(.easeOut(duration: 0.12), value: dragging)
+        }
+    }
+
+    private var failureControls: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if showFailureDetail, let suggestion = device.connection.failureSuggestion {
+                Text(suggestion)
+                    .font(.footnote)
+                    .foregroundStyle(WarmSignal.label2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Button("Try Again") {
@@ -216,17 +294,107 @@ struct DeviceRowView: View {
             .controlSize(.small)
             .accessibilityHint("Retry connecting to \(device.name)")
         }
-        .padding(.top, 2)
+        .padding(.horizontal, 12)
+    }
+
+    // MARK: - Text
+
+    /// doc:1833-1837, plus the muted case at doc:1897. Order matters: the
+    /// first true branch is what the row says.
+    private var subLabel: String {
+        if isFailed { return device.connection.failureHeadline ?? "CONNECTION FAILED" }
+        if !device.isAvailable { return "UNAVAILABLE" }
+        if isConnecting { return "CONNECTING…" }
+        if device.isMuted { return "MUTED" }
+        if device.isSelected { return "LIVE" }
+        return "IDLE"
+    }
+
+    private var subTint: Color {
+        if isFailed { return WarmSignal.fail }
+        if !device.isAvailable { return WarmSignal.label3 }
+        if isConnecting { return WarmSignal.ring }
+        if device.isMuted { return WarmSignal.label2 }
+        if device.isSelected { return WarmSignal.gold }
+        return WarmSignal.label3
+    }
+
+    /// doc:1858.
+    private var nameTint: Color {
+        guard device.isAvailable else { return WarmSignal.label3 }
+        return isLive ? WarmSignal.label : WarmSignal.label2
+    }
+
+    /// doc:1848.
+    private var glyphTint: Color {
+        guard device.isAvailable else { return WarmSignal.label3 }
+        return isLive ? WarmSignal.label : WarmSignal.label2
+    }
+
+    /// A row the rule won't let you adjust must not advertise a swipe that
+    /// does nothing, and must say why — so the reason rides on the hint.
+    private var hint: String {
+        let base = "Double tap to \(device.isSelected ? "disarm" : "arm")."
+        guard controlsEnabled else {
+            return [base, Self.disabledReason(for: device, controllable: false)]
+                .compactMap { $0 }
+                .joined(separator: " ")
+        }
+        return base + " Swipe up or down to change volume."
+    }
+
+    // MARK: - Gesture
+
+    /// doc:1730-1794. `.simultaneousGesture` plus the axis latch, so the
+    /// enclosing `ScrollView` keeps its own pan and this row only takes over
+    /// once the finger has committed horizontally.
+    private var dragGesture: some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                let w = value.translation.width, h = value.translation.height
+                if axis == nil {
+                    // 5 pt slop (doc:1739, doc:1773), then commit to one axis for
+                    // the rest of the gesture. Vertical commits are inert so the
+                    // enclosing ScrollView keeps the pan.
+                    guard max(abs(w), abs(h)) >= 5 else { return }
+                    axis = abs(w) > abs(h) ? .horizontal : .vertical
+                    if axis == .horizontal { dragStartVolume = device.volume }
+                }
+                guard axis == .horizontal, controlsEnabled, let start = dragStartVolume else { return }
+                let v = WarmSignal.faderValue(start: start, translationWidth: w, trackWidth: rowWidth)
+                localVolume = Double(v)
+                session.setDeviceVolume(id: device.id, volume: v, isFinal: false)
+            }
+            .onEnded { _ in
+                defer { axis = nil; dragStartVolume = nil }
+                switch axis {
+                case .horizontal:
+                    guard controlsEnabled else { return }
+                    session.setDeviceVolume(id: device.id,
+                                            volume: Int((localVolume ?? Double(device.volume)).rounded()),
+                                            isFinal: true)
+                    localVolume = nil                    // clear on release, unlike MainOutRow
+                case .vertical:
+                    return                               // the ScrollView handled it
+                case nil:
+                    guard device.isAvailable else { return }
+                    session.setDeviceSelected(id: device.id, selected: !device.isSelected)  // doc:1792
+                }
+            }
     }
 }
 
 #Preview("Healthy") {
     let demo = DemoMacSession()
-    return List {
-        ForEach(demo.snapshot!.devices, id: \.id) { device in
-            DeviceRowView(device: device, session: demo)
+    return ScrollView {
+        LazyVStack(spacing: 0) {
+            ForEach(demo.snapshot!.devices, id: \.id) { device in
+                DeviceRowView(device: device, session: demo)
+            }
         }
+        .padding(.horizontal, 14)
     }
+    .background(WarmSignal.canvasGradient)
 }
 
 #Preview("Failed device") {
@@ -240,7 +408,7 @@ struct DeviceRowView: View {
             failureSuggestion: "The speaker is no longer visible on the network. Check that it's powered on and on the same Wi-Fi, then try again."
         )
     )
-    return List {
-        DeviceRowView(device: failed, session: DemoMacSession())
-    }
+    return DeviceRowView(device: failed, session: DemoMacSession())
+        .padding(.horizontal, 14)
+        .background(WarmSignal.canvasGradient)
 }

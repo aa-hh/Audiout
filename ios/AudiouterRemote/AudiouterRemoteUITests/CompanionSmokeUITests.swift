@@ -125,13 +125,14 @@ final class CompanionSmokeUITests: XCTestCase {
                       "Kitchen HomePod (demo fleet) should render as a speaker row")
         attachAndSaveScreenshot(name: "Speakers", filename: "01-speakers.png")
 
-        // Interaction: toggle a speaker's Select switch.
-        let homePodToggle = app.switches["Select Kitchen HomePod"]
-        XCTAssertTrue(homePodToggle.waitForExistence(timeout: 5))
-        let beforeToggle = homePodToggle.value as? String
-        homePodToggle.tap()
-        let afterToggle = homePodToggle.value as? String
-        XCTAssertNotEqual(beforeToggle, afterToggle, "Toggling Select Kitchen HomePod should flip its switch state")
+        // Interaction: tap a speaker row to arm it — the row is the control,
+        // so its accessibility value is what flips.
+        let homePodRow = app.buttons["Kitchen HomePod"]
+        XCTAssertTrue(homePodRow.waitForExistence(timeout: 5))
+        let beforeToggle = homePodRow.value as? String
+        homePodRow.tap()
+        let afterToggle = homePodRow.value as? String
+        XCTAssertNotEqual(beforeToggle, afterToggle, "Tapping the Kitchen HomePod row should flip it between armed and not armed")
 
         // 4. Visit Apps: assert a demo app route row rendered.
         appsTab.tap()
@@ -174,7 +175,7 @@ final class CompanionSmokeUITests: XCTestCase {
         // 7. No crash, and the earlier speaker toggle stuck (it's session
         // state, not view-local state that a tab switch would reset).
         speakersTab.tap()
-        let persistedToggle = app.switches["Select Kitchen HomePod"].value as? String
+        let persistedToggle = app.buttons["Kitchen HomePod"].value as? String
         XCTAssertEqual(afterToggle, persistedToggle,
                         "Speaker selection should persist across tab navigation, not reset per view")
     }

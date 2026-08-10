@@ -150,6 +150,13 @@ struct RootView: View {
             .tabItem { Label("Connection", systemImage: "antenna.radiowaves.left.and.right") }
             .tag(Tab.connection)
         }
+        // Warm Signal's gold, everywhere the tint reaches: tab-bar selection,
+        // buttons, chevrons, picker menus, toggles. It does NOT reach
+        // `Color.accentColor` (which resolves from the app accent — no asset
+        // catalog exists, so system blue — and ignores an ancestor tint), so
+        // the four explicit `.accentColor` literals in UI/Groups/ are swapped
+        // to `WarmSignal.gold` directly.
+        .tint(WarmSignal.gold)
         .task { model.start() }
         .onChange(of: model.isConnected) { wasConnected, isConnected in
             if isConnected, !wasConnected, selection == .connection {

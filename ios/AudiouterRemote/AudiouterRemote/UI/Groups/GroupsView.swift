@@ -51,7 +51,7 @@ struct GroupsView: View {
                             } label: {
                                 Label("Set as Output", systemImage: "hifispeaker.and.homepod")
                             }
-                            .tint(.accentColor)
+                            .tint(WarmSignal.gold)
                         }
                         .swipeActions(edge: .trailing) {
                             Button(role: .destructive) {

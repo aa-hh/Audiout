@@ -40,6 +40,10 @@ struct MainOutPicker: View {
                 Text(group.name).tag(Target.group(group.id))
             }
         }
+        .pickerStyle(.menu)
+        .labelsHidden()
+        .tint(WarmSignal.label)
+        .font(.system(size: 15, weight: .semibold))
         .accessibilityHint("Choose which speakers Main Out sends to")
     }
 }

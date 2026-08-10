@@ -49,15 +49,15 @@ struct GroupIconPicker: View {
                             .frame(width: 56, height: 56)
                             .background(
                                 selection == item.symbol
-                                    ? Color.accentColor.opacity(0.15)
+                                    ? WarmSignal.gold.opacity(0.15)
                                     : Color(.secondarySystemBackground)
                             )
-                            .foregroundStyle(selection == item.symbol ? Color.accentColor : Color.primary)
+                            .foregroundStyle(selection == item.symbol ? WarmSignal.gold : Color.primary)
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                             .overlay {
                                 if selection == item.symbol {
                                     RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                        .strokeBorder(Color.accentColor, lineWidth: 2)
+                                        .strokeBorder(WarmSignal.gold, lineWidth: 2)
                                 }
                             }
                     }

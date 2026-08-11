@@ -916,6 +916,28 @@ public enum Tokens {
         public static let groupedSectionCornerRadius: CGFloat = 10
     }
 
+    // MARK: - Motion
+
+    /// Motion durations shared across surfaces (spec §6, "one motion
+    /// language"). Only values a SECOND surface would otherwise re-declare
+    /// belong here — a duration used in exactly one place stays where it is
+    /// used.
+    public enum Motion {
+        /// How long ANY collapsible element in the app takes to unfold into —
+        /// or fold out of — its host, on one curve (`.easeInEaseOut`): the
+        /// popover's inserted rows, device-type subsections and card bodies
+        /// (`CardView.setBodyCollapsed`), and the Setup window's permission
+        /// cards (`SetupCardView`). ONE value, so an expand is the exact
+        /// mirror of its collapse and every clip in the app reads as the same
+        /// gesture — a second constant kept in step by hand silently drifts
+        /// (live report 2026-08-10: the cards' own 0.2 s "don't follow the
+        /// same system"). 0.15 s is Alec's live call on the previous 0.22 s
+        /// ("it's also not that snappy") — short enough to feel immediate,
+        /// long enough that neighbouring content still reads as being PUSHED
+        /// rather than jumping.
+        public static let collapseRevealDuration: TimeInterval = 0.15
+    }
+
     // MARK: - Material
 
     /// `NSVisualEffectView.Material` aliases for the vibrancy materials the

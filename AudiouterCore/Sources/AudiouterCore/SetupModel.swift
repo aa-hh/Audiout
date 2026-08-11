@@ -14,12 +14,14 @@ import Foundation
 ///   level. That yields a real `.granted` / `.denied`, and `.unsupported` when
 ///   the OS predates the tap API (< macOS 14.2), where no grant is possible.
 /// - **Local Network** has *no* public request-or-check API (Apple TN3179), so it
-///   can't be read directly. It IS inferred *functionally*: a brief Bonjour browse
-///   that actually reaches the network (sees a service / goes ready) proves the
-///   grant, giving a real `.granted`; a browse that gets nowhere leaves `.requested`
-///   ("asked, but unproven — no speakers, or denied"). It never reports a hard
-///   `.denied`, because "found nothing" can't distinguish denial from an empty
-///   network.
+///   can't be read directly — but BOTH answers are provable behaviourally, and
+///   ``LocalNetworkPrimer`` proves them. The app publishes its own Bonjour
+///   service and browses for it:
+///   finding itself proves the grant even on a network with no speaker on it, so
+///   that's a real `.granted`; a browser going
+///   `.waiting(.dns(kDNSServiceErr_PolicyDenied))` is the refusal itself, so
+///   that's a real `.denied`. `.requested` now means only what it says — asked,
+///   and nothing answered yet (the dialog is presumably still up).
 /// - **Remote Control** (Accessibility) DOES have a real, public, *silent* status
 ///   API — `AXIsProcessTrusted()` reads the live value without prompting — so this
 ///   yields a genuine `.granted`, refreshed on every window focus (a grant the
@@ -34,9 +36,9 @@ public enum PermissionStatus: Equatable, Sendable {
     case granted
     /// Confirmed denied — only ever set for audio capture (verifiable).
     case denied
-    /// Prompt was triggered but macOS exposes no way to confirm the outcome
-    /// (Local Network, Remote Control). The UI pairs this with a "…enable it in
-    /// System Settings" deep link as the fallback path.
+    /// Prompt was triggered and nothing has answered it yet (Local Network's
+    /// still-open dialog, Remote Control's un-flipped toggle). The UI pairs this
+    /// with a "…enable it in System Settings" deep link as the fallback path.
     case requested
     /// The capability isn't available on this OS at all (the process-tap API is
     /// macOS 14.2+), so no permission grant could help. Distinct from `.denied`,
@@ -82,6 +84,12 @@ public enum SetupPermission: CaseIterable, Sendable {
     /// exactly the state where macOS has already stopped handling them itself —
     /// see `docs/plans/PLAN-VOLUME-KEY-INTERCEPTION.md`.
     case remoteControl
+    /// "Bluetooth" — gates the IOBluetooth paired list (so a powered-off
+    /// speaker keeps its row) and programmatic reconnect. Deliberately absent
+    /// from ``RequiredPermission``: without it the app still routes to
+    /// AirPlay and to already-connected Bluetooth endpoints, so it must never
+    /// block setup or force-reopen it.
+    case bluetooth
 }
 
 /// A permission the app REQUIRES to operate — as opposed to Remote Control
@@ -99,41 +107,80 @@ public enum RequiredPermission: CaseIterable, Sendable {
 
 /// A System Settings privacy pane the setup flow deep-links to when a permission
 /// is denied or unverifiable. The `x-apple.systempreferences:` scheme is the
-/// documented way to open a specific pane; the anchors below are the ones macOS
-/// 13/14 use. They are best-effort — Apple can rename an anchor between releases
-/// — so the opener (``AudiouterOnboardingUI``) falls back to
-/// ``privacyRoot`` if a specific pane URL won't open.
-public enum SystemSettingsPane: Sendable {
+/// documented way to open a specific pane; the `Privacy_*` anchors below are
+/// stable, but the PANE the anchors hang off changed name in macOS 26 (see
+/// ``privacySettingsBundleID(osMajorVersion:)``). They are best-effort — Apple
+/// can rename an anchor between releases — so the opener
+/// (``AudiouterOnboardingUI``) falls back to ``privacyRoot`` if a specific pane
+/// URL won't open.
+public enum SystemSettingsPane: Equatable, Sendable {
     case screenAndSystemAudioRecording
     case localNetwork
     case accessibility
+    /// Privacy & Security ▸ Bluetooth — the list of apps allowed to use
+    /// Bluetooth, i.e. where THIS app's grant is toggled. Distinct from
+    /// ``bluetooth`` below, which is the radio's own settings pane and can't
+    /// fix a denied grant.
+    case bluetoothPrivacy
     /// Not a Privacy anchor — the Bluetooth pane itself. The BT-CONNECT
     /// fallback (PLAN-UNIVERSAL-SYNC Decision 3): when a programmatic
     /// reconnect doesn't resolve, one tap lands the user where pairing and
     /// manual connect live.
     case bluetooth
 
-    /// The `x-apple.systempreferences:` URL that opens this pane.
-    public var url: URL {
+    /// The `x-apple.systempreferences:` URL that opens this pane on THIS Mac.
+    public var url: URL { url(osMajorVersion: Self.liveOSMajorVersion) }
+
+    /// The same URL for an explicit macOS major version — the seam that makes
+    /// the macOS 26 rename testable on either side of the boundary (a unit test
+    /// can't change the runner's OS).
+    public func url(osMajorVersion: Int) -> URL {
         switch self {
         case .screenAndSystemAudioRecording:
-            return Self.make("Privacy_ScreenCapture")
+            return Self.make("Privacy_ScreenCapture", osMajorVersion: osMajorVersion)
         case .localNetwork:
-            return Self.make("Privacy_LocalNetwork")
+            return Self.make("Privacy_LocalNetwork", osMajorVersion: osMajorVersion)
         case .accessibility:
-            return Self.make("Privacy_Accessibility")
+            return Self.make("Privacy_Accessibility", osMajorVersion: osMajorVersion)
+        case .bluetoothPrivacy:
+            return Self.make("Privacy_Bluetooth", osMajorVersion: osMajorVersion)
         case .bluetooth:
+            // The Bluetooth RADIO pane, not a Privacy anchor — its own bundle
+            // id, unaffected by the Privacy & Security rename.
             return URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings")!
         }
     }
 
     /// Privacy & Security root — the fallback when a specific anchor won't open.
-    public static let privacyRoot = make(nil)
+    public static var privacyRoot: URL { privacyRoot(osMajorVersion: liveOSMajorVersion) }
 
-    private static func make(_ anchor: String?) -> URL {
+    /// The root for an explicit macOS major version (same seam as ``url(osMajorVersion:)``).
+    public static func privacyRoot(osMajorVersion: Int) -> URL {
+        make(nil, osMajorVersion: osMajorVersion)
+    }
+
+    /// Which Settings pane the `Privacy_*` anchors hang off, by macOS major
+    /// version. macOS 26 moved Privacy & Security into an extension bundle —
+    /// `com.apple.settings.PrivacySecurity.extension` — and the pre-26 id
+    /// misroutes there (it opens Settings, but not the pane asked for), while
+    /// the 26 id is unknown to earlier releases. The anchors themselves did not
+    /// change, so only the id is gated.
+    static func privacySettingsBundleID(osMajorVersion: Int) -> String {
+        osMajorVersion >= 26
+            ? "com.apple.settings.PrivacySecurity.extension"
+            : "com.apple.preference.security"
+    }
+
+    /// This Mac's macOS major version — read once per call, no caching, so a
+    /// value that only exists at runtime never gets frozen into a constant.
+    private static var liveOSMajorVersion: Int {
+        ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+    }
+
+    private static func make(_ anchor: String?, osMajorVersion: Int) -> URL {
         // These string literals are compile-time-constant and known-valid, so the
         // force-unwrap can never fire; it keeps `url` non-optional for callers.
-        let base = "x-apple.systempreferences:com.apple.preference.security"
+        let base = "x-apple.systempreferences:\(privacySettingsBundleID(osMajorVersion: osMajorVersion))"
         return URL(string: anchor.map { "\(base)?\($0)" } ?? base)!
     }
 }
@@ -205,17 +252,95 @@ public extension AudioCapturePermissionProbing {
     func currentStatusSilently() -> PermissionStatus? { nil }
 }
 
+/// What one Local Network prime proved. macOS has no status API for this
+/// permission (TN3179), but both answers ARE provable behaviourally — see
+/// ``LocalNetworkPrimer`` for the two mechanisms (self-discovery for the grant,
+/// the mDNS policy error for the refusal).
+public enum LocalNetworkOutcome: Equatable, Sendable {
+    /// The browse demonstrably reached the network. `foundSpeakers` is how many
+    /// speakers it saw, which may legitimately be ZERO: the permission is what
+    /// this case asserts, not the presence of a speaker.
+    case granted(foundSpeakers: Int)
+    /// The user refused (an mDNS `kDNSServiceErr_PolicyDenied`).
+    case denied
+    /// Nothing answered within the window — the system dialog is presumably
+    /// still up. NOT a denial.
+    case undecided
+}
+
 /// Triggers AND functionally checks the Local Network permission. macOS exposes
-/// no status API (TN3179), so the only honest signal is behavioural: run a brief
-/// Bonjour browse and report whether it actually reached the network — `true` if
-/// it saw a service or the browser went `ready` (a functional proxy for "granted
-/// and working"), `false` otherwise. The same browse ALSO surfaces the system
-/// prompt when the permission is still undetermined, so probing is both the ask
-/// and the check. The production impl is ``LocalNetworkPrimer``; tests inject a
-/// fake that returns a canned result.
+/// no status API (TN3179), so every signal here is behavioural — but all three
+/// answers are real (see ``LocalNetworkOutcome``). The same browse ALSO surfaces
+/// the system prompt when the permission is still undetermined, so priming is
+/// both the ask and the check. The production impl is ``LocalNetworkPrimer``;
+/// tests inject a fake that returns a canned result.
 public protocol LocalNetworkPriming: Sendable {
     /// Browse briefly; return `true` if the local network was reachable.
     func probe() async -> Bool
+
+    /// Browse briefly; return HOW MANY speakers the browse saw (0 = none, which
+    /// also covers "not reachable" — the two are indistinguishable, see
+    /// ``PermissionStatus``). The count is what lets setup say "Found 3
+    /// speakers" instead of a checkmark nobody can verify, and it is the same
+    /// browse: `probe()` is exactly `count > 0`.
+    ///
+    /// Defaulted (below) so a fake that only answers the Bool keeps compiling.
+    func probeFoundSpeakers() async -> Int
+
+    /// The same browse with an explicit window, because the FIRST browse is
+    /// also the system prompt: a human has to notice, read and click a dialog
+    /// that hasn't even rendered yet, which takes far longer than a re-scan of
+    /// a permission that is already decided. The caller picks the window (see
+    /// ``SetupModel``); defaulted (below) so a fake that ignores timing keeps
+    /// compiling.
+    func probeFoundSpeakers(browseSeconds: TimeInterval) async -> Int
+
+    /// The full answer: granted (with the speaker count), denied, or nothing
+    /// yet. This is what ``SetupModel`` actually calls — the count-only calls
+    /// above remain for the fakes and for callers that want the number alone.
+    /// Defaulted (below) so every existing fake keeps compiling.
+    ///
+    /// `onReachable` fires (possibly on any thread) the moment the prime PROVES
+    /// the network is reachable, which is earlier than it can answer: the
+    /// speaker count is still filling in. That gap is what lets the card say
+    /// "Checking your network…" instead of leaving a bare spinner up.
+    func prime(browseSeconds: TimeInterval,
+               onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome
+}
+
+public extension LocalNetworkPriming {
+    /// A seam that only implements the Bool answer reports one speaker for
+    /// reachable, none otherwise — preserving `count > 0 ⇔ probe()`.
+    func probeFoundSpeakers() async -> Int { await probe() ? 1 : 0 }
+
+    /// A seam with no window of its own just answers — fakes resolve instantly.
+    func probeFoundSpeakers(browseSeconds: TimeInterval) async -> Int {
+        await probeFoundSpeakers()
+    }
+
+    /// A seam that only counts speakers can still answer two of the three
+    /// outcomes honestly: a speaker sighting proves the grant, and no sighting
+    /// proves nothing at all (`.undecided`). Only a primer that watches for the
+    /// policy error can ever report `.denied`.
+    func prime(browseSeconds: TimeInterval,
+               onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome {
+        let found = await probeFoundSpeakers(browseSeconds: browseSeconds)
+        guard found > 0 else { return .undecided }
+        onReachable()
+        return .granted(foundSpeakers: found)
+    }
+}
+
+/// How far along an in-flight prompt/probe is, for the one thing the UI can
+/// honestly say while it waits. Two phases, because they are different waits:
+/// ``waitingForAnswer`` is a system dialog sitting unanswered (up to a minute
+/// for Local Network), while ``verifying`` is our own brief wrap-up after the
+/// answer landed. A prime that gets refused skips ``verifying`` entirely —
+/// there is nothing left to check.
+public enum SetupProbePhase: Equatable, Sendable {
+    case idle
+    case waitingForAnswer
+    case verifying
 }
 
 /// Triggers and reads the macOS **Accessibility** permission, needed for a
@@ -237,6 +362,31 @@ public protocol RemoteControlPriming: Sendable {
     func isTrusted() -> Bool
 }
 
+/// Reads the macOS **Bluetooth** permission. `CBManager.authorization` is the
+/// one permission in this flow with a fully honest status API — synchronous,
+/// prompt-free, and three-valued for real (undetermined / granted / denied), so
+/// unlike Local Network and Remote Control this never has to settle for
+/// `.requested`. The production impl is ``BluetoothPermissionReader``; tests
+/// inject a fake.
+public protocol BluetoothPermissionReading: Sendable {
+    /// The live authorization state. Never prompts, never touches IOBluetooth.
+    func currentStatus() -> PermissionStatus
+}
+
+/// Fires the macOS **Bluetooth** permission prompt. Separate from
+/// ``BluetoothPermissionReading`` because only this half has side effects: the
+/// prompt exists solely as a consequence of instantiating a `CBCentralManager`,
+/// which must then be retained until the user answers.
+///
+/// `onDecided` fires ONCE, on granted OR denied — both end the wait, and the
+/// caller re-reads the status to learn which. The production impl is
+/// ``BluetoothPermissionPrimer``; tests inject a fake.
+public protocol BluetoothPermissionPriming: Sendable {
+    /// Open the prompt (if the status is still undetermined) and report back
+    /// once it's answered. May fire `onDecided` on any thread.
+    func prime(onDecided: @escaping @Sendable () -> Void)
+}
+
 // MARK: - The flow model
 
 /// Drives the first-run setup/onboarding flow: holds the observable status of
@@ -255,13 +405,20 @@ public final class SetupModel {
     public private(set) var audioStatus: PermissionStatus = .unknown
 
     /// Local-network status. When the OS gates local network (`localNetworkGated`,
-    /// macOS 15+), starts `.unknown` and becomes `.requested` once the prompt is
-    /// triggered (never `.granted` on its own — see ``PermissionStatus``). On
+    /// macOS 15+), starts `.unknown` and becomes whichever of `.granted` /
+    /// `.denied` / `.requested` the prime proved (see ``LocalNetworkOutcome``). On
     /// macOS < 15 there is NO local-network privacy gate — that permission arrived
     /// in Sequoia — so access is unconditionally allowed: it starts, and stays,
     /// `.granted`, and the row never routes the user to a Settings pane that
     /// doesn't exist there. See `localNetworkGated`.
     public private(set) var localNetworkStatus: PermissionStatus = .unknown
+
+    /// How many speakers the most recent Local Network browse saw. `0` until a
+    /// prime has run, and legitimately `0` afterwards too: self-discovery proves
+    /// the permission on its own, so a `.granted` Local Network with zero
+    /// speakers just means none is switched on. The count is the detail the card
+    /// shows ("Found 3 speakers"), not the grant itself.
+    public private(set) var localNetworkFoundSpeakers = 0
 
     /// Remote-control (Accessibility) status. Starts `.unknown`, becomes
     /// `.requested` once primed (never `.granted` on its own — see
@@ -269,14 +426,39 @@ public final class SetupModel {
     /// ``RemoteControlPriming``.
     public private(set) var remoteControlStatus: PermissionStatus = .unknown
 
+    /// Bluetooth status, backed by the honest `CBManager.authorization` read —
+    /// so this is a real `.unknown`/`.granted`/`.denied` and never a
+    /// `.requested` placeholder. Refreshed on every ``refreshStatuses()``: the
+    /// read is free and prompt-free, so a grant OR a revocation made in System
+    /// Settings lands (same posture as Remote Control).
+    public private(set) var bluetoothStatus: PermissionStatus = .unknown
+
     /// PTP helper daemon status (T6). Starts `.notRegistered`; becomes
     /// `.requiresApproval` once ``registerPTPHelper()`` runs, then `.enabled`
     /// once the user approves it in Login Items. See ``PTPHelperStatus``.
     public private(set) var ptpHelperStatus: PTPHelperStatus = .notRegistered
 
+    /// How far the explicit Local Network prime (the Allow tap) has got: it can
+    /// sit a full minute on an unanswered dialog, so the card needs something
+    /// truthful to say for the whole wait. Only ``primeLocalNetwork()`` moves
+    /// this — a background refresh browses without ever claiming the user is
+    /// being asked anything.
+    public private(set) var localNetworkPhase: SetupProbePhase = .idle
+
     /// True while an audio probe is running, so the UI can show progress and
     /// ignore repeat taps. The probe blocks ~250 ms capturing the test tone.
     public private(set) var isProbingAudio = false
+
+    /// True while the Bluetooth prompt is up and unanswered, so the card can
+    /// show the same in-flight spinner the audio probe gets. Cleared by a
+    /// decision that actually decided something — or, if none ever arrives, by
+    /// ``bluetoothPromptTimeout``, which is what keeps a prompt that never
+    /// reports back from wedging the card shut forever.
+    public private(set) var isPrimingBluetooth = false
+
+    /// Which prime this is, so a timeout from an earlier one can't clear a
+    /// later one's flight.
+    private var bluetoothPrimeGeneration = 0
 
     /// Fired (on the main actor) after any observable change, so the UI repaints.
     public var onChange: (() -> Void)?
@@ -284,6 +466,8 @@ public final class SetupModel {
     private let audioProbe: AudioCapturePermissionProbing
     private let localNetwork: LocalNetworkPriming
     private let remoteControl: RemoteControlPriming
+    private let bluetoothReader: BluetoothPermissionReading
+    private let bluetoothPrimer: BluetoothPermissionPriming
     private let ptpHelper: PTPHelperManaging
     private let settings: AppSettings
 
@@ -294,6 +478,15 @@ public final class SetupModel {
     /// the app passes ``osGatesLocalNetwork``.
     private let localNetworkGated: Bool
 
+    /// How long a Bluetooth prompt may sit undecided before the card re-arms.
+    /// Injected so a test can drive the timeout without waiting on it.
+    private let bluetoothPromptTimeout: TimeInterval
+
+    /// Whether this OS gates local-network access — read by ``SetupFlowModel``,
+    /// which must count the ungated case as satisfied without inventing a
+    /// status for it.
+    public var isLocalNetworkGated: Bool { localNetworkGated }
+
     /// The real per-OS value for `localNetworkGated`: macOS 15+ gates local
     /// network, earlier versions don't. The app injects this. The init default
     /// stays `true` so existing tests keep their gated expectations regardless of
@@ -302,15 +495,26 @@ public final class SetupModel {
         if #available(macOS 15, *) { return true } else { return false }
     }
 
+    /// The Bluetooth pair defaults INERT (an undetermined read, a prime that
+    /// decides immediately without a `CBCentralManager`) for the same reason
+    /// ``BTDeviceEnumerator``'s authorization pair does: a test that forgets to
+    /// inject it must degrade to "never asks, never reads the runner's real
+    /// grant", not spring a system prompt mid-`swift test`.
     public init(audioProbe: AudioCapturePermissionProbing,
                 localNetwork: LocalNetworkPriming,
                 remoteControl: RemoteControlPriming,
                 ptpHelper: PTPHelperManaging,
+                bluetoothReader: BluetoothPermissionReading = SimulatedBluetoothPermission(status: .unknown),
+                bluetoothPrimer: BluetoothPermissionPriming = SimulatedBluetoothPermission(status: .unknown),
                 settings: AppSettings = AppSettings(),
-                localNetworkGated: Bool = true) {
+                localNetworkGated: Bool = true,
+                bluetoothPromptTimeout: TimeInterval = 10) {
+        self.bluetoothPromptTimeout = bluetoothPromptTimeout
         self.audioProbe = audioProbe
         self.localNetwork = localNetwork
         self.remoteControl = remoteControl
+        self.bluetoothReader = bluetoothReader
+        self.bluetoothPrimer = bluetoothPrimer
         self.ptpHelper = ptpHelper
         self.settings = settings
         self.localNetworkGated = localNetworkGated
@@ -322,7 +526,7 @@ public final class SetupModel {
         }
     }
 
-    /// Convenience over the four-seam init that takes a ``PermissionProviders``
+    /// Convenience over the seam-by-seam init that takes a ``PermissionProviders``
     /// bundle — how the app builds it once from ``PermissionMode`` and threads
     /// the same set (real or simulated) into every construction site.
     public convenience init(providers: PermissionProviders,
@@ -332,6 +536,8 @@ public final class SetupModel {
                   localNetwork: providers.localNetwork,
                   remoteControl: providers.remoteControl,
                   ptpHelper: providers.ptpHelper,
+                  bluetoothReader: providers.bluetoothReader,
+                  bluetoothPrimer: providers.bluetoothPrimer,
                   settings: settings,
                   localNetworkGated: localNetworkGated)
     }
@@ -352,11 +558,12 @@ public final class SetupModel {
         onChange?()
     }
 
-    /// Ask for + functionally check Local Network. The browse fires the system
-    /// prompt (if undetermined) and reports whether the network was reachable:
-    /// reachable ⇒ `.granted` (it demonstrably works — the case ahh hit, where
-    /// it was already allowed and "Requested" was a lie); not reachable ⇒
-    /// `.requested` (asked, but we can't prove it — no speakers, or denied).
+    /// Ask for + functionally check Local Network. The prime fires the system
+    /// prompt (if undetermined) and reports one of three REAL answers (see
+    /// ``LocalNetworkOutcome``): the network was demonstrably reachable ⇒
+    /// `.granted`, even with no speaker on it; the user refused ⇒ `.denied`;
+    /// nothing answered inside the window ⇒ `.requested` (the dialog is
+    /// presumably still up).
     public func primeLocalNetwork() async {
         // No gate on this OS (macOS < 15): access is already allowed, so there's
         // nothing to prompt for and no Settings pane to open — report granted and
@@ -366,9 +573,58 @@ public final class SetupModel {
             onChange?()
             return
         }
-        let reachable = await localNetwork.probe()
-        localNetworkStatus = reachable ? .granted : .requested
+        localNetworkPhase = .waitingForAnswer
         onChange?()
+        localNetworkStatus = await probeLocalNetwork(onReachable: { [weak self] in
+            Task { @MainActor in self?.markLocalNetworkVerifying() }
+        })
+        localNetworkPhase = .idle
+        onChange?()
+    }
+
+    /// The dialog was answered and the browse is through — only the speaker
+    /// count is still filling in. Fired from the primer's own callback, so the
+    /// card's "Checking your network…" is a real observation, not a timer.
+    private func markLocalNetworkVerifying() {
+        guard localNetworkPhase == .waitingForAnswer else { return }
+        localNetworkPhase = .verifying
+        onChange?()
+    }
+
+    /// The CEILING on the first Local Network prime — how long it may sit
+    /// undecided before giving up. A grant or a refusal resolves it in well
+    /// under a second, so this window is only ever spent waiting on a person
+    /// who hasn't answered the dialog yet; it matches the audio probe's
+    /// generous ceiling for the same reason.
+    static let firstAskBrowseSeconds: TimeInterval = 60
+
+    /// How long every later prime waits — a re-scan of an already-decided
+    /// permission, where a spinner is pure cost.
+    static let rescanBrowseSeconds: TimeInterval = 3
+
+    /// Run the prime, record how many speakers it saw, and map the outcome to a
+    /// status. One place so `primeLocalNetwork()`, ``refreshStatuses()`` and
+    /// ``auditRequiredPermissions()`` can never disagree.
+    private func probeLocalNetwork(
+        onReachable: @escaping @Sendable () -> Void = {}
+    ) async -> PermissionStatus {
+        // `.unknown` means nothing has primed yet, so THIS prime is the one that
+        // raises the system permission dialog, and it must outlast a person
+        // reading it. Every later prime re-checks an already-decided permission,
+        // with no dialog to wait for, so it stays snappy.
+        let window = localNetworkStatus == .unknown ? Self.firstAskBrowseSeconds
+                                                    : Self.rescanBrowseSeconds
+        switch await localNetwork.prime(browseSeconds: window, onReachable: onReachable) {
+        case .granted(let found):
+            localNetworkFoundSpeakers = found
+            return .granted
+        case .denied:
+            localNetworkFoundSpeakers = 0
+            return .denied
+        case .undecided:
+            localNetworkFoundSpeakers = 0
+            return .requested
+        }
     }
 
     /// Ask for Accessibility. Opens the prompt, then reads the REAL live state
@@ -379,6 +635,67 @@ public final class SetupModel {
     public func primeRemoteControl() {
         remoteControl.prime()
         remoteControlStatus = remoteControl.isTrusted() ? .granted : .requested
+        onChange?()
+    }
+
+    /// Ask for Bluetooth. The prompt's answer arrives through the primer's
+    /// decision callback — granted and denied both end the wait — and the
+    /// honest status comes from re-reading `CBManager.authorization`, never
+    /// from assuming the answer. No status is written here: an undecided prompt
+    /// must leave the step exactly as it was.
+    ///
+    /// ``isPrimingBluetooth`` stays true for the whole wait, and a callback that
+    /// leaves the authorization still undetermined does NOT end it — that is the
+    /// wedge case (the prompt reported back without deciding anything), and the
+    /// only thing that ends it is ``bluetoothPromptTimeout``, after which a
+    /// later click may ask again: a fresh `CBCentralManager` re-raises the
+    /// prompt while the authorization is undetermined.
+    public func primeBluetooth() {
+        guard !isPrimingBluetooth else { return }
+        isPrimingBluetooth = true
+        bluetoothPrimeGeneration += 1
+        let generation = bluetoothPrimeGeneration
+        onChange?()
+        bluetoothPrimer.prime {
+            Task { @MainActor [weak self] in self?.bluetoothPromptDecided(generation) }
+        }
+        Task { @MainActor [weak self] in
+            guard let timeout = self?.bluetoothPromptTimeout else { return }
+            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            self?.bluetoothPromptUndecidedTimeout(generation)
+        }
+    }
+
+    private func bluetoothPromptDecided(_ generation: Int) {
+        guard generation == bluetoothPrimeGeneration else { return }
+        // A callback that left the authorization undetermined decided NOTHING —
+        // the prompt is still in flight as far as the card is concerned, and only
+        // the timeout ends that wait.
+        let decided = bluetoothReader.currentStatus()
+        guard decided != .unknown else { return }
+        // Published in one go rather than through `refreshBluetoothStatus()`: the
+        // wait ending is itself observable, so this must repaint even when the
+        // status it read is the one already held.
+        bluetoothStatus = decided
+        isPrimingBluetooth = false
+        onChange?()
+    }
+
+    private func bluetoothPromptUndecidedTimeout(_ generation: Int) {
+        guard generation == bluetoothPrimeGeneration, isPrimingBluetooth else { return }
+        isPrimingBluetooth = false
+        onChange?()
+    }
+
+    /// Re-read the Bluetooth authorization — a silent, prompt-free read, so
+    /// this is safe to call on any focus/decision edge and a `.granted` →
+    /// revoked downgrade is allowed (same posture as
+    /// ``refreshRemoteControlStatus()``). Fires `onChange` only on an actual
+    /// transition.
+    public func refreshBluetoothStatus() {
+        let next = bluetoothReader.currentStatus()
+        guard next != bluetoothStatus else { return }
+        bluetoothStatus = next
         onChange?()
     }
 
@@ -422,10 +739,13 @@ public final class SetupModel {
     ///   still catches a grant made in Settings; a `nil` result (a test fake that
     ///   hasn't implemented the silent seam) leaves `audioStatus` untouched, same
     ///   posture as ``auditRequiredPermissions()``.
-    /// - **Local Network** re-probes ONLY if already asked (browsing fires the
-    ///   prompt), upgrading `.requested` → `.granted` once discovery works.
+    /// - **Local Network** re-primes ONLY if already asked (browsing fires the
+    ///   prompt), which upgrades `.requested` → `.granted` once the browse
+    ///   reaches the network, and can now also land on a real `.denied`.
     /// - **PTP helper** always re-reads `.status` (silent, no re-`register()` —
     ///   see ``refreshPTPHelperStatus()``), the same posture as Remote Control.
+    /// - **Bluetooth** always re-reads `CBManager.authorization` (silent and
+    ///   prompt-free), same posture again — see ``refreshBluetoothStatus()``.
     public func refreshStatuses() async {
         // Remote Control — silent, always safe.
         if remoteControl.isTrusted() {
@@ -448,11 +768,14 @@ public final class SetupModel {
         // and only where the OS gates it. On macOS < 15 it's unconditionally
         // granted, so there's nothing to re-read and no prompt to risk.
         if localNetworkGated, localNetworkStatus != .unknown {
-            localNetworkStatus = await localNetwork.probe() ? .granted : .requested
+            localNetworkStatus = await probeLocalNetwork()
         }
 
         // PTP helper — silent status read only, never re-registers here.
         ptpHelperStatus = ptpHelper.status
+
+        // Bluetooth — silent, prompt-free, so always re-read.
+        refreshBluetoothStatus()
 
         onChange?()
     }
@@ -528,9 +851,9 @@ public final class SetupModel {
     ///
     /// - Audio capture is unmet only on a confirmed `.denied` — `.unsupported`
     ///   (pre-14.2 OS) isn't fixable, and `.granted`/`.unknown` are fine.
-    /// - Local Network is unmet only on `.requested` (asked but unproven —
-    ///   the honest "not currently working" state); `.unknown` means never
-    ///   engaged, not lost, so it never counts.
+    /// - Local Network is unmet on `.requested` (asked, nothing answered) and
+    ///   on the now-real `.denied`; `.unknown` means never engaged, not lost,
+    ///   so it never counts.
     /// - The PTP helper is unmet when it's registered but not usable
     ///   (`.requiresApproval`/`.notFound`) — a REGISTERED-but-not-approved
     ///   helper is the actionable "turned off in Login Items" case.
@@ -541,7 +864,7 @@ public final class SetupModel {
         if audioStatus == .denied {
             unmet.append(.audioCapture)
         }
-        if localNetworkStatus == .requested {
+        if localNetworkStatus == .requested || localNetworkStatus == .denied {
             unmet.append(.localNetwork)
         }
         if ptpHelperStatus != .enabled, ptpHelperStatus != .notRegistered {
@@ -615,8 +938,11 @@ public final class SetupModel {
         }
 
         if localNetworkGated, localNetworkStatus != .unknown {
-            let next: PermissionStatus = await localNetwork.probe() ? .granted : .requested
-            if next != localNetworkStatus {
+            let previousFound = localNetworkFoundSpeakers
+            let next = await probeLocalNetwork()
+            // The COUNT is observable too (the card reads "Found 3 speakers"),
+            // so a same-status re-count still has to repaint.
+            if next != localNetworkStatus || localNetworkFoundSpeakers != previousFound {
                 localNetworkStatus = next
                 changed = true
             }
@@ -632,9 +958,15 @@ public final class SetupModel {
         return unmetRequiredPermissions()
     }
 
-    /// Mark the flow finished so it doesn't present again on launch. Does NOT
-    /// require every permission to be granted — setup is guidance, not a gate;
-    /// the app still runs (and re-prompts lazily) if the user skips a grant.
+    /// Mark the flow finished so it doesn't present again on launch. A plain
+    /// persistence write: it checks no status of its own.
+    ///
+    /// Completion IS gated, just not here. Setup is a GATE, not guidance (owner
+    /// decision, reversing what this comment used to promise): the UI offers no
+    /// Done affordance at all until ``SetupFlowModel/isDoneAvailable`` is true,
+    /// so reaching this call means every required permission verified. The ✕
+    /// close remains the one ungated exit and deliberately does NOT come through
+    /// here — the flow returns next launch.
     public func complete() {
         settings.hasCompletedSetup = true
     }

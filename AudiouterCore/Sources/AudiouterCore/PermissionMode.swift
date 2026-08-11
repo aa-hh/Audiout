@@ -2,9 +2,9 @@
 
 import Foundation
 
-/// Launch-time override for how the app reads the four OS permission seams
-/// (system-audio capture, Local Network, Accessibility, PTP helper), driven by
-/// the `AIRPLAY_PERMISSIONS` environment variable — sibling knob to
+/// Launch-time override for how the app reads the OS permission seams
+/// (system-audio capture, Local Network, Accessibility, Bluetooth, PTP helper),
+/// driven by the `AIRPLAY_PERMISSIONS` environment variable — sibling knob to
 /// ``BackendKind`` (`AIRPLAY_BACKEND`) and ``SetupPresentation`` (`AIRPLAY_SETUP`).
 ///
 /// ## Why this exists
@@ -38,11 +38,12 @@ public enum PermissionMode: Sendable {
     /// The default, so a plain launch behaves exactly as before.
     case system
     /// Inject simulated seams that all report satisfied (audio `.granted`,
-    /// Local Network reachable, Accessibility trusted, PTP helper `.enabled`).
+    /// Local Network reachable, Accessibility trusted, Bluetooth `.granted`,
+    /// PTP helper `.enabled`).
     case granted
     /// Inject simulated seams that all report the actionable "not granted"
     /// state (audio `.denied`, Local Network unreachable, Accessibility
-    /// untrusted, PTP helper `.requiresApproval`).
+    /// untrusted, Bluetooth `.denied`, PTP helper `.requiresApproval`).
     case denied
 
     public static let environmentVariableName = "AIRPLAY_PERMISSIONS"
@@ -65,7 +66,7 @@ public enum PermissionMode: Sendable {
         }
     }
 
-    /// Build the four permission seams for this mode. `.system` hands back the
+    /// Build the permission seams for this mode. `.system` hands back the
     /// production factories (the exact objects `AppDelegate` used before this
     /// knob existed); `.granted`/`.denied` hand back the ``Simulated`` seams.
     public func makeProviders() -> PermissionProviders {
@@ -75,42 +76,60 @@ public enum PermissionMode: Sendable {
                 audioProbe: AudioCapturePermissionProbeFactory.makeDefault(),
                 localNetwork: LocalNetworkPrimerFactory.makeDefault(),
                 remoteControl: RemoteControlPrimerFactory.makeDefault(),
-                ptpHelper: SMAppServicePTPHelper())
+                ptpHelper: SMAppServicePTPHelper(),
+                bluetoothReader: BluetoothPermissionReader(),
+                bluetoothPrimer: BluetoothPermissionPrimer())
         case .granted:
+            let bluetooth = SimulatedBluetoothPermission(status: .granted)
             return PermissionProviders(
                 audioProbe: SimulatedAudioCaptureProbe(status: .granted),
                 localNetwork: SimulatedLocalNetworkPrimer(reachable: true),
                 remoteControl: SimulatedRemoteControlPrimer(trusted: true),
-                ptpHelper: SimulatedPTPHelper(status: .enabled))
+                ptpHelper: SimulatedPTPHelper(status: .enabled),
+                bluetoothReader: bluetooth,
+                bluetoothPrimer: bluetooth)
         case .denied:
+            let bluetooth = SimulatedBluetoothPermission(status: .denied)
             return PermissionProviders(
                 audioProbe: SimulatedAudioCaptureProbe(status: .denied),
                 localNetwork: SimulatedLocalNetworkPrimer(reachable: false),
                 remoteControl: SimulatedRemoteControlPrimer(trusted: false),
-                ptpHelper: SimulatedPTPHelper(status: .requiresApproval))
+                ptpHelper: SimulatedPTPHelper(status: .requiresApproval),
+                bluetoothReader: bluetooth,
+                bluetoothPrimer: bluetooth)
         }
     }
 }
 
-/// The four injected permission seams the app needs, bundled so `AppDelegate`
+/// The injected permission seams the app needs, bundled so `AppDelegate`
 /// resolves them once (from ``PermissionMode``) and threads the same set into
 /// every consumer: both ``SetupModel`` construction sites, the launch-time PTP
 /// registration, and `MediaKeyController`'s Accessibility check. One bundle
 /// keeps those consumers from each re-deriving the mode (and drifting).
+///
+/// Bluetooth is TWO properties because reading and asking are genuinely
+/// different operations there — the read is a pure `CBManager.authorization`
+/// call, the ask has to keep a `CBCentralManager` alive until the user answers.
 public struct PermissionProviders {
     public let audioProbe: AudioCapturePermissionProbing
     public let localNetwork: LocalNetworkPriming
     public let remoteControl: RemoteControlPriming
     public let ptpHelper: PTPHelperManaging
+    public let bluetoothReader: BluetoothPermissionReading
+    public let bluetoothPrimer: BluetoothPermissionPriming
 
     public init(audioProbe: AudioCapturePermissionProbing,
                 localNetwork: LocalNetworkPriming,
                 remoteControl: RemoteControlPriming,
-                ptpHelper: PTPHelperManaging) {
+                ptpHelper: PTPHelperManaging,
+                bluetoothReader: BluetoothPermissionReading,
+                bluetoothPrimer: BluetoothPermissionPriming) {
         self.audioProbe = audioProbe
         self.localNetwork = localNetwork
         self.remoteControl = remoteControl
         self.ptpHelper = ptpHelper
+        self.bluetoothReader = bluetoothReader
+        self.bluetoothPrimer = bluetoothPrimer
     }
 }
 
@@ -129,11 +148,18 @@ public struct SimulatedAudioCaptureProbe: AudioCapturePermissionProbing {
 }
 
 /// A ``LocalNetworkPriming`` that reports a fixed reachability without a Bonjour
-/// browse (so no real network access, no Local Network prompt).
+/// browse (so no real network access, no Local Network prompt). `foundSpeakers`
+/// is what setup's Local Network card counts — a fixed, plausible two, so the
+/// simulated flow reads "Found 2 speakers" rather than a suspiciously round one.
 public struct SimulatedLocalNetworkPrimer: LocalNetworkPriming {
     public let reachable: Bool
-    public init(reachable: Bool) { self.reachable = reachable }
+    public let foundSpeakers: Int
+    public init(reachable: Bool, foundSpeakers: Int = 2) {
+        self.reachable = reachable
+        self.foundSpeakers = foundSpeakers
+    }
     public func probe() async -> Bool { reachable }
+    public func probeFoundSpeakers() async -> Int { reachable ? foundSpeakers : 0 }
 }
 
 /// A ``RemoteControlPriming`` that reports a fixed trust state and never opens
@@ -144,6 +170,17 @@ public struct SimulatedRemoteControlPrimer: RemoteControlPriming {
     public init(trusted: Bool) { self.trusted = trusted }
     public func prime() {}
     public func isTrusted() -> Bool { trusted }
+}
+
+/// A ``BluetoothPermissionReading`` + ``BluetoothPermissionPriming`` that
+/// reports a fixed status and never instantiates a `CBCentralManager` — so an
+/// automated run can't spring the real Bluetooth prompt. `prime` reports the
+/// decision immediately, since the canned status is already the answer.
+public struct SimulatedBluetoothPermission: BluetoothPermissionReading, BluetoothPermissionPriming {
+    public let status: PermissionStatus
+    public init(status: PermissionStatus) { self.status = status }
+    public func currentStatus() -> PermissionStatus { status }
+    public func prime(onDecided: @escaping @Sendable () -> Void) { onDecided() }
 }
 
 /// A ``PTPHelperManaging`` that reports a fixed status and never registers a

@@ -1,17 +1,30 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// onboarding-snapshot — offscreen PNG renderer for the first-run onboarding
-// window (mirrors `settings-snapshot`). The live window isn't visible to an
-// agent shell, and this app is a menu-bar accessory outside computer-use's
-// resolver, so this assembles the REAL `OnboardingViewController` against fake
-// permission seams (never touching Core Audio or the local network), forces each
-// permission status, and renders a PNG to `dev/notes/onboarding-snapshots/` in
-// both light and dark appearances.
+// onboarding-snapshot — offscreen PNG renderer for the Setup window (mirrors
+// `settings-snapshot`). The live window isn't visible to an agent shell, and
+// this app is a menu-bar accessory outside computer-use's resolver, so this
+// assembles the REAL `OnboardingViewController` against fake permission seams
+// (never touching Core Audio or the local network), drives the sequential flow
+// through its real Allow path, and renders a PNG to
+// `dev/notes/onboarding-snapshots/` in both light and dark appearances.
 //
-// It writes:
-//   onboarding-<light|dark>-initial.png   all three permissions unknown ("Allow…")
-//   onboarding-<light|dark>-resolved.png  audio granted + network/remote-control requested
-//   onboarding-<light|dark>-denied.png    audio denied (Open Settings fallback)
+// It writes, per appearance:
+//   onboarding-<light|dark>-step1-audio.png      card 1 active, nothing granted
+//   onboarding-<light|dark>-step2-network.png    audio granted, card 2 active
+//   onboarding-<light|dark>-step2-waiting.png    card 2's prime in flight (caption)
+//   onboarding-<light|dark>-step3-bluetooth.png  audio + network in, card 3 active
+//   onboarding-<light|dark>-denied.png           audio denied → Settings mode demo
+//   onboarding-<light|dark>-complete.png         every step in, Done visible
+//   onboarding-<light|dark>-permission-lost.png  the re-entry header message
+//
+// KNOWN LIMIT: prominent buttons render as plain pills here. AppKit fills a
+// `bezelColor` only in the active app's key window, and making this offscreen
+// window key (`.titled` + `NSApp.activate` + `makeKeyAndOrderFront`) was tried and
+// did NOT restore the fill — so button PROMINENCE is not verifiable from these
+// fixtures; check it on a live window.
+//
+// Every demo renders its SETTLED frame: `HeadlessRuntime.isActive` is true here
+// (AIRPLAY_HEADLESS=1 below), and the demo pane never animates off-window.
 //
 // Run: `swift run onboarding-snapshot [output-dir]`.
 
@@ -23,17 +36,36 @@ import AudiouterOnboardingUI
 struct SnapshotAudioProbe: AudioCapturePermissionProbing {
     let result: PermissionStatus
     func probe() async -> PermissionStatus { result }
+    func currentStatusSilently() -> PermissionStatus? { result }
 }
 
-/// Fake local-network primer — never touches the network.
+/// Fake local-network primer — never touches the network. `foundSpeakers`
+/// drives the completed card's "Found N speakers" title.
 struct SnapshotLocalNetwork: LocalNetworkPriming {
+    let foundSpeakers: Int
+    func probe() async -> Bool { foundSpeakers > 0 }
+    func probeFoundSpeakers() async -> Int { foundSpeakers }
+}
+
+/// A prime that never answers, so a fixture can render the in-flight caption —
+/// the state a real first ask sits in for as long as the system dialog is up.
+struct SnapshotWaitingLocalNetwork: LocalNetworkPriming {
     func probe() async -> Bool { false }
+    func prime(browseSeconds: TimeInterval,
+               onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome {
+        // Parks for the life of the tool: the fixture renders while it waits.
+        // A sleep rather than a never-resumed continuation, which is the same
+        // wait but makes the runtime log a continuation-leak warning.
+        try? await Task.sleep(nanoseconds: 3_600_000_000_000)
+        return .undecided
+    }
 }
 
 /// Fake remote-control primer — never touches Accessibility.
 struct SnapshotRemoteControl: RemoteControlPriming {
+    let trusted: Bool
     func prime() {}
-    func isTrusted() -> Bool { false }
+    func isTrusted() -> Bool { trusted }
 }
 
 /// Fake PTP helper manager — never touches `SMAppService`.
@@ -59,15 +91,38 @@ func makeSnapshotDefaults() -> UserDefaults {
     return defaults
 }
 
+/// One fixture's whole permission world.
+struct SnapshotWorld {
+    var audio: PermissionStatus = .granted
+    var foundSpeakers = 3
+    var remoteControlTrusted = false
+    var bluetooth: PermissionStatus = .unknown
+    var ptpHelper: PTPHelperStatus = .requiresApproval
+    /// Which cards' Allow to fire before rendering — how the flow is walked to
+    /// the step this fixture is about.
+    var allow: [SetupStep] = []
+    /// Render Local Network's Allow MID-FLIGHT (the prime parked on an
+    /// unanswered dialog), which is the only way to see the in-flight caption.
+    var waitingOnLocalNetwork = false
+    var reason: OnboardingReason = .firstRun
+}
+
 @MainActor
-func makeViewController() -> OnboardingViewController {
+func makeViewController(_ world: SnapshotWorld) -> OnboardingViewController {
     let suite = makeSnapshotDefaults()
-    let model = SetupModel(audioProbe: SnapshotAudioProbe(result: .granted),
-                           localNetwork: SnapshotLocalNetwork(),
-                           remoteControl: SnapshotRemoteControl(),
-                           ptpHelper: SnapshotPTPHelper(statusToReport: .enabled),
+    let bluetooth = SimulatedBluetoothPermission(status: world.bluetooth)
+    let localNetwork: LocalNetworkPriming = world.waitingOnLocalNetwork
+        ? SnapshotWaitingLocalNetwork()
+        : SnapshotLocalNetwork(foundSpeakers: world.foundSpeakers)
+    let model = SetupModel(audioProbe: SnapshotAudioProbe(result: world.audio),
+                           localNetwork: localNetwork,
+                           remoteControl: SnapshotRemoteControl(trusted: world.remoteControlTrusted),
+                           ptpHelper: SnapshotPTPHelper(statusToReport: world.ptpHelper),
+                           bluetoothReader: bluetooth,
+                           bluetoothPrimer: bluetooth,
                            settings: AppSettings(defaults: suite))
     return OnboardingViewController(model: model,
+                                    reason: world.reason,
                                     onOpenSettings: { _ in },
                                     onDone: {})
 }
@@ -102,7 +157,7 @@ func renderPNG(view: NSView, to url: URL) {
         memset(bitmapData, 0, rep.bytesPerRow * pixelsHigh)
     }
     view.cacheDisplay(in: bounds, to: rep)
-    
+
     guard let data = rep.representation(using: .png, properties: [:]) else {
         print("  FAIL  could not encode PNG for \(url.lastPathComponent)")
         return
@@ -115,25 +170,28 @@ func renderPNG(view: NSView, to url: URL) {
     }
 }
 
-
-
-
-
-
 @MainActor
 func snapshot(appearanceName: NSAppearance.Name,
               label: String,
-              audio: PermissionStatus,
-              network: PermissionStatus,
-              remoteControl: PermissionStatus,
-              ptpHelper: PTPHelperStatus = .enabled,
-              outDir: URL) {
-    let controller = makeViewController()
+              world: SnapshotWorld,
+              outDir: URL) async {
+    let controller = makeViewController(world)
     let appearance = NSAppearance(named: appearanceName)
     let rootView = controller.test_rootView
     rootView.appearance = appearance
-    controller.test_applyStatuses(audio: audio, isProbingAudio: false, network: network,
-                                  remoteControl: remoteControl, ptpHelper: ptpHelper)
+    // Awaited, unlike the load-time fire-and-forget: Bluetooth and Remote
+    // Control only ever reach `.granted` through the silent re-read, so a
+    // fixture that means "these are already granted" has to wait for it.
+    await controller.test_refreshStatuses()
+    await controller.test_allow(world.allow)
+    if world.waitingOnLocalNetwork {
+        // Deliberately NOT awaited: this prime never answers, and the fixture is
+        // the wait itself. Poll for the caption rather than sleeping a guess.
+        Task { await controller.test_tapAllow(.localNetwork) }
+        for _ in 0..<200 where controller.test_statusCaption(of: .localNetwork) == nil {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+    }
     rootView.layoutSubtreeIfNeeded()
     let size = rootView.fittingSize
     let frame = NSRect(origin: .zero, size: size)
@@ -152,8 +210,17 @@ func snapshot(appearanceName: NSAppearance.Name,
     window.contentView = NSView()   // detach so nothing dangles
 }
 
+/// Every step granted: audio + network really probe, Bluetooth and the helper
+/// report satisfied from their seams, Accessibility is already trusted.
+let completeWorld = SnapshotWorld(audio: .granted,
+                                  foundSpeakers: 3,
+                                  remoteControlTrusted: true,
+                                  bluetooth: .granted,
+                                  ptpHelper: .enabled,
+                                  allow: [.audio, .localNetwork])
+
 @MainActor
-func run() -> Int32 {
+func run() async -> Int32 {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
 
@@ -173,16 +240,39 @@ func run() -> Int32 {
     print("Rendering onboarding snapshots to: \(outDir.path)")
 
     for (name, tag) in [(NSAppearance.Name.aqua, "light"), (.darkAqua, "dark")] {
-        snapshot(appearanceName: name, label: "\(tag)-initial",
-                 audio: .unknown, network: .unknown, remoteControl: .unknown, ptpHelper: .requiresApproval, outDir: outDir)
-        snapshot(appearanceName: name, label: "\(tag)-resolved",
-                 audio: .granted, network: .requested, remoteControl: .requested, outDir: outDir)
-        snapshot(appearanceName: name, label: "\(tag)-denied",
-                 audio: .denied, network: .requested, remoteControl: .requested, outDir: outDir)
+        await snapshot(appearanceName: name, label: "\(tag)-step1-audio",
+                       world: SnapshotWorld(), outDir: outDir)
+        await snapshot(appearanceName: name, label: "\(tag)-step2-network",
+                       world: SnapshotWorld(allow: [.audio]), outDir: outDir)
+        await snapshot(appearanceName: name, label: "\(tag)-step3-bluetooth",
+                       world: SnapshotWorld(allow: [.audio, .localNetwork]), outDir: outDir)
+        // Local Network's Allow fired and the system dialog is still up: the
+        // card shows the wait, and says what it is waiting for.
+        await snapshot(appearanceName: name, label: "\(tag)-step2-waiting",
+                       world: SnapshotWorld(allow: [.audio], waitingOnLocalNetwork: true),
+                       outDir: outDir)
+        // Audio denied: the card's Allow has become the Settings deep link, and
+        // the demo swaps to the Settings-pane miniature.
+        await snapshot(appearanceName: name, label: "\(tag)-denied",
+                       world: SnapshotWorld(audio: .denied, allow: [.audio]), outDir: outDir)
+        await snapshot(appearanceName: name, label: "\(tag)-complete",
+                       world: completeWorld, outDir: outDir)
+        await snapshot(appearanceName: name, label: "\(tag)-permission-lost",
+                       world: SnapshotWorld(audio: .denied,
+                                            ptpHelper: .requiresApproval,
+                                            allow: [.audio],
+                                            reason: .permissionLost([.audioCapture, .ptpHelper])),
+                       outDir: outDir)
     }
 
     print("Done.")
     return 0
 }
 
-exit(MainActor.assumeIsolated { run() })
+// Headless: no window ever reaches the screen, and every animated instrument
+// (including the demo pane's timelines) must resolve to its settled frame.
+setenv("AIRPLAY_HEADLESS", "1", 1)
+// Top-level `await` (SE-0343): the fixtures drive the REAL async Allow path, so
+// this entry point is async — unlike the other snapshot tools, which are
+// synchronous and use `MainActor.assumeIsolated`.
+exit(await run())

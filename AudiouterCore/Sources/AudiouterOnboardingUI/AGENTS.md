@@ -128,10 +128,18 @@ set changes, or when the gate/motion/demo rules change.
   is spent the same slot becomes "Open Settings…". Which statuses count as spent
   lives in `offersSettingsFallback(_:)` and MUST stay in lockstep with
   `SetupFlowModel.allow(_:)`'s own preflight — the button must not promise a prompt
-  the model will refuse to fire. **Remote Control's "Open Settings…" re-fires the
-  Accessibility system PROMPT** (`model.primeRemoteControl()`) rather than
-  deep-linking: the prompt's own "Open System Settings" button is the only path that
-  scrolls to/highlights Audiouter in the list; macOS gives no URL way to do that.
+  the model will refuse to fire. **Remote Control asks ONCE, then deep-links to
+  `SystemSettingsPane.accessibility`** (owner decision 2026-08-11 — this REPLACES
+  the rule that its "Open Settings…" re-fires the Accessibility PROMPT). The first
+  fire must stay `primeRemoteControl()`, because prompting is what REGISTERS this
+  app's row in the Accessibility list at all: a cold deep link would drop the user
+  on a list with no Audiouter row to switch on. The retry deep-links because the
+  rationale for re-priming did not survive contact with reality — it rested on the
+  claim that the alert's own "Open System Settings" button is the only path that
+  scrolls to/highlights Audiouter in the list, and the owner has NEVER seen that
+  highlight across many live runs. With no highlight to buy, re-priming only cost
+  an extra window and an extra click. The retry reuses the `settings_fallback_denied`
+  outcome, whose meaning already covered "was already asked once".
   Bluetooth's retry goes to `SystemSettingsPane.bluetoothPrivacy` (the app-grant
   pane), never the radio pane. Speaker Sync has ONE mode: Login Items. **Local
   Network is NOT two-mode** — see below. Bluetooth's wait is the MODEL's to report
@@ -188,15 +196,32 @@ set changes, or when the gate/motion/demo rules change.
   ways: the window exists only for a summoned flow that dies at Done/✕, and the
   reactivate hook takes key ONLY when no other window in the app holds it
   (`keyWindowProvider` seam).
-  - **AMENDMENT (owner decision 2026-08-11) — float, but YIELD to System
-    Settings.** A refinement, not a reversal: any path that opens System Settings
-    (a privacy pane OR Speaker Sync's Login Items) drops `window.level` to
-    `.normal` first, and `appDidBecomeActive` restores `.floating`. Floating
-    otherwise parks us on top of the one app we deliberately send the user to.
-    Native permission ALERTS already draw above a floating window, so this is only
-    about Settings. The seam is the content VC's `onWillOpenSystemSettings`
-    closure, which the window controller wires to `yieldToSystemSettings()`;
-    `test_windowLevel` is what pins the contract.
+  - **AMENDMENT (owner decision 2026-08-11) — float, but YIELD.** A refinement,
+    not a reversal: any path that opens System Settings (a privacy pane OR Speaker
+    Sync's Login Items) drops `window.level` to `.normal` first, and
+    `appDidBecomeActive` restores `.floating`. Floating otherwise parks us on top
+    of the one app we deliberately send the user to. The seam is the content VC's
+    `onWillOpenSystemSettings` closure, which the window controller wires to
+    `yieldToSystemSettings()`; `test_windowLevel` is what pins the contract.
+    - **"Native permission alerts already draw above a floating window" is only
+      true of the TCC dialogs** (owner live observation 2026-08-11 — this scopes
+      down a claim this file used to make flat). A system process draws those, at
+      a level of its own. The **Accessibility Access alert is ordinary window
+      chrome at NORMAL level**, and a floating Setup window buries it completely —
+      the user clicks Allow on Remote Control and nothing appears to happen.
+    - So **Remote Control's ASK is a yield site too**, and the only one that isn't
+      a Settings trip. `performAllow` fires `onWillOpenSystemSettings?()` BEFORE
+      `await flow.allow(.remoteControl)`, not after: by the time that call
+      returns, the alert is already on screen. The closure is idempotent, so a
+      granted short-circuit that raises no alert costs nothing — the next
+      `appDidBecomeActive` restores the level either way. The name was kept
+      (that alert's one forward button opens System Settings anyway).
+    - **And the `.none` branch must NOT `returnToFront()` for Remote Control**
+      without positive evidence (`remoteControlStatus == .granted`). The re-front
+      assumes the user has come BACK from a dialog; for this step the dialog just
+      OPENED, and fronting ourselves re-buries the panel the yield stepped aside
+      for. Same shape, same reason as Local Network's rule — both live in
+      `shouldReturnToFront(after:)`. `test_returnToFrontCount` pins it.
   - **TRAP: the level drop only sticks if `appDidBecomeActive` is gated on
     having actually LOST the front** (live fix 2026-08-11 — Settings still
     opened behind the window with the drop in place). The click that fires
@@ -212,11 +237,30 @@ set changes, or when the gate/motion/demo rules change.
     `returnToFront()`, both of which follow a genuine resign) restores float.
     `test_appDidResignActive()` is the seam; true cross-app z-order is not
     observable headless, so this pair of hooks is what tests can pin.
+- **The window is `OnboardingWindow`, the click witness** (live symptom: the
+  first "Start listening" click left NO telemetry at all — not even the
+  single-flight swallow — so the failure sat somewhere no view-level fix or
+  log could see). Its `sendEvent` logs a `setup_click` down/up pair for every
+  physical click (what it hit, whether the app was active/key at delivery)
+  and force-activates an inactive app BEFORE dispatching the click — a click
+  that landed on this window is intent to use it. Silence in the trail now
+  means the click never reached the app at all. This complements, never
+  replaces, the `acceptsFirstMouse` overrides: those are what let the same
+  click also press the control.
 - `present()` sizes and centers on the FIRST call only — a re-present (the
   `presentSetup` re-entry guard, "Open Setup…" while open) must not re-center a
   window the user moved. The content's `fittingSize` is a FIXED
   `contentWidth × contentHeight` (820 × 560), not a per-step measurement: the
   window must not resize under the user as cards expand and collapse.
+- **Both on-screen paths are gated on `HeadlessRuntime`** — `present()` and the
+  `appDidBecomeActive` re-front. The sizing/centering and the take-key DECISION
+  still run headless (the latter counted into `test_frontCount`), so both
+  contracts stay just as testable; only `activate`/`makeKeyAndOrderFront` are
+  skipped. Ungated, a `swift test` run parks this `.floating` window above
+  everything on the developer's real screen — un-clickable, because the test
+  process is not a foreground app — until the whole run ends. This window is
+  more disruptive than the others when it leaks, which is why it is called out
+  here as well as in `HeadlessRuntime`'s own doc comment.
 - **`leftPaneWidth` is 420, not the 380 the layout was first specified at.** The
   longest earned title truncated on a collapsed strip at 380, and the titles are
   reviewed copy — the column moves, not the words. The demo's fixed surface still
@@ -305,8 +349,158 @@ set changes, or when the gate/motion/demo rules change.
     `NSColor.systemColorsDidChangeNotification`, NOT
     `Tokens.accentStyleDidChangeNotification`: the user's macOS accent is what its
     stamped `CGColor`s are derived from, and the app's own dial is deliberately not.
+  - **The prompt mock is the macOS 26 "Liquid Glass" privacy dialog, not the old
+    alert** (owner decision 2026-08-11, from screenshots of the real dialogs —
+    this REVERSES the previous "centred, icon above the text, 6 pt rounded
+    buttons with an accent-filled default" drawing, which was the pre-26 shape
+    and read to the owner as "an abstract allow thing"). The anatomy, which is
+    generic across all five steps:
+    a TALL portrait card (real 283 × 340 pt, drawn here at ~0.85 of that, with a
+    large ~24 pt continuous corner); an ICON TILE top-LEFT (which icon depends on
+    the step — see below) with a `systemBlue` circle badge carrying a white
+    `hand.raised.fill` overlapping its bottom-trailing corner — the marker that
+    says *privacy prompt*; a small grey
+    Help circle top-right; a bold LEFT-ALIGNED title over two or three lines; a
+    left-aligned `secondaryLabelColor` body; and two EQUAL, NEUTRAL CAPSULE
+    buttons filling the content width. **There is no accent-filled default
+    button any more** — drawing one would date the mock and, worse, send the user
+    looking for a blue button that won't be there. Nothing is centred, and
+    nothing is greeked.
+    - **The body is the app's REAL Info.plist purpose string** — the same words
+      `scripts/make-app.sh` stamps into `NSAudioCaptureUsageDescription` /
+      `NSLocalNetworkUsageDescription` / `NSBluetoothAlwaysUsageDescription`, so
+      the paragraph the user rehearses here is the paragraph macOS will show.
+      Change one there, change it in `bodyText(for:)`. That sentence is why the
+      card is drawn near life size at all: the type tiers still hold (nothing
+      under 9 pt), which puts the title at 14 pt and the body at 11 pt.
+    - **The top-left tile is NOT always the app's icon** (owner screenshots of
+      the real dialogs, 2026-08-11). macOS shows the asking app's own icon only
+      where the grant is about capturing THAT APP's content — System Audio, which
+      really does draw `NSApp.applicationIconImage` with the hand badge on it.
+      The CAPABILITY grants show a generic SYSTEM tile instead, the same one for
+      every app: the real Local Network dialog draws the Network pane's blue
+      rounded square with a white wireframe globe, not Audiouter's icon. So
+      `DemoPromptMockView.iconView(for:)` returns the app icon for `.audio` and a
+      `systemTile` (`DemoSystemColor.accent` fill, side × 0.23 continuous corner,
+      white glyph at side × 0.55) for `.localNetwork` (`network`) and
+      `.bluetooth`. Everything else about the slot — size, position, the badge —
+      is identical either way; only the tile's CONTENTS change. `.remoteControl`
+      and `.speakerSync` never reach this path in practice and keep the app icon
+      as the safe default.
+      - **Bluetooth's glyph is a NAMED APPROXIMATION, twice over.** No screenshot
+        of the real macOS Bluetooth prompt was available and a search turned up
+        none, so the system-tile treatment is INFERRED from the Local Network
+        one; and SF Symbols ships no Bluetooth rune at all (Apple doesn't licence
+        the mark — `name_availability.plist` has no such name), so the tile
+        carries `dot.radiowaves.right`, the glyph the Bluetooth setup card beside
+        it already uses, rather than a hand-drawn rune. If a real screenshot ever
+        contradicts either half, this is the one place to change.
+    - `.localNetwork`'s title is the odd one out: macOS phrases it as a QUESTION
+      opening on "Allow" — "Allow “Audiouter” to find devices on local
+      networks?" — where the other steps use "…would like to…". Verbatim from
+      the real dialog; don't regularise it.
+    - The per-step hooks stay `askText` / `bodyText` / `confirmTitle` /
+      `grantedText`; the ANATOMY is shared. `DemoPaneView.surfaceSize` grew to
+      336 × 336 to seat the taller card with a margin around it (the pane has
+      516 pt of height, so Replay still clears underneath).
+  - **ONE step has a two-stage demo: Remote Control's FIRST ASK** (owner
+    decisions 2026-08-11 — a live run showed its demo jumping straight to a
+    Settings pane the user had no idea how to reach). Its first ask takes two
+    acts on two different surfaces; every other step's first ask is the
+    one-surface privacy dialog. **The mapping was REMAPPED the same day**, when
+    the retry became a deep link: the first ask now shows the two-stage handoff
+    (`makeMock` routes `.prompt` + `.remoteControl` there) and the retry shows
+    the plain `DemoSettingsMockView`, which is exactly what each click really
+    does. It was the other way round, which put a portrait TCC privacy card — a
+    dialog shape macOS never shows for Accessibility — in front of the first
+    ask. `DemoMode` did not change: `.prompt` still means "the surface this ask
+    raises", `.settings` still means "the pane", so both stay assertable.
+    **Speaker Sync briefly had a two-stage demo
+    too, and it was RETRACTED the same day** (owner re-test 2026-08-11): the
+    premise was that registering the login item raises an alert of this shape,
+    but macOS opens System Settings DIRECTLY from the card's "Open Login
+    Items…" — no alert exists. (The research behind the original build had
+    already flagged that panel as unconfirmed; the re-test confirmed the
+    doubt.) `DemoLoginItemsMockView` was DELETED rather than left orphaned —
+    it is in git history with this rationale if the premise ever revives.
+    Don't re-add a Speaker Sync alert stage without a screenshot.
+  - **Remote Control's two-stage demo opens on `DemoSystemAlertMockView`, the
+    classic macOS ALERT PANEL** (owner decision 2026-08-11, from a screenshot
+    of the real Accessibility Access alert taken against a signed build — this
+    REPLACES the earlier stage-one surface, the re-fired privacy card). Its
+    whole reason to exist is that the real panel is a completely different
+    SHAPE from the macOS 26 privacy card above, and the earlier drawing
+    implied the user would meet the card twice:
+    - LANDSCAPE (288 pt wide, height from the copy — about 1.8 : 1) with a small
+      ~12 pt corner, against the card's tall portrait and its ~24 pt one;
+    - a plain, non-bold HEADER line naming the access ("Accessibility Access");
+    - a **full-bleed hairline divider** under it — the one structural element the
+      privacy card has nothing like, and the fastest way to tell them apart;
+    - a two-column body: the gold privacy PADLOCK left, bold ask and Settings
+      instruction right, the two centred against each other as a group;
+    - a Help circle bottom-LEFT; bottom-RIGHT "Open System Settings" (neutral)
+      then "Deny" — and **the REFUSAL is the accent-filled default**, the
+      opposite emphasis from the card's two equal neutral capsules. That is why
+      the pointer goes for the QUIET button: on this panel the blue one is the
+      wrong answer, and the demo has to show that.
+    - The padlock is `lock.fill` filled with a gold GRADIENT, because the real
+      icon is artwork with some dimension in it and a flat amber symbol at this
+      size reads as a toolbar glyph. **TRAP: the mask has to be built in an
+      `NSImage` of its own** — compositing the gradient `.sourceAtop` straight
+      into `draw(_:)` does not clip to the symbol (the view's backing store is
+      not the empty destination that mode needs) and the whole icon rect comes
+      out a solid gold rectangle. Draw the gradient into a fresh image and knock
+      the symbol's alpha out of it with `.destinationIn`.
+    - Accessibility's padlock carries a blue circular badge with the
+      `accessibility` glyph (SF Symbols 5 / macOS 14 — checked against
+      `name_availability.plist`, and the package floor is macOS 14). No other
+      step raises this alert, so no other step earns a marker.
+    - It is a passive SURFACE, not a `DemoMockView`: it draws itself and exposes
+      `pressTarget`/`pressPoint(in:)`/`addPressAnimation(on:pressedAt:)`, while
+      the host owns the cursor and the crossfade — a stage that owned a cursor
+      would put a second one on screen. `pointerRest` is where a host parks that
+      pointer: resting it on "Open System Settings" reads as a press that already
+      happened, which is what the first drawing did.
+    - `DemoNotificationBannerView` — the drawn "Background Items Added" banner
+      from Speaker Sync's deleted two-stage era — is likewise only in git
+      history.
+  - **Remote Control's two stages.** Its first Allow raises the alert, whose own
+    button opens the pane, so the user has two clicks to make on two different
+    surfaces — and a demo that opened straight onto the Settings pane showed the
+    toggle without showing how the pane carrying it is reached.
+    `DemoSettingsHandoffMockView` plays both in ONE pass: the system alert with
+    the pointer pressing **Open System Settings**, a crossfade, then the ordinary
+    Settings pass with the pointer flipping the Audiouter toggle on, then back to
+    the alert. Two presses, two surfaces, one clock. `test_demoStage` is `nil`
+    for every step but Remote Control.
+    - Stage two is `DemoSettingsMockView` unchanged; the container sequences the
+      two, owns the crossfade, and owns stage one's POINTER (the alert has none
+      of its own). Stage two draws its own pointer inside the Settings mock, so
+      the host's is invisible from the crossfade until the alert comes back —
+      the two never share a frame.
+    - `DemoStage` names its two surfaces; `DemoHandoffStage` was deleted rather
+      than kept as a second enum with the same two cases, and
+      `test_demoHandoffStage` folded into `test_demoStage`.
+    - `DemoPromptOutcome` went with it. It existed only to relabel the privacy
+      card's buttons for the re-fired ask; with a real alert drawn for that job,
+      the card is back to one shape (two equal neutral capsules, "Don't Allow"
+      beside its confirming title) and `confirmTitle(for:)` lost its `outcome:`.
+    - `surfaceSize` did NOT change: at 288 pt wide and ~158 tall the alert clears
+      its margins inside the existing 336 × 336, and the handoff container is now
+      the Settings pane's 300 × 190 rather than the card's taller box.
+    - **A stage keeps writing its score in its OWN seconds.** `DemoMockView`
+      .`stageWindow` is the seam: set it and `keyframes(_:_:timing:)` lays that
+      score onto the host's longer pass at an offset, holding the first and last
+      values through the time either side (Core Animation wants a linear score to
+      span the whole animation, and "not on screen yet" has to look like a hold
+      anyway). So a mock never has to know whether it is playing alone or as a
+      stage — `DemoSettingsMockView` needed no change at all.
+    - **TRAP: a nested mock still has its autoresizing mask on.** The pane turns
+      `translatesAutoresizingMaskIntoConstraints` off for the mock it installs;
+      a mock nested one stage deeper is its container's job, and left on, both
+      stages render as nothing but their drawn pointer.
   - **`DemoSystemColor` is a documented exception to "colour literals live only in
-    `Tokens`"** (root `AGENTS.md`). Five values have no semantic equivalent that
+    `Tokens`"** (root `AGENTS.md`). Four values have no semantic equivalent that
     survives both appearances — above all, System Settings paints its sidebar
     DARKER than its content pane, and `windowBackgroundColor` vs
     `controlBackgroundColor` INVERTS that in dark mode, flipping the one structural
@@ -385,6 +579,37 @@ set changes, or when the gate/motion/demo rules change.
     centre — an image-centre anchor lands the press off the button. The arrow's ink
     fills about half its image box, so `DemoCursorView` is sized from the pointer
     height the caller asks for, not from the box.
+  - **Every press fires ONE shared click splash** (added 2026-08-11): two
+    concentric hairline rings rippling out from the cursor's TIP — a sound wave
+    leaving the click, the one place this audio app's own character shows inside
+    a mock of somebody else's chrome. It lives entirely in
+    `DemoCursorView.addClickSplash(on:at:)`: pure `CAShapeLayer`s anchored on
+    `tipPoint` INSIDE the cursor view, so they ride the cursor's transform and
+    no call site keeps coordinates in step. Three press sites arm it, each at
+    the beat its existing press/state-change already uses (none of which the
+    splash replaces or retimes): the prompt mock's confirm press and the
+    Settings switch flip (both `DemoBeat.pressEnd` — the Settings call also
+    covers the handoff's stage two for free, through `stageWindow`), and the
+    handoff's stage-one alert press (`DemoBeat.pressEnd`).
+    - **Duration is 0.18 s, and that number is load-bearing:** it is the
+      TIGHTEST press-to-cursor-fade window any pass has (the prompt mock
+      presses at 1.90 s and its cursor is fully faded by 2.08 s). A longer
+      splash gets clipped by the cursor fade it rides inside.
+    - **Colour judgment call:** neutral `labelColor` ink — NOT `Tokens` gold and
+      not `DemoSystemColor.accent`. The splash is arguably cursor chrome rather
+      than mock content, but it plays ON surfaces that must read as macOS, and a
+      gold burst would claim macOS draws Audiouter-coloured feedback; the ripple
+      FORM carries the product note instead. `labelColor` also guarantees
+      contrast on every press target (all mid-grey at press time — the switch
+      track only turns blue after `pressEnd`). Stamped per pass like the switch
+      tint, so appearance changes catch up on the next loop.
+    - **The layers' MODEL opacity is 0 and nothing ever sets it otherwise** —
+      only the pass's keyframes make a ring visible, so `applySettledState`
+      needs no new line and a settled/headless frame cannot carry a splash by
+      construction. Pure layers, never views, so `installAccessibilityOptOut`
+      needed no extension either. `test_clickSplashesAreSettled` /
+      `test_clickSplashesAreArmed` (on `DemoMockView`, walking nested stages)
+      pin both halves.
 - **Bluetooth SHARES Remote Control's `Tokens.Color.permission*` hue** rather than
   minting a fifth token, which would need authored light/dark/Increase-Contrast
   values and a measured contrast rationale from the palette owner. The two cards are
@@ -431,7 +656,8 @@ set changes, or when the gate/motion/demo rules change.
   `test_hasCheckmark`, `test_note(of:)`, `test_hint(of:)`), the real Allow/Skip
   paths (`test_tapAllow`, `test_allow([steps])`, `test_tapSkip`), the gate
   (`test_doneExists`, `test_doneIsReturnDefault`, `test_snapBackStep`), the demo
-  (`test_demoMode`, `test_isDemoAnimating`, `test_demoShowsReplay`), and the window
+  (`test_demoMode`, `test_demoStage`, `test_isDemoAnimating`,
+  `test_demoShowsReplay`), and the window
   level (`test_windowLevel`). `test_refreshStatuses()` is the AWAITED silent
   re-read — the load-time one fires a detached task, so a caller that needs its
   result (Bluetooth and Remote Control only reach `.granted` through it) has to be
@@ -473,9 +699,11 @@ set changes, or when the gate/motion/demo rules change.
 | `SetupCheckRowView` | The sixth row: the automatic final check's pending/running/passed status strip. |
 | `ClipView` | The card body's masking container — the thing whose HEIGHT the collapse animates. |
 | `DemoPaneView` / `DemoMode` | The right pane: the elevated surface, the mode swap crossfade, the motion policy, the Replay button. |
-| `DemoMockView` | Timeline base class (restartable score, settled-state hook) for the two animated mocks. |
-| `DemoPromptMockView` / `DemoSettingsMockView` / `DemoSettledMockView` | The permission-dialog miniature, the Settings-pane miniature, and the completion finale (one-shot ripple, static gold-aura resting frame). |
-| `DemoDialogSurfaceView` / `DemoCapsuleView` / `DemoToggleView` / `DemoSettingsRowView` / `DemoPlaceholderBarView` / `DemoCursorView` | The drawn parts of the mocks. |
+| `DemoMockView` | Timeline base class for the animated mocks: restartable score, settled-state hook, and the two multi-stage seams — `held(_:)` and the `stageWindow` offset. |
+| `DemoPromptMockView` / `DemoSettingsMockView` / `DemoSettledMockView` | The privacy-dialog miniature, the Settings-pane miniature, and the completion finale (one-shot ripple, static gold-aura resting frame). |
+| `DemoSystemAlertMockView` / `DemoLockIconView` | The classic macOS ALERT panel Remote Control's two-stage pass opens on — header, divider, gold padlock, accent-filled refusal — and the gradient-filled padlock it leads with. A passive surface: the host owns the cursor and the crossfade. |
+| `DemoSettingsHandoffMockView` / `DemoStage` | Remote Control's two-stage FIRST ASK: the Accessibility alert handing off to the Settings pane in one pass, the owner of stage one's pointer, and which of its two surfaces the pass rests on. |
+| `DemoWindowSurfaceView` / `DemoPushButtonView` / `DemoButtonEmphasis` / `DemoSwitchView` / `DemoSidebarView` / `DemoSettingsRowView` / `DemoGreekBarView` / `DemoPillView` / `DemoDotView` / `DemoBluetoothGlyphView` / `DemoCursorView` | The drawn parts of the mocks — window body, dialog button (neutral capsule or accent rounded rect), switch, sidebar, list row, greeked label, pill, circle, the hand-drawn Bluetooth rune, pointer. |
 | `SystemSettingsOpener` | `NSWorkspace` seam for opening a `SystemSettingsPane`, with a Privacy & Security root fallback. |
 | `ProminentButton` | Fill-tinted CTA button with key-window-aware title ink (forced white, or measured from the fill). |
 | `IconTileView` / `RoundedContainerView` | Shared appearance-adaptive chrome (icon chip, grouped-inset card) — no stock AppKit equivalent. |
@@ -488,4 +716,4 @@ set changes, or when the gate/motion/demo rules change.
 | `AudiouterCore/Tests/AudiouterCoreTests/SetupFlowModelTests.swift` | The sequence, gate and Allow decision table this UI renders (Core, not this folder, but the seam it depends on). |
 | `AudiouterCore/Tests/AudiouterCoreTests/SetupModelTests.swift` | The underlying `SetupModel` probes/status, the Local Network found count, and the version-gated System Settings deep links. |
 | `AudiouterCore/Tests/AudiouterCoreTests/OnboardingPermissionColorTests.swift` | The four per-card tile colours: distinctness, contrast floors, tint permanence across every card state, tile fill unchanged. |
-| `AudiouterCore/Sources/onboarding-snapshot` | Offscreen PNG fixtures (per-step, the in-flight wait, denied, complete, permission-lost × light/dark) in `dev/notes/onboarding-snapshots/`. |
+| `AudiouterCore/Sources/onboarding-snapshot` | Offscreen PNG fixtures (per-step — including the in-flight wait and Remote Control's two-stage first ask at rest — remote-control-retry, the running final check, denied, complete, permission-lost × light/dark) in `dev/notes/onboarding-snapshots/`. |

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+import AppKit
 import Foundation
 import Testing
 @testable import AudiouterCore
+@testable import AudiouterOnboardingUI
 
 /// The setup flow's DECISION LOG: every Allow click and every Done
 /// verification ends in exactly one named `Telemetry` outcome, so a live
@@ -113,6 +115,47 @@ extension SerializedSharedState {
             let refused = try #require(lines.last)
             #expect(refused.contains("\"outcome\":\"auto_check_refused\""), "line: \(refused)")
             #expect(refused.contains("\"unmet\":\"speaker_sync\""), "names the permission: \(refused)")
+        }
+
+        /// Every physical click on the Setup window leaves a `setup_click`
+        /// down/up pair naming what it hit — the witness for a live click
+        /// that dies before any control's action (the "first CTA click left
+        /// no trace" symptom: with this, silence means the click never
+        /// reached the app at all).
+        @Test func aPhysicalClickOnTheSetupWindowLeavesDownAndUpLines() throws {
+            let setup = SetupModel(audioProbe: CannedAudio(result: .granted),
+                                   localNetwork: ReachableNetwork(),
+                                   remoteControl: UntrustedRemote(),
+                                   ptpHelper: CannedPTPHelper(status: .enabled),
+                                   settings: AppSettings(defaults: isolatedDefaults))
+            let wc = OnboardingWindowController(model: setup,
+                                                openSettings: { _ in },
+                                                onFinished: {})
+            let window = try #require(wc.window)
+            window.contentView?.layoutSubtreeIfNeeded()
+            let capture = TelemetrySetupLineCapture()
+            Telemetry._installTestSink { capture.append($0) }
+            // An inert corner of the canvas — never a control, so this
+            // headless dispatch cannot start a button tracking loop.
+            let corner = NSPoint(x: 2, y: 2)
+            for type in [NSEvent.EventType.leftMouseDown, .leftMouseUp] {
+                if let event = NSEvent.mouseEvent(with: type, location: corner,
+                                                  modifierFlags: [], timestamp: 0,
+                                                  windowNumber: window.windowNumber,
+                                                  context: nil, eventNumber: 0,
+                                                  clickCount: 1, pressure: 1) {
+                    window.sendEvent(event)
+                }
+            }
+            Telemetry._installTestSink(nil)   // flush barrier (serial queue) + removes the sink
+
+            let lines = capture.snapshot().filter { $0.contains("\"evt\":\"setup_click\"") }
+            #expect(lines.count == 2, "one line per phase: \(lines)")
+            #expect(try #require(lines.first).contains("\"phase\":\"down\""))
+            #expect(try #require(lines.last).contains("\"phase\":\"up\""))
+            #expect(lines.allSatisfy { $0.contains("\"hit\":") && $0.contains("\"app_active\":")
+                        && $0.contains("\"key\":") },
+                    "each line snapshots delivery state: \(lines)")
         }
     }
 }

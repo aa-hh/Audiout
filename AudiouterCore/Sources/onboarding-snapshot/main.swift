@@ -127,6 +127,9 @@ struct SnapshotWorld {
     /// Render the sixth row's automatic check MID-FLIGHT: the walk's browse
     /// grants, the check's audit re-browse parks, and the fixture is the wait.
     var waitingOnFinalCheck = false
+    /// Cards to Skip, after the allows. The only way past an optional step the
+    /// fixture's world can't satisfy.
+    var skip: [SetupStep] = []
     var reason: OnboardingReason = .firstRun
 }
 
@@ -212,6 +215,9 @@ func snapshot(appearanceName: NSAppearance.Name,
     // fixture that means "these are already granted" has to wait for it.
     await controller.test_refreshStatuses()
     await controller.test_allow(world.allow)
+    // Before any waiting: a skipped card is a DECIDED card, and the final
+    // check below is what waits on every card being decided.
+    world.skip.forEach(controller.test_tapSkip)
     if world.waitingOnLocalNetwork {
         // Deliberately NOT awaited: this prime never answers, and the fixture is
         // the wait itself. Poll for the caption rather than sleeping a guess.
@@ -289,10 +295,30 @@ func run() async -> Int32 {
         await snapshot(appearanceName: name, label: "\(tag)-step2-waiting",
                        world: SnapshotWorld(allow: [.audio], waitingOnLocalNetwork: true),
                        outDir: outDir)
+        // Speaker Sync active: the Login Items pane with the toggle. A
+        // single-stage demo — "Open Login Items…" opens System Settings
+        // directly, with no alert in between.
+        await snapshot(appearanceName: name, label: "\(tag)-step4-speakersync",
+                       world: SnapshotWorld(allow: [.audio, .localNetwork],
+                                            skip: [.bluetooth]),
+                       outDir: outDir)
         // Audio denied: the card's Allow has become the Settings deep link, and
         // the demo swaps to the Settings-pane miniature.
         await snapshot(appearanceName: name, label: "\(tag)-denied",
                        world: SnapshotWorld(audio: .denied, allow: [.audio]), outDir: outDir)
+        // Remote Control's first ask: the demo is the TWO-STAGE handoff —
+        // settled on stage one, the Accessibility alert with its "Open System
+        // Settings" button, because that alert is what the Allow raises.
+        await snapshot(appearanceName: name, label: "\(tag)-step5-remotecontrol",
+                       world: SnapshotWorld(bluetooth: .granted, ptpHelper: .enabled,
+                                            allow: [.audio, .localNetwork]),
+                       outDir: outDir)
+        // Remote Control asked and is still waiting: the prompt is spent, so its
+        // Allow has become the deep link and the demo is the plain pane.
+        await snapshot(appearanceName: name, label: "\(tag)-remote-control-retry",
+                       world: SnapshotWorld(bluetooth: .granted, ptpHelper: .enabled,
+                                            allow: [.audio, .localNetwork, .remoteControl]),
+                       outDir: outDir)
         // Every card decided, the sixth row's automatic check still running:
         // no CTA, no finale yet — the beat the redesign exists to show.
         await snapshot(appearanceName: name, label: "\(tag)-checking",

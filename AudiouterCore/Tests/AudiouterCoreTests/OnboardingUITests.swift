@@ -748,18 +748,56 @@ import Testing
         #expect(opened.isEmpty, "Login Items is not a privacy pane deep link")
     }
 
-    /// Remote Control's "Open Settings…" re-fires the Accessibility PROMPT (whose
-    /// own button highlights the app in the list) and never deep-links.
-    @Test func remoteControlNeverRoutesThroughTheDeepLinkOpener() async {
+    /// Remote Control's first click is the PROMPT — that is what registers our
+    /// row in the Accessibility list — and its "Open Settings…" retry then deep-
+    /// links to that pane like every other step.
+    @Test func remoteControlPromptsFirstThenOpensTheAccessibilityPane() async {
         var opened: [SystemSettingsPane] = []
         let vc = makeVC(model: makeGrantableModel(), onOpenSettings: { opened.append($0) })
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
-        vc.test_tapSkip(.remoteControl)   // ignored below — it isn't active yet
+
+        await vc.test_tapAllow(.remoteControl)
+        #expect(opened.isEmpty, "the first ask is the prompt, not a deep link")
+
+        await vc.test_tapAllow(.remoteControl)
+        #expect(opened == [.accessibility])
+    }
+
+    /// The Accessibility Access prompt is an ordinary alert panel at normal
+    /// level, NOT a TCC dialog a system process draws above everything — so the
+    /// window has to yield BEFORE the ask, and must not front itself back over
+    /// the alert it just raised (owner live observation 2026-08-11).
+    @Test func askingForRemoteControlYieldsTheLevelAndDoesNotReFrontOverTheAlert() async {
+        let wc = OnboardingWindowController(model: makeGrantableModel(),
+                                            openSettings: { _ in },
+                                            onFinished: {})
+        let vc = wc.test_contentViewController
+        _ = vc.test_rootView
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        #expect(vc.test_activeStep == .remoteControl)
+        #expect(wc.test_windowLevel == .floating)
+        let before = vc.test_returnToFrontCount
 
         await vc.test_tapAllow(.remoteControl)
 
-        #expect(opened.isEmpty)
+        #expect(wc.test_windowLevel == .normal,
+                "the alert is ordinary window chrome — floating buries it")
+        #expect(vc.test_returnToFrontCount == before,
+                "the dialog just OPENED; re-fronting would re-bury it")
+
+        // An activation with NO resign in front of it is our own click catching
+        // up with the ask, not the user coming back — re-floating there is what
+        // buried the alert (`isYieldingToSettings`).
+        wc.test_appDidBecomeActive()
+        #expect(wc.test_windowLevel == .normal,
+                "our own activation must not re-float over the alert it just raised")
+
+        // A real return: the alert took the front, then we got it back.
+        wc.test_appDidResignActive()
+        wc.test_appDidBecomeActive()
+        #expect(wc.test_windowLevel == .floating, "back in our app, back on top")
     }
 
     // MARK: The gate
@@ -1211,16 +1249,20 @@ import Testing
         let vc = makeVC(model: makeModel(audio: .denied))
         await vc.test_tapAllow(.audio)
         #expect(vc.test_demoMode == .settings)
+        #expect(vc.test_demoStage == nil, "every step but Remote Control starts at the pane itself")
     }
 
-    /// Speaker Sync's approval only exists in Login Items — there is no prompt to
-    /// mirror, so it is always the Settings mock.
+    /// Speaker Sync's approval only exists in Login Items — there is no privacy
+    /// dialog to mirror, so it is always the Settings mock, and SINGLE-stage:
+    /// "Open Login Items…" opens System Settings directly, with no alert in
+    /// between.
     @Test func speakerSyncAlwaysShowsTheSettingsMock() async {
         let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 2))
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
         #expect(vc.test_activeStep == .speakerSync)
         #expect(vc.test_demoMode == .settings)
+        #expect(vc.test_demoStage == nil, "no alert exists for Login Items — one stage, the pane")
     }
 
     @Test func demoSettlesWhenEveryStepIsDone() async {
@@ -1316,6 +1358,116 @@ import Testing
         #expect(switchView.test_isOn)
         #expect(switchView.test_knobIsAtTrailingEnd,
                 "on must slide the knob across — a blue track with a left knob is a lie")
+    }
+
+    /// The click splash is an EVENT at the pointer's tip: every press site arms
+    /// it for the pass, and none of it survives into the settled frame — which
+    /// is the frame the headless snapshot fixtures capture, so a ring at rest
+    /// would stamp a decoration onto every fixture.
+    @Test func theClickSplashFiresOnEveryPressAndNeverRests() {
+        let mocks: [DemoMockView] = [
+            DemoPromptMockView(step: .audio),
+            DemoSettingsMockView(step: .localNetwork),
+            DemoSettingsHandoffMockView(step: .remoteControl),
+        ]
+        for mock in mocks {
+            mock.layoutSubtreeIfNeeded()
+            #expect(mock.test_clickSplashesAreSettled,
+                    "\(type(of: mock)) carries a splash before any pass has run")
+
+            mock.startTimeline(loop: false)
+            #expect(mock.test_clickSplashesAreArmed,
+                    "\(type(of: mock)) did not wire the splash into its pass")
+
+            mock.stopTimeline()
+            #expect(mock.test_clickSplashesAreSettled,
+                    "\(type(of: mock)) left a splash visible at rest")
+        }
+    }
+
+    // MARK: The two-stage Remote Control demo
+
+    /// Remote Control's FIRST ask raises the Accessibility alert, whose own
+    /// button is what opens the pane — two clicks on two surfaces, and a demo
+    /// that opened straight onto the pane showed the toggle without showing how
+    /// the pane carrying it is reached. The pass starts and ends on the alert,
+    /// the click still to make.
+    @Test func remoteControlsFirstAskDemoIsTwoStageAndRestsOnTheAlert() async {
+        let vc = makeVC(model: makeGrantableModel())
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        #expect(vc.test_activeStep == .remoteControl)
+
+        #expect(vc.test_demoMode == .prompt)
+        #expect(vc.test_demoStage == .alert)
+        // The opt-out has to reach a mock nested one stage deeper than before.
+        #expect(vc.test_demoAccessibilityElements.isEmpty,
+                "still reachable: \(vc.test_demoAccessibilityElements)")
+    }
+
+    /// Once the prompt is spent the retry deep-links straight to the pane, so
+    /// there is no alert left to rehearse — one surface, like everyone else's.
+    @Test func remoteControlsRetryDemoIsThePlainSettingsPane() async {
+        let vc = makeVC(model: makeGrantableModel())
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+
+        await vc.test_tapAllow(.remoteControl)   // the prompt is spent: `.requested`
+
+        #expect(vc.test_demoMode == .settings)
+        #expect(vc.test_demoStage == nil)
+    }
+
+    /// Every other step's ask really is one surface, so only Remote Control pays
+    /// for the second one.
+    @Test func everyOtherRetryDemoIsASingleSurface() async {
+        let vc = makeVC(model: makeModel(audio: .denied))
+        await vc.test_tapAllow(.audio)
+        #expect(vc.test_demoMode == .settings)
+        #expect(vc.test_demoStage == nil)
+    }
+
+    /// Remote Control's two-stage pass ends where it started — resting on the
+    /// alert, the first of the two clicks the user still has to make.
+    @Test func theRemoteControlFirstAskDemoRestsOnTheAlert() {
+        let mock = DemoSettingsHandoffMockView(step: .remoteControl)
+        mock.layoutSubtreeIfNeeded()
+        #expect(mock.test_stage == .alert)
+
+        mock.startTimeline(loop: false)
+        mock.stopTimeline()
+
+        #expect(mock.test_stage == .alert, "a pass must end where it started")
+    }
+
+    /// The system alert is the real panel's copy, not the privacy dialog's: the
+    /// access as a header, the OS's own ask, and the instruction that names the
+    /// pane the grant is actually made in. The privacy dialog's own titles are
+    /// untouched.
+    @Test func theSystemAlertCarriesTheRealPanelsCopy() {
+        #expect(DemoSystemAlertMockView.headerText(for: .remoteControl) == "Accessibility Access")
+        #expect(DemoSystemAlertMockView.askText(for: .remoteControl)
+            == "“Audiouter” would like to control this computer using accessibility features.")
+        #expect(DemoSystemAlertMockView.bodyText(for: .remoteControl)
+            .contains("Privacy & Security settings"))
+
+        #expect(DemoPromptMockView.confirmTitle(for: .audio) == "Allow")
+    }
+
+    /// A stage writes its score in its OWN seconds; the host lays it down at an
+    /// offset. Core Animation wants a linear score to span the whole animation,
+    /// so the stage HOLDS its first and last values through the time either side
+    /// rather than being stretched over it.
+    @Test func aStagedScoreIsMappedIntoItsWindowOfTheHostPass() {
+        let mock = DemoMockView(frame: .zero)
+        mock.stageWindow = (hostDuration: 10, start: 4)
+
+        let animation = mock.keyframes("opacity", [(0, 0), (2, 1)])
+
+        #expect(animation.duration == 10)
+        #expect(animation.keyTimes?.map(\.doubleValue) == [0, 0.4, 0.6, 1])
+        #expect(animation.values?.count == 4)
+        #expect(animation.timingFunctions?.count == 3)
     }
 
     // MARK: One motion language
@@ -1414,6 +1566,17 @@ import Testing
 
     // MARK: Window level + presentation (punch-list W10/W6)
 
+    /// The Setup window is the click-witnessing kind: every physical click
+    /// leaves a `setup_click` telemetry line, and a click on an inactive app
+    /// activates it before dispatch (the "first CTA click left no trace" live
+    /// symptom — the line shapes are pinned in `SetupTelemetryTests`).
+    @Test func theSetupWindowIsTheClickReportingKind() {
+        let wc = OnboardingWindowController(model: makeModel(audio: .granted),
+                                            openSettings: { _ in },
+                                            onFinished: {})
+        #expect(wc.window is OnboardingWindow)
+    }
+
     @Test func windowFloatsWhileOpen() {
         let wc = OnboardingWindowController(model: makeModel(audio: .granted),
                                             openSettings: { _ in },
@@ -1446,11 +1609,9 @@ import Testing
         let wc = OnboardingWindowController(model: makeModel(audio: .granted),
                                             openSettings: { _ in },
                                             onFinished: {})
-        // `present()` really does put the floating Setup window on the tester's
-        // screen: left open it parks above every other window, un-clickable (the
-        // test process is not a foreground app), until the whole run ends. Same
-        // for the reactivate test below.
-        defer { wc.window?.close() }
+        // `present()` sizes and centers headless but never orders the window in
+        // (`HeadlessRuntime`), so this asserts the first-present-only rule
+        // without parking a floating window on the tester's screen.
         wc.present()
         let moved = NSPoint(x: 13, y: 17)   // far from any plausible center
         wc.window?.setFrameOrigin(moved)
@@ -1470,7 +1631,7 @@ import Testing
 
         wc.test_appDidBecomeActive()
 
-        #expect(wc.window?.isVisible == false,
+        #expect(wc.test_frontCount == 0,
                 "with another window key, the hook must not order setup in (visibility is the floating level's job)")
     }
 
@@ -1478,12 +1639,11 @@ import Testing
         let wc = OnboardingWindowController(model: makeModel(audio: .granted),
                                             openSettings: { _ in },
                                             onFinished: {})
-        defer { wc.window?.close() }
         wc.keyWindowProvider = { nil }   // e.g. returning from a permission prompt
 
         wc.test_appDidBecomeActive()
 
-        #expect(wc.window?.isVisible == true,
+        #expect(wc.test_frontCount == 1,
                 "with no key window, the hook re-fronts setup so the user lands right back on it")
     }
 

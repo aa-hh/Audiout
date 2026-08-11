@@ -57,7 +57,7 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
         let levelTrampoline = Trampoline()
         contentVC.onWillOpenSystemSettings = { levelTrampoline.fire() }
 
-        let window = NSWindow(contentViewController: contentVC)
+        let window = OnboardingWindow(contentViewController: contentVC)
         window.styleMask = [.titled, .closable]
         window.title = "Setup"
         window.isRestorable = false   // fixed-size, centered; never restored
@@ -156,7 +156,12 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
             // from a permission prompt or System Settings.
             let key = keyWindowProvider()
             if key == nil || key === window {
-                window?.makeKeyAndOrderFront(nil)
+                // Counted BEFORE the headless bail-out: ordering a window in is
+                // invisible to a headless test, but WHETHER to take key is the
+                // rule worth pinning (same shape as
+                // `OnboardingViewController.returnToFront`).
+                test_frontCount += 1
+                if !HeadlessRuntime.isActive { window?.makeKeyAndOrderFront(nil) }
             }
         }
         // Returning to the app (e.g. back from System Settings) is exactly when a
@@ -179,14 +184,23 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
     /// (`OnboardingViewController.contentWidth` × `contentHeight`), not a
     /// measurement that moves per step — the window must not resize under the
     /// user as cards expand and collapse.
+    ///
+    /// Sizing and centering run everywhere; only the on-screen half is gated on
+    /// ``HeadlessRuntime``. A test process holds a real WindowServer connection,
+    /// so an un-gated activate/order-front here parks a FLOATING, un-clickable
+    /// Setup window above everything on the developer's actual screen until the
+    /// whole run ends — the exact noise `HeadlessRuntime` exists to prevent, and
+    /// which every other window controller in this app already gates (see
+    /// `ControlPanelWindowController`, `AboutView`).
     public func present() {
-        NSApp?.activate(ignoringOtherApps: true)
         if !hasBeenPresented {
             hasBeenPresented = true
             contentVC.view.layoutSubtreeIfNeeded()
             window?.setContentSize(contentVC.view.fittingSize)
             window?.center()
         }
+        guard !HeadlessRuntime.isActive else { return }
+        NSApp?.activate(ignoringOtherApps: true)
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
     }
@@ -254,6 +268,50 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
     /// Fire the app-deactivate hook directly — "System Settings took the front"
     /// is the step that turns the NEXT activation into a real return.
     func test_appDidResignActive() { appDidResignActive() }
+
+    /// How many times the reactivate hook decided to front the window. The
+    /// decision, not the pixels: headless runs never really order a window in.
+    private(set) var test_frontCount = 0
+}
+
+/// The Setup window itself: logs every physical click it receives, and forces
+/// the app active before dispatching a click that arrives while it isn't.
+///
+/// Both halves exist because of one live symptom ("Start listening took two
+/// clicks" — the first CTA click left NO `setup_done` trace at all, not even
+/// the single-flight swallow, so it either never reached this window or died
+/// between delivery and the button's action). The candidate mechanisms all
+/// produce the same EMPTY telemetry, so `sendEvent` is made the witness: from
+/// now on a dead click either leaves a `setup_click` line naming the exact
+/// view it hit (delivery happened — the fault is below, and the line says
+/// where), or leaves nothing (the click was consumed upstream of the app,
+/// where no in-process code can help). The activation force closes the half
+/// we can reach: a click that physically lands on this window is the user's
+/// intent to use it, so an inactive app is activated BEFORE the event is
+/// dispatched — the ordinary click path instead of the fragile first-mouse
+/// one. The `acceptsFirstMouse` overrides on the CTA/cards stay regardless:
+/// they are what lets this same click also PRESS the control.
+final class OnboardingWindow: NSWindow {
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown || event.type == .leftMouseUp {
+            let wasActive = NSApp?.isActive == true
+            if event.type == .leftMouseDown, !wasActive, !HeadlessRuntime.isActive {
+                NSApp?.activate(ignoringOtherApps: true)
+                makeKeyAndOrderFront(nil)
+            }
+            // `hitTest` takes a point in the SUPERVIEW's space; the content
+            // view's superview is the frame view, whose coordinates are the
+            // window's own — so the raw window location is the right point.
+            let hit = contentView?.hitTest(event.locationInWindow)
+            Telemetry.log(.permission, "setup_click", [
+                "phase": event.type == .leftMouseDown ? "down" : "up",
+                "hit": hit.map { String(describing: type(of: $0)) } ?? "none",
+                "app_active": wasActive ? "true" : "false",
+                "key": isKeyWindow ? "true" : "false",
+            ])
+        }
+        super.sendEvent(event)
+    }
 }
 
 /// Bridges the VC's Done tap back to the window controller across the

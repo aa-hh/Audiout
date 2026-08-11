@@ -264,9 +264,18 @@ public final class SetupFlowModel {
             return SetupAllowResult(.settingsOpened, .loginItems)
 
         case .remoteControl:
-            // Accessibility's own prompt is the ONLY path that highlights this
-            // app in the list, so a retry re-primes instead of deep-linking
-            // (documented exception — see AudiouterOnboardingUI/AGENTS.md).
+            // The FIRST fire has to be the prompt, because prompting is what
+            // REGISTERS this app's row in the Accessibility list at all — a cold
+            // deep link would drop the user on a list with no Audiouter row to
+            // switch on. Once that prompt is spent (`.requested`, the same
+            // condition the button's two-mode flip reads) asking again silently
+            // no-ops, so the retry deep-links like every other step. Re-priming
+            // instead was worth an extra window and an extra click only while
+            // the alert was believed to highlight us in that list, which no live
+            // run has ever shown it doing — see this app's onboarding AGENTS.md.
+            if setup.remoteControlStatus == .requested {
+                return SetupAllowResult(.settingsFallbackDenied, .settingsPane(.accessibility))
+            }
             setup.primeRemoteControl()
             return SetupAllowResult(setup.remoteControlStatus == .granted ? .promptTriggered : .probeTimeout)
         }

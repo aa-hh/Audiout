@@ -221,6 +221,13 @@ func run() async -> Int32 {
         // the demo swaps to the Settings-pane miniature.
         await snapshot(appearanceName: name, label: "\(tag)-denied",
                        world: SnapshotWorld(audio: .denied, allow: [.audio]), outDir: outDir)
+        // Remote Control asked and is still waiting: its Allow has become the
+        // re-fire, and the demo is the TWO-STAGE handoff — settled on stage
+        // one, the ask with its "Open System Settings" button.
+        await snapshot(appearanceName: name, label: "\(tag)-remote-control-retry",
+                       world: SnapshotWorld(bluetooth: .granted, ptpHelper: .enabled,
+                                            allow: [.audio, .localNetwork, .remoteControl]),
+                       outDir: outDir)
         await snapshot(appearanceName: name, label: "\(tag)-complete",
                        world: completeWorld, outDir: outDir)
         await snapshot(appearanceName: name, label: "\(tag)-permission-lost",

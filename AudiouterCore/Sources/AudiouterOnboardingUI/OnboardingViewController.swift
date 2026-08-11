@@ -880,6 +880,10 @@ public final class OnboardingViewController: NSViewController {
     /// Which miniature the demo pane is showing.
     public var test_demoMode: DemoMode { _ = view; return demoPane.test_mode }
 
+    /// Which surface the two-stage retry is on, or `nil` if this step's demo is
+    /// a single surface.
+    public var test_demoHandoffStage: DemoHandoffStage? { _ = view; return demoPane.test_handoffStage }
+
     /// Whether the demo's timeline is running (the zero-idle-CPU rule).
     public var test_isDemoAnimating: Bool { _ = view; return demoPane.test_isAnimating }
 

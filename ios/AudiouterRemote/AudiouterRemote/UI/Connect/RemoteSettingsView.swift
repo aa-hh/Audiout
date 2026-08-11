@@ -31,7 +31,7 @@ struct RemoteSettingsView: View {
     // razor: DEBUG-only picker for the level-style concept sprint. When one
     // wins, delete this, `levelStylePicker`, and `LevelStyle` itself.
     #if DEBUG
-    @AppStorage(LevelStyle.storageKey) private var levelStyle: LevelStyle = .light
+    @AppStorage(LevelStyle.storageKey) private var levelStyle: LevelStyle = .standard
     #endif
     @State private var stagedBufferMs: Int?
     @State private var isApplyingBuffer = false

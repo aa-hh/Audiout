@@ -431,6 +431,11 @@ enum LevelStyle: String, CaseIterable, Identifiable {
     }
 
     static let storageKey = "debug.levelStyle"
+
+    /// What a fresh install shows. Both `@AppStorage` sites take their default
+    /// from here, so the row and the picker cannot disagree about what the app
+    /// looks like before anyone has picked anything.
+    static let standard: LevelStyle = .dial
 }
 
 /// V2 — the level as a gold arc around the speaker's own halo ring.
@@ -443,30 +448,64 @@ enum LevelStyle: String, CaseIterable, Identifiable {
 ///
 /// Track `well` rather than the halo's usual `ring`: a gold arc on `ring`
 /// measures 1.12:1 in light, which is no arc at all. On `well` it is 3.04:1
-/// light / 10.51:1 dark, over the 3:1 floor in both.
+/// light / 10.51:1 dark, over the 3:1 floor in both, and the muted arc's `rim`
+/// is 3.46:1 / 4.82:1 on the same track.
 ///
-/// Twelve o'clock to twelve o'clock, clockwise — the way every dial a person
-/// has ever turned reads, and the way the winding haptic at either rail lands.
+/// A KNOB, NOT A FULL CIRCLE, and the routed dot is why: ``DeviceRowView``'s
+/// `routedDot` sits on the halo's lower right and is gold too, so any arc that
+/// reaches that angle merges with it into one shape at 44 pt. So the arc gets a
+/// physical volume knob's travel and a permanent dead zone, and the dead zone
+/// is centred on the dot — which puts the dot inside the gap at every value,
+/// both stops included.
 struct LevelDial: View {
     let fraction: CGFloat
     let muted: Bool
     let dragging: Bool
 
-    private var sweep: Double { Double(max(0, min(1, fraction))) * 360 }
+    /// Where the gap's centre sits, in degrees clockwise from 12 o'clock.
+    ///
+    /// It is where the dot is: an 11 pt disc, `bottomTrailing` of the 44 pt
+    /// halo, offset (1, −2), which puts its centre 17.5 pt right of and 14.5 pt
+    /// below the halo's centre — 129.6° round from straight up, or about 4:19
+    /// on a clock face.
+    static let gapCenter: Double = 129.6
+
+    /// A knob's own convention, turned to face the dot: 7 o'clock to 5 o'clock
+    /// is 300° of travel and a 60° dead zone, and here the dead zone lands on
+    /// the dot rather than at the bottom. 30° either side of the dot puts each
+    /// stop 11.4 pt from its centre — 5.9 pt clear of the disc's outer edge,
+    /// 7.4 pt clear of the gold inside it, at 0 and at 100 alike.
+    static let travel: Double = 300
+
+    private var lineWidth: CGFloat { dragging ? 3.5 : 2.5 }
+
+    /// The travel, and the lit part of it, as fractions of the whole circle.
+    private var span: CGFloat { CGFloat(Self.travel / 360) }
+    private var lit: CGFloat { span * max(0, min(1, fraction)) }
 
     var body: some View {
         ZStack {
-            Circle().strokeBorder(WarmSignal.well, lineWidth: dragging ? 3.5 : 2.5)
-            Circle()
-                .trim(from: 0, to: max(0, min(1, fraction)))
-                .stroke(muted ? WarmSignal.rim : WarmSignal.gold,
-                        style: StrokeStyle(lineWidth: dragging ? 3.5 : 2.5, lineCap: .butt))
-                // `trim` starts at 3 o'clock; a dial starts at 12.
-                .rotationEffect(.degrees(-90))
-                .padding(dragging ? 1.75 : 1.25)
+            knob(to: span).stroke(WarmSignal.well, style: stroke)
+            knob(to: lit).stroke(muted ? WarmSignal.rim : WarmSignal.gold, style: stroke)
         }
+        .padding(lineWidth / 2)
         .accessibilityHidden(true)
-        .animation(nil, value: sweep)
+        .animation(nil, value: fraction)
+    }
+
+    private var stroke: StrokeStyle {
+        // Butt caps: the fill's end IS the value, and a round cap would put a
+        // dot of gold at the min stop even at zero.
+        StrokeStyle(lineWidth: lineWidth, lineCap: .butt)
+    }
+
+    /// `trim` starts at 3 o'clock and runs clockwise, so the whole path is
+    /// turned until its start lands on the knob's min stop — 30° clockwise of
+    /// the gap's centre.
+    private func knob(to end: CGFloat) -> some Shape {
+        Circle()
+            .trim(from: 0, to: end)
+            .rotation(.degrees(Self.gapCenter + (360 - Self.travel) / 2 - 90))
     }
 }
 

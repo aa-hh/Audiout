@@ -67,7 +67,7 @@ struct DeviceRowView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     // razor: DEBUG-only, for the concept sprint. See `LevelStyle`.
-    @AppStorage(LevelStyle.storageKey) private var levelStyle: LevelStyle = .light
+    @AppStorage(LevelStyle.storageKey) private var levelStyle: LevelStyle = .standard
 
     /// D9's failure card takes the whole control slot: a `"failed"` device
     /// gets headline / details / Try Again INSTEAD of volume + mute. This is
@@ -493,6 +493,11 @@ struct DeviceRowView: View {
     /// doc:92, doc:1849-1850 — lit when an app route points here. The gold fill
     /// against the unlit `socket` colour IS the signal; the document's glow was
     /// a zero-offset coloured halo, which is decoration rather than depth.
+    ///
+    /// WHERE THIS SITS IS LOAD-BEARING: ``LevelDial`` cuts its knob gap around
+    /// this dot, at the angle these numbers put it (``LevelDial/gapCenter``).
+    /// Move the dot and the gap has to move with it, or the two gold shapes
+    /// merge again.
     private var routedDot: some View {
         Circle()
             .fill(isRouted ? WarmSignal.gold : WarmSignal.socket)

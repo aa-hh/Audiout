@@ -1902,23 +1902,19 @@ public final class PopoverController: NSObject {
         // or passes `blocked`/`blockReason` to the row (both default to
         // false/nil in `DeviceRowView.apply`, which is exactly the always-un-blocked
         // behavior this now produces).
-        // Route-armed inputs (spec §3.3, S2): membership is evaluated against
-        // the ACTIVE Main Out target — the Selected set when Main Out targets
-        // Selected Devices, the group's member set when it targets a saved
-        // group (so a playing group member lights its dot even while its
-        // Selected checkbox dims in the dormant card). Master mute is folded
-        // in so it drains every device dot.
-        let inActiveTarget: Bool
-        switch controller.mainOut {
-        case .selectedDevices:
-            inActiveTarget = selected
-        case .group(let id):
-            inActiveTarget = controller.groups.first { $0.id == id }?
-                .memberIDs.contains(device.id) ?? false
-        }
+        // Route-armed inputs (spec §3.3, S2): membership against the ACTIVE Main
+        // Out target is `isMainOutMember` — the Selected set when Main Out
+        // targets Selected Devices, the group's member set when it targets a
+        // saved group (so a playing group member lights its dot even while its
+        // Selected checkbox dims in the dormant card). The SAME predicate drives
+        // `controllable:` below: a playing group member's slider and mute stay
+        // live, while a device stranded in the dormant Selected set — which Main
+        // Out sends nothing to — does not. Master mute is folded in so it drains
+        // every device dot.
+        let inActiveTarget = controller.isMainOutMember(device.id)
         row.apply(device,
                   selected: selected,
-                  controllable: controller.isSpeakerSelected(device.id) || isRedirectTarget(device.id),
+                  controllable: controller.isMainOutMember(device.id) || isRedirectTarget(device.id),
                   selectionDimmed: dimmed,
                   routedAppNames: appRouting.routedAppNames(for: device.id),
                   liveAppNames: liveRoutedAppNames[device.id] ?? [],
@@ -2395,10 +2391,11 @@ public final class PopoverController: NSObject {
         }
     }
 
-    /// Whether the user currently intends audio on `id` — a Selected-Devices/group
-    /// member, or an app-redirect target. The same predicate `applySelectionState`
-    /// uses for `controllable:`, so a row that renders live keeps its panel and one
-    /// that doesn't loses it.
+    /// Whether the user currently intends audio on `id` — a Selected-Devices
+    /// member, or an app-redirect target. Deliberately NOT the same predicate
+    /// `applySelectionState` uses for `controllable:`: that one is group-aware
+    /// (`isMainOutMember`, so a playing group member stays adjustable), while
+    /// this still reads the Selected set plus redirect targets.
     private func wantsAudio(_ id: String) -> Bool {
         (groupController?.isSpeakerSelected(id) ?? false) || isRedirectTarget(id)
     }

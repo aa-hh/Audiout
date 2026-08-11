@@ -626,6 +626,14 @@ import AudiouterProtocol
         #expect(seen == [1, 2, 3])
     }
 
+    @Test func theDetentStaysTheWeakerOfTheTwoClicks() {
+        // The rails fire at full strength for their weight, so a notch that
+        // reached 1.0 would make running out of track and crossing a detent
+        // feel like the same event. The strength itself was settled by thumb;
+        // this is the bound that any future retune has to stay inside.
+        #expect(WarmSignal.FaderDetents.intensity < 1)
+    }
+
     @Test func theDetentStepMatchesTheSpokenAdjustableStep() {
         // One notch means one thing whether it is felt or spoken: the rows'
         // `accessibilityAdjustableAction` moves by 5 too.

@@ -223,7 +223,13 @@ enum WarmSignal {
         /// convention — was the other candidate and is rejected for exactly
         /// this: it is a fixed strength with no defined relationship to the
         /// tick already on this control.
-        static let intensity: Double = 0.4
+        ///
+        /// The number is a thumb's answer, not a derivation — it was set by
+        /// dragging on hardware, because a phone in a case transmits less than
+        /// a simulator suggests. Two bounds hold it: it must stay under the
+        /// rails' 1.0, or a stop and a crossing become the same event; and it
+        /// cannot be re-judged anywhere but on a device.
+        static let intensity: Double = 0.52
 
         private var lastDetent: Int?
         private var lastTickedAt: ContinuousClock.Instant?

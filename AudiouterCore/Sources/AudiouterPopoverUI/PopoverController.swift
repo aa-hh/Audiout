@@ -476,7 +476,7 @@ public final class PopoverController: NSObject {
     /// The device ids currently showing the energize PENDING beat (item 9): the
     /// members of the just-switched Main-Audio target that hadn't started
     /// connecting yet (`connectionState == .off`) at the switch instant. Their
-    /// rows render `MembershipBusView.Node.pending` (ember dashed, on-spine) —
+    /// rows render `MembershipBusView.Node.connecting` (gold dashed, on-spine) —
     /// the instant "press-play" drop — until their real `connectionState`
     /// advances (`→ .connecting`, then `→ .member`), at which point
     /// `reconcileEnergize()` prunes them and the model state carries the node.
@@ -494,9 +494,25 @@ public final class PopoverController: NSObject {
     /// Devices" or a saved group's name), for the VoiceOver announcements.
     private var energizeTargetName: String?
 
-    /// The last VoiceOver announcement the energize posted — a deterministic
-    /// test seam (headless runs can't observe the real accessibility post).
+    /// The last VoiceOver announcement posted — the energize milestones and the
+    /// live-removal offer share this one channel. A deterministic test seam
+    /// (headless runs can't observe the real accessibility post).
     private var lastEnergizeAnnouncement: String?
+
+    /// The device currently offering the transient "Removed — Undo" (the
+    /// live-removal safety net), and the timer that retires the offer.
+    ///
+    /// The OFFER IS HOST STATE, not row state, on purpose: a membership toggle
+    /// repaints — and sometimes rebuilds — the whole card, so a row-owned pill
+    /// would be destroyed by the very click that raised it. Keyed by device id,
+    /// it also expires for free on the cases that must end it: a row rebuilt for
+    /// a different device never matches the id, and a device that becomes a
+    /// member again renders no offer (`applySelectionState`).
+    private var removalUndoDeviceID: String?
+    private var removalUndoTimer: Timer?
+
+    /// How long the live-removal offer stands before it retires itself.
+    private static let removalUndoWindow: TimeInterval = 5
 
     /// The mounted in-place refusal-note row per BLOCKED device id (spec §4.6):
     /// a body-click on a local-mix-blocked row toggles a one-line note carrying
@@ -1200,7 +1216,7 @@ public final class PopoverController: NSObject {
         // spine runs Main Audio → the LOWEST SELECTED node; rows below it render
         // BARE (no rail) — spec v4 §Call-1. Runs even with no devices (the overlay
         // then draws just the Main Audio origin hook).
-        updateBusRailExtents()
+        updateRailRows()
 
         // 3. Applications card — rendered LAST (below Selected Devices), one
         // `AppRowView` per routed app in stable `appRoutes` order, then the ±
@@ -1316,8 +1332,8 @@ public final class PopoverController: NSObject {
     /// The devices `rebuild()` would mount rows for right now: visible, and
     /// inside an EXPANDED subsection. Compared against `deviceRowsByID` to
     /// decide whether `update(devices:)` needs a structural rebuild. The rail
-    /// deliberately does NOT read this — its terminus is the lowest selected
-    /// device in the FULL order (`updateBusRailExtents`).
+    /// deliberately does NOT read this — its band ends at the last device in the
+    /// FULL order (`updateRailRows`).
     private func renderedDeviceOrder() -> [Device] {
         deviceSections().filter { !isSubsectionCollapsed($0.title) }.flatMap(\.devices)
     }
@@ -1406,7 +1422,7 @@ public final class PopoverController: NSObject {
         if collapsed {
             dropSubsectionRowModel(section)
             reconcileSyncDrawer(animated: false)
-            updateBusRailExtents()
+            updateRailRows()
         }
         panel.setSubsectionCollapsed(title: title, collapsed: collapsed, animated: true) {
             // EXPAND only, and before the panel measures: the rows, then the
@@ -1416,7 +1432,7 @@ public final class PopoverController: NSObject {
             reconcileDiagnosisPanels(animated: false)
             reconcileBTAlignmentPanels(animated: false)
             reconcileSyncDrawer(animated: false)
-            updateBusRailExtents()
+            updateRailRows()
         }
     }
 
@@ -1586,7 +1602,7 @@ public final class PopoverController: NSObject {
         // drop-to-pending is an accessibility affordance, independent of the
         // motion setting: a VoiceOver user with Reduce Motion on still hears the
         // switch even though the sweep isn't drawn.
-        announceEnergize("Switching Main Audio to \(energizeTargetName ?? "the new source")")
+        postAnnouncement("Switching Main Audio to \(energizeTargetName ?? "the new source")")
         // Reduce Motion removes the sweep: raise no beat, so every member snaps
         // straight to its resolved node (the rows' own gate is belt-and-braces).
         guard !reduceMotionActive else {
@@ -1615,7 +1631,7 @@ public final class PopoverController: NSObject {
         var summary = "\(energizeTargetName ?? "Main Audio") ready"
         if connected > 0 { summary += " — \(connected) connected" }
         if failed > 0 { summary += ", \(failed) didn’t connect" }
-        announceEnergize(summary)
+        postAnnouncement(summary)
     }
 
     /// Whether a device is still waiting to come online (`.off`, or absent from
@@ -1666,11 +1682,12 @@ public final class PopoverController: NSObject {
         }
     }
 
-    /// Post a VoiceOver announcement for an energize milestone (the transition's
-    /// accessibility equivalent — the visual sweep has no other spoken form), and
-    /// record it for the deterministic test seam. High priority so it isn't
-    /// dropped mid-scan. No-op-safe headlessly (the post simply reaches no AT).
-    private func announceEnergize(_ message: String) {
+    /// Post a VoiceOver announcement for a Main-Audio milestone — the energize
+    /// transition/settle, or the live-removal offer — and record it for the
+    /// deterministic test seam. These states have no other spoken form. High
+    /// priority so it isn't dropped mid-scan. No-op-safe headlessly (the post
+    /// simply reaches no AT).
+    private func postAnnouncement(_ message: String) {
         lastEnergizeAnnouncement = message
         NSAccessibility.post(
             element: panel.view,
@@ -1679,6 +1696,56 @@ public final class PopoverController: NSObject {
                 .announcement: message,
                 .priority: NSAccessibilityPriorityLevel.high.rawValue,
             ])
+    }
+
+    // MARK: Live-removal undo (the "Removed — Undo" offer)
+
+    /// Whether unchecking `id` right now would silence a room that is AUDIBLE
+    /// this instant — the only case that earns the transient undo. All three
+    /// terms are read before the edit:
+    ///
+    ///   liveRemoval = isMainOutMember(id) ∧ id is `.connected`
+    ///               ∧ the Main Audio spine is armed
+    ///
+    /// The spine term is `MainOutRowView`'s own `isSpineLive` recipe (a
+    /// connected, unmuted target — or the local-only resting case, where audio
+    /// genuinely plays with no AirPlay handshake to report). An idle removal
+    /// gets nothing: no pill, no timer, no announcement.
+    private func isLiveMainAudioRemoval(_ id: String) -> Bool {
+        guard let controller = groupController, controller.isMainOutMember(id) else { return false }
+        guard case .connected = devicesByID[id]?.connectionState else { return false }
+        if case .connected = mainOutConnectionState(controller), !controller.isMainOutMuted {
+            return true
+        }
+        return mainOutIsLocalOnlyArmed(controller)
+    }
+
+    /// Raise the offer on `id` and start its 5 s retirement timer. The pill's
+    /// spoken equivalent goes out on the same channel the energize milestones
+    /// use — the visual has no other spoken form.
+    private func offerRemovalUndo(for id: String) {
+        removalUndoTimer?.invalidate()
+        removalUndoDeviceID = id
+        postAnnouncement("Removed \(devicesByID[id]?.name ?? "device") from Main Audio")
+        removalUndoTimer = Timer.scheduledTimer(withTimeInterval: Self.removalUndoWindow,
+                                                repeats: false) { [weak self] _ in
+            self?.expireRemovalUndo()
+        }
+    }
+
+    /// The timer's end of the offer: drop it, then repaint so the pill goes.
+    private func expireRemovalUndo() {
+        guard removalUndoDeviceID != nil else { return }
+        clearRemovalUndo()
+        refreshDeviceRows()
+    }
+
+    /// Drop the offer without repainting — for callers that repaint anyway (a
+    /// membership edit) or that are tearing the surface down.
+    private func clearRemovalUndo() {
+        removalUndoTimer?.invalidate()
+        removalUndoTimer = nil
+        removalUndoDeviceID = nil
     }
 
     /// Live Reduce Motion value, overridable for headless determinism.
@@ -1928,7 +1995,11 @@ public final class PopoverController: NSObject {
                   iconSymbolName: deviceIconController?.symbolName(for: device),
                   syncTrimMs: btSyncTrim(for: device),
                   syncTrimIsSet: btSyncTrimIsSet(for: device),
-                  syncDrawerExpanded: expandedSyncDeviceID == device.id)
+                  syncDrawerExpanded: expandedSyncDeviceID == device.id,
+                  // The offer stands only while the device is genuinely OUT —
+                  // re-joining the mix (undo, or a re-select from anywhere)
+                  // withdraws it without needing its own edge to watch.
+                  removalUndoOffered: removalUndoDeviceID == device.id && !selected)
     }
 
     /// A Bluetooth row's current SYNC trim: the session cache first (the
@@ -2095,56 +2166,34 @@ public final class PopoverController: NSObject {
             guard let device = devicesByID[id] else { continue }
             applySelectionState(to: row, device: device)
         }
-        // The rail extent tracks the checked set, which a mid-open toggle can
-        // change (v4 §Call-1), so recompute it on every in-place repaint too.
-        updateBusRailExtents()
+        // The rail's dormancy and its far end both track state a mid-open toggle
+        // can change (v4 §Call-1), so re-point it on every in-place repaint too.
+        updateRailRows()
     }
 
-    /// Set each mounted device row's membership-rail extent (Warm Signal v4
-    /// §Call-1): the spine runs Main Audio (the origin hook) → the LOWEST
-    /// SELECTED node. Rows within that span carry a through-rail (the terminus
-    /// draws none below it); rows BELOW the lowest selected node render BARE —
-    /// a hollow clickable node with no rail — so the rail's length reads as "how
-    /// far down the mix reaches."
+    /// Re-point the membership rail at the mounted device rows (Warm Signal v4
+    /// §Call-1). The rail's two ends are the overlay's to derive: the recessed
+    /// channel spans the whole device band, and the gold signal inside it reaches
+    /// the LOWEST member. What the host still owns is WHICH rows exist, WHERE the
+    /// rail is cut, and whether the whole path is dormant.
     ///
-    /// The terminus is the lowest selected device in the FULL order
-    /// (`deviceSections()`), whether or not a collapsed subsection is currently
-    /// hiding it — and when it IS hidden the rail cuts at that subsection's
+    /// The cut belongs to the subsection holding the band's LAST device — in the
+    /// FULL order (`deviceSections()`), whether or not a collapsed subsection is
+    /// currently hiding it — so a collapse cuts the rail at that subsection's
     /// header with a dot, exactly as a collapsed CARD already cuts at its own.
-    /// Indexing the RENDERED order instead silently pulled the terminus up to a
-    /// higher visible row with no dot, and — when every selected device sat in
-    /// the collapsed subsection — left no terminus at all, so the rail rendered
-    /// as a hook curling off Main Audio into mid-air. A device the BT-LIST
-    /// filter never listed is a different matter: it is not in `deviceSections()`
-    /// at all, so it can never be the terminus.
-    private func updateBusRailExtents() {
+    /// Indexing the RENDERED order instead silently pulled the far end up to a
+    /// higher visible row with no dot, so the rail read as ending in mid-air. A
+    /// device the BT-LIST filter never listed is a different matter: it is not in
+    /// `deviceSections()` at all, so it can never be the band's end.
+    private func updateRailRows() {
         let sections = deviceSections()
         let fullOrder = sections.flatMap(\.devices)
-        let lastSelected = fullOrder.lastIndex {
-            groupController?.isSpeakerSelected($0.id) ?? false
-        }
-        var railRows: [DeviceRowView] = []
-        for (i, device) in fullOrder.enumerated() {
-            // Only MOUNTED rows carry rail state — a collapsed subsection's rows
-            // are already out of the model, which is what leaves them out of the
-            // overlay's stop list while the terminus below them still counts.
-            guard let row = deviceRowsByID[device.id] else { continue }
-            if let last = lastSelected {
-                // Within the span: rail above through the terminus; rail below
-                // only until it. Below the terminus: bare (no rail either side).
-                row.setBusRail(above: i <= last, below: i < last)
-            } else {
-                // Degenerate (no selected device — the floor should prevent this):
-                // every node bare, no spine.
-                row.setBusRail(above: false, below: false)
-            }
-            railRows.append(row)
-        }
-        // Where the rail is CUT: the terminus device's own subsection while that
-        // subsection is collapsed, else nothing — the whole device card stays
-        // the far end, as before.
-        let terminusID = lastSelected.map { fullOrder[$0].id }
-        let cutSubsectionTitle = terminusID.flatMap { id in
+        // Only MOUNTED rows carry a node — a collapsed subsection's rows are
+        // already out of the model, which is what leaves them out of the overlay's
+        // stop list while the cut below them still counts.
+        let railRows = fullOrder.compactMap { deviceRowsByID[$0.id] }
+        let bandEndID = fullOrder.last?.id
+        let cutSubsectionTitle = bandEndID.flatMap { id in
             sections.first {
                 isSubsectionCollapsed($0.title) && $0.devices.contains { $0.id == id }
             }?.title
@@ -2154,7 +2203,8 @@ public final class PopoverController: NSObject {
         panel.setRailRows(mainOut: mainOutRow, deviceRows: railRows,
                           originCardTitle: Self.mainAudioCardTitle,
                           deviceCardTitle: Self.outputDevicesCardTitle,
-                          cutSubsectionTitle: cutSubsectionTitle)
+                          cutSubsectionTitle: cutSubsectionTitle,
+                          dormant: devicesCardDivergence() != nil)
     }
 
     // MARK: OUTPUT DEVICES "+" menu (BT-UI / BT-LIST)
@@ -3188,8 +3238,15 @@ public final class PopoverController: NSObject {
     /// Whether an energize sequence is mid-flight.
     public var test_energizeActive: Bool { energizeActive }
 
-    /// The last VoiceOver announcement the energize posted (start or settle).
+    /// The last VoiceOver announcement posted (energize start/settle, or the
+    /// live-removal offer — one channel).
     public var test_lastEnergizeAnnouncement: String? { lastEnergizeAnnouncement }
+
+    /// The device currently offering the transient "Removed — Undo", if any.
+    public var test_removalUndoDeviceID: String? { removalUndoDeviceID }
+
+    /// Fire the offer's retirement timer now (headless runs don't wait 5 s).
+    public func test_expireRemovalUndo() { expireRemovalUndo() }
 
     /// Force a specific pending set + repaint — the snapshot harness stages a
     /// frozen mid-sequence frame with it (bypassing the async connection
@@ -3335,11 +3392,32 @@ extension PopoverController: DeviceRowView.Delegate {
     }
 
     public func deviceRow(_ row: DeviceRowView, didToggleEnabled on: Bool, for id: String) {
+        // Read the "was this room live?" facts BEFORE the edit — after it, the
+        // removed device is no longer a member and the spine it was feeding may
+        // already have gone quiet.
+        let wasLiveRemoval = !on && isLiveMainAudioRemoval(id)
         // Compose the Selected Devices set (SPEC §9b). Does NOT route unless Main
         // Out targets Selected Devices; the model handles the local-mix block +
         // auto-swap and returns a result we present.
         let result = groupController?.setDeviceSelected(id, on) ?? .ok
+        // Any membership edit retires a standing offer; a live removal raises a
+        // fresh one. A refused edit changed nothing, so it offers nothing.
+        if wasLiveRemoval && result.refusalReason == nil {
+            offerRemovalUndo(for: id)
+        } else {
+            clearRemovalUndo()
+        }
         handleSelection(result, deviceID: id)
+    }
+
+    /// The user clicked the transient offer: put the membership back through
+    /// the checkbox's OWN delegate path, so there is no second re-add
+    /// implementation that could diverge from a plain re-check. The membership
+    /// change speaks through the existing row plumbing — no extra announcement.
+    public func deviceRowDidRequestUndoRemoval(_ row: DeviceRowView) {
+        let id = row.device.id
+        clearRemovalUndo()
+        deviceRow(row, didToggleEnabled: true, for: id)
     }
 
     /// The blocked local-mix row's body-click (spec §4.6): surface the refusal
@@ -3873,6 +3951,8 @@ extension PopoverController: AppRowView.Delegate {
         hostIsShown = false
         removeDeselectMonitor()
         selectedAppBundleID = nil
+        // The live-removal offer never outlives the surface it was made on.
+        clearRemovalUndo()
         for row in deviceRowsByID.values { row.resetLevel() }
         mainOutRow.resetLevel()
         for row in appRowsByBundleID.values { row.resetLevel() }

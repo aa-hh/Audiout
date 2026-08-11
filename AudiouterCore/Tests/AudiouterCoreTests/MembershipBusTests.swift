@@ -115,16 +115,22 @@ import AudiouterCore
                        "zero layout shift across a membership toggle (R7)")
     }
 
-    // MARK: Terminating rail (§4.1 "runs to the last device row's node")
+    // MARK: The row states a NODE, never an extent
 
-    @Test func terminatingRowDrawsNoRailBelow() {
+    /// Where the rail begins and ends is the overlay's to derive from the node
+    /// kinds it is handed (the channel spans the whole band; the signal stops at
+    /// the lowest member). A row therefore contributes ONE thing — its node — and
+    /// that contribution must track the drawn node through an in-place repaint,
+    /// or the rail resolves against stale geometry.
+    @Test func theRowContributesItsDrawnNodeAndNoExtent() {
         let row = makeBusRow()
-        #expect(row.test_busRailBelow == true, "an ordinary row rails below its node")
-        row.setBusTerminates(true)
-        #expect(row.test_busRailBelow == false, "the last node terminates the line")
-        // Terminate-state is structural: it survives an in-place repaint.
         row.apply(makeDevice(), selected: true, controllable: true)
-        #expect(row.test_busRailBelow == false, "termination survives a model re-apply")
+        #expect(row.railNode == .member, "a member row contributes its member node")
+        #expect(row.railNode == row.test_busNode, "the contribution IS the drawn node")
+
+        row.apply(makeDevice(), selected: false)
+        #expect(row.railNode == .nonMember, "and follows an in-place re-apply")
+        #expect(row.railNode == row.test_busNode)
     }
 
     // MARK: Dormant de-emphasis — tint, never alpha (§4.7; the host scopes WHO dims)
@@ -183,6 +189,53 @@ import AudiouterCore
         row.apply(makeDevice(), selected: true, controllable: true)
         #expect(row.test_membershipAXLabel == "Include Test Speaker in main audio",
                        "the label is identical checked and unchecked — the value carries the state")
+    }
+
+    // MARK: The node's clickability (generous hit target + hover affordance)
+
+    @Test func membershipHitTargetCoversTheWholeSocket() {
+        let row = makeBusRow()
+        row.frame = NSRect(x: 0, y: 0, width: 500, height: DeviceRowView.rowHeight)
+        row.apply(makeDevice(), selected: true, controllable: true)
+        guard let hit = row.test_membershipHitRect(), let socket = row.test_socketRect() else {
+            Issue.record("a bus row must expose both rects"); return
+        }
+        #expect(hit.contains(socket),
+                "the invisible checkbox's target covers the drawn socket, not just the node disc")
+        #expect(hit.height == row.bounds.height, "…over the full row height")
+        #expect(hit.maxX <= PopoverColumnGrid.firstElementLeading(indented: false),
+                "…and stops at the icon column, so it steals nothing from the row's other controls")
+    }
+
+    @Test func gutterHoverBrightensTheSocketRim() {
+        let row = makeBusRow()
+        row.apply(makeDevice(), selected: false, controllable: true)
+        #expect(row.test_socketRimColor == Tokens.Color.faderRim, "at rest the socket wears the milled rim")
+        row.test_setGutterHovered(true)
+        #expect(row.test_socketRimColor == Tokens.Color.gold,
+                "hovering the gutter wakes the socket in the node's own action tone")
+        row.test_setGutterHovered(false)
+        #expect(row.test_socketRimColor == Tokens.Color.faderRim, "and it settles back on exit")
+    }
+
+    @Test func blockedRowNeverInvitesTheClick() {
+        let row = makeBusRow()
+        row.apply(makeDevice(), selected: false, blocked: true, blockReason: "no mixed set")
+        row.test_setGutterHovered(true)
+        #expect(row.test_busNode == .blocked)
+        #expect(row.test_socketRimColor == Tokens.Color.faderRim,
+                "a disabled membership control must not offer a hover it would refuse")
+    }
+
+    @Test func modelRefreshClearsTheGutterHover() {
+        let row = makeBusRow()
+        row.apply(makeDevice(), selected: true, controllable: true)
+        row.test_setGutterHovered(true)
+        #expect(row.test_socketRimColor == Tokens.Color.gold)
+        // Row reuse (any `apply`) drops the transient hover, exactly like the
+        // row's own hover wash.
+        row.apply(makeDevice(id: "dev-2"), selected: false)
+        #expect(row.test_socketRimColor == Tokens.Color.faderRim)
     }
 
     @Test func nonBusCheckboxKeepsItsLegacyVoiceOverLabel() {

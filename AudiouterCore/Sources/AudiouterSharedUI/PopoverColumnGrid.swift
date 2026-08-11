@@ -432,18 +432,52 @@ public enum PopoverColumnGrid {
     /// consecutive nodes read airy. Applied to the straight through-rail (member /
     /// connecting / pending / failed nodes, which sit ON the spine).
     public static let busNodeRailGap: CGFloat = 3
-    /// How far past the node radius the hop-arc bows when the line detours a
-    /// HOLLOW non-member node. Warm Signal v4 GREW this (4.5 → 6.5) so a skipped
-    /// node gets generous berth (spec §Call-1 "a wider, rounder bypass arc than
-    /// v3"). The detour semicircle's radius is `busNodeDiameter/2 + busDetourBulge`;
-    /// it bows to the LEADING (panel-edge) side, away from the icon column.
-    public static let busDetourBulge: CGFloat = 6.5
+    /// Full width of the RECESSED CHANNEL the rail is milled into (rim to rim) —
+    /// the groove that carries the signal down the gutter. It is drawn as two
+    /// strokes on one path (`faderRim` at this width, then `well` 2 pt narrower),
+    /// so the channel keeps a 1 pt rim on each side, exactly the recipe
+    /// `WarmFaderCell` uses for the fader trough — the rail and the faders are
+    /// the same milled material.
+    public static let railGrooveWidth: CGFloat = 6
+    /// Radius of the SOCKET pad every node sits in — `busNodeDiameterSelected/2`
+    /// plus a little air. CONSTANT for every node kind on purpose: the socket is
+    /// infrastructure, only the plug (the node disc) changes with selection, so an
+    /// 11 pt hollow node reads as an EMPTY socket inviting a plug while the 15 pt
+    /// member disc sits proud in the identical socket.
+    public static let railSocketPadRadius: CGFloat = 10
+    /// Radius of the detour arc that bows around an off-spine node — the socket
+    /// pad plus half the channel, so the arc's inner rim just clears the pad.
+    /// ONE radius serves BOTH the groove and the signal, because the signal rides
+    /// centred in the channel: two radii would let the gold line drift off its
+    /// own groove. Derived, so re-sizing either term keeps the pair in lockstep.
+    public static var railDetourRadius: CGFloat {
+        railSocketPadRadius + railGrooveWidth / 2
+    }
     /// Width of the non-interactive bus-overlay column view a row hosts, centered
-    /// on `railGutterCenterX`. Wide enough to contain the leading-side hop-arc
-    /// (`busNodeDiameter/2 + busDetourBulge` from centre) plus the line width,
-    /// without clipping. Spans the full row height so stacked rows' rail segments
-    /// read as one continuous line.
+    /// on `railGutterCenterX`. Wide enough to contain the node's socket pad
+    /// (`railSocketPadRadius` from centre) plus its rim, without clipping — the
+    /// detour arcs are drawn by the panel-level overlay, not here. Spans the full
+    /// row height so stacked rows' rail segments read as one continuous line.
     public static let busColumnWidth: CGFloat = 30
+    /// Minimum hit height of the inline "Undo" link button in the transient
+    /// live-removal offer — a text button still has to be a comfortable target,
+    /// so its box is floored here rather than left at the string's own height.
+    public static let removalUndoButtonHeight: CGFloat = 24
+    /// Width of the membership checkbox's invisible HIT box on a bus row — the
+    /// whole leading gutter, so the click target matches the region a user reads
+    /// as "the node", not just the drawn disc. SYMMETRIC about
+    /// `railGutterCenterX` on purpose: `InvisibleSwitchCell` centres the node's
+    /// focus ring on the cell frame, so an asymmetric box would drag the ring off
+    /// the node. Derived from the same terms as `busGutterWidth`, so it reaches
+    /// exactly to the icon column's leading edge and widens with the gutter.
+    public static var busHitTargetWidth: CGFloat {
+        2 * (busNodeDiameter / 2 + busNodeClearance - busHitTargetIconGap)
+    }
+    /// How far short of the icon column the hit box stops. AppKit's layout
+    /// rounding grid shifts a half-point frame by up to 0.5 pt (and varies per
+    /// run), so a box derived to land EXACTLY on the icon's leading edge lands
+    /// under it half the time — this pulls it clear.
+    public static let busHitTargetIconGap: CGFloat = 1
     /// Diameter of the small filled dot the rail draws where it is CUT SHORT by a
     /// collapsed (or mid-collapse clipping) section — the terminus marker that
     /// says "the rail stops HERE, at this section's header, nothing below it is

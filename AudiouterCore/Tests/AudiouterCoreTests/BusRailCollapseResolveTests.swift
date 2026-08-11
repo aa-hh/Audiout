@@ -21,8 +21,9 @@ import Testing
 @MainActor
 @Suite final class BusRailCollapseResolveTests: IsolatedSuite {
 
-    // A three-device span: two through-members then a terminus member, all under
-    // the Main Audio ring. Device clip fully expanded (floor below every node).
+    // A three-device band: two through-members, a member, then a NON-member below
+    // them — all under the Main Audio ring. Device clip fully expanded (floor
+    // below every node).
     private func expandedInput() -> RailPlan.Input {
         RailPlan.Input(
             gold: true,
@@ -31,11 +32,12 @@ import Testing
             originClipBand: 460...540,      // ring (500) sits inside → ring visible
             originHeaderY: 560,
             deviceSectionCollapsed: false,
-            deviceFloorY: 300,              // below every stop → no clip
+            deviceFloorY: 260,              // below every stop → no clip
             stops: [
-                .init(y: 420, node: .member, below: true, dimmed: false),
-                .init(y: 380, node: .member, below: true, dimmed: false),
-                .init(y: 340, node: .member, below: false, dimmed: false),  // natural terminus
+                .init(y: 420, node: .member),
+                .init(y: 380, node: .member),
+                .init(y: 340, node: .member),      // the signal's natural terminus
+                .init(y: 300, node: .nonMember),   // channel continues; signal does not
             ])
     }
 
@@ -45,9 +47,50 @@ import Testing
         let plan = RailPlan.resolve(expandedInput())
         #expect(plan.origin == .ring(centerY: 500, ringCenterX: 20, ringRadius: 15),
                        "expanded origin curves into the Main Audio ring")
-        #expect(plan.stops.count == 3, "every in-span node is drawn when expanded")
+        #expect(plan.stops.count == 4, "every node in the band is drawn when expanded")
         #expect(plan.terminusDotY == nil,
                      "expanded: the rail ends naturally at its lowest node — no cut dot")
+    }
+
+    // MARK: The two ends — full-band channel vs the signal's own terminus
+
+    @Test func theChannelSpansTheWholeBandWhileTheSignalStopsAtTheLowestMember() {
+        let plan = RailPlan.resolve(expandedInput())
+        #expect(plan.signalTerminusIndex == 2,
+                "the signal ends at the lowest MEMBER, not at the lowest node")
+        // The channel bows around that last non-member and ends on the far side of
+        // its detour — well below where the signal stopped.
+        #expect(abs(plan.grooveEndY - (300 - PopoverColumnGrid.railDetourRadius)) <= 0.001,
+                "the channel is milled past the last socket, whether or not it is a member")
+    }
+
+    @Test func aBandWithNoMembersIsAnEmptyChannel() {
+        var input = expandedInput()
+        input.stops = input.stops.map { .init(y: $0.y, node: .nonMember) }
+        let plan = RailPlan.resolve(input)
+        #expect(plan.signalTerminusIndex == nil, "no member ⇒ no signal to draw")
+        #expect(plan.stops.count == 4, "…but the channel and every socket are still there")
+        #expect(plan.grooveEndY < plan.railTopY)
+    }
+
+    @Test func theChannelEndsAtTheLowestSocketWhenThatNodeIsAMember() {
+        var input = expandedInput()
+        input.stops = Array(input.stops.dropLast())        // lowest node is a member
+        let plan = RailPlan.resolve(input)
+        #expect(abs(plan.grooveEndY - (340 + PopoverColumnGrid.railSocketPadRadius)) <= 0.001,
+                "the channel breaks AT the socket the signal runs into")
+    }
+
+    // MARK: Dormancy is ONE flag for the whole path
+
+    @Test func dormancyIsCarriedOnceForTheWholeRail() {
+        var input = expandedInput()
+        input.dormant = true
+        let plan = RailPlan.resolve(input)
+        #expect(plan.dormant, "the §4.7 condition rides the plan, not the individual stops")
+        #expect(RailPlan.resolve(expandedInput()).dormant == false)
+        #expect(plan.stops == RailPlan.resolve(expandedInput()).stops,
+                "dormancy changes the ink, never the geometry")
     }
 
     @Test func collapsedDeviceSectionCutsRailWithHeaderDotAndDropsAllNodes() throws {
@@ -63,6 +106,8 @@ import Testing
         let terminusDotY = try #require(plan.terminusDotY)
         #expect(abs(terminusDotY - 452) <= 0.001,
                        "the rail is cut with a terminus dot at the collapsed section floor (its header)")
+        #expect(abs(plan.grooveEndY - 452) <= 0.001,
+                       "the cut takes the CHANNEL with it — it never runs past the visible band")
         #expect(plan.origin == .ring(centerY: 500, ringCenterX: 20, ringRadius: 15),
                        "the ORIGIN is untouched — only the far end collapsed (behavior 2 contrast)")
     }
@@ -81,7 +126,7 @@ import Testing
                        "a collapsed origin section begins the rail at its own header dot")
         #expect(abs(plan.railTopY - 560) <= 0.001,
                        "the vertical rail now starts at the header, not the ring landing")
-        #expect(plan.stops.count == 3,
+        #expect(plan.stops.count == 4,
                        "the device section is still expanded, so all its nodes still draw")
         #expect(plan.terminusDotY == nil, "device end unaffected by the origin collapsing")
     }
@@ -106,18 +151,18 @@ import Testing
         // snap.
         var input = expandedInput()
 
-        // Floor just above the lowest node (340): that node is clipped, two remain.
+        // Floor just above the lowest two nodes: they are clipped, two remain.
         input.deviceFloorY = 360
         var plan = RailPlan.resolve(input)
         #expect(plan.stops.map(\.y) == [420, 380],
-                       "floor at 360 clips only the lowest node")
+                       "floor at 360 clips the lower two nodes")
         var terminusDotY = try #require(plan.terminusDotY)
         #expect(abs(terminusDotY - 360) <= 0.001)
 
         // Floor risen further (above 380): only the top node remains.
         input.deviceFloorY = 400
         plan = RailPlan.resolve(input)
-        #expect(plan.stops.map(\.y) == [420], "floor at 400 clips the lower two nodes")
+        #expect(plan.stops.map(\.y) == [420], "floor at 400 clips the lower three nodes")
         terminusDotY = try #require(plan.terminusDotY)
         #expect(abs(terminusDotY - 400) <= 0.001)
 

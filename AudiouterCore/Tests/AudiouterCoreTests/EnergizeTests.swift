@@ -14,11 +14,12 @@ import Testing
 /// membership/connection/routing model — so these tests assert two seams:
 ///
 ///  1. **Row level** (`DeviceRowView.energizePending`): a targeted member that
-///     hasn't started connecting (`.off`) renders the ember-dashed PENDING node
-///     the instant the switch fires, hands off to the live `.connecting` /
-///     `.member` node as its real state advances, ships the spoken "connecting"
-///     equivalent, and — under Reduce Motion — is REMOVED (the node snaps to its
-///     resolved rendering), including on a live mid-flight Reduce Motion toggle.
+///     hasn't started connecting (`.off`) renders the gold-dashed `.connecting`
+///     node the instant the switch fires (the beat has no node form of its own),
+///     holds it as its real state advances to `.connecting` then `.member`, ships
+///     the spoken "connecting" equivalent, and — under Reduce Motion — is REMOVED
+///     (the node snaps to its resolved rendering), including on a live mid-flight
+///     Reduce Motion toggle.
 ///  2. **Controller level** (`PopoverController`): a real source switch raises
 ///     the beat over the selected `.off` members, posts the VoiceOver
 ///     transition announcement, prunes the beat as members leave `.off`, and
@@ -46,8 +47,8 @@ import Testing
         row.apply(makeDevice(connectionState: .off), selected: true,
                   controllable: true, energizePending: true)
         #expect(row.test_energizePending, "the host raised the beat")
-        #expect(row.test_busNode == .pending,
-                       "an .off member on the energize beat renders the ember dashed pending node")
+        #expect(row.test_busNode == .connecting,
+                       "an .off member on the energize beat renders the gold dashed connecting node")
     }
 
     @Test func connectingStateSupersedesThePendingBeat() {
@@ -75,7 +76,7 @@ import Testing
         row.test_reduceMotionOverride = false
         row.apply(makeDevice(connectionState: .off), selected: true,
                   controllable: true, energizePending: true)
-        #expect(row.test_busNode == .pending, "beat visible while motion is allowed")
+        #expect(row.test_busNode == .connecting, "beat visible while motion is allowed")
 
         // Reduce Motion flips ON mid-sequence: the OS posts the display-options
         // notification; the row must re-derive its node off it (not wait for the
@@ -92,7 +93,7 @@ import Testing
         row.test_reduceMotionOverride = false
         row.apply(makeDevice(connectionState: .off), selected: true,
                   controllable: true, energizePending: true)
-        #expect(row.test_busNode == .pending)
+        #expect(row.test_busNode == .connecting)
         #expect(row.test_accessibilityLabel?.contains("connecting") ?? false,
                       "the new pending visual ships a VoiceOver equivalent: the row speaks 'connecting'")
     }
@@ -163,9 +164,9 @@ import Testing
         #expect(popover.test_energizePendingIDs == ["en-a", "en-b"],
                        "only the selected members that hadn't started connecting get the beat")
         #expect(popover.test_energizeActive)
-        #expect(popover.test_deviceRow(for: "en-a")?.test_busNode == .pending)
+        #expect(popover.test_deviceRow(for: "en-a")?.test_busNode == .connecting)
         #expect(popover.test_deviceRow(for: "en-c")?.test_busNode == .member,
-                       "an already-connected member never drops to pending")
+                       "an already-connected member never drops to the beat's connecting node")
         #expect(popover.test_lastEnergizeAnnouncement ==
                        "Switching Main Audio to Selected Devices")
     }

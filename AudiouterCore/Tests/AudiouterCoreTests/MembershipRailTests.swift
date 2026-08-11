@@ -83,7 +83,6 @@ import AppKit
             #expect(!row.test_hasInvisibleCheckboxSkin,
                     "the sheet keeps the STOCK checkbox drawing")
             #expect(row.railNode == nil, "it contributes no stop to any rail")
-            #expect(!row.railHasSpine, "and never claims to be inside a spine")
             #expect(row.test_nodeCenterX == nil)
         }
     }
@@ -190,21 +189,33 @@ import AppKit
                 == [.nonMember, .member, .nonMember, .member, .nonMember])
     }
 
-    @Test func editorRailTerminatesAtTheLowestCheckedRow() throws {
+    @Test func editorSignalEndsAtTheLowestCheckedRowInAFullBandChannel() throws {
         let (editor, _, _) = try makeEditor()
-        // Spine runs a…mixer (index 3, the lowest member); `echo` sits below the
-        // terminus as a BARE node with no rail through it.
-        #expect(editor.test_railExtents.map(\.above) == [true, true, true, true, false])
-        #expect(editor.test_railExtents.map(\.below) == [true, true, true, false, false])
+        let plan = try #require(editor.test_railPlan())
+        // The channel runs the WHOLE candidate list — every row is a stop …
+        #expect(plan.stops.count == 5, "every candidate row sits on the channel")
+        // … while the signal inside it ends at `mixer` (index 3, the lowest
+        // member); `echo` below it is a socket on an empty stretch of channel.
+        #expect(plan.signalTerminusIndex == 3)
+        #expect(plan.stops[3].node == .member)
+        #expect(plan.grooveEndY < plan.stops[4].y,
+                "the channel is milled past the last row's socket, not cut at the signal's end")
     }
 
-    @Test func checkingALowerRowExtendsTheSpineDownToIt() throws {
+    @Test func checkingALowerRowExtendsTheSignalDownToIt() throws {
         let (editor, _, _) = try makeEditor()
+        let before = try #require(editor.test_railPlan())
         editor.test_setMembership(true, for: "e")
-        #expect(editor.test_railExtents.map(\.above) == [true, true, true, true, true],
-                "selecting a row below the terminus extends the spine to reach it")
-        #expect(editor.test_railExtents.map(\.below) == [true, true, true, true, false])
+        let after = try #require(editor.test_railPlan())
+        #expect(after.signalTerminusIndex == 4,
+                "selecting the bottom row runs the signal down to reach it")
         #expect(editor.test_railNodes.last == .member)
+        #expect(after.stops.count == before.stops.count,
+                "the CHANNEL never changed — only how far the signal runs inside it")
+        let padR = PopoverColumnGrid.railSocketPadRadius
+        #expect(before.grooveEndY <= before.stops[4].y + padR + 0.01
+                && after.grooveEndY <= after.stops[4].y + padR + 0.01,
+                "…and it reaches the bottom row's socket whether or not that row is a member")
     }
 
     @Test func editorRailPlanResolvesFromTheIconWellOrigin() throws {
@@ -237,14 +248,13 @@ import AppKit
                 "measured in the OVERLAY's space, which is pinned to the column, not the pane"))
         #expect(centerY > plan.railTopY, "the rail drops below the well's centre")
 
-        // Four in-span stops (a, office, c, mixer); `echo` is bare, so it
-        // contributes no stop. Nothing cuts the rail short — this pane has no
-        // collapsible sections.
-        #expect(plan.stops.count == 4)
-        #expect(plan.stops.map(\.node) == [.nonMember, .member, .nonMember, .member])
-        #expect(plan.stops.map(\.below) == [true, true, true, false])
+        // Five stops — every candidate row, member or not, sits on the channel.
+        // Nothing cuts the rail short: this pane has no collapsible sections.
+        #expect(plan.stops.count == 5)
+        #expect(plan.stops.map(\.node)
+                == [.nonMember, .member, .nonMember, .member, .nonMember])
         #expect(plan.terminusDotY == nil, "no collapsible section cuts the spine here")
-        #expect(!plan.stops.contains { $0.dimmed }, "membership has no dormant tint")
+        #expect(!plan.dormant, "membership has no dormant-divergent concept")
     }
 
     @Test func stopsRunTopToBottomInCandidateOrder() throws {
@@ -283,10 +293,11 @@ import AppKit
     }
 
     @Test func nodeClearsTheIconColumn() {
-        // The gutter reserve must keep the node from crowding the glyph.
+        // The gutter reserve must keep the node — and the SOCKET it is seated in,
+        // which is wider than any node — from crowding the glyph.
         let row = makeRow(.warmPane, checked: true)
         let nodeRightEdge = PopoverColumnGrid.railGutterCenterX
-            + PopoverColumnGrid.busNodeDiameterSelected / 2
+            + PopoverColumnGrid.railSocketPadRadius
         let iconLeading = PopoverColumnGrid.firstElementLeading(indented: false)
         #expect(iconLeading - nodeRightEdge > 8,
                 "the node keeps clear negative space before the icon tile")

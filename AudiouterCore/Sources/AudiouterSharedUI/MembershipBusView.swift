@@ -13,14 +13,12 @@ import AppKit
 /// click on the node area falls through to the invisible checkbox re-anchored
 /// behind it, and a rail click falls through to the row.
 ///
-/// **Rail extent (v4 §Call-1).** The rail runs Main Audio (top anchor, the
-/// `.origin` hook) → the LOWEST SELECTED node (bottom terminus). Nodes *within*
-/// that span get the wide detour arc when unselected; nodes *below* the lowest
-/// selected node are **bare** hollow clickable nodes with NO rail through them
-/// (the host passes `railAbove: false, railBelow: false`). Selecting one extends
-/// the spine down to reach it — the rail's length reads as "how far down the mix
-/// reaches." The last device inside the span passes `railBelow: false` so the
-/// line terminates at that node.
+/// **Socket + plug.** Every node (except the `.origin`) sits in a SOCKET: a
+/// recessed pad in the milled channel the overlay draws, painted here in the
+/// same `well`/`faderRim` pair the fader troughs use. The socket is CONSTANT —
+/// infrastructure that never dims and never changes size — so a small hollow
+/// node reads as an empty socket and a large filled member disc reads as a plug
+/// seated in it.
 ///
 /// **Cross-row continuity is achieved by the panel-level ``BusRailOverlayView``**
 /// (Alec's continuity correction): the overlay draws the rail line, detour
@@ -31,11 +29,12 @@ import AppKit
 ///
 /// **Node vocabulary (v4 §Call-1, the static states the energize agent drives):**
 /// `.member` (filled gold — connected member), `.connecting` (gold dashed
-/// hollow), `.pending` (ember dashed hollow — the energize "refresh" beat),
-/// `.failed` (failure-red ring), `.nonMember` (hollow, detoured), `.blocked`
-/// (greyed hollow). **Rail segment tone:** GOLD through a connected member,
-/// `ember` otherwise; Call 3's energize sequence re-invokes the ember/pending
-/// tones over this settled drawing.
+/// hollow), `.failed` (failure-red ring), `.nonMember` (hollow, detoured),
+/// `.blocked` (greyed hollow). The energize "pending" beat has NO node form of
+/// its own — an ember dashed rim is indistinguishable from the gold dashed one
+/// at node size, so the beat renders as `.connecting`. **Rail segment tone:**
+/// GOLD through a connected member, `ember` otherwise — ember survives as a
+/// SEGMENT tone only, which is where Call 3's energize sequence reads.
 ///
 /// **Determinism:** node + rails are steady drawing (no animation), so
 /// `cacheDisplay(in:to:)` captures them identically every run.
@@ -43,8 +42,7 @@ public final class MembershipBusView: NSView {
 
     /// What this row's bus node renders as. The line path follows from it: a
     /// connected member sits ON the line (straight run), an unselected/blocked
-    /// node is DETOURED around (the hop arc) when it has a rail, or drawn bare
-    /// (node only) when it sits below the rail's terminus.
+    /// node is DETOURED around (the hop arc) — wherever in the band it sits.
     public enum Node: Equatable {
         /// A connected member — a FILLED gold disc with a gold rim, the line
         /// running straight through it in gold (spec §Call-1 "member / connected
@@ -52,17 +50,13 @@ public final class MembershipBusView: NSView {
         case member
         /// A member whose session is establishing — a HOLLOW node with a GOLD
         /// DASHED rim (spec §Call-1 "connecting = gold dashed"). The controls
-        /// render muted (not adjustable yet).
+        /// render muted (not adjustable yet). The energize "press-play" beat
+        /// (v4.1 item 9) also renders here: a host-raised
+        /// `DeviceRowView.energizePending` on a still-`.off` member draws this
+        /// node before the backend reports `.connecting`, then hands off to the
+        /// real state. Reduce Motion removes the beat (the node renders its
+        /// resolved form).
         case connecting
-        /// The energize "refresh" pending beat (spec §Call-1 / Call 3 step 1,
-        /// v4.1 item 9) — a HOLLOW node with an `ember` DASHED rim. Raised by
-        /// the host on the members of a Main-Audio source switch that haven't
-        /// started connecting yet (`DeviceRowView.energizePending` while the
-        /// device is still `.off`), so the switch reads as an instant
-        /// "press-play" drop to ember pending; each node then hands off to
-        /// `.connecting` → `.member` as its real `connectionState` advances.
-        /// Reduce Motion removes the beat (the node renders its resolved form).
-        case pending
         /// A member that failed to connect — a HOLLOW node with a heavier
         /// FAILURE-RED solid ring (spec §Call-1 "failed = failure-red ring"). It
         /// keeps its place in the spine; the red ring says which room didn't make
@@ -83,8 +77,6 @@ public final class MembershipBusView: NSView {
     }
 
     private var node: Node = .nonMember
-    private var railAbove = true
-    private var railBelow = true
     /// Dormant-divergent tint (spec §4.7): dim the node + line to `text-3` via
     /// tint (not alpha) when the Selected set genuinely diverges from the active
     /// group target.
@@ -93,6 +85,11 @@ public final class MembershipBusView: NSView {
     /// connected members are feeding it) vs the quiet `ember` idle tone (v4
     /// §Call-1 rail-segment tone). Ignored for every non-origin node.
     private var originGold = false
+    /// Whether the pointer is over the row's bus-gutter region — the socket rim
+    /// brightens from `faderRim` to the node's own action tone so the node
+    /// admits it is clickable. The HOST row owns the tracking (this view stays
+    /// non-interactive) and only reports a hover its checkbox can act on.
+    private var hovered = false
 
     public init() {
         super.init(frame: .zero)
@@ -105,18 +102,21 @@ public final class MembershipBusView: NSView {
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    /// Point the bus at a rendering. `railAbove`/`railBelow` gate the vertical
-    /// rail segments: the terminating (lowest selected) node passes
-    /// `railBelow: false`, and a BARE node below the terminus passes both
-    /// `false` (node only, no rail, no detour). Idempotent — safe to re-apply on
-    /// every row repaint.
-    public func apply(node: Node, railAbove: Bool = true, railBelow: Bool = true,
-                      dimmed: Bool = false, originGold: Bool = false) {
+    /// Point the bus at a rendering. Idempotent — safe to re-apply on every row
+    /// repaint.
+    public func apply(node: Node, dimmed: Bool = false, originGold: Bool = false) {
         self.node = node
-        self.railAbove = railAbove
-        self.railBelow = railBelow
         self.dimmed = dimmed
         self.originGold = originGold
+        needsDisplay = true
+    }
+
+    /// Point the socket at the pointer state the HOST row tracked. Rim tone
+    /// only — no size change, no glow — so the hover reads as the socket
+    /// waking up rather than the node moving.
+    public func setHovered(_ hovered: Bool) {
+        guard self.hovered != hovered else { return }
+        self.hovered = hovered
         needsDisplay = true
     }
 
@@ -146,6 +146,7 @@ public final class MembershipBusView: NSView {
             let cx = bounds.midX
             let cy = bounds.midY
             let ember = dimmed ? Tokens.Color.tertiaryLabel : Tokens.Color.ember
+            drawSocket(centerX: cx, centerY: cy)
             let rect = NSRect(x: cx - r, y: cy - r, width: 2 * r, height: 2 * r)
             if node == .member {
                 // Filled gold disc + gold rim.
@@ -154,12 +155,35 @@ public final class MembershipBusView: NSView {
                 strokeNodeRim(in: rect, color: dimmed ? Tokens.Color.tertiaryLabel : Tokens.Color.gold,
                               dashed: false)
             } else {
-                // Hollow node: connecting = gold dashed, pending = ember dashed,
-                // failed = heavier failure-red ring, non-member/blocked = plain rim.
+                // Hollow node: connecting = gold dashed, failed = heavier
+                // failure-red ring, non-member/blocked = plain rim.
                 strokeNodeRim(in: rect, color: rimColor(for: node, ember: ember),
                               dashed: isDashed(node))
             }
         }
+    }
+
+    /// The recessed SOCKET pad the node is seated in — the `well` fill + 1 pt
+    /// `faderRim` rim `WarmFaderCell` gives its trough, so the rail's channel and
+    /// the faders read as the same milled surface. Constant size for every node
+    /// kind, and never dimmed: the socket is infrastructure, not signal.
+    private func drawSocket(centerX: CGFloat, centerY: CGFloat) {
+        let padR = PopoverColumnGrid.railSocketPadRadius
+        let pad = NSRect(x: centerX - padR, y: centerY - padR, width: 2 * padR, height: 2 * padR)
+        Tokens.Color.well.setFill()
+        NSBezierPath(ovalIn: pad).fill()
+        let rim = NSBezierPath(ovalIn: pad.insetBy(dx: 0.5, dy: 0.5))
+        rim.lineWidth = 1
+        socketRimColor.setStroke()
+        rim.stroke()
+    }
+
+    /// The socket rim's tone: the resting `faderRim` normally, the node's own
+    /// action tone (`gold`) while the pointer is over the gutter. A `.blocked`
+    /// node keeps the resting rim in both states — its checkbox is honestly
+    /// disabled, and a disabled control must not invite the click.
+    private var socketRimColor: NSColor {
+        (hovered && node != .blocked) ? Tokens.Color.gold : Tokens.Color.faderRim
     }
 
     /// Stroke a node's rim (hollow node border, or the filled node's edge).
@@ -183,19 +207,19 @@ public final class MembershipBusView: NSView {
         case .connecting:              return dimmed ? Tokens.Color.tertiaryLabel : Tokens.Color.gold
         case .failed:                  return Tokens.Color.failure  // never dimmed
         case .blocked:                 return Tokens.Color.tertiaryLabel
-        case .pending, .nonMember,
-             .member, .origin:         return ember
+        case .nonMember, .member,
+             .origin:                  return ember
         }
     }
 
-    /// Whether a node's rim is dashed (the "incomplete" pending/connecting form).
+    /// Whether a node's rim is dashed (the "incomplete" connecting form).
     private func isDashed(_ node: Node) -> Bool {
-        node == .connecting || node == .pending
+        node == .connecting
     }
 
     /// The drawn disc radius for a node kind (Warm Signal v4.1 item 4 "larger
     /// selected nodes"): size joins fill as a selection signal, so a node still
-    /// IN the mix (on-spine — member/connecting/pending/failed, the same set
+    /// IN the mix (on-spine — member/connecting/failed, the same set
     /// `BusRailOverlayView.onSpine` treats as "the rail runs through it") draws
     /// at `busNodeDiameterSelected`; a genuine non-member/blocked node (off-spine,
     /// detoured) draws at the visibly smaller `busNodeDiameterUnselected`. Reuses
@@ -213,12 +237,6 @@ public final class MembershipBusView: NSView {
     /// The node rendering currently drawn (structural hook — the same `node` the
     /// drawing reads, so it can't drift from the pixels).
     public var test_node: Node { node }
-    /// Whether the rail is drawn below the node (false on the terminating lowest
-    /// selected node, spec §Call-1, and on a bare node below the terminus).
-    public var test_railBelow: Bool { railBelow }
-    /// Whether the rail is drawn above the node (false on a bare node below the
-    /// rail terminus — spec §Call-1 "bare hollow nodes … no rail through them").
-    public var test_railAbove: Bool { railAbove }
     /// Whether this row's node is rendered dimmed via the dormant-divergent tint
     /// (spec §4.7) — a tint, never alpha.
     public var test_dimmed: Bool { dimmed }
@@ -226,4 +244,9 @@ public final class MembershipBusView: NSView {
     /// joins fill as a selection signal). Structural hook, same value `draw`
     /// reads, so it can't drift from the pixels.
     public var test_nodeRadius: CGFloat { Self.nodeRadius(for: node) }
+    /// Whether the host row is currently reporting a gutter hover.
+    public var test_hovered: Bool { hovered }
+    /// The socket rim tone this node currently draws (structural hook — the
+    /// same value `drawSocket` strokes with, so it can't drift from the pixels).
+    public var test_socketRimColor: NSColor { socketRimColor }
 }

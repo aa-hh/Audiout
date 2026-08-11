@@ -5,9 +5,11 @@ import SwiftUI
 import AudiouterProtocol
 
 /// One speaker, drawn as its own fader (doc:84-105, doc:1823-1866): tapping
-/// the row starts or stops it, dragging horizontally sets its volume, and the
-/// gold wash behind the content IS the level. A playing row also carries its
-/// own mute button (``muteControl``) — a deliberate departure from the design
+/// the row starts or stops it, dragging horizontally sets its volume, and a
+/// ``LevelStrip`` along the row's bottom edge IS the level. That strip is a
+/// departure from doc:1853, which draws the level as the wash behind the
+/// content; see ``LevelStrip`` for the measurements that forced it. A playing
+/// row also carries its own mute button (``muteControl``) — a departure from
 /// document, which moved mute to the Main Out drawer alone: sound is live in
 /// another room while this screen is used, and the one control that stops it
 /// may not be behind a chevron a first-timer has no reason to open. The
@@ -217,11 +219,12 @@ struct DeviceRowView: View {
     /// signals anyway.
     private var identityDim: Double { device.isAvailable ? 1 : 0.45 }
 
-    /// Muting doesn't move the fader, so the level stays where it is — but a
-    /// muted speaker must not glow like a playing one. The wash steps down to
-    /// a fixed fraction of itself while the readout, the leading edge line and
-    /// the `MUTED` sub-label all keep saying exactly where the level sits.
-    private var washOpacity: Double { device.isMuted ? 0.3 : 1 }
+    /// A muted speaker must not glow like a playing one, and the wash is the
+    /// glow — it carries no level (see ``wash``), so muting simply puts its
+    /// light out. Where the level sits stays fully readable while it does:
+    /// ``LevelStrip`` holds 3.46:1 muted, and the readout and `MUTED`
+    /// sub-label say the same thing in words.
+    private var washOpacity: Double { device.isMuted ? 0 : 1 }
 
     private var displayVolume: Int { Int((localVolume ?? Double(device.volume)).rounded()) }
 
@@ -318,11 +321,11 @@ struct DeviceRowView: View {
                 // would slide under it without this.
                 if showsMute { Color.clear.frame(width: Self.muteSize, height: Self.muteSize) }
             }
-            .padding(.horizontal, 12)
-            .frame(maxWidth: .infinity, minHeight: 64, alignment: .leading)
+            .padding(.horizontal, WarmSignal.rowGutter)
+            .frame(maxWidth: .infinity, minHeight: Self.rowHeight, alignment: .leading)
         )
         .background(alignment: .leading) { wash }
-        .overlay(alignment: .leading) { edgeLine }
+        .overlay(alignment: .bottom) { levelStrip }
         .background(touchTint)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: pressed)
         .clipShape(RoundedRectangle(cornerRadius: WarmSignal.Radius.row, style: .continuous))
@@ -347,6 +350,12 @@ struct DeviceRowView: View {
         // which is what keeps it reachable as its own VoiceOver element.
         .overlay(alignment: .trailing) { muteControl }
     }
+
+    /// The whole vertical budget: 8 pt of air, the 44 pt halo, and the 8 pt
+    /// under it that ``LevelStrip`` lives in. Nothing here is slack — which is
+    /// what caps ``LevelStrip``'s cap at 8 pt, since a taller one either
+    /// crosses the halo or is sliced off by this row's own clip.
+    private static let rowHeight: CGFloat = 60
 
     /// Only on a row that is actually making sound: a mute button on a silent
     /// speaker is a control with nothing to stop.
@@ -391,42 +400,45 @@ struct DeviceRowView: View {
         return pressed ? WarmSignal.gold.opacity(0.10) : .clear
     }
 
-    /// doc:1853 — the level, drawn as light rather than as a control.
+    /// doc:1853's wash, carrying the one thing it is good at carrying: this
+    /// row is live. NOT the level — ``LevelStrip`` holds the measurements, but
+    /// the short version is that the row's own text sits on the wash, so the
+    /// text caps how far the wash may go: the gold `PLAYING` sub-label reads
+    /// 4.36–4.46:1 on a 0.14 wash and 3.70:1 on the 0.30 a drag would want,
+    /// against a 4.5:1 floor. At a flat 0.08 that sub-label clears the
+    /// floor (4.59:1 light / 8.73:1 dark) and the wash measures 1.08:1 against
+    /// the canvas, which is all a "live" tint has to be.
+    ///
+    /// Full width rather than filled to the level, so it and the strip are not
+    /// two statements of one number at two precisions — a hard-edged slab
+    /// stopping mid-row is what makes a row read as a selected card rather
+    /// than as a fader.
+    ///
+    /// Full width also means `isLive` has to be said out loud here, where a
+    /// level-width wash got it for free from `volumeFraction` (doc:1852);
+    /// without it every READY and UNAVAILABLE row lights up too.
     @ViewBuilder
     private var wash: some View {
-        Rectangle()
-            .fill(LinearGradient(
-                colors: [WarmSignal.gold.opacity(dragging ? 0.30 : 0.14),
-                         WarmSignal.gold.opacity(dragging ? 0.17 : 0.06)],
-                startPoint: .leading,
-                endPoint: .trailing))
-            .frame(width: max(0, volumeFraction * rowWidth))
-            .opacity(washOpacity)
-    }
-
-    /// doc:1854-1856 — the leading edge of the wash, only where there is a
-    /// level to show, and at rest the only mark on the row that says where
-    /// that level is: the light wash is a ~10-RGB-point delta on paper, so
-    /// this line alone has to carry the 3:1 non-text floor.
-    ///
-    /// Which is why it takes `WarmSignal.goldText` rather than `gold` — in
-    /// light, a dark mark is what reads on paper; in dark the two are the same
-    /// hex — and sits at 0.85 at rest: 3.56:1 light / 6.92:1 dark against the
-    /// washed ground under it, 3.73:1 / 7.52:1 against bare canvas past the
-    /// level. Dragging takes it to full (4.17:1 / 7.12:1), so the drag stays
-    /// the louder of the two states.
-    ///
-    /// It holds that strength while muted, where the wash behind it does not
-    /// (``washOpacity``): dimming the level's only precise mark to make a
-    /// point about mute would trade one honesty for another.
-    @ViewBuilder
-    private var edgeLine: some View {
         if isLive {
             Rectangle()
-                .fill(WarmSignal.goldText)
-                .frame(width: 2)
-                .opacity(dragging ? 1 : 0.85)
-                .offset(x: max(0, volumeFraction * rowWidth - 1))
+                .fill(WarmSignal.gold.opacity(0.08))
+                .opacity(washOpacity)
+        }
+    }
+
+    /// The level itself (doc:1854-1856's edge line, and the wash's old job).
+    /// Only where there is a level to show — a row that isn't playing gets no
+    /// rail at all, because its drag is refused (``refuseAdjustment()``) and
+    /// an empty track is an invitation to a gesture this row declines. The
+    /// PLAYING section sits first on the screen, so the filled rail with its
+    /// visible remainder is always above these rows to teach them.
+    @ViewBuilder
+    private var levelStrip: some View {
+        if isLive {
+            LevelStrip(fraction: volumeFraction,
+                       trackWidth: WarmSignal.faderTrackWidth(rowWidth: rowWidth),
+                       muted: device.isMuted,
+                       dragging: dragging)
         }
     }
 
@@ -463,7 +475,10 @@ struct DeviceRowView: View {
             .fill(isRouted ? WarmSignal.gold : WarmSignal.socket)
             .frame(width: 11, height: 11)
             .overlay(Circle().strokeBorder(WarmSignal.canvas, lineWidth: 1.5))
-            .offset(x: 1, y: 1)
+            // Pulled UP, not down: hanging the dot below the halo leaves
+            // ``levelStrip`` about 1.5 pt of air under it, and at that
+            // distance the dot and the strip read as touching.
+            .offset(x: 1, y: -2)
     }
 
     /// doc:1861-1863, and the failure affordance that replaces the number.
@@ -478,11 +493,15 @@ struct DeviceRowView: View {
                     .hittable(drawn: 20)
             }
         } else if isLive {
-            // A number with no wash behind it is a quantity of nothing, so the
-            // readout follows the same rule `volumeFraction` does (doc:1852):
-            // both appear together, or neither does.
+            // A number with no strip behind it is a quantity of nothing, so
+            // the readout follows the same rule `volumeFraction` does
+            // (doc:1852): both appear together, or neither does.
+            //
+            // 16 at rest: the size the deck states Main Out at
+            // (`MainOutRow`), because this is the same kind of number and the
+            // screen should say it one way.
             Text(String(displayVolume))
-                .readout(dragging ? 22 : 13)
+                .readout(dragging ? 22 : 16)
                 .foregroundStyle(WarmSignal.goldText)
                 .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: dragging)
         }
@@ -595,7 +614,11 @@ struct DeviceRowView: View {
                     }
                 }
                 guard axis == .horizontal, controlsEnabled, let start = dragStartVolume else { return }
-                let v = WarmSignal.faderValue(start: start, translationWidth: w, trackWidth: rowWidth)
+                // The STRIP's width, not the row's: the strip is inset to the
+                // row gutter at both ends, and the finger has to cross exactly
+                // what it fills. See `WarmSignal.faderTrackWidth`.
+                let v = WarmSignal.faderValue(start: start, translationWidth: w,
+                                              trackWidth: WarmSignal.faderTrackWidth(rowWidth: rowWidth))
                 localVolume = Double(v)
                 session.setDeviceVolume(id: device.id, volume: v, isFinal: false)
             }

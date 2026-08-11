@@ -778,6 +778,16 @@ private struct MainOutDrawerRow: View {
                     .foregroundStyle(WarmSignal.label)
                     .lineLimit(1)
 
+                // The row's second visible mute signal, so the state does not
+                // rest on the button glyph alone — and the same word the
+                // device row shows, in the same voice, so mute reads the same
+                // in both places it is drawn.
+                if device.isMuted {
+                    Text("MUTED")
+                        .microLabel()
+                        .foregroundStyle(WarmSignal.label2)
+                }
+
                 Spacer(minLength: 8)
 
                 Text(String(displayVolume))
@@ -801,30 +811,21 @@ private struct MainOutDrawerRow: View {
                     isFinal: true)
             }
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, WarmSignal.rowGutter)
+        // Unchanged 10/10: the drawer row's own content is 28 pt, so the strip
+        // fits in the bottom padding it already had and the row keeps its
+        // height. Only the device row above trades slack for the strip.
         .padding(.vertical, 10)
-        .background(alignment: .leading) {
-            Rectangle()
-                .fill(LinearGradient(colors: [WarmSignal.ember, WarmSignal.gold],
-                                     startPoint: .leading, endPoint: .trailing))
-                // The same step down ``DeviceRowView/washOpacity`` takes, so a
-                // muted speaker reads as muted in both places it is drawn. The
-                // edge line and the readout keep the level.
-                .opacity(device.isMuted ? 0.09 : 0.30)
-                .frame(width: max(0, CGFloat(displayVolume) / 100 * rowWidth))
-        }
-        .overlay(alignment: .leading) {
-            // razor: at rest this measures 1.36:1 light / 2.14:1 dark, under
-            // the 3:1 non-text floor ``DeviceRowView/edgeLine`` is held to.
-            // It is not the sole carrier of the level here — the drawer row
-            // also states it as a number — and this row's wash is 0.30 against
-            // that row's 0.14, so no single opacity clears both sides of the
-            // line. Fixing it means restyling the drawer row's wash.
-            Rectangle()
-                .fill(WarmSignal.glow)
-                .frame(width: 2.5)
-                .opacity(dragging ? 1 : 0.4)
-                .offset(x: max(0, CGFloat(displayVolume) / 100 * rowWidth - 1.25))
+        // The device row's level, in the drawer, from the one construction
+        // both share — and the row's ONLY level mark. It carries no wash of
+        // its own: every row in this drawer is a member, so a wash would have
+        // no "this one is live" to say, and the readout sitting on bare `well`
+        // reads 4.63:1 where a gold wash under it measures 3.43:1 in light.
+        .overlay(alignment: .bottom) {
+            LevelStrip(fraction: CGFloat(displayVolume) / 100,
+                       trackWidth: WarmSignal.faderTrackWidth(rowWidth: rowWidth),
+                       muted: device.isMuted,
+                       dragging: dragging)
         }
         .background(WarmSignal.well)
         .clipShape(RoundedRectangle(cornerRadius: WarmSignal.Radius.row, style: .continuous))
@@ -847,7 +848,10 @@ private struct MainOutDrawerRow: View {
                     if axis == .horizontal { dragStartVolume = device.volume }
                 }
                 guard axis == .horizontal, controlsEnabled, let start = dragStartVolume else { return }
-                let v = WarmSignal.faderValue(start: start, translationWidth: w, trackWidth: rowWidth)
+                // The strip's width, not the row's — same rule the device row
+                // drags on (`WarmSignal.faderTrackWidth`).
+                let v = WarmSignal.faderValue(start: start, translationWidth: w,
+                                              trackWidth: WarmSignal.faderTrackWidth(rowWidth: rowWidth))
                 localVolume = Double(v)
                 session.setDeviceVolume(id: device.id, volume: v, isFinal: false)
             }

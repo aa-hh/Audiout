@@ -364,6 +364,48 @@ import AudiouterProtocol
         #expect(WarmSignal.faderRail(0, dragging: true) != WarmSignal.faderRail(100, dragging: true))
     }
 
+    // MARK: - The level strip's track, and the finger that has to match it
+
+    @Test func theStripsTrackIsTheRowMinusBothGutters() {
+        // The strip draws inset to the row's own content gutter at each end,
+        // so its track is the row width less two of them — the same number the
+        // halo's leading edge and the mute button's trailing edge sit on.
+        #expect(WarmSignal.faderTrackWidth(rowWidth: 365) == 365 - 2 * WarmSignal.rowGutter)
+        #expect(WarmSignal.faderTrackWidth(rowWidth: 365) == 341)
+    }
+
+    @Test func aRowNarrowerThanItsGuttersHasNoTrackRatherThanANegativeOne() {
+        // First layout pass reports 0; a negative track would run the drag
+        // maths backwards and `Capsule().frame(width:)` would trap.
+        #expect(WarmSignal.faderTrackWidth(rowWidth: 0) == 0)
+        #expect(WarmSignal.faderTrackWidth(rowWidth: 10) == 0)
+    }
+
+    @Test func fingerTravelAndStripTravelAgreeAcrossTheWholeTrack() {
+        // The coupling the whole strip stands on: the value the finger sets
+        // and the fill the strip paints are computed from ONE width, so a
+        // finger that has crossed x% of the track leaves the fill under it.
+        // Mapping the drag to the row width instead would move the fill ~7%
+        // slower than the finger on a 365 pt row — a lie you can feel.
+        let track = WarmSignal.faderTrackWidth(rowWidth: 365)
+        for target in [0, 10, 25, 50, 65, 90, 100] {
+            let travel = CGFloat(target) / 100 * track
+            let value = WarmSignal.faderValue(start: 0, translationWidth: travel, trackWidth: track)
+            #expect(value == target)
+            // …and the fill the strip draws for that value ends where the
+            // finger is, to within the half-point the value is rounded to.
+            #expect(abs(CGFloat(value) / 100 * track - travel) < 0.5 * track / 100)
+        }
+    }
+
+    @Test func aDragThatCrossesTheWholeTrackCoversTheWholeRange() {
+        // Both rails are reachable inside one gesture across the strip, which
+        // is what makes the strip's ends and the fader's ends the same ends.
+        let track = WarmSignal.faderTrackWidth(rowWidth: 365)
+        #expect(WarmSignal.faderValue(start: 0, translationWidth: track, trackWidth: track) == 100)
+        #expect(WarmSignal.faderValue(start: 100, translationWidth: -track, trackWidth: track) == 0)
+    }
+
     // MARK: - The one-time gesture coach
 
     @Test func theCoachStaysUntilBothGesturesHaveBeenUsed() {

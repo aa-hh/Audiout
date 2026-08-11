@@ -7,9 +7,9 @@ import AudiouterProtocol
 /// One speaker, drawn as its own fader (doc:84-105, doc:1823-1866): tapping
 /// the row starts or stops it, dragging horizontally sets its volume, and the
 /// gold wash behind the content IS the level (``LevelLight``). Put a finger on
-/// it and the row admits what it is: a rail and a cap fade in under the light
-/// (``LevelStrip``) and melt away again on release, so the instrument exists
-/// exactly while it is in use. A playing row also carries its own mute button
+/// it and the row admits what it is: the row draws its own edge, so the light
+/// becomes a partial fill of a visible track, and the edge goes again on
+/// release — the instrument is the row itself, never a second object. A playing row also carries its own mute button
 /// (``muteControl``) — a departure from the design document, which moved mute
 /// to the Main Out drawer alone: sound is live in
 /// another room while this screen is used, and the one control that stops it
@@ -65,6 +65,9 @@ struct DeviceRowView: View {
     @ScaledMetric(relativeTo: .caption) private var muteIconSize: CGFloat = 12
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    // razor: DEBUG-only, for the concept sprint. See `LevelStyle`.
+    @AppStorage(LevelStyle.storageKey) private var levelStyle: LevelStyle = .light
 
     /// D9's failure card takes the whole control slot: a `"failed"` device
     /// gets headline / details / Try Again INSTEAD of volume + mute. This is
@@ -304,6 +307,7 @@ struct DeviceRowView: View {
                     Text(subLabel)
                         .microLabel()
                         .foregroundStyle(subTint)
+
                 }
 
                 Spacer(minLength: 8)
@@ -319,14 +323,20 @@ struct DeviceRowView: View {
             .frame(maxWidth: .infinity, minHeight: Self.rowHeight, alignment: .leading)
         )
         .background(alignment: .leading) { level }
-        .overlay(alignment: .bottom) { instrument }
+        // Aligned to the name's own column and living in the slack the row
+        // already has, so it reads as the name's meter rather than as a strip
+        // under the row — and so it costs the row no height and the name no
+        // width. In the text stack it did both: 60 pt became 67 and
+        // "Kitchen HomePod" truncated.
+        .overlay(alignment: .bottomLeading) { nameMeter }
+        .overlay { instrument }
         .background(touchTint)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: pressed)
         // The reveal, and its whole implementation: the instrument arrives
         // over 0.18s and leaves over 0.14s — out faster than in, so the
         // arrival is the authored half and the dismissal gets out of the way.
-        // Under Reduce Motion the rail and cap simply are or are not there,
-        // which is the same information without the movement.
+        // Under Reduce Motion the track edge is simply there or not, which is
+        // the same information without the movement.
         .animation(reduceMotion ? nil : .easeOut(duration: dragging ? 0.18 : 0.14), value: dragging)
         .clipShape(RoundedRectangle(cornerRadius: WarmSignal.Radius.row, style: .continuous))
         .contentShape(Rectangle())
@@ -352,9 +362,7 @@ struct DeviceRowView: View {
     }
 
     /// The whole vertical budget: 8 pt of air, the 44 pt halo, and the 8 pt
-    /// under it that ``LevelStrip`` lives in. Nothing here is slack — which is
-    /// what caps ``LevelStrip``'s cap at 8 pt, since a taller one either
-    /// crosses the halo or is sliced off by this row's own clip.
+    /// under it that ``LevelLight``'s mark stands in. Nothing here is slack.
     private static let rowHeight: CGFloat = 60
 
     /// Only on a row that is actually making sound: a mute button on a silent
@@ -407,28 +415,51 @@ struct DeviceRowView: View {
     @ViewBuilder
     private var level: some View {
         if isLive {
-            LevelLight(fraction: volumeFraction,
-                       width: rowWidth,
-                       muted: device.isMuted,
-                       dragging: dragging)
+            if levelStyle == .light {
+                LevelLight(fraction: volumeFraction,
+                           width: rowWidth,
+                           muted: device.isMuted,
+                           dragging: dragging)
+            } else {
+                // The dial and the meter carry the level themselves, so the
+                // wash keeps only the job it shares with them: this row is
+                // live. Flat, and no edge to read as a value.
+                Rectangle().fill(WarmSignal.gold.opacity(0.05))
+            }
         }
     }
 
-    /// The instrument, and only under a finger: the rail and its cap fade in
-    /// on the drag latch and melt away on release, so the row admits it is a
-    /// fader exactly while it is being used as one. The rail is the
-    /// denominator the light alone can never give — light has no remainder.
+    /// The instrument, and only under a finger: the row strokes its own shape
+    /// while a level is being set, which turns the light into a partial fill
+    /// of a visible container — the denominator light alone cannot give, since
+    /// light has no remainder. Nothing NEW appears; the row's own edge simply
+    /// becomes visible, and the mark thickens with it.
     ///
     /// Never on a row that isn't playing: its drag is refused
-    /// (``refuseAdjustment()``), and a rail is an invitation to a gesture this
-    /// row declines.
+    /// (``refuseAdjustment()``), and a track is an invitation to a gesture
+    /// this row declines.
+    @ViewBuilder
+    private var nameMeter: some View {
+        if levelStyle == .meter && isLive {
+            LevelMeter(fraction: volumeFraction, muted: device.isMuted, dragging: dragging)
+                .padding(.leading, WarmSignal.rowGutter + 44 + 12)   // gutter, halo, its spacing
+                .padding(.bottom, 6)
+        }
+    }
+
     @ViewBuilder
     private var instrument: some View {
         if isLive && dragging {
-            LevelStrip(fraction: volumeFraction,
-                       width: rowWidth,
-                       muted: device.isMuted)
-                .transition(.opacity)
+            // The remainder, tinted inside the shape the row already has, so
+            // the light reads as a partial fill of a visible whole. `pill` is
+            // the one token that separates from the lit side by the same
+            // amount in both grounds (1.35:1); it is context rather than the
+            // level itself, which the mark and the readout carry.
+            HStack(spacing: 0) {
+                Color.clear.frame(width: max(0, volumeFraction * rowWidth))
+                WarmSignal.pill.opacity(0.5)
+            }
+            .transition(.opacity)
         }
     }
 
@@ -452,6 +483,8 @@ struct DeviceRowView: View {
             Circle().strokeBorder(WarmSignal.fail, lineWidth: 2.8)
         } else if isConnecting {
             Circle().strokeBorder(WarmSignal.ring, style: StrokeStyle(lineWidth: 2.5, dash: [4, 3]))
+        } else if isLive && levelStyle == .dial {
+            LevelDial(fraction: volumeFraction, muted: device.isMuted, dragging: dragging)
         } else if isLive {
             Circle().strokeBorder(WarmSignal.ring, lineWidth: 2.5)
         }

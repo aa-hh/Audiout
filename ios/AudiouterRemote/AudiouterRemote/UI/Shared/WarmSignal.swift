@@ -123,11 +123,21 @@ enum WarmSignal {
     static let hitTarget: CGFloat = 44
 
     /// The gutter both fader rows keep at each end, for their CONTENT. The
-    /// level does not take it: ``LevelLight``, its edge line, ``LevelStrip``
-    /// and the drag all run on the bare row width, so there is exactly one
-    /// coordinate for the value and the light's edge, the line on it, the fill
-    /// under it and the finger can never disagree about where it is.
+    /// level does not take it: ``LevelLight`` and the drag both run on the
+    /// bare row width, so there is exactly one coordinate for the value and
+    /// the light's edge, the mark on it and the finger can never disagree
+    /// about where it is.
     static let rowGutter: CGFloat = 12
+
+    /// What a row draws around itself while its level is being set. The row
+    /// IS the track: outlining the shape that is already there turns the wash
+    /// into a partial fill of a visible container — the denominator light
+    /// alone cannot give — without a single new object appearing. An outline
+    /// rather than a tint on the remainder because `rim` holds 3.53:1 light
+    /// and 4.25:1 dark against the lit side, where every remainder tint in the
+    /// palette lands between 1.02:1 and 1.84:1 and needs a different token in
+    /// each appearance to read at all.
+    static let trackRim = rim
 
     // MARK: Elevation
 
@@ -252,150 +262,102 @@ struct Readout: ViewModifier {
 /// entirely, which is what lets it be brighter than the wash has ever been at
 /// the point the eye actually needs.
 struct LevelLight: View {
-    /// 0...1. The wash, the edge and ``LevelStrip`` all take the SAME fraction
-    /// of the SAME row width, which is what keeps the light's edge, the line
-    /// on it and the fill under it at one x.
+    /// 0...1. The wash and the mark take the SAME fraction of the SAME row
+    /// width the drag maps to, so the light's edge, the mark on it and the
+    /// finger can never disagree about where the value is.
     let fraction: CGFloat
     let width: CGFloat
     let muted: Bool
     let dragging: Bool
 
-    /// Text-safe at every level: `goldText` on it is 4.72:1, over the floor
-    /// wherever the sub-label happens to land.
+    /// The full-height wash, and the only part of the level that passes behind
+    /// the row's words. Text-safe at every level: `goldText` on it is 4.72:1,
+    /// over the floor wherever the sub-label happens to land — and at 1.09:1
+    /// against the ground it is nearly a step the eye cannot find — but only
+    /// nearly, and a straight vertical boundary is the one thing a reader can
+    /// spot at any contrast. So it does not have one: the last ``fade`` points
+    /// ramp to nothing, and the wash simply stops being there. Every crisp
+    /// edge in this view lives in the bottom band, under the words.
     private static let base: Double = 0.05
+    private static let fade: CGFloat = 28
 
-    /// The light at the edge. Never reaches the text because it is clipped to
-    /// start at ``bloomFloor``; at the levels where the edge itself is left of
-    /// that, there is no bloom and the edge line carries the level alone.
-    private static let bloomPeak: Double = 0.20
-    private static let bloomReach: CGFloat = 56
+    /// EVERYTHING WITH A HARD EDGE LIVES BELOW THE TEXT. The bloom and the
+    /// mark are the two parts of this view a reader can actually locate, so
+    /// both are confined to a band under the sub-label's descender — at every
+    /// value, not only the ones that clear the name column. A level mark that
+    /// is full-height at 70 and full-height at 34 puts a rule through the
+    /// middle of a word at 34, and reads as a broken layout rather than as a
+    /// level; a mark that changes shape by value would make two adjacent rows
+    /// look like two different components.
+    ///
+    /// The bloom fades to nothing at the top of its band, so it never has a
+    /// horizontal edge of its own to notice, and the mark simply starts below
+    /// the halo. Both are measured from the BOTTOM, so one set of numbers
+    /// serves the 60 pt device row and the 48 pt drawer row alike.
+    private static let bloomBand: CGFloat = 12
+    private static let markHeight: CGFloat = 8
 
-    /// Past the name column — the `PLAYING` sub-label ends around 121 pt on
-    /// the narrowest iPhone, so the bloom may not begin before this.
-    private static let bloomFloor: CGFloat = 130
+    /// The light at the level. Brighter than the wash has ever been at the
+    /// point the eye needs it, which it can afford to be precisely because no
+    /// text sits on it.
+    private static let bloomPeak: Double = 0.22
+
+    /// The mark, and its one change under a finger: it firms up in place
+    /// rather than being joined by anything. Nothing new appears on a drag —
+    /// the row's own edge becomes visible (``WarmSignal/trackRim``) and the
+    /// mark thickens, so the instrument is the row rather than a second object
+    /// bolted to it.
+    private static let markWidth: CGFloat = 2
+    private static let markWidthDragging: CGFloat = 3
+    private static let markHeightDragging: CGFloat = 12
 
     /// A muted speaker keeps its LEVEL and loses its GLOW: the base wash and
-    /// the edge line hold the value exactly where it was (the edge is
-    /// `goldText`, 3.73:1 against canvas, muted or not), and only the bloom —
-    /// the part that reads as sound in the room — goes out. Dimming the level
-    /// itself to make a point about mute is what took the old muted wash to
-    /// 1.04:1, where the value simply vanished.
+    /// the mark hold the value exactly where it was (the mark is `goldText`,
+    /// 3.73:1 against canvas, muted or not), and only the bloom — the part
+    /// that reads as sound in the room — goes out. Dimming the level itself to
+    /// make a point about mute is what took the old muted wash to 1.04:1,
+    /// where the value simply vanished.
     private var showsBloom: Bool { !muted }
 
     private var edge: CGFloat { max(0, min(1, fraction) * width) }
 
-    var body: some View {
-        ZStack(alignment: .leading) {
-            Rectangle()
-                .fill(WarmSignal.gold.opacity(Self.base))
-                .frame(width: edge)
+    private var markW: CGFloat { dragging ? Self.markWidthDragging : Self.markWidth }
 
-            if showsBloom, edge > Self.bloomFloor {
-                let start = max(Self.bloomFloor, edge - Self.bloomReach)
+    var body: some View {
+        ZStack(alignment: .bottomLeading) {
+            Rectangle()
+                .fill(LinearGradient(
+                    stops: [.init(color: WarmSignal.gold.opacity(Self.base), location: 0),
+                            .init(color: WarmSignal.gold.opacity(Self.base),
+                                  location: max(0, 1 - Self.fade / max(edge, 1))),
+                            .init(color: WarmSignal.gold.opacity(0), location: 1)],
+                    startPoint: .leading, endPoint: .trailing))
+                .frame(width: edge)
+                .frame(maxHeight: .infinity)
+
+            if showsBloom {
                 Rectangle()
                     .fill(LinearGradient(
                         colors: [WarmSignal.gold.opacity(0), WarmSignal.gold.opacity(Self.bloomPeak)],
                         startPoint: .leading,
                         endPoint: .trailing))
-                    .frame(width: edge - start)
-                    .offset(x: start)
+                    .frame(width: edge, height: Self.bloomBand)
+                    .mask(LinearGradient(colors: [.clear, .black],
+                                         startPoint: .top, endPoint: .bottom))
             }
 
-            // doc:1854-1856. Full height and `goldText` — on paper a dark
-            // mark is what reads, and this line is the level's only precise
-            // statement at rest: 3.73:1 against canvas, 4.17:1 at full. It
-            // stands at the bloom's brightest point, so the line and the light
-            // read as one mark rather than two.
+            // doc:1854-1856's edge line, as a mark rather than a rule.
+            // `goldText` for the reason it always was — on paper a dark mark is
+            // what reads: 3.73:1 against canvas at rest, 4.17:1 under a finger.
+            // It stands at the bloom's brightest point, so the mark and the
+            // light read as one statement rather than two.
             Rectangle()
                 .fill(WarmSignal.goldText)
-                .frame(width: dragging ? 3 : 2.5)
+                .frame(width: markW, height: dragging ? Self.markHeightDragging : Self.markHeight)
                 .opacity(dragging ? 1 : 0.9)
-                .offset(x: max(0, edge - (dragging ? 1.5 : 1.25)))
+                .offset(x: max(0, min(width - markW, edge - markW / 2)))
         }
         .accessibilityHidden(true)
-    }
-}
-
-/// The instrument, and only while a finger is on it.
-///
-/// The row is a fader that looks like light until you touch it, at which point
-/// it admits what it is: a rail appears under the glow — the denominator the
-/// light alone can never give, because a fill with no visible remainder is an
-/// amount of nothing — with a cap at the value, and both melt away on release.
-/// This is the whole delight thesis in one view, so it is deliberately absent
-/// at rest: a permanent rail on every row would be four standing instruments
-/// competing with the Main Out deck's, and would take the row back to being a
-/// control rather than light.
-///
-/// Solid rather than washed, because it can be: nothing overlaps it, so `gold`
-/// on a `well` rail is **3.04:1 in light and 10.51:1 in dark** — over the 3:1
-/// non-text floor on the paper ground, which the wash above it can never
-/// reach at any opacity that keeps the text on it legible.
-///
-/// One construction, both places a row is a fader (``DeviceRowView`` and
-/// `MainOutDrawerRow`). The Main Out deck's own fader is the reference this
-/// borrows from and is deliberately untouched.
-struct LevelStrip: View {
-    /// 0...1, on the same row width ``LevelLight`` uses.
-    let fraction: CGFloat
-    let width: CGFloat
-    let muted: Bool
-
-    private static let height: CGFloat = 3
-
-    /// The deck's fader cap at row scale. 8 pt tall, and the height is forced
-    /// rather than chosen: a device row is 60 pt around a 44 pt halo, which
-    /// leaves exactly 8 pt beneath it for the whole instrument — a taller cap
-    /// either crosses the halo or is sliced off by the row's own clip. At 8 on
-    /// a 3 pt rail it still straddles by more than the deck's cap does (2.7x
-    /// its track against the deck's 1.9x).
-    private static let capWidth: CGFloat = 10
-    private static let capHeight: CGFloat = 8
-
-    /// What a row must reserve for this, whether or not it is showing.
-    static let band: CGFloat = capHeight
-
-    /// Gold IS the signal in this identity, so a muted level is the same level
-    /// with the signal taken out of it. `rim` holds **3.46:1 light / 4.82:1
-    /// dark** against the rail, so muting costs the level no legibility at
-    /// all. `ember` is the obvious alternative and fails on paper at 2.06:1;
-    /// every reduced-opacity gold is worse still.
-    private var fillColor: Color { muted ? WarmSignal.rim : WarmSignal.gold }
-
-    var body: some View {
-        ZStack(alignment: .leading) {
-            Rectangle()
-                .fill(WarmSignal.well)
-                .overlay(Rectangle().strokeBorder(WarmSignal.rim, lineWidth: 0.5))
-                .frame(height: Self.height)
-
-            Rectangle()
-                .fill(fillColor)
-                .frame(width: max(0, min(1, fraction) * width), height: Self.height)
-
-            cap
-        }
-        .frame(width: width, height: Self.band)
-        .accessibilityHidden(true)
-    }
-
-    /// `raised` fill, `rim` edge, gold index bar down the middle — the deck's
-    /// cap, and its numbers: the rim reads 4.17:1 light / 4.07:1 dark on the
-    /// cap, the index bar 3.66:1 / 8.86:1. The body is invisible on paper by
-    /// itself (1.12:1 against canvas) and is defined by its edge, exactly as
-    /// the deck's is.
-    private var cap: some View {
-        ZStack {
-            Capsule()
-                .fill(WarmSignal.raised)
-                .overlay(Capsule().strokeBorder(WarmSignal.rim, lineWidth: 1))
-            Capsule()
-                .fill(WarmSignal.gold)
-                .frame(width: 2, height: Self.capHeight - 3)
-        }
-        .frame(width: Self.capWidth, height: Self.capHeight)
-        .offset(x: max(0, min(width - Self.capWidth,
-                              min(1, fraction) * width - Self.capWidth / 2)))
     }
 }
 
@@ -444,5 +406,102 @@ extension View {
 
     func glassPanel(cornerRadius: CGFloat, fill: Color = WarmSignal.glass) -> some View {
         modifier(GlassPanel(cornerRadius: cornerRadius, fill: fill))
+    }
+}
+
+// MARK: - Level styles (concept sprint)
+
+/// Three ways a row can show its level, switchable live from Settings in a
+/// DEBUG build so the choice can be made with a thumb rather than a rebuild.
+///
+// razor: DEBUG-only chooser for a decision in flight. When one wins, keep that
+// case, delete the enum and the picker in `RemoteSettingsView`, and inline it.
+enum LevelStyle: String, CaseIterable, Identifiable {
+    case light, dial, meter
+    var id: String { rawValue }
+
+    /// The words the picker shows. Household, not console — a picker is chrome
+    /// but these name the thing being chosen.
+    var title: String {
+        switch self {
+        case .light: return "Light"
+        case .dial:  return "Dial"
+        case .meter: return "Meter"
+        }
+    }
+
+    static let storageKey = "debug.levelStyle"
+}
+
+/// V2 — the level as a gold arc around the speaker's own halo ring.
+///
+/// The ring is already there and already means "live", so the level costs no
+/// width, no height and no new object; and a circle is the one denominator
+/// that needs no explaining, because its whole is visible at every value. It
+/// cannot collide with the name at any level by construction — it is not in
+/// the text column at all.
+///
+/// Track `well` rather than the halo's usual `ring`: a gold arc on `ring`
+/// measures 1.12:1 in light, which is no arc at all. On `well` it is 3.04:1
+/// light / 10.51:1 dark, over the 3:1 floor in both.
+///
+/// Twelve o'clock to twelve o'clock, clockwise — the way every dial a person
+/// has ever turned reads, and the way the winding haptic at either rail lands.
+struct LevelDial: View {
+    let fraction: CGFloat
+    let muted: Bool
+    let dragging: Bool
+
+    private var sweep: Double { Double(max(0, min(1, fraction))) * 360 }
+
+    var body: some View {
+        ZStack {
+            Circle().strokeBorder(WarmSignal.well, lineWidth: dragging ? 3.5 : 2.5)
+            Circle()
+                .trim(from: 0, to: max(0, min(1, fraction)))
+                .stroke(muted ? WarmSignal.rim : WarmSignal.gold,
+                        style: StrokeStyle(lineWidth: dragging ? 3.5 : 2.5, lineCap: .butt))
+                // `trim` starts at 3 o'clock; a dial starts at 12.
+                .rotationEffect(.degrees(-90))
+                .padding(dragging ? 1.75 : 1.25)
+        }
+        .accessibilityHidden(true)
+        .animation(nil, value: sweep)
+    }
+}
+
+/// V3 — the level as a short meter under the device's name.
+///
+/// The Mac's popover already draws a per-app volume as a gold underline
+/// beneath the app's name, so this is the one variant that is not invented
+/// here: it makes the phone and the Mac say the level the same way. It sits
+/// inside the content column, tied to the name it belongs to, rather than
+/// spanning the row — which is what keeps it from being a strip under the row.
+///
+/// A FIXED width, not the name's: a mixer is for comparing rows, and a meter
+/// whose full scale is "however long this speaker is called" cannot be
+/// compared with the one above it.
+///
+/// Track `meter` with a `goldText` fill is the only pairing in the palette
+/// that clears both floors in both grounds at once: fill on track 3.03:1 light
+/// / 5.04:1 dark, track against canvas 1.64:1 / 1.99:1 so the remainder is
+/// visible at all.
+struct LevelMeter: View {
+    let fraction: CGFloat
+    let muted: Bool
+    let dragging: Bool
+
+    static let trackWidth: CGFloat = 120
+    private var height: CGFloat { dragging ? 5 : 3 }
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            Capsule().fill(WarmSignal.meter)
+            Capsule()
+                .fill(muted ? WarmSignal.rim : WarmSignal.goldText)
+                .frame(width: max(0, min(1, fraction) * Self.trackWidth))
+        }
+        .frame(width: Self.trackWidth, height: height)
+        .accessibilityHidden(true)
     }
 }

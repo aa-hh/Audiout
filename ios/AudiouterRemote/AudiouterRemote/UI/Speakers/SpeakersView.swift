@@ -814,9 +814,6 @@ private struct MainOutDrawerRow: View {
             }
         }
         .padding(.horizontal, WarmSignal.rowGutter)
-        // 10/10 leaves the drawer row's 28 pt of content exactly the room
-        // ``LevelStrip`` needs beneath it, so revealing the instrument never
-        // reflows the drawer.
         .padding(.vertical, 10)
         // The same two views the device row is built from, in the same order
         // and for the same reasons: the light IS the level, and the rail is
@@ -830,11 +827,10 @@ private struct MainOutDrawerRow: View {
                        muted: device.isMuted,
                        dragging: dragging)
         }
-        .overlay(alignment: .bottom) {
+        .overlay {
             if dragging {
-                LevelStrip(fraction: CGFloat(displayVolume) / 100,
-                           width: rowWidth,
-                           muted: device.isMuted)
+                RoundedRectangle(cornerRadius: WarmSignal.Radius.row, style: .continuous)
+                    .strokeBorder(WarmSignal.trackRim, lineWidth: 1)
                     .transition(.opacity)
             }
         }

@@ -194,7 +194,7 @@ set changes, or when the gate/motion/demo rules change.
   opens. It fires on the TRANSITION into complete, never on a repaint that changed
   nothing. **Reduce Motion, an off-window/occluded window, and `HeadlessRuntime`
   make every beat an instant swap** — steady states must render settled or
-  snapshots stop being deterministic (same rule as `IconTileView.setLit`).
+  snapshots stop being deterministic.
 - **Keyboard:** while Done doesn't exist, Return belongs to the one live Allow
   (`SetupCardView.setAllowIsReturnDefault`); the moment Done exists, Done takes it.
 - Accessibility and the PTP helper can only be confirmed by a silent poll, not a
@@ -322,13 +322,14 @@ set changes, or when the gate/motion/demo rules change.
   pane's mocks (above).
 - Per-card tile colour lives ONLY in `Tokens.Color` (never a hardcoded `NSColor`)
   and tints the SF Symbol GLYPH only, via `IconTileView`'s `color` param — the tile
-  fill and rim stay `Tokens.Color.raised`/hairline on every card. Granting
-  crossfades the glyph to `Tokens.Color.gold` for all cards alike — a deliberate
-  exception to per-card colour; don't "fix" a granted card to light its own resting
-  hue. The resting tints are dial-aware in `.subtle` only and must NEVER route
-  through `accentDynamic`, which collapses distinct hues into one accent.
-  `setLit`'s Reduce-Motion and off-window guards must stay, or snapshots stop being
-  deterministic.
+  fill and rim stay `Tokens.Color.raised`/hairline on every card. **The tint is
+  PERMANENT** (owner decision 2026-08-11 — this REPLACES the earlier
+  "granting crossfades the glyph to `Tokens.Color.gold`" rule): the grant-goes-gold
+  crossfade duplicated the checkmark/status the row already shows, so the glyph
+  never recolours and `IconTileView` has no `setLit`/`isLit` at all. The card's
+  only state role for the tile is the locked dimming (`lockedTileAlpha`). The
+  tints are dial-aware in `.subtle` only and must NEVER route through
+  `accentDynamic`, which collapses distinct hues into one accent.
 - `test_` hooks throughout, because this window isn't visible to a headless
   harness: sequencing (`test_activeStep`, `test_expandedSteps`, `test_title(of:)`,
   `test_hasCheckmark`, `test_note(of:)`, `test_hint(of:)`), the real Allow/Skip
@@ -389,5 +390,5 @@ set changes, or when the gate/motion/demo rules change.
 | `AudiouterCore/Tests/AudiouterCoreTests/OnboardingUITests.swift` | Sequencing, locked/active rendering, the card-level click target and its refusals, skip, the two-mode Allow and its deep links, the Done gate + snap-back, the demo pane's mode/idle rules, the lost-permission header, window level/float/re-present, Done-vs-✕. |
 | `AudiouterCore/Tests/AudiouterCoreTests/SetupFlowModelTests.swift` | The sequence, gate and Allow decision table this UI renders (Core, not this folder, but the seam it depends on). |
 | `AudiouterCore/Tests/AudiouterCoreTests/SetupModelTests.swift` | The underlying `SetupModel` probes/status, the Local Network found count, and the version-gated System Settings deep links. |
-| `AudiouterCore/Tests/AudiouterCoreTests/OnboardingPermissionColorTests.swift` | The four per-card tile colours: distinctness, contrast floors, granted-lights-gold, tile fill unchanged. |
+| `AudiouterCore/Tests/AudiouterCoreTests/OnboardingPermissionColorTests.swift` | The four per-card tile colours: distinctness, contrast floors, tint permanence across every card state, tile fill unchanged. |
 | `AudiouterCore/Sources/onboarding-snapshot` | Offscreen PNG fixtures (per-step, the in-flight wait, denied, complete, permission-lost × light/dark) in `dev/notes/onboarding-snapshots/`. |

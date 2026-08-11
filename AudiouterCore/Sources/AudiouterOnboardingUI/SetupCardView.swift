@@ -462,8 +462,9 @@ final class SetupCardView: NSView {
         case .pending: Tokens.Color.tertiaryLabel
         case .completed, .autoPassed, .skipped: Tokens.Color.secondaryLabel
         }
+        // Dimming is the tile's ONLY state role: its glyph tint is permanent,
+        // and the checkmark below is what says "earned".
         iconTile.alphaValue = state == .pending ? Self.lockedTileAlpha : 1
-        iconTile.setLit(isCheckmarked(state))
         // The lock and the checkmark share one slot, so only one can show; a
         // skipped step gets neither (the user answered, they just said no).
         lockGlyph.isHidden = state != .pending
@@ -738,6 +739,8 @@ final class SetupCardView: NSView {
     /// than a completed one.
     var test_titleColor: NSColor? { titleLabel.textColor }
     var test_iconTileAlpha: CGFloat { iconTile.alphaValue }
+    /// The tile's glyph tint — the card's `iconColor` in EVERY state.
+    var test_iconTint: NSColor? { iconTile.test_restingTint }
     /// Whether the surface is drawing the active card's emphasis.
     var test_isEmphasized: Bool { surface.borderWidth > 1 }
     /// Whether a click anywhere on the card fires Allow right now.

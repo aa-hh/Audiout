@@ -540,31 +540,31 @@ import Testing
         #expect(vc.test_demoStage == nil, "every step but Speaker Sync starts at the pane itself")
     }
 
-    /// Speaker Sync's approval only exists in Login Items — there is no prompt to
-    /// mirror, so it is always the Settings mock. Its mock has TWO stages, and
-    /// rests on the first: the notification macOS posts when the login item
-    /// registers, which the user has to act on before any pane opens.
+    /// Speaker Sync's approval only exists in Login Items — there is no privacy
+    /// dialog to mirror, so it is always the Settings mock. Its mock has TWO
+    /// stages, and rests on the first: the system alert that sends the user to
+    /// Login Items, which they have to act on before any pane opens.
     @Test func speakerSyncAlwaysShowsTheSettingsMock() async {
         let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 2))
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
         #expect(vc.test_activeStep == .speakerSync)
         #expect(vc.test_demoMode == .settings)
-        #expect(vc.test_demoStage == .banner)
+        #expect(vc.test_demoStage == .alert)
     }
 
     /// The two-stage pass has the same contract as every one-stage one: it ends
     /// where it started. Resting on the Login Items pane would show a switch the
     /// user hasn't been told how to reach yet.
-    @Test func theLoginItemsDemoRestsOnTheNotificationNotThePane() {
+    @Test func theLoginItemsDemoRestsOnTheAlertNotThePane() {
         let mock = DemoLoginItemsMockView(step: .speakerSync)
         mock.layoutSubtreeIfNeeded()
-        #expect(mock.test_stage == .banner)
+        #expect(mock.test_stage == .alert)
 
         mock.startTimeline(loop: false)
         mock.stopTimeline()
 
-        #expect(mock.test_stage == .banner, "a pass must end where it started")
+        #expect(mock.test_stage == .alert, "a pass must end where it started")
     }
 
     @Test func demoSettlesWhenEveryStepIsDone() async {
@@ -663,12 +663,12 @@ import Testing
 
     // MARK: The two-stage Remote Control demo
 
-    /// Remote Control's "Open Settings…" re-fires the PROMPT rather than
-    /// deep-linking, because the prompt's own "Open System Settings" button is
+    /// Remote Control's "Open Settings…" re-fires the ASK rather than
+    /// deep-linking, because that panel's own "Open System Settings" button is
     /// the only path that highlights Audiouter in the list. So the user has TWO
     /// clicks to make, on two surfaces — and a demo that opened straight onto the
     /// pane showed the toggle without showing how the pane carrying it is
-    /// reached. The pass starts and ends on the ask, the click still to make.
+    /// reached. The pass starts and ends on the alert, the click still to make.
     @Test func remoteControlsRetryDemoIsTwoStageAndRestsOnTheAsk() async {
         let vc = makeVC(model: makeGrantableModel())
         await vc.test_allow([.audio, .localNetwork])
@@ -678,7 +678,7 @@ import Testing
         await vc.test_tapAllow(.remoteControl)   // the prompt is spent: `.requested`
 
         #expect(vc.test_demoMode == .settings)
-        #expect(vc.test_demoHandoffStage == .prompt)
+        #expect(vc.test_demoStage == .alert)
         // The opt-out has to reach a mock nested one stage deeper than before.
         #expect(vc.test_demoAccessibilityElements.isEmpty,
                 "still reachable: \(vc.test_demoAccessibilityElements)")
@@ -690,17 +690,38 @@ import Testing
         let vc = makeVC(model: makeModel(audio: .denied))
         await vc.test_tapAllow(.audio)
         #expect(vc.test_demoMode == .settings)
-        #expect(vc.test_demoHandoffStage == nil)
+        #expect(vc.test_demoStage == nil)
     }
 
-    /// The re-fired ask confirms nothing — its button leaves for System Settings,
-    /// and both its titles say so. The first ask is untouched.
-    @Test func theReFiredAskIsTheButtonThatOpensSystemSettings() {
-        #expect(DemoPromptMockView.confirmTitle(for: .remoteControl,
-                                                outcome: .opensSystemSettings) == "Open System Settings")
-        #expect(DemoPromptMockView.denyTitle(for: .opensSystemSettings) == "Deny")
-        #expect(DemoPromptMockView.confirmTitle(for: .remoteControl) == "OK")
-        #expect(DemoPromptMockView.denyTitle(for: .grants) == "Don't Allow")
+    /// Remote Control's retry rests on the same shape as Speaker Sync's, and it
+    /// ends where it started.
+    @Test func theRemoteControlRetryDemoRestsOnTheAlert() {
+        let mock = DemoSettingsHandoffMockView(step: .remoteControl)
+        mock.layoutSubtreeIfNeeded()
+        #expect(mock.test_stage == .alert)
+
+        mock.startTimeline(loop: false)
+        mock.stopTimeline()
+
+        #expect(mock.test_stage == .alert, "a pass must end where it started")
+    }
+
+    /// The system alert is the real panel's copy, not the privacy dialog's: the
+    /// access as a header, the OS's own ask, and the instruction that names the
+    /// pane the grant is actually made in. The privacy dialog's own titles are
+    /// untouched.
+    @Test func theSystemAlertCarriesTheRealPanelsCopy() {
+        #expect(DemoSystemAlertMockView.headerText(for: .remoteControl) == "Accessibility Access")
+        #expect(DemoSystemAlertMockView.askText(for: .remoteControl)
+            == "“Audiouter” would like to control this computer using accessibility features.")
+        #expect(DemoSystemAlertMockView.bodyText(for: .remoteControl)
+            .contains("Privacy & Security settings"))
+
+        #expect(DemoSystemAlertMockView.headerText(for: .speakerSync) == "Login Items")
+        #expect(DemoSystemAlertMockView.bodyText(for: .speakerSync)
+            .contains("Login Items settings"))
+
+        #expect(DemoPromptMockView.confirmTitle(for: .audio) == "Allow")
     }
 
     /// A stage writes its score in its OWN seconds; the host lays it down at an

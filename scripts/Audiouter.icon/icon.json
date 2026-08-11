@@ -1,8 +1,12 @@
 {
+  "features" : [
+    "refractivity",
+    "specular-location"
+  ],
   "fill" : {
     "linear-gradient" : [
-      "display-p3:0.99349,1.00000,0.87949,1.00000",
-      "display-p3:0.13086,0.18408,0.23413,1.00000"
+      "display-p3:0.95996,0.93818,0.87373,1.00000",
+      "display-p3:0.54445,0.48576,0.41654,1.00000"
     ],
     "orientation" : {
       "start" : {
@@ -17,25 +21,34 @@
   },
   "groups" : [
     {
+      "blur-material" : 1,
       "layers" : [
         {
+          "blend-mode" : "plus-darker",
+          "glass" : true,
+          "hidden" : false,
           "image-name" : "Halo 3.svg",
           "name" : "Halo 3",
           "position" : {
-            "scale" : 1,
+            "scale" : 0.91,
             "translation-in-points" : [
               0.07150000000001455,
-              -332.39156249999996
+              -360.39156249999996
             ]
           }
         }
       ],
       "lighting" : "individual",
+      "refractivity" : {
+        "depth" : 0,
+        "enabled" : false,
+        "strength" : 1
+      },
       "shadow" : {
         "kind" : "layer-color",
-        "opacity" : 0.7
+        "opacity" : 1.5
       },
-      "specular" : true,
+      "specular" : "inside",
       "translucency" : {
         "enabled" : true,
         "value" : 0.4
@@ -47,11 +60,29 @@
         {
           "fill-specializations" : [
             {
+              "value" : {
+                "linear-gradient" : [
+                  "display-p3:0.21565,0.19691,0.17175,1.00000",
+                  "extended-gray:1.00000,1.00000"
+                ],
+                "orientation" : {
+                  "start" : {
+                    "x" : 0.5000000000000013,
+                    "y" : 0.5
+                  },
+                  "stop" : {
+                    "x" : 0,
+                    "y" : -0.13729042343334552
+                  }
+                }
+              }
+            },
+            {
               "appearance" : "dark",
               "value" : {
                 "linear-gradient" : [
-                  "display-p3:0.16321,0.17322,0.19531,1.00000",
-                  "display-p3:0.35620,0.36719,0.39722,1.00000"
+                  "display-p3:0.17709,0.16147,0.13294,1.00000",
+                  "display-p3:0.36724,0.34227,0.29234,1.00000"
                 ],
                 "orientation" : {
                   "start" : {
@@ -78,6 +109,24 @@
         },
         {
           "fill-specializations" : [
+            {
+              "value" : {
+                "linear-gradient" : [
+                  "display-p3:0.79526,0.77348,0.72324,1.00000",
+                  "display-p3:0.88025,0.72886,0.36958,0.70865"
+                ],
+                "orientation" : {
+                  "start" : {
+                    "x" : 0.5,
+                    "y" : -0.28134660380689364
+                  },
+                  "stop" : {
+                    "x" : 0.5,
+                    "y" : 1.868868300373999
+                  }
+                }
+              }
+            },
             {
               "appearance" : "dark",
               "value" : "none"
@@ -116,6 +165,7 @@
           }
         }
       ],
+      "name" : "Group",
       "position" : {
         "scale" : 0.9,
         "translation-in-points" : [
@@ -133,15 +183,34 @@
       }
     },
     {
+      "blur-material" : 0.5,
       "layers" : [
         {
           "fill-specializations" : [
             {
+              "value" : {
+                "linear-gradient" : [
+                  "display-p3:0.21565,0.19691,0.17175,1.00000",
+                  "extended-gray:1.00000,1.00000"
+                ],
+                "orientation" : {
+                  "start" : {
+                    "x" : 0.5000000000000013,
+                    "y" : 0.5
+                  },
+                  "stop" : {
+                    "x" : 0,
+                    "y" : -0.13729042343334552
+                  }
+                }
+              }
+            },
+            {
               "appearance" : "dark",
               "value" : {
                 "linear-gradient" : [
-                  "display-p3:0.16321,0.17322,0.19531,1.00000",
-                  "display-p3:0.35620,0.36719,0.39722,1.00000"
+                  "display-p3:0.17709,0.16147,0.13294,1.00000",
+                  "display-p3:0.36724,0.34227,0.29234,1.00000"
                 ],
                 "orientation" : {
                   "start" : {
@@ -168,6 +237,24 @@
         },
         {
           "fill-specializations" : [
+            {
+              "value" : {
+                "linear-gradient" : [
+                  "display-p3:0.79526,0.77348,0.72324,1.00000",
+                  "display-p3:0.88025,0.72886,0.36958,0.70865"
+                ],
+                "orientation" : {
+                  "start" : {
+                    "x" : 0.5,
+                    "y" : -0.28134660380689364
+                  },
+                  "stop" : {
+                    "x" : 0.5,
+                    "y" : 1.868868300373999
+                  }
+                }
+              }
+            },
             {
               "appearance" : "dark",
               "value" : "none"
@@ -223,16 +310,16 @@
       }
     },
     {
-      "blur-material" : 0.5,
+      "blur-material" : null,
       "layers" : [
         {
           "image-name" : "Baffle.svg",
           "name" : "Baffle",
           "position" : {
-            "scale" : 1.04,
+            "scale" : 1.07,
             "translation-in-points" : [
-              0.25,
-              27.1484375
+              0.18900000000007822,
+              30.457987499999945
             ]
           }
         },
@@ -248,14 +335,20 @@
           }
         }
       ],
+      "lighting" : "individual",
+      "refractivity" : {
+        "depth" : 0,
+        "enabled" : true,
+        "strength" : 0.6559765625
+      },
       "shadow" : {
         "kind" : "layer-color",
-        "opacity" : 0.45
+        "opacity" : 0.35
       },
-      "specular" : true,
+      "specular" : "outside",
       "translucency" : {
         "enabled" : true,
-        "value" : 0.5
+        "value" : 0.6
       }
     }
   ],

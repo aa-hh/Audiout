@@ -174,6 +174,12 @@ public final class AppSurfaceController {
         // only re-anchors a visible panel, so this is a pure profile stamp.
         shell.setPinned(settings.surfacePinned)
         shell.onClose = { [weak self] in self?.handleShellClosed() }
+        // The window's frame animation reads `animationResizeTime(_:)`, never
+        // the `NSAnimationContext` around `animator().setFrame` — without this
+        // the shell resize runs on AppKit's own clock while every collapsible
+        // clip travels on `collapseRevealDuration`, and the two can never meet
+        // (the root of the content-vs-window judder, live 2026-08-11).
+        shell.resizeAnimationDuration = PopoverPanelViewController.collapseRevealDuration
 
         // The one header (D1): a real unified NSToolbar on the shell window,
         // both profiles. Attaching here — before anything shows — means the
@@ -533,11 +539,20 @@ public final class AppSurfaceController {
         if !animated || reduceMotion || HeadlessRuntime.isActive {
             window.setFrame(frame, display: true)
         } else {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = PopoverPanelViewController.collapseRevealDuration
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                window.animator().setFrame(frame, display: true)
-            }
+            // `setFrame(_:display:animate:)`, NEVER `animator().setFrame`: the
+            // animator proxy animates the frame as a pure surface transform —
+            // no layout runs mid-flight, and the content's backing store rides
+            // the window ORIGIN (bottom-left in AppKit), so this top-anchored
+            // surface shrinking from the bottom slides its whole content up
+            // under the toolbar until the end-of-animation layout snaps it
+            // back (live slow-motion captures, 2026-08-11). The old API steps
+            // the frame on the runloop and lays the content out at EVERY tick,
+            // so the panel's required top pin holds throughout and any
+            // content-vs-window drift resolves at the bottom edge (the panel's
+            // 999 shield), reading as the fold itself. Duration comes from
+            // `animationResizeTime(_:)` — `ControlPanelPanel` overrides it to
+            // the one shared `collapseRevealDuration`.
+            window.setFrame(frame, display: true, animate: true)
         }
     }
 

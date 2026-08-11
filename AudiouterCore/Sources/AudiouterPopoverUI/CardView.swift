@@ -45,8 +45,8 @@ final class CardView: NSView {
     private let bodyStack = NSStackView()
     /// The animated height constraint on `bodyClip`. Active with `constant == 0`
     /// while collapsed; deactivated while expanded (so the body's own fitting
-    /// height flows through). Toggled via the constraint's `animator()` proxy so
-    /// rapid collapse/expand retarget cleanly (PLAN §E risk 1).
+    /// height flows through). Driven by `FoldAnimator`, which retargets a rapid
+    /// collapse/expand from the live constant (PLAN §E risk 1).
     private var bodyHeightConstraint: NSLayoutConstraint!
     /// The body stack's bottom pin to the clip, at `.defaultHigh` so a required
     /// height-0 constraint can override it during a collapse (see the init note).
@@ -57,17 +57,22 @@ final class CardView: NSView {
     }()
     /// Whether the body is currently collapsed (height pinned to 0 + hidden).
     private(set) var isBodyCollapsed = false
-    /// Bumped on every animated toggle so a stale completion handler (from an
-    /// animation a rapid retarget superseded) can no-op instead of applying a
-    /// terminal `isHidden`/constraint change against a newer in-flight animation
+    /// The panel this card is mounted in, which re-fits itself (and the surface
+    /// window with it) on every tick of this card's fold. Set by `beginCard`;
+    /// `nil` for a bare card built outside a panel.
+    weak var foldFollower: PopoverPanelViewController?
+    /// Bumped on every animated toggle so a stale completion handler (from a
+    /// fold a non-animated end state superseded) can no-op instead of applying a
+    /// terminal `isHidden`/constraint change against a newer in-flight fold
     /// (PLAN §E risk 1: "rapid toggles retarget cleanly, never queue or fight").
     private var collapseGeneration = 0
     /// The clip height the most recent ANIMATED collapse/expand started from — the
-    /// value the height constraint held (and the layer animates FROM) at the
-    /// instant the animator retargeted it. Recorded for the regression test that
-    /// pins first-collapse-vs-second-collapse trajectory parity: a correct collapse
-    /// always begins at the expanded height (`target`), never a stale `0` (see
-    /// `setBodyCollapsed`'s collapse branch). `nil` until the first animated toggle.
+    /// value the height constraint held at the instant the driver took it over.
+    /// Recorded for the regression test that
+    /// pins first-collapse-vs-second-collapse trajectory parity: a collapse from
+    /// rest always begins at the expanded height (`target`), never a stale `0`;
+    /// a retarget mid-flight begins at the live height (see `setBodyCollapsed`'s
+    /// collapse branch). `nil` until the first animated toggle.
     private(set) var lastAnimatedStartHeight: CGFloat?
 
     init() {
@@ -202,13 +207,18 @@ final class CardView: NSView {
     ///   constraint at the end).
     ///
     /// `animated == false` (initial build + Reduce Motion) applies the end state
-    /// synchronously with no animation. All constraint changes go through the
-    /// `animator()` proxy so rapid toggles retarget the in-flight animation rather
-    /// than queueing or fighting (PLAN §E risk 1: "retargetable rapid toggles").
+    /// synchronously with no animation. The animated path hands the clip height
+    /// to `FoldAnimator` — the ONE driver every fold on this surface shares — so
+    /// rapid toggles retarget from the live constant rather than queueing or
+    /// fighting (PLAN §E risk 1: "retargetable rapid toggles"), and the panel's
+    /// size (and the window's) is laid out FROM that height every tick rather
+    /// than pre-measured and animated alongside it.
     ///
-    /// `onComplete` fires when the animation settles (or immediately on the
-    /// non-animated path) — the panel uses it to publish the final popover size.
-    func setBodyCollapsed(_ collapsed: Bool, animated: Bool, onComplete: (() -> Void)? = nil) {
+    /// `onComplete` fires when the fold settles (or immediately on the
+    /// non-animated path) — the panel uses it to publish the final popover size
+    /// on the paths the driver isn't following.
+    func setBodyCollapsed(_ collapsed: Bool, animated: Bool,
+                          onComplete: (() -> Void)? = nil) {
         // A header-only card has no body to move.
         guard bodyClip.superview != nil else {
             isBodyCollapsed = collapsed
@@ -244,47 +254,45 @@ final class CardView: NSView {
 
         collapseGeneration += 1
         let generation = collapseGeneration
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = PopoverPanelViewController.collapseRevealDuration
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            context.allowsImplicitAnimation = true
-            if collapsed {
-                // Seed the constraint with the CURRENT expanded height BEFORE
-                // animating it to 0 — mirroring the expand branch's explicit floor
-                // below. Without this seed, the FIRST collapse of a freshly-built
-                // card animates from the constraint's AS-CREATED constant (0):
-                // `bodyHeightConstraint`'s constant is only ever set to `target` as
-                // a side effect of a prior EXPAND animation, so on a never-expanded
-                // card activating it here pins the clip to 0 IMMEDIATELY while
-                // `animator().constant = 0` animates 0→0 (a no-op) — the body height
-                // SNAPS shut, and the rail overlay, which tracks the live clip floor
-                // every layout pass, snaps with it. That was the visible "content
-                // jumps on the first collapse only" glitch.
-                // Seeding `target` gives the first collapse the identical target→0
-                // travel every later collapse already gets (a prior expand left the
-                // constant at `target`), so all collapses squeeze identically.
-                bodyHeightConstraint.constant = target
-                bodyHeightConstraint.isActive = true
-                layoutSubtreeIfNeeded()
-                lastAnimatedStartHeight = target
-                bodyHeightConstraint.animator().constant = 0
-            } else {
-                // Clear hidden BEFORE animating up to the fitting height, then let
-                // the pinned constraint go inactive at the end.
-                bodyClip.isHidden = false
-                // Start from 0 explicitly so the up-animation has a floor even if a
-                // prior expand left the constraint inactive.
-                bodyHeightConstraint.isActive = true
-                bodyHeightConstraint.constant = 0
-                layoutSubtreeIfNeeded()
-                lastAnimatedStartHeight = 0
-                bodyHeightConstraint.animator().constant = target
-            }
-            layoutSubtreeIfNeeded()
-        }, completionHandler: { [weak self] in
+
+        // START state committed and LAID OUT before the fold begins, so it
+        // SNAPS into place and the fold has the full distance left to travel.
+        // `insertRow` and `expandSubsection` commit their start state the same
+        // way.
+        //
+        // Both seeds take the height the body is AT: the live (possibly
+        // mid-flight) constant when this toggle retargets a running one —
+        // the fold/reveal must continue from where the body is, because
+        // jumping it to a rest height first makes the content momentarily
+        // TALLER than the mid-flight window, the one deformation the surplus
+        // shield cannot absorb (rows riding up to the window top on rapid
+        // toggles). At rest the seeds are exactly the old values: collapse
+        // starts at `target` (covering the first-collapse trap — a
+        // never-expanded card's constraint holds its AS-CREATED constant 0,
+        // and animating 0→0 would snap the body shut); expand floors at 0 (a
+        // completed collapse leaves the constraint active at 0).
+        let start: CGFloat
+        if collapsed {
+            start = bodyHeightConstraint.isActive
+                ? bodyHeightConstraint.constant : target
+        } else {
+            // Clear hidden BEFORE the seed layout — a hidden arranged subview
+            // is detached from stack layout entirely.
+            bodyClip.isHidden = false
+            start = bodyHeightConstraint.isActive
+                ? bodyHeightConstraint.constant : 0
+        }
+        bodyHeightConstraint.constant = start
+        bodyHeightConstraint.isActive = true
+        lastAnimatedStartHeight = start
+        layoutSubtreeIfNeeded()
+
+        FoldAnimator.shared.animate(bodyHeightConstraint,
+                                    to: collapsed ? 0 : target,
+                                    follower: foldFollower) { [weak self] in
             guard let self else { onComplete?(); return }
-            // A superseded animation's completion must NOT touch the terminal state
-            // — the newest animation owns it (and will fire its own completion).
+            // A superseded fold's completion must NOT touch the terminal state
+            // — the newest fold owns it (and will fire its own completion).
             guard generation == self.collapseGeneration else { onComplete?(); return }
             if self.isBodyCollapsed {
                 self.bodyClip.isHidden = true
@@ -294,7 +302,7 @@ final class CardView: NSView {
                 self.bodyHeightConstraint.isActive = false
             }
             onComplete?()
-        })
+        }
     }
 }
 

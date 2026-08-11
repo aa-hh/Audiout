@@ -81,8 +81,11 @@ public final class BusRailOverlayView: NSView {
     /// through ``test_isConnectPulsing``; nothing survives the pulse).
     private var pulseLayer: CAShapeLayer?
     private static let pulseKey = "busRail.connectPulse"
-    /// The pulse window's length as a fraction of the whole wire.
-    private static let pulseWindow: CGFloat = 0.3
+    /// The bead's length ON GLASS, in points — fixed, so it reads as a bead of
+    /// light on any wire. (A fraction-of-the-wire window became a long STRIP
+    /// on a tall wire — Alec's live read of that cut.) Capped at 45% of a very
+    /// short wire so the bead never IS the wire.
+    private static let beadLength: CGFloat = 26
     /// The arrival bloom's disc radius (its light halo doubles the visual
     /// footprint via the shadow).
     private static let arrivalBloomRadius: CGFloat = 5
@@ -454,9 +457,35 @@ public final class BusRailOverlayView: NSView {
         // mutation out of the draw pass just the same, and a nested run-loop
         // spin (tests) can execute it, which the main dispatch queue's
         // non-reentrancy forbids.
+        // The bead is a fixed LENGTH of light; convert it to this wire's
+        // stroke-fraction space (capped so a very short wire still shows wire
+        // around the bead).
+        let window = min(Self.beadLength / max(Self.length(of: joined), 1), 0.45)
         RunLoop.main.perform { [weak self] in
-            self?.runConnectPulse(along: path, from: departure, arrivingAt: arrival)
+            self?.runConnectPulse(along: path, from: departure, window: window, arrivingAt: arrival)
         }
+    }
+
+    /// Total flattened length of `path` in points (0 for an empty path).
+    static func length(of path: NSBezierPath) -> CGFloat {
+        let flat = path.flattened
+        var points = [NSPoint](repeating: .zero, count: 3)
+        var current: NSPoint?
+        var total: CGFloat = 0
+        for index in 0..<flat.elementCount {
+            switch flat.element(at: index, associatedPoints: &points) {
+            case .moveTo:
+                current = points[0]
+            case .lineTo:
+                if let from = current {
+                    total += hypot(points[0].x - from.x, points[0].y - from.y)
+                }
+                current = points[0]
+            default:
+                break
+            }
+        }
+        return total
     }
 
     /// Where `targetY` sits along `path`, as a fraction of its total flattened
@@ -513,7 +542,7 @@ public final class BusRailOverlayView: NSView {
     /// instant captures the settled wire, never the transient. Self-removing on
     /// completion: nothing runs, or exists, at rest. A fresh surge replaces an
     /// in-flight one (the newest room restarts the pulse from its own spot).
-    func runConnectPulse(along path: CGPath, from departure: CGFloat, arrivingAt arrival: NSPoint) {
+    func runConnectPulse(along path: CGPath, from departure: CGFloat, window: CGFloat, arrivingAt arrival: NSPoint) {
         guard window != nil, !reduceMotion, let hostLayer = layer else { return }
         test_lastPulseDeparture = departure
         cancelConnectPulse()
@@ -543,7 +572,7 @@ public final class BusRailOverlayView: NSView {
         // it climbs — the ring swallows the bead rather than the bead dying
         // in place. easeIn: it accelerates INTO the ring's receiving bloom.
         let leading = CABasicAnimation(keyPath: "strokeStart")
-        leading.fromValue = max(0, departure - Self.pulseWindow)
+        leading.fromValue = max(0, departure - window)
         leading.toValue = 0
         let trailing = CABasicAnimation(keyPath: "strokeEnd")
         trailing.fromValue = departure
@@ -560,11 +589,15 @@ public final class BusRailOverlayView: NSView {
         // `CATransaction` completion: CA only delivers those under an
         // app-driven commit loop (a test process never gets one — measured),
         // and CA completions are exactly the sharp edge the CATransition-key
-        // trap already documents. At travel's end the animation has removed
-        // itself and the bead's model is already invisible, so cleanup timing
-        // is not visual. A cancel (RM, accent dial, remount, replacement)
-        // nils/replaces `pulseLayer` first, so the stale timer no-ops.
-        Timer.scheduledTimer(withTimeInterval: travel.duration, repeats: false) { [weak self, weak bead] _ in
+        // trap already documents. The timer runs a BEAT PAST the travel time —
+        // CA's own clock starts a frame or two after this line, and easeIn
+        // packs the landing into the last frames, so an exact-duration timer
+        // beheads the arrival (live bug: the bead died at the hook curve).
+        // Landing needs no cleanup precision anyway: the animation removes
+        // itself at its natural end and the model underneath is invisible.
+        // A cancel (RM, accent dial, remount, replacement) nils/replaces
+        // `pulseLayer` first, so the stale timer no-ops.
+        Timer.scheduledTimer(withTimeInterval: travel.duration + 0.08, repeats: false) { [weak self, weak bead] _ in
             MainActor.assumeIsolated {
                 guard let self, let bead, self.pulseLayer === bead else { return }
                 self.test_pulseHandoffRuns += 1

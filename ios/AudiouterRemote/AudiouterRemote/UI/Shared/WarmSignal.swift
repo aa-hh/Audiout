@@ -99,11 +99,6 @@ enum WarmSignal {
 
     // MARK: Glass
 
-    /// What the drawer puts between itself and the list it covers. The same
-    /// near-black in both appearances on purpose: a scrim is an absence of
-    /// light, and the paper ground needs it more than the dark one does.
-    static let scrim = Color(UIColor(rgb: 0x080604, alpha: 0.5))
-
     static let glass     = warm(light: 0xFAF7EE, dark: 0x342D25, lightAlpha: 0.66, darkAlpha: 0.52)
     static let glassEdge = warm(light: 0x1E1C1C, dark: 0xFFFFFF, lightAlpha: 0.10, darkAlpha: 0.11)
     static let glassHi   = warm(light: 0xFFFFFF, dark: 0xFFFFFF, lightAlpha: 0.80, darkAlpha: 0.10)
@@ -128,16 +123,6 @@ enum WarmSignal {
     /// the light's edge, the mark on it and the finger can never disagree
     /// about where it is.
     static let rowGutter: CGFloat = 12
-
-    /// What a row draws around itself while its level is being set. The row
-    /// IS the track: outlining the shape that is already there turns the wash
-    /// into a partial fill of a visible container — the denominator light
-    /// alone cannot give — without a single new object appearing. An outline
-    /// rather than a tint on the remainder because `rim` holds 3.53:1 light
-    /// and 4.25:1 dark against the lit side, where every remainder tint in the
-    /// palette lands between 1.02:1 and 1.84:1 and needs a different token in
-    /// each appearance to read at all.
-    static let trackRim = rim
 
     // MARK: Elevation
 
@@ -293,7 +278,7 @@ struct LevelLight: View {
     /// The bloom fades to nothing at the top of its band, so it never has a
     /// horizontal edge of its own to notice, and the mark simply starts below
     /// the halo. Both are measured from the BOTTOM, so one set of numbers
-    /// serves the 60 pt device row and the 48 pt drawer row alike.
+    /// serves any row height the type scale grows the row to.
     private static let bloomBand: CGFloat = 12
     private static let markHeight: CGFloat = 8
 
@@ -304,9 +289,8 @@ struct LevelLight: View {
 
     /// The mark, and its one change under a finger: it firms up in place
     /// rather than being joined by anything. Nothing new appears on a drag —
-    /// the row's own edge becomes visible (``WarmSignal/trackRim``) and the
-    /// mark thickens, so the instrument is the row rather than a second object
-    /// bolted to it.
+    /// the row's remainder tints in behind the light and the mark thickens, so
+    /// the instrument is the row rather than a second object bolted to it.
     private static let markWidth: CGFloat = 2
     private static let markWidthDragging: CGFloat = 3
     private static let markHeightDragging: CGFloat = 12
@@ -389,7 +373,7 @@ extension View {
     /// Expands the tap area to the 44 pt floor without moving anything: pad
     /// out, claim the padded rect, pad back in. A `minWidth`/`minHeight` frame
     /// would reach the same floor but push its container out with it — a 28 pt
-    /// mute button would take its drawer row from 48 pt to 64.
+    /// mute button would take a 48 pt row to 64.
     ///
     /// `drawn` is the size the control actually paints, so the padding can be
     /// exactly what the floor needs and no more.

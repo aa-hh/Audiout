@@ -9,12 +9,12 @@ import AudiouterProtocol
 /// gold wash behind the content IS the level (``LevelLight``). Put a finger on
 /// it and the row admits what it is: the row draws its own edge, so the light
 /// becomes a partial fill of a visible track, and the edge goes again on
-/// release — the instrument is the row itself, never a second object. A playing row also carries its own mute button
-/// (``muteControl``) — a departure from the design document, which moved mute
-/// to the Main Out drawer alone: sound is live in
-/// another room while this screen is used, and the one control that stops it
-/// may not be behind a chevron a first-timer has no reason to open. The
-/// drawer keeps its copy; the two are the same button, in both places.
+/// release — the instrument is the row itself, never a second object. A
+/// playing row also carries its own mute button (``muteControl``) — a
+/// departure from the design document, which moved mute to a Main Out drawer:
+/// sound is live in another room while this screen is used, and the one
+/// control that stops it may not be behind a chevron a first-timer has no
+/// reason to open. The row is the only place it lives.
 ///
 /// Volume policy: while dragging, the wash and the readout track `localVolume`
 /// (set on every tick) rather than `device.volume` from the snapshot, because
@@ -61,7 +61,6 @@ struct DeviceRowView: View {
     @ScaledMetric(relativeTo: .body) private var nameSize: CGFloat = 16.5
     @ScaledMetric(relativeTo: .body) private var glyphSize: CGFloat = 17
     @ScaledMetric(relativeTo: .footnote) private var diagnoseSize: CGFloat = 12.5
-    /// The drawer mute button's glyph size, because this is that button.
     @ScaledMetric(relativeTo: .caption) private var muteIconSize: CGFloat = 12
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -171,6 +170,10 @@ struct DeviceRowView: View {
     private static func playingWord(for device: DeviceState, isSelected: Bool) -> String {
         if !device.isAvailable { return "Unavailable" }
         if device.connection.state == "connecting" { return "Connecting" }
+        // A link that dropped and is coming back is not the same news as one
+        // that never came up, and it is specifically not Playing: the room is
+        // silent while this lasts, so the word cannot say otherwise.
+        if device.connection.state == "reconnecting" { return "Reconnecting" }
         return isSelected ? "Playing" : "Ready"
     }
 
@@ -187,6 +190,13 @@ struct DeviceRowView: View {
 
     private var isConnecting: Bool { device.connection.state == "connecting" }
 
+    private var isReconnecting: Bool { device.connection.state == "reconnecting" }
+
+    /// The link isn't up yet, whether this is the first attempt or a recovery.
+    /// The two share everything the row draws — the dashed ring, the sub-label
+    /// tint, and being kept out of PLAYING — and differ only in the word.
+    private var isPending: Bool { isConnecting || isReconnecting }
+
     /// The playing state the row draws and speaks — the Mac's, or the tap that
     /// is still on its way there.
     private var selected: Bool {
@@ -195,7 +205,7 @@ struct DeviceRowView: View {
 
     /// doc:1828 — playing, present, and nothing in the way.
     private var isLive: Bool {
-        selected && device.isAvailable && !isFailed && !isConnecting
+        selected && device.isAvailable && !isFailed && !isPending
     }
 
     /// doc:1826 — the row only reads as "dragging" once the finger has
@@ -349,8 +359,8 @@ struct DeviceRowView: View {
         // nothing fires for the continuous middle of a drag.
         .sensoryFeedback(trigger: pendingSelection) { _, new in new == nil ? nil : .selection }
         .sensoryFeedback(trigger: rail) { _, new in new == nil ? nil : .impact(weight: .light) }
-        // Mute is confirmed rather than optimistic, exactly as it is in the
-        // drawer, so the tick rides the Mac's answer.
+        // Mute is confirmed rather than optimistic, exactly as Main Out's is,
+        // so the tick rides the Mac's answer.
         .sensoryFeedback(.impact(weight: .light), trigger: device.isMuted)
         // An OVERLAY, and applied after the gesture on purpose: a `Button`
         // inside `faderRow` would sit under `.simultaneousGesture`, which
@@ -372,9 +382,10 @@ struct DeviceRowView: View {
     /// What the button paints; the ``hittable(drawn:)`` floor is 44 either way.
     private static let muteSize: CGFloat = 28
 
-    /// The drawer's mute button (``MainOutDrawerRow``), on the row: same well,
-    /// same rim, same glyph pair, same gold-when-muted. One control drawn one
-    /// way in the two places it appears, so neither has to be learned twice.
+    /// Mute, on the row that is making the sound: same well, same rim and the
+    /// same glyph pair the deck's Main Out mute uses, so the gesture that
+    /// silences one speaker and the one that silences everything are visibly
+    /// the same control at two scopes.
     @ViewBuilder
     private var muteControl: some View {
         if showsMute {
@@ -481,7 +492,7 @@ struct DeviceRowView: View {
     private var ring: some View {
         if isFailed {
             Circle().strokeBorder(WarmSignal.fail, lineWidth: 2.8)
-        } else if isConnecting {
+        } else if isPending {
             Circle().strokeBorder(WarmSignal.ring, style: StrokeStyle(lineWidth: 2.5, dash: [4, 3]))
         } else if isLive && levelStyle == .dial {
             LevelDial(fraction: volumeFraction, muted: device.isMuted, dragging: dragging)
@@ -563,11 +574,12 @@ struct DeviceRowView: View {
         if isFailed { return device.connection.failureHeadline ?? "CONNECTION FAILED" }
         if !device.isAvailable { return "UNAVAILABLE" }
         if isConnecting { return "CONNECTING…" }
+        if isReconnecting { return "RECONNECTING…" }
         if device.isMuted { return "MUTED" }
         // One word for the state everywhere it appears: the section this row
-        // sits in, the deck's count and the drawer all say PLAYING too. READY
-        // rather than IDLE for its opposite — the speaker is fine, it just
-        // isn't getting the Mac's sound.
+        // sits in and the deck's count both say PLAYING too. READY rather than
+        // IDLE for its opposite — the speaker is fine, it just isn't getting
+        // the Mac's sound.
         if selected { return "PLAYING" }
         return "READY"
     }
@@ -575,7 +587,7 @@ struct DeviceRowView: View {
     private var subTint: Color {
         if isFailed { return WarmSignal.fail }
         if !device.isAvailable { return WarmSignal.label3 }
-        if isConnecting { return WarmSignal.ring }
+        if isPending { return WarmSignal.ring }
         if device.isMuted { return WarmSignal.label2 }
         if selected { return WarmSignal.goldText }
         return WarmSignal.label3

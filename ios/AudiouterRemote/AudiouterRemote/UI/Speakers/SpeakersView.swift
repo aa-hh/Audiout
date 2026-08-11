@@ -7,9 +7,9 @@ import AudiouterProtocol
 /// floating Main Out deck. This view owns no local state at all — every value
 /// it renders comes straight from `session.snapshot`. The in-drag echoes live
 /// one level down, in ``MainOutRow`` and ``DeviceRowView``, and the screen's
-/// presentation state (which sections are collapsed, whether the drawer is up)
-/// lives in ``SpeakerConsole``, which only exists while a snapshot does — so
-/// each dies with the list it belongs to.
+/// presentation state (which sections are collapsed) lives in
+/// ``SpeakerConsole``, which only exists while a snapshot does — so each dies
+/// with the list it belongs to.
 struct SpeakersView: View {
     let session: any MacSessionProtocol
 
@@ -127,33 +127,51 @@ struct SpeakersView: View {
 
 // MARK: - The console
 
-/// One section of the speaker list. `devices` is what renders; `placeholder`
-/// is the honest empty state for the one section that is structurally always
-/// empty, and is never anything a user could mistake for a real speaker.
 private struct SpeakerSectionSpec: Identifiable {
     let id: String
     let title: String
     let tint: Color
     let devices: [DeviceState]
-    let placeholder: String?
 }
 
-/// Which way a finger committed. Shared by the deck fader and the drawer rows;
-/// ``DeviceRowView`` declares its own, because the only symbol these three
-/// gestures deliberately share is `WarmSignal.faderValue`.
+/// Which section of the list a speaker belongs in. The screen is one list of
+/// every speaker, cut by the only thing a reader is scanning for — what this
+/// speaker is doing right now — so a device's state IS its address, and there
+/// is exactly one row per speaker anywhere on the screen.
+///
+/// A `"failed"` speaker sits in READY rather than PLAYING even while the Mac
+/// still has it selected: it is making no sound, and its row is a failure card
+/// asking to be retried, which is a thing to do rather than a thing playing.
+enum SpeakerSection {
+    case playing, ready, unavailable
+
+    /// `@MainActor` only because ``DeviceRowView/showsFailureCard(_:)`` is —
+    /// `View` conformance infers it, and the failure rule has exactly one
+    /// definition on purpose.
+    @MainActor
+    static func of(_ device: DeviceState) -> SpeakerSection {
+        if !device.isAvailable { return .unavailable }
+        if device.isSelected && !DeviceRowView.showsFailureCard(device) { return .playing }
+        return .ready
+    }
+}
+
+/// Which way a finger committed. ``DeviceRowView`` declares its own, because
+/// the only symbol these two gestures deliberately share is
+/// `WarmSignal.faderValue`.
 private enum DragAxis { case horizontal, vertical }
 
-/// The sections, the floating Main Out deck and its drawer. Split out of
-/// ``SpeakersView`` so this screen's presentation state has a legal home: it is
-/// only ever constructed when a snapshot exists, so its state dies with the
-/// snapshot exactly the way ``MainOutRow``'s echo does.
+/// The sections and the floating Main Out deck. Split out of ``SpeakersView``
+/// so this screen's presentation state has a legal home: it is only ever
+/// constructed when a snapshot exists, so its state dies with the snapshot
+/// exactly the way ``MainOutRow``'s echo does.
 private struct SpeakerConsole: View {
     let snapshot: Snapshot
     let session: any MacSessionProtocol
 
     // razor: collapse state is in-memory only. The design wants it remembered per Mac (doc:1046), but the phone may not persist routing state (Model/MacSessionProtocol.swift:21-23); revisit if that rule changes.
     @State private var collapsed: Set<String> = []   // the `= []` is required: State<Set<String>>
-    @State private var drawerOpen = false            // has no init(), so without it `collapsed`
+                                                     // has no init(), so without it `collapsed`
                                                      // becomes a memberwise-init parameter and
                                                      // SpeakerConsole(snapshot:session:) won't compile
 
@@ -161,12 +179,12 @@ private struct SpeakerConsole: View {
     /// between the two grounds — 0.4 black over paper is a smudge, not height.
     @Environment(\.colorScheme) private var colorScheme
 
-    /// The drawer and the row that moves between sections are the two things
-    /// on this screen that travel. With Reduce Motion on they crossfade in
-    /// place instead — same state change, no slide, no spring overshoot.
+    /// The row that moves between sections is the one thing on this screen
+    /// that travels. With Reduce Motion on it crossfades in place instead —
+    /// same state change, no slide, no spring overshoot.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    /// One namespace for the row that moves between AIRPLAY and PLAYING: the
+    /// One namespace for the row that moves between READY and PLAYING: the
     /// two `ForEach`es render the same device id, so the row can travel
     /// between them instead of vanishing from one and appearing in the other.
     @Namespace private var rowMove
@@ -189,12 +207,28 @@ private struct SpeakerConsole: View {
 
     // MARK: Derived
 
-    private var playingDevices: [DeviceState] { snapshot.devices.filter { $0.isSelected && $0.isAvailable } }
+    private var playingDevices: [DeviceState] { devices(in: .playing) }
     private var playingCount: Int { playingDevices.count }
     private var master: Int { snapshot.mainOutMasterVolume }
 
-    /// One motion for the whole screen: the drawer's rise and a row's move
-    /// between sections run on the same curve for the same length, so the
+    private func devices(in section: SpeakerSection) -> [DeviceState] {
+        snapshot.devices.filter { SpeakerSection.of($0) == section }
+    }
+
+    /// READY, with anything that failed at the top of it. A failure card is
+    /// the one row in the section that is asking for something, and it is also
+    /// the tallest, so burying it under three idle speakers hides both the ask
+    /// and the reason. Two passes rather than a `sorted` predicate, because
+    /// this has to be stable: the Mac's own device order is what the rest of
+    /// the list is in.
+    private var readyDevices: [DeviceState] {
+        let ready = devices(in: .ready)
+        return ready.filter(DeviceRowView.showsFailureCard)
+             + ready.filter { !DeviceRowView.showsFailureCard($0) }
+    }
+
+    /// One motion for the whole screen: a row's move between sections and a
+    /// section's collapse run on the same curve for the same length, so the
     /// surface has a single tempo rather than one per animated thing.
     /// `spring(duration:)` is bounce-free by default — this is deceleration,
     /// not overshoot.
@@ -216,23 +250,24 @@ private struct SpeakerConsole: View {
         return sections.first { !collapsed.contains($0.id) && !$0.devices.isEmpty }?.devices.first?.id
     }
 
-    /// doc:2000-2006 minus PINNED: nothing in the protocol carries a pin, so
-    /// that section could only ever draw its own "no pinned speakers" — an
-    /// empty heading first on the screen, above the speakers themselves. The
-    /// remaining four, always all four, in this order.
+    /// Three sections, one per state (``SpeakerSection``), always all three —
+    /// an empty heading is the honest answer to "nothing is playing", and a
+    /// section that comes and goes moves the two below it every time.
+    ///
+    /// Not the design's own list (doc:2000-2006): PINNED is gone because
+    /// nothing in the protocol carries a pin, and BLUETOOTH is gone because a
+    /// Bluetooth output arrives as an ordinary speaker whose icon says what it
+    /// is — a heading of its own was a permanently empty section promising a
+    /// feature (roadmap 004), and it cut the list by transport where the
+    /// reader is scanning by state.
     private var sections: [SpeakerSectionSpec] {
         [
             SpeakerSectionSpec(id: "live", title: "PLAYING", tint: WarmSignal.goldText,
-                               devices: playingDevices, placeholder: nil),
-            SpeakerSectionSpec(id: "airplay", title: "AIRPLAY", tint: WarmSignal.label2,
-                               devices: snapshot.devices.filter { !$0.isSelected && $0.isAvailable },
-                               placeholder: nil),
-            // razor: structural placeholder only. Nothing on the wire ever reports a Bluetooth output — DeviceState.kind is a free-form String (AudiouterProtocol CompanionSnapshot.swift:42) and the Mac never sends one. Tracked as roadmap 004.
-            SpeakerSectionSpec(id: "bluetooth", title: "BLUETOOTH", tint: WarmSignal.label2,
-                               devices: [], placeholder: "BLUETOOTH OUTPUT NOT AVAILABLE YET"),
+                               devices: playingDevices),
+            SpeakerSectionSpec(id: "ready", title: "READY", tint: WarmSignal.label2,
+                               devices: readyDevices),
             SpeakerSectionSpec(id: "unavailable", title: "UNAVAILABLE", tint: WarmSignal.label2,
-                               devices: snapshot.devices.filter { !$0.isAvailable },
-                               placeholder: nil),
+                               devices: devices(in: .unavailable)),
         ]
     }
 
@@ -252,29 +287,14 @@ private struct SpeakerConsole: View {
             }
             .padding(.horizontal, 14)
             .padding(.bottom, deckHeight + 16)
-            // Arming re-sorts the row out of AIRPLAY and into PLAYING. Without
-            // this the row teleports and the user has to find it again; with
-            // it the row is the same object in a new place, which is the truth.
+            // Starting a speaker re-sorts the row out of READY and into
+            // PLAYING. Without this the row teleports and the user has to find
+            // it again; with it the row is the same object in a new place,
+            // which is the truth.
             .animation(motion, value: playingIDs)
         }
         .scrollIndicators(.hidden)
-        // The scrim takes every touch that lands on the list, so VoiceOver must
-        // not keep offering the rows underneath it — a double tap there would
-        // arm a speaker no finger can reach. The deck stays live either way:
-        // it draws OVER the scrim and is not dimmed by it.
-        .accessibilityHidden(drawerOpen)
-        .overlay { if drawerOpen { scrim } }
         .overlay(alignment: .bottom) { deck }
-        .overlay(alignment: .bottom) {
-            if drawerOpen {
-                drawer
-                    .padding(.bottom, deckHeight)
-                    .transition(reduceMotion
-                                ? .opacity
-                                : .move(edge: .bottom).combined(with: .opacity))
-            }
-        }
-        .animation(motion, value: drawerOpen)
     }
 
     // MARK: Sections
@@ -297,14 +317,6 @@ private struct SpeakerConsole: View {
                         .transition(.opacity)
 
                     if device.id == coachAnchorID { gestureCoach }
-                }
-
-                if let placeholder = section.placeholder {
-                    Text(placeholder)
-                        .microLabel()
-                        .foregroundStyle(WarmSignal.label3)
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 34)
                 }
             }
         }
@@ -333,9 +345,9 @@ private struct SpeakerConsole: View {
         // target would only shrink the strip a finger already has.
         .frame(height: WarmSignal.hitTarget)
         .contentShape(Rectangle())
-        // On the screen's one curve, like the drawer and the travelling row —
-        // it was the last state change here that simply cut. `motion` is
-        // already the Reduce Motion branch, so this needs no gate of its own.
+        // On the screen's one curve, like the travelling row — it was the
+        // last state change here that simply cut. `motion` is already the
+        // Reduce Motion branch, so this needs no gate of its own.
         .onTapGesture {
             withAnimation(motion) {
                 if collapsed.contains(section.id) { collapsed.remove(section.id) }
@@ -365,9 +377,9 @@ private struct SpeakerConsole: View {
             Text("TAP TO PLAY · DRAG TO SET LEVEL")
                 .microLabel()
                 .foregroundStyle(WarmSignal.label2)
-                // On screen it is the same micro voice as the drawer's own
-                // "DRAG TO ADJUST"; spoken, capitals and a middle dot are
-                // noise, so VoiceOver gets the sentence instead.
+                // On screen it is the screen's micro voice; spoken, capitals
+                // and a middle dot are noise, so VoiceOver gets the sentence
+                // instead.
                 .accessibilityLabel("Tap a speaker to play it. Drag across a speaker to set its level.")
 
             Spacer(minLength: 8)
@@ -400,8 +412,7 @@ private struct SpeakerConsole: View {
             MainOutRow(masterVolume: master,
                        isMuted: snapshot.mainOutMuted,
                        session: session,
-                       onToggleMute: { session.setMainOutMuted(!snapshot.mainOutMuted) },
-                       onIdlePress: { drawerOpen.toggle() })
+                       onToggleMute: { session.setMainOutMuted(!snapshot.mainOutMuted) })
         }
         .padding(EdgeInsets(top: 13, leading: 15, bottom: 14, trailing: 15))
         // One edge, drawn by `glassPanel` itself. The second `glassHi` stroke
@@ -412,9 +423,9 @@ private struct SpeakerConsole: View {
         .padding(.horizontal, 14)
         .padding(.bottom, 8)
         // Measured at the end of the chain, so the number is everything the
-        // deck occupies — its own bottom padding included — and both the
-        // list's bottom inset and the drawer's offset are driven by the same
-        // one. Nothing the list does changes this height, so there is no loop.
+        // deck occupies — its own bottom padding included — and the list's
+        // bottom inset clears all of it. Nothing the list does changes this
+        // height, so there is no loop.
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { deckHeight = $0 }
     }
 
@@ -437,74 +448,8 @@ private struct SpeakerConsole: View {
                 .fixedSize()
 
             Spacer(minLength: 0)
-
-            warmChevron(drawerOpen ? 135 : -45)
-                .hittable(drawn: 9)
-                .onTapGesture { drawerOpen.toggle() }
-                .accessibilityAddTraits(.isButton)
-                .accessibilityLabel(drawerOpen ? "Hide playing speakers" : "Show playing speakers")
         }
         .lineLimit(1)
-        .contentShape(Rectangle())
-        // The whole strip opens the drawer, not the 9 pt chevron alone: the
-        // label, the count and the gap between them sit over a control the
-        // chevron only points at, and 9 pt is not where a thumb aims.
-        //
-        // `.onTapGesture` on the container, deliberately — a gesture on a
-        // child outranks one on its ancestor, so the picker's UIKit menu keeps
-        // every tap that lands on the picker (including the 12 pt its
-        // `.hittable` claims past its glyph) and this takes the rest. A
-        // `.simultaneousGesture` would fire both and open a menu into a moving
-        // drawer.
-        .onTapGesture { drawerOpen.toggle() }
-    }
-
-    // MARK: Drawer
-
-    private var scrim: some View {
-        WarmSignal.scrim
-            .ignoresSafeArea()
-            .onTapGesture { drawerOpen = false }
-            .transition(.opacity)
-            .accessibilityLabel("Hide playing speakers")
-            .accessibilityAddTraits(.isButton)
-            .accessibilityAction { drawerOpen = false }
-    }
-
-    /// doc:188-217 — every armed device's own level and mute, gathered in one
-    /// place: the row carries the same mute (``DeviceRowView/muteControl``),
-    /// but the drawer is where the whole set is adjustable without scrolling.
-    private var drawer: some View {
-        VStack(spacing: 0) {
-            Capsule()
-                .fill(WarmSignal.label3)
-                .frame(width: 38, height: 4)
-                .padding(.bottom, 14)
-
-            HStack(spacing: 8) {
-                Text("PLAYING")
-                    .microLabel()
-                    .foregroundStyle(WarmSignal.goldText)
-                Spacer(minLength: 8)
-                Text("DRAG TO ADJUST")
-                    .microLabel()
-                    .foregroundStyle(WarmSignal.label2)
-            }
-            .padding(.horizontal, 4)
-            .padding(.bottom, 12)
-
-            VStack(spacing: 4) {
-                // The design's own drawer list is its pinned device plus the
-                // playing ones (doc:2007); there is no PINNED section here, so
-                // that reduces to the playing ones.
-                ForEach(playingDevices, id: \.id) { device in
-                    MainOutDrawerRow(device: device, session: session)
-                }
-            }
-        }
-        .padding(EdgeInsets(top: 16, leading: 14, bottom: 12, trailing: 14))
-        .glassPanel(cornerRadius: WarmSignal.Radius.panel, fill: WarmSignal.panel)
-        .padding(.horizontal, 10)
     }
 }
 
@@ -565,7 +510,6 @@ struct MainOutRow: View {
     let isMuted: Bool
     let session: any MacSessionProtocol
     var onToggleMute: () -> Void = {}   // defaulted → the 3-arg init still compiles
-    var onIdlePress: () -> Void = {}    // a press with no movement — raises the drawer
 
     @State private var localVolume: Double?
     /// True from the drag's first tick to its release. While it's true the
@@ -686,7 +630,8 @@ struct MainOutRow: View {
     }
 
     /// doc:1730-1749 — the same axis latch ``DeviceRowView`` uses. A press
-    /// that never commits raises the drawer instead of moving anything.
+    /// that never commits does nothing: a master fader is not a button, and
+    /// the one thing a stray tap on it must never do is move the level.
     private var dragGesture: some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { gestureValue in
@@ -716,157 +661,9 @@ struct MainOutRow: View {
                     // other rows still do) rubber-bands the thumb to the
                     // pre-release value for that beat. Hold it instead and let
                     // the snapshot above clear it.
-                case .vertical:
+                case .vertical, nil:
                     return
-                case nil:
-                    onIdlePress()
                 }
-            }
-    }
-}
-
-// MARK: - Drawer row
-
-/// One armed device inside the Main Out drawer (doc:200-215): its own level,
-/// dragged the same way, plus the same mute button the row itself carries
-/// (``DeviceRowView/muteControl``) — parity in both directions, so whichever
-/// surface the user is on, mute is where they are.
-private struct MainOutDrawerRow: View {
-    let device: DeviceState
-    let session: any MacSessionProtocol
-
-    @State private var axis: DragAxis?
-    @State private var dragStartVolume: Int?
-    @State private var localVolume: Double?
-    @State private var rowWidth: CGFloat = 0
-
-    @ScaledMetric(relativeTo: .caption) private var muteIconSize: CGFloat = 12
-    @ScaledMetric(relativeTo: .subheadline) private var nameSize: CGFloat = 14.5
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    private var displayVolume: Int { Int((localVolume ?? Double(device.volume)).rounded()) }
-    private var dragging: Bool { axis == .horizontal }
-    private var controlsEnabled: Bool {
-        DeviceRowView.isControllable(device, appRoutes: session.snapshot?.appRoutes ?? [])
-    }
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Button {
-                session.setDeviceMuted(id: device.id, muted: !device.isMuted)
-            } label: {
-                Image(systemName: device.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                    .font(.system(size: muteIconSize))
-                    .foregroundStyle(device.isMuted ? WarmSignal.gold : WarmSignal.label2)
-                    .frame(width: 28, height: 28)
-                    .background(RoundedRectangle(cornerRadius: WarmSignal.Radius.control, style: .continuous)
-                        .fill(WarmSignal.well))
-                    .overlay(RoundedRectangle(cornerRadius: WarmSignal.Radius.control, style: .continuous)
-                        .strokeBorder(WarmSignal.rim, lineWidth: 0.5))
-            }
-            .buttonStyle(.plain)
-            .hittable(drawn: 28)
-            .accessibilityLabel(device.isMuted ? "Unmute \(device.name)" : "Mute \(device.name)")
-
-            HStack(spacing: 10) {
-                Circle()
-                    .strokeBorder(WarmSignal.ring, lineWidth: 2)
-                    .frame(width: 24, height: 24)
-                    .accessibilityHidden(true)
-
-                Text(device.name)
-                    .font(.system(size: nameSize, weight: .medium))
-                    .foregroundStyle(WarmSignal.label)
-                    .lineLimit(1)
-
-                // The row's second visible mute signal, so the state does not
-                // rest on the button glyph alone — and the same word the
-                // device row shows, in the same voice, so mute reads the same
-                // in both places it is drawn.
-                if device.isMuted {
-                    Text("MUTED")
-                        .microLabel()
-                        .foregroundStyle(WarmSignal.label2)
-                }
-
-                Spacer(minLength: 8)
-
-                Text(String(displayVolume))
-                    .readout(14)
-                    .foregroundStyle(WarmSignal.goldText)
-            }
-            .contentShape(Rectangle())
-            .gesture(dragGesture)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(device.name)
-            // The mute button beside this one says which way it will go, not
-            // which way the speaker currently is — so the state has to be here
-            // or it is nowhere in the drawer at all.
-            .accessibilityValue(device.isMuted ? "\(displayVolume) percent, Muted"
-                                               : "\(displayVolume) percent")
-            .accessibilityAdjustableAction { direction in
-                guard controlsEnabled else { return }
-                session.setDeviceVolume(
-                    id: device.id,
-                    volume: min(100, max(0, device.volume + (direction == .increment ? 5 : -5))),
-                    isFinal: true)
-            }
-        }
-        .padding(.horizontal, WarmSignal.rowGutter)
-        .padding(.vertical, 10)
-        // The same two views the device row is built from, in the same order
-        // and for the same reasons: the light IS the level, and the rail is
-        // the instrument the row reveals under a finger. The edge line is
-        // `goldText` and reads 4.63:1 on this row's `well` ground, where a
-        // `glow` mark on the same ground measures 1.36:1 light / 2.14:1 dark
-        // and cannot carry a level at all.
-        .background(alignment: .leading) {
-            LevelLight(fraction: CGFloat(displayVolume) / 100,
-                       width: rowWidth,
-                       muted: device.isMuted,
-                       dragging: dragging)
-        }
-        .overlay {
-            if dragging {
-                RoundedRectangle(cornerRadius: WarmSignal.Radius.row, style: .continuous)
-                    .strokeBorder(WarmSignal.trackRim, lineWidth: 1)
-                    .transition(.opacity)
-            }
-        }
-        .animation(reduceMotion ? nil : .easeOut(duration: dragging ? 0.18 : 0.14), value: dragging)
-        .background(WarmSignal.well)
-        .clipShape(RoundedRectangle(cornerRadius: WarmSignal.Radius.row, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: WarmSignal.Radius.row, style: .continuous)
-            .strokeBorder(WarmSignal.rim, lineWidth: 0.5))
-        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { rowWidth = $0 }
-        .sensoryFeedback(.impact(weight: .light), trigger: device.isMuted)
-        .sensoryFeedback(trigger: WarmSignal.faderRail(displayVolume, dragging: dragging)) { _, new in
-            new == nil ? nil : .impact(weight: .light)
-        }
-    }
-
-    private var dragGesture: some Gesture {
-        DragGesture(minimumDistance: 0)
-            .onChanged { gestureValue in
-                let w = gestureValue.translation.width, h = gestureValue.translation.height
-                if axis == nil {
-                    guard max(abs(w), abs(h)) >= 5 else { return }
-                    axis = abs(w) > abs(h) ? .horizontal : .vertical
-                    if axis == .horizontal { dragStartVolume = device.volume }
-                }
-                guard axis == .horizontal, controlsEnabled, let start = dragStartVolume else { return }
-                let v = WarmSignal.faderValue(start: start, translationWidth: w, trackWidth: rowWidth)
-                localVolume = Double(v)
-                session.setDeviceVolume(id: device.id, volume: v, isFinal: false)
-            }
-            .onEnded { _ in
-                defer { axis = nil; dragStartVolume = nil }
-                guard axis == .horizontal, controlsEnabled else { return }
-                session.setDeviceVolume(id: device.id,
-                                        volume: Int((localVolume ?? Double(device.volume)).rounded()),
-                                        isFinal: true)
-                localVolume = nil
             }
     }
 }

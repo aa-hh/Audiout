@@ -280,6 +280,14 @@ import AudiouterProtocol
         #expect(DeviceRowView.spokenValue(
             for: makeDevice(isSelected: true, connectionState: "connecting"),
             isSelected: true, isRouted: false) == "Connecting")
+        // A link that dropped is its own news, and it is not PLAYING: the room
+        // is silent until it comes back, so the row says so in both channels.
+        #expect(DeviceRowView.spokenValue(
+            for: makeDevice(isSelected: true, connectionState: "reconnecting"),
+            isSelected: true, isRouted: false) == "Reconnecting")
+        #expect(DeviceRowView.spokenValue(
+            for: makeDevice(connectionState: "reconnecting"), isSelected: false, isRouted: false)
+            == "Reconnecting")
         #expect(DeviceRowView.spokenValue(
             for: makeDevice(isAvailable: false), isSelected: false, isRouted: false)
             == "Unavailable")
@@ -307,6 +315,41 @@ import AudiouterProtocol
         #expect(DeviceRowView.spokenValue(
             for: makeDevice(isSelected: false),
             isSelected: false, isRouted: true) == "Ready, App audio routed here")
+    }
+
+    // MARK: - Which section a speaker lands in
+
+    @MainActor
+    @Test func aSpeakerSectionIsWhatTheSpeakerIsDoing() {
+        // The list is cut by state and nothing else, so every device has
+        // exactly one address and no row is drawn twice.
+        #expect(SpeakerSection.of(makeDevice(isSelected: true)) == .playing)
+        #expect(SpeakerSection.of(makeDevice(isSelected: false)) == .ready)
+        #expect(SpeakerSection.of(makeDevice(isAvailable: false)) == .unavailable)
+    }
+
+    @MainActor
+    @Test func aFailedSpeakerIsReadyRatherThanPlaying() {
+        // The Mac still has it selected, but it is making no sound and its row
+        // is a failure card asking to be retried — PLAYING would be a lie the
+        // section heading tells before the row can correct it.
+        #expect(SpeakerSection.of(
+            makeDevice(isSelected: true, connectionState: "failed")) == .ready)
+        // Off the network outranks everything, exactly as the sub-label does.
+        #expect(SpeakerSection.of(
+            makeDevice(isAvailable: false, isSelected: true, connectionState: "failed"))
+            == .unavailable)
+    }
+
+    @MainActor
+    @Test func aConnectingSpeakerStaysInPlayingWhileItComesUp() {
+        // Section membership follows the Mac's selection, not the link: a
+        // speaker on its way up belongs where it is going, and the row's own
+        // sub-label (CONNECTING… / RECONNECTING…) carries the beat it is in.
+        for state in ["connecting", "reconnecting", "off"] {
+            #expect(SpeakerSection.of(
+                makeDevice(isSelected: true, connectionState: state)) == .playing)
+        }
     }
 
     // MARK: - Device row: the tap's local echo

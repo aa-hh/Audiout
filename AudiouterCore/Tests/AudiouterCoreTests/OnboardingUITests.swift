@@ -209,13 +209,52 @@ import Testing
     @Test func localNetworkCompletedTitleReportsTheFoundCount() async {
         let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 3))
         await vc.test_allow([.audio, .localNetwork])
-        #expect(vc.test_title(of: .localNetwork) == "Found 3 speakers")
+        #expect(vc.test_title(of: .localNetwork) == "3 speakers on your network")
+    }
+
+    /// A card the user already finished is DONE — clicking it must do nothing
+    /// at all. Live, clicking the completed Local Network card flashed an error
+    /// state that then dismissed itself: the click landed on a card that a
+    /// rescan had just downgraded out of completed (fixed in `SetupModel`), so
+    /// this pins the inertness the flash was hiding — no press accepted, no
+    /// buttons, no probe, and the flow does not move.
+    @Test func aCompletedCardIsInertToClicks() async {
+        let net = CannedLocalNetwork(found: 3)
+        let vc = makeVC(model: makeModel(audio: .granted, localNetwork: net))
+        await vc.test_allow([.audio, .localNetwork])
+        #expect(vc.test_activeStep == .bluetooth)
+        let frontCount = vc.test_returnToFrontCount
+
+        for done in [SetupStep.audio, .localNetwork] {
+            #expect(!vc.test_isCardClickable(done), "\(done) is finished")
+            #expect(vc.test_cardPressIsRefused(done), "\(done) must refuse a press")
+            #expect(!vc.test_cardIsAccessibilityButton(done), "and offer VoiceOver no action")
+            #expect(vc.test_buttonTitles(of: done).isEmpty, "a finished card offers no controls")
+        }
+
+        #expect(vc.test_activeStep == .bluetooth, "nothing moved")
+        #expect(vc.test_title(of: .localNetwork) == "3 speakers on your network")
+        #expect(vc.test_returnToFrontCount == frontCount)
+    }
+
+    /// The model half of the same rule: an Allow routed at a finished step is a
+    /// no-op that says so, and never re-runs the probe.
+    @Test func allowingACompletedStepIsANoOp() async {
+        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 3))
+        await vc.test_allow([.audio, .localNetwork])
+        #expect(vc.test_hasCheckmark(.localNetwork))
+
+        await vc.test_tapAllow(.localNetwork)
+
+        #expect(vc.test_activeStep == .bluetooth)
+        #expect(vc.test_hint(of: .localNetwork) == nil, "no error state on a finished card")
+        #expect(vc.test_statusCaption(of: .localNetwork) == nil)
     }
 
     @Test func oneFoundSpeakerReadsSingular() async {
         let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 1))
         await vc.test_allow([.audio, .localNetwork])
-        #expect(vc.test_title(of: .localNetwork) == "Found 1 speaker")
+        #expect(vc.test_title(of: .localNetwork) == "1 speaker on your network")
     }
 
     /// On a macOS with no Local Network gate the step is satisfied without any
@@ -381,8 +420,9 @@ import Testing
         #expect(opened == [.screenAndSystemAudioRecording])
     }
 
-    /// An unproven browse can't be called a denial — it gets a "turn a speaker
-    /// on" line rather than an accusation, and the primary click keeps being the
+    /// An unanswered ask can't be called a denial — it gets a line naming what
+    /// actually happened (nothing answered) rather than an accusation or an
+    /// invented switched-off speaker, and the primary click keeps being the
     /// retry that line asks for. Settings is demoted beside it, never instead of
     /// it: a card whose only button opened Settings left NOTHING able to
     /// re-browse, so the flow dead-ended on a speaker the user had just switched on.
@@ -393,7 +433,8 @@ import Testing
         await vc.test_allow([.audio, .localNetwork])
 
         #expect(vc.test_activeStep == .localNetwork, "an unproven browse does not advance")
-        #expect(vc.test_hint(of: .localNetwork) == "No speakers found yet. Turn one on, then try again.")
+        #expect(vc.test_hint(of: .localNetwork)
+                == "Nothing has answered yet. If the permission dialog is open, choose Allow — or try again.")
         #expect(vc.test_buttonTitles(of: .localNetwork) == ["Try Again", "Open Settings…"])
 
         await vc.test_tapAllow(.localNetwork)
@@ -412,7 +453,7 @@ import Testing
 
         await vc.test_tapAllow(.localNetwork)
 
-        #expect(vc.test_title(of: .localNetwork) == "Found 2 speakers")
+        #expect(vc.test_title(of: .localNetwork) == "2 speakers on your network")
         #expect(vc.test_hint(of: .localNetwork) == nil, "nothing left to explain")
         #expect(vc.test_activeStep == .bluetooth)
     }
@@ -516,7 +557,7 @@ import Testing
         await priming.value
 
         #expect(vc.test_statusCaption(of: .localNetwork) == nil, "the wait clears with the answer")
-        #expect(vc.test_title(of: .localNetwork) == "Found 2 speakers")
+        #expect(vc.test_title(of: .localNetwork) == "2 speakers on your network")
     }
 
     /// A refusal skips the second half entirely — there is nothing left to
@@ -1065,7 +1106,8 @@ import Testing
         await vc.test_tapAllow(.audio)   // second click: the deep link
         #expect(wc.test_windowLevel == .normal, "System Settings has to be able to come forward")
 
-        wc.test_appDidBecomeActive()
+        wc.test_appDidResignActive()     // Settings takes the front
+        wc.test_appDidBecomeActive()     // the user comes back
         #expect(wc.test_windowLevel == .floating, "back in our app, back on top")
     }
 

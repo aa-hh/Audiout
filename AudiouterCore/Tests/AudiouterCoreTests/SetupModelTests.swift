@@ -42,9 +42,42 @@ extension SerializedSharedState {
             lock.withLock { _windows.append(browseSeconds) }
             return await probe() ? 1 : 0
         }
+
+        /// Whether each prime was allowed to publish the self-discovery service,
+        /// in order — the flag that keeps the firewall dialog out of every
+        /// background rescan.
+        private var _selfDiscoveryFlags: [Bool] = []
+        var selfDiscoveryFlags: [Bool] { lock.withLock { _selfDiscoveryFlags } }
+        func prime(browseSeconds: TimeInterval,
+                   selfDiscovery: Bool,
+                   onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome {
+            lock.withLock { _selfDiscoveryFlags.append(selfDiscovery) }
+            return await prime(browseSeconds: browseSeconds, onReachable: onReachable)
+        }
     }
 
-    /// Reports a fixed speaker COUNT (the seam behind "Found 3 speakers"), with
+    /// A prime whose answer the test changes between calls — the live shape of
+    /// "granted once, then a rescan that sees nothing."
+    private final class SwitchableLocalNetwork: LocalNetworkPriming, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _outcome: LocalNetworkOutcome
+        init(_ outcome: LocalNetworkOutcome) { _outcome = outcome }
+        var outcome: LocalNetworkOutcome {
+            get { lock.withLock { _outcome } }
+            set { lock.withLock { _outcome = newValue } }
+        }
+        func probe() async -> Bool {
+            guard case .granted(let found) = outcome else { return false }
+            return found > 0
+        }
+        func prime(browseSeconds: TimeInterval,
+                   onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome {
+            if case .granted = outcome { onReachable() }
+            return outcome
+        }
+    }
+
+    /// Reports a fixed speaker COUNT (the seam behind "3 speakers on your network"), with
     /// the Bool answer derived from it exactly as the real primer derives it.
     private struct CountingLocalNetwork: LocalNetworkPriming {
         let found: Int
@@ -1068,15 +1101,83 @@ extension SerializedSharedState {
         _ = await model.auditRequiredPermissions()
         #expect(net.probeCount == 0)
 
-        // Now engage it, then revoke it — the audit re-probes because it's no
-        // longer `.unknown`.
+        // Now engage it — the audit re-probes because it's no longer `.unknown`.
         net.reachable = true
         await model.primeLocalNetwork()
         #expect(model.localNetworkStatus == .granted)
-        net.reachable = false
-        let unmet = await model.auditRequiredPermissions()
-        #expect(model.localNetworkStatus == .requested)
-        #expect(unmet.contains(.localNetwork))
+        let probesAfterAsk = net.probeCount
+
+        _ = await model.auditRequiredPermissions()
+        #expect(net.probeCount > probesAfterAsk)
+    }
+
+    /// THE state churn caught live: after the grant, every app activation
+    /// re-probes, and a re-probe that proved nothing used to downgrade the
+    /// permission to `.requested` — the card flashed "not granted", the
+    /// completed step re-opened as the active one, and the next probe put it
+    /// back. The grant is SELF-PROVEN; nothing but the refusal itself takes it
+    /// away.
+    @Test func aRescanThatProvesNothingNeverTakesAProvedGrantBack() async {
+        let net = SwitchableLocalNetwork(.granted(foundSpeakers: 3))
+        let model = SetupModel(audioProbe: CannedAudioProbe(result: .granted),
+                               localNetwork: net,
+                               remoteControl: SpyRemoteControl(),
+                               ptpHelper: FakePTPHelper(),
+                               settings: AppSettings(defaults: defaults))
+        await model.primeLocalNetwork()
+        #expect(model.localNetworkStatus == .granted)
+
+        // Every status the UI could have repainted from here on.
+        var seen: [PermissionStatus] = []
+        model.onChange = { seen.append(model.localNetworkStatus) }
+
+        net.outcome = .undecided                  // the rescan sees nothing
+        await model.refreshStatuses()             // ← the app-activation path
+        #expect(model.localNetworkStatus == .granted)
+        #expect(model.localNetworkFoundSpeakers == 3, "a speaker switched off is not a permission event")
+
+        _ = await model.auditRequiredPermissions() // ← the wake/reactivate audit
+        #expect(model.localNetworkStatus == .granted)
+        #expect(!model.unmetRequiredPermissions().contains(.localNetwork))
+        #expect(!model.requiredPermissionsNotGranted().contains(.localNetwork))
+
+        #expect(!seen.contains(.requested),
+                "not even an intermediate repaint may show the grant as lost")
+    }
+
+    /// The one signal that DOES take it back. A revocation in System Settings
+    /// reaches the browse as the mDNS policy error, and that is a real denial.
+    @Test func aRefusalStillRevokesAProvedGrant() async {
+        let net = SwitchableLocalNetwork(.granted(foundSpeakers: 2))
+        let model = SetupModel(audioProbe: CannedAudioProbe(result: .granted),
+                               localNetwork: net,
+                               remoteControl: SpyRemoteControl(),
+                               ptpHelper: FakePTPHelper(),
+                               settings: AppSettings(defaults: defaults))
+        await model.primeLocalNetwork()
+
+        net.outcome = .denied
+        await model.refreshStatuses()
+
+        #expect(model.localNetworkStatus == .denied)
+        #expect(model.localNetworkFoundSpeakers == 0)
+        #expect(model.unmetRequiredPermissions().contains(.localNetwork))
+    }
+
+    /// Publishing the self-discovery service opens a listening socket, which the
+    /// macOS application firewall can ask about. It belongs to the ASK; a
+    /// permission already proved needs no second proof, so its rescans browse
+    /// and nothing more.
+    @Test func onlyAnUnprovedLocalNetworkPublishesTheSelfDiscoveryService() async {
+        let (model, spy, _, _) = makeModel(audio: .granted)
+        spy.reachable = true
+
+        await model.primeLocalNetwork()            // the first ask — publish
+        #expect(model.localNetworkStatus == .granted)
+        await model.refreshStatuses()              // a rescan of a proved grant
+        _ = await model.auditRequiredPermissions()
+
+        #expect(spy.selfDiscoveryFlags == [true, false, false])
     }
 
     @Test func auditRequiredPermissionsSilentlyRereadsPTPHelperStatus() async {

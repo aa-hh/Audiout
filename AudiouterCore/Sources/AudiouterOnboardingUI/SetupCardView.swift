@@ -39,9 +39,10 @@ struct SetupCardContent {
     /// imperative → earned capability).
     ///
     /// `foundSpeakers` only matters for Local Network, whose completed title
-    /// carries the browse's real count — "Found 3 speakers" is something the
-    /// user can check. `nil` means NO browse ran at all (macOS 14, where local
-    /// network isn't gated), so that copy must not imply the user did anything;
+    /// carries the browse's real count — "3 speakers on your network" is
+    /// something the user can check. `nil` means NO browse ran at all (macOS
+    /// 14, where local network isn't gated), so that copy must not imply the
+    /// user did anything;
     /// a count of zero is a genuine browse that saw nothing, which since the
     /// self-discovery primer still completes the step (the PERMISSION is what
     /// was granted), so its copy says exactly that and nothing more.
@@ -54,8 +55,11 @@ struct SetupCardContent {
             switch foundSpeakers {
             case nil: return "Speakers on your Wi\u{2011}Fi are already reachable"
             case 0: return "No speakers found yet \u{2014} switch one on and it'll appear"
-            case 1: return "Found 1 speaker"
-            case let count?: return "Found \(count) speakers"
+            // "Found" read as "connected to" to the owner, who was connected to
+            // none of them: the count is what DISCOVERY saw, so the copy says
+            // where they are rather than what we did with them.
+            case 1: return "1 speaker on your network"
+            case let count?: return "\(count) speakers on your network"
             }
         }
     }
@@ -297,8 +301,12 @@ final class SetupCardView: NSView {
 
         captionLabel.font = Tokens.Font.caption
         captionLabel.textColor = Tokens.Color.secondaryLabel
-        captionLabel.lineBreakMode = .byWordWrapping
-        captionLabel.maximumNumberOfLines = 0
+        // ONE line, always. The row is permanently in the layout (see below), so
+        // a caption that wrapped would move every card under this one — the
+        // thing the reserved band exists to prevent. Both captions fit the
+        // column with room to spare.
+        captionLabel.lineBreakMode = .byTruncatingTail
+        captionLabel.maximumNumberOfLines = 1
         captionLabel.preferredMaxLayoutWidth = Self.textColumnWidth - Self.captionSpinnerColumn
         captionLabel.translatesAutoresizingMaskIntoConstraints = false
         captionRow.orientation = .horizontal
@@ -309,7 +317,11 @@ final class SetupCardView: NSView {
         captionRow.translatesAutoresizingMaskIntoConstraints = false
         captionRow.addArrangedSubview(spinner)
         captionRow.addArrangedSubview(captionLabel)
-        captionRow.isHidden = true
+        // The row NEVER leaves the layout: an expanded card's height is a
+        // constant of its copy, and a caption that appeared when Allow was
+        // tapped grew the card ~50 pt and shoved every card below it down. It
+        // is emptied and faded instead (see `apply`).
+        captionRow.alphaValue = 0
 
         primarySlot.translatesAutoresizingMaskIntoConstraints = false
 
@@ -450,8 +462,9 @@ final class SetupCardView: NSView {
         case .pending: Tokens.Color.tertiaryLabel
         case .completed, .autoPassed, .skipped: Tokens.Color.secondaryLabel
         }
+        // Dimming is the tile's ONLY state role: its glyph tint is permanent,
+        // and the checkmark below is what says "earned".
         iconTile.alphaValue = state == .pending ? Self.lockedTileAlpha : 1
-        iconTile.setLit(isCheckmarked(state))
         // The lock and the checkmark share one slot, so only one can show; a
         // skipped step gets neither (the user answered, they just said no).
         lockGlyph.isHidden = state != .pending
@@ -470,7 +483,9 @@ final class SetupCardView: NSView {
         // a wait that says nothing reads as a hang.
         let caption = state == .active ? statusCaption : nil
         captionLabel.stringValue = caption ?? ""
-        captionRow.isHidden = caption == nil
+        // Faded, never hidden — the band stays reserved so no wait can resize
+        // the card it appears on.
+        captionRow.alphaValue = caption == nil ? 0 : 1
         if caption == nil { spinner.stopAnimation(nil) } else { spinner.startAnimation(nil) }
 
         applyCheckmark(shown: isCheckmarked(state),
@@ -724,6 +739,8 @@ final class SetupCardView: NSView {
     /// than a completed one.
     var test_titleColor: NSColor? { titleLabel.textColor }
     var test_iconTileAlpha: CGFloat { iconTile.alphaValue }
+    /// The tile's glyph tint — the card's `iconColor` in EVERY state.
+    var test_iconTint: NSColor? { iconTile.test_restingTint }
     /// Whether the surface is drawing the active card's emphasis.
     var test_isEmphasized: Bool { surface.borderWidth > 1 }
     /// Whether a click anywhere on the card fires Allow right now.
@@ -735,9 +752,12 @@ final class SetupCardView: NSView {
     var test_note: String? { noteLabel.isHidden ? nil : noteLabel.stringValue }
     var test_hint: String? { hintLabel.isHidden ? nil : hintLabel.stringValue }
     var test_isBodyCollapsed: Bool { isBodyCollapsed }
-    var test_isProbing: Bool { !captionRow.isHidden }
+    /// Whether a wait is on screen. The caption ROW is always in the layout (a
+    /// reserved band, so it can't resize the card) — what comes and goes is its
+    /// visibility.
+    var test_isProbing: Bool { captionRow.alphaValue > 0 }
     /// The in-flight caption's text, or nil when no wait is on screen.
-    var test_statusCaption: String? { captionRow.isHidden ? nil : captionLabel.stringValue }
+    var test_statusCaption: String? { test_isProbing ? captionLabel.stringValue : nil }
     var test_offersSkip: Bool { skipButton != nil && state == .active }
     /// The titles of the buttons the card currently offers, in order.
     var test_buttonTitles: [String] {

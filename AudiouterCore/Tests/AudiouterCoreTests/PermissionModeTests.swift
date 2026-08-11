@@ -136,7 +136,11 @@ import Testing
         model.registerPTPHelper()
 
         #expect(model.audioStatus == .denied)
-        #expect(model.localNetworkStatus == .requested)
+        // `denied` mode means the simulated user REFUSED — so Local Network
+        // reports the refusal, like every other seam in this mode. It used to
+        // report `.requested` ("asked, nothing answered"), which put the one
+        // card this mode exists to exercise in the wrong shape entirely.
+        #expect(model.localNetworkStatus == .denied)
         #expect(model.ptpHelperStatus == .requiresApproval)
         let notGranted = Set(model.requiredPermissionsNotGranted())
         #expect(notGranted.contains(.audioCapture))

@@ -364,10 +364,11 @@ public final class OnboardingViewController: NSViewController {
                 activeTitle: "Let Audiouter hear your Mac's sound",
                 completedTitle: "Audiouter can now hear your Mac's sound",
                 // Outcome-framed reassurance FIRST (spec §5.8 house voice: the
-                // OS prompt will say "screen recording", so defuse it here),
+                // OS prompt will say "screen recording", so defuse it here —
+                // the card names the AUDIO half, which is all we ask for),
                 // then the honest heads-up about the confirmation tone the
                 // probe really does play.
-                detail: "macOS calls this screen recording. Your audio flows "
+                detail: "macOS calls this audio recording. Your audio flows "
                     + "straight to your speakers — nothing is stored or sent. "
                     + "Allowing plays a brief tone to confirm it's working.",
                 allowTitle: "Allow…",
@@ -404,9 +405,9 @@ public final class OnboardingViewController: NSViewController {
                 iconColor: Tokens.Color.permissionRemoteControl,
                 activeTitle: "Let Audiouter use Bluetooth speakers",
                 completedTitle: "Audiouter can now use Bluetooth speakers",
-                detail: "Keep a Bluetooth speaker in your list while it's "
-                    + "switched off, and reconnect it from Audiouter. Without "
-                    + "this you can still use one that's already connected.",
+                detail: "Reconnect a paired Bluetooth speaker that's switched "
+                    + "off, straight from Audiouter. Without this you can still "
+                    + "use one that's already connected.",
                 allowTitle: "Allow…",
                 isSkippable: true)
         case .speakerSync:
@@ -427,11 +428,9 @@ public final class OnboardingViewController: NSViewController {
                 iconColor: Tokens.Color.permissionRemoteControl,
                 activeTitle: "Control playback with your volume keys",
                 completedTitle: "Your volume keys control Audiouter",
-                // Outcome first, then name the OS's own label for the
-                // permission so the System Settings pane is recognisable.
                 detail: "Use your volume keys while Audiouter is your output "
                     + "device, and press play or pause on a speaker to control "
-                    + "your Mac. macOS calls this Accessibility.",
+                    + "your Mac.",
                 allowTitle: "Allow…",
                 isSkippable: true)
         }
@@ -523,18 +522,22 @@ public final class OnboardingViewController: NSViewController {
         }
     }
 
-    /// The one extra line the flow ever adds to a card: Local Network can NEVER
-    /// prove a denial (no status API), so a browse that found nothing must ask
-    /// for a speaker rather than accuse the user of refusing.
+    /// The one extra line the flow ever adds to a card. `.requested` means the
+    /// ask went out and NOTHING answered it — the permission dialog is
+    /// presumably still up, or its window expired. It does NOT mean the browse
+    /// found no speaker (a browse that reached the network proves the grant,
+    /// speakers or not), so the line must not invent a switched-off speaker as
+    /// the reason; it names the actual state and leaves both doors open.
     private func hint(for step: SetupStep) -> String? {
-        guard localNetworkCameUpEmpty(step) else { return nil }
-        return "No speakers found yet. Turn one on, then try again."
+        guard localNetworkUnanswered(step) else { return nil }
+        return "Nothing has answered yet. If the permission dialog is open, "
+            + "choose Allow — or try again."
     }
 
-    /// Local Network asked and the browse found nothing. The hint tells the user
-    /// to turn a speaker on and try again, so SOMETHING has to re-browse — which
-    /// is why this card keeps a primary retry instead of flipping to Settings.
-    private func localNetworkCameUpEmpty(_ step: SetupStep) -> Bool {
+    /// Local Network was asked and nothing answered. Something still has to be
+    /// able to re-ask, which is why this card keeps a primary retry instead of
+    /// flipping to Settings.
+    private func localNetworkUnanswered(_ step: SetupStep) -> Bool {
         step == .localNetwork && step == displayedActiveStep
             && model.localNetworkStatus == .requested
     }
@@ -542,14 +545,14 @@ public final class OnboardingViewController: NSViewController {
     /// The Allow slot's label when it isn't the plain first ask. Only Local
     /// Network has one: same click, same browse, honestly named.
     private func primaryTitle(for step: SetupStep) -> String? {
-        localNetworkCameUpEmpty(step) ? "Try Again" : nil
+        localNetworkUnanswered(step) ? "Try Again" : nil
     }
 
     /// Whether the card shows the demoted "Open Settings…" beside its primary.
     /// Local Network only, and only where that pane exists at all — macOS 14
     /// has no Local Network privacy gate, so there is nowhere to send anyone.
     private func offersSettingsLink(_ step: SetupStep) -> Bool {
-        localNetworkCameUpEmpty(step) && model.isLocalNetworkGated
+        localNetworkUnanswered(step) && model.isLocalNetworkGated
     }
 
     /// Whether this card is waiting on a prompt or probe it fired — the spinner,

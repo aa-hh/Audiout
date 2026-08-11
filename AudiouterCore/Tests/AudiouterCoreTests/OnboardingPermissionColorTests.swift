@@ -17,8 +17,9 @@ import AppKit
 /// authored Full-gold hues and STILL mutually distinct (NEW-1 — the explicit
 /// guard against a later regression routing them through `accentDynamic`,
 /// which would collapse all four onto the same live-accent-derived value),
-/// and the glyph-only decision (Q3) holds end to end: granting still
-/// gold-lights the glyph while the tile's own FILL never recolours.
+/// and the glyph-only decision (Q3) holds end to end: the tile's own FILL
+/// never recolours, and each card's glyph keeps its identity hue in every
+/// `SetupCardState`.
 ///
 /// Two helpers are ported rather than shared (so those suites stay untouched):
 ///  - `relativeLuminance`/`contrastRatio` — ported from `AppTetherColorTests`.
@@ -204,7 +205,7 @@ extension SerializedSharedState {
         assertMutuallyDistinct(appearance: .aqua)
     }
 
-    // MARK: 5/6 — granting still gold-lights the glyph; the tile fill never recolours (Q2/Q3)
+    // MARK: 5/6 — the glyph tint is PERMANENT; the tile fill never recolours (Q2/Q3)
 
     /// Forces a layer-backed, off-window tile through one real display pass:
     /// `updateLayer()` (which paints `test_fillColor`) only runs on an actual
@@ -221,39 +222,46 @@ extension SerializedSharedState {
         tile.layer?.displayIfNeeded()
     }
 
-    /// `SetupCardView.apply(_:)` forwards straight to
-    /// `IconTileView.setLit(isCheckmarked(state))` on its own PRIVATE
-    /// `iconTile` field, and Swift's `private` is not reachable from a
-    /// different file even under `@testable import`. So this test exercises
-    /// `IconTileView.setLit` directly on a tile constructed exactly the way
-    /// the card builds its own (`color:` = one of the four permission
-    /// tokens) — the identical call the card's `apply(_:)` makes on its
-    /// own private field, just reached through a tile this test owns instead
-    /// of the card's.
-    @Test func grantedLightsGlyphGoldWithoutRecoloringTileFill() {
+    /// The card's glyph tint is its step's identity hue in EVERY
+    /// `SetupCardState` — state is carried by the checkmark/lock slot alone.
+    /// Driven through the real `SetupCardView.apply(...)`, the same call the
+    /// view controller makes, because the tile itself is private to the card.
+    @Test func glyphTintIsPermanentAcrossEveryCardState() {
+        let states: [SetupCardState] = [.pending, .active, .completed,
+                                        .autoPassed(note: "Requires macOS 14.2 or later"),
+                                        .skipped]
+        for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
+            for step in SetupStep.allCases {
+                let content = OnboardingViewController.content(for: step)
+                let card = SetupCardView(content: content, onAllow: {}, onSkip: {})
+                let expected = resolved(content.iconColor, appearanceName: appearance)
+                for state in states {
+                    card.apply(state, foundSpeakers: nil, isProbing: false,
+                               offersSettingsFallback: false, animated: false)
+                    assertSameRGB(resolved(card.test_iconTint ?? .clear, appearanceName: appearance), expected,
+                        "\(step)/\(state)/\(appearance.rawValue): the glyph tint must stay the card's own iconColor in every state")
+                }
+            }
+        }
+    }
+
+    /// Q3, unchanged: the tile's own FILL is the neutral `raised` well — only
+    /// the glyph ever carries a permission's colour.
+    @Test func tileFillIsAlwaysTheNeutralRaisedWell() {
         for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
             for (name, color) in permissionTokens {
                 let tile = IconTileView(symbolName: "waveform", accessibility: name, color: color)
                 settle(tile, appearance: appearance)
 
-                #expect(!tile.isLit, "\(name)/\(appearance.rawValue): a freshly-built tile starts ungranted")
                 assertSameRGB(tile.test_fillColor, resolved(Tokens.Color.raised, appearanceName: appearance),
-                             "\(name)/\(appearance.rawValue): tile fill must be the neutral `raised` well before granting")
-
-                tile.setLit(true)   // == what update(status: .granted) does to its own iconTile
-
-                #expect(tile.isLit, "\(name)/\(appearance.rawValue): granting must light the glyph")
-                // `test_litTint` is itself a dynamic (unresolved) `NSColor` —
-                // a bare `.usingColorSpace(.sRGB)` (inside `assertSameRGB`)
-                // would resolve it against the process's ambient appearance,
-                // not the one under test, so it must go through `resolved(_:
-                // appearanceName:)` explicitly first, same as the `gold`
-                // reference on the other side.
-                assertSameRGB(resolved(tile.test_litTint ?? .clear, appearanceName: appearance),
-                             resolved(Tokens.Color.gold, appearanceName: appearance),
-                             "\(name)/\(appearance.rawValue): the lit glyph tint must be gold for every row (Q2, unchanged)")
-                assertSameRGB(tile.test_fillColor, resolved(Tokens.Color.raised, appearanceName: appearance),
-                             "\(name)/\(appearance.rawValue): granting must NOT recolour the tile fill (Q3)")
+                             "\(name)/\(appearance.rawValue): tile fill must be the neutral `raised` well")
+                // The glyph keeps the caller's token — a dynamic (unresolved)
+                // `NSColor`, so it must go through `resolved(_:appearanceName:)`
+                // explicitly before `assertSameRGB` resolves it against the
+                // process's ambient appearance instead of the one under test.
+                assertSameRGB(resolved(tile.test_restingTint ?? .clear, appearanceName: appearance),
+                             resolved(color, appearanceName: appearance),
+                             "\(name)/\(appearance.rawValue): the glyph tint must be this row's own token")
             }
         }
     }

@@ -3,6 +3,7 @@
 import Foundation
 import Testing
 import Network
+import UIKit
 import AudiouterProtocol
 @testable import AudiouterRemote
 
@@ -192,10 +193,14 @@ import AudiouterProtocol
     /// Every test's on-ramp: a session already attached to a controller
     /// that's live over a fake transport (RemoteSession is constructed
     /// BEFORE `connect(to:)` so it actually catches the welcome snapshot,
-    /// same as production wiring in `AudiouterRemoteApp`).
+    /// same as production wiring in `AudiouterRemoteApp`). `iconStore` and
+    /// `snapshot` are nil-by-default so every existing call site is
+    /// unaffected — pass them only for the app-icon tests below.
     @MainActor
     private func makeLiveSession(
-        clock: CommandClock = WallCommandClock()
+        clock: CommandClock = WallCommandClock(),
+        iconStore: AppIconStore? = nil,
+        snapshot: Snapshot? = nil
     ) throws -> (session: RemoteSession, controller: ConnectionController, transport: FakeTransport, defaults: UserDefaults) {
         let defaults = try makeDefaults()
         let box = TransportBox()
@@ -208,7 +213,7 @@ import AudiouterProtocol
                 return transport
             }
         )
-        let session = RemoteSession(controller: controller, clock: clock)
+        let session = RemoteSession(controller: controller, iconStore: iconStore, clock: clock)
 
         controller.connect(to: makeMac())
         controller.queue.sync {}
@@ -216,10 +221,49 @@ import AudiouterProtocol
         try controller.queue.sync {
             transport.events?(.ready)
             transport.events?(.message(try encoded(
-                .welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: makeSnapshot())
+                .welcome(serverName: "TestMac", protoVersion: CompanionProto.version, snapshot: snapshot ?? makeSnapshot())
             )))
         }
         return (session, controller, transport, defaults)
+    }
+
+    /// An `AppIconStore` backed by a scratch directory unique to this test —
+    /// never the real `Caches/AppIcons`, and never shared between tests.
+    @MainActor
+    private func makeIconStore() -> AppIconStore {
+        AppIconStore(directory: FileManager.default.temporaryDirectory
+            .appendingPathComponent("RemoteSessionTests-\(UUID().uuidString)", isDirectory: true))
+    }
+
+    /// `makeSnapshot()` plus two app routes and one addable app, all with
+    /// distinct bundle IDs, for exercising `requestMissingIcons`.
+    private func makeSnapshotWithApps() -> Snapshot {
+        var snapshot = makeSnapshot()
+        snapshot.appRoutes = [
+            AppRouteState(bundleID: "com.example.routeA", displayName: "Route A", destinationKind: "noRedirect", volume: 50, isRunning: true),
+            AppRouteState(bundleID: "com.example.routeB", displayName: "Route B", destinationKind: "noRedirect", volume: 50, isRunning: false)
+        ]
+        snapshot.addableApps = [
+            Snapshot.AddableApp(bundleID: "com.example.addable", displayName: "Addable")
+        ]
+        return snapshot
+    }
+
+    /// A tiny, genuinely-decodable PNG — `AppIconStore.store` refuses
+    /// anything `UIImage(data:)` can't parse.
+    private func makeTestPNG() -> Data {
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 2, height: 2))
+        return renderer.pngData { context in
+            UIColor.red.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+        }
+    }
+
+    private func requestAppIconsCommands(_ frames: [Data]) throws -> [[String]] {
+        try commandMessages(frames).compactMap {
+            guard case .requestAppIcons(let bundleIDs) = $0.command else { return nil }
+            return bundleIDs
+        }
     }
 
     /// Spin the main actor's own executor (not `Thread.sleep`, which
@@ -565,5 +609,95 @@ import AudiouterProtocol
         #expect(Set(statuses.map(\.guidance)).count == 3)
         #expect(ApprovalStatus.denied.guidance.contains("Settings"),
                 "denial recovery lives in the Mac's Settings — the copy must point there")
+    }
+
+    // MARK: - T11: app icon requests
+
+    @MainActor
+    @Test func snapshotWithAppsRequestsMissingIconsRoutesFirst() async throws {
+        let iconStore = makeIconStore()
+        let snapshot = makeSnapshotWithApps()
+        let (session, _, transport, _) = try makeLiveSession(iconStore: iconStore, snapshot: snapshot)
+
+        // Precondition before behavior: the welcome snapshot must land at
+        // all, or the icon request can't be expected — and its absence is a
+        // different bug than a broken request policy.
+        #expect(await waitUntilMain { session.snapshot != nil },
+                "the welcome snapshot never reached the session")
+
+        #expect(await waitUntilMain { !(try! requestAppIconsCommands(transport.sentFrames)).isEmpty })
+        let requests = try requestAppIconsCommands(transport.sentFrames)
+        #expect(requests.count == 1)
+        // `first`, never `[0]`: a failed count expectation above must fail
+        // this test, not crash the whole suite process on an empty subscript.
+        let request = try #require(requests.first)
+        #expect(request == ["com.example.routeA", "com.example.routeB", "com.example.addable"],
+                "routes fill the visible Apps tab before the Add sheet's addable apps")
+    }
+
+    @MainActor
+    @Test func anIdenticalLaterSnapshotDoesNotReRequestTheSameIcons() async throws {
+        let iconStore = makeIconStore()
+        let snapshot = makeSnapshotWithApps()
+        let (session, controller, transport, _) = try makeLiveSession(iconStore: iconStore, snapshot: snapshot)
+        // The session IS the requester: discarded, ARC frees it and every
+        // [weak self] callback goes nil before the first request can send.
+        defer { withExtendedLifetime(session) {} }
+        #expect(await waitUntilMain { !(try! requestAppIconsCommands(transport.sentFrames)).isEmpty })
+
+        try controller.queue.sync {
+            transport.events?(.message(try encoded(.state(snapshot: snapshot))))
+        }
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(try requestAppIconsCommands(transport.sentFrames).count == 1,
+                "a snapshot with nothing new to ask for must not re-request")
+    }
+
+    @MainActor
+    @Test func anAppIconsFrameWithARealPNGLandsInTheInjectedStore() async throws {
+        let iconStore = makeIconStore()
+        let snapshot = makeSnapshotWithApps()
+        let (session, controller, transport, _) = try makeLiveSession(iconStore: iconStore, snapshot: snapshot)
+        // The session IS the requester: discarded, ARC frees it and every
+        // [weak self] callback goes nil before the first request can send.
+        defer { withExtendedLifetime(session) {} }
+        #expect(await waitUntilMain { !(try! requestAppIconsCommands(transport.sentFrames)).isEmpty })
+
+        let png = makeTestPNG()
+        try controller.queue.sync {
+            transport.events?(.message(try encoded(.appIcons(
+                page: 1, pageCount: 1,
+                icons: [AppIconPayload(bundleID: "com.example.routeA", png: png)]
+            ))))
+        }
+        #expect(await waitUntilMain { iconStore.image(for: "com.example.routeA") != nil })
+    }
+
+    @MainActor
+    @Test func aNilIconPayloadStoresNothingAndIsNotReRequested() async throws {
+        let iconStore = makeIconStore()
+        let snapshot = makeSnapshotWithApps()
+        let (session, controller, transport, _) = try makeLiveSession(iconStore: iconStore, snapshot: snapshot)
+        // The session IS the requester: discarded, ARC frees it and every
+        // [weak self] callback goes nil before the first request can send.
+        defer { withExtendedLifetime(session) {} }
+        #expect(await waitUntilMain { !(try! requestAppIconsCommands(transport.sentFrames)).isEmpty })
+
+        try controller.queue.sync {
+            transport.events?(.message(try encoded(.appIcons(
+                page: 1, pageCount: 1,
+                icons: [AppIconPayload(bundleID: "com.example.routeA", png: nil)]
+            ))))
+        }
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(iconStore.image(for: "com.example.routeA") == nil,
+                "a definitive nil reply must store nothing")
+
+        try controller.queue.sync {
+            transport.events?(.message(try encoded(.state(snapshot: snapshot))))
+        }
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(try requestAppIconsCommands(transport.sentFrames).count == 1,
+                "a bundle ID answered with nil must not be re-asked this process")
     }
 }

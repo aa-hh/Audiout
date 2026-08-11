@@ -109,6 +109,11 @@ import Testing
         #expect(try roundTrip(message) == message)
     }
 
+    @Test func requestAppIconsCommandMessageRoundTrips() throws {
+        let message = CompanionMessage.command(requestID: "req-1", command: .requestAppIcons(bundleIDs: ["a", "b"]))
+        #expect(try roundTrip(message) == message)
+    }
+
     @Test func welcomeRoundTrips() throws {
         let message = CompanionMessage.welcome(serverName: "Alec's Mac", protoVersion: 1, snapshot: Self.fullSnapshot())
         #expect(try roundTrip(message) == message)
@@ -132,6 +137,24 @@ import Testing
     @Test func goodbyeRoundTrips() throws {
         let message = CompanionMessage.goodbye(reason: "shutdown")
         #expect(try roundTrip(message) == message)
+    }
+
+    @Test func appIconsRoundTrips() throws {
+        let message = CompanionMessage.appIcons(
+            page: 1,
+            pageCount: 3,
+            icons: [
+                AppIconPayload(bundleID: "com.spotify.client", png: Data([0x89, 0x50, 0x4E, 0x47])),
+                AppIconPayload(bundleID: "com.apple.Music", png: nil),
+            ])
+        let reloaded = try roundTrip(message)
+        #expect(reloaded == message)
+        guard case .appIcons(_, _, let icons) = reloaded else {
+            Issue.record("expected .appIcons")
+            return
+        }
+        #expect(icons[0].png == Data([0x89, 0x50, 0x4E, 0x47]))
+        #expect(icons[1].png == nil)
     }
 
     @Test func fullyPopulatedSnapshotRoundTrips() throws {
@@ -164,6 +187,7 @@ import Testing
         .setAppVolume(bundleID: "com.spotify.client", volume: 77),
         .setConnectVolume(volume: 60),
         .setStartBufferMs(ms: 300),
+        .requestAppIcons(bundleIDs: ["com.spotify.client", "com.apple.Music"]),
     ])
     func everyCommandCaseRoundTrips(_ command: CompanionCommand) throws {
         let data = try JSONEncoder().encode(command)

@@ -755,6 +755,26 @@ import AudiouterProtocol
         #expect(!result.applied)
         #expect(result.refusalReason != nil)
     }
+
+    // MARK: requestAppIcons — wiring layer responsibility
+
+    @Test func requestAppIconsReturnsSuccessWithoutMutatingState() async throws {
+        let ctx = try await makeContext()
+        // Capture initial state to verify immutability.
+        let groupsBefore = ctx.groupController.groups.count
+        let appRoutesBefore = ctx.appRouting.appRoutes.count
+        let selectedBefore = ctx.groupController.selectedDeviceIDs
+
+        let result = ctx.dispatcher.execute(.requestAppIcons(bundleIDs: ["com.example.app"]))
+
+        // Should succeed (not a refusal).
+        #expect(result.applied)
+        #expect(result.refusalReason == nil)
+        // Verify immutability: no state was modified by the dispatcher.
+        #expect(ctx.groupController.groups.count == groupsBefore)
+        #expect(ctx.appRouting.appRoutes.count == appRoutesBefore)
+        #expect(ctx.groupController.selectedDeviceIDs == selectedBefore)
+    }
 }
 
 private actor DispatcherTestCountBox {

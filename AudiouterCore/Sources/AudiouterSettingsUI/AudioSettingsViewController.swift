@@ -704,14 +704,14 @@ public final class AudioSettingsViewController: NSViewController {
     }
 
     /// Resolve an excluded app's icon: the running app's icon if it's running,
-    /// else a generic placeholder (an excluded app need not be running — it can
-    /// be pre-excluded). Mirrors the popover's `appIcon`.
+    /// else the installed app's cached icon, else a generic placeholder (an
+    /// excluded app need not be running — it can be pre-excluded). Mirrors the
+    /// popover's `appIcon`.
     private func icon(for bundleID: String) -> NSImage? {
         if let running = runningAppsProvider().first(where: { $0.bundleID == bundleID }), let icon = running.icon {
             return icon
         }
-        if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first,
-           let icon = app.icon {
+        if let icon = AppIconCache.icon(forBundleID: bundleID) {
             return icon
         }
         let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)

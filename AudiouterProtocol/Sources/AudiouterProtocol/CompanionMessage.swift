@@ -4,7 +4,7 @@ import Foundation
 
 /// One message on the WebSocket connection between the Mac (`CompanionServer`)
 /// and the phone. Client→server: `hello`, `command`. Server→client: `welcome`,
-/// `awaitingApproval`, `state`, `commandResult`, `goodbye`. `.unknown` is a
+/// `awaitingApproval`, `state`, `commandResult`, `goodbye`, `appIcons`. `.unknown` is a
 /// decode-only case: a message type neither side recognizes yet (e.g. a newer
 /// peer's message type) decodes into it rather than throwing, so a version
 /// skew never crashes the connection — the client ignores it, the server
@@ -37,6 +37,10 @@ public enum CompanionMessage: Equatable, Sendable {
     case commandResult(requestID: String, applied: Bool, refusalReason: String?, autoSwappedCurrentDevice: Bool)
     /// `reason` is one of `CompanionGoodbyeReason`'s constants.
     case goodbye(reason: String)
+    /// One page of the icons the phone requested via
+    /// `CompanionCommand.requestAppIcons`, at most
+    /// `CompanionAppIcons.pageSize` icons per page.
+    case appIcons(page: Int, pageCount: Int, icons: [AppIconPayload])
 
     case unknown(type: String)
 }
@@ -103,10 +107,11 @@ extension CompanionEnvelope: Codable {
         case serverName, snapshot
         case applied, refusalReason, autoSwappedCurrentDevice
         case reason
+        case page, pageCount, icons
     }
 
     private enum TypeName: String {
-        case hello, command, welcome, awaitingApproval, state, commandResult, goodbye
+        case hello, command, welcome, awaitingApproval, state, commandResult, goodbye, appIcons
     }
 
     public init(from decoder: Decoder) throws {
@@ -152,6 +157,12 @@ extension CompanionEnvelope: Codable {
             )
         case .goodbye:
             message = .goodbye(reason: try payload.decode(String.self, forKey: .reason))
+        case .appIcons:
+            message = .appIcons(
+                page: try payload.decode(Int.self, forKey: .page),
+                pageCount: try payload.decode(Int.self, forKey: .pageCount),
+                icons: try payload.decode([AppIconPayload].self, forKey: .icons)
+            )
         }
     }
 
@@ -196,6 +207,12 @@ extension CompanionEnvelope: Codable {
             try c.encode(TypeName.goodbye.rawValue, forKey: .type)
             var payload = c.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
             try payload.encode(reason, forKey: .reason)
+        case .appIcons(let page, let pageCount, let icons):
+            try c.encode(TypeName.appIcons.rawValue, forKey: .type)
+            var payload = c.nestedContainer(keyedBy: PayloadKeys.self, forKey: .payload)
+            try payload.encode(page, forKey: .page)
+            try payload.encode(pageCount, forKey: .pageCount)
+            try payload.encode(icons, forKey: .icons)
         case .unknown(let type):
             // Round-trips as whatever it decoded from; there is no payload
             // to re-emit since we never understood its shape.

@@ -428,6 +428,17 @@ public final class CompanionServer: @unchecked Sendable {
         }
     }
 
+    /// Send one page of app icons to exactly one promoted client. Icons ride
+    /// OUTSIDE the snapshot on purpose: `broadcast(_:)`'s identical-snapshot
+    /// suppression must never be defeated by icon churn, and snapshots stay
+    /// small. A clientID that is no longer promoted is a silent no-op.
+    public func sendAppIcons(_ icons: [AppIconPayload], page: Int, pageCount: Int, to clientID: UUID) {
+        queue.async { [weak self] in
+            guard let self, let client = self.clients[clientID], client.isWelcomed else { return }
+            self.send(.appIcons(page: page, pageCount: pageCount, icons: icons), to: client)
+        }
+    }
+
     // MARK: - Connection handling
 
     /// `internal` (not `private`) so `CompanionServerTests` can hand it a
@@ -813,7 +824,7 @@ public final class CompanionServer: @unchecked Sendable {
                 reply(CommandResult(applied: false, refusalReason: "server not ready"))
             }
 
-        case .welcome, .awaitingApproval, .state, .commandResult, .goodbye, .unknown:
+        case .welcome, .awaitingApproval, .state, .commandResult, .goodbye, .appIcons, .unknown:
             // Server-to-client message types arriving FROM a client, or a
             // frame type from a future protocol: not actionable, not worth a
             // disconnect. Ignore (forward-compat, `CompanionMessage.unknown`).

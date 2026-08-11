@@ -2784,23 +2784,24 @@ public final class PopoverController: NSObject {
         return .device(id: id)
     }
 
-    /// Resolve a routed app's icon lazily (T-8): the live `NSRunningApplication`'s
-    /// icon when the app is running, else a generic placeholder — routes persist
-    /// across app quits, so a routed-but-quit app must still render. Prefers the
-    /// injected `runningAppsProvider` (so tests/headless runs stay off the real
-    /// workspace), falling back to `NSRunningApplication(bundleIdentifier:)`.
+    /// Resolve a routed app's icon lazily (T-8): the injected `runningAppsProvider`
+    /// first — the test/harness seam (`popover-harness`/`popover-snapshot` inject
+    /// fake apps there; a live lookup ahead of it would put headless runs on the
+    /// real workspace) — then `AppIconCache`, which resolves a routed-but-quit
+    /// app's real icon from disk/`NSWorkspace` instead of falling straight to the
+    /// placeholder below. Only an app `AppIconCache` truly can't find (never
+    /// installed, or an invalid bundle id) reaches the generic placeholder. This
+    /// also means `appTintColor(for:)` below, which derives its tint from this
+    /// icon, now resolves a quit app's real brand hue instead of the neutral
+    /// placeholder tint.
     private func appIcon(for bundleID: String) -> NSImage? {
         if let running = runningAppsProvider().first(where: { $0.bundleID == bundleID }),
            let icon = running.icon {
             return icon
         }
-        if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first,
-           let icon = app.icon {
-            return icon
+        if let cached = AppIconCache.icon(forBundleID: bundleID) {
+            return cached
         }
-        // Not currently running (route persisted across a quit) — generic
-        // placeholder (PLAN §C: "a routed app that is NOT currently running shows a
-        // generic placeholder").
         let config = NSImage.SymbolConfiguration(pointSize: 18, weight: .regular)
         return NSImage(systemSymbolName: Self.missingAppIconSymbolName, accessibilityDescription: nil)?
             .withSymbolConfiguration(config)

@@ -870,4 +870,75 @@ import AudiouterProtocol
         #expect(!keptLog.closed, "an unrelated client must survive another phone's revocation")
         #expect(waitUntil { server.test_clientNames() == ["kept"] })
     }
+
+    // MARK: - App icon pages
+
+    /// Icons are addressed, not broadcast: only the asking client should ever
+    /// receive a page, because pages answer that client's own request and a
+    /// broadcast would push megabytes at phones that already hold the icons.
+    @Test func sendAppIconsReachesOnlyTheAddressedClient() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = makeAutoApprovingServer()
+        defer { server.stop() }
+        // A cached snapshot is what lets promotion send `welcome` — and
+        // `sendAppIcons` guards on `isWelcomed`, which is exactly right: a
+        // phone can only ask for icons off a snapshot it has received.
+        server.broadcast(makeSnapshot())
+
+        // The addressee's server-side UUID is only observable through
+        // `onCommand`, so the asker sends one command to introduce itself.
+        let askerID = LockedBox<UUID?>(nil)
+        server.onCommand = { _, _, clientID, reply in
+            askerID.value = clientID
+            reply(.init(applied: true))
+        }
+
+        let (asker, askerLog) = try connectClient(via: hub, to: server)
+        defer { asker.cancel() }
+        try sendHello(over: asker, name: "asker", clientID: UUID().uuidString)
+        let (bystander, bystanderLog) = try connectClient(via: hub, to: server)
+        defer { bystander.cancel() }
+        try sendHello(over: bystander, name: "bystander", clientID: UUID().uuidString)
+        try #require(waitUntil { Set(server.test_clientNames()) == ["asker", "bystander"] },
+                     "both clients must be promoted first")
+
+        sendText(try CompanionEnvelope(message: .command(
+            requestID: "req-icons",
+            command: .requestAppIcons(bundleIDs: ["com.example.app"]))).encoded(), over: asker)
+        let clientID = try #require(waitUntil { askerID.value != nil } ? askerID.value : nil,
+                                    "the asker's command never surfaced its clientID")
+
+        let icons = [AppIconPayload(bundleID: "com.example.app", png: Data([0x89, 0x50, 0x4E, 0x47]))]
+        server.sendAppIcons(icons, page: 0, pageCount: 1, to: clientID)
+
+        #expect(waitUntil { askerLog.contains(.appIcons(page: 0, pageCount: 1, icons: icons)) },
+                "the addressed client never received its icon page")
+        #expect(!bystanderLog.messages.contains { if case .appIcons = $0 { return true } else { return false } },
+                "an icon page must never reach a client that didn't ask")
+    }
+
+    @Test func sendAppIconsToAnUnknownClientIsASilentNoOp() throws {
+        let hub = try makeHub()
+        defer { hub.cancel() }
+        let server = makeAutoApprovingServer()
+        defer { server.stop() }
+        server.broadcast(makeSnapshot())
+
+        let (client, log) = try connectClient(via: hub, to: server)
+        defer { client.cancel() }
+        try sendHello(over: client)
+        try #require(waitUntil { server.test_clientNames() == ["phone"] })
+
+        server.sendAppIcons([AppIconPayload(bundleID: "com.example.app", png: nil)],
+                            page: 0, pageCount: 1, to: UUID())
+
+        // Nothing to wait FOR — give the server queue a beat, then assert
+        // the connected client neither received a stray page nor died.
+        Thread.sleep(forTimeInterval: 0.2)
+        #expect(!log.messages.contains { if case .appIcons = $0 { return true } else { return false } },
+                "a page addressed to an unknown client must not leak to anyone else")
+        #expect(!log.closed, "a bad clientID must not disturb live connections")
+        #expect(server.test_clientNames() == ["phone"])
+    }
 }

@@ -51,6 +51,7 @@ public enum CompanionCommand: Equatable, Sendable {
     case setAppVolume(bundleID: String, volume: Int)
     case setConnectVolume(volume: Int)
     case setStartBufferMs(ms: Int)
+    case requestAppIcons(bundleIDs: [String])
 
     /// An unrecognized `"command"` string — e.g. a newer phone talking to an
     /// older Mac. Decodes without throwing so the server can answer with a
@@ -67,6 +68,7 @@ extension CompanionCommand: Codable {
         case group
         case bundleID, displayName, kind, deviceID
         case ms
+        case bundleIDs
     }
 
     private enum Name: String {
@@ -74,7 +76,7 @@ extension CompanionCommand: Codable {
         case setMainOutMasterVolume, setMainOutMuted
         case createGroup, updateGroup, deleteGroup, setGroupMuted
         case addAppRoute, removeAppRoute, setAppDestination, setAppVolume
-        case setConnectVolume, setStartBufferMs
+        case setConnectVolume, setStartBufferMs, requestAppIcons
     }
 
     public init(from decoder: Decoder) throws {
@@ -127,6 +129,8 @@ extension CompanionCommand: Codable {
             self = .setConnectVolume(volume: try c.decode(Int.self, forKey: .volume))
         case .setStartBufferMs:
             self = .setStartBufferMs(ms: try c.decode(Int.self, forKey: .ms))
+        case .requestAppIcons:
+            self = .requestAppIcons(bundleIDs: try c.decode([String].self, forKey: .bundleIDs))
         }
     }
 
@@ -194,6 +198,9 @@ extension CompanionCommand: Codable {
         case .setStartBufferMs(let ms):
             try c.encode(Name.setStartBufferMs.rawValue, forKey: .command)
             try c.encode(ms, forKey: .ms)
+        case .requestAppIcons(let bundleIDs):
+            try c.encode(Name.requestAppIcons.rawValue, forKey: .command)
+            try c.encode(bundleIDs, forKey: .bundleIDs)
         case .unknown(let name):
             // Round-trips as whatever it decoded from — re-encoding an
             // `.unknown` just forwards the original unrecognized name with

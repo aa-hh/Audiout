@@ -42,6 +42,10 @@ import AudiouterProtocol
 /// holds only the in-memory latest ``Snapshot`` handed to it by the
 /// controller: it reads no defaults and writes none itself (the controller's
 /// own `lastUsedMacID` is the one exception, and it isn't routing state).
+/// The injected ``AppIconStore`` (T11) is a second, explicit exception: it
+/// persists to `Caches/`, not `Application Support`, and holds nothing but a
+/// bundleID → PNG cache that's re-fetchable from the Mac at any time — not
+/// routing state.
 @MainActor
 @Observable
 final class RemoteSession: MacSessionProtocol {
@@ -66,6 +70,14 @@ final class RemoteSession: MacSessionProtocol {
 
     private let controller: ConnectionController
     private let sender: CommandSender
+    private let iconStore: AppIconStore?
+
+    /// Bundle IDs already asked for via `.requestAppIcons` this process —
+    /// keeps a later, unchanged snapshot from re-asking for the same icons
+    /// (a `png: nil` reply is a definitive negative, so it stays here too;
+    /// see `handleAppIcons`). Cleared on disconnect (`applyConnectionState`)
+    /// so a reconnect re-asks anything still missing.
+    private var askedBundleIDs: Set<String> = []
 
     /// Event delivery from the controller's queue to the main actor is
     /// `DispatchQueue.main.async` (FIFO), NOT one unstructured `Task` per
@@ -75,8 +87,13 @@ final class RemoteSession: MacSessionProtocol {
     /// correct it). Subscription happens through the controller's `set…`
     /// replay setters, so a session constructed AFTER the link went live
     /// still receives the current snapshot/state immediately.
-    init(controller: ConnectionController, clock: CommandClock = WallCommandClock()) {
+    ///
+    /// `iconStore` defaults to `nil`: a session with no store makes no icon
+    /// requests at all (used by tests that don't care about icons, and
+    /// keeps every existing call site compiling unchanged).
+    init(controller: ConnectionController, iconStore: AppIconStore? = nil, clock: CommandClock = WallCommandClock()) {
         self.controller = controller
+        self.iconStore = iconStore
         self.sender = CommandSender(
             transport: { [weak controller] command, requestID in
                 controller?.send(command: command, requestID: requestID)
@@ -86,7 +103,10 @@ final class RemoteSession: MacSessionProtocol {
 
         controller.setOnSnapshot { [weak self] snapshot in
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.snapshot = snapshot }
+                MainActor.assumeIsolated {
+                    self?.snapshot = snapshot
+                    self?.requestMissingIcons()
+                }
             }
         }
         controller.setOnConnectionStateChanged { [weak self] state in
@@ -106,6 +126,11 @@ final class RemoteSession: MacSessionProtocol {
                 }
             }
         }
+        controller.setOnAppIcons { [weak self] _, _, icons in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.handleAppIcons(icons) }
+            }
+        }
     }
 
     private func applyConnectionState(_ state: MacConnectionState) {
@@ -117,6 +142,39 @@ final class RemoteSession: MacSessionProtocol {
             // The disconnect itself is the surface for anything in flight —
             // a timeout toast on top would be noise.
             pendingRequests.removeAll()
+            // A reconnect's welcome should re-ask for anything still
+            // missing — the icon cache itself is untouched, just the memory
+            // of what this process already asked for.
+            askedBundleIDs.removeAll()
+        }
+    }
+
+    /// Fires after every snapshot lands: asks the Mac for whatever app
+    /// icons the local cache doesn't have yet. Routes first, then addable
+    /// apps — the visible Apps tab fills before the Add sheet does. Goes
+    /// through the same `track(sender.send(...))` path every other command
+    /// uses, so the request gets requestID/timeout/backpressure for free.
+    private func requestMissingIcons() {
+        guard let iconStore else { return }
+        guard let snapshot else { return }
+        let wanted = snapshot.appRoutes.map(\.bundleID) + snapshot.addableApps.map(\.bundleID)
+        let notYetAsked = wanted.filter { !askedBundleIDs.contains($0) }
+        let chunk = iconStore.missing(from: notYetAsked).prefix(CompanionAppIcons.maxRequestedBundleIDs)
+        guard !chunk.isEmpty else { return }
+        askedBundleIDs.formUnion(chunk)
+        track(sender.send(.requestAppIcons(bundleIDs: Array(chunk))))
+    }
+
+    /// A `png` payload is stored; a `nil` payload is a definitive "the Mac
+    /// has no icon for this bundle ID" — nothing to store, and it stays in
+    /// `askedBundleIDs` so it isn't re-requested this process. Page/page
+    /// count don't drive any control flow here — each page's icons are just
+    /// stored as they arrive.
+    private func handleAppIcons(_ icons: [AppIconPayload]) {
+        guard let iconStore else { return }
+        for icon in icons {
+            guard let png = icon.png else { continue }
+            iconStore.store(bundleID: icon.bundleID, png: png)
         }
     }
 

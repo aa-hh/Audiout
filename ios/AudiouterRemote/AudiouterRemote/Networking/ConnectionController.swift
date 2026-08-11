@@ -83,6 +83,7 @@ final class ConnectionController: @unchecked Sendable {
     /// data until the next welcome.
     private var onSnapshot: (@Sendable (Snapshot) -> Void)?
     private var onCommandResult: (@Sendable (_ requestID: String, _ applied: Bool, _ refusalReason: String?, _ autoSwappedCurrentDevice: Bool) -> Void)?
+    private var onAppIcons: (@Sendable (_ page: Int, _ pageCount: Int, _ icons: [AppIconPayload]) -> Void)?
 
     func setOnMacsChanged(_ handler: (@Sendable ([DiscoveredMac]) -> Void)?) {
         queue.async {
@@ -122,6 +123,11 @@ final class ConnectionController: @unchecked Sendable {
     /// No replay — command results are events, not state.
     func setOnCommandResult(_ handler: (@Sendable (_ requestID: String, _ applied: Bool, _ refusalReason: String?, _ autoSwappedCurrentDevice: Bool) -> Void)?) {
         queue.async { self.onCommandResult = handler }
+    }
+
+    /// No replay — icon pages are events, not state.
+    func setOnAppIcons(_ handler: (@Sendable (_ page: Int, _ pageCount: Int, _ icons: [AppIconPayload]) -> Void)?) {
+        queue.async { self.onAppIcons = handler }
     }
 
     // MARK: State (touched on `queue` only, except reads via `queue.sync`)
@@ -378,6 +384,8 @@ final class ConnectionController: @unchecked Sendable {
             onSnapshot?(snapshot)
         case .commandResult(let requestID, let applied, let refusalReason, let autoSwapped):
             onCommandResult?(requestID, applied, refusalReason, autoSwapped)
+        case .appIcons(let page, let pageCount, let icons):
+            onAppIcons?(page, pageCount, icons)
         }
     }
 

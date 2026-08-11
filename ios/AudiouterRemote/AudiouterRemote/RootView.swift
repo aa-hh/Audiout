@@ -18,6 +18,7 @@ import AudiouterProtocol
 @Observable
 final class AppSessionModel {
     let controller: ConnectionController
+    let iconStore: AppIconStore
     private let remoteSession: RemoteSession
     private(set) var demoSession: DemoMacSession?
 
@@ -39,7 +40,9 @@ final class AppSessionModel {
 
     init(controller: ConnectionController = ConnectionController()) {
         self.controller = controller
-        self.remoteSession = RemoteSession(controller: controller)
+        let iconStore = AppIconStore()
+        self.iconStore = iconStore
+        self.remoteSession = RemoteSession(controller: controller, iconStore: iconStore)
 
         controller.setOnMacsChanged { [weak self] macs in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.handleMacsChanged(macs) } }
@@ -157,6 +160,7 @@ struct RootView: View {
         // the four explicit `.accentColor` literals in UI/Groups/ are swapped
         // to `WarmSignal.gold` directly.
         .tint(WarmSignal.gold)
+        .environment(model.iconStore)
         .task { model.start() }
         .onChange(of: model.isConnected) { wasConnected, isConnected in
             if isConnected, !wasConnected, selection == .connection {

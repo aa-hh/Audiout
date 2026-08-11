@@ -34,6 +34,7 @@ graph with none of that.
 ## Map
 
 - `CompanionProto` — service type, TXT keys, protocol version, refuse-forward check.
-- `CompanionMessage` / `CompanionEnvelope` — the seven message cases + the `{v, type, payload}` wire envelope.
-- `CompanionCommand` — the phone's 19 outbound commands, hand-Codable.
+- `CompanionMessage` / `CompanionEnvelope` — the eight message cases + the `{v, type, payload}` wire envelope.
+- `CompanionCommand` — the phone's 18 outbound commands, hand-Codable.
+- `AppIconPayload` / `CompanionAppIcons` — one app's 128×128 PNG (or an explicit "no icon"), plus the page size and request cap bounding the icon request/response pair. Icons ride OUTSIDE `Snapshot` on purpose, so identical-snapshot suppression is never defeated by icon churn.
 - `Snapshot` / `DeviceState` / `GroupState` / `AppRouteState` / `MainOutState` / `SettingsState` — full app state, `Equatable` for change-suppression on the server.

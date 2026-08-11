@@ -216,6 +216,14 @@ public final class CompanionCommandDispatcher {
             }
             return .ok
 
+        case .requestAppIcons:
+            // Handled by the wiring layer BEFORE it reaches here: answering needs
+            // the client identity (to address the icon frames) and AppKit (to read
+            // icons), neither of which this AppKit-free, client-agnostic dispatcher
+            // has. Reaching this arm means the wiring didn't intercept — report
+            // applied so the phone doesn't surface a spurious refusal toast.
+            return .ok
+
         case .unknown(let name):
             return .refused("Unknown command: \(name).")
         }

@@ -140,6 +140,7 @@ enum MacConnectionEvent: Sendable {
     case welcome(serverName: String, snapshot: Snapshot)
     case snapshot(Snapshot)
     case commandResult(requestID: String, applied: Bool, refusalReason: String?, autoSwappedCurrentDevice: Bool)
+    case appIcons(page: Int, pageCount: Int, icons: [AppIconPayload])
 }
 
 /// One WebSocket session to one ``DiscoveredMac``. All state transitions
@@ -315,6 +316,8 @@ final class MacConnection: @unchecked Sendable {
             startApprovalDeadline()
         case .state(let snapshot):
             onEvent?(.snapshot(snapshot))
+        case .appIcons(let page, let pageCount, let icons):
+            onEvent?(.appIcons(page: page, pageCount: pageCount, icons: icons))
         case .commandResult(let requestID, let applied, let refusalReason, let autoSwapped):
             onEvent?(.commandResult(
                 requestID: requestID,

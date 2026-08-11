@@ -737,6 +737,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let bundleID = app.bundleIdentifier
             else { return }
             (self?.backend as? AppRouteConfiguring)?.handleAppLaunched(bundleID: bundleID)
+            // An app that just launched may have shipped a new icon; drop the
+            // cached copy so the next read re-fetches it.
+            AppIconCache.invalidate(bundleID: bundleID)
             // Companion (T7): the launched app joins `addableApps` (or flips
             // its existing route row's `isRunning`). FIX-B2 finding 2b: also
             // invalidate the cached running-app list on this edge.
@@ -1576,6 +1579,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         refusalReason: "Too many commands — slow down and try again."))
                     return
                 }
+                // Icon requests are answered HERE, not in the dispatcher:
+                // addressing the icon frames needs the client identity and
+                // reading an icon needs AppKit, neither of which that
+                // AppKit-free, client-agnostic type has
+                // (CompanionCommandDispatcher.swift:219). Rate-limited like
+                // every other command by the guard above.
+                if case .requestAppIcons(let requested) = command {
+                    reply(CompanionServer.CommandResult(applied: true))
+                    self.serveAppIconPages(requested, to: clientID)
+                    return  // no snapshot broadcast — icons are not snapshot state
+                }
                 let result = self.companionDispatcher.execute(command)
                 reply(CompanionServer.CommandResult(
                     applied: result.applied,
@@ -1737,18 +1751,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return rebuilt
     }
 
+    /// The apps the phone may still add a route for: running `.regular` apps,
+    /// minus already-routed, minus excluded — the popover picker's own recipe
+    /// (`PopoverController.availableAppsForPicker`). ONE definition, read by
+    /// both the snapshot broadcast and the icon-request allow-set, so what the
+    /// phone can see and what it may ask an icon for can never drift apart.
+    @MainActor
+    private func companionAddableApps() -> [(bundleID: String, displayName: String)] {
+        let routedIDs = Set(appRouting.appRoutes.map(\.bundleID))
+        return companionRunningApps()
+            .filter { !routedIDs.contains($0.bundleID) && !excludedApps.isExcluded($0.bundleID) }
+    }
+
     /// Build the full snapshot from the live controllers and hand it to the
     /// server (which owns encoding + identical-snapshot suppression).
-    /// `addableApps` mirrors the popover picker's own recipe
-    /// (`PopoverController.availableAppsForPicker`): running `.regular` apps,
-    /// minus already-routed, minus excluded.
     @MainActor
     private func broadcastCompanionSnapshotNow() {
         guard companionActive else { return }
         let running = companionRunningApps()
         let routedIDs = Set(appRouting.appRoutes.map(\.bundleID))
-        let addable = running
-            .filter { !routedIDs.contains($0.bundleID) && !excludedApps.isExcluded($0.bundleID) }
+        let addable = companionAddableApps()
         let snapshot = CompanionSnapshotBuilder.build(
             // Sorted for a deterministic wire order: `devicesByID` is a
             // dictionary, and an order flap would defeat the server's
@@ -1772,6 +1794,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             startBufferMs: settings.startBufferMs,
             startBufferOptionsMs: AppSettings.startBufferOptionsMs)
         companionServer.broadcast(snapshot)
+    }
+
+    /// Mirrors `CompanionCommandDispatcher`'s private `bundleIDAllowed`
+    /// (CompanionCommandDispatcher.swift:96-97) — ASCII letters/digits plus
+    /// `.`/`-` (Apple's documented bundle-ID alphabet) and `_` (nonconforming
+    /// but seen in real apps). Copied only because that property is private to
+    /// that type; the two must stay identical.
+    private static let bundleIDAllowed = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-_")
+
+    /// Answer one phone's `requestAppIcons` with paged icon frames.
+    ///
+    /// TRUST BOUNDARY: the only bundle IDs answered are ones this phone can
+    /// already see in the snapshot — its routed apps plus `companionAddableApps()`.
+    /// So an approved phone learns nothing new from an answer, and this must
+    /// never become an "is app X installed?" oracle for the rest of the Mac.
+    /// Shape is checked as well (non-empty, ≤128 chars, bundle-ID alphabet):
+    /// the id becomes a cache filename downstream, so a malformed one is
+    /// refused here rather than relied on being caught later.
+    @MainActor
+    private func serveAppIconPages(_ requested: [String], to clientID: UUID) {
+        var allowed = Set(appRouting.appRoutes.map(\.bundleID))
+        allowed.formUnion(companionAddableApps().map(\.bundleID))
+        let wanted = requested.filter { bundleID in
+            allowed.contains(bundleID)
+                && !bundleID.isEmpty && bundleID.count <= 128
+                && bundleID.unicodeScalars.allSatisfy { Self.bundleIDAllowed.contains($0) }
+        }.prefix(CompanionAppIcons.maxRequestedBundleIDs)
+        sendAppIconPage(AppIconCache.chunk(Array(wanted)), index: 0, to: clientID)
+    }
+
+    /// razor: ONE page (8 icons) per main-queue turn, recursing between pages.
+    /// A cold cache live-fetches, draws and PNG-encodes each icon at roughly
+    /// 5-15 ms, so answering 128 in a single turn would freeze the UI for
+    /// seconds; a page bounds any hitch to ~120 ms, once. Every icon read is
+    /// AppKit work and stays on main. Upgrade path if a cold first connect
+    /// ever visibly hitches: move the fetch + encode to a serial background
+    /// queue. Gated on `isTerminating` like every other deferred main-queue
+    /// hop in this file.
+    @MainActor
+    private func sendAppIconPage(_ pages: [[String]], index: Int, to clientID: UUID) {
+        guard !isTerminating, index < pages.count else { return }
+        let payloads = pages[index].map {
+            AppIconPayload(bundleID: $0, png: AppIconCache.pngData(forBundleID: $0))
+        }
+        companionServer.sendAppIcons(payloads, page: index, pageCount: pages.count, to: clientID)
+        guard index + 1 < pages.count else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.sendAppIconPage(pages, index: index + 1, to: clientID)
+        }
     }
 
     /// The wire copy for `Snapshot.takeoverStatus` — the same plain language

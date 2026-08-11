@@ -231,6 +231,47 @@ units=$(
     done | sort -n
 )
 
+# Rule 0: dead-engine subtrees. This repo builds exclusively with
+# `--build-system native` (see scripts/run-tests.sh), whose cache is
+# .build/arm64-apple-macosx. The DEFAULT engine's cache — .build/out — is
+# therefore unreachable: no command this repo runs can ever hit it again. It is
+# ~800 MB per worktree and was 8.4 GB machine-wide at the switchover.
+#
+# This runs BEFORE the two rules below on purpose, because it is the only
+# reclaim that is free: rules 1 and 2 delete WARM caches and make that
+# worktree's next build cold (~95s), whereas a dead engine's tree costs nothing
+# to give up. Reclaiming it first often clears the floor with no rebuild at all.
+#
+# Same "unless open" gate as every other delete — a worktree someone left on the
+# old engine still has a live process pointing at it, so `skippable` protects it
+# and it simply ages out via rule 1 instead.
+#
+# AND it only fires on a worktree whose OWN checkout has the native pin. A
+# branch cut before that change still builds with swiftbuild, so its .build/out
+# is its LIVE cache, not a dead one — deleting it would force a cold rebuild
+# that the branch then immediately redoes, thrashing it once per housekeeping
+# run until it merges main. Checking each worktree's own run-tests.sh keeps the
+# reclaim to caches that are genuinely unreachable.
+dead_engine_dir=out
+migrated() { grep -q -- '--build-system native' "$1/scripts/run-tests.sh" 2>/dev/null; }
+printf '%s\n' "$units" | while IFS='	' read -r mt u; do
+    [ -n "$u" ] || continue
+    found=$(caches_of "$u" | while IFS= read -r d; do
+        [ -d "$d/$dead_engine_dir" ] && printf '%s\n' "$d/$dead_engine_dir"
+    done)
+    [ -n "$found" ] || continue
+    migrated "$u" || continue
+    skippable "$u" || continue
+    sz=$(printf '%s\n' "$found" | while IFS= read -r d; do du -sk "$d" 2>/dev/null | cut -f1; done |
+         awk '{t+=$1} END {printf "%d", t/1024}')
+    if [ "$dry_run" -eq 1 ]; then
+        say "would delete dead swiftbuild cache in $(basename "$u") (~${sz} MB) — repo builds with --build-system native."
+    else
+        printf '%s\n' "$found" | while IFS= read -r d; do rm -rf "$d"; done
+        say "deleted dead swiftbuild cache in $(basename "$u") (~${sz} MB) — unreachable, repo builds with --build-system native."
+    fi
+done
+
 # Rule 1: staleness.
 max_age_s=$((max_age_days * 86400))
 printf '%s\n' "$units" | while IFS='	' read -r mt u; do

@@ -142,6 +142,10 @@ private struct SpeakerSectionSpec: Identifiable {
 /// A `"failed"` speaker sits in READY rather than PLAYING even while the Mac
 /// still has it selected: it is making no sound, and its row is a failure card
 /// asking to be retried, which is a thing to do rather than a thing playing.
+///
+/// PLAYING is ``DeviceRowView/isSounding(_:)``, NOT `isSelected` — which is why
+/// activating a group puts its members here rather than leaving them in READY
+/// while the room they're in plays.
 enum SpeakerSection {
     case playing, ready, unavailable
 
@@ -151,7 +155,7 @@ enum SpeakerSection {
     @MainActor
     static func of(_ device: DeviceState) -> SpeakerSection {
         if !device.isAvailable { return .unavailable }
-        if device.isSelected && !DeviceRowView.showsFailureCard(device) { return .playing }
+        if DeviceRowView.isSounding(device) && !DeviceRowView.showsFailureCard(device) { return .playing }
         return .ready
     }
 }
@@ -208,7 +212,6 @@ private struct SpeakerConsole: View {
     // MARK: Derived
 
     private var playingDevices: [DeviceState] { devices(in: .playing) }
-    private var playingCount: Int { playingDevices.count }
     private var master: Int { snapshot.mainOutMasterVolume }
 
     private func devices(in section: SpeakerSection) -> [DeviceState] {
@@ -429,25 +432,24 @@ private struct SpeakerConsole: View {
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { deckHeight = $0 }
     }
 
+    /// The deck's one line of chrome, and exactly two things: what this panel
+    /// is, and where it is pointed. A count of what's playing belongs to the
+    /// PLAYING section's own heading, which is on the same screen — carried
+    /// here as well it is a duplicate, and one that costs the title its width.
+    ///
+    /// Truncation has exactly one loser, and it is the picker: `MAIN OUT` is
+    /// two fixed words that name the panel, and `.fixedSize()` is what
+    /// guarantees the header can never spend them on a long group name.
     private var deckHeader: some View {
         HStack(spacing: 10) {
             Text("MAIN OUT")
                 .microLabel()
                 .foregroundStyle(WarmSignal.goldText)
+                .fixedSize()
 
-            // A menu picker's label is drawn by UIKit and ignores `.lineLimit`,
-            // so the only way to stop it wrapping is to let it take its ideal
-            // width. Without this the deck header grows to four lines and the
-            // deck buries the last section (doc:123-128 is one line).
+            Spacer(minLength: 8)
+
             MainOutPicker(snapshot: snapshot, session: session)
-                .fixedSize()
-
-            Text("\(playingCount) PLAYING")
-                .microLabel()
-                .foregroundStyle(WarmSignal.label2)
-                .fixedSize()
-
-            Spacer(minLength: 0)
         }
         .lineLimit(1)
     }
@@ -708,6 +710,14 @@ private final class PreviewSession: MacSessionProtocol {
 
 #Preview("Healthy — Demo") {
     SpeakersView(session: DemoMacSession())
+}
+
+/// Main Out pointed at a group: its members are PLAYING and adjustable, and
+/// the Mac — still ticked in the dormant Selected Devices set — is READY.
+#Preview("Group is Main Out") {
+    let demo = DemoMacSession()
+    demo.setMainOut(MainOutState(kind: "group", groupID: "demo-living-room"))
+    return SpeakersView(session: demo)
 }
 
 #Preview("Failed device + banners") {

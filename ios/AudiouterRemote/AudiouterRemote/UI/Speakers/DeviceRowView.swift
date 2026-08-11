@@ -23,9 +23,10 @@ import AudiouterProtocol
 /// row reconciles from the next snapshot — and rubber-bands to the pre-release
 /// value for that one beat, which ``MainOutRow`` deliberately does not.
 ///
-/// The drag is enabled by the same rule the Mac's own row uses (see
-/// ``isControllable``); starting a speaker is enabled by the Mac's separate,
-/// weaker checkbox rule (availability alone). `isAvailable == false` means the
+/// The drag is enabled for a speaker that is sounding or is an app's redirect
+/// target (see ``isControllable``); the tap starts and stops one, except while
+/// Main Out is pointed at a group and the membership is what plays (see
+/// ``playRefusal(mainOut:)``). `isAvailable == false` means the
 /// device is gone from the network entirely (distinct from `connection.state`,
 /// which can be "failed"/"off" while still `isAvailable`) — inert, and drawn
 /// recessive by its own tints, with the opacity dim reaching the halo and
@@ -76,6 +77,37 @@ struct DeviceRowView: View {
         device.connection.state == "failed"
     }
 
+    /// Whether the Mac is sending sound to this speaker right now — the row's
+    /// whole PLAYING/READY notion, and the one thing `isSelected` cannot
+    /// answer.
+    ///
+    /// Main Out points at EITHER the Selected Devices set or a saved group, and
+    /// `DeviceState.isSelected` is only ever the first of those
+    /// (`GroupController.isSpeakerSelected`, which reads `selectedDeviceIDs`
+    /// alone). `isMainOutMember` is the Mac's own answer to "is this device in
+    /// whatever Main Out currently points at" — identical to `isSelected` under
+    /// a Selected Devices target, and the group's members under a group one. So
+    /// it is the field, and `isSelected` is never read for this: an OR of the
+    /// two would light up a speaker stranded in the dormant Selected set while
+    /// an AirPlay group plays, which is the exact confusion
+    /// `GroupController.isMainOutMember(_:)` documents.
+    static func isSounding(_ device: DeviceState) -> Bool {
+        device.isMainOutMember
+    }
+
+    /// Why a tap can neither start nor stop this speaker, or `nil` when it can.
+    ///
+    /// While Main Out points at a group, what plays IS the group's membership.
+    /// The row's tap writes the Selected Devices set (`setDeviceSelected`),
+    /// which the Mac holds dormant until Main Out points back at it — so the
+    /// write would be accepted, change nothing audible, and leave the row
+    /// echoing a state for two seconds before snapping back. The screen does
+    /// not lie for two seconds; it says why instead.
+    static func playRefusal(mainOut: MainOutState) -> String? {
+        guard mainOut.kind == "group" else { return nil }
+        return "A group is playing. Switch Main Out to Selected Speakers to start or stop one speaker."
+    }
+
     /// Whether a bare tap on the row toggles play. A failure card's row must
     /// not: Diagnose and Try Again sit inside the same gesture subtree, so the
     /// tap that presses them ALSO lands here — and a `"failed"` device can
@@ -83,15 +115,27 @@ struct DeviceRowView: View {
     /// press silently start or stop the speaker. VoiceOver already can't
     /// toggle a failed row (``combined(_:)`` gives it no action); this makes
     /// touch agree.
-    static func tapTogglesPlay(_ device: DeviceState) -> Bool {
-        device.isAvailable && !showsFailureCard(device)
+    static func tapTogglesPlay(_ device: DeviceState, mainOut: MainOutState) -> Bool {
+        device.isAvailable && !showsFailureCard(device) && playRefusal(mainOut: mainOut) == nil
     }
 
-    /// The Mac's rule for the volume slider and the mute button, mirrored
-    /// exactly (AudiouterSharedUI/DeviceRowView: `device.isAvailable &&
-    /// controllable`, where `PopoverController` passes `controllable` =
+    /// The Mac's rule for the volume slider and the mute button
+    /// (AudiouterSharedUI/DeviceRowView: `device.isAvailable && controllable`,
+    /// where `PopoverController` passes `controllable` =
     /// `isSpeakerSelected(id) || isRedirectTarget(id)`, and a redirect target
-    /// is any app route pointed at this device).
+    /// is any app route pointed at this device) — with `isSpeakerSelected`
+    /// replaced by ``isSounding(_:)``, which is the same answer under a
+    /// Selected Devices target and the right one under a group.
+    ///
+    /// The rule is "you can set the level of a speaker you can hear". A group
+    /// member is sounding, so its level is adjustable — the server takes the
+    /// write (`CompanionCommandDispatcher.deviceWriteRefusal` gates on
+    /// connection state alone, and `GroupController.setMemberVolume` is the
+    /// same path the Mac's Groups window uses for a member). A device left in
+    /// the dormant Selected set while a group plays is silent, so it isn't.
+    /// The Mac's own popover row still keys off `isSpeakerSelected` and so
+    /// greys a playing group member's slider — a Mac-side gap, not mirrored
+    /// here on purpose.
     ///
     /// Connection state is deliberately absent, because it's absent from the
     /// Mac's rule too — there it only dims the controls. So an available but
@@ -116,7 +160,7 @@ struct DeviceRowView: View {
     ///   VoiceOver, so the control is never dead-and-silent.
     static func isControllable(_ device: DeviceState, appRoutes: [AppRouteState]) -> Bool {
         guard device.isAvailable else { return false }
-        return device.isSelected || appRoutes.contains {
+        return isSounding(device) || appRoutes.contains {
             $0.destinationKind == "device" && $0.deviceID == device.id
         }
     }
@@ -200,7 +244,14 @@ struct DeviceRowView: View {
     /// The playing state the row draws and speaks — the Mac's, or the tap that
     /// is still on its way there.
     private var selected: Bool {
-        Self.selectionEcho(pending: pendingSelection, server: device.isSelected)
+        Self.selectionEcho(pending: pendingSelection, server: Self.isSounding(device))
+    }
+
+    /// Where Main Out is pointed, for the one rule that needs it
+    /// (``playRefusal(mainOut:)``). No snapshot yet means no group can be the
+    /// target, which is also the state in which nothing is playing.
+    private var mainOut: MainOutState {
+        session.snapshot?.mainOut ?? MainOutState(kind: "selected")
     }
 
     /// doc:1828 — playing, present, and nothing in the way.
@@ -271,7 +322,7 @@ struct DeviceRowView: View {
                 .accessibilityLabel(device.name)
                 .accessibilityValue(Self.spokenValue(for: device, isSelected: selected, isRouted: isRouted))
                 .accessibilityHint(hint)
-                .accessibilityAction { toggleSelected() }
+                .accessibilityAction { tapped() }
                 .accessibilityAdjustableAction { direction in
                     guard controlsEnabled else { return refuseAdjustment() }
                     session.setDeviceVolume(
@@ -289,8 +340,10 @@ struct DeviceRowView: View {
         }
         .padding(.bottom, 2)
         // The bound on the echo: any snapshot that moves this device's playing
-        // state ends it, whichever way it moved.
-        .onChange(of: device.isSelected) { pendingSelection = nil }
+        // state ends it, whichever way it moved. Watched on the same value the
+        // row draws (``isSounding(_:)``), or activating a group would strand
+        // every member's echo for the full two seconds.
+        .onChange(of: Self.isSounding(device)) { pendingSelection = nil }
         // And the other bound, for the write that never lands: a refusal
         // changes nothing on the wire, so nothing above would ever fire.
         .task(id: pendingSelection) {
@@ -314,8 +367,12 @@ struct DeviceRowView: View {
                         .lineLimit(1)
                         .foregroundStyle(nameTint)
 
+                    // Every state but one is a single word in the screen's
+                    // micro voice, which is upper case. A failure headline is
+                    // a SENTENCE the Mac wrote ("Not on the network"), and a
+                    // sentence in capitals is a shout. See ``subLabel``.
                     Text(subLabel)
-                        .microLabel()
+                        .microLabel(uppercased: !isFailed)
                         .foregroundStyle(subTint)
 
                 }
@@ -333,13 +390,18 @@ struct DeviceRowView: View {
             .frame(maxWidth: .infinity, minHeight: Self.rowHeight, alignment: .leading)
         )
         .background(alignment: .leading) { level }
+        // EVERY TINT IS A BACKGROUND, and this one is the lowest layer of all.
+        // A level is what the row's words sit ON; it never sits on them. As an
+        // `.overlay` this band lies across the halo and the first letters of
+        // the name for the whole drag — the row's own content, washed out by
+        // the thing that is only describing it.
+        .background { instrument }
         // Aligned to the name's own column and living in the slack the row
         // already has, so it reads as the name's meter rather than as a strip
         // under the row — and so it costs the row no height and the name no
         // width. In the text stack it did both: 60 pt became 67 and
         // "Kitchen HomePod" truncated.
         .overlay(alignment: .bottomLeading) { nameMeter }
-        .overlay { instrument }
         .background(touchTint)
         .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: pressed)
         // The reveal, and its whole implementation: the instrument arrives
@@ -570,8 +632,12 @@ struct DeviceRowView: View {
 
     /// doc:1833-1837, plus the muted case at doc:1897. Order matters: the
     /// first true branch is what the row says.
+    ///
+    /// The failure branch is the one that is not a state word: it is the Mac's
+    /// own sentence, and it keeps its sentence case (see the call site) and
+    /// its own tint (see ``subTint``).
     private var subLabel: String {
-        if isFailed { return device.connection.failureHeadline ?? "CONNECTION FAILED" }
+        if isFailed { return device.connection.failureHeadline ?? "Connection failed" }
         if !device.isAvailable { return "UNAVAILABLE" }
         if isConnecting { return "CONNECTING…" }
         if isReconnecting { return "RECONNECTING…" }
@@ -585,7 +651,15 @@ struct DeviceRowView: View {
     }
 
     private var subTint: Color {
-        if isFailed { return WarmSignal.fail }
+        // ONE thing on this card is red, and it is the ring. Red on the
+        // headline too puts the alarm colour on the card's widest element, and
+        // a failure card at the top of READY then reads as the app being
+        // broken rather than one speaker. `label2` is the row's ordinary
+        // secondary ink — 5.07:1 on paper, 6.19:1 on the dark ground, and
+        // brighter there than the `label3` a healthy READY row's word takes.
+        // The state stays legible; the alarm stays on the ring, next to the
+        // two things that can act on it.
+        if isFailed { return WarmSignal.label2 }
         if !device.isAvailable { return WarmSignal.label3 }
         if isPending { return WarmSignal.ring }
         if device.isMuted { return WarmSignal.label2 }
@@ -611,7 +685,10 @@ struct DeviceRowView: View {
     /// sighted user is horizontal (``dragGesture``), so any wording here is
     /// either a duplicate or a lie to one of the two audiences.
     private var hint: String {
-        let base = "Double tap to \(selected ? "stop" : "play")."
+        // A hint that promises an action the tap will refuse is worse than no
+        // hint, so under a group target it carries the reason instead.
+        let base = Self.playRefusal(mainOut: mainOut)
+            ?? "Double tap to \(selected ? "stop" : "play")."
         guard controlsEnabled else {
             return [base, Self.disabledReason(for: device, controllable: false)]
                 .compactMap { $0 }
@@ -671,8 +748,7 @@ struct DeviceRowView: View {
                 case .vertical:
                     return                               // the ScrollView handled it
                 case nil:
-                    guard Self.tapTogglesPlay(device) else { return }
-                    toggleSelected()                     // doc:1792
+                    tapped()                             // doc:1792
                 }
             }
     }
@@ -686,6 +762,21 @@ struct DeviceRowView: View {
     private func refuseAdjustment() {
         guard let reason = Self.disabledReason(for: device, controllable: false) else { return }
         session.toasts.show(.refusal(reason: reason))
+    }
+
+    /// The row's tap, from either audience: it starts or stops the speaker, or
+    /// says why it can't (``playRefusal(mainOut:)``) on the same channel a
+    /// dead drag answers on. A row with neither — a failure card, or one off
+    /// the network — swallows the tap: the card's own buttons are what that
+    /// row is for, and an absent speaker has nothing to say back.
+    private func tapped() {
+        guard Self.tapTogglesPlay(device, mainOut: mainOut) else {
+            if let refusal = Self.playRefusal(mainOut: mainOut) {
+                session.toasts.show(.refusal(reason: refusal))
+            }
+            return
+        }
+        toggleSelected()
     }
 
     /// The one place a tap starts or stops a speaker — the touch path and

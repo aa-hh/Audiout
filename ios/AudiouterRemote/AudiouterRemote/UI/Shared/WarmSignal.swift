@@ -196,8 +196,17 @@ struct MicroLabel: ViewModifier {
     @ScaledMetric private var scaledSize: CGFloat
     private let baseSize: CGFloat
 
-    init(size: CGFloat) {
+    /// Upper case is the voice, and it is the default. The exception is text
+    /// the app did not choose the words of — a device row's failure headline
+    /// is the Mac's own sentence, and a sentence in capitals is a shout. The
+    /// knob lives here rather than at the call site because `.textCase` is an
+    /// environment value: applied outside this modifier it is simply overruled
+    /// by the one inside.
+    private let uppercased: Bool
+
+    init(size: CGFloat, uppercased: Bool = true) {
         self.baseSize = size
+        self.uppercased = uppercased
         self._scaledSize = ScaledMetric(wrappedValue: size, relativeTo: .caption2)
     }
 
@@ -208,7 +217,7 @@ struct MicroLabel: ViewModifier {
             // a fixed proportion of the label's design size, not something
             // that should itself expand further as the label already grows.
             .tracking(baseSize * 0.09)
-            .textCase(.uppercase)
+            .textCase(uppercased ? .uppercase : nil)
     }
 }
 
@@ -384,7 +393,9 @@ extension View {
             .padding(-pad)
     }
 
-    func microLabel(_ size: CGFloat = 11) -> some View { modifier(MicroLabel(size: size)) }
+    func microLabel(_ size: CGFloat = 11, uppercased: Bool = true) -> some View {
+        modifier(MicroLabel(size: size, uppercased: uppercased))
+    }
 
     func readout(_ size: CGFloat) -> some View { modifier(Readout(size: size)) }
 

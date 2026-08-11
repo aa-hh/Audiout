@@ -19,15 +19,23 @@ import AudiouterProtocol
 
     // MARK: - Fixtures
 
+    /// `isMainOutMember` DEFAULTS TO `isSelected`, because that is what the wire
+    /// carries whenever Main Out targets Selected Devices: `mainOutMemberIDs`
+    /// is the selected set in that branch, so the Mac sends the two fields
+    /// equal (`GroupController.isMainOutMember(_:)`). Pass it explicitly to
+    /// model the only case where they diverge — Main Out pointed at a group,
+    /// where the members are sounding and are not selected, and anything left
+    /// in the dormant selected set is selected and is not sounding.
     private func makeDevice(
         id: String = "d1",
         isAvailable: Bool = true,
         isSelected: Bool = false,
-        isMainOutMember: Bool = false,
+        isMainOutMember: Bool? = nil,
         isMuted: Bool = false,
         connectionState: String = "connected"
     ) -> DeviceState {
-        DeviceState(
+        let isMainOutMember = isMainOutMember ?? isSelected
+        return DeviceState(
             id: id,
             name: "Kitchen Speaker",
             kind: "generic",
@@ -175,9 +183,36 @@ import AudiouterProtocol
         // "failed" device can still be isAvailable — so the tap rule, not the
         // availability rule, is what keeps a Diagnose press from silently
         // starting the speaker.
-        #expect(!DeviceRowView.tapTogglesPlay(makeDevice(isSelected: true, connectionState: "failed")))
-        #expect(!DeviceRowView.tapTogglesPlay(makeDevice(isAvailable: false)))
-        #expect(DeviceRowView.tapTogglesPlay(makeDevice()))
+        #expect(!DeviceRowView.tapTogglesPlay(
+            makeDevice(isSelected: true, connectionState: "failed"), mainOut: selectedTarget))
+        #expect(!DeviceRowView.tapTogglesPlay(makeDevice(isAvailable: false), mainOut: selectedTarget))
+        #expect(DeviceRowView.tapTogglesPlay(makeDevice(), mainOut: selectedTarget))
+    }
+
+    // MARK: - Device row: what a tap may do while a group is playing
+
+    private var selectedTarget: MainOutState { MainOutState(kind: "selected") }
+    private var groupTarget: MainOutState { MainOutState(kind: "group", groupID: "g1") }
+
+    @MainActor
+    @Test func noTapStartsOrStopsASpeakerWhileAGroupIsMainOut() {
+        // What plays is the group's membership. The row's tap writes the
+        // Selected Devices set, which the Mac holds dormant under a group
+        // target — accepted, silent, and changing nothing — so the row would
+        // echo a state for two seconds and snap back. It says why instead.
+        #expect(!DeviceRowView.tapTogglesPlay(
+            makeDevice(isSelected: false, isMainOutMember: true), mainOut: groupTarget))
+        #expect(!DeviceRowView.tapTogglesPlay(
+            makeDevice(isSelected: true, isMainOutMember: false), mainOut: groupTarget))
+        #expect(DeviceRowView.playRefusal(mainOut: groupTarget) != nil)
+    }
+
+    @MainActor
+    @Test func aSelectedDevicesTargetRefusesNoTap() {
+        // The refusal is a property of the TARGET, not of a device: with Main
+        // Out on Selected Devices every row's tap means what it says.
+        #expect(DeviceRowView.playRefusal(mainOut: selectedTarget) == nil)
+        #expect(DeviceRowView.tapTogglesPlay(makeDevice(isSelected: true), mainOut: selectedTarget))
     }
 
     @MainActor
@@ -186,11 +221,23 @@ import AudiouterProtocol
     }
 
     @MainActor
-    @Test func groupMembershipAloneDoesNotMakeADeviceControllable() {
-        // `isMainOutMember` is not part of the Mac's rule: a member of a
-        // group-targeted Main Out that isn't also selected comes out disabled.
-        #expect(!DeviceRowView.isControllable(
+    @Test func aGroupMemberIsAdjustableWhileItsGroupIsMainOut() {
+        // The live-caught bug: activating a group left every member's level
+        // frozen, because the rule read `isSelected` — which a group member
+        // isn't. The rule is "you can set the level of a speaker you can
+        // hear", and the server takes the write (`setMemberVolume`).
+        #expect(DeviceRowView.isControllable(
             makeDevice(isSelected: false, isMainOutMember: true), appRoutes: []))
+    }
+
+    @MainActor
+    @Test func aDeviceStrandedInTheDormantSelectedSetIsNotAdjustable() {
+        // The other direction of the same field, and why `isSounding` is
+        // `isMainOutMember` alone rather than an OR: while a group plays, a
+        // speaker still ticked in the dormant Selected Devices set is silent,
+        // so it has no level to set.
+        #expect(!DeviceRowView.isControllable(
+            makeDevice(isSelected: true, isMainOutMember: false), appRoutes: []))
     }
 
     // MARK: - Device row: a disabled control says why
@@ -329,6 +376,26 @@ import AudiouterProtocol
     }
 
     @MainActor
+    @Test func aGroupsMembersArePlayingTheMomentTheGroupIs() {
+        // The live-caught bug: enabling a group left its speakers sitting in
+        // READY while the room they're in played. PLAYING is what Main Out is
+        // sending to (`isSounding` = `isMainOutMember`), not what happens to
+        // be ticked in the Selected Devices set.
+        #expect(SpeakerSection.of(
+            makeDevice(isSelected: false, isMainOutMember: true)) == .playing)
+        // And the reverse, from the same snapshot: a speaker left in the
+        // dormant selected set while the group plays is silent, so it is READY.
+        #expect(SpeakerSection.of(
+            makeDevice(isSelected: true, isMainOutMember: false)) == .ready)
+        // A member that is off the network is still off the network.
+        #expect(SpeakerSection.of(
+            makeDevice(isAvailable: false, isSelected: false, isMainOutMember: true)) == .unavailable)
+        // And a member whose link failed is still a failure card in READY.
+        #expect(SpeakerSection.of(
+            makeDevice(isSelected: false, isMainOutMember: true, connectionState: "failed")) == .ready)
+    }
+
+    @MainActor
     @Test func aFailedSpeakerIsReadyRatherThanPlaying() {
         // The Mac still has it selected, but it is making no sound and its row
         // is a failure card asking to be retried — PLAYING would be a lie the
@@ -350,6 +417,26 @@ import AudiouterProtocol
             #expect(SpeakerSection.of(
                 makeDevice(isSelected: true, connectionState: state)) == .playing)
         }
+    }
+
+    @MainActor
+    @Test func theDemoMacStagesAPlayingGroupTheSameWayARealOneDoes() throws {
+        // The offline fixture has to be able to produce this list, or the
+        // group case can only ever be seen on real hardware.
+        let demo = DemoMacSession()
+        demo.setMainOut(MainOutState(kind: "group", groupID: "demo-living-room"))
+        let devices = try #require(demo.snapshot).devices
+
+        for id in ["demo-sonos-left", "demo-sonos-right"] {
+            let member = try #require(devices.first { $0.id == id })
+            #expect(member.isMainOutMember && !member.isSelected, "a group member, not a selected one")
+            #expect(SpeakerSection.of(member) == .playing)
+            #expect(DeviceRowView.isControllable(member, appRoutes: []))
+        }
+        // The Mac stays ticked in the dormant selected set and is not playing.
+        let mac = try #require(devices.first { $0.id == "local-mac" })
+        #expect(mac.isSelected && !mac.isMainOutMember)
+        #expect(SpeakerSection.of(mac) == .ready)
     }
 
     // MARK: - Device row: the tap's local echo

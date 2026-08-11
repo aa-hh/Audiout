@@ -199,8 +199,35 @@ set changes, or when the gate/motion/demo rules change.
     `NSColor.systemColorsDidChangeNotification`, NOT
     `Tokens.accentStyleDidChangeNotification`: the user's macOS accent is what its
     stamped `CGColor`s are derived from, and the app's own dial is deliberately not.
+  - **The prompt mock is the macOS 26 "Liquid Glass" privacy dialog, not the old
+    alert** (owner decision 2026-08-11, from screenshots of the real dialogs —
+    this REVERSES the previous "centred, icon above the text, 6 pt rounded
+    buttons with an accent-filled default" drawing, which was the pre-26 shape
+    and read to the owner as "an abstract allow thing"). The anatomy, which is
+    generic across all five steps:
+    a TALL portrait card (real 283 × 340 pt, drawn here at ~0.85 of that, with a
+    large ~24 pt continuous corner); the app icon top-LEFT with a `systemBlue`
+    circle badge carrying a white `hand.raised.fill` overlapping its
+    bottom-trailing corner — the marker that says *privacy prompt*; a small grey
+    Help circle top-right; a bold LEFT-ALIGNED title over two or three lines; a
+    left-aligned `secondaryLabelColor` body; and two EQUAL, NEUTRAL CAPSULE
+    buttons filling the content width. **There is no accent-filled default
+    button any more** — drawing one would date the mock and, worse, send the user
+    looking for a blue button that won't be there. Nothing is centred, and
+    nothing is greeked.
+    - **The body is the app's REAL Info.plist purpose string** — the same words
+      `scripts/make-app.sh` stamps into `NSAudioCaptureUsageDescription` /
+      `NSLocalNetworkUsageDescription` / `NSBluetoothAlwaysUsageDescription`, so
+      the paragraph the user rehearses here is the paragraph macOS will show.
+      Change one there, change it in `bodyText(for:)`. That sentence is why the
+      card is drawn near life size at all: the type tiers still hold (nothing
+      under 9 pt), which puts the title at 14 pt and the body at 11 pt.
+    - The per-step hooks stay `askText` / `bodyText` / `confirmTitle` /
+      `grantedText`; the ANATOMY is shared. `DemoPaneView.surfaceSize` grew to
+      336 × 336 to seat the taller card with a margin around it (the pane has
+      516 pt of height, so Replay still clears underneath).
   - **`DemoSystemColor` is a documented exception to "colour literals live only in
-    `Tokens`"** (root `AGENTS.md`). Five values have no semantic equivalent that
+    `Tokens`"** (root `AGENTS.md`). Four values have no semantic equivalent that
     survives both appearances — above all, System Settings paints its sidebar
     DARKER than its content pane, and `windowBackgroundColor` vs
     `controlBackgroundColor` INVERTS that in dark mode, flipping the one structural
@@ -331,7 +358,7 @@ set changes, or when the gate/motion/demo rules change.
 | `DemoPaneView` / `DemoMode` | The right pane: the elevated surface, the mode swap crossfade, the motion policy, the Replay button. |
 | `DemoMockView` | Timeline base class (restartable score, settled-state hook) for the two animated mocks. |
 | `DemoPromptMockView` / `DemoSettingsMockView` / `DemoSettledMockView` | The permission-dialog miniature, the Settings-pane miniature, and the calm completion state. |
-| `DemoDialogSurfaceView` / `DemoCapsuleView` / `DemoToggleView` / `DemoSettingsRowView` / `DemoPlaceholderBarView` / `DemoCursorView` | The drawn parts of the mocks. |
+| `DemoWindowSurfaceView` / `DemoPushButtonView` / `DemoSwitchView` / `DemoSidebarView` / `DemoSettingsRowView` / `DemoGreekBarView` / `DemoPillView` / `DemoDotView` / `DemoCursorView` | The drawn parts of the mocks — window body, neutral capsule button, switch, sidebar, list row, greeked label, pill, circle, pointer. |
 | `SystemSettingsOpener` | `NSWorkspace` seam for opening a `SystemSettingsPane`, with a Privacy & Security root fallback. |
 | `ProminentButton` | Accent-filled CTA button with key-window-aware title color. |
 | `IconTileView` / `RoundedContainerView` | Shared appearance-adaptive chrome (icon chip, grouped-inset card) — no stock AppKit equivalent. |

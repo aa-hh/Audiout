@@ -44,7 +44,13 @@ final class DemoPaneView: NSView {
 
     /// The elevated surface both mocks sit on — fixed, so consecutive steps
     /// read at the same scale rather than the pane resizing under the user.
-    static let surfaceSize = NSSize(width: 336, height: 268)
+    ///
+    /// Square since the permission dialog became a portrait card (macOS 26):
+    /// 336 is the prompt mock's 288 plus the margin the mock had before, so the
+    /// dialog sits ON the surface rather than filling it edge to edge. The
+    /// 820 × 560 window leaves 516 pt of pane height, so this still clears the
+    /// Replay button underneath it with room to spare.
+    static let surfaceSize = NSSize(width: 336, height: 336)
 
     /// The step-to-step content crossfade.
     static let stepCrossfadeDuration: TimeInterval = 0.22
@@ -399,7 +405,7 @@ extension DemoMockView: CAAnimationDelegate {
 ///
 /// Everything in the mocks that CAN be a semantic system colour is one
 /// (`labelColor`, `separatorColor`, `windowBackgroundColor`, `systemBlue`, …).
-/// These five can't be: System Settings paints its sidebar DARKER than its
+/// These four can't be: System Settings paints its sidebar DARKER than its
 /// content pane, and the obvious semantic pair (`windowBackgroundColor` vs
 /// `controlBackgroundColor`) inverts that relationship in dark mode — the one
 /// structural cue that says "System Settings" would flip. So they are measured
@@ -419,12 +425,10 @@ enum DemoSystemColor {
     /// the pane and defines it by its border alone; at mock scale that vanishes,
     /// so this is lifted ~2.5 % — a readability adjustment, not a measurement.
     static let card = dynamic(light: 0xFAFAFA, dark: 0x333336)
-    /// A plain push button. `controlColor` is white-ish in light mode, which is
-    /// the SHEET's Cancel button, not an alert's grey one.
+    /// A dialog button — BOTH of them: macOS 26's permission dialog has no
+    /// accent-filled default. `controlColor` is white-ish in light mode, which
+    /// is the SHEET's Cancel button, not a dialog's grey one.
     static let plainButton = dynamic(light: 0xD7D7D7, dark: 0x5A5A5E)
-    /// The default button's gradient top — the accent about 8 % lighter. The
-    /// gradient is what makes an AppKit accent button read as one.
-    static let accentGradientTop = dynamic(light: 0x2A8CFB, dark: 0x2E90FF)
 
     static let trafficRed = solid(0xFF5F57)
     static let trafficYellow = solid(0xFEBC2E)
@@ -465,29 +469,43 @@ enum DemoBeat {
 
 // MARK: - Prompt mock
 
-/// A miniature of the TCC permission dialog for one step: the app icon on top,
-/// the ask, and a two-up button row — with a drawn cursor gliding to the
-/// confirming button, pressing it, and the dialog settling into its granted
-/// state.
+/// A miniature of the macOS 26 privacy dialog for one step — with a drawn cursor
+/// gliding to the confirming button, pressing it, and the dialog settling into
+/// its granted state.
 ///
-/// Drawn at 1:1 with the real alert (256 × 231 pt), which is the single most
-/// important scale finding in the reference: at this size real text at real
-/// sizes is what sells it, so nothing here is greeked or shrunk. The centred,
-/// icon-on-top layout is the TCC/privacy shape — NOT `NSAlert`'s left-icon one —
-/// and the wording is a recognisable likeness rather than verbatim OS text, which
-/// would go stale against a macOS release.
+/// **The anatomy is the point.** A dialog the user doesn't recognise is worth
+/// nothing, and every part below is one the real one is identified by. A tall
+/// portrait card, everything LEFT-aligned under an icon row:
+///
+/// 1. the app's icon, with the blue `hand.raised.fill` badge overlapping its
+///    bottom-trailing corner — the marker that says *privacy prompt*;
+/// 2. a small grey Help button in the opposite corner;
+/// 3. the bold title, wrapping over two or three lines;
+/// 4. the app's own Info.plist purpose string as the body, in
+///    `secondaryLabelColor`;
+/// 5. two EQUAL, NEUTRAL capsules filling the width — there is no accent-filled
+///    default button in this dialog any more.
+///
+/// Drawn at ~0.85 of the real 283 × 340 pt card: the closest to life size that
+/// leaves the whole thing, at real proportions, inside the pane's fixed surface.
+/// Nothing is greeked — the purpose string is the sentence the user will
+/// actually read, so it is the one thing the mock cannot fake.
 final class DemoPromptMockView: DemoMockView {
 
-    static let size = NSSize(width: 260, height: 210)
+    static let size = NSSize(width: 240, height: 288)
     /// Content inset on all four sides.
     private static let inset: CGFloat = 16
+    private static let iconSide: CGFloat = 56
+    private static let badgeSide: CGFloat = 20
+    private static let helpSide: CGFloat = 18
+    private static var contentWidth: CGFloat { size.width - inset * 2 }
 
     private let step: SetupStep
-    private let askStack = NSStackView()
+    /// Everything the dialog ASKS with, in one layer — so the swap to the
+    /// granted state stays a single opacity crossfade.
+    private let ask = NSView()
     private let grantedStack = NSStackView()
-    /// ~1.5× life size: readable at this scale without dominating a 210 pt-tall
-    /// dialog the way the old drawing (a third of its height) did.
-    private let cursor = DemoCursorView(pointerHeight: 24)
+    private let cursor = DemoCursorView(pointerHeight: 22)
     private var confirmButton: DemoPushButtonView!
 
     init(step: SetupStep) {
@@ -507,30 +525,43 @@ final class DemoPromptMockView: DemoMockView {
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.translatesAutoresizingMaskIntoConstraints = false
 
-        let ask = NSTextField(labelWithString: Self.askText(for: step))
-        ask.font = .boldSystemFont(ofSize: 13)
-        ask.textColor = .labelColor
-        ask.alignment = .center
-        ask.maximumNumberOfLines = 2
-        ask.lineBreakMode = .byWordWrapping
-        ask.preferredMaxLayoutWidth = Self.size.width - Self.inset * 2
+        // The privacy marker: a blue hand badge overlapping the icon's
+        // bottom-trailing corner. It is what distinguishes this dialog from any
+        // other alert at a glance, so it is drawn before anything else is.
+        let badge = DemoDotView(diameter: Self.badgeSide, fill: DemoSystemColor.accent)
+        let badgeGlyph = Self.glyph("hand.raised.fill", pointSize: 9,
+                                    weight: .semibold, color: .white)
 
-        // Negative on the left, default on the right, filling the content width.
-        let deny = DemoPushButtonView(title: "Don't Allow", isDefault: false)
-        confirmButton = DemoPushButtonView(title: Self.confirmTitle(for: step), isDefault: true)
+        let help = DemoDotView(diameter: Self.helpSide, fill: .quaternaryLabelColor)
+        let helpGlyph = Self.glyph("questionmark", pointSize: 9,
+                                   weight: .semibold, color: .secondaryLabelColor)
+
+        // The real dialog's 15 pt title, taken down by this mock's scale and
+        // rounded UP rather than down — these two blocks are the only things in
+        // here the user actually reads, and the 9 pt floor is a floor, not a
+        // target.
+        let title = Self.paragraph(Self.askText(for: step),
+                                   font: .boldSystemFont(ofSize: 14),
+                                   color: .labelColor)
+        let body = Self.paragraph(Self.bodyText(for: step),
+                                  font: .systemFont(ofSize: 11),
+                                  color: .secondaryLabelColor)
+
+        // Two equal neutral capsules filling the content width: refusal on the
+        // left, the confirming one on the right.
+        let deny = DemoPushButtonView(title: "Don't Allow")
+        confirmButton = DemoPushButtonView(title: Self.confirmTitle(for: step))
         let buttons = NSStackView(views: [deny, confirmButton])
         buttons.orientation = .horizontal
         buttons.spacing = 8
         buttons.distribution = .fillEqually
+        buttons.translatesAutoresizingMaskIntoConstraints = false
 
-        askStack.orientation = .vertical
-        askStack.alignment = .centerX
-        askStack.spacing = 14
-        askStack.translatesAutoresizingMaskIntoConstraints = false
-        askStack.addArrangedSubview(icon)
-        askStack.addArrangedSubview(ask)
-        askStack.addArrangedSubview(buttons)
-        askStack.setCustomSpacing(18, after: ask)
+        ask.wantsLayer = true
+        ask.translatesAutoresizingMaskIntoConstraints = false
+        for view in [icon, badge, badgeGlyph, help, helpGlyph, title, body, buttons] {
+            ask.addSubview(view)
+        }
 
         let check = NSImageView()
         check.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil)
@@ -550,8 +581,10 @@ final class DemoPromptMockView: DemoMockView {
         grantedStack.addArrangedSubview(check)
         grantedStack.addArrangedSubview(capability)
 
-        let dialog = DemoWindowSurfaceView()
-        dialog.addSubview(askStack)
+        // The real card's corner is ~24 pt at life size — big, and one of the
+        // things that dates a Liquid Glass dialog.
+        let dialog = DemoWindowSurfaceView(radius: 20)
+        dialog.addSubview(ask)
         dialog.addSubview(grantedStack)
         addSubview(dialog)
         addSubview(cursor)
@@ -565,30 +598,86 @@ final class DemoPromptMockView: DemoMockView {
             dialog.topAnchor.constraint(equalTo: topAnchor),
             dialog.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            // Real alerts use a 64 pt icon box; 48 buys back the height a 2-line
-            // title costs.
-            icon.widthAnchor.constraint(equalToConstant: 48),
-            icon.heightAnchor.constraint(equalToConstant: 48),
-            buttons.widthAnchor.constraint(equalTo: dialog.widthAnchor,
-                                           constant: -Self.inset * 2),
+            ask.leadingAnchor.constraint(equalTo: dialog.leadingAnchor),
+            ask.trailingAnchor.constraint(equalTo: dialog.trailingAnchor),
+            ask.topAnchor.constraint(equalTo: dialog.topAnchor),
+            ask.bottomAnchor.constraint(equalTo: dialog.bottomAnchor),
 
-            askStack.centerXAnchor.constraint(equalTo: dialog.centerXAnchor),
-            askStack.centerYAnchor.constraint(equalTo: dialog.centerYAnchor),
-            askStack.topAnchor.constraint(greaterThanOrEqualTo: dialog.topAnchor,
-                                          constant: Self.inset),
+            icon.leadingAnchor.constraint(equalTo: ask.leadingAnchor, constant: Self.inset),
+            icon.topAnchor.constraint(equalTo: ask.topAnchor, constant: Self.inset),
+            icon.widthAnchor.constraint(equalToConstant: Self.iconSide),
+            icon.heightAnchor.constraint(equalToConstant: Self.iconSide),
+
+            // Overlapping, not tucked inside: the badge hangs off the icon's
+            // bottom-trailing corner, the way macOS draws it.
+            badge.centerXAnchor.constraint(equalTo: icon.trailingAnchor, constant: -5),
+            badge.centerYAnchor.constraint(equalTo: icon.bottomAnchor, constant: -5),
+            badgeGlyph.centerXAnchor.constraint(equalTo: badge.centerXAnchor),
+            badgeGlyph.centerYAnchor.constraint(equalTo: badge.centerYAnchor),
+
+            help.trailingAnchor.constraint(equalTo: ask.trailingAnchor, constant: -Self.inset),
+            help.topAnchor.constraint(equalTo: ask.topAnchor, constant: Self.inset),
+            helpGlyph.centerXAnchor.constraint(equalTo: help.centerXAnchor),
+            helpGlyph.centerYAnchor.constraint(equalTo: help.centerYAnchor),
+
+            title.leadingAnchor.constraint(equalTo: ask.leadingAnchor, constant: Self.inset),
+            title.trailingAnchor.constraint(equalTo: ask.trailingAnchor, constant: -Self.inset),
+            title.topAnchor.constraint(equalTo: icon.bottomAnchor, constant: 14),
+
+            body.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            body.trailingAnchor.constraint(equalTo: title.trailingAnchor),
+            body.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8),
+            // The copy is allowed to take the slack, never to run into the
+            // buttons — a step with a longer purpose string just sits lower.
+            body.bottomAnchor.constraint(lessThanOrEqualTo: buttons.topAnchor, constant: -14),
+
+            buttons.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            buttons.trailingAnchor.constraint(equalTo: title.trailingAnchor),
+            buttons.bottomAnchor.constraint(equalTo: ask.bottomAnchor, constant: -Self.inset),
 
             grantedStack.centerXAnchor.constraint(equalTo: dialog.centerXAnchor),
             grantedStack.centerYAnchor.constraint(equalTo: dialog.centerYAnchor),
             grantedStack.leadingAnchor.constraint(greaterThanOrEqualTo: dialog.leadingAnchor,
                                                  constant: Self.inset),
 
-            // The cursor's resting position; the timeline moves it by TRANSFORM
-            // (AutoLayout owns its frame and would reset an animated position).
-            // The arrow's TIP is the anchor, so the view's top-left is the hot spot.
-            cursor.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 26),
-            cursor.topAnchor.constraint(equalTo: topAnchor, constant: 24),
+            // The cursor's resting position — parked in the band between the
+            // copy and the buttons, never on top of text, and anchored to the
+            // BUTTON row so a longer body can't push the text under it. The
+            // timeline moves it by TRANSFORM (AutoLayout owns its frame and
+            // would reset an animated position); the arrow's TIP is the anchor,
+            // so the view's top-left is the hot spot.
+            cursor.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            cursor.bottomAnchor.constraint(equalTo: buttons.bottomAnchor, constant: 6),
         ])
         applySettledState()
+    }
+
+    /// A wrapping, LEFT-aligned block of dialog text. Both the title and the
+    /// body are real sentences at real sizes — the recognisability of this mock
+    /// is the whole reason it exists, so neither is greeked or clipped.
+    private static func paragraph(_ text: String, font: NSFont, color: NSColor) -> NSTextField {
+        let field = NSTextField(labelWithString: text)
+        field.font = font
+        field.textColor = color
+        field.alignment = .left
+        field.maximumNumberOfLines = 0
+        field.lineBreakMode = .byWordWrapping
+        field.preferredMaxLayoutWidth = contentWidth
+        field.translatesAutoresizingMaskIntoConstraints = false
+        return field
+    }
+
+    /// A tinted SF Symbol sized in points — the badge's hand and the Help
+    /// button's question mark. Symbols, not text, so the 9 pt legibility floor
+    /// the labels obey doesn't apply.
+    private static func glyph(_ name: String, pointSize: CGFloat,
+                              weight: NSFont.Weight, color: NSColor) -> NSImageView {
+        let view = NSImageView()
+        view.image = NSImage(systemSymbolName: name, accessibilityDescription: nil)
+        view.symbolConfiguration = .init(pointSize: pointSize, weight: weight)
+        view.contentTintColor = color
+        view.translatesAutoresizingMaskIntoConstraints = false
+        return view
     }
 
     /// The settled frame is the dialog AS THE USER WILL FIND IT — the ask, with
@@ -598,7 +687,7 @@ final class DemoPromptMockView: DemoMockView {
     /// was already given. Every pass therefore returns here, which also makes
     /// the loop seamless.
     override func applySettledState() {
-        askStack.alphaValue = 1
+        ask.alphaValue = 1
         grantedStack.alphaValue = 0
         cursor.alphaValue = 1
         cursor.layer?.transform = CATransform3DIdentity
@@ -628,7 +717,7 @@ final class DemoPromptMockView: DemoMockView {
             (DemoBeat.pressEnd + 0.08, 1), (end, 1),
         ]), forKey: "press")
 
-        askStack.layer?.add(keyframes("opacity", [
+        ask.layer?.add(keyframes("opacity", [
             (0, 1), (DemoBeat.pressEnd, 1), (DemoBeat.changeEnd, 0),
             (DemoBeat.holdEnd, 0), (DemoBeat.resetEnd, 1), (end, 1),
         ]), forKey: "askFade")
@@ -649,18 +738,51 @@ final class DemoPromptMockView: DemoMockView {
 
     // MARK: Copy
 
-    /// The ask, per step — quoted-app-name style, sentence case, full stop, and
-    /// recognisably the shape of the real dialog without quoting OS text that
-    /// changes between releases.
+    /// The dialog's TITLE, per step — quoted app name, sentence case, full stop.
+    /// It wraps on its own now that the layout is left-aligned; a hard line
+    /// break would fight the wrap at any other text size.
     static func askText(for step: SetupStep) -> String {
         switch step {
-        case .audio:         return "“Audiouter” would like to\nrecord this Mac's audio."
-        case .localNetwork:  return "“Audiouter” would like to find\nspeakers on your network."
-        case .bluetooth:     return "“Audiouter” would like to\nuse Bluetooth."
-        case .remoteControl: return "“Audiouter” would like to\ncontrol this Mac."
+        // Verbatim, because macOS composes this one from the permission itself
+        // and the owner checked it against the real dialog.
+        case .audio:         return "“Audiouter” would like access to record your system audio."
+        case .localNetwork:  return "“Audiouter” would like to find speakers on your network."
+        case .bluetooth:     return "“Audiouter” would like to use Bluetooth."
+        case .remoteControl: return "“Audiouter” would like to control this Mac."
         // Speaker Sync has no prompt (it is a Login Items approval) and never
         // reaches the prompt mock; the settings mock is its only mode.
-        case .speakerSync:   return "“Audiouter” would like to\nrun in the background."
+        case .speakerSync:   return "“Audiouter” would like to run in the background."
+        }
+    }
+
+    /// The dialog's BODY: the app's own purpose string, which is exactly what
+    /// macOS puts in the dialog — not a paraphrase. The first three are
+    /// word-for-word the `*_USAGE` strings `scripts/make-app.sh` stamps into the
+    /// bundle's Info.plist; change one there and change it here, because this
+    /// sentence is what the user reads before deciding. The last two have no
+    /// Info.plist string to quote (Accessibility's wording is the OS's own, and
+    /// Login Items has no dialog at all), so they are a likeness.
+    static func bodyText(for step: SetupStep) -> String {
+        switch step {
+        case .audio:
+            return "Audiouter needs to capture your Mac's audio so it can send it to the "
+                + "AirPlay speakers you choose. Audio goes only to those speakers — it is "
+                + "never recorded, saved, or sent anywhere else."
+        case .localNetwork:
+            return "Audiouter looks for AirPlay speakers on your local network so you can "
+                + "play your Mac's audio to them. It only finds speakers — it doesn't read "
+                + "or collect anything else about your network."
+        case .bluetooth:
+            return "Audiouter connects to Bluetooth speakers you've already paired so it can "
+                + "play your Mac's audio on them. It only reaches speakers you choose — it "
+                + "never scans for or reads anything else."
+        case .remoteControl:
+            return "Audiouter needs to control this Mac so the keys on your keyboard can "
+                + "start, pause and skip what is playing. It watches for those keys and "
+                + "nothing else."
+        case .speakerSync:
+            return "Audiouter runs a small background helper that keeps your speakers in "
+                + "step with each other. It starts with your Mac and does nothing else."
         }
     }
 
@@ -969,9 +1091,13 @@ final class DemoSettledMockView: NSView {
 final class DemoWindowSurfaceView: NSView {
 
     private let fill: NSColor
+    /// The Settings window's corner; the permission dialog passes its own, much
+    /// larger one.
+    private let radius: CGFloat
 
-    init(fill: NSColor = .windowBackgroundColor) {
+    init(fill: NSColor = .windowBackgroundColor, radius: CGFloat = 10) {
         self.fill = fill
+        self.radius = radius
         super.init(frame: .zero)
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
@@ -986,7 +1112,7 @@ final class DemoWindowSurfaceView: NSView {
 
     override func updateLayer() {
         layer?.backgroundColor = fill.cgColor
-        layer?.cornerRadius = 10
+        layer?.cornerRadius = radius
         layer?.cornerCurve = .continuous
         // A dark window needs a heavier shadow to separate from a dark canvas.
         let isDark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
@@ -994,51 +1120,41 @@ final class DemoWindowSurfaceView: NSView {
     }
 }
 
-/// A macOS push button. `isDefault` is the accent-filled one, which carries the
-/// top-to-bottom gradient that makes an AppKit accent button look like one rather
-/// than like a flat web button.
+/// A macOS 26 dialog button: a neutral CAPSULE with a plain label.
 ///
-/// A 6 pt ROUNDED RECT, not a capsule: capsules arrived with macOS 26's Liquid
-/// Glass, and at this size a capsule reads as an iOS or web control — exactly the
-/// failure this mock exists to avoid.
+/// **Both buttons are the same grey.** Liquid Glass has no accent-filled
+/// default button in the permission dialog, so painting one would date the mock
+/// and, worse, send the user looking for a blue button that won't be there.
 final class DemoPushButtonView: NSView {
 
     static let height: CGFloat = 28
-    private static let radius: CGFloat = 6
 
-    private let isDefault: Bool
-
-    init(title: String, isDefault: Bool) {
-        self.isDefault = isDefault
+    init(title: String) {
         super.init(frame: .zero)
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
 
         let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 13)
+        label.font = .systemFont(ofSize: 12)
         label.alignment = .center
-        label.textColor = isDefault ? .white : .labelColor
+        label.textColor = .labelColor
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(label)
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: Self.height),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 6),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    override func draw(_ dirtyRect: NSRect) {
-        let path = NSBezierPath(roundedRect: bounds, xRadius: Self.radius, yRadius: Self.radius)
-        guard isDefault else {
-            DemoSystemColor.plainButton.setFill()
-            path.fill()
-            return
-        }
-        NSGradient(starting: DemoSystemColor.accentGradientTop,
-                   ending: DemoSystemColor.accent)?.draw(in: path, angle: -90)
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.backgroundColor = DemoSystemColor.plainButton.cgColor
+        layer?.cornerRadius = Self.height / 2
     }
 }
 
@@ -1442,7 +1558,7 @@ final class DemoDotView: NSView {
 /// The system image, not a drawn silhouette: it is the same artwork the user is
 /// about to see under their own hand, it carries its own outline and shape, and it
 /// re-resolves per macOS release for free. The drop shadow is what keeps the
-/// pointer legible over the accent-filled default button.
+/// pointer legible over the grey capsule it presses.
 final class DemoCursorView: NSView {
 
     private static let cursor = NSCursor.arrow

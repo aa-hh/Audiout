@@ -113,11 +113,16 @@ import AppKit
         card.setBodyCollapsed(true, animated: true)
         let firstStart = try #require(card.lastAnimatedStartHeight)
 
-        // Expand back to the same expanded state …
+        // Expand back to the same expanded state. The collapse animation is
+        // still IN FLIGHT here (the model constant interpolates over the
+        // duration, and no runloop has ticked), so the retarget rule applies:
+        // the expand continues from the LIVE height — never a forced 0, which
+        // would jump the body shut mid-flight (the rapid-toggle deformation,
+        // live gif 2026-08-11).
         card.setBodyCollapsed(false, animated: true)
         let expandStart = try #require(card.lastAnimatedStartHeight)
-        #expect(abs(expandStart - 0) <= 0.5,
-                "an expand animates UP from the collapsed floor (0)")
+        #expect(abs(expandStart - expandedHeight) <= 0.5,
+                "a mid-flight expand retarget continues from the live height")
 
         // … then the second collapse from that identical expanded state.
         card.setBodyCollapsed(true, animated: true)
@@ -127,6 +132,21 @@ import AppKit
                 "first and second collapse must share the same start height (identical trajectory)")
         #expect(abs(firstStart - expandedHeight) <= 0.5,
                 "…and that shared start is the true expanded height, not the stale 0")
+    }
+
+    /// An expand from REST (a settled, completed collapse) floors at 0. Rest is
+    /// reached via the non-animated path — the same end state the animated
+    /// completion applies — so this pins the 0-floor without needing a runloop.
+    @Test func expandFromSettledCollapseStartsAtZero() throws {
+        let card = makeLaidOutExpandedCard()
+
+        card.setBodyCollapsed(true, animated: false)
+        card.layoutSubtreeIfNeeded()
+
+        card.setBodyCollapsed(false, animated: true)
+        let start = try #require(card.lastAnimatedStartHeight)
+        #expect(abs(start - 0) <= 0.5,
+                "an expand from rest animates UP from the collapsed floor (0)")
     }
 
     /// The non-animated path (initial build + Reduce Motion) is unaffected: it

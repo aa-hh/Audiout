@@ -196,7 +196,12 @@ import Testing
 
         #expect(flow.activeStep == nil)
         #expect(SetupFlowModel.steps.allSatisfy { flow.display($0) == .completed })
-        #expect(flow.isDoneAvailable, "every card decided by a grant opens the gate")
+        #expect(flow.isReadyForFinalCheck, "every card decided by a grant readies the check")
+        #expect(!flow.isDoneAvailable, "the gate waits for the check itself")
+
+        #expect(await flow.runFinalCheck() == .complete)
+
+        #expect(flow.isDoneAvailable, "the passed check opens the gate")
     }
 
     // MARK: Skipping
@@ -248,7 +253,7 @@ import Testing
         #expect(setup.audioStatus == .unsupported, "the status itself is never faked")
         flow.skip(.bluetooth)
         flow.skip(.remoteControl)
-        #expect(flow.isDoneAvailable, "the auto-pass counts as decided — it never blocks the gate")
+        #expect(flow.isReadyForFinalCheck, "the auto-pass counts as decided — it never blocks the check")
     }
 
     /// macOS 14 has no Local Network privacy gate at all — nothing to grant, and
@@ -262,7 +267,7 @@ import Testing
         #expect(flow.activeStep == .bluetooth, "the ungated card is passed, not asked")
         flow.skip(.bluetooth)
         flow.skip(.remoteControl)
-        #expect(flow.isDoneAvailable, "the auto-pass counts as decided — it never blocks the gate")
+        #expect(flow.isReadyForFinalCheck, "the auto-pass counts as decided — it never blocks the check")
     }
 
     // MARK: The Done gate
@@ -272,26 +277,101 @@ import Testing
 
         let partial = makeSetup(audio: .granted, localNetworkReachable: true)
         await prime(partial)
-        #expect(!SetupFlowModel(setup: partial).isDoneAvailable, "Speaker Sync still unmet")
+        #expect(!SetupFlowModel(setup: partial).isReadyForFinalCheck, "Speaker Sync still unmet")
 
         let flow = await makeFullyGrantedFlow()
         flow.skip(.bluetooth)
         flow.skip(.remoteControl)
+        #expect(!flow.isDoneAvailable, "decided is not yet checked")
+        _ = await flow.runFinalCheck()
         #expect(flow.isDoneAvailable)
     }
 
     /// Owner decision 2026-08-11 (tightened gate): the optional cards'
-    /// PERMISSIONS stay outside the gate, but an UNDECIDED card holds it shut —
-    /// Done exists only once every card is granted, auto-passed, or explicitly
-    /// skipped, so the CTA can never sit beside a card still offering
+    /// PERMISSIONS stay outside the gate, but an UNDECIDED card holds the
+    /// check back — it runs only once every card is granted, auto-passed, or
+    /// explicitly skipped, so it can never run beside a card still offering
     /// Allow/Skip. A skip is the decision that clears it.
-    @Test func anUndecidedOptionalCardHoldsTheGateAndASkipOpensIt() async {
+    @Test func anUndecidedOptionalCardHoldsTheCheckAndASkipReadiesIt() async {
         let flow = await makeFullyGrantedFlow()
-        #expect(!flow.isDoneAvailable, "Bluetooth is still sitting undecided")
+        #expect(!flow.isReadyForFinalCheck, "Bluetooth is still sitting undecided")
         flow.skip(.bluetooth)
-        #expect(!flow.isDoneAvailable, "…and Remote Control after it")
+        #expect(!flow.isReadyForFinalCheck, "…and Remote Control after it")
         flow.skip(.remoteControl)
+        #expect(flow.isReadyForFinalCheck)
+    }
+
+    // MARK: The final check
+
+    /// The row's walk: pending until every card is decided, running while the
+    /// audit runs, passed once it lands — and only the pass opens the gate.
+    @Test func theFinalCheckPassesAndOpensTheGate() async {
+        let flow = await makeFullyGrantedFlow()
+        #expect(flow.finalCheckState == .pending)
+        flow.skip(.bluetooth)
+        flow.skip(.remoteControl)
+        #expect(flow.finalCheckState == .pending, "readiness alone is not a pass")
+
+        #expect(await flow.runFinalCheck() == .complete)
+
+        #expect(flow.finalCheckState == .passed)
         #expect(flow.isDoneAvailable)
+    }
+
+    /// A silent read that disagrees with the cached grant refuses the check:
+    /// the verdict names the step, the state reverts to pending, and the gate
+    /// stays shut.
+    @Test func aRefusedFinalCheckRevertsToPendingAndNamesTheStep() async {
+        let audio = TwoFacedAudioProbe(probed: .granted, silent: .denied)
+        let setup = SetupModel(audioProbe: audio,
+                               localNetwork: CannedLocalNetwork(reachable: true),
+                               remoteControl: CannedRemoteControl(trusted: false),
+                               ptpHelper: CannedPTPHelper(status: .enabled),
+                               settings: AppSettings(defaults: isolatedDefaults))
+        await setup.requestAudioCapture()
+        await setup.primeLocalNetwork()
+        // The plain refresh leaves a cached GRANTED audio alone (it only
+        // silently re-reads engaged-and-unhappy rows), so readiness holds
+        // until the audit's own silent read finds the revocation.
+        await setup.refreshStatuses()
+        let flow = SetupFlowModel(setup: setup)
+        flow.skip(.bluetooth)
+        flow.skip(.remoteControl)
+        #expect(flow.isReadyForFinalCheck)
+
+        #expect(await flow.runFinalCheck() == .unmet(.audio))
+
+        #expect(flow.finalCheckState == .pending, "a refusal reverts the row")
+        #expect(!flow.isDoneAvailable)
+    }
+
+    /// A revocation AFTER the pass closes the gate on its own: the state
+    /// derives pending the moment readiness is lost, so the CTA can never sit
+    /// beside a re-opened card.
+    @Test func aRevocationAfterThePassClosesTheGate() async {
+        let helper = MutablePTPHelper(.enabled)
+        let setup = makeSetup(audio: .granted, localNetworkReachable: true, ptpHelperManager: helper)
+        await prime(setup)
+        let flow = SetupFlowModel(setup: setup)
+        flow.skip(.bluetooth)
+        flow.skip(.remoteControl)
+        _ = await flow.runFinalCheck()
+        #expect(flow.isDoneAvailable)
+
+        helper.status = .requiresApproval
+        await setup.refreshStatuses()
+
+        #expect(!flow.isDoneAvailable)
+        #expect(flow.finalCheckState == .pending)
+    }
+
+    /// Reports `probed` to the tone probe and `silent` to the silent read —
+    /// how a mid-presentation revocation reaches the audit.
+    private struct TwoFacedAudioProbe: AudioCapturePermissionProbing {
+        let probed: PermissionStatus
+        let silent: PermissionStatus
+        func probe() async -> PermissionStatus { probed }
+        func currentStatusSilently() -> PermissionStatus? { silent }
     }
 
     // MARK: verifyForDone
@@ -377,9 +457,10 @@ import Testing
     @Test func reEntryWithNothingUnmetOffersTheOptionalSteps() async {
         let flow = await makeFullyGrantedFlow()
         #expect(flow.activeStep == .bluetooth)
-        #expect(!flow.isDoneAvailable, "the offered cards are undecided this presentation")
+        #expect(!flow.isReadyForFinalCheck, "the offered cards are undecided this presentation")
         flow.skip(.bluetooth)
         flow.skip(.remoteControl)
+        _ = await flow.runFinalCheck()
         #expect(flow.isDoneAvailable)
     }
 
@@ -400,8 +481,9 @@ import Testing
         await setup.refreshStatuses()     // …and the focus-return refresh sees it
 
         #expect(flow.activeStep == .remoteControl, "the walk continues to the card it shows")
-        #expect(!flow.isDoneAvailable, "that shown card is undecided")
+        #expect(!flow.isReadyForFinalCheck, "that shown card is undecided")
         flow.skip(.remoteControl)
+        _ = await flow.runFinalCheck()
         #expect(flow.isDoneAvailable, "Bluetooth, behind the start, never blocked the gate")
     }
 

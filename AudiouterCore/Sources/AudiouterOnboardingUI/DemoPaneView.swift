@@ -219,6 +219,15 @@ final class DemoPaneView: NSView {
         })
     }
 
+    /// The final-check beat: no step is active, but the payoff hasn't been
+    /// earned yet — the current mock rests at its settled frame instead of
+    /// swapping to the finale. The finale (and its one-shot) arrives only via
+    /// a later `show(step:nil, mode:.settled)`, on the check's pass.
+    func holdCurrentFrame() {
+        (mock as? DemoMockView)?.stopTimeline()
+        replayButton.isHidden = true
+    }
+
     /// Take a whole drawn mock out of the accessibility tree, view by view. The
     /// container-level opt-out hoists rather than prunes, and these subtrees
     /// carry real `NSTextField`s and images that are elements by default.

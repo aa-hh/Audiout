@@ -14,7 +14,8 @@
 //   onboarding-<light|dark>-step2-waiting.png    card 2's prime in flight (caption)
 //   onboarding-<light|dark>-step3-bluetooth.png  audio + network in, card 3 active
 //   onboarding-<light|dark>-denied.png           audio denied → Settings mode demo
-//   onboarding-<light|dark>-complete.png         every step in — the settled finale + Start listening CTA
+//   onboarding-<light|dark>-checking.png         every card decided, the sixth row's check mid-flight
+//   onboarding-<light|dark>-complete.png         check passed — six checked rows, settled finale + Start listening CTA
 //   onboarding-<light|dark>-permission-lost.png  the re-entry header message
 //
 // KNOWN LIMIT: prominent buttons render as plain pills here. AppKit fills a
@@ -56,6 +57,25 @@ struct SnapshotWaitingLocalNetwork: LocalNetworkPriming {
         // Parks for the life of the tool: the fixture renders while it waits.
         // A sleep rather than a never-resumed continuation, which is the same
         // wait but makes the runtime log a continuation-leak warning.
+        try? await Task.sleep(nanoseconds: 3_600_000_000_000)
+        return .undecided
+    }
+}
+
+/// Grants the walk's browse, then parks every later one — so the AUTOMATIC
+/// final check that follows the last decision is caught mid-flight and the
+/// sixth row renders its running state.
+final class SnapshotCheckParkedLocalNetwork: LocalNetworkPriming, @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls = 0
+    func probe() async -> Bool { true }
+    func prime(browseSeconds: TimeInterval,
+               onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome {
+        let isWalk = lock.withLock { calls += 1; return calls == 1 }
+        if isWalk {
+            onReachable()
+            return .granted(foundSpeakers: 3)
+        }
         try? await Task.sleep(nanoseconds: 3_600_000_000_000)
         return .undecided
     }
@@ -104,6 +124,9 @@ struct SnapshotWorld {
     /// Render Local Network's Allow MID-FLIGHT (the prime parked on an
     /// unanswered dialog), which is the only way to see the in-flight caption.
     var waitingOnLocalNetwork = false
+    /// Render the sixth row's automatic check MID-FLIGHT: the walk's browse
+    /// grants, the check's audit re-browse parks, and the fixture is the wait.
+    var waitingOnFinalCheck = false
     var reason: OnboardingReason = .firstRun
 }
 
@@ -111,9 +134,14 @@ struct SnapshotWorld {
 func makeViewController(_ world: SnapshotWorld) -> OnboardingViewController {
     let suite = makeSnapshotDefaults()
     let bluetooth = SimulatedBluetoothPermission(status: world.bluetooth)
-    let localNetwork: LocalNetworkPriming = world.waitingOnLocalNetwork
-        ? SnapshotWaitingLocalNetwork()
-        : SnapshotLocalNetwork(foundSpeakers: world.foundSpeakers)
+    let localNetwork: LocalNetworkPriming
+    if world.waitingOnLocalNetwork {
+        localNetwork = SnapshotWaitingLocalNetwork()
+    } else if world.waitingOnFinalCheck {
+        localNetwork = SnapshotCheckParkedLocalNetwork()
+    } else {
+        localNetwork = SnapshotLocalNetwork(foundSpeakers: world.foundSpeakers)
+    }
     let model = SetupModel(audioProbe: SnapshotAudioProbe(result: world.audio),
                            localNetwork: localNetwork,
                            remoteControl: SnapshotRemoteControl(trusted: world.remoteControlTrusted),
@@ -192,6 +220,16 @@ func snapshot(appearanceName: NSAppearance.Name,
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
     }
+    if world.waitingOnFinalCheck {
+        // The walk's last decision auto-started the check, whose audit browse
+        // is parked — poll for the running row, and never await the check.
+        for _ in 0..<200 where controller.test_checkRowState != .running {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+    } else {
+        // Complete fixtures render AFTER the beat: check passed, CTA + finale in.
+        await controller.test_awaitFinalCheck()
+    }
     rootView.layoutSubtreeIfNeeded()
     let size = rootView.fittingSize
     let frame = NSRect(origin: .zero, size: size)
@@ -255,6 +293,15 @@ func run() async -> Int32 {
         // the demo swaps to the Settings-pane miniature.
         await snapshot(appearanceName: name, label: "\(tag)-denied",
                        world: SnapshotWorld(audio: .denied, allow: [.audio]), outDir: outDir)
+        // Every card decided, the sixth row's automatic check still running:
+        // no CTA, no finale yet — the beat the redesign exists to show.
+        await snapshot(appearanceName: name, label: "\(tag)-checking",
+                       world: SnapshotWorld(remoteControlTrusted: true,
+                                            bluetooth: .granted,
+                                            ptpHelper: .enabled,
+                                            allow: [.audio, .localNetwork],
+                                            waitingOnFinalCheck: true),
+                       outDir: outDir)
         await snapshot(appearanceName: name, label: "\(tag)-complete",
                        world: completeWorld, outDir: outDir)
         await snapshot(appearanceName: name, label: "\(tag)-permission-lost",

@@ -205,6 +205,28 @@ extension SerializedSharedState {
         assertMutuallyDistinct(appearance: .aqua)
     }
 
+    // MARK: The check row's gold glyph — measured, not assumed
+
+    /// The final-check row's `checklist` glyph is `gold` on the tile's
+    /// `raised` well (a deliberate non-permission hue — the first note of the
+    /// finale's colour story). Same ≥3:1 glyph floor the four permission
+    /// tokens are held to, measured in both authored dial columns and both
+    /// appearances. `.systemAccent` is excluded on the token's own terms: it
+    /// resolves `gold` to the live user accent, whose contrast the OS owns.
+    @Test func goldOnRaisedClearsTheGlyphFloorInBothDialColumnsAndAppearances() {
+        let floor: CGFloat = 3.0
+        for style: AccentStyle in [.fullGold, .subtle] {
+            Tokens.accentStyle = style
+            for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
+                let gold = resolved(Tokens.Color.gold, appearanceName: appearance)
+                let raised = resolved(Tokens.Color.raised, appearanceName: appearance)
+                let ratio = contrastRatio(gold, raised)
+                #expect(ratio >= floor,
+                        "gold \(style)/\(appearance.rawValue) vs raised: \(ratio):1 under the \(floor):1 floor")
+            }
+        }
+    }
+
     // MARK: goldCTA — the finale CTA's double floor (ink AND canvas)
 
     /// The Setup CTA's fill is contrast-governed on BOTH sides: white ink must

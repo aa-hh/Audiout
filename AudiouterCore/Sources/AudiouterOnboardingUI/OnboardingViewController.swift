@@ -70,6 +70,11 @@ public final class OnboardingViewController: NSViewController {
     public var onWillOpenSystemSettings: (() -> Void)?
 
     private var cards: [SetupStep: SetupCardView] = [:]
+    /// The sixth row: the automatic final check, made visible (owner decision
+    /// 2026-08-11 — telemetry showed five clicks swallowed while an invisible
+    /// ~2 s verification ran, so the check became a line item and the payoff
+    /// waits for it).
+    private var checkRow: SetupCheckRowView!
     private var cardStack: NSStackView!
     private var demoPane: DemoPaneView!
     private var subtitleLabel: NSTextField!
@@ -173,6 +178,9 @@ public final class OnboardingViewController: NSViewController {
             cardStack.addArrangedSubview(card)
             card.widthAnchor.constraint(equalTo: cardStack.widthAnchor).isActive = true
         }
+        checkRow = SetupCheckRowView()
+        cardStack.addArrangedSubview(checkRow)
+        checkRow.widthAnchor.constraint(equalTo: cardStack.widthAnchor).isActive = true
 
         footer = makeFooter()
 
@@ -480,10 +488,50 @@ public final class OnboardingViewController: NSViewController {
                                offersSettingsLink: offersSettingsLink(step),
                                animated: shouldAnimate)
         }
-        demoPane.show(step: active, mode: demoMode(for: active),
-                      animated: shouldAnimate)
+        runFinalCheckIfReady()
+        checkRow.apply(displayedCheckState)
+        // The beat: the pane HOLDS while the check is pending/running — the
+        // finale (crossfade + one-shot ripple) and the CTA arrive together on
+        // the pass, in this same repaint.
+        if active != nil || flow.finalCheckState == .passed {
+            demoPane.show(step: active, mode: demoMode(for: active),
+                          animated: shouldAnimate)
+        } else {
+            demoPane.holdCurrentFrame()
+        }
         refreshDone()
         refreshHeaderMessage()
+    }
+
+    // MARK: The final check
+
+    /// The running check's work — the UI half of single-flight (same idea as
+    /// ``allowInFlight``), and the seam a headless walk awaits
+    /// (``test_awaitFinalCheck()``).
+    private var finalCheckTask: Task<Void, Never>?
+
+    /// What the check row shows. The model owns the state; the task handle
+    /// covers the paint between starting the task and the model's own
+    /// `.running` becoming observable.
+    private var displayedCheckState: SetupFinalCheckState {
+        let state = flow.finalCheckState
+        if state == .pending, finalCheckTask != nil, flow.isReadyForFinalCheck { return .running }
+        return state
+    }
+
+    /// Start the automatic check the moment every card is decided. A failure
+    /// uses the existing snap-back machinery — the offending card re-opens and
+    /// the row reverts to pending (the readiness conjunct in
+    /// `SetupFlowModel.finalCheckState` does the reverting).
+    private func runFinalCheckIfReady() {
+        guard finalCheckTask == nil, flow.isReadyForFinalCheck,
+              flow.finalCheckState != .passed else { return }
+        finalCheckTask = Task { @MainActor in
+            let verdict = await flow.runFinalCheck()
+            finalCheckTask = nil
+            if case .unmet(let step) = verdict { snapBackStep = step }
+            refresh(animated: canAnimate)
+        }
     }
 
     private func state(for step: SetupStep, active: SetupStep?) -> SetupCardState {
@@ -628,9 +676,9 @@ public final class OnboardingViewController: NSViewController {
 
     // MARK: The gate
 
-    /// Add or remove Done. It is ABSENT until every required permission
-    /// verifies — never present-but-disabled, which reads as "the app is
-    /// broken" rather than "there is one more thing to do".
+    /// Add or remove Done. It is ABSENT until the final check has passed —
+    /// never present-but-disabled, which reads as "the app is broken" rather
+    /// than "there is one more thing to do".
     private func refreshDone() {
         let shouldExist = flow.isDoneAvailable
         if shouldExist, doneButton == nil {
@@ -936,6 +984,29 @@ public final class OnboardingViewController: NSViewController {
     /// Drive a card's Skip exactly as the button does.
     public func test_tapSkip(_ step: SetupStep) { _ = view; skipTapped(step) }
 
+    /// The check row's displayed state.
+    public var test_checkRowState: SetupFinalCheckState { _ = view; return displayedCheckState }
+
+    /// The check row's on-screen title (the state-carrying copy).
+    public var test_checkRowTitle: String { _ = view; return checkRow.test_title }
+
+    /// Whether the check row is showing its earned green checkmark.
+    public var test_checkRowHasCheckmark: Bool { _ = view; return checkRow.test_hasCheckmark }
+
+    /// Whether the check row's spinner is on screen (the running state).
+    public var test_checkRowIsSpinning: Bool { _ = view; return checkRow.test_isSpinning }
+
+    /// What VoiceOver reads for the check row — derived from the same title
+    /// the pixels draw.
+    public var test_checkRowAccessibilityLabel: String? {
+        _ = view
+        return checkRow.test_accessibilityLabel
+    }
+
+    /// Await the automatic final check the last card decision started, if one
+    /// is in flight — a headless walk asserts on the state AFTER the beat.
+    public func test_awaitFinalCheck() async { _ = view; await finalCheckTask?.value }
+
     /// Whether Done is in the view hierarchy at all — the gate contract is
     /// ABSENT, not disabled, so this is the assertion that matters.
     public var test_doneExists: Bool { _ = view; return doneButton?.superview != nil }
@@ -1055,6 +1126,24 @@ public final class OnboardingViewController: NSViewController {
         _ = view
         await model.refreshStatuses()
         refresh(animated: false)
+    }
+
+    /// The footer's laid-out frame in its pane (whose height is the fixed
+    /// window height). Its bottom pin is deliberately the column's weakest
+    /// constraint: with a card expanded the EMPTY reserve may cross the pane
+    /// edge, and the fit test pins that the visible content never does.
+    public var test_footerFrame: NSRect {
+        _ = view
+        view.layoutSubtreeIfNeeded()
+        return footer.frame
+    }
+
+    /// The card column's laid-out frame in its pane — everything visible the
+    /// left pane stacks (five cards + the check row).
+    public var test_cardStackFrame: NSRect {
+        _ = view
+        view.layoutSubtreeIfNeeded()
+        return cardStack.frame
     }
 
     /// The laid-out root view (for offscreen snapshot rendering).

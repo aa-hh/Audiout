@@ -211,8 +211,23 @@ import Testing
     private let isolation = TestIsolation(owner: "OnboardingUITests")
     private var defaults: UserDefaults { isolation.isolatedDefaults }
 
+    /// A silent audio read a test can flip mid-run — how a revocation lands
+    /// between the automatic check's pass and the CTA click.
+    private final class MutableSilentAudioProbe: AudioCapturePermissionProbing, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _silent: PermissionStatus
+        init(silent: PermissionStatus) { _silent = silent }
+        var silent: PermissionStatus {
+            get { lock.withLock { _silent } }
+            set { lock.withLock { _silent = newValue } }
+        }
+        func probe() async -> PermissionStatus { .granted }
+        func currentStatusSilently() -> PermissionStatus? { silent }
+    }
+
     private func makeModel(audio: PermissionStatus,
                            silentAudio: PermissionStatus? = nil,
+                           audioProbe: AudioCapturePermissionProbing? = nil,
                            foundSpeakers: Int = 0,
                            localNetwork: LocalNetworkPriming? = nil,
                            bluetooth: PermissionStatus = .unknown,
@@ -221,7 +236,7 @@ import Testing
                            remoteControlTrusted: Bool = false,
                            localNetworkGated: Bool = true,
                            ptpHelper: PTPHelperManaging = FakePTPHelper()) -> SetupModel {
-        SetupModel(audioProbe: CannedAudioProbe(result: audio, silent: silentAudio),
+        SetupModel(audioProbe: audioProbe ?? CannedAudioProbe(result: audio, silent: silentAudio),
                    localNetwork: localNetwork ?? CannedLocalNetwork(found: foundSpeakers),
                    remoteControl: NoopRemoteControl(trusted: remoteControlTrusted),
                    ptpHelper: ptpHelper,
@@ -759,7 +774,9 @@ import Testing
         await vc.test_tapAllow(.localNetwork)
         vc.test_tapSkip(.bluetooth)
         vc.test_tapSkip(.remoteControl)
-        #expect(vc.test_doneExists, "every required permission is in, every card decided")
+        #expect(!vc.test_doneExists, "decided is not yet checked — the CTA waits for the pass")
+        await vc.test_awaitFinalCheck()
+        #expect(vc.test_doneExists, "every required permission is in, every card decided, check passed")
         #expect(vc.test_doneIsReturnDefault)
     }
 
@@ -777,7 +794,95 @@ import Testing
         #expect(!vc.test_doneExists, "Remote Control is still undecided")
 
         vc.test_tapSkip(.remoteControl)
-        #expect(vc.test_doneExists, "a skip is a decision — the gate opens")
+        await vc.test_awaitFinalCheck()
+        #expect(vc.test_doneExists, "a skip is a decision — the check runs and the gate opens")
+    }
+
+    // MARK: The final check (the sixth row + the beat)
+
+    /// The sixth row's walk: dormant "One last check" while any card is
+    /// undecided, auto-running the moment the last card is decided — with
+    /// NOTHING payoff-ish on screen while it runs — then the pass lands the
+    /// checkmark, the settled finale, and the CTA together.
+    @Test func theCheckRowRunsOnTheLastDecisionAndGatesThePayoff() async {
+        let vc = makeVC(model: makeGrantableModel())
+        #expect(vc.test_checkRowState == .pending)
+        #expect(vc.test_checkRowTitle == "One last check")
+        #expect(!vc.test_checkRowIsSpinning)
+        #expect(!vc.test_checkRowHasCheckmark)
+
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        #expect(vc.test_checkRowState == .pending, "Remote Control is still undecided")
+
+        vc.test_tapSkip(.remoteControl)   // the last decision — the check auto-runs
+
+        #expect(vc.test_checkRowState == .running)
+        #expect(vc.test_checkRowTitle == "Making sure everything's ready\u{2026}")
+        #expect(vc.test_checkRowIsSpinning)
+        #expect(!vc.test_doneExists, "no CTA until the check passes")
+        #expect(vc.test_demoMode != .settled, "no finale until the check passes")
+
+        await vc.test_awaitFinalCheck()
+
+        #expect(vc.test_checkRowState == .passed)
+        #expect(vc.test_checkRowTitle == "Everything's ready")
+        #expect(vc.test_checkRowHasCheckmark)
+        #expect(!vc.test_checkRowIsSpinning)
+        #expect(vc.test_doneExists, "the CTA arrives on the pass")
+        #expect(vc.test_demoMode == .settled, "…together with the finale")
+    }
+
+    /// The row is real UI (unlike the decorative demo pane): one VoiceOver
+    /// element whose label is the same state-carrying title the pixels draw.
+    @Test func theCheckRowSpeaksItsStateToVoiceOver() async {
+        let vc = makeVC(model: makeGrantableModel())
+        #expect(vc.test_checkRowAccessibilityLabel == "One last check")
+
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        vc.test_tapSkip(.remoteControl)
+        await vc.test_awaitFinalCheck()
+
+        #expect(vc.test_checkRowAccessibilityLabel == "Everything's ready")
+    }
+
+    /// The fixed 820×560 fit, pinned at what is load-bearing. In the tallest
+    /// expanded states (audio's long copy; Local Network with its unanswered
+    /// hint) the EMPTY footer reserve crosses the pane edge — its bottom pin
+    /// is deliberately the column's weakest constraint, and the reserve only
+    /// carries the CTA once the stack is collapsed — so the fit contract is:
+    /// every VISIBLE row stays inside the pane in every state, and the footer
+    /// holds its full margin whenever the CTA can exist.
+    @Test func theLeftColumnFitsTheFixedWindowInItsTallestStates() async {
+        func layout(_ vc: OnboardingViewController) {
+            let root = vc.test_rootView
+            root.frame = NSRect(x: 0, y: 0,
+                                width: OnboardingViewController.contentWidth,
+                                height: OnboardingViewController.contentHeight)
+            root.layoutSubtreeIfNeeded()
+        }
+
+        let fresh = makeVC(model: makeModel(audio: .unknown))
+        layout(fresh)
+        #expect(fresh.test_cardStackFrame.minY >= 0,
+                "audio expanded: the six rows overrun the pane by \(-fresh.test_cardStackFrame.minY) pt")
+
+        let hinted = makeVC(model: makeModel(audio: .granted, foundSpeakers: 0))
+        await hinted.test_allow([.audio, .localNetwork])   // unproven browse → hint + Try Again
+        layout(hinted)
+        #expect(hinted.test_cardStackFrame.minY >= 0,
+                "local network with hint: the six rows overrun the pane by \(-hinted.test_cardStackFrame.minY) pt")
+
+        let complete = makeVC(model: makeGrantableModel())
+        await complete.test_allow([.audio, .localNetwork])
+        complete.test_tapSkip(.bluetooth)
+        complete.test_tapSkip(.remoteControl)
+        await complete.test_awaitFinalCheck()
+        layout(complete)
+        #expect(complete.test_doneExists)
+        #expect(complete.test_footerFrame.minY >= 19,
+                "with the CTA on screen the footer holds its full bottom margin: \(complete.test_footerFrame.minY)")
     }
 
     @Test func returnBelongsToTheActiveAllowUntilDoneExists() async {
@@ -790,6 +895,7 @@ import Testing
 
         vc.test_tapSkip(.bluetooth)
         vc.test_tapSkip(.remoteControl)
+        await vc.test_awaitFinalCheck()
 
         #expect(vc.test_doneIsReturnDefault, "Done takes Return the moment it exists")
     }
@@ -813,6 +919,7 @@ import Testing
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
         vc.test_tapSkip(.remoteControl)
+        await vc.test_awaitFinalCheck()
 
         #expect(vc.test_doneAcceptsFirstMouse, "the CTA acts on the returning click")
     }
@@ -823,6 +930,7 @@ import Testing
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
         vc.test_tapSkip(.remoteControl)
+        await vc.test_awaitFinalCheck()
 
         await vc.test_tapDone()
 
@@ -832,15 +940,21 @@ import Testing
 
     /// The revocation case: Done's re-verify finds the silent audio read has gone
     /// denied since, so the flow snaps back to that card instead of finishing —
-    /// no sheet, no "continue anyway".
+    /// no sheet, no "continue anyway". The revocation lands AFTER the automatic
+    /// check passed (a flip caught BY the check is the auto-check failure test).
     @Test func doneSnapsBackToARevokedCardInsteadOfFinishing() async {
         var doneFired = false
-        let vc = makeVC(model: makeGrantableModel(silentAudio: .denied),
+        let audio = MutableSilentAudioProbe(silent: .granted)
+        let vc = makeVC(model: makeModel(audio: .granted, audioProbe: audio, foundSpeakers: 3,
+                                         ptpHelper: FakePTPHelper(status: .enabled)),
                         onDone: { doneFired = true })
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
         vc.test_tapSkip(.remoteControl)
+        await vc.test_awaitFinalCheck()
         #expect(vc.test_doneExists)
+
+        audio.silent = .denied   // revoked while the CTA sat on screen
 
         await vc.test_tapDone()
 
@@ -849,6 +963,25 @@ import Testing
         #expect(vc.test_activeStep == .audio)
         #expect(vc.test_expandedSteps == [.audio])
         #expect(!vc.test_doneExists, "the gate closes again")
+        #expect(vc.test_checkRowState == .pending, "the check row reverts with the snap-back")
+    }
+
+    /// The automatic check itself catches a revocation: the row reverts to
+    /// pending, the offending card re-opens through the same snap-back
+    /// machinery, and nothing payoff-ish ever appears.
+    @Test func aFailedAutoCheckRevertsTheRowAndSnapsBack() async {
+        let vc = makeVC(model: makeGrantableModel(silentAudio: .denied))
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        vc.test_tapSkip(.remoteControl)
+
+        await vc.test_awaitFinalCheck()
+
+        #expect(vc.test_snapBackStep == .audio)
+        #expect(vc.test_activeStep == .audio)
+        #expect(vc.test_checkRowState == .pending, "the row reverts to pending")
+        #expect(!vc.test_doneExists, "no CTA on a failed check")
+        #expect(vc.test_demoMode != .settled, "no finale on a failed check")
     }
 
     /// The live double-click bug's exact shape: the app-reactivation
@@ -866,6 +999,7 @@ import Testing
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
         vc.test_tapSkip(.remoteControl)
+        await vc.test_awaitFinalCheck()   // the auto-check's own browse (#2) completes
         #expect(vc.test_doneExists)
 
         net.armParking()
@@ -882,8 +1016,8 @@ import Testing
 
         #expect(doneCount == 1, "the FIRST click finishes")
         #expect(vc.test_snapBackStep == nil, "no fabricated unmet permission")
-        #expect(net.test_primeCount == 2,
-                "the walk's browse plus the reactivation's — the verification joined, it did not stack a third")
+        #expect(net.test_primeCount == 3,
+                "the walk's browse, the auto-check's, and the reactivation's — the verification joined, it did not stack a fourth")
     }
 
     /// A second click while Done's verification is still running is a no-op —
@@ -902,6 +1036,7 @@ import Testing
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
         vc.test_tapSkip(.remoteControl)
+        await vc.test_awaitFinalCheck()   // the auto-check's own browse (#2) completes
 
         net.armParking()
         let first = Task { await vc.test_tapDone() }
@@ -914,7 +1049,7 @@ import Testing
         await first.value
 
         #expect(doneCount == 1, "exactly one finish")
-        #expect(net.test_primeCount == 2, "the second click fired no browse of its own")
+        #expect(net.test_primeCount == 3, "the second click fired no browse of its own")
     }
 
     // MARK: The finale (setup-complete state)
@@ -931,6 +1066,7 @@ import Testing
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
         vc.test_tapSkip(.remoteControl)
+        await vc.test_awaitFinalCheck()
 
         #expect(vc.test_doneExists)
         #expect(vc.test_doneTitle == "Start listening")
@@ -947,6 +1083,7 @@ import Testing
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
         vc.test_tapSkip(.remoteControl)
+        await vc.test_awaitFinalCheck()
 
         #expect(vc.test_doneExists)
         #expect(vc.test_subtitleText == OnboardingViewController.welcomeSubtitle)
@@ -971,6 +1108,7 @@ import Testing
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
         vc.test_tapSkip(.remoteControl)
+        await vc.test_awaitFinalCheck()
 
         #expect(vc.test_doneExists)
         #expect(vc.test_subtitleText == OnboardingViewController.welcomeSubtitle)
@@ -988,6 +1126,7 @@ import Testing
         #expect(vc.test_demoCelebrationRunCount == 0, "nothing to celebrate yet")
 
         await vc.test_allow([.audio, .localNetwork])
+        await vc.test_awaitFinalCheck()
 
         #expect(vc.test_demoMode == .settled)
         #expect(vc.test_demoCelebrationRunCount == 1)
@@ -1007,6 +1146,7 @@ import Testing
         await vc.test_refreshStatuses()
 
         await vc.test_allow([.audio, .localNetwork])
+        await vc.test_awaitFinalCheck()
 
         #expect(vc.test_demoMode == .settled)
         #expect(vc.test_demoCelebrationRunCount == 0, "no motion under Reduce Motion")
@@ -1021,6 +1161,7 @@ import Testing
         await vc.test_refreshStatuses()
 
         await vc.test_allow([.audio, .localNetwork])
+        await vc.test_awaitFinalCheck()
 
         #expect(vc.test_demoMode == .settled)
         #expect(vc.test_demoCelebrationRunCount == 0)
@@ -1035,6 +1176,7 @@ import Testing
         let vc = makeVC(model: makeCompleteableModel())
         await vc.test_refreshStatuses()
         await vc.test_allow([.audio, .localNetwork])
+        await vc.test_awaitFinalCheck()
         #expect(vc.test_demoCelebrationRunCount == 0)
 
         vc.test_demoReduceMotionOverride = false
@@ -1051,6 +1193,7 @@ import Testing
         await vc.test_refreshStatuses()
 
         await vc.test_allow([.audio, .localNetwork])
+        await vc.test_awaitFinalCheck()
 
         #expect(vc.test_demoMode == .settled)
         #expect(vc.test_demoAccessibilityElements.isEmpty,
@@ -1087,6 +1230,7 @@ import Testing
         await vc.test_refreshStatuses()
         await vc.test_allow([.audio, .localNetwork])
         #expect(vc.test_activeStep == nil)
+        await vc.test_awaitFinalCheck()
         #expect(vc.test_demoMode == .settled)
     }
 

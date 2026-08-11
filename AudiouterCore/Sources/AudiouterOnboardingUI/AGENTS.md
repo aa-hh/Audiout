@@ -4,7 +4,7 @@
 
 The first-run Setup window (pure AppKit): a **two-pane** screen that asks for the
 five permissions **one at a time**. LEFT, a fixed column with the hero, the five
-sequential cards, and the Done footer. RIGHT, a native-drawn miniature of the
+sequential cards, the final-check status row, and the Done footer. RIGHT, a native-drawn miniature of the
 exact surface the active card's Allow button is about to raise. It reframes the
 OS's "recording" language before any TCC prompt fires, and (unlike the
 popover/window/settings surfaces) is also re-shown later if a required permission
@@ -27,16 +27,27 @@ set changes, or when the gate/motion/demo rules change.
 - **Setup is a GATE, not guidance** (owner decision 2026-08-11 — this REVERSES the
   documented "setup is guidance, not a gate" decision, so read the history before
   changing it back). Done is **ABSENT from the view hierarchy** until
-  `SetupFlowModel.isDoneAvailable`; never disabled, never alpha-hidden. **The gate
-  is two conditions** (owner decision 2026-08-11, tightened live after the CTA
-  appeared beside a still-undecided Remote Control card): every REQUIRED
-  permission granted, AND **no card still active** — every walked step granted,
-  auto-passed, or explicitly skipped. The optional cards' permissions never hold
-  Done shut, but an UNDECIDED optional card does; a skip is the decision that
-  clears it. Both the gate and the demo pane's settled finale key off
-  `activeStep == nil`, so the CTA, the finale, and its one-shot ripple land on
-  the same beat. `verifyForDone()` still re-verifies REQUIRED permissions only —
-  a skip is a decision, not a permission. On a `.permissionLost` re-entry the
+  `SetupFlowModel.isDoneAvailable`; never disabled, never alpha-hidden. **The
+  gate now means "the final check PASSED"** (owner decision 2026-08-11, after a
+  live telemetry trail showed five clicks swallowed during an invisible ~2 s
+  verification): the moment every card is decided — every REQUIRED permission
+  granted AND no card still active (`isReadyForFinalCheck`, the gate's old two
+  conditions; a skip is the decision that clears an undecided optional card) —
+  the flow AUTO-RUNS `runFinalCheck()`, the same silent audit `verifyForDone()`
+  uses (one audit machinery, two entry points), and only its pass opens the
+  gate. **The beat:** while the check is pending/running there is NO CTA, NO
+  settled finale, NO ripple — the demo pane HOLDS its current frame
+  (`DemoPaneView.holdCurrentFrame`) — and on the pass the finale crossfade, the
+  one-shot ripple, and the CTA fade-in all arrive in the same repaint. A check
+  failure reuses the snap-back machinery (the offending card re-opens; the row
+  reverts to pending — `finalCheckState` derives pending whenever readiness is
+  lost, so nobody has to remember to revert it). The check logs its own
+  `setup_done` outcomes, `auto_check_passed` / `auto_check_refused` + `unmet`,
+  beside the click's `finished`/`refused`/`swallowed_in_flight`.
+  `verifyForDone()` still re-verifies REQUIRED permissions only — a skip is a
+  decision, not a permission — and stays on the CTA click unchanged
+  (near-instant after a passed check: sticky Local Network grant + coalesced
+  probe). On a `.permissionLost` re-entry the
   walk starts at the lost step, so an undecided optional card BEHIND that start
   is not walked and cannot block Done; one AFTER it (Remote Control) is shown
   and must be decided, as the flow always re-offered it. There is no
@@ -57,6 +68,20 @@ set changes, or when the gate/motion/demo rules change.
   **"Start listening"** (owner copy 2026-08-11: closing setup is what starts the
   deferred audio engine, so the button names that), a gold `ProminentButton` that
   fades in on the gate's beat. The face changed; the gate contract above did not.
+- **The final-check row is a STATUS row, not a card** (`SetupCheckRowView`,
+  sixth in the column below Remote Control): never expandable, no body, no
+  Allow/Skip — but in the column's grammar (same surface/inset, icon tile,
+  title, one trailing slot). Three states, copy is owner-reviewed and EXACT:
+  pending **"One last check"** (dormant like the locked cards' dimming but with
+  NO padlock — it isn't permission-locked, it's waiting its turn), running
+  **"Making sure everything's ready…"** (small spinner in the trailing slot),
+  passed **"Everything's ready"** (the completed cards' green checkmark). Icon:
+  SF "checklist" tinted `Tokens.Color.gold` — deliberately NOT a permission
+  hue: the row is the first note of the finale's colour story, and the tint is
+  PERMANENT like every tile (gold-on-`raised` ≥3:1 is measured in
+  `OnboardingPermissionColorTests`). Unlike the demo pane the row is REAL UI:
+  one VoiceOver element whose label is the state-carrying title, so the pixels
+  and the spoken state can never disagree.
 - **Exactly ONE card is expanded.** `SetupCardView` renders five states
   (`SetupCardState`): `pending`, `active`, `completed`, `autoPassed(note:)`,
   `skipped`. The invariant a test pins is `test_expandedSteps == [activeStep]`.
@@ -445,6 +470,7 @@ set changes, or when the gate/motion/demo rules change.
 | `OnboardingViewController` | Assembles the two panes; turns `SetupModel` + `SetupFlowModel` into card states; owns the grant choreography, the Done gate, the header message and both polling timers. |
 | `OnboardingReason` | `.firstRun` vs `.permissionLost([RequiredPermission])` — drives the header message. |
 | `SetupCardView` / `SetupCardContent` / `SetupCardState` | One permission card: collapsed strip ↔ expanded body on the shared clip-height motion, the locked/active surface treatment, and the card-level click target. The per-state title table lives on `SetupCardContent`. |
+| `SetupCheckRowView` | The sixth row: the automatic final check's pending/running/passed status strip. |
 | `ClipView` | The card body's masking container — the thing whose HEIGHT the collapse animates. |
 | `DemoPaneView` / `DemoMode` | The right pane: the elevated surface, the mode swap crossfade, the motion policy, the Replay button. |
 | `DemoMockView` | Timeline base class (restartable score, settled-state hook) for the two animated mocks. |

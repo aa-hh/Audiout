@@ -94,6 +94,26 @@ extension SerializedSharedState {
             #expect(refused.contains("\"outcome\":\"refused\""), "line: \(refused)")
             #expect(refused.contains("\"unmet\":\"speaker_sync\""), "names the permission: \(refused)")
         }
+
+        /// The AUTOMATIC check leaves its own named outcome beside the click's
+        /// — passed, or refused naming the unmet permission — so a live trail
+        /// shows the check the user watched apart from the click they made.
+        @Test func theAutoCheckLogsPassedOrRefusedWithTheUnmetPermission() async throws {
+            let granted = await makeFlow()
+            let revoked = await makeFlow(ptpHelper: .requiresApproval)
+            let capture = TelemetrySetupLineCapture()
+            Telemetry._installTestSink { capture.append($0) }
+            _ = await granted.runFinalCheck()
+            _ = await revoked.runFinalCheck()
+            Telemetry._installTestSink(nil)   // flush barrier (serial queue) + removes the sink
+
+            let lines = capture.snapshot().filter { $0.contains("\"evt\":\"setup_done\"") }
+            #expect(lines.count == 2, "one outcome per check: \(lines)")
+            #expect(try #require(lines.first).contains("\"outcome\":\"auto_check_passed\""))
+            let refused = try #require(lines.last)
+            #expect(refused.contains("\"outcome\":\"auto_check_refused\""), "line: \(refused)")
+            #expect(refused.contains("\"unmet\":\"speaker_sync\""), "names the permission: \(refused)")
+        }
     }
 }
 

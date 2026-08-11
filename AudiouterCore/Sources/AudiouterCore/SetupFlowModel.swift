@@ -80,6 +80,18 @@ public enum SetupFlowVerification: Equatable, Sendable {
     case unmet(SetupStep)
 }
 
+/// Where the automatic final check stands — the sixth row in the Setup
+/// column. `pending` until every card is decided, `running` while the silent
+/// audit re-verifies, `passed` once it lands clean. The gate, the settled
+/// finale, and the CTA all key off `passed`, so success and forward motion
+/// arrive on the same beat — the check made VISIBLE is what closed the live
+/// "clicked and nothing happened for two seconds" gap.
+public enum SetupFinalCheckState: Equatable, Sendable {
+    case pending
+    case running
+    case passed
+}
+
 /// Sequences the permission cards over ``SetupModel``'s statuses: which step is
 /// active, which are done, which were skipped, and whether Done may exist yet.
 /// AppKit-free, and holds no statuses of its own — every answer is derived from
@@ -281,54 +293,115 @@ public final class SetupFlowModel {
         skippedSteps.insert(step)
     }
 
-    /// Whether Done may exist at all. The Wispr gate: the button is ABSENT from
-    /// the layout until this is true, never present-but-disabled.
+    /// Whether every card is decided AND every required permission's cached
+    /// status is granted — the moment the automatic final check runs.
     ///
     /// Two conditions, deliberately different in kind (owner decision
-    /// 2026-08-11, tightening the required-only gate after the CTA appeared
-    /// live beside a still-undecided Remote Control card):
+    /// 2026-08-11, tightening the required-only condition after the CTA
+    /// appeared live beside a still-undecided Remote Control card):
     ///
     /// - **Every required permission is granted** — the product gate.
     ///   Bluetooth and Remote Control stay outside ``RequiredPermission``, so
-    ///   their PERMISSIONS can never hold Done shut, and ``verifyForDone()``
-    ///   still re-verifies the required set only.
+    ///   their PERMISSIONS can never hold the check back, and the audit
+    ///   re-verifies the required set only.
     /// - **No card is still active** — every walked step is granted,
     ///   auto-passed, or explicitly skipped. A skip is a decision; an
-    ///   untouched optional card is not, and the finale CTA must never appear
-    ///   beside a card still offering Allow/Skip. This also puts the gate, the
-    ///   demo pane's settled finale, and its one-shot ripple on the same beat
-    ///   (both key off `activeStep == nil`).
+    ///   untouched optional card is not, and the check must never run beside a
+    ///   card still offering Allow/Skip.
     ///
     /// The required check is not redundant: `activeStep` only walks from the
     /// re-entry start index, so a required permission GRANTED at entry but
     /// revoked mid-presentation is caught here, not by the walk.
-    public var isDoneAvailable: Bool {
+    public var isReadyForFinalCheck: Bool {
         setup.requiredPermissionsNotGranted().isEmpty && activeStep == nil
+    }
+
+    /// Backing store for ``finalCheckState``. The public read derives
+    /// `pending` whenever the flow has regressed out of readiness (a card
+    /// re-opened, a required permission dropped), so the row can never claim
+    /// a check on a flow that is no longer decided.
+    private var finalCheck: SetupFinalCheckState = .pending
+
+    /// The sixth row's state — see ``SetupFinalCheckState``.
+    public var finalCheckState: SetupFinalCheckState {
+        isReadyForFinalCheck ? finalCheck : .pending
+    }
+
+    /// Whether Done may exist at all. The Wispr gate: the button is ABSENT from
+    /// the layout until this is true, never present-but-disabled.
+    ///
+    /// The gate means **the final check passed** (owner decision 2026-08-11,
+    /// after telemetry showed five clicks swallowed during an invisible ~2 s
+    /// verification): the CTA, the settled finale and its one-shot ripple all
+    /// arrive on the check's pass, never before. ``finalCheckState`` already
+    /// folds in ``isReadyForFinalCheck``, so a card re-opening or a required
+    /// permission dropping closes the gate again on its own.
+    public var isDoneAvailable: Bool {
+        finalCheckState == .passed
+    }
+
+    /// The one audit both verifications run — the silent re-read (it is what
+    /// catches a revocation the window-focus refresh deliberately can't); its
+    /// own return value uses revocation semantics, so the verdict comes from
+    /// the gate check.
+    private func auditVerdict() async -> SetupFlowVerification {
+        _ = await setup.auditRequiredPermissions()
+        guard let unmet = Self.firstUnmetRequiredStep(in: setup) else { return .complete }
+        return .unmet(unmet)
+    }
+
+    private func record(_ verdict: SetupFlowVerification) {
+        finalCheck = verdict == .complete ? .passed : .pending
+    }
+
+    /// The automatic verification behind the sixth row: the SAME audit
+    /// ``verifyForDone()`` runs — one machinery, two entry points — recorded
+    /// into ``finalCheckState`` so the gate can open. Logs its own named
+    /// outcome (`setup_done` + `auto_check_passed`/`auto_check_refused` +
+    /// `unmet`), so a live trail shows the check the user watched apart from
+    /// the click they made.
+    public func runFinalCheck() async -> SetupFlowVerification {
+        finalCheck = .running
+        let verdict = await auditVerdict()
+        record(verdict)
+        switch verdict {
+        case .complete:
+            Telemetry.log(.permission, "setup_done", ["outcome": "auto_check_passed"])
+        case .unmet(let unmet):
+            Telemetry.log(.permission, "setup_done", [
+                "outcome": "auto_check_refused",
+                "unmet": Self.telemetryName(unmet),
+            ])
+        }
+        return verdict
     }
 
     /// Re-verify everything behind a Done tap: SILENT reads only — never the
     /// audible tone probe, which stays reserved for an explicit Allow tap.
     /// Reports the first still-unmet required step so the UI can snap back to it
-    /// with a plain explanation.
+    /// with a plain explanation. Near-instant after a passed check — the Local
+    /// Network grant is sticky and concurrent primes coalesce — so the click
+    /// that follows the visible check never hangs.
     /// Like the Allow path, every verification logs exactly ONE named outcome
     /// (`setup_done` + `outcome`): a live session's "Start listening took two
     /// clicks" should be readable from the trail — finished, refused (and on
     /// what), or a click the UI's single-flight swallowed (logged there) —
     /// instead of guessed at.
     public func verifyForDone() async -> SetupFlowVerification {
-        // The audit is the silent re-read (it is what catches a revocation the
-        // window-focus refresh deliberately can't); its own return value uses
-        // revocation semantics, so the Done verdict comes from the gate check.
-        _ = await setup.auditRequiredPermissions()
-        guard let unmet = Self.firstUnmetRequiredStep(in: setup) else {
+        let verdict = await auditVerdict()
+        // A refusal reverts the check row to pending; a pass changes nothing
+        // the auto-check hadn't already recorded.
+        record(verdict)
+        switch verdict {
+        case .complete:
             Telemetry.log(.permission, "setup_done", ["outcome": "finished"])
-            return .complete
+        case .unmet(let unmet):
+            Telemetry.log(.permission, "setup_done", [
+                "outcome": "refused",
+                "unmet": Self.telemetryName(unmet),
+            ])
         }
-        Telemetry.log(.permission, "setup_done", [
-            "outcome": "refused",
-            "unmet": Self.telemetryName(unmet),
-        ])
-        return .unmet(unmet)
+        return verdict
     }
 
     /// The card a ``RequiredPermission`` is asked on.

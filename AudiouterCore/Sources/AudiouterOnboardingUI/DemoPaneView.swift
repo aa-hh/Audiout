@@ -575,8 +575,10 @@ enum DemoPromptOutcome {
 /// nothing, and every part below is one the real one is identified by. A tall
 /// portrait card, everything LEFT-aligned under an icon row:
 ///
-/// 1. the app's icon, with the blue `hand.raised.fill` badge overlapping its
-///    bottom-trailing corner — the marker that says *privacy prompt*;
+/// 1. an icon tile — the app's own for a content-capture grant, a blue system
+///    tile for a capability grant (see ``iconView(for:)``) — with the blue
+///    `hand.raised.fill` badge overlapping its bottom-trailing corner, the
+///    marker that says *privacy prompt*;
 /// 2. a small grey Help button in the opposite corner;
 /// 3. the bold title, wrapping over two or three lines;
 /// 4. the app's own Info.plist purpose string as the body, in
@@ -624,10 +626,7 @@ final class DemoPromptMockView: DemoMockView {
     }
 
     private func build() {
-        let icon = NSImageView()
-        icon.image = NSApp?.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
-        icon.imageScaling = .scaleProportionallyUpOrDown
-        icon.translatesAutoresizingMaskIntoConstraints = false
+        let icon = Self.iconView(for: step)
 
         // The privacy marker: a blue hand badge overlapping the icon's
         // bottom-trailing corner. It is what distinguishes this dialog from any
@@ -787,6 +786,54 @@ final class DemoPromptMockView: DemoMockView {
         return field
     }
 
+    /// The tile in the dialog's top-left corner. macOS does NOT always put the
+    /// asking app's icon there: the app's own icon appears for the grants that
+    /// are about capturing that app's content (System Audio), while the
+    /// CAPABILITY grants show a generic SYSTEM tile — the same one for every
+    /// app. Verified from the real Local Network dialog, which draws the
+    /// Network pane's blue globe rather than Audiouter's icon. The badge, the
+    /// size and the slot are identical either way; only the tile's contents
+    /// change.
+    private static func iconView(for step: SetupStep) -> NSView {
+        switch step {
+        case .localNetwork:
+            return systemTile(symbol: "network")
+        // razor: a NAMED APPROXIMATION on two counts — no screenshot of the
+        // real Bluetooth dialog was available, so the system tile is inferred
+        // from Local Network's; and SF Symbols carries no Bluetooth rune, so
+        // the glyph is the `dot.radiowaves.right` the Bluetooth setup card
+        // beside it already uses. Upgrade path: a real screenshot, or a rune
+        // symbol, changes this one line.
+        case .bluetooth:
+            return systemTile(symbol: "dot.radiowaves.right")
+        // System Audio is a content-capture grant and really does show the
+        // app's icon. The other two never reach this mock; the app icon is the
+        // safe default for them.
+        case .audio, .remoteControl, .speakerSync:
+            let icon = NSImageView()
+            icon.image = NSApp?.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
+            icon.imageScaling = .scaleProportionallyUpOrDown
+            icon.translatesAutoresizingMaskIntoConstraints = false
+            return icon
+        }
+    }
+
+    /// A macOS system-pane tile: a blue rounded square carrying one white
+    /// glyph, drawn at the app icon's size so the badge lands where it always
+    /// does. Corner and glyph are fractions of the side rather than points, so
+    /// changing `iconSide` alone keeps the tile in proportion; both are matched
+    /// by eye to the Local Network screenshot, not measured.
+    private static func systemTile(symbol: String) -> NSView {
+        let tile = DemoPillView(radius: iconSide * 0.23, fill: DemoSystemColor.accent)
+        let mark = glyph(symbol, pointSize: iconSide * 0.55, weight: .regular, color: .white)
+        tile.addSubview(mark)
+        NSLayoutConstraint.activate([
+            mark.centerXAnchor.constraint(equalTo: tile.centerXAnchor),
+            mark.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
+        ])
+        return tile
+    }
+
     /// A tinted SF Symbol sized in points — the badge's hand and the Help
     /// button's question mark. Symbols, not text, so the 9 pt legibility floor
     /// the labels obey doesn't apply.
@@ -888,7 +935,10 @@ final class DemoPromptMockView: DemoMockView {
         // Verbatim, because macOS composes this one from the permission itself
         // and the owner checked it against the real dialog.
         case .audio:         return "“Audiouter” would like access to record your system audio."
-        case .localNetwork:  return "“Audiouter” would like to find speakers on your network."
+        // Local Network is the odd one out: macOS phrases it as a QUESTION
+        // opening on "Allow", not the "would like to…" pattern. Verbatim from
+        // the real dialog.
+        case .localNetwork:  return "Allow “Audiouter” to find devices on local networks?"
         case .bluetooth:     return "“Audiouter” would like to use Bluetooth."
         case .remoteControl: return "“Audiouter” would like to control this Mac."
         // Speaker Sync has no prompt (it is a Login Items approval) and never

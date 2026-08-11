@@ -15,11 +15,14 @@ import AppKit
 /// is identical either way, which is why every other row-reveal test stayed
 /// green through it.
 ///
-/// What this CANNOT cover: AppKit's interpolation itself. An
-/// `NSAnimationContext` group's completion handler never fires for a view in no
-/// window, and a windowless view runs no presentation layer — so the assertions
-/// below pin the trajectory's two ENDPOINTS, where the reveal starts and where
-/// the surface is told to finish. Whether the two read as one motion is a live
+/// Since the single-driver refactor the surface is no longer TOLD the grown
+/// height up front — `FoldAnimator` owns the one animated value and the panel
+/// publishes its laid-out size from it every tick, so content and surface are
+/// the same number at every instant by construction. The endpoints below pin
+/// exactly that: at the start the published size is the COLLAPSED height (the
+/// state the content is actually in), and once the fold settles it is the grown
+/// one. `test_settleNow()` stands in for the runloop time a headless test
+/// cannot spend. Whether the travel between them reads as one motion is a live
 /// judgement.
 @MainActor
 @Suite struct PopoverControllerRowRevealMotionTests {
@@ -57,8 +60,12 @@ import AppKit
 
         #expect(panel.test_rowRevealStartHeight == collapsed,
                 "the reveal has to begin at the height the panel had BEFORE the row: measuring the row settles the layout at the FINAL height, and an animation that starts already arrived leaves the popover's frame moving on its own")
+        #expect(panel.preferredContentSize.height == collapsed,
+                "and the surface is sized from that same start state in the same turn — one driver, so it can never lead or trail the content")
+
+        FoldAnimator.shared.test_settleNow()
         #expect(panel.preferredContentSize.height == collapsed + Self.drawerHeight,
-                "and the surface is told the grown height in the same turn, so it travels WITH the row rather than ahead of it")
+                "…arriving at the grown height only once the row actually has")
     }
 
     /// The reused drawer — the case the correctness fix exists for — takes the
@@ -71,6 +78,9 @@ import AppKit
         panel.insertRow(drawer, after: row, animated: true)
 
         #expect(panel.test_rowRevealStartHeight == collapsed)
+        #expect(panel.preferredContentSize.height == collapsed)
+
+        FoldAnimator.shared.test_settleNow()
         #expect(panel.preferredContentSize.height == collapsed + Self.drawerHeight)
     }
 }

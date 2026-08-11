@@ -11,7 +11,15 @@ import AudiouterSharedUI
 ///
 /// - the three screens as an `NSToolbarItemGroup` with
 ///   `selectionMode = .selectOne` — the system draws the capsule selection
-///   natively (icon + label per tab, `toolbar.displayMode = .iconAndLabel`);
+///   natively, ICON-ONLY (`toolbar.displayMode = .iconOnly`) and deliberately
+///   so: on macOS 26+ (reproduced on 27.0) every label-showing display mode —
+///   `.iconAndLabel`, `.labelOnly`, `.default` — builds the group's picker
+///   WITHOUT its interactive expanded view, and the strip degrades to an empty
+///   glass capsule with the tab names spilled beside it as loose text and all
+///   three segments dead: a click lands on an inert placeholder (Pin and Quit,
+///   plain items, kept working). The tab names survive the missing labels —
+///   per-segment tooltips ("Mixer (⌘1)"), the subitems' `label`s (VoiceOver
+///   and the overflow menu), and ⌘1/⌘2/⌘3;
 /// - "Audiouter" as a centered label item (`centeredItemIdentifiers`) — the
 ///   one place the app name appears in the header, both profiles;
 /// - Pin and Quit as trailing bordered items.
@@ -62,7 +70,7 @@ final class SurfaceToolbarController: NSObject {
         toolbar = NSToolbar(identifier: "SurfaceToolbar")
         super.init()
         toolbar.delegate = self
-        toolbar.displayMode = .iconAndLabel
+        toolbar.displayMode = .iconOnly
         toolbar.allowsUserCustomization = false
         toolbar.autosavesConfiguration = false
         if #available(macOS 13.0, *) {

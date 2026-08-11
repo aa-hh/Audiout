@@ -1315,8 +1315,9 @@ public final class PopoverController: NSObject {
 
     /// The devices `rebuild()` would mount rows for right now: visible, and
     /// inside an EXPANDED subsection. Compared against `deviceRowsByID` to
-    /// decide whether `update(devices:)` needs a structural rebuild, and used
-    /// as the rail's render order.
+    /// decide whether `update(devices:)` needs a structural rebuild. The rail
+    /// deliberately does NOT read this — its terminus is the lowest selected
+    /// device in the FULL order (`updateBusRailExtents`).
     private func renderedDeviceOrder() -> [Device] {
         deviceSections().filter { !isSubsectionCollapsed($0.title) }.flatMap(\.devices)
     }
@@ -1387,9 +1388,10 @@ public final class PopoverController: NSObject {
     /// animating — the live snap/judder report.
     ///
     /// The MODEL flips on the click even though the collapsed rows' views only
-    /// leave when the clip finishes closing: `renderedDeviceOrder()` feeds the
-    /// rail terminus, `update(devices:)`'s structural compare and the drawer
-    /// reconcile, and none of them may wait on an animation.
+    /// leave when the clip finishes closing: `renderedDeviceOrder()` feeds
+    /// `update(devices:)`'s structural compare and the drawer reconcile, and the
+    /// rail's own extents (which read the collapse state directly) re-run in the
+    /// same turn — none of them may wait on an animation.
     ///
     /// Consequences of the rows leaving, both intended: an open sync drawer
     /// under one of them loses its row, so `reconcileSyncDrawer` retracts the
@@ -2105,18 +2107,27 @@ public final class PopoverController: NSObject {
     /// a hollow clickable node with no rail — so the rail's length reads as "how
     /// far down the mix reaches."
     ///
-    /// The terminus is the lowest selected VISIBLE node: `renderedDeviceOrder()`
-    /// is the same list `rebuild()` builds rows from, so a hidden device or one
-    /// inside a collapsed subsection is not a candidate. Selection intent is
-    /// untouched by either — the spine just can't end on a row that isn't on
-    /// screen, or every row above it would carry a through-rail to nothing.
+    /// The terminus is the lowest selected device in the FULL order
+    /// (`deviceSections()`), whether or not a collapsed subsection is currently
+    /// hiding it — and when it IS hidden the rail cuts at that subsection's
+    /// header with a dot, exactly as a collapsed CARD already cuts at its own.
+    /// Indexing the RENDERED order instead silently pulled the terminus up to a
+    /// higher visible row with no dot, and — when every selected device sat in
+    /// the collapsed subsection — left no terminus at all, so the rail rendered
+    /// as a hook curling off Main Audio into mid-air. A device the BT-LIST
+    /// filter never listed is a different matter: it is not in `deviceSections()`
+    /// at all, so it can never be the terminus.
     private func updateBusRailExtents() {
-        let renderOrder = renderedDeviceOrder()
-        let lastSelected = renderOrder.lastIndex {
+        let sections = deviceSections()
+        let fullOrder = sections.flatMap(\.devices)
+        let lastSelected = fullOrder.lastIndex {
             groupController?.isSpeakerSelected($0.id) ?? false
         }
         var railRows: [DeviceRowView] = []
-        for (i, device) in renderOrder.enumerated() {
+        for (i, device) in fullOrder.enumerated() {
+            // Only MOUNTED rows carry rail state — a collapsed subsection's rows
+            // are already out of the model, which is what leaves them out of the
+            // overlay's stop list while the terminus below them still counts.
             guard let row = deviceRowsByID[device.id] else { continue }
             if let last = lastSelected {
                 // Within the span: rail above through the terminus; rail below
@@ -2129,11 +2140,21 @@ public final class PopoverController: NSObject {
             }
             railRows.append(row)
         }
+        // Where the rail is CUT: the terminus device's own subsection while that
+        // subsection is collapsed, else nothing — the whole device card stays
+        // the far end, as before.
+        let terminusID = lastSelected.map { fullOrder[$0].id }
+        let cutSubsectionTitle = terminusID.flatMap { id in
+            sections.first {
+                isSubsectionCollapsed($0.title) && $0.devices.contains { $0.id == id }
+            }?.title
+        }
         // Feed the continuous rail overlay the Main Audio row + device rows in
         // display order so it can draw the spine as one line through the gutter.
         panel.setRailRows(mainOut: mainOutRow, deviceRows: railRows,
                           originCardTitle: Self.mainAudioCardTitle,
-                          deviceCardTitle: Self.outputDevicesCardTitle)
+                          deviceCardTitle: Self.outputDevicesCardTitle,
+                          cutSubsectionTitle: cutSubsectionTitle)
     }
 
     // MARK: OUTPUT DEVICES "+" menu (BT-UI / BT-LIST)

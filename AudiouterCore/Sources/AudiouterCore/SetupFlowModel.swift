@@ -42,6 +42,10 @@ public enum SetupAllowOutcome: String, Equatable, Sendable {
     /// A prompt or probe for this step is already in flight — the second click
     /// is a no-op (single-flight).
     case promptInFlight = "prompt_in_flight"
+    /// Bluetooth only: the previous prompt sat undecided past its timeout, so
+    /// this click asked again rather than reporting a prompt still in flight —
+    /// the un-wedge, named so a live session shows it happened.
+    case promptRearmed = "prompt_rearmed"
 }
 
 /// Where an Allow click sends the user, when it sends them anywhere. The flow
@@ -160,10 +164,12 @@ public final class SetupFlowModel {
     /// single-flight guard, so a double-click can't stack two prompts.
     private var inFlightStep: SetupStep?
 
-    /// Whether Bluetooth's prompt has already been fired this presentation.
-    /// Bluetooth is the one prompt whose answer arrives on a callback we can't
-    /// await (`CBCentralManager` decides asynchronously), so "in flight" for it
-    /// means "asked, still undetermined" rather than a running `await`.
+    /// Whether Bluetooth's prompt has already been fired this presentation —
+    /// only to name the outcome (a second ask is a re-arm, not a first ask).
+    /// Whether one is IN FLIGHT is ``SetupModel/isPrimingBluetooth``, which is
+    /// also what expires: Bluetooth is the one prompt whose answer arrives on a
+    /// callback we can't await, and a callback that never decides must not latch
+    /// the card shut for the rest of the presentation.
     private var didPrimeBluetooth = false
 
     /// Run one Allow click for `step` and report what it did.
@@ -208,11 +214,11 @@ public final class SetupFlowModel {
             return SetupAllowResult(setup.audioStatus == .granted ? .promptTriggered : .probeTimeout)
 
         case .localNetwork:
-            // `.requested` means "asked, and the browse got nowhere" — the
-            // prompt has already been consumed, so the only path left is the pane.
-            if setup.localNetworkStatus == .requested {
-                return SetupAllowResult(.settingsFallbackDenied, .settingsPane(.localNetwork))
-            }
+            // No two-mode flip here: this card's "prompt" IS the browse, so a
+            // browse that found nothing must be re-runnable — the user was told
+            // to turn a speaker on and try again, and nothing else re-browses.
+            // The Settings pane is offered alongside it by the UI (macOS 15+,
+            // where that pane exists), never instead of it.
             await setup.primeLocalNetwork()
             return SetupAllowResult(setup.localNetworkStatus == .granted ? .promptTriggered : .probeTimeout)
 
@@ -222,10 +228,14 @@ public final class SetupFlowModel {
             if setup.bluetoothStatus == .denied {
                 return SetupAllowResult(.settingsFallbackDenied, .settingsPane(.bluetoothPrivacy))
             }
-            if didPrimeBluetooth { return SetupAllowResult(.promptInFlight) }
+            // In flight means "asked, and the answer hasn't landed" — held by
+            // the model, which also un-holds it if the prompt never decides, so
+            // a later click can ask again instead of clicking into nothing.
+            if setup.isPrimingBluetooth { return SetupAllowResult(.promptInFlight) }
+            let isRearm = didPrimeBluetooth
             didPrimeBluetooth = true
             setup.primeBluetooth()
-            return SetupAllowResult(.promptTriggered)
+            return SetupAllowResult(isRearm ? .promptRearmed : .promptTriggered)
 
         case .speakerSync:
             // Not a TCC permission at all: registration already happened at

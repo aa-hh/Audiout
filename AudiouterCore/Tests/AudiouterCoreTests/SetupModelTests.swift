@@ -341,7 +341,10 @@ extension SerializedSharedState {
         model.primeBluetooth()
         #expect(script.primeCount == 1)
         #expect(model.bluetoothStatus == .unknown, "an unanswered prompt is not an answer")
-        #expect(counter.count == 0, "no transition ⇒ no onChange noise")
+        // The STATUS is untouched, but the wait itself is observable now — the
+        // card shows a spinner while the prompt is up, so starting one repaints.
+        #expect(model.isPrimingBluetooth)
+        #expect(counter.count == 1, "the wait began ⇒ one repaint, and no status write")
     }
 
     @Test func primeBluetoothAdoptsTheGrantWhenDecided() async {
@@ -353,7 +356,9 @@ extension SerializedSharedState {
         await waitForChange { model.bluetoothStatus == .granted }
 
         #expect(model.bluetoothStatus == .granted)
-        #expect(counter.count == 1, "one transition ⇒ exactly one repaint")
+        #expect(!model.isPrimingBluetooth, "a real decision ends the wait")
+        // Two repaints, both earned: the wait starting, and the grant landing.
+        #expect(counter.count == 2, "one for the wait, one for the transition")
     }
 
     /// A denial ends the wait exactly like a grant does — the callback fires

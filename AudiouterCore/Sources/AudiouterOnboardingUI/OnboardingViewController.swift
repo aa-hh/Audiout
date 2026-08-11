@@ -53,6 +53,9 @@ public final class OnboardingViewController: NSViewController {
     static let leftPaneWidth: CGFloat = 420
     /// Outer margin inside each pane.
     static let paneMargin: CGFloat = 22
+    /// Gap from the card stack down to the Done footer — Done belongs to the
+    /// stack it completes, not to the bottom of the window.
+    static let cardsToFooterGap: CGFloat = 24
 
     private let model: SetupModel
     private let flow: SetupFlowModel
@@ -76,6 +79,10 @@ public final class OnboardingViewController: NSViewController {
     /// The step whose Allow is in flight — the spinner, and the UI half of the
     /// single-flight rule the flow model enforces.
     private var allowInFlight: SetupStep?
+
+    /// The most recent Allow's work, so a headless press can await exactly what
+    /// the real click started (`test_pressCard`) instead of re-implementing it.
+    private var allowTask: Task<Void, Never>?
 
     /// Set by a failed Done verification: the card to snap back to. It overrides
     /// the flow model's own active step, which is anchored to where this
@@ -174,15 +181,18 @@ public final class OnboardingViewController: NSViewController {
         pane.addSubview(footer)
 
         let margin = Self.paneMargin
-        // The gap above the footer is deliberately the weakest constraint in
-        // this column. The window is a FIXED size (`contentHeight`), so this
-        // must never be the thing that decides how tall the window is — it is
-        // only the "don't crowd the footer" hint. A step whose copy wraps one
-        // line further than expected bends this, rather than resizing the window
-        // under the user or breaking a required constraint.
-        let cardsToFooter = cardStack.bottomAnchor.constraint(lessThanOrEqualTo: footer.topAnchor,
-                                                             constant: -14)
-        cardsToFooter.priority = .defaultLow
+        // Done rides DIRECTLY under the card stack, not at the pane's bottom edge.
+        // The window is a FIXED size, so a footer pinned down there strands the
+        // complete state's collapsed stack at the top with the button ~250 pt below
+        // it across an empty band. The pane's lower slack falls BELOW the footer.
+        let cardsToFooter = footer.topAnchor.constraint(equalTo: cardStack.bottomAnchor,
+                                                       constant: Self.cardsToFooterGap)
+        // Weakest constraint in the column: a step whose copy wraps one line
+        // further than expected bends the bottom margin rather than resizing the
+        // window under the user or breaking a required constraint.
+        let footerAboveBottom = footer.bottomAnchor.constraint(lessThanOrEqualTo: pane.bottomAnchor,
+                                                              constant: -20)
+        footerAboveBottom.priority = .defaultLow
 
         NSLayoutConstraint.activate([
             header.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: margin),
@@ -196,7 +206,7 @@ public final class OnboardingViewController: NSViewController {
 
             footer.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: margin),
             footer.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -margin),
-            footer.bottomAnchor.constraint(equalTo: pane.bottomAnchor, constant: -20),
+            footerAboveBottom,
         ])
         return pane
     }
@@ -269,7 +279,8 @@ public final class OnboardingViewController: NSViewController {
     private func makeCard(for step: SetupStep) -> SetupCardView {
         SetupCardView(content: Self.content(for: step),
                       onAllow: { [weak self] in self?.allowTapped(step) },
-                      onSkip: { [weak self] in self?.skipTapped(step) })
+                      onSkip: { [weak self] in self?.skipTapped(step) },
+                      onOpenSettings: { [weak self] in self?.settingsLinkTapped(step) })
     }
 
     public override func viewDidLoad() {
@@ -458,9 +469,11 @@ public final class OnboardingViewController: NSViewController {
         for step in SetupFlowModel.steps {
             cards[step]?.apply(state(for: step, active: active),
                                foundSpeakers: flow.localNetworkFoundSpeakers,
-                               isProbing: allowInFlight == step,
+                               isProbing: isPrompting(step),
                                offersSettingsFallback: offersSettingsFallback(step),
                                hint: hint(for: step),
+                               primaryTitle: primaryTitle(for: step),
+                               offersSettingsLink: offersSettingsLink(step),
                                animated: shouldAnimate)
         }
         demoPane.show(step: active, mode: demoMode(for: active),
@@ -489,7 +502,9 @@ public final class OnboardingViewController: NSViewController {
     private func offersSettingsFallback(_ step: SetupStep) -> Bool {
         switch step {
         case .audio:         return model.audioStatus == .denied
-        case .localNetwork:  return model.localNetworkStatus == .requested
+        // NOT two-mode: this card's prompt IS the browse, so its retry stays a
+        // retry and the pane is offered beside it (`offersSettingsLink`).
+        case .localNetwork:  return false
         case .bluetooth:     return model.bluetoothStatus == .denied
         // Login Items is Speaker Sync's only mode — its Allow is already the
         // Settings button, so there is no second mode to switch into.
@@ -505,9 +520,38 @@ public final class OnboardingViewController: NSViewController {
     /// prove a denial (no status API), so a browse that found nothing must ask
     /// for a speaker rather than accuse the user of refusing.
     private func hint(for step: SetupStep) -> String? {
-        guard step == .localNetwork, step == displayedActiveStep,
-              model.localNetworkStatus == .requested else { return nil }
+        guard localNetworkCameUpEmpty(step) else { return nil }
         return "No speakers found yet. Turn one on, then try again."
+    }
+
+    /// Local Network asked and the browse found nothing. The hint tells the user
+    /// to turn a speaker on and try again, so SOMETHING has to re-browse — which
+    /// is why this card keeps a primary retry instead of flipping to Settings.
+    private func localNetworkCameUpEmpty(_ step: SetupStep) -> Bool {
+        step == .localNetwork && step == displayedActiveStep
+            && model.localNetworkStatus == .requested
+    }
+
+    /// The Allow slot's label when it isn't the plain first ask. Only Local
+    /// Network has one: same click, same browse, honestly named.
+    private func primaryTitle(for step: SetupStep) -> String? {
+        localNetworkCameUpEmpty(step) ? "Try Again" : nil
+    }
+
+    /// Whether the card shows the demoted "Open Settings…" beside its primary.
+    /// Local Network only, and only where that pane exists at all — macOS 14
+    /// has no Local Network privacy gate, so there is nowhere to send anyone.
+    private func offersSettingsLink(_ step: SetupStep) -> Bool {
+        localNetworkCameUpEmpty(step) && model.isLocalNetworkGated
+    }
+
+    /// Whether this card is waiting on a prompt or probe it fired — the spinner,
+    /// and the inert card-level click target. Bluetooth's wait is the model's to
+    /// report: its prompt answers on a callback, so the click returns long before
+    /// the user has answered anything.
+    private func isPrompting(_ step: SetupStep) -> Bool {
+        if allowInFlight == step { return true }
+        return step == .bluetooth && model.isPrimingBluetooth
     }
 
     private func demoMode(for step: SetupStep?) -> DemoMode {
@@ -515,6 +559,10 @@ public final class OnboardingViewController: NSViewController {
         // Speaker Sync has no prompt at all — Login Items is the only surface
         // it ever shows the user.
         if step == .speakerSync { return .settings }
+        // Local Network's prompt is spent once a browse has run, so the pane it
+        // now offers is the surface worth showing — even though the primary
+        // button stays a retry.
+        if offersSettingsLink(step) { return .settings }
         return offersSettingsFallback(step) ? .settings : .prompt
     }
 
@@ -631,9 +679,12 @@ public final class OnboardingViewController: NSViewController {
         case 2: joined = "\(names[0]) and \(names[1])"
         default: joined = names.dropLast().joined(separator: ", ") + ", and \(names[names.count - 1])"
         }
-        let plural = names.count > 1 ? "permissions" : "permission"
-        return "Audiouter needs the \(joined) \(plural), currently turned off. "
-            + "Re-enable it below so the app can keep working."
+        // The PRONOUN has to agree too: with two permissions named, "Re-enable
+        // it below" is a broken sentence on screen.
+        let isPlural = names.count > 1
+        return "Audiouter needs the \(joined) \(isPlural ? "permissions" : "permission"), "
+            + "currently turned off. Re-enable \(isPlural ? "them" : "it") below "
+            + "so the app can keep working."
     }
 
     static func displayName(for permission: RequiredPermission) -> String {
@@ -652,7 +703,7 @@ public final class OnboardingViewController: NSViewController {
         guard allowInFlight == nil else { return }   // single-flight, UI half
         allowInFlight = step
         refresh(animated: false)                     // spinner in, instantly
-        Task { @MainActor in
+        allowTask = Task { @MainActor in
             let result = await flow.allow(step)
             allowInFlight = nil
             switch result.destination {
@@ -669,6 +720,15 @@ public final class OnboardingViewController: NSViewController {
             }
             refresh()
         }
+    }
+
+    /// The demoted "Open Settings…" beside Local Network's retry. It opens the
+    /// pane directly — there is no prompt left to fire, and the flow model's
+    /// Allow deliberately re-browses instead of routing here.
+    private func settingsLinkTapped(_ step: SetupStep) {
+        guard step == .localNetwork else { return }
+        onWillOpenSystemSettings?()
+        onOpenSettings(.localNetwork)
     }
 
     private func skipTapped(_ step: SetupStep) {
@@ -731,11 +791,18 @@ public final class OnboardingViewController: NSViewController {
     }
 
     /// Press the CARD itself (not its Allow button) and wait for whatever that
-    /// starts — the card-level click target, driven through the real path.
+    /// starts.
+    ///
+    /// This drives the card view's REAL press entry
+    /// (`accessibilityPerformPress`, the same path `mouseUp` takes) through
+    /// `allowTapped` INCLUDING its single-flight guard, and then awaits the work
+    /// that press started. It deliberately does not call ``test_tapAllow(_:)``:
+    /// a hook that re-implements the dispatch it claims to exercise is how a
+    /// real break in row selection stayed hidden once already.
     public func test_pressCard(_ step: SetupStep) async -> Bool {
         _ = view
-        guard let card = cards[step], card.test_isCardClickable else { return false }
-        await test_tapAllow(step)
+        guard cards[step]?.test_pressCard() == true else { return false }
+        await allowTask?.value
         return true
     }
 
@@ -804,6 +871,36 @@ public final class OnboardingViewController: NSViewController {
         get { _ = view; return demoPane.test_reduceMotionOverride }
         set { _ = view; demoPane.test_reduceMotionOverride = newValue }
     }
+
+    /// Override for "this pane is allowed to animate" (`nil` = the live
+    /// window/headless check). A headless run is never allowed to animate for
+    /// real, so this is the only way to reach the motion POLICY — which of the
+    /// two branches runs, and whether it loops — without a live window.
+    public var test_demoCanAnimateOverride: Bool? {
+        get { _ = view; return demoPane.test_canAnimateOverride }
+        set { _ = view; demoPane.test_canAnimateOverride = newValue }
+    }
+
+    /// Whether the demo's timeline is set to LOOP — false is the Reduce Motion
+    /// single play-through.
+    public var test_demoIsLooping: Bool { _ = view; return demoPane.test_isLooping }
+
+    /// Press the demo's Replay button exactly as the button does.
+    public func test_tapReplay() { _ = view; demoPane.test_tapReplay() }
+
+    /// Anything inside the demo that VoiceOver would still reach. The demo is
+    /// decorative — the card copy beside it carries every word — so this must be
+    /// empty, Replay (outside the mock host) aside.
+    public var test_demoAccessibilityElements: [String] {
+        _ = view
+        return demoPane.test_accessibleDemoDescendants
+    }
+
+    /// Whether Replay — a real control — is still reachable.
+    public var test_replayIsAccessible: Bool { _ = view; return demoPane.test_replayIsAccessible }
+
+    /// Press the demoted "Open Settings…" link on a card, as the button does.
+    public func test_tapSettingsLink(_ step: SetupStep) { _ = view; cards[step]?.test_tapSettingsLink() }
 
     /// Re-read model status into the cards (the `viewWillAppear` bind, headless).
     public func test_refresh() { _ = view; refresh(animated: false) }

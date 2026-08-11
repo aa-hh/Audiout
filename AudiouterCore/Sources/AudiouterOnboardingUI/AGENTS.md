@@ -31,7 +31,11 @@ set changes, or when the gate/motion/demo rules change.
   "Continue without every permission?" sheet — it and its paths were deleted in the
   same change. Clicking Done re-verifies (`verifyForDone()`, silent reads only) and
   on failure snaps the flow back to the card that came up short. The ✕ close remains
-  the one ungated exit and still doesn't persist completion.
+  the one ungated exit and still doesn't persist completion. Done rides DIRECTLY
+  under the card stack (`cardsToFooterGap`), not pinned to the pane's bottom edge:
+  the window is a fixed height, so the bottom pin left the complete state with the
+  collapsed stack at the top and Done ~250 pt below it across an empty band. The
+  pane's lower slack now falls below the footer.
 - **Exactly ONE card is expanded.** `SetupCardView` renders five states
   (`SetupCardState`): `pending`, `active`, `completed`, `autoPassed(note:)`,
   `skipped`. The invariant a test pins is `test_expandedSteps == [activeStep]`.
@@ -75,10 +79,21 @@ set changes, or when the gate/motion/demo rules change.
   deep-linking: the prompt's own "Open System Settings" button is the only path that
   scrolls to/highlights Audiouter in the list; macOS gives no URL way to do that.
   Bluetooth's retry goes to `SystemSettingsPane.bluetoothPrivacy` (the app-grant
-  pane), never the radio pane. Speaker Sync has ONE mode: Login Items.
-- **Local Network must never claim a denial.** A browse that found nothing is
-  indistinguishable from a refusal, so the card adds the "No speakers found yet.
-  Turn one on, then try again." line and keeps offering a retry.
+  pane), never the radio pane. Speaker Sync has ONE mode: Login Items. **Local
+  Network is NOT two-mode** — see below. Bluetooth's wait is the MODEL's to report
+  (`SetupModel.isPrimingBluetooth`), because its answer arrives on a callback the
+  click can't await: the card shows the spinner for as long as that wait lasts, and
+  the wait expires after `bluetoothPromptTimeout` (10 s) so a prompt whose decision
+  callback never fires can't latch the card shut — the next click asks again under
+  the `prompt_rearmed` outcome.
+- **Local Network must never claim a denial, and must never dead-end.** A browse
+  that found nothing is indistinguishable from a refusal, so the card adds the "No
+  speakers found yet. Turn one on, then try again." line — and because this card's
+  "prompt" IS the browse, its primary stays a **Try Again** that re-runs the browse
+  (`offersSettingsFallback` is always false for it). "Open Settings…" is a quiet
+  SECONDARY beside it, and only where that pane exists (`isLocalNetworkGated`,
+  macOS 15+). Flipping this card to Settings-only left nothing able to re-browse the
+  speaker the user had just switched on.
 - **The window is deliberately `.floating` while open** (owner decision 2026-08-07,
   punch-list W10 — this REVERSES an earlier reversal, so read the history before
   touching it). The first floating version was demoted to normal level because it
@@ -227,9 +242,18 @@ set changes, or when the gate/motion/demo rules change.
     sentinel animation whose completion decides whether to loop, so play,
     play-once, and stop are the same code path with a flag. The cursor moves by
     TRANSFORM, never by `position` — AutoLayout owns its frame and would reset it.
-  - The demo is DECORATIVE and excluded from the accessibility tree (`mockHost`
-    sets `setAccessibilityElement(false)` + empty children); the card copy beside it
-    carries every word of the information. Replay, a real control, stays accessible.
+  - The demo is DECORATIVE and excluded from the accessibility tree; the card copy
+    beside it carries every word of the information. Un-electing `mockHost` alone is
+    NOT enough — an ignored container HOISTS its children, so the mock's real
+    `NSTextField`s ("Allow", "Don't Allow", the pane title) stayed reachable. Every
+    descendant is un-elected as the mock is installed
+    (`DemoPaneView.installAccessibilityOptOut`), and a test walks the host asserting
+    nothing is left. Replay, a real control, stays accessible.
+  - **The pointer is the real macOS arrow** (`NSCursor.arrow.image`), ~1.5× life
+    size, and every motion path anchors on its HOT SPOT (the tip), never the image
+    centre — an image-centre anchor lands the press off the button. The arrow's ink
+    fills about half its image box, so `DemoCursorView` is sized from the pointer
+    height the caller asks for, not from the box.
 - **Bluetooth SHARES Remote Control's `Tokens.Color.permission*` hue** rather than
   minting a fifth token, which would need authored light/dark/Increase-Contrast
   values and a measured contrast rationale from the palette owner. The two cards are

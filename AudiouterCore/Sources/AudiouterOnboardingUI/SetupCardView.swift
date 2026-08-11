@@ -166,6 +166,7 @@ final class SetupCardView: NSView {
     private let content: SetupCardContent
     private let onAllow: () -> Void
     private let onSkip: () -> Void
+    private let onOpenSettings: () -> Void
 
     private var iconTile: IconTileView!
     private let titleLabel = NSTextField(labelWithString: "")
@@ -188,6 +189,10 @@ final class SetupCardView: NSView {
     private let spinner = NSProgressIndicator()
     private var allowButton: NSButton?
     private var skipButton: NSButton?
+    /// The quiet SECOND path, offered beside the primary rather than replacing
+    /// it: Local Network's retry IS its own browse, so the pane is a demotion,
+    /// not the two-mode flip every other card does.
+    private var settingsLinkButton: NSButton!
 
     private let bodyClip = ClipView()
     private let bodyStack = NSStackView()
@@ -203,10 +208,12 @@ final class SetupCardView: NSView {
 
     init(content: SetupCardContent,
          onAllow: @escaping () -> Void,
-         onSkip: @escaping () -> Void) {
+         onSkip: @escaping () -> Void,
+         onOpenSettings: @escaping () -> Void = {}) {
         self.content = content
         self.onAllow = onAllow
         self.onSkip = onSkip
+        self.onOpenSettings = onOpenSettings
         super.init(frame: .zero)
         build()
         apply(.pending, foundSpeakers: 0, isProbing: false, offersSettingsFallback: false, animated: false)
@@ -289,6 +296,10 @@ final class SetupCardView: NSView {
             skipButton = skip
             accessory.addArrangedSubview(skip)
         }
+        settingsLinkButton = onboardingActionButton(title: "Open Settings…", prominent: false,
+                                                    target: self, action: #selector(settingsTapped))
+        settingsLinkButton.isHidden = true
+        accessory.addArrangedSubview(settingsLinkButton)
 
         bodyStack.orientation = .vertical
         bodyStack.alignment = .leading
@@ -379,6 +390,11 @@ final class SetupCardView: NSView {
     ///     prompt is spent, so the button becomes the Settings deep link.
     ///   - hint: an extra honest line under the copy (Local Network's "no
     ///     speakers found yet"), or nil.
+    ///   - primaryTitle: replaces the Allow title without changing what the
+    ///     click does (Local Network's "Try Again" — the retry is the same
+    ///     browse, so it must not become a Settings link).
+    ///   - offersSettingsLink: show the quiet secondary "Open Settings…"
+    ///     BESIDE the primary, rather than in place of it.
     ///   - animated: run the grant choreography (checkmark slide-in, clip
     ///     collapse/expand). Callers pass false for the first build, Reduce
     ///     Motion, and any off-window/occluded window — steady states must
@@ -388,6 +404,8 @@ final class SetupCardView: NSView {
                isProbing: Bool,
                offersSettingsFallback: Bool,
                hint: String? = nil,
+               primaryTitle: String? = nil,
+               offersSettingsLink: Bool = false,
                animated: Bool) {
         let wasCompleted = isCheckmarked(self.state)
         self.state = state
@@ -420,7 +438,9 @@ final class SetupCardView: NSView {
 
         applyCheckmark(shown: isCheckmarked(state),
                        animated: animated && !wasCompleted && isCheckmarked(state))
-        rebuildPrimarySlot(isProbing: isProbing, offersSettingsFallback: offersSettingsFallback)
+        rebuildPrimarySlot(isProbing: isProbing, offersSettingsFallback: offersSettingsFallback,
+                           primaryTitle: primaryTitle)
+        settingsLinkButton.isHidden = !(state == .active && offersSettingsLink)
         setBodyCollapsed(state != .active, animated: animated)
         applySurface()
         applyAccessibility()
@@ -456,7 +476,8 @@ final class SetupCardView: NSView {
 
     /// Rebuild the leading accessory slot. Exactly one occupant: the spinner
     /// while a prompt/probe is in flight, otherwise the two-mode Allow button.
-    private func rebuildPrimarySlot(isProbing: Bool, offersSettingsFallback: Bool) {
+    private func rebuildPrimarySlot(isProbing: Bool, offersSettingsFallback: Bool,
+                                    primaryTitle: String?) {
         for view in primarySlot.subviews { view.removeFromSuperview() }
         allowButton = nil
         guard state == .active else { spinner.stopAnimation(nil); return }
@@ -467,7 +488,7 @@ final class SetupCardView: NSView {
             occupant = spinner
         } else {
             spinner.stopAnimation(nil)
-            let title = offersSettingsFallback ? "Open Settings…" : content.allowTitle
+            let title = primaryTitle ?? (offersSettingsFallback ? "Open Settings…" : content.allowTitle)
             let button = onboardingActionButton(title: title, prominent: true,
                                                 target: self, action: #selector(allowTapped))
             allowButton = button
@@ -589,6 +610,7 @@ final class SetupCardView: NSView {
 
     @objc private func allowTapped() { onAllow() }
     @objc private func skipTapped() { onSkip() }
+    @objc private func settingsTapped() { onOpenSettings() }
 
     /// Whether a click anywhere on this card should fire its Allow (owner
     /// decision 2026-08-11: the whole active card is the target, the button is
@@ -692,8 +714,11 @@ final class SetupCardView: NSView {
     var test_buttonTitles: [String] {
         var titles = (primarySlot.subviews.compactMap { ($0 as? NSButton)?.title })
         if state == .active, let skip = skipButton { titles.append(skip.title) }
+        if !settingsLinkButton.isHidden { titles.append(settingsLinkButton.title) }
         return titles
     }
+    /// Press the demoted "Open Settings…" link exactly as the button does.
+    func test_tapSettingsLink() { settingsTapped() }
     var test_allowIsReturnDefault: Bool { allowButton?.keyEquivalent == "\r" }
 
     func test_tapAllow() { allowTapped() }

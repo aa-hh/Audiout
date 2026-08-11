@@ -27,6 +27,30 @@ import Testing
         func probe() async -> Bool { reachable }
     }
 
+    /// A browse whose result changes from call to call — how "turn a speaker on,
+    /// then try again" is modelled: the first browse finds nothing, the next one
+    /// finds speakers. The last count repeats once the script runs out.
+    private final class ScriptedLocalNetwork: LocalNetworkPriming, @unchecked Sendable {
+        private let lock = NSLock()
+        private let counts: [Int]
+        private var index = 0
+        init(_ counts: [Int]) { self.counts = counts }
+        func probeFoundSpeakers() async -> Int {
+            lock.withLock {
+                let count = counts[min(index, counts.count - 1)]
+                index += 1
+                return count
+            }
+        }
+        func probe() async -> Bool { await probeFoundSpeakers() > 0 }
+    }
+
+    /// A Bluetooth prompt that NEVER reports back — the wedge case: the decision
+    /// callback that `CBCentralManager` is supposed to deliver simply doesn't.
+    private struct NeverDecidingBluetooth: BluetoothPermissionPriming {
+        func prime(onDecided: @escaping @Sendable () -> Void) {}
+    }
+
     private struct CannedRemoteControl: RemoteControlPriming {
         let trusted: Bool
         func prime() {}
@@ -45,19 +69,23 @@ import Testing
     private func makeSetup(
         audio: PermissionStatus = .unknown,
         localNetworkReachable: Bool = false,
+        localNetwork: LocalNetworkPriming? = nil,
         bluetooth: PermissionStatus = .unknown,
+        bluetoothPrimer: BluetoothPermissionPriming? = nil,
+        bluetoothPromptTimeout: TimeInterval = 10,
         ptpHelper: PTPHelperStatus = .notRegistered,
         remoteControlTrusted: Bool = false,
         localNetworkGated: Bool = true
     ) -> SetupModel {
         SetupModel(audioProbe: CannedAudioProbe(result: audio),
-                   localNetwork: CannedLocalNetwork(reachable: localNetworkReachable),
+                   localNetwork: localNetwork ?? CannedLocalNetwork(reachable: localNetworkReachable),
                    remoteControl: CannedRemoteControl(trusted: remoteControlTrusted),
                    ptpHelper: CannedPTPHelper(status: ptpHelper),
                    bluetoothReader: SimulatedBluetoothPermission(status: bluetooth),
-                   bluetoothPrimer: SimulatedBluetoothPermission(status: bluetooth),
+                   bluetoothPrimer: bluetoothPrimer ?? SimulatedBluetoothPermission(status: bluetooth),
                    settings: AppSettings(defaults: isolatedDefaults),
-                   localNetworkGated: localNetworkGated)
+                   localNetworkGated: localNetworkGated,
+                   bluetoothPromptTimeout: bluetoothPromptTimeout)
     }
 
     /// Run what the cards run, in flow order, so the statuses under test are ones
@@ -329,17 +357,25 @@ import Testing
         #expect(result.destination == .settingsPane(.screenAndSystemAudioRecording))
     }
 
-    /// Local Network can never prove a denial, so "asked, found nothing" is what
-    /// spends its prompt — after that the only path left is the pane.
-    @Test func aSecondAllowOnAnUnprovenLocalNetworkDeepLinks() async {
-        let setup = makeSetup(localNetworkReachable: false)
+    /// Local Network is the one card whose "prompt" IS the browse, so an empty
+    /// browse must stay RE-RUNNABLE: the card told the user to turn a speaker on
+    /// and try again, and a click that deep-linked to Settings instead would
+    /// leave nothing at all able to re-browse. It must also open nothing — the
+    /// pane is offered beside the retry by the UI, not by this click.
+    @Test func anEmptyLocalNetworkBrowseIsRetriedRatherThanDeadEnded() async {
+        let setup = makeSetup(localNetwork: ScriptedLocalNetwork([0, 2]))
         let flow = SetupFlowModel(setup: setup)
-        _ = await flow.allow(.localNetwork)
 
-        let result = await flow.allow(.localNetwork)
+        let first = await flow.allow(.localNetwork)
+        #expect(first.outcome == .probeTimeout)
+        #expect(first.destination == .none, "nothing to open: the retry is the browse")
+        #expect(!flow.isComplete(.localNetwork))
 
-        #expect(result.outcome == .settingsFallbackDenied)
-        #expect(result.destination == .settingsPane(.localNetwork))
+        let second = await flow.allow(.localNetwork)
+
+        #expect(second.outcome == .promptTriggered, "the second click browses again")
+        #expect(flow.isComplete(.localNetwork))
+        #expect(setup.localNetworkFoundSpeakers == 2)
     }
 
     /// Bluetooth's retry goes to the PRIVACY pane, where this app's grant is
@@ -361,6 +397,31 @@ import Testing
         let flow = SetupFlowModel(setup: makeSetup(bluetooth: .unknown))
         #expect(await flow.allow(.bluetooth).outcome == .promptTriggered)
         #expect(await flow.allow(.bluetooth).outcome == .promptInFlight)
+    }
+
+    /// …but single-flight must not become a LATCH. A prompt whose decision callback
+    /// never fires would otherwise leave every later click reporting a prompt in
+    /// flight forever — a card the user can click with nothing happening at all. The
+    /// wait expires, and the next click asks again under its own named outcome
+    /// (a fresh `CBCentralManager` re-raises the prompt while undetermined).
+    @Test func anUndecidedBluetoothPromptRearmsAfterItsTimeout() async {
+        let setup = makeSetup(bluetooth: .unknown,
+                              bluetoothPrimer: NeverDecidingBluetooth(),
+                              bluetoothPromptTimeout: 0.05)
+        let flow = SetupFlowModel(setup: setup)
+        #expect(await flow.allow(.bluetooth).outcome == .promptTriggered)
+        #expect(await flow.allow(.bluetooth).outcome == .promptInFlight)
+        #expect(setup.isPrimingBluetooth)
+
+        // Polled, not slept through: the main actor is shared with every other
+        // test in the run, so when the timeout lands is not this test's to decide.
+        for _ in 0..<600 where setup.isPrimingBluetooth {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        #expect(!setup.isPrimingBluetooth, "an undecided prompt does not hold the card forever")
+        #expect(await flow.allow(.bluetooth).outcome == .promptRearmed)
+        #expect(setup.isPrimingBluetooth, "…and the fresh ask is itself in flight")
     }
 
     /// Speaker Sync has no prompt at all — Login Items is its only destination.

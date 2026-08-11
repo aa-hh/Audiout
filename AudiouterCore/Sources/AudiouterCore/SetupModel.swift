@@ -377,6 +377,17 @@ public final class SetupModel {
     /// ignore repeat taps. The probe blocks ~250 ms capturing the test tone.
     public private(set) var isProbingAudio = false
 
+    /// True while the Bluetooth prompt is up and unanswered, so the card can
+    /// show the same in-flight spinner the audio probe gets. Cleared by a
+    /// decision that actually decided something — or, if none ever arrives, by
+    /// ``bluetoothPromptTimeout``, which is what keeps a prompt that never
+    /// reports back from wedging the card shut forever.
+    public private(set) var isPrimingBluetooth = false
+
+    /// Which prime this is, so a timeout from an earlier one can't clear a
+    /// later one's flight.
+    private var bluetoothPrimeGeneration = 0
+
     /// Fired (on the main actor) after any observable change, so the UI repaints.
     public var onChange: (() -> Void)?
 
@@ -394,6 +405,10 @@ public final class SetupModel {
     /// a Settings link that doesn't exist. Injected so tests stay OS-independent;
     /// the app passes ``osGatesLocalNetwork``.
     private let localNetworkGated: Bool
+
+    /// How long a Bluetooth prompt may sit undecided before the card re-arms.
+    /// Injected so a test can drive the timeout without waiting on it.
+    private let bluetoothPromptTimeout: TimeInterval
 
     /// Whether this OS gates local-network access — read by ``SetupFlowModel``,
     /// which must count the ungated case as satisfied without inventing a
@@ -420,7 +435,9 @@ public final class SetupModel {
                 bluetoothReader: BluetoothPermissionReading = SimulatedBluetoothPermission(status: .unknown),
                 bluetoothPrimer: BluetoothPermissionPriming = SimulatedBluetoothPermission(status: .unknown),
                 settings: AppSettings = AppSettings(),
-                localNetworkGated: Bool = true) {
+                localNetworkGated: Bool = true,
+                bluetoothPromptTimeout: TimeInterval = 10) {
+        self.bluetoothPromptTimeout = bluetoothPromptTimeout
         self.audioProbe = audioProbe
         self.localNetwork = localNetwork
         self.remoteControl = remoteControl
@@ -513,10 +530,48 @@ public final class SetupModel {
     /// honest status comes from re-reading `CBManager.authorization`, never
     /// from assuming the answer. No status is written here: an undecided prompt
     /// must leave the step exactly as it was.
+    ///
+    /// ``isPrimingBluetooth`` stays true for the whole wait, and a callback that
+    /// leaves the authorization still undetermined does NOT end it — that is the
+    /// wedge case (the prompt reported back without deciding anything), and the
+    /// only thing that ends it is ``bluetoothPromptTimeout``, after which a
+    /// later click may ask again: a fresh `CBCentralManager` re-raises the
+    /// prompt while the authorization is undetermined.
     public func primeBluetooth() {
+        guard !isPrimingBluetooth else { return }
+        isPrimingBluetooth = true
+        bluetoothPrimeGeneration += 1
+        let generation = bluetoothPrimeGeneration
+        onChange?()
         bluetoothPrimer.prime {
-            Task { @MainActor [weak self] in self?.refreshBluetoothStatus() }
+            Task { @MainActor [weak self] in self?.bluetoothPromptDecided(generation) }
         }
+        Task { @MainActor [weak self] in
+            guard let timeout = self?.bluetoothPromptTimeout else { return }
+            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            self?.bluetoothPromptUndecidedTimeout(generation)
+        }
+    }
+
+    private func bluetoothPromptDecided(_ generation: Int) {
+        guard generation == bluetoothPrimeGeneration else { return }
+        // A callback that left the authorization undetermined decided NOTHING —
+        // the prompt is still in flight as far as the card is concerned, and only
+        // the timeout ends that wait.
+        let decided = bluetoothReader.currentStatus()
+        guard decided != .unknown else { return }
+        // Published in one go rather than through `refreshBluetoothStatus()`: the
+        // wait ending is itself observable, so this must repaint even when the
+        // status it read is the one already held.
+        bluetoothStatus = decided
+        isPrimingBluetooth = false
+        onChange?()
+    }
+
+    private func bluetoothPromptUndecidedTimeout(_ generation: Int) {
+        guard generation == bluetoothPrimeGeneration, isPrimingBluetooth else { return }
+        isPrimingBluetooth = false
+        onChange?()
     }
 
     /// Re-read the Bluetooth authorization — a silent, prompt-free read, so

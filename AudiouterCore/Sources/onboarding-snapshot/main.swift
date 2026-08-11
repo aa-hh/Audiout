@@ -16,6 +16,12 @@
 //   onboarding-<light|dark>-complete.png         every step in, Done visible
 //   onboarding-<light|dark>-permission-lost.png  the re-entry header message
 //
+// KNOWN LIMIT: prominent buttons render as plain pills here. AppKit fills a
+// `bezelColor` only in the active app's key window, and making this offscreen
+// window key (`.titled` + `NSApp.activate` + `makeKeyAndOrderFront`) was tried and
+// did NOT restore the fill — so button PROMINENCE is not verifiable from these
+// fixtures; check it on a live window.
+//
 // Every demo renders its SETTLED frame: `HeadlessRuntime.isActive` is true here
 // (AIRPLAY_HEADLESS=1 below), and the demo pane never animates off-window.
 //

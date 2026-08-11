@@ -33,6 +33,26 @@ import Testing
         func probe() async -> Bool { found > 0 }
         func probeFoundSpeakers() async -> Int { found }
     }
+    /// A browse whose count changes call to call — "turn a speaker on, then try
+    /// again", modelled. The last count repeats once the script runs out.
+    private final class ScriptedLocalNetwork: LocalNetworkPriming, @unchecked Sendable {
+        private let lock = NSLock()
+        private let counts: [Int]
+        private var index = 0
+        init(_ counts: [Int]) { self.counts = counts }
+        func probeFoundSpeakers() async -> Int {
+            lock.withLock {
+                let count = counts[min(index, counts.count - 1)]
+                index += 1
+                return count
+            }
+        }
+        func probe() async -> Bool { await probeFoundSpeakers() > 0 }
+    }
+    /// A Bluetooth prompt that never reports back — the wedge case.
+    private struct NeverDecidingBluetooth: BluetoothPermissionPriming {
+        func prime(onDecided: @escaping @Sendable () -> Void) {}
+    }
     private struct NoopRemoteControl: RemoteControlPriming {
         let trusted: Bool
         init(trusted: Bool = false) { self.trusted = trusted }
@@ -59,18 +79,22 @@ import Testing
     private func makeModel(audio: PermissionStatus,
                            silentAudio: PermissionStatus? = nil,
                            foundSpeakers: Int = 0,
+                           localNetwork: LocalNetworkPriming? = nil,
                            bluetooth: PermissionStatus = .unknown,
+                           bluetoothPrimer: BluetoothPermissionPriming? = nil,
+                           bluetoothPromptTimeout: TimeInterval = 10,
                            remoteControlTrusted: Bool = false,
                            localNetworkGated: Bool = true,
                            ptpHelper: PTPHelperManaging = FakePTPHelper()) -> SetupModel {
         SetupModel(audioProbe: CannedAudioProbe(result: audio, silent: silentAudio),
-                   localNetwork: CannedLocalNetwork(found: foundSpeakers),
+                   localNetwork: localNetwork ?? CannedLocalNetwork(found: foundSpeakers),
                    remoteControl: NoopRemoteControl(trusted: remoteControlTrusted),
                    ptpHelper: ptpHelper,
                    bluetoothReader: SimulatedBluetoothPermission(status: bluetooth),
-                   bluetoothPrimer: SimulatedBluetoothPermission(status: bluetooth),
+                   bluetoothPrimer: bluetoothPrimer ?? SimulatedBluetoothPermission(status: bluetooth),
                    settings: AppSettings(defaults: defaults),
-                   localNetworkGated: localNetworkGated)
+                   localNetworkGated: localNetworkGated,
+                   bluetoothPromptTimeout: bluetoothPromptTimeout)
     }
 
     private func makeVC(model: SetupModel,
@@ -289,8 +313,11 @@ import Testing
     }
 
     /// An unproven browse can't be called a denial — it gets a "turn a speaker
-    /// on" line rather than an accusation, and its retry goes to the pane.
-    @Test func anUnprovenLocalNetworkExplainsItselfWithoutClaimingDenial() async {
+    /// on" line rather than an accusation, and the primary click keeps being the
+    /// retry that line asks for. Settings is demoted beside it, never instead of
+    /// it: a card whose only button opened Settings left NOTHING able to
+    /// re-browse, so the flow dead-ended on a speaker the user had just switched on.
+    @Test func anUnprovenLocalNetworkOffersARetryNotADeadEnd() async {
         var opened: [SystemSettingsPane] = []
         let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 0),
                         onOpenSettings: { opened.append($0) })
@@ -298,10 +325,82 @@ import Testing
 
         #expect(vc.test_activeStep == .localNetwork, "an unproven browse does not advance")
         #expect(vc.test_hint(of: .localNetwork) == "No speakers found yet. Turn one on, then try again.")
-        #expect(vc.test_buttonTitles(of: .localNetwork) == ["Open Settings…"])
+        #expect(vc.test_buttonTitles(of: .localNetwork) == ["Try Again", "Open Settings…"])
 
         await vc.test_tapAllow(.localNetwork)
+
+        #expect(opened.isEmpty, "the primary click browses again — it must not open Settings")
+        #expect(vc.test_buttonTitles(of: .localNetwork) == ["Try Again", "Open Settings…"])
+    }
+
+    /// The retry really re-runs the browse, and the card reports what the second
+    /// one found — the whole point of keeping it a retry.
+    @Test func theLocalNetworkRetryBrowsesAgainAndReportsWhatItFinds() async {
+        let vc = makeVC(model: makeModel(audio: .granted,
+                                         localNetwork: ScriptedLocalNetwork([0, 2])))
+        await vc.test_allow([.audio, .localNetwork])
+        #expect(vc.test_activeStep == .localNetwork)
+
+        await vc.test_tapAllow(.localNetwork)
+
+        #expect(vc.test_title(of: .localNetwork) == "Found 2 speakers")
+        #expect(vc.test_hint(of: .localNetwork) == nil, "nothing left to explain")
+        #expect(vc.test_activeStep == .bluetooth)
+    }
+
+    /// The demoted link still works, and still goes to the Local Network pane.
+    @Test func theDemotedSettingsLinkOpensTheLocalNetworkPane() async {
+        var opened: [SystemSettingsPane] = []
+        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 0),
+                        onOpenSettings: { opened.append($0) })
+        await vc.test_allow([.audio, .localNetwork])
+
+        vc.test_tapSettingsLink(.localNetwork)
+
         #expect(opened == [.localNetwork])
+    }
+
+    /// Bluetooth's answer arrives on a callback, so the click returns long before
+    /// the user has answered — the card has to LOOK like it is waiting, or an
+    /// undecided prompt is a click into nothing.
+    @Test func anUndecidedBluetoothPromptShowsTheCardWaiting() async {
+        let model = makeModel(audio: .granted, foundSpeakers: 2,
+                              bluetoothPrimer: NeverDecidingBluetooth())
+        let vc = makeVC(model: model)
+        await vc.test_allow([.audio, .localNetwork])
+        #expect(vc.test_activeStep == .bluetooth)
+
+        await vc.test_tapAllow(.bluetooth)
+
+        #expect(vc.test_isProbing(.bluetooth), "the wait is visible")
+        #expect(!vc.test_isCardClickable(.bluetooth), "and the card is inert while it waits")
+    }
+
+    /// …and the wait expires, so the card comes back to life instead of staying
+    /// wedged for the rest of the presentation.
+    @Test func anUndecidedBluetoothPromptStopsWaitingAfterItsTimeout() async {
+        let model = makeModel(audio: .granted, foundSpeakers: 2,
+                              bluetoothPrimer: NeverDecidingBluetooth(),
+                              bluetoothPromptTimeout: 0.05)
+        let vc = makeVC(model: model)
+        await vc.test_allow([.audio, .localNetwork])
+        await vc.test_tapAllow(.bluetooth)
+        #expect(vc.test_isProbing(.bluetooth))
+
+        await waitUntil { !model.isPrimingBluetooth }
+
+        #expect(!vc.test_isProbing(.bluetooth), "the spinner clears itself")
+        #expect(vc.test_isCardClickable(.bluetooth), "and the card can ask again")
+    }
+
+    /// Wait for something a background timeout will make true. A fixed sleep is a
+    /// flake here: the main actor is shared with every other test in the run, so
+    /// how soon that work lands is not this test's to decide.
+    private func waitUntil(_ satisfied: () -> Bool) async {
+        for _ in 0..<600 {                                   // ≤3 s, then give up
+            if satisfied() { return }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
     }
 
     @Test func speakerSyncRoutesToLoginItemsThroughTheModelSeam() async {
@@ -439,6 +538,64 @@ import Testing
         #expect(!vc.test_demoShowsReplay, "Replay is for a Reduce Motion user watching a live window")
     }
 
+    /// The demo is decoration: every word of the information is in the card copy
+    /// beside it. Un-electing only the container HOISTS its children, which left
+    /// the mock's real text fields ("Allow", "Don't Allow", the pane title)
+    /// reachable — VoiceOver reading out a picture of a dialog.
+    @Test func theDemoIsInvisibleToVoiceOver() async {
+        let vc = makeVC(model: makeModel(audio: .unknown))
+        #expect(vc.test_demoAccessibilityElements.isEmpty,
+                "still reachable: \(vc.test_demoAccessibilityElements)")
+
+        await vc.test_tapAllow(.audio)   // a different mock, same rule
+
+        #expect(vc.test_demoAccessibilityElements.isEmpty,
+                "still reachable: \(vc.test_demoAccessibilityElements)")
+        #expect(vc.test_replayIsAccessible, "Replay is a real control and stays reachable")
+    }
+
+    /// Reduce Motion: ONE play-through on step activation, resting at the settled
+    /// frame, with Replay offered — never the loop. Headless never animates for
+    /// real, so the policy is driven through the pane's own seams.
+    @Test func reduceMotionPlaysTheDemoOnceAndOffersReplay() async {
+        let vc = makeVC(model: makeGrantableModel())
+        vc.test_demoReduceMotionOverride = true
+        vc.test_demoCanAnimateOverride = true
+
+        await vc.test_tapAllow(.audio)   // the step changes: the one play-through
+
+        #expect(vc.test_demoShowsReplay, "a Reduce Motion user gets the button")
+        #expect(vc.test_isDemoAnimating)
+        #expect(!vc.test_demoIsLooping, "played once — it must not loop")
+    }
+
+    @Test func replayRunsTheDemoAgain() async {
+        let vc = makeVC(model: makeGrantableModel())
+        vc.test_demoReduceMotionOverride = true
+        vc.test_demoCanAnimateOverride = true
+        await vc.test_tapAllow(.audio)
+        vc.test_demoCanAnimateOverride = nil   // headless: the pass stops, settled
+        vc.test_demoCanAnimateOverride = true
+
+        vc.test_tapReplay()
+
+        #expect(vc.test_isDemoAnimating)
+        #expect(!vc.test_demoIsLooping, "Replay is another single pass")
+    }
+
+    /// Reduce Motion OFF on a live pane loops instead, and offers no Replay.
+    @Test func fullMotionLoopsTheDemoWithoutAReplayButton() async {
+        let vc = makeVC(model: makeGrantableModel())
+        vc.test_demoReduceMotionOverride = false
+        vc.test_demoCanAnimateOverride = true
+
+        await vc.test_tapAllow(.audio)
+
+        #expect(vc.test_isDemoAnimating)
+        #expect(vc.test_demoIsLooping)
+        #expect(!vc.test_demoShowsReplay)
+    }
+
     /// The Settings mock's switch: ON is a blue track AND the knob at the
     /// TRAILING end. It regressed once — an `NSView` knob offset by
     /// `layer.transform` had that transform wiped by the next layout pass, so an
@@ -490,6 +647,19 @@ import Testing
         #expect(text.contains("System Audio"), "\(text)")
         // "Speaker Sync", not "PTP helper" — the card was named out of jargon.
         #expect(text.contains("Speaker Sync"), "\(text)")
+    }
+
+    /// The pronoun has to agree with the count: "Re-enable it below" beside two
+    /// named permissions is a broken sentence, on the one screen whose whole job
+    /// is explaining what went wrong.
+    @Test func theLostPermissionMessageAgreesWithHowManyItNamed() {
+        let one = OnboardingViewController.permissionLostText(for: [.audioCapture])
+        #expect(one.contains("permission, currently turned off"), "\(one)")
+        #expect(one.contains("Re-enable it below"), "\(one)")
+
+        let two = OnboardingViewController.permissionLostText(for: [.audioCapture, .ptpHelper])
+        #expect(two.contains("permissions, currently turned off"), "\(two)")
+        #expect(two.contains("Re-enable them below"), "\(two)")
     }
 
     @Test func permissionLostMessageClearsOnceItsFlaggedPermissionIsGranted() async {

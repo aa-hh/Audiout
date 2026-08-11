@@ -83,6 +83,10 @@ final class DemoPaneView: NSView {
 
         mockHost.translatesAutoresizingMaskIntoConstraints = false
         // Decorative: the whole mock subtree is invisible to VoiceOver.
+        // Un-electing the HOST alone is not enough — an ignored container HOISTS
+        // its children, which leaves the mock's real `NSTextField`s ("Allow",
+        // "Don't Allow", the pane title) reachable. Every descendant is un-elected
+        // too, as it is installed (`installAccessibilityOptOut`).
         mockHost.setAccessibilityElement(false)
         mockHost.setAccessibilityChildren([])
 
@@ -172,6 +176,7 @@ final class DemoPaneView: NSView {
         let incoming = Self.makeMock(step: step, mode: mode)
         mock = incoming
         incoming.translatesAutoresizingMaskIntoConstraints = false
+        Self.installAccessibilityOptOut(incoming)
         mockHost.addSubview(incoming)
         NSLayoutConstraint.activate([
             incoming.leadingAnchor.constraint(equalTo: mockHost.leadingAnchor),
@@ -197,6 +202,15 @@ final class DemoPaneView: NSView {
         })
     }
 
+    /// Take a whole drawn mock out of the accessibility tree, view by view. The
+    /// container-level opt-out hoists rather than prunes, and these subtrees
+    /// carry real `NSTextField`s and images that are elements by default.
+    private static func installAccessibilityOptOut(_ view: NSView) {
+        view.setAccessibilityElement(false)
+        view.setAccessibilityChildren([])
+        view.subviews.forEach(installAccessibilityOptOut)
+    }
+
     private static func makeMock(step: SetupStep?, mode: DemoMode) -> NSView {
         guard let step, mode != .settled else { return DemoSettledMockView() }
         switch mode {
@@ -215,8 +229,11 @@ final class DemoPaneView: NSView {
     }
 
     /// Whether this pane may animate at all: a real window, actually on screen,
-    /// and not a headless run (`cacheDisplay` snapshots must be settled).
+    /// and not a headless run (`cacheDisplay` snapshots must be settled). The
+    /// override is the seam a headless test drives the motion POLICY through —
+    /// nothing here ever animates for real under `swift test`.
     private var canAnimate: Bool {
+        if let test_canAnimateOverride { return test_canAnimateOverride }
         guard !HeadlessRuntime.isActive else { return false }
         guard let window = window, window.isVisible else { return false }
         return window.occlusionState.contains(.visible)
@@ -255,10 +272,34 @@ final class DemoPaneView: NSView {
     var test_mode: DemoMode { mode }
     var test_step: SetupStep? { step }
     var test_isAnimating: Bool { (mock as? DemoMockView)?.isTimelineRunning ?? false }
+    var test_isLooping: Bool { (mock as? DemoMockView)?.isLooping ?? false }
     var test_showsReplay: Bool { !replayButton.isHidden }
     /// `nil` = the live system setting (the shared override seam).
     var test_reduceMotionOverride: Bool?
+    /// `nil` = the live window/headless check.
+    var test_canAnimateOverride: Bool?
     func test_tapReplay() { replayTapped() }
+    /// Anything in the mock subtree VoiceOver would still reach — described so a
+    /// failure names the offender.
+    ///
+    /// Two signals, because one alone is not enough: a view that is its own
+    /// accessibility ELEMENT is reachable directly, and a view that still
+    /// publishes accessibility CHILDREN is reachable through the hoist an ignored
+    /// container performs. Both have to be empty for the subtree to be gone.
+    var test_accessibleDemoDescendants: [String] {
+        ([mockHost] + mockHost.subviewsRecursively)
+            .filter { $0.isAccessibilityElement() || $0.accessibilityChildren()?.isEmpty == false }
+            .map { ($0 as? NSTextField)?.stringValue ?? String(describing: type(of: $0)) }
+    }
+
+    /// Replay is a real control and must survive the purge beside it. Headless
+    /// AppKit reports every view as `element=false` with an unknown role, so what
+    /// distinguishes "left alone" from "pruned" is that it still publishes its own
+    /// accessibility children and label.
+    var test_replayIsAccessible: Bool {
+        replayButton.accessibilityChildren()?.isEmpty == false
+            && replayButton.accessibilityLabel() == "Replay"
+    }
 }
 
 // MARK: - Timeline base
@@ -276,7 +317,7 @@ class DemoMockView: NSView {
     /// One pass of the loop.
     var timelineDuration: TimeInterval { 4.0 }
 
-    private var isLooping = false
+    private(set) var isLooping = false
     private(set) var isTimelineRunning = false
     private static let sentinelKey = "demoTimeline"
 
@@ -444,7 +485,9 @@ final class DemoPromptMockView: DemoMockView {
     private let step: SetupStep
     private let askStack = NSStackView()
     private let grantedStack = NSStackView()
-    private let cursor = DemoCursorView(height: 48)
+    /// ~1.5× life size: readable at this scale without dominating a 210 pt-tall
+    /// dialog the way the old drawing (a third of its height) did.
+    private let cursor = DemoCursorView(pointerHeight: 24)
     private var confirmButton: DemoPushButtonView!
 
     init(step: SetupStep) {
@@ -670,7 +713,9 @@ final class DemoSettingsMockView: DemoMockView {
 
     private let step: SetupStep
     private var toggle: DemoSwitchView!
-    private let cursor = DemoCursorView(height: 40)
+    /// Slightly smaller than the prompt mock's, in step with this mock's own
+    /// tighter scale.
+    private let cursor = DemoCursorView(pointerHeight: 22)
 
     init(step: SetupStep) {
         self.step = step
@@ -893,15 +938,18 @@ final class DemoSettledMockView: NSView {
         let stack = NSStackView(views: [icon, line])
         stack.orientation = .vertical
         stack.alignment = .centerX
-        stack.spacing = 16
+        // Nothing is being asked for here, so the one thing on the surface may
+        // take the room: a larger icon and more air under it than the mocks,
+        // which are packed to mimic a real dialog's density.
+        stack.spacing = 22
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
 
         NSLayoutConstraint.activate([
             widthAnchor.constraint(equalToConstant: DemoPromptMockView.size.width),
             heightAnchor.constraint(equalToConstant: DemoPromptMockView.size.height),
-            icon.widthAnchor.constraint(equalToConstant: 72),
-            icon.heightAnchor.constraint(equalToConstant: 72),
+            icon.widthAnchor.constraint(equalToConstant: 88),
+            icon.heightAnchor.constraint(equalToConstant: 88),
             stack.centerXAnchor.constraint(equalTo: centerXAnchor),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
             stack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor),
@@ -1189,9 +1237,19 @@ final class DemoSwitchView: NSView {
         ]), forKey: Self.knobAnimationKey)
     }
 
-    /// The off track. `quaternaryLabelColor` over the row is what the frames
-    /// measure, and it adapts correctly in dark mode.
-    static var offTrackColor: NSColor { .quaternaryLabelColor }
+    /// The off track.
+    ///
+    /// `quaternaryLabelColor` is what the frames measure and it reads correctly in
+    /// dark. In LIGHT it is too faint for this job — a white knob on a near-white
+    /// track over an already-light card, on the row the whole mock exists for — so
+    /// light takes one step more contrast.
+    static var offTrackColor: NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                ? .quaternaryLabelColor
+                : .tertiaryLabelColor
+        }
+    }
 
     override var wantsUpdateLayer: Bool { true }
 
@@ -1377,66 +1435,62 @@ final class DemoDotView: NSView {
     }
 }
 
-/// The oversized demo pointer: the macOS arrow at about 2.4× life size, black
-/// with a white outline in BOTH appearances (macOS only inverts the real cursor
-/// under an Accessibility setting, and a demo cursor shouldn't).
+/// The demo pointer: the REAL macOS arrow, `NSCursor.arrow.image`, drawn at
+/// about 1.5× life size — big enough to follow at mock scale, small enough to be
+/// a pointer rather than a prop.
 ///
-/// Drawn as one bezier of the classic arrow silhouette — stroked white, then
-/// filled black — rather than an SF Symbol, because no symbol carries the
-/// outline, and the outline is what keeps it visible over a blue button.
+/// The system image, not a drawn silhouette: it is the same artwork the user is
+/// about to see under their own hand, it carries its own outline and shape, and it
+/// re-resolves per macOS release for free. The drop shadow is what keeps the
+/// pointer legible over the accent-filled default button.
 final class DemoCursorView: NSView {
 
-    /// The arrow's real aspect: 1.55 : 1 tall.
-    private static let aspect: CGFloat = 1.55
+    private static let cursor = NSCursor.arrow
+    private static var image: NSImage { cursor.image }
+    /// Where the cursor is positioned FROM, in the image's own (top-left origin)
+    /// coordinates — the tip, for the arrow.
+    private static var hotSpot: NSPoint { cursor.hotSpot }
 
-    init(height: CGFloat) {
+    /// The arrow's artwork sits in the TOP-LEFT of its image box and fills about
+    /// HALF of it (measured: ink y 3…22 of a 28 × 40 pt image). So the view is
+    /// sized from the POINTER height the caller wants, not from the box — asking
+    /// for a 24 pt pointer and getting a 12 pt one is how the sizing goes wrong.
+    private static let inkHeightFraction: CGFloat = 0.5
+
+    /// View points per image point, so the hot spot scales with the artwork.
+    private let scale: CGFloat
+
+    init(pointerHeight: CGFloat) {
+        let imageSize = Self.image.size
+        let height = (pointerHeight / Self.inkHeightFraction).rounded()
+        scale = height / max(imageSize.height, 1)
         super.init(frame: .zero)
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: height),
-            widthAnchor.constraint(equalToConstant: (height / Self.aspect).rounded()),
+            widthAnchor.constraint(equalToConstant: max((imageSize.width * scale).rounded(), 1)),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    /// The hot spot: the arrow's TIP, which is what a cursor is positioned by.
-    var tipPoint: NSPoint { NSPoint(x: 0, y: isFlipped ? 0 : bounds.maxY) }
+    /// The hot spot in this view's own coordinates — what every motion path
+    /// anchors on, because that is the point a real cursor is aligned by (the
+    /// image's centre would land the press off the button).
+    var tipPoint: NSPoint { NSPoint(x: Self.hotSpot.x * scale, y: Self.hotSpot.y * scale) }
 
     override var isFlipped: Bool { true }
 
     override func draw(_ dirtyRect: NSRect) {
-        let w = bounds.width, h = bounds.height
-        // The classic 8-point arrow, in fractions of the box so it scales.
-        let points: [NSPoint] = [
-            NSPoint(x: 0, y: 0),
-            NSPoint(x: 0, y: h * 0.795),
-            NSPoint(x: w * 0.295, y: h * 0.605),
-            NSPoint(x: w * 0.475, y: h),
-            NSPoint(x: w * 0.675, y: h * 0.915),
-            NSPoint(x: w * 0.495, y: h * 0.525),
-            NSPoint(x: w, y: h * 0.475),
-        ]
-        let arrow = NSBezierPath()
-        arrow.move(to: points[0])
-        for point in points.dropFirst() { arrow.line(to: point) }
-        arrow.close()
-
+        NSGraphicsContext.current?.saveGraphicsState()
         let shadow = NSShadow()
         shadow.shadowColor = NSColor.black.withAlphaComponent(0.30)
         shadow.shadowBlurRadius = 3
         shadow.shadowOffset = NSSize(width: 0, height: -1)
         shadow.set()
-
-        // Outline about 4 % of the height, stroked at twice that so half of it
-        // lands outside the silhouette.
-        arrow.lineWidth = max(h * 0.04, 1) * 2
-        arrow.lineJoinStyle = .miter
-        NSColor.white.setStroke()
-        arrow.stroke()
-        NSColor.black.setFill()
-        arrow.fill()
+        Self.image.draw(in: bounds)
+        NSGraphicsContext.current?.restoreGraphicsState()
     }
 }
 

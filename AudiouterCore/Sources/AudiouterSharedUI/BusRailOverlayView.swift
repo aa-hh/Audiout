@@ -30,8 +30,19 @@ import AppKit
 /// section-title text sits in the name column far to the right, so a continuous
 /// vertical rail never collides with a title.
 ///
-/// **Determinism:** steady drawing (no animation) computed from settled frames,
-/// so `cacheDisplay` snapshots are byte-identical run-to-run.
+/// **Energize sweep (Warm Signal v4.1 item 9 — "rail segment brightens
+/// top-to-bottom"):** when the wire GAINS gold reach — the spine arms, or a new
+/// member segment goes live on an armed spine — an ember film laid over the
+/// settled wire retreats origin→terminus, so the gold reads as current flowing
+/// down to the newly lit room. One-shot, self-removing (nothing runs at rest),
+/// gone entirely under Reduce Motion, and never fired by the first draw in a
+/// window (no transient fires on open, spec §6).
+///
+/// **Determinism:** the settled wire is steady drawing computed from settled
+/// frames, and the sweep follows the settled-model-layer contract
+/// (`RouteArmedDotView` precedent): the film's MODEL is fully retreated
+/// (invisible) and only its presentation animates, so `cacheDisplay` snapshots
+/// are byte-identical run-to-run at ANY capture instant.
 public final class BusRailOverlayView: NSView {
 
     /// The Main Audio row supplying the origin-hook anchor (the meter's leading
@@ -58,9 +69,34 @@ public final class BusRailOverlayView: NSView {
     /// Node fills stay per-row; this is the wire's tone alone.
     public var dormant = false
 
+    /// The transient energize film currently mid-flight, if any (test-visible
+    /// through ``test_isEnergizeSweeping``; nothing survives the sweep).
+    private var sweepLayer: CAShapeLayer?
+    private static let sweepKey = "busRail.energizeSweep"
+    /// The last drawn plan's energize signature. `nil` = no baseline yet, so the
+    /// next draw stamps one WITHOUT firing — the first render in a window is
+    /// always settled (no transient fires on open, spec §6).
+    private var lastEnergy: EnergySignature?
+
     public init() {
         super.init(frame: .zero)
-        wantsLayer = false
+        // Layer-backed so the one-shot energize sweep has a layer to ride;
+        // `draw(_:)` still paints the settled wire into the backing layer.
+        wantsLayer = true
+        // Mid-session accessibility-display + accent-dial changes reconcile
+        // LIVE (AGENTS.md rules — neither arrives through `apply` or an
+        // appearance change). Selector-based observation needs no matching
+        // removal (post-10.11 AppKit auto-unregisters).
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(accessibilityDisplayOptionsDidChange),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(accentStyleDidChange),
+            name: Tokens.accentStyleDidChangeNotification,
+            object: nil)
     }
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -73,11 +109,35 @@ public final class BusRailOverlayView: NSView {
         needsDisplay = true
     }
 
+    /// A (re)mount renders settled: the baseline resets so the first draw in a
+    /// window can never read as a transition, and an in-flight film from the
+    /// previous mount dies with it.
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        lastEnergy = nil
+        cancelEnergizeSweep()
+    }
+
+    /// Reduce Motion turning ON strips an in-flight sweep so the wire lands on
+    /// its settled state instantly instead of finishing a transition the user
+    /// asked not to see.
+    @objc private func accessibilityDisplayOptionsDidChange() {
+        if reduceMotion { cancelEnergizeSweep() }
+    }
+
+    /// The film stamps a resolved `CGColor`, which a dial change can't re-tint
+    /// mid-flight — drop it, and let the settled draw re-resolve its tokens.
+    @objc private func accentStyleDidChange() {
+        cancelEnergizeSweep()
+        needsDisplay = true
+    }
+
     public override func draw(_ dirtyRect: NSRect) {
         guard let plan = resolvePlan() else { return }
         effectiveAppearance.performAsCurrentDrawingAppearance {
             drawPlan(plan)
         }
+        reconcileEnergize(with: plan)
     }
 
     // MARK: Geometry resolution (collapse-reactive; pure once converted)
@@ -144,26 +204,61 @@ public final class BusRailOverlayView: NSView {
 
     // MARK: Plan drawing
 
+    /// One stroked run of the wire — the origin hook, a straight segment, or a
+    /// detour arc — with the tone it wears. `drawPlan` strokes exactly these
+    /// (plus the fill dots), and the energize sweep joins their geometry, so the
+    /// film always travels the same wire the settled draw painted.
+    struct WireRun {
+        var path: NSBezierPath
+        var color: NSColor
+    }
+
     private func drawPlan(_ plan: RailPlan) {
-        // Warm Signal v4.1 item 4 ("larger selected nodes"): the gap/arc math is
-        // keyed off each STOP's OWN node radius so the rail meets a large member
-        // node and a small detoured non-member node cleanly at their true edges.
+        let cx = PopoverColumnGrid.railGutterCenterX
+        let originColor = Self.originColor(for: plan)
+
+        if case let .headerDot(y) = plan.origin {
+            // The origin section (System Audio) is collapsed: the Main Audio ring
+            // is hidden, so the rail simply BEGINS at that collapsed header with a
+            // small gutter dot (behavior 2 — the origin moves up to the header).
+            originColor.setFill()
+            fillTerminusDot(atY: y, x: cx)
+        }
+        for run in wireRuns(for: plan) {
+            run.color.setStroke()
+            run.path.stroke()
+        }
+        // Collapsed / mid-collapse device section: the rail was cut short at the
+        // clip floor — mark the cut with a terminus dot (behavior 1).
+        if let terminusY = plan.terminusDotY {
+            originColor.setFill()
+            fillTerminusDot(atY: terminusY, x: cx)
+        }
+    }
+
+    /// The hook/terminus tone. The Main Audio ring's connected stroke comes from
+    /// the SAME resolution (`Tokens.Color.spineTone`), so the curve and the ring
+    /// it lands on can never be two different colors — including mid-flight
+    /// through an accent-dial change. A DORMANT rail (spec §4.7) takes one quiet
+    /// tone for its whole path — hook, every segment and the terminus dot —
+    /// rather than the gold/grey patchwork per-stop tones drew on a wire that is
+    /// feeding nothing.
+    private static func originColor(for plan: RailPlan) -> NSColor {
+        plan.dormant ? Tokens.Color.tertiaryLabel : Tokens.Color.spineTone(armed: plan.gold)
+    }
+
+    /// The wire's stroked runs in path order, origin → terminus. Warm Signal
+    /// v4.1 item 4 ("larger selected nodes"): the gap/arc math is keyed off each
+    /// STOP's OWN node radius so the rail meets a large member node and a small
+    /// detoured non-member node cleanly at their true edges.
+    func wireRuns(for plan: RailPlan) -> [WireRun] {
         let lw = PopoverColumnGrid.busLineWidth
         let cx = PopoverColumnGrid.railGutterCenterX
-        // The hook/terminus tone and the Main Audio ring's connected stroke come
-        // from the SAME resolution (`Tokens.Color.spineTone`), so the curve and
-        // the ring it lands on can never be two different colors — including
-        // mid-flight through an accent-dial change. A DORMANT rail (spec §4.7)
-        // takes one quiet tone for its whole path — hook, every segment and the
-        // terminus dot — rather than the gold/grey patchwork per-stop tones drew
-        // on a wire that is feeding nothing.
-        let originColor = plan.dormant
-            ? Tokens.Color.tertiaryLabel
-            : Tokens.Color.spineTone(armed: plan.gold)
+        let originColor = Self.originColor(for: plan)
+        var runs: [WireRun] = []
 
-        switch plan.origin {
-        case let .ring(ringCenterY, ringCenterX, ringRadius):
-            // Terminus (Warm Signal nitpicks — "rail into the ring"): the rail
+        if case let .ring(ringCenterY, ringCenterX, ringRadius) = plan.origin {
+            // Origin hook (Warm Signal nitpicks — "rail into the ring"): the rail
             // curves up from the gutter column and lands directly on the Main
             // Audio ring's own left edge, stroked at the SAME width the ring uses
             // while connected, so the two read as one continuous line.
@@ -176,14 +271,7 @@ public final class BusRailOverlayView: NSView {
             hook.curve(to: NSPoint(x: cx, y: ringCenterY - PopoverColumnGrid.railRingHookLandingDrop),
                        controlPoint1: NSPoint(x: ringLeftX - PopoverColumnGrid.railRingHookBulge, y: ringCenterY),
                        controlPoint2: NSPoint(x: cx, y: ringCenterY - PopoverColumnGrid.railRingHookControlDrop))
-            originColor.setStroke()
-            hook.stroke()
-        case let .headerDot(y):
-            // The origin section (System Audio) is collapsed: the Main Audio ring
-            // is hidden, so the rail simply BEGINS at that collapsed header with a
-            // small gutter dot (behavior 2 — the origin moves up to the header).
-            originColor.setFill()
-            fillTerminusDot(atY: y, x: cx)
+            runs.append(WireRun(path: hook, color: originColor))
         }
 
         // How far the line reaches: its natural terminus is the lowest on-spine
@@ -216,41 +304,40 @@ public final class BusRailOverlayView: NSView {
             } else {
                 segColor = Tokens.Color.ember
             }
-            segColor.setStroke()
 
             if onSpine {
                 // The rail runs THROUGH the node with a breathing gap above.
                 let gap = stopR + PopoverColumnGrid.busNodeRailGap
-                strokeVertical(from: currentY, to: stop.y + gap, x: cx, lineWidth: lw)
+                appendVertical(from: currentY, to: stop.y + gap, x: cx,
+                               lineWidth: lw, color: segColor, into: &runs)
                 // The natural terminus ends the signal — UNLESS a collapsed/
                 // clipping device section cuts it first (`terminusDotY != nil`), in
                 // which case the line continues down to that cut and dots there.
-                if index == plan.signalTerminusIndex && plan.terminusDotY == nil { return }
+                if index == plan.signalTerminusIndex && plan.terminusDotY == nil { return runs }
                 currentY = stop.y - gap
             } else {
                 // Detour ARC around a bypassed non-member node — keyed off that
                 // node's OWN radius, so the bow clears a large node and a small
                 // one by the same margin.
                 let arcR = stopR + PopoverColumnGrid.busDetourBulge
-                strokeVertical(from: currentY, to: stop.y + arcR, x: cx, lineWidth: lw)
+                appendVertical(from: currentY, to: stop.y + arcR, x: cx,
+                               lineWidth: lw, color: segColor, into: &runs)
                 let arc = NSBezierPath()
                 arc.lineWidth = lw
                 arc.appendArc(withCenter: NSPoint(x: cx, y: stop.y), radius: arcR,
                               startAngle: 90, endAngle: 270, clockwise: false)
-                arc.stroke()
+                runs.append(WireRun(path: arc, color: segColor))
                 currentY = stop.y - arcR
             }
         }
 
-        // Collapsed / mid-collapse device section: the rail was cut short. Run the
-        // line down to the cut (the section's header, or the shrinking clip floor
-        // mid-animation) and mark the stop with a terminus dot (behavior 1).
+        // Run the line down to the cut (the section's header, or the shrinking
+        // clip floor mid-animation).
         if let terminusY = plan.terminusDotY {
-            originColor.setStroke()
-            strokeVertical(from: currentY, to: terminusY, x: cx, lineWidth: lw)
-            originColor.setFill()
-            fillTerminusDot(atY: terminusY, x: cx)
+            appendVertical(from: currentY, to: terminusY, x: cx,
+                           lineWidth: lw, color: originColor, into: &runs)
         }
+        return runs
     }
 
     /// Fill the small round terminus/origin gutter dot centred at `(x, y)`.
@@ -259,14 +346,15 @@ public final class BusRailOverlayView: NSView {
         NSBezierPath(ovalIn: NSRect(x: x - r, y: y - r, width: r * 2, height: r * 2)).fill()
     }
 
-    private func strokeVertical(from: CGFloat, to: CGFloat, x: CGFloat, lineWidth: CGFloat) {
+    private func appendVertical(from: CGFloat, to: CGFloat, x: CGFloat, lineWidth: CGFloat,
+                                color: NSColor, into runs: inout [WireRun]) {
         guard abs(from - to) > 0.01 else { return }
         let line = NSBezierPath()
         line.lineWidth = lineWidth
         line.lineCapStyle = .round
         line.move(to: NSPoint(x: x, y: from))
         line.line(to: NSPoint(x: x, y: to))
-        line.stroke()
+        runs.append(WireRun(path: line, color: color))
     }
 
     /// Whether a node sits ON the spine (rail runs through it) vs OFF it (the
@@ -279,11 +367,122 @@ public final class BusRailOverlayView: NSView {
         }
     }
 
+    // MARK: Energize sweep (v4.1 item 9)
+
+    /// The wire's live-signal signature: whether the spine is carrying gold at
+    /// all, and how many member segments it reaches. A dormant wire (spec §4.7)
+    /// carries nothing, whatever its stops say.
+    struct EnergySignature: Equatable {
+        var gold: Bool
+        var memberStops: Int
+    }
+
+    static func energizeSignature(of plan: RailPlan) -> EnergySignature {
+        EnergySignature(
+            gold: plan.gold && !plan.dormant,
+            memberStops: plan.dormant ? 0 : plan.stops.filter { $0.node == .member }.count)
+    }
+
+    /// Pure firing decision: a sweep plays only when a LIVE wire GAINS reach —
+    /// the spine arms, or a new member segment goes gold on an armed spine.
+    /// Never on the first draw (`previous == nil`), never on an idle/dormant
+    /// wire, never on loss (a room leaving is not a surge).
+    static func energizeSweepFires(previous: EnergySignature?, current: EnergySignature) -> Bool {
+        guard let previous, current.gold else { return false }
+        return !previous.gold || current.memberStops > previous.memberStops
+    }
+
+    private var reduceMotion: Bool {
+        test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
+    /// Compare this draw's plan against the last one and fire the sweep on a
+    /// qualifying gain. The layer mutation is deferred out of the draw pass.
+    private func reconcileEnergize(with plan: RailPlan) {
+        let signature = Self.energizeSignature(of: plan)
+        let fires = Self.energizeSweepFires(previous: lastEnergy, current: signature)
+        lastEnergy = signature
+        guard fires, window != nil, !reduceMotion else { return }
+        let joined = NSBezierPath()
+        for run in wireRuns(for: plan) { joined.append(run.path) }
+        guard !joined.isEmpty else { return }
+        let path = joined.cgPath
+        // A run-loop block, not `DispatchQueue.main.async`: it defers the layer
+        // mutation out of the draw pass just the same, and a nested run-loop
+        // spin (tests) can execute it, which the main dispatch queue's
+        // non-reentrancy forbids.
+        RunLoop.main.perform { [weak self] in self?.runEnergizeSweep(along: path) }
+    }
+
+    /// Mount the ember film over the settled wire and play its origin→terminus
+    /// retreat. The film's MODEL is fully retreated (`strokeStart = 1`,
+    /// invisible) — only the presentation animates — so a `cacheDisplay` at any
+    /// instant captures the settled wire, never the transient. Self-removing on
+    /// completion: nothing runs, or exists, at rest. A fresh surge replaces an
+    /// in-flight one (the new room restarts the current from the origin).
+    func runEnergizeSweep(along path: CGPath) {
+        guard window != nil, !reduceMotion, let hostLayer = layer else { return }
+        sweepLayer?.removeFromSuperlayer()
+        let film = CAShapeLayer()
+        film.frame = hostLayer.bounds
+        film.path = path
+        film.fillColor = nil
+        film.lineWidth = PopoverColumnGrid.busLineWidth
+        film.lineCap = .round
+        film.lineJoin = .round
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            film.strokeColor = Tokens.Color.ember.cgColor
+        }
+        film.strokeStart = 1
+        hostLayer.addSublayer(film)
+        sweepLayer = film
+
+        let retreat = CABasicAnimation(keyPath: "strokeStart")
+        retreat.fromValue = 0
+        retreat.toValue = 1
+        retreat.duration = PopoverColumnGrid.railEnergizeSweepDuration
+        retreat.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { [weak self, weak film] in
+            film?.removeFromSuperlayer()
+            if let self, self.sweepLayer === film { self.sweepLayer = nil }
+        }
+        film.add(retreat, forKey: Self.sweepKey)
+        CATransaction.commit()
+    }
+
+    private func cancelEnergizeSweep() {
+        sweepLayer?.removeFromSuperlayer()
+        sweepLayer = nil
+    }
+
+    // MARK: Test-support hooks
+
     /// The rail geometry the overlay would draw from its CURRENT live frames —
     /// the same plan `draw` renders. Lets tests assert the collapse-reactive
     /// resolution (origin at header vs ring, the terminus dot, which stops are
     /// visible) against real laid-out frames without a graphics context.
     public func test_resolvePlan() -> RailPlan? { resolvePlan() }
+
+    /// Reduce Motion override seam — mirrors `RouteArmedDotView`/`HaloRingView`.
+    /// `nil` (the default) reads the live workspace value; tests flip it and
+    /// post the real `accessibilityDisplayOptionsDidChangeNotification`.
+    public var test_reduceMotionOverride: Bool?
+
+    /// Whether the energize film is currently mounted mid-flight (present the
+    /// instant it's added — no run loop needed to assert it fired).
+    public var test_isEnergizeSweeping: Bool { sweepLayer != nil }
+
+    /// The film's MODEL stroke-start — the settled-model-layer contract says it
+    /// is always 1 (fully retreated / invisible) while the presentation plays.
+    public var test_sweepModelStrokeStart: CGFloat? { sweepLayer?.strokeStart }
+
+    /// Run the energize reconcile a qualifying draw would, against the current
+    /// live plan (so tests can drive transitions without a graphics context).
+    public func test_reconcileEnergize() {
+        guard let plan = resolvePlan() else { return }
+        reconcileEnergize(with: plan)
+    }
 }
 
 /// The drawable rail plan — resolved purely from geometry already converted into

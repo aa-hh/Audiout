@@ -59,9 +59,14 @@ import CoreAudio
             get { lock.withLock { _onSnapshot } }
             set { lock.withLock { _onSnapshot = newValue } }
         }
+        private var _userActionAsks = 0
+        /// How often a user gesture asked for the Bluetooth grant (the ask the
+        /// enumerator no longer fires at backend start).
+        var userActionAsks: Int { lock.withLock { _userActionAsks } }
         func start() {}
         func stop() {}
         func refresh() {}
+        func requestAuthorizationForUserAction() { lock.withLock { _userActionAsks += 1 } }
         func fire(_ snapshots: [BTDeviceSnapshot]) { onSnapshot?(snapshots) }
     }
 
@@ -519,6 +524,24 @@ import CoreAudio
         waitFor { sink.deviceSets.count > appliesBefore }
         #expect(sink.deviceSets.count > appliesBefore,
                 "a successful reconnect re-applies the sink decision (Wave-3 gap closed)")
+    }
+
+    /// The enumerator no longer asks for the Bluetooth grant at backend start
+    /// (setup's own card owns the prompt), so a user reaching for a Bluetooth row
+    /// is the fallback asker — otherwise someone who skipped that card has no
+    /// in-app path to the prompt and every attempt is a silent `.unauthorized`.
+    @Test func btRetryAsksForTheGrantOnTheUserGesture() {
+        let manager = FakeBTConnectionManager()
+        let (backend, _, _, bt, _, _) = makeBackend(btConnection: manager)
+        defer { backend.stop() }
+        backend.start()
+        bt.fire([btMove])
+        waitFor { self.device(backend, self.btMove.id) != nil }
+        #expect(bt.userActionAsks == 0, "no gesture yet ⇒ no ask")
+
+        backend.retryOutput(btMove.id)
+        waitFor { bt.userActionAsks == 1 }
+        #expect(bt.userActionAsks == 1)
     }
 
     /// A FAST refusal is the live-measured signature of a speaker another host

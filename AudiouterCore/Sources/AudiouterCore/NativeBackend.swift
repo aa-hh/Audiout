@@ -2726,6 +2726,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             return true
         }
         guard isBT else { return false }
+        // The enumerator no longer asks for the Bluetooth grant at backend start
+        // (setup's own step owns the prompt), so a user reaching for a Bluetooth
+        // row is the fallback asker — otherwise someone who skipped that step
+        // has no in-app path to the prompt at all, and every attempt below is a
+        // silent `.unauthorized`. Once-only, and inert once decided.
+        btEnumerator?.requestAuthorizationForUserAction()
         guard let address, let manager = btConnectionManager else { return true }
         Task { [weak self] in
             let outcome = await manager.connect(address: address)

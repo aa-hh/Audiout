@@ -82,6 +82,12 @@ public enum SetupPermission: CaseIterable, Sendable {
     /// exactly the state where macOS has already stopped handling them itself —
     /// see `docs/plans/PLAN-VOLUME-KEY-INTERCEPTION.md`.
     case remoteControl
+    /// "Bluetooth" — gates the IOBluetooth paired list (so a powered-off
+    /// speaker keeps its row) and programmatic reconnect. Deliberately absent
+    /// from ``RequiredPermission``: without it the app still routes to
+    /// AirPlay and to already-connected Bluetooth endpoints, so it must never
+    /// block setup or force-reopen it.
+    case bluetooth
 }
 
 /// A permission the app REQUIRES to operate — as opposed to Remote Control
@@ -107,6 +113,11 @@ public enum SystemSettingsPane: Sendable {
     case screenAndSystemAudioRecording
     case localNetwork
     case accessibility
+    /// Privacy & Security ▸ Bluetooth — the list of apps allowed to use
+    /// Bluetooth, i.e. where THIS app's grant is toggled. Distinct from
+    /// ``bluetooth`` below, which is the radio's own settings pane and can't
+    /// fix a denied grant.
+    case bluetoothPrivacy
     /// Not a Privacy anchor — the Bluetooth pane itself. The BT-CONNECT
     /// fallback (PLAN-UNIVERSAL-SYNC Decision 3): when a programmatic
     /// reconnect doesn't resolve, one tap lands the user where pairing and
@@ -122,6 +133,8 @@ public enum SystemSettingsPane: Sendable {
             return Self.make("Privacy_LocalNetwork")
         case .accessibility:
             return Self.make("Privacy_Accessibility")
+        case .bluetoothPrivacy:
+            return Self.make("Privacy_Bluetooth")
         case .bluetooth:
             return URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings")!
         }
@@ -237,6 +250,31 @@ public protocol RemoteControlPriming: Sendable {
     func isTrusted() -> Bool
 }
 
+/// Reads the macOS **Bluetooth** permission. `CBManager.authorization` is the
+/// one permission in this flow with a fully honest status API — synchronous,
+/// prompt-free, and three-valued for real (undetermined / granted / denied), so
+/// unlike Local Network and Remote Control this never has to settle for
+/// `.requested`. The production impl is ``BluetoothPermissionReader``; tests
+/// inject a fake.
+public protocol BluetoothPermissionReading: Sendable {
+    /// The live authorization state. Never prompts, never touches IOBluetooth.
+    func currentStatus() -> PermissionStatus
+}
+
+/// Fires the macOS **Bluetooth** permission prompt. Separate from
+/// ``BluetoothPermissionReading`` because only this half has side effects: the
+/// prompt exists solely as a consequence of instantiating a `CBCentralManager`,
+/// which must then be retained until the user answers.
+///
+/// `onDecided` fires ONCE, on granted OR denied — both end the wait, and the
+/// caller re-reads the status to learn which. The production impl is
+/// ``BluetoothPermissionPrimer``; tests inject a fake.
+public protocol BluetoothPermissionPriming: Sendable {
+    /// Open the prompt (if the status is still undetermined) and report back
+    /// once it's answered. May fire `onDecided` on any thread.
+    func prime(onDecided: @escaping @Sendable () -> Void)
+}
+
 // MARK: - The flow model
 
 /// Drives the first-run setup/onboarding flow: holds the observable status of
@@ -269,6 +307,13 @@ public final class SetupModel {
     /// ``RemoteControlPriming``.
     public private(set) var remoteControlStatus: PermissionStatus = .unknown
 
+    /// Bluetooth status, backed by the honest `CBManager.authorization` read —
+    /// so this is a real `.unknown`/`.granted`/`.denied` and never a
+    /// `.requested` placeholder. Refreshed on every ``refreshStatuses()``: the
+    /// read is free and prompt-free, so a grant OR a revocation made in System
+    /// Settings lands (same posture as Remote Control).
+    public private(set) var bluetoothStatus: PermissionStatus = .unknown
+
     /// PTP helper daemon status (T6). Starts `.notRegistered`; becomes
     /// `.requiresApproval` once ``registerPTPHelper()`` runs, then `.enabled`
     /// once the user approves it in Login Items. See ``PTPHelperStatus``.
@@ -284,6 +329,8 @@ public final class SetupModel {
     private let audioProbe: AudioCapturePermissionProbing
     private let localNetwork: LocalNetworkPriming
     private let remoteControl: RemoteControlPriming
+    private let bluetoothReader: BluetoothPermissionReading
+    private let bluetoothPrimer: BluetoothPermissionPriming
     private let ptpHelper: PTPHelperManaging
     private let settings: AppSettings
 
@@ -294,6 +341,11 @@ public final class SetupModel {
     /// the app passes ``osGatesLocalNetwork``.
     private let localNetworkGated: Bool
 
+    /// Whether this OS gates local-network access — read by ``SetupFlowModel``,
+    /// which must count the ungated case as satisfied without inventing a
+    /// status for it.
+    public var isLocalNetworkGated: Bool { localNetworkGated }
+
     /// The real per-OS value for `localNetworkGated`: macOS 15+ gates local
     /// network, earlier versions don't. The app injects this. The init default
     /// stays `true` so existing tests keep their gated expectations regardless of
@@ -302,15 +354,24 @@ public final class SetupModel {
         if #available(macOS 15, *) { return true } else { return false }
     }
 
+    /// The Bluetooth pair defaults INERT (an undetermined read, a prime that
+    /// decides immediately without a `CBCentralManager`) for the same reason
+    /// ``BTDeviceEnumerator``'s authorization pair does: a test that forgets to
+    /// inject it must degrade to "never asks, never reads the runner's real
+    /// grant", not spring a system prompt mid-`swift test`.
     public init(audioProbe: AudioCapturePermissionProbing,
                 localNetwork: LocalNetworkPriming,
                 remoteControl: RemoteControlPriming,
                 ptpHelper: PTPHelperManaging,
+                bluetoothReader: BluetoothPermissionReading = SimulatedBluetoothPermission(status: .unknown),
+                bluetoothPrimer: BluetoothPermissionPriming = SimulatedBluetoothPermission(status: .unknown),
                 settings: AppSettings = AppSettings(),
                 localNetworkGated: Bool = true) {
         self.audioProbe = audioProbe
         self.localNetwork = localNetwork
         self.remoteControl = remoteControl
+        self.bluetoothReader = bluetoothReader
+        self.bluetoothPrimer = bluetoothPrimer
         self.ptpHelper = ptpHelper
         self.settings = settings
         self.localNetworkGated = localNetworkGated
@@ -322,7 +383,7 @@ public final class SetupModel {
         }
     }
 
-    /// Convenience over the four-seam init that takes a ``PermissionProviders``
+    /// Convenience over the seam-by-seam init that takes a ``PermissionProviders``
     /// bundle — how the app builds it once from ``PermissionMode`` and threads
     /// the same set (real or simulated) into every construction site.
     public convenience init(providers: PermissionProviders,
@@ -332,6 +393,8 @@ public final class SetupModel {
                   localNetwork: providers.localNetwork,
                   remoteControl: providers.remoteControl,
                   ptpHelper: providers.ptpHelper,
+                  bluetoothReader: providers.bluetoothReader,
+                  bluetoothPrimer: providers.bluetoothPrimer,
                   settings: settings,
                   localNetworkGated: localNetworkGated)
     }
@@ -382,6 +445,29 @@ public final class SetupModel {
         onChange?()
     }
 
+    /// Ask for Bluetooth. The prompt's answer arrives through the primer's
+    /// decision callback — granted and denied both end the wait — and the
+    /// honest status comes from re-reading `CBManager.authorization`, never
+    /// from assuming the answer. No status is written here: an undecided prompt
+    /// must leave the step exactly as it was.
+    public func primeBluetooth() {
+        bluetoothPrimer.prime {
+            Task { @MainActor [weak self] in self?.refreshBluetoothStatus() }
+        }
+    }
+
+    /// Re-read the Bluetooth authorization — a silent, prompt-free read, so
+    /// this is safe to call on any focus/decision edge and a `.granted` →
+    /// revoked downgrade is allowed (same posture as
+    /// ``refreshRemoteControlStatus()``). Fires `onChange` only on an actual
+    /// transition.
+    public func refreshBluetoothStatus() {
+        let next = bluetoothReader.currentStatus()
+        guard next != bluetoothStatus else { return }
+        bluetoothStatus = next
+        onChange?()
+    }
+
     /// T5: emits the exact "setup says X, the live TCC-backed read says Y"
     /// comparison at every audio reconciliation point (``refreshStatuses()``,
     /// ``auditRequiredPermissions()``) — the evidence tonight's live bug had
@@ -426,6 +512,8 @@ public final class SetupModel {
     ///   prompt), upgrading `.requested` → `.granted` once discovery works.
     /// - **PTP helper** always re-reads `.status` (silent, no re-`register()` —
     ///   see ``refreshPTPHelperStatus()``), the same posture as Remote Control.
+    /// - **Bluetooth** always re-reads `CBManager.authorization` (silent and
+    ///   prompt-free), same posture again — see ``refreshBluetoothStatus()``.
     public func refreshStatuses() async {
         // Remote Control — silent, always safe.
         if remoteControl.isTrusted() {
@@ -453,6 +541,9 @@ public final class SetupModel {
 
         // PTP helper — silent status read only, never re-registers here.
         ptpHelperStatus = ptpHelper.status
+
+        // Bluetooth — silent, prompt-free, so always re-read.
+        refreshBluetoothStatus()
 
         onChange?()
     }
@@ -632,9 +723,15 @@ public final class SetupModel {
         return unmetRequiredPermissions()
     }
 
-    /// Mark the flow finished so it doesn't present again on launch. Does NOT
-    /// require every permission to be granted — setup is guidance, not a gate;
-    /// the app still runs (and re-prompts lazily) if the user skips a grant.
+    /// Mark the flow finished so it doesn't present again on launch. A plain
+    /// persistence write: it checks no status of its own.
+    ///
+    /// Completion IS gated, just not here. Setup is a GATE, not guidance (owner
+    /// decision, reversing what this comment used to promise): the UI offers no
+    /// Done affordance at all until ``SetupFlowModel/isDoneAvailable`` is true,
+    /// so reaching this call means every required permission verified. The ✕
+    /// close remains the one ungated exit and deliberately does NOT come through
+    /// here — the flow returns next launch.
     public func complete() {
         settings.hasCompletedSetup = true
     }

@@ -47,6 +47,30 @@ extension SerializedSharedState {
         func isTrusted() -> Bool { trusted }
     }
 
+    /// Plays the Bluetooth pair: a scriptable authorization status plus a prompt
+    /// that records itself and hands the decision callback back to the test, so
+    /// nothing here constructs a `CBCentralManager`.
+    private final class BluetoothScript: BluetoothPermissionReading, BluetoothPermissionPriming, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _status: PermissionStatus = .unknown
+        private var _primeCount = 0
+        private var _onDecided: (@Sendable () -> Void)?
+        var status: PermissionStatus {
+            get { lock.withLock { _status } }
+            set { lock.withLock { _status = newValue } }
+        }
+        var primeCount: Int { lock.withLock { _primeCount } }
+        func currentStatus() -> PermissionStatus { status }
+        func prime(onDecided: @escaping @Sendable () -> Void) {
+            lock.withLock { _primeCount += 1; _onDecided = onDecided }
+        }
+        /// The user answered the prompt.
+        func decide(_ answer: PermissionStatus) {
+            status = answer
+            lock.withLock { _onDecided }?()
+        }
+    }
+
     /// Records `register()`/`openSystemSettingsLoginItems()` calls and returns a
     /// canned ``PTPHelperStatus`` — never touches the real `SMAppService`.
     private final class FakePTPHelper: PTPHelperManaging, @unchecked Sendable {
@@ -245,6 +269,140 @@ extension SerializedSharedState {
         spy.trusted = false
         model.primeRemoteControl()
         #expect(model.remoteControlStatus == .requested)
+    }
+
+    // MARK: Bluetooth (CBManager.authorization — the one fully honest status API)
+
+    private func makeBluetoothModel(_ script: BluetoothScript) -> (SetupModel, ChangeCounter) {
+        let counter = ChangeCounter()
+        let model = SetupModel(audioProbe: CannedAudioProbe(result: .granted),
+                               localNetwork: SpyLocalNetwork(),
+                               remoteControl: SpyRemoteControl(),
+                               ptpHelper: FakePTPHelper(),
+                               bluetoothReader: script,
+                               bluetoothPrimer: script,
+                               settings: AppSettings(defaults: defaults))
+        model.onChange = { counter.count += 1 }
+        return (model, counter)
+    }
+
+    /// `primeBluetooth()`'s decision callback reaches the main actor through a
+    /// `Task`, so it lands on a suspension point rather than synchronously.
+    private func waitForChange(_ satisfied: () -> Bool) async {
+        for _ in 0..<1_000 {
+            if satisfied() { return }
+            await Task.yield()
+        }
+    }
+
+    @Test func bluetoothStatusMapsFromTheSilentRead() async {
+        let script = BluetoothScript()
+        let (model, _) = makeBluetoothModel(script)
+        #expect(model.bluetoothStatus == .unknown, "undetermined ⇒ unknown, never a sticky requested")
+
+        script.status = .granted
+        await model.refreshStatuses()
+        #expect(model.bluetoothStatus == .granted)
+
+        // Bluetooth has a REAL denied — unlike Local Network / Remote Control,
+        // this flow never has to soften a refusal into `.requested`.
+        script.status = .denied
+        await model.refreshStatuses()
+        #expect(model.bluetoothStatus == .denied)
+    }
+
+    /// A revocation made in System Settings downgrades a prior `.granted` — the
+    /// read is free and prompt-free, so it is always re-read (same posture as
+    /// Remote Control).
+    @Test func refreshDowngradesBluetoothWhenRevoked() async {
+        let script = BluetoothScript()
+        script.status = .granted
+        let (model, _) = makeBluetoothModel(script)
+        await model.refreshStatuses()
+        #expect(model.bluetoothStatus == .granted)
+
+        script.status = .denied
+        await model.refreshStatuses()
+        #expect(model.bluetoothStatus == .denied)
+    }
+
+    @Test func primeBluetoothLeavesStatusUntouchedUntilTheUserAnswers() async {
+        let script = BluetoothScript()
+        let (model, counter) = makeBluetoothModel(script)
+
+        model.primeBluetooth()
+        #expect(script.primeCount == 1)
+        #expect(model.bluetoothStatus == .unknown, "an unanswered prompt is not an answer")
+        #expect(counter.count == 0, "no transition ⇒ no onChange noise")
+    }
+
+    @Test func primeBluetoothAdoptsTheGrantWhenDecided() async {
+        let script = BluetoothScript()
+        let (model, counter) = makeBluetoothModel(script)
+
+        model.primeBluetooth()
+        script.decide(.granted)
+        await waitForChange { model.bluetoothStatus == .granted }
+
+        #expect(model.bluetoothStatus == .granted)
+        #expect(counter.count == 1, "one transition ⇒ exactly one repaint")
+    }
+
+    /// A denial ends the wait exactly like a grant does — the callback fires
+    /// either way, and re-reading the status is what tells them apart.
+    @Test func primeBluetoothAdoptsADenialWhenDecided() async {
+        let script = BluetoothScript()
+        let (model, _) = makeBluetoothModel(script)
+
+        model.primeBluetooth()
+        script.decide(.denied)
+        await waitForChange { model.bluetoothStatus == .denied }
+
+        #expect(model.bluetoothStatus == .denied)
+    }
+
+    /// Bluetooth is an ENHANCEMENT (locked: it joins the flow, not the required
+    /// set): a denial must leave Done available and must never force-reopen
+    /// setup, or a user without Bluetooth could never finish.
+    @Test func deniedBluetoothLeavesEveryRequiredPermissionSatisfied() async {
+        let script = BluetoothScript()
+        script.status = .denied
+        let net = SpyLocalNetwork()
+        net.reachable = true
+        let ptpHelper = FakePTPHelper()
+        ptpHelper.status = .enabled
+        let model = SetupModel(audioProbe: CannedAudioProbe(result: .granted),
+                               localNetwork: net,
+                               remoteControl: SpyRemoteControl(),
+                               ptpHelper: ptpHelper,
+                               bluetoothReader: script,
+                               bluetoothPrimer: script,
+                               settings: AppSettings(defaults: defaults))
+        await model.requestAudioCapture()
+        await model.primeLocalNetwork()
+        await model.refreshStatuses()
+
+        #expect(model.bluetoothStatus == .denied)
+        #expect(model.requiredPermissionsNotGranted().isEmpty,
+                "a denied Bluetooth must not hold the Done gate shut")
+        #expect(model.unmetRequiredPermissions().isEmpty,
+                "a denied Bluetooth must not force-reopen setup")
+    }
+
+    /// Bluetooth is a step in the flow but never a required permission — the
+    /// locked product decision, in the only two places it is expressible.
+    @Test func bluetoothIsASetupStepButNotRequired() {
+        #expect(SetupPermission.allCases.contains(.bluetooth))
+        #expect(RequiredPermission.allCases.count == 3)
+    }
+
+    /// The mapping from `CBManager.authorization`, exhaustively — the live read
+    /// itself can only ever report whatever this Mac happens to have granted.
+    @Test func cbAuthorizationMapping() {
+        #expect(BluetoothPermissionReader.status(for: .notDetermined) == .unknown)
+        #expect(BluetoothPermissionReader.status(for: .allowedAlways) == .granted)
+        #expect(BluetoothPermissionReader.status(for: .denied) == .denied)
+        #expect(BluetoothPermissionReader.status(for: .restricted) == .denied)
     }
 
     // MARK: PTP helper daemon (T6 — SMAppService registration + approval)
@@ -850,6 +1008,18 @@ extension SerializedSharedState {
         #expect(
             SystemSettingsPane.privacyRoot.absoluteString ==
             "x-apple.systempreferences:com.apple.preference.security")
+    }
+
+    /// The Bluetooth CARD's retry destination is the Privacy pane (where this
+    /// app's grant is toggled), NOT `SystemSettingsPane.bluetooth`, which is the
+    /// radio's own pane and can't fix a denied grant.
+    @Test func bluetoothPrivacyPaneIsThePrivacyAnchorNotTheRadioPane() {
+        #expect(
+            SystemSettingsPane.bluetoothPrivacy.url.absoluteString ==
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth")
+        #expect(
+            SystemSettingsPane.bluetooth.url.absoluteString ==
+            "x-apple.systempreferences:com.apple.BluetoothSettings")
     }
     }
 }

@@ -66,6 +66,15 @@ import AudiouterCore
 @MainActor
 public final class ControlPanelWindowController: NSWindowController {
 
+    /// The duration animated `setFrame` resizes of the shell window use — a
+    /// window's frame animation reads `animationResizeTime(_:)`, never the
+    /// enclosing `NSAnimationContext`, so a host that animates window and
+    /// content in step MUST set this to the content's shared duration.
+    public var resizeAnimationDuration: TimeInterval? {
+        get { (window as? ControlPanelPanel)?.resizeAnimationDuration }
+        set { (window as? ControlPanelPanel)?.resizeAnimationDuration = newValue }
+    }
+
     /// Fired when the panel closes for real (✕ / Esc / `performClose`) — never
     /// for a `hidesOnDeactivate` tuck-away. The caller uses this to "land home"
     /// (re-present the menu-bar popover).
@@ -766,6 +775,19 @@ final class ControlPanelPanel: NSPanel {
     /// consume the event. Set through
     /// `ControlPanelWindowController.keyEquivalentHandler`.
     var keyEquivalentHandler: ((NSEvent) -> Bool)?
+
+    /// The duration `animator().setFrame` resizes actually use. An NSWindow
+    /// frame animation takes its duration from `animationResizeTime(_:)`, NOT
+    /// from the enclosing `NSAnimationContext` — so a host animating window
+    /// and content together must set this to the content's duration or the two
+    /// run on different clocks no matter what the context says (live
+    /// slow-motion capture 2026-08-11: content slowed 10x, window still
+    /// snapped shut at AppKit's default pace). `nil` keeps the default.
+    var resizeAnimationDuration: TimeInterval?
+
+    override func animationResizeTime(_ newFrame: NSRect) -> TimeInterval {
+        resizeAnimationDuration ?? super.animationResizeTime(newFrame)
+    }
 
     override func cancelOperation(_ sender: Any?) {
         performClose(sender)

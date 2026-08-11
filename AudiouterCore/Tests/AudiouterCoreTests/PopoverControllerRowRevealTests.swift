@@ -53,13 +53,12 @@ import Foundation
         return (panel, rows, panel.fittingSizeSettled().height)
     }
 
-    /// Spin the run loop until `condition` holds — the reveal's constraint
-    /// animation is timer-driven, so under parallel-suite CPU contention it
-    /// owns no fixed pace and a single fixed sleep flakes (the roadmap-023
-    /// lesson). A missed deadline falls through to the caller's assertion,
-    /// which then reports the real value. COMPLETION handlers still never fire
-    /// for a view that is in no window, so nothing here may depend on
-    /// `removeRow`'s deferred detach.
+    /// Spin the run loop until `condition` holds — the reveal is driven by
+    /// `FoldAnimator`'s main-runloop timer, so under parallel-suite CPU
+    /// contention it owns no fixed pace and a single fixed sleep flakes (the
+    /// roadmap-023 lesson). A missed deadline falls through to the caller's
+    /// assertion, which then reports the real value. A test that spins nothing
+    /// gets no ticks at all — that is the harness the eviction case below wants.
     private func settle(until condition: () -> Bool) {
         let deadline = Date().addingTimeInterval(5)
         while !condition() && Date() < deadline {
@@ -69,15 +68,17 @@ import Foundation
 
     // MARK: The published height
 
-    @Test func insertPublishesTheGrownHeightBeforeTheRowAnimatesIn() {
+    @Test func insertPublishesTheHeightItIsLaidOutAtOnEveryTickOfTheReveal() {
         let (panel, rows, collapsed) = makePanel(reduceMotion: false)
         let drawer = FixedRow(height: Self.drawerHeight)
 
         panel.insertRow(drawer, after: rows[0], animated: true)
 
+        #expect(panel.preferredContentSize.height == collapsed,
+                "the published size is the height the panel is actually laid out at — at the start of the reveal that is still the collapsed one (`FoldAnimator`: one animated value, everything else derived from it)")
+        settle { panel.preferredContentSize.height == collapsed + Self.drawerHeight }
         #expect(panel.preferredContentSize.height == collapsed + Self.drawerHeight,
-                "the popover has to be told the FINAL height up front — it is what grows the window while the row unfolds into it")
-        settle { panel.fittingSizeSettled().height == panel.preferredContentSize.height }
+                "and it arrives at the grown height with the row, never ahead of it")
         #expect(drawer.isHidden == false, "the row ends the animation visible")
         #expect(panel.fittingSizeSettled().height == panel.preferredContentSize.height,
                 "content and published size agree once the animation settles")
@@ -93,9 +94,9 @@ import Foundation
 
         panel.insertRow(drawer, after: rows[0], animated: true)
 
+        settle { panel.preferredContentSize.height == collapsed + Self.drawerHeight }
         #expect(panel.preferredContentSize.height == collapsed + Self.drawerHeight,
-                "a re-mounted row must publish its height like a fresh one; measuring it while hidden published \(collapsed) and let the content overflow the popover")
-        settle { drawer.isHidden == false }
+                "a re-mounted row must reach its full height like a fresh one; measured while hidden it counted for nothing and the reveal published \(collapsed) forever, letting the content overflow the popover")
         #expect(drawer.isHidden == false)
     }
 
@@ -202,7 +203,10 @@ import Foundation
                 "the drawer remounts under its NEW sibling, back in the body stack")
         #expect(stack?.arrangedSubviews.filter { $0 is RowClipView }.count == 1,
                 "the closing clip was evicted — exactly one clip remains mounted")
+        #expect(panel.preferredContentSize.height == collapsed,
+                "the fresh reveal starts from the bare panel — no residue from the evicted clip's mid-close height")
+        FoldAnimator.shared.test_settleNow()
         #expect(panel.preferredContentSize.height == collapsed + Self.drawerHeight,
-                "the published height carries no residue from the evicted clip")
+                "…and arrives at exactly one drawer taller, the stale clip's detach still a no-op")
     }
 }

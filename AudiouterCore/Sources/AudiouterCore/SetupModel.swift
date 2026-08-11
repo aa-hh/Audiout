@@ -629,12 +629,27 @@ public final class SetupModel {
     /// permission, where a spinner is pure cost.
     static let rescanBrowseSeconds: TimeInterval = 3
 
+    /// The one Local Network prime in flight, shared by every concurrent
+    /// caller — see ``probeLocalNetwork(onReachable:)``.
+    private var localNetworkProbeTask: Task<PermissionStatus, Never>?
+
     /// Run the prime, record how many speakers it saw, and map the outcome to a
     /// status. One place so `primeLocalNetwork()`, ``refreshStatuses()`` and
     /// ``auditRequiredPermissions()`` can never disagree.
+    ///
+    /// Concurrent callers COALESCE onto one running prime instead of each
+    /// firing their own: `LocalNetworkPrimer`'s in-flight guard answers a
+    /// colliding prime `.undecided` — "not yet known" — which this funnel
+    /// would then record as a real `.requested`. That fabricated answer is how
+    /// clicking Done while the app-reactivation `refreshStatuses()` was still
+    /// browsing made the verification claim Local Network was unmet and refuse
+    /// to finish (live, 2026-08-11). A joiner inherits the running prime's
+    /// browse window and outcome; only the starter's `onReachable` is live
+    /// (the silent callers pass none, so nothing user-facing is lost).
     private func probeLocalNetwork(
         onReachable: @escaping @Sendable () -> Void = {}
     ) async -> PermissionStatus {
+        if let running = localNetworkProbeTask { return await running.value }
         // `.unknown` means nothing has primed yet, so THIS prime is the one that
         // raises the system permission dialog, and it must outlast a person
         // reading it. Every later prime re-checks an already-decided permission,
@@ -645,31 +660,39 @@ public final class SetupModel {
         // rescans skip the published service (and the firewall dialog that
         // publishing can raise) and just browse.
         let wasGranted = localNetworkStatus == .granted
-        switch await localNetwork.prime(browseSeconds: window,
-                                        selfDiscovery: !wasGranted,
-                                        onReachable: onReachable) {
-        case .granted(let found):
-            // A later browse that saw FEWER speakers hasn't unsaid the earlier
-            // sighting — a speaker was switched off, which is not a permission
-            // event. Only a browse that actually saw something rewrites the
-            // count a granted card is showing.
-            if found > 0 || !wasGranted { localNetworkFoundSpeakers = found }
-            return .granted
-        case .denied:
-            localNetworkFoundSpeakers = 0
-            return .denied
-        case .undecided:
-            // GRANTED IS PROVEN AND STICKY. Self-discovery proved the
-            // permission; a later rescan that proves nothing (an empty network,
-            // a prime already in flight, a browse that ended early) has NOT
-            // disproved it. Downgrade here and every app activation flaps the
-            // completed card to "permission lost" and back. The only thing that
-            // takes the grant away is the refusal itself — the mDNS policy
-            // error, which arrives as `.denied` above.
-            guard !wasGranted else { return .granted }
-            localNetworkFoundSpeakers = 0
-            return .requested
+        let primer = localNetwork
+        let probe = Task { @MainActor [weak self] () -> PermissionStatus in
+            switch await primer.prime(browseSeconds: window,
+                                      selfDiscovery: !wasGranted,
+                                      onReachable: onReachable) {
+            case .granted(let found):
+                // A later browse that saw FEWER speakers hasn't unsaid the
+                // earlier sighting — a speaker was switched off, which is not a
+                // permission event. Only a browse that actually saw something
+                // rewrites the count a granted card is showing.
+                if found > 0 || !wasGranted { self?.localNetworkFoundSpeakers = found }
+                return .granted
+            case .denied:
+                self?.localNetworkFoundSpeakers = 0
+                return .denied
+            case .undecided:
+                // GRANTED IS PROVEN AND STICKY. Self-discovery proved the
+                // permission; a later rescan that proves nothing (an empty
+                // network, a prime already in flight, a browse that ended
+                // early) has NOT disproved it. Downgrade here and every app
+                // activation flaps the completed card to "permission lost" and
+                // back. The only thing that takes the grant away is the refusal
+                // itself — the mDNS policy error, which arrives as `.denied`
+                // above.
+                guard !wasGranted else { return .granted }
+                self?.localNetworkFoundSpeakers = 0
+                return .requested
+            }
         }
+        localNetworkProbeTask = probe
+        let status = await probe.value
+        localNetworkProbeTask = nil
+        return status
     }
 
     /// Abandon a Local Network prime that is in flight — the window closing

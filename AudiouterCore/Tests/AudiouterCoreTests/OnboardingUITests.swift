@@ -118,6 +118,72 @@ import Testing
         }
     }
 
+    /// The real `LocalNetworkPrimer`'s collision shape in miniature: a prime
+    /// that runs while another is parked answers `.undecided` IMMEDIATELY —
+    /// exactly what the primer's in-flight guard does to the loser. Unparked
+    /// primes answer granted instantly so the flow can be walked; `armParking()`
+    /// parks the NEXT prime until `resume()`.
+    private final class CollidingLocalNetwork: LocalNetworkPriming, @unchecked Sendable {
+        private let lock = NSLock()
+        private var parkNext = false
+        private var parkedResume: (() -> Void)?
+        private var parkedWaiter: (() -> Void)?
+        private(set) var primeCount = 0
+
+        func probe() async -> Bool { true }
+
+        func armParking() { lock.withLock { parkNext = true } }
+
+        var test_primeCount: Int { lock.withLock { primeCount } }
+
+        func prime(browseSeconds: TimeInterval,
+                   onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome {
+            enum Role { case parked, collided, instant }
+            let role: Role = lock.withLock {
+                primeCount += 1
+                if parkedResume != nil { return .collided }
+                if parkNext { parkNext = false; return .parked }
+                return .instant
+            }
+            switch role {
+            case .collided: return .undecided
+            case .instant: return .granted(foundSpeakers: 2)
+            case .parked:
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    let waiter: (() -> Void)? = lock.withLock {
+                        parkedResume = { continuation.resume() }
+                        let waiter = parkedWaiter
+                        parkedWaiter = nil
+                        return waiter
+                    }
+                    waiter?()
+                }
+                onReachable()
+                return .granted(foundSpeakers: 2)
+            }
+        }
+
+        func waitUntilParked() async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let alreadyParked: Bool = lock.withLock {
+                    if parkedResume != nil { return true }
+                    parkedWaiter = { continuation.resume() }
+                    return false
+                }
+                if alreadyParked { continuation.resume() }
+            }
+        }
+
+        func resume() {
+            let gate: (() -> Void)? = lock.withLock {
+                let gate = parkedResume
+                parkedResume = nil
+                return gate
+            }
+            gate?()
+        }
+    }
+
     /// A Bluetooth prompt that never reports back — the wedge case.
     private struct NeverDecidingBluetooth: BluetoothPermissionPriming {
         func prime(onDecided: @escaping @Sendable () -> Void) {}
@@ -745,6 +811,64 @@ import Testing
         #expect(!vc.test_doneExists, "the gate closes again")
     }
 
+    /// The live double-click bug's exact shape: the app-reactivation
+    /// `refreshStatuses()` is still browsing the local network when the user
+    /// clicks Done. The verification must JOIN that running probe and finish on
+    /// the first click — the real primer answers a colliding prime `.undecided`
+    /// (its in-flight guard), which the model would have recorded as a real
+    /// "not granted" and refused to finish on.
+    @Test func doneFinishesOnTheFirstClickWhileAReactivationProbeIsStillBrowsing() async {
+        let net = CollidingLocalNetwork()
+        var doneCount = 0
+        let vc = makeVC(model: makeModel(audio: .granted, localNetwork: net,
+                                         ptpHelper: FakePTPHelper(status: .enabled)),
+                        onDone: { doneCount += 1 })
+        await vc.test_allow([.audio, .localNetwork])
+        #expect(vc.test_doneExists)
+
+        net.armParking()
+        let reactivation = Task { await vc.test_refreshStatuses() }
+        await net.waitUntilParked()
+
+        let done = Task { await vc.test_tapDone() }
+        await waitUntil { vc.test_doneVerifyInFlight }
+        // Let the verification reach the shared probe before the browse answers.
+        for _ in 0..<20 { await Task.yield() }
+        net.resume()
+        await done.value
+        await reactivation.value
+
+        #expect(doneCount == 1, "the FIRST click finishes")
+        #expect(vc.test_snapBackStep == nil, "no fabricated unmet permission")
+        #expect(net.test_primeCount == 2,
+                "the walk's browse plus the reactivation's — the verification joined, it did not stack a third")
+    }
+
+    /// A second click while Done's verification is still running is a no-op —
+    /// single-flight, like the Allow path. Without it the second verification
+    /// would collide with the first's browse and race it past `onDone`.
+    @Test func aSecondClickDuringDoneVerificationIsANoOp() async {
+        let net = CollidingLocalNetwork()
+        var doneCount = 0
+        let vc = makeVC(model: makeModel(audio: .granted, localNetwork: net,
+                                         ptpHelper: FakePTPHelper(status: .enabled)),
+                        onDone: { doneCount += 1 })
+        await vc.test_allow([.audio, .localNetwork])
+
+        net.armParking()
+        let first = Task { await vc.test_tapDone() }
+        await net.waitUntilParked()   // the first verification's browse is live
+
+        await vc.test_tapDone()       // the second click, mid-verification
+
+        #expect(doneCount == 0, "the no-op returned while the first verification still runs")
+        net.resume()
+        await first.value
+
+        #expect(doneCount == 1, "exactly one finish")
+        #expect(net.test_primeCount == 2, "the second click fired no browse of its own")
+    }
+
     // MARK: The finale (setup-complete state)
 
     /// A model every step of the flow can be walked to completion on — the
@@ -764,30 +888,39 @@ import Testing
         #expect(vc.test_doneIsReturnDefault)
     }
 
-    @Test func theSubtitleBecomesTheCompleteLineWhenTheGateOpens() async {
+    /// The header keeps its welcome subtitle in EVERY state — the payoff line
+    /// lives on the finale card in the demo pane, never in the header.
+    @Test func theHeaderKeepsTheWelcomeSubtitleWhenTheGateOpens() async {
         let vc = makeVC(model: makeGrantableModel())
         #expect(vc.test_subtitleText == OnboardingViewController.welcomeSubtitle)
 
         await vc.test_allow([.audio, .localNetwork])
 
-        #expect(vc.test_subtitleText == "Your Mac's sound can reach every room.")
+        #expect(vc.test_doneExists)
+        #expect(vc.test_subtitleText == OnboardingViewController.welcomeSubtitle)
     }
 
-    /// Precedence, and the honest predicate: the lost-permission warning
-    /// outranks the complete line while its permission is missing, and once the
-    /// gate opens the complete line must not read as a warning to the banner
-    /// hooks — a string-compare predicate ("not the welcome copy") would.
-    @Test func theCompleteLineNeitherOutranksNorImpersonatesTheWarning() async {
+    /// The finale card carries the payoff copy: display headline over the
+    /// every-room line (owner copy 2026-08-11 — no found-speaker count).
+    @Test func theFinaleCardCarriesThePayoffCopy() {
+        let settled = DemoSettledMockView()
+        #expect(settled.test_headlineText == "You're all set.")
+        #expect(settled.test_lineText == "Your Mac's sound can reach every room.")
+    }
+
+    /// The warning stands down to the WELCOME line once its permission is
+    /// re-granted — even with the gate open — and the banner hooks report the
+    /// tracked message kind.
+    @Test func theWarningStandsDownToTheWelcomeLineOnceRegranted() async {
         let vc = makeVC(model: makeGrantableModel(), reason: .permissionLost([.audioCapture]))
         #expect(vc.test_permissionLostBannerIsVisible,
-                "the warning outranks everything while its permission is missing")
+                "the warning shows while its permission is missing")
 
         await vc.test_allow([.audio, .localNetwork])
 
-        #expect(vc.test_subtitleText == "Your Mac's sound can reach every room.",
-                "gate open: the payoff line, not the welcome")
-        #expect(!vc.test_permissionLostBannerIsVisible,
-                "a non-welcome subtitle is not evidence of a warning")
+        #expect(vc.test_doneExists)
+        #expect(vc.test_subtitleText == OnboardingViewController.welcomeSubtitle)
+        #expect(!vc.test_permissionLostBannerIsVisible)
         #expect(vc.test_permissionLostBannerText == nil)
     }
 

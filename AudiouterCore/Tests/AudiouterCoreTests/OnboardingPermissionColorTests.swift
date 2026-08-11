@@ -205,6 +205,34 @@ extension SerializedSharedState {
         assertMutuallyDistinct(appearance: .aqua)
     }
 
+    // MARK: goldCTA — the finale CTA's double floor (ink AND canvas)
+
+    /// The Setup CTA's fill is contrast-governed on BOTH sides: white ink must
+    /// clear the 4.5:1 body floor on it, and the fill itself must clear 3:1
+    /// against `canvas` — the Setup window's true background. Re-measured here
+    /// rather than trusted from the token's written rationale, in both
+    /// appearances, plus the ink PICK itself: the measured-ink machinery must
+    /// resolve white on this fill everywhere.
+    @Test func goldCTAClearsTheInkAndCanvasFloorsInBothAppearances() {
+        Tokens.accentStyle = .fullGold
+        for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
+            let fill = resolved(Tokens.Color.goldCTA, appearanceName: appearance)
+            let canvas = resolved(Tokens.Color.canvas, appearanceName: appearance)
+            let inkRatio = contrastRatio(fill, .white)
+            let canvasRatio = contrastRatio(fill, canvas)
+            #expect(inkRatio >= 4.5,
+                    "goldCTA/\(appearance.rawValue): white ink \(inkRatio):1 under the 4.5:1 body floor")
+            #expect(canvasRatio >= 3.0,
+                    "goldCTA/\(appearance.rawValue): fill vs canvas \(canvasRatio):1 under the 3:1 floor")
+
+            let cta = ProminentButton(title: "Start listening", target: nil, action: nil,
+                                      fill: Tokens.Color.goldCTA, picksInkFromFill: true)
+            cta.appearance = NSAppearance(named: appearance)
+            #expect(cta.test_measuredKeyInk == .white,
+                    "goldCTA/\(appearance.rawValue): the measured ink must be white — the fill is authored deep enough that black never wins")
+        }
+    }
+
     // MARK: 5/6 — the glyph tint is PERMANENT; the tile fill never recolours (Q2/Q3)
 
     /// Forces a layer-backed, off-window tile through one real display pass:

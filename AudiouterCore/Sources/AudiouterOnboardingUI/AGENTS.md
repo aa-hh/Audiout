@@ -30,7 +30,13 @@ set changes, or when the gate/motion/demo rules change.
   `SetupFlowModel.isDoneAvailable`; never disabled, never alpha-hidden. There is no
   "Continue without every permission?" sheet — it and its paths were deleted in the
   same change. Clicking Done re-verifies (`verifyForDone()`, silent reads only) and
-  on failure snaps the flow back to the card that came up short. The ✕ close remains
+  on failure snaps the flow back to the card that came up short. **The verification
+  is SINGLE-FLIGHT, and `SetupModel` coalesces concurrent Local Network probes onto
+  one running prime** — the audit's re-browse takes seconds, and a colliding prime
+  is answered `.undecided` by the primer's in-flight guard, which the model would
+  record as a real "not granted": that fabricated answer is how clicking Done while
+  the reactivation `refreshStatuses()` was still browsing refused to finish (live,
+  2026-08-11 — "Start listening took two clicks"). The ✕ close remains
   the one ungated exit and still doesn't persist completion. Done rides DIRECTLY
   under the card stack (`cardsToFooterGap`), not pinned to the pane's bottom edge:
   the window is a fixed height, so the bottom pin left the complete state with the
@@ -222,14 +228,14 @@ set changes, or when the gate/motion/demo rules change.
   revoked after setup already completed. **There is no banner VIEW any more** — the
   message rides the header subtitle tinted `Tokens.Color.warning`, so the layout is
   identical either way. It re-words itself to the still-missing subset and stands
-  down once every permission it named is granted, without expanding to cover
-  anything it didn't originally flag. **The subtitle carries THREE messages, in
-  precedence order:** that warning → the COMPLETE line, "Your Mac's sound can
-  reach every room." (owner copy 2026-08-11 — deliberately NO found-speaker count),
-  whenever the Done gate is open → the welcome line. Which one is showing is
-  tracked as a message KIND, and that kind is what the banner hooks report — a
-  string-compare predicate ("not the welcome copy") would call the complete line a
-  warning. The `test_showsPermissionLostBanner` /
+  down to the welcome line once every permission it named is granted, without
+  expanding to cover anything it didn't originally flag. **The welcome subtitle
+  holds in EVERY other state, complete included** (owner decision 2026-08-11): the
+  payoff line — "Your Mac's sound can reach every room.", deliberately with NO
+  found-speaker count — belongs to the demo pane's finale card, under "You're all
+  set.", never to the header. Which header message is showing is tracked as a
+  message KIND, and that kind is what the banner hooks report — never a
+  string-compare against the welcome copy. The `test_showsPermissionLostBanner` /
   `test_permissionLostBannerIsVisible` / `test_permissionLostBannerText` hooks
   kept their names so the intent stayed testable across the rebuild.
 - Done and ✕ are NOT equivalent: both call `dismiss()` exactly once (single-fire
@@ -296,12 +302,16 @@ set changes, or when the gate/motion/demo rules change.
     spends it without motion; off-window/headless leave it UNSPENT so the
     presentation that can show it still gets it. No loop, no Replay, no idle motion
     after it. Its RESTING frame must read rich on its own (static gold aura +
-    display-weight "You're all set.") — it is also the model-layer state, so every
-    animation ends there and snapshots stay deterministic. The aura/rings stamp
-    resolved `gold`/`glow`, so the view observes the accent-dial and a11y
-    notifications like the mocks do. On the animated transition the shot rides the
-    step crossfade itself (fired as the fade STARTS), or the text would reveal
-    twice.
+    display-weight "You're all set." over the payoff line) — it is also the
+    model-layer state, so every animation ends there and snapshots stay
+    deterministic. The rings' travel is DERIVED from the icon centre's real
+    distance to the nearest surface edge, never authored: an authored end-scale is
+    how the ripple got clipped by the surface's top edge live, and the surface
+    height itself was raised for the same reason (`DemoPaneView.surfaceSize`).
+    The aura/rings stamp resolved `gold`/`glow`, so the view observes the
+    accent-dial and a11y notifications like the mocks do. On the animated
+    transition the shot rides the step crossfade itself (fired as the fade
+    STARTS), or the text would reveal twice.
   - **A pass must END where it started.** The settled frame is the surface AS THE
     USER WILL FIND IT — the ask, or the switch off — never the finished state: the
     pane always shows the ACTIVE step's mock, so resting on "allowed" would sit
@@ -335,14 +345,17 @@ set changes, or when the gate/motion/demo rules change.
   title to match, so it goes white-on-white. Being the Return-default doesn't fix
   it — the sequential flow DOES make the one live Allow the default, and the
   white-on-white still happens the moment the window resigns key to System Settings,
-  which is exactly when the user is looking at it. It now also takes a `fill` (the
-  CTA passes `Tokens.Color.gold`) and an opt-in `picksInkFromFill`: the key-window
-  ink is then MEASURED white-or-black against the resolved fill, because the
-  authored gold columns cross that line per appearance and Increase Contrast (dark
-  gold is a light fill; light-IC gold is a dark one) — except under the
-  `.systemAccent` dial, where gold IS the live accent and forced white stays the
-  platform convention. Accent-filled Allow buttons keep forced white; don't route
-  them through the measure (it would flip a blue accent's ink to black). **TRAP:**
+  which is exactly when the user is looking at it. It now also takes a `fill` and a
+  `titleFont` (the CTA passes `Tokens.Color.goldCTA` — a deep gold AUTHORED for
+  white ink, measured rationale on the token; the flagship `gold` is too light a
+  fill for body text — plus the emphasized weight) and an opt-in
+  `picksInkFromFill`: the key-window ink is then MEASURED white-or-black against
+  the resolved fill per appearance and Increase Contrast, proving the ink instead
+  of assuming it (white wins on every authored `goldCTA` variant). The
+  `.systemAccent` dial keeps forced white regardless — platform convention for a
+  live-accent fill. Accent-filled Allow buttons keep forced white and
+  `Tokens.Font.body`; don't route them through the measure (it would flip a blue
+  accent's ink to black). **TRAP:**
   the shared `onboardingActionButton` factory must set
   `translatesAutoresizingMaskIntoConstraints = false`; the card's Allow slot
   constrains the button directly rather than through an `NSStackView` (which used to

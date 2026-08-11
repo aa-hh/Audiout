@@ -47,7 +47,13 @@ final class DemoPaneView: NSView {
 
     /// The elevated surface both mocks sit on — fixed, so consecutive steps
     /// read at the same scale rather than the pane resizing under the user.
-    static let surfaceSize = NSSize(width: 336, height: 268)
+    /// The height is set by the FINALE, not the mocks: the settled view fills
+    /// this surface and its ripple must die fully inside it (owner call
+    /// 2026-08-11 after a live top-edge clip — grow the stage, don't shrink
+    /// the wave), and the icon's centre sits above the vertical middle, so the
+    /// top edge is the binding one. The right pane absorbs the height: 560 −
+    /// 2×22 pane margin leaves 516, and Replay still fits below at +14.
+    static let surfaceSize = NSSize(width: 336, height: 360)
 
     /// The step-to-step content crossfade.
     static let stepCrossfadeDuration: TimeInterval = 0.22
@@ -978,9 +984,15 @@ final class DemoSettledMockView: NSView {
     static let size = DemoPaneView.surfaceSize
 
     private static let iconSide: CGFloat = 88
-    /// Rings start just outside the icon and roughly treble before they die.
+    /// Rings start just outside the icon; how far they travel is DERIVED from
+    /// the icon's real distance to the nearest surface edge — see
+    /// ``ringEndScale()``.
     private static let ringBaseDiameter: CGFloat = 104
-    private static let ringEndScale: CGFloat = 3.0
+    /// Air kept between a dying ring's outer stroke edge and the nearest
+    /// surface edge, so the flight visibly ends inside the frame — a ring cut
+    /// off mid-flight by the mask reads as a bug (owner, live, at the old
+    /// surface height).
+    private static let ringEdgeClearance: CGFloat = 12
     /// Seconds into the shot each ring launches — staggered, like a broadcast.
     private static let ringStarts: [TimeInterval] = [0.10, 0.28, 0.46]
     private static let ringTravelDuration: TimeInterval = 1.05
@@ -988,7 +1000,9 @@ final class DemoSettledMockView: NSView {
 
     private let icon = NSImageView()
     private let headline = NSTextField(labelWithString: "You're all set.")
-    private let line = NSTextField(labelWithString: "Every speaker is ready.")
+    // The payoff line lives HERE, not in the header (owner decision
+    // 2026-08-11): the header keeps its welcome subtitle in every state.
+    private let line = NSTextField(labelWithString: "Your Mac's sound can reach every room.")
     /// The static warm aura behind the icon — part of the RESTING frame, not
     /// the celebration: its model opacity is 1, and only its entrance animates.
     private let auraLayer = CAGradientLayer()
@@ -1137,8 +1151,9 @@ final class DemoSettledMockView: NSView {
         celebrationRunCount += 1
         layoutSubtreeIfNeeded()   // ring/aura geometry comes from layout
 
+        let endScale = ringEndScale()
         for (ring, start) in zip(ringLayers, Self.ringStarts) {
-            addRipple(to: ring, delay: start)
+            addRipple(to: ring, delay: start, endScale: endScale)
         }
 
         let bloom = CABasicAnimation(keyPath: "opacity")
@@ -1156,12 +1171,29 @@ final class DemoSettledMockView: NSView {
         addTextLanding(line, delay: 0.48)
     }
 
+    /// How far a ring may scale before it dies: the icon centre's real
+    /// distance to the NEAREST surface edge (the top, in practice — the icon
+    /// sits above the vertical middle), minus the clearance and the swelling
+    /// stroke's own half-width. Derived per play rather than authored, so a
+    /// resized surface or re-balanced stack can never re-introduce the clip.
+    private func ringEndScale() -> CGFloat {
+        let centre = ringLayers.first?.position ?? .zero
+        let nearestEdge = min(centre.x, bounds.width - centre.x,
+                              centre.y, bounds.height - centre.y)
+        let baseRadius = Self.ringBaseDiameter / 2
+        let scale = (nearestEdge - Self.ringEdgeClearance) / baseRadius
+        // Half the stroke rides OUTSIDE the path radius, and the stroke width
+        // scales with the layer.
+        let strokeAllowance = (ringLayers.first?.lineWidth ?? 2) * scale / 2
+        return max((nearestEdge - Self.ringEdgeClearance - strokeAllowance) / baseRadius, 1)
+    }
+
     /// One ring's flight: scale out to death while the stroke swells and fades
     /// — a wave dissipating, not a shape resizing.
-    private func addRipple(to ring: CAShapeLayer, delay: TimeInterval) {
+    private func addRipple(to ring: CAShapeLayer, delay: TimeInterval, endScale: CGFloat) {
         let scale = CABasicAnimation(keyPath: "transform.scale")
         scale.fromValue = 1.0
-        scale.toValue = Self.ringEndScale
+        scale.toValue = endScale
         let fade = CAKeyframeAnimation(keyPath: "opacity")
         fade.values = [0, 0.55, 0]
         fade.keyTimes = [0, 0.18, 1]
@@ -1196,6 +1228,11 @@ final class DemoSettledMockView: NSView {
         animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
         layer.add(animation, forKey: key)
     }
+
+    // MARK: Test-support hooks
+
+    var test_headlineText: String { headline.stringValue }
+    var test_lineText: String { line.stringValue }
 }
 
 // MARK: - Drawn parts

@@ -64,20 +64,24 @@ final class ProminentButton: NSButton {
     /// Forced white stays the default: it is the platform's convention for the
     /// accent fill, and a measured pick would flip a blue-accent button's ink
     /// to black (black measures fractionally higher on system blue), which
-    /// reads off-platform. The gold "Start listening" CTA opts in because the
-    /// authored gold columns CROSS the black/white line per appearance and
-    /// Increase Contrast — dark gold is a light fill (white measures 1.8:1,
-    /// black 11.4:1), while light-IC gold is a dark one (white 5.3:1, black
-    /// 4.0:1) — so no fixed ink clears the body floor everywhere.
+    /// reads off-platform. The `goldCTA` fill opts in: its four authored
+    /// variants all measure white ≥5.5:1 (the token's rationale), so the
+    /// measure PROVES the ink per appearance and Increase Contrast rather
+    /// than assuming it.
     private let picksInkFromFill: Bool
+    /// The title's font. `Tokens.Font.body` for the everyday Allow buttons;
+    /// the finale CTA passes the emphasized weight for more presence.
+    private let titleFont: NSFont
     private var keyStateObservers: [NSObjectProtocol] = []
 
     init(title: String, target: AnyObject?, action: Selector?,
          fill: NSColor = Tokens.Color.accent,
-         picksInkFromFill: Bool = false) {
+         picksInkFromFill: Bool = false,
+         titleFont: NSFont = Tokens.Font.body) {
         self.plainTitle = title
         self.fill = fill
         self.picksInkFromFill = picksInkFromFill
+        self.titleFont = titleFont
         super.init(frame: .zero)
         self.title = title
         self.target = target
@@ -141,7 +145,7 @@ final class ProminentButton: NSButton {
         attributedTitle = NSAttributedString(
             string: plainTitle,
             attributes: [.foregroundColor: colour,
-                         .font: Tokens.Font.body])
+                         .font: titleFont])
     }
 
     /// White or black over the RESOLVED fill, by WCAG contrast — except under

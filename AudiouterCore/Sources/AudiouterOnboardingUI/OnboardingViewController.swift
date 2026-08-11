@@ -636,12 +636,14 @@ public final class OnboardingViewController: NSViewController {
         if shouldExist, doneButton == nil {
             // The finale CTA (owner copy 2026-08-11): closing setup is what
             // starts the deferred audio engine, so the button names that —
-            // and it wears GOLD, the payoff's accent, where the everyday Allow
-            // wears the system accent. Ink is measured off the resolved fill
+            // and it wears the DEEP gold authored for white ink (`goldCTA`,
+            // measured rationale on the token) where the everyday Allow wears
+            // the system accent. Ink is still measured off the resolved fill
             // (see `ProminentButton.picksInkFromFill`).
             let done = ProminentButton(title: "Start listening", target: self,
                                        action: #selector(doneTapped),
-                                       fill: Tokens.Color.gold, picksInkFromFill: true)
+                                       fill: Tokens.Color.goldCTA, picksInkFromFill: true,
+                                       titleFont: Tokens.Font.bodyEmphasized)
             // Constrained directly below (no stack view to do it for us): left
             // on, AutoLayout synthesises size from the zero frame and the
             // button renders as nothing at all.
@@ -681,7 +683,17 @@ public final class OnboardingViewController: NSViewController {
         Task { @MainActor in await verifyThenFinish() }
     }
 
+    /// Whether a Done verification is already running — the same single-flight
+    /// rule the Allow path has: the audit's Local Network re-browse takes
+    /// seconds, and a second click during it must join the outcome already on
+    /// its way, not stack a second verification (whose own answer would race
+    /// the first past `onDone`).
+    private var doneVerifyInFlight = false
+
     private func verifyThenFinish() async {
+        guard !doneVerifyInFlight else { return }
+        doneVerifyInFlight = true
+        defer { doneVerifyInFlight = false }
         switch await flow.verifyForDone() {
         case .complete:
             onDone()
@@ -694,16 +706,17 @@ public final class OnboardingViewController: NSViewController {
     // MARK: Header message
 
     /// Which message the header subtitle is carrying — tracked as a KIND so the
-    /// banner hooks report what is showing instead of inferring it from copy (a
-    /// string-compare predicate would call any non-welcome line a warning).
-    private enum HeaderMessage { case welcome, complete, permissionLost }
+    /// banner hooks report what is showing instead of inferring it from copy.
+    /// The welcome line holds in EVERY state including complete (owner decision
+    /// 2026-08-11: the payoff line lives on the demo pane's finale card, not in
+    /// the header) — only the lost-permission warning ever displaces it.
+    private enum HeaderMessage { case welcome, permissionLost }
     private var headerMessage: HeaderMessage = .welcome
 
-    /// Pick the ONE header message, in precedence order: the `.permissionLost`
-    /// warning while any permission it ORIGINALLY flagged is still missing
-    /// (re-worded to the still-missing subset, never expanded to nag about
-    /// something it didn't open for) → the completion line while the Done gate
-    /// is open → the plain welcome.
+    /// Show the `.permissionLost` warning while any permission it ORIGINALLY
+    /// flagged is still missing (re-worded to the still-missing subset, never
+    /// expanded to nag about something it didn't open for); the welcome line
+    /// otherwise.
     private func refreshHeaderMessage() {
         if case .permissionLost(let originallyUnmet) = reason {
             let notGranted = model.requiredPermissionsNotGranted()
@@ -715,25 +728,13 @@ public final class OnboardingViewController: NSViewController {
                 return
             }
         }
-        if flow.isDoneAvailable {
-            headerMessage = .complete
-            subtitleLabel.stringValue = Self.completeSubtitle
-        } else {
-            headerMessage = .welcome
-            subtitleLabel.stringValue = Self.welcomeSubtitle
-        }
+        headerMessage = .welcome
+        subtitleLabel.stringValue = Self.welcomeSubtitle
         subtitleLabel.textColor = Tokens.Color.secondaryLabel
     }
 
     static let welcomeSubtitle = "Play your Mac's sound on the speakers around your home. "
         + "A few one-time permissions, one at a time."
-
-    /// The payoff line once the gate is open (owner copy 2026-08-11 — no
-    /// found-speaker count; the owner rejected a number here). Secondary tone,
-    /// not gold: 13 pt body text needs 4.5:1, which light gold (3.6:1 on the
-    /// light canvas) cannot give — the gold in this moment belongs to the demo
-    /// pane's finale and the CTA.
-    static let completeSubtitle = "Your Mac's sound can reach every room."
 
     /// The specific unmet permission(s), named plainly, so the user knows
     /// exactly what to look for below.
@@ -941,8 +942,8 @@ public final class OnboardingViewController: NSViewController {
     public var test_doneTitle: String? { _ = view; return doneButton?.title }
 
     /// Whether the gate button is the gold prominent CTA — a `ProminentButton`
-    /// carrying the gold fill, not a plain bezel. Compared by RESOLVED sRGB
-    /// components: two accesses of a provider-backed token are distinct
+    /// carrying the `goldCTA` fill, not a plain bezel. Compared by RESOLVED
+    /// sRGB components: two accesses of a provider-backed token are distinct
     /// `NSColor` instances, and their `isEqual` is not documented to see
     /// through the provider.
     public var test_doneIsGoldProminent: Bool {
@@ -950,7 +951,7 @@ public final class OnboardingViewController: NSViewController {
         guard let done = doneButton as? ProminentButton else { return false }
         var matches = false
         NSAppearance(named: .darkAqua)?.performAsCurrentDrawingAppearance {
-            matches = done.fill.usingColorSpace(.sRGB) == Tokens.Color.gold.usingColorSpace(.sRGB)
+            matches = done.fill.usingColorSpace(.sRGB) == Tokens.Color.goldCTA.usingColorSpace(.sRGB)
         }
         return matches
     }
@@ -964,6 +965,10 @@ public final class OnboardingViewController: NSViewController {
 
     /// Tap Done: re-verifies, then either finishes or snaps back.
     public func test_tapDone() async { _ = view; await verifyThenFinish() }
+
+    /// Whether Done's verification is currently running — the single-flight
+    /// flag, exposed so a test can order itself around the in-flight window.
+    public var test_doneVerifyInFlight: Bool { doneVerifyInFlight }
 
     /// The step a failed Done verification snapped back to, if any.
     public var test_snapBackStep: SetupStep? { _ = view; return snapBackStep }

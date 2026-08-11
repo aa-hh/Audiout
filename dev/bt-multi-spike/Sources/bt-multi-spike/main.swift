@@ -434,6 +434,12 @@ if args.contains("--lateralization-probe") {
     exit(LateralizationProbe.run(args.filter { $0 != "--lateralization-probe" }))
 }
 
+// MARK: - Unattended soak (dropout ceiling + settled drift over tens of minutes)
+
+if args.contains("--soak") {
+    exit(SoakProbe.run(args.filter { $0 != "--soak" }))
+}
+
 // MARK: - T5: --selftest (flow-proof against the built-in output device)
 
 if args.contains("--selftest") {
@@ -455,6 +461,7 @@ if args.contains("-h") || args.contains("--help") {
     print("       bt-multi-spike --connect-probe [name-or-address] [--disconnect]")
     print("       bt-multi-spike --pacing-probe <name-or-uid> [--seconds N]")
     print("       bt-multi-spike --lateralization-probe <A> <B> [--demo | --smoke]")
+    print("       bt-multi-spike --soak [--minutes N] [--interval S] [--devices a,b] [--log path]")
     exit(0)
 }
 

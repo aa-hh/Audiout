@@ -525,10 +525,6 @@ struct MainOutRow: View {
 
     @ScaledMetric(relativeTo: .subheadline) private var muteIconSize: CGFloat = 15
 
-    // razor: DEBUG-only, while the detent's strength is being picked by feel.
-    // See `HapticBoost`.
-    @AppStorage(HapticBoost.storageKey) private var hapticBoost: HapticBoost = .standard
-
     /// What the thumb shows: the finger while a drag is in flight (and the
     /// value it was released at until the Mac echoes it back), the Mac's
     /// value whenever neither applies.
@@ -579,7 +575,7 @@ struct MainOutRow: View {
         // The detents the fader travels through, at a fraction of the rails'
         // strength — the same rule and the same click the row's dial gives,
         // because they are the same control at two scopes.
-        .sensoryFeedback(.impact(weight: .light, intensity: hapticBoost.detentIntensity),
+        .sensoryFeedback(.impact(weight: .light, intensity: WarmSignal.FaderDetents.intensity),
                          trigger: detents.ticks)
     }
 

@@ -223,7 +223,13 @@ enum WarmSignal {
         /// convention — was the other candidate and is rejected for exactly
         /// this: it is a fixed strength with no defined relationship to the
         /// tick already on this control.
-        static let intensity: Double = 0.4
+        ///
+        /// The number is a thumb's answer, not a derivation — it was set by
+        /// dragging on hardware, because a phone in a case transmits less than
+        /// a simulator suggests. Two bounds hold it: it must stay under the
+        /// rails' 1.0, or a stop and a crossing become the same event; and it
+        /// cannot be re-judged anywhere but on a device.
+        static let intensity: Double = 0.52
 
         private var lastDetent: Int?
         private var lastTickedAt: ContinuousClock.Instant?
@@ -507,55 +513,6 @@ enum LevelStyle: String, CaseIterable, Identifiable {
     /// from here, so the row and the picker cannot disagree about what the app
     /// looks like before anyone has picked anything.
     static let standard: LevelStyle = .dial
-}
-
-/// How hard the drag's detents click, as a percentage over today's strength,
-/// switchable live from Settings in a DEBUG build.
-///
-/// How much force a notch wants is a question about the hand, and the hand is
-/// not in the source — it can only be answered by holding the phone and
-/// dragging. The rails are deliberately out of scope: they already fire at
-/// full strength for their weight class, so a percentage cannot move them, and
-/// ``detentIntensity`` stays well under them at every case, which is what keeps
-/// "the stop is stronger than the notch" true whatever gets picked.
-///
-// razor: DEBUG-only tuner for a decision in flight. When a value wins, fold it
-// into ``WarmSignal/FaderDetents/intensity``, point the two faders back at that
-// constant, and delete this enum and its picker in `RemoteSettingsView`.
-enum HapticBoost: String, CaseIterable, Identifiable {
-    case standard, plus10, plus20, plus30
-    var id: String { rawValue }
-
-    /// The picker's words. The choice being made is a CHANGE to a strength
-    /// nobody can name, so the options say what they add, not what they are.
-    var title: String {
-        switch self {
-        case .standard: return "+0%"
-        case .plus10:   return "+10%"
-        case .plus20:   return "+20%"
-        case .plus30:   return "+30%"
-        }
-    }
-
-    var multiplier: Double {
-        switch self {
-        case .standard: return 1.0
-        case .plus10:   return 1.1
-        case .plus20:   return 1.2
-        case .plus30:   return 1.3
-        }
-    }
-
-    /// What the two faders actually feed `.sensoryFeedback`. It lives here so
-    /// the boost is applied by one rule rather than once per fader — the same
-    /// reason ``WarmSignal/faderValue(start:translationWidth:trackWidth:)`` is
-    /// shared — and the clamp is the API's 0…1 contract held in the one place
-    /// that could ever break it.
-    var detentIntensity: Double {
-        min(1, WarmSignal.FaderDetents.intensity * multiplier)
-    }
-
-    static let storageKey = "debug.hapticBoost"
 }
 
 /// V2 — the level as a gold arc around the speaker's own halo ring.

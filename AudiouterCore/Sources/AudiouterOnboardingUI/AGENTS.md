@@ -304,10 +304,16 @@ set changes, or when the gate/motion/demo rules change.
     after it. Its RESTING frame must read rich on its own (static gold aura +
     display-weight "You're all set." over the payoff line) — it is also the
     model-layer state, so every animation ends there and snapshots stay
-    deterministic. The rings' travel is DERIVED from the icon centre's real
-    distance to the nearest surface edge, never authored: an authored end-scale is
-    how the ripple got clipped by the surface's top edge live, and the surface
-    height itself was raised for the same reason (`DemoPaneView.surfaceSize`).
+    deterministic. The rings' travel is DERIVED, never authored — from the icon
+    centre's real distance to the FARTHEST surface edge, so the wave sweeps the
+    whole stage and deliberately crosses the frame on every side — and the RING
+    LAYERS ONLY are masked by a soft per-edge feather (`ringFeatherWidth`, ~24 pt
+    fading to clear at each edge), so a crossing ring dissolves instead of being
+    truncated by the rounded-corner clip. Both halves are owner-tested history:
+    an authored end-scale hard-clipped the ripple live, and the nearest-edge
+    derivation that replaced it was rejected live as "one little line that goes
+    out" — big travel PLUS feather is the fix, and the feather must never touch
+    the aura/text or the settled render (rings rest at opacity 0).
     The aura/rings stamp resolved `gold`/`glow`, so the view observes the
     accent-dial and a11y notifications like the mocks do. On the animated
     transition the shot rides the step crossfade itself (fired as the fade

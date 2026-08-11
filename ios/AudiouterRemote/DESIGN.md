@@ -346,6 +346,34 @@ An inline micro-label line under the first visible row — "TAP TO PLAY · DRAG
 TO SET LEVEL … GOT IT" — never a modal or a spotlight tour. It leaves for
 good once both gestures have actually been used, or immediately on tap.
 
+### App Route Row (Apps tab)
+The row-as-fader grammar restated on a routing row. Same 44pt identity tile
+(`raised` fill, `hairline` stroke, control radius — SF Symbol or a mono
+initial; never a per-app hue, there is no hue left in the palette to spend),
+same flat gold wash while the app is running, same in-drag remainder divide,
+same detent/rail haptics. What differs from a device row, and why:
+- **No tap action, no touch-down flash** — the protocol has no app mute, so
+  the row has nothing to promise a tap.
+- **The destination chip** is the row's one tap target: a `Menu` with a
+  drawn label on a `well` + `rim` capsule — the recessed-control recipe the
+  mute buttons and fader tracks wear, chosen over `pill` because `pill` was
+  never a text backdrop and fails as one (3.5:1 light against the 4.5:1
+  floor; `well` clears in both grounds). Chip text: `goldText` when
+  redirected to a device (the same gold thread as the Speakers routed dot),
+  `label2` otherwise. Its menu also carries the destructive "Stop Routing" —
+  horizontal swipes are the fader, so swipe-to-delete is gone.
+- **The readout never hides**: a silent app's level is a stored preset —
+  true, so shown — but in `label3`, because gold is reserved for live.
+- **Silent apps sink**: running rows first, then not-running, each half in
+  the Mac's own order (a stable two-pass partition), dimmed by tint only —
+  never whole-row opacity.
+
+### Follow Note (Apps tab)
+The header's one line of context — a 6pt gold dot and "Apps without a route
+follow Main Out" in footnote `label2` ("Main Out" in `label`). No container:
+a glass pill would promise a press, the same reasoning the Speakers status
+pill is built on.
+
 ## Do's and Don'ts
 
 ### Do:

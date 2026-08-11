@@ -155,8 +155,10 @@ final class CompanionSmokeUITests: XCTestCase {
                       "Demo Music (demo fleet) should render as an app route row")
         attachAndSaveScreenshot(name: "Apps", filename: "02-apps.png")
 
-        // Interaction: open the add-app sheet and cancel.
-        app.navigationBars["Apps"].buttons["Add App"].tap()
+        // Interaction: open the add-app sheet and cancel. The Apps tab draws
+        // its own header (no navigation bar), so the button is found by its
+        // accessibility label rather than as a nav-bar descendant.
+        app.buttons["Add App"].tap()
         let addAppNavBar = app.navigationBars["Add App"]
         XCTAssertTrue(addAppNavBar.waitForExistence(timeout: 5), "Add App sheet should present")
         addAppNavBar.buttons["Cancel"].tap()

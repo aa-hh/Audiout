@@ -24,6 +24,12 @@ struct AddAppSheet: View {
                     }
                 }
         }
+        // A self-contained task, so native sheet chrome is the right call —
+        // no Warm Signal header of its own, just the world's ground and
+        // grab handle under the system title.
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(WarmSignal.canvas)
     }
 
     @ViewBuilder
@@ -42,14 +48,25 @@ struct AddAppSheet: View {
                     dismiss()
                 } label: {
                     HStack(spacing: 12) {
-                        AppGlyph(bundleID: app.bundleID, displayName: app.displayName)
+                        AppGlyph(bundleID: app.bundleID, displayName: app.displayName, size: 44)
                         Text(app.displayName)
+                            .foregroundStyle(WarmSignal.label)
                         Spacer()
                     }
+                    .frame(minHeight: 44)
                 }
                 .buttonStyle(.plain)
                 .accessibilityAddTraits(.isButton)
+                // `scrollContentBackground` below only clears the List's
+                // OUTER backdrop — each cell still paints its own system
+                // fill, which on the warm canvas reads as grey cards. Clear
+                // the cells too, and give the separators the world's own
+                // edge.
+                .listRowBackground(Color.clear)
+                .listRowSeparatorTint(WarmSignal.hairline)
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
         }
     }
 }

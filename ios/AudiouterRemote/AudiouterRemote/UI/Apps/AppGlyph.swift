@@ -4,8 +4,11 @@ import SwiftUI
 
 /// One app's visual identity in a list row. Real macOS app icons aren't
 /// reachable from iOS, so the glyph story is: a recognised app gets a fitting
-/// SF Symbol on a neutral tile; anything unrecognised falls back to a
-/// coloured rounded tile carrying its first letter.
+/// SF Symbol; anything unrecognised falls back to its first letter in the
+/// screen's micro voice. Both sit on the same `raised` tile — Warm Signal's
+/// palette is gold plus neutrals plus fail/caution, nothing else, so there is
+/// no hue left to spend on a per-app identity color; only the content and its
+/// tint vary.
 ///
 /// razor: `symbolTable` is a short, flat category table (one entry per
 /// well-known app or family), not a per-app icon database — extend it when a
@@ -16,13 +19,23 @@ struct AppGlyph: View {
     let bundleID: String
     let displayName: String
     var size: CGFloat = 36
+    /// Whether the app this glyph identifies is currently making sound — the
+    /// same signal `AppRouteRowView`'s name and readout dim on. Defaulted
+    /// `true` so a call site with no running/not-running notion of its own
+    /// (`AddAppSheet`'s addable-app rows, this file's own `#Preview`) keeps
+    /// the brighter tint rather than reading as silenced.
+    var running: Bool = true
 
-    private var cornerRadius: CGFloat { size * 0.28 }
+    private var contentTint: Color { running ? WarmSignal.label2 : WarmSignal.label3 }
 
     var body: some View {
-        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            .fill(fillStyle)
+        RoundedRectangle(cornerRadius: WarmSignal.Radius.control, style: .continuous)
+            .fill(WarmSignal.raised)
             .frame(width: size, height: size)
+            .overlay {
+                RoundedRectangle(cornerRadius: WarmSignal.Radius.control, style: .continuous)
+                    .strokeBorder(WarmSignal.hairline, lineWidth: 0.5)
+            }
             .overlay { glyphContent }
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(displayName)
@@ -33,18 +46,12 @@ struct AppGlyph: View {
         if let symbol = Self.symbolName(bundleID: bundleID, displayName: displayName) {
             Image(systemName: symbol)
                 .font(.system(size: size * 0.5, weight: .medium))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(contentTint)
         } else {
             Text(Self.initial(for: displayName))
-                .font(.system(size: size * 0.44, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white)
+                .font(.system(size: size * 0.44, weight: .bold, design: .monospaced))
+                .foregroundStyle(contentTint)
         }
-    }
-
-    private var fillStyle: AnyShapeStyle {
-        Self.symbolName(bundleID: bundleID, displayName: displayName) == nil
-            ? AnyShapeStyle(Self.tileColor(for: displayName))
-            : AnyShapeStyle(Color(.secondarySystemBackground))
     }
 
     // MARK: - Symbol mapping
@@ -84,7 +91,9 @@ struct AppGlyph: View {
         ("xcode", "terminal"),
     ]
 
-    static func symbolName(bundleID: String, displayName: String) -> String? {
+    // nonisolated, like AppRouteRowView's statics: pure helpers the tests
+    // call from Swift Testing's background threads.
+    nonisolated static func symbolName(bundleID: String, displayName: String) -> String? {
         let id = bundleID.lowercased()
         if let hit = symbolTable.first(where: { id.contains($0.match) }) { return hit.symbol }
         let name = displayName.lowercased()
@@ -92,24 +101,12 @@ struct AppGlyph: View {
         return nil
     }
 
-    // MARK: - Fallback tile
+    // MARK: - Fallback initial
 
-    static func initial(for displayName: String) -> String {
+    nonisolated static func initial(for displayName: String) -> String {
         let trimmed = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let first = trimmed.first else { return "?" }
         return String(first).uppercased()
-    }
-
-    /// Deterministic across launches — hashed from the name, not random or
-    /// clock-based, so the same app always lands on the same hue and two
-    /// different names usually land on distinguishably different ones.
-    static func tileColor(for displayName: String) -> Color {
-        var hash: UInt64 = 5381
-        for scalar in displayName.unicodeScalars {
-            hash = (hash &* 33) &+ UInt64(scalar.value)
-        }
-        let hue = Double(hash % 360) / 360
-        return Color(hue: hue, saturation: 0.55, brightness: 0.62)
     }
 }
 
@@ -120,7 +117,8 @@ struct AppGlyph: View {
         AppGlyph(bundleID: "us.zoom.xos", displayName: "Zoom")
         AppGlyph(bundleID: "org.videolan.vlc", displayName: "VLC")
         AppGlyph(bundleID: "com.example.mystery", displayName: "Mystery Radio")
-        AppGlyph(bundleID: "com.example.other", displayName: "Another App")
+        AppGlyph(bundleID: "com.example.other", displayName: "Another App", running: false)
     }
     .padding()
+    .background(WarmSignal.canvasGradient)
 }

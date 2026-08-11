@@ -186,7 +186,7 @@ final class PopoverPanelViewController: NSViewController {
     /// 0.22s ("it's also not that snappy"). Short enough to feel immediate, long
     /// enough that the rows below still read as being PUSHED apart rather than
     /// jumping to a new position.
-    static let collapseRevealDuration: TimeInterval = 0.15
+    static let collapseRevealDuration: TimeInterval = Tokens.Motion.collapseRevealDuration
 
     /// The panel height the most recent ANIMATED `insertRow` reveal starts FROM,
     /// recorded once the collapsed start state is laid out. A reveal that starts
@@ -373,9 +373,10 @@ final class PopoverPanelViewController: NSViewController {
     /// header's dot; `nil` leaves the whole device card as the far end.
     func setRailRows(mainOut: RailHookProviding, deviceRows: [RailNodeProviding],
                      originCardTitle: String, deviceCardTitle: String,
-                     cutSubsectionTitle: String? = nil) {
+                     cutSubsectionTitle: String? = nil, dormant: Bool = false) {
         railOverlay.mainOutRow = mainOut
         railOverlay.deviceRows = deviceRows
+        railOverlay.dormant = dormant
         railOverlay.originSection = cardsByHeader[originCardTitle]
         if let cutSubsectionTitle, let subsection = subsectionBodies[cutSubsectionTitle]?.rail {
             railOverlay.deviceSection = subsection

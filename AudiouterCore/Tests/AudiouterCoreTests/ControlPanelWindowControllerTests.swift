@@ -46,7 +46,14 @@ struct ControlPanelWindowControllerTests {
     /// a window key without putting it on the developer's real screen, so the
     /// delegate method is called directly — the same seam style the existing
     /// close tests use (`cancelOperation(nil)`, `performClose(nil)`).
+    /// A resign-key dismissal decides across two runloop passes, so the harness
+    /// drives both: the notification, then the settle a pass later.
     private func resignKey(_ controller: ControlPanelWindowController) {
+        deliverResignKey(controller)
+        controller.test_settleResignDismissal()
+    }
+
+    private func deliverResignKey(_ controller: ControlPanelWindowController) {
         controller.windowDidResignKey(
             Notification(name: NSWindow.didResignKeyNotification, object: controller.window))
     }
@@ -333,6 +340,8 @@ struct ControlPanelWindowControllerTests {
         #expect(panel.titlebarAppearsTransparent)
         #expect(panel.titleVisibility == .hidden)
         #expect(!panel.isOpaque)
+        #expect(panel.backgroundColor.alphaComponent > 0,
+                "zero-alpha pixels are CLICK-THROUGH at the window server; a fully clear background made the toolbar band's nav tabs fall through to the app behind (macOS 26 draws the glass toolbar in its own surface)")
         #expect(!panel.hasShadow)
         #expect(controller.test_backingWindow?.parent === panel,
                 "the decorative beak/bubble window is attached while unpinned")
@@ -384,6 +393,8 @@ struct ControlPanelWindowControllerTests {
         #expect(panel.titlebarAppearsTransparent)
         #expect(panel.titleVisibility == .hidden)
         #expect(!panel.isOpaque)
+        #expect(panel.backgroundColor.alphaComponent > 0,
+                "the un-pinned profile must keep the hit-testable (non-zero alpha) background — see freshShellIsUnpinned")
         #expect(!panel.hasShadow)
         #expect(controller.test_backingWindow?.parent === panel,
                 "the beak/bubble window is re-attached on un-pin")
@@ -613,6 +624,38 @@ struct ControlPanelWindowControllerTests {
     @Test func noDismissalIsNeverConsumed() {
         let controller = makeController()
         #expect(!controller.consumeRecentResignDismissal())
+    }
+
+    /// A key loss the panel has already recovered from by the time it settles
+    /// is its own chrome borrowing key (a toolbar picker, a menu, field-editor
+    /// churn), not a click-outside — dismissing there tears the surface down
+    /// mid-interaction.
+    @Test func aKeyLossTheWindowRecoversFromBeforeItSettlesDoesNotDismiss() {
+        let controller = makeDismissableController()
+        var fired = false
+        controller.onClose = { fired = true }
+
+        deliverResignKey(controller)
+        controller.test_isKeyWindowOverride = true   // AppKit handed key back
+        controller.test_settleResignDismissal()
+
+        #expect(!fired, "a key loss that reversed itself is not a click-outside")
+        #expect(!controller.consumeRecentResignDismissal(),
+                "nothing was dismissed, so there is nothing for a click to consume")
+    }
+
+    /// The app-switch tuck-away is decided at SETTLE time too: AppKit can
+    /// deliver the resign before `NSApp.isActive` flips.
+    @Test func aResignThatTurnsOutToBeAnAppSwitchDoesNotDismiss() {
+        let controller = makeDismissableController()
+        var fired = false
+        controller.onClose = { fired = true }
+
+        deliverResignKey(controller)
+        controller.test_appIsActiveOverride = false  // the app-switch lands late
+        controller.test_settleResignDismissal()
+
+        #expect(!fired, "an app-switch must stay a tuck-away, never become a close")
     }
 
     /// A suppressed resign (pinned / sheet / app-switch) must not leave a

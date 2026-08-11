@@ -189,8 +189,8 @@ import AppKit
 
     /// Regression for the "solid black Firefox chip": the real Firefox icon's
     /// dominant *saturated* hue is the violet globe (~265°, a cool-family hue),
-    /// not the orange fox — and a cool hue dropped for warm paper (0.66 − 0.28 =
-    /// 0.38), or a gold-steered orange likewise dropped and Increase-Contrast-
+    /// not the orange fox — and a cool hue dropped for the light ground (0.66 −
+    /// 0.40 = 0.26), or a gold-steered orange likewise dropped and Increase-Contrast-
     /// darkened (~0.33), used to bottom out dark enough to read as black against
     /// the near-black canvas at the 5pt chip. The legibility floor now caps that.
     @Test func derivedTint_neverDarkerThanLegibilityFloor() {
@@ -314,7 +314,7 @@ import AppKit
     /// Contrast.
     @Test func measuredContrast_clearsWCAGFloor() {
         let canvasDark = NSColor(srgbRed: 0x16 / 255.0, green: 0x13 / 255.0, blue: 0x0F / 255.0, alpha: 1)
-        let canvasLight = NSColor(srgbRed: 0xF4 / 255.0, green: 0xEF / 255.0, blue: 0xE7 / 255.0, alpha: 1)
+        let canvasLight = NSColor(srgbRed: 0xFB / 255.0, green: 0xFB / 255.0, blue: 0xF9 / 255.0, alpha: 1)
         let floor: CGFloat = 3.0
 
         // (name, brand hex) — spans warm (Firefox/Instagram/Chrome), mid

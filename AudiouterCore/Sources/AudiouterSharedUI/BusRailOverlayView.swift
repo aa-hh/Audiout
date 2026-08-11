@@ -4,21 +4,27 @@ import AppKit
 
 /// The **continuous membership-rail spine** (Warm Signal v4 §Call-1, Alec's
 /// continuity correction): a single panel-level overlay that draws the rail as
-/// ONE UNINTERRUPTED line down the left gutter — Main Audio's `.origin` hook →
-/// the LOWEST SELECTED device node — passing STRAIGHT THROUGH any section-header
-/// rows, subsection headers, and hairline dividers it crosses. Per-row bus
-/// segments left a gap wherever a non-device row (a header or a divider) sat in
-/// the span; drawing the rail as one continuous element here removes every such
-/// gap. The overlay sits ON TOP of the cards + dividers (added last), so where
-/// the rail crosses a hairline it reads unbroken. It is non-interactive
-/// (`hitTest` returns `nil`).
+/// ONE UNINTERRUPTED line down the left gutter, passing STRAIGHT THROUGH any
+/// section-header rows, subsection headers, and hairline dividers it crosses.
+/// Per-row bus segments left a gap wherever a non-device row (a header or a
+/// divider) sat in the span; drawing the rail as one continuous element here
+/// removes every such gap. The overlay sits ON TOP of the cards + dividers
+/// (added last), so where the rail crosses a hairline it reads unbroken. It is
+/// non-interactive (`hitTest` returns `nil`).
 ///
-/// **Division of labour:** this overlay draws the rail LINE, the detour ARCS
-/// around bypassed non-member nodes, and the origin HOOK. The NODE discs/rings
-/// stay per-row (`MembershipBusView` with `drawsRailLine == false`), centred on
-/// each row's real checkbox, so they align exactly with the click target. The
-/// overlay reads each row's live frame + node state at draw time, so it always
-/// reflects the current layout (collapse/expand/resize) with no cached geometry.
+/// **One wire, one tone.** The rail is a single stroked line — no channel, no
+/// pad, nothing under it: gold while the spine is armed, ember while it idles,
+/// one quiet tone end to end while it is dormant. It runs from the origin hook
+/// to its terminus, the LOWEST ON-SPINE node, detouring around every off-spine
+/// node it passes on the way. Rows below the terminus draw their node disc and
+/// no line.
+///
+/// **Division of labour:** this overlay draws the line, the detour ARCS around
+/// bypassed non-member nodes, and the origin HOOK. The NODE discs/rings stay
+/// per-row (`MembershipBusView`), centred on each row's real checkbox, so they
+/// align exactly with the click target. The overlay reads each row's live frame
+/// + node state at draw time, so it always reflects the current layout
+/// (collapse/expand/resize) with no cached geometry.
 ///
 /// The rail lives at `railGutterCenterX` (≈20 pt from the panel's left edge);
 /// section-title text sits in the name column far to the right, so a continuous
@@ -45,6 +51,12 @@ public final class BusRailOverlayView: NSView {
     /// section's header with a terminus dot rather than drawn over now-hidden rows;
     /// its live clip frame drives the in-sync squeeze (behaviors 1 + 3).
     public weak var deviceSection: RailSectionProviding?
+    /// The dormant-divergent condition (spec §4.7): the checked set genuinely
+    /// diverges from the active group target, so nothing on this rail is
+    /// actually feeding audio. The host owns the condition; when it is set the
+    /// WHOLE signal path draws in one quiet tone rather than a per-row patchwork.
+    /// Node fills stay per-row; this is the wire's tone alone.
+    public var dormant = false
 
     public init() {
         super.init(frame: .zero)
@@ -84,15 +96,15 @@ public final class BusRailOverlayView: NSView {
     func resolvePlan() -> RailPlan? {
         guard let mainOutRow, let anchor = mainOutRow.railHookAnchor(in: self) else { return nil }
 
-        // In-span node stops (rows carrying a rail above them), top-to-bottom.
-        // Bare nodes below the terminus (no rail above) contribute no line — their
-        // disc is drawn per-row. `RailPlan.resolve` clips these to the device
-        // section's live band; here we only gather the full unclipped set.
+        // EVERY device node is a stop, top-to-bottom — the channel runs the full
+        // band and treats each node alike (on-spine = straight through, off-spine
+        // = detour). `RailPlan.resolve` clips these to the device section's live
+        // band; here we only gather the full unclipped set.
         var stops: [RailPlan.Stop] = []
         for row in deviceRows {
-            guard let node = row.railNode, row.railHasSpine else { continue }
+            guard let node = row.railNode else { continue }
             let f = convert(row.railNodeBounds, from: row.railNodeView)
-            stops.append(RailPlan.Stop(y: f.midY, node: node, below: row.railBelow, dimmed: row.railDimmed))
+            stops.append(RailPlan.Stop(y: f.midY, node: node))
         }
         stops.sort { $0.y > $1.y }   // non-flipped: top = higher y
 
@@ -107,6 +119,7 @@ public final class BusRailOverlayView: NSView {
             originHeaderY: headerTerminusY(of: originSection),
             deviceSectionCollapsed: deviceSection?.railSectionCollapsed ?? false,
             deviceFloorY: clipBand(of: deviceSection)?.lowerBound,
+            dormant: dormant,
             stops: stops)
         return RailPlan.resolve(input)
     }
@@ -140,8 +153,13 @@ public final class BusRailOverlayView: NSView {
         // The hook/terminus tone and the Main Audio ring's connected stroke come
         // from the SAME resolution (`Tokens.Color.spineTone`), so the curve and
         // the ring it lands on can never be two different colors — including
-        // mid-flight through an accent-dial change.
-        let originColor = Tokens.Color.spineTone(armed: plan.gold)
+        // mid-flight through an accent-dial change. A DORMANT rail (spec §4.7)
+        // takes one quiet tone for its whole path — hook, every segment and the
+        // terminus dot — rather than the gold/grey patchwork per-stop tones drew
+        // on a wire that is feeding nothing.
+        let originColor = plan.dormant
+            ? Tokens.Color.tertiaryLabel
+            : Tokens.Color.spineTone(armed: plan.gold)
 
         switch plan.origin {
         case let .ring(ringCenterY, ringCenterX, ringRadius):
@@ -168,21 +186,30 @@ public final class BusRailOverlayView: NSView {
             fillTerminusDot(atY: y, x: cx)
         }
 
+        // How far the line reaches: its natural terminus is the lowest on-spine
+        // node — below that, nothing. A collapsed/clipping device section
+        // overrides that, running the line down to the cut dot instead (what lies
+        // below is hidden, not absent).
         var currentY = plan.railTopY
-        for stop in plan.stops {
+        for (index, stop) in plan.stops.enumerated() {
+            if plan.terminusDotY == nil {
+                guard let last = plan.signalTerminusIndex, index <= last else { break }
+            }
             let onSpine = Self.onSpine(stop.node)
             let stopR = MembershipBusView.nodeRadius(for: stop.node)
             // Segment tone (Warm Signal v4 §Call-1 + v4.1 items 3/4/9):
             //   • member (connected)  → the SPINE TONE (`originColor`) — gold on
-            //     a live spine, ember on a dormant one. It reuses the HOOK's own
+            //     an armed spine, ember on an idle one. It reuses the HOOK's own
             //     resolution rather than naming `gold` again, because the hook's
             //     corner and the line leaving it are one continuous stroke: a
             //     second call site here can pick a tone the corner didn't,
-            //   • pending / connecting → ember (the energize "coming online" sweep),
-            //   • FAILED               → DIM (item 9 — the red node carries failure),
-            //   • dormant-divergent    → DIM (the §4.7 tint the node uses).
+            //   • connecting          → ember (the energize "coming online" sweep
+            //     — the segment, not the node, carries the ember tone),
+            //   • FAILED               → DIM (item 9 — the red node carries failure).
+            // A DORMANT rail skips the split entirely: `originColor` is already
+            // the one quiet tone, so every segment inherits it.
             let segColor: NSColor
-            if stop.dimmed || stop.node == .failed {
+            if plan.dormant || stop.node == .failed {
                 segColor = Tokens.Color.tertiaryLabel
             } else if stop.node == .member {
                 segColor = originColor
@@ -195,13 +222,15 @@ public final class BusRailOverlayView: NSView {
                 // The rail runs THROUGH the node with a breathing gap above.
                 let gap = stopR + PopoverColumnGrid.busNodeRailGap
                 strokeVertical(from: currentY, to: stop.y + gap, x: cx, lineWidth: lw)
-                // A natural terminus (`!below`) ends the rail — UNLESS a collapsed/
+                // The natural terminus ends the signal — UNLESS a collapsed/
                 // clipping device section cuts it first (`terminusDotY != nil`), in
-                // which case the rail continues down to that cut and dots there.
-                if !stop.below && plan.terminusDotY == nil { return }
+                // which case the line continues down to that cut and dots there.
+                if index == plan.signalTerminusIndex && plan.terminusDotY == nil { return }
                 currentY = stop.y - gap
             } else {
-                // Detour ARC around a bypassed non-member node.
+                // Detour ARC around a bypassed non-member node — keyed off that
+                // node's OWN radius, so the bow clears a large node and a small
+                // one by the same margin.
                 let arcR = stopR + PopoverColumnGrid.busDetourBulge
                 strokeVertical(from: currentY, to: stop.y + arcR, x: cx, lineWidth: lw)
                 let arc = NSBezierPath()
@@ -209,7 +238,6 @@ public final class BusRailOverlayView: NSView {
                 arc.appendArc(withCenter: NSPoint(x: cx, y: stop.y), radius: arcR,
                               startAngle: 90, endAngle: 270, clockwise: false)
                 arc.stroke()
-                if !stop.below && plan.terminusDotY == nil { return }
                 currentY = stop.y - arcR
             }
         }
@@ -246,8 +274,8 @@ public final class BusRailOverlayView: NSView {
     /// genuine non-members and the blocked local node are detoured.
     static func onSpine(_ node: MembershipBusView.Node) -> Bool {
         switch node {
-        case .member, .connecting, .pending, .failed, .origin: return true
-        case .nonMember, .blocked:                             return false
+        case .member, .connecting, .failed, .origin: return true
+        case .nonMember, .blocked:                   return false
         }
     }
 
@@ -262,14 +290,16 @@ public final class BusRailOverlayView: NSView {
 /// the overlay's coordinate space (no view lookups), so it is deterministic and
 /// unit-testable at any intermediate collapse height. `draw` renders exactly this.
 public struct RailPlan: Equatable {
-    /// One in-span device node the rail passes through / detours around.
+    /// One device node the rail passes through / detours around. EVERY device
+    /// row in the band is a stop — the rail has no third "bare node" rendering.
     public struct Stop: Equatable {
         public var y: CGFloat
         public var node: MembershipBusView.Node
-        /// Whether the rail continues below this node (false = natural terminus).
-        public var below: Bool
-        /// Whether the node (and the segment into it) renders dimmed.
-        public var dimmed: Bool
+
+        public init(y: CGFloat, node: MembershipBusView.Node) {
+            self.y = y
+            self.node = node
+        }
     }
 
     /// How the rail begins at the top.
@@ -290,6 +320,13 @@ public struct RailPlan: Equatable {
     /// of the terminus dot (behaviors 1 + 3); `nil` when the rail ends naturally
     /// at its lowest selected node.
     public var terminusDotY: CGFloat?
+    /// Index into `stops` of the line's natural terminus — the lowest on-spine
+    /// node, the last place the wire reaches. `nil` when no on-spine node is
+    /// visible, i.e. no line is drawn through the band at all.
+    public var signalTerminusIndex: Int?
+    /// The dormant-divergent condition (spec §4.7), resolved ONCE for the whole
+    /// rail so the wire takes one tone end to end instead of a per-stop patchwork.
+    public var dormant: Bool
     public var gold: Bool
 
     /// Plain-number inputs read from live frames by `BusRailOverlayView`.
@@ -311,13 +348,16 @@ public struct RailPlan: Equatable {
         /// The device section's live clip floor (its band's `lowerBound`): the
         /// lowest y the rail may reach. `nil` if the device section has no clip.
         public var deviceFloorY: CGFloat?
-        /// Every in-span stop, unclipped, sorted top-to-bottom (highest y first).
+        /// The host-resolved dormant-divergent condition (spec §4.7).
+        public var dormant: Bool
+        /// Every device stop, unclipped, sorted top-to-bottom (highest y first).
         public var stops: [Stop]
 
         public init(gold: Bool, ringCenterY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat,
                     landingDrop: CGFloat, originSectionCollapsed: Bool,
                     originClipBand: ClosedRange<CGFloat>?, originHeaderY: CGFloat?,
-                    deviceSectionCollapsed: Bool, deviceFloorY: CGFloat?, stops: [Stop]) {
+                    deviceSectionCollapsed: Bool, deviceFloorY: CGFloat?,
+                    dormant: Bool = false, stops: [Stop]) {
             self.gold = gold
             self.ringCenterY = ringCenterY
             self.ringCenterX = ringCenterX
@@ -328,6 +368,7 @@ public struct RailPlan: Equatable {
             self.originHeaderY = originHeaderY
             self.deviceSectionCollapsed = deviceSectionCollapsed
             self.deviceFloorY = deviceFloorY
+            self.dormant = dormant
             self.stops = stops
         }
     }
@@ -347,8 +388,11 @@ public struct RailPlan: Equatable {
     /// collapsed outright — the rail is CUT with a terminus dot at the floor,
     /// which lands at the section header once fully collapsed. When the section is
     /// expanded the floor sits below every node, so nothing is dropped and the
-    /// rail ends naturally at its lowest selected node exactly as before (the
-    /// expanded render is byte-for-byte unchanged).
+    /// line ends where it naturally would.
+    ///
+    /// The line's own end is `signalTerminusIndex`, the lowest ON-SPINE node,
+    /// because that is how far the audio actually reaches. A cut overrides it: the
+    /// line runs down to the dot, since what lies below is hidden, not absent.
     public static func resolve(_ input: Input) -> RailPlan {
         // Origin resolution.
         let originAtHeader: Bool = {
@@ -385,24 +429,22 @@ public struct RailPlan: Equatable {
             drawnStops = input.stops
         }
 
+        let signalTerminusIndex = drawnStops.lastIndex { BusRailOverlayView.onSpine($0.node) }
+
         return RailPlan(origin: origin, railTopY: railTopY, stops: drawnStops,
-                        terminusDotY: terminusDotY, gold: input.gold)
+                        terminusDotY: terminusDotY, signalTerminusIndex: signalTerminusIndex,
+                        dormant: input.dormant, gold: input.gold)
     }
 }
 
 /// A device row's contribution to the continuous rail (Warm Signal v4 §Call-1):
-/// its node kind, rail extent, dimming, and the view + bounds whose centre the
-/// node sits on (so the overlay can place the rail exactly on the row).
+/// its node kind, and the view + bounds whose centre the node sits on (so the
+/// overlay can place the rail exactly on the row). The row states no extent —
+/// the rail spans the whole band and the overlay derives both ends from the node
+/// kinds and their order.
 public protocol RailNodeProviding: AnyObject {
     /// The node this row renders, or `nil` if the row carries no bus node.
     var railNode: MembershipBusView.Node? { get }
-    /// Whether the row is within the rail span (has a rail above it) — false on
-    /// a bare node below the terminus.
-    var railHasSpine: Bool { get }
-    /// Whether the rail continues below this node (false on the terminus).
-    var railBelow: Bool { get }
-    /// Whether the node renders dimmed (dormant-divergent tint).
-    var railDimmed: Bool { get }
     /// The view whose coordinate space `railNodeBounds` is in.
     var railNodeView: NSView { get }
     /// The bounds whose `midY` is the node's centre (in `railNodeView` coords).

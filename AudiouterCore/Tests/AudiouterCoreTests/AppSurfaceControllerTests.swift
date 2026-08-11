@@ -398,6 +398,8 @@ import AppKit
         surface.shell.test_hasAttachedSheetOverride = false
         surface.shell.windowDidResignKey(
             Notification(name: NSWindow.didResignKeyNotification, object: surface.shell.window))
+        // The dismissal decides a runloop pass later; headless, nothing turns.
+        surface.shell.test_settleResignDismissal()
     }
 
     /// (a) Setup owns the click outright: no surface action of any kind, so a

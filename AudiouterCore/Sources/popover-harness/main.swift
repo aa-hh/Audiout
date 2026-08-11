@@ -411,19 +411,28 @@ func run() -> Int32 {
     let officeXAfter = popover.test_deviceRow(for: "office")?.test_busNodeCenterX() ?? -3
     checks.expect(abs(officeXAfter - officeX) < 0.001,
                   "…with zero layout shift — only fill and line path changed (R7)")
-    let railBelows = backend.devices.compactMap {
-        popover.test_deviceRow(for: $0.id)?.test_busRailBelow
+    let nodes = backend.devices.compactMap {
+        popover.test_deviceRow(for: $0.id)?.test_busNode
     }
-    checks.expectEqual(railBelows.count, backend.devices.count,
-                       "every device row carries a bus segment")
-    // v4 §Call-1: the rail runs to the LOWEST SELECTED node — exactly one
-    // terminus (rail above, none below); bare nodes below it have no rail.
-    let terminusCount = backend.devices.filter { d in
-        let row = popover.test_deviceRow(for: d.id)
-        return row?.test_busRailAbove == true && row?.test_busRailBelow == false
-    }.count
-    checks.expectEqual(terminusCount, 1,
-                       "exactly one terminating (lowest selected) node ends the spine (spec v4 §Call-1)")
+    checks.expectEqual(nodes.count, backend.devices.count,
+                       "every device row carries a bus node")
+    // The channel spans the FULL band — every device row is a stop on it — while
+    // the SIGNAL inside it stops at the lowest member, and nothing below that is
+    // a member.
+    if let plan = popover.test_railPlan() {
+        checks.expectEqual(plan.stops.count, nodes.count,
+                           "every device node is a stop on the full-band rail")
+        if let terminus = plan.signalTerminusIndex {
+            checks.expectEqual(plan.stops[terminus].node, .member,
+                               "the signal ends ON a member node")
+            checks.expect(!plan.stops.dropFirst(terminus + 1).contains { $0.node == .member },
+                          "nothing below the signal's end is a member (spec v4 §Call-1)")
+        } else {
+            checks.expect(false, "with devices in the mix the signal must reach one")
+        }
+    } else {
+        checks.expect(false, "the rail resolves a plan from the laid-out popover")
+    }
 
     // --- 22. Connection-status flow (brief §7.3), on a scripted MockBackend:
     // fail → membership KEPT (R12) + warning + auto-expanded panel; sticky

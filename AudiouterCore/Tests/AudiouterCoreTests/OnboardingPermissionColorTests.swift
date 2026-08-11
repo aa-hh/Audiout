@@ -17,8 +17,9 @@ import AppKit
 /// authored Full-gold hues and STILL mutually distinct (NEW-1 — the explicit
 /// guard against a later regression routing them through `accentDynamic`,
 /// which would collapse all four onto the same live-accent-derived value),
-/// and the glyph-only decision (Q3) holds end to end: granting still
-/// gold-lights the glyph while the tile's own FILL never recolours.
+/// and the glyph-only decision (Q3) holds end to end: the tile's own FILL
+/// never recolours, and each card's glyph keeps its identity hue in every
+/// `SetupCardState`.
 ///
 /// Two helpers are ported rather than shared (so those suites stay untouched):
 ///  - `relativeLuminance`/`contrastRatio` — ported from `AppTetherColorTests`.
@@ -204,7 +205,57 @@ extension SerializedSharedState {
         assertMutuallyDistinct(appearance: .aqua)
     }
 
-    // MARK: 5/6 — granting still gold-lights the glyph; the tile fill never recolours (Q2/Q3)
+    // MARK: The check row's gold glyph — measured, not assumed
+
+    /// The final-check row's `checklist` glyph is `gold` on the tile's
+    /// `raised` well (a deliberate non-permission hue — the first note of the
+    /// finale's colour story). Same ≥3:1 glyph floor the four permission
+    /// tokens are held to, measured in both authored dial columns and both
+    /// appearances. `.systemAccent` is excluded on the token's own terms: it
+    /// resolves `gold` to the live user accent, whose contrast the OS owns.
+    @Test func goldOnRaisedClearsTheGlyphFloorInBothDialColumnsAndAppearances() {
+        let floor: CGFloat = 3.0
+        for style: AccentStyle in [.fullGold, .subtle] {
+            Tokens.accentStyle = style
+            for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
+                let gold = resolved(Tokens.Color.gold, appearanceName: appearance)
+                let raised = resolved(Tokens.Color.raised, appearanceName: appearance)
+                let ratio = contrastRatio(gold, raised)
+                #expect(ratio >= floor,
+                        "gold \(style)/\(appearance.rawValue) vs raised: \(ratio):1 under the \(floor):1 floor")
+            }
+        }
+    }
+
+    // MARK: goldCTA — the finale CTA's double floor (ink AND canvas)
+
+    /// The Setup CTA's fill is contrast-governed on BOTH sides: white ink must
+    /// clear the 4.5:1 body floor on it, and the fill itself must clear 3:1
+    /// against `canvas` — the Setup window's true background. Re-measured here
+    /// rather than trusted from the token's written rationale, in both
+    /// appearances, plus the ink PICK itself: the measured-ink machinery must
+    /// resolve white on this fill everywhere.
+    @Test func goldCTAClearsTheInkAndCanvasFloorsInBothAppearances() {
+        Tokens.accentStyle = .fullGold
+        for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
+            let fill = resolved(Tokens.Color.goldCTA, appearanceName: appearance)
+            let canvas = resolved(Tokens.Color.canvas, appearanceName: appearance)
+            let inkRatio = contrastRatio(fill, .white)
+            let canvasRatio = contrastRatio(fill, canvas)
+            #expect(inkRatio >= 4.5,
+                    "goldCTA/\(appearance.rawValue): white ink \(inkRatio):1 under the 4.5:1 body floor")
+            #expect(canvasRatio >= 3.0,
+                    "goldCTA/\(appearance.rawValue): fill vs canvas \(canvasRatio):1 under the 3:1 floor")
+
+            let cta = ProminentButton(title: "Start listening", target: nil, action: nil,
+                                      fill: Tokens.Color.goldCTA, picksInkFromFill: true)
+            cta.appearance = NSAppearance(named: appearance)
+            #expect(cta.test_measuredKeyInk == .white,
+                    "goldCTA/\(appearance.rawValue): the measured ink must be white — the fill is authored deep enough that black never wins")
+        }
+    }
+
+    // MARK: 5/6 — the glyph tint is PERMANENT; the tile fill never recolours (Q2/Q3)
 
     /// Forces a layer-backed, off-window tile through one real display pass:
     /// `updateLayer()` (which paints `test_fillColor`) only runs on an actual
@@ -221,39 +272,46 @@ extension SerializedSharedState {
         tile.layer?.displayIfNeeded()
     }
 
-    /// `PermissionRowView.update(status:)` and `PTPHelperRowView.update(status:)`
-    /// both forward straight to `IconTileView.setLit(status == .granted / .enabled)`
-    /// on their own PRIVATE `iconTile` field, and Swift's `private` is not
-    /// reachable from a different file even under `@testable import`. So this
-    /// test exercises `IconTileView.setLit` directly on a tile constructed
-    /// exactly the way both rows build theirs (`color:` = one of the four
-    /// permission tokens) — the identical call each row's `update(status:)`
-    /// makes on its own private field, just reached through a tile this test
-    /// owns instead of the row's.
-    @Test func grantedLightsGlyphGoldWithoutRecoloringTileFill() {
+    /// The card's glyph tint is its step's identity hue in EVERY
+    /// `SetupCardState` — state is carried by the checkmark/lock slot alone.
+    /// Driven through the real `SetupCardView.apply(...)`, the same call the
+    /// view controller makes, because the tile itself is private to the card.
+    @Test func glyphTintIsPermanentAcrossEveryCardState() {
+        let states: [SetupCardState] = [.pending, .active, .completed,
+                                        .autoPassed(note: "Requires macOS 14.2 or later"),
+                                        .skipped]
+        for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
+            for step in SetupStep.allCases {
+                let content = OnboardingViewController.content(for: step)
+                let card = SetupCardView(content: content, onAllow: {}, onSkip: {})
+                let expected = resolved(content.iconColor, appearanceName: appearance)
+                for state in states {
+                    card.apply(state, foundSpeakers: nil, isProbing: false,
+                               offersSettingsFallback: false, animated: false)
+                    assertSameRGB(resolved(card.test_iconTint ?? .clear, appearanceName: appearance), expected,
+                        "\(step)/\(state)/\(appearance.rawValue): the glyph tint must stay the card's own iconColor in every state")
+                }
+            }
+        }
+    }
+
+    /// Q3, unchanged: the tile's own FILL is the neutral `raised` well — only
+    /// the glyph ever carries a permission's colour.
+    @Test func tileFillIsAlwaysTheNeutralRaisedWell() {
         for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
             for (name, color) in permissionTokens {
                 let tile = IconTileView(symbolName: "waveform", accessibility: name, color: color)
                 settle(tile, appearance: appearance)
 
-                #expect(!tile.isLit, "\(name)/\(appearance.rawValue): a freshly-built tile starts ungranted")
                 assertSameRGB(tile.test_fillColor, resolved(Tokens.Color.raised, appearanceName: appearance),
-                             "\(name)/\(appearance.rawValue): tile fill must be the neutral `raised` well before granting")
-
-                tile.setLit(true)   // == what update(status: .granted) does to its own iconTile
-
-                #expect(tile.isLit, "\(name)/\(appearance.rawValue): granting must light the glyph")
-                // `test_litTint` is itself a dynamic (unresolved) `NSColor` —
-                // a bare `.usingColorSpace(.sRGB)` (inside `assertSameRGB`)
-                // would resolve it against the process's ambient appearance,
-                // not the one under test, so it must go through `resolved(_:
-                // appearanceName:)` explicitly first, same as the `gold`
-                // reference on the other side.
-                assertSameRGB(resolved(tile.test_litTint ?? .clear, appearanceName: appearance),
-                             resolved(Tokens.Color.gold, appearanceName: appearance),
-                             "\(name)/\(appearance.rawValue): the lit glyph tint must be gold for every row (Q2, unchanged)")
-                assertSameRGB(tile.test_fillColor, resolved(Tokens.Color.raised, appearanceName: appearance),
-                             "\(name)/\(appearance.rawValue): granting must NOT recolour the tile fill (Q3)")
+                             "\(name)/\(appearance.rawValue): tile fill must be the neutral `raised` well")
+                // The glyph keeps the caller's token — a dynamic (unresolved)
+                // `NSColor`, so it must go through `resolved(_:appearanceName:)`
+                // explicitly before `assertSameRGB` resolves it against the
+                // process's ambient appearance instead of the one under test.
+                assertSameRGB(resolved(tile.test_restingTint ?? .clear, appearanceName: appearance),
+                             resolved(color, appearanceName: appearance),
+                             "\(name)/\(appearance.rawValue): the glyph tint must be this row's own token")
             }
         }
     }

@@ -306,7 +306,18 @@ public final class ControlPanelWindowController: NSWindowController {
             // 2026-08-07).
             panel.standardWindowButton(.closeButton)?.isHidden = true
             panel.isOpaque = false
-            panel.backgroundColor = Tokens.Color.clear
+            // NOT `.clear`: the window server treats zero-alpha pixels as
+            // CLICK-THROUGH, and on macOS 26 the glass toolbar renders in its
+            // own surface — so with a clear background the whole toolbar band
+            // is transparent in THIS window's surface wherever no content sits
+            // behind it (Settings/Groups seat content below the strip; only
+            // Mixer's list happens to underlap it). Result: clicks on the nav
+            // tabs fell through to whatever app was behind the panel, which
+            // deactivated us and read as "the tab click closed the popover"
+            // (live-diagnosed 2026-08-12, window-server hit-grid probe). A 2%
+            // wash is invisible over the backing bubble but keeps every pixel
+            // of the panel hit-testable.
+            panel.backgroundColor = NSColor.black.withAlphaComponent(0.02)
             panel.hasShadow = false
             if backingWindow.parent !== panel {
                 panel.addChildWindow(backingWindow, ordered: .below)
@@ -661,6 +672,14 @@ public final class ControlPanelWindowController: NSWindowController {
     /// applications, so the in-app-focus-loss path needs to be driven.
     public var test_appIsActiveOverride: Bool?
 
+    /// `nil` = read the real `window.isKeyWindow`.
+    public var test_isKeyWindowOverride: Bool?
+
+    /// Run the deferred half of a resign-key dismissal now — the runloop pass
+    /// AppKit would have given it. Tests drive both halves explicitly because a
+    /// headless run has no runloop turning between them.
+    public func test_settleResignDismissal() { dismissIfStillResigned() }
+
     /// A sheet is up (e.g. group creation). Dismissing the panel out from under
     /// it would kill the sheet mid-edit — R7. Public: the surface's click
     /// policy (`AppSurfaceController.clickAction`) reads this too, to front
@@ -712,11 +731,39 @@ extension ControlPanelWindowController: NSWindowDelegate {
     ///
     /// The timestamp recorded before closing is the R1 race guard — see
     /// `consumeRecentResignDismissal(within:)` for what it protects against.
+    ///
+    /// The four conditions are evaluated TWICE: once here, and again one
+    /// runloop pass later, where the panel must also still not be key. Only a
+    /// key loss that SURVIVES that pass is a click-outside. One that reverses
+    /// itself is this window's own AppKit chrome borrowing key and handing it
+    /// straight back (a toolbar picker, a menu, field-editor churn), and this
+    /// delegate method is the ONLY path that can close the surface — so an
+    /// instant dismissal here tears the whole surface down for a transition
+    /// the user never made. The user loses nothing to the wait: the dismissal
+    /// still lands in the same runloop turn, before anything is drawn.
     public func windowDidResignKey(_ notification: Notification) {
-        guard !isPinned, isPanelVisible, !hasAttachedSheet, appIsActive else { return }
+        guard shouldDismissOnResignKey else { return }
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.dismissIfStillResigned() }
+        }
+    }
+
+    /// The four conditions a resign-key dismissal requires, each documented
+    /// above `windowDidResignKey`.
+    private var shouldDismissOnResignKey: Bool {
+        !isPinned && isPanelVisible && !hasAttachedSheet && appIsActive
+    }
+
+    private func dismissIfStillResigned() {
+        guard shouldDismissOnResignKey, !isKeyNow else { return }
         lastResignDismissalTime = CACurrentMediaTime()
         window?.performClose(nil)
     }
+
+    /// Whether the panel holds key status right now. Honors
+    /// `test_isKeyWindowOverride` — `swift test` never puts a window on screen,
+    /// so the real property is permanently `false` there.
+    private var isKeyNow: Bool { test_isKeyWindowOverride ?? (window?.isKeyWindow ?? false) }
 
     /// Resync the decorative bubble/beak window when the user drags the
     /// panel's (resizable) edge. `addChildWindow` (see `init`) tracks the

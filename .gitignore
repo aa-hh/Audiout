@@ -40,3 +40,6 @@ DerivedData/
 # in-tree build dir with -derivedDataPath; ignore that case too.
 ios/DerivedData/
 ios/**/DerivedData/
+
+# Impeccable design-skill scratch state (local config + generated critique notes).
+.impeccable/

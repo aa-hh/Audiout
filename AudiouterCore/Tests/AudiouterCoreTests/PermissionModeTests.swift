@@ -62,6 +62,7 @@ import Testing
         #expect(reachable)
         #expect(p.remoteControl.isTrusted())
         #expect(p.ptpHelper.status == .enabled)
+        #expect(p.bluetoothReader.currentStatus() == .granted)
     }
 
     @Test func deniedProviders_reportUnsatisfied() async {
@@ -73,6 +74,26 @@ import Testing
         #expect(!reachable)
         #expect(!p.remoteControl.isTrusted())
         #expect(p.ptpHelper.status == .requiresApproval)
+        #expect(p.bluetoothReader.currentStatus() == .denied)
+    }
+
+    /// A simulated Bluetooth prime must never construct a `CBCentralManager`
+    /// (which IS the real prompt), and must still report a decision — the canned
+    /// status is already the answer, so an automated run never waits on a dialog
+    /// nobody can click.
+    @Test func simulatedBluetooth_primeDecidesWithoutAPrompt() {
+        let simulated = SimulatedBluetoothPermission(status: .granted)
+        let decided = LockedFlag()
+        simulated.prime { decided.set() }
+        #expect(decided.isSet)
+        #expect(simulated.currentStatus() == .granted)
+    }
+
+    private final class LockedFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        func set() { lock.withLock { value = true } }
+        var isSet: Bool { lock.withLock { value } }
     }
 
     /// A simulated primer must NEVER open the real Accessibility dialog — that's
@@ -95,11 +116,13 @@ import Testing
         await model.primeLocalNetwork()
         model.primeRemoteControl()
         model.registerPTPHelper()
+        await model.refreshStatuses()
 
         #expect(model.audioStatus == .granted)
         #expect(model.localNetworkStatus == .granted)
         #expect(model.remoteControlStatus == .granted)
         #expect(model.ptpHelperStatus == .enabled)
+        #expect(model.bluetoothStatus == .granted)
         #expect(model.requiredPermissionsNotGranted().isEmpty,
                       "granted providers should satisfy every required permission")
     }
@@ -113,7 +136,11 @@ import Testing
         model.registerPTPHelper()
 
         #expect(model.audioStatus == .denied)
-        #expect(model.localNetworkStatus == .requested)
+        // `denied` mode means the simulated user REFUSED — so Local Network
+        // reports the refusal, like every other seam in this mode. It used to
+        // report `.requested` ("asked, nothing answered"), which put the one
+        // card this mode exists to exercise in the wrong shape entirely.
+        #expect(model.localNetworkStatus == .denied)
         #expect(model.ptpHelperStatus == .requiresApproval)
         let notGranted = Set(model.requiredPermissionsNotGranted())
         #expect(notGranted.contains(.audioCapture))

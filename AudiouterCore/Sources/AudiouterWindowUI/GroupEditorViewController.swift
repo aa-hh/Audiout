@@ -517,23 +517,16 @@ public final class GroupEditorViewController: NSViewController {
         updateRail()
     }
 
-    /// Re-point the pane-level rail at the current rows and set each row's
-    /// extent in the spine (Warm Signal v4 §Call-1): the rail runs from the
-    /// group icon well down to the LOWEST CHECKED row, detouring around the
-    /// unchecked rows inside that span; rows below the terminus render as bare
-    /// nodes with no rail through them, so the spine's LENGTH reads as "how far
-    /// down this group reaches." Called after every rebuild — which is also
-    /// after every membership toggle, so the terminus follows the checkboxes.
+    /// Re-point the pane-level rail at the current rows (Warm Signal v4 §Call-1):
+    /// the channel runs from the group icon well down the WHOLE candidate list,
+    /// detouring around every unchecked row wherever it sits, while the signal
+    /// line inside it reaches only as far as the LOWEST CHECKED row — so the
+    /// GOLD's length reads as "how far down this group reaches." The overlay
+    /// derives both ends from the rows' node kinds, so this only has to hand it
+    /// the current rows. Called after every rebuild — which is also after every
+    /// membership toggle, so the signal's end follows the checkboxes.
     private func updateRail() {
         let rows = candidateDevices.compactMap { rowsByID[$0.id] }
-        let terminus = rows.lastIndex { $0.isChecked }
-        for (index, row) in rows.enumerated() {
-            if let terminus, index <= terminus {
-                row.setRail(above: true, below: index < terminus)
-            } else {
-                row.setRail(above: false, below: false)
-            }
-        }
         railOverlay.mainOutRow = self
         railOverlay.deviceRows = rows
         railOverlay.needsDisplay = true
@@ -845,12 +838,6 @@ public final class GroupEditorViewController: NSViewController {
     /// Each candidate row's drawn node, in candidate order.
     public var test_railNodes: [MembershipBusView.Node?] {
         candidateDevices.compactMap { rowsByID[$0.id] }.map(\.railNode)
-    }
-
-    /// Each candidate row's rail extent, in candidate order — `above` is
-    /// "inside the spine", `below` is "the rail continues past me".
-    public var test_railExtents: [(above: Bool, below: Bool)] {
-        candidateDevices.compactMap { rowsByID[$0.id] }.map { ($0.railHasSpine, $0.railBelow) }
     }
 
     /// Where a row's node centre lands in the RAIL OVERLAY's own coordinate

@@ -270,12 +270,25 @@ public protocol LocalNetworkPriming: Sendable {
     ///
     /// Defaulted (below) so a fake that only answers the Bool keeps compiling.
     func probeFoundSpeakers() async -> Int
+
+    /// The same browse with an explicit window, because the FIRST browse is
+    /// also the system prompt: a human has to notice, read and click a dialog
+    /// that hasn't even rendered yet, which takes far longer than a re-scan of
+    /// a permission that is already decided. The caller picks the window (see
+    /// ``SetupModel``); defaulted (below) so a fake that ignores timing keeps
+    /// compiling.
+    func probeFoundSpeakers(browseSeconds: TimeInterval) async -> Int
 }
 
 public extension LocalNetworkPriming {
     /// A seam that only implements the Bool answer reports one speaker for
     /// reachable, none otherwise — preserving `count > 0 ⇔ probe()`.
     func probeFoundSpeakers() async -> Int { await probe() ? 1 : 0 }
+
+    /// A seam with no window of its own just answers — fakes resolve instantly.
+    func probeFoundSpeakers(browseSeconds: TimeInterval) async -> Int {
+        await probeFoundSpeakers()
+    }
 }
 
 /// Triggers and reads the macOS **Accessibility** permission, needed for a
@@ -504,12 +517,30 @@ public final class SetupModel {
         onChange?()
     }
 
+    /// How long the FIRST Local Network browse waits: long enough for the
+    /// system permission dialog to render and for a person to read and answer
+    /// it. Nothing about it is precise — it just has to be human-length.
+    static let firstAskBrowseSeconds: TimeInterval = 15
+
+    /// How long every later browse waits — a plain mDNS scan of an
+    /// already-decided permission, where a spinner is pure cost.
+    static let rescanBrowseSeconds: TimeInterval = 3
+
     /// Run the browse, record how many speakers it saw, and map that to a
     /// status. One place so `primeLocalNetwork()`, ``refreshStatuses()`` and
     /// ``auditRequiredPermissions()`` can never disagree about whether a count
     /// of zero is granted.
     private func probeLocalNetwork() async -> PermissionStatus {
-        let found = await localNetwork.probeFoundSpeakers()
+        // `.unknown` means no browse has ever run, so THIS one is the browse
+        // that raises the system permission dialog. A three-second window
+        // expires before the user can even see it, and the card then accuses
+        // them of having no speakers while the dialog is still up — so the
+        // first ask waits at a human's pace. Every
+        // later browse re-scans a permission that is already decided, with no
+        // dialog to wait for, so it stays snappy.
+        let window = localNetworkStatus == .unknown ? Self.firstAskBrowseSeconds
+                                                    : Self.rescanBrowseSeconds
+        let found = await localNetwork.probeFoundSpeakers(browseSeconds: window)
         localNetworkFoundSpeakers = found
         return found > 0 ? .granted : .requested
     }

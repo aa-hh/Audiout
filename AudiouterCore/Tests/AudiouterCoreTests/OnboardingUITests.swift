@@ -348,6 +348,35 @@ import Testing
         #expect(vc.test_activeStep == .bluetooth)
     }
 
+    /// A Local Network browse that proves nothing is NOT evidence the user is
+    /// finished with the system dialog — macOS has no status API to ask
+    /// (TN3179), so the timeout may well land while the dialog is still up.
+    /// Re-fronting on it steals activation from that dialog and leaves it
+    /// dimmed and unclickable.
+    @Test func anUnprovenLocalNetworkBrowseDoesNotStealTheFront() async {
+        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 0))
+        await vc.test_tapAllow(.audio)
+        let before = vc.test_returnToFrontCount
+
+        await vc.test_tapAllow(.localNetwork)
+
+        #expect(vc.test_activeStep == .localNetwork, "an unproven browse does not advance")
+        #expect(vc.test_returnToFrontCount == before,
+                "a bare probe timeout leaves the front to the system dialog")
+    }
+
+    /// The grant landing IS positive evidence the interaction is over, so the
+    /// window comes back to show the rest of the flow.
+    @Test func aProvenLocalNetworkBrowseTakesTheFrontBack() async {
+        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 2))
+        await vc.test_tapAllow(.audio)
+        let before = vc.test_returnToFrontCount
+
+        await vc.test_tapAllow(.localNetwork)
+
+        #expect(vc.test_returnToFrontCount > before)
+    }
+
     /// The demoted link still works, and still goes to the Local Network pane.
     @Test func theDemotedSettingsLinkOpensTheLocalNetworkPane() async {
         var opened: [SystemSettingsPane] = []

@@ -38,7 +38,7 @@ public struct NoopLocalNetworkPrimer: LocalNetworkPriming {
 /// while the permission is undetermined, so probing doubles as the ask.
 ///
 /// On a still-undetermined first run the prompt blocks the browse, so a user who
-/// takes longer than `browseSeconds` to answer resolves `false` this pass — but
+/// takes longer than the caller's window to answer resolves `false` this pass — but
 /// ``SetupModel/refreshStatuses()`` re-probes on the next window focus and picks
 /// up the grant, so the slow-answer case self-heals. When the grant already
 /// exists (ahh's case), the browse reaches `.ready`/results immediately and
@@ -50,26 +50,34 @@ public final class LocalNetworkPrimer: LocalNetworkPriming, @unchecked Sendable 
     /// arrive on this queue.
     private let queue = DispatchQueue(label: "com.audiouter.localnetwork.primer")
     private var browser: NWBrowser?
-    private let browseSeconds: TimeInterval
+    /// The window a caller that doesn't name one gets — also the point at which
+    /// a longer browse that has already found something settles.
+    private let defaultBrowseSeconds: TimeInterval
 
     public init(browseSeconds: TimeInterval = 3.0) {
-        self.browseSeconds = browseSeconds
+        self.defaultBrowseSeconds = browseSeconds
     }
 
     public func probe() async -> Bool { await probeFoundSpeakers() > 0 }
 
-    /// Browse for the whole window and report the most speakers seen at once.
+    public func probeFoundSpeakers() async -> Int {
+        await probeFoundSpeakers(browseSeconds: defaultBrowseSeconds)
+    }
+
+    /// Browse for `browseSeconds` and report the most speakers seen at once.
     ///
-    /// It runs the FULL `browseSeconds` even after the first result, rather than
-    /// finishing on the first one as the Bool-only version did: mDNS answers
-    /// trickle in, and "Found 1 speaker" when three are on the network would be
-    /// a worse lie than a three-second spinner. `.failed` still short-circuits.
+    /// It keeps browsing after the first result rather than finishing on it:
+    /// mDNS answers trickle in, and "Found 1 speaker" when three are on the
+    /// network would be a worse lie than a three-second spinner. A window
+    /// longer than `defaultBrowseSeconds` is a first ask waiting on a person
+    /// and a permission dialog, so it settles at that shorter mark once it has
+    /// actually seen something. `.failed` still short-circuits.
     /// A `.ready` browser with no results is deliberately NOT reported as
     /// reachable-and-done — with no OS status API, "the browse worked but found
     /// nothing" and "denied" are the same observation, and setup's Local Network
     /// card is the one place that difference matters (it asks the user to power
     /// a speaker on rather than claiming a denial).
-    public func probeFoundSpeakers() async -> Int {
+    public func probeFoundSpeakers(browseSeconds: TimeInterval) async -> Int {
         await withCheckedContinuation { continuation in
             queue.async { [weak self] in
                 guard let self else { continuation.resume(returning: 0); return }
@@ -107,8 +115,17 @@ public final class LocalNetworkPrimer: LocalNetworkPriming, @unchecked Sendable 
                 self.browser = browser
                 browser.start(queue: self.queue)
 
+                // A browse that has already seen a speaker has its answer, so it
+                // settles here rather than making someone whose permission was
+                // already granted watch a long first-ask window run out. Only
+                // the EMPTY wait runs long — that's the one waiting on a human
+                // and a dialog.
+                let settle = min(browseSeconds, self.defaultBrowseSeconds)
+                self.queue.asyncAfter(deadline: .now() + settle) {
+                    if found > 0 { finish(found) }
+                }
                 // Window closed: report whatever the browse saw (default = none).
-                self.queue.asyncAfter(deadline: .now() + self.browseSeconds) {
+                self.queue.asyncAfter(deadline: .now() + browseSeconds) {
                     finish(found)
                 }
             }

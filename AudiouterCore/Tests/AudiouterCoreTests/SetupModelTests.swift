@@ -34,6 +34,14 @@ extension SerializedSharedState {
         var reachable = false
         var probeCount: Int { lock.withLock { _probeCount } }
         func probe() async -> Bool { lock.withLock { _probeCount += 1 }; return reachable }
+
+        /// The browse window each probe was handed, in order.
+        private var _windows: [TimeInterval] = []
+        var windows: [TimeInterval] { lock.withLock { _windows } }
+        func probeFoundSpeakers(browseSeconds: TimeInterval) async -> Int {
+            lock.withLock { _windows.append(browseSeconds) }
+            return await probe() ? 1 : 0
+        }
     }
 
     /// Reports a fixed speaker COUNT (the seam behind "Found 3 speakers"), with
@@ -250,6 +258,23 @@ extension SerializedSharedState {
         #expect(spy.probeCount == 1)
         #expect(model.localNetworkStatus == .requested,
                        "browse got nowhere ⇒ asked-but-unproven")
+    }
+
+    /// The first browse IS the system permission dialog: a three-second window
+    /// runs out before the user can even see it, and the card then claims there
+    /// are no speakers while the dialog is still open.
+    /// Only that first ask waits at a human's pace — a retry re-scans an
+    /// already-decided permission and stays snappy.
+    @Test func onlyTheFirstLocalNetworkBrowseWaitsForAHuman() async {
+        let (model, spy, _, _) = makeModel(audio: .granted)
+        spy.reachable = false
+
+        await model.primeLocalNetwork()   // first ask — the dialog appears here
+        await model.primeLocalNetwork()   // "Try Again" — no dialog to wait for
+
+        #expect(spy.windows == [SetupModel.firstAskBrowseSeconds,
+                                SetupModel.rescanBrowseSeconds])
+        #expect(SetupModel.firstAskBrowseSeconds > SetupModel.rescanBrowseSeconds)
     }
 
     @Test func primeLocalNetworkReachableBecomesGranted() async {

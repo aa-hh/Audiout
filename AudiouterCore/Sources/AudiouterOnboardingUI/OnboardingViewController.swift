@@ -580,6 +580,10 @@ public final class OnboardingViewController: NSViewController {
     /// Pull the window back in front of whatever the user was just in (a TCC
     /// prompt, System Settings) and restore keyboard focus.
     private func returnToFront() {
+        // Counted before the headless bail-out: activation itself is invisible
+        // to a headless test, but WHETHER to activate is what Local Network's
+        // rule decides (see `allowTapped`).
+        test_returnToFrontCount += 1
         guard !HeadlessRuntime.isActive else { return }
         NSApp?.activate(ignoringOtherApps: true)
         view.window?.makeKeyAndOrderFront(nil)
@@ -709,8 +713,19 @@ public final class OnboardingViewController: NSViewController {
             switch result.destination {
             case .none:
                 // A prompt ran (or was refused): the user came back from a
-                // system dialog, so take the front again.
-                returnToFront()
+                // system dialog, so take the front again. EXCEPT Local
+                // Network: its "prompt" is a browse with no OS status API
+                // (TN3179) to tell a real dismissal from the dialog still
+                // being up — a plain timeout is not evidence the user is
+                // done. Reactivating here steals focus mid-dialog and leaves
+                // the real permission alert dimmed and unclickable. Only
+                // re-front on positive evidence the grant landed; else leave
+                // it be —
+                // the next natural activation (the user's own click back, or
+                // a re-open) brings the window forward again.
+                if step != .localNetwork || model.localNetworkStatus == .granted {
+                    returnToFront()
+                }
             case .settingsPane(let pane):
                 onWillOpenSystemSettings?()
                 onOpenSettings(pane)
@@ -739,6 +754,11 @@ public final class OnboardingViewController: NSViewController {
     }
 
     // MARK: Test-support hooks
+
+    /// How many times the flow decided to pull the window back to the front.
+    /// Local Network's rule — never on a bare probe timeout, because the system
+    /// dialog may still be open — has no other headless signal.
+    public private(set) var test_returnToFrontCount = 0
 
     /// The expanded card's step (nil once every step is done or skipped).
     public var test_activeStep: SetupStep? { _ = view; return displayedActiveStep }

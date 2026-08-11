@@ -46,8 +46,14 @@ set changes, or when the gate/motion/demo rules change.
   beside the click's `finished`/`refused`/`swallowed_in_flight`.
   `verifyForDone()` still re-verifies REQUIRED permissions only — a skip is a
   decision, not a permission — and stays on the CTA click unchanged
-  (near-instant after a passed check: sticky Local Network grant + coalesced
-  probe). On a `.permissionLost` re-entry the
+  and is NEAR-INSTANT by construction: the click's audit TRUSTS the proven
+  Local Network grant (`auditRequiredPermissions(trustingProvenLocalNetworkGrant:)`)
+  instead of re-browsing it — the auto-check's own browse is the one visible
+  re-proof per gate opening, and re-proving it again invisibly behind the
+  click was the v7 "took two clicks" (a 3.2 s verification with the second
+  click correctly swallowed inside it). The app-level wake audit keeps the
+  browse: there it is the only Local Network revocation detector and the
+  granted card's only speaker recount. On a `.permissionLost` re-entry the
   walk starts at the lost step, so an undecided optional card BEHIND that start
   is not walked and cannot block Done; one AFTER it (Remote Control) is shown
   and must be decided, as the flow always re-offered it. There is no

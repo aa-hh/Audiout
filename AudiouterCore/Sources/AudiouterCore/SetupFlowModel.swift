@@ -352,9 +352,11 @@ public final class SetupFlowModel {
     /// The one audit both verifications run — the silent re-read (it is what
     /// catches a revocation the window-focus refresh deliberately can't); its
     /// own return value uses revocation semantics, so the verdict comes from
-    /// the gate check.
-    private func auditVerdict() async -> SetupFlowVerification {
-        _ = await setup.auditRequiredPermissions()
+    /// the gate check. The trust flag is the two entry points' one difference
+    /// — see each caller.
+    private func auditVerdict(trustingProvenLocalNetworkGrant: Bool) async -> SetupFlowVerification {
+        _ = await setup.auditRequiredPermissions(
+            trustingProvenLocalNetworkGrant: trustingProvenLocalNetworkGrant)
         guard let unmet = Self.firstUnmetRequiredStep(in: setup) else { return .complete }
         return .unmet(unmet)
     }
@@ -371,7 +373,10 @@ public final class SetupFlowModel {
     /// the click they made.
     public func runFinalCheck() async -> SetupFlowVerification {
         finalCheck = .running
-        let verdict = await auditVerdict()
+        // The full audit, Local Network re-browse included: this is the ONE
+        // re-proof per gate opening, and the row's spinner is where its cost
+        // belongs on screen. The CTA click that follows trusts it.
+        let verdict = await auditVerdict(trustingProvenLocalNetworkGrant: false)
         record(verdict)
         switch verdict {
         case .complete:
@@ -388,16 +393,22 @@ public final class SetupFlowModel {
     /// Re-verify everything behind a Done tap: SILENT reads only — never the
     /// audible tone probe, which stays reserved for an explicit Allow tap.
     /// Reports the first still-unmet required step so the UI can snap back to it
-    /// with a plain explanation. Near-instant after a passed check — the Local
-    /// Network grant is sticky and concurrent primes coalesce — so the click
-    /// that follows the visible check never hangs.
+    /// with a plain explanation.
+    ///
+    /// NEAR-INSTANT by construction: the click trusts a PROVEN Local Network
+    /// grant instead of re-browsing it (the audit's trust flag). Re-proving
+    /// behind the click cost an invisible ~3 s and produced the live "Start
+    /// listening took two clicks" in its v7 form — the click's own
+    /// verification, 3.2 s wide, with the second click correctly swallowed
+    /// inside it. Audio and the helper keep their instant silent reads, and a
+    /// grant revoked in Settings still can't sneak past: reaching Settings
+    /// and back re-browses via the reactivation `refreshStatuses()`.
     /// Like the Allow path, every verification logs exactly ONE named outcome
-    /// (`setup_done` + `outcome`): a live session's "Start listening took two
-    /// clicks" should be readable from the trail — finished, refused (and on
-    /// what), or a click the UI's single-flight swallowed (logged there) —
-    /// instead of guessed at.
+    /// (`setup_done` + `outcome`): a live session's misbehaviour should be
+    /// readable from the trail — finished, refused (and on what), or a click
+    /// the UI's single-flight swallowed (logged there) — instead of guessed at.
     public func verifyForDone() async -> SetupFlowVerification {
-        let verdict = await auditVerdict()
+        let verdict = await auditVerdict(trustingProvenLocalNetworkGrant: true)
         // A refusal reverts the check row to pending; a pass changes nothing
         // the auto-check hadn't already recorded.
         record(verdict)

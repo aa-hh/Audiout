@@ -1003,7 +1003,20 @@ public final class SetupModel {
     /// - PTP helper: a plain silent `.status` re-read, never re-``register()``.
     /// - Remote Control is NEVER touched here — it's excluded from "required"
     ///   entirely (see ``RequiredPermission``).
-    public func auditRequiredPermissions() async -> [RequiredPermission] {
+    /// - Parameter trustingProvenLocalNetworkGrant: skip the Local Network
+    ///   re-browse when the cached status is already the PROVEN, sticky
+    ///   `.granted`. The Setup window's own audits pass `true`: re-browsing a
+    ///   proven grant costs ~3 s (`rescanBrowseSeconds`) and can learn nothing
+    ///   there — while that window is open, any revocation requires a System
+    ///   Settings round-trip whose reactivation `refreshStatuses()` already
+    ///   re-browses — and that invisible cost behind the CTA click was the
+    ///   live "Start listening took two clicks" (v7: 3.2 s between the
+    ///   click's mouseUp and its `finished` line). The default `false` keeps
+    ///   the browse for the app's wake/reactivate audit, where it is the ONLY
+    ///   detector of a Local Network revocation (the mDNS refusal can only
+    ///   arrive FROM a browse) and the only recount for the granted card's
+    ///   speaker-count title.
+    public func auditRequiredPermissions(trustingProvenLocalNetworkGrant: Bool = false) async -> [RequiredPermission] {
         var changed = false
 
         if let silentAudio = audioProbe.currentStatusSilently() {
@@ -1014,7 +1027,8 @@ public final class SetupModel {
             }
         }
 
-        if localNetworkGated, localNetworkStatus != .unknown {
+        if localNetworkGated, localNetworkStatus != .unknown,
+           !(trustingProvenLocalNetworkGrant && localNetworkStatus == .granted) {
             let previousFound = localNetworkFoundSpeakers
             let next = await probeLocalNetwork()
             // The COUNT is observable too (the card reads "3 speakers on your

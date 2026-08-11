@@ -51,6 +51,7 @@ import Testing
         private let counts: [Int]
         private var index = 0
         init(_ counts: [Int]) { self.counts = counts }
+        var test_primeCount: Int { lock.withLock { index } }
         func probe() async -> Bool { true }
         func prime(browseSeconds: TimeInterval,
                    onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome {
@@ -343,6 +344,28 @@ import Testing
 
         #expect(flow.finalCheckState == .pending, "a refusal reverts the row")
         #expect(!flow.isDoneAvailable)
+    }
+
+    /// The CTA click after the visible check fires NO browse of its own: the
+    /// auto-check's audit is the one re-proof per gate opening, and the click
+    /// trusts its proven grant — the invisible second browse behind the click
+    /// was the v7 "Start listening took two clicks" (a 3.2 s verification the
+    /// second click was correctly swallowed inside).
+    @Test func verifyForDoneAfterThePassedCheckFiresNoBrowse() async {
+        let net = GrantingLocalNetwork([2])
+        let setup = makeSetup(audio: .granted, localNetwork: net, ptpHelper: .enabled)
+        await prime(setup)
+        let flow = SetupFlowModel(setup: setup)
+        flow.skip(.bluetooth)
+        flow.skip(.remoteControl)
+
+        #expect(await flow.runFinalCheck() == .complete)   // the one visible re-proof
+        let browsesAfterCheck = net.test_primeCount
+
+        #expect(await flow.verifyForDone() == .complete)
+
+        #expect(net.test_primeCount == browsesAfterCheck,
+                "the click trusts the check it just watched — no browse of its own")
     }
 
     /// A revocation AFTER the pass closes the gate on its own: the state

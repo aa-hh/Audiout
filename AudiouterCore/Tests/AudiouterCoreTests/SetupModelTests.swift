@@ -1194,6 +1194,46 @@ extension SerializedSharedState {
         #expect(unmet.contains(.ptpHelper))
     }
 
+    /// The window-open audits TRUST a proven, sticky grant: the trust flag
+    /// skips the ~3 s Local Network re-browse whose invisible cost behind the
+    /// CTA click was the live "Start listening took two clicks" (v7 — a 3.2 s
+    /// verification the second click was correctly swallowed inside). The
+    /// default keeps the browse: the wake audit is the app's only Local
+    /// Network revocation detector.
+    @Test func auditSkipsTheLocalNetworkBrowseOnlyWhenTrustingAProvenGrant() async {
+        let spy = SpyLocalNetwork()
+        spy.reachable = true
+        let (model, _, _, _) = makeModel(audio: .granted, localNetwork: spy)
+        await model.primeLocalNetwork()
+        #expect(model.localNetworkStatus == .granted)
+        let browsesAfterPrime = spy.probeCount
+
+        _ = await model.auditRequiredPermissions(trustingProvenLocalNetworkGrant: true)
+
+        #expect(spy.probeCount == browsesAfterPrime, "a proven grant is trusted — no re-browse")
+        #expect(model.localNetworkStatus == .granted)
+
+        _ = await model.auditRequiredPermissions()
+
+        #expect(spy.probeCount == browsesAfterPrime + 1, "the default audit still re-browses")
+    }
+
+    /// The trust flag only covers a PROVEN grant: any other engaged status
+    /// still browses — a denial's audit must stay able to observe the user
+    /// re-allowing it (and vice versa).
+    @Test func aTrustingAuditStillBrowsesAnUnprovenLocalNetwork() async {
+        let spy = SpyLocalNetwork()   // not reachable ⇒ `.requested`
+        let (model, _, _, _) = makeModel(audio: .granted, localNetwork: spy)
+        await model.primeLocalNetwork()
+        #expect(model.localNetworkStatus == .requested)
+        let browsesAfterPrime = spy.probeCount
+
+        _ = await model.auditRequiredPermissions(trustingProvenLocalNetworkGrant: true)
+
+        #expect(spy.probeCount == browsesAfterPrime + 1,
+                "only a proven grant is trusted — an unproven status re-browses")
+    }
+
     @Test func auditRequiredPermissionsFiresOnChangeOnlyWhenSomethingChanged() async {
         let ptpHelper = FakePTPHelper()
         let model = SetupModel(audioProbe: SilentAudioProbe(silentResult: nil),

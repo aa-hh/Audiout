@@ -1022,12 +1022,13 @@ import Testing
         #expect(vc.test_demoMode != .settled, "no finale on a failed check")
     }
 
-    /// The live double-click bug's exact shape: the app-reactivation
-    /// `refreshStatuses()` is still browsing the local network when the user
-    /// clicks Done. The verification must JOIN that running probe and finish on
-    /// the first click — the real primer answers a colliding prime `.undecided`
-    /// (its in-flight guard), which the model would have recorded as a real
-    /// "not granted" and refused to finish on.
+    /// The reactivation `refreshStatuses()` is still browsing the local
+    /// network when the user clicks Done — the click must finish FIRST, and
+    /// instantly: the verification trusts the proven grant, so it never even
+    /// meets the running probe. (The probe coalescing stays load-bearing
+    /// behind it: a colliding prime answers `.undecided`, which the model
+    /// would record as a real "not granted" — the original first-click
+    /// refusal, live 2026-08-11.)
     @Test func doneFinishesOnTheFirstClickWhileAReactivationProbeIsStillBrowsing() async {
         let net = CollidingLocalNetwork()
         var doneCount = 0
@@ -1044,41 +1045,106 @@ import Testing
         let reactivation = Task { await vc.test_refreshStatuses() }
         await net.waitUntilParked()
 
-        let done = Task { await vc.test_tapDone() }
-        await waitUntil { vc.test_doneVerifyInFlight }
-        // Let the verification reach the shared probe before the browse answers.
-        for _ in 0..<20 { await Task.yield() }
-        net.resume()
-        await done.value
-        await reactivation.value
+        // The click completes WHILE the reactivation browse is still parked:
+        // the verification trusts the proven grant, so it neither joins the
+        // running probe nor stacks one of its own.
+        await vc.test_tapDone()
 
         #expect(doneCount == 1, "the FIRST click finishes")
+        net.resume()
+        await reactivation.value
         #expect(vc.test_snapBackStep == nil, "no fabricated unmet permission")
         #expect(net.test_primeCount == 3,
-                "the walk's browse, the auto-check's, and the reactivation's — the verification joined, it did not stack a fourth")
+                "the walk's browse, the auto-check's, and the reactivation's — the click fired none")
+    }
+
+    /// Grants until told otherwise, then reports the mDNS refusal, then PARKS
+    /// the next browse. A slow verification now takes a REVOKED Local Network
+    /// — a proven grant is trusted and never browses — so this is how the
+    /// single-flight window is held open for the test to click into.
+    private final class RevokableParkingLocalNetwork: LocalNetworkPriming, @unchecked Sendable {
+        enum Mode { case grant, deny, park }
+        private let lock = NSLock()
+        private var mode: Mode = .grant
+        private var parkedResume: (() -> Void)?
+        private var parkedWaiter: (() -> Void)?
+        private var primeCount = 0
+
+        func probe() async -> Bool { true }
+        func set(_ mode: Mode) { lock.withLock { self.mode = mode } }
+        var test_primeCount: Int { lock.withLock { primeCount } }
+
+        func prime(browseSeconds: TimeInterval,
+                   onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome {
+            let mode = lock.withLock { primeCount += 1; return self.mode }
+            switch mode {
+            case .grant:
+                onReachable()
+                return .granted(foundSpeakers: 2)
+            case .deny:
+                return .denied
+            case .park:
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    let waiter: (() -> Void)? = lock.withLock {
+                        parkedResume = { continuation.resume() }
+                        let waiter = parkedWaiter
+                        parkedWaiter = nil
+                        return waiter
+                    }
+                    waiter?()
+                }
+                return .denied
+            }
+        }
+
+        func waitUntilParked() async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let alreadyParked: Bool = lock.withLock {
+                    if parkedResume != nil { return true }
+                    parkedWaiter = { continuation.resume() }
+                    return false
+                }
+                if alreadyParked { continuation.resume() }
+            }
+        }
+
+        func resume() {
+            let gate: (() -> Void)? = lock.withLock {
+                let gate = parkedResume
+                parkedResume = nil
+                return gate
+            }
+            gate?()
+        }
     }
 
     /// A second click while Done's verification is still running is a no-op —
     /// single-flight, like the Allow path. Without it the second verification
-    /// would collide with the first's browse and race it past `onDone`.
-    /// (Each click also leaves a named `setup_done` outcome in the decision
-    /// log — the swallowed click's line is the guard this test pins; the
-    /// line shapes themselves are pinned in `SetupTelemetryTests`, the
-    /// serialized suite that may install the process-global sink.)
+    /// would collide with the first's browse and race it past `onDone`. A slow
+    /// verification takes a REVOKED Local Network now (a proven grant never
+    /// browses), so that is the shape driven here. (Each click also leaves a
+    /// named `setup_done` outcome in the decision log — the swallowed click's
+    /// line is the guard this test pins; the line shapes themselves are pinned
+    /// in `SetupTelemetryTests`, the serialized suite that may install the
+    /// process-global sink.)
     @Test func aSecondClickDuringDoneVerificationIsANoOp() async {
-        let net = CollidingLocalNetwork()
+        let net = RevokableParkingLocalNetwork()
         var doneCount = 0
         let vc = makeVC(model: makeModel(audio: .granted, localNetwork: net,
                                          ptpHelper: FakePTPHelper(status: .enabled)),
                         onDone: { doneCount += 1 })
-        await vc.test_allow([.audio, .localNetwork])
+        await vc.test_allow([.audio, .localNetwork])   // browse #1
         vc.test_tapSkip(.bluetooth)
         vc.test_tapSkip(.remoteControl)
-        await vc.test_awaitFinalCheck()   // the auto-check's own browse (#2) completes
+        await vc.test_awaitFinalCheck()                 // browse #2, the visible re-proof
 
-        net.armParking()
-        let first = Task { await vc.test_tapDone() }
-        await net.waitUntilParked()   // the first verification's browse is live
+        net.set(.deny)
+        await vc.test_refreshStatuses()                 // browse #3 — the revocation lands
+        #expect(!vc.test_doneExists, "the gate closed on the revocation")
+
+        net.set(.park)
+        let first = Task { await vc.test_tapDone() }    // denied is not trusted: browse #4 parks
+        await net.waitUntilParked()
 
         await vc.test_tapDone()       // the second click, mid-verification
 
@@ -1086,8 +1152,9 @@ import Testing
         net.resume()
         await first.value
 
-        #expect(doneCount == 1, "exactly one finish")
-        #expect(net.test_primeCount == 3, "the second click fired no browse of its own")
+        #expect(doneCount == 0, "a revoked permission refuses to finish")
+        #expect(vc.test_snapBackStep == .localNetwork)
+        #expect(net.test_primeCount == 4, "the second click fired no browse of its own")
     }
 
     // MARK: The finale (setup-complete state)

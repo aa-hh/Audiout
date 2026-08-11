@@ -118,6 +118,15 @@ set changes, or when the gate/motion/demo rules change.
   window the user moved. The content's `fittingSize` is a FIXED
   `contentWidth × contentHeight` (820 × 560), not a per-step measurement: the
   window must not resize under the user as cards expand and collapse.
+- **Both on-screen paths are gated on `HeadlessRuntime`** — `present()` and the
+  `appDidBecomeActive` re-front. The sizing/centering and the take-key DECISION
+  still run headless (the latter counted into `test_frontCount`), so both
+  contracts stay just as testable; only `activate`/`makeKeyAndOrderFront` are
+  skipped. Ungated, a `swift test` run parks this `.floating` window above
+  everything on the developer's real screen — un-clickable, because the test
+  process is not a foreground app — until the whole run ends. This window is
+  more disruptive than the others when it leaks, which is why it is called out
+  here as well as in `HeadlessRuntime`'s own doc comment.
 - **`leftPaneWidth` is 420, not the 380 the layout was first specified at.** The
   longest earned title truncated on a collapsed strip at 380, and the titles are
   reviewed copy — the column moves, not the words. The demo's fixed surface still

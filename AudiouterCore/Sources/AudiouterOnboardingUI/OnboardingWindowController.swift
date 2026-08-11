@@ -119,7 +119,11 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
         // prompt or System Settings.
         let key = keyWindowProvider()
         if key == nil || key === window {
-            window?.makeKeyAndOrderFront(nil)
+            // Counted BEFORE the headless bail-out: ordering a window in is
+            // invisible to a headless test, but WHETHER to take key is the rule
+            // worth pinning (same shape as `OnboardingViewController.returnToFront`).
+            test_frontCount += 1
+            if !HeadlessRuntime.isActive { window?.makeKeyAndOrderFront(nil) }
         }
         // Returning to the app (e.g. back from System Settings) is exactly when a
         // permission the user just changed should be re-read — so the rows reflect
@@ -141,14 +145,23 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
     /// (`OnboardingViewController.contentWidth` × `contentHeight`), not a
     /// measurement that moves per step — the window must not resize under the
     /// user as cards expand and collapse.
+    ///
+    /// Sizing and centering run everywhere; only the on-screen half is gated on
+    /// ``HeadlessRuntime``. A test process holds a real WindowServer connection,
+    /// so an un-gated activate/order-front here parks a FLOATING, un-clickable
+    /// Setup window above everything on the developer's actual screen until the
+    /// whole run ends — the exact noise `HeadlessRuntime` exists to prevent, and
+    /// which every other window controller in this app already gates (see
+    /// `ControlPanelWindowController`, `AboutView`).
     public func present() {
-        NSApp?.activate(ignoringOtherApps: true)
         if !hasBeenPresented {
             hasBeenPresented = true
             contentVC.view.layoutSubtreeIfNeeded()
             window?.setContentSize(contentVC.view.fittingSize)
             window?.center()
         }
+        guard !HeadlessRuntime.isActive else { return }
+        NSApp?.activate(ignoringOtherApps: true)
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
     }
@@ -206,6 +219,10 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
     /// Fire the app-reactivate hook directly — headless tests can't activate
     /// the app, and the key-steal guard is exactly what needs pinning.
     func test_appDidBecomeActive() { appDidBecomeActive() }
+
+    /// How many times the reactivate hook decided to front the window. The
+    /// decision, not the pixels: headless runs never really order a window in.
+    private(set) var test_frontCount = 0
 }
 
 /// Bridges the VC's Done tap back to the window controller across the

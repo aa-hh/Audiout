@@ -770,11 +770,9 @@ import Testing
         let wc = OnboardingWindowController(model: makeModel(audio: .granted),
                                             openSettings: { _ in },
                                             onFinished: {})
-        // `present()` really does put the floating Setup window on the tester's
-        // screen: left open it parks above every other window, un-clickable (the
-        // test process is not a foreground app), until the whole run ends. Same
-        // for the reactivate test below.
-        defer { wc.window?.close() }
+        // `present()` sizes and centers headless but never orders the window in
+        // (`HeadlessRuntime`), so this asserts the first-present-only rule
+        // without parking a floating window on the tester's screen.
         wc.present()
         let moved = NSPoint(x: 13, y: 17)   // far from any plausible center
         wc.window?.setFrameOrigin(moved)
@@ -794,7 +792,7 @@ import Testing
 
         wc.test_appDidBecomeActive()
 
-        #expect(wc.window?.isVisible == false,
+        #expect(wc.test_frontCount == 0,
                 "with another window key, the hook must not order setup in (visibility is the floating level's job)")
     }
 
@@ -802,12 +800,11 @@ import Testing
         let wc = OnboardingWindowController(model: makeModel(audio: .granted),
                                             openSettings: { _ in },
                                             onFinished: {})
-        defer { wc.window?.close() }
         wc.keyWindowProvider = { nil }   // e.g. returning from a permission prompt
 
         wc.test_appDidBecomeActive()
 
-        #expect(wc.window?.isVisible == true,
+        #expect(wc.test_frontCount == 1,
                 "with no key window, the hook re-fronts setup so the user lands right back on it")
     }
 

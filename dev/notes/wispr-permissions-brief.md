@@ -101,6 +101,20 @@ Scope: the permission-granting interaction ONLY — no other onboarding content.
 - `.permissionLost` re-entry: same window, sequence starts at the first
   unmet card; the banner concept can fold into the header line.
 
+## Amendments (Alec, 2026-08-11, during the UI build)
+
+- **Demo mocks are styled as macOS system UI, not Warm Signal**: semantic system
+  colors + system font inside the mock (systemBlue toggle, window-background
+  grays) so the demo reads as "what macOS will show you"; only the framing
+  around the demo stays on the Warm Signal canvas.
+- **Locked steps read locked**: not-yet-reached strips are dimmed with a small
+  tertiary lock glyph in the trailing slot; the active card is visually
+  emphasized. (Replaces the earlier full-opacity-pending rule.) Optional steps
+  keep their Skip button; locked strips are not clickable.
+- **The whole active card is the click target**, firing the same two-mode action
+  as its Allow button (single-flight; sub-controls hit-test above it; hover +
+  pointing-hand; card exposes a button accessibility action).
+
 ## Window layering + prompt sequencing (added after reading Wispr's main-process code)
 
 - **Float, but yield to Settings (Alec, 2026-08-11):** the window stays `.floating`

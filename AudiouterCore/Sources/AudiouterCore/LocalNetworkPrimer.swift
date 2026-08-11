@@ -56,23 +56,37 @@ public final class LocalNetworkPrimer: LocalNetworkPriming, @unchecked Sendable 
         self.browseSeconds = browseSeconds
     }
 
-    public func probe() async -> Bool {
+    public func probe() async -> Bool { await probeFoundSpeakers() > 0 }
+
+    /// Browse for the whole window and report the most speakers seen at once.
+    ///
+    /// It runs the FULL `browseSeconds` even after the first result, rather than
+    /// finishing on the first one as the Bool-only version did: mDNS answers
+    /// trickle in, and "Found 1 speaker" when three are on the network would be
+    /// a worse lie than a three-second spinner. `.failed` still short-circuits.
+    /// A `.ready` browser with no results is deliberately NOT reported as
+    /// reachable-and-done — with no OS status API, "the browse worked but found
+    /// nothing" and "denied" are the same observation, and setup's Local Network
+    /// card is the one place that difference matters (it asks the user to power
+    /// a speaker on rather than claiming a denial).
+    public func probeFoundSpeakers() async -> Int {
         await withCheckedContinuation { continuation in
             queue.async { [weak self] in
-                guard let self else { continuation.resume(returning: false); return }
+                guard let self else { continuation.resume(returning: 0); return }
                 // A probe is already in flight (double-tap) — don't stack a second
                 // browser; report not-yet-known and let the running one settle.
-                guard self.browser == nil else { continuation.resume(returning: false); return }
+                guard self.browser == nil else { continuation.resume(returning: 0); return }
 
                 var resumed = false
+                var found = 0
                 // All callbacks + the timeout run on `queue` (serial), so this
                 // single-resume guard needs no extra locking.
-                func finish(_ reachable: Bool) {
+                func finish(_ count: Int) {
                     guard !resumed else { return }
                     resumed = true
                     self.browser?.cancel()
                     self.browser = nil
-                    continuation.resume(returning: reachable)
+                    continuation.resume(returning: count)
                 }
 
                 let parameters = NWParameters()
@@ -81,20 +95,21 @@ public final class LocalNetworkPrimer: LocalNetworkPriming, @unchecked Sendable 
                     for: .bonjour(type: "_airplay._tcp", domain: nil), using: parameters)
                 browser.stateUpdateHandler = { state in
                     switch state {
-                    case .ready: finish(true)     // permission active, network reachable
-                    case .failed: finish(false)   // hard failure
-                    default: break                // `.waiting` (incl. LN-denied) → let the timeout decide
+                    case .failed: finish(0)   // hard failure
+                    default: break            // `.ready`/`.waiting` → let the results + timeout decide
                     }
                 }
                 browser.browseResultsChangedHandler = { results, _ in
-                    if !results.isEmpty { finish(true) }   // saw a real speaker ⇒ granted
+                    // Peak, not last: a speaker that drops out mid-browse was
+                    // still found.
+                    found = max(found, results.count)
                 }
                 self.browser = browser
                 browser.start(queue: self.queue)
 
-                // Timeout: stop and report whatever we've seen (default = not reachable).
+                // Window closed: report whatever the browse saw (default = none).
                 self.queue.asyncAfter(deadline: .now() + self.browseSeconds) {
-                    finish(false)
+                    finish(found)
                 }
             }
         }

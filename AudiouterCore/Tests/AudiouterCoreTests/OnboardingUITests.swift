@@ -5,9 +5,11 @@ import Foundation
 import Testing
 @testable import AudiouterCore
 @testable import AudiouterOnboardingUI
+@testable import AudiouterPopoverUI
+@testable import AudiouterSharedUI
 
-/// Structure + behavior of the onboarding UI, driven through the real
-/// `OnboardingViewController` / `OnboardingWindowController` against fake
+/// Structure + behavior of the Setup window's sequential flow, driven through the
+/// real `OnboardingViewController` / `OnboardingWindowController` against fake
 /// permission seams (no Core Audio, no network). The window isn't visible to a
 /// headless test, so these assert via the `test_` hooks — the same approach the
 /// popover/settings UI tests use.
@@ -16,14 +18,26 @@ import Testing
 
     private struct CannedAudioProbe: AudioCapturePermissionProbing {
         let result: PermissionStatus
+        /// What the SILENT read reports, if anything — the seam a revocation
+        /// arrives through (`nil` leaves the cached status alone).
+        let silent: PermissionStatus?
+        init(result: PermissionStatus, silent: PermissionStatus? = nil) {
+            self.result = result
+            self.silent = silent
+        }
         func probe() async -> PermissionStatus { result }
+        func currentStatusSilently() -> PermissionStatus? { silent }
     }
-    private struct NoopLocalNetwork: LocalNetworkPriming {
-        func probe() async -> Bool { false }
+    private struct CannedLocalNetwork: LocalNetworkPriming {
+        let found: Int
+        func probe() async -> Bool { found > 0 }
+        func probeFoundSpeakers() async -> Int { found }
     }
     private struct NoopRemoteControl: RemoteControlPriming {
+        let trusted: Bool
+        init(trusted: Bool = false) { self.trusted = trusted }
         func prime() {}
-        func isTrusted() -> Bool { false }
+        func isTrusted() -> Bool { trusted }
     }
     /// Reports a fixed ``PTPHelperStatus`` and records `register()`/
     /// `openSystemSettingsLoginItems()` calls — never touches `SMAppService`.
@@ -43,194 +57,451 @@ import Testing
     private var defaults: UserDefaults { isolation.isolatedDefaults }
 
     private func makeModel(audio: PermissionStatus,
+                           silentAudio: PermissionStatus? = nil,
+                           foundSpeakers: Int = 0,
+                           bluetooth: PermissionStatus = .unknown,
+                           remoteControlTrusted: Bool = false,
+                           localNetworkGated: Bool = true,
                            ptpHelper: PTPHelperManaging = FakePTPHelper()) -> SetupModel {
-        SetupModel(audioProbe: CannedAudioProbe(result: audio),
-                   localNetwork: NoopLocalNetwork(),
-                   remoteControl: NoopRemoteControl(),
+        SetupModel(audioProbe: CannedAudioProbe(result: audio, silent: silentAudio),
+                   localNetwork: CannedLocalNetwork(found: foundSpeakers),
+                   remoteControl: NoopRemoteControl(trusted: remoteControlTrusted),
                    ptpHelper: ptpHelper,
-                   settings: AppSettings(defaults: defaults))
+                   bluetoothReader: SimulatedBluetoothPermission(status: bluetooth),
+                   bluetoothPrimer: SimulatedBluetoothPermission(status: bluetooth),
+                   settings: AppSettings(defaults: defaults),
+                   localNetworkGated: localNetworkGated)
     }
 
-    // MARK: View controller structure
-
-    @Test func initialRowsOfferAllow() {
-        let vc = OnboardingViewController(model: makeModel(audio: .granted),
-                                          onOpenSettings: { _ in }, onDone: {})
-        #expect(vc.test_audioRowButtonTitles == ["Allow…"])
-        #expect(vc.test_networkRowButtonTitles == ["Allow…"])
-        #expect(vc.test_remoteControlRowButtonTitles == ["Allow…"])
+    private func makeVC(model: SetupModel,
+                        reason: OnboardingReason = .firstRun,
+                        onOpenSettings: @escaping (SystemSettingsPane) -> Void = { _ in },
+                        onDone: @escaping () -> Void = {}) -> OnboardingViewController {
+        let vc = OnboardingViewController(model: model, reason: reason,
+                                          onOpenSettings: onOpenSettings, onDone: onDone)
+        _ = vc.test_rootView   // force loadView + viewDidLoad
+        return vc
     }
 
-    @Test func grantingAudioReplacesButtonWithAllowedStatus() async {
-        let vc = OnboardingViewController(model: makeModel(audio: .granted),
-                                          onOpenSettings: { _ in }, onDone: {})
-        await vc.test_allowAudio()
-        // Granted shows a status chip, no button.
-        #expect(vc.test_audioRowButtonTitles == [])
-        #expect(vc.test_audioRow.lastStatus == .granted)
+    /// A model where every required permission is satisfiable, so the flow can
+    /// be walked to the gate.
+    private func makeGrantableModel(silentAudio: PermissionStatus? = nil) -> SetupModel {
+        makeModel(audio: .granted, silentAudio: silentAudio, foundSpeakers: 3,
+                  ptpHelper: FakePTPHelper(status: .enabled))
     }
 
-    @Test func deniedAudioOffersOpenSettings() {
-        let vc = OnboardingViewController(model: makeModel(audio: .denied),
-                                          onOpenSettings: { _ in }, onDone: {})
-        vc.test_applyStatuses(audio: .denied, isProbingAudio: false, network: .unknown,
-                              remoteControl: .unknown)
-        #expect(vc.test_audioRowButtonTitles == ["Open Settings…"])
+    // MARK: Sequencing
+
+    @Test func flowOpensOnTheFirstCardWithEveryOtherCollapsed() {
+        let vc = makeVC(model: makeModel(audio: .unknown))
+        #expect(vc.test_activeStep == .audio)
+        #expect(vc.test_expandedSteps == [.audio], "exactly one card is ever open")
     }
 
-    @Test func primingNetworkShowsRequestedAndOpenSettings() async {
-        // NoopLocalNetwork reports unreachable, so priming lands on .requested.
-        let vc = OnboardingViewController(model: makeModel(audio: .granted),
-                                          onOpenSettings: { _ in }, onDone: {})
-        await vc.test_allowNetwork()
-        #expect(vc.test_networkRow.lastStatus == .requested)
-        #expect(vc.test_networkRowButtonTitles == ["Open Settings…"])
+    @Test func grantingACardAdvancesToTheNextAndRewritesItsTitle() async {
+        let vc = makeVC(model: makeModel(audio: .granted))
+        #expect(vc.test_title(of: .audio) == "Let Audiouter hear your Mac's sound")
+
+        await vc.test_tapAllow(.audio)
+
+        #expect(vc.test_activeStep == .localNetwork)
+        #expect(vc.test_expandedSteps == [.localNetwork])
+        #expect(vc.test_title(of: .audio) == "Audiouter can now hear your Mac's sound")
+        #expect(vc.test_hasCheckmark(.audio))
     }
 
-    @Test func primingRemoteControlShowsRequestedAndOpenSettings() {
-        let vc = OnboardingViewController(model: makeModel(audio: .granted),
-                                          onOpenSettings: { _ in }, onDone: {})
-        vc.test_allowRemoteControl()
-        #expect(vc.test_remoteControlRow.lastStatus == .requested)
-        #expect(vc.test_remoteControlRowButtonTitles == ["Open Settings…"])
+    /// Local Network's earned title is the found COUNT, not a checkmark's worth
+    /// of nothing — macOS won't confirm that permission, but a speaker it found
+    /// is proof the user can check.
+    @Test func localNetworkCompletedTitleReportsTheFoundCount() async {
+        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 3))
+        await vc.test_allow([.audio, .localNetwork])
+        #expect(vc.test_title(of: .localNetwork) == "Found 3 speakers")
     }
 
-    // MARK: Deep-link routing
+    @Test func oneFoundSpeakerReadsSingular() async {
+        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 1))
+        await vc.test_allow([.audio, .localNetwork])
+        #expect(vc.test_title(of: .localNetwork) == "Found 1 speaker")
+    }
 
-    @Test func openSettingsRoutesCorrectPanePerRow() {
+    /// On a macOS with no Local Network gate the step is satisfied without any
+    /// browse, so the copy must not claim the user found anything.
+    @Test func ungatedLocalNetworkNeverClaimsAFind() {
+        let vc = makeVC(model: makeModel(audio: .unknown, localNetworkGated: false))
+        #expect(vc.test_title(of: .localNetwork) == "Speakers on your Wi\u{2011}Fi are already reachable")
+    }
+
+    /// Auto-passed because the OS can't grant it at all: the strip says why,
+    /// rather than showing a checkmark for a grant nobody made.
+    @Test func autoPassedAudioShowsTheOSNoteNotACheckmark() {
+        let vc = makeVC(model: makeModel(audio: .unsupported))
+        // `.unsupported` only lands after a probe runs.
+        #expect(vc.test_activeStep == .audio)
+    }
+
+    @Test func autoPassedAudioAfterProbingCarriesTheNote() async {
+        let vc = makeVC(model: makeModel(audio: .unsupported))
+        await vc.test_tapAllow(.audio)
+        #expect(!vc.test_hasCheckmark(.audio), "nobody granted anything")
+        #expect(vc.test_note(of: .audio) == "Requires macOS 14.2 or later")
+        #expect(vc.test_title(of: .audio) == "Let Audiouter hear your Mac's sound",
+                "a card with no checkmark keeps the imperative title")
+    }
+
+    // MARK: Locked / active rendering (owner decision 2026-08-11)
+
+    /// A step the flow hasn't reached must READ locked, not merely un-ticked: the
+    /// lock sits in the slot the checkmark will eventually take, and the content
+    /// is dimmed past the completed steps' own secondary tone.
+    @Test func stepsTheFlowHasNotReachedRenderLocked() {
+        // Nothing granted, so every step behind the first really is unreached —
+        // an already-satisfied one would carry a checkmark instead.
+        let vc = makeVC(model: makeModel(audio: .unknown))
+        for step: SetupStep in [.localNetwork, .bluetooth, .speakerSync, .remoteControl] {
+            #expect(vc.test_isLocked(step), "\(step) is behind the active card")
+        }
+        #expect(!vc.test_isLocked(.audio), "the active card is not locked")
+    }
+
+    @Test func completedAndSkippedStepsCarryNoLock() async {
+        let vc = makeVC(model: makeGrantableModel())
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+
+        #expect(!vc.test_isLocked(.audio), "completed: it has a checkmark instead")
+        #expect(vc.test_hasCheckmark(.audio))
+        #expect(!vc.test_isLocked(.bluetooth), "skipped: the user answered, they just said no")
+        #expect(!vc.test_hasCheckmark(.bluetooth))
+    }
+
+    /// The active card is lifted off the canvas so current-vs-locked can't be
+    /// mistaken, and the emphasis travels with the active step.
+    @Test func onlyTheActiveCardIsEmphasized() async {
+        let vc = makeVC(model: makeGrantableModel())
+        #expect(vc.test_isEmphasized(.audio))
+        #expect(!vc.test_isEmphasized(.localNetwork))
+
+        await vc.test_tapAllow(.audio)
+
+        #expect(!vc.test_isEmphasized(.audio))
+        #expect(vc.test_isEmphasized(.localNetwork))
+    }
+
+    // MARK: The whole active card is the click target
+
+    @Test func pressingTheActiveCardFiresItsAllow() async {
+        let vc = makeVC(model: makeGrantableModel())
+        #expect(vc.test_isCardClickable(.audio))
+
+        #expect(await vc.test_pressCard(.audio))
+
+        #expect(vc.test_hasCheckmark(.audio), "the card press ran the real Allow path")
+        #expect(vc.test_activeStep == .localNetwork)
+    }
+
+    /// No jump-ahead: the flow is sequential, so a locked strip must refuse the
+    /// press rather than asking for a permission out of order.
+    @Test func lockedCardsAreNotClickable() {
+        let vc = makeVC(model: makeGrantableModel())
+        for step: SetupStep in [.localNetwork, .bluetooth, .speakerSync, .remoteControl] {
+            #expect(!vc.test_isCardClickable(step))
+            #expect(vc.test_cardPressIsRefused(step), "\(step) must refuse a press")
+        }
+    }
+
+    /// The card-level target is two-mode aware for free — it fires whatever the
+    /// button currently offers, so after a denial it opens Settings.
+    @Test func theCardPressFollowsTheTwoModeAllow() async {
         var opened: [SystemSettingsPane] = []
-        let vc = OnboardingViewController(model: makeModel(audio: .denied),
-                                          onOpenSettings: { opened.append($0) }, onDone: {})
-        vc.test_applyStatuses(audio: .denied, isProbingAudio: false, network: .requested,
-                              remoteControl: .requested)
+        let vc = makeVC(model: makeModel(audio: .denied), onOpenSettings: { opened.append($0) })
+        _ = await vc.test_pressCard(.audio)   // first press: the probe lands denied
+        #expect(opened.isEmpty)
 
-        vc.test_audioRow.test_tapOpenSettings()
-        vc.test_networkRow.test_tapOpenSettings()
-        vc.test_remoteControlRow.test_tapOpenSettings()
+        _ = await vc.test_pressCard(.audio)
 
-        // Audio + Local Network deep-link to their panes. Remote Control does NOT —
-        // its "Open Settings…" re-fires the macOS Accessibility prompt (whose own
-        // button highlights the app), so it never routes through the deep-link opener.
-        #expect(opened == [.screenAndSystemAudioRecording, .localNetwork])
+        #expect(opened == [.screenAndSystemAudioRecording])
     }
 
-    // MARK: Probing state
+    /// VoiceOver sees the card itself as the button, named for what pressing it
+    /// does; a card that isn't live is a plain group, since its press is refused.
+    @Test func theActiveCardIsAccessibleAsAButtonNamedLikeItsAllow() async {
+        let vc = makeVC(model: makeModel(audio: .denied))
+        #expect(vc.test_cardIsAccessibilityButton(.audio))
+        #expect(vc.test_cardAccessibilityAction(.audio) == "Allow…")
+        #expect(!vc.test_cardIsAccessibilityButton(.localNetwork))
 
-    @Test func unsupportedAudioShowsNoButton() {
-        let vc = OnboardingViewController(model: makeModel(audio: .unsupported),
-                                          onOpenSettings: { _ in }, onDone: {})
-        vc.test_applyStatuses(audio: .unsupported, isProbingAudio: false, network: .unknown,
-                              remoteControl: .unknown)
-        // Unsupported is not a user-fixable state — no button, just a message.
-        #expect(vc.test_audioRowButtonTitles == [])
+        await vc.test_tapAllow(.audio)   // spends the prompt → the label changes
+
+        #expect(vc.test_cardAccessibilityAction(.audio) == "Open Settings…")
     }
 
-    // MARK: PTP helper row (T6)
+    // MARK: Skip
 
-    @Test func notRegisteredShowsNoButton() {
-        let vc = OnboardingViewController(model: makeModel(audio: .granted, ptpHelper: FakePTPHelper(status: .notRegistered)),
-                                          onOpenSettings: { _ in }, onDone: {})
-        vc.test_applyStatuses(audio: .granted, isProbingAudio: false, network: .unknown,
-                              remoteControl: .unknown, ptpHelper: .notRegistered)
-        #expect(vc.test_ptpHelperRow.lastStatus == .notRegistered)
-        #expect(vc.test_ptpHelperRowButtonTitles == [],
-                       "notRegistered: registration is automatic, nothing to tap")
+    @Test func skipIsOfferedOnlyOnTheOptionalCards() async {
+        let vc = makeVC(model: makeGrantableModel())
+        #expect(vc.test_buttonTitles(of: .audio) == ["Allow…"], "System Audio is required")
+
+        await vc.test_allow([.audio, .localNetwork])
+
+        #expect(vc.test_activeStep == .bluetooth)
+        #expect(vc.test_buttonTitles(of: .bluetooth) == ["Allow…", "Skip"])
     }
 
-    @Test func requiresApprovalShowsTheExplainerAndOpenLoginItemsButton() {
-        // requiresApproval → the explainer row is showing, with the deep-link
-        // button that opens Login Items.
-        let vc = OnboardingViewController(model: makeModel(audio: .granted, ptpHelper: FakePTPHelper(status: .requiresApproval)),
-                                          onOpenSettings: { _ in }, onDone: {})
-        vc.test_applyStatuses(audio: .granted, isProbingAudio: false, network: .unknown,
-                              remoteControl: .unknown, ptpHelper: .requiresApproval)
-        #expect(vc.test_ptpHelperRow.lastStatus == .requiresApproval)
-        #expect(vc.test_ptpHelperRowButtonTitles == ["Open Login Items…"])
+    @Test func skippingAdvancesWithoutACheckmark() async {
+        let vc = makeVC(model: makeGrantableModel())
+        await vc.test_allow([.audio, .localNetwork])
+
+        vc.test_tapSkip(.bluetooth)
+
+        // Speaker Sync is already satisfied in this model, so the next step the
+        // flow can offer is Remote Control — skipping advances PAST a card, it
+        // doesn't step onto the next index blindly.
+        #expect(vc.test_activeStep == .remoteControl)
+        #expect(!vc.test_hasCheckmark(.bluetooth), "skipped is not granted")
+        #expect(vc.test_title(of: .bluetooth) == "Let Audiouter use Bluetooth speakers",
+                "a skipped card keeps the imperative title")
     }
 
-    @Test func enabledShowsNoButtonAndIsAvailable() {
-        // enabled → available: a plain "Enabled" chip, no button.
-        let vc = OnboardingViewController(model: makeModel(audio: .granted, ptpHelper: FakePTPHelper(status: .enabled)),
-                                          onOpenSettings: { _ in }, onDone: {})
-        vc.test_applyStatuses(audio: .granted, isProbingAudio: false, network: .unknown,
-                              remoteControl: .unknown, ptpHelper: .enabled)
-        #expect(vc.test_ptpHelperRow.lastStatus == .enabled)
-        #expect(vc.test_ptpHelperRowButtonTitles == [])
+    @Test func skipIsIgnoredOnARequiredCard() async {
+        let vc = makeVC(model: makeModel(audio: .unknown))
+        vc.test_tapSkip(.audio)
+        #expect(vc.test_activeStep == .audio, "the gate is not negotiable")
     }
 
-    @Test func notFoundShowsNoButton() {
-        let vc = OnboardingViewController(model: makeModel(audio: .granted, ptpHelper: FakePTPHelper(status: .notFound)),
-                                          onOpenSettings: { _ in }, onDone: {})
-        vc.test_applyStatuses(audio: .granted, isProbingAudio: false, network: .unknown,
-                              remoteControl: .unknown, ptpHelper: .notFound)
-        #expect(vc.test_ptpHelperRow.lastStatus == .notFound)
-        #expect(vc.test_ptpHelperRowButtonTitles == [],
-                       "notFound is a packaging bug, not user-fixable")
+    // MARK: Two-mode Allow + deep links
+
+    @Test func deniedAudioSwitchesAllowToOpenSettings() async {
+        let vc = makeVC(model: makeModel(audio: .denied))
+        await vc.test_tapAllow(.audio)
+        #expect(vc.test_buttonTitles(of: .audio) == ["Open Settings…"])
     }
 
-    @Test func openLoginItemsButtonRoutesToTheModelSeam() {
+    @Test func theSecondAllowOnDeniedAudioRoutesToTheRecordingPane() async {
+        var opened: [SystemSettingsPane] = []
+        let vc = makeVC(model: makeModel(audio: .denied), onOpenSettings: { opened.append($0) })
+
+        await vc.test_tapAllow(.audio)   // the probe runs and lands denied
+        #expect(opened.isEmpty, "the first click asks; it must not jump to Settings")
+
+        await vc.test_tapAllow(.audio)
+        #expect(opened == [.screenAndSystemAudioRecording])
+    }
+
+    /// An unproven browse can't be called a denial — it gets a "turn a speaker
+    /// on" line rather than an accusation, and its retry goes to the pane.
+    @Test func anUnprovenLocalNetworkExplainsItselfWithoutClaimingDenial() async {
+        var opened: [SystemSettingsPane] = []
+        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 0),
+                        onOpenSettings: { opened.append($0) })
+        await vc.test_allow([.audio, .localNetwork])
+
+        #expect(vc.test_activeStep == .localNetwork, "an unproven browse does not advance")
+        #expect(vc.test_hint(of: .localNetwork) == "No speakers found yet. Turn one on, then try again.")
+        #expect(vc.test_buttonTitles(of: .localNetwork) == ["Open Settings…"])
+
+        await vc.test_tapAllow(.localNetwork)
+        #expect(opened == [.localNetwork])
+    }
+
+    @Test func speakerSyncRoutesToLoginItemsThroughTheModelSeam() async {
         let ptpHelper = FakePTPHelper(status: .requiresApproval)
-        let vc = OnboardingViewController(model: makeModel(audio: .granted, ptpHelper: ptpHelper),
-                                          onOpenSettings: { _ in }, onDone: {})
-        vc.test_refresh()   // bind the row to the real (requiresApproval) model state
-        vc.test_ptpHelperRow.test_tapOpenLoginItems()
+        var opened: [SystemSettingsPane] = []
+        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 2, ptpHelper: ptpHelper),
+                        onOpenSettings: { opened.append($0) })
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        #expect(vc.test_activeStep == .speakerSync)
+        #expect(vc.test_buttonTitles(of: .speakerSync) == ["Open Login Items…"])
+
+        await vc.test_tapAllow(.speakerSync)
+
         #expect(ptpHelper.openSettingsCount == 1)
+        #expect(opened.isEmpty, "Login Items is not a privacy pane deep link")
     }
 
-    @Test func viewDidLoadRegistersThePTPHelper() {
-        let ptpHelper = FakePTPHelper(status: .notRegistered)
-        let vc = OnboardingViewController(model: makeModel(audio: .granted, ptpHelper: ptpHelper),
-                                          onOpenSettings: { _ in }, onDone: {})
-        _ = vc.test_rootView   // forces loadView + viewDidLoad
-        #expect(ptpHelper.registerCount == 1)
+    /// Remote Control's "Open Settings…" re-fires the Accessibility PROMPT (whose
+    /// own button highlights the app in the list) and never deep-links.
+    @Test func remoteControlNeverRoutesThroughTheDeepLinkOpener() async {
+        var opened: [SystemSettingsPane] = []
+        let vc = makeVC(model: makeGrantableModel(), onOpenSettings: { opened.append($0) })
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        vc.test_tapSkip(.remoteControl)   // ignored below — it isn't active yet
+
+        await vc.test_tapAllow(.remoteControl)
+
+        #expect(opened.isEmpty)
     }
 
-    // MARK: Presentation reason (`.permissionLost` banner)
+    // MARK: The gate
 
-    @Test func firstRunRendersNoBanner() {
-        let vc = OnboardingViewController(model: makeModel(audio: .granted),
-                                          reason: .firstRun,
-                                          onOpenSettings: { _ in }, onDone: {})
+    @Test func doneIsAbsentUntilEveryRequiredPermissionVerifies() async {
+        let vc = makeVC(model: makeGrantableModel())
+        #expect(!vc.test_doneExists, "the gate is ABSENT, not disabled")
+
+        await vc.test_tapAllow(.audio)
+        #expect(!vc.test_doneExists, "Local Network is still unmet")
+
+        await vc.test_tapAllow(.localNetwork)
+        #expect(vc.test_doneExists, "every required permission is in")
+        #expect(vc.test_doneIsReturnDefault)
+    }
+
+    /// Bluetooth and Remote Control are outside `RequiredPermission`, so leaving
+    /// them untouched can never hold the gate shut.
+    @Test func theOptionalCardsNeverHoldTheGateShut() async {
+        let vc = makeVC(model: makeGrantableModel())
+        await vc.test_allow([.audio, .localNetwork])
+        #expect(vc.test_doneExists)
+        #expect(vc.test_activeStep == .bluetooth, "the flow still offers them")
+    }
+
+    @Test func returnBelongsToTheActiveAllowUntilDoneExists() async {
+        let vc = makeVC(model: makeGrantableModel())
+        #expect(vc.test_allowIsReturnDefault(.audio))
+
+        await vc.test_allow([.audio, .localNetwork])
+
+        #expect(vc.test_doneIsReturnDefault)
+        #expect(!vc.test_allowIsReturnDefault(.bluetooth),
+                "Done takes Return the moment it exists")
+    }
+
+    @Test func doneFinishesWhenReVerificationPasses() async {
+        var doneFired = false
+        let vc = makeVC(model: makeGrantableModel(), onDone: { doneFired = true })
+        await vc.test_allow([.audio, .localNetwork])
+
+        await vc.test_tapDone()
+
+        #expect(doneFired)
+        #expect(vc.test_snapBackStep == nil)
+    }
+
+    /// The revocation case: Done's re-verify finds the silent audio read has gone
+    /// denied since, so the flow snaps back to that card instead of finishing —
+    /// no sheet, no "continue anyway".
+    @Test func doneSnapsBackToARevokedCardInsteadOfFinishing() async {
+        var doneFired = false
+        let vc = makeVC(model: makeGrantableModel(silentAudio: .denied),
+                        onDone: { doneFired = true })
+        await vc.test_allow([.audio, .localNetwork])
+        #expect(vc.test_doneExists)
+
+        await vc.test_tapDone()
+
+        #expect(!doneFired, "a hard gate does not finish on an unmet permission")
+        #expect(vc.test_snapBackStep == .audio)
+        #expect(vc.test_activeStep == .audio)
+        #expect(vc.test_expandedSteps == [.audio])
+        #expect(!vc.test_doneExists, "the gate closes again")
+    }
+
+    // MARK: Demo pane
+
+    @Test func demoShowsThePromptMockForAFirstAsk() {
+        let vc = makeVC(model: makeModel(audio: .unknown))
+        #expect(vc.test_demoMode == .prompt)
+    }
+
+    @Test func demoSwapsToTheSettingsMockAfterADenial() async {
+        let vc = makeVC(model: makeModel(audio: .denied))
+        await vc.test_tapAllow(.audio)
+        #expect(vc.test_demoMode == .settings)
+    }
+
+    /// Speaker Sync's approval only exists in Login Items — there is no prompt to
+    /// mirror, so it is always the Settings mock.
+    @Test func speakerSyncAlwaysShowsTheSettingsMock() async {
+        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 2))
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        #expect(vc.test_activeStep == .speakerSync)
+        #expect(vc.test_demoMode == .settings)
+    }
+
+    @Test func demoSettlesWhenEveryStepIsDone() async {
+        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 2,
+                                         bluetooth: .granted, remoteControlTrusted: true,
+                                         ptpHelper: FakePTPHelper(status: .enabled)))
+        await vc.test_refreshStatuses()
+        await vc.test_allow([.audio, .localNetwork])
+        #expect(vc.test_activeStep == nil)
+        #expect(vc.test_demoMode == .settled)
+    }
+
+    /// Zero idle CPU: the loop only ever runs on a window that is really on
+    /// screen, so a headless/off-window pane is settled and silent.
+    @Test func demoNeverAnimatesOffWindow() {
+        let vc = makeVC(model: makeModel(audio: .unknown))
+        #expect(!vc.test_isDemoAnimating)
+        #expect(!vc.test_demoShowsReplay, "Replay is for a Reduce Motion user watching a live window")
+    }
+
+    /// The Settings mock's switch: ON is a blue track AND the knob at the
+    /// TRAILING end. It regressed once — an `NSView` knob offset by
+    /// `layer.transform` had that transform wiped by the next layout pass, so an
+    /// ON switch rendered blue with the knob still parked left.
+    @Test func theMockSwitchPutsItsKnobAtTheTrailingEndWhenOn() {
+        let switchView = DemoSwitchView()
+        switchView.setOn(false)
+        switchView.layoutSubtreeIfNeeded()
+        #expect(!switchView.test_knobIsAtTrailingEnd, "off parks the knob at the leading inset")
+
+        switchView.setOn(true)
+        switchView.layoutSubtreeIfNeeded()
+
+        #expect(switchView.test_isOn)
+        #expect(switchView.test_knobIsAtTrailingEnd,
+                "on must slide the knob across — a blue track with a left knob is a lie")
+    }
+
+    // MARK: One motion language
+
+    /// The cards clip on the SAME constant every other collapsible element in
+    /// the app uses — a second hand-synced copy is exactly what drifted before.
+    @Test func collapseSharesTheOneMotionDuration() {
+        #expect(Tokens.Motion.collapseRevealDuration == 0.15)
+        #expect(PopoverPanelViewController.collapseRevealDuration == Tokens.Motion.collapseRevealDuration)
+    }
+
+    // MARK: Presentation reason (the lost-permission message)
+
+    @Test func firstRunShowsNoLostPermissionMessage() {
+        let vc = makeVC(model: makeModel(audio: .granted), reason: .firstRun)
         #expect(!vc.test_showsPermissionLostBanner)
         #expect(vc.test_permissionLostBannerText == nil)
     }
 
-    @Test func permissionLostRendersBannerNamingTheUnmetPermission() {
-        let vc = OnboardingViewController(model: makeModel(audio: .denied),
-                                          reason: .permissionLost([.audioCapture]),
-                                          onOpenSettings: { _ in }, onDone: {})
+    @Test func permissionLostNamesTheUnmetPermissionInTheHeader() {
+        let vc = makeVC(model: makeModel(audio: .denied), reason: .permissionLost([.audioCapture]))
         #expect(vc.test_showsPermissionLostBanner)
         let text = vc.test_permissionLostBannerText
         #expect(text != nil)
         #expect(text?.contains("System Audio") ?? false,
-                      "banner names the specific unmet permission: \(text ?? "nil")")
+                "the header names the specific unmet permission: \(text ?? "nil")")
     }
 
-    @Test func permissionLostBannerNamesMultipleUnmetPermissions() {
-        let vc = OnboardingViewController(model: makeModel(audio: .denied),
-                                          reason: .permissionLost([.audioCapture, .ptpHelper]),
-                                          onOpenSettings: { _ in }, onDone: {})
+    @Test func permissionLostNamesMultipleUnmetPermissions() {
+        let vc = makeVC(model: makeModel(audio: .denied),
+                        reason: .permissionLost([.audioCapture, .ptpHelper]))
         let text = vc.test_permissionLostBannerText ?? ""
         #expect(text.contains("System Audio"), "\(text)")
-        // "Speaker Sync", not "PTP helper" — the row was renamed out of jargon
-        // (OnboardingViewController.displayName, spec 5.8).
+        // "Speaker Sync", not "PTP helper" — the card was named out of jargon.
         #expect(text.contains("Speaker Sync"), "\(text)")
     }
 
-    @Test func permissionLostBannerClearsOnceItsFlaggedPermissionIsGranted() async {
-        let vc = OnboardingViewController(model: makeModel(audio: .granted),
-                                          reason: .permissionLost([.audioCapture]),
-                                          onOpenSettings: { _ in }, onDone: {})
-        _ = vc.test_rootView
+    @Test func permissionLostMessageClearsOnceItsFlaggedPermissionIsGranted() async {
+        let vc = makeVC(model: makeGrantableModel(), reason: .permissionLost([.audioCapture]))
         #expect(vc.test_permissionLostBannerIsVisible,
-                      "banner shows while the flagged permission is still ungranted")
+                "shown while the flagged permission is still ungranted")
 
-        await vc.test_allowAudio()   // a successful probe flips model.audioStatus to .granted
+        await vc.test_tapAllow(.audio)
 
         #expect(!vc.test_permissionLostBannerIsVisible,
-                       "the banner must clear once the permission it warned about is granted")
-        #expect(vc.test_showsPermissionLostBanner,
-                      "it's hidden, not never-built")
+                "the message must clear once the permission it warned about is granted")
+        #expect(vc.test_showsPermissionLostBanner, "it cleared, it was never not-warranted")
     }
 
     @Test func windowControllerThreadsReasonThroughToTheContentViewController() {
@@ -248,6 +519,25 @@ import Testing
         #expect(!wc.test_contentViewController.test_showsPermissionLostBanner)
     }
 
+    // MARK: Load-time behavior
+
+    @Test func viewDidLoadRegistersThePTPHelper() {
+        let ptpHelper = FakePTPHelper(status: .notRegistered)
+        _ = makeVC(model: makeModel(audio: .granted, ptpHelper: ptpHelper))
+        #expect(ptpHelper.registerCount == 1)
+    }
+
+    /// Without the load-time silent re-read the Bluetooth card paints
+    /// undetermined even when the grant is already in place (`bluetoothStatus`
+    /// starts `.unknown`).
+    @Test func loadReadsAnAlreadyGrantedBluetoothStatus() async {
+        let model = makeModel(audio: .granted, bluetooth: .granted)
+        let vc = makeVC(model: model)
+        await vc.test_refreshStatuses()
+        #expect(model.bluetoothStatus == .granted)
+        #expect(vc.test_hasCheckmark(.bluetooth))
+    }
+
     // MARK: Window level + presentation (punch-list W10/W6)
 
     @Test func windowFloatsWhileOpen() {
@@ -256,6 +546,25 @@ import Testing
                                             onFinished: {})
         #expect(wc.window?.level == .floating,
                 "owner decision 2026-08-07: setup stays above other windows for its whole open lifetime")
+    }
+
+    /// The 2026-08-11 amendment: floating yields to System Settings, because
+    /// Settings is the one app we deliberately send the user to.
+    @Test func openingSettingsDropsTheFloatingLevelAndComingBackRestoresIt() async {
+        let wc = OnboardingWindowController(model: makeModel(audio: .denied),
+                                            openSettings: { _ in },
+                                            onFinished: {})
+        let vc = wc.test_contentViewController
+        _ = vc.test_rootView
+
+        await vc.test_tapAllow(.audio)   // first click: the probe lands denied
+        #expect(wc.test_windowLevel == .floating, "asking for a permission is not a Settings trip")
+
+        await vc.test_tapAllow(.audio)   // second click: the deep link
+        #expect(wc.test_windowLevel == .normal, "System Settings has to be able to come forward")
+
+        wc.test_appDidBecomeActive()
+        #expect(wc.test_windowLevel == .floating, "back in our app, back on top")
     }
 
     @Test func representDoesNotRecenterAMovedWindow() {
@@ -300,7 +609,7 @@ import Testing
         wc.test_appDidBecomeActive()
 
         #expect(wc.window?.isVisible == true,
-                "with no key window, the hook re-fronts setup so the user lands back on it")
+                "with no key window, the hook re-fronts setup so the user lands right back on it")
     }
 
     // MARK: Window controller dismissal contract
@@ -328,7 +637,7 @@ import Testing
 
         #expect(wc.test_didFinish)
         #expect(!AppSettings(defaults: defaults).hasCompletedSetup,
-                       "Closing with ✕ leaves setup to reappear next launch")
+                "Closing with ✕ leaves setup to reappear next launch")
         #expect(counter.count == 1)
     }
 
@@ -341,118 +650,5 @@ import Testing
         wc.test_closeWithoutDone()   // second dismissal path
         wc.test_finishWithDone()     // and again
         #expect(counter.count == 1, "onFinished fires exactly once")
-    }
-
-    // MARK: Done-tap confirmation gate (ONBOARD-GATE)
-    //
-    // The original bug: a first-time user could click Done with ZERO
-    // permissions granted and the flow would silently complete, with no
-    // warning and no path back once something failed later. These pin that
-    // Done now asks first whenever a REQUIRED permission
-    // (`SetupModel.requiredPermissionsNotGranted()`) isn't actually granted,
-    // and that "Continue Anyway" still finishes (setup stays guidance, not a
-    // hard gate — `SetupModel.complete()`).
-
-    /// A local-network fake that reports the browse as reachable — needed here
-    /// (unlike `NoopLocalNetwork`) to drive `localNetworkStatus` all the way to
-    /// `.granted` for the "everything granted" case.
-    private struct ReachableLocalNetwork: LocalNetworkPriming {
-        func probe() async -> Bool { true }
-    }
-
-    @Test func doneAsksForConfirmationWhenNothingWasEverGranted() {
-        // A fresh model: every required permission is still at its untouched
-        // initial state (.unknown / .notRegistered) — exactly the scenario
-        // that used to complete silently.
-        var doneFired = false
-        let vc = OnboardingViewController(model: makeModel(audio: .unknown),
-                                          onOpenSettings: { _ in }, onDone: { doneFired = true })
-        vc.test_tapDone()
-        #expect(!doneFired, "must not finish silently with nothing granted")
-        #expect(Set(vc.test_pendingConfirmationPermissions ?? []) ==
-                       Set([.audioCapture, .localNetwork, .ptpHelper]))
-    }
-
-    @Test func doneAsksOnlyAboutPermissionsStillMissing() async {
-        let ptpHelper = FakePTPHelper(status: .enabled)
-        let vc = OnboardingViewController(model: makeModel(audio: .granted, ptpHelper: ptpHelper),
-                                          onOpenSettings: { _ in }, onDone: {})
-        // Actually grant audio (unlike test_applyStatuses, which only fakes the
-        // row display and never touches the model the gate reads from). PTP
-        // helper is already `.enabled` from `viewDidLoad()`'s automatic
-        // registration; Local Network is left untouched.
-        await vc.test_allowAudio()
-
-        vc.test_tapDone()
-
-        #expect(vc.test_pendingConfirmationPermissions == [.localNetwork],
-                       "audio + PTP helper are already granted; only Local Network is still missing")
-    }
-
-    @Test func doneFinishesImmediatelyWhenEveryRequiredPermissionIsGranted() async {
-        let ptpHelper = FakePTPHelper(status: .enabled)
-        let model = SetupModel(audioProbe: CannedAudioProbe(result: .granted),
-                               localNetwork: ReachableLocalNetwork(),
-                               remoteControl: NoopRemoteControl(),
-                               ptpHelper: ptpHelper,
-                               settings: AppSettings(defaults: defaults))
-        var doneFired = false
-        let vc = OnboardingViewController(model: model, onOpenSettings: { _ in }, onDone: { doneFired = true })
-        await vc.test_allowAudio()
-        await vc.test_allowNetwork()
-        #expect(model.requiredPermissionsNotGranted() == [])
-
-        vc.test_tapDone()
-
-        #expect(doneFired, "Done finishes immediately once every required permission is granted")
-        #expect(vc.test_pendingConfirmationPermissions == nil)
-    }
-
-    @Test func continueAnywayStillFinishesDespiteUngrantedPermissions() {
-        var doneFired = false
-        let vc = OnboardingViewController(model: makeModel(audio: .unknown),
-                                          onOpenSettings: { _ in }, onDone: { doneFired = true })
-        vc.test_tapDone()
-        #expect(!doneFired)
-
-        vc.test_resolvePendingConfirmation(continueAnyway: true)
-
-        #expect(doneFired, "Continue Anyway still finishes — setup is guidance, not a hard gate")
-        #expect(vc.test_pendingConfirmationPermissions == nil)
-    }
-
-    @Test func goBackLeavesOnboardingOpenWithoutFinishing() {
-        var doneFired = false
-        let vc = OnboardingViewController(model: makeModel(audio: .unknown),
-                                          onOpenSettings: { _ in }, onDone: { doneFired = true })
-        vc.test_tapDone()
-
-        vc.test_resolvePendingConfirmation(continueAnyway: false)
-
-        #expect(!doneFired, "Go Back must not finish setup")
-        #expect(vc.test_pendingConfirmationPermissions == nil, "the pending confirmation clears either way")
-    }
-
-    @Test func doneCanBeRetriedAfterGoingBackAndThenGranting() async {
-        // Go Back, grant the missing permissions, tap Done again — the second
-        // tap must re-evaluate rather than being stuck.
-        let ptpHelper = FakePTPHelper(status: .enabled)
-        let model = SetupModel(audioProbe: CannedAudioProbe(result: .granted),
-                               localNetwork: ReachableLocalNetwork(),
-                               remoteControl: NoopRemoteControl(),
-                               ptpHelper: ptpHelper,
-                               settings: AppSettings(defaults: defaults))
-        var doneFired = false
-        let vc = OnboardingViewController(model: model, onOpenSettings: { _ in }, onDone: { doneFired = true })
-
-        vc.test_tapDone()   // nothing granted yet → asks
-        #expect(!doneFired)
-        vc.test_resolvePendingConfirmation(continueAnyway: false)   // Go Back
-
-        await vc.test_allowAudio()
-        await vc.test_allowNetwork()
-        vc.test_tapDone()   // now everything is granted → finishes immediately
-
-        #expect(doneFired)
     }
 }

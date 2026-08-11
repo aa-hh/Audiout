@@ -299,4 +299,130 @@ import Testing
         #expect(flow.activeStep == .bluetooth)
         #expect(flow.isDoneAvailable)
     }
+
+    // MARK: The Allow click (sequencing rules)
+
+    @Test func firstAllowFiresThePromptAndNeverOpensSettings() async {
+        let flow = SetupFlowModel(setup: makeSetup(audio: .granted))
+        let result = await flow.allow(.audio)
+        #expect(result.outcome == .promptTriggered)
+        #expect(result.destination == .none)
+    }
+
+    /// A probe that ran and came back without a grant is its own outcome — the
+    /// click asked, the answer was no.
+    @Test func aProbeThatDoesNotLandReportsTimeout() async {
+        let flow = SetupFlowModel(setup: makeSetup(audio: .denied))
+        #expect(await flow.allow(.audio).outcome == .probeTimeout)
+    }
+
+    /// Preflight: a determined-and-denied permission's prompt silently no-ops,
+    /// so the SECOND click must skip it and go straight to the pane.
+    @Test func aSecondAllowOnDeniedAudioDeepLinksInstead() async {
+        let setup = makeSetup(audio: .denied)
+        let flow = SetupFlowModel(setup: setup)
+        _ = await flow.allow(.audio)   // first click: the probe runs, lands denied
+
+        let result = await flow.allow(.audio)
+
+        #expect(result.outcome == .settingsFallbackDenied)
+        #expect(result.destination == .settingsPane(.screenAndSystemAudioRecording))
+    }
+
+    /// Local Network can never prove a denial, so "asked, found nothing" is what
+    /// spends its prompt — after that the only path left is the pane.
+    @Test func aSecondAllowOnAnUnprovenLocalNetworkDeepLinks() async {
+        let setup = makeSetup(localNetworkReachable: false)
+        let flow = SetupFlowModel(setup: setup)
+        _ = await flow.allow(.localNetwork)
+
+        let result = await flow.allow(.localNetwork)
+
+        #expect(result.outcome == .settingsFallbackDenied)
+        #expect(result.destination == .settingsPane(.localNetwork))
+    }
+
+    /// Bluetooth's retry goes to the PRIVACY pane, where this app's grant is
+    /// toggled — not the radio pane, which can't fix a denial.
+    @Test func deniedBluetoothDeepLinksToThePrivacyPane() async {
+        let setup = makeSetup(bluetooth: .denied)
+        await setup.refreshStatuses()
+        let flow = SetupFlowModel(setup: setup)
+
+        let result = await flow.allow(.bluetooth)
+
+        #expect(result.outcome == .settingsFallbackDenied)
+        #expect(result.destination == .settingsPane(.bluetoothPrivacy))
+    }
+
+    /// Bluetooth's answer arrives on a callback we can't await, so a second
+    /// click while the prompt is still unanswered must not fire a second one.
+    @Test func bluetoothPromptIsSingleFlightWhileUndecided() async {
+        let flow = SetupFlowModel(setup: makeSetup(bluetooth: .unknown))
+        #expect(await flow.allow(.bluetooth).outcome == .promptTriggered)
+        #expect(await flow.allow(.bluetooth).outcome == .promptInFlight)
+    }
+
+    /// Speaker Sync has no prompt at all — Login Items is its only destination.
+    @Test func speakerSyncAlwaysOpensLoginItems() async {
+        let flow = SetupFlowModel(setup: makeSetup(ptpHelper: .requiresApproval))
+        let result = await flow.allow(.speakerSync)
+        #expect(result.outcome == .settingsOpened)
+        #expect(result.destination == .loginItems)
+    }
+
+    /// Remote Control's exception: its retry re-fires the Accessibility PROMPT
+    /// (whose own button highlights this app in the list) and never deep-links.
+    @Test func remoteControlNeverDeepLinks() async {
+        let flow = SetupFlowModel(setup: makeSetup(remoteControlTrusted: false))
+        let first = await flow.allow(.remoteControl)
+        let second = await flow.allow(.remoteControl)
+        #expect(first.destination == .none)
+        #expect(second.destination == .none)
+    }
+
+    /// Never send someone to Settings to fix what isn't broken.
+    @Test func allowOnAnAlreadyGrantedStepIsANoOp() async {
+        let setup = makeSetup(audio: .granted)
+        await setup.requestAudioCapture()
+        let flow = SetupFlowModel(setup: setup)
+
+        let result = await flow.allow(.audio)
+
+        #expect(result.outcome == .alreadyGranted)
+        #expect(result.destination == .none)
+    }
+
+    /// An auto-passed step is satisfied without anyone granting anything, so its
+    /// Allow must not offer a pane either.
+    @Test func allowOnAnAutoPassedStepIsANoOp() async {
+        let flow = SetupFlowModel(setup: makeSetup(localNetworkGated: false))
+        #expect(await flow.allow(.localNetwork).outcome == .alreadyGranted)
+    }
+
+    /// Every Allow click ends in exactly ONE named outcome in the decision log.
+    @Test func everyAllowClickLogsExactlyOneNamedOutcome() async throws {
+        let flow = SetupFlowModel(setup: makeSetup(audio: .granted))
+        let capture = TelemetryFlowLineCapture()
+        Telemetry._installTestSink { capture.append($0) }
+        _ = await flow.allow(.audio)
+        Telemetry._installTestSink(nil)   // flush barrier (serial queue) + removes the sink
+
+        let lines = capture.snapshot().filter { $0.contains("\"evt\":\"setup_allow\"") }
+        #expect(lines.count == 1, "one click, one outcome: \(lines)")
+        let line = try #require(lines.first)
+        #expect(line.contains("\"step\":\"audio\""), "line: \(line)")
+        #expect(line.contains("\"outcome\":\"prompt_triggered\""), "line: \(line)")
+    }
+}
+
+/// Captures lines from an installed `Telemetry` test sink. The sink is invoked
+/// from `Telemetry`'s own serial writer queue (a different thread than the test
+/// body), so a plain captured `var` won't do — same NSLock-guarded box
+/// `SetupModelTests` uses for the reported-vs-actual lines.
+private final class TelemetryFlowLineCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lines: [String] = []
+    func append(_ line: String) { lock.withLock { lines.append(line) } }
+    func snapshot() -> [String] { lock.withLock { lines } }
 }

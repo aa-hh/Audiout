@@ -5,72 +5,98 @@ import AudiouterCore
 import AudiouterSharedUI
 
 /// Why the onboarding window is being presented right now — drives whether the
-/// "a permission got turned off" banner renders.
+/// header carries the "a permission got turned off" message.
 ///
-/// `.firstRun` (the default, used by every existing call site) is the
-/// original screen, unchanged. `.permissionLost` is used when the app finds
-/// — via ``SetupModel/auditRequiredPermissions()`` on reactivate/wake — that
-/// one of the three REQUIRED permissions (``RequiredPermission``; Remote
-/// Control is deliberately excluded, it's an enhancement not a requirement)
-/// was revoked after setup had already completed, and force-reopens this
-/// window rather than silently degrading.
+/// `.firstRun` (the default, used by every existing call site) is the plain
+/// welcome. `.permissionLost` is used when the app finds — via
+/// ``SetupModel/auditRequiredPermissions()`` on reactivate/wake — that one of
+/// the three REQUIRED permissions (``RequiredPermission``; Remote Control is
+/// deliberately excluded, it's an enhancement not a requirement) was revoked
+/// after setup had already completed, and force-reopens this window rather than
+/// silently degrading.
 public enum OnboardingReason: Equatable, Sendable {
     case firstRun
     case permissionLost([RequiredPermission])
 }
 
-/// The single-screen first-run onboarding content: a welcome header, the
-/// reassurance copy that reframes the OS's "recording" language before any system
-/// prompt fires, one row per permission (``PermissionRowView``), and a Done
-/// button. A thin renderer over ``SetupModel`` — it holds no permission logic,
-/// just binds the model's status to the rows and forwards button taps back to it.
+/// The Setup window's content: a two-pane screen. LEFT, a fixed column with the
+/// hero, the five permission cards asked ONE AT A TIME (``SetupCardView``), and
+/// the Done footer. RIGHT, a native-drawn miniature of whatever surface the
+/// active card's Allow button is about to raise (``DemoPaneView``).
 ///
-/// Sibling in spirit to `SettingsRootViewController`: fixed content width, an
-/// opaque appearance-adaptive background (the Warm Signal canvas —
-/// `WarmCanvasView`, spec §5.8), and `test_` hooks so a headless harness/test
-/// can assert structure without a visible window.
+/// A thin renderer over two Core models and holding no permission logic of its
+/// own: ``SetupModel`` owns the statuses and the probes, ``SetupFlowModel``
+/// owns the sequence, the skip set, the Done gate and the Allow decision table.
+/// This class turns those into views and turns clicks back into calls.
+///
+/// **Setup is a GATE** (owner decision 2026-08-11, reversing "guidance, not a
+/// gate"): Done is ABSENT from the view hierarchy — not disabled, not
+/// alpha-hidden — until every required permission verifies, and there is no
+/// "continue anyway" escape. The ✕ close remains the one ungated exit, and it
+/// deliberately doesn't persist completion, so the flow returns next launch.
 @MainActor
 public final class OnboardingViewController: NSViewController {
 
-    /// Fixed content width. Everything (hero, reassurance, permission card,
-    /// footer) derives its column width from this, so widening it here widens the
-    /// whole screen — used to give the reassurance copy enough room that it no
-    /// longer breaks a single word ("through.") onto its own last line, and to
-    /// give the permission-row descriptions more breathing room.
-    static let contentWidth: CGFloat = 500
-    /// `contentWidth` minus the standard outer margin — the width every
-    /// full-bleed section (card, reassurance text, footer row) actually gets.
-    /// Named once instead of retyping `contentWidth - 56` at every site.
-    static let columnWidth: CGFloat = contentWidth - 56
+    /// Fixed content size. The window is fixed at exactly this (see
+    /// ``OnboardingWindowController/present()``), so no step's copy can resize
+    /// the window under the user mid-flow — the slack lands in the gap above
+    /// the footer instead.
+    static let contentWidth: CGFloat = 820
+    static let contentHeight: CGFloat = 560
+    /// The left column's fixed width; the demo pane takes the rest.
+    ///
+    /// Sized to the longest earned title ("Audiouter can now hear your Mac's
+    /// sound") plus its checkmark: a collapsed strip truncates below about 410,
+    /// and the titles are reviewed copy, so the column fits the words rather
+    /// than the words fitting the column. The demo's fixed surface still clears
+    /// its margins in what's left (`DemoPaneView.surfaceSize`).
+    static let leftPaneWidth: CGFloat = 420
+    /// Outer margin inside each pane.
+    static let paneMargin: CGFloat = 22
 
     private let model: SetupModel
+    private let flow: SetupFlowModel
     private let reason: OnboardingReason
     private let onOpenSettings: (SystemSettingsPane) -> Void
     private let onDone: () -> Void
 
-    private var audioRow: PermissionRowView!
-    private var networkRow: PermissionRowView!
-    private var remoteControlRow: PermissionRowView!
-    private var ptpHelperRow: PTPHelperRowView!
+    /// Called immediately before ANY System Settings destination is opened (a
+    /// privacy pane or Login Items). The window controller uses it to drop this
+    /// window's `.floating` level, so System Settings can actually come to the
+    /// front — see that class for the amended decision.
+    public var onWillOpenSystemSettings: (() -> Void)?
 
-    /// The `.permissionLost` banner, if this presentation built one (nil for
-    /// `.firstRun`). Held for test inspection.
-    private var permissionBannerView: NSView?
-    private var permissionBannerLabel: NSTextField?
+    private var cards: [SetupStep: SetupCardView] = [:]
+    private var cardStack: NSStackView!
+    private var demoPane: DemoPaneView!
+    private var subtitleLabel: NSTextField!
+    private var footer: NSView!
+    private var doneButton: NSButton?
+
+    /// The step whose Allow is in flight — the spinner, and the UI half of the
+    /// single-flight rule the flow model enforces.
+    private var allowInFlight: SetupStep?
+
+    /// Set by a failed Done verification: the card to snap back to. It overrides
+    /// the flow model's own active step, which is anchored to where this
+    /// presentation STARTED and so can't reach back to a step that was fine
+    /// when the window opened and has since been revoked.
+    private var snapBackStep: SetupStep?
+
+    /// Steps already completed at the last repaint — the transition edge the
+    /// grant choreography fires on (a repaint that changes nothing must not
+    /// re-run it).
+    private var completedAtLastRefresh: Set<SetupStep> = []
 
     /// Polls the silent Accessibility trust read while the window is open, so a
     /// grant made in System Settings shows up even if `AXIsProcessTrusted()` only
     /// flips true a moment after the user returns (a re-focus check alone can miss
-    /// that). Stops once granted. If AX *never* flips true this process (the known
-    /// "relaunch to apply" Accessibility behavior), polling can't help — that's what
-    /// the AIRPLAY_DEBUG_SETUP log disambiguates.
+    /// that). Stops once granted.
     private var remoteControlPoll: Timer?
 
     /// Polls the PTP helper's `SMAppService.status` while the window is open, so
     /// approving it in Login Items (System Settings, not this window) is picked
-    /// up without needing a re-focus. Stops once `.enabled`. Same rationale as
-    /// `remoteControlPoll` — see T6/PROGRESS.md for the Developer-ID gating that
-    /// keeps this from ever reaching `.enabled` on an ad-hoc-signed build.
+    /// up without needing a re-focus. Stops once `.enabled`.
     private var ptpHelperPoll: Timer?
 
     public init(model: SetupModel,
@@ -78,6 +104,11 @@ public final class OnboardingViewController: NSViewController {
                 onOpenSettings: @escaping (SystemSettingsPane) -> Void,
                 onDone: @escaping () -> Void) {
         self.model = model
+        // Built HERE, at presentation time and before anything can be granted:
+        // the flow's start position is fixed at init from the first unmet
+        // required step, and building it after a grant would read as a
+        // re-entry and open on a different card.
+        self.flow = SetupFlowModel(setup: model)
         self.reason = reason
         self.onOpenSettings = onOpenSettings
         self.onDone = onDone
@@ -91,204 +122,196 @@ public final class OnboardingViewController: NSViewController {
     // MARK: Build
 
     public override func loadView() {
-        let content = NSStackView()
-        content.orientation = .vertical
-        content.alignment = .leading
-        content.spacing = 18
-        content.translatesAutoresizingMaskIntoConstraints = false
-        content.edgeInsets = NSEdgeInsets(top: 30, left: 28, bottom: 22, right: 28)
-
-        audioRow = PermissionRowView(
-            content: PermissionRowContent(
-                symbolName: "waveform",
-                title: "System Audio",
-                // Outcome-framed reassurance FIRST (spec §5.8 house voice: the
-                // OS prompt will say "screen recording", so defuse it here),
-                // then the honest heads-up about the confirmation tone the
-                // probe really does play (AudioCapturePermissionProbe —
-                // "the UI warns first" is part of that contract).
-                detail: "macOS calls this screen recording. Your audio flows "
-                    + "straight to your speakers — nothing is stored or sent. "
-                    + "Allowing plays a brief tone to confirm it's working.",
-                allowButtonTitle: "Allow…",
-                iconColor: Tokens.Color.permissionSystemAudio),
-            onAllow: { [weak self] in self?.allowAudio() },
-            onOpenSettings: { [weak self] in self?.onOpenSettings(.screenAndSystemAudioRecording) })
-
-        networkRow = PermissionRowView(
-            content: PermissionRowContent(
-                symbolName: "wifi",
-                title: "Local Network",
-                // Plain "speakers", never "AirPlay", in onboarding copy (spec
-                // §5.8, decision m). U+2011 non-breaking hyphen keeps "Wi‑Fi"
-                // from wrapping to an orphan "Fi."
-                detail: "Find the speakers on your Wi\u{2011}Fi so they show up "
-                    + "in your list.",
-                allowButtonTitle: "Allow…",
-                iconColor: Tokens.Color.permissionLocalNetwork),
-            onAllow: { [weak self] in
-                Task { @MainActor in
-                    await self?.model.primeLocalNetwork()
-                    // The browse may have surfaced the system prompt; pull the
-                    // window back to the front like the audio grant does.
-                    NSApp?.activate(ignoringOtherApps: true)
-                    self?.view.window?.makeKeyAndOrderFront(nil)
-                }
-            },
-            onOpenSettings: { [weak self] in self?.onOpenSettings(.localNetwork) })
-
-        // Asked for up front so neither consumer springs a cold THIRD prompt
-        // later: speaker-side transport controls simulating Mac media keys, and
-        // the volume-key interceptor. Only the second one HAS to have it — a
-        // CGEventTap can't be created untrusted, where posting merely no-ops.
-        // See SetupModel's `SetupPermission.remoteControl`.
-        remoteControlRow = PermissionRowView(
-            content: PermissionRowContent(
-                symbolName: "accessibility",
-                title: "Remote Control",
-                // Outcome first, then name the OS's own label for the
-                // permission so the System Settings pane is recognisable. The
-                // volume keys lead: macOS refuses to move the volume while
-                // Audiouter is the output device, so without this grant they do
-                // nothing at all — a far more visible loss than transport keys.
-                detail: "Use your volume keys while Audiouter is your output "
-                    + "device, and press play or pause on a speaker to control "
-                    + "your Mac. macOS calls this Accessibility.",
-                allowButtonTitle: "Allow…",
-                iconColor: Tokens.Color.permissionRemoteControl),
-            onAllow: { [weak self] in self?.model.primeRemoteControl() },
-            // Re-fire the macOS Accessibility PROMPT rather than deep-linking to the
-            // pane: the prompt's own "Open System Settings" button is the one path
-            // that scrolls to / highlights Audiouter in the list — a plain deep link
-            // can't. (macOS gives no way to highlight an app row via URL.)
-            onOpenSettings: { [weak self] in self?.model.primeRemoteControl() })
-
-        // T6: the privileged PTP helper daemon (SMAppService, not a TCC
-        // permission) — its own row type/status (see PTPHelperRowView's doc
-        // comment) rather than a fourth PermissionStatus case.
-        ptpHelperRow = PTPHelperRowView(
-            onOpenLoginItems: { [weak self] in self?.model.openPTPHelperLoginItems() })
-
-        // `.permissionLost` gets a banner ABOVE the header; `.firstRun` renders
-        // exactly as before (no banner at all).
-        if case .permissionLost(let unmet) = reason {
-            let banner = makeBanner(unmet: unmet)
-            permissionBannerView = banner
-            content.addArrangedSubview(banner)
-            content.setCustomSpacing(18, after: banner)
-        }
-
-        let header = makeHeader()
-        content.addArrangedSubview(header)
-        content.addArrangedSubview(makeReassurance())
-        content.addArrangedSubview(makePermissionCard())
-        content.addArrangedSubview(makeFooter())
-        // A touch more air below the hero than the uniform rhythm.
-        content.setCustomSpacing(22, after: header)
-
-        // The Warm Signal canvas (spec §5.8: "warm canvas + permission
-        // tiles"), replacing the old opaque `NSVisualEffectView`
-        // window-background material. `WarmCanvasView` is always fully
-        // opaque and self-handles Reduce Transparency / Increase Contrast
-        // (flat `canvas` fill, no gradient/grain) — see its doc comment.
         let background = WarmCanvasView()
         background.translatesAutoresizingMaskIntoConstraints = false
-        background.addSubview(content)
+
+        let leftPane = makeLeftPane()
+        let rightPane = makeRightPane()
+        background.addSubview(leftPane)
+        background.addSubview(rightPane)
+
         NSLayoutConstraint.activate([
-            content.leadingAnchor.constraint(equalTo: background.leadingAnchor),
-            content.trailingAnchor.constraint(equalTo: background.trailingAnchor),
-            content.topAnchor.constraint(equalTo: background.topAnchor),
-            content.bottomAnchor.constraint(equalTo: background.bottomAnchor),
-            content.widthAnchor.constraint(equalToConstant: Self.contentWidth),
+            background.widthAnchor.constraint(equalToConstant: Self.contentWidth),
+            background.heightAnchor.constraint(equalToConstant: Self.contentHeight),
+
+            leftPane.leadingAnchor.constraint(equalTo: background.leadingAnchor),
+            leftPane.topAnchor.constraint(equalTo: background.topAnchor),
+            leftPane.bottomAnchor.constraint(equalTo: background.bottomAnchor),
+            leftPane.widthAnchor.constraint(equalToConstant: Self.leftPaneWidth),
+
+            rightPane.leadingAnchor.constraint(equalTo: leftPane.trailingAnchor),
+            rightPane.trailingAnchor.constraint(equalTo: background.trailingAnchor),
+            rightPane.topAnchor.constraint(equalTo: background.topAnchor),
+            rightPane.bottomAnchor.constraint(equalTo: background.bottomAnchor),
         ])
         view = background
     }
 
-    /// The three permission rows wrapped in a single grouped inset card (the
-    /// System Settings list look): one rounded, hairline-bordered container with
-    /// a text-inset separator between each row.
-    private func makePermissionCard() -> NSView {
-        let card = RoundedContainerView()
+    /// Hero, card stack, footer — the column that carries every word and every
+    /// control.
+    private func makeLeftPane() -> NSView {
+        let pane = NSView()
+        pane.translatesAutoresizingMaskIntoConstraints = false
 
-        func textInsetSeparator() -> NSBox {
-            let separator = NSBox()
-            separator.boxType = .separator
-            separator.translatesAutoresizingMaskIntoConstraints = false
-            return separator
+        let header = makeHeader()
+        cardStack = NSStackView()
+        cardStack.orientation = .vertical
+        cardStack.alignment = .leading
+        cardStack.spacing = 6
+        cardStack.distribution = .fill
+        cardStack.translatesAutoresizingMaskIntoConstraints = false
+        for step in SetupFlowModel.steps {
+            let card = makeCard(for: step)
+            cards[step] = card
+            cardStack.addArrangedSubview(card)
+            card.widthAnchor.constraint(equalTo: cardStack.widthAnchor).isActive = true
         }
-        let separator1 = textInsetSeparator()
-        let separator2 = textInsetSeparator()
-        let separator3 = textInsetSeparator()
 
-        card.addSubview(audioRow)
-        card.addSubview(separator1)
-        card.addSubview(networkRow)
-        card.addSubview(separator2)
-        card.addSubview(remoteControlRow)
-        card.addSubview(separator3)
-        card.addSubview(ptpHelperRow)
+        footer = makeFooter()
 
-        // Separators start after the icon tile, aligned with the row text —
-        // exactly how System Settings insets its grouped-row dividers.
-        let textInset = PermissionRowView.horizontalInset + IconTileView.side + 12
+        pane.addSubview(header)
+        pane.addSubview(cardStack)
+        pane.addSubview(footer)
+
+        let margin = Self.paneMargin
+        // The gap above the footer is deliberately the weakest constraint in
+        // this column. The window is a FIXED size (`contentHeight`), so this
+        // must never be the thing that decides how tall the window is — it is
+        // only the "don't crowd the footer" hint. A step whose copy wraps one
+        // line further than expected bends this, rather than resizing the window
+        // under the user or breaking a required constraint.
+        let cardsToFooter = cardStack.bottomAnchor.constraint(lessThanOrEqualTo: footer.topAnchor,
+                                                             constant: -14)
+        cardsToFooter.priority = .defaultLow
+
         NSLayoutConstraint.activate([
-            audioRow.topAnchor.constraint(equalTo: card.topAnchor),
-            audioRow.leadingAnchor.constraint(equalTo: card.leadingAnchor),
-            audioRow.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            header.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: margin),
+            header.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -margin),
+            header.topAnchor.constraint(equalTo: pane.topAnchor, constant: margin),
 
-            separator1.topAnchor.constraint(equalTo: audioRow.bottomAnchor),
-            separator1.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: textInset),
-            separator1.trailingAnchor.constraint(equalTo: card.trailingAnchor),
+            cardStack.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: margin),
+            cardStack.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -margin),
+            cardStack.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 18),
+            cardsToFooter,
 
-            networkRow.topAnchor.constraint(equalTo: separator1.bottomAnchor),
-            networkRow.leadingAnchor.constraint(equalTo: card.leadingAnchor),
-            networkRow.trailingAnchor.constraint(equalTo: card.trailingAnchor),
-
-            separator2.topAnchor.constraint(equalTo: networkRow.bottomAnchor),
-            separator2.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: textInset),
-            separator2.trailingAnchor.constraint(equalTo: card.trailingAnchor),
-
-            remoteControlRow.topAnchor.constraint(equalTo: separator2.bottomAnchor),
-            remoteControlRow.leadingAnchor.constraint(equalTo: card.leadingAnchor),
-            remoteControlRow.trailingAnchor.constraint(equalTo: card.trailingAnchor),
-
-            separator3.topAnchor.constraint(equalTo: remoteControlRow.bottomAnchor),
-            separator3.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: textInset),
-            separator3.trailingAnchor.constraint(equalTo: card.trailingAnchor),
-
-            ptpHelperRow.topAnchor.constraint(equalTo: separator3.bottomAnchor),
-            ptpHelperRow.leadingAnchor.constraint(equalTo: card.leadingAnchor),
-            ptpHelperRow.trailingAnchor.constraint(equalTo: card.trailingAnchor),
-            ptpHelperRow.bottomAnchor.constraint(equalTo: card.bottomAnchor),
-
-            card.widthAnchor.constraint(equalToConstant: Self.columnWidth),
+            footer.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: margin),
+            footer.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -margin),
+            footer.bottomAnchor.constraint(equalTo: pane.bottomAnchor, constant: -20),
         ])
-        return card
+        return pane
+    }
+
+    /// The demo, centred on a subtly elevated surface.
+    private func makeRightPane() -> NSView {
+        let pane = NSView()
+        pane.translatesAutoresizingMaskIntoConstraints = false
+        demoPane = DemoPaneView()
+        pane.addSubview(demoPane)
+        NSLayoutConstraint.activate([
+            demoPane.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: Self.paneMargin),
+            demoPane.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -Self.paneMargin),
+            demoPane.topAnchor.constraint(equalTo: pane.topAnchor, constant: Self.paneMargin),
+            demoPane.bottomAnchor.constraint(equalTo: pane.bottomAnchor, constant: -Self.paneMargin),
+        ])
+        return pane
+    }
+
+    private func makeHeader() -> NSView {
+        // Show the app's REAL icon (not a generic glyph) — a stronger first
+        // impression for a paid product. Fetched from the running app so it
+        // tracks whatever icon ships, with no hardcoded asset name to go stale.
+        let tile = NSImageView()
+        tile.image = NSApp?.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
+        tile.imageScaling = .scaleProportionallyUpOrDown
+        tile.setAccessibilityLabel("Audiouter")
+        tile.translatesAutoresizingMaskIntoConstraints = false
+
+        let title = NSTextField(labelWithString: "Welcome to Audiouter")
+        title.font = .systemFont(ofSize: 20, weight: .bold)
+        title.translatesAutoresizingMaskIntoConstraints = false
+
+        // Plain "speakers", never "AirPlay" (spec §5.8, decision m). This one
+        // label is also where a `.permissionLost` re-entry says what went off —
+        // no separate banner view, so the layout is identical either way.
+        subtitleLabel = NSTextField(wrappingLabelWithString: "")
+        subtitleLabel.font = Tokens.Font.body
+        subtitleLabel.maximumNumberOfLines = 3
+        subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        subtitleLabel.preferredMaxLayoutWidth = Self.leftPaneWidth - Self.paneMargin * 2
+
+        let stack = NSStackView(views: [tile, title, subtitleLabel])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 4
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.setCustomSpacing(12, after: tile)
+
+        NSLayoutConstraint.activate([
+            tile.widthAnchor.constraint(equalToConstant: 52),
+            tile.heightAnchor.constraint(equalToConstant: 52),
+            subtitleLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
+        ])
+        return stack
+    }
+
+    /// The Done area. The button itself is NOT built here — it only enters the
+    /// hierarchy once the gate opens (see ``refreshDone()``).
+    private func makeFooter() -> NSView {
+        let footer = NSView()
+        footer.translatesAutoresizingMaskIntoConstraints = false
+        // Reserve the button's height so the card stack doesn't shift when Done
+        // appears — the gate is about the BUTTON's absence, not about the
+        // layout jumping.
+        footer.heightAnchor.constraint(equalToConstant: 32).isActive = true
+        return footer
+    }
+
+    private func makeCard(for step: SetupStep) -> SetupCardView {
+        SetupCardView(content: Self.content(for: step),
+                      onAllow: { [weak self] in self?.allowTapped(step) },
+                      onSkip: { [weak self] in self?.skipTapped(step) })
     }
 
     public override func viewDidLoad() {
         super.viewDidLoad()
         // Bind as soon as the view exists (not only in `viewWillAppear`, which a
         // headless test/harness never triggers) so a model status change — the
-        // async audio probe resolving, the network prime — repaints the rows.
+        // async audio probe resolving, the Bluetooth prompt being answered —
+        // repaints the cards.
         model.onChange = { [weak self] in self?.refresh() }
-        refresh()
-        // Reflect real current state up front — surfaces an Accessibility grant the
-        // user already had (silent check), without prompting anything untouched.
-        refreshStatuses()
-        // Register the PTP helper daemon once, at load (T6): unlike the three
-        // probes above, registering shows no system prompt of its own, so it's
-        // safe to run unconditionally rather than waiting for a tap — see
-        // `SetupModel.registerPTPHelper()`'s doc comment.
+        // Register the PTP helper daemon once, at load: unlike the probes,
+        // registering shows no system prompt of its own, so it's safe to run
+        // unconditionally rather than waiting for a tap.
         model.registerPTPHelper()
+        // Reflect real current state up front — without this the Bluetooth card
+        // paints undetermined even when the grant is already in place
+        // (`bluetoothStatus` starts `.unknown`). Silent: never springs a prompt.
+        refreshStatuses()
+        refresh(animated: false)
         startRemoteControlPoll()
         startPTPHelperPoll()
         view.layoutSubtreeIfNeeded()
         preferredContentSize = view.fittingSize
     }
 
+    public override func viewWillAppear() {
+        super.viewWillAppear()
+        // Re-attach on every open (a reused window) and re-read current status.
+        model.onChange = { [weak self] in self?.refresh() }
+        refreshStatuses()
+        refresh(animated: false)
+    }
+
+    /// Re-derive every permission's live status (see ``SetupModel/refreshStatuses()``).
+    /// Called on load, on appear, and — via the window controller — whenever the app
+    /// regains focus, so returning from System Settings updates the cards to reality.
+    /// Safe to call freely: it never springs a prompt on an un-engaged permission.
+    public func refreshStatuses() {
+        Task { @MainActor in await model.refreshStatuses() }
+    }
+
     /// Poll the silent Accessibility read every ~1.5 s until it's granted, so a
-    /// toggle flipped in System Settings lands on the row even without a re-focus.
+    /// toggle flipped in System Settings lands on the card even without a re-focus.
     private func startRemoteControlPoll() {
         guard remoteControlPoll == nil else { return }
         remoteControlPoll = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] timer in
@@ -301,7 +324,7 @@ public final class OnboardingViewController: NSViewController {
     }
 
     /// Poll the PTP helper's `SMAppService.status` every ~1.5 s until it's
-    /// `.enabled`, so approving it in Login Items lands on the row without a
+    /// `.enabled`, so approving it in Login Items lands on the card without a
     /// re-focus. Same shape as `startRemoteControlPoll()`.
     private func startPTPHelperPoll() {
         guard ptpHelperPoll == nil else { return }
@@ -314,102 +337,292 @@ public final class OnboardingViewController: NSViewController {
         }
     }
 
-    public override func viewWillAppear() {
-        super.viewWillAppear()
-        // Re-attach on every open (a reused window) and re-read current status.
-        model.onChange = { [weak self] in self?.refresh() }
-        refresh()
-        refreshStatuses()
+    // MARK: Card copy
+
+    /// The per-step card copy. The DETAIL strings are reused verbatim from the
+    /// pre-sequential rows: each one is TCC-framing tested (it defuses the OS's
+    /// own wording before that prompt appears), so they are not re-written for
+    /// the new layout.
+    static func content(for step: SetupStep) -> SetupCardContent {
+        switch step {
+        case .audio:
+            return SetupCardContent(
+                step: step,
+                symbolName: "waveform",
+                iconColor: Tokens.Color.permissionSystemAudio,
+                activeTitle: "Let Audiouter hear your Mac's sound",
+                completedTitle: "Audiouter can now hear your Mac's sound",
+                // Outcome-framed reassurance FIRST (spec §5.8 house voice: the
+                // OS prompt will say "screen recording", so defuse it here),
+                // then the honest heads-up about the confirmation tone the
+                // probe really does play.
+                detail: "macOS calls this screen recording. Your audio flows "
+                    + "straight to your speakers — nothing is stored or sent. "
+                    + "Allowing plays a brief tone to confirm it's working.",
+                allowTitle: "Allow…",
+                isSkippable: false)
+        case .localNetwork:
+            return SetupCardContent(
+                step: step,
+                symbolName: "wifi",
+                iconColor: Tokens.Color.permissionLocalNetwork,
+                activeTitle: "Find the speakers on your Wi\u{2011}Fi",
+                // Never used: Local Network's completed title is the found
+                // count (`SetupCardContent.title(for:foundSpeakers:)`), because
+                // a checkmark for a permission macOS refuses to confirm would
+                // be a claim we can't back.
+                completedTitle: "Found your speakers",
+                // Plain "speakers", never "AirPlay", in onboarding copy (spec
+                // §5.8, decision m). U+2011 non-breaking hyphen keeps "Wi‑Fi"
+                // from wrapping to an orphan "Fi."
+                detail: "Find the speakers on your Wi\u{2011}Fi so they show up "
+                    + "in your list.",
+                allowTitle: "Allow…",
+                isSkippable: false)
+        case .bluetooth:
+            return SetupCardContent(
+                step: step,
+                symbolName: "dot.radiowaves.right",
+                // razor: Bluetooth SHARES Remote Control's hue rather than
+                // minting a fifth `Tokens.Color.permission*` token, which would
+                // need authored light/dark/Increase-Contrast values and a
+                // measured contrast rationale from the palette owner. The two
+                // cards are never adjacent, so the repeat doesn't read as a
+                // mistake. Upgrade path: add `permissionBluetooth` to `Tokens`
+                // with those three variants and swap this one line.
+                iconColor: Tokens.Color.permissionRemoteControl,
+                activeTitle: "Let Audiouter use Bluetooth speakers",
+                completedTitle: "Audiouter can now use Bluetooth speakers",
+                detail: "Keep a Bluetooth speaker in your list while it's "
+                    + "switched off, and reconnect it from Audiouter. Without "
+                    + "this you can still use one that's already connected.",
+                allowTitle: "Allow…",
+                isSkippable: true)
+        case .speakerSync:
+            return SetupCardContent(
+                step: step,
+                symbolName: "clock.arrow.2.circlepath",
+                iconColor: Tokens.Color.permissionSpeakerSync,
+                activeTitle: "Keep your speakers in perfect time",
+                completedTitle: "Your speakers stay in perfect time",
+                detail: "Your speakers play in perfect time by sharing one "
+                    + "clock, through a small helper. Approve it once in Login Items.",
+                allowTitle: "Open Login Items…",
+                isSkippable: false)
+        case .remoteControl:
+            return SetupCardContent(
+                step: step,
+                symbolName: "accessibility",
+                iconColor: Tokens.Color.permissionRemoteControl,
+                activeTitle: "Control playback with your volume keys",
+                completedTitle: "Your volume keys control Audiouter",
+                // Outcome first, then name the OS's own label for the
+                // permission so the System Settings pane is recognisable.
+                detail: "Use your volume keys while Audiouter is your output "
+                    + "device, and press play or pause on a speaker to control "
+                    + "your Mac. macOS calls this Accessibility.",
+                allowTitle: "Allow…",
+                isSkippable: true)
+        }
     }
 
-    /// Re-derive every permission's live status (see ``SetupModel/refreshStatuses()``).
-    /// Called on load, on appear, and — via the window controller — whenever the app
-    /// regains focus, so returning from System Settings updates the rows to reality.
-    /// Safe to call freely: it never springs a prompt on an un-engaged permission.
-    public func refreshStatuses() {
-        Task { @MainActor in await model.refreshStatuses() }
+    // MARK: State
+
+    /// The card that is expanded right now. Normally the flow model's own
+    /// answer; a failed Done verification overrides it (see ``snapBackStep``).
+    private var displayedActiveStep: SetupStep? {
+        if let snapBackStep, !flow.isComplete(snapBackStep) { return snapBackStep }
+        return flow.activeStep
     }
 
-    // MARK: Sections
+    /// Repaint everything from the two models.
+    ///
+    /// - Parameter animated: `nil` derives it — the grant choreography runs on
+    ///   the edge where a step becomes complete, and only on a window that is
+    ///   really on screen with Reduce Motion off. Callers pass `false` for the
+    ///   initial build and `true`/`canAnimate` for a UI-initiated change (a skip,
+    ///   a snap-back) that isn't a grant.
+    private func refresh(animated: Bool? = nil) {
+        let completedNow = Set(SetupFlowModel.steps.filter { flow.isComplete($0) })
+        let newlyCompleted = completedNow.subtracting(completedAtLastRefresh)
+        let shouldAnimate = animated ?? (!newlyCompleted.isEmpty && canAnimate)
+        completedAtLastRefresh = completedNow
 
-    private func makeHeader() -> NSView {
-        // Show the app's REAL icon (not a generic glyph) — a stronger first
-        // impression for a paid product. Fetched from the running app so it
-        // tracks whatever icon ships, with no hardcoded asset name to go stale.
-        let tile = NSImageView()
-        tile.image = NSApp?.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
-        tile.imageScaling = .scaleProportionallyUpOrDown
-        tile.setAccessibilityLabel("Audiouter")
-        tile.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            tile.widthAnchor.constraint(equalToConstant: 60),
-            tile.heightAnchor.constraint(equalToConstant: 60),
-        ])
+        // A grant lands while the user is looking at System Settings or a TCC
+        // prompt — pull ourselves back to the front FIRST, so the rest of the
+        // choreography happens somewhere the user can see it.
+        if !newlyCompleted.isEmpty { returnToFront() }
+        if let snapBackStep, flow.isComplete(snapBackStep) { self.snapBackStep = nil }
 
-        let title = NSTextField(labelWithString: "Welcome to Audiouter")
-        title.font = .systemFont(ofSize: 22, weight: .bold)
-        title.alignment = .center
-
-        // Plain "speakers", never "AirPlay" (spec §5.8, decision m).
-        let subtitle = NSTextField(labelWithString: "Play your Mac's sound on the speakers around your home.")
-        subtitle.font = Tokens.Font.body
-        subtitle.textColor = Tokens.Color.secondaryLabel
-        subtitle.alignment = .center
-
-        let stack = NSStackView(views: [tile, title, subtitle])
-        stack.orientation = .vertical
-        stack.alignment = .centerX
-        stack.spacing = 6
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.setCustomSpacing(14, after: tile)
-        return fullWidth(stack)
+        let active = displayedActiveStep
+        for step in SetupFlowModel.steps {
+            cards[step]?.apply(state(for: step, active: active),
+                               foundSpeakers: flow.localNetworkFoundSpeakers,
+                               isProbing: allowInFlight == step,
+                               offersSettingsFallback: offersSettingsFallback(step),
+                               hint: hint(for: step),
+                               animated: shouldAnimate)
+        }
+        demoPane.show(step: active, mode: demoMode(for: active),
+                      animated: shouldAnimate)
+        refreshDone()
+        refreshHeaderMessage()
     }
 
-    /// The `.permissionLost` banner: a stock system-orange inset card (reusing
-    /// ``RoundedContainerView``, the same grouped-container look the
-    /// permission card below uses) with a warning glyph and copy naming the
-    /// specific permission(s) that got turned off. System colors only — no
-    /// custom drawing beyond the shared rounded-rect container this screen
-    /// already uses.
-    private func makeBanner(unmet: [RequiredPermission]) -> NSView {
-        let icon = NSImageView()
-        icon.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill",
-                             accessibilityDescription: "Warning")
-        icon.symbolConfiguration = .init(pointSize: 16, weight: .semibold)
-        icon.contentTintColor = Tokens.Color.warning
-        icon.translatesAutoresizingMaskIntoConstraints = false
-        icon.setContentHuggingPriority(.required, for: .horizontal)
-        icon.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-        let text = NSTextField(wrappingLabelWithString: Self.bannerText(for: unmet))
-        text.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .medium)
-        text.textColor = Tokens.Color.label
-        text.translatesAutoresizingMaskIntoConstraints = false
-        text.preferredMaxLayoutWidth = Self.columnWidth - 32 - 16
-        permissionBannerLabel = text
-
-        let row = NSStackView(views: [icon, text])
-        row.orientation = .horizontal
-        row.alignment = .firstBaseline
-        row.spacing = 10
-        row.translatesAutoresizingMaskIntoConstraints = false
-
-        let card = RoundedContainerView(fill: Tokens.Color.warning.withAlphaComponent(0.14),
-                                        border: Tokens.Color.warning.withAlphaComponent(0.4))
-        card.addSubview(row)
-        NSLayoutConstraint.activate([
-            row.topAnchor.constraint(equalTo: card.topAnchor, constant: 12),
-            row.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -12),
-            row.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
-            row.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -14),
-            card.widthAnchor.constraint(equalToConstant: Self.columnWidth),
-        ])
-        return card
+    private func state(for step: SetupStep, active: SetupStep?) -> SetupCardState {
+        if step == active { return .active }
+        guard flow.isComplete(step) else {
+            return flow.skippedSteps.contains(step) ? .skipped : .pending
+        }
+        // Auto-passed, not granted: this OS has no such permission to give, so
+        // the strip says why instead of claiming a grant nobody made.
+        if step == .audio, model.audioStatus == .unsupported {
+            return .autoPassed(note: "Requires macOS 14.2 or later")
+        }
+        return .completed
     }
+
+    /// Whether this step's Allow has spent its prompt, so the next click is the
+    /// Settings deep link instead (the two-mode Allow). Kept in lockstep with
+    /// ``SetupFlowModel/allow(_:)``'s own preflight — the button must not
+    /// promise a prompt the model will refuse to fire.
+    private func offersSettingsFallback(_ step: SetupStep) -> Bool {
+        switch step {
+        case .audio:         return model.audioStatus == .denied
+        case .localNetwork:  return model.localNetworkStatus == .requested
+        case .bluetooth:     return model.bluetoothStatus == .denied
+        // Login Items is Speaker Sync's only mode — its Allow is already the
+        // Settings button, so there is no second mode to switch into.
+        case .speakerSync:   return false
+        // Remote Control's "Open Settings…" re-fires the Accessibility PROMPT
+        // (the prompt's own button is the only path that highlights this app in
+        // the list); the label changes, the destination doesn't.
+        case .remoteControl: return model.remoteControlStatus == .requested
+        }
+    }
+
+    /// The one extra line the flow ever adds to a card: Local Network can NEVER
+    /// prove a denial (no status API), so a browse that found nothing must ask
+    /// for a speaker rather than accuse the user of refusing.
+    private func hint(for step: SetupStep) -> String? {
+        guard step == .localNetwork, step == displayedActiveStep,
+              model.localNetworkStatus == .requested else { return nil }
+        return "No speakers found yet. Turn one on, then try again."
+    }
+
+    private func demoMode(for step: SetupStep?) -> DemoMode {
+        guard let step else { return .settled }
+        // Speaker Sync has no prompt at all — Login Items is the only surface
+        // it ever shows the user.
+        if step == .speakerSync { return .settings }
+        return offersSettingsFallback(step) ? .settings : .prompt
+    }
+
+    /// Whether the choreography may run: a real, on-screen window with Reduce
+    /// Motion off. Everywhere else every beat is an instant swap, so steady
+    /// states (first render, snapshots, headless tests, an occluded window)
+    /// render settled.
+    private var canAnimate: Bool {
+        guard !HeadlessRuntime.isActive,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+              let window = view.window, window.isVisible else { return false }
+        return window.occlusionState.contains(.visible)
+    }
+
+    /// Pull the window back in front of whatever the user was just in (a TCC
+    /// prompt, System Settings) and restore keyboard focus.
+    private func returnToFront() {
+        guard !HeadlessRuntime.isActive else { return }
+        NSApp?.activate(ignoringOtherApps: true)
+        view.window?.makeKeyAndOrderFront(nil)
+    }
+
+    // MARK: The gate
+
+    /// Add or remove Done. It is ABSENT until every required permission
+    /// verifies — never present-but-disabled, which reads as "the app is
+    /// broken" rather than "there is one more thing to do".
+    private func refreshDone() {
+        let shouldExist = flow.isDoneAvailable
+        if shouldExist, doneButton == nil {
+            let done = NSButton(title: "Done", target: self, action: #selector(doneTapped))
+            done.bezelStyle = .rounded
+            done.controlSize = .large
+            done.translatesAutoresizingMaskIntoConstraints = false
+            // Once Done exists it IS the Return-default; until then Return
+            // belongs to the one live Allow (below).
+            done.keyEquivalent = "\r"
+            doneButton = done
+            footer.addSubview(done)
+            NSLayoutConstraint.activate([
+                done.trailingAnchor.constraint(equalTo: footer.trailingAnchor),
+                done.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
+            ])
+            if canAnimate {
+                done.alphaValue = 0
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.2
+                    context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    done.animator().alphaValue = 1
+                }
+            }
+        } else if !shouldExist, let done = doneButton {
+            done.removeFromSuperview()
+            doneButton = nil
+        }
+        let active = displayedActiveStep
+        for step in SetupFlowModel.steps {
+            cards[step]?.setAllowIsReturnDefault(!shouldExist && step == active)
+        }
+    }
+
+    /// Done re-verifies before finishing: something may have been revoked while
+    /// the window sat open. A failure snaps the flow back to the card that came
+    /// up short — no sheet, no "continue anyway".
+    @objc private func doneTapped() {
+        Task { @MainActor in await verifyThenFinish() }
+    }
+
+    private func verifyThenFinish() async {
+        switch await flow.verifyForDone() {
+        case .complete:
+            onDone()
+        case .unmet(let step):
+            snapBackStep = step
+            refresh(animated: canAnimate)
+        }
+    }
+
+    // MARK: Header message
+
+    /// Keep the `.permissionLost` message honest as the user re-grants: re-word
+    /// it to the still-missing subset, and drop back to the plain welcome line
+    /// once every permission it named is satisfied. Scoped to the permissions it
+    /// ORIGINALLY flagged, so it never expands to nag about something it didn't
+    /// open for. `.firstRun` always shows the welcome line.
+    private func refreshHeaderMessage() {
+        guard case .permissionLost(let originallyUnmet) = reason else {
+            subtitleLabel.stringValue = Self.welcomeSubtitle
+            subtitleLabel.textColor = Tokens.Color.secondaryLabel
+            return
+        }
+        let notGranted = model.requiredPermissionsNotGranted()
+        let stillMissing = originallyUnmet.filter { notGranted.contains($0) }
+        guard !stillMissing.isEmpty else {
+            subtitleLabel.stringValue = Self.welcomeSubtitle
+            subtitleLabel.textColor = Tokens.Color.secondaryLabel
+            return
+        }
+        subtitleLabel.stringValue = Self.permissionLostText(for: stillMissing)
+        subtitleLabel.textColor = Tokens.Color.warning
+    }
+
+    static let welcomeSubtitle = "Play your Mac's sound on the speakers around your home. "
+        + "A few one-time permissions, one at a time."
 
     /// The specific unmet permission(s), named plainly, so the user knows
-    /// exactly what to look for below without hunting through all three rows.
-    private static func bannerText(for unmet: [RequiredPermission]) -> String {
+    /// exactly what to look for below.
+    static func permissionLostText(for unmet: [RequiredPermission]) -> String {
         let names = unmet.map(displayName(for:))
         let joined: String
         switch names.count {
@@ -423,258 +636,186 @@ public final class OnboardingViewController: NSViewController {
             + "Re-enable it below so the app can keep working."
     }
 
-    private static func displayName(for permission: RequiredPermission) -> String {
+    static func displayName(for permission: RequiredPermission) -> String {
         switch permission {
         case .audioCapture: return "System Audio"
         case .localNetwork: return "Local Network"
-        // Matches the row's on-screen title (was "PTP helper" — jargon the
+        // Matches the card's on-screen title (was "PTP helper" — jargon the
         // user never sees anywhere else; spec §5.8's plain-speakers voice).
         case .ptpHelper:    return "Speaker Sync"
         }
     }
 
-    private func makeReassurance() -> NSView {
-        // Outcome-framed and calm (spec §5.8 house voice): what saying yes
-        // gets you, and how little it asks. The "recording" reframe now lives
-        // on the System Audio row itself, right where that prompt fires.
-        let text = NSTextField(wrappingLabelWithString:
-            "A few one-time permissions let your sound reach every speaker "
-            + "in the house. Each one below is a single click.")
-        text.font = Tokens.Font.body
-        text.textColor = Tokens.Color.label
-        text.alignment = .center
-        text.translatesAutoresizingMaskIntoConstraints = false
-        text.preferredMaxLayoutWidth = Self.columnWidth
-        return fullWidth(text)
-    }
+    // MARK: Actions
 
-    private func makeFooter() -> NSView {
-        // Names the app explicitly: macOS won't let us highlight the row, so the
-        // next-best help is telling the user exactly what to look for in the list.
-        let note = NSTextField(wrappingLabelWithString:
-            "In System Settings, find Audiouter in the list and switch it on.")
-        note.font = Tokens.Font.caption
-        note.textColor = Tokens.Color.secondaryLabel
-        note.maximumNumberOfLines = 2
-        note.translatesAutoresizingMaskIntoConstraints = false
-        note.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        note.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        note.preferredMaxLayoutWidth = Self.columnWidth - 96
-
-        // Done is a plain (gray) button, deliberately quieter than the accent
-        // "Allow…" CTAs, and NOT the Return-default — we don't want an accidental
-        // Return to skip granting. The prominent buttons are the ones to click.
-        // `.large` gives the finish action a little more presence than the note.
-        let done = NSButton(title: "Done", target: self, action: #selector(doneTapped))
-        done.bezelStyle = .rounded
-        done.controlSize = .large
-        done.setContentHuggingPriority(.required, for: .horizontal)
-        done.setContentCompressionResistancePriority(.required, for: .horizontal)
-        self.doneButton = done
-
-        // Horizontal stack (.fill) stretches the low-hugging note to take the slack
-        // and pins the high-hugging Done to the trailing edge — note left, Done right.
-        let row = NSStackView(views: [note, done])
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.distribution = .fill
-        row.spacing = 12
-        row.translatesAutoresizingMaskIntoConstraints = false
-        row.widthAnchor.constraint(equalToConstant: Self.columnWidth).isActive = true
-        return row
-    }
-
-    /// Wrap a view in a full-content-width container so vertical-stack children
-    /// all span the column (and centered content actually centers).
-    private func fullWidth(_ inner: NSView) -> NSView {
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        inner.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(inner)
-        NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: Self.columnWidth),
-            inner.topAnchor.constraint(equalTo: container.topAnchor),
-            inner.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-            inner.centerXAnchor.constraint(equalTo: container.centerXAnchor),
-            inner.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor),
-            inner.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor),
-        ])
-        return container
-    }
-
-    // MARK: State
-
-    private func refresh() {
-        audioRow.update(status: model.audioStatus, isProbing: model.isProbingAudio)
-        networkRow.update(status: model.localNetworkStatus, isProbing: false)
-        remoteControlRow.update(status: model.remoteControlStatus, isProbing: false)
-        ptpHelperRow.update(status: model.ptpHelperStatus)
-        refreshPermissionLostBanner()
-    }
-
-    /// Keep the `.permissionLost` banner honest as the user re-grants: re-word it
-    /// to the still-missing subset, and HIDE it once every permission it warned
-    /// about is satisfied. Without this the "…currently turned off" warning stayed
-    /// up even after the row it named flipped to Allowed. Scoped to the permissions
-    /// the banner ORIGINALLY flagged (from `reason`), so granting them clears it
-    /// and it never expands to nag about something it didn't open for. No-op for
-    /// `.firstRun` — there's no banner (`permissionBannerView` is nil).
-    private func refreshPermissionLostBanner() {
-        guard let banner = permissionBannerView,
-              case .permissionLost(let originallyUnmet) = reason else { return }
-        let notGranted = model.requiredPermissionsNotGranted()
-        let stillMissing = originallyUnmet.filter { notGranted.contains($0) }
-        if !stillMissing.isEmpty {
-            permissionBannerLabel?.stringValue = Self.bannerText(for: stillMissing)
-        }
-        let shouldHide = stillMissing.isEmpty
-        guard banner.isHidden != shouldHide else { return }   // only act on a change
-        banner.isHidden = shouldHide
-
-        // Re-fit the window so hiding the banner doesn't leave a gap, keeping the
-        // title bar fixed (window origin is bottom-left, so shrink from the bottom).
-        view.layoutSubtreeIfNeeded()
-        guard let window = view.window else { return }
-        let target = view.fittingSize
-        var frame = window.frame
-        frame.origin.y += frame.height - target.height
-        frame.size = target
-        window.setFrame(frame, display: true, animate: true)
-    }
-
-    private func allowAudio() {
+    private func allowTapped(_ step: SetupStep) {
+        guard allowInFlight == nil else { return }   // single-flight, UI half
+        allowInFlight = step
+        refresh(animated: false)                     // spinner in, instantly
         Task { @MainActor in
-            await model.requestAudioCapture()
-            // The audio grant runs the system TCC prompt, which appears in front
-            // of us and (accessory app) makes us resign active while the user
-            // answers. When the probe returns, pull our window back to the front
-            // and make the app active so the user lands right back on setup
-            // instead of staring at whatever was behind it.
-            NSApp?.activate(ignoringOtherApps: true)
-            view.window?.makeKeyAndOrderFront(nil)
-        }
-    }
-
-    /// Finish onboarding — unless a REQUIRED permission
-    /// (``SetupModel/requiredPermissionsNotGranted()``) hasn't actually been
-    /// granted, in which case ask first rather than silently completing setup
-    /// with a gap the user won't discover until something fails later with no
-    /// path back. Setup stays "guidance, not a gate"
-    /// (``SetupModel/complete()``) — Continue Anyway still finishes; this only
-    /// stops the SILENT case.
-    @objc private func doneTapped() {
-        let notGranted = model.requiredPermissionsNotGranted()
-        guard !notGranted.isEmpty else { onDone(); return }
-        confirmFinishDespiteUngrantedPermissions(notGranted) { [weak self] continueAnyway in
-            if continueAnyway { self?.onDone() }
-        }
-    }
-
-    /// Ask "continue anyway?" as a sheet on the window when one exists (the
-    /// real app always has one here — the Done button is only visible inside
-    /// an on-screen window). A headless test has no window to host a sheet
-    /// (its completion handler needs the app's run loop, which XCTest doesn't
-    /// pump), so it stashes the pending confirmation for
-    /// ``test_resolvePendingConfirmation(continueAnyway:)`` to resolve instead
-    /// of calling `completion` synchronously.
-    private func confirmFinishDespiteUngrantedPermissions(
-        _ notGranted: [RequiredPermission],
-        completion: @escaping (Bool) -> Void
-    ) {
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "Continue without every permission?"
-        alert.informativeText = Self.confirmationText(for: notGranted)
-        // "Go Back" first (and thus default/Return-bound) so an accidental
-        // Return doesn't skip the very permissions this dialog is warning
-        // about — same reasoning as Done itself not being Return-default.
-        alert.addButton(withTitle: "Go Back")
-        alert.addButton(withTitle: "Continue Anyway")
-        if let window = view.window {
-            alert.beginSheetModal(for: window) { response in
-                completion(response == .alertSecondButtonReturn)
+            let result = await flow.allow(step)
+            allowInFlight = nil
+            switch result.destination {
+            case .none:
+                // A prompt ran (or was refused): the user came back from a
+                // system dialog, so take the front again.
+                returnToFront()
+            case .settingsPane(let pane):
+                onWillOpenSystemSettings?()
+                onOpenSettings(pane)
+            case .loginItems:
+                onWillOpenSystemSettings?()
+                model.openPTPHelperLoginItems()
             }
-        } else {
-            test_pendingConfirmation = (notGranted, completion)
+            refresh()
         }
     }
 
-    /// The confirmation body, naming the specific ungranted permission(s) —
-    /// same "name it plainly" approach as ``bannerText(for:)``.
-    private static func confirmationText(for notGranted: [RequiredPermission]) -> String {
-        let names = notGranted.map(displayName(for:))
-        let joined: String
-        switch names.count {
-        case 0: joined = "a permission"   // shouldn't happen — only called with a non-empty set
-        case 1: joined = names[0]
-        case 2: joined = "\(names[0]) and \(names[1])"
-        default: joined = names.dropLast().joined(separator: ", ") + ", and \(names[names.count - 1])"
-        }
-        let plural = names.count > 1 ? "permissions" : "permission"
-        return "You haven't granted the \(joined) \(plural). Audiouter may not work "
-            + "correctly until it's turned on in System Settings."
+    private func skipTapped(_ step: SetupStep) {
+        flow.skip(step)
+        // Skipping is UI-initiated, and `SetupFlowModel` has no change hook of
+        // its own, so the repaint is this call site's job.
+        refresh(animated: canAnimate)
     }
 
     // MARK: Test-support hooks
 
-    private var doneButton: NSButton?
+    /// The expanded card's step (nil once every step is done or skipped).
+    public var test_activeStep: SetupStep? { _ = view; return displayedActiveStep }
 
-    /// Set (headless only) while `doneTapped()` is waiting on a "continue
-    /// anyway?" confirmation that has no real window to host a sheet on.
-    /// `nil` once resolved, or whenever Done didn't need to ask at all.
-    public private(set) var test_pendingConfirmationPermissions: [RequiredPermission]?
-    private var test_pendingConfirmation: (permissions: [RequiredPermission], completion: (Bool) -> Void)? {
-        didSet { test_pendingConfirmationPermissions = test_pendingConfirmation?.permissions }
-    }
-
-    /// Resolve a pending headless "continue anyway?" confirmation — `true`
-    /// simulates clicking Continue Anyway (finishes), `false` simulates Go
-    /// Back (does nothing further; Done can be tapped again later). A no-op
-    /// if nothing is pending.
-    public func test_resolvePendingConfirmation(continueAnyway: Bool) {
-        guard let pending = test_pendingConfirmation else { return }
-        test_pendingConfirmation = nil
-        pending.completion(continueAnyway)
-    }
-
-    public var test_audioRowButtonTitles: [String] { _ = view; return audioRow.test_buttonTitles }
-    public var test_networkRowButtonTitles: [String] { _ = view; return networkRow.test_buttonTitles }
-    public var test_remoteControlRowButtonTitles: [String] { _ = view; return remoteControlRow.test_buttonTitles }
-    public var test_ptpHelperRowButtonTitles: [String] { _ = view; return ptpHelperRow.test_buttonTitles }
-
-    /// Drive the model as the audio "Allow…" button would, then await the probe.
-    public func test_allowAudio() async { _ = view; await model.requestAudioCapture() }
-
-    /// Drive the model as the network "Allow…" button would, then await the probe.
-    public func test_allowNetwork() async { _ = view; await model.primeLocalNetwork() }
-
-    /// Drive the model as the remote-control "Allow…" button would.
-    public func test_allowRemoteControl() { _ = view; model.primeRemoteControl() }
-
-    /// Drive the model as the load-time PTP helper registration would.
-    public func test_registerPTPHelper() { _ = view; model.registerPTPHelper() }
-
-    /// Re-read model status into the rows (the `viewWillAppear` bind, headless).
-    public func test_refresh() { _ = view; refresh() }
-
-    /// Force the rows to specific statuses (for the snapshot harness, which wants
-    /// to render every state without driving real probes). Bypasses the model.
-    public func test_applyStatuses(audio: PermissionStatus,
-                                   isProbingAudio: Bool,
-                                   network: PermissionStatus,
-                                   remoteControl: PermissionStatus,
-                                   ptpHelper: PTPHelperStatus = .enabled) {
+    /// Which cards are collapsed — the sequencing invariant: exactly one open.
+    public var test_expandedSteps: [SetupStep] {
         _ = view
-        audioRow.update(status: audio, isProbing: isProbingAudio)
-        networkRow.update(status: network, isProbing: false)
-        remoteControlRow.update(status: remoteControl, isProbing: false)
-        ptpHelperRow.update(status: ptpHelper)
+        return SetupFlowModel.steps.filter { cards[$0]?.test_isBodyCollapsed == false }
     }
 
-    /// Invoke Done. Finishes immediately if every required permission is
-    /// granted; otherwise leaves a pending confirmation
-    /// (``test_pendingConfirmationPermissions``) rather than finishing.
-    public func test_tapDone() { _ = view; doneTapped() }
+    /// The on-screen title of a card, so a test can pin the imperative →
+    /// capability rewrite.
+    public func test_title(of step: SetupStep) -> String { _ = view; return cards[step]?.test_title ?? "" }
+
+    /// The buttons a card currently offers, in order.
+    public func test_buttonTitles(of step: SetupStep) -> [String] {
+        _ = view
+        return cards[step]?.test_buttonTitles ?? []
+    }
+
+    /// Whether a card is showing its earned checkmark.
+    public func test_hasCheckmark(_ step: SetupStep) -> Bool { _ = view; return cards[step]?.test_hasCheckmark ?? false }
+
+    /// The note a card shows in place of a checkmark (auto-passed steps).
+    public func test_note(of step: SetupStep) -> String? { _ = view; return cards[step]?.test_note }
+
+    /// The extra honest line under a card's copy, if any.
+    public func test_hint(of step: SetupStep) -> String? { _ = view; return cards[step]?.test_hint }
+
+    /// Whether a card is showing the probe spinner.
+    public func test_isProbing(_ step: SetupStep) -> Bool { _ = view; return cards[step]?.test_isProbing ?? false }
+
+    /// Whether a card is showing the LOCK — a step the flow hasn't reached.
+    public func test_isLocked(_ step: SetupStep) -> Bool { _ = view; return cards[step]?.test_isLocked ?? false }
+
+    /// Whether a card is drawing the active-step emphasis.
+    public func test_isEmphasized(_ step: SetupStep) -> Bool { _ = view; return cards[step]?.test_isEmphasized ?? false }
+
+    /// Whether a click anywhere on this card fires its Allow.
+    public func test_isCardClickable(_ step: SetupStep) -> Bool { _ = view; return cards[step]?.test_isCardClickable ?? false }
+
+    /// Whether VoiceOver sees this card as a button, and under what action name.
+    public func test_cardIsAccessibilityButton(_ step: SetupStep) -> Bool {
+        _ = view
+        return cards[step]?.test_accessibilityIsButton ?? false
+    }
+    public func test_cardAccessibilityAction(_ step: SetupStep) -> String? {
+        _ = view
+        return cards[step]?.test_accessibilityAction
+    }
+
+    /// Press the CARD itself (not its Allow button) and wait for whatever that
+    /// starts — the card-level click target, driven through the real path.
+    public func test_pressCard(_ step: SetupStep) async -> Bool {
+        _ = view
+        guard let card = cards[step], card.test_isCardClickable else { return false }
+        await test_tapAllow(step)
+        return true
+    }
+
+    /// Whether the card's OWN press action is refused (a locked strip, or one
+    /// whose probe is in flight) — the no-jump-ahead and single-flight guards.
+    public func test_cardPressIsRefused(_ step: SetupStep) -> Bool {
+        _ = view
+        guard let card = cards[step] else { return true }
+        return !card.test_isCardClickable && card.test_pressCard() == false
+    }
+
+    /// Drive a card's Allow exactly as the button does, and wait for it.
+    public func test_tapAllow(_ step: SetupStep) async {
+        _ = view
+        allowInFlight = step
+        let result = await flow.allow(step)
+        allowInFlight = nil
+        switch result.destination {
+        case .none: break
+        case .settingsPane(let pane): onWillOpenSystemSettings?(); onOpenSettings(pane)
+        case .loginItems: onWillOpenSystemSettings?(); model.openPTPHelperLoginItems()
+        }
+        refresh()
+    }
+
+    /// Drive each step's Allow in order — how the snapshot harness reaches
+    /// "card 3 is the active one" without a live prompt.
+    public func test_allow(_ steps: [SetupStep]) async {
+        for step in steps { await test_tapAllow(step) }
+    }
+
+    /// Drive a card's Skip exactly as the button does.
+    public func test_tapSkip(_ step: SetupStep) { _ = view; skipTapped(step) }
+
+    /// Whether Done is in the view hierarchy at all — the gate contract is
+    /// ABSENT, not disabled, so this is the assertion that matters.
+    public var test_doneExists: Bool { _ = view; return doneButton?.superview != nil }
+
+    /// Whether Done is the window's Return-default (it is, the moment it exists).
+    public var test_doneIsReturnDefault: Bool { _ = view; return doneButton?.keyEquivalent == "\r" }
+
+    /// Whether the active card's Allow currently owns Return (it does while
+    /// Done doesn't exist).
+    public func test_allowIsReturnDefault(_ step: SetupStep) -> Bool {
+        _ = view
+        return cards[step]?.test_allowIsReturnDefault ?? false
+    }
+
+    /// Tap Done: re-verifies, then either finishes or snaps back.
+    public func test_tapDone() async { _ = view; await verifyThenFinish() }
+
+    /// The step a failed Done verification snapped back to, if any.
+    public var test_snapBackStep: SetupStep? { _ = view; return snapBackStep }
+
+    /// Which miniature the demo pane is showing.
+    public var test_demoMode: DemoMode { _ = view; return demoPane.test_mode }
+
+    /// Whether the demo's timeline is running (the zero-idle-CPU rule).
+    public var test_isDemoAnimating: Bool { _ = view; return demoPane.test_isAnimating }
+
+    /// Whether the demo is offering its Reduce Motion Replay button.
+    public var test_demoShowsReplay: Bool { _ = view; return demoPane.test_showsReplay }
+
+    /// Reduce Motion override for the demo pane (`nil` = the live setting).
+    public var test_demoReduceMotionOverride: Bool? {
+        get { _ = view; return demoPane.test_reduceMotionOverride }
+        set { _ = view; demoPane.test_reduceMotionOverride = newValue }
+    }
+
+    /// Re-read model status into the cards (the `viewWillAppear` bind, headless).
+    public func test_refresh() { _ = view; refresh(animated: false) }
+
+    /// The silent status re-read, AWAITED — `refreshStatuses()` fires a detached
+    /// task, so a headless caller that needs the result (Bluetooth and Remote
+    /// Control only reach `.granted` through it) has to be able to wait for it.
+    public func test_refreshStatuses() async {
+        _ = view
+        await model.refreshStatuses()
+        refresh(animated: false)
+    }
 
     /// The laid-out root view (for offscreen snapshot rendering).
     public var test_rootView: NSView {
@@ -683,26 +824,27 @@ public final class OnboardingViewController: NSViewController {
         return view
     }
 
-    /// The three permission rows, for asserting status rendering directly.
-    var test_audioRow: PermissionRowView { _ = view; return audioRow }
-    var test_networkRow: PermissionRowView { _ = view; return networkRow }
-    var test_remoteControlRow: PermissionRowView { _ = view; return remoteControlRow }
-    /// The PTP helper row (its own type — see ``PTPHelperRowView``).
-    var test_ptpHelperRow: PTPHelperRowView { _ = view; return ptpHelperRow }
-
-    /// Whether this presentation rendered the `.permissionLost` banner.
-    public var test_showsPermissionLostBanner: Bool { _ = view; return permissionBannerView != nil }
-
-    /// Whether the `.permissionLost` banner is currently VISIBLE (built AND not
-    /// hidden) — distinct from ``test_showsPermissionLostBanner`` (was one ever
-    /// built) so a test can assert the banner CLEARS once its permission is
-    /// granted.
-    public var test_permissionLostBannerIsVisible: Bool {
+    /// Whether this presentation was opened for a lost permission (the banner's
+    /// successor — the message rides the header subtitle now).
+    public var test_showsPermissionLostBanner: Bool {
         _ = view
-        guard let banner = permissionBannerView else { return false }
-        return !banner.isHidden
+        if case .permissionLost = reason { return true }
+        return false
     }
 
-    /// The banner's copy, if shown (nil for `.firstRun`).
-    public var test_permissionLostBannerText: String? { _ = view; return permissionBannerLabel?.stringValue }
+    /// Whether the lost-permission message is currently VISIBLE — distinct from
+    /// ``test_showsPermissionLostBanner`` (was one ever warranted) so a test can
+    /// assert the message CLEARS once its permission is granted.
+    public var test_permissionLostBannerIsVisible: Bool {
+        _ = view
+        guard case .permissionLost = reason else { return false }
+        return subtitleLabel.stringValue != Self.welcomeSubtitle
+    }
+
+    /// The lost-permission copy, if it's showing (nil for `.firstRun`, and nil
+    /// once it clears).
+    public var test_permissionLostBannerText: String? {
+        _ = view
+        return test_permissionLostBannerIsVisible ? subtitleLabel.stringValue : nil
+    }
 }

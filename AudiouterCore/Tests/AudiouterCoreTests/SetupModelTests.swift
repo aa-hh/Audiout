@@ -36,6 +36,14 @@ extension SerializedSharedState {
         func probe() async -> Bool { lock.withLock { _probeCount += 1 }; return reachable }
     }
 
+    /// Reports a fixed speaker COUNT (the seam behind "Found 3 speakers"), with
+    /// the Bool answer derived from it exactly as the real primer derives it.
+    private struct CountingLocalNetwork: LocalNetworkPriming {
+        let found: Int
+        func probe() async -> Bool { found > 0 }
+        func probeFoundSpeakers() async -> Int { found }
+    }
+
     /// Records Accessibility prompts and returns a canned trust state.
     private final class SpyRemoteControl: RemoteControlPriming, @unchecked Sendable {
         private let lock = NSLock()
@@ -616,9 +624,10 @@ extension SerializedSharedState {
     }
 
     @Test func completeDoesNotRequireGrants() {
-        // Setup is guidance, not a gate: completing while a permission is still
-        // denied/unknown still persists completion (the app runs and re-prompts
-        // lazily).
+        // `complete()` is a plain persistence write and checks nothing itself.
+        // The GATE is real (owner decision 2026-08-11) but lives one level up:
+        // the UI offers no Done affordance until every required permission
+        // verifies, so reaching this call already means they did.
         let (model, _, _, _) = makeModel(audio: .denied)
         model.complete()
         #expect(AppSettings(defaults: defaults).hasCompletedSetup)
@@ -995,19 +1004,54 @@ extension SerializedSharedState {
 
     // MARK: System Settings deep links
 
-    @Test func systemSettingsPaneURLs() {
+    /// Below macOS 26 the anchors hang off the old Privacy & Security pane id.
+    /// Driven through the explicit-version seam, not the live one: a unit test
+    /// can't change the runner's OS, and both branches ship.
+    @Test func systemSettingsPaneURLsBeforeMacOS26() {
         #expect(
-            SystemSettingsPane.screenAndSystemAudioRecording.url.absoluteString ==
+            SystemSettingsPane.screenAndSystemAudioRecording.url(osMajorVersion: 15).absoluteString ==
             "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
         #expect(
-            SystemSettingsPane.localNetwork.url.absoluteString ==
+            SystemSettingsPane.localNetwork.url(osMajorVersion: 15).absoluteString ==
             "x-apple.systempreferences:com.apple.preference.security?Privacy_LocalNetwork")
         #expect(
-            SystemSettingsPane.accessibility.url.absoluteString ==
+            SystemSettingsPane.accessibility.url(osMajorVersion: 15).absoluteString ==
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
         #expect(
-            SystemSettingsPane.privacyRoot.absoluteString ==
+            SystemSettingsPane.privacyRoot(osMajorVersion: 15).absoluteString ==
             "x-apple.systempreferences:com.apple.preference.security")
+    }
+
+    /// macOS 26 moved Privacy & Security into an extension bundle. The `Privacy_*`
+    /// ANCHORS are unchanged — only the pane id — and the old id misroutes there,
+    /// so the gate has to flip for every anchor including the root fallback.
+    @Test func systemSettingsPaneURLsOnMacOS26AndLater() {
+        let expected = "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension"
+        #expect(
+            SystemSettingsPane.screenAndSystemAudioRecording.url(osMajorVersion: 26).absoluteString ==
+            "\(expected)?Privacy_ScreenCapture")
+        #expect(
+            SystemSettingsPane.localNetwork.url(osMajorVersion: 26).absoluteString ==
+            "\(expected)?Privacy_LocalNetwork")
+        #expect(
+            SystemSettingsPane.accessibility.url(osMajorVersion: 26).absoluteString ==
+            "\(expected)?Privacy_Accessibility")
+        #expect(
+            SystemSettingsPane.bluetoothPrivacy.url(osMajorVersion: 26).absoluteString ==
+            "\(expected)?Privacy_Bluetooth")
+        #expect(
+            SystemSettingsPane.privacyRoot(osMajorVersion: 26).absoluteString == expected)
+    }
+
+    /// The Bluetooth radio pane is its own bundle id, so the Privacy rename
+    /// leaves it alone on both sides of the boundary.
+    @Test func theBluetoothRadioPaneIsUnaffectedByThePrivacyRename() {
+        #expect(
+            SystemSettingsPane.bluetooth.url(osMajorVersion: 15).absoluteString ==
+            "x-apple.systempreferences:com.apple.BluetoothSettings")
+        #expect(
+            SystemSettingsPane.bluetooth.url(osMajorVersion: 26).absoluteString ==
+            "x-apple.systempreferences:com.apple.BluetoothSettings")
     }
 
     /// The Bluetooth CARD's retry destination is the Privacy pane (where this
@@ -1015,11 +1059,53 @@ extension SerializedSharedState {
     /// radio's own pane and can't fix a denied grant.
     @Test func bluetoothPrivacyPaneIsThePrivacyAnchorNotTheRadioPane() {
         #expect(
-            SystemSettingsPane.bluetoothPrivacy.url.absoluteString ==
+            SystemSettingsPane.bluetoothPrivacy.url(osMajorVersion: 15).absoluteString ==
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth")
         #expect(
-            SystemSettingsPane.bluetooth.url.absoluteString ==
+            SystemSettingsPane.bluetooth.url(osMajorVersion: 15).absoluteString ==
             "x-apple.systempreferences:com.apple.BluetoothSettings")
+    }
+
+    // MARK: Local Network found count
+
+    /// The count is the Local Network card's proof, so it has to survive the trip
+    /// from the browse to the model — and `.granted` on a gated OS means exactly
+    /// "the browse saw at least one speaker".
+    @Test func primingLocalNetworkRecordsHowManySpeakersTheBrowseSaw() async {
+        let model = SetupModel(audioProbe: CannedAudioProbe(result: .granted),
+                               localNetwork: CountingLocalNetwork(found: 3),
+                               remoteControl: SpyRemoteControl(),
+                               ptpHelper: FakePTPHelper(),
+                               settings: AppSettings(defaults: defaults))
+        #expect(model.localNetworkFoundSpeakers == 0, "nothing has browsed yet")
+
+        await model.primeLocalNetwork()
+
+        #expect(model.localNetworkFoundSpeakers == 3)
+        #expect(model.localNetworkStatus == .granted)
+    }
+
+    /// A browse that found nothing is NOT a denial — there is no status API to
+    /// tell them apart — so it stays `.requested` with a count of zero.
+    @Test func aBrowseThatFindsNothingLeavesTheCountAtZeroAndTheStatusUnproven() async {
+        let model = SetupModel(audioProbe: CannedAudioProbe(result: .granted),
+                               localNetwork: CountingLocalNetwork(found: 0),
+                               remoteControl: SpyRemoteControl(),
+                               ptpHelper: FakePTPHelper(),
+                               settings: AppSettings(defaults: defaults))
+        await model.primeLocalNetwork()
+
+        #expect(model.localNetworkFoundSpeakers == 0)
+        #expect(model.localNetworkStatus == .requested)
+    }
+
+    /// A seam that only implements the Bool answer still has to satisfy
+    /// `count > 0 ⇔ probe()`, so every existing fake keeps working.
+    @Test func aBoolOnlySeamReportsOneSpeakerForReachable() async {
+        let reachable = SpyLocalNetwork()
+        reachable.reachable = true
+        #expect(await reachable.probeFoundSpeakers() == 1)
+        #expect(await SpyLocalNetwork().probeFoundSpeakers() == 0)
     }
     }
 }

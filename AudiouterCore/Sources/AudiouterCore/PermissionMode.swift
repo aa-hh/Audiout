@@ -148,11 +148,18 @@ public struct SimulatedAudioCaptureProbe: AudioCapturePermissionProbing {
 }
 
 /// A ``LocalNetworkPriming`` that reports a fixed reachability without a Bonjour
-/// browse (so no real network access, no Local Network prompt).
+/// browse (so no real network access, no Local Network prompt). `foundSpeakers`
+/// is what setup's Local Network card counts — a fixed, plausible two, so the
+/// simulated flow reads "Found 2 speakers" rather than a suspiciously round one.
 public struct SimulatedLocalNetworkPrimer: LocalNetworkPriming {
     public let reachable: Bool
-    public init(reachable: Bool) { self.reachable = reachable }
+    public let foundSpeakers: Int
+    public init(reachable: Bool, foundSpeakers: Int = 2) {
+        self.reachable = reachable
+        self.foundSpeakers = foundSpeakers
+    }
     public func probe() async -> Bool { reachable }
+    public func probeFoundSpeakers() async -> Int { reachable ? foundSpeakers : 0 }
 }
 
 /// A ``RemoteControlPriming`` that reports a fixed trust state and never opens

@@ -105,11 +105,13 @@ public enum RequiredPermission: CaseIterable, Sendable {
 
 /// A System Settings privacy pane the setup flow deep-links to when a permission
 /// is denied or unverifiable. The `x-apple.systempreferences:` scheme is the
-/// documented way to open a specific pane; the anchors below are the ones macOS
-/// 13/14 use. They are best-effort — Apple can rename an anchor between releases
-/// — so the opener (``AudiouterOnboardingUI``) falls back to
-/// ``privacyRoot`` if a specific pane URL won't open.
-public enum SystemSettingsPane: Sendable {
+/// documented way to open a specific pane; the `Privacy_*` anchors below are
+/// stable, but the PANE the anchors hang off changed name in macOS 26 (see
+/// ``privacySettingsBundleID(osMajorVersion:)``). They are best-effort — Apple
+/// can rename an anchor between releases — so the opener
+/// (``AudiouterOnboardingUI``) falls back to ``privacyRoot`` if a specific pane
+/// URL won't open.
+public enum SystemSettingsPane: Equatable, Sendable {
     case screenAndSystemAudioRecording
     case localNetwork
     case accessibility
@@ -124,29 +126,59 @@ public enum SystemSettingsPane: Sendable {
     /// manual connect live.
     case bluetooth
 
-    /// The `x-apple.systempreferences:` URL that opens this pane.
-    public var url: URL {
+    /// The `x-apple.systempreferences:` URL that opens this pane on THIS Mac.
+    public var url: URL { url(osMajorVersion: Self.liveOSMajorVersion) }
+
+    /// The same URL for an explicit macOS major version — the seam that makes
+    /// the macOS 26 rename testable on either side of the boundary (a unit test
+    /// can't change the runner's OS).
+    public func url(osMajorVersion: Int) -> URL {
         switch self {
         case .screenAndSystemAudioRecording:
-            return Self.make("Privacy_ScreenCapture")
+            return Self.make("Privacy_ScreenCapture", osMajorVersion: osMajorVersion)
         case .localNetwork:
-            return Self.make("Privacy_LocalNetwork")
+            return Self.make("Privacy_LocalNetwork", osMajorVersion: osMajorVersion)
         case .accessibility:
-            return Self.make("Privacy_Accessibility")
+            return Self.make("Privacy_Accessibility", osMajorVersion: osMajorVersion)
         case .bluetoothPrivacy:
-            return Self.make("Privacy_Bluetooth")
+            return Self.make("Privacy_Bluetooth", osMajorVersion: osMajorVersion)
         case .bluetooth:
+            // The Bluetooth RADIO pane, not a Privacy anchor — its own bundle
+            // id, unaffected by the Privacy & Security rename.
             return URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings")!
         }
     }
 
     /// Privacy & Security root — the fallback when a specific anchor won't open.
-    public static let privacyRoot = make(nil)
+    public static var privacyRoot: URL { privacyRoot(osMajorVersion: liveOSMajorVersion) }
 
-    private static func make(_ anchor: String?) -> URL {
+    /// The root for an explicit macOS major version (same seam as ``url(osMajorVersion:)``).
+    public static func privacyRoot(osMajorVersion: Int) -> URL {
+        make(nil, osMajorVersion: osMajorVersion)
+    }
+
+    /// Which Settings pane the `Privacy_*` anchors hang off, by macOS major
+    /// version. macOS 26 moved Privacy & Security into an extension bundle —
+    /// `com.apple.settings.PrivacySecurity.extension` — and the pre-26 id
+    /// misroutes there (it opens Settings, but not the pane asked for), while
+    /// the 26 id is unknown to earlier releases. The anchors themselves did not
+    /// change, so only the id is gated.
+    static func privacySettingsBundleID(osMajorVersion: Int) -> String {
+        osMajorVersion >= 26
+            ? "com.apple.settings.PrivacySecurity.extension"
+            : "com.apple.preference.security"
+    }
+
+    /// This Mac's macOS major version — read once per call, no caching, so a
+    /// value that only exists at runtime never gets frozen into a constant.
+    private static var liveOSMajorVersion: Int {
+        ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+    }
+
+    private static func make(_ anchor: String?, osMajorVersion: Int) -> URL {
         // These string literals are compile-time-constant and known-valid, so the
         // force-unwrap can never fire; it keeps `url` non-optional for callers.
-        let base = "x-apple.systempreferences:com.apple.preference.security"
+        let base = "x-apple.systempreferences:\(privacySettingsBundleID(osMajorVersion: osMajorVersion))"
         return URL(string: anchor.map { "\(base)?\($0)" } ?? base)!
     }
 }
@@ -229,6 +261,21 @@ public extension AudioCapturePermissionProbing {
 public protocol LocalNetworkPriming: Sendable {
     /// Browse briefly; return `true` if the local network was reachable.
     func probe() async -> Bool
+
+    /// Browse briefly; return HOW MANY speakers the browse saw (0 = none, which
+    /// also covers "not reachable" — the two are indistinguishable, see
+    /// ``PermissionStatus``). The count is what lets setup say "Found 3
+    /// speakers" instead of a checkmark nobody can verify, and it is the same
+    /// browse: `probe()` is exactly `count > 0`.
+    ///
+    /// Defaulted (below) so a fake that only answers the Bool keeps compiling.
+    func probeFoundSpeakers() async -> Int
+}
+
+public extension LocalNetworkPriming {
+    /// A seam that only implements the Bool answer reports one speaker for
+    /// reachable, none otherwise — preserving `count > 0 ⇔ probe()`.
+    func probeFoundSpeakers() async -> Int { await probe() ? 1 : 0 }
 }
 
 /// Triggers and reads the macOS **Accessibility** permission, needed for a
@@ -300,6 +347,13 @@ public final class SetupModel {
     /// `.granted`, and the row never routes the user to a Settings pane that
     /// doesn't exist there. See `localNetworkGated`.
     public private(set) var localNetworkStatus: PermissionStatus = .unknown
+
+    /// How many speakers the most recent Local Network browse saw. `0` until a
+    /// browse has run (and whenever one finds nothing — "found nothing" and
+    /// "denied" are the same observation here). This is the honest proof the
+    /// Local Network card shows instead of a checkmark: `localNetworkStatus ==
+    /// .granted` on a gated OS means exactly `localNetworkFoundSpeakers > 0`.
+    public private(set) var localNetworkFoundSpeakers = 0
 
     /// Remote-control (Accessibility) status. Starts `.unknown`, becomes
     /// `.requested` once primed (never `.granted` on its own — see
@@ -429,9 +483,18 @@ public final class SetupModel {
             onChange?()
             return
         }
-        let reachable = await localNetwork.probe()
-        localNetworkStatus = reachable ? .granted : .requested
+        localNetworkStatus = await probeLocalNetwork()
         onChange?()
+    }
+
+    /// Run the browse, record how many speakers it saw, and map that to a
+    /// status. One place so `primeLocalNetwork()`, ``refreshStatuses()`` and
+    /// ``auditRequiredPermissions()`` can never disagree about whether a count
+    /// of zero is granted.
+    private func probeLocalNetwork() async -> PermissionStatus {
+        let found = await localNetwork.probeFoundSpeakers()
+        localNetworkFoundSpeakers = found
+        return found > 0 ? .granted : .requested
     }
 
     /// Ask for Accessibility. Opens the prompt, then reads the REAL live state
@@ -536,7 +599,7 @@ public final class SetupModel {
         // and only where the OS gates it. On macOS < 15 it's unconditionally
         // granted, so there's nothing to re-read and no prompt to risk.
         if localNetworkGated, localNetworkStatus != .unknown {
-            localNetworkStatus = await localNetwork.probe() ? .granted : .requested
+            localNetworkStatus = await probeLocalNetwork()
         }
 
         // PTP helper — silent status read only, never re-registers here.
@@ -706,8 +769,11 @@ public final class SetupModel {
         }
 
         if localNetworkGated, localNetworkStatus != .unknown {
-            let next: PermissionStatus = await localNetwork.probe() ? .granted : .requested
-            if next != localNetworkStatus {
+            let previousFound = localNetworkFoundSpeakers
+            let next = await probeLocalNetwork()
+            // The COUNT is observable too (the card reads "Found 3 speakers"),
+            // so a same-status re-count still has to repaint.
+            if next != localNetworkStatus || localNetworkFoundSpeakers != previousFound {
                 localNetworkStatus = next
                 changed = true
             }

@@ -54,6 +54,8 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
             reason: reason,
             onOpenSettings: openSettings,
             onDone: { trampoline.fire() })
+        let levelTrampoline = Trampoline()
+        contentVC.onWillOpenSystemSettings = { levelTrampoline.fire() }
 
         let window = NSWindow(contentViewController: contentVC)
         window.styleMask = [.titled, .closable]
@@ -75,6 +77,7 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
 
         super.init(window: window)
         trampoline.action = { [weak self] in self?.finish(markComplete: true) }
+        levelTrampoline.action = { [weak self] in self?.yieldToSystemSettings() }
         window.delegate = self
         // When the app becomes active again — e.g. the user finished a system
         // permission dialog, or clicked back to us — bring the setup window
@@ -89,8 +92,25 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
     /// `appDidBecomeActive` is testable headless (no real key windows there).
     var keyWindowProvider: () -> NSWindow? = { NSApp?.keyWindow }
 
+    /// Step out of the way of System Settings (amendment to the floating
+    /// decision, owner call 2026-08-11).
+    ///
+    /// `.floating` is what keeps a grant from leaving this window buried — but
+    /// it ALSO parks us on top of System Settings, which is the one app we
+    /// deliberately send the user to. Native permission ALERTS already draw
+    /// above a floating window, so this is only about Settings. Dropping to
+    /// `.normal` for the trip and restoring on the way back keeps both
+    /// behaviours: `appDidBecomeActive` is the restore, and it fires whether the
+    /// user comes back by granting (we activate ourselves) or by hand.
+    private func yieldToSystemSettings() {
+        window?.level = .normal
+    }
+
     @objc private func appDidBecomeActive() {
         guard !didFinish else { return }
+        // Back in our app: take the floating level again (see
+        // `yieldToSystemSettings()`).
+        window?.level = .floating
         // The floating level already keeps the window visible, so this hook only
         // governs keyboard focus — and it must not grab it away from a sibling
         // window the user actually clicked (Settings and Setup open together is a
@@ -116,6 +136,11 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
     /// first presentation only — a re-present (the `presentSetup` re-entry
     /// guard's re-front, "Open Setup…" while already open) must not throw
     /// away a position the user chose (punch-list W6).
+    ///
+    /// The content's `fittingSize` is the two-pane screen's FIXED size
+    /// (`OnboardingViewController.contentWidth` × `contentHeight`), not a
+    /// measurement that moves per step — the window must not resize under the
+    /// user as cards expand and collapse.
     public func present() {
         NSApp?.activate(ignoringOtherApps: true)
         if !hasBeenPresented {
@@ -169,6 +194,14 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
 
     /// Whether the single-fire finish has run.
     public var test_didFinish: Bool { didFinish }
+
+    /// The window's current level — the yield-to-Settings contract, which has no
+    /// other observable effect headless.
+    public var test_windowLevel: NSWindow.Level? { window?.level }
+
+    /// Fire the yield directly (the content VC's `onWillOpenSystemSettings`
+    /// seam, without a live Settings launch).
+    public func test_yieldToSystemSettings() { yieldToSystemSettings() }
 
     /// Fire the app-reactivate hook directly — headless tests can't activate
     /// the app, and the key-steal guard is exactly what needs pinning.

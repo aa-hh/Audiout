@@ -22,6 +22,52 @@ public enum SetupStepDisplay: Equatable, Sendable {
     case pending
 }
 
+/// What one Allow click did — exactly one of these per click, logged to
+/// ``Telemetry`` as the `outcome` field of a `setup_allow` line so a live
+/// session leaves a readable trail of "the user clicked, and then?".
+public enum SetupAllowOutcome: String, Equatable, Sendable {
+    /// The native prompt / probe was fired.
+    case promptTriggered = "prompt_triggered"
+    /// The permission was already granted — no prompt, and deliberately NO
+    /// Settings deep link (sending someone to fix what isn't broken).
+    case alreadyGranted = "already_granted"
+    /// The permission is determined-and-denied, or was already asked once, so
+    /// the prompt would silently no-op — the click deep-links to Settings.
+    case settingsFallbackDenied = "settings_fallback_denied"
+    /// Speaker Sync's only path: Login Items approval, which has no prompt.
+    case settingsOpened = "settings_opened"
+    /// The prompt/probe ran and came back without a grant (a denial, or a
+    /// browse that found nothing). The card's next click becomes the deep link.
+    case probeTimeout = "probe_timeout"
+    /// A prompt or probe for this step is already in flight — the second click
+    /// is a no-op (single-flight).
+    case promptInFlight = "prompt_in_flight"
+}
+
+/// Where an Allow click sends the user, when it sends them anywhere. The flow
+/// model stays AppKit-free, so it names the destination and the UI opens it —
+/// which is also what lets the Setup window drop its floating level first (it
+/// has to yield to System Settings).
+public enum SetupAllowDestination: Equatable, Sendable {
+    /// Nothing to open — the click was handled in-app.
+    case none
+    /// Deep-link to this privacy pane.
+    case settingsPane(SystemSettingsPane)
+    /// Open System Settings ▸ General ▸ Login Items & Extensions.
+    case loginItems
+}
+
+/// The full answer to one Allow click.
+public struct SetupAllowResult: Equatable, Sendable {
+    public let outcome: SetupAllowOutcome
+    public let destination: SetupAllowDestination
+
+    init(_ outcome: SetupAllowOutcome, _ destination: SetupAllowDestination = .none) {
+        self.outcome = outcome
+        self.destination = destination
+    }
+}
+
 /// Answer to a Done tap, after re-verification.
 public enum SetupFlowVerification: Equatable, Sendable {
     /// Every required permission still verifies — the flow may finish.
@@ -102,6 +148,110 @@ public final class SetupFlowModel {
     public func display(_ step: SetupStep) -> SetupStepDisplay {
         if isComplete(step) { return .completed }
         return step == activeStep ? .active : .pending
+    }
+
+    /// How many speakers the last Local Network browse saw — the Local Network
+    /// card's completed title ("Found 3 speakers") instead of a checkmark.
+    public var localNetworkFoundSpeakers: Int { setup.localNetworkFoundSpeakers }
+
+    // MARK: The Allow click
+
+    /// The step whose prompt/probe is currently in flight, if any — the
+    /// single-flight guard, so a double-click can't stack two prompts.
+    private var inFlightStep: SetupStep?
+
+    /// Whether Bluetooth's prompt has already been fired this presentation.
+    /// Bluetooth is the one prompt whose answer arrives on a callback we can't
+    /// await (`CBCentralManager` decides asynchronously), so "in flight" for it
+    /// means "asked, still undetermined" rather than a running `await`.
+    private var didPrimeBluetooth = false
+
+    /// Run one Allow click for `step` and report what it did.
+    ///
+    /// Three rules hold for every step (Wispr's habits, brief §"Window layering
+    /// + prompt sequencing"):
+    ///
+    /// - **Never open Settings for something already granted** — the click is a
+    ///   no-op that says so.
+    /// - **Preflight where a real status read exists.** A determined-and-denied
+    ///   permission's prompt silently no-ops, so that click goes STRAIGHT to the
+    ///   Settings deep link rather than pretending to ask.
+    /// - **Single-flight.** A second click while a prompt/probe is in flight is a
+    ///   no-op, not a second prompt.
+    public func allow(_ step: SetupStep) async -> SetupAllowResult {
+        let result = await route(step)
+        Telemetry.log(.permission, "setup_allow", [
+            "step": Self.telemetryName(step),
+            "outcome": result.outcome.rawValue,
+        ])
+        return result
+    }
+
+    private func route(_ step: SetupStep) async -> SetupAllowResult {
+        guard inFlightStep == nil else { return SetupAllowResult(.promptInFlight) }
+        // Short-circuit a step that is already satisfied — including the two
+        // auto-passes, where there is nothing to ask for and no pane to open.
+        guard !isComplete(step) else { return SetupAllowResult(.alreadyGranted) }
+
+        inFlightStep = step
+        defer { inFlightStep = nil }
+
+        switch step {
+        case .audio:
+            // A confirmed denial is the one audio state a re-probe can't fix
+            // (and re-probing replays the audible tone for nothing).
+            if setup.audioStatus == .denied {
+                return SetupAllowResult(.settingsFallbackDenied,
+                                        .settingsPane(.screenAndSystemAudioRecording))
+            }
+            await setup.requestAudioCapture()
+            return SetupAllowResult(setup.audioStatus == .granted ? .promptTriggered : .probeTimeout)
+
+        case .localNetwork:
+            // `.requested` means "asked, and the browse got nowhere" — the
+            // prompt has already been consumed, so the only path left is the pane.
+            if setup.localNetworkStatus == .requested {
+                return SetupAllowResult(.settingsFallbackDenied, .settingsPane(.localNetwork))
+            }
+            await setup.primeLocalNetwork()
+            return SetupAllowResult(setup.localNetworkStatus == .granted ? .promptTriggered : .probeTimeout)
+
+        case .bluetooth:
+            // The one permission with an honest three-valued read, so the
+            // preflight here is real: denied means the prompt is spent.
+            if setup.bluetoothStatus == .denied {
+                return SetupAllowResult(.settingsFallbackDenied, .settingsPane(.bluetoothPrivacy))
+            }
+            if didPrimeBluetooth { return SetupAllowResult(.promptInFlight) }
+            didPrimeBluetooth = true
+            setup.primeBluetooth()
+            return SetupAllowResult(.promptTriggered)
+
+        case .speakerSync:
+            // Not a TCC permission at all: registration already happened at
+            // load, and approval only exists in Login Items.
+            return SetupAllowResult(.settingsOpened, .loginItems)
+
+        case .remoteControl:
+            // Accessibility's own prompt is the ONLY path that highlights this
+            // app in the list, so a retry re-primes instead of deep-linking
+            // (documented exception — see AudiouterOnboardingUI/AGENTS.md).
+            setup.primeRemoteControl()
+            return SetupAllowResult(setup.remoteControlStatus == .granted ? .promptTriggered : .probeTimeout)
+        }
+    }
+
+    /// Stable step name for ``Telemetry`` — explicit, so a future added case is
+    /// a compile error here rather than a silently unlabeled log line (same
+    /// posture as `PermissionStatus.telemetryDescription`).
+    private static func telemetryName(_ step: SetupStep) -> String {
+        switch step {
+        case .audio: return "audio"
+        case .localNetwork: return "local_network"
+        case .bluetooth: return "bluetooth"
+        case .speakerSync: return "speaker_sync"
+        case .remoteControl: return "remote_control"
+        }
     }
 
     /// Pass on a step. Ignored for a step that isn't skippable — the gate is the

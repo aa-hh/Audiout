@@ -145,7 +145,7 @@ final class PopoverPanelViewController: NSViewController {
     /// 0.22s ("it's also not that snappy"). Short enough to feel immediate, long
     /// enough that the rows below still read as being PUSHED apart rather than
     /// jumping to a new position.
-    static let collapseRevealDuration: TimeInterval = 0.15
+    static let collapseRevealDuration: TimeInterval = Tokens.Motion.collapseRevealDuration
 
     /// The panel height the most recent ANIMATED `insertRow` reveal starts FROM,
     /// recorded once the collapsed start state is laid out. A reveal that starts

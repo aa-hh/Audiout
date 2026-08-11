@@ -33,6 +33,18 @@ import AppKit
 import AudiouterCore
 import AudiouterOnboardingUI
 
+/// Resolve `name` AND pin it as the app-level appearance. On Darwin 27,
+/// system-drawn artwork (source-list selection pills, segmented controls)
+/// resolves against the APP's effective appearance, so per-window/view
+/// overrides alone leave those pieces rendered in the host system's mode
+/// (found via window-snapshot's light captures on a dark-mode host).
+@MainActor
+func snapshotAppearance(_ name: NSAppearance.Name) -> NSAppearance? {
+    let appearance = NSAppearance(named: name)
+    NSApp.appearance = appearance
+    return appearance
+}
+
 /// Fake audio probe — never touches Core Audio.
 struct SnapshotAudioProbe: AudioCapturePermissionProbing {
     let result: PermissionStatus
@@ -207,7 +219,7 @@ func snapshot(appearanceName: NSAppearance.Name,
               world: SnapshotWorld,
               outDir: URL) async {
     let controller = makeViewController(world)
-    let appearance = NSAppearance(named: appearanceName)
+    let appearance = snapshotAppearance(appearanceName)
     let rootView = controller.test_rootView
     rootView.appearance = appearance
     // Awaited, unlike the load-time fire-and-forget: Bluetooth and Remote

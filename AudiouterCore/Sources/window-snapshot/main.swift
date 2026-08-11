@@ -510,6 +510,12 @@ func run() -> Int32 {
     print("Rendering mixer-window snapshots to: \(outDir.path)")
 
     for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
+        // App-level appearance too, not just per-window: on Darwin 27,
+        // system-drawn artwork (source-list selection pills, segmented
+        // controls) resolves against the APP's effective appearance, so a
+        // light pass on a dark-mode host rendered those pieces dark/garbled
+        // while everything else honored the window override.
+        app.appearance = NSAppearance(named: appearanceName)
         let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
                                   emitsLevels: false, simulatesDropouts: false)
         let controller = GroupController(backend: backend, store: GroupStore(directory: tempDir()),

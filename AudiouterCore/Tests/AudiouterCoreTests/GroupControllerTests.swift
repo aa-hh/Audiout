@@ -296,6 +296,51 @@ import Testing
         #expect(controller.isPassthrough, "default = current device only ⇒ passthrough")
     }
 
+    /// Reconnect-at-launch (roadmap 050): with the opt-in ON and a persisted
+    /// routing set on disk, `ensureDefaultSelection()` resumes it instead of
+    /// seeding {local}.
+    @Test func reconnectAtLaunchResumesPersistedRouting() async throws {
+        let dir = tempDirectory()
+        let routing = RoutingStore(directory: dir)
+        try routing.save(.init(selectedDeviceIDs: ["office"], mainOut: .selectedDevices))
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.reconnectAtLaunch = true
+        let backend = try await makeBackend()
+        let controller = GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                                         routingStore: routing, settings: settings, loadPersisted: false)
+        controller.ensureDefaultSelection()
+        #expect(controller.selectedDeviceIDs == ["office"])
+        #expect(controller.mainOut == .selectedDevices)
+    }
+
+    /// With the opt-in OFF (the default), a persisted routing set on disk must
+    /// NOT resume — the locked 2026-07-17 launch behavior.
+    @Test func reconnectAtLaunchOffIgnoresPersistedRouting() async throws {
+        let routing = RoutingStore(directory: tempDirectory())
+        try routing.save(.init(selectedDeviceIDs: ["office"], mainOut: .selectedDevices))
+        let backend = try await makeBackend()
+        let controller = GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                                         routingStore: routing, settings: AppSettings(defaults: isolatedDefaults),
+                                         loadPersisted: false)
+        controller.ensureDefaultSelection()
+        #expect(controller.selectedDeviceIDs == ["local-mac"])
+    }
+
+    /// A resumed `.group` Main Out whose group has since been deleted falls
+    /// back to `.selectedDevices` rather than pointing at nothing.
+    @Test func reconnectAtLaunchStaleGroupTargetFallsBack() async throws {
+        let routing = RoutingStore(directory: tempDirectory())
+        try routing.save(.init(selectedDeviceIDs: ["office"], mainOut: .group(id: "gone")))
+        let settings = AppSettings(defaults: isolatedDefaults)
+        settings.reconnectAtLaunch = true
+        let backend = try await makeBackend()
+        let controller = GroupController(backend: backend, store: GroupStore(directory: tempDirectory()),
+                                         routingStore: routing, settings: settings, loadPersisted: false)
+        controller.ensureDefaultSelection()
+        #expect(controller.selectedDeviceIDs == ["office"])
+        #expect(controller.mainOut == .selectedDevices)
+    }
+
     @Test func autoSwapDropsLocalWhenSoleMember() async throws {
         let (controller, _) = try await makeController()
         controller.ensureDefaultSelection()                       // set = {local}

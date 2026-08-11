@@ -126,6 +126,15 @@ public final class AudioSettingsViewController: NSViewController {
     // feeds `SyncedLocalSink`, a native-only feature).
     private let syncOffsetSlider = NSSlider()
     private let syncOffsetValueLabel = NSTextField(labelWithString: "")
+    private let syncOffsetHint = SettingsForm.hintLabel()
+    private let syncOffsetHelpButton = NSButton()
+    // Advanced is a disclosure, collapsed by default (roadmap 050): buffer and
+    // sync offset are expert controls and don't deserve standing rows.
+    private let advancedDisclosure = NSButton()
+    private let advancedContent = NSStackView()
+    // The pane's column stack, kept so the disclosure toggle can drive the
+    // stack's visibility priority for the content (see the toggle action).
+    private weak var columnStack: NSStackView?
     // Apply-in-progress feedback for the buffer popup (V1: applies immediately,
     // no CTA — see `applyBuffer(_:)`).
     private let applySpinner = NSProgressIndicator()
@@ -153,8 +162,9 @@ public final class AudioSettingsViewController: NSViewController {
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     public override func loadView() {
-        let heading = SettingsForm.label("Excluded applications")
-        heading.font = Tokens.Font.body
+        // Section-header voice (roadmap 050): real weight separation from
+        // body-font row titles, shared with every other header in the panes.
+        let heading = SettingsForm.sectionHeader("Apps that stay on this Mac")
 
         // `hintLabel`, not a hand-rolled `label` + wrap properties: it also
         // resolves `preferredMaxLayoutWidth`, without which this sentence's
@@ -182,6 +192,7 @@ public final class AudioSettingsViewController: NSViewController {
         column.alignment = .leading
         column.spacing = 8
         column.translatesAutoresizingMaskIntoConstraints = false
+        columnStack = column
 
         for sectionView in makeConnectVolumeSectionViews() {
             column.addArrangedSubview(sectionView)
@@ -249,14 +260,13 @@ public final class AudioSettingsViewController: NSViewController {
         connectVolumeSlider.setAccessibilityLabel("Volume when connecting a speaker")
         connectVolumeSlider.widthAnchor.constraint(equalToConstant: 160).isActive = true
 
-        connectVolumeValueLabel.font = Tokens.Font.body
-        connectVolumeValueLabel.textColor = Tokens.Color.secondaryLabel
-        connectVolumeValueLabel.alignment = .right
+        // Monospaced digits on the panel's well (roadmap 050) — the readout as
+        // instrument. One shared width with the sync-offset readout below so
+        // both sliders land on the same column.
+        let connectVolumeWell = SettingsForm.readoutWell(connectVolumeValueLabel, width: 56)
         connectVolumeValueLabel.stringValue = Self.percentLabel(settings.connectVolume)
-        // Fixed width so the row doesn't shift as the number's digit count changes.
-        connectVolumeValueLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
 
-        let control = NSStackView(views: [connectVolumeSlider, connectVolumeValueLabel])
+        let control = NSStackView(views: [connectVolumeSlider, connectVolumeWell])
         control.orientation = .horizontal
         control.alignment = .centerY
         control.spacing = 8
@@ -383,21 +393,87 @@ public final class AudioSettingsViewController: NSViewController {
         return "\(sign)\(magnitude) ms"
     }
 
-    /// The Advanced sub-section's stacked views: hairline + "Advanced" label +
-    /// the Audio buffer row (+ env-override note, or the apply-feedback row).
+    /// The Advanced sub-section: hairline + a **disclosure header** (collapsed
+    /// by default, roadmap 050) whose content stack holds the Audio buffer row
+    /// (+ env-override note, or the apply-feedback row) and the sync-offset row.
+    /// Expanding/collapsing republishes `preferredContentSize`, which reaches
+    /// the host via the same KVO path `rebuildList()` uses — no second path.
     private func makeAdvancedSectionViews() -> [NSView] {
-        guard let latency else { return [] }
-        var views: [NSView] = []
+        guard latency != nil else { return [] }
 
         let hairline = NSBox()
         hairline.boxType = .separator
         hairline.translatesAutoresizingMaskIntoConstraints = false
-        views.append(hairline)
 
-        let advancedLabel = SettingsForm.label("Advanced")
-        advancedLabel.font = Tokens.Font.captionEmphasized
-        advancedLabel.textColor = Tokens.Color.secondaryLabel
-        views.append(advancedLabel)
+        advancedDisclosure.translatesAutoresizingMaskIntoConstraints = false
+        advancedDisclosure.setButtonType(.pushOnPushOff)
+        advancedDisclosure.bezelStyle = .disclosure
+        advancedDisclosure.title = ""
+        advancedDisclosure.state = .off
+        advancedDisclosure.target = self
+        advancedDisclosure.action = #selector(advancedDisclosureToggled)
+        advancedDisclosure.setAccessibilityLabel("Advanced")
+
+        let header = NSStackView(views: [advancedDisclosure, SettingsForm.sectionHeader("Advanced")])
+        header.orientation = .horizontal
+        header.alignment = .centerY
+        header.spacing = 4
+        header.translatesAutoresizingMaskIntoConstraints = false
+
+        advancedContent.orientation = .vertical
+        advancedContent.alignment = .leading
+        advancedContent.spacing = 12
+        advancedContent.translatesAutoresizingMaskIntoConstraints = false
+        for contentView in makeAdvancedContentViews() {
+            advancedContent.addArrangedSubview(contentView)
+            contentView.widthAnchor.constraint(equalTo: advancedContent.widthAnchor).isActive = true
+        }
+
+        // Collapsed by default: the content ships DETACHED and the toggle
+        // physically adds/removes it. Probed (2026-08-12, this pane, headless)
+        // before settling here: `isHidden`, `setVisibilityPriority(.notVisible)`
+        // and a 999 zero-height constraint all left the column stack demanding
+        // the expanded height once the content had been shown — physical
+        // removal is the one mechanism whose collapse the stack provably
+        // honors. Advanced is the column's LAST section, so append/remove
+        // preserves order trivially.
+        return [hairline, header]
+    }
+
+    @objc private func advancedDisclosureToggled() {
+        guard let columnStack else { return }
+        if advancedDisclosure.state == .on {
+            columnStack.addView(advancedContent, in: .bottom)
+            advancedContent.widthAnchor.constraint(equalTo: columnStack.widthAnchor).isActive = true
+        } else {
+            columnStack.removeView(advancedContent)
+        }
+        republishFittedHeight()
+    }
+
+    /// Republish `preferredContentSize` from the COLUMN's fitting height, not
+    /// the root's — the host resizes via its KVO on `preferredContentSize`
+    /// (see the sizing-trap note on the root). Measuring the root is a trap
+    /// that only bites on SHRINK: `layoutSubtreeIfNeeded` on a windowless
+    /// top-level view installs a priority-501 height constraint pinning the
+    /// root to its current frame (probed 2026-08-12: `hcons=[501:h==424]` on
+    /// the root while the column solved to 214), and `fittingSize`'s pull-to-
+    /// zero at priority 50 loses to it — so the pane grows fine but keeps its
+    /// dead space forever after a disclosure collapse or list removal. The
+    /// column has no such lock; its fitting height + the standard insets IS
+    /// the pane's honest height.
+    private func republishFittedHeight() {
+        view.layoutSubtreeIfNeeded()
+        guard let columnStack else { return }
+        preferredContentSize = NSSize(
+            width: SettingsForm.contentWidth,
+            height: columnStack.fittingSize.height + SettingsForm.verticalPadding * 2)
+    }
+
+    /// The rows INSIDE the Advanced disclosure.
+    private func makeAdvancedContentViews() -> [NSView] {
+        guard let latency else { return [] }
+        var views: [NSView] = []
 
         // The popup: numeric options, or the env value alone (disabled) when
         // an env override won at launch.
@@ -569,30 +645,75 @@ public final class AudioSettingsViewController: NSViewController {
         syncOffsetSlider.setAccessibilityLabel("Local speaker sync offset")
         syncOffsetSlider.widthAnchor.constraint(equalToConstant: 160).isActive = true
 
-        syncOffsetValueLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
-        syncOffsetValueLabel.textColor = .secondaryLabelColor
-        syncOffsetValueLabel.alignment = .right
+        // Monospaced digits on the panel's well (roadmap 050); same width as
+        // the connect-volume readout so the sliders share a column.
+        let syncOffsetWell = SettingsForm.readoutWell(syncOffsetValueLabel, width: 56)
         syncOffsetValueLabel.stringValue = Self.syncOffsetLabel(settings.syncOffsetMs)
-        // Fixed width so the row doesn't shift as sign/digit count changes.
-        syncOffsetValueLabel.widthAnchor.constraint(equalToConstant: 56).isActive = true
 
-        let control = NSStackView(views: [syncOffsetSlider, syncOffsetValueLabel])
+        // The long what-is-this explanation moved OFF the pane (roadmap 050 —
+        // no static paragraphs) into a stock help button's popover; the line
+        // beneath the row is a live hint instead.
+        syncOffsetHelpButton.translatesAutoresizingMaskIntoConstraints = false
+        syncOffsetHelpButton.bezelStyle = .helpButton
+        syncOffsetHelpButton.title = ""
+        syncOffsetHelpButton.target = self
+        syncOffsetHelpButton.action = #selector(syncOffsetHelpTapped)
+        syncOffsetHelpButton.setAccessibilityLabel("About local speaker sync offset")
+
+        let control = NSStackView(views: [syncOffsetSlider, syncOffsetWell, syncOffsetHelpButton])
         control.orientation = .horizontal
         control.alignment = .centerY
         control.spacing = 8
         control.translatesAutoresizingMaskIntoConstraints = false
 
-        return [SettingsForm.row(
-            title: "Local speaker sync offset",
-            subtitle: "Fine-tune the delay on this Mac's own speakers when playing "
-                + "in sync with AirPlay devices. Raise it if the Mac plays ahead of "
-                + "your speakers, lower it if it plays behind.",
-            control: control)]
+        // Live hint (spec §5.2) — re-written on every drag.
+        syncOffsetHint.stringValue = Self.syncOffsetHintLine(settings.syncOffsetMs)
+
+        return [SettingsForm.row(title: "Local speaker sync offset", control: control),
+                syncOffsetHint]
+    }
+
+    /// The sync-offset live hint: where this Mac's own speakers sit relative to
+    /// the AirPlay devices at the current value.
+    private static func syncOffsetHintLine(_ ms: Int) -> String {
+        switch ms {
+        case 0:      return "Your Mac plays in step with your speakers."
+        case ..<0:   return "Your Mac plays \(syncOffsetLabel(ms)) ahead of your speakers."
+        default:     return "Your Mac plays \(syncOffsetLabel(ms)) behind your speakers."
+        }
+    }
+
+    @objc private func syncOffsetHelpTapped() {
+        let text = SettingsForm.hintLabel(
+            "Fine-tune the delay on this Mac's own speakers when playing "
+            + "in sync with AirPlay devices. Raise it if the Mac plays ahead of "
+            + "your speakers, lower it if it plays behind. Takes effect the next "
+            + "time the Mac's speakers join the stream.")
+        text.preferredMaxLayoutWidth = 260
+
+        let content = NSViewController()
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(text)
+        NSLayoutConstraint.activate([
+            container.widthAnchor.constraint(equalToConstant: 280),
+            text.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
+            text.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
+            text.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
+            text.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10),
+        ])
+        content.view = container
+
+        let popover = NSPopover()
+        popover.behavior = .transient
+        popover.contentViewController = content
+        popover.show(relativeTo: syncOffsetHelpButton.bounds, of: syncOffsetHelpButton, preferredEdge: .maxY)
     }
 
     @objc private func syncOffsetChanged() {
         let ms = syncOffsetSlider.integerValue
         syncOffsetValueLabel.stringValue = Self.syncOffsetLabel(ms)
+        syncOffsetHint.stringValue = Self.syncOffsetHintLine(ms)
         settings.syncOffsetMs = ms
     }
 
@@ -620,8 +741,7 @@ public final class AudioSettingsViewController: NSViewController {
             row.widthAnchor.constraint(equalTo: listStack.widthAnchor).isActive = true
         }
 
-        view.layoutSubtreeIfNeeded()
-        preferredContentSize = NSSize(width: SettingsForm.contentWidth, height: view.fittingSize.height)
+        republishFittedHeight()
     }
 
     private func makeExcludedRow(_ app: ExcludedApp) -> NSView {
@@ -927,6 +1047,28 @@ public final class AudioSettingsViewController: NSViewController {
         _ = view
         syncOffsetSlider.integerValue = ms
         syncOffsetChanged()
+    }
+
+    /// The sync-offset live hint line (spec §5.2, roadmap 050).
+    public var test_syncOffsetHint: String {
+        _ = view
+        return syncOffsetHint.stringValue
+    }
+
+    // MARK: Test-support hooks (Advanced disclosure — roadmap 050)
+
+    /// Whether the Advanced disclosure content is currently expanded.
+    public var test_advancedExpanded: Bool {
+        _ = view
+        return latency != nil && advancedContent.superview != nil
+    }
+
+    /// Drive the disclosure triangle, running the same expand/collapse +
+    /// republish a click would.
+    public func test_toggleAdvanced() {
+        _ = view
+        advancedDisclosure.state = advancedDisclosure.state == .on ? .off : .on
+        advancedDisclosureToggled()
     }
 }
 

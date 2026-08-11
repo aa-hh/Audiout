@@ -130,7 +130,8 @@ func makeRoot() -> SettingsRootViewController {
     // `.segmentedControlOnTop` style.
     return SettingsRootViewController(tabs: [
         .init(title: "General", symbolName: "gearshape",
-              viewController: GeneralSettingsViewController(loginItem: SnapshotLoginItem())),
+              viewController: GeneralSettingsViewController(loginItem: SnapshotLoginItem(),
+                                                            settings: settings)),
         .init(title: "Appearance", symbolName: "paintpalette",
               viewController: AppearanceSettingsViewController(settings: settings)),
         .init(title: "Audio", symbolName: "speaker.wave.2",

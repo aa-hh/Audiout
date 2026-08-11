@@ -196,6 +196,73 @@ extension SerializedSharedState {
                       "the Never position needs its own honest wording: \(pane.test_wakeRestoreHint)")
         #expect(applied == [0])
     }
+
+    @Test func syncOffsetHintTracksTheSlider() {
+        let latency = LatencySettingModel(optionsMs: AppSettings.startBufferOptionsMs,
+                                          initialMs: 1000,
+                                          envOverrideMs: nil,
+                                          isStreaming: { false },
+                                          apply: { _ in })
+        let pane = makeAudioPane(latency: latency)
+        pane.test_setSyncOffset(ms: 0)
+        let inStep = pane.test_syncOffsetHint
+        #expect(!inStep.isEmpty)
+
+        pane.test_setSyncOffset(ms: 120)
+        #expect(pane.test_syncOffsetHint.contains("120 ms"),
+                "hint must state the CURRENT value: \(pane.test_syncOffsetHint)")
+        #expect(pane.test_syncOffsetHint != inStep)
+    }
+
+    // MARK: Audio pane — Advanced disclosure (roadmap 050)
+
+    @Test func advancedDisclosureStartsCollapsedAndRepublishesOnToggle() {
+        let latency = LatencySettingModel(optionsMs: AppSettings.startBufferOptionsMs,
+                                          initialMs: 1000,
+                                          envOverrideMs: nil,
+                                          isStreaming: { false },
+                                          apply: { _ in })
+        let pane = makeAudioPane(latency: latency)
+        _ = pane.view
+        pane.view.layoutSubtreeIfNeeded()
+        #expect(!pane.test_advancedExpanded, "Advanced must ship collapsed")
+        let collapsedHeight = pane.preferredContentSize.height
+
+        pane.test_toggleAdvanced()
+        #expect(pane.test_advancedExpanded)
+        #expect(pane.preferredContentSize.height > collapsedHeight,
+                "expanding must republish a taller preferredContentSize")
+
+        let expandedHeight = pane.preferredContentSize.height
+        pane.test_toggleAdvanced()
+        #expect(!pane.test_advancedExpanded)
+        // Not an exact == against the pre-toggle height: AppKit's rounding
+        // grid shifts layout by fractions of a point between passes.
+        #expect(pane.preferredContentSize.height < expandedHeight,
+                "collapsing must republish a shorter preferredContentSize")
+    }
+
+    // MARK: General pane — reconnect-at-launch (roadmap 050)
+
+    private final class StubLoginItem: LoginItemManaging {
+        var isEnabled = false
+        func setEnabled(_ enabled: Bool) throws { isEnabled = enabled }
+    }
+
+    @Test func reconnectAtLaunchTogglePersistsAndHintTracks() {
+        let pane = GeneralSettingsViewController(loginItem: StubLoginItem(), settings: settings)
+        #expect(!pane.test_reconnectAtLaunchIsOn, "defaults off")
+        let offHint = pane.test_reconnectHint
+        #expect(!offHint.isEmpty)
+
+        pane.test_toggleReconnectAtLaunch(true)
+        #expect(AppSettings(defaults: isolatedDefaults).reconnectAtLaunch)
+        #expect(pane.test_reconnectHint != offHint)
+
+        pane.test_toggleReconnectAtLaunch(false)
+        #expect(!AppSettings(defaults: isolatedDefaults).reconnectAtLaunch)
+        #expect(pane.test_reconnectHint == offHint)
+    }
 }
 
 } // extension SerializedSharedState

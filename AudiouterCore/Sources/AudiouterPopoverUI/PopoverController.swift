@@ -1545,6 +1545,34 @@ public final class PopoverController: NSObject {
         panel.setCardCollapsed(title: title, collapsed: next, animated: animated)
     }
 
+    /// Repaint the Applications card when the routing table gained or lost a
+    /// route under the popover rather than through it — the phone's add and
+    /// remove, which reach `AppRoutingController` through the companion
+    /// dispatcher and used to leave the card painting a stale list until the
+    /// next open re-read it.
+    ///
+    /// MEMBERSHIP ONLY, and that is the whole safety of it. `onRoutesDidChange`
+    /// is source-blind: it also fires for the popover's OWN continuous volume
+    /// drag, once per tick (`AppRowView`'s slider is `isContinuous`), and a
+    /// `rebuild()` there would replace the `AppRowView` under the mouse and
+    /// break the NSSlider tracking loop — the invariant
+    /// `appRow(_:didSetVolume:for:)` documents and deliberately protects. A
+    /// volume or destination write never changes which rows exist, so keying
+    /// off the rendered row set skips every one of those without needing to
+    /// know where the mutation came from.
+    ///
+    /// Closed is a no-op: every open runs `rebuildForOpen()`, which re-reads
+    /// the table anyway (audit B8 — a closed popover never rebuilds).
+    ///
+    /// A phone-driven VOLUME or DESTINATION change still doesn't repaint the
+    /// Mac's row live; that is pre-existing and unchanged here, and fixing it
+    /// needs an in-place `AppRowView.apply` sweep rather than a rebuild.
+    public func refreshAppRoutes() {
+        guard isEffectivelyShown else { return }
+        guard Set(appRouting.appRoutes.map(\.bundleID)) != Set(appRowsByBundleID.keys) else { return }
+        rebuild()
+    }
+
     // MARK: Main Out row
 
     private func refreshMainOutRow() {

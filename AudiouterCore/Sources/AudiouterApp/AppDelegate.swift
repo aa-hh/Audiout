@@ -535,6 +535,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // `appRoutes` AND `addableApps` in the snapshot. Extended IN PLACE —
             // this closure is single-assignment, never reassigned elsewhere.
             self?.scheduleCompanionBroadcast()
+            // The popover's own add/remove paths rebuild for themselves, so
+            // this is here for the mutations that DON'T come from the popover:
+            // the phone's, which reach the model through the companion
+            // dispatcher and used to leave the Applications card painting a
+            // stale list until the next open re-ingested it. Devices have had
+            // the equivalent since `onStateDidChange`; routes hadn't.
+            self?.popoverController.refreshAppRoutes()
         }
         // One role per speaker: when Main Out membership changes (a device
         // selected, or a group activated), any per-app redirect still pointed at

@@ -1412,6 +1412,91 @@ import AudiouterProtocol
         #expect(popover.test_availableAppsForPicker().isEmpty, "the picker excludes it now that it's routed (proves the rebuild/state refreshed)")
     }
 
+    /// A route added WITHOUT going through the popover — the phone's path,
+    /// which reaches `AppRoutingController` through the companion dispatcher —
+    /// must repaint the open card. It used to update the model and the backend
+    /// while the Applications card kept painting the old list until the next
+    /// open re-ingested it (reported live: "it only shows up if I open and
+    /// close the popover").
+    ///
+    /// These four tests drive `refreshAppRoutes()` through a hand-wired
+    /// `onRoutesDidChange`, because `AppDelegate` — which owns the real
+    /// assignment — lives in an executable target this test target can't
+    /// import (`Package.swift`), the same reason `CompanionEndToEndTests`
+    /// stands up its own AppDelegate-shaped wiring. What they prove is the
+    /// SEAM's behavior; that AppDelegate still calls it is not automatable
+    /// here.
+    @Test func aRouteAddedOutsideThePopoverRepaintsTheOpenCard() async throws {
+        let appRouting = tempAppRoutingController()
+        let fakeApps = [RunningAppInfo(bundleID: "com.example.music", displayName: "Music", icon: nil)]
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: { fakeApps })
+        appRouting.onRoutesDidChange = { popover.refreshAppRoutes() }
+
+        #expect(popover.test_appRow(for: "com.example.music") == nil, "no row before the route exists")
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+
+        // The rendered row, not a rebuild counter and not the model: only
+        // `makeAppRow` — which runs solely inside `rebuild()` — populates this.
+        #expect(popover.test_appRow(for: "com.example.music") != nil,
+                "the Applications card must have built a row for the new route")
+    }
+
+    /// The mirror case: a route REMOVED from the phone must take its row with
+    /// it, rather than leaving a row for a route that no longer exists.
+    @Test func aRouteRemovedOutsideThePopoverDropsItsRow() async throws {
+        let appRouting = tempAppRoutingController()
+        let fakeApps = [RunningAppInfo(bundleID: "com.example.music", displayName: "Music", icon: nil)]
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: { fakeApps })
+        appRouting.onRoutesDidChange = { popover.refreshAppRoutes() }
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        try #require(popover.test_appRow(for: "com.example.music") != nil)
+
+        appRouting.removeRoute(bundleID: "com.example.music")
+
+        #expect(popover.test_appRow(for: "com.example.music") == nil,
+                "the removed route's row must be gone from the card")
+    }
+
+    /// THE REGRESSION GUARD for this repaint hook. A volume write must NEVER
+    /// rebuild the open popover: `AppRowView`'s slider is `isContinuous`, so
+    /// the Mac's own drag fires `onRoutesDidChange` on every tick, and a
+    /// rebuild there replaces the row under the mouse and breaks the
+    /// NSSlider tracking loop (the invariant `appRow(_:didSetVolume:for:)`
+    /// documents). Driven through `test_setVolume`, which is the row's real
+    /// delegate path — the same one a live drag takes.
+    @Test func aVolumeDragNeverRebuildsTheOpenPopover() async throws {
+        let appRouting = tempAppRoutingController()
+        let fakeApps = [RunningAppInfo(bundleID: "com.example.music", displayName: "Music", icon: nil)]
+        let (popover, _, _) = try await makePopover(appRouting: appRouting,
+                                                     runningAppsProvider: { fakeApps })
+        appRouting.onRoutesDidChange = { popover.refreshAppRoutes() }
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+        let row = try #require(popover.test_appRow(for: "com.example.music"))
+
+        let baseline = popover.test_rebuildCount
+        for volume in 1...25 { row.test_setVolume(volume) }
+
+        #expect(popover.test_rebuildCount == baseline,
+                "a drag's per-tick volume writes must not rebuild the tree under the slider")
+        #expect(popover.test_appRow(for: "com.example.music") === row,
+                "the row under the mouse must be the same object throughout the drag")
+    }
+
+    /// The same mutation while CLOSED must NOT rebuild — audit B8's rule.
+    @Test func aRouteAddedWhileClosedDoesNotRebuild() async throws {
+        let appRouting = tempAppRoutingController()
+        let (popover, _, _) = try await makePopover(appRouting: appRouting)
+        popover.test_isShownOverride = false
+        appRouting.onRoutesDidChange = { popover.refreshAppRoutes() }
+
+        let baseline = popover.test_rebuildCount
+        appRouting.addRoute(bundleID: "com.example.music", displayName: "Music")
+
+        #expect(popover.test_rebuildCount == baseline, "a closed popover ingests the change without rebuilding; the next open re-reads it")
+    }
+
     // MARK: T-8 — Applications card wiring (PLAN §C decisions 3/4/6/7/8)
 
     /// Two fake running apps + one seeded route, so tests can inspect the card's

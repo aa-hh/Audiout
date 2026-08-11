@@ -92,7 +92,6 @@ run_remote() {
         return 2
     fi
     [ "$rrc" -ne 0 ] && return 1
-    status=$remote_status
     echo "  suite: passed on remote $remote_host." >&2
     return 0
 }
@@ -337,6 +336,13 @@ set -e
 if [ "$status" -eq 0 ] && [ "${AUDIOUTER_TEST_NO_CACHE:-0}" != "1" ]; then
     mkdir -p "$cache_dir"
     : > "$stamp"
+else
+    # Say it in our own voice, last. The exit code below is correct and always
+    # has been, but a caller who writes `run-tests.sh | tail -15` gets TAIL's
+    # exit code — 0, always — and then reads a green status over a red suite.
+    # (That is exactly how this script got accused of swallowing failures.) One
+    # unmistakable line survives any tail, so the transcript cannot look green.
+    [ "$status" -eq 0 ] || echo "  suite: FAILED — swift test exited $status." >&2
 fi
 
 exit "$status"

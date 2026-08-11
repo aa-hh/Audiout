@@ -17,10 +17,9 @@ public enum DemoMode: Equatable, Sendable {
     case settled
 }
 
-/// Where a TWO-STAGE mock is in its pass. Two steps have one — Speaker Sync and
-/// Remote Control — and since both now open on the same kind of surface, they
-/// share one enum rather than each minting its own. Public only because the
-/// Setup window's `test_demoStage` hook exposes it.
+/// Where a TWO-STAGE mock is in its pass. One step has one — Remote Control,
+/// whose retry re-fires the system alert before the Settings pane. Public only
+/// because the Setup window's `test_demoStage` hook exposes it.
 public enum DemoStage: Equatable, Sendable {
     /// The system ALERT that hands the user off to Settings — the first of the
     /// two clicks, and the thing a two-stage pass rests on.
@@ -233,15 +232,14 @@ final class DemoPaneView: NSView {
         guard let step, mode != .settled else { return DemoSettledMockView() }
         switch mode {
         case .prompt:   return DemoPromptMockView(step: step)
-        // Two steps reach their switch through something else first, so their
-        // Settings mode is a two-stage pass rather than the bare pane. Speaker
-        // Sync: registering the login item posts a system notification, and only
-        // clicking that lands the user on the pane. Remote Control: its retry
-        // raises the PROMPT again, whose own button is the only path that
-        // highlights us in the list. Every other step starts at the pane.
+        // Remote Control reaches its switch through something else first, so
+        // its Settings mode is a two-stage pass rather than the bare pane: its
+        // retry raises the system ALERT again, whose own button is the only
+        // path that highlights us in the list. Every other step starts at the
+        // pane — Speaker Sync included, whose "Open Login Items…" opens System
+        // Settings directly, with no alert in between.
         case .settings:
             switch step {
-            case .speakerSync:   return DemoLoginItemsMockView(step: step)
             case .remoteControl: return DemoSettingsHandoffMockView(step: step)
             default:             return DemoSettingsMockView(step: step)
             }
@@ -303,10 +301,7 @@ final class DemoPaneView: NSView {
     /// Which surface a two-stage mock RESTS on; `nil` for the mocks that only
     /// ever have one. What it pins is the settled frame — a two-stage pass must
     /// rest on the FIRST thing the user will meet, not on the pane it ends at.
-    var test_stage: DemoStage? {
-        (mock as? DemoLoginItemsMockView)?.test_stage
-            ?? (mock as? DemoSettingsHandoffMockView)?.test_stage
-    }
+    var test_stage: DemoStage? { (mock as? DemoSettingsHandoffMockView)?.test_stage }
     var test_isAnimating: Bool { (mock as? DemoMockView)?.isTimelineRunning ?? false }
     var test_isLooping: Bool { (mock as? DemoMockView)?.isLooping ?? false }
     var test_showsReplay: Bool { !replayButton.isHidden }
@@ -390,8 +385,17 @@ class DemoMockView: NSView {
 
     func stopTimeline() {
         isTimelineRunning = false
-        Self.removeAnimations(from: layer)
+        Self.removeAnimations(from: self)
         applySettledState()
+    }
+
+    /// Walks the VIEW tree as well as each view's layer tree: headless (no
+    /// window), a subview's backing layer is not yet a sublayer of its
+    /// superview's, so a layer-only walk misses the animations on the drawn
+    /// cursor — invisible in the settled model state, but still attached.
+    private static func removeAnimations(from view: NSView) {
+        removeAnimations(from: view.layer)
+        view.subviews.forEach { removeAnimations(from: $0) }
     }
 
     private static func removeAnimations(from layer: CALayer?) {
@@ -450,6 +454,23 @@ class DemoMockView: NSView {
     func held(_ score: [(time: TimeInterval, value: Any)]) -> [(time: TimeInterval, value: Any)] {
         guard let last = score.last, last.time < timelineDuration else { return score }
         return score + [(timelineDuration, last.value)]
+    }
+
+    // MARK: Test-support hooks
+
+    /// Every drawn cursor in this mock — nested stages included — with its
+    /// click splash at rest. What the settled frame (and every snapshot
+    /// fixture) must find: no ring visible, no splash score attached.
+    var test_clickSplashesAreSettled: Bool {
+        subviewsRecursively.compactMap { $0 as? DemoCursorView }
+            .allSatisfy(\.test_splashIsSettled)
+    }
+
+    /// Every drawn cursor mid-pass carrying its splash score — what pins that
+    /// each press site actually wired the splash in.
+    var test_clickSplashesAreArmed: Bool {
+        let cursors = subviewsRecursively.compactMap { $0 as? DemoCursorView }
+        return !cursors.isEmpty && cursors.allSatisfy(\.test_splashIsArmed)
     }
 }
 
@@ -849,6 +870,7 @@ final class DemoPromptMockView: DemoMockView {
             (0, 1), (DemoBeat.travelEnd, 1), (DemoBeat.pressEnd, 0.85),
             (DemoBeat.pressEnd + 0.08, 1), (end, 1),
         ]), forKey: "press")
+        cursor.addClickSplash(on: self, at: DemoBeat.pressEnd)
 
         // The travel decelerates into the target — 80 % of the distance early,
         // then it eases in over the last third.
@@ -895,9 +917,10 @@ final class DemoPromptMockView: DemoMockView {
         // the real dialog.
         case .localNetwork:  return "Allow “Audiouter” to find devices on local networks?"
         case .bluetooth:     return "“Audiouter” would like to use Bluetooth."
-        // Neither of these reaches this mock: both raise the system ALERT
-        // (``DemoSystemAlertMockView``), which words its own ask. Kept so the
-        // table stays exhaustive and readable.
+        // Neither of these reaches this mock: Remote Control raises the system
+        // ALERT (``DemoSystemAlertMockView``), which words its own ask, and
+        // Speaker Sync has no prompt at all. Kept so the table stays exhaustive
+        // and readable.
         case .remoteControl: return "“Audiouter” would like to control this Mac."
         case .speakerSync:   return "“Audiouter” would like to run in the background."
         }
@@ -957,7 +980,8 @@ final class DemoPromptMockView: DemoMockView {
 
 /// A miniature of the macOS ALERT PANEL that hands a grant over to System
 /// Settings — a completely different animal from the portrait privacy card
-/// ``DemoPromptMockView`` draws, and the first surface of BOTH two-stage passes.
+/// ``DemoPromptMockView`` draws, and the first surface of Remote Control's
+/// two-stage pass, its one client.
 ///
 /// Drawn from the real "Accessibility Access" alert. Every part below is one
 /// the real panel is identified by, and the contrast with the privacy card is
@@ -978,8 +1002,8 @@ final class DemoPromptMockView: DemoMockView {
 ///
 /// It is a passive SURFACE, not a timeline: it draws itself and exposes the
 /// button a pointer should press, while the host two-stage mock owns the one
-/// cursor and the crossfade. That is what lets ``DemoLoginItemsMockView`` keep
-/// its single pointer.
+/// cursor and the crossfade — a stage that owned a cursor would put a second
+/// pointer on screen.
 final class DemoSystemAlertMockView: NSView {
 
     /// Fixed width; the HEIGHT comes from the copy, so a longer sentence sits
@@ -1001,9 +1025,8 @@ final class DemoSystemAlertMockView: NSView {
     /// Where a host parks its pointer while this alert is the settled frame:
     /// inside the panel's bottom-left, in the button row's band but clear of
     /// both buttons and of the Help circle. Resting it ON "Open System Settings"
-    /// reads as a press that already happened. In the HOST's coordinates — both
-    /// hosts centre this alert in the same 300 × 190 frame, which is what makes
-    /// one constant enough for the two of them.
+    /// reads as a press that already happened. In the HOST's coordinates — the
+    /// host centres this alert in its 300 × 190 frame.
     static let pointerRest = CGPoint(x: 66, y: 150)
 
     private let step: SetupStep
@@ -1154,18 +1177,12 @@ final class DemoSystemAlertMockView: NSView {
     // MARK: Copy
 
     /// The header line — the ACCESS being asked for, which is how macOS titles
-    /// these panels ("Accessibility Access"). Only the two two-stage steps ever
-    /// raise this alert; the rest fall back to the name of their own pane.
+    /// these panels ("Accessibility Access"). Only Remote Control ever raises
+    /// this alert; the rest fall back to the name of their own pane.
     static func headerText(for step: SetupStep) -> String {
         switch step {
         case .remoteControl: return "Accessibility Access"
-        // razor: the Login Items panel's own header was never screenshotted (see
-        // this folder's AGENTS.md on what the research did and didn't confirm),
-        // so it takes the name of the pane it sends the user to — the one string
-        // here we know macOS uses for this grant. Upgrade path: a real
-        // screenshot changes this line.
-        case .speakerSync:   return "Login Items"
-        case .audio, .localNetwork, .bluetooth:
+        case .audio, .localNetwork, .bluetooth, .speakerSync:
             return DemoSettingsMockView.paneTitle(for: step)
         }
     }
@@ -1176,29 +1193,23 @@ final class DemoSystemAlertMockView: NSView {
         switch step {
         case .remoteControl:
             return "“Audiouter” would like to control this computer using accessibility features."
-        case .speakerSync:
-            return "“Audiouter” would like to run in the background."
-        case .audio, .localNetwork, .bluetooth:
+        case .audio, .localNetwork, .bluetooth, .speakerSync:
             return DemoPromptMockView.askText(for: step)
         }
     }
 
-    /// The instruction under it: where the grant actually gets made. macOS words
-    /// this the same way for every panel of this shape, changing only the pane
-    /// it names.
+    /// The instruction under it: where the grant actually gets made. Verbatim
+    /// from the real Accessibility panel.
     static func bodyText(for step: SetupStep) -> String {
-        let pane = step == .speakerSync ? "Login Items" : "Privacy & Security"
-        return "Grant access to this application in \(pane) settings, "
+        "Grant access to this application in Privacy & Security settings, "
             + "located in System Settings."
     }
 
     /// The blue circular badge overlapping the padlock, if this step has one.
     ///
     /// Accessibility's is the accessibility figure — the badge is what says
-    /// WHICH capability the padlock is standing for. Login Items has no
-    /// established badge to copy (no screenshot of that panel exists, and the
-    /// research found no description of one either), so it shows the padlock
-    /// alone rather than an invented marker.
+    /// WHICH capability the padlock is standing for. No other step raises this
+    /// alert, so no other step earns a marker.
     private static func badge(for step: SetupStep) -> (circle: NSView, glyph: NSView)? {
         guard step == .remoteControl else { return nil }
         return (DemoDotView(diameter: badgeSide, fill: DemoSystemColor.accent),
@@ -1225,10 +1236,7 @@ final class DemoSystemAlertMockView: NSView {
 /// anything that would land under 9 pt of text is REPLACED rather than shrunk —
 /// greeked bars and flat tinted tiles, because text between 6 and 8.5 pt
 /// antialiases into mush that reads as a rendering bug.
-/// Not `final`: ``DemoLoginItemsMockView`` extends this pane into the two-stage
-/// Speaker Sync choreography, and does it by inheriting the whole drawn pane
-/// rather than by copying its layout.
-class DemoSettingsMockView: DemoMockView {
+final class DemoSettingsMockView: DemoMockView {
 
     static let size = NSSize(width: 300, height: 190)
     /// The reference puts the sidebar at 80 pt (27 % of 300, deliberately less
@@ -1239,22 +1247,14 @@ class DemoSettingsMockView: DemoMockView {
     private static let sidebarWidth: CGFloat = 76
 
     private let step: SetupStep
-    /// `fileprivate`, not `private`: the two-stage subclass drives the same
-    /// switch, cursor and window from ITS score, so a second copy of any of them
-    /// would be a second thing to keep in step.
-    fileprivate var toggle: DemoSwitchView!
-    /// The drawn Settings window — the whole of stage 2, and therefore the thing
-    /// the two-stage pass crossfades in and back out.
-    fileprivate var shell: DemoWindowSurfaceView!
+    private var toggle: DemoSwitchView!
     /// Slightly smaller than the prompt mock's, in step with this mock's own
     /// tighter scale.
-    fileprivate let cursor = DemoCursorView(pointerHeight: 22)
+    private let cursor = DemoCursorView(pointerHeight: 22)
 
     /// Where the pointer waits: low in the content pane, clear of the title and
     /// the card's first row — a cursor sitting on top of text read as a mistake.
-    /// The two-stage subclass moves it, because its settled frame is an ALERT
-    /// covering this whole area and this spot lands on the button.
-    fileprivate var cursorPark: CGPoint { CGPoint(x: 110, y: 138) }
+    private let cursorPark = CGPoint(x: 110, y: 138)
 
     init(step: SetupStep) {
         self.step = step
@@ -1269,7 +1269,6 @@ class DemoSettingsMockView: DemoMockView {
 
     private func build() {
         let shell = DemoWindowSurfaceView(fill: DemoSystemColor.contentPane)
-        self.shell = shell
         let sidebar = DemoSidebarView()
         let divider = NSBox()
         divider.boxType = .separator
@@ -1420,13 +1419,15 @@ class DemoSettingsMockView: DemoMockView {
             (0, 1), (DemoBeat.holdEnd - 0.3, 1), (DemoBeat.holdEnd, 0),
             (DemoBeat.resetEnd, 0), (end, 1),
         ]), forKey: "cursorFade")
+        // The flip's press moment: the beat the track starts crossing to blue.
+        cursor.addClickSplash(on: self, at: DemoBeat.pressEnd)
 
         toggle.addTimeline(on: self)
     }
 
     /// How far the cursor's TIP has to travel to the switch, in this view's own
     /// coordinates.
-    fileprivate func switchTravel() -> CGPoint {
+    private func switchTravel() -> CGPoint {
         let from = cursor.convert(cursor.tipPoint, to: self)
         let to = toggle.convert(NSPoint(x: toggle.bounds.midX, y: toggle.bounds.midY), to: self)
         return CGPoint(x: to.x - from.x, y: to.y - from.y)
@@ -1448,149 +1449,6 @@ class DemoSettingsMockView: DemoMockView {
         case .speakerSync:   return "Login Items"
         }
     }
-}
-
-// MARK: - Login Items mock (two stages)
-
-/// Speaker Sync's miniature, in two stages, because its approval takes two acts
-/// on two surfaces.
-///
-/// Registering the login item doesn't put the switch in front of anybody: the
-/// user is asked to go to Login Items and flip it there. **Stage one is the
-/// system ALERT that asks them** — see this folder's AGENTS.md for what the
-/// research could and could not confirm about that panel — and only its "Open
-/// System Settings" lands them on the pane. The pane on its own would leave out
-/// the harder half.
-///
-/// So one pass, two surfaces, two clicks:
-///
-/// 1. the alert, with the cursor gliding to "Open System Settings" and pressing
-///    it;
-/// 2. a crossfade into the inherited Settings pane — the same drawn Login Items
-///    window, the same switch — with the cursor flipping Audiouter on.
-///
-/// It inherits rather than composes: the pane, its switch and its cursor are all
-/// the parent's, so stage 2 IS the one-stage mock, replayed later along the pass
-/// (`stage2Start`) with `DemoBeat`'s rhythm untouched. The pass still ends where
-/// it started — back on the alert, the first thing the user will really meet.
-final class DemoLoginItemsMockView: DemoSettingsMockView {
-
-    /// Where stage 2 begins: the moment the crossfade has finished, so the
-    /// inherited score runs against a pane that is fully there.
-    private static let stage2Start: TimeInterval = 2.10
-
-    /// Stage 1's beats, in seconds along the pass. Stage 2's are `DemoBeat`'s,
-    /// shifted by ``stage2Start``.
-    private enum Beat {
-        /// The cursor's tip reaches the alert's button.
-        static let reached: TimeInterval = 1.50
-        static let pressed: TimeInterval = 1.62
-        /// Alert out, pane in.
-        static let handoffStart: TimeInterval = 1.80
-        static let handoffEnd = DemoLoginItemsMockView.stage2Start
-        /// Pane out, alert back — the pass returning to its settled frame.
-        static let returnStart: TimeInterval = handoffEnd + DemoBeat.loop
-        static let returnEnd: TimeInterval = returnStart + 0.30
-        static let end: TimeInterval = returnEnd + 0.30
-    }
-
-    private let alert: DemoSystemAlertMockView
-
-    fileprivate override var cursorPark: CGPoint { DemoSystemAlertMockView.pointerRest }
-
-    override init(step: SetupStep) {
-        alert = DemoSystemAlertMockView(step: step)
-        super.init(step: step)
-        buildAlert()
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    override var timelineDuration: TimeInterval { Beat.end }
-
-    private func buildAlert() {
-        // BELOW the cursor, which the parent added last: the pointer presses the
-        // alert's button, so it has to be drawn over it.
-        addSubview(alert, positioned: .below, relativeTo: cursor)
-        NSLayoutConstraint.activate([
-            alert.centerXAnchor.constraint(equalTo: centerXAnchor),
-            alert.centerYAnchor.constraint(equalTo: centerYAnchor),
-        ])
-        applySettledState()
-    }
-
-    /// Settled: the ALERT, alone — the pane behind it hasn't been opened yet.
-    /// The parent's rest state (switch off, cursor parked) still holds under it,
-    /// so the pass returns to one frame, not two.
-    override func applySettledState() {
-        super.applySettledState()
-        // Called once from the parent's own `build()`, before this subclass has
-        // added the alert — harmless, and it means every later call has both.
-        alert.alphaValue = 1
-        alert.setPressed(false)
-        shell?.alphaValue = 0
-    }
-
-    override func addTimelineAnimations() {
-        let toAlert = translation(alertTravel())
-        let toSwitch = translation(switchTravel())
-        let still = NSValue(caTransform3D: CATransform3DIdentity)
-        let stage2 = Self.stage2Start
-
-        // ONE cursor, two targets. It goes home while it is invisible, between
-        // the press and stage 2's rest — a jump nobody sees, rather than a
-        // second pointer or a slide back across a pane that isn't there yet.
-        cursor.layer?.add(keyframes("transform", [
-            (0, still), (DemoBeat.idle, still),
-            (Beat.reached, toAlert), (Beat.handoffStart, toAlert),
-            (Beat.handoffEnd, still), (stage2 + DemoBeat.idle, still),
-            (stage2 + DemoBeat.travelEnd, toSwitch), (stage2 + DemoBeat.resetEnd, toSwitch),
-            (Beat.returnStart, still), (Beat.end, still),
-        ], timing: .easeOut), forKey: "cursorGlide")
-        cursor.layer?.add(keyframes("opacity", [
-            (0, 1), (Beat.handoffStart, 1), (Beat.handoffStart + 0.15, 0),
-            (Beat.handoffEnd + 0.35, 0), (Beat.handoffEnd + 0.50, 1),
-            (stage2 + DemoBeat.holdEnd - 0.3, 1), (stage2 + DemoBeat.holdEnd, 0),
-            (Beat.returnEnd, 0), (Beat.end, 1),
-        ]), forKey: "cursorFade")
-
-        // The press dips the BUTTON, not the panel — the panel's opacity is the
-        // crossfade's channel, and two animations on one property fight.
-        alert.addPressAnimation(on: self, pressedAt: Beat.pressed)
-
-        // The handoff, and its mirror at the end of the pass.
-        alert.layer?.add(keyframes("opacity", [
-            (0, 1), (Beat.handoffStart, 1), (Beat.handoffEnd, 0),
-            (Beat.returnStart, 0), (Beat.returnEnd, 1), (Beat.end, 1),
-        ]), forKey: "alertFade")
-        shell.layer?.add(keyframes("opacity", [
-            (0, 0), (Beat.handoffStart, 0), (Beat.handoffEnd, 1),
-            (Beat.returnStart, 1), (Beat.returnEnd, 0), (Beat.end, 0),
-        ]), forKey: "paneFade")
-
-        toggle.addTimeline(on: self, offset: stage2)
-    }
-
-    private func translation(_ delta: CGPoint) -> NSValue {
-        NSValue(caTransform3D: CATransform3DMakeTranslation(delta.x, delta.y, 0))
-    }
-
-    /// How far the cursor's TIP has to travel to the alert's "Open System
-    /// Settings" — the one button that gets the user to the pane.
-    private func alertTravel() -> CGPoint {
-        let from = cursor.convert(cursor.tipPoint, to: self)
-        let to = alert.pressPoint(in: self)
-        return CGPoint(x: to.x - from.x, y: to.y - from.y)
-    }
-
-    // MARK: Test-support hooks
-
-    /// Which surface this mock RESTS on — read from the model state the pass
-    /// returns to, not from a stage counter, so it can't claim a stage the pane
-    /// isn't actually left painting. (A running pass is a presentation-layer
-    /// affair; the model state stays settled throughout, which is exactly what
-    /// makes "a pass ends where it started" checkable at all.)
-    var test_stage: DemoStage { (shell?.alphaValue ?? 0) > 0.5 ? .settingsPane : .alert }
 }
 
 // MARK: - Two-stage retry mock
@@ -1702,9 +1560,11 @@ final class DemoSettingsHandoffMockView: DemoMockView {
             (DemoHandoffBeat.settingsEnd, 0), (end, 1),
         ]), forKey: "cursorFade")
         alert.addPressAnimation(on: self, pressedAt: DemoBeat.pressEnd)
+        cursor.addClickSplash(on: self, at: DemoBeat.pressEnd)
 
         // Stage two is written in its own seconds and mapped onto the window it
-        // plays in.
+        // plays in. Its cursor's own click splash comes along with the rest of
+        // its score — this view adds nothing for it.
         settings.stageWindow = (hostDuration: end, start: DemoHandoffBeat.settingsStart)
         settings.addTimelineAnimations()
     }
@@ -2093,17 +1953,14 @@ final class DemoSwitchView: NSView {
     /// leading → trailing while the track CROSS-FADES to blue, never wipes), the
     /// hold, and back off — a pass has to end where it started, both so the loop is
     /// seamless and so the resting frame is the state the user will really find.
-    ///
-    /// - Parameter offset: where along the host's pass this stage begins. Zero
-    ///   for a single-stage mock; the two-stage Speaker Sync pass hands over its
-    ///   handoff beat, so the switch keeps the exact same rhythm as everywhere
-    ///   else, just later.
-    func addTimeline(on host: DemoMockView, offset: TimeInterval = 0) {
+    /// A staged host (Remote Control's handoff) shifts this score through its
+    /// ``DemoMockView/stageWindow``, so there is nothing per-stage in here.
+    func addTimeline(on host: DemoMockView) {
         let off = Self.offTrackColor.cgColor, on = DemoSystemColor.accent.cgColor
         layer?.add(host.keyframes("backgroundColor", host.held([
-            (offset, off), (offset + DemoBeat.pressEnd, off),
-            (offset + DemoBeat.changeEnd, on), (offset + DemoBeat.holdEnd, on),
-            (offset + DemoBeat.resetEnd, off), (offset + DemoBeat.loop, off),
+            (0, off), (DemoBeat.pressEnd, off),
+            (DemoBeat.changeEnd, on), (DemoBeat.holdEnd, on),
+            (DemoBeat.resetEnd, off), (DemoBeat.loop, off),
         ])), forKey: "tint")
 
         let offCentre = NSValue(point: CGPoint(x: knobFrame(on: false).midX,
@@ -2111,9 +1968,9 @@ final class DemoSwitchView: NSView {
         let onCentre = NSValue(point: CGPoint(x: knobFrame(on: true).midX,
                                              y: knobFrame(on: true).midY))
         knobLayer.add(host.keyframes("position", host.held([
-            (offset, offCentre), (offset + DemoBeat.pressEnd, offCentre),
-            (offset + DemoBeat.changeEnd, onCentre), (offset + DemoBeat.holdEnd, onCentre),
-            (offset + DemoBeat.resetEnd, offCentre), (offset + DemoBeat.loop, offCentre),
+            (0, offCentre), (DemoBeat.pressEnd, offCentre),
+            (DemoBeat.changeEnd, onCentre), (DemoBeat.holdEnd, onCentre),
+            (DemoBeat.resetEnd, offCentre), (DemoBeat.loop, offCentre),
         ])), forKey: Self.knobAnimationKey)
     }
 
@@ -2371,6 +2228,100 @@ final class DemoCursorView: NSView {
         shadow.set()
         Self.image.draw(in: bounds)
         NSGraphicsContext.current?.restoreGraphicsState()
+    }
+
+    // MARK: The click splash
+
+    /// One ring of the splash: when it sets off after the press, and how far it
+    /// gets before it is gone.
+    private struct SplashRing {
+        let delay: TimeInterval
+        let startRadius: CGFloat
+        let endRadius: CGFloat
+        let lineWidth: CGFloat
+    }
+
+    /// Two concentric hairline rings, the second a beat behind and smaller —
+    /// a sound wave leaving the click, which is the one place this audio app's
+    /// own character may show inside a mock of somebody else's chrome. Two, not
+    /// a burst of dots or a filled pulse: at pointer scale anything heavier
+    /// reads as a screen-recording tap indicator.
+    private static let splashRings = [
+        SplashRing(delay: 0, startRadius: 3, endRadius: 10, lineWidth: 1.25),
+        SplashRing(delay: 0.06, startRadius: 2, endRadius: 6.5, lineWidth: 1),
+    ]
+
+    /// Press to gone. Sized to the TIGHTEST press-to-cursor-fade window any
+    /// pass has — the prompt mock presses at 1.90 s and its cursor is fully
+    /// faded by 2.08 s — so the ripple always completes before the pointer it
+    /// belongs to disappears.
+    static let splashDuration: TimeInterval = 0.18
+
+    private var splashLayers: [CAShapeLayer] = []
+
+    /// The press flourish: rings ripple out FROM THE TIP at `time` (seconds
+    /// along `host`'s pass, mapped through its ``DemoMockView/stageWindow``
+    /// like every other score). The layers live inside this view, anchored on
+    /// ``tipPoint``, so they ride the cursor's transform — the splash follows
+    /// the pointer wherever the glide has taken it, with no coordinates for a
+    /// call site to keep in step.
+    ///
+    /// The layers' MODEL opacity is 0 and nothing ever changes it: only the
+    /// pass's keyframes make a ring visible, so a stopped, settled or headless
+    /// frame cannot carry one by construction. Pure `CALayer`s, so nothing here
+    /// can enter the accessibility tree either.
+    func addClickSplash(on host: DemoMockView, at time: TimeInterval) {
+        guard let layer else { return }
+        if splashLayers.isEmpty {
+            splashLayers = Self.splashRings.map { ring in
+                let shape = CAShapeLayer()
+                shape.fillColor = nil
+                shape.lineWidth = ring.lineWidth
+                shape.opacity = 0   // the model value — never anything else
+                layer.addSublayer(shape)
+                return shape
+            }
+        }
+        // Neutral ink, deliberately: the splash is narration, but it plays over
+        // surfaces that must read as macOS, and a gold or accent burst would
+        // claim macOS draws coloured feedback. Re-stamped per pass (like the
+        // switch tint), so an appearance change is picked up on the next one.
+        let ink = NSColor.labelColor.cgColor
+        for (ring, shape) in zip(Self.splashRings, splashLayers) {
+            shape.position = tipPoint
+            shape.strokeColor = ink
+            let circle = { (radius: CGFloat) in
+                CGPath(ellipseIn: CGRect(x: -radius, y: -radius,
+                                         width: radius * 2, height: radius * 2),
+                       transform: nil)
+            }
+            let small = circle(ring.startRadius)
+            let large = circle(ring.endRadius)
+
+            let start = time + ring.delay
+            let end = time + Self.splashDuration
+            shape.add(host.keyframes("opacity", [
+                (start - 0.01, 0), (start, 0.65), (end, 0),
+            ], timing: .easeOut), forKey: "splashFade")
+            shape.add(host.keyframes("path", [
+                (start - 0.01, small), (start, small), (end, large),
+            ], timing: .easeOut), forKey: "splashGrow")
+        }
+    }
+
+    // MARK: Test-support hooks
+
+    /// At rest: invisible and free of animations — what every settled frame
+    /// (and therefore every snapshot fixture) must find.
+    var test_splashIsSettled: Bool {
+        splashLayers.allSatisfy { $0.opacity == 0 && ($0.animationKeys() ?? []).isEmpty }
+    }
+
+    /// Mid-pass: every ring is carrying its score — what pins that a press site
+    /// actually wired the splash in.
+    var test_splashIsArmed: Bool {
+        !splashLayers.isEmpty
+            && splashLayers.allSatisfy { ($0.animationKeys() ?? []).contains("splashGrow") }
     }
 }
 

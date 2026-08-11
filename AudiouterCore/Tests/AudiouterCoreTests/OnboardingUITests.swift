@@ -537,16 +537,34 @@ import Testing
         let vc = makeVC(model: makeModel(audio: .denied))
         await vc.test_tapAllow(.audio)
         #expect(vc.test_demoMode == .settings)
+        #expect(vc.test_demoStage == nil, "every step but Speaker Sync starts at the pane itself")
     }
 
     /// Speaker Sync's approval only exists in Login Items — there is no prompt to
-    /// mirror, so it is always the Settings mock.
+    /// mirror, so it is always the Settings mock. Its mock has TWO stages, and
+    /// rests on the first: the notification macOS posts when the login item
+    /// registers, which the user has to act on before any pane opens.
     @Test func speakerSyncAlwaysShowsTheSettingsMock() async {
         let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 2))
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
         #expect(vc.test_activeStep == .speakerSync)
         #expect(vc.test_demoMode == .settings)
+        #expect(vc.test_demoStage == .banner)
+    }
+
+    /// The two-stage pass has the same contract as every one-stage one: it ends
+    /// where it started. Resting on the Login Items pane would show a switch the
+    /// user hasn't been told how to reach yet.
+    @Test func theLoginItemsDemoRestsOnTheNotificationNotThePane() {
+        let mock = DemoLoginItemsMockView(step: .speakerSync)
+        mock.layoutSubtreeIfNeeded()
+        #expect(mock.test_stage == .banner)
+
+        mock.startTimeline(loop: false)
+        mock.stopTimeline()
+
+        #expect(mock.test_stage == .banner, "a pass must end where it started")
     }
 
     @Test func demoSettlesWhenEveryStepIsDone() async {

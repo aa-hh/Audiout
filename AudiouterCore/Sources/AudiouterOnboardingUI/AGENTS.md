@@ -235,6 +235,40 @@ set changes, or when the gate/motion/demo rules change.
       `grantedText`; the ANATOMY is shared. `DemoPaneView.surfaceSize` grew to
       336 × 336 to seat the taller card with a margin around it (the pane has
       516 pt of height, so Replay still clears underneath).
+  - **Speaker Sync's demo has TWO stages, and it is the only one that does**
+    (owner decision 2026-08-11 — from a live run, where the demo jumped straight
+    to a Login Items pane the user had no idea how to reach). Its grant is the
+    only one that takes two acts: registering the login item raises no dialog at
+    all, so macOS posts a **notification** — "Background Items Added", with
+    "“Audiouter” added items that can run in the background. You can manage this
+    in Login Items Settings." (verified wording, macOS 13+) — and clicking THAT
+    is what opens the pane with the switch. One pass, two surfaces, two clicks:
+    the banner, cursor gliding to it and pressing it; a 0.3 s crossfade; then the
+    inherited Settings pane with the switch flipping on.
+    - The whole BANNER is the click target, not an invented "Show in Settings"
+      button: a real notification's default click is what opens Login Items, and
+      the banner carries no persistent button to draw. Nor does it carry the
+      source-app header, timestamp or hover actions — none of them add
+      recognisability at this size, and every one would be chrome we made up.
+    - `DemoLoginItemsMockView` **inherits** `DemoSettingsMockView` rather than
+      composing one: stage 2 IS the one-stage mock — the same drawn window, the
+      same switch, the same cursor — replayed later along the pass at
+      `stage2Start` (2.10 s) with `DemoBeat`'s rhythm untouched, so there is no
+      second copy of the pane's layout or its timing to keep in step. That is
+      what `DemoSwitchView.addTimeline(on:offset:)` and `DemoMockView.held(_:)`
+      exist for: a stage's score is written in the same seconds as everywhere
+      else, shifted, and its last value held out to the end of the pass.
+    - ONE cursor, two targets. It travels home while it is INVISIBLE (between
+      the banner press and stage 2's rest) — a jump nobody sees beats a second
+      pointer or a slide across a pane that isn't there yet. The banner's press
+      is a WASH layer, not a dip in its opacity: opacity is the crossfade's
+      channel, and two animations on one property fight.
+    - The settled frame is the BANNER (the "ends where it started" rule below,
+      applied to a two-stage pass): the notification is the first thing the user
+      will really meet, and resting on the pane would show a switch they haven't
+      been told how to reach. `test_demoStage` pins it — it reads the MODEL
+      state, which stays settled while a pass runs, so a running loop can't fake
+      a stage the pane isn't left painting.
   - **`DemoSystemColor` is a documented exception to "colour literals live only in
     `Tokens`"** (root `AGENTS.md`). Four values have no semantic equivalent that
     survives both appearances — above all, System Settings paints its sidebar
@@ -365,9 +399,10 @@ set changes, or when the gate/motion/demo rules change.
 | `SetupCardView` / `SetupCardContent` / `SetupCardState` | One permission card: collapsed strip ↔ expanded body on the shared clip-height motion, the locked/active surface treatment, and the card-level click target. The per-state title table lives on `SetupCardContent`. |
 | `ClipView` | The card body's masking container — the thing whose HEIGHT the collapse animates. |
 | `DemoPaneView` / `DemoMode` | The right pane: the elevated surface, the mode swap crossfade, the motion policy, the Replay button. |
-| `DemoMockView` | Timeline base class (restartable score, settled-state hook) for the two animated mocks. |
+| `DemoMockView` | Timeline base class (restartable score, settled-state hook, `held(_:)` for one stage of a multi-stage score) for the animated mocks. |
 | `DemoPromptMockView` / `DemoSettingsMockView` / `DemoSettledMockView` | The permission-dialog miniature, the Settings-pane miniature, and the calm completion state. |
-| `DemoWindowSurfaceView` / `DemoPushButtonView` / `DemoSwitchView` / `DemoSidebarView` / `DemoSettingsRowView` / `DemoGreekBarView` / `DemoPillView` / `DemoDotView` / `DemoCursorView` | The drawn parts of the mocks — window body, neutral capsule button, switch, sidebar, list row, greeked label, pill, circle, pointer. |
+| `DemoLoginItemsMockView` / `DemoStage` | Speaker Sync's two-stage pass — the "Background Items Added" notification, then the inherited Settings pane — and which of the two it rests on. |
+| `DemoWindowSurfaceView` / `DemoNotificationBannerView` / `DemoPushButtonView` / `DemoSwitchView` / `DemoSidebarView` / `DemoSettingsRowView` / `DemoGreekBarView` / `DemoPillView` / `DemoDotView` / `DemoCursorView` | The drawn parts of the mocks — window body, notification banner, neutral capsule button, switch, sidebar, list row, greeked label, pill, circle, pointer. |
 | `SystemSettingsOpener` | `NSWorkspace` seam for opening a `SystemSettingsPane`, with a Privacy & Security root fallback. |
 | `ProminentButton` | Accent-filled CTA button with key-window-aware title color. |
 | `IconTileView` / `RoundedContainerView` | Shared appearance-adaptive chrome (icon chip, grouped-inset card) — no stock AppKit equivalent. |
@@ -380,4 +415,4 @@ set changes, or when the gate/motion/demo rules change.
 | `AudiouterCore/Tests/AudiouterCoreTests/SetupFlowModelTests.swift` | The sequence, gate and Allow decision table this UI renders (Core, not this folder, but the seam it depends on). |
 | `AudiouterCore/Tests/AudiouterCoreTests/SetupModelTests.swift` | The underlying `SetupModel` probes/status, the Local Network found count, and the version-gated System Settings deep links. |
 | `AudiouterCore/Tests/AudiouterCoreTests/OnboardingPermissionColorTests.swift` | The four per-card tile colours: distinctness, contrast floors, granted-lights-gold, tile fill unchanged. |
-| `AudiouterCore/Sources/onboarding-snapshot` | Offscreen PNG fixtures (per-step, denied, complete, permission-lost × light/dark) in `dev/notes/onboarding-snapshots/`. |
+| `AudiouterCore/Sources/onboarding-snapshot` | Offscreen PNG fixtures (per-step — including Speaker Sync's two-stage demo at rest — denied, complete, permission-lost × light/dark) in `dev/notes/onboarding-snapshots/`. |

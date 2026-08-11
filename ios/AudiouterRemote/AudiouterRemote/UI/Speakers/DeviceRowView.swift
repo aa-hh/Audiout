@@ -69,6 +69,9 @@ struct DeviceRowView: View {
 
     // razor: DEBUG-only, for the concept sprint. See `LevelStyle`.
     @AppStorage(LevelStyle.storageKey) private var levelStyle: LevelStyle = .standard
+    // razor: DEBUG-only, while the detent's strength is being picked by feel.
+    // See `HapticBoost`.
+    @AppStorage(HapticBoost.storageKey) private var hapticBoost: HapticBoost = .standard
 
     /// D9's failure card takes the whole control slot: a `"failed"` device
     /// gets headline / details / Try Again INSTEAD of volume + mute. This is
@@ -425,7 +428,7 @@ struct DeviceRowView: View {
         // as the rail's tick and deliberately a fraction of its strength.
         // Passing a notch and running out of track are both news, but they are
         // not the same news, so they cannot be the same click.
-        .sensoryFeedback(.impact(weight: .light, intensity: WarmSignal.FaderDetents.intensity),
+        .sensoryFeedback(.impact(weight: .light, intensity: hapticBoost.detentIntensity),
                          trigger: detents.ticks)
         // Mute is confirmed rather than optimistic, exactly as Main Out's is,
         // so the tick rides the Mac's answer.

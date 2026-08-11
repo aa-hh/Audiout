@@ -32,6 +32,9 @@ struct RemoteSettingsView: View {
     // wins, delete this, `levelStylePicker`, and `LevelStyle` itself.
     #if DEBUG
     @AppStorage(LevelStyle.storageKey) private var levelStyle: LevelStyle = .standard
+    // razor: DEBUG-only tuner for the detent's strength. When a value wins,
+    // delete this, `hapticBoostPicker`, and `HapticBoost` itself.
+    @AppStorage(HapticBoost.storageKey) private var hapticBoost: HapticBoost = .standard
     #endif
     @State private var stagedBufferMs: Int?
     @State private var isApplyingBuffer = false
@@ -57,12 +60,22 @@ struct RemoteSettingsView: View {
             .pickerStyle(.segmented)
         }
     }
+
+    private var hapticBoostPicker: some View {
+        Section("Slider haptics") {
+            Picker("Detent strength", selection: $hapticBoost) {
+                ForEach(HapticBoost.allCases) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented)
+        }
+    }
     #endif
 
     var body: some View {
         Form {
             #if DEBUG
             levelStylePicker
+            hapticBoostPicker
             #endif
             if let snapshot = session.snapshot {
                 connectVolumeSection(snapshot)

@@ -626,6 +626,26 @@ import AudiouterProtocol
         #expect(seen == [1, 2, 3])
     }
 
+    @Test func theBoostLeavesTheDetentWeakerThanTheRailAtEverySetting() {
+        // The one thing the tuner is not allowed to change: the rails fire at
+        // full strength, so a boosted notch that reached 1.0 would make the
+        // stop and the crossing feel identical.
+        for boost in HapticBoost.allCases {
+            #expect(boost.detentIntensity < 1)
+        }
+    }
+
+    @Test func theBoostsAreTheStepsThePickerNames() {
+        // "+10%" has to be ten percent, and "+0%" has to be today's click
+        // unchanged — otherwise the setting picked by feel is not the setting
+        // that gets folded back into ``WarmSignal/FaderDetents/intensity``.
+        #expect(HapticBoost.standard.multiplier == 1.0)
+        #expect(HapticBoost.plus10.multiplier == 1.1)
+        #expect(HapticBoost.plus20.multiplier == 1.2)
+        #expect(HapticBoost.plus30.multiplier == 1.3)
+        #expect(HapticBoost.standard.detentIntensity == WarmSignal.FaderDetents.intensity)
+    }
+
     @Test func theDetentStepMatchesTheSpokenAdjustableStep() {
         // One notch means one thing whether it is felt or spoken: the rows'
         // `accessibilityAdjustableAction` moves by 5 too.

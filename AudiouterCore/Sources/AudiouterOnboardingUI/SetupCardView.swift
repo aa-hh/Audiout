@@ -661,6 +661,13 @@ final class SetupCardView: NSView {
     /// The in-flight guard is the UI half of single-flight.
     private var isCardClickable: Bool { state == .active && !isProbing }
 
+    /// The live card is a button, and it must act on the click that ACTIVATES
+    /// the app — same rule as `ProminentButton.acceptsFirstMouse` (the
+    /// bounce-to-Settings-and-back loop returns the user to an inactive app,
+    /// where a stock view spends the first click on activation). A non-live
+    /// card refuses the click either way, so it keeps stock behaviour.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { isCardClickable }
+
     /// AppKit hit-tests the deepest view first, so a click that lands on Skip,
     /// Allow… or the spinner never reaches here — the sub-controls sit above the
     /// card-level target by construction, with no coordinate maths to keep in

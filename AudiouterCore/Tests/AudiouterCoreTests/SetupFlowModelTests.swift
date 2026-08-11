@@ -588,29 +588,7 @@ import Testing
         #expect(await flow.allow(.localNetwork).outcome == .alreadyGranted)
     }
 
-    /// Every Allow click ends in exactly ONE named outcome in the decision log.
-    @Test func everyAllowClickLogsExactlyOneNamedOutcome() async throws {
-        let flow = SetupFlowModel(setup: makeSetup(audio: .granted))
-        let capture = TelemetryFlowLineCapture()
-        Telemetry._installTestSink { capture.append($0) }
-        _ = await flow.allow(.audio)
-        Telemetry._installTestSink(nil)   // flush barrier (serial queue) + removes the sink
-
-        let lines = capture.snapshot().filter { $0.contains("\"evt\":\"setup_allow\"") }
-        #expect(lines.count == 1, "one click, one outcome: \(lines)")
-        let line = try #require(lines.first)
-        #expect(line.contains("\"step\":\"audio\""), "line: \(line)")
-        #expect(line.contains("\"outcome\":\"prompt_triggered\""), "line: \(line)")
-    }
-}
-
-/// Captures lines from an installed `Telemetry` test sink. The sink is invoked
-/// from `Telemetry`'s own serial writer queue (a different thread than the test
-/// body), so a plain captured `var` won't do — same NSLock-guarded box
-/// `SetupModelTests` uses for the reported-vs-actual lines.
-private final class TelemetryFlowLineCapture: @unchecked Sendable {
-    private let lock = NSLock()
-    private var lines: [String] = []
-    func append(_ line: String) { lock.withLock { lines.append(line) } }
-    func snapshot() -> [String] { lock.withLock { lines } }
+    // The setup_allow / setup_done decision-log tests live in
+    // `SetupTelemetryTests` — `Telemetry._installTestSink` is process-global,
+    // so its users belong under `SerializedSharedState`, not here.
 }

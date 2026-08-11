@@ -310,12 +310,24 @@ public final class SetupFlowModel {
     /// audible tone probe, which stays reserved for an explicit Allow tap.
     /// Reports the first still-unmet required step so the UI can snap back to it
     /// with a plain explanation.
+    /// Like the Allow path, every verification logs exactly ONE named outcome
+    /// (`setup_done` + `outcome`): a live session's "Start listening took two
+    /// clicks" should be readable from the trail — finished, refused (and on
+    /// what), or a click the UI's single-flight swallowed (logged there) —
+    /// instead of guessed at.
     public func verifyForDone() async -> SetupFlowVerification {
         // The audit is the silent re-read (it is what catches a revocation the
         // window-focus refresh deliberately can't); its own return value uses
         // revocation semantics, so the Done verdict comes from the gate check.
         _ = await setup.auditRequiredPermissions()
-        guard let unmet = Self.firstUnmetRequiredStep(in: setup) else { return .complete }
+        guard let unmet = Self.firstUnmetRequiredStep(in: setup) else {
+            Telemetry.log(.permission, "setup_done", ["outcome": "finished"])
+            return .complete
+        }
+        Telemetry.log(.permission, "setup_done", [
+            "outcome": "refused",
+            "unmet": Self.telemetryName(unmet),
+        ])
         return .unmet(unmet)
     }
 

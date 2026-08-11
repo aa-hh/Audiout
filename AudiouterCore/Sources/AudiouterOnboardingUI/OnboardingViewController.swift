@@ -691,7 +691,12 @@ public final class OnboardingViewController: NSViewController {
     private var doneVerifyInFlight = false
 
     private func verifyThenFinish() async {
-        guard !doneVerifyInFlight else { return }
+        // The third `setup_done` outcome; "finished"/"refused" are logged by
+        // `verifyForDone()` itself, but a swallowed click never reaches it.
+        guard !doneVerifyInFlight else {
+            Telemetry.log(.permission, "setup_done", ["outcome": "swallowed_in_flight"])
+            return
+        }
         doneVerifyInFlight = true
         defer { doneVerifyInFlight = false }
         switch await flow.verifyForDone() {
@@ -961,6 +966,19 @@ public final class OnboardingViewController: NSViewController {
     public func test_allowIsReturnDefault(_ step: SetupStep) -> Bool {
         _ = view
         return cards[step]?.test_allowIsReturnDefault ?? false
+    }
+
+    /// Whether this card acts on the click that ACTIVATES the app (the
+    /// bounce-to-Settings-and-back fix — see `SetupCardView.acceptsFirstMouse`).
+    public func test_cardAcceptsFirstMouse(_ step: SetupStep) -> Bool {
+        _ = view
+        return cards[step]?.acceptsFirstMouse(for: nil) ?? false
+    }
+
+    /// Whether the CTA acts on the activating click (the v4 two-clicks fix).
+    public var test_doneAcceptsFirstMouse: Bool {
+        _ = view
+        return doneButton?.acceptsFirstMouse(for: nil) ?? false
     }
 
     /// Tap Done: re-verifies, then either finishes or snaps back.

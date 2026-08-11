@@ -794,6 +794,29 @@ import Testing
         #expect(vc.test_doneIsReturnDefault, "Done takes Return the moment it exists")
     }
 
+    /// v4 live fix ("Start listening took two clicks"): the last grant is often
+    /// detected by the poll while the user is still IN System Settings, whose
+    /// frontmost app can make macOS decline our re-activation — so the user
+    /// returns to an INACTIVE app, where a stock control spends the first click
+    /// activating the window. The CTA, every prominent Allow, and the live
+    /// card target act on that activating click; a locked strip keeps stock
+    /// behaviour. (The earlier headless `acceptsFirstMouse` probe on a bare
+    /// NSButton never exercised this path — this pins the overrides that do.)
+    @Test func theCTAAndLiveCardActOnTheActivatingClick() async {
+        let vc = makeVC(model: makeGrantableModel())
+        #expect(vc.test_cardAcceptsFirstMouse(.audio), "the live card acts on first mouse")
+        #expect(!vc.test_cardAcceptsFirstMouse(.bluetooth), "a locked strip keeps stock behaviour")
+        #expect(ProminentButton(title: "Allow…", target: nil, action: nil)
+                    .acceptsFirstMouse(for: nil),
+                "every prominent button — the card Allows live the same bounce loop")
+
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        vc.test_tapSkip(.remoteControl)
+
+        #expect(vc.test_doneAcceptsFirstMouse, "the CTA acts on the returning click")
+    }
+
     @Test func doneFinishesWhenReVerificationPasses() async {
         var doneFired = false
         let vc = makeVC(model: makeGrantableModel(), onDone: { doneFired = true })
@@ -866,6 +889,10 @@ import Testing
     /// A second click while Done's verification is still running is a no-op —
     /// single-flight, like the Allow path. Without it the second verification
     /// would collide with the first's browse and race it past `onDone`.
+    /// (Each click also leaves a named `setup_done` outcome in the decision
+    /// log — the swallowed click's line is the guard this test pins; the
+    /// line shapes themselves are pinned in `SetupTelemetryTests`, the
+    /// serialized suite that may install the process-global sink.)
     @Test func aSecondClickDuringDoneVerificationIsANoOp() async {
         let net = CollidingLocalNetwork()
         var doneCount = 0

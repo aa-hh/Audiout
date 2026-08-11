@@ -107,6 +107,20 @@ final class ProminentButton: NSButton {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// Act on the click that ACTIVATES the app (v4 live fix, "Start listening
+    /// took two clicks"). The Setup window's whole design bounces the user to
+    /// System Settings and back; the last grant is often detected by the poll
+    /// while the user is still IN Settings, and macOS's cooperative activation
+    /// may decline our poll-driven re-front while another app is frontmost —
+    /// so the user returns to an app that is NOT active, and a stock NSButton
+    /// spends their first click activating the window (`acceptsFirstMouse`
+    /// defaults to false for push buttons) and only presses on the second.
+    /// A window that deliberately sends you away SHOULD act on the returning
+    /// click, so every prominent button (the CTA and the card Allows, which
+    /// live the same bounce loop) accepts it. `shouldDelayWindowOrdering`
+    /// keeps its false default — we WANT the click to front the window too.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         keyStateObservers.forEach { NotificationCenter.default.removeObserver($0) }

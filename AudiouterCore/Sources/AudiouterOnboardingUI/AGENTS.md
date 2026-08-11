@@ -81,7 +81,14 @@ set changes, or when the gate/motion/demo rules change.
   `mouseUp`; there are no coordinates to keep in step. The card takes a
   `pointingHand` cursor rect and the shared row hover wash while it's live, and
   VoiceOver sees it as a `.button` named for the action (a non-live card is a
-  plain `.group`, because its press is refused).
+  plain `.group`, because its press is refused). **The live card, every
+  prominent Allow, and the CTA act on the click that ACTIVATES the app**
+  (`acceptsFirstMouse` overrides on `ProminentButton` and `SetupCardView`; v4
+  live fix 2026-08-11, "Start listening took two clicks"): the bounce to System
+  Settings and back often returns the user to an INACTIVE app — the poll grants
+  the last card while Settings is frontmost, where macOS may decline our
+  re-activation — and a stock control spends the returning click on activation.
+  Skip and other secondary controls keep stock first-mouse behaviour.
 - **Checkmark ⇔ capability title.** A card that has EARNED a checkmark shows the
   capability title; every state that hasn't (pending, skipped, and an auto-passed
   step the OS can't grant) keeps the imperative one. The auto-pass carries a NOTE

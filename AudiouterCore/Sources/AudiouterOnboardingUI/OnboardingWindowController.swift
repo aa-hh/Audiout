@@ -86,6 +86,11 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
         NotificationCenter.default.addObserver(
             self, selector: #selector(appDidBecomeActive),
             name: NSApplication.didBecomeActiveNotification, object: nil)
+        // The other half of the yield: losing the front is how we know the trip
+        // to System Settings really started (see `isYieldingToSettings`).
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(appDidResignActive),
+            name: NSApplication.didResignActiveNotification, object: nil)
     }
 
     /// Seam for `NSApp.keyWindow` so the take-key-only-when-unclaimed rule in
@@ -104,22 +109,55 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
     /// user comes back by granting (we activate ourselves) or by hand.
     private func yieldToSystemSettings() {
         window?.level = .normal
+        // Armed until we have ACTUALLY lost the front — see
+        // `appDidBecomeActive`, which must not undo the line above.
+        isYieldingToSettings = true
+    }
+
+    /// Set while a Settings trip has been started but the front has not yet
+    /// moved away from us.
+    ///
+    /// **The bug this closes (live, macOS 26): Settings opened BEHIND the setup
+    /// window even though the level drop above ran.** Clicking Allow can be the
+    /// same click that activates our app, and `didBecomeActiveNotification` is
+    /// delivered on the main run loop — while the Allow itself resolves through
+    /// an `await` before it reaches the deep link. So the order on real hardware
+    /// is: click → yield to `.normal` → `NSWorkspace.open` → *then* our own,
+    /// already-queued activation arrives and restores `.floating` (and re-orders
+    /// the window in) a beat before System Settings has finished coming
+    /// forward. Net effect: exactly the reported symptom, with the unit test
+    /// still green because it never had a stray activation in between.
+    ///
+    /// Losing the front is the only honest signal that the trip began, so that
+    /// is what disarms this — an activation that arrives without an intervening
+    /// deactivation is our own, not the user coming back.
+    private var isYieldingToSettings = false
+
+    @objc private func appDidResignActive() {
+        // System Settings (or anything else) took the front: the yield did its
+        // job, and the NEXT activation is a real return.
+        isYieldingToSettings = false
     }
 
     @objc private func appDidBecomeActive() {
         guard !didFinish else { return }
-        // Back in our app: take the floating level again (see
-        // `yieldToSystemSettings()`).
-        window?.level = .floating
-        // The floating level already keeps the window visible, so this hook only
-        // governs keyboard focus — and it must not grab it away from a sibling
-        // window the user actually clicked (Settings and Setup open together is a
-        // normal state: Setup is reached FROM Settings). Take key only when
-        // nothing else in the app holds it, e.g. returning from a permission
-        // prompt or System Settings.
-        let key = keyWindowProvider()
-        if key == nil || key === window {
-            window?.makeKeyAndOrderFront(nil)
+        // Not a return — our own activation catching up with the deep link we
+        // just fired. Re-floating (or re-ordering) here is what buried System
+        // Settings; the status re-read below is still worth doing.
+        if !isYieldingToSettings {
+            // Back in our app: take the floating level again (see
+            // `yieldToSystemSettings()`).
+            window?.level = .floating
+            // The floating level already keeps the window visible, so this hook
+            // only governs keyboard focus — and it must not grab it away from a
+            // sibling window the user actually clicked (Settings and Setup open
+            // together is a normal state: Setup is reached FROM Settings). Take
+            // key only when nothing else in the app holds it, e.g. returning
+            // from a permission prompt or System Settings.
+            let key = keyWindowProvider()
+            if key == nil || key === window {
+                window?.makeKeyAndOrderFront(nil)
+            }
         }
         // Returning to the app (e.g. back from System Settings) is exactly when a
         // permission the user just changed should be re-read — so the rows reflect
@@ -171,7 +209,13 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
         didFinish = true
         NotificationCenter.default.removeObserver(
             self, name: NSApplication.didBecomeActiveNotification, object: nil)
+        NotificationCenter.default.removeObserver(
+            self, name: NSApplication.didResignActiveNotification, object: nil)
         model.onChange = nil   // stop repainting a torn-down view
+        // A first-ask Local Network prime can outlive the window by up to its
+        // 60 s ceiling (listener + browsers live, every other Allow blocked
+        // behind the in-flight step) — closing the flow cancels it.
+        model.cancelLocalNetworkPrime()
         onFinished()
     }
 
@@ -206,6 +250,10 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
     /// Fire the app-reactivate hook directly — headless tests can't activate
     /// the app, and the key-steal guard is exactly what needs pinning.
     func test_appDidBecomeActive() { appDidBecomeActive() }
+
+    /// Fire the app-deactivate hook directly — "System Settings took the front"
+    /// is the step that turns the NEXT activation into a real return.
+    func test_appDidResignActive() { appDidResignActive() }
 }
 
 /// Bridges the VC's Done tap back to the window controller across the

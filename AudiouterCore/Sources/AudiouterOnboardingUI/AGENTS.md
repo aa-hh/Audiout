@@ -66,7 +66,8 @@ set changes, or when the gate/motion/demo rules change.
   step the OS can't grant) keeps the imperative one. The auto-pass carries a NOTE
   where the checkmark would be ("Requires macOS 14.2 or later"), because claiming a
   grant nobody made would be a lie. Local Network's earned title is the found COUNT
-  ("Found 3 speakers") rather than a checkmark — it is the detail a user can check.
+  ("3 speakers on your network" — found ≠ connected, and the phrasing must never
+  imply a connection) rather than a checkmark — it is the detail a user can check.
   The count is an `Int?`: `nil` means no browse ran at all (macOS 14, ungated), and
   `0` means a real browse that saw nothing on a permission that IS granted — two
   different sentences, neither implying the user did something they didn't.
@@ -95,19 +96,28 @@ set changes, or when the gate/motion/demo rules change.
   - **granted** completes the step — the permission is the gate, not the speaker.
     The earned title carries the real count, including the honest zero ("No
     speakers found yet — switch one on and it'll appear"); `nil` (macOS 14,
-    ungated, no browse ran) keeps its own line.
+    ungated, no browse ran) keeps its own line. **A proved grant is STICKY**: a
+    rescan that proves nothing (empty browse, in-flight `.undecided`) must never
+    take `.granted` back — only the mDNS policy refusal revokes it. The
+    activation-rescan downgrade was the live-caught state flap of 2026-08-11.
   - **denied** takes the ordinary two-mode shape: `offersSettingsFallback` is
     true, so the primary becomes "Open Settings…" — re-browsing a refusal only
     gets refused again. No speaker hint there: a speaker isn't the problem.
   - **requested** (asked, nothing answered) keeps the old no-dead-end handling:
-    the "No speakers found yet. Turn one on, then try again." line, a primary
-    **Try Again** that re-runs the prime, and "Open Settings…" as a quiet
-    SECONDARY beside it where that pane exists (`isLocalNetworkGated`, macOS
-    15+). Flipping this state to Settings-only left nothing able to re-browse the
-    speaker the user had just switched on.
+    the "Nothing has answered yet. If the permission dialog is open, choose
+    Allow — or try again." line (it must NOT claim "no speakers found" — this
+    state means the DIALOG went unanswered, not that a browse came up empty), a
+    primary **Try Again** that re-runs the prime, and "Open Settings…" as a
+    quiet SECONDARY beside it where that pane exists (`isLocalNetworkGated`,
+    macOS 15+). Flipping this state to Settings-only left nothing able to
+    re-browse the speaker the user had just switched on.
 - **A wait on screen always SAYS what it is waiting for.** The active card's
   in-flight state is a small spinner plus a caption in the TEXT column (never the
-  fixed accessory column — the wrap-stability rule is untouched), in two phases:
+  fixed accessory column — the wrap-stability rule is untouched). **The caption's
+  band is RESERVED**: the expanded card's height is identical with and without it
+  (the deterministic-height rule), so tapping Allow never shifts the cards below —
+  the show/hide height flap was a review-caught defect of 2026-08-11. The hint
+  label does not yet have the same reservation (known follow-up). Two phases:
   "Waiting for your answer…" while a system dialog is unanswered (Local Network
   up to its 60 s ceiling, Bluetooth, System Audio, Remote Control), then
   "Checking your network…" for Local Network's brief post-grant count, driven by
@@ -134,6 +144,21 @@ set changes, or when the gate/motion/demo rules change.
     about Settings. The seam is the content VC's `onWillOpenSystemSettings`
     closure, which the window controller wires to `yieldToSystemSettings()`;
     `test_windowLevel` is what pins the contract.
+  - **TRAP: the level drop only sticks if `appDidBecomeActive` is gated on
+    having actually LOST the front** (live fix 2026-08-11 — Settings still
+    opened behind the window with the drop in place). The click that fires
+    Allow is often the same click that activates our app, and
+    `didBecomeActiveNotification` is delivered on the run loop while the Allow
+    is still resolving through its `await` — so our own activation lands AFTER
+    the deep link and instantly restored `.floating` (and re-ordered the window
+    in) before System Settings finished coming forward. The window controller
+    now arms `isYieldingToSettings` on the yield and disarms it on
+    `didResignActiveNotification`: an activation with no deactivation in front
+    of it is our own, not a return, and re-floats nothing. The window still
+    can't get lost — the first real return (user click, or the grant-lands
+    `returnToFront()`, both of which follow a genuine resign) restores float.
+    `test_appDidResignActive()` is the seam; true cross-app z-order is not
+    observable headless, so this pair of hooks is what tests can pin.
 - `present()` sizes and centers on the FIRST call only — a re-present (the
   `presentSetup` re-entry guard, "Open Setup…" while open) must not re-center a
   window the user moved. The content's `fittingSize` is a FIXED

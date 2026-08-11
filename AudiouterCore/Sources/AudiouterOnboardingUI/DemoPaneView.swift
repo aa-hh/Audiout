@@ -7,8 +7,10 @@ import AudiouterSharedUI
 /// Which miniature the demo pane is showing for the active step. Public only
 /// because the Setup window's `test_demoMode` hook exposes it.
 public enum DemoMode: Equatable, Sendable {
-    /// The step's first ask: a miniature of the system permission DIALOG, with
-    /// a cursor pressing Allow.
+    /// The step's first ask: a miniature of whatever surface that ask raises,
+    /// with a cursor pressing its confirming button — the privacy dialog for
+    /// most steps, the Accessibility alert and the pane it hands off to for
+    /// Remote Control.
     case prompt
     /// The retry path (and Speaker Sync always, which has no prompt at all): a
     /// miniature of the System Settings pane, with a toggle switching on.
@@ -18,8 +20,8 @@ public enum DemoMode: Equatable, Sendable {
 }
 
 /// Where a TWO-STAGE mock is in its pass. One step has one — Remote Control,
-/// whose retry re-fires the system alert before the Settings pane. Public only
-/// because the Setup window's `test_demoStage` hook exposes it.
+/// whose first ask raises the system alert before the Settings pane it opens.
+/// Public only because the Setup window's `test_demoStage` hook exposes it.
 public enum DemoStage: Equatable, Sendable {
     /// The system ALERT that hands the user off to Settings — the first of the
     /// two clicks, and the thing a two-stage pass rests on.
@@ -231,18 +233,19 @@ final class DemoPaneView: NSView {
     private static func makeMock(step: SetupStep?, mode: DemoMode) -> NSView {
         guard let step, mode != .settled else { return DemoSettledMockView() }
         switch mode {
-        case .prompt:   return DemoPromptMockView(step: step)
-        // Remote Control reaches its switch through something else first, so
-        // its Settings mode is a two-stage pass rather than the bare pane: its
-        // retry raises the system ALERT again, whose own button is the only
-        // path that highlights us in the list. Every other step starts at the
-        // pane — Speaker Sync included, whose "Open Login Items…" opens System
-        // Settings directly, with no alert in between.
-        case .settings:
+        // Remote Control's FIRST ask isn't the privacy card at all: it raises
+        // the Accessibility ALERT, and that alert's own button is what opens the
+        // pane — two surfaces, two clicks, so its first ask plays both. Every
+        // other step's first ask really is the one-surface privacy dialog.
+        case .prompt:
             switch step {
             case .remoteControl: return DemoSettingsHandoffMockView(step: step)
-            default:             return DemoSettingsMockView(step: step)
+            default:             return DemoPromptMockView(step: step)
             }
+        // Every retry lands on the pane itself — Remote Control's included, now
+        // that its second click deep-links there, and Speaker Sync's, whose
+        // "Open Login Items…" opens System Settings directly.
+        case .settings: return DemoSettingsMockView(step: step)
         case .settled:  return DemoSettledMockView()
         }
     }
@@ -1451,17 +1454,17 @@ final class DemoSettingsMockView: DemoMockView {
     }
 }
 
-// MARK: - Two-stage retry mock
+// MARK: - Two-stage first-ask mock
 
-/// Remote Control's retry, which is TWO surfaces rather than one.
+/// Remote Control's FIRST ask, which is TWO surfaces rather than one.
 ///
-/// Its "Open Settings…" doesn't deep-link anywhere — it re-fires the
-/// Accessibility ask, because that panel's own "Open System Settings" button is
-/// the only path that scrolls to and highlights Audiouter in the list (see this
-/// folder's AGENTS.md). So the user has two clicks to make, on two different
-/// surfaces, and a demo that opened straight onto the Settings pane skipped the
-/// first one — it showed the toggle without showing how the pane carrying it is
-/// reached.
+/// Its Allow doesn't raise a privacy dialog the user answers in place: it raises
+/// the Accessibility Access ALERT, whose only forward button opens System
+/// Settings, where the actual toggle lives. So the user has two clicks to make,
+/// on two different surfaces, and a demo that opened straight onto the Settings
+/// pane skipped the first one — it showed the toggle without showing how the
+/// pane carrying it is reached. (The RETRY does land on the pane directly, and
+/// gets the one-stage mock like every other step.)
 ///
 /// One pass, one clock: the system ALERT with the pointer pressing **Open System
 /// Settings**, a crossfade, then the ordinary Settings pass with the pointer

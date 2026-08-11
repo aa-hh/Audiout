@@ -67,6 +67,13 @@ public final class OnboardingViewController: NSViewController {
     /// privacy pane or Login Items). The window controller uses it to drop this
     /// window's `.floating` level, so System Settings can actually come to the
     /// front — see that class for the amended decision.
+    ///
+    /// It also fires for Remote Control's ASK, which opens no pane of its own:
+    /// the Accessibility Access prompt is an ordinary alert panel at normal
+    /// level, not a TCC dialog drawn above everything, so a floating window
+    /// buries it exactly the way it buries Settings. The name is kept — that
+    /// alert's only button opens System Settings anyway, and every one of the
+    /// four call sites is on the way there.
     public var onWillOpenSystemSettings: (() -> Void)?
 
     private var cards: [SetupStep: SetupCardView] = [:]
@@ -509,9 +516,9 @@ public final class OnboardingViewController: NSViewController {
         // Login Items is Speaker Sync's only mode — its Allow is already the
         // Settings button, so there is no second mode to switch into.
         case .speakerSync:   return false
-        // Remote Control's "Open Settings…" re-fires the Accessibility PROMPT
-        // (the prompt's own button is the only path that highlights this app in
-        // the list); the label changes, the destination doesn't.
+        // Remote Control's prompt is spent once it has been asked: `.requested`
+        // means "asked, and Accessibility still isn't trusted", and asking again
+        // silently no-ops. The retry deep-links to the Accessibility pane.
         case .remoteControl: return model.remoteControlStatus == .requested
         }
     }
@@ -581,8 +588,8 @@ public final class OnboardingViewController: NSViewController {
     /// prompt, System Settings) and restore keyboard focus.
     private func returnToFront() {
         // Counted before the headless bail-out: activation itself is invisible
-        // to a headless test, but WHETHER to activate is what Local Network's
-        // rule decides (see `allowTapped`).
+        // to a headless test, but WHETHER to activate is what
+        // `shouldReturnToFront(after:)` decides.
         test_returnToFrontCount += 1
         guard !HeadlessRuntime.isActive else { return }
         NSApp?.activate(ignoringOtherApps: true)
@@ -707,33 +714,57 @@ public final class OnboardingViewController: NSViewController {
         guard allowInFlight == nil else { return }   // single-flight, UI half
         allowInFlight = step
         refresh(animated: false)                     // spinner in, instantly
-        allowTask = Task { @MainActor in
-            let result = await flow.allow(step)
-            allowInFlight = nil
-            switch result.destination {
-            case .none:
-                // A prompt ran (or was refused): the user came back from a
-                // system dialog, so take the front again. EXCEPT Local
-                // Network: its "prompt" is a browse with no OS status API
-                // (TN3179) to tell a real dismissal from the dialog still
-                // being up — a plain timeout is not evidence the user is
-                // done. Reactivating here steals focus mid-dialog and leaves
-                // the real permission alert dimmed and unclickable. Only
-                // re-front on positive evidence the grant landed; else leave
-                // it be —
-                // the next natural activation (the user's own click back, or
-                // a re-open) brings the window forward again.
-                if step != .localNetwork || model.localNetworkStatus == .granted {
-                    returnToFront()
-                }
-            case .settingsPane(let pane):
-                onWillOpenSystemSettings?()
-                onOpenSettings(pane)
-            case .loginItems:
-                onWillOpenSystemSettings?()
-                model.openPTPHelperLoginItems()
-            }
-            refresh()
+        allowTask = Task { @MainActor in await performAllow(step) }
+    }
+
+    /// Run one Allow to completion: yield the window level if this step is about
+    /// to raise something we'd otherwise cover, fire it, perform whatever
+    /// destination it names, and repaint. The caller has already claimed
+    /// `allowInFlight`.
+    private func performAllow(_ step: SetupStep) async {
+        // Remote Control is the one step whose ASK needs the yield too. Its
+        // prompt is a plain macOS ALERT PANEL — ordinary window chrome at normal
+        // level, not a TCC dialog a system process draws above everything — so a
+        // floating Setup window buries it and the user never sees what they just
+        // asked for (owner live observation 2026-08-11). It has to drop BEFORE
+        // the ask: by the time `allow` returns, the alert is already on screen.
+        // Harmless when the ask short-circuits and no alert appears — the yield
+        // is idempotent, and `appDidBecomeActive` restores the level the next
+        // time this app comes forward.
+        if step == .remoteControl { onWillOpenSystemSettings?() }
+        let result = await flow.allow(step)
+        allowInFlight = nil
+        switch result.destination {
+        case .none:
+            if shouldReturnToFront(after: step) { returnToFront() }
+        case .settingsPane(let pane):
+            onWillOpenSystemSettings?()
+            onOpenSettings(pane)
+        case .loginItems:
+            onWillOpenSystemSettings?()
+            model.openPTPHelperLoginItems()
+        }
+        refresh()
+    }
+
+    /// Whether an Allow that stayed in-app (no Settings destination) may pull the
+    /// window back to the front. Normally yes — the user came back from a system
+    /// dialog and should land on setup rather than on whatever was behind it.
+    ///
+    /// Two steps say no without positive evidence the grant landed, for the same
+    /// reason: the system surface they raised may well still be up, and
+    /// re-fronting over it leaves the real dialog dimmed and unclickable.
+    private func shouldReturnToFront(after step: SetupStep) -> Bool {
+        switch step {
+        // Local Network's "prompt" is a browse, with no OS status API (TN3179)
+        // to tell a real dismissal from the dialog still being open — a plain
+        // timeout is not evidence the user is done.
+        case .localNetwork: return model.localNetworkStatus == .granted
+        // The Accessibility alert has just OPENED (that is what the yield above
+        // is for); fronting ourselves now would re-bury the very panel we
+        // stepped aside for.
+        case .remoteControl: return model.remoteControlStatus == .granted
+        case .audio, .bluetooth, .speakerSync: return true
         }
     }
 
@@ -756,8 +787,9 @@ public final class OnboardingViewController: NSViewController {
     // MARK: Test-support hooks
 
     /// How many times the flow decided to pull the window back to the front.
-    /// Local Network's rule — never on a bare probe timeout, because the system
-    /// dialog may still be open — has no other headless signal.
+    /// ``shouldReturnToFront(after:)``'s two refusals — a Local Network browse
+    /// that proved nothing, and a Remote Control alert that has only just
+    /// opened — have no other headless signal.
     public private(set) var test_returnToFrontCount = 0
 
     /// The expanded card's step (nil once every step is done or skipped).
@@ -834,18 +866,14 @@ public final class OnboardingViewController: NSViewController {
         return !card.test_isCardClickable && card.test_pressCard() == false
     }
 
-    /// Drive a card's Allow exactly as the button does, and wait for it.
+    /// Drive a card's Allow exactly as the button does, and wait for it — the
+    /// same ``performAllow(_:)`` the real click runs, so the level yield and the
+    /// return-to-front rules are the ones under test rather than a re-write of
+    /// them.
     public func test_tapAllow(_ step: SetupStep) async {
         _ = view
         allowInFlight = step
-        let result = await flow.allow(step)
-        allowInFlight = nil
-        switch result.destination {
-        case .none: break
-        case .settingsPane(let pane): onWillOpenSystemSettings?(); onOpenSettings(pane)
-        case .loginItems: onWillOpenSystemSettings?(); model.openPTPHelperLoginItems()
-        }
-        refresh()
+        await performAllow(step)
     }
 
     /// Drive each step's Allow in order — how the snapshot harness reaches
@@ -880,9 +908,8 @@ public final class OnboardingViewController: NSViewController {
     /// Which miniature the demo pane is showing.
     public var test_demoMode: DemoMode { _ = view; return demoPane.test_mode }
 
-    /// Which surface a two-stage demo rests on — Speaker Sync's and Remote
-    /// Control's alike, since both now open on the same system alert. `nil` for
-    /// every step whose mock has one surface.
+    /// Which surface a two-stage demo rests on. Remote Control's first ask is
+    /// the only one — `nil` for every other step, and for its own retry.
     public var test_demoStage: DemoStage? { _ = view; return demoPane.test_stage }
 
     /// Whether the demo's timeline is running (the zero-idle-CPU rule).

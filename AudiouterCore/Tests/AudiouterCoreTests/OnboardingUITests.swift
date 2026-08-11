@@ -49,6 +49,75 @@ import Testing
         }
         func probe() async -> Bool { await probeFoundSpeakers() > 0 }
     }
+    /// Reports a fixed ``LocalNetworkOutcome`` — the refusal and the
+    /// grant-with-no-speakers only the real primer's two signals can produce.
+    private struct CannedOutcomeLocalNetwork: LocalNetworkPriming {
+        let outcome: LocalNetworkOutcome
+        func probe() async -> Bool {
+            guard case .granted(let found) = outcome else { return false }
+            return found > 0
+        }
+        func prime(browseSeconds: TimeInterval,
+                   onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome {
+            if case .granted = outcome { onReachable() }
+            return outcome
+        }
+    }
+
+    /// A prime the test drives step by step, so both halves of the wait are
+    /// observable on screen: parked with the dialog notionally still up, then
+    /// parked again after the network proved reachable while the count fills in.
+    private final class SteppedLocalNetwork: LocalNetworkPriming, @unchecked Sendable {
+        let found: Int
+        init(found: Int) { self.found = found }
+
+        private let lock = NSLock()
+        private var resumeGate: (() -> Void)?
+        private var parkedWaiter: (() -> Void)?
+
+        func probe() async -> Bool { found > 0 }
+
+        func prime(browseSeconds: TimeInterval,
+                   onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome {
+            await park()
+            onReachable()
+            await park()
+            return .granted(foundSpeakers: found)
+        }
+
+        private func park() async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let waiter: (() -> Void)? = lock.withLock {
+                    resumeGate = { continuation.resume() }
+                    let waiter = parkedWaiter
+                    parkedWaiter = nil
+                    return waiter
+                }
+                waiter?()
+            }
+        }
+
+        func waitUntilParked() async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let alreadyParked: Bool = lock.withLock {
+                    if resumeGate != nil { return true }
+                    parkedWaiter = { continuation.resume() }
+                    return false
+                }
+                if alreadyParked { continuation.resume() }
+            }
+        }
+
+        func resume() {
+            let gate: (() -> Void)? = lock.withLock {
+                let gate = resumeGate
+                resumeGate = nil
+                return gate
+            }
+            gate?()
+        }
+    }
+
     /// A Bluetooth prompt that never reports back — the wedge case.
     private struct NeverDecidingBluetooth: BluetoothPermissionPriming {
         func prime(onDecided: @escaping @Sendable () -> Void) {}
@@ -375,6 +444,115 @@ import Testing
         await vc.test_tapAllow(.localNetwork)
 
         #expect(vc.test_returnToFrontCount > before)
+    }
+
+    /// A REFUSAL is answered evidence too — the dialog is gone, so the window
+    /// comes back rather than hiding behind an alert that no longer exists.
+    @Test func aRefusedLocalNetworkBrowseTakesTheFrontBack() async {
+        let vc = makeVC(model: makeModel(audio: .granted,
+                                         localNetwork: CannedOutcomeLocalNetwork(outcome: .denied)))
+        await vc.test_tapAllow(.audio)
+        let before = vc.test_returnToFrontCount
+
+        await vc.test_tapAllow(.localNetwork)
+
+        #expect(vc.test_returnToFrontCount > before)
+    }
+
+    /// A refused Local Network is the one state where re-browsing is pointless,
+    /// so the card stops offering a retry and becomes the Settings deep link —
+    /// the same two-mode shape a denied System Audio or Bluetooth card takes.
+    @Test func aRefusedLocalNetworkCardOffersSettingsInsteadOfARetry() async {
+        var opened: [SystemSettingsPane] = []
+        let vc = makeVC(model: makeModel(audio: .granted,
+                                         localNetwork: CannedOutcomeLocalNetwork(outcome: .denied)),
+                        onOpenSettings: { opened.append($0) })
+        await vc.test_allow([.audio, .localNetwork])
+
+        #expect(vc.test_activeStep == .localNetwork, "a refusal does not advance the flow")
+        #expect(vc.test_buttonTitles(of: .localNetwork) == ["Open Settings…"])
+        #expect(vc.test_hint(of: .localNetwork) == nil, "no speaker advice — a speaker isn't the problem")
+
+        await vc.test_tapAllow(.localNetwork)
+
+        #expect(opened == [.localNetwork])
+    }
+
+    /// The permission is what completes this step: a grant with nothing switched
+    /// on still earns the checkmark, and the title says exactly what happened.
+    @Test func aGrantedLocalNetworkWithNoSpeakersStillCompletes() async {
+        let vc = makeVC(model: makeModel(audio: .granted,
+                                         localNetwork: CannedOutcomeLocalNetwork(
+                                             outcome: .granted(foundSpeakers: 0))))
+        await vc.test_allow([.audio, .localNetwork])
+
+        #expect(vc.test_activeStep == .bluetooth, "the permission landed, so the flow moves on")
+        #expect(vc.test_title(of: .localNetwork)
+                == "No speakers found yet \u{2014} switch one on and it'll appear")
+        #expect(vc.test_hasCheckmark(.localNetwork))
+    }
+
+    /// A Local Network prime can sit a full minute on an unanswered dialog, so
+    /// the card has to say what it is waiting for — and then say something
+    /// different once the answer lands and only the count is left.
+    @Test func theLocalNetworkCardNamesBothHalvesOfItsWait() async {
+        let net = SteppedLocalNetwork(found: 2)
+        let vc = makeVC(model: makeModel(audio: .granted, localNetwork: net))
+        await vc.test_tapAllow(.audio)
+
+        let priming = Task { await vc.test_tapAllow(.localNetwork) }
+
+        await net.waitUntilParked()
+        await waitUntil { vc.test_statusCaption(of: .localNetwork) != nil }
+        #expect(vc.test_statusCaption(of: .localNetwork) == "Waiting for your answer\u{2026}")
+        #expect(vc.test_buttonTitles(of: .localNetwork).isEmpty, "no second ask while one is in flight")
+
+        net.resume()                                    // the browse reaches the network
+        await net.waitUntilParked()
+        await waitUntil { vc.test_statusCaption(of: .localNetwork) == "Checking your network\u{2026}" }
+        #expect(vc.test_statusCaption(of: .localNetwork) == "Checking your network\u{2026}")
+
+        net.resume()
+        await priming.value
+
+        #expect(vc.test_statusCaption(of: .localNetwork) == nil, "the wait clears with the answer")
+        #expect(vc.test_title(of: .localNetwork) == "Found 2 speakers")
+    }
+
+    /// A refusal skips the second half entirely — there is nothing left to
+    /// check, so the card goes straight to its actionable denied state.
+    @Test func aRefusedLocalNetworkLeavesNoWaitOnScreen() async {
+        let vc = makeVC(model: makeModel(audio: .granted,
+                                         localNetwork: CannedOutcomeLocalNetwork(outcome: .denied)))
+        await vc.test_allow([.audio, .localNetwork])
+
+        #expect(vc.test_statusCaption(of: .localNetwork) == nil)
+        #expect(!vc.test_isProbing(.localNetwork))
+        #expect(vc.test_buttonTitles(of: .localNetwork) == ["Open Settings…"])
+    }
+
+    /// An undecided prime (the dialog is still up when the ceiling expires) must
+    /// leave the card ACTIONABLE, never stuck saying it is waiting.
+    @Test func anUndecidedLocalNetworkPrimeLeavesTheCardActionable() async {
+        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 0))
+        await vc.test_allow([.audio, .localNetwork])
+
+        #expect(vc.test_statusCaption(of: .localNetwork) == nil, "never a stuck wait")
+        #expect(vc.test_buttonTitles(of: .localNetwork) == ["Try Again", "Open Settings…"])
+        #expect(vc.test_isCardClickable(.localNetwork))
+    }
+
+    /// The waiting line is shared: every card whose Allow raises a system dialog
+    /// says the same thing while that dialog is unanswered.
+    @Test func anUndecidedBluetoothPromptSaysWhatItIsWaitingFor() async {
+        let model = makeModel(audio: .granted, foundSpeakers: 2,
+                              bluetoothPrimer: NeverDecidingBluetooth())
+        let vc = makeVC(model: model)
+        await vc.test_allow([.audio, .localNetwork])
+
+        await vc.test_tapAllow(.bluetooth)
+
+        #expect(vc.test_statusCaption(of: .bluetooth) == "Waiting for your answer\u{2026}")
     }
 
     /// The demoted link still works, and still goes to the Local Network pane.

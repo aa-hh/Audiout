@@ -66,10 +66,10 @@ set changes, or when the gate/motion/demo rules change.
   step the OS can't grant) keeps the imperative one. The auto-pass carries a NOTE
   where the checkmark would be ("Requires macOS 14.2 or later"), because claiming a
   grant nobody made would be a lie. Local Network's earned title is the found COUNT
-  ("Found 3 speakers") rather than a checkmark — macOS won't confirm that
-  permission, but a speaker the browse saw is proof the user can check; a count of
-  zero there means the step passed with no browse at all (macOS 14, ungated), so the
-  copy must not imply the user did anything.
+  ("Found 3 speakers") rather than a checkmark — it is the detail a user can check.
+  The count is an `Int?`: `nil` means no browse ran at all (macOS 14, ungated), and
+  `0` means a real browse that saw nothing on a permission that IS granted — two
+  different sentences, neither implying the user did something they didn't.
 - **The two-mode Allow.** First fire runs the native prompt/probe; once that prompt
   is spent the same slot becomes "Open Settings…". Which statuses count as spent
   lives in `offersSettingsFallback(_:)` and MUST stay in lockstep with
@@ -86,14 +86,35 @@ set changes, or when the gate/motion/demo rules change.
   the wait expires after `bluetoothPromptTimeout` (10 s) so a prompt whose decision
   callback never fires can't latch the card shut — the next click asks again under
   the `prompt_rearmed` outcome.
-- **Local Network must never claim a denial, and must never dead-end.** A browse
-  that found nothing is indistinguishable from a refusal, so the card adds the "No
-  speakers found yet. Turn one on, then try again." line — and because this card's
-  "prompt" IS the browse, its primary stays a **Try Again** that re-runs the browse
-  (`offersSettingsFallback` is always false for it). "Open Settings…" is a quiet
-  SECONDARY beside it, and only where that pane exists (`isLocalNetworkGated`,
-  macOS 15+). Flipping this card to Settings-only left nothing able to re-browse the
-  speaker the user had just switched on.
+- **Local Network now proves BOTH answers, and still must never dead-end**
+  (2026-08-11 — this REPLACES the earlier "must never claim a denial" rule, which
+  was true only while the browse was the sole signal). `LocalNetworkPrimer`
+  publishes its own Bonjour service and browses for it, so the GRANT is provable
+  with no speaker on the network, and an mDNS `kDNSServiceErr_PolicyDenied` is a
+  real refusal. Three card shapes follow:
+  - **granted** completes the step — the permission is the gate, not the speaker.
+    The earned title carries the real count, including the honest zero ("No
+    speakers found yet — switch one on and it'll appear"); `nil` (macOS 14,
+    ungated, no browse ran) keeps its own line.
+  - **denied** takes the ordinary two-mode shape: `offersSettingsFallback` is
+    true, so the primary becomes "Open Settings…" — re-browsing a refusal only
+    gets refused again. No speaker hint there: a speaker isn't the problem.
+  - **requested** (asked, nothing answered) keeps the old no-dead-end handling:
+    the "No speakers found yet. Turn one on, then try again." line, a primary
+    **Try Again** that re-runs the prime, and "Open Settings…" as a quiet
+    SECONDARY beside it where that pane exists (`isLocalNetworkGated`, macOS
+    15+). Flipping this state to Settings-only left nothing able to re-browse the
+    speaker the user had just switched on.
+- **A wait on screen always SAYS what it is waiting for.** The active card's
+  in-flight state is a small spinner plus a caption in the TEXT column (never the
+  fixed accessory column — the wrap-stability rule is untouched), in two phases:
+  "Waiting for your answer…" while a system dialog is unanswered (Local Network
+  up to its 60 s ceiling, Bluetooth, System Audio, Remote Control), then
+  "Checking your network…" for Local Network's brief post-grant count, driven by
+  the primer's OWN reachability callback (`SetupModel.localNetworkPhase`) — never
+  a timer. A refusal has no second phase, and an undecided prime clears the
+  caption and returns the card to its actionable state; a wait must never latch.
+  Speaker Sync is unchanged (its Login Items approval is a poll, not our prompt).
 - **The window is deliberately `.floating` while open** (owner decision 2026-08-07,
   punch-list W10 — this REVERSES an earlier reversal, so read the history before
   touching it). The first floating version was demoted to normal level because it
@@ -344,4 +365,4 @@ set changes, or when the gate/motion/demo rules change.
 | `AudiouterCore/Tests/AudiouterCoreTests/SetupFlowModelTests.swift` | The sequence, gate and Allow decision table this UI renders (Core, not this folder, but the seam it depends on). |
 | `AudiouterCore/Tests/AudiouterCoreTests/SetupModelTests.swift` | The underlying `SetupModel` probes/status, the Local Network found count, and the version-gated System Settings deep links. |
 | `AudiouterCore/Tests/AudiouterCoreTests/OnboardingPermissionColorTests.swift` | The four per-card tile colours: distinctness, contrast floors, granted-lights-gold, tile fill unchanged. |
-| `AudiouterCore/Sources/onboarding-snapshot` | Offscreen PNG fixtures (per-step, denied, complete, permission-lost × light/dark) in `dev/notes/onboarding-snapshots/`. |
+| `AudiouterCore/Sources/onboarding-snapshot` | Offscreen PNG fixtures (per-step, the in-flight wait, denied, complete, permission-lost × light/dark) in `dev/notes/onboarding-snapshots/`. |

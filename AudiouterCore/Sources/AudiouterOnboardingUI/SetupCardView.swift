@@ -38,22 +38,24 @@ struct SetupCardContent {
     /// The one place the per-state title table lives (brief §"Card anatomy":
     /// imperative → earned capability).
     ///
-    /// `foundSpeakers` only matters for Local Network, whose completed title IS
-    /// the proof — "Found 3 speakers" is something the user can check, where a
-    /// checkmark for a permission macOS won't confirm is a claim we can't back.
-    /// A count of zero there means the step completed WITHOUT a browse (macOS
-    /// 14, where local network isn't gated at all), so the copy must not imply
-    /// the user did anything.
-    func title(for state: SetupCardState, foundSpeakers: Int = 0) -> String {
+    /// `foundSpeakers` only matters for Local Network, whose completed title
+    /// carries the browse's real count — "Found 3 speakers" is something the
+    /// user can check. `nil` means NO browse ran at all (macOS 14, where local
+    /// network isn't gated), so that copy must not imply the user did anything;
+    /// a count of zero is a genuine browse that saw nothing, which since the
+    /// self-discovery primer still completes the step (the PERMISSION is what
+    /// was granted), so its copy says exactly that and nothing more.
+    func title(for state: SetupCardState, foundSpeakers: Int? = nil) -> String {
         switch state {
         case .active, .pending, .skipped, .autoPassed:
             return activeTitle
         case .completed:
             guard step == .localNetwork else { return completedTitle }
             switch foundSpeakers {
-            case 0: return "Speakers on your Wi\u{2011}Fi are already reachable"
+            case nil: return "Speakers on your Wi\u{2011}Fi are already reachable"
+            case 0: return "No speakers found yet \u{2014} switch one on and it'll appear"
             case 1: return "Found 1 speaker"
-            default: return "Found \(foundSpeakers) speakers"
+            case let count?: return "Found \(count) speakers"
             }
         }
     }
@@ -128,6 +130,9 @@ final class SetupCardView: NSView {
     /// Height reserved for the accessory row, so swapping a button for the
     /// spinner never changes the card's height.
     static let accessoryHeight: CGFloat = 24
+    /// What the in-flight caption's spinner + its gap take out of the text
+    /// column, so the caption wraps inside the same column the copy does.
+    static let captionSpinnerColumn: CGFloat = 22
     /// The checkmark's grown width (Wispr's 0 → 20 slide-in).
     static let checkmarkWidth: CGFloat = 20
     /// How far a locked step's icon tile fades. Enough to read as not-yet-yours
@@ -174,6 +179,13 @@ final class SetupCardView: NSView {
     /// The honest "asked, found nothing" line under Local Network's copy — nil
     /// (hidden) for every other state and step.
     private let hintLabel = NSTextField(labelWithString: "")
+    /// What the card says WHILE a prompt or probe is in flight — a Local
+    /// Network prime can sit a full minute on an unanswered dialog, and a bare
+    /// spinner for that long reads as a hang. Lives in the TEXT column beside
+    /// its spinner, never in the fixed accessory column, so nothing about it can
+    /// move a button or re-wrap the copy.
+    private let captionLabel = NSTextField(labelWithString: "")
+    private let captionRow = NSStackView()
     private let checkmark = NSImageView()
     /// Sits in the same trailing slot as the checkmark, for a step the flow
     /// hasn't reached: locked steps have to READ locked, not merely un-ticked.
@@ -216,7 +228,7 @@ final class SetupCardView: NSView {
         self.onOpenSettings = onOpenSettings
         super.init(frame: .zero)
         build()
-        apply(.pending, foundSpeakers: 0, isProbing: false, offersSettingsFallback: false, animated: false)
+        apply(.pending, foundSpeakers: nil, isProbing: false, offersSettingsFallback: false, animated: false)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -283,6 +295,22 @@ final class SetupCardView: NSView {
         spinner.isDisplayedWhenStopped = false
         spinner.translatesAutoresizingMaskIntoConstraints = false
 
+        captionLabel.font = Tokens.Font.caption
+        captionLabel.textColor = Tokens.Color.secondaryLabel
+        captionLabel.lineBreakMode = .byWordWrapping
+        captionLabel.maximumNumberOfLines = 0
+        captionLabel.preferredMaxLayoutWidth = Self.textColumnWidth - Self.captionSpinnerColumn
+        captionLabel.translatesAutoresizingMaskIntoConstraints = false
+        captionRow.orientation = .horizontal
+        // Centre, not baseline: a progress indicator has no baseline to align
+        // text to, and AppKit resolves that by not aligning anything.
+        captionRow.alignment = .centerY
+        captionRow.spacing = 6
+        captionRow.translatesAutoresizingMaskIntoConstraints = false
+        captionRow.addArrangedSubview(spinner)
+        captionRow.addArrangedSubview(captionLabel)
+        captionRow.isHidden = true
+
         primarySlot.translatesAutoresizingMaskIntoConstraints = false
 
         let accessory = NSStackView(views: [primarySlot])
@@ -307,6 +335,7 @@ final class SetupCardView: NSView {
         bodyStack.translatesAutoresizingMaskIntoConstraints = false
         bodyStack.addArrangedSubview(detailLabel)
         bodyStack.addArrangedSubview(hintLabel)
+        bodyStack.addArrangedSubview(captionRow)
         bodyStack.addArrangedSubview(accessory)
 
         bodyClip.translatesAutoresizingMaskIntoConstraints = false
@@ -384,8 +413,8 @@ final class SetupCardView: NSView {
     ///
     /// - Parameters:
     ///   - foundSpeakers: Local Network's browse count, for the completed title.
-    ///   - isProbing: a prompt/probe for this step is in flight — the spinner
-    ///     replaces the Allow button (never both, and never a second prompt).
+    ///   - isProbing: a prompt/probe for this step is in flight — the Allow
+    ///     button leaves (never a second prompt) and `statusCaption` says why.
     ///   - offersSettingsFallback: the two-mode Allow's second mode — the
     ///     prompt is spent, so the button becomes the Settings deep link.
     ///   - hint: an extra honest line under the copy (Local Network's "no
@@ -400,10 +429,11 @@ final class SetupCardView: NSView {
     ///     Motion, and any off-window/occluded window — steady states must
     ///     render settled or snapshots stop being deterministic.
     func apply(_ state: SetupCardState,
-               foundSpeakers: Int,
+               foundSpeakers: Int?,
                isProbing: Bool,
                offersSettingsFallback: Bool,
                hint: String? = nil,
+               statusCaption: String? = nil,
                primaryTitle: String? = nil,
                offersSettingsLink: Bool = false,
                animated: Bool) {
@@ -435,6 +465,13 @@ final class SetupCardView: NSView {
 
         hintLabel.stringValue = hint ?? ""
         hintLabel.isHidden = hint == nil
+
+        // The caption belongs to the ACTIVE card only, and it owns the spinner:
+        // a wait that says nothing reads as a hang.
+        let caption = state == .active ? statusCaption : nil
+        captionLabel.stringValue = caption ?? ""
+        captionRow.isHidden = caption == nil
+        if caption == nil { spinner.stopAnimation(nil) } else { spinner.startAnimation(nil) }
 
         applyCheckmark(shown: isCheckmarked(state),
                        animated: animated && !wasCompleted && isCheckmarked(state))
@@ -474,41 +511,31 @@ final class SetupCardView: NSView {
     /// visibly unfinished.
     private func isCheckmarked(_ state: SetupCardState) -> Bool { state == .completed }
 
-    /// Rebuild the leading accessory slot. Exactly one occupant: the spinner
-    /// while a prompt/probe is in flight, otherwise the two-mode Allow button.
+    /// Rebuild the leading accessory slot: the two-mode Allow button, or NOTHING
+    /// while a prompt/probe is in flight. The wait's spinner and its caption
+    /// live in the text column (see ``captionRow``) — the slot keeps its fixed
+    /// size either way, so Skip never moves.
     private func rebuildPrimarySlot(isProbing: Bool, offersSettingsFallback: Bool,
                                     primaryTitle: String?) {
         for view in primarySlot.subviews { view.removeFromSuperview() }
         allowButton = nil
-        guard state == .active else { spinner.stopAnimation(nil); return }
+        guard state == .active, !isProbing else { return }
 
-        let occupant: NSView
-        if isProbing {
-            spinner.startAnimation(nil)
-            occupant = spinner
-        } else {
-            spinner.stopAnimation(nil)
-            let title = primaryTitle ?? (offersSettingsFallback ? "Open Settings…" : content.allowTitle)
-            let button = onboardingActionButton(title: title, prominent: true,
-                                                target: self, action: #selector(allowTapped))
-            allowButton = button
-            occupant = button
-        }
-        primarySlot.addSubview(occupant)
+        let title = primaryTitle ?? (offersSettingsFallback ? "Open Settings…" : content.allowTitle)
+        let button = onboardingActionButton(title: title, prominent: true,
+                                            target: self, action: #selector(allowTapped))
+        allowButton = button
+        primarySlot.addSubview(button)
         NSLayoutConstraint.activate([
-            occupant.leadingAnchor.constraint(equalTo: primarySlot.leadingAnchor),
-            occupant.centerYAnchor.constraint(equalTo: primarySlot.centerYAnchor),
-        ])
-        if occupant !== spinner {
+            button.leadingAnchor.constraint(equalTo: primarySlot.leadingAnchor),
+            button.centerYAnchor.constraint(equalTo: primarySlot.centerYAnchor),
             // A BUTTON fills the slot rather than sitting in it: "Allow…" is far
             // narrower than "Open Settings…", and a button hugging its own title
             // inside a fixed slot leaves a dead gap before Skip that reads as a
             // layout mistake. `>=` so a wider button (Speaker Sync's "Open Login
-            // Items…") overflows instead of being squeezed. The spinner keeps
-            // its natural size — the SLOT is what holds Skip's position there.
-            occupant.trailingAnchor.constraint(greaterThanOrEqualTo: primarySlot.trailingAnchor)
-                .isActive = true
-        }
+            // Items…") overflows instead of being squeezed.
+            button.trailingAnchor.constraint(greaterThanOrEqualTo: primarySlot.trailingAnchor),
+        ])
     }
 
     /// The checkmark's width-0 → 20 pt slide plus fade, delayed after the grant
@@ -708,7 +735,9 @@ final class SetupCardView: NSView {
     var test_note: String? { noteLabel.isHidden ? nil : noteLabel.stringValue }
     var test_hint: String? { hintLabel.isHidden ? nil : hintLabel.stringValue }
     var test_isBodyCollapsed: Bool { isBodyCollapsed }
-    var test_isProbing: Bool { primarySlot.subviews.contains(spinner) }
+    var test_isProbing: Bool { !captionRow.isHidden }
+    /// The in-flight caption's text, or nil when no wait is on screen.
+    var test_statusCaption: String? { captionRow.isHidden ? nil : captionLabel.stringValue }
     var test_offersSkip: Bool { skipButton != nil && state == .active }
     /// The titles of the buttons the card currently offers, in order.
     var test_buttonTitles: [String] {

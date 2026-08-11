@@ -468,10 +468,15 @@ public final class OnboardingViewController: NSViewController {
         let active = displayedActiveStep
         for step in SetupFlowModel.steps {
             cards[step]?.apply(state(for: step, active: active),
-                               foundSpeakers: flow.localNetworkFoundSpeakers,
+                               // No browse ever runs on an ungated OS (macOS
+                               // 14), so there is no count to report there —
+                               // nil, where zero means a real browse that saw
+                               // nothing.
+                               foundSpeakers: model.isLocalNetworkGated ? flow.localNetworkFoundSpeakers : nil,
                                isProbing: isPrompting(step),
                                offersSettingsFallback: offersSettingsFallback(step),
                                hint: hint(for: step),
+                               statusCaption: statusCaption(for: step),
                                primaryTitle: primaryTitle(for: step),
                                offersSettingsLink: offersSettingsLink(step),
                                animated: shouldAnimate)
@@ -502,9 +507,11 @@ public final class OnboardingViewController: NSViewController {
     private func offersSettingsFallback(_ step: SetupStep) -> Bool {
         switch step {
         case .audio:         return model.audioStatus == .denied
-        // NOT two-mode: this card's prompt IS the browse, so its retry stays a
-        // retry and the pane is offered beside it (`offersSettingsLink`).
-        case .localNetwork:  return false
+        // A PROVEN refusal spends this prompt like any other (the browse would
+        // only be refused again). Short of that it is NOT two-mode: the card's
+        // prompt IS the browse, so an empty browse keeps its retry and offers
+        // the pane beside it (`offersSettingsLink`).
+        case .localNetwork:  return model.localNetworkStatus == .denied
         case .bluetooth:     return model.bluetoothStatus == .denied
         // Login Items is Speaker Sync's only mode — its Allow is already the
         // Settings button, so there is no second mode to switch into.
@@ -553,6 +560,33 @@ public final class OnboardingViewController: NSViewController {
         if allowInFlight == step { return true }
         return step == .bluetooth && model.isPrimingBluetooth
     }
+
+    /// What the card says while it waits. Two phases, and the difference is the
+    /// point: ``waitingCaption`` points at the system dialog the user still has
+    /// to answer (up to a minute for Local Network — a bare spinner that long
+    /// reads as a hang), while the verifying captions cover our own brief
+    /// wrap-up AFTER the answer landed. A refusal has no wrap-up: it goes
+    /// straight to the denied card. Speaker Sync has nothing to name — its
+    /// Login Items approval is a poll, not a prompt of ours.
+    private func statusCaption(for step: SetupStep) -> String? {
+        if step == .localNetwork {
+            switch model.localNetworkPhase {
+            case .idle: return isPrompting(step) ? Self.waitingCaption : nil
+            case .waitingForAnswer: return Self.waitingCaption
+            case .verifying: return "Checking your network\u{2026}"
+            }
+        }
+        guard isPrompting(step) else { return nil }
+        switch step {
+        case .audio, .bluetooth, .remoteControl: return Self.waitingCaption
+        case .speakerSync, .localNetwork: return nil
+        }
+    }
+
+    /// The one line every unanswered system dialog gets. It names what the user
+    /// is waiting ON — themselves, in another window — rather than implying the
+    /// app is busy.
+    static let waitingCaption = "Waiting for your answer\u{2026}"
 
     private func demoMode(for step: SetupStep?) -> DemoMode {
         guard let step else { return .settled }
@@ -710,30 +744,35 @@ public final class OnboardingViewController: NSViewController {
         allowTask = Task { @MainActor in
             let result = await flow.allow(step)
             allowInFlight = nil
-            switch result.destination {
-            case .none:
-                // A prompt ran (or was refused): the user came back from a
-                // system dialog, so take the front again. EXCEPT Local
-                // Network: its "prompt" is a browse with no OS status API
-                // (TN3179) to tell a real dismissal from the dialog still
-                // being up — a plain timeout is not evidence the user is
-                // done. Reactivating here steals focus mid-dialog and leaves
-                // the real permission alert dimmed and unclickable. Only
-                // re-front on positive evidence the grant landed; else leave
-                // it be —
-                // the next natural activation (the user's own click back, or
-                // a re-open) brings the window forward again.
-                if step != .localNetwork || model.localNetworkStatus == .granted {
-                    returnToFront()
-                }
-            case .settingsPane(let pane):
-                onWillOpenSystemSettings?()
-                onOpenSettings(pane)
-            case .loginItems:
-                onWillOpenSystemSettings?()
-                model.openPTPHelperLoginItems()
-            }
+            applyAllowResult(step, result)
             refresh()
+        }
+    }
+
+    /// What one Allow click does with its answer — re-front, or open the place
+    /// the model named. Shared with ``test_tapAllow(_:)`` so the test hook can
+    /// never drift from the real click's rules.
+    private func applyAllowResult(_ step: SetupStep, _ result: SetupAllowResult) {
+        switch result.destination {
+        case .none:
+            // A prompt ran (or was refused): the user came back from a system
+            // dialog, so take the front again. EXCEPT an UNDECIDED Local
+            // Network prime: its window can expire while the real permission
+            // alert is still on screen, and reactivating there steals focus
+            // mid-dialog and leaves that alert dimmed and unclickable. Both
+            // real answers — granted OR denied — mean the dialog was answered,
+            // so both take the front back; only `.requested` (nothing answered)
+            // leaves it be, and the next natural activation brings the window
+            // forward anyway.
+            if step != .localNetwork || model.localNetworkStatus != .requested {
+                returnToFront()
+            }
+        case .settingsPane(let pane):
+            onWillOpenSystemSettings?()
+            onOpenSettings(pane)
+        case .loginItems:
+            onWillOpenSystemSettings?()
+            model.openPTPHelperLoginItems()
         }
     }
 
@@ -788,8 +827,14 @@ public final class OnboardingViewController: NSViewController {
     /// The extra honest line under a card's copy, if any.
     public func test_hint(of step: SetupStep) -> String? { _ = view; return cards[step]?.test_hint }
 
-    /// Whether a card is showing the probe spinner.
+    /// Whether a card is showing the in-flight wait (spinner + caption).
     public func test_isProbing(_ step: SetupStep) -> Bool { _ = view; return cards[step]?.test_isProbing ?? false }
+
+    /// What that wait currently SAYS — nil when no wait is on screen.
+    public func test_statusCaption(of step: SetupStep) -> String? {
+        _ = view
+        return cards[step]?.test_statusCaption
+    }
 
     /// Whether a card is showing the LOCK — a step the flow hasn't reached.
     public func test_isLocked(_ step: SetupStep) -> Bool { _ = view; return cards[step]?.test_isLocked ?? false }
@@ -834,17 +879,16 @@ public final class OnboardingViewController: NSViewController {
         return !card.test_isCardClickable && card.test_pressCard() == false
     }
 
-    /// Drive a card's Allow exactly as the button does, and wait for it.
+    /// Drive a card's Allow exactly as the button does, and wait for it — the
+    /// same single-flight bookkeeping and the same ``applyAllowResult(_:_:)``
+    /// the real click uses, so the re-front rules can't be true here and false
+    /// on screen.
     public func test_tapAllow(_ step: SetupStep) async {
         _ = view
         allowInFlight = step
         let result = await flow.allow(step)
         allowInFlight = nil
-        switch result.destination {
-        case .none: break
-        case .settingsPane(let pane): onWillOpenSystemSettings?(); onOpenSettings(pane)
-        case .loginItems: onWillOpenSystemSettings?(); model.openPTPHelperLoginItems()
-        }
+        applyAllowResult(step, result)
         refresh()
     }
 

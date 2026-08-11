@@ -32,7 +32,7 @@ Scope: the permission-granting interaction ONLY — no other onboarding content.
 | # | Card | Verify signal (all already built) | Notes |
 |---|------|-----------------------------------|-------|
 | 1 | System Audio | `CoreAudioTonePermissionProbe` (audible tone, tap held up to 60 s while the prompt is up) + `PermissionStateObserver`/`TCCProbeRunner` for grants made in Settings | The scary one — copy pre-warns about the "screen recording" framing and the beep |
-| 2 | Local Network | `LocalNetworkPrimer` browse succeeding — advance shows "Found N speakers", a better proof than a checkmark | Auto-passes (card pre-completed) on macOS 14 via `osGatesLocalNetwork`. Can NEVER prove denial — see gate consequences |
+| 2 | Local Network | `LocalNetworkPrimer` — SELF-DISCOVERY proves the grant (see the amendment below); the browse's "Found N speakers" is shown alongside as the human-checkable detail | Auto-passes (card pre-completed) on macOS 14 via `osGatesLocalNetwork`. **Denial is provable since 2026-08-11** — the "can never prove denial" rule below is superseded |
 | 3 | Bluetooth | `CBManager.authorization` — sync, prompt-free, and the ONLY permission here with a full honest status API (granted/denied/undetermined all real). Prompt fires via `BTAuthorizationRequest` (exists, `BTDeviceEnumerator.swift`), whose `onDecided` callback IS the advance signal — no polling | SKIPPABLE. Skipped or denied → the enumerator must not auto-ask at backend start; it defers until the user first touches a BT feature (ungranted IOBluetooth is already a safe no-op behind `isBluetoothAuthorized()`) |
 | 4 | Speaker Sync | Existing 1.5 s `SMAppService` status poll | Login Items approval, not TCC |
 | 5 | Remote Control | Existing 1.5 s `AXIsProcessTrusted` poll | OPTIONAL — skippable; stays excluded from required |
@@ -92,9 +92,13 @@ Scope: the permission-granting interaction ONLY — no other onboarding content.
 - The ✕ close remains the ONLY exit (existing contract: `onFinished` fires
   but completion is not persisted; the flow returns next launch).
 - Accepted consequences of the hard gate:
-  - Local Network genuinely requires a discoverable speaker; card offers a
+  - ~~Local Network genuinely requires a discoverable speaker; card offers a
     retry and says to power one on. "Found nothing" is indistinguishable
-    from denial (no OS status API) — the card must never claim "denied".
+    from denial (no OS status API) — the card must never claim "denied".~~
+    **SUPERSEDED 2026-08-11** by the self-discovery amendment below: the gate
+    is the PERMISSION, which is provable with no speaker on the network, and a
+    refusal is provable too. The card still offers a retry while the count is
+    zero — it just no longer blocks the flow on someone owning a speaker.
   - Ad-hoc dev builds can't verify Speaker Sync (`SMAppService` never reaches
     `.enabled` unsigned): dev path is `AIRPLAY_PERMISSIONS=granted`
     (simulated seams, already built) — never weaken the gate for it.
@@ -136,6 +140,34 @@ Scope: the permission-granting interaction ONLY — no other onboarding content.
   (Electron workarounds — native calls make them moot), their 60 s status cache +
   bounded-read retry (our reads are direct), their restart resume-intent (no
   restart-required permissions on our floor).
+
+## Local Network: both answers are provable (amendment, 2026-08-11)
+
+Local Network privacy is not TCC — it is a packet filter in the network stack
+(Apple TN3179), with no status API, no request API and no callback. The flow
+used to guess around that (a long first browse, `.waiting` ignored, denial
+indistinguishable from an empty network). Two real signals replace the guess,
+both in `LocalNetworkPrimer`:
+
+- **Grant — self-discovery.** The app publishes its own Bonjour service
+  (`_audiouter-preflight._tcp`, unique instance name) via `NWListener` and
+  browses for that same type on this Mac. Publishing isn't gated; BROWSING is —
+  so finding OURSELVES proves the permission, on a network with no speaker
+  switched on. (Technique: Nonstrict, "Request and check for local network
+  permission", 2024; documented for iOS 14+, and macOS 15 gained this permission
+  with the same Network.framework APIs. **Expected-but-unproven on macOS until
+  the owner live-verifies.**)
+- **Denial — the policy error.** Once the user clicks Don't Allow, an active
+  `NWBrowser` goes `.waiting(NWError.dns(kDNSServiceErr_PolicyDenied))`
+  (−65570). That error IS the refusal; it resolves the prime immediately.
+- Neither inside the window ⇒ undecided (the dialog is presumably still up).
+  The ceiling is 60 s, spent only on an unanswered dialog.
+
+Consequences: the step completes on the PERMISSION (zero speakers included, with
+copy that says so); a refused card takes the denied two-mode shape (Open
+Settings…) like System Audio and Bluetooth; and the window re-fronts on granted
+OR denied, never on undecided. `NSBonjourServices` in `scripts/make-app.sh` must
+list the preflight type or the self-browse is silently blocked.
 
 ## Integration map (verified on this branch 2026-08-11)
 

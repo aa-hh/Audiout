@@ -136,9 +136,10 @@ public final class SetupFlowModel {
         // give, so a hard gate must not demand it.
         case .audio: return setup.audioStatus == .granted || setup.audioStatus == .unsupported
         // Local Network privacy arrived in macOS 15; below that, access is
-        // already allowed and there is no pane to send anyone to. `.requested`
-        // does NOT complete it — that state means "asked, nothing answered",
-        // which is indistinguishable from a denial.
+        // already allowed and there is no pane to send anyone to. `.granted`
+        // means the PERMISSION is granted (self-discovery proves it with zero
+        // speakers on the network), which is the honest gate condition;
+        // `.requested` (asked, nothing answered) and `.denied` do not complete.
         case .localNetwork: return setup.localNetworkStatus == .granted || !setup.isLocalNetworkGated
         case .bluetooth: return setup.bluetoothStatus == .granted
         case .speakerSync: return setup.ptpHelperStatus == .enabled
@@ -214,11 +215,17 @@ public final class SetupFlowModel {
             return SetupAllowResult(setup.audioStatus == .granted ? .promptTriggered : .probeTimeout)
 
         case .localNetwork:
-            // No two-mode flip here: this card's "prompt" IS the browse, so a
-            // browse that found nothing must be re-runnable — the user was told
-            // to turn a speaker on and try again, and nothing else re-browses.
-            // The Settings pane is offered alongside it by the UI (macOS 15+,
-            // where that pane exists), never instead of it.
+            // A refusal IS provable here (the mDNS policy error), and it spends
+            // the prompt exactly like a denied TCC grant — so this preflight is
+            // as real as Bluetooth's.
+            if setup.localNetworkStatus == .denied {
+                return SetupAllowResult(.settingsFallbackDenied, .settingsPane(.localNetwork))
+            }
+            // Short of a proven refusal there is no two-mode flip: this card's
+            // "prompt" IS the browse, so a browse that found nothing must be
+            // re-runnable — the user was told to turn a speaker on and try
+            // again, and nothing else re-browses. The Settings pane is offered
+            // alongside it by the UI (macOS 15+, where that pane exists).
             await setup.primeLocalNetwork()
             return SetupAllowResult(setup.localNetworkStatus == .granted ? .promptTriggered : .probeTimeout)
 

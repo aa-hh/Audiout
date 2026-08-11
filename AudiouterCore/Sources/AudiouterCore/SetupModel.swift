@@ -14,12 +14,14 @@ import Foundation
 ///   level. That yields a real `.granted` / `.denied`, and `.unsupported` when
 ///   the OS predates the tap API (< macOS 14.2), where no grant is possible.
 /// - **Local Network** has *no* public request-or-check API (Apple TN3179), so it
-///   can't be read directly. It IS inferred *functionally*: a brief Bonjour browse
-///   that actually reaches the network (sees a service / goes ready) proves the
-///   grant, giving a real `.granted`; a browse that gets nowhere leaves `.requested`
-///   ("asked, but unproven — no speakers, or denied"). It never reports a hard
-///   `.denied`, because "found nothing" can't distinguish denial from an empty
-///   network.
+///   can't be read directly — but BOTH answers are provable behaviourally, and
+///   ``LocalNetworkPrimer`` proves them. The app publishes its own Bonjour
+///   service and browses for it:
+///   finding itself proves the grant even on a network with no speaker on it, so
+///   that's a real `.granted`; a browser going
+///   `.waiting(.dns(kDNSServiceErr_PolicyDenied))` is the refusal itself, so
+///   that's a real `.denied`. `.requested` now means only what it says — asked,
+///   and nothing answered yet (the dialog is presumably still up).
 /// - **Remote Control** (Accessibility) DOES have a real, public, *silent* status
 ///   API — `AXIsProcessTrusted()` reads the live value without prompting — so this
 ///   yields a genuine `.granted`, refreshed on every window focus (a grant the
@@ -34,9 +36,9 @@ public enum PermissionStatus: Equatable, Sendable {
     case granted
     /// Confirmed denied — only ever set for audio capture (verifiable).
     case denied
-    /// Prompt was triggered but macOS exposes no way to confirm the outcome
-    /// (Local Network, Remote Control). The UI pairs this with a "…enable it in
-    /// System Settings" deep link as the fallback path.
+    /// Prompt was triggered and nothing has answered it yet (Local Network's
+    /// still-open dialog, Remote Control's un-flipped toggle). The UI pairs this
+    /// with a "…enable it in System Settings" deep link as the fallback path.
     case requested
     /// The capability isn't available on this OS at all (the process-tap API is
     /// macOS 14.2+), so no permission grant could help. Distinct from `.denied`,
@@ -250,14 +252,28 @@ public extension AudioCapturePermissionProbing {
     func currentStatusSilently() -> PermissionStatus? { nil }
 }
 
+/// What one Local Network prime proved. macOS has no status API for this
+/// permission (TN3179), but both answers ARE provable behaviourally — see
+/// ``LocalNetworkPrimer`` for the two mechanisms (self-discovery for the grant,
+/// the mDNS policy error for the refusal).
+public enum LocalNetworkOutcome: Equatable, Sendable {
+    /// The browse demonstrably reached the network. `foundSpeakers` is how many
+    /// speakers it saw, which may legitimately be ZERO: the permission is what
+    /// this case asserts, not the presence of a speaker.
+    case granted(foundSpeakers: Int)
+    /// The user refused (an mDNS `kDNSServiceErr_PolicyDenied`).
+    case denied
+    /// Nothing answered within the window — the system dialog is presumably
+    /// still up. NOT a denial.
+    case undecided
+}
+
 /// Triggers AND functionally checks the Local Network permission. macOS exposes
-/// no status API (TN3179), so the only honest signal is behavioural: run a brief
-/// Bonjour browse and report whether it actually reached the network — `true` if
-/// it saw a service or the browser went `ready` (a functional proxy for "granted
-/// and working"), `false` otherwise. The same browse ALSO surfaces the system
-/// prompt when the permission is still undetermined, so probing is both the ask
-/// and the check. The production impl is ``LocalNetworkPrimer``; tests inject a
-/// fake that returns a canned result.
+/// no status API (TN3179), so every signal here is behavioural — but all three
+/// answers are real (see ``LocalNetworkOutcome``). The same browse ALSO surfaces
+/// the system prompt when the permission is still undetermined, so priming is
+/// both the ask and the check. The production impl is ``LocalNetworkPrimer``;
+/// tests inject a fake that returns a canned result.
 public protocol LocalNetworkPriming: Sendable {
     /// Browse briefly; return `true` if the local network was reachable.
     func probe() async -> Bool
@@ -278,6 +294,18 @@ public protocol LocalNetworkPriming: Sendable {
     /// ``SetupModel``); defaulted (below) so a fake that ignores timing keeps
     /// compiling.
     func probeFoundSpeakers(browseSeconds: TimeInterval) async -> Int
+
+    /// The full answer: granted (with the speaker count), denied, or nothing
+    /// yet. This is what ``SetupModel`` actually calls — the count-only calls
+    /// above remain for the fakes and for callers that want the number alone.
+    /// Defaulted (below) so every existing fake keeps compiling.
+    ///
+    /// `onReachable` fires (possibly on any thread) the moment the prime PROVES
+    /// the network is reachable, which is earlier than it can answer: the
+    /// speaker count is still filling in. That gap is what lets the card say
+    /// "Checking your network…" instead of leaving a bare spinner up.
+    func prime(browseSeconds: TimeInterval,
+               onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome
 }
 
 public extension LocalNetworkPriming {
@@ -289,6 +317,30 @@ public extension LocalNetworkPriming {
     func probeFoundSpeakers(browseSeconds: TimeInterval) async -> Int {
         await probeFoundSpeakers()
     }
+
+    /// A seam that only counts speakers can still answer two of the three
+    /// outcomes honestly: a speaker sighting proves the grant, and no sighting
+    /// proves nothing at all (`.undecided`). Only a primer that watches for the
+    /// policy error can ever report `.denied`.
+    func prime(browseSeconds: TimeInterval,
+               onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome {
+        let found = await probeFoundSpeakers(browseSeconds: browseSeconds)
+        guard found > 0 else { return .undecided }
+        onReachable()
+        return .granted(foundSpeakers: found)
+    }
+}
+
+/// How far along an in-flight prompt/probe is, for the one thing the UI can
+/// honestly say while it waits. Two phases, because they are different waits:
+/// ``waitingForAnswer`` is a system dialog sitting unanswered (up to a minute
+/// for Local Network), while ``verifying`` is our own brief wrap-up after the
+/// answer landed. A prime that gets refused skips ``verifying`` entirely —
+/// there is nothing left to check.
+public enum SetupProbePhase: Equatable, Sendable {
+    case idle
+    case waitingForAnswer
+    case verifying
 }
 
 /// Triggers and reads the macOS **Accessibility** permission, needed for a
@@ -353,8 +405,8 @@ public final class SetupModel {
     public private(set) var audioStatus: PermissionStatus = .unknown
 
     /// Local-network status. When the OS gates local network (`localNetworkGated`,
-    /// macOS 15+), starts `.unknown` and becomes `.requested` once the prompt is
-    /// triggered (never `.granted` on its own — see ``PermissionStatus``). On
+    /// macOS 15+), starts `.unknown` and becomes whichever of `.granted` /
+    /// `.denied` / `.requested` the prime proved (see ``LocalNetworkOutcome``). On
     /// macOS < 15 there is NO local-network privacy gate — that permission arrived
     /// in Sequoia — so access is unconditionally allowed: it starts, and stays,
     /// `.granted`, and the row never routes the user to a Settings pane that
@@ -362,10 +414,10 @@ public final class SetupModel {
     public private(set) var localNetworkStatus: PermissionStatus = .unknown
 
     /// How many speakers the most recent Local Network browse saw. `0` until a
-    /// browse has run (and whenever one finds nothing — "found nothing" and
-    /// "denied" are the same observation here). This is the honest proof the
-    /// Local Network card shows instead of a checkmark: `localNetworkStatus ==
-    /// .granted` on a gated OS means exactly `localNetworkFoundSpeakers > 0`.
+    /// prime has run, and legitimately `0` afterwards too: self-discovery proves
+    /// the permission on its own, so a `.granted` Local Network with zero
+    /// speakers just means none is switched on. The count is the detail the card
+    /// shows ("Found 3 speakers"), not the grant itself.
     public private(set) var localNetworkFoundSpeakers = 0
 
     /// Remote-control (Accessibility) status. Starts `.unknown`, becomes
@@ -385,6 +437,13 @@ public final class SetupModel {
     /// `.requiresApproval` once ``registerPTPHelper()`` runs, then `.enabled`
     /// once the user approves it in Login Items. See ``PTPHelperStatus``.
     public private(set) var ptpHelperStatus: PTPHelperStatus = .notRegistered
+
+    /// How far the explicit Local Network prime (the Allow tap) has got: it can
+    /// sit a full minute on an unanswered dialog, so the card needs something
+    /// truthful to say for the whole wait. Only ``primeLocalNetwork()`` moves
+    /// this — a background refresh browses without ever claiming the user is
+    /// being asked anything.
+    public private(set) var localNetworkPhase: SetupProbePhase = .idle
 
     /// True while an audio probe is running, so the UI can show progress and
     /// ignore repeat taps. The probe blocks ~250 ms capturing the test tone.
@@ -499,11 +558,12 @@ public final class SetupModel {
         onChange?()
     }
 
-    /// Ask for + functionally check Local Network. The browse fires the system
-    /// prompt (if undetermined) and reports whether the network was reachable:
-    /// reachable ⇒ `.granted` (it demonstrably works — the case ahh hit, where
-    /// it was already allowed and "Requested" was a lie); not reachable ⇒
-    /// `.requested` (asked, but we can't prove it — no speakers, or denied).
+    /// Ask for + functionally check Local Network. The prime fires the system
+    /// prompt (if undetermined) and reports one of three REAL answers (see
+    /// ``LocalNetworkOutcome``): the network was demonstrably reachable ⇒
+    /// `.granted`, even with no speaker on it; the user refused ⇒ `.denied`;
+    /// nothing answered inside the window ⇒ `.requested` (the dialog is
+    /// presumably still up).
     public func primeLocalNetwork() async {
         // No gate on this OS (macOS < 15): access is already allowed, so there's
         // nothing to prompt for and no Settings pane to open — report granted and
@@ -513,36 +573,58 @@ public final class SetupModel {
             onChange?()
             return
         }
-        localNetworkStatus = await probeLocalNetwork()
+        localNetworkPhase = .waitingForAnswer
+        onChange?()
+        localNetworkStatus = await probeLocalNetwork(onReachable: { [weak self] in
+            Task { @MainActor in self?.markLocalNetworkVerifying() }
+        })
+        localNetworkPhase = .idle
         onChange?()
     }
 
-    /// How long the FIRST Local Network browse waits: long enough for the
-    /// system permission dialog to render and for a person to read and answer
-    /// it. Nothing about it is precise — it just has to be human-length.
-    static let firstAskBrowseSeconds: TimeInterval = 15
+    /// The dialog was answered and the browse is through — only the speaker
+    /// count is still filling in. Fired from the primer's own callback, so the
+    /// card's "Checking your network…" is a real observation, not a timer.
+    private func markLocalNetworkVerifying() {
+        guard localNetworkPhase == .waitingForAnswer else { return }
+        localNetworkPhase = .verifying
+        onChange?()
+    }
 
-    /// How long every later browse waits — a plain mDNS scan of an
-    /// already-decided permission, where a spinner is pure cost.
+    /// The CEILING on the first Local Network prime — how long it may sit
+    /// undecided before giving up. A grant or a refusal resolves it in well
+    /// under a second, so this window is only ever spent waiting on a person
+    /// who hasn't answered the dialog yet; it matches the audio probe's
+    /// generous ceiling for the same reason.
+    static let firstAskBrowseSeconds: TimeInterval = 60
+
+    /// How long every later prime waits — a re-scan of an already-decided
+    /// permission, where a spinner is pure cost.
     static let rescanBrowseSeconds: TimeInterval = 3
 
-    /// Run the browse, record how many speakers it saw, and map that to a
+    /// Run the prime, record how many speakers it saw, and map the outcome to a
     /// status. One place so `primeLocalNetwork()`, ``refreshStatuses()`` and
-    /// ``auditRequiredPermissions()`` can never disagree about whether a count
-    /// of zero is granted.
-    private func probeLocalNetwork() async -> PermissionStatus {
-        // `.unknown` means no browse has ever run, so THIS one is the browse
-        // that raises the system permission dialog. A three-second window
-        // expires before the user can even see it, and the card then accuses
-        // them of having no speakers while the dialog is still up — so the
-        // first ask waits at a human's pace. Every
-        // later browse re-scans a permission that is already decided, with no
-        // dialog to wait for, so it stays snappy.
+    /// ``auditRequiredPermissions()`` can never disagree.
+    private func probeLocalNetwork(
+        onReachable: @escaping @Sendable () -> Void = {}
+    ) async -> PermissionStatus {
+        // `.unknown` means nothing has primed yet, so THIS prime is the one that
+        // raises the system permission dialog, and it must outlast a person
+        // reading it. Every later prime re-checks an already-decided permission,
+        // with no dialog to wait for, so it stays snappy.
         let window = localNetworkStatus == .unknown ? Self.firstAskBrowseSeconds
                                                     : Self.rescanBrowseSeconds
-        let found = await localNetwork.probeFoundSpeakers(browseSeconds: window)
-        localNetworkFoundSpeakers = found
-        return found > 0 ? .granted : .requested
+        switch await localNetwork.prime(browseSeconds: window, onReachable: onReachable) {
+        case .granted(let found):
+            localNetworkFoundSpeakers = found
+            return .granted
+        case .denied:
+            localNetworkFoundSpeakers = 0
+            return .denied
+        case .undecided:
+            localNetworkFoundSpeakers = 0
+            return .requested
+        }
     }
 
     /// Ask for Accessibility. Opens the prompt, then reads the REAL live state
@@ -657,8 +739,9 @@ public final class SetupModel {
     ///   still catches a grant made in Settings; a `nil` result (a test fake that
     ///   hasn't implemented the silent seam) leaves `audioStatus` untouched, same
     ///   posture as ``auditRequiredPermissions()``.
-    /// - **Local Network** re-probes ONLY if already asked (browsing fires the
-    ///   prompt), upgrading `.requested` → `.granted` once discovery works.
+    /// - **Local Network** re-primes ONLY if already asked (browsing fires the
+    ///   prompt), which upgrades `.requested` → `.granted` once the browse
+    ///   reaches the network, and can now also land on a real `.denied`.
     /// - **PTP helper** always re-reads `.status` (silent, no re-`register()` —
     ///   see ``refreshPTPHelperStatus()``), the same posture as Remote Control.
     /// - **Bluetooth** always re-reads `CBManager.authorization` (silent and
@@ -768,9 +851,9 @@ public final class SetupModel {
     ///
     /// - Audio capture is unmet only on a confirmed `.denied` — `.unsupported`
     ///   (pre-14.2 OS) isn't fixable, and `.granted`/`.unknown` are fine.
-    /// - Local Network is unmet only on `.requested` (asked but unproven —
-    ///   the honest "not currently working" state); `.unknown` means never
-    ///   engaged, not lost, so it never counts.
+    /// - Local Network is unmet on `.requested` (asked, nothing answered) and
+    ///   on the now-real `.denied`; `.unknown` means never engaged, not lost,
+    ///   so it never counts.
     /// - The PTP helper is unmet when it's registered but not usable
     ///   (`.requiresApproval`/`.notFound`) — a REGISTERED-but-not-approved
     ///   helper is the actionable "turned off in Login Items" case.
@@ -781,7 +864,7 @@ public final class SetupModel {
         if audioStatus == .denied {
             unmet.append(.audioCapture)
         }
-        if localNetworkStatus == .requested {
+        if localNetworkStatus == .requested || localNetworkStatus == .denied {
             unmet.append(.localNetwork)
         }
         if ptpHelperStatus != .enabled, ptpHelperStatus != .notRegistered {

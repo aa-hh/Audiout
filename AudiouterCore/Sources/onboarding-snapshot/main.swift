@@ -11,6 +11,7 @@
 // It writes, per appearance:
 //   onboarding-<light|dark>-step1-audio.png      card 1 active, nothing granted
 //   onboarding-<light|dark>-step2-network.png    audio granted, card 2 active
+//   onboarding-<light|dark>-step2-waiting.png    card 2's prime in flight (caption)
 //   onboarding-<light|dark>-step3-bluetooth.png  audio + network in, card 3 active
 //   onboarding-<light|dark>-denied.png           audio denied → Settings mode demo
 //   onboarding-<light|dark>-complete.png         every step in, Done visible
@@ -44,6 +45,20 @@ struct SnapshotLocalNetwork: LocalNetworkPriming {
     let foundSpeakers: Int
     func probe() async -> Bool { foundSpeakers > 0 }
     func probeFoundSpeakers() async -> Int { foundSpeakers }
+}
+
+/// A prime that never answers, so a fixture can render the in-flight caption —
+/// the state a real first ask sits in for as long as the system dialog is up.
+struct SnapshotWaitingLocalNetwork: LocalNetworkPriming {
+    func probe() async -> Bool { false }
+    func prime(browseSeconds: TimeInterval,
+               onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome {
+        // Parks for the life of the tool: the fixture renders while it waits.
+        // A sleep rather than a never-resumed continuation, which is the same
+        // wait but makes the runtime log a continuation-leak warning.
+        try? await Task.sleep(nanoseconds: 3_600_000_000_000)
+        return .undecided
+    }
 }
 
 /// Fake remote-control primer — never touches Accessibility.
@@ -86,6 +101,9 @@ struct SnapshotWorld {
     /// Which cards' Allow to fire before rendering — how the flow is walked to
     /// the step this fixture is about.
     var allow: [SetupStep] = []
+    /// Render Local Network's Allow MID-FLIGHT (the prime parked on an
+    /// unanswered dialog), which is the only way to see the in-flight caption.
+    var waitingOnLocalNetwork = false
     var reason: OnboardingReason = .firstRun
 }
 
@@ -93,8 +111,11 @@ struct SnapshotWorld {
 func makeViewController(_ world: SnapshotWorld) -> OnboardingViewController {
     let suite = makeSnapshotDefaults()
     let bluetooth = SimulatedBluetoothPermission(status: world.bluetooth)
+    let localNetwork: LocalNetworkPriming = world.waitingOnLocalNetwork
+        ? SnapshotWaitingLocalNetwork()
+        : SnapshotLocalNetwork(foundSpeakers: world.foundSpeakers)
     let model = SetupModel(audioProbe: SnapshotAudioProbe(result: world.audio),
-                           localNetwork: SnapshotLocalNetwork(foundSpeakers: world.foundSpeakers),
+                           localNetwork: localNetwork,
                            remoteControl: SnapshotRemoteControl(trusted: world.remoteControlTrusted),
                            ptpHelper: SnapshotPTPHelper(statusToReport: world.ptpHelper),
                            bluetoothReader: bluetooth,
@@ -163,6 +184,14 @@ func snapshot(appearanceName: NSAppearance.Name,
     // fixture that means "these are already granted" has to wait for it.
     await controller.test_refreshStatuses()
     await controller.test_allow(world.allow)
+    if world.waitingOnLocalNetwork {
+        // Deliberately NOT awaited: this prime never answers, and the fixture is
+        // the wait itself. Poll for the caption rather than sleeping a guess.
+        Task { await controller.test_tapAllow(.localNetwork) }
+        for _ in 0..<200 where controller.test_statusCaption(of: .localNetwork) == nil {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+    }
     rootView.layoutSubtreeIfNeeded()
     let size = rootView.fittingSize
     let frame = NSRect(origin: .zero, size: size)
@@ -217,6 +246,11 @@ func run() async -> Int32 {
                        world: SnapshotWorld(allow: [.audio]), outDir: outDir)
         await snapshot(appearanceName: name, label: "\(tag)-step3-bluetooth",
                        world: SnapshotWorld(allow: [.audio, .localNetwork]), outDir: outDir)
+        // Local Network's Allow fired and the system dialog is still up: the
+        // card shows the wait, and says what it is waiting for.
+        await snapshot(appearanceName: name, label: "\(tag)-step2-waiting",
+                       world: SnapshotWorld(allow: [.audio], waitingOnLocalNetwork: true),
+                       outDir: outDir)
         // Audio denied: the card's Allow has become the Settings deep link, and
         // the demo swaps to the Settings-pane miniature.
         await snapshot(appearanceName: name, label: "\(tag)-denied",

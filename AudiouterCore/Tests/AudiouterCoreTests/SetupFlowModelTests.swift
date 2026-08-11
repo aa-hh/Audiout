@@ -27,6 +27,43 @@ import Testing
         func probe() async -> Bool { reachable }
     }
 
+    /// Reports a fixed ``LocalNetworkOutcome`` — the answers only a primer that
+    /// watches the mDNS policy error can give (a real refusal), and the grant
+    /// self-discovery proves on a network with no speaker on it.
+    private struct CannedOutcomeLocalNetwork: LocalNetworkPriming {
+        let outcome: LocalNetworkOutcome
+        func probe() async -> Bool {
+            guard case .granted(let found) = outcome else { return false }
+            return found > 0
+        }
+        func prime(browseSeconds: TimeInterval,
+                   onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome {
+            if case .granted = outcome { onReachable() }
+            return outcome
+        }
+    }
+
+    /// A prime that always PROVES the grant (what self-discovery does), while
+    /// reporting a scripted speaker count per call — the "granted, but nothing
+    /// switched on yet" case. The last count repeats.
+    private final class GrantingLocalNetwork: LocalNetworkPriming, @unchecked Sendable {
+        private let lock = NSLock()
+        private let counts: [Int]
+        private var index = 0
+        init(_ counts: [Int]) { self.counts = counts }
+        func probe() async -> Bool { true }
+        func prime(browseSeconds: TimeInterval,
+                   onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome {
+            onReachable()
+            let count = lock.withLock { () -> Int in
+                let count = counts[min(index, counts.count - 1)]
+                index += 1
+                return count
+            }
+            return .granted(foundSpeakers: count)
+        }
+    }
+
     /// A browse whose result changes from call to call — how "turn a speaker on,
     /// then try again" is modelled: the first browse finds nothing, the next one
     /// finds speakers. The last count repeats once the script runs out.
@@ -376,6 +413,46 @@ import Testing
         #expect(second.outcome == .promptTriggered, "the second click browses again")
         #expect(flow.isComplete(.localNetwork))
         #expect(setup.localNetworkFoundSpeakers == 2)
+    }
+
+    /// A REFUSAL is a different thing from an empty browse, and the primer can
+    /// now tell them apart — so this click stops pretending to re-ask (the
+    /// browse would only be refused again) and goes where the refusal can be
+    /// undone, exactly as a denied Bluetooth grant does.
+    @Test func aRefusedLocalNetworkDeepLinksToItsPane() async {
+        let setup = makeSetup(localNetwork: CannedOutcomeLocalNetwork(outcome: .denied))
+        let flow = SetupFlowModel(setup: setup)
+
+        let first = await flow.allow(.localNetwork)
+        #expect(first.outcome == .probeTimeout, "the first click is still the ask")
+        #expect(setup.localNetworkStatus == .denied)
+
+        let second = await flow.allow(.localNetwork)
+
+        #expect(second.outcome == .settingsFallbackDenied)
+        #expect(second.destination == .settingsPane(.localNetwork))
+        #expect(!flow.isComplete(.localNetwork))
+    }
+
+    /// The gate condition is the PERMISSION, not the speaker: self-discovery
+    /// proves the grant with nothing switched on, so the step completes — and
+    /// the card's Try Again is still there to recount once a speaker appears.
+    @Test func aGrantedLocalNetworkWithNoSpeakersCompletesAndCanStillRecount() async {
+        let setup = makeSetup(localNetwork: GrantingLocalNetwork([0, 3]))
+        let flow = SetupFlowModel(setup: setup)
+
+        let first = await flow.allow(.localNetwork)
+
+        #expect(first.outcome == .promptTriggered)
+        #expect(flow.isComplete(.localNetwork), "the permission is what completes it")
+        #expect(setup.localNetworkFoundSpeakers == 0)
+
+        // Try Again on a completed step short-circuits, so the recount comes
+        // through the same refresh the window's focus fires.
+        await setup.refreshStatuses()
+
+        #expect(setup.localNetworkFoundSpeakers == 3)
+        #expect(flow.isComplete(.localNetwork))
     }
 
     /// Bluetooth's retry goes to the PRIVACY pane, where this app's grant is

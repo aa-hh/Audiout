@@ -52,6 +52,79 @@ extension SerializedSharedState {
         func probeFoundSpeakers() async -> Int { found }
     }
 
+    /// Reports a fixed ``LocalNetworkOutcome`` — the seam's full three-valued
+    /// answer, including the refusal only a real primer can observe (the mDNS
+    /// policy error) and the grant-with-no-speakers self-discovery proves.
+    private struct CannedOutcomeLocalNetwork: LocalNetworkPriming {
+        let outcome: LocalNetworkOutcome
+        func probe() async -> Bool {
+            guard case .granted(let found) = outcome else { return false }
+            return found > 0
+        }
+        func prime(browseSeconds: TimeInterval,
+                   onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome {
+            if case .granted = outcome { onReachable() }
+            return outcome
+        }
+    }
+
+    /// A prime the test drives step by step, so the two waits the card names are
+    /// both observable: it parks first with the dialog notionally still up, then
+    /// (once released) reports the network reachable and parks again while the
+    /// speaker count fills in, then answers.
+    private final class SteppedLocalNetwork: LocalNetworkPriming, @unchecked Sendable {
+        let found: Int
+        init(found: Int) { self.found = found }
+
+        private let lock = NSLock()
+        private var resumeGate: (() -> Void)?
+        private var parkedWaiter: (() -> Void)?
+
+        func probe() async -> Bool { found > 0 }
+
+        func prime(browseSeconds: TimeInterval,
+                   onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome {
+            await park()
+            onReachable()
+            await park()
+            return .granted(foundSpeakers: found)
+        }
+
+        private func park() async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let waiter: (() -> Void)? = lock.withLock {
+                    resumeGate = { continuation.resume() }
+                    let waiter = parkedWaiter
+                    parkedWaiter = nil
+                    return waiter
+                }
+                waiter?()
+            }
+        }
+
+        /// Suspends until the prime is parked at its next step.
+        func waitUntilParked() async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let alreadyParked: Bool = lock.withLock {
+                    if resumeGate != nil { return true }
+                    parkedWaiter = { continuation.resume() }
+                    return false
+                }
+                if alreadyParked { continuation.resume() }
+            }
+        }
+
+        /// Let it run on to the next step.
+        func resume() {
+            let gate: (() -> Void)? = lock.withLock {
+                let gate = resumeGate
+                resumeGate = nil
+                return gate
+            }
+            gate?()
+        }
+    }
+
     /// Records Accessibility prompts and returns a canned trust state.
     private final class SpyRemoteControl: RemoteControlPriming, @unchecked Sendable {
         private let lock = NSLock()
@@ -260,11 +333,11 @@ extension SerializedSharedState {
                        "browse got nowhere ⇒ asked-but-unproven")
     }
 
-    /// The first browse IS the system permission dialog: a three-second window
-    /// runs out before the user can even see it, and the card then claims there
-    /// are no speakers while the dialog is still open.
-    /// Only that first ask waits at a human's pace — a retry re-scans an
-    /// already-decided permission and stays snappy.
+    /// The first prime IS the system permission dialog, and it resolves the
+    /// instant the user answers EITHER way — so its window is a pure ceiling on
+    /// an unanswered dialog and can afford to be generous. Only that first ask
+    /// carries it; a retry re-checks an already-decided permission and stays
+    /// snappy.
     @Test func onlyTheFirstLocalNetworkBrowseWaitsForAHuman() async {
         let (model, spy, _, _) = makeModel(audio: .granted)
         spy.reachable = false
@@ -275,6 +348,88 @@ extension SerializedSharedState {
         #expect(spy.windows == [SetupModel.firstAskBrowseSeconds,
                                 SetupModel.rescanBrowseSeconds])
         #expect(SetupModel.firstAskBrowseSeconds > SetupModel.rescanBrowseSeconds)
+    }
+
+    /// The refusal is REAL now (the mDNS policy error the primer watches for),
+    /// so the model must report it as such rather than hiding it inside the
+    /// "asked, unproven" bucket — that is what routes the card to Settings
+    /// instead of asking the user to switch a speaker on that would not help.
+    @Test func aRefusedLocalNetworkIsReportedAsDenied() async {
+        let model = SetupModel(audioProbe: CannedAudioProbe(result: .granted),
+                               localNetwork: CannedOutcomeLocalNetwork(outcome: .denied),
+                               remoteControl: SpyRemoteControl(),
+                               ptpHelper: FakePTPHelper(),
+                               settings: AppSettings(defaults: defaults))
+        await model.primeLocalNetwork()
+
+        #expect(model.localNetworkStatus == .denied)
+        #expect(model.localNetworkFoundSpeakers == 0)
+        #expect(model.unmetRequiredPermissions().contains(.localNetwork))
+        #expect(model.requiredPermissionsNotGranted().contains(.localNetwork))
+    }
+
+    /// Self-discovery proves the PERMISSION, not the presence of a speaker — so
+    /// a grant on a network with nothing switched on is a real grant, and the
+    /// required-permission gate must not hold it against the user.
+    @Test func aGrantWithNoSpeakersIsStillAGrant() async {
+        let model = SetupModel(audioProbe: CannedAudioProbe(result: .granted),
+                               localNetwork: CannedOutcomeLocalNetwork(
+                                   outcome: .granted(foundSpeakers: 0)),
+                               remoteControl: SpyRemoteControl(),
+                               ptpHelper: FakePTPHelper(),
+                               settings: AppSettings(defaults: defaults))
+        await model.primeLocalNetwork()
+
+        #expect(model.localNetworkStatus == .granted)
+        #expect(model.localNetworkFoundSpeakers == 0)
+        #expect(!model.requiredPermissionsNotGranted().contains(.localNetwork))
+        #expect(!model.unmetRequiredPermissions().contains(.localNetwork))
+    }
+
+    /// The wait has two halves and they are different things to say: the dialog
+    /// is unanswered, then the answer landed and only the count is filling in.
+    /// Both are observations, never timers — the second one is the primer's own
+    /// reachability callback.
+    @Test func theLocalNetworkPrimeReportsBothWaits() async {
+        let net = SteppedLocalNetwork(found: 2)
+        let model = SetupModel(audioProbe: CannedAudioProbe(result: .granted),
+                               localNetwork: net,
+                               remoteControl: SpyRemoteControl(),
+                               ptpHelper: FakePTPHelper(),
+                               settings: AppSettings(defaults: defaults))
+        #expect(model.localNetworkPhase == .idle)
+
+        let priming = Task { await model.primeLocalNetwork() }
+
+        await net.waitUntilParked()
+        #expect(model.localNetworkPhase == .waitingForAnswer)
+
+        net.resume()                         // …the browse reaches the network
+        await net.waitUntilParked()
+        await waitForChange { model.localNetworkPhase == .verifying }
+        #expect(model.localNetworkPhase == .verifying)
+
+        net.resume()
+        await priming.value
+        #expect(model.localNetworkPhase == .idle, "the wait never outlives the prime")
+        #expect(model.localNetworkStatus == .granted)
+        #expect(model.localNetworkFoundSpeakers == 2)
+    }
+
+    /// A refusal has no second half to report — there is nothing left to check.
+    @Test func aRefusedLocalNetworkNeverEntersTheVerifyingWait() async {
+        let model = SetupModel(audioProbe: CannedAudioProbe(result: .granted),
+                               localNetwork: CannedOutcomeLocalNetwork(outcome: .denied),
+                               remoteControl: SpyRemoteControl(),
+                               ptpHelper: FakePTPHelper(),
+                               settings: AppSettings(defaults: defaults))
+        var phases: [SetupProbePhase] = []
+        model.onChange = { phases.append(model.localNetworkPhase) }
+
+        await model.primeLocalNetwork()
+
+        #expect(!phases.contains(.verifying))
+        #expect(model.localNetworkPhase == .idle)
     }
 
     @Test func primeLocalNetworkReachableBecomesGranted() async {

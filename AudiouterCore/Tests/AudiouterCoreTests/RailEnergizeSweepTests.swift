@@ -123,6 +123,39 @@ import Testing
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
     }
 
+    @Test func theRealDrawPathFiresTheSweep() {
+        // Through `display()` → `draw(_:)`, not the `test_reconcileEnergize`
+        // shortcut — the live app has no other route into the reconcile.
+        let scene = makeScene(nodes: [.member])
+        scene.overlay.needsDisplay = true
+        scene.overlay.display()                       // baseline: idle
+        scene.hook.gold = true
+        scene.overlay.needsDisplay = true
+        scene.overlay.display()
+        drainMainQueue()
+        #expect(scene.overlay.test_isEnergizeSweeping,
+                "arming must fire through the real draw pass, not just the test seam")
+    }
+
+    @Test func theFilmPresentationActuallyAnimates() throws {
+        // GUI-session only: headless runners have no render server, so the
+        // presentation tree never commits there — skip rather than lie.
+        try #require(NSScreen.main != nil, "needs a window server")
+        let scene = makeScene(nodes: [.member])
+        scene.window.orderFrontRegardless()
+        scene.overlay.needsDisplay = true
+        scene.overlay.display()                       // baseline: idle
+        scene.hook.gold = true
+        scene.overlay.needsDisplay = true
+        scene.overlay.display()
+        drainMainQueue()
+        try #require(scene.overlay.test_isEnergizeSweeping)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.15))
+        let presented = scene.overlay.test_sweepPresentationStrokeStart
+        #expect(presented != nil && presented! < 0.99,
+                "mid-flight the PRESENTATION must differ from the retreated model — \(String(describing: presented))")
+    }
+
     @Test func theFirstReconcileOnlyStampsTheBaseline() {
         let scene = makeScene(nodes: [.member])
         scene.hook.gold = true

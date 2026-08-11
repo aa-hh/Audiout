@@ -477,6 +477,13 @@ public final class BusRailOverlayView: NSView {
     /// is always 1 (fully retreated / invisible) while the presentation plays.
     public var test_sweepModelStrokeStart: CGFloat? { sweepLayer?.strokeStart }
 
+    /// The film's PRESENTATION stroke-start — what is actually on glass. `nil`
+    /// until the render server has committed a presentation tree (headless
+    /// runners never do).
+    public var test_sweepPresentationStrokeStart: CGFloat? {
+        sweepLayer?.presentation()?.strokeStart
+    }
+
     /// Run the energize reconcile a qualifying draw would, against the current
     /// live plan (so tests can drive transitions without a graphics context).
     public func test_reconcileEnergize() {

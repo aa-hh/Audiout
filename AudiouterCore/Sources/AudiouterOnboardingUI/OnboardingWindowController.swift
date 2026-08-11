@@ -263,6 +263,18 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
         onFinished()
     }
 
+    /// Refuse the ✕ while a permission dialog is unanswered.
+    ///
+    /// Closing (and so deallocating) this window is a fourth way it can fight
+    /// the dialog for focus — AppKit reassigns key/main status and reorders
+    /// remaining windows on teardown, the same disturbance `isPromptInFlight`
+    /// already gives up floating level, reactivate re-front and force-activate
+    /// for. The stuck-prompt hint the content VC already shows after the 20 s
+    /// timeout is the honest explanation for why the ✕ isn't doing anything.
+    public func windowShouldClose(_ sender: NSWindow) -> Bool {
+        !isPromptInFlight
+    }
+
     public func windowWillClose(_ notification: Notification) {
         dismiss()
     }

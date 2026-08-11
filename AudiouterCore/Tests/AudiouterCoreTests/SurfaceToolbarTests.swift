@@ -65,13 +65,52 @@ import AppKit
         #expect(controller.test_quitItemHasImage)
     }
 
+    // MARK: Display mode — the dead-tabs guard
+
+    /// Icon-only is load-bearing, not cosmetic (live review 2026-08-11): under
+    /// a label-showing display mode macOS 26+ builds the tab group's picker
+    /// WITHOUT its interactive expanded view, and segments that render blank
+    /// also swallow every click. Hence the assertion — no expanded view means
+    /// dead tabs. Both classes are private AppKit, so they are matched by
+    /// class NAME, never by type. It discriminates only where the break
+    /// happens: a macOS 26.5 host builds the expanded view under labels too,
+    /// so there this passes either way.
+    @Test func theTabGroupBuildsItsInteractivePicker() {
+        guard #available(macOS 26, *) else { return }
+        let (_, window) = makeAttached()
+        guard let themeFrame = window.contentView?.superview else {
+            Issue.record("no theme frame to search — the window built no chrome")
+            return
+        }
+        themeFrame.layoutSubtreeIfNeeded()
+
+        guard let picker = firstView(in: themeFrame, named: "NSToolbarItemGroupPickerView") else {
+            Issue.record("the tab group materialized no picker view at all")
+            return
+        }
+        #expect(picker.subviews.contains {
+            String(describing: type(of: $0)).contains("NSToolbarItemGroupPickerExpandedView")
+        }, "no expanded view under the picker — the tabs would render blank and eat every click")
+    }
+
+    /// First view in `root`'s subtree whose class name contains `name`.
+    private func firstView(in root: NSView, named name: String) -> NSView? {
+        if String(describing: type(of: root)).contains(name) { return root }
+        for subview in root.subviews {
+            if let hit = firstView(in: subview, named: name) { return hit }
+        }
+        return nil
+    }
+
     // MARK: Selection — host-confirmed round trip
 
     @Test func tabTapsReportTheScreenButDoNotSelfSelect() {
         // The host owns selection, same contract as the retired header: a tap
         // fires the callback with the right screen, and with no confirming
         // `setSelectedScreen` the segmented state snaps back to the confirmed
-        // selection.
+        // selection. NOTE: `test_selectTab` runs the action directly — it
+        // proves the callback contract, never that a real click reaches it
+        // (that is the picker guard above).
         let (controller, _) = makeAttached()
         var reported: [SurfaceScreen] = []
         controller.onSelectScreen = { reported.append($0) }

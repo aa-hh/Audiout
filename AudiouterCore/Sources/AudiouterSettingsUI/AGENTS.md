@@ -78,11 +78,16 @@ layout and where the settings model types (`AppSettings`,
   Also probed there: **`NSStackView` does not release an in-place
   arranged child's height** once the child has been shown — not via
   `isHidden`, not via `setVisibilityPriority(.notVisible)`, not via a
-  priority-999 zero-height constraint. All three left the stack still
-  demanding the expanded height. Physical `removeView`/`addView` is the
-  one mechanism whose collapse the stack actually honors, so that's what
-  the Advanced disclosure uses to detach/reattach its content — see
-  `advancedDisclosureToggled()`.
+  priority-999 zero-height constraint fighting the child's own required
+  internals. All three left the stack still demanding the expanded height.
+  The Advanced disclosure therefore uses the app's one collapse idiom, the
+  `CardView` clip (AudiouterPopoverUI): the content lives inside a
+  layer-clipped wrapper whose REQUIRED height==0 constraint is the single
+  controlled value, and the content's bottom pin into the wrapper is
+  `.defaultHigh` — the clip always wins, no conflict, and the stack only
+  ever sees the wrapper. Toggling that one constraint is the whole
+  collapse — see `advancedDisclosureToggled()`. (This also keeps the door
+  open to a `FoldAnimator`-style animated fold: one animated value.)
 
   **Only the HEIGHT is ever measured.** The width is pinned to
   `SettingsForm.contentWidth`, and the height is taken from the pane's own
@@ -173,4 +178,4 @@ layout and where the settings model types (`AppSettings`,
 | `SettingsRootViewController` | Public `NSTabViewController` holding the panes; measures `fittedContentSize` (pane + in-content chrome) and publishes it via `onFittedContentSizeChange`. |
 | `GeneralSettingsViewController` | Launch at login / "Reconnect last speakers when Audiouter starts" (switch on `AppSettings.reconnectAtLaunch`, live hint) / a hairline + footer button strip (`Setup…`, `About Audiouter…`) in place of the old full-row Setup and About. |
 | `AppearanceSettingsViewController` | Theme tiles (warm product previews) + Accent dial. |
-| `AudioSettingsViewController` | Excluded-apps list (heading via `SettingsForm.sectionHeader`) + connect volume + wake restore + Advanced (Audio buffer, sync offset), Advanced a disclosure collapsed by default that physically adds/removes its content from the column stack. |
+| `AudioSettingsViewController` | Excluded-apps list (heading via `SettingsForm.sectionHeader`) + connect volume + wake restore + Advanced (Audio buffer, sync offset), Advanced a disclosure collapsed by default via the CardView-style clip (required height==0 vs a `.defaultHigh` bottom pin). |

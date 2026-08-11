@@ -132,8 +132,10 @@ public final class AudioSettingsViewController: NSViewController {
     // sync offset are expert controls and don't deserve standing rows.
     private let advancedDisclosure = NSButton()
     private let advancedContent = NSStackView()
-    // The pane's column stack, kept so the disclosure toggle can drive the
-    // stack's visibility priority for the content (see the toggle action).
+    private let advancedClip = NSView()
+    private lazy var advancedClipCollapsed = advancedClip.heightAnchor.constraint(equalToConstant: 0)
+    // The pane's column stack, kept because `republishFittedHeight()` measures
+    // IT rather than the root (see that method's trap note).
     private weak var columnStack: NSStackView?
     // Apply-in-progress feedback for the buffer popup (V1: applies immediately,
     // no CTA — see `applyBuffer(_:)`).
@@ -429,25 +431,37 @@ public final class AudioSettingsViewController: NSViewController {
             contentView.widthAnchor.constraint(equalTo: advancedContent.widthAnchor).isActive = true
         }
 
-        // Collapsed by default: the content ships DETACHED and the toggle
-        // physically adds/removes it. Probed (2026-08-12, this pane, headless)
-        // before settling here: `isHidden`, `setVisibilityPriority(.notVisible)`
-        // and a 999 zero-height constraint all left the column stack demanding
-        // the expanded height once the content had been shown — physical
-        // removal is the one mechanism whose collapse the stack provably
-        // honors. Advanced is the column's LAST section, so append/remove
-        // preserves order trivially.
-        return [hairline, header]
+        // Collapsed by default via the app's one collapse idiom — the
+        // `CardView` clip (AudiouterPopoverUI): the content sits inside a
+        // layer-clipped container whose REQUIRED height==0 constraint is the
+        // single controlled value; the content's bottom pin is `.defaultHigh`,
+        // so the clip always wins without a conflict. Probed alternatives that
+        // do NOT work in-place on a stack child once it has been shown:
+        // `isHidden`, `setVisibilityPriority(.notVisible)`, and a 999
+        // zero-height constraint fighting the stack directly — the stack kept
+        // demanding the expanded height for all three.
+        advancedClip.translatesAutoresizingMaskIntoConstraints = false
+        advancedClip.wantsLayer = true
+        advancedClip.layer?.masksToBounds = true
+        advancedClip.addSubview(advancedContent)
+        let bottomPin = advancedContent.bottomAnchor.constraint(equalTo: advancedClip.bottomAnchor)
+        bottomPin.priority = .defaultHigh
+        NSLayoutConstraint.activate([
+            advancedContent.leadingAnchor.constraint(equalTo: advancedClip.leadingAnchor),
+            advancedContent.trailingAnchor.constraint(equalTo: advancedClip.trailingAnchor),
+            // 4pt inside the clip + the column's own 8pt spacing = the
+            // standard 12pt section gap when expanded; collapsed, only the
+            // stack's 8pt remains above the pane's bottom padding.
+            advancedContent.topAnchor.constraint(equalTo: advancedClip.topAnchor, constant: 4),
+            bottomPin,
+        ])
+        advancedClipCollapsed.isActive = true
+
+        return [hairline, header, advancedClip]
     }
 
     @objc private func advancedDisclosureToggled() {
-        guard let columnStack else { return }
-        if advancedDisclosure.state == .on {
-            columnStack.addView(advancedContent, in: .bottom)
-            advancedContent.widthAnchor.constraint(equalTo: columnStack.widthAnchor).isActive = true
-        } else {
-            columnStack.removeView(advancedContent)
-        }
+        advancedClipCollapsed.isActive = advancedDisclosure.state != .on
         republishFittedHeight()
     }
 
@@ -1060,7 +1074,7 @@ public final class AudioSettingsViewController: NSViewController {
     /// Whether the Advanced disclosure content is currently expanded.
     public var test_advancedExpanded: Bool {
         _ = view
-        return latency != nil && advancedContent.superview != nil
+        return latency != nil && !advancedClipCollapsed.isActive
     }
 
     /// Drive the disclosure triangle, running the same expand/collapse +

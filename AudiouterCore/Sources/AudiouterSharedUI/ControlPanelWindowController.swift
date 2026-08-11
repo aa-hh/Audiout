@@ -306,7 +306,18 @@ public final class ControlPanelWindowController: NSWindowController {
             // 2026-08-07).
             panel.standardWindowButton(.closeButton)?.isHidden = true
             panel.isOpaque = false
-            panel.backgroundColor = Tokens.Color.clear
+            // NOT `.clear`: the window server treats zero-alpha pixels as
+            // CLICK-THROUGH, and on macOS 26 the glass toolbar renders in its
+            // own surface — so with a clear background the whole toolbar band
+            // is transparent in THIS window's surface wherever no content sits
+            // behind it (Settings/Groups seat content below the strip; only
+            // Mixer's list happens to underlap it). Result: clicks on the nav
+            // tabs fell through to whatever app was behind the panel, which
+            // deactivated us and read as "the tab click closed the popover"
+            // (live-diagnosed 2026-08-12, window-server hit-grid probe). A 2%
+            // wash is invisible over the backing bubble but keeps every pixel
+            // of the panel hit-testable.
+            panel.backgroundColor = NSColor.black.withAlphaComponent(0.02)
             panel.hasShadow = false
             if backingWindow.parent !== panel {
                 panel.addChildWindow(backingWindow, ordered: .below)

@@ -340,6 +340,8 @@ struct ControlPanelWindowControllerTests {
         #expect(panel.titlebarAppearsTransparent)
         #expect(panel.titleVisibility == .hidden)
         #expect(!panel.isOpaque)
+        #expect(panel.backgroundColor.alphaComponent > 0,
+                "zero-alpha pixels are CLICK-THROUGH at the window server; a fully clear background made the toolbar band's nav tabs fall through to the app behind (macOS 26 draws the glass toolbar in its own surface)")
         #expect(!panel.hasShadow)
         #expect(controller.test_backingWindow?.parent === panel,
                 "the decorative beak/bubble window is attached while unpinned")
@@ -391,6 +393,8 @@ struct ControlPanelWindowControllerTests {
         #expect(panel.titlebarAppearsTransparent)
         #expect(panel.titleVisibility == .hidden)
         #expect(!panel.isOpaque)
+        #expect(panel.backgroundColor.alphaComponent > 0,
+                "the un-pinned profile must keep the hit-testable (non-zero alpha) background — see freshShellIsUnpinned")
         #expect(!panel.hasShadow)
         #expect(controller.test_backingWindow?.parent === panel,
                 "the beak/bubble window is re-attached on un-pin")

@@ -221,9 +221,9 @@ func run() async -> Int32 {
                        world: SnapshotWorld(allow: [.audio]), outDir: outDir)
         await snapshot(appearanceName: name, label: "\(tag)-step3-bluetooth",
                        world: SnapshotWorld(allow: [.audio, .localNetwork]), outDir: outDir)
-        // Speaker Sync active: the one TWO-STAGE demo, resting on stage 1 — the
-        // "Background Items Added" notification, which is what the user has to
-        // act on before the Login Items pane ever opens.
+        // Speaker Sync active: the Login Items pane with the toggle. A
+        // single-stage demo — "Open Login Items…" opens System Settings
+        // directly, with no alert in between.
         await snapshot(appearanceName: name, label: "\(tag)-step4-speakersync",
                        world: SnapshotWorld(allow: [.audio, .localNetwork],
                                             skip: [.bluetooth]),

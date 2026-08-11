@@ -262,19 +262,26 @@ set changes, or when the gate/motion/demo rules change.
       `grantedText`; the ANATOMY is shared. `DemoPaneView.surfaceSize` grew to
       336 × 336 to seat the taller card with a margin around it (the pane has
       516 pt of height, so Replay still clears underneath).
-  - **TWO steps have a two-stage demo: Speaker Sync and Remote Control** (owner
-    decision 2026-08-11 — from a live run, where both demos jumped straight to a
-    Settings pane the user had no idea how to reach). They are the two whose
-    grant takes two acts on two different surfaces; every other step's retry
-    really does land on the pane, and gets the one-stage mock.
-  - **Both two-stage demos open on the SAME surface: `DemoSystemAlertMockView`,
-    the classic macOS ALERT PANEL** (owner decision 2026-08-11, from a screenshot
+  - **ONE step has a two-stage demo: Remote Control** (owner decisions
+    2026-08-11 — a live run showed its demo jumping straight to a Settings pane
+    the user had no idea how to reach). Its grant takes two acts on two
+    different surfaces; every other step's retry really does land on the pane,
+    and gets the one-stage mock. **Speaker Sync briefly had a two-stage demo
+    too, and it was RETRACTED the same day** (owner re-test 2026-08-11): the
+    premise was that registering the login item raises an alert of this shape,
+    but macOS opens System Settings DIRECTLY from the card's "Open Login
+    Items…" — no alert exists. (The research behind the original build had
+    already flagged that panel as unconfirmed; the re-test confirmed the
+    doubt.) `DemoLoginItemsMockView` was DELETED rather than left orphaned —
+    it is in git history with this rationale if the premise ever revives.
+    Don't re-add a Speaker Sync alert stage without a screenshot.
+  - **Remote Control's two-stage demo opens on `DemoSystemAlertMockView`, the
+    classic macOS ALERT PANEL** (owner decision 2026-08-11, from a screenshot
     of the real Accessibility Access alert taken against a signed build — this
-    REPLACES both earlier stage-one surfaces, the re-fired privacy card for
-    Remote Control and the "Background Items Added" notification banner for
-    Speaker Sync). Its whole reason to exist is that the real panel is a
-    completely different SHAPE from the macOS 26 privacy card above, and the
-    earlier drawing implied the user would meet the card twice:
+    REPLACES the earlier stage-one surface, the re-fired privacy card). Its
+    whole reason to exist is that the real panel is a completely different
+    SHAPE from the macOS 26 privacy card above, and the earlier drawing
+    implied the user would meet the card twice:
     - LANDSCAPE (288 pt wide, height from the copy — about 1.8 : 1) with a small
       ~12 pt corner, against the card's tall portrait and its ~24 pt one;
     - a plain, non-bold HEADER line naming the access ("Accessibility Access");
@@ -297,57 +304,17 @@ set changes, or when the gate/motion/demo rules change.
       the symbol's alpha out of it with `.destinationIn`.
     - Accessibility's padlock carries a blue circular badge with the
       `accessibility` glyph (SF Symbols 5 / macOS 14 — checked against
-      `name_availability.plist`, and the package floor is macOS 14). **Login
-      Items has NO badge**: no screenshot of that panel exists and the research
-      turned up no description of one, so the padlock stands alone rather than
-      wearing a marker we invented.
+      `name_availability.plist`, and the package floor is macOS 14). No other
+      step raises this alert, so no other step earns a marker.
     - It is a passive SURFACE, not a `DemoMockView`: it draws itself and exposes
       `pressTarget`/`pressPoint(in:)`/`addPressAnimation(on:pressedAt:)`, while
-      the host owns the cursor and the crossfade. That is what lets
-      `DemoLoginItemsMockView` keep its ONE pointer — a stage that owned a cursor
+      the host owns the cursor and the crossfade — a stage that owned a cursor
       would put a second one on screen. `pointerRest` is where a host parks that
       pointer: resting it on "Open System Settings" reads as a press that already
       happened, which is what the first drawing did.
-    - **The Login Items panel is UNCONFIRMED, and deliberately shipped anyway.**
-      The owner reports meeting it on their own Mac ("we have the exact same
-      thing for Login Items"), and that is the instruction this is built to. A
-      web search found the opposite: every source describes `SMAppService
-      .register()` as raising only the "Background Items Added" NOTIFICATION, and
-      none describes an alert of this shape for it (Apple DTS included, which
-      calls it a notification). No source says such an alert does NOT exist
-      either — the absence is what the research found. If this turns out to be
-      wrong, the fix is one line in `DemoPaneView.makeMock` (back to a banner)
-      plus restoring `DemoNotificationBannerView` from history; nothing else is
-      shaped around it.
-  - **Speaker Sync's two stages.** Registering the login item doesn't put the
-    switch in front of anybody — the user is sent to Login Items to flip it
-    there. Stage one is the alert that sends them; only its "Open System
-    Settings" reaches the pane. One pass, two surfaces, two clicks: the alert,
-    cursor gliding to its button and pressing it; a 0.3 s crossfade; then the
-    inherited Settings pane with the switch flipping on.
     - `DemoNotificationBannerView` — the drawn "Background Items Added" banner
-      this replaced — was DELETED rather than left orphaned. Its rationale (whole
-      banner as the click target, no source-app header or timestamp) is in git
-      history if the panel above ever turns out to be wrong.
-    - `DemoLoginItemsMockView` **inherits** `DemoSettingsMockView` rather than
-      composing one: stage 2 IS the one-stage mock — the same drawn window, the
-      same switch, the same cursor — replayed later along the pass at
-      `stage2Start` (2.10 s) with `DemoBeat`'s rhythm untouched, so there is no
-      second copy of the pane's layout or its timing to keep in step. That is
-      what `DemoSwitchView.addTimeline(on:offset:)` and `DemoMockView.held(_:)`
-      exist for: a stage's score is written in the same seconds as everywhere
-      else, shifted, and its last value held out to the end of the pass.
-    - ONE cursor, two targets. It travels home while it is INVISIBLE (between
-      the alert press and stage 2's rest) — a jump nobody sees beats a second
-      pointer or a slide across a pane that isn't there yet. The press dips the
-      BUTTON, not the panel: the panel's opacity is the crossfade's channel, and
-      two animations on one property fight.
-    - The settled frame is the ALERT (the "ends where it started" rule below,
-      applied to a two-stage pass): it is the first thing the user will really
-      meet, and resting on the pane would show a switch they haven't been told
-      how to reach. `test_demoStage` pins it — it reads the MODEL state, which
-      stays settled while a pass runs, so a running loop can't fake a stage the
-      pane isn't left painting.
+      from Speaker Sync's deleted two-stage era — is likewise only in git
+      history.
   - **Remote Control's two stages.** Its "Open Settings…" re-fires the ASK (rule
     above), so the user has two clicks to make on two different surfaces — and a
     demo that opened straight onto the Settings pane showed the toggle without
@@ -356,15 +323,15 @@ set changes, or when the gate/motion/demo rules change.
     the pointer pressing **Open System Settings**, a crossfade, then the ordinary
     Settings pass with the pointer flipping the Audiouter toggle on, then back to
     the alert. Two presses, two surfaces, one clock. `test_demoStage` is `nil`
-    for every step that isn't one of the two-stage ones.
+    for every step but Remote Control.
     - Stage two is `DemoSettingsMockView` unchanged; the container sequences the
       two, owns the crossfade, and owns stage one's POINTER (the alert has none
       of its own). Stage two draws its own pointer inside the Settings mock, so
       the host's is invisible from the crossfade until the alert comes back —
       the two never share a frame.
-    - `DemoStage` covers BOTH passes now that they open on the same surface;
-      `DemoHandoffStage` was deleted rather than kept as a second enum with the
-      same two cases, and `test_demoHandoffStage` folded into `test_demoStage`.
+    - `DemoStage` names its two surfaces; `DemoHandoffStage` was deleted rather
+      than kept as a second enum with the same two cases, and
+      `test_demoHandoffStage` folded into `test_demoStage`.
     - `DemoPromptOutcome` went with it. It existed only to relabel the privacy
       card's buttons for the re-fired ask; with a real alert drawn for that job,
       the card is back to one shape (two equal neutral capsules, "Don't Allow"
@@ -438,6 +405,37 @@ set changes, or when the gate/motion/demo rules change.
     centre — an image-centre anchor lands the press off the button. The arrow's ink
     fills about half its image box, so `DemoCursorView` is sized from the pointer
     height the caller asks for, not from the box.
+  - **Every press fires ONE shared click splash** (added 2026-08-11): two
+    concentric hairline rings rippling out from the cursor's TIP — a sound wave
+    leaving the click, the one place this audio app's own character shows inside
+    a mock of somebody else's chrome. It lives entirely in
+    `DemoCursorView.addClickSplash(on:at:)`: pure `CAShapeLayer`s anchored on
+    `tipPoint` INSIDE the cursor view, so they ride the cursor's transform and
+    no call site keeps coordinates in step. Three press sites arm it, each at
+    the beat its existing press/state-change already uses (none of which the
+    splash replaces or retimes): the prompt mock's confirm press and the
+    Settings switch flip (both `DemoBeat.pressEnd` — the Settings call also
+    covers the handoff's stage two for free, through `stageWindow`), and the
+    handoff's stage-one alert press (`DemoBeat.pressEnd`).
+    - **Duration is 0.18 s, and that number is load-bearing:** it is the
+      TIGHTEST press-to-cursor-fade window any pass has (the prompt mock
+      presses at 1.90 s and its cursor is fully faded by 2.08 s). A longer
+      splash gets clipped by the cursor fade it rides inside.
+    - **Colour judgment call:** neutral `labelColor` ink — NOT `Tokens` gold and
+      not `DemoSystemColor.accent`. The splash is arguably cursor chrome rather
+      than mock content, but it plays ON surfaces that must read as macOS, and a
+      gold burst would claim macOS draws Audiouter-coloured feedback; the ripple
+      FORM carries the product note instead. `labelColor` also guarantees
+      contrast on every press target (all mid-grey at press time — the switch
+      track only turns blue after `pressEnd`). Stamped per pass like the switch
+      tint, so appearance changes catch up on the next loop.
+    - **The layers' MODEL opacity is 0 and nothing ever sets it otherwise** —
+      only the pass's keyframes make a ring visible, so `applySettledState`
+      needs no new line and a settled/headless frame cannot carry a splash by
+      construction. Pure layers, never views, so `installAccessibilityOptOut`
+      needed no extension either. `test_clickSplashesAreSettled` /
+      `test_clickSplashesAreArmed` (on `DemoMockView`, walking nested stages)
+      pin both halves.
 - **Bluetooth SHARES Remote Control's `Tokens.Color.permission*` hue** rather than
   minting a fifth token, which would need authored light/dark/Increase-Contrast
   values and a measured contrast rationale from the palette owner. The two cards are
@@ -516,9 +514,8 @@ set changes, or when the gate/motion/demo rules change.
 | `DemoPaneView` / `DemoMode` | The right pane: the elevated surface, the mode swap crossfade, the motion policy, the Replay button. |
 | `DemoMockView` | Timeline base class for the animated mocks: restartable score, settled-state hook, and the two multi-stage seams — `held(_:)` and the `stageWindow` offset. |
 | `DemoPromptMockView` / `DemoSettingsMockView` / `DemoSettledMockView` | The privacy-dialog miniature, the Settings-pane miniature, and the calm completion state. |
-| `DemoSystemAlertMockView` / `DemoLockIconView` | The classic macOS ALERT panel both two-stage passes open on — header, divider, gold padlock, accent-filled refusal — and the gradient-filled padlock it leads with. A passive surface: the host owns the cursor and the crossfade. |
-| `DemoLoginItemsMockView` / `DemoStage` | Speaker Sync's two-stage pass — the system alert, then the inherited Settings pane — and which of the two it (and Remote Control's pass) rests on. |
-| `DemoSettingsHandoffMockView` | Remote Control's two-stage retry: the re-fired ask handing off to the Settings pane in one pass, and the owner of stage one's pointer. |
+| `DemoSystemAlertMockView` / `DemoLockIconView` | The classic macOS ALERT panel Remote Control's two-stage pass opens on — header, divider, gold padlock, accent-filled refusal — and the gradient-filled padlock it leads with. A passive surface: the host owns the cursor and the crossfade. |
+| `DemoSettingsHandoffMockView` / `DemoStage` | Remote Control's two-stage retry: the re-fired ask handing off to the Settings pane in one pass, the owner of stage one's pointer, and which of its two surfaces the pass rests on. |
 | `DemoWindowSurfaceView` / `DemoPushButtonView` / `DemoButtonEmphasis` / `DemoSwitchView` / `DemoSidebarView` / `DemoSettingsRowView` / `DemoGreekBarView` / `DemoPillView` / `DemoDotView` / `DemoCursorView` | The drawn parts of the mocks — window body, dialog button (neutral capsule or accent rounded rect), switch, sidebar, list row, greeked label, pill, circle, pointer. |
 | `SystemSettingsOpener` | `NSWorkspace` seam for opening a `SystemSettingsPane`, with a Privacy & Security root fallback. |
 | `ProminentButton` | Accent-filled CTA button with key-window-aware title color. |
@@ -532,4 +529,4 @@ set changes, or when the gate/motion/demo rules change.
 | `AudiouterCore/Tests/AudiouterCoreTests/SetupFlowModelTests.swift` | The sequence, gate and Allow decision table this UI renders (Core, not this folder, but the seam it depends on). |
 | `AudiouterCore/Tests/AudiouterCoreTests/SetupModelTests.swift` | The underlying `SetupModel` probes/status, the Local Network found count, and the version-gated System Settings deep links. |
 | `AudiouterCore/Tests/AudiouterCoreTests/OnboardingPermissionColorTests.swift` | The four per-card tile colours: distinctness, contrast floors, granted-lights-gold, tile fill unchanged. |
-| `AudiouterCore/Sources/onboarding-snapshot` | Offscreen PNG fixtures (per-step — including both two-stage demos at rest — denied, remote-control-retry, complete, permission-lost × light/dark) in `dev/notes/onboarding-snapshots/`. |
+| `AudiouterCore/Sources/onboarding-snapshot` | Offscreen PNG fixtures (per-step — including the two-stage Remote Control demo at rest — denied, remote-control-retry, complete, permission-lost × light/dark) in `dev/notes/onboarding-snapshots/`. |

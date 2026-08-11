@@ -28,11 +28,6 @@ struct RemoteSettingsView: View {
     let session: any MacSessionProtocol
 
     @State private var localConnectVolume: Double?
-    // razor: DEBUG-only picker for the level-style concept sprint. When one
-    // wins, delete this, `levelStylePicker`, and `LevelStyle` itself.
-    #if DEBUG
-    @AppStorage(LevelStyle.storageKey) private var levelStyle: LevelStyle = .standard
-    #endif
     @State private var stagedBufferMs: Int?
     @State private var isApplyingBuffer = false
 
@@ -48,22 +43,8 @@ struct RemoteSettingsView: View {
         _stagedBufferMs = State(initialValue: previewStagedBufferMs)
     }
 
-    #if DEBUG
-    private var levelStylePicker: some View {
-        Section("Volume display") {
-            Picker("Style", selection: $levelStyle) {
-                ForEach(LevelStyle.allCases) { Text($0.title).tag($0) }
-            }
-            .pickerStyle(.segmented)
-        }
-    }
-    #endif
-
     var body: some View {
         Form {
-            #if DEBUG
-            levelStylePicker
-            #endif
             if let snapshot = session.snapshot {
                 connectVolumeSection(snapshot)
                 bufferSection(snapshot)

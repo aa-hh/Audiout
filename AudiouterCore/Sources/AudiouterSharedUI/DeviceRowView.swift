@@ -2375,22 +2375,21 @@ public final class DeviceRowView: NSView {
         return enableCheckbox.frame
     }
 
-    /// The drawn socket pad's rect in this row's coordinates — what the hit
-    /// rect above has to contain.
-    public func test_socketRect() -> NSRect? {
+    /// The drawn node's outer rect (disc plus hover ring) in this row's
+    /// coordinates — what the hit rect above has to contain.
+    public func test_nodeRect() -> NSRect? {
         guard busActive else { return nil }
         layoutSubtreeIfNeeded()
-        let pad = PopoverColumnGrid.railSocketPadRadius
-        return NSRect(x: busView.frame.midX - pad, y: busView.frame.midY - pad,
-                      width: 2 * pad, height: 2 * pad)
+        let r = PopoverColumnGrid.busNodeHoverRingRadius
+        return NSRect(x: busView.frame.midX - r, y: busView.frame.midY - r,
+                      width: 2 * r, height: 2 * r)
     }
 
     /// Drive the gutter hover through the same private path the tracking area
     /// uses (a real pointer crossing can't be synthesized headlessly).
     public func test_setGutterHovered(_ hovered: Bool) { setGutterHovered(hovered) }
-    /// The socket rim tone the node currently draws — `gold` while the gutter
-    /// is hovered on a live row, the resting `faderRim` otherwise.
-    public var test_socketRimColor: NSColor? { busActive ? busView.test_socketRimColor : nil }
+    /// Whether the node currently draws its gold hover ring.
+    public var test_drawsHoverRing: Bool { busActive && busView.test_drawsHoverRing }
 
     /// The membership control's (the node-skinned checkbox's) current VoiceOver
     /// label — asserts the bus node speaks as the SAME real checkbox (spec §4.8:

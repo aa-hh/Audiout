@@ -192,14 +192,12 @@ import AppKit
     @Test func editorSignalEndsAtTheLowestCheckedRowInAFullBandChannel() throws {
         let (editor, _, _) = try makeEditor()
         let plan = try #require(editor.test_railPlan())
-        // The channel runs the WHOLE candidate list — every row is a stop …
-        #expect(plan.stops.count == 5, "every candidate row sits on the channel")
-        // … while the signal inside it ends at `mixer` (index 3, the lowest
-        // member); `echo` below it is a socket on an empty stretch of channel.
+        // Every candidate row is a stop …
+        #expect(plan.stops.count == 5, "every candidate row contributes a node")
+        // … while the wire ends at `mixer` (index 3, the lowest member); `echo`
+        // below it draws its node and no line.
         #expect(plan.signalTerminusIndex == 3)
         #expect(plan.stops[3].node == .member)
-        #expect(plan.grooveEndY < plan.stops[4].y,
-                "the channel is milled past the last row's socket, not cut at the signal's end")
     }
 
     @Test func checkingALowerRowExtendsTheSignalDownToIt() throws {
@@ -211,11 +209,7 @@ import AppKit
                 "selecting the bottom row runs the signal down to reach it")
         #expect(editor.test_railNodes.last == .member)
         #expect(after.stops.count == before.stops.count,
-                "the CHANNEL never changed — only how far the signal runs inside it")
-        let padR = PopoverColumnGrid.railSocketPadRadius
-        #expect(before.grooveEndY <= before.stops[4].y + padR + 0.01
-                && after.grooveEndY <= after.stops[4].y + padR + 0.01,
-                "…and it reaches the bottom row's socket whether or not that row is a member")
+                "the node set never changed — only how far the wire runs through it")
     }
 
     @Test func editorRailPlanResolvesFromTheIconWellOrigin() throws {
@@ -293,11 +287,11 @@ import AppKit
     }
 
     @Test func nodeClearsTheIconColumn() {
-        // The gutter reserve must keep the node — and the SOCKET it is seated in,
-        // which is wider than any node — from crowding the glyph.
+        // The gutter reserve must keep the node — and the hover ring around it —
+        // from crowding the glyph.
         let row = makeRow(.warmPane, checked: true)
         let nodeRightEdge = PopoverColumnGrid.railGutterCenterX
-            + PopoverColumnGrid.railSocketPadRadius
+            + PopoverColumnGrid.busNodeHoverRingRadius
         let iconLeading = PopoverColumnGrid.firstElementLeading(indented: false)
         #expect(iconLeading - nodeRightEdge > 8,
                 "the node keeps clear negative space before the icon tile")

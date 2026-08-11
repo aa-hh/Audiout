@@ -13,13 +13,6 @@ import AppKit
 /// click on the node area falls through to the invisible checkbox re-anchored
 /// behind it, and a rail click falls through to the row.
 ///
-/// **Socket + plug.** Every node (except the `.origin`) sits in a SOCKET: a
-/// recessed pad in the milled channel the overlay draws, painted here in the
-/// same `well`/`faderRim` pair the fader troughs use. The socket is CONSTANT —
-/// infrastructure that never dims and never changes size — so a small hollow
-/// node reads as an empty socket and a large filled member disc reads as a plug
-/// seated in it.
-///
 /// **Cross-row continuity is achieved by the panel-level ``BusRailOverlayView``**
 /// (Alec's continuity correction): the overlay draws the rail line, detour
 /// arcs, and origin hook as ONE continuous spine down a clear gutter; each row
@@ -85,10 +78,10 @@ public final class MembershipBusView: NSView {
     /// connected members are feeding it) vs the quiet `ember` idle tone (v4
     /// §Call-1 rail-segment tone). Ignored for every non-origin node.
     private var originGold = false
-    /// Whether the pointer is over the row's bus-gutter region — the socket rim
-    /// brightens from `faderRim` to the node's own action tone so the node
-    /// admits it is clickable. The HOST row owns the tracking (this view stays
-    /// non-interactive) and only reports a hover its checkbox can act on.
+    /// Whether the pointer is over the row's bus-gutter region — a thin gold ring
+    /// appears around the node so it admits it is clickable. The HOST row owns the
+    /// tracking (this view stays non-interactive) and only reports a hover its
+    /// checkbox can act on.
     private var hovered = false
 
     public init() {
@@ -111,9 +104,9 @@ public final class MembershipBusView: NSView {
         needsDisplay = true
     }
 
-    /// Point the socket at the pointer state the HOST row tracked. Rim tone
-    /// only — no size change, no glow — so the hover reads as the socket
-    /// waking up rather than the node moving.
+    /// Point the node at the pointer state the HOST row tracked. The node itself
+    /// never moves or resizes on hover — only the ring around it appears — so the
+    /// gutter stays still under the pointer.
     public func setHovered(_ hovered: Bool) {
         guard self.hovered != hovered else { return }
         self.hovered = hovered
@@ -146,7 +139,7 @@ public final class MembershipBusView: NSView {
             let cx = bounds.midX
             let cy = bounds.midY
             let ember = dimmed ? Tokens.Color.tertiaryLabel : Tokens.Color.ember
-            drawSocket(centerX: cx, centerY: cy)
+            drawHoverRing(centerX: cx, centerY: cy)
             let rect = NSRect(x: cx - r, y: cy - r, width: 2 * r, height: 2 * r)
             if node == .member {
                 // Filled gold disc + gold rim.
@@ -163,27 +156,19 @@ public final class MembershipBusView: NSView {
         }
     }
 
-    /// The recessed SOCKET pad the node is seated in — the `well` fill + 1 pt
-    /// `faderRim` rim `WarmFaderCell` gives its trough, so the rail's channel and
-    /// the faders read as the same milled surface. Constant size for every node
-    /// kind, and never dimmed: the socket is infrastructure, not signal.
-    private func drawSocket(centerX: CGFloat, centerY: CGFloat) {
-        let padR = PopoverColumnGrid.railSocketPadRadius
-        let pad = NSRect(x: centerX - padR, y: centerY - padR, width: 2 * padR, height: 2 * padR)
-        Tokens.Color.well.setFill()
-        NSBezierPath(ovalIn: pad).fill()
-        let rim = NSBezierPath(ovalIn: pad.insetBy(dx: 0.5, dy: 0.5))
-        rim.lineWidth = 1
-        socketRimColor.setStroke()
-        rim.stroke()
-    }
-
-    /// The socket rim's tone: the resting `faderRim` normally, the node's own
-    /// action tone (`gold`) while the pointer is over the gutter. A `.blocked`
-    /// node keeps the resting rim in both states — its checkbox is honestly
-    /// disabled, and a disabled control must not invite the click.
-    private var socketRimColor: NSColor {
-        (hovered && node != .blocked) ? Tokens.Color.gold : Tokens.Color.faderRim
+    /// The hover ring: a thin gold circle standing off the node while the pointer
+    /// is over the gutter, so the node admits it is the click target without the
+    /// rail carrying a permanent affordance. A `.blocked` node never draws it —
+    /// its checkbox is honestly disabled, and a disabled control must not invite
+    /// the click.
+    private func drawHoverRing(centerX: CGFloat, centerY: CGFloat) {
+        guard hovered, node != .blocked else { return }
+        let r = PopoverColumnGrid.busNodeHoverRingRadius
+        let ring = NSBezierPath(ovalIn: NSRect(x: centerX - r, y: centerY - r,
+                                               width: 2 * r, height: 2 * r))
+        ring.lineWidth = 1
+        Tokens.Color.gold.setStroke()
+        ring.stroke()
     }
 
     /// Stroke a node's rim (hollow node border, or the filled node's edge).
@@ -246,7 +231,7 @@ public final class MembershipBusView: NSView {
     public var test_nodeRadius: CGFloat { Self.nodeRadius(for: node) }
     /// Whether the host row is currently reporting a gutter hover.
     public var test_hovered: Bool { hovered }
-    /// The socket rim tone this node currently draws (structural hook — the
-    /// same value `drawSocket` strokes with, so it can't drift from the pixels).
-    public var test_socketRimColor: NSColor { socketRimColor }
+    /// Whether the node currently draws its gold hover ring (structural hook —
+    /// the same condition `drawHoverRing` guards on).
+    public var test_drawsHoverRing: Bool { hovered && node != .blocked }
 }

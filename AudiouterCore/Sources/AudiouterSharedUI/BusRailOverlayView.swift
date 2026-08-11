@@ -12,22 +12,18 @@ import AppKit
 /// (added last), so where the rail crosses a hairline it reads unbroken. It is
 /// non-interactive (`hitTest` returns `nil`).
 ///
-/// **Two layers, one gutter.** The GROOVE is a recessed channel milled into the
-/// console face: it spans the FULL device band (origin → the lowest device
-/// node's socket), detours every off-spine node, never dims, and is there even
-/// when nothing is selected — infrastructure. The SIGNAL is the gold/ember line
-/// flowing INSIDE that channel, and it ends at its natural terminus, the LOWEST
-/// ON-SPINE node: below that the channel simply runs empty. Every node is
-/// treated identically — there is no third "bare node with no rail" rendering.
+/// **One wire, one tone.** The rail is a single stroked line — no channel, no
+/// pad, nothing under it: gold while the spine is armed, ember while it idles,
+/// one quiet tone end to end while it is dormant. It runs from the origin hook
+/// to its terminus, the LOWEST ON-SPINE node, detouring around every off-spine
+/// node it passes on the way. Rows below the terminus draw their node disc and
+/// no line.
 ///
-/// **Division of labour:** this overlay draws the channel, the signal line, the
-/// detour ARCS around bypassed non-member nodes, and the origin HOOK (which is
-/// deliberately NOT grooved — the channel ends with a round cap and the hook
-/// rises bare out of it to plug into the Main Audio ring, whose stroke a groove
-/// would occlude). The NODE discs/rings and their SOCKET pads stay per-row
-/// (`MembershipBusView`), centred on each row's real checkbox, so they align
-/// exactly with the click target. The overlay reads each row's live frame + node
-/// state at draw time, so it always reflects the current layout
+/// **Division of labour:** this overlay draws the line, the detour ARCS around
+/// bypassed non-member nodes, and the origin HOOK. The NODE discs/rings stay
+/// per-row (`MembershipBusView`), centred on each row's real checkbox, so they
+/// align exactly with the click target. The overlay reads each row's live frame
+/// + node state at draw time, so it always reflects the current layout
 /// (collapse/expand/resize) with no cached geometry.
 ///
 /// The rail lives at `railGutterCenterX` (≈20 pt from the panel's left edge);
@@ -59,7 +55,7 @@ public final class BusRailOverlayView: NSView {
     /// diverges from the active group target, so nothing on this rail is
     /// actually feeding audio. The host owns the condition; when it is set the
     /// WHOLE signal path draws in one quiet tone rather than a per-row patchwork.
-    /// The groove ignores it — a channel is there whether or not signal flows.
+    /// Node fills stay per-row; this is the wire's tone alone.
     public var dormant = false
 
     public init() {
@@ -165,8 +161,6 @@ public final class BusRailOverlayView: NSView {
             ? Tokens.Color.tertiaryLabel
             : Tokens.Color.spineTone(armed: plan.gold)
 
-        drawGroove(plan)
-
         switch plan.origin {
         case let .ring(ringCenterY, ringCenterX, ringRadius):
             // Terminus (Warm Signal nitpicks — "rail into the ring"): the rail
@@ -192,10 +186,10 @@ public final class BusRailOverlayView: NSView {
             fillTerminusDot(atY: y, x: cx)
         }
 
-        // How far the SIGNAL reaches: its natural terminus is the lowest on-spine
-        // node — below that the channel runs empty. A collapsed/clipping device
-        // section overrides that, running the line down to the cut dot instead
-        // (what lies below is hidden, not absent).
+        // How far the line reaches: its natural terminus is the lowest on-spine
+        // node — below that, nothing. A collapsed/clipping device section
+        // overrides that, running the line down to the cut dot instead (what lies
+        // below is hidden, not absent).
         var currentY = plan.railTopY
         for (index, stop) in plan.stops.enumerated() {
             if plan.terminusDotY == nil {
@@ -234,9 +228,10 @@ public final class BusRailOverlayView: NSView {
                 if index == plan.signalTerminusIndex && plan.terminusDotY == nil { return }
                 currentY = stop.y - gap
             } else {
-                // Detour ARC around a bypassed non-member node — the SAME radius
-                // the groove uses, so the signal stays centred in its channel.
-                let arcR = PopoverColumnGrid.railDetourRadius
+                // Detour ARC around a bypassed non-member node — keyed off that
+                // node's OWN radius, so the bow clears a large node and a small
+                // one by the same margin.
+                let arcR = stopR + PopoverColumnGrid.busDetourBulge
                 strokeVertical(from: currentY, to: stop.y + arcR, x: cx, lineWidth: lw)
                 let arc = NSBezierPath()
                 arc.lineWidth = lw
@@ -256,84 +251,6 @@ public final class BusRailOverlayView: NSView {
             originColor.setFill()
             fillTerminusDot(atY: terminusY, x: cx)
         }
-    }
-
-    // MARK: The groove — the milled channel the signal runs inside
-
-    /// Draw the recessed CHANNEL, under the signal: a groove milled down the
-    /// gutter from the origin to the lowest node's socket, breaking at every
-    /// socket and bowing around every off-spine one. It ignores dormancy and the
-    /// selection entirely — the channel is infrastructure, so it is there in full
-    /// even when nothing is in the mix and the channel runs empty.
-    ///
-    /// The origin HOOK is deliberately not grooved: the channel ends at the top
-    /// of the vertical run with a round cap and the hook rises bare out of it, so
-    /// the Main Audio ring's own stroke (drawn BELOW this overlay) is never
-    /// occluded by a channel drawn over it.
-    private func drawGroove(_ plan: RailPlan) {
-        guard plan.railTopY - plan.grooveEndY > 0.01 else { return }
-        let cx = PopoverColumnGrid.railGutterCenterX
-        let padR = PopoverColumnGrid.railSocketPadRadius
-        let arcR = PopoverColumnGrid.railDetourRadius
-
-        var run = NSBezierPath()
-        run.move(to: NSPoint(x: cx, y: plan.railTopY))
-        var currentY = plan.railTopY
-        for stop in plan.stops {
-            if Self.onSpine(stop.node) {
-                // The channel BREAKS at the socket pad — a butt end each side, the
-                // pad itself carrying the recess across the gap.
-                if currentY - (stop.y + padR) > 0.01 {
-                    run.line(to: NSPoint(x: cx, y: stop.y + padR))
-                }
-                strokeGroove(run)
-                run = NSBezierPath()
-                run.move(to: NSPoint(x: cx, y: stop.y - padR))
-                currentY = stop.y - padR
-            } else {
-                // Off-spine: the channel bows around the socket. One continuous
-                // path, so the vertical run and its arc join without a seam.
-                if currentY - (stop.y + arcR) > 0.01 {
-                    run.line(to: NSPoint(x: cx, y: stop.y + arcR))
-                }
-                run.appendArc(withCenter: NSPoint(x: cx, y: stop.y), radius: arcR,
-                              startAngle: 90, endAngle: 270, clockwise: false)
-                currentY = stop.y - arcR
-            }
-        }
-        if currentY - plan.grooveEndY > 0.01 {
-            run.line(to: NSPoint(x: cx, y: plan.grooveEndY))
-        }
-        strokeGroove(run)
-        capGrooveTop(atY: plan.railTopY, x: cx)
-    }
-
-    /// Stroke one length of channel: the `faderRim` edge at full width, then the
-    /// `well` interior 2 pt narrower — the exact recessed-trough recipe
-    /// `WarmFaderCell` draws, leaving a 1 pt rim on each side. Butt caps: every
-    /// end of a run meets a socket, and the one exception (the very top) gets its
-    /// round finish from `capGrooveTop`.
-    private func strokeGroove(_ path: NSBezierPath) {
-        guard path.elementCount > 1 else { return }
-        path.lineCapStyle = .butt
-        path.lineJoinStyle = .round
-        path.lineWidth = PopoverColumnGrid.railGrooveWidth
-        Tokens.Color.faderRim.setStroke()
-        path.stroke()
-        path.lineWidth = PopoverColumnGrid.railGrooveWidth - 2
-        Tokens.Color.well.setStroke()
-        path.stroke()
-    }
-
-    /// Round off the channel's top end — the milled end of the cut, drawn as the
-    /// same rim-around-well pair the run itself is stroked with.
-    private func capGrooveTop(atY y: CGFloat, x: CGFloat) {
-        let r = PopoverColumnGrid.railGrooveWidth / 2
-        Tokens.Color.faderRim.setFill()
-        NSBezierPath(ovalIn: NSRect(x: x - r, y: y - r, width: 2 * r, height: 2 * r)).fill()
-        Tokens.Color.well.setFill()
-        NSBezierPath(ovalIn: NSRect(x: x - r + 1, y: y - r + 1,
-                                    width: 2 * (r - 1), height: 2 * (r - 1))).fill()
     }
 
     /// Fill the small round terminus/origin gutter dot centred at `(x, y)`.
@@ -403,16 +320,12 @@ public struct RailPlan: Equatable {
     /// of the terminus dot (behaviors 1 + 3); `nil` when the rail ends naturally
     /// at its lowest selected node.
     public var terminusDotY: CGFloat?
-    /// Index into `stops` of the SIGNAL's natural terminus — the lowest on-spine
-    /// node, the last place the gold line reaches. `nil` when no on-spine node is
-    /// visible, i.e. the channel runs empty for the whole band.
+    /// Index into `stops` of the line's natural terminus — the lowest on-spine
+    /// node, the last place the wire reaches. `nil` when no on-spine node is
+    /// visible, i.e. no line is drawn through the band at all.
     public var signalTerminusIndex: Int?
-    /// The y the GROOVE's vertical run ends at: the lowest stop's socket edge (or
-    /// the far side of its detour arc), or the cut when a collapsing section
-    /// takes the rail short. Equals `railTopY` when there is no band to mill.
-    public var grooveEndY: CGFloat
     /// The dormant-divergent condition (spec §4.7), resolved ONCE for the whole
-    /// rail: the entire signal path draws in one quiet tone. The groove ignores it.
+    /// rail so the wire takes one tone end to end instead of a per-stop patchwork.
     public var dormant: Bool
     public var gold: Bool
 
@@ -475,13 +388,11 @@ public struct RailPlan: Equatable {
     /// collapsed outright — the rail is CUT with a terminus dot at the floor,
     /// which lands at the section header once fully collapsed. When the section is
     /// expanded the floor sits below every node, so nothing is dropped and the
-    /// groove runs the full band.
+    /// line ends where it naturally would.
     ///
-    /// **The two ends are different ends.** The GROOVE reaches the lowest visible
-    /// node (`grooveEndY`); the SIGNAL stops at `signalTerminusIndex`, the lowest
-    /// ON-SPINE node, because that is how far the audio actually reaches. A cut
-    /// overrides both: the line runs down to the dot, since what lies below it is
-    /// hidden rather than absent.
+    /// The line's own end is `signalTerminusIndex`, the lowest ON-SPINE node,
+    /// because that is how far the audio actually reaches. A cut overrides it: the
+    /// line runs down to the dot, since what lies below is hidden, not absent.
     public static func resolve(_ input: Input) -> RailPlan {
         // Origin resolution.
         let originAtHeader: Bool = {
@@ -518,25 +429,11 @@ public struct RailPlan: Equatable {
             drawnStops = input.stops
         }
 
-        // Where each of the two layers ends.
         let signalTerminusIndex = drawnStops.lastIndex { BusRailOverlayView.onSpine($0.node) }
-        let grooveEndY: CGFloat
-        if let terminusDotY {
-            grooveEndY = terminusDotY
-        } else if let last = drawnStops.last {
-            // The channel ends AT the lowest socket — at its pad edge for a node
-            // the channel runs into, at the far side of the bow for one it goes
-            // around (that arc IS the channel's last element).
-            grooveEndY = BusRailOverlayView.onSpine(last.node)
-                ? last.y + PopoverColumnGrid.railSocketPadRadius
-                : last.y - PopoverColumnGrid.railDetourRadius
-        } else {
-            grooveEndY = railTopY
-        }
 
         return RailPlan(origin: origin, railTopY: railTopY, stops: drawnStops,
                         terminusDotY: terminusDotY, signalTerminusIndex: signalTerminusIndex,
-                        grooveEndY: grooveEndY, dormant: input.dormant, gold: input.gold)
+                        dormant: input.dormant, gold: input.gold)
     }
 }
 

@@ -193,29 +193,29 @@ import AudiouterCore
 
     // MARK: The node's clickability (generous hit target + hover affordance)
 
-    @Test func membershipHitTargetCoversTheWholeSocket() {
+    @Test func membershipHitTargetCoversTheWholeNode() {
         let row = makeBusRow()
         row.frame = NSRect(x: 0, y: 0, width: 500, height: DeviceRowView.rowHeight)
         row.apply(makeDevice(), selected: true, controllable: true)
-        guard let hit = row.test_membershipHitRect(), let socket = row.test_socketRect() else {
+        guard let hit = row.test_membershipHitRect(), let node = row.test_nodeRect() else {
             Issue.record("a bus row must expose both rects"); return
         }
-        #expect(hit.contains(socket),
-                "the invisible checkbox's target covers the drawn socket, not just the node disc")
+        #expect(hit.contains(node),
+                "the invisible checkbox's target covers the node and its hover ring, not just the disc")
         #expect(hit.height == row.bounds.height, "…over the full row height")
         #expect(hit.maxX <= PopoverColumnGrid.firstElementLeading(indented: false),
                 "…and stops at the icon column, so it steals nothing from the row's other controls")
     }
 
-    @Test func gutterHoverBrightensTheSocketRim() {
+    @Test func gutterHoverRingsTheNode() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: false, controllable: true)
-        #expect(row.test_socketRimColor == Tokens.Color.faderRim, "at rest the socket wears the milled rim")
+        #expect(!row.test_drawsHoverRing, "at rest the gutter carries no affordance ink")
         row.test_setGutterHovered(true)
-        #expect(row.test_socketRimColor == Tokens.Color.gold,
-                "hovering the gutter wakes the socket in the node's own action tone")
+        #expect(row.test_drawsHoverRing,
+                "hovering the gutter rings the node, so it admits it is the click target")
         row.test_setGutterHovered(false)
-        #expect(row.test_socketRimColor == Tokens.Color.faderRim, "and it settles back on exit")
+        #expect(!row.test_drawsHoverRing, "and it settles back on exit")
     }
 
     @Test func blockedRowNeverInvitesTheClick() {
@@ -223,7 +223,7 @@ import AudiouterCore
         row.apply(makeDevice(), selected: false, blocked: true, blockReason: "no mixed set")
         row.test_setGutterHovered(true)
         #expect(row.test_busNode == .blocked)
-        #expect(row.test_socketRimColor == Tokens.Color.faderRim,
+        #expect(!row.test_drawsHoverRing,
                 "a disabled membership control must not offer a hover it would refuse")
     }
 
@@ -231,11 +231,11 @@ import AudiouterCore
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true)
         row.test_setGutterHovered(true)
-        #expect(row.test_socketRimColor == Tokens.Color.gold)
+        #expect(row.test_drawsHoverRing)
         // Row reuse (any `apply`) drops the transient hover, exactly like the
         // row's own hover wash.
         row.apply(makeDevice(id: "dev-2"), selected: false)
-        #expect(row.test_socketRimColor == Tokens.Color.faderRim)
+        #expect(!row.test_drawsHoverRing)
     }
 
     @Test func nonBusCheckboxKeepsItsLegacyVoiceOverLabel() {

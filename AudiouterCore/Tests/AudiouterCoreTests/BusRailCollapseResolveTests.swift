@@ -52,33 +52,22 @@ import Testing
                      "expanded: the rail ends naturally at its lowest node — no cut dot")
     }
 
-    // MARK: The two ends — full-band channel vs the signal's own terminus
+    // MARK: Where the line ends
 
-    @Test func theChannelSpansTheWholeBandWhileTheSignalStopsAtTheLowestMember() {
+    @Test func theLineEndsAtTheLowestMemberNotTheLowestNode() {
         let plan = RailPlan.resolve(expandedInput())
         #expect(plan.signalTerminusIndex == 2,
-                "the signal ends at the lowest MEMBER, not at the lowest node")
-        // The channel bows around that last non-member and ends on the far side of
-        // its detour — well below where the signal stopped.
-        #expect(abs(plan.grooveEndY - (300 - PopoverColumnGrid.railDetourRadius)) <= 0.001,
-                "the channel is milled past the last socket, whether or not it is a member")
+                "the wire stops at the lowest MEMBER; the non-member below it draws a node only")
+        #expect(plan.stops.count == 4,
+                "every device is still a stop — extent is the plan's call, not the row's")
     }
 
-    @Test func aBandWithNoMembersIsAnEmptyChannel() {
+    @Test func aBandWithNoMembersDrawsNoLineAtAll() {
         var input = expandedInput()
         input.stops = input.stops.map { .init(y: $0.y, node: .nonMember) }
         let plan = RailPlan.resolve(input)
-        #expect(plan.signalTerminusIndex == nil, "no member ⇒ no signal to draw")
-        #expect(plan.stops.count == 4, "…but the channel and every socket are still there")
-        #expect(plan.grooveEndY < plan.railTopY)
-    }
-
-    @Test func theChannelEndsAtTheLowestSocketWhenThatNodeIsAMember() {
-        var input = expandedInput()
-        input.stops = Array(input.stops.dropLast())        // lowest node is a member
-        let plan = RailPlan.resolve(input)
-        #expect(abs(plan.grooveEndY - (340 + PopoverColumnGrid.railSocketPadRadius)) <= 0.001,
-                "the channel breaks AT the socket the signal runs into")
+        #expect(plan.signalTerminusIndex == nil, "no member ⇒ no wire to draw")
+        #expect(plan.stops.count == 4, "…but every node is still there to click")
     }
 
     // MARK: Dormancy is ONE flag for the whole path
@@ -106,8 +95,6 @@ import Testing
         let terminusDotY = try #require(plan.terminusDotY)
         #expect(abs(terminusDotY - 452) <= 0.001,
                        "the rail is cut with a terminus dot at the collapsed section floor (its header)")
-        #expect(abs(plan.grooveEndY - 452) <= 0.001,
-                       "the cut takes the CHANNEL with it — it never runs past the visible band")
         #expect(plan.origin == .ring(centerY: 500, ringCenterX: 20, ringRadius: 15),
                        "the ORIGIN is untouched — only the far end collapsed (behavior 2 contrast)")
     }

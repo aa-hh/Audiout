@@ -430,8 +430,6 @@ func run() -> Int32 {
         } else {
             checks.expect(false, "with devices in the mix the signal must reach one")
         }
-        checks.expect(plan.grooveEndY <= plan.railTopY,
-                      "the channel is milled downward from the origin")
     } else {
         checks.expect(false, "the rail resolves a plan from the laid-out popover")
     }

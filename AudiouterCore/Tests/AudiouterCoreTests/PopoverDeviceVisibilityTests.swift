@@ -352,7 +352,7 @@ import AppKit
         popover.update(devices: fleet)
         popover.test_applyExactFitSize()
         #expect(!(try #require(popover.test_railPlan()).stops.isEmpty),
-                "expanded: the Mac's own node is on the channel")
+                "expanded: the Mac's own node is on the rail")
 
         popover.test_fireSubsectionHeaderClick(title: PopoverController.thisMacSubsectionTitle)
         popover.test_applyExactFitSize()
@@ -361,8 +361,6 @@ import AppKit
         #expect(plan.stops.isEmpty, "no visible node is left to draw")
         #expect(plan.terminusDotY != nil,
                 "the rail ends in a dot at the collapsed header, not in mid-air")
-        #expect(abs(plan.grooveEndY - (plan.terminusDotY ?? .nan)) <= 0.001,
-                "the channel stops at the cut too — it never runs past the visible band")
     }
 
     /// The invariant behind both cases above, stated once. With the origin

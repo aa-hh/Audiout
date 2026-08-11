@@ -432,31 +432,20 @@ public enum PopoverColumnGrid {
     /// consecutive nodes read airy. Applied to the straight through-rail (member /
     /// connecting / pending / failed nodes, which sit ON the spine).
     public static let busNodeRailGap: CGFloat = 3
-    /// Full width of the RECESSED CHANNEL the rail is milled into (rim to rim) —
-    /// the groove that carries the signal down the gutter. It is drawn as two
-    /// strokes on one path (`faderRim` at this width, then `well` 2 pt narrower),
-    /// so the channel keeps a 1 pt rim on each side, exactly the recipe
-    /// `WarmFaderCell` uses for the fader trough — the rail and the faders are
-    /// the same milled material.
-    public static let railGrooveWidth: CGFloat = 6
-    /// Radius of the SOCKET pad every node sits in — `busNodeDiameterSelected/2`
-    /// plus a little air. CONSTANT for every node kind on purpose: the socket is
-    /// infrastructure, only the plug (the node disc) changes with selection, so an
-    /// 11 pt hollow node reads as an EMPTY socket inviting a plug while the 15 pt
-    /// member disc sits proud in the identical socket.
-    public static let railSocketPadRadius: CGFloat = 10
-    /// Radius of the detour arc that bows around an off-spine node — the socket
-    /// pad plus half the channel, so the arc's inner rim just clears the pad.
-    /// ONE radius serves BOTH the groove and the signal, because the signal rides
-    /// centred in the channel: two radii would let the gold line drift off its
-    /// own groove. Derived, so re-sizing either term keeps the pair in lockstep.
-    public static var railDetourRadius: CGFloat {
-        railSocketPadRadius + railGrooveWidth / 2
-    }
+    /// How far the detour arc bows out past an off-spine node's own edge, so the
+    /// line visibly goes AROUND a node it doesn't run through. Added to that
+    /// node's radius, so a large node and a small one are cleared by the same
+    /// margin.
+    public static let busDetourBulge: CGFloat = 6.5
+    /// Radius of the HOVER RING — the thin gold circle that appears around the
+    /// node while the pointer is in the gutter. CONSTANT for every node kind, so
+    /// the affordance lands in the same place whether the row is in the mix or
+    /// out of it, and so the gutter reserve can be sized against one number.
+    public static let busNodeHoverRingRadius: CGFloat = 10
     /// Width of the non-interactive bus-overlay column view a row hosts, centered
-    /// on `railGutterCenterX`. Wide enough to contain the node's socket pad
-    /// (`railSocketPadRadius` from centre) plus its rim, without clipping — the
-    /// detour arcs are drawn by the panel-level overlay, not here. Spans the full
+    /// on `railGutterCenterX`. Wide enough to contain the largest node plus its
+    /// hover ring without clipping — the detour arcs are drawn by the panel-level
+    /// overlay, not here. Spans the full
     /// row height so stacked rows' rail segments read as one continuous line.
     public static let busColumnWidth: CGFloat = 30
     /// Minimum hit height of the inline "Undo" link button in the transient

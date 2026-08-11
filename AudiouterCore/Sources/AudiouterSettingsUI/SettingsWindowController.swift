@@ -101,6 +101,17 @@ public final class SettingsRootViewController: NSTabViewController {
     /// something else still needs.
     public var onFittedContentSizeChange: ((NSSize) -> Void)?
 
+    /// Re-read whatever a remote client can also have changed since these
+    /// panes were built — today only Audio's connect volume and buffer (see
+    /// `AudioSettingsViewController.reloadFromSettings`). Addressed to the
+    /// panes that have something to reconcile rather than broadcast to all of
+    /// them, so a pane without remote-writable state needs no empty override.
+    public func reloadFromSettings() {
+        for case let audio as AudioSettingsViewController in children {
+            audio.reloadFromSettings()
+        }
+    }
+
     /// Re-measure trigger 3, held for the controller's lifetime — see the
     /// comment where they're installed for why this is KVO and not the
     /// documented AppKit callback.

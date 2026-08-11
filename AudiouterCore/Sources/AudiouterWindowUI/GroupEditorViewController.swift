@@ -424,11 +424,26 @@ public final class GroupEditorViewController: NSViewController {
     /// ``rebuildCandidates(devices:)``). No-op if the group no longer exists.
     public func show(groupID: String, devices: [Device]) {
         guard let group = groupController.groups.first(where: { $0.id == groupID }) else { return }
+        // A repaint must never discard text the user is still typing. This is
+        // reached as a REFRESH as well as a first show — a membership toggle in
+        // this same pane saves the group, and any phone-driven group edit
+        // repaints too — and assigning `stringValue` under a live field editor
+        // throws the edit away with nothing said. Skipping the overwrite loses
+        // nothing: `controlTextDidEndEditing` still commits what was typed, and
+        // if another actor renamed the group meanwhile, the commit wins over
+        // their value rather than the user's typing vanishing mid-word.
+        //
+        // Read BEFORE `editingGroupID` moves, and scoped to the SAME group:
+        // switching the pane to a different group must re-fill the field, or it
+        // would show the previous group's half-typed name.
+        let isRenamingThisGroup = editingGroupID == groupID && nameField.currentEditor() != nil
         editingGroupID = groupID
         allDevices = devices
 
-        nameField.stringValue = group.name
-        updateNameFieldWidth()
+        if !isRenamingThisGroup {
+            nameField.stringValue = group.name
+            updateNameFieldWidth()
+        }
         refreshIconWell(group: group)
         // Warm Signal §5.3: the ACTIVE Main Out group's icon well carries the
         // thin gold ring (drawing-only; pure model state from

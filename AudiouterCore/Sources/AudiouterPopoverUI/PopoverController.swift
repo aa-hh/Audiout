@@ -1573,6 +1573,27 @@ public final class PopoverController: NSObject {
         rebuild()
     }
 
+    /// Repaint every device row's membership state in place, for the changes
+    /// that reach the model WITHOUT a backend echo behind them.
+    ///
+    /// `update(devices:)` is how a row normally learns anything, and it rides
+    /// a `BackendEvent`. But `GroupController.setDeviceSelected` only calls
+    /// `applyRouting()` — the sole path that can produce an event — while Main
+    /// Out targets Selected Devices. With a GROUP as the target it mutates
+    /// `selectedDeviceIDs` and announces `onStateDidChange` alone, so a phone
+    /// toggling a speaker left the checkbox stale with nothing on the way to
+    /// correct it. Group edits reach the rows the same way (the rail's dormant
+    /// dimming is derived from the active target's membership).
+    ///
+    /// The caller gates this on the selection or the groups having actually
+    /// changed — `refreshMainOutMaster` documents why the full sweep must not
+    /// ride every `onStateDidChange` (it would re-run the energize reconcile
+    /// and the rail extents on every tick of a volume-key hold).
+    public func refreshDeviceMembership() {
+        guard isEffectivelyShown else { return }
+        refreshDeviceRows()
+    }
+
     // MARK: Main Out row
 
     private func refreshMainOutRow() {

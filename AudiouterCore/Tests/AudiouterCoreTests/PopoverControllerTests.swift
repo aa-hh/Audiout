@@ -1484,6 +1484,42 @@ import AudiouterProtocol
                 "the row under the mouse must be the same object throughout the drag")
     }
 
+    /// A speaker toggled from the PHONE while a GROUP carries Main Out reaches
+    /// the model with no `BackendEvent` behind it — `setDeviceSelected` only
+    /// calls `applyRouting()` under a Selected-Devices target — so the row's
+    /// checkbox had nothing on the way to correct it and stayed stale until
+    /// the popover was reopened.
+    @Test func refreshDeviceMembershipRepaintsACheckboxChangedWithoutABackendEvent() async throws {
+        let (popover, controller, backend) = try await makePopover()
+        let device = try #require(backend.devices.first { !$0.isLocalDevice })
+        popover.update(devices: backend.devices)
+        let row = try #require(popover.test_deviceRow(for: device.id))
+        let before = row.test_isEnabledOn
+
+        // Straight at the controller, the way the companion dispatcher does it
+        // — deliberately NOT through the row's own click.
+        _ = controller.setDeviceSelected(device.id, !before)
+        #expect(row.test_isEnabledOn == before, "nothing has repainted the row yet")
+
+        popover.refreshDeviceMembership()
+
+        #expect(row.test_isEnabledOn == !before, "the checkbox must follow the model")
+    }
+
+    /// The same call while CLOSED must not sweep the rows — the sweep re-runs
+    /// the energize reconcile and the rail extents, which is why
+    /// `refreshMainOutMaster` refuses to ride every state change.
+    @Test func refreshDeviceMembershipWhileClosedDoesNothing() async throws {
+        let (popover, _, backend) = try await makePopover()
+        popover.update(devices: backend.devices)
+        popover.test_isShownOverride = false
+
+        let baseline = popover.test_rebuildCount
+        popover.refreshDeviceMembership()
+
+        #expect(popover.test_rebuildCount == baseline)
+    }
+
     /// The same mutation while CLOSED must NOT rebuild — audit B8's rule.
     @Test func aRouteAddedWhileClosedDoesNotRebuild() async throws {
         let appRouting = tempAppRoutingController()

@@ -294,6 +294,42 @@ public final class AudioSettingsViewController: NSViewController {
             + "Each speaker's own slider takes over right after."
     }
 
+    /// Re-read the two values a REMOTE client can also change (the phone's
+    /// `setConnectVolume` / `setStartBufferMs`) and repaint their controls.
+    ///
+    /// This pane builds its controls once and the surface caches the whole
+    /// screen for the process's life, so without this a phone-driven change
+    /// left the slider and popup showing the launch-time values permanently —
+    /// not just until the pane was reopened. The stored settings themselves
+    /// were always correct; only this paint was stale.
+    ///
+    /// Called when the Settings screen BECOMES VISIBLE, deliberately not on
+    /// every remote write: `connectVolumeSlider` is `isContinuous`, so writing
+    /// to it while the user is dragging would fight the drag — and nobody can
+    /// be dragging a control on a screen that is only now appearing.
+    public func reloadFromSettings() {
+        // Nothing to reconcile before the controls exist — and the load path
+        // reads `settings` itself, so an unloaded pane comes up current. This
+        // must NOT force the view: building a whole pane to answer a reconcile
+        // is the opposite of what the caller asked for.
+        guard isViewLoaded else { return }
+
+        let percent = settings.connectVolume
+        connectVolumeSlider.integerValue = percent
+        connectVolumeValueLabel.stringValue = Self.percentLabel(percent)
+        connectVolumeHint.stringValue = Self.connectVolumeHintLine(percent)
+
+        // The buffer popup is disabled outright under an env override, and
+        // then its one item is that override — nothing to reconcile.
+        guard let latency, latency.envOverrideMs == nil else { return }
+        let ms = settings.startBufferMs
+        appliedMs = ms
+        if let index = latency.optionsMs.firstIndex(of: ms) {
+            bufferPopup.selectItem(at: index)
+        }
+        bufferHint.stringValue = Self.bufferHintLine(ms)
+    }
+
     @objc private func connectVolumeChanged() {
         let percent = connectVolumeSlider.integerValue
         connectVolumeValueLabel.stringValue = Self.percentLabel(percent)
@@ -894,6 +930,13 @@ public final class AudioSettingsViewController: NSViewController {
     public var test_bufferHint: String {
         _ = view
         return bufferHint.stringValue
+    }
+
+    /// The option the popup is currently showing — what a reader would see,
+    /// as opposed to what has been applied.
+    public var test_bufferSelectedTitle: String? {
+        _ = view
+        return bufferPopup.titleOfSelectedItem
     }
 
     public var test_bufferPopupEnabled: Bool { _ = view; return bufferPopup.isEnabled }

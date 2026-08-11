@@ -667,6 +667,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // tells it which screen the user is looking at.
         surface.onVisibleScreenChange = { [weak self] screen in
             self?.mixerWindowController?.setHostVisible(screen == .groups)
+            // Settings' panes are built once and cached for the process's
+            // life, so a phone-driven connect-volume/buffer change would show
+            // the launch-time value forever. Reconciled on appearance rather
+            // than on the write: nobody can be dragging a control on a screen
+            // that is only now becoming visible.
+            if screen == .settings { self?.settingsRoot?.reloadFromSettings() }
         }
 
         // Enforce the precedence up front: prune any persisted route for an
@@ -1275,6 +1281,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// strip renders BENEATH the surface's screen switcher rather than in a
     /// title bar the surface doesn't have.
     @MainActor
+    /// The live Settings root, for reconciling its panes when the screen
+    /// reappears. Weak: `AppSurfaceController` owns it, and it only exists
+    /// once the user has visited Settings at least once.
+    private weak var settingsRoot: SettingsRootViewController?
+
     private func makeSettingsRoot() -> SettingsRootViewController {
         let general = GeneralSettingsViewController(loginItem: SMAppServiceLoginItem(),
                                                     approvals: companionApprovals)
@@ -1306,11 +1317,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // slice of the snapshot, so re-broadcast it.
         audio.onSettingChanged = { [weak self] in self?.scheduleCompanionBroadcast() }
 
-        return SettingsRootViewController(tabs: [
+        let root = SettingsRootViewController(tabs: [
             .init(title: "General", symbolName: "gearshape", viewController: general),
             .init(title: "Appearance", symbolName: "paintpalette", viewController: appearance),
             .init(title: "Audio", symbolName: "speaker.wave.2", viewController: audio),
         ], tabStyle: .segmentedControlOnTop)
+        settingsRoot = root
+        return root
     }
 
     /// The menu-bar item's frame in screen coordinates, for anchoring the
@@ -1536,6 +1549,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             self.popoverController.refreshMainOutMaster()
             self.statusItemController.updateMasterVolume(self.popoverController.statusMasterVolume)
+            self.repaintStructuralStateIfChanged()
             self.scheduleCompanionBroadcast()
         }
 
@@ -2049,6 +2063,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `apply(_:)` for most events, and also what the volume-key interceptor calls
     /// after moving Main — that path never enters the event stream, so without
     /// this the readouts would sit stale until the next unrelated backend event.
+    /// Gates the two repaints below on the state they actually draw — see
+    /// ``StructuralStateGate`` for why they must not ride every announcement.
+    private var structuralStateGate = StructuralStateGate()
+
+    /// Repaint the surfaces that render membership — the popover's device rows
+    /// and the Groups screen — for the changes that reach the model with no
+    /// `BackendEvent` behind them, so nothing else would ever repaint them: a
+    /// phone toggling a speaker while a GROUP carries Main Out (see
+    /// `PopoverController.refreshDeviceMembership`), and phone-driven group
+    /// create/rename/membership/delete, which the Groups screen otherwise
+    /// showed stale until the user navigated away and back.
+    @MainActor
+    private func repaintStructuralStateIfChanged() {
+        guard structuralStateGate.shouldRepaint(selection: groupController.selectedDeviceIDs,
+                                                groups: groupController.groups) else { return }
+        popoverController.refreshDeviceMembership()
+        // Its own hidden-means-idle gate drops this whenever the user is
+        // looking at another screen, so this costs a dictionary rebuild there.
+        mixerWindowController?.update(devices: Array(devicesByID.values))
+    }
+
     private func repaintFromCurrentState() {
         // Establish the out-of-the-box default (current device selected ⇒
         // passthrough) once the fleet is known (SPEC §9b). No-op after the first

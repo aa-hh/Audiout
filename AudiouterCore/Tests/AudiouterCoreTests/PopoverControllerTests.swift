@@ -181,6 +181,41 @@ import AppKit
         #expect(Set(backend.devices.filter(\.isSelected).map(\.id)) == Set(group.memberIDs))
     }
 
+    /// Live-caught: PLAYING is what Main Out actually SENDS to, not the dormant
+    /// Selected set. A member of the group Main Out targets is audible right now,
+    /// so its volume and mute must stay live even with its Selected checkbox
+    /// cleared.
+    @Test func aGroupMemberIsAdjustableWhileItsGroupIsMainOut() async throws {
+        let (popover, controller, _) = try await makePopover(appRouting: tempAppRoutingController())
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        popover.test_saveCurrentSetup(); await drain()
+        let group = controller.groups[0]
+        popover.test_selectMainOut(.group(id: group.id)); await drain()
+        // Saving leaves "office" checked as well, which the OLD selected-set-only
+        // predicate would have ridden; clear it so ONLY group membership can be
+        // keeping the row live.
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false); await drain()
+        #expect(!(controller.isSpeakerSelected("office")), "the dormant Selected set no longer holds it")
+        #expect(controller.isMainOutMember("office"), "but the group Main Out targets still does")
+        #expect(popover.test_deviceRow(for: "office")?.test_isSliderEnabled == true,
+                "a playing group member stays adjustable (mute rides the same value)")
+    }
+
+    /// The deliberate other direction of the same field: selected but outside the
+    /// active group means Main Out sends it nothing, so it must NOT be adjustable.
+    @Test func aDeviceStrandedInTheDormantSelectedSetIsNotAdjustable() async throws {
+        let (popover, controller, _) = try await makePopover(appRouting: tempAppRoutingController())
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        popover.test_saveCurrentSetup(); await drain()
+        let group = controller.groups[0]
+        _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
+        popover.test_selectMainOut(.group(id: group.id)); await drain()
+        #expect(controller.isSpeakerSelected("homepod-bed"), "in the dormant Selected set")
+        #expect(!(controller.isMainOutMember("homepod-bed")), "but not in the group that's playing")
+        #expect(popover.test_deviceRow(for: "homepod-bed")?.test_isSliderEnabled == false,
+                "a silent device must not be adjustable")
+    }
+
     @Test func selectingSelectedDevicesRoutesTheAirPlayMembers() async throws {
         let (popover, controller, backend) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)

@@ -157,6 +157,50 @@ import Testing
                 "mid-flight the PRESENTATION must differ from the absorbed model — \(String(describing: presented))")
     }
 
+    // MARK: Departure point (the pulse leaves from the room that joined)
+
+    @Test func fractionMapsAYPositionOntoTheWire() throws {
+        let wire = NSBezierPath()
+        wire.move(to: NSPoint(x: 20, y: 300))
+        wire.line(to: NSPoint(x: 20, y: 100))
+        let mid = try #require(BusRailOverlayView.fraction(atY: 200, along: wire))
+        #expect(abs(mid - 0.5) < 0.001, "y 200 sits halfway down a 300→100 wire")
+        let above = try #require(BusRailOverlayView.fraction(atY: 350, along: wire))
+        #expect(above == 0, "a y above the wire clamps to the origin")
+        let below = try #require(BusRailOverlayView.fraction(atY: 50, along: wire))
+        #expect(below == 1, "a y below the wire clamps to the terminus")
+        #expect(BusRailOverlayView.fraction(atY: 200, along: NSBezierPath()) == nil,
+                "an empty path has no fractions to give")
+    }
+
+    @Test func aJoiningRoomDepartsFromItsOwnNode() throws {
+        // Three rows; the MIDDLE one joins an armed spine — the pulse must
+        // depart from its spot on the wire, not the wire's end.
+        let scene = makeScene(nodes: [.member, .nonMember, .member])
+        scene.hook.gold = true
+        scene.overlay.test_reconcileEnergize()          // baseline: armed, rooms 0+2
+        drainMainQueue()
+
+        scene.rows[1].node = .member
+        scene.overlay.test_reconcileEnergize()
+        drainMainQueue()
+        let departure = try #require(scene.overlay.test_lastPulseDeparture)
+        #expect(departure < 0.95,
+                "a mid-wire join departs from that node, not the terminus — got \(departure)")
+        #expect(departure > 0.05, "…and not from the ring either")
+    }
+
+    @Test func armingDepartsFromTheTerminus() throws {
+        let scene = makeScene(nodes: [.member, .member])
+        scene.overlay.test_reconcileEnergize()          // baseline: idle
+        scene.hook.gold = true
+        scene.overlay.test_reconcileEnergize()
+        drainMainQueue()
+        let departure = try #require(scene.overlay.test_lastPulseDeparture)
+        #expect(departure == 1,
+                "arming lights every room at once — the pulse runs the whole wire")
+    }
+
     @Test func theFirstReconcileOnlyStampsTheBaseline() {
         let scene = makeScene(nodes: [.member])
         scene.hook.gold = true

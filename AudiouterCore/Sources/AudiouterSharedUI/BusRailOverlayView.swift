@@ -33,14 +33,18 @@ import AppKit
 /// **Connect pulse (Warm Signal v4.1 item 9, reshaped 2026-08-12 — "a pulse
 /// along the rail towards the main out"):** when the wire GAINS gold reach —
 /// the spine arms, or a new member segment goes live on an armed spine — a
-/// short bright `glow` window travels terminus→origin along the wire and is
-/// absorbed into the Main Audio ring: the new room announcing itself up the
-/// bus. (The first cut was a dim ember film retreating downward; live it read
-/// as nothing on connect and a plain dim-out on disconnect — inverted. A
-/// bright pulse over the gold wire is unmissable on connect, and a loss
-/// animates nothing.) One-shot, self-removing (nothing runs at rest), gone
-/// entirely under Reduce Motion, and never fired by the first draw in a
-/// window (no transient fires on open, spec §6).
+/// short bright `glow` window departs from the JOINING ROOM's own node (the
+/// whole wire's terminus when the spine arms), travels up the wire at constant
+/// speed, and is absorbed into the Main Audio ring: the room announcing itself
+/// up the bus. It completes the connect story the row already tells — dashed
+/// breathing node while the handshake runs (`.connecting`), then this pulse
+/// the moment the node lands `.member`. (The first cut was a dim ember film
+/// retreating downward; live it read as nothing on connect and a plain
+/// dim-out on disconnect — inverted. A bright pulse over the gold wire is
+/// unmissable on connect, and a loss animates nothing.) One-shot,
+/// self-removing (nothing runs at rest), gone entirely under Reduce Motion,
+/// and never fired by the first draw in a window (no transient fires on open,
+/// spec §6).
 ///
 /// **Determinism:** the settled wire is steady drawing computed from settled
 /// frames, and the pulse follows the settled-model-layer contract
@@ -83,6 +87,10 @@ public final class BusRailOverlayView: NSView {
     /// next draw stamps one WITHOUT firing — the first render in a window is
     /// always settled (no transient fires on open, spec §6).
     private var lastEnergy: EnergySignature?
+    /// The last drawn plan's member-stop y positions — diffed against the next
+    /// draw's to name WHICH room just joined, so the pulse departs from its
+    /// node rather than the wire's end.
+    private var lastMemberYs: [CGFloat] = []
 
     public init() {
         super.init(frame: .zero)
@@ -121,6 +129,7 @@ public final class BusRailOverlayView: NSView {
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         lastEnergy = nil
+        lastMemberYs = []
         cancelConnectPulse()
     }
 
@@ -407,34 +416,85 @@ public final class BusRailOverlayView: NSView {
     private func reconcileEnergize(with plan: RailPlan) {
         let signature = Self.energizeSignature(of: plan)
         let fires = Self.connectPulseFires(previous: lastEnergy, current: signature)
+        let previousMemberYs = lastMemberYs
         lastEnergy = signature
+        lastMemberYs = plan.dormant ? [] : plan.stops.filter { $0.node == .member }.map(\.y)
         guard fires, window != nil, !reduceMotion else { return }
         let joined = NSBezierPath()
         for run in wireRuns(for: plan) { joined.append(run.path) }
         guard !joined.isEmpty else { return }
+        // The pulse departs FROM THE ROOM THAT JUST JOINED (the member stop
+        // with no counterpart in the previous draw — 2 pt tolerance absorbs
+        // AppKit's per-run rounding). Arming has no new room — every member
+        // goes live at once — so the pulse runs the whole wire from its
+        // terminus. Lowest new room wins if several land in one draw.
+        let newYs = lastMemberYs.filter { y in
+            !previousMemberYs.contains { abs($0 - y) < 2 }
+        }
+        let departure = newYs
+            .compactMap { Self.fraction(atY: $0, along: joined) }
+            .max() ?? 1
         let path = joined.cgPath
         // A run-loop block, not `DispatchQueue.main.async`: it defers the layer
         // mutation out of the draw pass just the same, and a nested run-loop
         // spin (tests) can execute it, which the main dispatch queue's
         // non-reentrancy forbids.
-        RunLoop.main.perform { [weak self] in self?.runConnectPulse(along: path) }
+        RunLoop.main.perform { [weak self] in
+            self?.runConnectPulse(along: path, from: departure)
+        }
     }
 
-    /// Mount the bright pulse over the settled wire and play its
-    /// terminus→origin travel: a short `glow` window slides up the wire,
-    /// shrinking as it goes, and is absorbed to nothing at the Main Audio ring.
+    /// Where `targetY` sits along `path`, as a fraction of its total flattened
+    /// length (0 = path start / origin, 1 = end / terminus). The wire's y is
+    /// weakly decreasing along its whole run (hook, segments, detour arcs), so
+    /// the first flattened segment that crosses `targetY` is THE crossing.
+    /// `nil` when the path has no length.
+    static func fraction(atY targetY: CGFloat, along path: NSBezierPath) -> CGFloat? {
+        let flat = path.flattened
+        var points = [NSPoint](repeating: .zero, count: 3)
+        var current: NSPoint?
+        var total: CGFloat = 0
+        var crossing: CGFloat?
+        for index in 0..<flat.elementCount {
+            switch flat.element(at: index, associatedPoints: &points) {
+            case .moveTo:
+                current = points[0]
+            case .lineTo:
+                guard let from = current else { break }
+                let to = points[0]
+                let length = hypot(to.x - from.x, to.y - from.y)
+                if crossing == nil, length > 0, to.y <= targetY {
+                    let within = from.y > to.y
+                        ? min(max((from.y - targetY) / (from.y - to.y), 0), 1)
+                        : 1
+                    crossing = total + length * within
+                }
+                total += length
+                current = to
+            default:
+                // `flattened` emits moveTo/lineTo only; anything else has no
+                // length to add.
+                break
+            }
+        }
+        guard total > 0 else { return nil }
+        return min(max((crossing ?? total) / total, 0), 1)
+    }
+
+    /// Mount the bright pulse over the settled wire and play its travel from
+    /// `departure` (the joining room's spot on the wire; 1 = terminus) up into
+    /// the Main Audio ring: a short `glow` window slides up the wire, shrinking
+    /// as it goes, and is absorbed to nothing at the ring. Travel time scales
+    /// with the distance (constant speed — `railConnectPulseDuration` is the
+    /// full-wire time), floored so a short hop still reads as motion.
     /// The pulse's MODEL is fully absorbed (`strokeStart = strokeEnd = 0`,
     /// invisible) — only the presentation animates — so a `cacheDisplay` at any
     /// instant captures the settled wire, never the transient. Self-removing on
     /// completion: nothing runs, or exists, at rest. A fresh surge replaces an
-    /// in-flight one (the newest room restarts the pulse from the terminus).
-    ///
-    /// razor: the pulse always departs from the wire's TERMINUS, not from the
-    /// specific node that just joined — precise per-node departure needs a
-    /// path-length map of the stops; add it only if the full-length pulse
-    /// reads wrong on a mid-wire join.
-    func runConnectPulse(along path: CGPath) {
+    /// in-flight one (the newest room restarts the pulse from its own spot).
+    func runConnectPulse(along path: CGPath, from departure: CGFloat) {
         guard window != nil, !reduceMotion, let hostLayer = layer else { return }
+        test_lastPulseDeparture = departure
         pulseLayer?.removeFromSuperlayer()
         let pulse = CAShapeLayer()
         pulse.frame = hostLayer.bounds
@@ -455,14 +515,16 @@ public final class BusRailOverlayView: NSView {
         // it climbs — the ring swallows the pulse rather than the pulse dying
         // in place. easeIn: it accelerates INTO the ring.
         let leading = CABasicAnimation(keyPath: "strokeStart")
-        leading.fromValue = 1 - Self.pulseWindow
+        leading.fromValue = max(0, departure - Self.pulseWindow)
         leading.toValue = 0
         let trailing = CABasicAnimation(keyPath: "strokeEnd")
-        trailing.fromValue = 1
+        trailing.fromValue = departure
         trailing.toValue = 0
         let travel = CAAnimationGroup()
         travel.animations = [leading, trailing]
-        travel.duration = PopoverColumnGrid.railConnectPulseDuration
+        travel.duration = max(
+            PopoverColumnGrid.railConnectPulseDuration * Double(departure),
+            PopoverColumnGrid.railConnectPulseDuration * 0.3)
         travel.timingFunction = CAMediaTimingFunction(name: .easeIn)
         CATransaction.begin()
         CATransaction.setCompletionBlock { [weak self, weak pulse] in
@@ -490,6 +552,10 @@ public final class BusRailOverlayView: NSView {
     /// `nil` (the default) reads the live workspace value; tests flip it and
     /// post the real `accessibilityDisplayOptionsDidChangeNotification`.
     public var test_reduceMotionOverride: Bool?
+
+    /// Where the LAST pulse departed from (fraction of the wire; 1 = terminus,
+    /// smaller = a mid-wire room's own node). `nil` until a pulse has run.
+    public private(set) var test_lastPulseDeparture: CGFloat?
 
     /// Whether the connect pulse is currently mounted mid-flight (present the
     /// instant it's added — no run loop needed to assert it fired).

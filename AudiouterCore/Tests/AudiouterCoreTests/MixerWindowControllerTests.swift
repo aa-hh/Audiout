@@ -212,6 +212,16 @@ import AppKit
         #expect(controller.groups.count == 0, "presenting the sheet creates nothing")
     }
 
+    @Test func createSheetShowsATitleAndAnEditablePencilOnItsIconWell() async throws {
+        let (window, _, _) = try await makeWindow()
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        let sheet = try #require(window.test_createSheet)
+
+        #expect(sheet.test_titleText == "New Group", "the sheet names itself instead of opening as a bare form")
+        #expect(sheet.test_iconWellShowsPencil, "bordered + pencil = editable — the icon well is editable, so it wears the same cue DeviceIconWellView does")
+    }
+
     @Test func createSheetPrefillsPreselectedMembersChecked() async throws {
         let (window, _, _) = try await makeWindow()
         window.test_presentCreateSheet(preselected: ["office", "appletv-lr"])

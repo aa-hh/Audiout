@@ -371,13 +371,20 @@ public enum Tokens {
         // light `gold` `#A97F1E` ≈ 3.6:1 vs `panel` `#FBF8F2` (the deepened
         // paper-gold, spec §1.2's stated floor pick). `ember` is dimmer by design
         // (it's the connecting line, not the node): dark `#8A6A2F` ≈ 3.5:1 vs
-        // `panel`; light `#AC8C46` ≈ 3.07:1 vs Circuit `bg/normal` `#FBFBF9` —
-        // deeper than the spec's `#C2A05A` (≈2.4:1 on this ground, the one
-        // instrument the Circuit decision flagged as worth darkening), so it
-        // clears the floor while staying dimmer than light `gold` (`#A97F1E`,
-        // 3.53:1 on the same ground) and preserving the node/line hierarchy.
-        // The Increase-Contrast variant pushes further (light IC `#9A7A2E`
-        // ≈ 3.9:1). IC variants (my picks, flagged for the Wave-5 sweep like
+        // `panel`. LIGHT EMBER IS MEASURED AGAINST `well`, NOT ONLY `panel`
+        // (2026-08-12): the Groups editor's sections are filled with `well`, so
+        // the rail runs over the darker of the two surfaces, and the previous
+        // `#AC8C46` measured 3.07:1 on `panel` but only 2.55:1 on `well`
+        // `#E8E6DC` — under the ≥3:1 non-text floor on the ground it is
+        // actually drawn on. Light is now `#9C7E3C`: 3.71:1 vs `panel`, 3.07:1
+        // vs `well`. NOTE the consequence, deliberately accepted: nothing that
+        // clears 3:1 on `well` can also be LIGHTER than light `gold`
+        // (`#A97F1E`, itself only 2.92:1 there), so in LIGHT mode ember's
+        // "dimmer" reads as LESS CHROMATIC rather than lighter — saturation
+        // 0.44 against gold's 0.70 at the same ~41° hue, a muted brown beside a
+        // saturated gold. Dark mode keeps the luminance hierarchy unchanged.
+        // The Increase-Contrast variant stays ahead of it (light IC `#9A7A2E`
+        // ≈ 3.90:1 vs `panel` / 3.23:1 vs `well`). IC variants (my picks, flagged for the Wave-5 sweep like
         // `ringConnected`): dark `gold` `#F2C75E`, dark `ember` `#A5824A`, light
         // `gold` `#8A6614`, light `ember` `#9A7A2E`.
 
@@ -405,7 +412,9 @@ public enum Tokens {
         }
 
         /// Gold's dim companion — the bus LINE ink (spec §4.1), the filled node's
-        /// rim (§4.2), and the meter low end (§1). Dimmer than `gold` by design.
+        /// rim (§4.2), and the meter low end (§1). Dimmer than `gold` by design
+        /// — by luminance in dark, by CHROMA in light (see the block above, and
+        /// `MembershipWellContrastTests` for the pinned light floor).
         /// Accent-dial columns (§1.3 — W1): Subtle dark `#6D5B34` is the spec
         /// hex (2.66:1 vs dark `panel` — below the instrument floor exactly
         /// like Full-gold light ember already is: `ember` is a 2 pt line
@@ -417,7 +426,7 @@ public enum Tokens {
         public static var ember: NSColor {
             accentDynamic(name: "ember",
                           full: WarmVariants(dark: 0x8A6A2F, darkHighContrast: 0xA5824A,
-                                             light: 0xAC8C46, lightHighContrast: 0x9A7A2E),
+                                             light: 0x9C7E3C, lightHighContrast: 0x9A7A2E),
                           subtle: WarmVariants(dark: 0x6D5B34, darkHighContrast: 0x877146,
                                                light: 0xAE9668, lightHighContrast: 0x8A744C),
                           systemAccentScale: 0.55)

@@ -100,6 +100,55 @@ public final class GroupEditorViewController: NSViewController {
     private let headerWell = GroupedSectionView()
     private let deleteButton = NSButton()
 
+    /// The header's "Playing now" marker, shown ONLY while the edited group is
+    /// the active Main Out — the SAME glyph + wording the sidebar's
+    /// `IconLabelCellView` already uses, so one state has one name. It lives
+    /// UNDER the rename field, inside the header band: the band's height is
+    /// pinned to the icon well (`GroupsHeaderParityTests`), so nothing here may
+    /// grow it, and the trailing space beside the field belongs to a name that
+    /// can be long.
+    ///
+    /// HIDDEN AT DECLARATION, never in `loadView`: `showEditor(for:)` calls
+    /// ``show(groupID:devices:)`` BEFORE this controller's view is first
+    /// embedded, so `loadView` can run afterwards and would wipe the state
+    /// `show` just decided (the same ordering trap `WarmNameFieldCell`'s swap
+    /// carries below).
+    private let playingBadge: NSStackView = {
+        let stack = NSStackView()
+        stack.isHidden = true
+        return stack
+    }()
+
+    /// The reassurance line for the one editor that raises the fear — an ACTIVE
+    /// group's, where "Playing now" is on screen while membership is being
+    /// edited. An inactive group's editor states nothing, because nothing there
+    /// is playing to change.
+    ///
+    /// HEIGHT BUDGET: it sits BESIDE "Delete Group…" and is centred on it, with
+    /// no bottom pin, so it rides inside the button's existing bottom margin and
+    /// costs the pane ZERO fitting height. The pane has no scroll view and (at a
+    /// seven-device fleet) no spare points at all — a new band above the button
+    /// would overflow it (`MembershipRailTests`).
+    ///
+    /// Configured (and hidden) at declaration for the same `loadView`-after-
+    /// `show` ordering reason as ``playingBadge``.
+    private let reassuranceLabel: NSTextField = {
+        let label = NSTextField(wrappingLabelWithString:
+            "Changes here are saved for next time \u{2014} they don\u{2019}t change "
+            + "what\u{2019}s playing now.")
+        label.font = Tokens.Font.caption
+        // Stock `.secondaryLabel`: text colours are frozen in this pane
+        // (`AGENTS.md`) — the gold in this pair tints the badge's GLYPH only.
+        label.textColor = Tokens.Color.secondaryLabel
+        label.isSelectable = false
+        label.maximumNumberOfLines = 0
+        // It WRAPS into whatever the button leaves rather than pushing the
+        // button's own required geometry around.
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.isHidden = true
+        return label
+    }()
+
     /// Floor for the rename field's width. An editable `NSTextField` has NO
     /// intrinsic width, so without this a field whose width is otherwise driven
     /// by its (measured) content can be squeezed to nothing — it rendered
@@ -209,6 +258,9 @@ public final class GroupEditorViewController: NSViewController {
         nameField.addTrackingArea(tracking)
         nameFieldTracking = tracking
 
+        buildPlayingBadge()
+        reassuranceLabel.translatesAutoresizingMaskIntoConstraints = false
+
         let speakersLabel = NSTextField(labelWithString: "Speakers")
         speakersLabel.translatesAutoresizingMaskIntoConstraints = false
         speakersLabel.textColor = Tokens.Color.secondaryLabel
@@ -263,10 +315,10 @@ public final class GroupEditorViewController: NSViewController {
             well.contentLeadingInset = GroupsPaneLayout.contentLeadingInset
             column.addSubview(well)
         }
-        for v in [iconWell, nameField, speakersLabel, membershipStack] {
+        for v in [iconWell, nameField, playingBadge, speakersLabel, membershipStack] {
             column.addSubview(v)
         }
-        for v in [column, deleteButton] {
+        for v in [column, deleteButton, reassuranceLabel] {
             container.addSubview(v)
         }
         // Added LAST so the spine composites ON TOP of the header and the rows
@@ -308,6 +360,13 @@ public final class GroupEditorViewController: NSViewController {
             constant: -GroupsPaneLayout.contentTrailingInset)
         titleCap.priority = NSLayoutConstraint.Priority(999)
 
+        // The reassurance line takes whatever the delete button leaves, wrapping
+        // into it. 999 rather than required so a pathologically narrow pane
+        // breaks THIS rather than the button's own required geometry.
+        let reassuranceTrailing = reassuranceLabel.trailingAnchor.constraint(
+            equalTo: column.trailingAnchor, constant: -GroupsPaneLayout.contentTrailingInset)
+        reassuranceTrailing.priority = NSLayoutConstraint.Priority(999)
+
         NSLayoutConstraint.activate([
             column.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor,
                                         constant: GroupsPaneLayout.columnTopInset),
@@ -343,6 +402,12 @@ public final class GroupEditorViewController: NSViewController {
             nameField.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.titleFieldMinWidth),
             titleWidth,
             titleCap,
+
+            // The "Playing now" marker tucks UNDER the name, inside the header
+            // band's own padding — it hangs off the field, never off the
+            // section's bottom, so the band's pinned height can't follow it.
+            playingBadge.leadingAnchor.constraint(equalTo: nameField.leadingAnchor),
+            playingBadge.topAnchor.constraint(equalTo: nameField.bottomAnchor, constant: 4),
 
             // Sits BETWEEN the two sections, on bare pane — the gap below the
             // header section's bottom border, above the list section's top.
@@ -409,6 +474,14 @@ public final class GroupEditorViewController: NSViewController {
             deleteButton.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor,
                                                  constant: -16),
 
+            // Beside the button, centred on it, with NO bottom pin: the line's
+            // overhang rides inside the 16pt margin above, so the pane's fitting
+            // height is unchanged (see ``reassuranceLabel``).
+            reassuranceLabel.leadingAnchor.constraint(
+                greaterThanOrEqualTo: deleteButton.trailingAnchor, constant: 12),
+            reassuranceLabel.centerYAnchor.constraint(equalTo: deleteButton.centerYAnchor),
+            reassuranceTrailing,
+
             // ANCHORING TRAP: the overlay's LEADING edge must coincide with the
             // rows' leading edge (the column's), not the container's — the
             // overlay draws the spine at the literal `railGutterCenterX` in its
@@ -422,6 +495,35 @@ public final class GroupEditorViewController: NSViewController {
         ])
 
         view = container
+    }
+
+    /// Build the header's "Playing now" marker: the sidebar's exact symbol and
+    /// wording (`IconLabelCellView`), so the same state can't acquire a second
+    /// name. `Tokens.Color.gold` is an INSTRUMENT — it keeps its authored value
+    /// in every theme, and it tints the GLYPH only; the caption stays stock
+    /// `.secondaryLabel` under this pane's frozen-text-colors rule.
+    private func buildPlayingBadge() {
+        let glyph = NSImageView()
+        glyph.translatesAutoresizingMaskIntoConstraints = false
+        glyph.image = NSImage(systemSymbolName: "speaker.wave.2.fill",
+                              accessibilityDescription: "Playing now")?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
+        glyph.image?.isTemplate = true
+        glyph.contentTintColor = Tokens.Color.gold
+        // The caption beside it already speaks the words — an AX element here
+        // would announce them twice.
+        glyph.setAccessibilityElement(false)
+
+        let caption = NSTextField(labelWithString: "Playing now")
+        caption.translatesAutoresizingMaskIntoConstraints = false
+        caption.font = Tokens.Font.caption
+        caption.textColor = Tokens.Color.secondaryLabel
+
+        playingBadge.translatesAutoresizingMaskIntoConstraints = false
+        playingBadge.orientation = .horizontal
+        playingBadge.alignment = .centerY
+        playingBadge.spacing = 4
+        playingBadge.setViews([glyph, caption], in: .leading)
     }
 
     // MARK: Model
@@ -448,6 +550,12 @@ public final class GroupEditorViewController: NSViewController {
         isActiveGroup = isActive
         iconWell.isActiveGroup = isActive
         iconWell.setAccessibilityValue(isActive ? "Active group" : "")
+        // The ring is colour alone; these two say it in words — the marker
+        // states that this group IS playing, and the line answers the question
+        // that raises while its membership is being edited. Both are hidden for
+        // an inactive group, whose editor moves nothing either way.
+        playingBadge.isHidden = !isActive
+        reassuranceLabel.isHidden = !isActive
         // The origin hook's tone follows the same active-group truth the well's
         // gold ring does (`railHookAnchor`), so repaint the rail with it.
         railOverlay.needsDisplay = true
@@ -708,6 +816,19 @@ public final class GroupEditorViewController: NSViewController {
         onDidEditGroup?()
     }
 
+    /// Put keyboard focus in the rename field with its text selected — the
+    /// sidebar's "Rename…" / double-click path, after the host has shown this
+    /// editor. First-focus select-all comes from the existing delegate.
+    public func focusRenameField() {
+        view.window?.makeFirstResponder(nameField)
+    }
+
+    /// Run the same confirm-then-delete flow the "Delete Group…" button does —
+    /// the sidebar's context-menu "Delete Group…" path.
+    public func requestDelete() {
+        deleteTapped(deleteButton)
+    }
+
     @objc private func deleteTapped(_ sender: NSButton) {
         guard let editingGroupID else { return }
         // Confirm before deleting (HIG — destructive action). In a headless
@@ -828,6 +949,34 @@ public final class GroupEditorViewController: NSViewController {
     /// ``pickIcon(_:)`` path `IconPickerViewController.onPick` would.
     public func test_pickIcon(_ name: String?) {
         pickIcon(name)
+    }
+
+    /// Whether the header's gold "Playing now" marker is on screen — true for
+    /// the active Main Out group's editor only.
+    public var test_playingBadgeVisible: Bool { !playingBadge.isHidden }
+
+    /// Whether the reassurance line under the membership section is on screen —
+    /// the active group's editor only (nothing else raises the question).
+    public var test_reassuranceVisible: Bool { !reassuranceLabel.isHidden }
+
+    /// The reassurance line's exact wording.
+    public var test_reassuranceText: String { reassuranceLabel.stringValue }
+
+    /// Drive a membership row's pointer state headlessly — the hover ring is
+    /// the row's "this is clickable" affordance now that the whole row toggles.
+    public func test_setRowHovered(_ hovered: Bool, for deviceID: String) {
+        rowsByID[deviceID]?.test_setHovered(hovered)
+    }
+
+    /// Whether a membership row currently draws its hover ring.
+    public func test_rowDrawsHoverRing(for deviceID: String) -> Bool {
+        rowsByID[deviceID]?.test_drawsHoverRing ?? false
+    }
+
+    /// Simulate a click on a membership row's BODY (not its checkbox) — the
+    /// same path a real `mouseUp` on the row takes.
+    public func test_clickRow(for deviceID: String) {
+        rowsByID[deviceID]?.test_clickRow()
     }
 
     /// True when "Delete Group…" is currently visible (always true — the

@@ -77,6 +77,18 @@ lives in the Mixer screen. All group logic goes through the shared
   multi-selected it retitles live to "New Group from N Speakers…"; the create
   sheet then prefills its name from the selection ("Office + Sonos Move") and
   auto-focuses the field with the text selected.
+- **Power paths live in the sidebar:** right-click context menu (group row →
+  "Rename…"/"Delete Group…", speaker row → "New Group from Selection…" with
+  clicked-vs-selected arbitration), Cmd-N (view-local key equivalent), and
+  double-click-to-rename. The menu fires `onRequestRename`/`onRequestDelete`;
+  `MixerWindowController` wires them to `focusRenameField()`/`requestDelete()`.
+- **On `.warmPane` the WHOLE membership row is the toggle** (hitTest collapses
+  non-checkbox hits onto the row; drag-off cancels; disabled row refuses), and
+  hovering the row shows the node's ring. The active group's editor carries a
+  "Playing now" badge in the header band and a reassurance caption beside
+  "Delete Group…" — beside, not below: the editor pane's fitting height has
+  ZERO headroom at a 7-device fleet, so new bands need surface-height budget
+  first (`theActiveGroupsMarkersAddNoHeightToTheEditorPane`).
 - **Both sidebar sections are FLAT** — no expand/collapse, no nested rows;
   the Speakers section lists EVERY device (membership is previewed in the
   editor, not by expansion).
@@ -122,7 +134,7 @@ lives in the Mixer screen. All group logic goes through the shared
 |---|---|
 | `MixerWindowController` | Screen-content controller: owns the split view, sheet flow, auto-select rule; vends `contentController`; visibility via `setHostVisible(_:)`. |
 | `ContentPaneHostViewController` | Swapped editor/detail/empty pane + the persistent footer caption. |
-| `GroupsEmptyStateViewController` | "No groups yet" pane: message + §5.9 teaching subtitle + New Group… |
+| `GroupsEmptyStateViewController` | Empty pane: "Group your speakers" + §5.9 teaching subtitle + New Group… |
 | `SidebarViewController` | Source-list (Groups + Speakers), both FLAT; selection drives the content pane. |
 | `GroupEditorViewController` | Edit-only pane: rename, membership toggles, delete. |
 | `GroupCreationSheetController` | Standard macOS sheet for new groups; never activates. |

@@ -62,11 +62,23 @@ public final class SidebarViewController: NSViewController {
     /// of the source list (SPEC.md §9 — manual creation, standard macOS add).
     public var onAddGroup: (() -> Void)?
 
-    /// Called when the user chooses "New Group from Selection" (the "+" while
-    /// devices are multi-selected, or the context-menu item) — carries the
-    /// selected device ids (SPEC.md §9 — "click on speakers and multiselect to
-    /// create a group").
+    /// Called with the device ids a new group should be built from (SPEC.md §9
+    /// — "click on speakers and multiselect to create a group"). Three routes
+    /// reach it: the "+" button while devices are selected, Cmd-N with the same
+    /// selection, and a speaker row's "New Group from Selection…" context item
+    /// (which may carry the CLICKED row alone — see `menuNeedsUpdate`).
     public var onNewGroupFromSelection: (([String]) -> Void)?
+
+    /// Called when the user asks to rename the group with this id — a group
+    /// row's "Rename…" context item or a double-click on the row. The sidebar
+    /// selects that group first, so the host can put focus straight on the
+    /// editor's rename field; it owns no rename UI itself.
+    public var onRequestRename: ((String) -> Void)?
+
+    /// Called when the user chooses a group row's "Delete Group…" context item.
+    /// Confirmation and the delete itself belong to the host — this only
+    /// reports the request.
+    public var onRequestDelete: ((String) -> Void)?
 
     /// Resolves per-device icon overrides (set via the icon picker) so sidebar
     /// device rows show the same glyph as the popover/mixer. `nil` (the
@@ -175,6 +187,15 @@ public final class SidebarViewController: NSViewController {
         outlineView.allowsMultipleSelection = true
         outlineView.dataSource = self
         outlineView.delegate = self
+        // Right-click menu: one menu whose items are rebuilt per click, because
+        // they depend on the CLICKED row (`menuNeedsUpdate`).
+        let contextMenu = NSMenu()
+        contextMenu.delegate = self
+        outlineView.menu = contextMenu
+        // Double-click a group row = rename. `doubleAction` fires after the
+        // single click has already moved the selection.
+        outlineView.target = self
+        outlineView.doubleAction = #selector(rowDoubleClicked(_:))
 
         scrollView.documentView = outlineView
         scrollView.hasVerticalScroller = true
@@ -203,7 +224,8 @@ public final class SidebarViewController: NSViewController {
         addBar.translatesAutoresizingMaskIntoConstraints = false
         addBar.addSubview(addButton)
 
-        let container = NSView()
+        let container = SidebarContainerView()
+        container.onCommandN = { [weak self] in self?.performAdd() }
         // The warm surface sits BEHIND everything else (glass tint on
         // macOS 26+, opaque warm fallback below) and BENEATH the outline
         // view (T7, spec Q4-b) — added first so it's the bottommost
@@ -254,6 +276,12 @@ public final class SidebarViewController: NSViewController {
     }
 
     @objc private func addTapped(_ sender: NSButton) {
+        performAdd()
+    }
+
+    /// The single add path — the "+" button and Cmd-N both route here, so the
+    /// two can't drift apart on what an empty vs. device selection creates.
+    private func performAdd() {
         let selected = selectedDeviceIDs
         if selected.isEmpty {
             onAddGroup?()
@@ -271,6 +299,70 @@ public final class SidebarViewController: NSViewController {
         guard addButton.title != title else { return }
         addButton.title = title
         addButton.toolTip = title
+    }
+
+    // MARK: Context menu / double-click
+    //
+    // Both act on the CLICKED row, which is NOT always a selected one: standard
+    // macOS arbitration is that a right-click inside the selection acts on the
+    // whole selection and a right-click outside it acts on that row alone.
+    // `NSTableView` sets `clickedRow` before it shows its menu and before
+    // `doubleAction` fires, which is why the items are rebuilt per click in
+    // `menuNeedsUpdate` rather than assembled once at setup.
+
+    /// The clicked row, injected. A headless run never right-clicks, so
+    /// `outlineView.clickedRow` is permanently -1 there — this is the ONLY seam
+    /// the menu/double-click hooks take; menu construction and dispatch below
+    /// are the real ones.
+    private var clickedRowOverride: Int?
+
+    private var clickedNode: Node? {
+        let row = clickedRowOverride ?? outlineView.clickedRow
+        guard row >= 0 else { return nil }
+        return outlineView.item(atRow: row) as? Node
+    }
+
+    private func contextMenuItem(_ title: String, _ action: Selector, _ represented: Any) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        item.target = self
+        item.representedObject = represented
+        return item
+    }
+
+    /// Build the menu for `node` as if it had just been right-clicked. Shared by
+    /// the live `outlineView.menu` path and the test hooks.
+    private func contextMenu(clickedNode node: Node?) -> NSMenu {
+        let menu = NSMenu()
+        clickedRowOverride = node.map { outlineView.row(forItem: $0) } ?? -1
+        defer { clickedRowOverride = nil }
+        menuNeedsUpdate(menu)
+        return menu
+    }
+
+    @objc private func renameGroupMenuItemSelected(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        // Select first: the rename field lives in that group's editor, so the
+        // host has nothing to focus until the selection has swapped it in.
+        select(.group(id: id), notify: true)
+        onRequestRename?(id)
+    }
+
+    @objc private func deleteGroupMenuItemSelected(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        onRequestDelete?(id)
+    }
+
+    @objc private func newGroupFromSelectionMenuItemSelected(_ sender: NSMenuItem) {
+        guard let ids = sender.representedObject as? [String] else { return }
+        onNewGroupFromSelection?(ids)
+    }
+
+    /// A device row's double-click does nothing on purpose: the first click
+    /// already opened its (read-only) detail pane, so there is nothing further
+    /// to open.
+    @objc private func rowDoubleClicked(_ sender: Any?) {
+        guard let node = clickedNode, case .group(let group) = node.payload else { return }
+        onRequestRename?(group.id)
     }
 
     // MARK: Model
@@ -357,6 +449,24 @@ public final class SidebarViewController: NSViewController {
         func search(_ nodes: [Node]) -> Node? {
             for node in nodes {
                 if selection(for: node) == target { return node }
+                if let hit = search(node.children) { return hit }
+            }
+            return nil
+        }
+        return search(roots)
+    }
+
+    /// The non-selectable row (a section header or the "No groups yet"
+    /// placeholder) showing `title` — the rows that carry no identity, so
+    /// `findNode(matching:)` can't reach them.
+    private func findNode(titled title: String) -> Node? {
+        func search(_ nodes: [Node]) -> Node? {
+            for node in nodes {
+                switch node.payload {
+                case .header(let t) where t == title: return node
+                case .emptyState(let t) where t == title: return node
+                default: break
+                }
                 if let hit = search(node.children) { return hit }
             }
             return nil
@@ -456,6 +566,50 @@ public final class SidebarViewController: NSViewController {
     /// True when the outline view allows multi-selection (SPEC.md §9).
     public var test_allowsMultipleSelection: Bool { outlineView.allowsMultipleSelection }
 
+    /// Titles of the context menu a right-click on `target`'s row produces —
+    /// built through the real `menuNeedsUpdate` path with the clicked row
+    /// injected, so clicked-vs-selected arbitration is exercised, not bypassed.
+    public func test_contextMenuItems(for target: SidebarSelection) -> [String] {
+        contextMenu(clickedNode: findNode(matching: target)).items.map(\.title)
+    }
+
+    /// Same, for the rows with no identity — the section headers and the "No
+    /// groups yet" placeholder. Both must come back EMPTY.
+    public func test_contextMenuItems(forRowTitled title: String) -> [String] {
+        contextMenu(clickedNode: findNode(titled: title)).items.map(\.title)
+    }
+
+    /// Right-click `target`, then choose the item titled `title`. Dispatched
+    /// through the real `NSMenuItem` target/action (`performActionForItem`),
+    /// never a bypass seam. False when that row's menu has no such item.
+    @discardableResult
+    public func test_clickContextMenuItem(_ title: String, for target: SidebarSelection) -> Bool {
+        let menu = contextMenu(clickedNode: findNode(matching: target))
+        guard let index = menu.items.firstIndex(where: { $0.title == title }) else { return false }
+        menu.performActionForItem(at: index)
+        return true
+    }
+
+    /// Press Cmd-N in the sidebar — a real `NSEvent` through the real
+    /// `performKeyEquivalent` chain. True when the sidebar claimed it.
+    @discardableResult
+    public func test_performCmdN() -> Bool {
+        guard let event = NSEvent.keyEvent(with: .keyDown, location: .zero,
+                                           modifierFlags: .command, timestamp: 0,
+                                           windowNumber: 0, context: nil,
+                                           characters: "n", charactersIgnoringModifiers: "n",
+                                           isARepeat: false, keyCode: 45) else { return false }
+        return view.performKeyEquivalent(with: event)
+    }
+
+    /// Double-click a row (a group row asks for rename; a device row does
+    /// nothing).
+    public func test_doubleClick(_ target: SidebarSelection) {
+        clickedRowOverride = findNode(matching: target).map { outlineView.row(forItem: $0) } ?? -1
+        defer { clickedRowOverride = nil }
+        rowDoubleClicked(outlineView)
+    }
+
     /// Drive the real `viewDidAppear()` lifecycle override directly (A11Y-GROUPS)
     /// — a headless run never orders the window on screen, so AppKit never calls
     /// this itself; this hook exercises the exact same method a live window
@@ -520,6 +674,32 @@ final class IconLabelCellView: NSTableCellView {
 
     func setActiveMarkerVisible(_ visible: Bool) {
         activeMarkerView.isHidden = !visible
+    }
+}
+
+/// The sidebar's container view. Exists only to catch Cmd-N: key equivalents
+/// are dispatched DOWN THE VIEW TREE (the window asks its content view, which
+/// asks each subview), not along the responder chain, so an `NSViewController`
+/// override would never be called — it has to be a view.
+///
+/// razor: a view-local key equivalent is the ceiling. The Groups screen is
+/// hosted in the menu-bar surface and has no menu bar of its own, so Cmd-N
+/// works while the sidebar's tree is in the key window and nowhere else, and
+/// no UI can advertise the shortcut. Upgrade path: a real "New Group…" item in
+/// the app's main menu, which would both widen the scope and print the ⌘N.
+private final class SidebarContainerView: NSView {
+
+    /// Runs the add path (`SidebarViewController.performAdd`). Set at build time.
+    var onCommandN: (() -> Void)?
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+           event.charactersIgnoringModifiers?.lowercased() == "n",
+           let handler = onCommandN {
+            handler()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
     }
 }
 
@@ -619,6 +799,40 @@ private final class SidebarWarmSurfaceView: NSView {
         let color = alpha < 1 ? base.withAlphaComponent(alpha) : base
         color.setFill()
         bounds.fill()
+    }
+}
+
+// MARK: - NSMenuDelegate (row context menu)
+
+extension SidebarViewController: NSMenuDelegate {
+
+    /// Rebuilt per right-click: which items exist, and what they act on, both
+    /// depend on the clicked row.
+    public func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        // Nothing validates these items, so AppKit must not be left to enable
+        // them (`autoenablesItems` would disable every one without a validator).
+        menu.autoenablesItems = false
+        guard let node = clickedNode else { return }
+        switch node.payload {
+        case .header, .emptyState:
+            break   // no identity to act on — an empty menu shows nothing at all
+        case .group(let group):
+            menu.addItem(contextMenuItem("Rename…",
+                                         #selector(renameGroupMenuItemSelected(_:)), group.id))
+            // No destructive styling: `NSMenuItem` has no equivalent of
+            // `hasDestructiveAction`, and the confirmation the delete goes
+            // through is the host's, not this menu's.
+            menu.addItem(contextMenuItem("Delete Group…",
+                                         #selector(deleteGroupMenuItemSelected(_:)), group.id))
+        case .device(let device):
+            // Clicked inside the multi-selection → the whole selection; clicked
+            // outside it → that one row (macOS arbitration).
+            let selected = selectedDeviceIDs
+            let ids = selected.contains(device.id) ? selected : [device.id]
+            menu.addItem(contextMenuItem("New Group from Selection…",
+                                         #selector(newGroupFromSelectionMenuItemSelected(_:)), ids))
+        }
     }
 }
 

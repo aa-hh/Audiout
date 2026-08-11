@@ -152,6 +152,22 @@ public final class MixerWindowController {
         sidebarViewController.onNewGroupFromSelection = { [weak self] deviceIDs in
             self?.presentCreateSheet(preselected: deviceIDs)
         }
+        // Context-menu "Rename…" / double-click on a group row: open its
+        // editor and drop focus straight into the rename field.
+        sidebarViewController.onRequestRename = { [weak self] groupID in
+            guard let self else { return }
+            self.sidebarViewController.select(.group(id: groupID), notify: false)
+            self.showEditor(for: groupID)
+            self.editorViewController.focusRenameField()
+        }
+        // Context-menu "Delete Group…": open the group's editor and run the
+        // same confirm-then-delete flow its button does.
+        sidebarViewController.onRequestDelete = { [weak self] groupID in
+            guard let self else { return }
+            self.sidebarViewController.select(.group(id: groupID), notify: false)
+            self.showEditor(for: groupID)
+            self.editorViewController.requestDelete()
+        }
         // The empty pane's call-to-action runs the same creation sheet.
         emptyStateViewController.onNewGroup = { [weak self] in
             self?.presentCreateSheet(preselected: [])
@@ -509,7 +525,7 @@ final class ContentPaneHostViewController: NSViewController {
     /// (`GroupsEmptyStateViewController.subtitleLabel`): the footer is the one
     /// full teaching line; the empty-state subtitle is a shorter contextual
     /// nudge shown only when there's nothing else on screen.
-    private let footerLabel = NSTextField(labelWithString: "Set up here — play from the menu-bar icon")
+    private let footerLabel = NSTextField(labelWithString: "Set up groups here — switch to the Mixer to play")
 
     /// The container the swapped child view fills; sits above the footer.
     private let contentContainer = NSView()
@@ -627,9 +643,11 @@ public final class GroupsEmptyStateViewController: NSViewController {
     /// Fired when the call-to-action button is clicked.
     var onNewGroup: (() -> Void)?
 
-    // No trailing period — one voice with the sidebar's own "No groups yet"
-    // placeholder row (the two used to disagree on punctuation).
-    private let messageLabel = NSTextField(labelWithString: "No groups yet")
+    // Deliberately NOT "No groups yet" — the sidebar's own placeholder row
+    // (a different file/owner) already says that right above this pane, so
+    // repeating it here read as the same message twice on one screen. This
+    // headline instead states the feature promise the subtitle explains.
+    private let messageLabel = NSTextField(labelWithString: "Group your speakers")
     private let subtitleLabel = NSTextField(labelWithString:
         "Save a set of speakers as a group, then switch to it in two clicks from the menu bar.")
     private let newGroupButton = NSButton()

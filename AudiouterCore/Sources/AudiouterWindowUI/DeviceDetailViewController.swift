@@ -37,10 +37,11 @@ import AudiouterSharedUI
 ///   contain this device) in the second. The sections' own inset hairlines
 ///   separate the rows; the old stock `NSBox` divider is gone (it drew a 185 pt
 ///   rule that stopped a third of the way across the pane);
-/// - a minimal, single-line secondary-colour hint ("View-only — control
-///   playback from the menu-bar popover.") under the form. Deliberately
-///   terse: the fuller "configure here / play in the popover" teaching lives
-///   in a footer elsewhere in this window, not restated here.
+/// - a minimal, single-line secondary-colour hint ("Playback is controlled
+///   from the Mixer — this page only describes the speaker.") under the
+///   form. Deliberately terse: the fuller "configure here / play in the
+///   Mixer" teaching lives in a footer elsewhere in this window, not
+///   restated here.
 ///
 /// No volume slider, no mute, no Selected-Devices toggle, no group-activation
 /// control of any kind lives here — that's the popover/mixer's job, not this
@@ -272,10 +273,14 @@ public final class DeviceDetailViewController: NSViewController {
     }
 
     /// Minimal one-line view-only hint. Deliberately terse — the fuller
-    /// "configure here / play in the popover" teaching lives in a footer
-    /// elsewhere in this window; this pane only needs to
-    /// mark itself as non-interactive.
-    private static let viewOnlyHint = "View-only — control playback from the menu-bar popover."
+    /// "configure here / play in the Mixer" teaching lives in a footer
+    /// elsewhere in this window; this pane only needs to mark itself as
+    /// non-interactive. Names the Mixer (not "menu-bar popover" — the user
+    /// reading this is already inside the one surface, one toolbar click from
+    /// it) and avoids "View-only" as an opener: the icon well right above
+    /// this pane IS editable, so a blanket "view-only" read as a
+    /// contradiction next to its edit pencil.
+    private static let viewOnlyHint = "Playback is controlled from the Mixer — this page only describes the speaker."
 
     /// Build one "Caption ······ Value" row: a secondary-colour caption on the
     /// leading edge and its value RIGHT-ALIGNED on the trailing edge, so the

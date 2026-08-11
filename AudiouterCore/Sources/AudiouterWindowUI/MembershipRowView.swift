@@ -63,6 +63,11 @@ public final class MembershipRowView: NSView {
     private var checked: Bool
     private var iconSymbolName: String?
     private let surface: Surface
+    /// Whether the pointer is over the row. Stored rather than read back off the
+    /// node, because ``setCheckboxEnabled(_:tooltip:)`` has to re-decide whether
+    /// that hover may still be SHOWN after the checkbox's enablement changes
+    /// under a stationary pointer.
+    private var rowHovered = false
 
     private let checkbox = NSButton()
     private let iconView = NSImageView()
@@ -275,6 +280,10 @@ public final class MembershipRowView: NSView {
         // VoiceOver does not reliably announce `toolTip`; the "why is this
         // disabled" explanation has to travel as accessibilityHelp too.
         checkbox.setAccessibilityHelp(tooltip)
+        // Pinning happens under a stationary pointer (a rebuild after the
+        // second-to-last member was unchecked), so a ring already on screen has
+        // to be withdrawn here — no `mouseExited` follows.
+        applyHoverToNode()
     }
 
     /// Whether the checkbox is currently interactive (for structural assertions).
@@ -290,12 +299,103 @@ public final class MembershipRowView: NSView {
         surface == .warmPane ? busView.test_armed : railArmed
     }
 
+    // MARK: The whole row is one click target (warm pane only)
+
+    /// On `.warmPane` the row body is the click target, so nothing inside it may
+    /// swallow a click: a non-editable `NSTextField` and an `NSImageView` still
+    /// hit-test to themselves and consume the mouse, which left the name, the
+    /// glyph and the "Unavailable" annotation dead. Collapsing every hit that
+    /// isn't the real checkbox onto the row is ONE fix instead of a click
+    /// recognizer per label. `.systemSheet` keeps stock hit-testing — its
+    /// checkbox is visible and the row is not an affordance.
+    public override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        guard surface == .warmPane, let hit else { return hit }
+        return hit === checkbox ? hit : self
+    }
+
+    /// Swallowed so the matching `mouseUp` is delivered here; the toggle itself
+    /// fires on mouse-UP, so dragging off the row cancels it exactly like the
+    /// checkbox this row stands in for.
+    public override func mouseDown(with event: NSEvent) {
+        guard surface == .warmPane, checkbox.isEnabled else {
+            return super.mouseDown(with: event)
+        }
+    }
+
+    public override func mouseUp(with event: NSEvent) {
+        guard surface == .warmPane, checkbox.isEnabled,
+              bounds.contains(convert(event.locationInWindow, from: nil)) else {
+            return super.mouseUp(with: event)
+        }
+        rowClicked()
+    }
+
+    /// A click on the row body, routed through the SAME path the real checkbox
+    /// takes — one toggle, one `onToggle`, whichever way the user reached it.
+    /// A pinned (disabled) row refuses it, as the checkbox itself would.
+    private func rowClicked() {
+        guard surface == .warmPane, checkbox.isEnabled else { return }
+        performToggle()
+    }
+
+    // MARK: Hover (the "this row is clickable" affordance)
+
+    /// One tracking area over the WHOLE row, not just the gutter: now that the
+    /// body toggles, the ring has to answer a pointer anywhere on the row.
+    /// `.inVisibleRect` keeps the rect live, so no geometry is cached here.
+    public override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        guard surface == .warmPane else { return }
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+            owner: self))
+        // Re-tracking means the row was rebuilt or moved UNDER a stationary
+        // pointer (every membership toggle rebuilds this list), and no
+        // `mouseEntered`/`mouseExited` follows that — so read the pointer's real
+        // position rather than wait for the next move.
+        refreshHoverFromPointer()
+    }
+
+    private func refreshHoverFromPointer() {
+        guard let window else { return setRowHovered(false) }
+        setRowHovered(bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil)))
+    }
+
+    public override func mouseEntered(with event: NSEvent) { setRowHovered(true) }
+    public override func mouseExited(with event: NSEvent) { setRowHovered(false) }
+
+    private func setRowHovered(_ hovered: Bool) {
+        rowHovered = hovered
+        applyHoverToNode()
+    }
+
+    /// Push the hover into the node — but only from a row whose checkbox is
+    /// actually enabled (`../AudiouterSharedUI/AGENTS.md`). `MembershipBusView`
+    /// refuses a `.blocked` node on its own; a PINNED row here keeps its
+    /// `.member` node (it IS a member), so the refusal for that case has to
+    /// live in the row, on the checkbox's real enablement.
+    private func applyHoverToNode() {
+        guard surface == .warmPane else { return }
+        busView.setHovered(rowHovered && checkbox.isEnabled)
+    }
+
     // MARK: Actions
 
     @objc private func checkboxToggled(_ sender: NSButton) {
         checked = sender.state == .on
         updateBus()
         onToggle?(device.id, checked)
+    }
+
+    /// Flip the real control and dispatch its action — the single path every
+    /// toggle affordance (checkbox click, row click, test hook) funnels through,
+    /// so none of them can grow a second, divergent rule.
+    private func performToggle() {
+        checkbox.state = checkbox.state == .on ? .off : .on
+        checkboxToggled(checkbox)
     }
 
     // MARK: Test-support hooks
@@ -309,8 +409,26 @@ public final class MembershipRowView: NSView {
     /// Simulate the user clicking the row's checkbox — flips the state and
     /// fires `onToggle`, exactly like a real click.
     public func test_toggle() {
-        checkbox.state = checkbox.state == .on ? .off : .on
-        checkboxToggled(checkbox)
+        performToggle()
+    }
+
+    /// Simulate a click on the row BODY (not the checkbox) — the same
+    /// ``rowClicked()`` a real `mouseUp` reaches, so the surface split and the
+    /// disabled-checkbox refusal are exercised, not bypassed.
+    public func test_clickRow() {
+        rowClicked()
+    }
+
+    /// Drive the row's pointer state headlessly — the same path the tracking
+    /// area's `mouseEntered`/`mouseExited` take.
+    public func test_setHovered(_ hovered: Bool) {
+        setRowHovered(hovered)
+    }
+
+    /// Whether the node currently draws its hover ring (reads the node's own
+    /// drawing condition, so it can't drift from the pixels).
+    public var test_drawsHoverRing: Bool {
+        surface == .warmPane && busView.test_drawsHoverRing
     }
 
     /// The name label's current text (for asserting the row shows the right

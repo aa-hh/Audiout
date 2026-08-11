@@ -4,52 +4,53 @@ import AppKit
 import Testing
 @testable import AudiouterSharedUI
 
-/// The rail's ENERGIZE SWEEP (Warm Signal v4.1 item 9 — "rail segment brightens
-/// top-to-bottom"): when the wire GAINS gold reach, an ember film over the
-/// settled wire retreats origin→terminus. These tests pin the firing decision
-/// (pure) and the film's contract (settled model, Reduce Motion removal,
+/// The rail's CONNECT PULSE (Warm Signal v4.1 item 9, reshaped per Alec
+/// 2026-08-12 — "a pulse along the rail towards the main out"): when the wire
+/// GAINS gold reach, a bright `glow` window travels terminus→origin and is
+/// absorbed into the Main Audio ring. These tests pin the firing decision
+/// (pure) and the pulse's contract (settled model, Reduce Motion removal,
 /// mid-flight cancel) against a real windowed overlay with stub providers — no
 /// graphics context, no PopoverController.
 @MainActor
-@Suite final class RailEnergizeSweepTests: IsolatedSuite {
+@Suite final class RailConnectPulseTests: IsolatedSuite {
 
     // MARK: Pure firing decision
 
     private typealias Signature = BusRailOverlayView.EnergySignature
 
     @Test func theFirstDrawNeverFires() {
-        #expect(!BusRailOverlayView.energizeSweepFires(
+        #expect(!BusRailOverlayView.connectPulseFires(
             previous: nil, current: Signature(gold: true, memberStops: 3)),
             "no baseline yet ⇒ the first render is settled (no transient fires on open)")
     }
 
     @Test func armingFires() {
-        #expect(BusRailOverlayView.energizeSweepFires(
+        #expect(BusRailOverlayView.connectPulseFires(
             previous: Signature(gold: false, memberStops: 1),
             current: Signature(gold: true, memberStops: 1)),
             "the spine arming is a gain in reach")
     }
 
     @Test func aNewMemberOnAnArmedSpineFires() {
-        #expect(BusRailOverlayView.energizeSweepFires(
+        #expect(BusRailOverlayView.connectPulseFires(
             previous: Signature(gold: true, memberStops: 1),
             current: Signature(gold: true, memberStops: 2)),
             "a new room going live on an armed spine is a gain in reach")
     }
 
     @Test func lossAndIdleGainsStayQuiet() {
-        #expect(!BusRailOverlayView.energizeSweepFires(
+        #expect(!BusRailOverlayView.connectPulseFires(
             previous: Signature(gold: true, memberStops: 2),
             current: Signature(gold: true, memberStops: 1)),
             "a room leaving is not a surge")
-        #expect(!BusRailOverlayView.energizeSweepFires(
+        #expect(!BusRailOverlayView.connectPulseFires(
             previous: Signature(gold: false, memberStops: 0),
             current: Signature(gold: false, memberStops: 1)),
             "a member added to an IDLE wire carries no signal yet")
-        #expect(!BusRailOverlayView.energizeSweepFires(
+        #expect(!BusRailOverlayView.connectPulseFires(
             previous: Signature(gold: true, memberStops: 2),
             current: Signature(gold: true, memberStops: 2)),
-            "no change, no sweep")
+            "no change, no pulse")
     }
 
     @Test func aDormantPlanReadsAsCarryingNothing() {
@@ -123,7 +124,7 @@ import Testing
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
     }
 
-    @Test func theRealDrawPathFiresTheSweep() {
+    @Test func theRealDrawPathFiresThePulse() {
         // Through `display()` → `draw(_:)`, not the `test_reconcileEnergize`
         // shortcut — the live app has no other route into the reconcile.
         let scene = makeScene(nodes: [.member])
@@ -133,11 +134,11 @@ import Testing
         scene.overlay.needsDisplay = true
         scene.overlay.display()
         drainMainQueue()
-        #expect(scene.overlay.test_isEnergizeSweeping,
+        #expect(scene.overlay.test_isConnectPulsing,
                 "arming must fire through the real draw pass, not just the test seam")
     }
 
-    @Test func theFilmPresentationActuallyAnimates() throws {
+    @Test func thePulsePresentationActuallyAnimates() throws {
         // GUI-session only: headless runners have no render server, so the
         // presentation tree never commits there — skip rather than lie.
         try #require(NSScreen.main != nil, "needs a window server")
@@ -149,11 +150,11 @@ import Testing
         scene.overlay.needsDisplay = true
         scene.overlay.display()
         drainMainQueue()
-        try #require(scene.overlay.test_isEnergizeSweeping)
+        try #require(scene.overlay.test_isConnectPulsing)
         RunLoop.main.run(until: Date().addingTimeInterval(0.15))
-        let presented = scene.overlay.test_sweepPresentationStrokeStart
-        #expect(presented != nil && presented! < 0.99,
-                "mid-flight the PRESENTATION must differ from the retreated model — \(String(describing: presented))")
+        let presented = scene.overlay.test_pulsePresentationStrokeEnd
+        #expect(presented != nil && presented! > 0.01,
+                "mid-flight the PRESENTATION must differ from the absorbed model — \(String(describing: presented))")
     }
 
     @Test func theFirstReconcileOnlyStampsTheBaseline() {
@@ -161,19 +162,20 @@ import Testing
         scene.hook.gold = true
         scene.overlay.test_reconcileEnergize()
         drainMainQueue()
-        #expect(!scene.overlay.test_isEnergizeSweeping,
+        #expect(!scene.overlay.test_isConnectPulsing,
                 "an armed wire on first render is settled state, not a transition")
     }
 
-    @Test func armingMountsTheFilmWithASettledModel() {
+    @Test func armingMountsThePulseWithASettledModel() {
         let scene = makeScene(nodes: [.member, .nonMember])
         scene.overlay.test_reconcileEnergize()          // baseline: idle
         scene.hook.gold = true
         scene.overlay.test_reconcileEnergize()
         drainMainQueue()
-        #expect(scene.overlay.test_isEnergizeSweeping, "arming fires the sweep")
-        #expect(scene.overlay.test_sweepModelStrokeStart == 1,
-                "the film's MODEL stays fully retreated (invisible) — only the presentation animates, so cacheDisplay is deterministic mid-flight")
+        #expect(scene.overlay.test_isConnectPulsing, "arming fires the pulse")
+        let model = scene.overlay.test_pulseModelStrokeWindow
+        #expect(model?.start == 0 && model?.end == 0,
+                "the pulse's MODEL stays fully absorbed (invisible) — only the presentation animates, so cacheDisplay is deterministic mid-flight")
     }
 
     @Test func aNewMemberSegmentFiresOnALiveWire() {
@@ -181,64 +183,64 @@ import Testing
         scene.hook.gold = true
         scene.overlay.test_reconcileEnergize()          // baseline: armed, one member
         drainMainQueue()
-        #expect(!scene.overlay.test_isEnergizeSweeping)
+        #expect(!scene.overlay.test_isConnectPulsing)
 
         scene.rows[1].node = .member
         scene.overlay.test_reconcileEnergize()
         drainMainQueue()
-        #expect(scene.overlay.test_isEnergizeSweeping,
+        #expect(scene.overlay.test_isConnectPulsing,
                 "a second room going live surges the wire again")
     }
 
-    @Test func reduceMotionRemovesTheSweepEntirely() {
+    @Test func reduceMotionRemovesThePulseEntirely() {
         let scene = makeScene(nodes: [.member])
         scene.overlay.test_reduceMotionOverride = true
         scene.overlay.test_reconcileEnergize()          // baseline: idle
         scene.hook.gold = true
         scene.overlay.test_reconcileEnergize()
         drainMainQueue()
-        #expect(!scene.overlay.test_isEnergizeSweeping,
-                "Reduce Motion snaps to the settled wire — no travelling sweep")
+        #expect(!scene.overlay.test_isConnectPulsing,
+                "Reduce Motion snaps to the settled wire — no travelling pulse")
     }
 
-    @Test func aMidFlightReduceMotionToggleCancelsTheFilm() {
+    @Test func aMidFlightReduceMotionToggleCancelsThePulse() {
         let scene = makeScene(nodes: [.member])
         scene.overlay.test_reconcileEnergize()          // baseline: idle
         scene.hook.gold = true
         scene.overlay.test_reconcileEnergize()
         drainMainQueue()
-        #expect(scene.overlay.test_isEnergizeSweeping)
+        #expect(scene.overlay.test_isConnectPulsing)
 
         scene.overlay.test_reduceMotionOverride = true
         NSWorkspace.shared.notificationCenter.post(
             name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
             object: NSWorkspace.shared)
-        #expect(!scene.overlay.test_isEnergizeSweeping,
-                "the in-flight film dies the instant the user asks for no motion")
+        #expect(!scene.overlay.test_isConnectPulsing,
+                "the in-flight pulse dies the instant the user asks for no motion")
     }
 
-    @Test func anAccentDialChangeCancelsTheFilm() {
+    @Test func anAccentDialChangeCancelsThePulse() {
         let scene = makeScene(nodes: [.member])
         scene.overlay.test_reconcileEnergize()          // baseline: idle
         scene.hook.gold = true
         scene.overlay.test_reconcileEnergize()
         drainMainQueue()
-        #expect(scene.overlay.test_isEnergizeSweeping)
+        #expect(scene.overlay.test_isConnectPulsing)
 
         NotificationCenter.default.post(name: Tokens.accentStyleDidChangeNotification,
                                         object: nil)
-        #expect(!scene.overlay.test_isEnergizeSweeping,
-                "the film's stamped CGColor can't re-tint — it drops and the settled draw re-resolves")
+        #expect(!scene.overlay.test_isConnectPulsing,
+                "the pulse's stamped CGColor can't re-tint — it drops and the settled draw re-resolves")
     }
 
-    @Test func aDormantWireNeverSweeps() {
+    @Test func aDormantWireNeverPulses() {
         let scene = makeScene(nodes: [.member])
         scene.overlay.dormant = true
         scene.overlay.test_reconcileEnergize()          // baseline
         scene.hook.gold = true
         scene.overlay.test_reconcileEnergize()
         drainMainQueue()
-        #expect(!scene.overlay.test_isEnergizeSweeping,
+        #expect(!scene.overlay.test_isConnectPulsing,
                 "a dormant wire feeds nothing — there is no current to show arriving")
     }
 }

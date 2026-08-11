@@ -30,17 +30,21 @@ import AppKit
 /// section-title text sits in the name column far to the right, so a continuous
 /// vertical rail never collides with a title.
 ///
-/// **Energize sweep (Warm Signal v4.1 item 9 — "rail segment brightens
-/// top-to-bottom"):** when the wire GAINS gold reach — the spine arms, or a new
-/// member segment goes live on an armed spine — an ember film laid over the
-/// settled wire retreats origin→terminus, so the gold reads as current flowing
-/// down to the newly lit room. One-shot, self-removing (nothing runs at rest),
-/// gone entirely under Reduce Motion, and never fired by the first draw in a
+/// **Connect pulse (Warm Signal v4.1 item 9, reshaped 2026-08-12 — "a pulse
+/// along the rail towards the main out"):** when the wire GAINS gold reach —
+/// the spine arms, or a new member segment goes live on an armed spine — a
+/// short bright `glow` window travels terminus→origin along the wire and is
+/// absorbed into the Main Audio ring: the new room announcing itself up the
+/// bus. (The first cut was a dim ember film retreating downward; live it read
+/// as nothing on connect and a plain dim-out on disconnect — inverted. A
+/// bright pulse over the gold wire is unmissable on connect, and a loss
+/// animates nothing.) One-shot, self-removing (nothing runs at rest), gone
+/// entirely under Reduce Motion, and never fired by the first draw in a
 /// window (no transient fires on open, spec §6).
 ///
 /// **Determinism:** the settled wire is steady drawing computed from settled
-/// frames, and the sweep follows the settled-model-layer contract
-/// (`RouteArmedDotView` precedent): the film's MODEL is fully retreated
+/// frames, and the pulse follows the settled-model-layer contract
+/// (`RouteArmedDotView` precedent): the pulse layer's MODEL is fully absorbed
 /// (invisible) and only its presentation animates, so `cacheDisplay` snapshots
 /// are byte-identical run-to-run at ANY capture instant.
 public final class BusRailOverlayView: NSView {
@@ -69,10 +73,12 @@ public final class BusRailOverlayView: NSView {
     /// Node fills stay per-row; this is the wire's tone alone.
     public var dormant = false
 
-    /// The transient energize film currently mid-flight, if any (test-visible
-    /// through ``test_isEnergizeSweeping``; nothing survives the sweep).
-    private var sweepLayer: CAShapeLayer?
-    private static let sweepKey = "busRail.energizeSweep"
+    /// The transient connect pulse currently mid-flight, if any (test-visible
+    /// through ``test_isConnectPulsing``; nothing survives the pulse).
+    private var pulseLayer: CAShapeLayer?
+    private static let pulseKey = "busRail.connectPulse"
+    /// The pulse window's length as a fraction of the whole wire.
+    private static let pulseWindow: CGFloat = 0.3
     /// The last drawn plan's energize signature. `nil` = no baseline yet, so the
     /// next draw stamps one WITHOUT firing — the first render in a window is
     /// always settled (no transient fires on open, spec §6).
@@ -80,7 +86,7 @@ public final class BusRailOverlayView: NSView {
 
     public init() {
         super.init(frame: .zero)
-        // Layer-backed so the one-shot energize sweep has a layer to ride;
+        // Layer-backed so the one-shot connect pulse has a layer to ride;
         // `draw(_:)` still paints the settled wire into the backing layer.
         wantsLayer = true
         // Mid-session accessibility-display + accent-dial changes reconcile
@@ -110,25 +116,25 @@ public final class BusRailOverlayView: NSView {
     }
 
     /// A (re)mount renders settled: the baseline resets so the first draw in a
-    /// window can never read as a transition, and an in-flight film from the
+    /// window can never read as a transition, and an in-flight pulse from the
     /// previous mount dies with it.
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         lastEnergy = nil
-        cancelEnergizeSweep()
+        cancelConnectPulse()
     }
 
-    /// Reduce Motion turning ON strips an in-flight sweep so the wire lands on
+    /// Reduce Motion turning ON strips an in-flight pulse so the wire lands on
     /// its settled state instantly instead of finishing a transition the user
     /// asked not to see.
     @objc private func accessibilityDisplayOptionsDidChange() {
-        if reduceMotion { cancelEnergizeSweep() }
+        if reduceMotion { cancelConnectPulse() }
     }
 
-    /// The film stamps a resolved `CGColor`, which a dial change can't re-tint
+    /// The pulse stamps a resolved `CGColor`, which a dial change can't re-tint
     /// mid-flight — drop it, and let the settled draw re-resolve its tokens.
     @objc private func accentStyleDidChange() {
-        cancelEnergizeSweep()
+        cancelConnectPulse()
         needsDisplay = true
     }
 
@@ -206,7 +212,7 @@ public final class BusRailOverlayView: NSView {
 
     /// One stroked run of the wire — the origin hook, a straight segment, or a
     /// detour arc — with the tone it wears. `drawPlan` strokes exactly these
-    /// (plus the fill dots), and the energize sweep joins their geometry, so the
+    /// (plus the fill dots), and the connect pulse joins their geometry, so the
     /// film always travels the same wire the settled draw painted.
     struct WireRun {
         var path: NSBezierPath
@@ -367,7 +373,7 @@ public final class BusRailOverlayView: NSView {
         }
     }
 
-    // MARK: Energize sweep (v4.1 item 9)
+    // MARK: Connect pulse (v4.1 item 9, reshaped)
 
     /// The wire's live-signal signature: whether the spine is carrying gold at
     /// all, and how many member segments it reaches. A dormant wire (spec §4.7)
@@ -383,11 +389,11 @@ public final class BusRailOverlayView: NSView {
             memberStops: plan.dormant ? 0 : plan.stops.filter { $0.node == .member }.count)
     }
 
-    /// Pure firing decision: a sweep plays only when a LIVE wire GAINS reach —
+    /// Pure firing decision: a pulse plays only when a LIVE wire GAINS reach —
     /// the spine arms, or a new member segment goes gold on an armed spine.
     /// Never on the first draw (`previous == nil`), never on an idle/dormant
     /// wire, never on loss (a room leaving is not a surge).
-    static func energizeSweepFires(previous: EnergySignature?, current: EnergySignature) -> Bool {
+    static func connectPulseFires(previous: EnergySignature?, current: EnergySignature) -> Bool {
         guard let previous, current.gold else { return false }
         return !previous.gold || current.memberStops > previous.memberStops
     }
@@ -396,11 +402,11 @@ public final class BusRailOverlayView: NSView {
         test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
-    /// Compare this draw's plan against the last one and fire the sweep on a
+    /// Compare this draw's plan against the last one and fire the pulse on a
     /// qualifying gain. The layer mutation is deferred out of the draw pass.
     private func reconcileEnergize(with plan: RailPlan) {
         let signature = Self.energizeSignature(of: plan)
-        let fires = Self.energizeSweepFires(previous: lastEnergy, current: signature)
+        let fires = Self.connectPulseFires(previous: lastEnergy, current: signature)
         lastEnergy = signature
         guard fires, window != nil, !reduceMotion else { return }
         let joined = NSBezierPath()
@@ -411,49 +417,65 @@ public final class BusRailOverlayView: NSView {
         // mutation out of the draw pass just the same, and a nested run-loop
         // spin (tests) can execute it, which the main dispatch queue's
         // non-reentrancy forbids.
-        RunLoop.main.perform { [weak self] in self?.runEnergizeSweep(along: path) }
+        RunLoop.main.perform { [weak self] in self?.runConnectPulse(along: path) }
     }
 
-    /// Mount the ember film over the settled wire and play its origin→terminus
-    /// retreat. The film's MODEL is fully retreated (`strokeStart = 1`,
+    /// Mount the bright pulse over the settled wire and play its
+    /// terminus→origin travel: a short `glow` window slides up the wire,
+    /// shrinking as it goes, and is absorbed to nothing at the Main Audio ring.
+    /// The pulse's MODEL is fully absorbed (`strokeStart = strokeEnd = 0`,
     /// invisible) — only the presentation animates — so a `cacheDisplay` at any
     /// instant captures the settled wire, never the transient. Self-removing on
     /// completion: nothing runs, or exists, at rest. A fresh surge replaces an
-    /// in-flight one (the new room restarts the current from the origin).
-    func runEnergizeSweep(along path: CGPath) {
+    /// in-flight one (the newest room restarts the pulse from the terminus).
+    ///
+    /// razor: the pulse always departs from the wire's TERMINUS, not from the
+    /// specific node that just joined — precise per-node departure needs a
+    /// path-length map of the stops; add it only if the full-length pulse
+    /// reads wrong on a mid-wire join.
+    func runConnectPulse(along path: CGPath) {
         guard window != nil, !reduceMotion, let hostLayer = layer else { return }
-        sweepLayer?.removeFromSuperlayer()
-        let film = CAShapeLayer()
-        film.frame = hostLayer.bounds
-        film.path = path
-        film.fillColor = nil
-        film.lineWidth = PopoverColumnGrid.busLineWidth
-        film.lineCap = .round
-        film.lineJoin = .round
+        pulseLayer?.removeFromSuperlayer()
+        let pulse = CAShapeLayer()
+        pulse.frame = hostLayer.bounds
+        pulse.path = path
+        pulse.fillColor = nil
+        pulse.lineWidth = PopoverColumnGrid.busLineWidth
+        pulse.lineCap = .round
+        pulse.lineJoin = .round
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            film.strokeColor = Tokens.Color.ember.cgColor
+            pulse.strokeColor = Tokens.Color.glow.cgColor
         }
-        film.strokeStart = 1
-        hostLayer.addSublayer(film)
-        sweepLayer = film
+        pulse.strokeStart = 0
+        pulse.strokeEnd = 0
+        hostLayer.addSublayer(pulse)
+        pulseLayer = pulse
 
-        let retreat = CABasicAnimation(keyPath: "strokeStart")
-        retreat.fromValue = 0
-        retreat.toValue = 1
-        retreat.duration = PopoverColumnGrid.railEnergizeSweepDuration
-        retreat.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        // Both edges run to 0 on one clock, so the visible window narrows as
+        // it climbs — the ring swallows the pulse rather than the pulse dying
+        // in place. easeIn: it accelerates INTO the ring.
+        let leading = CABasicAnimation(keyPath: "strokeStart")
+        leading.fromValue = 1 - Self.pulseWindow
+        leading.toValue = 0
+        let trailing = CABasicAnimation(keyPath: "strokeEnd")
+        trailing.fromValue = 1
+        trailing.toValue = 0
+        let travel = CAAnimationGroup()
+        travel.animations = [leading, trailing]
+        travel.duration = PopoverColumnGrid.railConnectPulseDuration
+        travel.timingFunction = CAMediaTimingFunction(name: .easeIn)
         CATransaction.begin()
-        CATransaction.setCompletionBlock { [weak self, weak film] in
-            film?.removeFromSuperlayer()
-            if let self, self.sweepLayer === film { self.sweepLayer = nil }
+        CATransaction.setCompletionBlock { [weak self, weak pulse] in
+            pulse?.removeFromSuperlayer()
+            if let self, self.pulseLayer === pulse { self.pulseLayer = nil }
         }
-        film.add(retreat, forKey: Self.sweepKey)
+        pulse.add(travel, forKey: Self.pulseKey)
         CATransaction.commit()
     }
 
-    private func cancelEnergizeSweep() {
-        sweepLayer?.removeFromSuperlayer()
-        sweepLayer = nil
+    private func cancelConnectPulse() {
+        pulseLayer?.removeFromSuperlayer()
+        pulseLayer = nil
     }
 
     // MARK: Test-support hooks
@@ -469,19 +491,22 @@ public final class BusRailOverlayView: NSView {
     /// post the real `accessibilityDisplayOptionsDidChangeNotification`.
     public var test_reduceMotionOverride: Bool?
 
-    /// Whether the energize film is currently mounted mid-flight (present the
+    /// Whether the connect pulse is currently mounted mid-flight (present the
     /// instant it's added — no run loop needed to assert it fired).
-    public var test_isEnergizeSweeping: Bool { sweepLayer != nil }
+    public var test_isConnectPulsing: Bool { pulseLayer != nil }
 
-    /// The film's MODEL stroke-start — the settled-model-layer contract says it
-    /// is always 1 (fully retreated / invisible) while the presentation plays.
-    public var test_sweepModelStrokeStart: CGFloat? { sweepLayer?.strokeStart }
+    /// The pulse's MODEL stroke window — the settled-model-layer contract says
+    /// it is always (0, 0) (fully absorbed / invisible) while the presentation
+    /// plays.
+    public var test_pulseModelStrokeWindow: (start: CGFloat, end: CGFloat)? {
+        pulseLayer.map { ($0.strokeStart, $0.strokeEnd) }
+    }
 
-    /// The film's PRESENTATION stroke-start — what is actually on glass. `nil`
+    /// The pulse's PRESENTATION stroke-end — what is actually on glass. `nil`
     /// until the render server has committed a presentation tree (headless
     /// runners never do).
-    public var test_sweepPresentationStrokeStart: CGFloat? {
-        sweepLayer?.presentation()?.strokeStart
+    public var test_pulsePresentationStrokeEnd: CGFloat? {
+        pulseLayer?.presentation()?.strokeEnd
     }
 
     /// Run the energize reconcile a qualifying draw would, against the current

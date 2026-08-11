@@ -367,26 +367,33 @@ public enum Tokens {
         //
         // CONTRAST RATIONALE (spec §1 "instruments clear ≥3:1 vs every surface"):
         // the bus draws on the warm `canvas`/`panel` surfaces. Measured (WCAG
-        // relative luminance): dark `gold` `#E8B84B` ≈ 8.9:1 vs `panel` `#1D1915`;
-        // light `gold` `#A97F1E` ≈ 3.6:1 vs `panel` `#FBF8F2` (the deepened
-        // paper-gold, spec §1.2's stated floor pick). `ember` is dimmer by design
-        // (it's the connecting line, not the node): dark `#8A6A2F` ≈ 3.5:1 vs
-        // `panel`. LIGHT EMBER IS MEASURED AGAINST `well`, NOT ONLY `panel`
+        // relative luminance): dark `gold` `#E8B84B` ≈ 9.5:1 vs `panel` `#1D1915`.
+        // `ember` is dimmer by design (it's the connecting line, not the node):
+        // dark `#8A6A2F` ≈ 3.5:1 vs `panel`.
+        //
+        // BOTH LIGHT INSTRUMENTS ARE MEASURED AGAINST `well`, NOT ONLY `panel`
         // (2026-08-12): the Groups editor's sections are filled with `well`, so
-        // the rail runs over the darker of the two surfaces, and the previous
-        // `#AC8C46` measured 3.07:1 on `panel` but only 2.55:1 on `well`
-        // `#E8E6DC` — under the ≥3:1 non-text floor on the ground it is
-        // actually drawn on. Light is now `#9C7E3C`: 3.71:1 vs `panel`, 3.07:1
-        // vs `well`. NOTE the consequence, deliberately accepted: nothing that
-        // clears 3:1 on `well` can also be LIGHTER than light `gold`
-        // (`#A97F1E`, itself only 2.92:1 there), so in LIGHT mode ember's
-        // "dimmer" reads as LESS CHROMATIC rather than lighter — saturation
-        // 0.44 against gold's 0.70 at the same ~41° hue, a muted brown beside a
-        // saturated gold. Dark mode keeps the luminance hierarchy unchanged.
-        // The Increase-Contrast variant stays ahead of it (light IC `#9A7A2E`
-        // ≈ 3.90:1 vs `panel` / 3.23:1 vs `well`). IC variants (my picks, flagged for the Wave-5 sweep like
-        // `ringConnected`): dark `gold` `#F2C75E`, dark `ember` `#A5824A`, light
-        // `gold` `#8A6614`, light `ember` `#9A7A2E`.
+        // the rail and its nodes run over the darker of the two surfaces. Light
+        // ember's previous `#AC8C46` measured 3.07:1 on `panel` but only 2.55:1
+        // on `well` `#E8E6DC`; light gold's previous `#A97F1E` measured 3.53:1
+        // on `panel` but only 2.92:1 on `well` — both under the ≥3:1 non-text
+        // floor on the ground they are actually drawn on. Retuned: light
+        // `ember` `#9C7E3C` (3.71:1 panel / 3.07:1 well), light `gold`
+        // `#A67C1E` (3.67:1 panel / 3.04:1 well) — gold darkened by a whisker
+        // at its own ~41.5° hue, a re-tune, not a new accent.
+        //
+        // NOTE the consequence, deliberately accepted: with BOTH inks pinned
+        // just over 3:1 on the same ground, their luminances are necessarily
+        // close (gold 0.226 vs ember 0.223), so in LIGHT mode ember's "dimmer"
+        // reads as LESS CHROMATIC rather than lighter — saturation 0.62 against
+        // gold's 0.82 at the same ~41° hue, a muted brown beside a saturated
+        // gold. Dark mode keeps the luminance hierarchy unchanged. Under
+        // Increase Contrast the light pair BOTH deepen and the ordering flips
+        // to gold-is-darker (light IC `gold` `#8A6614` 5.08:1 panel / 4.21:1
+        // well vs light IC `ember` `#9A7A2E` 3.90:1 / 3.23:1) — gold still
+        // reads as MORE, by ink weight and by chroma (0.86 vs 0.70). IC
+        // variants are my picks, flagged for the Wave-5 sweep like
+        // `ringConnected`'s: dark `gold` `#F2C75E`, dark `ember` `#A5824A`.
 
         /// THE gold accent — the bus-node fill (spec §4.2), route-armed dot, and
         /// meter hot end (spec §1). Remapped ONLY by the accent dial
@@ -405,7 +412,7 @@ public enum Tokens {
         public static var gold: NSColor {
             accentDynamic(name: "gold",
                           full: WarmVariants(dark: 0xE8B84B, darkHighContrast: 0xF2C75E,
-                                             light: 0xA97F1E, lightHighContrast: 0x8A6614),
+                                             light: 0xA67C1E, lightHighContrast: 0x8A6614),
                           subtle: WarmVariants(dark: 0xB99B53, darkHighContrast: 0xCBAF6A,
                                                light: 0x8F7B4A, lightHighContrast: 0x6F5E33),
                           systemAccentScale: 1.0)
@@ -494,8 +501,8 @@ public enum Tokens {
         /// The Setup finale CTA's fill (`OnboardingViewController`'s "Start
         /// listening" button) — the gold family deepened until WHITE ink wins
         /// decisively. The flagship ``gold`` cannot fill a text-bearing
-        /// control: its light hex `#A97F1E` gives white only 3.66:1 (under the
-        /// 4.5:1 body floor) and black 5.74:1, and that mid-gold-plus-black
+        /// control: its light hex `#A67C1E` gives white only 3.80:1 (under the
+        /// 4.5:1 body floor) and black 5.52:1, and that mid-gold-plus-black
         /// pairing is what the owner rejected live (2026-08-11).
         /// CONTRAST RATIONALE (WCAG relative luminance; ink is white in every
         /// variant, and the fill must ALSO clear ≥3:1 vs ``canvas``, the Setup

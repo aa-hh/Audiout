@@ -135,6 +135,40 @@ import AppKit
                 "light ember vs panel: \(onPanel):1 below the \(floor):1 non-text floor")
     }
 
+    /// `gold` carries the same ≥3:1 non-text floor on the same two surfaces —
+    /// the node discs sit on the section's `well` fill, where the pre-retune
+    /// `#A97F1E` measured only 2.92:1 (2026-08-12). Same base-value-only
+    /// caveat as ember's: Increase Contrast can't be forced from a test, and
+    /// the IC variant is authored strictly darker still.
+    @Test func lightGoldClearsTheNonTextFloorOnBothSurfaces() {
+        let floor: CGFloat = 3.0
+        let gold = resolved(Tokens.Color.gold, appearanceName: .aqua)
+
+        let onWell = contrastRatio(gold, resolved(Tokens.Color.well, appearanceName: .aqua))
+        #expect(onWell >= floor,
+                Comment(rawValue: "light gold vs well: \(onWell):1 below the \(floor):1 non-text floor — " +
+                "the editor's nodes sit on the section fill, not the pane"))
+
+        let onPanel = contrastRatio(gold, resolved(Tokens.Color.panel, appearanceName: .aqua))
+        #expect(onPanel >= floor,
+                "light gold vs panel: \(onPanel):1 below the \(floor):1 non-text floor")
+    }
+
+    /// …and darkening GOLD must not let ember catch up: gold stays the louder
+    /// instrument on both axes it can still spend in light mode — chroma, and
+    /// (narrowly, since both inks are pinned just over 3:1 on the same ground)
+    /// luminance.
+    @Test func lightGoldStaysTheLouderInkBesideEmber() {
+        let gold = resolved(Tokens.Color.gold, appearanceName: .aqua)
+        let ember = resolved(Tokens.Color.ember, appearanceName: .aqua)
+
+        #expect(gold.saturationComponent > ember.saturationComponent,
+                "gold must stay the more saturated ink")
+        #expect(relativeLuminance(gold) > relativeLuminance(ember),
+                Comment(rawValue: "gold \(relativeLuminance(gold)) vs ember \(relativeLuminance(ember)) — " +
+                "gold must not converge with (or drop below) its own dim companion"))
+    }
+
     /// …and darkening it must not walk it into `gold`. The two are the rail's
     /// idle/armed pair, so they have to stay visibly different inks. In LIGHT
     /// mode that separation is CHROMA, not luminance: nothing clearing 3:1 on

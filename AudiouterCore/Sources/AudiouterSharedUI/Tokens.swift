@@ -592,11 +592,11 @@ public enum Tokens {
         // keeps its neutral `Tokens.Color.raised` fill and hairline rim
         // untouched, exactly like every other tile. Q2 (grant crossfades the
         // glyph to gold) is REVERSED (Alec, 2026-08-11): the identity hue is
-        // permanent — the row's "Allowed" status chip alone carries the
-        // granted state, and the code's own comment already called the gold
-        // "redundant reinforcement." The VIVID pass (same date) raised each
-        // Full column's saturation (~+12-25 points) now that the hue is the
-        // row's standing identity, not just a resting state.
+        // PERMANENT in every status — the row's "Allowed" status chip alone
+        // carries the granted state. Because the hue is a standing identity
+        // rather than a resting state, the Full columns carry real saturation
+        // (46-79 depending on family); the Subtle column stays muted, since
+        // muting is that dial position's whole job.
         //
         // DIAL RESOLUTION (Q5/NEW-1) deliberately does NOT reuse `accentDynamic`
         // (see `permissionDynamic` below for the two concrete reasons, verified
@@ -619,15 +619,15 @@ public enum Tokens {
         // `[0°,12°) ∪ [350°,360°)`. Measured hues (own-theme Full column,
         // stable within a few degrees across every dial column/appearance/
         // Increase-Contrast variant since mostly saturation/brightness shift):
-        // `permissionSystemAudio` ~209-210° (blue, already clear of both
-        // bands), `permissionLocalNetwork` ~267-273° (indigo warmed toward
-        // magenta), `permissionRemoteControl` ~320-323° (purple warmed toward
-        // pink), `permissionSpeakerSync` ~23-25° — strictly BELOW the gold
+        // `permissionSystemAudio` ~207-210° (blue, already clear of both
+        // bands), `permissionLocalNetwork` ~265-272° (indigo warmed toward
+        // magenta), `permissionRemoteControl` ~319-325° (purple warmed toward
+        // pink), `permissionSpeakerSync` ~23-26° — strictly BELOW the gold
         // band's 28° floor, the same terracotta corridor
         // `AppTetherColor.steer` escapes a raw hue into when it steers off
-        // gold. That keeps all four ≥45° apart from each other and from both
-        // reserved bands in every one of the 32 authored hexes
-        // (mutual-distinguishability check, Q1 criterion 4).
+        // gold. That keeps all four ≥45° apart (measured minimum 47°) from
+        // each other and from both reserved bands in every one of the 32
+        // authored hexes (mutual-distinguishability check, Q1 criterion 4).
         //
         // CONTRAST (WCAG 2.x relative luminance — same formula as
         // `AppTetherColorTests.relativeLuminance`/`contrastRatio`): every one
@@ -648,24 +648,24 @@ public enum Tokens {
         /// Warmed & deepened from `.systemBlue` (System Audio's retired tile
         /// colour) — a blue "warm slate," the row's PERMANENT identity glyph
         /// tint (granting never recolours it — the status chip carries state).
-        /// Hue ~209-210° in every column/appearance — its own family, already
+        /// Hue ~207-210° in every column/appearance — its own family, already
         /// clear of both reserved bands (gold/amber `[28°,68°)`, failure-red
         /// `[0°,12°)∪[350°,360°)`). CONTRAST RATIONALE (>=3:1 vs BOTH `panel`
-        /// and `raised`, both themes, both dial columns; vivid-pass hexes,
-        /// measured): Full dark `#6E8BA8` = 4.93:1 vs `panel` / 4.60:1 vs
-        /// `raised`; Full light `#577C9E` = 4.24:1 vs `panel`. Subtle
+        /// and `raised`, both themes, both dial columns; measured): Full dark
+        /// `#5B93C4` = 5.34:1 vs `panel` / 4.99:1 vs `raised`; Full light
+        /// `#3A79AE` = 4.48:1 vs `panel`. Subtle
         /// (authored, not derived — the dial's mute stays muted): dark
         /// `#6C7680` = 3.78:1 vs `panel` / 3.53:1 vs `raised`; light
         /// `#737D86` = 3.96:1 vs `panel` / 4.19:1 vs `raised`. IC variants
-        /// push further from both surfaces: Full dark `#93AEC7` = 7.59:1 vs
-        /// `panel`, Full light `#3D5C7A` = 6.73:1 vs `panel`; Subtle dark
+        /// push further from both surfaces: Full dark `#8FB6DC` = 8.23:1 vs
+        /// `panel`, Full light `#2A5C89` = 6.78:1 vs `panel`; Subtle dark
         /// `#8C98A3` = 5.94:1 vs `panel`, Subtle light `#4B535B` = 7.37:1 vs
         /// `panel`. Mutually distinguishable from the other three permission
-        /// hues (~270°/~322°/~24°) by >=45° in every column.
+        /// hues (~271°/~320°/~23°) by >=47° in every column.
         public static var permissionSystemAudio: NSColor {
             permissionDynamic(name: "permissionSystemAudio",
-                              full: WarmVariants(dark: 0x6E8BA8, darkHighContrast: 0x93AEC7,
-                                                 light: 0x577C9E, lightHighContrast: 0x3D5C7A),
+                              full: WarmVariants(dark: 0x5B93C4, darkHighContrast: 0x8FB6DC,
+                                                 light: 0x3A79AE, lightHighContrast: 0x2A5C89),
                               subtle: WarmVariants(dark: 0x6C7680, darkHighContrast: 0x8C98A3,
                                                    light: 0x737D86, lightHighContrast: 0x4B535B))
         }
@@ -673,21 +673,21 @@ public enum Tokens {
         /// Warmed & deepened from `.systemIndigo` (Local Network's retired tile
         /// colour) — a "dusty plum," warmed toward magenta off indigo's cooler
         /// blue-purple; the row's PERMANENT identity tint (see
-        /// ``permissionSystemAudio``). Hue ~267-273° in every
+        /// ``permissionSystemAudio``). Hue ~265-272° in every
         /// column/appearance, clear of both reserved bands. CONTRAST
-        /// RATIONALE (vivid-pass hexes, measured): Full dark `#9673B2` =
-        /// 4.49:1 vs `panel` / 4.19:1 vs `raised`; Full light `#7E5CA2` =
-        /// 5.14:1 vs `panel`. Subtle (authored): dark `#776882` = 3.40:1 vs
+        /// RATIONALE (measured): Full dark `#9A6BC6` = 4.40:1 vs `panel` /
+        /// 4.12:1 vs `raised`; Full light `#7749B5` = 5.95:1 vs `panel`.
+        /// Subtle (authored): dark `#776882` = 3.40:1 vs
         /// `panel` / 3.18:1 vs `raised`; light `#7A6E82` = 4.52:1 vs `panel` /
-        /// 4.79:1 vs `raised`. IC variants: Full dark `#B495CE` = 6.76:1 vs
-        /// `panel`, Full light `#5C3E80` = 8.25:1 vs `panel`; Subtle dark
+        /// 4.79:1 vs `raised`. IC variants: Full dark `#BE9BDD` = 7.42:1 vs
+        /// `panel`, Full light `#5B3690` = 8.53:1 vs `panel`; Subtle dark
         /// `#9988A6` = 5.35:1 vs `panel`, Subtle light `#4F4557` = 8.53:1 vs
         /// `panel`. Mutually distinguishable from the other three permission
-        /// hues (~210°/~322°/~24°) by >=45° in every column.
+        /// hues (~208°/~320°/~23°) by >=47° in every column.
         public static var permissionLocalNetwork: NSColor {
             permissionDynamic(name: "permissionLocalNetwork",
-                              full: WarmVariants(dark: 0x9673B2, darkHighContrast: 0xB495CE,
-                                                 light: 0x7E5CA2, lightHighContrast: 0x5C3E80),
+                              full: WarmVariants(dark: 0x9A6BC6, darkHighContrast: 0xBE9BDD,
+                                                 light: 0x7749B5, lightHighContrast: 0x5B3690),
                               subtle: WarmVariants(dark: 0x776882, darkHighContrast: 0x9988A6,
                                                    light: 0x7A6E82, lightHighContrast: 0x4F4557))
         }
@@ -695,21 +695,21 @@ public enum Tokens {
         /// Warmed & deepened from `.systemPurple` (Remote Control's retired
         /// tile colour) — a "muted mauve," warmed toward pink off purple's
         /// cooler violet; the row's PERMANENT identity tint (see
-        /// ``permissionSystemAudio``). Hue ~320-323° in every
+        /// ``permissionSystemAudio``). Hue ~319-325° in every
         /// column/appearance, clear of both reserved bands. CONTRAST
-        /// RATIONALE (vivid-pass hexes, measured): Full dark `#AB6D96` =
-        /// 4.46:1 vs `panel` / 4.17:1 vs `raised`; Full light `#9B5280` =
-        /// 5.18:1 vs `panel`. Subtle (authored): dark `#806977` = 3.50:1 vs
+        /// RATIONALE (measured): Full dark `#C066A2` = 4.71:1 vs `panel` /
+        /// 4.40:1 vs `raised`; Full light `#AF3E7F` = 5.31:1 vs `panel`.
+        /// Subtle (authored): dark `#806977` = 3.50:1 vs
         /// `panel` / 3.27:1 vs `raised`; light `#86737F` = 4.15:1 vs `panel` /
-        /// 4.40:1 vs `raised`. IC variants: Full dark `#C78EB2` = 6.61:1 vs
-        /// `panel`, Full light `#7B3C63` = 7.59:1 vs `panel`; Subtle dark
+        /// 4.40:1 vs `raised`. IC variants: Full dark `#D494C0` = 7.32:1 vs
+        /// `panel`, Full light `#852B66` = 8.00:1 vs `panel`; Subtle dark
         /// `#A3899A` = 5.49:1 vs `panel`, Subtle light `#5B4A55` = 7.75:1 vs
         /// `panel`. Mutually distinguishable from the other three permission
-        /// hues (~210°/~270°/~24°) by >=45° in every column.
+        /// hues (~208°/~271°/~23°) by >=47° in every column.
         public static var permissionRemoteControl: NSColor {
             permissionDynamic(name: "permissionRemoteControl",
-                              full: WarmVariants(dark: 0xAB6D96, darkHighContrast: 0xC78EB2,
-                                                 light: 0x9B5280, lightHighContrast: 0x7B3C63),
+                              full: WarmVariants(dark: 0xC066A2, darkHighContrast: 0xD494C0,
+                                                 light: 0xAF3E7F, lightHighContrast: 0x852B66),
                               subtle: WarmVariants(dark: 0x806977, darkHighContrast: 0xA3899A,
                                                    light: 0x86737F, lightHighContrast: 0x5B4A55))
         }
@@ -723,19 +723,19 @@ public enum Tokens {
         /// escapes a raw hue into off gold), so the row reads as warm/golden-
         /// adjacent WITHOUT impersonating the accent `gold` (~42°) the app's
         /// armed instruments wear — also clear of the failure-red band.
-        /// CONTRAST RATIONALE (vivid-pass hexes, measured): Full dark
-        /// `#AE744F` = 4.50:1 vs `panel` / 4.21:1 vs `raised`; Full light
-        /// `#9C6138` = 4.85:1 vs `panel`. Subtle (authored): dark `#876A59` =
+        /// CONTRAST RATIONALE (measured): Full dark `#B86F41` = 4.48:1 vs
+        /// `panel` / 4.19:1 vs `raised`; Full light `#A55B22` = 4.92:1 vs
+        /// `panel`. Subtle (authored): dark `#876A59` =
         /// 3.52:1 vs `panel` / 3.29:1 vs `raised`; light `#796356` = 5.31:1
-        /// vs `panel` / 5.63:1 vs `raised`. IC variants: Full dark `#C98F68`
-        /// = 6.33:1 vs `panel`, Full light `#7A4826` = 7.28:1 vs `panel`;
+        /// vs `panel` / 5.63:1 vs `raised`. IC variants: Full dark `#D4996E`
+        /// = 7.14:1 vs `panel`, Full light `#7E4116` = 7.63:1 vs `panel`;
         /// Subtle dark `#A88672` = 5.26:1 vs `panel`, Subtle light `#524036`
         /// = 9.23:1 vs `panel`. Mutually distinguishable from the other three
-        /// permission hues (~210°/~270°/~322°) by >=45° in every column.
+        /// permission hues (~208°/~271°/~320°) by >=47° in every column.
         public static var permissionSpeakerSync: NSColor {
             permissionDynamic(name: "permissionSpeakerSync",
-                              full: WarmVariants(dark: 0xAE744F, darkHighContrast: 0xC98F68,
-                                                 light: 0x9C6138, lightHighContrast: 0x7A4826),
+                              full: WarmVariants(dark: 0xB86F41, darkHighContrast: 0xD4996E,
+                                                 light: 0xA55B22, lightHighContrast: 0x7E4116),
                               subtle: WarmVariants(dark: 0x876A59, darkHighContrast: 0xA88672,
                                                    light: 0x796356, lightHighContrast: 0x524036))
         }

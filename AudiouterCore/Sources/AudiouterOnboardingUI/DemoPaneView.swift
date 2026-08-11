@@ -233,13 +233,18 @@ final class DemoPaneView: NSView {
         guard let step, mode != .settled else { return DemoSettledMockView() }
         switch mode {
         case .prompt:   return DemoPromptMockView(step: step)
-        // Speaker Sync's grant takes TWO acts, not one: registering the login
-        // item posts a system notification, and only clicking that lands the
-        // user on the pane with the switch. Every other step's Settings path
-        // starts at the pane.
-        case .settings: return step == .speakerSync
-            ? DemoLoginItemsMockView(step: step)
-            : DemoSettingsMockView(step: step)
+        // Two steps reach their switch through something else first, so their
+        // Settings mode is a two-stage pass rather than the bare pane. Speaker
+        // Sync: registering the login item posts a system notification, and only
+        // clicking that lands the user on the pane. Remote Control: its retry
+        // raises the PROMPT again, whose own button is the only path that
+        // highlights us in the list. Every other step starts at the pane.
+        case .settings:
+            switch step {
+            case .speakerSync:   return DemoLoginItemsMockView(step: step)
+            case .remoteControl: return DemoSettingsHandoffMockView(step: step)
+            default:             return DemoSettingsMockView(step: step)
+            }
         case .settled:  return DemoSettledMockView()
         }
     }
@@ -299,6 +304,8 @@ final class DemoPaneView: NSView {
     /// ever have one. What it pins is the settled frame — a two-stage pass must
     /// rest on the FIRST thing the user will meet, not on the pane it ends at.
     var test_stage: DemoStage? { (mock as? DemoLoginItemsMockView)?.test_stage }
+    /// The same, for Remote Control's retry, whose first surface is the ASK.
+    var test_handoffStage: DemoHandoffStage? { (mock as? DemoSettingsHandoffMockView)?.test_stage }
     var test_isAnimating: Bool { (mock as? DemoMockView)?.isTimelineRunning ?? false }
     var test_isLooping: Bool { (mock as? DemoMockView)?.isLooping ?? false }
     var test_showsReplay: Bool { !replayButton.isHidden }
@@ -345,6 +352,15 @@ class DemoMockView: NSView {
     /// One pass of the loop.
     var timelineDuration: TimeInterval { 4.0 }
 
+    /// Set when this mock plays as one STAGE inside a longer host timeline: the
+    /// host's whole pass, and where along it this stage's own score begins.
+    /// `nil` — the default — means the mock owns the whole pass.
+    ///
+    /// A stage keeps writing its score in its OWN seconds, so a mock never has
+    /// to know whether it is playing alone or as part of a sequence;
+    /// ``keyframes(_:_:timing:)`` is the one place that maps one onto the other.
+    var stageWindow: (hostDuration: TimeInterval, start: TimeInterval)?
+
     private(set) var isLooping = false
     private(set) var isTimelineRunning = false
     private static let sentinelKey = "demoTimeline"
@@ -388,15 +404,34 @@ class DemoMockView: NSView {
     /// hand-normalized fractions. `timing` applies to every segment — the cursor's
     /// travel decelerates into its target (`.easeOut`), everything else eases both
     /// ends.
+    ///
+    /// Under a ``stageWindow`` the same score is laid onto the host's longer
+    /// pass at the stage's start offset, and HELD at its first and last values
+    /// through the host time on either side — Core Animation wants a linear
+    /// score to span the whole animation, and holding is what "this stage isn't
+    /// on screen yet" has to look like anyway.
     func keyframes(_ keyPath: String,
                    _ score: [(time: TimeInterval, value: Any)],
                    timing: CAMediaTimingFunctionName = .easeInEaseOut) -> CAKeyframeAnimation {
+        let span = stageWindow?.hostDuration ?? timelineDuration
+        let start = stageWindow?.start ?? 0
+        var values = score.map(\.value)
+        var keyTimes = score.map { ($0.time + start) / span }
+        if let first = keyTimes.first, first > 0 {
+            keyTimes.insert(0, at: 0)
+            values.insert(values[0], at: 0)
+        }
+        if let last = keyTimes.last, last < 1 {
+            keyTimes.append(1)
+            values.append(values[values.count - 1])
+        }
+
         let animation = CAKeyframeAnimation(keyPath: keyPath)
-        animation.duration = timelineDuration
-        animation.values = score.map(\.value)
-        animation.keyTimes = score.map { NSNumber(value: $0.time / timelineDuration) }
+        animation.duration = span
+        animation.values = values
+        animation.keyTimes = keyTimes.map { NSNumber(value: $0) }
         animation.timingFunctions = Array(repeating: CAMediaTimingFunction(name: timing),
-                                          count: max(score.count - 1, 0))
+                                          count: max(values.count - 1, 0))
         animation.calculationMode = .linear
         // The settled model value is the pass's last value, so letting the
         // animation be removed on completion lands exactly there.
@@ -501,7 +536,36 @@ enum DemoBeat {
     static let loop: TimeInterval = 4.50
 }
 
+/// The two-stage retry's beats, in seconds along ONE pass of
+/// ``DemoSettingsHandoffMockView``. Stage one is only as long as it takes to
+/// press a button — nothing is granted there, so there is no result to hold on;
+/// stage two then plays its whole ordinary pass inside this longer one.
+enum DemoHandoffBeat {
+    /// The press has landed and the two surfaces start to cross.
+    static let handoff: TimeInterval = DemoBeat.pressEnd + 0.22
+    static let crossfade: TimeInterval = 0.28
+    /// Where stage two's own 0-based score is laid down.
+    static let settingsStart: TimeInterval = handoff + crossfade
+    static let settingsEnd: TimeInterval = settingsStart + DemoBeat.loop
+    /// Back to stage one, so the pass ends where it started.
+    static let loop: TimeInterval = settingsEnd + crossfade
+}
+
 // MARK: - Prompt mock
+
+/// What a prompt mock's confirming button DOES — which decides its two button
+/// titles and how its pass ends.
+enum DemoPromptOutcome {
+    /// The first ask: the confirming button grants, and the dialog settles into
+    /// its granted state before resetting.
+    case grants
+    /// The RE-FIRED ask: its confirming button is "Open System Settings", the
+    /// only path that scrolls to and highlights Audiouter in the Accessibility
+    /// list. Nothing is granted here, so the pass ends ON the press and the host
+    /// hands off to the Settings mock — this outcome is only ever played as
+    /// stage one of ``DemoSettingsHandoffMockView``.
+    case opensSystemSettings
+}
 
 /// A miniature of the macOS 26 privacy dialog for one step — with a drawn cursor
 /// gliding to the confirming button, pressing it, and the dialog settling into
@@ -535,6 +599,7 @@ final class DemoPromptMockView: DemoMockView {
     private static var contentWidth: CGFloat { size.width - inset * 2 }
 
     private let step: SetupStep
+    private let outcome: DemoPromptOutcome
     /// Everything the dialog ASKS with, in one layer — so the swap to the
     /// granted state stays a single opacity crossfade.
     private let ask = NSView()
@@ -542,8 +607,9 @@ final class DemoPromptMockView: DemoMockView {
     private let cursor = DemoCursorView(pointerHeight: 22)
     private var confirmButton: DemoPushButtonView!
 
-    init(step: SetupStep) {
+    init(step: SetupStep, outcome: DemoPromptOutcome = .grants) {
         self.step = step
+        self.outcome = outcome
         super.init(frame: .zero)
         wantsLayer = true
         build()
@@ -551,7 +617,11 @@ final class DemoPromptMockView: DemoMockView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    override var timelineDuration: TimeInterval { DemoBeat.loop }
+    /// The handoff variant is written on its HOST's clock, because its cursor has
+    /// to be home again before the host crossfades this dialog back in.
+    override var timelineDuration: TimeInterval {
+        outcome == .grants ? DemoBeat.loop : DemoHandoffBeat.loop
+    }
 
     private func build() {
         let icon = NSImageView()
@@ -581,14 +651,26 @@ final class DemoPromptMockView: DemoMockView {
                                   font: .systemFont(ofSize: 11),
                                   color: .secondaryLabelColor)
 
-        // Two equal neutral capsules filling the content width: refusal on the
-        // left, the confirming one on the right.
-        let deny = DemoPushButtonView(title: "Don't Allow")
-        confirmButton = DemoPushButtonView(title: Self.confirmTitle(for: step))
+        // Two neutral capsules filling the content width: refusal on the left,
+        // the confirming one on the right.
+        let deny = DemoPushButtonView(title: Self.denyTitle(for: outcome))
+        confirmButton = DemoPushButtonView(title: Self.confirmTitle(for: step, outcome: outcome))
         let buttons = NSStackView(views: [deny, confirmButton])
         buttons.orientation = .horizontal
         buttons.spacing = 8
-        buttons.distribution = .fillEqually
+        // Equal halves for the ordinary ask, whose two titles are about the same
+        // length. "Open System Settings" is four times "Deny", and half the
+        // content width does not fit it — so the re-fired ask sizes its refusal
+        // to its own title and gives the rest to the button being pressed, which
+        // is also what a real alert with two unequal titles does.
+        switch outcome {
+        case .grants:
+            buttons.distribution = .fillEqually
+        case .opensSystemSettings:
+            buttons.distribution = .fill
+            deny.setContentHuggingPriority(.required, for: .horizontal)
+            confirmButton.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        }
         buttons.translatesAutoresizingMaskIntoConstraints = false
 
         ask.wantsLayer = true
@@ -597,6 +679,10 @@ final class DemoPromptMockView: DemoMockView {
             ask.addSubview(view)
         }
 
+        // The granted state, which only ``DemoPromptOutcome/grants`` ever reveals
+        // — a re-fired ask confirms nothing. It is built either way and simply
+        // stays at zero opacity, rather than making the whole layout conditional
+        // on the outcome for the sake of two hidden views.
         let check = NSImageView()
         check.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil)
         check.symbolConfiguration = .init(pointSize: 28, weight: .semibold)
@@ -734,6 +820,18 @@ final class DemoPromptMockView: DemoMockView {
         let moved = NSValue(caTransform3D: CATransform3DMakeTranslation(delta.x, delta.y, 0))
         let still = NSValue(caTransform3D: CATransform3DIdentity)
 
+        // Press: the real button darkens about 4 % for ~100 ms. The same beat
+        // either way — it is the travel and what follows that differ.
+        confirmButton.layer?.add(keyframes("opacity", [
+            (0, 1), (DemoBeat.travelEnd, 1), (DemoBeat.pressEnd, 0.85),
+            (DemoBeat.pressEnd + 0.08, 1), (end, 1),
+        ]), forKey: "press")
+
+        guard outcome == .grants else {
+            addHandoffAnimations(moved: moved, still: still)
+            return
+        }
+
         // The travel decelerates into the target — 80 % of the distance early,
         // then it eases in over the last third.
         cursor.layer?.add(keyframes("transform", [
@@ -745,12 +843,6 @@ final class DemoPromptMockView: DemoMockView {
             (DemoBeat.resetEnd, 0), (end, 1),
         ]), forKey: "cursorFade")
 
-        // Press: the real button darkens about 4 % for ~100 ms.
-        confirmButton.layer?.add(keyframes("opacity", [
-            (0, 1), (DemoBeat.travelEnd, 1), (DemoBeat.pressEnd, 0.85),
-            (DemoBeat.pressEnd + 0.08, 1), (end, 1),
-        ]), forKey: "press")
-
         ask.layer?.add(keyframes("opacity", [
             (0, 1), (DemoBeat.pressEnd, 1), (DemoBeat.changeEnd, 0),
             (DemoBeat.holdEnd, 0), (DemoBeat.resetEnd, 1), (end, 1),
@@ -759,6 +851,22 @@ final class DemoPromptMockView: DemoMockView {
             (0, 0), (DemoBeat.pressEnd, 0), (DemoBeat.changeEnd, 1),
             (DemoBeat.holdEnd, 1), (DemoBeat.resetEnd, 0), (end, 0),
         ]), forKey: "grantedFade")
+    }
+
+    /// Stage one of the handoff: the same glide and press, but nothing here is
+    /// granted — the host fades this whole dialog out from under the pointer and
+    /// brings the Settings pane up in its place.
+    ///
+    /// The dialog is invisible from the crossfade to the end of the host's pass,
+    /// which is when the pointer walks back to where it started. Doing it out of
+    /// sight is the point: the pass has to END at the settled frame, and a
+    /// pointer visibly retracing its steps would read as a second instruction.
+    private func addHandoffAnimations(moved: NSValue, still: NSValue) {
+        cursor.layer?.add(keyframes("transform", [
+            (0, still), (DemoBeat.idle, still), (DemoBeat.travelEnd, moved),
+            (DemoHandoffBeat.settingsStart, moved),
+            (DemoHandoffBeat.settingsStart + 0.4, still), (timelineDuration, still),
+        ], timing: .easeOut), forKey: "cursorGlide")
     }
 
     /// How far the cursor has to travel, in this view's own coordinates, from
@@ -820,11 +928,20 @@ final class DemoPromptMockView: DemoMockView {
         }
     }
 
-    static func confirmTitle(for step: SetupStep) -> String {
+    /// The button the cursor presses. A re-fired ask confirms nothing — its one
+    /// button leaves for System Settings, and says so.
+    static func confirmTitle(for step: SetupStep, outcome: DemoPromptOutcome = .grants) -> String {
+        guard outcome == .grants else { return "Open System Settings" }
         switch step {
         case .audio, .localNetwork: return "Allow"
         case .bluetooth, .remoteControl, .speakerSync: return "OK"
         }
+    }
+
+    /// The refusal beside it. macOS words a re-fired ask's refusal "Deny", not
+    /// "Don't Allow" — there is nothing left to allow, only somewhere to go.
+    static func denyTitle(for outcome: DemoPromptOutcome) -> String {
+        outcome == .grants ? "Don't Allow" : "Deny"
     }
 
     static func grantedText(for step: SetupStep) -> String {
@@ -1323,6 +1440,107 @@ final class DemoNotificationBannerView: NSView {
     }
 }
 
+// MARK: - Two-stage retry mock
+
+/// Which of the two-stage retry's surfaces is on screen. Public only because the
+/// Setup window's `test_demoHandoffStage` hook exposes it.
+public enum DemoHandoffStage: Equatable, Sendable {
+    case prompt
+    case settings
+}
+
+/// Remote Control's retry, which is TWO surfaces rather than one.
+///
+/// Its "Open Settings…" doesn't deep-link anywhere — it re-fires the
+/// Accessibility PROMPT, because that prompt's own "Open System Settings" button
+/// is the only path that scrolls to and highlights Audiouter in the list (see
+/// this folder's AGENTS.md). So the user has two clicks to make, on two
+/// different surfaces, and a demo that opened straight onto the Settings pane
+/// skipped the first one — it showed the toggle without showing how the pane
+/// carrying it is reached.
+///
+/// One pass, one clock: the ask with the pointer pressing **Open System
+/// Settings**, a crossfade, then the ordinary Settings pass with the pointer
+/// flipping the Audiouter toggle on. Both stages are the mocks the other steps
+/// already use; this view only sequences them and owns the crossfade, laying
+/// stage two's own 0-based score onto this longer pass through
+/// ``DemoMockView/stageWindow``.
+final class DemoSettingsHandoffMockView: DemoMockView {
+
+    /// As wide as the wider stage and as tall as the taller one, so neither
+    /// moves when the other takes over.
+    static let size = NSSize(width: DemoSettingsMockView.size.width,
+                             height: DemoPromptMockView.size.height)
+
+    private let prompt: DemoPromptMockView
+    private let settings: DemoSettingsMockView
+
+    init(step: SetupStep) {
+        prompt = DemoPromptMockView(step: step, outcome: .opensSystemSettings)
+        settings = DemoSettingsMockView(step: step)
+        super.init(frame: .zero)
+        wantsLayer = true
+        build()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var timelineDuration: TimeInterval { DemoHandoffBeat.loop }
+
+    private func build() {
+        for stage in [prompt as NSView, settings] {
+            // A mock is normally installed by the pane, which turns this off for
+            // it; nested one stage deep, that is this view's job.
+            stage.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(stage)
+            NSLayoutConstraint.activate([
+                stage.centerXAnchor.constraint(equalTo: centerXAnchor),
+                stage.centerYAnchor.constraint(equalTo: centerYAnchor),
+            ])
+        }
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: Self.size.width),
+            heightAnchor.constraint(equalToConstant: Self.size.height),
+        ])
+        applySettledState()
+    }
+
+    /// Settled: stage one, as the user will find it. Both stages settle
+    /// themselves too, so a stopped pass leaves neither half-played.
+    override func applySettledState() {
+        prompt.alphaValue = 1
+        prompt.applySettledState()
+        settings.alphaValue = 0
+        settings.applySettledState()
+    }
+
+    override func addTimelineAnimations() {
+        let end = timelineDuration
+        prompt.layer?.add(keyframes("opacity", [
+            (0, 1), (DemoHandoffBeat.handoff, 1), (DemoHandoffBeat.settingsStart, 0),
+            (DemoHandoffBeat.settingsEnd, 0), (end, 1),
+        ]), forKey: "promptStage")
+        settings.layer?.add(keyframes("opacity", [
+            (0, 0), (DemoHandoffBeat.handoff, 0), (DemoHandoffBeat.settingsStart, 1),
+            (DemoHandoffBeat.settingsEnd, 1), (end, 0),
+        ]), forKey: "settingsStage")
+
+        // Stage one already runs on this clock; stage two is written in its own
+        // seconds and mapped onto the window it plays in.
+        prompt.addTimelineAnimations()
+        settings.stageWindow = (hostDuration: end, start: DemoHandoffBeat.settingsStart)
+        settings.addTimelineAnimations()
+    }
+
+    // MARK: Test-support hooks
+
+    /// Which surface is up. The settled frame must be ``DemoHandoffStage/prompt``
+    /// — the first of the two clicks the user still has to make.
+    var test_stage: DemoHandoffStage {
+        settings.alphaValue > prompt.alphaValue ? .settings : .prompt
+    }
+}
+
 // MARK: - Settled mock
 
 /// The completion state: the app's own icon and one calm line. No loop, and none
@@ -1419,6 +1637,10 @@ final class DemoWindowSurfaceView: NSView {
 final class DemoPushButtonView: NSView {
 
     static let height: CGFloat = 28
+    /// Air either side of the label. It only shows on a button that sizes to its
+    /// own title (the re-fired ask's "Deny"); an equal-halves button is wider
+    /// than its label anyway, so this changes nothing there.
+    private static let labelInset: CGFloat = 10
 
     init(title: String) {
         super.init(frame: .zero)
@@ -1434,8 +1656,8 @@ final class DemoPushButtonView: NSView {
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: Self.height),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.labelInset),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.labelInset),
         ])
     }
 

@@ -235,10 +235,12 @@ set changes, or when the gate/motion/demo rules change.
       `grantedText`; the ANATOMY is shared. `DemoPaneView.surfaceSize` grew to
       336 × 336 to seat the taller card with a margin around it (the pane has
       516 pt of height, so Replay still clears underneath).
-  - **Speaker Sync's demo has TWO stages, and it is the only one that does**
-    (owner decision 2026-08-11 — from a live run, where the demo jumped straight
-    to a Login Items pane the user had no idea how to reach). Its grant is the
-    only one that takes two acts: registering the login item raises no dialog at
+  - **TWO steps have a two-stage demo: Speaker Sync and Remote Control** (owner
+    decision 2026-08-11 — from a live run, where both demos jumped straight to a
+    Settings pane the user had no idea how to reach). They are the two whose
+    grant takes two acts on two different surfaces; every other step's retry
+    really does land on the pane, and gets the one-stage mock.
+  - **Speaker Sync's two stages.** Registering the login item raises no dialog at
     all, so macOS posts a **notification** — "Background Items Added", with
     "“Audiouter” added items that can run in the background. You can manage this
     in Login Items Settings." (verified wording, macOS 13+) — and clicking THAT
@@ -269,6 +271,39 @@ set changes, or when the gate/motion/demo rules change.
       been told how to reach. `test_demoStage` pins it — it reads the MODEL
       state, which stays settled while a pass runs, so a running loop can't fake
       a stage the pane isn't left painting.
+  - **Remote Control's two stages.** Its "Open Settings…" re-fires the PROMPT
+    (rule above), so the user has two clicks to make on two different surfaces —
+    and a demo that opened straight onto the Settings pane showed the toggle
+    without showing how the pane carrying it is reached.
+    `DemoSettingsHandoffMockView` plays both in ONE pass: the re-fired ask with
+    the pointer pressing **Open System Settings**, a crossfade, then the ordinary
+    Settings pass with the pointer flipping the Audiouter toggle on, then back to
+    the ask. Two presses, two surfaces, one clock. `test_demoHandoffStage` is
+    `nil` for every step that isn't this one.
+    - Both stages are the mocks the other steps already use; the container only
+      sequences them and owns the crossfade. Stage one is
+      `DemoPromptMockView(step:outcome: .opensSystemSettings)` — same anatomy,
+      but its buttons are "Deny" and "Open System Settings", it never shows a
+      granted state (nothing is granted by leaving for Settings), and it is
+      written on the HOST's clock so its pointer is home again before the pass
+      crossfades it back in. Stage two is `DemoSettingsMockView` unchanged.
+    - "Open System Settings" is four times the width of "Deny", so the re-fired
+      ask abandons the privacy dialog's two EQUAL capsules and sizes its refusal
+      to its own title (`.fill` + a hugging Deny), which is what a real alert
+      with two unequal titles does anyway. That is what keeps the card at
+      240 × 288 and `surfaceSize` at 336 × 336 — stacking the buttons would have
+      cost 36 pt the card does not have.
+    - **A stage keeps writing its score in its OWN seconds.** `DemoMockView`
+      .`stageWindow` is the seam: set it and `keyframes(_:_:timing:)` lays that
+      score onto the host's longer pass at an offset, holding the first and last
+      values through the time either side (Core Animation wants a linear score to
+      span the whole animation, and "not on screen yet" has to look like a hold
+      anyway). So a mock never has to know whether it is playing alone or as a
+      stage — `DemoSettingsMockView` needed no change at all.
+    - **TRAP: a nested mock still has its autoresizing mask on.** The pane turns
+      `translatesAutoresizingMaskIntoConstraints` off for the mock it installs;
+      a mock nested one stage deeper is its container's job, and left on, both
+      stages render as nothing but their drawn pointer.
   - **`DemoSystemColor` is a documented exception to "colour literals live only in
     `Tokens`"** (root `AGENTS.md`). Four values have no semantic equivalent that
     survives both appearances — above all, System Settings paints its sidebar
@@ -358,7 +393,8 @@ set changes, or when the gate/motion/demo rules change.
   `test_hasCheckmark`, `test_note(of:)`, `test_hint(of:)`), the real Allow/Skip
   paths (`test_tapAllow`, `test_allow([steps])`, `test_tapSkip`), the gate
   (`test_doneExists`, `test_doneIsReturnDefault`, `test_snapBackStep`), the demo
-  (`test_demoMode`, `test_isDemoAnimating`, `test_demoShowsReplay`), and the window
+  (`test_demoMode`, `test_demoHandoffStage`, `test_isDemoAnimating`,
+  `test_demoShowsReplay`), and the window
   level (`test_windowLevel`). `test_refreshStatuses()` is the AWAITED silent
   re-read — the load-time one fires a detached task, so a caller that needs its
   result (Bluetooth and Remote Control only reach `.granted` through it) has to be
@@ -399,9 +435,10 @@ set changes, or when the gate/motion/demo rules change.
 | `SetupCardView` / `SetupCardContent` / `SetupCardState` | One permission card: collapsed strip ↔ expanded body on the shared clip-height motion, the locked/active surface treatment, and the card-level click target. The per-state title table lives on `SetupCardContent`. |
 | `ClipView` | The card body's masking container — the thing whose HEIGHT the collapse animates. |
 | `DemoPaneView` / `DemoMode` | The right pane: the elevated surface, the mode swap crossfade, the motion policy, the Replay button. |
-| `DemoMockView` | Timeline base class (restartable score, settled-state hook, `held(_:)` for one stage of a multi-stage score) for the animated mocks. |
-| `DemoPromptMockView` / `DemoSettingsMockView` / `DemoSettledMockView` | The permission-dialog miniature, the Settings-pane miniature, and the calm completion state. |
+| `DemoMockView` | Timeline base class for the animated mocks: restartable score, settled-state hook, and the two multi-stage seams — `held(_:)` and the `stageWindow` offset. |
+| `DemoPromptMockView` / `DemoSettingsMockView` / `DemoSettledMockView` | The permission-dialog miniature (either outcome — grants, or opens System Settings), the Settings-pane miniature, and the calm completion state. |
 | `DemoLoginItemsMockView` / `DemoStage` | Speaker Sync's two-stage pass — the "Background Items Added" notification, then the inherited Settings pane — and which of the two it rests on. |
+| `DemoSettingsHandoffMockView` / `DemoPromptOutcome` / `DemoHandoffStage` | Remote Control's two-stage retry: the re-fired ask handing off to the Settings pane in one pass. |
 | `DemoWindowSurfaceView` / `DemoNotificationBannerView` / `DemoPushButtonView` / `DemoSwitchView` / `DemoSidebarView` / `DemoSettingsRowView` / `DemoGreekBarView` / `DemoPillView` / `DemoDotView` / `DemoCursorView` | The drawn parts of the mocks — window body, notification banner, neutral capsule button, switch, sidebar, list row, greeked label, pill, circle, pointer. |
 | `SystemSettingsOpener` | `NSWorkspace` seam for opening a `SystemSettingsPane`, with a Privacy & Security root fallback. |
 | `ProminentButton` | Accent-filled CTA button with key-window-aware title color. |
@@ -415,4 +452,4 @@ set changes, or when the gate/motion/demo rules change.
 | `AudiouterCore/Tests/AudiouterCoreTests/SetupFlowModelTests.swift` | The sequence, gate and Allow decision table this UI renders (Core, not this folder, but the seam it depends on). |
 | `AudiouterCore/Tests/AudiouterCoreTests/SetupModelTests.swift` | The underlying `SetupModel` probes/status, the Local Network found count, and the version-gated System Settings deep links. |
 | `AudiouterCore/Tests/AudiouterCoreTests/OnboardingPermissionColorTests.swift` | The four per-card tile colours: distinctness, contrast floors, granted-lights-gold, tile fill unchanged. |
-| `AudiouterCore/Sources/onboarding-snapshot` | Offscreen PNG fixtures (per-step — including Speaker Sync's two-stage demo at rest — denied, complete, permission-lost × light/dark) in `dev/notes/onboarding-snapshots/`. |
+| `AudiouterCore/Sources/onboarding-snapshot` | Offscreen PNG fixtures (per-step — including both two-stage demos at rest — denied, remote-control-retry, complete, permission-lost × light/dark) in `dev/notes/onboarding-snapshots/`. |

@@ -661,6 +661,64 @@ import Testing
                 "on must slide the knob across — a blue track with a left knob is a lie")
     }
 
+    // MARK: The two-stage Remote Control demo
+
+    /// Remote Control's "Open Settings…" re-fires the PROMPT rather than
+    /// deep-linking, because the prompt's own "Open System Settings" button is
+    /// the only path that highlights Audiouter in the list. So the user has TWO
+    /// clicks to make, on two surfaces — and a demo that opened straight onto the
+    /// pane showed the toggle without showing how the pane carrying it is
+    /// reached. The pass starts and ends on the ask, the click still to make.
+    @Test func remoteControlsRetryDemoIsTwoStageAndRestsOnTheAsk() async {
+        let vc = makeVC(model: makeGrantableModel())
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        #expect(vc.test_activeStep == .remoteControl)
+
+        await vc.test_tapAllow(.remoteControl)   // the prompt is spent: `.requested`
+
+        #expect(vc.test_demoMode == .settings)
+        #expect(vc.test_demoHandoffStage == .prompt)
+        // The opt-out has to reach a mock nested one stage deeper than before.
+        #expect(vc.test_demoAccessibilityElements.isEmpty,
+                "still reachable: \(vc.test_demoAccessibilityElements)")
+    }
+
+    /// Every other step's retry really does land on the pane, so only this one
+    /// pays for the second surface.
+    @Test func everyOtherRetryDemoIsASingleSurface() async {
+        let vc = makeVC(model: makeModel(audio: .denied))
+        await vc.test_tapAllow(.audio)
+        #expect(vc.test_demoMode == .settings)
+        #expect(vc.test_demoHandoffStage == nil)
+    }
+
+    /// The re-fired ask confirms nothing — its button leaves for System Settings,
+    /// and both its titles say so. The first ask is untouched.
+    @Test func theReFiredAskIsTheButtonThatOpensSystemSettings() {
+        #expect(DemoPromptMockView.confirmTitle(for: .remoteControl,
+                                                outcome: .opensSystemSettings) == "Open System Settings")
+        #expect(DemoPromptMockView.denyTitle(for: .opensSystemSettings) == "Deny")
+        #expect(DemoPromptMockView.confirmTitle(for: .remoteControl) == "OK")
+        #expect(DemoPromptMockView.denyTitle(for: .grants) == "Don't Allow")
+    }
+
+    /// A stage writes its score in its OWN seconds; the host lays it down at an
+    /// offset. Core Animation wants a linear score to span the whole animation,
+    /// so the stage HOLDS its first and last values through the time either side
+    /// rather than being stretched over it.
+    @Test func aStagedScoreIsMappedIntoItsWindowOfTheHostPass() {
+        let mock = DemoMockView(frame: .zero)
+        mock.stageWindow = (hostDuration: 10, start: 4)
+
+        let animation = mock.keyframes("opacity", [(0, 0), (2, 1)])
+
+        #expect(animation.duration == 10)
+        #expect(animation.keyTimes?.map(\.doubleValue) == [0, 0.4, 0.6, 1])
+        #expect(animation.values?.count == 4)
+        #expect(animation.timingFunctions?.count == 3)
+    }
+
     // MARK: One motion language
 
     /// The cards clip on the SAME constant every other collapsible element in

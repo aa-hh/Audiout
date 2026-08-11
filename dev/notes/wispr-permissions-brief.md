@@ -101,6 +101,28 @@ Scope: the permission-granting interaction ONLY — no other onboarding content.
 - `.permissionLost` re-entry: same window, sequence starts at the first
   unmet card; the banner concept can fold into the header line.
 
+## Window layering + prompt sequencing (added after reading Wispr's main-process code)
+
+- **Float, but yield to Settings (Alec, 2026-08-11):** the window stays `.floating`
+  (buried-window fix), but any Settings deep link drops it to `.normal` so System
+  Settings sits on top; restore `.floating` on grant/refocus. Native permission
+  alerts already sit above floating — this only fixes Settings occlusion. A
+  refinement of the floating decision, not a reversal.
+- **macOS 26+ deep links:** Privacy & Security pane id changed to
+  `com.apple.settings.PrivacySecurity.extension` (same `?Privacy_*` anchors);
+  version-gate on major ≥ 26. The old id misroutes there — and the dev Mac runs 26+.
+- **Sequencing rules per Allow click** (Wispr's habits, adopted): preflight where a
+  status read exists — determined-and-denied goes straight to Settings (the prompt
+  would silently no-op); never open Settings for an already-granted permission;
+  single-flight every prompt/probe (double-click = no-op); every Allow click ends
+  in exactly one named Telemetry outcome (`prompt_triggered`, `already_granted`,
+  `settings_fallback_denied`, `probe_timeout`, …).
+- Non-adoptions, considered and dropped: Wispr's regular-app-mode toggle (Dock icon
+  blink; floating+yield covers us), their helper-app grant holder and stdin protocol
+  (Electron workarounds — native calls make them moot), their 60 s status cache +
+  bounded-read retry (our reads are direct), their restart resume-intent (no
+  restart-required permissions on our floor).
+
 ## Integration map (verified on this branch 2026-08-11)
 
 - UI to rebuild: `AudiouterCore/Sources/AudiouterOnboardingUI/` — read its

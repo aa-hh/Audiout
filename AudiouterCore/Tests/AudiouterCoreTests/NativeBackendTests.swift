@@ -11,6 +11,1400 @@ import CoreAudio
 import AudioToolbox
 #endif
 
+// MARK: - Shared doubles, fixtures, and helpers
+//
+// These live at FILE scope (`private` here means file-private) rather than inside
+// the suite, because this file now declares TWO suites — the parallel
+// `NativeBackendTests` and the serialized `NativeBackendGlobalStateTests` — and
+// both drive the same doubles. Nothing here is stateful across tests: every helper
+// builds a fresh `NativeBackend`/`SpyEngine`/`FakeDiscovery` per call.
+
+/// Records every engine op and lets a test drive the device-state stream.
+private final class SpyEngine: EngineControlling, @unchecked Sendable {
+    let lock = NSLock()
+    private(set) var started = false
+    private(set) var stopped = false
+    private(set) var discoveryFed: [OutputID] = []
+    /// The full descriptors handed to `updateDiscovery`, in order — lets an
+    /// integration test assert the ENGINE-facing `kind`/`name`/`parsedID` that
+    /// route a device to `output_raop` vs `output_airplay`, not just its id.
+    private(set) var fedDescriptors: [DeviceDescriptor] = []
+    private(set) var discoveryRemoved: [String] = []   // descriptor names
+    private(set) var added: [OutputID] = []
+    private(set) var removed: [OutputID] = []
+    private(set) var volumes: [(OutputID, Double)] = []
+    private(set) var bufferSets: [Int] = []
+    /// Interleaved op order (`remove:N` / `setBuffer:N` / `add:N` /
+    /// `volume:N`) — the applyStartBuffer invariant is about ORDER across
+    /// op kinds (all removes, then the buffer set, then re-adds), which the
+    /// per-kind arrays above can't express.
+    private(set) var opLog: [String] = []
+
+    /// Ids that should THROW on `addOutput` (best-effort partial-failure test).
+    var addFailures: Set<UInt64> = []
+    /// The error `addFailures` throws — defaults to the generic session
+    /// failure; the auth-mapping test sets `.passwordRequired` to prove the
+    /// connect path surfaces `.authRequired` instead of flattening to
+    /// `.unknown`.
+    var addFailureError: AirPlayEngineError = .sessionFailed
+    /// Ids that should THROW on `removeOutput`.
+    var removeFailures: Set<UInt64> = []
+    /// Ids that should THROW on `flushOutput` — forces a whole-system rebind
+    /// recovery to fall through to the removeOutput→addOutput teardown, same
+    /// as a real receiver that NACKs the FLUSH.
+    var flushFailures: Set<UInt64> = []
+    /// Ids whose `flushOutput` should return `false` WITHOUT throwing — models
+    /// the vendored flush's silent NO-OP (device in the set but not STREAMING /
+    /// session gone). The recovery must treat this like a failure and fall
+    /// through to teardown; before the discriminator fix a no-op was mistaken
+    /// for success and the teardown was skipped (silent-forever regression).
+    var flushNoOps: Set<UInt64> = []
+
+    /// Optional hook run INSIDE `addOutput`'s op body, after the add is recorded
+    /// but before it returns successfully. Lets a test deterministically inject
+    /// an out-of-band state transition in the window between addOutput resolving
+    /// and NativeBackend's post-success write (medium finding). T6 (008): ALSO
+    /// invoked from the per-app `addOutput(_:streamId:)` — without that, no
+    /// per-app-side interleaving is forceable.
+    var onAddOutputBody: (@Sendable (OutputID) -> Void)?
+
+    /// Async HOLD-OPEN hook (008 race tests): awaited inside BOTH `addOutput`
+    /// variants, after the op is recorded and any `onAddOutputBody` ran but
+    /// BEFORE the spy's `liveStreams` write — so while a test holds an add
+    /// open here, a concurrent `boundStreamId` read still sees the pre-add
+    /// world. The stream argument is 0 for the whole-system add, ≥ 1 for the
+    /// per-app add, so one hook can hold the two apart.
+    var onAddOutputHold: (@Sendable (OutputID, UInt32) async -> Void)?
+
+    /// Async hold-open hook awaited inside `removeOutput`, after the remove is
+    /// recorded but BEFORE the spy's `liveStreams` removal — the window a 008
+    /// test uses to fire the other FIFO from strictly inside a teardown.
+    var onRemoveOutputBody: (@Sendable (OutputID) async -> Void)?
+
+    /// Async hold-open hook awaited inside `rebindOutput`, between the
+    /// rebind's stop-half and add-half (the stop already cleared
+    /// `liveStreams`, so a concurrent read sees no stale stream).
+    var onRebindBody: (@Sendable (OutputID, UInt32) async -> Void)?
+
+    /// Artificial per-op latency (ns). Used by the toggle-spam test to force
+    /// slow op completions to race fast toggle flips, so a broken (unserialized)
+    /// converge would issue overlapping ops for the same device.
+    var opDelayNanos: UInt64 = 0
+
+    /// Count of `updateDiscovery` calls per parsed OutputID (root cause 2: assert
+    /// no re-feed of an unchanged descriptor per toggle).
+    private var feedCounts: [UInt64: Int] = [:]
+    /// The max number of ops (add or remove) observed IN FLIGHT concurrently for
+    /// any single device — must stay 1 with per-device serialization.
+    private var inFlightByID: [UInt64: Int] = [:]
+    private(set) var maxConcurrentPerDevice = 0
+
+    private var continuation: AsyncStream<(OutputID, OutputState)>.Continuation?
+    private var remoteContinuation: AsyncStream<RemoteEvent>.Continuation?
+
+    var dacpID: UInt64 { 0x1122334455667788 }
+
+    func start() async throws { lock.withLock { started = true } }
+    func stop() async { lock.withLock { stopped = true } }
+
+    @discardableResult
+    func updateDiscovery(_ descriptor: DeviceDescriptor) async throws -> OutputID {
+        let id = descriptor.parsedID ?? OutputID(rawValue: 0)
+        lock.withLock {
+            discoveryFed.append(id)
+            fedDescriptors.append(descriptor)
+            feedCounts[id.rawValue, default: 0] += 1
+        }
+        return id
+    }
+    func removeDiscovery(_ descriptor: DeviceDescriptor) async {
+        lock.withLock { discoveryRemoved.append(descriptor.name) }
+    }
+    /// Which stream each device's LIVE session is actually on — the spy's model
+    /// of the vendored C `device->stream_id` (T7). This is what makes the
+    /// architecture review's defect B reproducible offline: `addOutput` on a
+    /// device that ALREADY has a live session is a silent idempotent no-op in
+    /// the real engine and does NOT move its binding, so the spy must refuse to
+    /// move it too. Only `rebindOutput` (stop + re-add) actually moves a live
+    /// session. Written only on op SUCCESS.
+    private var liveStreams: [UInt64: UInt32] = [:]
+    /// The stream `id`'s live session is on, or `nil` if it has none.
+    func liveStream(of id: OutputID) -> UInt32? { lock.withLock { liveStreams[id.rawValue] } }
+    /// Every `rebindOutput` the backend issued, in order (T7).
+    private(set) var rebinds: [(OutputID, UInt32)] = []
+    var rebindCalls: [(OutputID, UInt32)] { lock.withLock { rebinds } }
+
+    func addOutput(_ id: OutputID) async throws {
+        try await runOp(id) {
+            self.lock.withLock { self.added.append(id); self.opLog.append("add:\(id.rawValue)") }
+            let hook = self.lock.withLock { self.onAddOutputBody }
+            hook?(id)
+            let hold = self.lock.withLock { self.onAddOutputHold }
+            if let hold { await hold(id, 0) }
+            if self.addFailures.contains(id.rawValue) { throw self.addFailureError }
+            // Engine idempotency: an already-live session is NOT re-bound.
+            self.lock.withLock { if self.liveStreams[id.rawValue] == nil { self.liveStreams[id.rawValue] = 0 } }
+        }
+    }
+    func removeOutput(_ id: OutputID) async throws {
+        try await runOp(id) {
+            self.lock.withLock { self.removed.append(id); self.opLog.append("remove:\(id.rawValue)") }
+            let hold = self.lock.withLock { self.onRemoveOutputBody }
+            if let hold { await hold(id) }
+            if self.removeFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
+            self.lock.withLock { self.liveStreams.removeValue(forKey: id.rawValue) }
+        }
+    }
+
+    /// Records every FLUSH (F-REANCHOR) attempt (T-A, whole-system rebind
+    /// recovery's new default path). Deliberately NOT routed through `runOp`'s
+    /// artificial `opDelayNanos` latency — the race-window tests apply that
+    /// delay to model the removeOutput→addOutput fallback specifically, and a
+    /// flush that fails does so immediately, same as a real receiver's fast
+    /// NACK.
+    func flushOutput(_ id: OutputID) async throws -> Bool {
+        lock.withLock { flushed.append(id); opLog.append("flush:\(id.rawValue)") }
+        if lock.withLock({ flushFailures.contains(id.rawValue) }) {
+            throw AirPlayEngineError.sessionFailed
+        }
+        // Silent no-op (returns false, no throw) — the vendored flush's
+        // not-STREAMING / NULL-session path. The caller must fall back to teardown.
+        if lock.withLock({ flushNoOps.contains(id.rawValue) }) { return false }
+        return true
+    }
+    private var flushed: [OutputID] = []
+    var flushedIDs: [OutputID] { lock.withLock { flushed } }
+
+    func boundStreamId(for id: OutputID) async -> UInt32? { lock.withLock { liveStreams[id.rawValue] } }
+
+    /// Stop + re-add as ONE op — the only way a LIVE session's stream moves.
+    /// Records BOTH halves into the same arrays/`opLog` the separate
+    /// `removeOutput`/`addOutput` pair used to, so every pre-T7 assertion about
+    /// a rebind's observable ops keeps holding.
+    func rebindOutput(_ id: OutputID, toStreamId streamId: UInt32) async throws {
+        try await runOp(id) {
+            self.lock.withLock {
+                self.rebinds.append((id, streamId))
+                self.removed.append(id)
+                self.opLog.append("remove:\(id.rawValue)")
+                self.liveStreams.removeValue(forKey: id.rawValue)
+            }
+            let hold = self.lock.withLock { self.onRebindBody }
+            if let hold { await hold(id, streamId) }
+            if self.addFailures.contains(id.rawValue) { throw self.addFailureError }
+            self.lock.withLock {
+                if streamId == 0 {
+                    self.added.append(id)
+                    self.opLog.append("add:\(id.rawValue)")
+                } else {
+                    self.streamAdds.append((id, streamId))
+                    self.opLog.append("streamAdd:\(id.rawValue):\(streamId)")
+                }
+                self.liveStreams[id.rawValue] = streamId
+            }
+        }
+    }
+
+    /// Per-app stream bind (T6). Recorded SEPARATELY from the legacy `added`
+    /// (stream_id 0) so per-app assertions never perturb the whole-system tests.
+    private var streamAdds: [(OutputID, UInt32)] = []
+    func addOutput(_ id: OutputID, streamId: UInt32) async throws {
+        try await runOp(id) {
+            self.lock.withLock {
+                self.streamAdds.append((id, streamId))
+                self.opLog.append("streamAdd:\(id.rawValue):\(streamId)")
+            }
+            // T6 (008): the per-app add runs the same mid-op hooks as the
+            // whole-system add, so per-app-side interleavings are forceable.
+            let hook = self.lock.withLock { self.onAddOutputBody }
+            hook?(id)
+            let hold = self.lock.withLock { self.onAddOutputHold }
+            if let hold { await hold(id, streamId) }
+            if self.addFailures.contains(id.rawValue) { throw self.addFailureError }
+            // Engine idempotency: an already-live session is NOT re-bound to
+            // `streamId` — that silent no-op is exactly defect B.
+            self.lock.withLock {
+                if self.liveStreams[id.rawValue] == nil { self.liveStreams[id.rawValue] = streamId }
+            }
+        }
+    }
+
+    /// Per-app mixed-buffer writes (T6), tagged with stream id + byte count.
+    private(set) var writes: [(streamId: UInt32, byteCount: Int)] = []
+    /// Same writes, but with the FULL pcm payload retained (not just its
+    /// count) — lets a cross-stream-leakage test assert on actual byte
+    /// CONTENT, not just size/streamId bookkeeping (T10).
+    private(set) var rawWrites: [(streamId: UInt32, pcm: Data)] = []
+    func write(pcm: Data, streamId: UInt32, pts: timespec) {
+        lock.withLock {
+            writes.append((streamId, pcm.count))
+            rawWrites.append((streamId, pcm))
+        }
+    }
+
+    /// What `writeCadenceSnapshot()` reports next (T-ENG-CADENCE-1 test
+    /// seam) — this spy has no real per-write cadence tracker underneath
+    /// it, so a test dials in whatever the "engine" currently reports.
+    /// Defaults to an all-zero (healthy) snapshot, matching
+    /// `EngineControlling`'s own protocol-extension default.
+    private var cadenceSnapshotToReturn = WriteCadenceSnapshot()
+    func scriptCadenceSnapshot(_ snapshot: WriteCadenceSnapshot) {
+        lock.withLock { cadenceSnapshotToReturn = snapshot }
+    }
+    func writeCadenceSnapshot() -> WriteCadenceSnapshot { lock.withLock { cadenceSnapshotToReturn } }
+
+    /// Run a device op, tracking concurrent-in-flight-per-device (to catch
+    /// overlapping ops) and applying the artificial latency. The body is
+    /// async (008) so the hold-open hooks can be awaited at their exact
+    /// placement points instead of blocking a cooperative-pool thread.
+    private func runOp(_ id: OutputID, _ body: () async throws -> Void) async throws {
+        lock.withLock {
+            let n = (inFlightByID[id.rawValue] ?? 0) + 1
+            inFlightByID[id.rawValue] = n
+            maxConcurrentPerDevice = max(maxConcurrentPerDevice, n)
+        }
+        defer { lock.withLock { inFlightByID[id.rawValue, default: 1] -= 1 } }
+        let delay = lock.withLock { opDelayNanos }
+        if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
+        try await body()
+    }
+
+    func feedCount(for id: OutputID) -> Int { lock.withLock { feedCounts[id.rawValue] ?? 0 } }
+    func setVolume(_ id: OutputID, _ volume: Double) async throws {
+        lock.withLock { volumes.append((id, volume)); opLog.append("volume:\(id.rawValue)") }
+    }
+    func setStartBufferMs(_ ms: Int) async {
+        lock.withLock { bufferSets.append(ms); opLog.append("setBuffer:\(ms)") }
+    }
+    func makeStateStream() -> AsyncStream<(OutputID, OutputState)> {
+        AsyncStream { continuation in
+            lock.withLock { self.continuation = continuation }
+        }
+    }
+    func makeRemoteEventStream() -> AsyncStream<RemoteEvent> {
+        AsyncStream { continuation in
+            lock.withLock { self.remoteContinuation = continuation }
+        }
+    }
+    /// Push a synthetic out-of-band transition through the state stream.
+    func pushState(_ id: OutputID, _ state: OutputState) {
+        // Mirror the real `boundStreamId`, which only reports a binding for a
+        // `.streaming`/`.connected` session: a device the engine just reported
+        // dead has no live binding to move, so a later add must bind fresh.
+        switch state {
+        case .streaming, .connected: break
+        default: lock.withLock { _ = liveStreams.removeValue(forKey: id.rawValue) }
+        }
+        let c = lock.withLock { continuation }
+        c?.yield((id, state))
+    }
+    /// Push a synthetic remote-control event (a speaker transport key or a
+    /// change to the speaker's own volume) through the remote-event stream.
+    func pushRemoteEvent(_ event: RemoteEvent) {
+        let c = lock.withLock { remoteContinuation }
+        c?.yield(event)
+    }
+
+    // Thread-safe snapshots for assertions.
+    var addedIDs: [OutputID] { lock.withLock { added } }
+    var removedIDs: [OutputID] { lock.withLock { removed } }
+    var fedIDs: [OutputID] { lock.withLock { discoveryFed } }
+    var fedDescriptorList: [DeviceDescriptor] { lock.withLock { fedDescriptors } }
+    var discoveryRemovedNames: [String] { lock.withLock { discoveryRemoved } }
+    var volumeCalls: [(OutputID, Double)] { lock.withLock { volumes } }
+    var bufferSetCalls: [Int] { lock.withLock { bufferSets } }
+    var ops: [String] { lock.withLock { opLog } }
+    var didStart: Bool { lock.withLock { started } }
+    var maxConcurrent: Int { lock.withLock { maxConcurrentPerDevice } }
+    var streamAddCalls: [(OutputID, UInt32)] { lock.withLock { streamAdds } }
+    var writeCalls: [(streamId: UInt32, byteCount: Int)] { lock.withLock { writes } }
+    var rawWriteCalls: [(streamId: UInt32, pcm: Data)] { lock.withLock { rawWrites } }
+}
+
+/// Feeds `DiscoveryEvent`s to the backend synchronously.
+private final class FakeDiscovery: DiscoverySource, @unchecked Sendable {
+    var onEvent: (@Sendable (DiscoveryEvent) -> Void)?
+    private(set) var startCount = 0
+    private(set) var stopCount = 0
+    func start() { startCount += 1 }
+    func stop() { stopCount += 1 }
+    func fire(_ event: DiscoveryEvent) { onEvent?(event) }
+}
+
+/// A no-socket ``DACPEndpoint`` double: the REAL `DACPServer.start(dacpID:)`
+/// binds an `NWListener` and advertises `_dacp._tcp` over Bonjour, which fires
+/// the macOS Local Network permission prompt once per `--parallel` worker
+/// process. Every backend this file constructs gets this fake instead (via
+/// `makeBackend` or explicitly), so the hermetic suite opens zero sockets.
+/// The volume-report handling stays covered: tests drive
+/// `applyDacpVolume`/`applyDacpVolumeStep` — the exact closures
+/// `NativeBackend.start()` wires to `onVolume`/`onVolumeStep` — directly.
+private final class FakeDACPEndpoint: DACPEndpoint, @unchecked Sendable {
+    var onVolume: (@Sendable (_ activeRemote: UInt32, _ level: Double) -> Void)?
+    var onVolumeStep: (@Sendable (_ activeRemote: UInt32, _ direction: Int) -> Void)?
+    private(set) var startCount = 0
+    private(set) var stopCount = 0
+    func start(dacpID: UInt64) { startCount += 1 }
+    func stop() { stopCount += 1 }
+}
+
+/// A ``PTPHelperActivating`` that reports ready immediately, never touching
+/// a real Mach service or `SMAppService` (T4). Every backend this file
+/// constructs gets this by default (via `makeBackend`): the production
+/// default (`PTPHelperActivator`) reads the REAL `SMAppService` status,
+/// which is `.notFound` outside a proper app bundle — every connect in
+/// this file would otherwise hard-fail before `engine.addOutput`, and each
+/// of the hundreds of `setOutputSet` calls across this suite would pay a
+/// real system XPC round-trip. Tests that specifically want to exercise
+/// the PTP gate (`.needsApproval`/`.timingPortsUnavailable`) construct
+/// their own fake and pass it explicitly.
+/// `willWaitForClock` is `false`: this double never really waits for
+/// anything (T6) — it's a canned instant return, not a real bind race —
+/// so it must never make `convergeDevice` emit a `.takeoverStatus` event.
+private struct AlwaysReadyPTPHelperActivator: PTPHelperActivating {
+    var willWaitForClock: Bool { false }
+    func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome { .ready }
+}
+
+/// A scriptable ``PTPHelperActivating`` for the takeover status strip's (T6)
+/// integration tests: reports a fixed `willWaitForClock` and resolves
+/// `activate` to a fixed outcome, counting calls so a test can assert
+/// exactly one Mach touch per connect attempt.
+private final class ScriptedPTPHelperActivator: PTPHelperActivating, @unchecked Sendable {
+    let willWaitForClock: Bool
+    private let lock = NSLock()
+    private var _outcome: PTPHelperActivationOutcome
+    private var _callCount = 0
+
+    init(willWaitForClock: Bool, outcome: PTPHelperActivationOutcome) {
+        self.willWaitForClock = willWaitForClock
+        self._outcome = outcome
+    }
+
+    func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome {
+        lock.withLock {
+            _callCount += 1
+            return _outcome
+        }
+    }
+
+    var callCount: Int { lock.withLock { _callCount } }
+
+    /// Re-script the outcome mid-test — how the clock-recovery tests flip
+    /// the world from "no clock" to "ready" between two connect attempts.
+    func setOutcome(_ outcome: PTPHelperActivationOutcome) {
+        lock.withLock { _outcome = outcome }
+    }
+}
+
+/// A minimal ``ServiceBrowsing`` that lets a test push a resolved service
+/// through the REAL ``NativeDiscovery`` production pipeline (identity →
+/// `descriptor(from:)` → `buildDevice`), so the end-to-end AP1 test exercises
+/// the actual descriptor construction rather than a hand-built fixture.
+private final class ScriptedBrowser: ServiceBrowsing, @unchecked Sendable {
+    var onResolve: (@Sendable (ResolvedService) -> Void)?
+    var onRemove: (@Sendable (RemovedService) -> Void)?
+    var onStateChange: (@Sendable (BrowserState) -> Void)?
+    func start() {}
+    func stop() {}
+    func resolve(_ service: ResolvedService) { onResolve?(service) }
+}
+
+/// A tiny thread-safe holder for the `DiscoveredDevice` that
+/// `NativeDiscovery.onEvent` (called on its own serial queue) produces.
+private final class DiscoveredBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: DiscoveredDevice?
+    func set(_ d: DiscoveredDevice) { lock.withLock { value = d } }
+    func get() -> DiscoveredDevice? { lock.withLock { value } }
+}
+
+/// Fakes the Mac's own default-output volume/mute (``SystemVolumeControlling``)
+/// with NO Core Audio HAL reads and NO property listeners on real hardware.
+///
+/// This closes a hermeticity gap: `NativeBackend`'s designated init defaults
+/// `systemVolume` to a real `SystemOutputVolume()`, so every one of this
+/// file's ~34 `backend.start()` calls used to construct a real one — reading
+/// the developer's actual default output device and installing real
+/// `AudioObjectAddPropertyListenerBlock` registrations on it. No test writes
+/// volume, so there was no hardware-slamming risk, but if the machine's
+/// volume/output changed mid-run, `onExternalChange` would fire and emit a
+/// genuine `local-mac` `deviceUpdated`, perturbing an event-sequence
+/// assertion elsewhere in the suite — the prime suspect for a real, one-off,
+/// never-reproduced flake (358 tests / 2 skips / 1 unnamed failure). Injecting
+/// this fake as `makeBackend()`'s default takes real hardware out of every
+/// test's path unconditionally.
+///
+/// Records every `setVolume`/`setMuted` call, serves scripted
+/// `currentVolume()`/`currentMuted()` reads (independent of what was written —
+/// a test dials in whatever the "hardware" currently reports), and lets a
+/// test fire `onExternalChange` on demand to simulate a change made outside
+/// the app (media keys, the Sound menu, a default-output-device switch).
+/// Mutable state is guarded by `lock`, matching `SpyEngine`/`FakeCapture`'s
+/// discipline.
+/// A minimal thread-safe `Int` box, so a test can script the injected
+/// `connectVolume` provider across reconnect episodes (the seed reads it on
+/// `stateQueue`, off the test's thread).
+private final class LockedInt: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Int
+    init(_ v: Int) { value = v }
+    func get() -> Int { lock.withLock { value } }
+    func set(_ v: Int) { lock.withLock { value = v } }
+}
+
+private final class FakeSystemVolume: SystemVolumeControlling, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _volume: Int?
+    private var _muted: Bool?
+    private var _volumeCalls: [Int] = []
+    private var _mutedCalls: [Bool] = []
+    private var _onExternalChange: (@Sendable (Int?, Bool?, Bool) -> Void)?
+    private var _startCount = 0
+    private var _stopCount = 0
+
+    /// Seeds the scripted hardware reads `NativeBackend.surfaceLocalDevice()`
+    /// consults via `currentVolume()`/`currentMuted()`. Both default `nil` —
+    /// the "unreadable control" case a real aggregate/HDMI output can hit,
+    /// which exercises the `?? 65` / `?? false` fallback.
+    /// `writable: false` is the readable-but-UNWRITABLE output (some USB DACs):
+    /// the write is accepted and silently changes nothing, which is exactly the
+    /// case an optimistic memo of the requested level gets wrong.
+    init(volume: Int? = nil, muted: Bool? = nil, writable: Bool = true) {
+        _volume = volume
+        _muted = muted
+        _writable = writable
+    }
+
+    private var _writable: Bool
+
+    func currentVolume() -> Int? { lock.withLock { _volume } }
+    func currentMuted() -> Bool? { lock.withLock { _muted } }
+
+    /// Re-script what the "hardware" reports for `currentVolume()`, simulating
+    /// the user turning the Mac's system volume knob between connect episodes.
+    /// (`setVolume` records the app's WRITES; this changes what a subsequent
+    /// `currentVolume()` READ returns — the two are independent, matching real
+    /// hardware where a read reflects the device's live level.)
+    func scriptVolume(_ v: Int?) { lock.withLock { _volume = v } }
+
+    func setVolume(_ volume: Int, didWrite: (@Sendable (Bool) -> Void)?) {
+        let wrote = lock.withLock { _volumeCalls.append(volume); return _writable }
+        didWrite?(wrote)
+    }
+    func setMuted(_ muted: Bool) {
+        lock.withLock { _mutedCalls.append(muted) }
+    }
+
+    var onExternalChange: (@Sendable (Int?, Bool?, Bool) -> Void)? {
+        get { lock.withLock { _onExternalChange } }
+        set { lock.withLock { _onExternalChange = newValue } }
+    }
+
+    func start() { lock.withLock { _startCount += 1 } }
+    func stop() { lock.withLock { _stopCount += 1 } }
+
+    // Thread-safe snapshots for assertions.
+    var volumeCalls: [Int] { lock.withLock { _volumeCalls } }
+    var mutedCalls: [Bool] { lock.withLock { _mutedCalls } }
+    var startCount: Int { lock.withLock { _startCount } }
+    var stopCount: Int { lock.withLock { _stopCount } }
+
+    /// Simulate a change made OUTSIDE this app by firing the callback
+    /// `NativeBackend.start()` registered. A harmless no-op if nothing is
+    /// registered yet (e.g. fired before `backend.start()`, or after
+    /// `backend.stop()` cleared it).
+    ///
+    /// `defaultDeviceChanged` defaults to `false` — a volume/mute gesture on the
+    /// device that was already the default, which is what every pre-existing
+    /// caller here means. Pass `true` to simulate the default output device
+    /// itself switching (speakers → AirPods), which reports the NEW device's
+    /// state and must not be mistaken for a gesture.
+    func fireExternalChange(volume: Int?, muted: Bool?, defaultDeviceChanged: Bool = false) {
+        let handler = lock.withLock { _onExternalChange }
+        handler?(volume, muted, defaultDeviceChanged)
+    }
+}
+
+/// No-op ``AggregateDeviceControlling`` double: every read returns nil/empty
+/// and create/destroy never run, so `AggregateOutputDevice.sweepOrphans()`/
+/// `adoptOrCreate()` — which `NativeBackend.start()` AND `.stop()` both call
+/// unconditionally — are pure no-ops instead of hitting the real HAL.
+/// Without this, `NativeBackend`'s default `aggregateControl` param
+/// (`CoreAudioAggregateDeviceControl()`) creates/destroys a REAL public
+/// "Audiouter" aggregate device in macOS Sound settings on every
+/// `makeBackend()`/direct-construction call in this file. Never touches the
+/// real HAL — same reason `FakeSystemVolume` above exists.
+private struct NoOpAggregateControl: AggregateDeviceControlling {
+    func resolveDeviceID(forUID uid: String) -> AudioObjectID? { nil }
+    func createAggregate(uid: String, name: String, subDeviceUID: String) -> AudioObjectID? { nil }
+    func destroyAggregate(_ deviceID: AudioObjectID) -> Bool { false }
+    func aggregateDeviceUIDs() -> [String] { [] }
+    func deviceUID(_ deviceID: AudioObjectID) -> String? { nil }
+    func builtInOutputDeviceUID() -> String? { nil }
+    func setDefaultOutputDevice(_ deviceID: AudioObjectID) -> Bool { false }
+}
+
+private func ap2Device(id: String = "AA:BB:CC:DD:EE:01", name: String = "Sonos Move", model: String = "S13") -> DiscoveredDevice {
+    let txt = ["deviceid": id, "model": model, "features": "0x445F8A00,0x1C340"]
+    let (parsedID, outputID) = NativeDiscovery.parseDeviceID(txt)!
+    let desc = DeviceDescriptor(name: name, address: "192.168.1.10", family: .ipv4, port: 7000, txtRecord: txt)
+    return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: true)
+}
+
+private func ap1Device(id: String = "AA:BB:CC:DD:EE:99", name: String = "Old Express") -> DiscoveredDevice {
+    let txt = ["deviceid": id, "model": "AirPort4,107"]
+    let (parsedID, outputID) = NativeDiscovery.parseDeviceID(txt)!
+    let desc = DeviceDescriptor(name: name, address: "192.168.1.20", family: .ipv4, port: 5000, txtRecord: txt)
+    return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: false)
+}
+
+/// `systemVolume` defaults to a fresh ``FakeSystemVolume`` so EVERY call
+/// site — all ~34 of them, unchanged — gets a hermetic double with no
+/// explicit opt-in; NO test in this file ever constructs a real
+/// `SystemOutputVolume` (see `FakeSystemVolume`'s doc comment for why that
+/// matters). Tests that need to script a readback or fire
+/// `onExternalChange` construct their own `FakeSystemVolume` and pass it
+/// explicitly to get a handle on it.
+private func makeBackend(
+    systemVolume: SystemVolumeControlling = FakeSystemVolume(),
+    ptpHelperActivator: PTPHelperActivating = AlwaysReadyPTPHelperActivator(),
+    connectVolume: @escaping @Sendable () -> Int = { AppSettings.defaultConnectVolume },
+    processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: NoAudioProcesses()),
+    injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
+    injectedMeteringCapture: PerAppCaptureCoordinator? = nil,
+    captureRetryDelay: TimeInterval = 2.0,
+    captureRetryMaxBackoff: TimeInterval = 10.0,
+    takeoverStripDelay: TimeInterval = 0,
+    watchdogScheduler: SilenceWatchdogScheduling? = nil,
+    silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
+    systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = { false },
+    /// The Mac's default-output UID. `nil` by default — no device, so the
+    /// volume-ownership gate reads "not our aggregate" unless a test says otherwise.
+    currentDefaultOutputUID: @escaping @Sendable () -> String? = { nil }
+) -> (NativeBackend, SpyEngine, FakeDiscovery) {
+    let engine = SpyEngine()
+    let discovery = FakeDiscovery()
+    let backend = NativeBackend(
+        engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
+        systemVolume: systemVolume, ptpHelperActivator: ptpHelperActivator,
+        connectVolume: connectVolume, processResolver: processResolver,
+        injectedPerAppCapture: injectedPerAppCapture,
+        injectedMeteringCapture: injectedMeteringCapture,
+        captureRetryDelay: captureRetryDelay,
+        captureRetryMaxBackoff: captureRetryMaxBackoff,
+        // 0 = the old synchronous `.takingOver` emit. The suite's scripted
+        // activators resolve instantly, so the production debounce (which
+        // exists to SUPPRESS the strip on fast resolutions) would hide the
+        // very ordering the strip tests pin; only the debounce tests pass a
+        // real delay.
+        takeoverStripDelay: takeoverStripDelay,
+        watchdogScheduler: watchdogScheduler,
+        silenceFallbackDelay: silenceFallbackDelay,
+        systemDefaultOutputIsAirPlayClass: systemDefaultOutputIsAirPlayClass,
+        aggregateControl: NoOpAggregateControl(),
+        currentDefaultOutputUID: currentDefaultOutputUID,
+        // D7 (adversarial review, Seamless handoff T3): the real default
+        // factory posix_spawns `/usr/bin/log stream`. Every other collaborator
+        // this helper touches (`systemVolume`, `ptpHelperActivator`,
+        // `aggregateControl`, …) is already swapped for a hermetic fake for
+        // exactly this reason — this is that same convention, not a
+        // `HeadlessRuntime`-gated production default (there is no precedent in
+        // `NativeBackend`'s own init for auto-detecting tests at a production
+        // default; every other collaborator is always real in production and
+        // always swapped explicitly here).
+        handoffWatcherFactory: { onBlockedAttempt in
+            AirPlayHandoffWatcher(spawn: NoOpLogStream(), onBlockedAttempt: onBlockedAttempt)
+        })
+    return (backend, engine, discovery)
+}
+
+/// Inert `LogStreamSpawning` stand-in (D7): never spawns a real subprocess,
+/// `isRunning` always false. Keeps this suite hermetic without exercising the
+/// watcher's own logic — that's owed as a dedicated `AirPlayHandoffWatcherTests`
+/// suite, out of scope here.
+private final class NoOpLogStream: LogStreamSpawning, @unchecked Sendable {
+    func start(onLine: @escaping @Sendable (String) -> Void,
+                onTermination: @escaping @Sendable () -> Void) throws {}
+    func stop() {}
+    var isRunning: Bool { false }
+}
+
+/// A scripted `AudioProcessEnumerating` fake: hands back a fixed process list
+/// so an `AudioProcessResolver` built on it resolves deterministically, with
+/// no live Core Audio. Mirrors `NativeCaptureCoordinatorTests.FakeProcessEnumerator`.
+private struct FakeProcessEnumerator: AudioProcessEnumerating {
+    let processes: [RawAudioProcess]
+    var parents: [pid_t: pid_t] = [:]
+    func enumerateProcesses() -> [RawAudioProcess] { processes }
+    func parentPID(of pid: pid_t) -> pid_t? { parents[pid] }
+}
+
+/// Builds an `AudioProcessResolver` where each bundle id resolves to exactly
+/// ONE process object, at `pid = objectID` — mirrors
+/// `NativeCaptureCoordinatorTests.singleProcessResolver`.
+private func singleProcessResolver(_ bundleIDsToObjectIDs: [String: AudioObjectID]) -> AudioProcessResolver {
+    let processes = bundleIDsToObjectIDs.map { bundleID, objectID in
+        RawAudioProcess(objectID: objectID, pid: pid_t(objectID), bundleID: bundleID)
+    }
+    return AudioProcessResolver(enumerator: FakeProcessEnumerator(processes: processes))
+}
+
+/// A `ProcessAudioTap` that always succeeds (T8): `createAndStart` never
+/// throws, so a coordinator built over it takes every bundle ID all the way
+/// to `.capturing` — unlike the default empty-`processResolver` setup
+/// (`NoAudioProcesses`), which fails fast at `.processNotYetAudible` by design
+/// and is what most of this file uses to exercise routing TOPOLOGY independent
+/// of real capture. Tests that need `.routedApps`/the mixer to reflect an app
+/// that's actually (fakely) streaming — e.g. it must NOT be excluded as
+/// "dead" — construct a coordinator with this tap instead.
+private final class AlwaysSucceedsTap: ProcessAudioTap, @unchecked Sendable {
+    var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
+    var onDefaultDeviceChanged: (@Sendable () -> Void)?
+    func createAndStart(processes: Set<AudioProcess>, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+        TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+    }
+    func teardown() {}
+}
+
+/// A `PerAppCaptureCoordinator` whose every `start(bundleID:)` reaches
+/// `.capturing` (T8) for each of `bundleIDs` — pass as `injectedPerAppCapture:`
+/// to `makeBackend`. Each bundle id needs its own resolvable process (T2's
+/// per-bundle-id process-set resolution, unlike the old single wildcard-pid
+/// resolver) — callers list every bundle id their test routes so all of them
+/// resolve non-empty.
+private func workingPerAppCapture(bundleIDs: [String]) -> PerAppCaptureCoordinator {
+    var mapping: [String: AudioObjectID] = [:]
+    for (offset, bundleID) in bundleIDs.enumerated() {
+        mapping[bundleID] = AudioObjectID(9000 + offset)
+    }
+    return PerAppCaptureCoordinator(
+        makeTap: { AlwaysSucceedsTap() }, processResolver: singleProcessResolver(mapping), muteBehavior: .mutedWhenTapped)
+}
+
+/// A scriptable `AudioProcessEnumerating` fake that records every
+/// `enumerateProcesses()` call — proof `AudioProcessResolver.resolve(bundleID:)`
+/// was invoked by a per-app capture start — while always resolving to the EMPTY
+/// process set, so no real Core Audio tap is ever created: the routing
+/// TOPOLOGY (`addOutput(_:streamId:)` + `.routedApps`) still runs. Replaces the
+/// pre-multi-process `PIDRecorder`: the resolver's `enumerateProcesses()` seam
+/// isn't parameterized by the target bundle id (it returns the same snapshot
+/// regardless), so per-bundle-id "which one was asked" tracking is no longer
+/// observable at this seam — a nonzero call count is the equivalent proxy for
+/// "a capture attempt happened", which is exact wherever (as below) only ONE
+/// bundle id is ever routed in the test.
+private final class ResolveAttemptRecorder: AudioProcessEnumerating, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _callCount = 0
+    func enumerateProcesses() -> [RawAudioProcess] {
+        lock.withLock { _callCount += 1 }
+        return []
+    }
+    func parentPID(of pid: pid_t) -> pid_t? { nil }
+    var callCount: Int { lock.withLock { _callCount } }
+}
+
+/// A `.device(id:)` route fixture.
+private func route(_ bundleID: String, name: String, toDevice deviceID: String, volume: Int = 100) -> AppRoute {
+    AppRoute(bundleID: bundleID, displayName: name, destination: .device(id: deviceID), volume: volume)
+}
+
+// MARK: T10 cross-component doubles
+//
+// The fakes below back the T10 full-chain tests: they let a test push
+// ACTUAL captured buffers through the real per-app pipeline (PerAppCaptureCoordinator
+// -> AppRouteMixer -> engine.write) and exercise the real NativeCaptureCoordinator's
+// T4 exclusion logic through NativeBackend.updateAppRoutes, rather than only
+// asserting on topology (streamAddCalls) as the existing T6/T7 tests do.
+
+/// A `ProcessAudioTap` that always succeeds, self-registers with an external
+/// registry keyed by the bundle ID it was started for (so a test can grab a
+/// handle to THIS app's specific tap instance and `push(_:)` content into
+/// it directly), and uses the engine's exact output format (44100/16-bit
+/// interleaved S16) so buffers round-trip through the real `AVFormatConverter`
+/// essentially unchanged — letting a test assert on exact byte content.
+private final class BundleTaggingTap: ProcessAudioTap, @unchecked Sendable {
+    var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
+    var onDefaultDeviceChanged: (@Sendable () -> Void)?
+    var onRegister: (@Sendable (String) -> Void)?
+    func createAndStart(processes: Set<AudioProcess>, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+        onRegister?(bundleID)
+        return TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 16, isFloat: false, isInterleaved: true)
+    }
+    func teardown() {}
+    func push(_ buffer: CapturedBuffer) { onBuffer?(buffer) }
+}
+
+/// Thread-safe bundleID -> tap registry, populated by ``BundleTaggingTap/onRegister``.
+private final class TapRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    private var byBundleID: [String: BundleTaggingTap] = [:]
+    func register(_ bundleID: String, _ tap: BundleTaggingTap) { lock.withLock { byBundleID[bundleID] = tap } }
+    func tap(for bundleID: String) -> BundleTaggingTap? { lock.withLock { byBundleID[bundleID] } }
+}
+
+/// A single-second, fixed-fill-byte, interleaved-S16-stereo `CapturedBuffer` —
+/// every byte is `fill`, so a downstream write can be checked for cross-app
+/// contamination with a trivial byte scan (0xAA never appears in app B's
+/// stream, 0xBB never appears in app A's).
+private func fingerprintedBuffer(fill: UInt8, frames: Int, atSecond sec: Int) -> CapturedBuffer {
+    let data = Data(repeating: fill, count: frames * 2 /* ch */ * 2 /* bytes/sample */)
+    return CapturedBuffer(channelData: [data], frameCount: frames, pts: timespec(tv_sec: sec, tv_nsec: 0))
+}
+
+/// A `SystemAudioTap` (the WHOLE-SYSTEM tap seam, not the per-app one) that
+/// records the `excludedProcessObjectIDs` it was last created with — lets a
+/// test drive the REAL ``NativeCaptureCoordinator`` (not a direct call to its
+/// `updateRouting`) through `NativeBackend.updateAppRoutes` and observe T4's
+/// exclusion list end to end.
+private final class RecordingSystemTap: SystemAudioTap, @unchecked Sendable {
+    var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
+    var onDefaultDeviceChanged: (@Sendable () -> Void)?
+    private let lock = NSLock()
+    private var _excludedProcessObjectIDs: Set<AudioObjectID> = []
+    private var _createCount = 0
+    func createAndStart(muteBehavior: TapMuteBehavior, excludedProcessObjectIDs: Set<AudioObjectID>) throws -> TapFormat {
+        lock.withLock { _excludedProcessObjectIDs = excludedProcessObjectIDs; _createCount += 1 }
+        return TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 16, isFloat: false, isInterleaved: true)
+    }
+    func teardown() {}
+    var excludedProcessObjectIDs: Set<AudioObjectID> { lock.withLock { _excludedProcessObjectIDs } }
+    var createCount: Int { lock.withLock { _createCount } }
+}
+
+private final class NoOpSink: PCMSink {
+    func write(pcm: Data, pts: timespec) {}
+}
+
+private struct PassthroughConverter: PCMConverting {
+    func convertToAirPlayPCM(_ buffer: CapturedBuffer) -> Data? { buffer.channelData.first }
+}
+
+/// A `ProcessAudioTap` whose `createAndStart` throws `.processNotYetAudible`
+/// for the first `failuresBeforeSuccess` attempts, then succeeds — scripts
+/// T8's bounded-retry recovery path (`NativeBackend.scheduleProcessNotYetAudibleRetry`)
+/// deterministically.
+private final class FlakyThenSucceedsTap: ProcessAudioTap, @unchecked Sendable {
+    var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
+    var onDefaultDeviceChanged: (@Sendable () -> Void)?
+    private let lock = NSLock()
+    private var attempts = 0
+    let failuresBeforeSuccess: Int
+    init(failuresBeforeSuccess: Int) { self.failuresBeforeSuccess = failuresBeforeSuccess }
+    func createAndStart(processes: Set<AudioProcess>, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+        let n = lock.withLock { attempts += 1; return attempts }
+        if n <= failuresBeforeSuccess {
+            throw PerAppCaptureError.processNotYetAudible(bundleID: bundleID)
+        }
+        return TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 16, isFloat: false, isInterleaved: true)
+    }
+    func teardown() {}
+    var attemptsMade: Int { lock.withLock { attempts } }
+}
+
+/// Collect non-level events until `predicate` holds or timeout.
+private func collect(
+    from backend: NativeBackend,
+    timeout: Duration = .seconds(3),
+    until predicate: @escaping @Sendable ([BackendEvent]) -> Bool
+) async -> [BackendEvent] {
+    let stream = backend.makeEventStream()
+    let box = EventBox()
+    await confirmation("predicate satisfied") { done in
+        let task = Task {
+            for await event in stream {
+                if case .level = event { continue }
+                let all = await box.append(event)
+                if predicate(all) { done(); break }
+            }
+        }
+        defer { task.cancel() }
+        try? await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { _ = await task.value }
+            group.addTask { try await Task.sleep(for: timeout) }
+            try await group.next()
+            // Cancel the STREAM task, not just the group's children. `cancelAll()`
+            // cancels the child that is `await task.value`, but `Task.value` does
+            // not observe its awaiter's cancellation — it waits for `task` itself.
+            // Without this the group's implicit scope-exit await never returns when
+            // the timeout wins, and the `defer { task.cancel() }` that would free it
+            // can't run because we are still inside this closure: a test whose
+            // predicate never fires HANGS THE WHOLE SUITE instead of failing.
+            task.cancel()
+            group.cancelAll()
+        }
+    }
+    return await box.snapshot()
+}
+
+private actor EventBox {
+    private var events: [BackendEvent] = []
+    func append(_ e: BackendEvent) -> [BackendEvent] { events.append(e); return events }
+    func snapshot() -> [BackendEvent] { events }
+}
+
+private func waitUntilStarted(_ engine: SpyEngine) async {
+    for _ in 0..<200 {
+        if engine.didStart { return }
+        try? await Task.sleep(nanoseconds: 5_000_000)
+    }
+}
+
+private func systemVolumeEvents(in events: [BackendEvent]) -> [Int] {
+    events.compactMap { if case .systemVolumeChanged(let v) = $0 { return v } else { return nil } }
+}
+
+/// True iff the engine is NET holding `id` (more adds than removes observed).
+/// The converge loop issues one add per on-transition and one remove per
+/// off-transition, so an equal count means the last op was a remove.
+private func netAdded(_ engine: SpyEngine, _ id: OutputID) -> Bool {
+    let adds = engine.addedIDs.filter { $0 == id }.count
+    let removes = engine.removedIDs.filter { $0 == id }.count
+    return adds > removes
+}
+
+/// Drive `device` to a parked `.failed` (its adds NACK) and return the
+/// number of engine add attempts consumed getting there.
+private func parkDevice(
+    _ backend: NativeBackend, _ engine: SpyEngine, _ discovery: FakeDiscovery,
+    _ device: DiscoveredDevice
+) async -> Int {
+    engine.addFailures = [device.outputID.rawValue]
+    _ = await collect(from: backend) { events in
+        events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+    } after: { discovery.fire(.appeared(device)) }
+    backend.setOutputSet([device.id])
+    await pollUntil {
+        if case .failed = backend.devices.first(where: { $0.id == device.id })?.connectionState { return true }
+        return false
+    }
+    return engine.addedIDs.filter { $0 == device.outputID }.count
+}
+
+private func isFailedNow(_ backend: NativeBackend, _ id: String) -> Bool {
+    if case .failed = backend.devices.first(where: { $0.id == id })?.connectionState { return true }
+    return false
+}
+
+/// Discover an AP2 device, select it, and wait until it's streaming (`added`).
+/// Returns once `engine.addedIDs` contains the device and its row is selected.
+private func connectAP2(
+    _ backend: NativeBackend, _ engine: SpyEngine, _ discovery: FakeDiscovery,
+    _ device: DiscoveredDevice
+) async {
+    await startAndDiscover(backend, engine, discovery, device)
+    backend.setOutputSet([device.id])
+    await pollUntil { engine.addedIDs.contains(device.outputID) }
+    await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+}
+
+/// Records the gate's capture ops in order, with no Core Audio tap / TCC prompt.
+private final class FakeCapture: CaptureControlling, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _onLevel: (@Sendable (Float) -> Void)?
+    private var _onStateChange: (@Sendable (NativeCaptureCoordinator.State) -> Void)?
+    private var _onDeviceRateRebuild: (@Sendable () -> Void)?
+    private var _ops: [String] = []
+    private var _meteringActive = false
+    /// How many times `start()` has actually been called — including a
+    /// retry-driven restart, not just the first one (T16, E10). `ops` also
+    /// records this (as another `"start"` entry), but a dedicated counter
+    /// reads clearer at the call site of a retry-recovery test.
+    private var _startCount = 0
+
+    var onLevel: (@Sendable (_ rms: Float) -> Void)? {
+        get { lock.withLock { _onLevel } }
+        set { lock.withLock { _onLevel = newValue } }
+    }
+    /// T16, E10: fired by `fireState(_:)` to script the whole-system tap's
+    /// state machine — `NativeBackend.start()` wires this exactly like the
+    /// real `NativeCaptureCoordinator.onStateChange`.
+    var onStateChange: (@Sendable (NativeCaptureCoordinator.State) -> Void)? {
+        get { lock.withLock { _onStateChange } }
+        set { lock.withLock { _onStateChange = newValue } }
+    }
+    /// Whole-system tap device/rate-rebuild seam (T2): the real coordinator
+    /// fires this ONLY when a device/nominal-rate change rebuilt the tap — the
+    /// rebuild that desyncs the AirPlay RTP timeline. Stored so a test can drive
+    /// a simulated device/rate rebuild without a real Core Audio tap, then assert
+    /// the backend's session-reset response. A benign exclusion-set rebuild (the
+    /// synced-local sink attach) is faithfully modelled by simply NOT firing this.
+    var onDeviceRateRebuild: (@Sendable () -> Void)? {
+        get { lock.withLock { _onDeviceRateRebuild } }
+        set { lock.withLock { _onDeviceRateRebuild = newValue } }
+    }
+    func start() { lock.withLock { _ops.append("start"); _startCount += 1 } }
+    func stop() { lock.withLock { _ops.append("stop") } }
+    func setMeteringActive(_ active: Bool) { lock.withLock { _meteringActive = active } }
+
+    /// R14: records every `refreshExcludedProcessSet(forRelaunchedBundleID:)`
+    /// call so a test can assert `NativeBackend.handleAppLaunched` /
+    /// `handlePerAppCaptureHealthChange` re-resolve the whole-system tap's
+    /// exclusion for a relaunched/now-audible bundle ID.
+    private var _refreshedBundleIDs: [String] = []
+    func refreshExcludedProcessSet(forRelaunchedBundleID bundleID: String) {
+        lock.withLock { _refreshedBundleIDs.append(bundleID) }
+    }
+    var refreshedBundleIDs: [String] { lock.withLock { _refreshedBundleIDs } }
+
+    /// R5: records the route table + denylist handed to `updateRouting`, in
+    /// order, so a test can assert exactly WHICH bundle IDs the whole-system tap
+    /// was told to exclude. The real coordinator turns `.device`-routed bundle
+    /// IDs plus the denylist into excluded process object ids (covered by
+    /// `NativeCaptureCoordinatorTests`); at THIS seam the question is only what
+    /// `NativeBackend` decided to send, which is what the effective route table
+    /// changes.
+    private var _routingUpdates: [(appRoutes: [AppRoute], excludedBundleIDs: Set<String>)] = []
+    func updateRouting(appRoutes: [AppRoute], excludedBundleIDs: Set<String>) {
+        lock.withLock { _routingUpdates.append((appRoutes, excludedBundleIDs)) }
+    }
+    var routingUpdates: [(appRoutes: [AppRoute], excludedBundleIDs: Set<String>)] {
+        lock.withLock { _routingUpdates }
+    }
+    /// The bundle IDs the LAST `updateRouting` call would have the whole-system
+    /// tap exclude: every `.device`-routed bundle ID unioned with the denylist —
+    /// i.e. `NativeCaptureCoordinator`'s own union rule, mirrored here.
+    var lastExcludedBundleIDs: Set<String>? {
+        guard let last = routingUpdates.last else { return nil }
+        let routedAway = last.appRoutes
+            .filter(\.destination.isDeviceRoute)
+            .map(\.bundleID)
+        return last.excludedBundleIDs.union(routedAway)
+    }
+
+    /// Fire a device/nominal-rate rebuild exactly as the real coordinator does
+    /// from `recreateTap(cause: .deviceOrRateChange)` (T2), so a test can
+    /// simulate the rate-renegotiation rebuild and observe `NativeBackend`'s
+    /// session-reset response.
+    func fireDeviceRateRebuild() {
+        let handler = lock.withLock { _onDeviceRateRebuild }
+        handler?()
+    }
+
+    /// Every start/stop, in the order they executed.
+    var ops: [String] { lock.withLock { _ops } }
+    /// Whether the tap is running right now — i.e. exactly when the real
+    /// `.mutedWhenTapped` tap has the Mac's speakers muted.
+    var isCapturing: Bool { lock.withLock { _ops.last == "start" } }
+    /// Total `start()` calls so far (T16, E10) — see `_startCount`.
+    var startCount: Int { lock.withLock { _startCount } }
+    /// The last value passed to `setMeteringActive`, `false` until called.
+    var meteringActive: Bool { lock.withLock { _meteringActive } }
+    /// Fire `onLevel` as the real coordinator would — but only if metering is
+    /// active, mirroring `NativeCaptureCoordinator.handleBuffer`'s gate so this
+    /// fake is a faithful stand-in for the T-GATE test below.
+    func fireLevelIfActive(_ rms: Float) {
+        let (handler, active) = lock.withLock { (_onLevel, _meteringActive) }
+        if active { handler?(rms) }
+    }
+    /// Fire `onStateChange` as the real coordinator would on a transition
+    /// (T16, E10) — drives `NativeBackend.handleCaptureCoordinatorStateChange`
+    /// with no real Core Audio tap in the loop.
+    func fireState(_ state: NativeCaptureCoordinator.State) {
+        let handler = lock.withLock { _onStateChange }
+        handler?(state)
+    }
+}
+
+/// Bring a selected AP2 device to actually-streaming (`added`) so a whole-system
+/// session reset has a live stream-0 session to rebind.
+private func startSelectAndStream(
+    _ backend: NativeBackend, _ engine: SpyEngine, _ discovery: FakeDiscovery,
+    _ capture: FakeCapture, _ device: DiscoveredDevice
+) async {
+    backend.captureCoordinator = capture
+    backend.start()
+    await waitUntilStarted(engine)
+    _ = await collect(from: backend) { events in
+        events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+    } after: { discovery.fire(.appeared(device)) }
+    backend.setOutputSet([device.id])
+    await pollUntil { engine.addedIDs.contains(device.outputID) }
+}
+
+/// Discover an AP2 device and wait until the backend knows it (so `outputIDs`
+/// is populated and a route can bind to it).
+private func startAndDiscover(
+    _ backend: NativeBackend, _ engine: SpyEngine, _ discovery: FakeDiscovery,
+    _ device: DiscoveredDevice
+) async {
+    backend.start()
+    await waitUntilStarted(engine)
+    _ = await collect(from: backend) { events in
+        events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+    } after: { discovery.fire(.appeared(device)) }
+    await pollUntil { engine.fedIDs.contains(device.outputID) }
+}
+
+/// Parse the sink's captured lines into `.airplay` JSON objects for `evt`,
+/// optionally filtered to one device id (mirrors
+/// `rebindRecoveryEmitsTelemetry...`'s local helpers).
+private func telemetryLines(
+    _ box: TelemetryLineBox, evt: String, device: String? = nil
+) -> [[String: Any]] {
+    box.snapshot().compactMap { line -> [String: Any]? in
+        guard let data = line.data(using: .utf8),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        else { return nil }
+        return obj
+    }.filter {
+        $0["cat"] as? String == "airplay" && $0["evt"] as? String == evt
+            && (device == nil || $0["device"] as? String == device)
+    }
+}
+
+/// A test-controlled hold point for the SpyEngine's async hooks: `hold()`
+/// (called from inside an engine op) marks `entered` and suspends until the
+/// test calls `open()` — the explicit open IS the synchronization.
+private final class HoldPoint: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _entered = false
+    private var _open = false
+    var entered: Bool { lock.withLock { _entered } }
+    func open() { lock.withLock { _open = true } }
+    func hold() async {
+        lock.withLock { _entered = true }
+        while !(lock.withLock { _open }) { try? await Task.sleep(nanoseconds: 2_000_000) }
+    }
+}
+
+/// A once-latch for hooks that must act on their first invocation only.
+private final class OnceFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var fired = false
+    /// Returns whether the flag was ALREADY set (and sets it).
+    func testAndSet() -> Bool { lock.withLock { let was = fired; fired = true; return was } }
+}
+
+/// A `PTPHelperActivating` that resolves `.ready` instantly until `arm()`ed,
+/// after which every activation HOLDS until `release()` — how a race test
+/// parks `convergeDevice` inside its widest suspension window
+/// (`ensurePTPTakeover`) at a test-chosen moment.
+private final class ArmableHoldingPTPActivator: PTPHelperActivating, @unchecked Sendable {
+    var willWaitForClock: Bool { false }
+    private let lock = NSLock()
+    private var armed = false
+    private let gate = HoldPoint()
+    func arm() { lock.withLock { armed = true } }
+    func release() { gate.open() }
+    var holding: Bool { gate.entered }
+    func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome {
+        if lock.withLock({ armed }) { await gate.hold() }
+        return .ready
+    }
+}
+
+/// Collects every `.routedApps` name list emitted for one device, in order.
+private final class RoutedAppsLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [[String]] = []
+    func append(_ names: [String]) { lock.withLock { entries.append(names) } }
+    var last: [String]? { lock.withLock { entries.last } }
+}
+
+/// Subscribe a `RoutedAppsLog` for `deviceID` BEFORE firing any stimulus.
+private func subscribeRoutedApps(
+    _ backend: NativeBackend, deviceID: String
+) -> (RoutedAppsLog, Task<Void, Never>) {
+    let log = RoutedAppsLog()
+    let task = Task {
+        for await event in backend.makeEventStream() {
+            if case .routedApps(let id, let names) = event, id == deviceID {
+                log.append(names)
+            }
+        }
+    }
+    return (log, task)
+}
+
+/// A per-app capture that actually reaches `.capturing` for `com.foo.player`
+/// — these tests are about the BIND gate, and a capture left failing (the
+/// default `NoAudioProcesses` resolver) would mark the app dead and
+/// republish an EMPTY topology mid-test, racing every assertion about the
+/// bind itself.
+private func succeedingPerAppCapture() -> PerAppCaptureCoordinator {
+    PerAppCaptureCoordinator(
+        makeTap: { FlakyThenSucceedsTap(failuresBeforeSuccess: 0) },
+        processResolver: singleProcessResolver(["com.foo.player": 4242]),
+        muteBehavior: .mutedWhenTapped)
+}
+
+/// A `ProcessAudioTap` that always succeeds and stores the
+/// `onDefaultDeviceChanged` closure it was handed, so a test can force a
+/// tap rebuild (`fireDeviceChange()`) at will — the per-app analogue of
+/// `PerAppCaptureCoordinatorTests.FakeProcessTap`, needed here to drive
+/// `NativeBackend`'s T4 rebind-recovery path (a rebuild with no death in
+/// between is a "recapture", which triggers `resetAirPlaySessionForRoutedApp`).
+private final class RebindTriggerTap: ProcessAudioTap, @unchecked Sendable {
+    var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
+    var onDefaultDeviceChanged: (@Sendable () -> Void)?
+    func createAndStart(processes: Set<AudioProcess>, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
+        TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
+    }
+    func teardown() {}
+    func fireDeviceChange() { onDefaultDeviceChanged?() }
+
+    /// True once `PerAppCaptureCoordinator` has installed its device-change
+    /// hook on this tap (`PerAppCaptureCoordinator.swift:355`/`:433`).
+    ///
+    /// **Every test must wait for this before calling
+    /// `fireDeviceChange()`.** `fireDeviceChange()` is
+    /// `onDefaultDeviceChanged?()` — a SILENT no-op while the hook is still
+    /// nil, so a too-early call produces no recapture, no session reset, no
+    /// rebind and no telemetry, and every downstream assertion then fails
+    /// with an empty collection rather than pointing at the real cause.
+    ///
+    /// The coordinator installs the hook on its own async start path, which
+    /// is NOT the same path as `engine.streamAddCalls` gaining the device —
+    /// the precondition these tests used to poll on. Under XCTest, where
+    /// each test method owned a whole process, the hook was always in place
+    /// by then; under swift-testing's in-process concurrency it sometimes
+    /// is not. Measured on this branch before the wait was added: the three
+    /// tests below failed in 4 of 10 full-suite runs and 7 of 10 runs of
+    /// `--filter 'NativeBackendTests|OwnToneBackendTests'`.
+    var isArmed: Bool { onDefaultDeviceChanged != nil }
+}
+
+/// Thread-safe capture box for a `Telemetry._installTestSink` — the sink runs
+/// on Telemetry's own writer queue, a different thread than the test body, so
+/// appending straight into a plain `[String]` there would race the read here.
+/// Mirrors `TelemetryTests`'s own private `Locked` helper (`TelemetryTests.swift`).
+private final class TelemetryLineBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lines: [String] = []
+    func append(_ line: String) { lock.lock(); lines.append(line); lock.unlock() }
+    func snapshot() -> [String] { lock.lock(); defer { lock.unlock() }; return lines }
+}
+
+/// A ``LocalPlaybackControlling`` double: records every call so a test can
+/// assert the NativeBackend wiring without an `AVAudioEngine` or audio
+/// hardware (mirrors `FakeCapture` for the whole-system tap seam).
+private final class SpyLocalPlayback: LocalPlaybackControlling, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _added: [(bundleID: String, volume: Float)] = []
+    private var _removed: [String] = []
+    private var _volumes: [(bundleID: String, volume: Float)] = []
+    private var _receiveCount = 0
+    private var _started = false
+
+    func addApp(bundleID: String, tapFormat: TapFormat, volume: Float) throws {
+        lock.withLock { _added.append((bundleID, volume)) }
+    }
+    func removeApp(bundleID: String) { lock.withLock { _removed.append(bundleID) } }
+    func setVolume(_ volume: Float, for bundleID: String) {
+        lock.withLock { _volumes.append((bundleID, volume)) }
+    }
+    func receive(buffer: CapturedBuffer, for bundleID: String) {
+        lock.withLock { _receiveCount += 1 }
+    }
+    func start() throws { lock.withLock { _started = true } }
+    func stop() { lock.withLock { _started = false } }
+    var onAppLevel: (@Sendable (_ bundleID: String, _ rms: Float) -> Void)?
+    private var _meteringActive = false
+    func setMeteringActive(_ active: Bool) { lock.withLock { _meteringActive = active } }
+    var meteringActive: Bool { lock.withLock { _meteringActive } }
+
+    var addedApps: [(bundleID: String, volume: Float)] { lock.withLock { _added } }
+    var removedApps: [String] { lock.withLock { _removed } }
+    var volumeSets: [(bundleID: String, volume: Float)] { lock.withLock { _volumes } }
+    var receiveCount: Int { lock.withLock { _receiveCount } }
+    var didStart: Bool { lock.withLock { _started } }
+    /// The volume the player for `bundleID` was most recently ADDED at.
+    func addedVolume(for bundleID: String) -> Float? {
+        lock.withLock { _added.last { $0.bundleID == bundleID }?.volume }
+    }
+}
+
+/// Records `.level`/`.appLevel` events (the two the other `collect` helpers
+/// deliberately skip) with sync accessors so `pollUntil` can inspect them.
+private final class LevelSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _device: [(id: String, rms: Float)] = []
+    private var _app: [(bundleID: String, rms: Float)] = []
+    func record(_ e: BackendEvent) {
+        switch e {
+        case .level(let id, let rms): lock.withLock { _device.append((id, rms)) }
+        case .appLevel(let b, let rms): lock.withLock { _app.append((b, rms)) }
+        default: break
+        }
+    }
+    /// The most recent `.level` for `id`, or nil if none seen.
+    func lastDeviceLevel(_ id: String) -> Float? { lock.withLock { _device.last { $0.id == id }?.rms } }
+    /// Whether any `.appLevel` has been seen for `bundleID`.
+    func hasAppLevel(_ bundleID: String) -> Bool { lock.withLock { _app.contains { $0.bundleID == bundleID } } }
+    /// The most recent `.appLevel` for `bundleID`, or nil.
+    func lastAppLevel(_ bundleID: String) -> Float? { lock.withLock { _app.last { $0.bundleID == bundleID }?.rms } }
+}
+
+/// Subscribe and record every `.level`/`.appLevel`. Caller cancels the task.
+private func subscribeLevels(_ backend: NativeBackend) -> (LevelSink, Task<Void, Never>) {
+    let sink = LevelSink()
+    let stream = backend.makeEventStream()
+    let task = Task { for await event in stream { sink.record(event) } }
+    return (sink, task)
+}
+
+/// A per-app capture over `BundleTaggingTap`s that self-register so a test can
+/// push content into a specific bundle's tap — same shape the cross-stream
+/// leakage test uses, factored out for the metering tests. Every bundle id the
+/// test will start needs its own resolvable process (T2), so callers list them.
+private func registeringPerAppCapture(
+    muteBehavior: TapMuteBehavior, bundleIDs: [String], into registry: TapRegistry
+) -> PerAppCaptureCoordinator {
+    var mapping: [String: AudioObjectID] = [:]
+    for (offset, bundleID) in bundleIDs.enumerated() {
+        mapping[bundleID] = AudioObjectID(9500 + offset)
+    }
+    return PerAppCaptureCoordinator(
+        makeTap: {
+            let tap = BundleTaggingTap()
+            tap.onRegister = { bundleID in registry.register(bundleID, tap) }
+            return tap
+        },
+        processResolver: singleProcessResolver(mapping),
+        muteBehavior: muteBehavior)
+}
+
+/// A CapturedBuffer whose RAW bytes are Float32 samples all equal to
+/// `amplitude` — so `NativeCaptureCoordinator.rmsOfFloat32` (the metering-only
+/// source's RMS) yields exactly `amplitude`. Used to drive `meteringCapture`
+/// deterministically (its RMS reads Float32, unlike the S16 stream path).
+private func float32Buffer(amplitude: Float, frames: Int, atSecond sec: Int) -> CapturedBuffer {
+    let samples = [Float32](repeating: amplitude, count: frames * 2 /* stereo */)
+    let data = samples.withUnsafeBytes { Data($0) }
+    return CapturedBuffer(channelData: [data], frameCount: frames, pts: timespec(tv_sec: sec, tv_nsec: 0))
+}
+
+/// A `SyncedLocalSinkControlling` spy: records start/stop calls so a test
+/// can `pollUntil` the sink is actually enabled/disabled before asserting
+/// on the local device's meter. Mirrors
+/// `NativeBackendSyncedLocalSelectionTests.SpySyncedLocalSink`, duplicated
+/// here because that one is private to its own file.
+private final class SpySyncedLocalSink: SyncedLocalSinkControlling, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _calls: [String] = []
+    func start() throws { lock.withLock { _calls.append("start") } }
+    func stop() { lock.withLock { _calls.append("stop") } }
+    func startObservingLifecycleEvents() { lock.withLock { _calls.append("startObserving") } }
+    func stopObservingLifecycleEvents() { lock.withLock { _calls.append("stopObserving") } }
+    func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {}
+    var calls: [String] { lock.withLock { _calls } }
+}
+
+/// A thread-safe `Bool` box standing in for the local Mac row's membership
+/// in `GroupController.selectedDeviceIDs` — lets a test flip "is the Mac
+/// selected" between `setOutputSet` calls. Mirrors
+/// `NativeBackendSyncedLocalSelectionTests.LockedBool`, duplicated here for
+/// the same reason as `SpySyncedLocalSink` above.
+private final class LockedBool: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Bool
+    init(_ v: Bool) { value = v }
+    func get() -> Bool { lock.withLock { value } }
+    func set(_ v: Bool) { lock.withLock { value = v } }
+}
+
+/// Wires a backend + `FakeCapture` + a synced-local-sink spy + a
+/// `selectedDevicesQuery` reporting the Mac's membership from `macSelected`
+/// — everything `setOutputSet`'s "Mac + ≥1 AirPlay" decision needs, with no
+/// `AVAudioEngine`/real Core Audio in the loop.
+private func makeSyncedLocalBackend(macSelectedByDefault: Bool)
+    -> (NativeBackend, SpyEngine, FakeDiscovery, FakeCapture, SpySyncedLocalSink, LockedBool) {
+    let (backend, engine, discovery) = makeBackend()
+    let capture = FakeCapture()
+    backend.captureCoordinator = capture
+    let sink = SpySyncedLocalSink()
+    backend.syncedLocalSinkFactory = { sink }
+    let macSelected = LockedBool(macSelectedByDefault)
+    backend.selectedDevicesQuery = { id in
+        id == NativeBackend.localDeviceID ? macSelected.get() : false
+    }
+    return (backend, engine, discovery, capture, sink, macSelected)
+}
+
+private func pollUntil(timeout: TimeInterval = 3, _ condition: @escaping () -> Bool) async {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if condition() { return }
+        try? await Task.sleep(nanoseconds: 5_000_000)
+    }
+}
+
+/// Poll the spy until a `setVolume(outputID, value)` call lands (the push is
+/// fire-and-forget through a Task, so it's not synchronous with the apply).
+private func waitForVolumePush(
+    _ engine: SpyEngine, _ outputID: OutputID, _ value: Double, timeout: TimeInterval = 3
+) async -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if engine.volumeCalls.contains(where: { $0.0 == outputID && abs($0.1 - value) < 0.001 }) {
+            return true
+        }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+    }
+    return false
+}
+
+/// Thread-safe call counter for the routing hook (fired on the caller's
+/// thread, which for these chokepoints is the caller of `setOutputSet`).
+private final class HookCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _count = 0
+    func bump() { lock.withLock { _count += 1 } }
+    var count: Int { lock.withLock { _count } }
+}
+
+private final class ManualWatchdogScheduler: SilenceWatchdogScheduling, @unchecked Sendable {
+    private let lock = NSLock()
+    private var pending: [(id: Int, body: @Sendable () -> Void)] = []
+    private var nextID = 0
+    private var _armCount = 0
+    private var _delays: [TimeInterval] = []
+
+    func schedule(after delay: TimeInterval, _ body: @escaping @Sendable () -> Void) -> SilenceWatchdogToken {
+        lock.lock(); defer { lock.unlock() }
+        let id = nextID; nextID += 1; _armCount += 1
+        _delays.append(delay)
+        pending.append((id, body))
+        return Token(id: id, scheduler: self)
+    }
+
+    fileprivate func cancel(id: Int) {
+        lock.withLock { pending.removeAll { $0.id == id } }
+    }
+
+    /// Total number of countdowns ever armed (for asserting "never armed").
+    var armCount: Int { lock.withLock { _armCount } }
+    /// Whether any countdown is currently armed (scheduled, not fired/cancelled).
+    var hasPending: Bool { lock.withLock { !pending.isEmpty } }
+    /// The delay of the MOST RECENT `schedule` call (Fix C: lets a test assert
+    /// which delay — the always-on silence delay vs the wake-restore preference —
+    /// an arm used). `nil` before anything was scheduled.
+    var lastDelay: TimeInterval? { lock.withLock { _delays.last } }
+
+    /// Fire (and consume) every pending countdown — the deterministic "T elapsed".
+    func fireAll() {
+        let bodies = lock.withLock { () -> [@Sendable () -> Void] in
+            let b = pending.map(\.body); pending.removeAll(); return b
+        }
+        for body in bodies { body() }
+    }
+
+    private final class Token: SilenceWatchdogToken {
+        let id: Int
+        weak var scheduler: ManualWatchdogScheduler?
+        init(id: Int, scheduler: ManualWatchdogScheduler) { self.id = id; self.scheduler = scheduler }
+        func cancel() { scheduler?.cancel(id: id) }
+    }
+}
+
+private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
+    events.compactMap { event -> TakeoverStatus?? in
+        if case .takeoverStatus(let status) = event { return .some(status) }
+        return nil
+    }
+}
+
 /// Hermetic tests for ``NativeBackend`` (T-NB-BACKEND-1): a spy ``EngineControlling``
 /// (records ops, fires synthetic state transitions) + an injected ``DiscoverySource``
 /// double (feeds `DiscoveryEvent`s synchronously). No engine thread, no C cluster,
@@ -19,9 +1413,17 @@ import AudioToolbox
 /// Covers: `deviceAdded` on discovery, AP1 surfaced-available-and-engine-driven,
 /// `deviceUpdated` on an out-of-band engine state transition, best-effort
 /// convergence (D4), and the mute stash/restore shim.
-extension SerializedSharedState {
-
+///
+/// These run in PARALLEL. Every test here builds its own backend/engine/discovery
+/// and asserts only on those instances, so two running at once cannot see each
+/// other. The tests that genuinely CANNOT — the ones that install the
+/// process-global `Telemetry` sink, plus the two that drive the real Core Audio
+/// aggregate — live in ``SerializedSharedState/NativeBackendGlobalStateTests`` at
+/// the bottom of this file, which explains where the line is drawn. A new test
+/// that touches either belongs in THAT suite, not this one.
 @Suite struct NativeBackendTests {
+
+    private let isolation = TestIsolation(owner: "NativeBackendTests")
 
     // MARK: AirPlay-1 perceptual volume curve (the "cliff at ~50%" fix, 2026-07-22)
 
@@ -58,775 +1460,6 @@ extension SerializedSharedState {
         #expect(abs(NativeBackend.engineVolume(0) - 0.0) <= 0.001)
         #expect(abs(NativeBackend.engineVolume(50) - 0.5) <= 0.001)
         #expect(abs(NativeBackend.engineVolume(100) - 1.0) <= 0.001)
-    }
-
-    // MARK: Doubles
-
-    /// Records every engine op and lets a test drive the device-state stream.
-    private final class SpyEngine: EngineControlling, @unchecked Sendable {
-        let lock = NSLock()
-        private(set) var started = false
-        private(set) var stopped = false
-        private(set) var discoveryFed: [OutputID] = []
-        /// The full descriptors handed to `updateDiscovery`, in order — lets an
-        /// integration test assert the ENGINE-facing `kind`/`name`/`parsedID` that
-        /// route a device to `output_raop` vs `output_airplay`, not just its id.
-        private(set) var fedDescriptors: [DeviceDescriptor] = []
-        private(set) var discoveryRemoved: [String] = []   // descriptor names
-        private(set) var added: [OutputID] = []
-        private(set) var removed: [OutputID] = []
-        private(set) var volumes: [(OutputID, Double)] = []
-        private(set) var bufferSets: [Int] = []
-        /// Interleaved op order (`remove:N` / `setBuffer:N` / `add:N` /
-        /// `volume:N`) — the applyStartBuffer invariant is about ORDER across
-        /// op kinds (all removes, then the buffer set, then re-adds), which the
-        /// per-kind arrays above can't express.
-        private(set) var opLog: [String] = []
-
-        /// Ids that should THROW on `addOutput` (best-effort partial-failure test).
-        var addFailures: Set<UInt64> = []
-        /// Ids that should THROW on `removeOutput`.
-        var removeFailures: Set<UInt64> = []
-        /// Ids that should THROW on `flushOutput` — forces a whole-system rebind
-        /// recovery to fall through to the removeOutput→addOutput teardown, same
-        /// as a real receiver that NACKs the FLUSH.
-        var flushFailures: Set<UInt64> = []
-        /// Ids whose `flushOutput` should return `false` WITHOUT throwing — models
-        /// the vendored flush's silent NO-OP (device in the set but not STREAMING /
-        /// session gone). The recovery must treat this like a failure and fall
-        /// through to teardown; before the discriminator fix a no-op was mistaken
-        /// for success and the teardown was skipped (silent-forever regression).
-        var flushNoOps: Set<UInt64> = []
-
-        /// Optional hook run INSIDE `addOutput`'s op body, after the add is recorded
-        /// but before it returns successfully. Lets a test deterministically inject
-        /// an out-of-band state transition in the window between addOutput resolving
-        /// and NativeBackend's post-success write (medium finding). T6 (008): ALSO
-        /// invoked from the per-app `addOutput(_:streamId:)` — without that, no
-        /// per-app-side interleaving is forceable.
-        var onAddOutputBody: (@Sendable (OutputID) -> Void)?
-
-        /// Async HOLD-OPEN hook (008 race tests): awaited inside BOTH `addOutput`
-        /// variants, after the op is recorded and any `onAddOutputBody` ran but
-        /// BEFORE the spy's `liveStreams` write — so while a test holds an add
-        /// open here, a concurrent `boundStreamId` read still sees the pre-add
-        /// world. The stream argument is 0 for the whole-system add, ≥ 1 for the
-        /// per-app add, so one hook can hold the two apart.
-        var onAddOutputHold: (@Sendable (OutputID, UInt32) async -> Void)?
-
-        /// Async hold-open hook awaited inside `removeOutput`, after the remove is
-        /// recorded but BEFORE the spy's `liveStreams` removal — the window a 008
-        /// test uses to fire the other FIFO from strictly inside a teardown.
-        var onRemoveOutputBody: (@Sendable (OutputID) async -> Void)?
-
-        /// Async hold-open hook awaited inside `rebindOutput`, between the
-        /// rebind's stop-half and add-half (the stop already cleared
-        /// `liveStreams`, so a concurrent read sees no stale stream).
-        var onRebindBody: (@Sendable (OutputID, UInt32) async -> Void)?
-
-        /// Artificial per-op latency (ns). Used by the toggle-spam test to force
-        /// slow op completions to race fast toggle flips, so a broken (unserialized)
-        /// converge would issue overlapping ops for the same device.
-        var opDelayNanos: UInt64 = 0
-
-        /// Count of `updateDiscovery` calls per parsed OutputID (root cause 2: assert
-        /// no re-feed of an unchanged descriptor per toggle).
-        private var feedCounts: [UInt64: Int] = [:]
-        /// The max number of ops (add or remove) observed IN FLIGHT concurrently for
-        /// any single device — must stay 1 with per-device serialization.
-        private var inFlightByID: [UInt64: Int] = [:]
-        private(set) var maxConcurrentPerDevice = 0
-
-        private var continuation: AsyncStream<(OutputID, OutputState)>.Continuation?
-        private var remoteContinuation: AsyncStream<RemoteEvent>.Continuation?
-
-        var dacpID: UInt64 { 0x1122334455667788 }
-
-        func start() async throws { lock.withLock { started = true } }
-        func stop() async { lock.withLock { stopped = true } }
-
-        @discardableResult
-        func updateDiscovery(_ descriptor: DeviceDescriptor) async throws -> OutputID {
-            let id = descriptor.parsedID ?? OutputID(rawValue: 0)
-            lock.withLock {
-                discoveryFed.append(id)
-                fedDescriptors.append(descriptor)
-                feedCounts[id.rawValue, default: 0] += 1
-            }
-            return id
-        }
-        func removeDiscovery(_ descriptor: DeviceDescriptor) async {
-            lock.withLock { discoveryRemoved.append(descriptor.name) }
-        }
-        /// Which stream each device's LIVE session is actually on — the spy's model
-        /// of the vendored C `device->stream_id` (T7). This is what makes the
-        /// architecture review's defect B reproducible offline: `addOutput` on a
-        /// device that ALREADY has a live session is a silent idempotent no-op in
-        /// the real engine and does NOT move its binding, so the spy must refuse to
-        /// move it too. Only `rebindOutput` (stop + re-add) actually moves a live
-        /// session. Written only on op SUCCESS.
-        private var liveStreams: [UInt64: UInt32] = [:]
-        /// The stream `id`'s live session is on, or `nil` if it has none.
-        func liveStream(of id: OutputID) -> UInt32? { lock.withLock { liveStreams[id.rawValue] } }
-        /// Every `rebindOutput` the backend issued, in order (T7).
-        private(set) var rebinds: [(OutputID, UInt32)] = []
-        var rebindCalls: [(OutputID, UInt32)] { lock.withLock { rebinds } }
-
-        func addOutput(_ id: OutputID) async throws {
-            try await runOp(id) {
-                self.lock.withLock { self.added.append(id); self.opLog.append("add:\(id.rawValue)") }
-                let hook = self.lock.withLock { self.onAddOutputBody }
-                hook?(id)
-                let hold = self.lock.withLock { self.onAddOutputHold }
-                if let hold { await hold(id, 0) }
-                if self.addFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
-                // Engine idempotency: an already-live session is NOT re-bound.
-                self.lock.withLock { if self.liveStreams[id.rawValue] == nil { self.liveStreams[id.rawValue] = 0 } }
-            }
-        }
-        func removeOutput(_ id: OutputID) async throws {
-            try await runOp(id) {
-                self.lock.withLock { self.removed.append(id); self.opLog.append("remove:\(id.rawValue)") }
-                let hold = self.lock.withLock { self.onRemoveOutputBody }
-                if let hold { await hold(id) }
-                if self.removeFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
-                self.lock.withLock { self.liveStreams.removeValue(forKey: id.rawValue) }
-            }
-        }
-
-        /// Records every FLUSH (F-REANCHOR) attempt (T-A, whole-system rebind
-        /// recovery's new default path). Deliberately NOT routed through `runOp`'s
-        /// artificial `opDelayNanos` latency — the race-window tests apply that
-        /// delay to model the removeOutput→addOutput fallback specifically, and a
-        /// flush that fails does so immediately, same as a real receiver's fast
-        /// NACK.
-        func flushOutput(_ id: OutputID) async throws -> Bool {
-            lock.withLock { flushed.append(id); opLog.append("flush:\(id.rawValue)") }
-            if lock.withLock({ flushFailures.contains(id.rawValue) }) {
-                throw AirPlayEngineError.sessionFailed
-            }
-            // Silent no-op (returns false, no throw) — the vendored flush's
-            // not-STREAMING / NULL-session path. The caller must fall back to teardown.
-            if lock.withLock({ flushNoOps.contains(id.rawValue) }) { return false }
-            return true
-        }
-        private var flushed: [OutputID] = []
-        var flushedIDs: [OutputID] { lock.withLock { flushed } }
-
-        func boundStreamId(for id: OutputID) async -> UInt32? { lock.withLock { liveStreams[id.rawValue] } }
-
-        /// Stop + re-add as ONE op — the only way a LIVE session's stream moves.
-        /// Records BOTH halves into the same arrays/`opLog` the separate
-        /// `removeOutput`/`addOutput` pair used to, so every pre-T7 assertion about
-        /// a rebind's observable ops keeps holding.
-        func rebindOutput(_ id: OutputID, toStreamId streamId: UInt32) async throws {
-            try await runOp(id) {
-                self.lock.withLock {
-                    self.rebinds.append((id, streamId))
-                    self.removed.append(id)
-                    self.opLog.append("remove:\(id.rawValue)")
-                    self.liveStreams.removeValue(forKey: id.rawValue)
-                }
-                let hold = self.lock.withLock { self.onRebindBody }
-                if let hold { await hold(id, streamId) }
-                if self.addFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
-                self.lock.withLock {
-                    if streamId == 0 {
-                        self.added.append(id)
-                        self.opLog.append("add:\(id.rawValue)")
-                    } else {
-                        self.streamAdds.append((id, streamId))
-                        self.opLog.append("streamAdd:\(id.rawValue):\(streamId)")
-                    }
-                    self.liveStreams[id.rawValue] = streamId
-                }
-            }
-        }
-
-        /// Per-app stream bind (T6). Recorded SEPARATELY from the legacy `added`
-        /// (stream_id 0) so per-app assertions never perturb the whole-system tests.
-        private var streamAdds: [(OutputID, UInt32)] = []
-        func addOutput(_ id: OutputID, streamId: UInt32) async throws {
-            try await runOp(id) {
-                self.lock.withLock {
-                    self.streamAdds.append((id, streamId))
-                    self.opLog.append("streamAdd:\(id.rawValue):\(streamId)")
-                }
-                // T6 (008): the per-app add runs the same mid-op hooks as the
-                // whole-system add, so per-app-side interleavings are forceable.
-                let hook = self.lock.withLock { self.onAddOutputBody }
-                hook?(id)
-                let hold = self.lock.withLock { self.onAddOutputHold }
-                if let hold { await hold(id, streamId) }
-                if self.addFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
-                // Engine idempotency: an already-live session is NOT re-bound to
-                // `streamId` — that silent no-op is exactly defect B.
-                self.lock.withLock {
-                    if self.liveStreams[id.rawValue] == nil { self.liveStreams[id.rawValue] = streamId }
-                }
-            }
-        }
-
-        /// Per-app mixed-buffer writes (T6), tagged with stream id + byte count.
-        private(set) var writes: [(streamId: UInt32, byteCount: Int)] = []
-        /// Same writes, but with the FULL pcm payload retained (not just its
-        /// count) — lets a cross-stream-leakage test assert on actual byte
-        /// CONTENT, not just size/streamId bookkeeping (T10).
-        private(set) var rawWrites: [(streamId: UInt32, pcm: Data)] = []
-        func write(pcm: Data, streamId: UInt32, pts: timespec) {
-            lock.withLock {
-                writes.append((streamId, pcm.count))
-                rawWrites.append((streamId, pcm))
-            }
-        }
-
-        /// What `writeCadenceSnapshot()` reports next (T-ENG-CADENCE-1 test
-        /// seam) — this spy has no real per-write cadence tracker underneath
-        /// it, so a test dials in whatever the "engine" currently reports.
-        /// Defaults to an all-zero (healthy) snapshot, matching
-        /// `EngineControlling`'s own protocol-extension default.
-        private var cadenceSnapshotToReturn = WriteCadenceSnapshot()
-        func scriptCadenceSnapshot(_ snapshot: WriteCadenceSnapshot) {
-            lock.withLock { cadenceSnapshotToReturn = snapshot }
-        }
-        func writeCadenceSnapshot() -> WriteCadenceSnapshot { lock.withLock { cadenceSnapshotToReturn } }
-
-        /// Run a device op, tracking concurrent-in-flight-per-device (to catch
-        /// overlapping ops) and applying the artificial latency. The body is
-        /// async (008) so the hold-open hooks can be awaited at their exact
-        /// placement points instead of blocking a cooperative-pool thread.
-        private func runOp(_ id: OutputID, _ body: () async throws -> Void) async throws {
-            lock.withLock {
-                let n = (inFlightByID[id.rawValue] ?? 0) + 1
-                inFlightByID[id.rawValue] = n
-                maxConcurrentPerDevice = max(maxConcurrentPerDevice, n)
-            }
-            defer { lock.withLock { inFlightByID[id.rawValue, default: 1] -= 1 } }
-            let delay = lock.withLock { opDelayNanos }
-            if delay > 0 { try? await Task.sleep(nanoseconds: delay) }
-            try await body()
-        }
-
-        func feedCount(for id: OutputID) -> Int { lock.withLock { feedCounts[id.rawValue] ?? 0 } }
-        func setVolume(_ id: OutputID, _ volume: Double) async throws {
-            lock.withLock { volumes.append((id, volume)); opLog.append("volume:\(id.rawValue)") }
-        }
-        func setStartBufferMs(_ ms: Int) async {
-            lock.withLock { bufferSets.append(ms); opLog.append("setBuffer:\(ms)") }
-        }
-        func makeStateStream() -> AsyncStream<(OutputID, OutputState)> {
-            AsyncStream { continuation in
-                lock.withLock { self.continuation = continuation }
-            }
-        }
-        func makeRemoteEventStream() -> AsyncStream<RemoteEvent> {
-            AsyncStream { continuation in
-                lock.withLock { self.remoteContinuation = continuation }
-            }
-        }
-        /// Push a synthetic out-of-band transition through the state stream.
-        func pushState(_ id: OutputID, _ state: OutputState) {
-            // Mirror the real `boundStreamId`, which only reports a binding for a
-            // `.streaming`/`.connected` session: a device the engine just reported
-            // dead has no live binding to move, so a later add must bind fresh.
-            switch state {
-            case .streaming, .connected: break
-            default: lock.withLock { _ = liveStreams.removeValue(forKey: id.rawValue) }
-            }
-            let c = lock.withLock { continuation }
-            c?.yield((id, state))
-        }
-        /// Push a synthetic remote-control event (a speaker transport key or a
-        /// change to the speaker's own volume) through the remote-event stream.
-        func pushRemoteEvent(_ event: RemoteEvent) {
-            let c = lock.withLock { remoteContinuation }
-            c?.yield(event)
-        }
-
-        // Thread-safe snapshots for assertions.
-        var addedIDs: [OutputID] { lock.withLock { added } }
-        var removedIDs: [OutputID] { lock.withLock { removed } }
-        var fedIDs: [OutputID] { lock.withLock { discoveryFed } }
-        var fedDescriptorList: [DeviceDescriptor] { lock.withLock { fedDescriptors } }
-        var discoveryRemovedNames: [String] { lock.withLock { discoveryRemoved } }
-        var volumeCalls: [(OutputID, Double)] { lock.withLock { volumes } }
-        var bufferSetCalls: [Int] { lock.withLock { bufferSets } }
-        var ops: [String] { lock.withLock { opLog } }
-        var didStart: Bool { lock.withLock { started } }
-        var maxConcurrent: Int { lock.withLock { maxConcurrentPerDevice } }
-        var streamAddCalls: [(OutputID, UInt32)] { lock.withLock { streamAdds } }
-        var writeCalls: [(streamId: UInt32, byteCount: Int)] { lock.withLock { writes } }
-        var rawWriteCalls: [(streamId: UInt32, pcm: Data)] { lock.withLock { rawWrites } }
-    }
-
-    /// Feeds `DiscoveryEvent`s to the backend synchronously.
-    private final class FakeDiscovery: DiscoverySource, @unchecked Sendable {
-        var onEvent: (@Sendable (DiscoveryEvent) -> Void)?
-        private(set) var startCount = 0
-        private(set) var stopCount = 0
-        func start() { startCount += 1 }
-        func stop() { stopCount += 1 }
-        func fire(_ event: DiscoveryEvent) { onEvent?(event) }
-    }
-
-    /// A no-socket ``DACPEndpoint`` double: the REAL `DACPServer.start(dacpID:)`
-    /// binds an `NWListener` and advertises `_dacp._tcp` over Bonjour, which fires
-    /// the macOS Local Network permission prompt once per `--parallel` worker
-    /// process. Every backend this file constructs gets this fake instead (via
-    /// `makeBackend` or explicitly), so the hermetic suite opens zero sockets.
-    /// The volume-report handling stays covered: tests drive
-    /// `applyDacpVolume`/`applyDacpVolumeStep` — the exact closures
-    /// `NativeBackend.start()` wires to `onVolume`/`onVolumeStep` — directly.
-    private final class FakeDACPEndpoint: DACPEndpoint, @unchecked Sendable {
-        var onVolume: (@Sendable (_ activeRemote: UInt32, _ level: Double) -> Void)?
-        var onVolumeStep: (@Sendable (_ activeRemote: UInt32, _ direction: Int) -> Void)?
-        private(set) var startCount = 0
-        private(set) var stopCount = 0
-        func start(dacpID: UInt64) { startCount += 1 }
-        func stop() { stopCount += 1 }
-    }
-
-    /// A ``PTPHelperActivating`` that reports ready immediately, never touching
-    /// a real Mach service or `SMAppService` (T4). Every backend this file
-    /// constructs gets this by default (via `makeBackend`): the production
-    /// default (`PTPHelperActivator`) reads the REAL `SMAppService` status,
-    /// which is `.notFound` outside a proper app bundle — every connect in
-    /// this file would otherwise hard-fail before `engine.addOutput`, and each
-    /// of the hundreds of `setOutputSet` calls across this suite would pay a
-    /// real system XPC round-trip. Tests that specifically want to exercise
-    /// the PTP gate (`.needsApproval`/`.timingPortsUnavailable`) construct
-    /// their own fake and pass it explicitly.
-    /// `willWaitForClock` is `false`: this double never really waits for
-    /// anything (T6) — it's a canned instant return, not a real bind race —
-    /// so it must never make `convergeDevice` emit a `.takeoverStatus` event.
-    private struct AlwaysReadyPTPHelperActivator: PTPHelperActivating {
-        var willWaitForClock: Bool { false }
-        func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome { .ready }
-    }
-
-    /// A scriptable ``PTPHelperActivating`` for the takeover status strip's (T6)
-    /// integration tests: reports a fixed `willWaitForClock` and resolves
-    /// `activate` to a fixed outcome, counting calls so a test can assert
-    /// exactly one Mach touch per connect attempt.
-    private final class ScriptedPTPHelperActivator: PTPHelperActivating, @unchecked Sendable {
-        let willWaitForClock: Bool
-        private let lock = NSLock()
-        private var _outcome: PTPHelperActivationOutcome
-        private var _callCount = 0
-
-        init(willWaitForClock: Bool, outcome: PTPHelperActivationOutcome) {
-            self.willWaitForClock = willWaitForClock
-            self._outcome = outcome
-        }
-
-        func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome {
-            lock.withLock {
-                _callCount += 1
-                return _outcome
-            }
-        }
-
-        var callCount: Int { lock.withLock { _callCount } }
-
-        /// Re-script the outcome mid-test — how the clock-recovery tests flip
-        /// the world from "no clock" to "ready" between two connect attempts.
-        func setOutcome(_ outcome: PTPHelperActivationOutcome) {
-            lock.withLock { _outcome = outcome }
-        }
-    }
-
-    /// A minimal ``ServiceBrowsing`` that lets a test push a resolved service
-    /// through the REAL ``NativeDiscovery`` production pipeline (identity →
-    /// `descriptor(from:)` → `buildDevice`), so the end-to-end AP1 test exercises
-    /// the actual descriptor construction rather than a hand-built fixture.
-    private final class ScriptedBrowser: ServiceBrowsing, @unchecked Sendable {
-        var onResolve: (@Sendable (ResolvedService) -> Void)?
-        var onRemove: (@Sendable (RemovedService) -> Void)?
-        var onStateChange: (@Sendable (BrowserState) -> Void)?
-        func start() {}
-        func stop() {}
-        func resolve(_ service: ResolvedService) { onResolve?(service) }
-    }
-
-    /// A tiny thread-safe holder for the `DiscoveredDevice` that
-    /// `NativeDiscovery.onEvent` (called on its own serial queue) produces.
-    private final class DiscoveredBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value: DiscoveredDevice?
-        func set(_ d: DiscoveredDevice) { lock.withLock { value = d } }
-        func get() -> DiscoveredDevice? { lock.withLock { value } }
-    }
-
-    /// Fakes the Mac's own default-output volume/mute (``SystemVolumeControlling``)
-    /// with NO Core Audio HAL reads and NO property listeners on real hardware.
-    ///
-    /// This closes a hermeticity gap: `NativeBackend`'s designated init defaults
-    /// `systemVolume` to a real `SystemOutputVolume()`, so every one of this
-    /// file's ~34 `backend.start()` calls used to construct a real one — reading
-    /// the developer's actual default output device and installing real
-    /// `AudioObjectAddPropertyListenerBlock` registrations on it. No test writes
-    /// volume, so there was no hardware-slamming risk, but if the machine's
-    /// volume/output changed mid-run, `onExternalChange` would fire and emit a
-    /// genuine `local-mac` `deviceUpdated`, perturbing an event-sequence
-    /// assertion elsewhere in the suite — the prime suspect for a real, one-off,
-    /// never-reproduced flake (358 tests / 2 skips / 1 unnamed failure). Injecting
-    /// this fake as `makeBackend()`'s default takes real hardware out of every
-    /// test's path unconditionally.
-    ///
-    /// Records every `setVolume`/`setMuted` call, serves scripted
-    /// `currentVolume()`/`currentMuted()` reads (independent of what was written —
-    /// a test dials in whatever the "hardware" currently reports), and lets a
-    /// test fire `onExternalChange` on demand to simulate a change made outside
-    /// the app (media keys, the Sound menu, a default-output-device switch).
-    /// Mutable state is guarded by `lock`, matching `SpyEngine`/`FakeCapture`'s
-    /// discipline.
-    /// A minimal thread-safe `Int` box, so a test can script the injected
-    /// `connectVolume` provider across reconnect episodes (the seed reads it on
-    /// `stateQueue`, off the test's thread).
-    private final class LockedInt: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value: Int
-        init(_ v: Int) { value = v }
-        func get() -> Int { lock.withLock { value } }
-        func set(_ v: Int) { lock.withLock { value = v } }
-    }
-
-    private final class FakeSystemVolume: SystemVolumeControlling, @unchecked Sendable {
-        private let lock = NSLock()
-        private var _volume: Int?
-        private var _muted: Bool?
-        private var _volumeCalls: [Int] = []
-        private var _mutedCalls: [Bool] = []
-        private var _onExternalChange: (@Sendable (Int?, Bool?, Bool) -> Void)?
-        private var _startCount = 0
-        private var _stopCount = 0
-
-        /// Seeds the scripted hardware reads `NativeBackend.surfaceLocalDevice()`
-        /// consults via `currentVolume()`/`currentMuted()`. Both default `nil` —
-        /// the "unreadable control" case a real aggregate/HDMI output can hit,
-        /// which exercises the `?? 65` / `?? false` fallback.
-        init(volume: Int? = nil, muted: Bool? = nil) {
-            _volume = volume
-            _muted = muted
-        }
-
-        func currentVolume() -> Int? { lock.withLock { _volume } }
-        func currentMuted() -> Bool? { lock.withLock { _muted } }
-
-        /// Re-script what the "hardware" reports for `currentVolume()`, simulating
-        /// the user turning the Mac's system volume knob between connect episodes.
-        /// (`setVolume` records the app's WRITES; this changes what a subsequent
-        /// `currentVolume()` READ returns — the two are independent, matching real
-        /// hardware where a read reflects the device's live level.)
-        func scriptVolume(_ v: Int?) { lock.withLock { _volume = v } }
-
-        func setVolume(_ volume: Int) {
-            lock.withLock { _volumeCalls.append(volume) }
-        }
-        func setMuted(_ muted: Bool) {
-            lock.withLock { _mutedCalls.append(muted) }
-        }
-
-        var onExternalChange: (@Sendable (Int?, Bool?, Bool) -> Void)? {
-            get { lock.withLock { _onExternalChange } }
-            set { lock.withLock { _onExternalChange = newValue } }
-        }
-
-        func start() { lock.withLock { _startCount += 1 } }
-        func stop() { lock.withLock { _stopCount += 1 } }
-
-        // Thread-safe snapshots for assertions.
-        var volumeCalls: [Int] { lock.withLock { _volumeCalls } }
-        var mutedCalls: [Bool] { lock.withLock { _mutedCalls } }
-        var startCount: Int { lock.withLock { _startCount } }
-        var stopCount: Int { lock.withLock { _stopCount } }
-
-        /// Simulate a change made OUTSIDE this app by firing the callback
-        /// `NativeBackend.start()` registered. A harmless no-op if nothing is
-        /// registered yet (e.g. fired before `backend.start()`, or after
-        /// `backend.stop()` cleared it).
-        ///
-        /// `defaultDeviceChanged` defaults to `false` — a volume/mute gesture on the
-        /// device that was already the default, which is what every pre-existing
-        /// caller here means. Pass `true` to simulate the default output device
-        /// itself switching (speakers → AirPods), which reports the NEW device's
-        /// state and must not be mistaken for a gesture.
-        func fireExternalChange(volume: Int?, muted: Bool?, defaultDeviceChanged: Bool = false) {
-            let handler = lock.withLock { _onExternalChange }
-            handler?(volume, muted, defaultDeviceChanged)
-        }
-    }
-
-    // MARK: Fixtures
-
-    private func ap2Device(id: String = "AA:BB:CC:DD:EE:01", name: String = "Sonos Move", model: String = "S13") -> DiscoveredDevice {
-        let txt = ["deviceid": id, "model": model, "features": "0x445F8A00,0x1C340"]
-        let (parsedID, outputID) = NativeDiscovery.parseDeviceID(txt)!
-        let desc = DeviceDescriptor(name: name, address: "192.168.1.10", family: .ipv4, port: 7000, txtRecord: txt)
-        return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: true)
-    }
-
-    private func ap1Device(id: String = "AA:BB:CC:DD:EE:99", name: String = "Old Express") -> DiscoveredDevice {
-        let txt = ["deviceid": id, "model": "AirPort4,107"]
-        let (parsedID, outputID) = NativeDiscovery.parseDeviceID(txt)!
-        let desc = DeviceDescriptor(name: name, address: "192.168.1.20", family: .ipv4, port: 5000, txtRecord: txt)
-        return DiscoveredDevice(id: parsedID, descriptor: desc, outputID: outputID, isAirPlay2Supported: false)
-    }
-
-    /// `systemVolume` defaults to a fresh ``FakeSystemVolume`` so EVERY call
-    /// site — all ~34 of them, unchanged — gets a hermetic double with no
-    /// explicit opt-in; NO test in this file ever constructs a real
-    /// `SystemOutputVolume` (see `FakeSystemVolume`'s doc comment for why that
-    /// matters). Tests that need to script a readback or fire
-    /// `onExternalChange` construct their own `FakeSystemVolume` and pass it
-    /// explicitly to get a handle on it.
-    private func makeBackend(
-        systemVolume: SystemVolumeControlling = FakeSystemVolume(),
-        ptpHelperActivator: PTPHelperActivating = AlwaysReadyPTPHelperActivator(),
-        connectVolume: @escaping @Sendable () -> Int = { AppSettings.defaultConnectVolume },
-        processResolver: AudioProcessResolver = AudioProcessResolver(enumerator: NoAudioProcesses()),
-        injectedPerAppCapture: PerAppCaptureCoordinator? = nil,
-        injectedMeteringCapture: PerAppCaptureCoordinator? = nil,
-        captureRetryDelay: TimeInterval = 2.0,
-        captureRetryMaxBackoff: TimeInterval = 10.0,
-        watchdogScheduler: SilenceWatchdogScheduling? = nil,
-        silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
-        systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = { false }
-    ) -> (NativeBackend, SpyEngine, FakeDiscovery) {
-        let engine = SpyEngine()
-        let discovery = FakeDiscovery()
-        let backend = NativeBackend(
-            engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
-            systemVolume: systemVolume, ptpHelperActivator: ptpHelperActivator,
-            connectVolume: connectVolume, processResolver: processResolver,
-            injectedPerAppCapture: injectedPerAppCapture,
-            injectedMeteringCapture: injectedMeteringCapture,
-            captureRetryDelay: captureRetryDelay,
-            captureRetryMaxBackoff: captureRetryMaxBackoff,
-            watchdogScheduler: watchdogScheduler,
-            silenceFallbackDelay: silenceFallbackDelay,
-            systemDefaultOutputIsAirPlayClass: systemDefaultOutputIsAirPlayClass)
-        return (backend, engine, discovery)
-    }
-
-    /// A scripted `AudioProcessEnumerating` fake: hands back a fixed process list
-    /// so an `AudioProcessResolver` built on it resolves deterministically, with
-    /// no live Core Audio. Mirrors `NativeCaptureCoordinatorTests.FakeProcessEnumerator`.
-    private struct FakeProcessEnumerator: AudioProcessEnumerating {
-        let processes: [RawAudioProcess]
-        var parents: [pid_t: pid_t] = [:]
-        func enumerateProcesses() -> [RawAudioProcess] { processes }
-        func parentPID(of pid: pid_t) -> pid_t? { parents[pid] }
-    }
-
-    /// Builds an `AudioProcessResolver` where each bundle id resolves to exactly
-    /// ONE process object, at `pid = objectID` — mirrors
-    /// `NativeCaptureCoordinatorTests.singleProcessResolver`.
-    private func singleProcessResolver(_ bundleIDsToObjectIDs: [String: AudioObjectID]) -> AudioProcessResolver {
-        let processes = bundleIDsToObjectIDs.map { bundleID, objectID in
-            RawAudioProcess(objectID: objectID, pid: pid_t(objectID), bundleID: bundleID)
-        }
-        return AudioProcessResolver(enumerator: FakeProcessEnumerator(processes: processes))
-    }
-
-    /// A `ProcessAudioTap` that always succeeds (T8): `createAndStart` never
-    /// throws, so a coordinator built over it takes every bundle ID all the way
-    /// to `.capturing` — unlike the default empty-`processResolver` setup
-    /// (`NoAudioProcesses`), which fails fast at `.processNotYetAudible` by design
-    /// and is what most of this file uses to exercise routing TOPOLOGY independent
-    /// of real capture. Tests that need `.routedApps`/the mixer to reflect an app
-    /// that's actually (fakely) streaming — e.g. it must NOT be excluded as
-    /// "dead" — construct a coordinator with this tap instead.
-    private final class AlwaysSucceedsTap: ProcessAudioTap, @unchecked Sendable {
-        var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
-        var onDefaultDeviceChanged: (@Sendable () -> Void)?
-        func createAndStart(processes: Set<AudioProcess>, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
-            TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
-        }
-        func teardown() {}
-    }
-
-    /// A `PerAppCaptureCoordinator` whose every `start(bundleID:)` reaches
-    /// `.capturing` (T8) for each of `bundleIDs` — pass as `injectedPerAppCapture:`
-    /// to `makeBackend`. Each bundle id needs its own resolvable process (T2's
-    /// per-bundle-id process-set resolution, unlike the old single wildcard-pid
-    /// resolver) — callers list every bundle id their test routes so all of them
-    /// resolve non-empty.
-    private func workingPerAppCapture(bundleIDs: [String]) -> PerAppCaptureCoordinator {
-        var mapping: [String: AudioObjectID] = [:]
-        for (offset, bundleID) in bundleIDs.enumerated() {
-            mapping[bundleID] = AudioObjectID(9000 + offset)
-        }
-        return PerAppCaptureCoordinator(
-            makeTap: { AlwaysSucceedsTap() }, processResolver: singleProcessResolver(mapping), muteBehavior: .mutedWhenTapped)
-    }
-
-    /// A scriptable `AudioProcessEnumerating` fake that records every
-    /// `enumerateProcesses()` call — proof `AudioProcessResolver.resolve(bundleID:)`
-    /// was invoked by a per-app capture start — while always resolving to the EMPTY
-    /// process set, so no real Core Audio tap is ever created: the routing
-    /// TOPOLOGY (`addOutput(_:streamId:)` + `.routedApps`) still runs. Replaces the
-    /// pre-multi-process `PIDRecorder`: the resolver's `enumerateProcesses()` seam
-    /// isn't parameterized by the target bundle id (it returns the same snapshot
-    /// regardless), so per-bundle-id "which one was asked" tracking is no longer
-    /// observable at this seam — a nonzero call count is the equivalent proxy for
-    /// "a capture attempt happened", which is exact wherever (as below) only ONE
-    /// bundle id is ever routed in the test.
-    private final class ResolveAttemptRecorder: AudioProcessEnumerating, @unchecked Sendable {
-        private let lock = NSLock()
-        private var _callCount = 0
-        func enumerateProcesses() -> [RawAudioProcess] {
-            lock.withLock { _callCount += 1 }
-            return []
-        }
-        func parentPID(of pid: pid_t) -> pid_t? { nil }
-        var callCount: Int { lock.withLock { _callCount } }
-    }
-
-    /// A `.device(id:)` route fixture.
-    private func route(_ bundleID: String, name: String, toDevice deviceID: String, volume: Int = 100) -> AppRoute {
-        AppRoute(bundleID: bundleID, displayName: name, destination: .device(id: deviceID), volume: volume)
-    }
-
-    // MARK: T10 cross-component doubles
-    //
-    // The fakes below back the T10 full-chain tests: they let a test push
-    // ACTUAL captured buffers through the real per-app pipeline (PerAppCaptureCoordinator
-    // -> AppRouteMixer -> engine.write) and exercise the real NativeCaptureCoordinator's
-    // T4 exclusion logic through NativeBackend.updateAppRoutes, rather than only
-    // asserting on topology (streamAddCalls) as the existing T6/T7 tests do.
-
-    /// A `ProcessAudioTap` that always succeeds, self-registers with an external
-    /// registry keyed by the bundle ID it was started for (so a test can grab a
-    /// handle to THIS app's specific tap instance and `push(_:)` content into
-    /// it directly), and uses the engine's exact output format (44100/16-bit
-    /// interleaved S16) so buffers round-trip through the real `AVFormatConverter`
-    /// essentially unchanged — letting a test assert on exact byte content.
-    private final class BundleTaggingTap: ProcessAudioTap, @unchecked Sendable {
-        var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
-        var onDefaultDeviceChanged: (@Sendable () -> Void)?
-        var onRegister: (@Sendable (String) -> Void)?
-        func createAndStart(processes: Set<AudioProcess>, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
-            onRegister?(bundleID)
-            return TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 16, isFloat: false, isInterleaved: true)
-        }
-        func teardown() {}
-        func push(_ buffer: CapturedBuffer) { onBuffer?(buffer) }
-    }
-
-    /// Thread-safe bundleID -> tap registry, populated by ``BundleTaggingTap/onRegister``.
-    private final class TapRegistry: @unchecked Sendable {
-        private let lock = NSLock()
-        private var byBundleID: [String: BundleTaggingTap] = [:]
-        func register(_ bundleID: String, _ tap: BundleTaggingTap) { lock.withLock { byBundleID[bundleID] = tap } }
-        func tap(for bundleID: String) -> BundleTaggingTap? { lock.withLock { byBundleID[bundleID] } }
-    }
-
-    /// A single-second, fixed-fill-byte, interleaved-S16-stereo `CapturedBuffer` —
-    /// every byte is `fill`, so a downstream write can be checked for cross-app
-    /// contamination with a trivial byte scan (0xAA never appears in app B's
-    /// stream, 0xBB never appears in app A's).
-    private func fingerprintedBuffer(fill: UInt8, frames: Int, atSecond sec: Int) -> CapturedBuffer {
-        let data = Data(repeating: fill, count: frames * 2 /* ch */ * 2 /* bytes/sample */)
-        return CapturedBuffer(channelData: [data], frameCount: frames, pts: timespec(tv_sec: sec, tv_nsec: 0))
-    }
-
-    /// A `SystemAudioTap` (the WHOLE-SYSTEM tap seam, not the per-app one) that
-    /// records the `excludedProcessObjectIDs` it was last created with — lets a
-    /// test drive the REAL ``NativeCaptureCoordinator`` (not a direct call to its
-    /// `updateRouting`) through `NativeBackend.updateAppRoutes` and observe T4's
-    /// exclusion list end to end.
-    private final class RecordingSystemTap: SystemAudioTap, @unchecked Sendable {
-        var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
-        var onDefaultDeviceChanged: (@Sendable () -> Void)?
-        private let lock = NSLock()
-        private var _excludedProcessObjectIDs: Set<AudioObjectID> = []
-        private var _createCount = 0
-        func createAndStart(muteBehavior: TapMuteBehavior, excludedProcessObjectIDs: Set<AudioObjectID>) throws -> TapFormat {
-            lock.withLock { _excludedProcessObjectIDs = excludedProcessObjectIDs; _createCount += 1 }
-            return TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 16, isFloat: false, isInterleaved: true)
-        }
-        func teardown() {}
-        var excludedProcessObjectIDs: Set<AudioObjectID> { lock.withLock { _excludedProcessObjectIDs } }
-        var createCount: Int { lock.withLock { _createCount } }
-    }
-
-    private final class NoOpSink: PCMSink {
-        func write(pcm: Data, pts: timespec) {}
-    }
-
-    private struct PassthroughConverter: PCMConverting {
-        func convertToAirPlayPCM(_ buffer: CapturedBuffer) -> Data? { buffer.channelData.first }
-    }
-
-    /// A `ProcessAudioTap` whose `createAndStart` throws `.processNotYetAudible`
-    /// for the first `failuresBeforeSuccess` attempts, then succeeds — scripts
-    /// T8's bounded-retry recovery path (`NativeBackend.scheduleProcessNotYetAudibleRetry`)
-    /// deterministically.
-    private final class FlakyThenSucceedsTap: ProcessAudioTap, @unchecked Sendable {
-        var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
-        var onDefaultDeviceChanged: (@Sendable () -> Void)?
-        private let lock = NSLock()
-        private var attempts = 0
-        let failuresBeforeSuccess: Int
-        init(failuresBeforeSuccess: Int) { self.failuresBeforeSuccess = failuresBeforeSuccess }
-        func createAndStart(processes: Set<AudioProcess>, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
-            let n = lock.withLock { attempts += 1; return attempts }
-            if n <= failuresBeforeSuccess {
-                throw PerAppCaptureError.processNotYetAudible(bundleID: bundleID)
-            }
-            return TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 16, isFloat: false, isInterleaved: true)
-        }
-        func teardown() {}
-        var attemptsMade: Int { lock.withLock { attempts } }
-    }
-
-    /// Collect non-level events until `predicate` holds or timeout.
-    private func collect(
-        from backend: NativeBackend,
-        timeout: Duration = .seconds(3),
-        until predicate: @escaping @Sendable ([BackendEvent]) -> Bool
-    ) async -> [BackendEvent] {
-        let stream = backend.makeEventStream()
-        let box = EventBox()
-        await confirmation("predicate satisfied") { done in
-            let task = Task {
-                for await event in stream {
-                    if case .level = event { continue }
-                    let all = await box.append(event)
-                    if predicate(all) { done(); break }
-                }
-            }
-            defer { task.cancel() }
-            try? await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: timeout) }
-                try await group.next()
-                // Cancel the STREAM task, not just the group's children. `cancelAll()`
-                // cancels the child that is `await task.value`, but `Task.value` does
-                // not observe its awaiter's cancellation — it waits for `task` itself.
-                // Without this the group's implicit scope-exit await never returns when
-                // the timeout wins, and the `defer { task.cancel() }` that would free it
-                // can't run because we are still inside this closure: a test whose
-                // predicate never fires HANGS THE WHOLE SUITE instead of failing.
-                task.cancel()
-                group.cancelAll()
-            }
-        }
-        return await box.snapshot()
-    }
-
-    private actor EventBox {
-        private var events: [BackendEvent] = []
-        func append(_ e: BackendEvent) -> [BackendEvent] { events.append(e); return events }
-        func snapshot() -> [BackendEvent] { events }
-    }
-
-    private func waitUntilStarted(_ engine: SpyEngine) async {
-        for _ in 0..<200 {
-            if engine.didStart { return }
-            try? await Task.sleep(nanoseconds: 5_000_000)
-        }
     }
 
     // MARK: Tests
@@ -1066,7 +1699,7 @@ extension SerializedSharedState {
     // mute. Its VOLUME no longer does: the row is the Mac's own fader now, a trim
     // under Main Out, and the hardware write belongs solely to
     // `setMasterGain(mirrorToSystemVolume: true)`. Neither ever reaches the
-    // engine. `FakeSystemVolume` (MARK: Doubles, above) keeps every one of these
+    // engine. `FakeSystemVolume` (file scope, above) keeps every one of these
     // hermetic — no Core Audio HAL read/write, no property listener, ever
     // touches the developer's real Mac.
 
@@ -1274,10 +1907,6 @@ extension SerializedSharedState {
     // What these pin down is WHICH facts qualify: the filters are the whole safety
     // story, since anything emitted here ends up scaling real speakers.
 
-    private func systemVolumeEvents(in events: [BackendEvent]) -> [Int] {
-        events.compactMap { if case .systemVolumeChanged(let v) = $0 { return v } else { return nil } }
-    }
-
     /// A genuine external volume change (media keys / Sound menu) republishes as
     /// `.systemVolumeChanged` alongside the local row's `deviceUpdated`.
     @Test func externalVolumeChangeEmitsSystemVolumeChanged() async {
@@ -1293,6 +1922,78 @@ extension SerializedSharedState {
 
         #expect(systemVolumeEvents(in: events) == [30],
                        "an external volume change must republish for the Main Out mirror")
+    }
+
+    /// A readable-but-UNWRITABLE default output (some USB DACs) accepts the mirror
+    /// write and changes nothing. Memoising the level we ASKED for would then make
+    /// a later genuine external change *to* that level compare equal to the memo
+    /// and be swallowed as our own echo — Main silently desyncs from the system.
+    /// Only a confirmed write may update the memo.
+    @Test func mirrorWriteThatDidNotLandDoesNotMemoiseTheRequestedLevel() async {
+        let volume = FakeSystemVolume(volume: 50, muted: false, writable: false)
+        let (backend, engine, _) = makeBackend(systemVolume: volume)
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        await pollUntil { backend.devices.contains { $0.isLocalDevice } }
+
+        // Mirror Main to hardware. The write no-ops, so the system is still at 50
+        // and nothing may be recorded as 70.
+        backend.setMasterGain(mainOut: 70, group: 100, mirrorToSystemVolume: true)
+        await pollUntil { volume.volumeCalls.contains(70) }
+
+        let events = await collect(from: backend) { events in
+            events.contains { if case .systemVolumeChanged = $0 { return true } else { return false } }
+        } after: { volume.fireExternalChange(volume: 70, muted: false) }
+
+        #expect(systemVolumeEvents(in: events) == [70],
+                "an external move to the level the failed write asked for is still news")
+    }
+
+    // MARK: Volume ownership — `BackendEvent.systemVolumeOwnershipChanged`
+    //
+    // The gate for the volume-key interceptor. Wrong in either direction it fails
+    // SILENTLY — either the keys stay dead on the aggregate, or the tap installs on
+    // a normal output and double-steps every press on top of the existing
+    // `.systemVolumeChanged` path. Both pinned below, at `start()`, because an
+    // aggregate left as the default by a previous session announces itself ONLY
+    // there: no default-output change ever fires for it.
+
+    /// Our aggregate as the default output means macOS refuses the volume write, so
+    /// the app must take the keys over — EVEN THOUGH the aggregate reports a
+    /// perfectly readable volume here. That lie is the trap: a capability-based gate
+    /// reads it as an ordinary settable device and the takeover never fires.
+    @Test func aggregateAsDefaultOutputPublishesVolumeOwnershipAtStart() async {
+        let volume = FakeSystemVolume(volume: 50, muted: false)
+        let (backend, _, _) = makeBackend(
+            systemVolume: volume,
+            currentDefaultOutputUID: { AggregateOutputDevice.productUID })
+        defer { backend.stop() }
+
+        let events = await collect(from: backend) { events in
+            events.contains { if case .systemVolumeOwnershipChanged = $0 { return true } else { return false } }
+        } after: { backend.start() }
+
+        #expect(events.compactMap {
+            if case .systemVolumeOwnershipChanged(let owned) = $0 { return owned } else { return nil }
+        } == [true], "the aggregate's readable volume must not be mistaken for a settable one")
+    }
+
+    /// A normal settable output leaves the keys with macOS, which already carries
+    /// them into Main via `.systemVolumeChanged`.
+    @Test func normalDefaultOutputPublishesNoVolumeOwnershipAtStart() async {
+        let volume = FakeSystemVolume(volume: 50, muted: false)
+        let (backend, _, _) = makeBackend(
+            systemVolume: volume,
+            currentDefaultOutputUID: { "BuiltInSpeakerDevice" })
+        defer { backend.stop() }
+
+        let events = await collect(from: backend) { events in
+            events.contains { if case .systemVolumeOwnershipChanged = $0 { return true } else { return false } }
+        } after: { backend.start() }
+
+        #expect(events.compactMap {
+            if case .systemVolumeOwnershipChanged(let owned) = $0 { return owned } else { return nil }
+        } == [false], "a settable output must leave the keys to macOS")
     }
 
     /// A DEFAULT-DEVICE SWITCH (speakers → AirPods) also reports a fresh volume/mute,
@@ -1410,7 +2111,7 @@ extension SerializedSharedState {
             // settings.mainOutVolume, so the default AppSettings() (UserDefaults.standard)
             // would pollute the real defaults domain. Both go to a per-test temp/suite.
             routingStore: RoutingStore(directory: isolatedDir),
-            settings: AppSettings(defaults: UserDefaults(suiteName: "test-\(UUID().uuidString)")!),
+            settings: AppSettings(defaults: isolation.makeDefaults()),
             loadPersisted: false)
         controller.ensureDefaultSelection()                     // {local} — passthrough
         _ = controller.setDeviceSelected(speaker.id, true)      // auto-swap drops local ⇒ streaming
@@ -1641,6 +2342,10 @@ extension SerializedSharedState {
 
         backend.setMuted(true, for: device.id)
         await pollUntil { backend.devices.first { $0.id == device.id }?.isMuted == true }
+        // Wait for the MUTE's own push before snapshotting. Snapshotting on the
+        // model edge can catch it still in flight, and it then lands inside the
+        // window below — inflating the count and reading as a (wrong) re-push.
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 == 0.0 } }
         let callsBeforeGainChange = engine.volumeCalls.filter { $0.0 == device.outputID }.count
 
         backend.setMasterGain(mainOut: 50, group: 100, mirrorToSystemVolume: false)
@@ -2061,6 +2766,72 @@ extension SerializedSharedState {
                       "the auto-recovery reconnect must still push a level to the engine (the seed fires) — the preserved 75, not skipped")
     }
 
+    /// An engine `.passwordRequired` on the STATE STREAM surfaces as
+    /// `.authRequired`, never flattened to `.unknown` (live 2026-08-06: an
+    /// auth-blocked Mac receiver — act=2 "Current User" access control — was
+    /// debugged blind because the panel said "failed for an unknown reason"
+    /// while the engine knew it wanted a password).
+    @Test func passwordRequiredOnStateStreamSurfacesAuthRequiredCause() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
+
+        engine.pushState(device.outputID, .passwordRequired)
+        await pollUntil {
+            if case .failed(let f)? = backend.devices.first(where: { $0.id == device.id })?.connectionState {
+                return f.cause == .authRequired
+            }
+            return false
+        }
+        guard case .failed(let failure)? =
+                backend.devices.first(where: { $0.id == device.id })?.connectionState else {
+            Issue.record("device did not enter .failed")
+            return
+        }
+        #expect(failure.cause == .authRequired,
+                "a password rejection carries its known cause, not .unknown")
+    }
+
+    /// The same mapping on the CONNECT path: an `addOutput` that throws the
+    /// engine's `.passwordRequired` parks the device with `.authRequired` —
+    /// `convergeDevice`'s catch mirrors `applyEngineState`'s arm.
+    @Test func passwordRequiredAddThrowSurfacesAuthRequiredCause() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device()
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .passwordRequired
+
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil {
+            if case .failed(let f)? = backend.devices.first(where: { $0.id == device.id })?.connectionState {
+                return f.cause == .authRequired
+            }
+            return false
+        }
+        guard case .failed(let failure)? =
+                backend.devices.first(where: { $0.id == device.id })?.connectionState else {
+            Issue.record("device did not enter .failed")
+            return
+        }
+        #expect(failure.cause == .authRequired,
+                "the add-throw catch maps the engine's passwordRequired, not .unknown")
+    }
+
     /// A MUTED AirPlay-1 receiver that drops and reconnects must come back TRULY
     /// silent (the −144 dB sentinel), not at the AP1 curve's −30 dB floor.
     /// `connectVolumeSeed`'s muted branch used to push the AP2-only
@@ -2207,7 +2978,7 @@ extension SerializedSharedState {
             await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == false }
             // Model the dispatcher mirroring the teardown too.
             engine.pushState(device.outputID, .stopped)
-            await pollUntil { !Self.netAdded(engine, device.outputID) }
+            await pollUntil { !netAdded(engine, device.outputID) }
         }
 
         // Initial connect at 50.
@@ -2272,6 +3043,9 @@ extension SerializedSharedState {
         await pollUntil { backend.devices.first { $0.id == device.id }?.isMuted == false }
         #expect(backend.devices.first { $0.id == device.id }?.volume == 60,
                        "unmuting after a connect-time seed must restore the current system level (60), not a stale pre-mute value")
+        // Poll for the push, not the model edge: `last` is only the unmute's push
+        // once that push has actually landed.
+        await pollUntil { engine.volumeCalls.last.map { $0.0 == device.outputID && abs($0.1 - 0.60) < 0.001 } ?? false }
         #expect(engine.volumeCalls.last.map { $0.0 == device.outputID && abs($0.1 - 0.60) < 0.001 } ?? false,
                       "unmute must push the seeded system level (0.60) to the engine")
     }
@@ -2298,6 +3072,10 @@ extension SerializedSharedState {
             let d = backend.devices.first { $0.id == device.id }
             return d?.isMuted == true && d?.volume == 0
         }
+        // The model settles BEFORE the engine push lands, so poll for the push
+        // itself — asserting straight off the model's edge reads volumeCalls too
+        // early and fails only when the machine is busy enough to widen the gap.
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 == 0.0 } }
         #expect(engine.volumeCalls.contains { $0.0 == device.outputID && $0.1 == 0.0 },
                       "mute should push engine volume 0.0")
 
@@ -2307,6 +3085,7 @@ extension SerializedSharedState {
             let d = backend.devices.first { $0.id == device.id }
             return d?.isMuted == false && d?.volume == 70
         }
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.7) < 0.001 } }
         #expect(engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.7) < 0.001 },
                       "unmute should restore the stashed level (0.7) to the engine")
     }
@@ -2556,22 +3335,13 @@ extension SerializedSharedState {
         // Settled: deselected AND every add was matched by a remove (net not added).
         await pollUntil(timeout: 5) {
             backend.devices.first { $0.id == device.id }?.isSelected == false
-                && Self.netAdded(engine, device.outputID) == false
+                && netAdded(engine, device.outputID) == false
         }
 
         #expect(engine.maxConcurrent <= 1)
-        #expect(!(Self.netAdded(engine, device.outputID)),
+        #expect(!(netAdded(engine, device.outputID)),
                        "spam ending OFF must not leave a live engine session (no zombie)")
         #expect(backend.devices.first { $0.id == device.id }?.isSelected == false)
-    }
-
-    /// True iff the engine is NET holding `id` (more adds than removes observed).
-    /// The converge loop issues one add per on-transition and one remove per
-    /// off-transition, so an equal count means the last op was a remove.
-    private static func netAdded(_ engine: SpyEngine, _ id: OutputID) -> Bool {
-        let adds = engine.addedIDs.filter { $0 == id }.count
-        let removes = engine.removedIDs.filter { $0 == id }.count
-        return adds > removes
     }
 
     /// Root cause 2: repeatedly toggling a device with an UNCHANGED descriptor must
@@ -2607,8 +3377,11 @@ extension SerializedSharedState {
 
     /// Root cause 4 + 5: a device whose add fails (engine NACKs SETPEERS under a
     /// session storm) is marked unavailable and PARKED (converge stops issuing
-    /// sessions), but must be RECOVERABLE — a subsequent discovery re-resolution
-    /// clears the park and a user re-toggle re-enables it, with the retry succeeding.
+    /// sessions), but must be RECOVERABLE — "Try again" (`retryOutput`) clears
+    /// the park for that id and the retry succeeds. (The discovery re-resolve in
+    /// between no longer clears the park by itself — same descriptor, so it's
+    /// not evidence of recovery under the 2026-08-06 storm fix — but it must not
+    /// WEDGE anything either.)
     @Test func setPeersFailureRecoversNotWedged() async {
         let (backend, engine, discovery) = makeBackend()
         backend.start(); defer { backend.stop() }
@@ -2628,7 +3401,8 @@ extension SerializedSharedState {
         }
         #expect(backend.devices.first { $0.id == device.id }?.isAvailable == false)
 
-        // RECOVERY: the receiver settles; discovery re-resolves it (clears the park),
+        // RECOVERY: the receiver settles; discovery re-resolves it (same
+        // descriptor — availability comes back, the park deliberately does NOT),
         // and the engine now accepts the add.
         engine.addFailures = []
         discovery.fire(.updated(device))
@@ -2636,8 +3410,8 @@ extension SerializedSharedState {
             backend.devices.first { $0.id == device.id }?.isAvailable == true
         }
 
-        // A user re-toggle now succeeds — the device is not permanently wedged.
-        backend.setOutputSet([device.id])
+        // "Try again" now succeeds — the device is not permanently wedged.
+        backend.retryOutput(device.id)
         await pollUntil(timeout: 5) {
             let d = backend.devices.first { $0.id == device.id }
             return d?.isSelected == true && d?.isAvailable == true
@@ -2646,6 +3420,107 @@ extension SerializedSharedState {
         #expect(d?.isSelected == true, "a NACKed device must be re-enableable after recovery (root cause 4)")
         #expect(d?.isAvailable == true)
         #expect(engine.addedIDs.contains(device.outputID))
+    }
+
+    // MARK: Retry-storm damping (2026-08-06 — parked `.failed` devices)
+
+    /// Storm fix, routing-traffic arm: with a device parked `.failed` and still
+    /// desired (R12 keeps intent), a membership-NEUTRAL `setOutputSet` — the
+    /// exact same set re-issued, which is what a This-Mac toggle, a Main-Out
+    /// re-pick, or any unrelated selection change produces — must NOT un-park
+    /// or re-kick it: no new engine attempt, no `.connecting` churn. Pre-fix,
+    /// the blanket park-clear plus `isRetryOfFailed` turned every such call
+    /// into a zero-backoff retry of every parked id (telemetry: 69 identical
+    /// `set_output_set added:[] removed:[]` calls in one storm session).
+    @Test func membershipNeutralSetOutputSetDoesNotRetryParkedDevice() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:60", name: "Parked Speaker")
+        let attempts = await parkDevice(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])   // membership-neutral: added:[] removed:[]
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == attempts,
+                "a membership-neutral setOutputSet must not re-kick a parked .failed device")
+        #expect(isFailedNow(backend, device.id),
+                "…and must not strobe its resting .failed through .connecting")
+    }
+
+    /// Storm fix, discovery arm: a Bonjour re-resolve of the IDENTICAL
+    /// descriptor — a dead-but-still-announcing receiver, re-announced — is not
+    /// evidence of recovery and must leave the park (and the engine) alone.
+    /// Pre-fix, `addOrUpdate` cleared the gate unconditionally (STABILITY(C7),
+    /// "no backoff") and re-kicked every still-desired id per re-announce.
+    @Test func sameDescriptorReResolveDoesNotRetryParkedDevice() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:61", name: "Announcing Corpse")
+        let attempts = await parkDevice(backend, engine, discovery, device)
+
+        discovery.fire(.updated(device))    // same descriptor, isAvailable == true
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == attempts,
+                "a same-descriptor re-resolve must not re-kick a parked .failed device")
+        #expect(isFailedNow(backend, device.id), "the resting .failed survives the re-announce")
+    }
+
+    /// The load-bearing auto-reconnect (R12) survives the damping: a re-resolve
+    /// announcing a CHANGED descriptor (the receiver restarted / moved — here a
+    /// new port) IS evidence the device came back, so the park clears and the
+    /// still-desired id reconnects with no user action.
+    @Test func changedDescriptorReResolveAutoReconnectsParkedDevice() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:62", name: "Restarted Speaker")
+        _ = await parkDevice(backend, engine, discovery, device)
+
+        engine.addFailures = []
+        let restarted = DiscoveredDevice(
+            id: device.id,
+            descriptor: DeviceDescriptor(
+                name: device.descriptor.name, address: device.descriptor.address,
+                family: .ipv4, port: device.descriptor.port + 1,
+                txtRecord: device.descriptor.txtRecord),
+            outputID: device.outputID, isAirPlay2Supported: true)
+        discovery.fire(.updated(restarted))
+
+        await pollUntil(timeout: 5) {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+        #expect(backend.devices.first { $0.id == device.id }?.connectionState == .connected,
+                "a changed-descriptor re-resolve auto-reconnects a still-desired parked device")
+    }
+
+    /// The other load-bearing recovery arm: a parked device that DISAPPEARS
+    /// entirely and later re-appears — even with the identical descriptor —
+    /// auto-reconnects, because the disappear ended the failure episode
+    /// (`markDisappeared` drops the park along with the `.failed` state).
+    @Test func reappearAfterDisappearAutoReconnectsParkedDevice() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:63", name: "Round Tripper")
+        _ = await parkDevice(backend, engine, discovery, device)
+
+        _ = await collect(from: backend) { events in
+            events.contains {
+                if case .deviceUpdated(let d) = $0 { return d.id == device.id && d.connectionState == .off }
+                else { return false }
+            }
+        } after: { discovery.fire(.disappeared(id: device.id, wasAirPlay2Supported: true)) }
+
+        engine.addFailures = []
+        discovery.fire(.appeared(device))   // identical descriptor
+        await pollUntil(timeout: 5) {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+        #expect(backend.devices.first { $0.id == device.id }?.connectionState == .connected,
+                "drop-off-and-return auto-reconnects a still-desired device (episode ended at disappear)")
     }
 
     // MARK: State-stream vs converge ordering (2026-07-17 findings)
@@ -2693,7 +3568,7 @@ extension SerializedSharedState {
         #expect(d?.isSelected == false,
                        "a stale .streaming after a successful OFF must not re-select the device")
         // And no phantom re-add of the engine session: removes >= adds (net off).
-        #expect(!(Self.netAdded(engine, device.outputID)),
+        #expect(!(netAdded(engine, device.outputID)),
                        "a stale .streaming must not leave a live engine session the user turned off")
     }
 
@@ -2729,11 +3604,11 @@ extension SerializedSharedState {
         // Eventually the device is off and the engine holds no session.
         await pollUntil(timeout: 5) {
             let d = backend.devices.first { $0.id == device.id }
-            return d?.isSelected == false && !Self.netAdded(engine, device.outputID)
+            return d?.isSelected == false && !netAdded(engine, device.outputID)
         }
         #expect(backend.devices.first { $0.id == device.id }?.isSelected == false,
                        "a stale .streaming with desiredOn=false must converge OFF, not re-wedge ON")
-        #expect(!(Self.netAdded(engine, device.outputID)))
+        #expect(!(netAdded(engine, device.outputID)))
         #expect(engine.maxConcurrent <= 1,
                                  "the re-kick must not overlap ops for the same device")
     }
@@ -2841,8 +3716,8 @@ extension SerializedSharedState {
     }
 
     /// Recovery clears to connecting/connected: after a NACK parks the device
-    /// `.failed`, a discovery re-resolution clears the park (root cause 4) and a
-    /// user re-toggle retries — the connection dot must follow through
+    /// `.failed`, "Try again" (`retryOutput`) clears the park (root cause 4) and
+    /// retries — the connection dot must follow through
     /// `.failed → .connecting → .connected`, not stay stuck amber.
     @Test func connectionStateRecoveryClearsFailedThenReconnects() async {
         let (backend, engine, discovery) = makeBackend()
@@ -2861,15 +3736,18 @@ extension SerializedSharedState {
             return false
         }
 
-        // The receiver settles; discovery re-resolves it. This clears the park but
-        // is not itself a retry, so the dot should NOT jump to .connecting on its
-        // own here — it stays .failed (sticky) until the user re-toggles.
+        // The receiver settles; discovery re-resolves it (same descriptor — the
+        // park deliberately survives, storm fix 2026-08-06). This is not a
+        // retry, so the dot must NOT jump to .connecting on its own here — it
+        // stays .failed (sticky) until the user acts.
         engine.addFailures = []
         discovery.fire(.updated(device))
         await pollUntil { backend.devices.first { $0.id == device.id }?.isAvailable == true }
+        #expect({ if case .failed = backend.devices.first(where: { $0.id == device.id })?.connectionState { return true }; return false }(),
+                "a same-descriptor re-resolve is not a retry — the resting .failed dot survives it")
 
-        // User re-toggle: the dot must move .failed → .connecting → .connected.
-        backend.setOutputSet([device.id])
+        // "Try again": the dot must move .failed → .connecting → .connected.
+        backend.retryOutput(device.id)
         await pollUntil(timeout: 5) {
             backend.devices.first { $0.id == device.id }?.connectionState == .connected
         }
@@ -3144,7 +4022,7 @@ extension SerializedSharedState {
 
         // Flip it on: NativeBackend must forward to the coordinator.
         (backend as MeteringControlling).setMeteringActive(true)
-        try? await Task.sleep(nanoseconds: 20_000_000)
+        await pollUntil { capture.meteringActive }
         #expect(capture.meteringActive, "setMeteringActive(true) must reach the coordinator")
         capture.fireLevelIfActive(0.5)
         try? await Task.sleep(nanoseconds: 50_000_000)
@@ -3441,42 +4319,6 @@ extension SerializedSharedState {
     // (pre-existing code, re-asserted as a regression guard now that arming
     // actually happens); and re-deciding "still true" never re-arms.
 
-    /// Selecting a device (the gate's false->true edge) must re-arm the poll —
-    /// and the poll's own immediate synchronous call (inside
-    /// `startSchedulingSnapshotPolling()`) must actually log `send_sched`,
-    /// proving this isn't just bookkeeping with no observable effect.
-    @Test func wholeSystemCaptureStartArmsSchedulingPollAndLogsSendSched() async {
-        let (backend, engine, discovery) = makeBackend()
-        let capture = FakeCapture()
-        backend.captureCoordinator = capture
-        backend.start(); defer { backend.stop() }
-        await waitUntilStarted(engine)
-
-        // At launch (no device selected yet), `captureRunning` is false, so
-        // the poll must NOT be armed — the exact dead shape the investigation
-        // found; still correct after the fix, since it's the RE-arm on later
-        // selection that was missing, not this launch-time no-op.
-        #expect(!backend.test_hasPendingSchedulingPoll(), "the poll must not arm before any device is ever selected")
-
-        let box = TelemetryLineBox()
-        Telemetry._installTestSink { box.append($0) }
-        defer { Telemetry._installTestSink(nil) }
-
-        let device = ap2Device(id: "AA:BB:CC:DD:EE:A1", name: "Scheduling Speaker")
-        _ = await collect(from: backend) { events in
-            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
-        } after: { discovery.fire(.appeared(device)) }
-
-        backend.setOutputSet([device.id])
-        await pollUntil { capture.isCapturing }
-        await pollUntil { backend.test_hasPendingSchedulingPoll() }
-        #expect(backend.test_hasPendingSchedulingPoll(), "selecting a device (captureRunning false->true) must re-arm the scheduling poll")
-
-        func sendSchedLines() -> [String] { box.snapshot().filter { $0.contains("\"evt\":\"send_sched\"") } }
-        await pollUntil { !sendSchedLines().isEmpty }
-        #expect(!sendSchedLines().isEmpty, "arming the poll must immediately log send_sched at least once — this event had never fired in production")
-    }
-
     /// A plain deselect (the gate's true->false edge via `setOutputSet([])`,
     /// NOT `stop()`) must ALSO cancel the poll — this exercises the actual NEW
     /// code added to `reconcileCaptureGate()`'s `else` branch.
@@ -3523,161 +4365,7 @@ extension SerializedSharedState {
         #expect(!backend.test_hasPendingSchedulingPoll(), "stop() must cancel the scheduling poll's pending work item")
     }
 
-    /// Selecting a SECOND device while already capturing (captureRunning
-    /// stays true->true) must NOT re-arm the poll a second time —
-    /// `reconcileCaptureGate`'s own `want != captureRunning` guard must
-    /// short-circuit before reaching the new arm/cancel code, so at most one
-    /// immediate `send_sched` line lands per capture-start episode, not one
-    /// per device added while already streaming (which would double the log
-    /// rate every time a second speaker joins an already-playing session).
-    @Test func wholeSystemCaptureSelectingSecondDeviceDoesNotDoubleArmSchedulingPoll() async {
-        let (backend, engine, discovery) = makeBackend()
-        let capture = FakeCapture()
-        backend.captureCoordinator = capture
-        backend.start(); defer { backend.stop() }
-        await waitUntilStarted(engine)
-
-        let deviceA = ap2Device(id: "AA:BB:CC:DD:EE:A4", name: "First Poll Speaker")
-        let deviceB = ap2Device(id: "AA:BB:CC:DD:EE:A5", name: "Second Poll Speaker")
-        _ = await collect(from: backend) { events in
-            events.contains { if case .deviceAdded(let d) = $0 { return d.id == deviceA.id } else { return false } }
-        } after: { discovery.fire(.appeared(deviceA)) }
-        _ = await collect(from: backend) { events in
-            events.contains { if case .deviceAdded(let d) = $0 { return d.id == deviceB.id } else { return false } }
-        } after: { discovery.fire(.appeared(deviceB)) }
-
-        let box = TelemetryLineBox()
-        Telemetry._installTestSink { box.append($0) }
-        defer { Telemetry._installTestSink(nil) }
-        func sendSchedCount() -> Int { box.snapshot().filter { $0.contains("\"evt\":\"send_sched\"") }.count }
-
-        backend.setOutputSet([deviceA.id])
-        await pollUntil { capture.isCapturing }
-        await pollUntil { sendSchedCount() == 1 }
-
-        // Adding a second already-streaming device: captureRunning stays
-        // true->true, so `reconcileCaptureGate`'s own guard must return before
-        // ever reaching the arm/cancel code — no second immediate poll.
-        backend.setOutputSet([deviceA.id, deviceB.id])
-        try? await Task.sleep(nanoseconds: 150_000_000)
-        #expect(sendSchedCount() == 1, "selecting an additional device while already capturing must not re-arm (double-log) the scheduling poll")
-    }
-
-    // MARK: Write-cadence drift sampling (T-ENG-CADENCE-1, whole-system-
-    // dropout investigation) — `AirPlayEngine.writeCadenceSnapshot()` was
-    // previously referenced nowhere in `AudiouterCore`. `sampleWriteCadenceIfDue()`
-    // wires it in on the per-app mixer's write path (`onMixedBuffer`), same
-    // throttled/delta-gated shape as the sibling `sampleWriteBacklogIfDue()`.
-
-    /// The delta-gate's core property: an unchanging (healthy) cadence
-    /// snapshot must never log `write_cadence_drift`, no matter how much real
-    /// per-buffer traffic flows through the sampler's trigger — this is NOT
-    /// "we never got around to sampling", it holds whether or not the
-    /// sample interval was crossed, since an unchanged snapshot reads equal to
-    /// the zero-initialized last-reported baseline either way. Then, scripting
-    /// the engine to report genuine degradation and pushing enough buffers to
-    /// cross the sample interval proves the sampler is actually wired up and
-    /// CAN log when there is something worth logging.
-    @Test func writeCadenceDriftStaysSilentWhileHealthyThenLogsOnDegradation() async {
-        let registry = TapRegistry()
-        let perAppCapture = registeringPerAppCapture(muteBehavior: .mutedWhenTapped, bundleIDs: ["com.cadence"], into: registry)
-        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perAppCapture)
-        defer { backend.stop() }
-        let device = ap2Device(id: "AA:BB:CC:DD:EE:A6", name: "Cadence Speaker")
-        await startAndDiscover(backend, engine, discovery, device)
-
-        backend.updateAppRoutes([route("com.cadence", name: "Cadence App", toDevice: device.id)])
-        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
-        await pollUntil {
-            if case .capturing = perAppCapture.state(for: "com.cadence") { return true }; return false
-        }
-        guard let tap = registry.tap(for: "com.cadence") else {
-            Issue.record("the routed app's per-app tap must have registered")
-            return
-        }
-
-        let box = TelemetryLineBox()
-        Telemetry._installTestSink { box.append($0) }
-        defer { Telemetry._installTestSink(nil) }
-        func driftLines() -> [String] { box.snapshot().filter { $0.contains("\"evt\":\"write_cadence_drift\"") } }
-
-        // Healthy (the spy's zeroed default `writeCadenceSnapshot()`): must
-        // stay silent under real per-buffer traffic through the full pipeline.
-        for i in 0..<10 {
-            tap.push(fingerprintedBuffer(fill: 0xAA, frames: 200, atSecond: i))
-        }
-        try? await Task.sleep(nanoseconds: 50_000_000)
-        #expect(driftLines().isEmpty, "an unchanging (healthy) cadence snapshot must never log write_cadence_drift")
-
-        // Script real degradation, then push well past the sample interval
-        // (`backlogSampleInterval`, reused by design). Each push is a
-        // single-contributor-stream buffer, which `AppRouteMixer.handleBuffer`
-        // passes straight through as exactly ONE `onMixedBuffer` emission (no
-        // hold-window accumulation on that path), so N pushes reliably cross
-        // an N-buffer sampling threshold.
-        engine.scriptCadenceSnapshot(WriteCadenceSnapshot(
-            writeCount: 999, deficitSeconds: 1.25, overrunSeconds: 0, lastGapSeconds: 0.05))
-        for i in 10..<520 {
-            tap.push(fingerprintedBuffer(fill: 0xAA, frames: 200, atSecond: i))
-        }
-
-        await pollUntil(timeout: 5) { !driftLines().isEmpty }
-        #expect(!driftLines().isEmpty, "a genuinely degraded cadence snapshot must log write_cadence_drift once the sample interval is crossed")
-        #expect(driftLines().allSatisfy { $0.contains("\"path\":\"perApp\"") },
-                      "the per-app call site must tag its own path — EngineSink's mirror in NativeCaptureCoordinator.swift tags \"wholeSystem\", and the two must stay distinguishable")
-    }
-
-    /// The whole-system (stream 0) mirror of the test above, at the ACTUAL
-    /// production `EngineSink` (not `SpyEngine` — `EngineSink.init(engine:)`
-    /// takes the concrete `AirPlayEngine`, not the `EngineControlling` seam,
-    /// so this is the one place a real engine instance is the only way to
-    /// exercise this code at all). `AirPlayEngine.init(config:)` is
-    /// documented side-effect-free ("the engine thread is created lazily in
-    /// start(), not here"), and every `write` is a no-op while `startedFlag`
-    /// is false (never set, since `start()` is never called) — so this is
-    /// still a hermetic, no-hardware test: it proves `EngineSink`'s new
-    /// cadence sampler (mirroring `sampleWriteCadenceIfDue()` byte-for-byte)
-    /// runs across real per-buffer traffic without crashing and never
-    /// spuriously logs — the delta-gate half of the mirror. It can't
-    /// exercise the "logs on real degradation" half the way the per-app test
-    /// does above, because that needs the engine's OWN wall-clock-driven
-    /// counters to move, and this spy has no way to script the concrete
-    /// `AirPlayEngine` the way `SpyEngine.scriptCadenceSnapshot` scripts the
-    /// seam — the same reason `write_backlog_drop`'s whole-system sampler
-    /// (9965bd9) has never had a dedicated unit test either. The "fires on
-    /// degradation" arithmetic itself is proven above; this test's job is
-    /// only to prove THIS call site's wiring doesn't crash and respects the
-    /// same gate.
-    @Test func engineSinkWriteCadenceStaysSilentWithRealUnstartedEngine() {
-        let engine = AirPlayEngine()
-        let sink = EngineSink(engine: engine)
-
-        let box = TelemetryLineBox()
-        Telemetry._installTestSink { box.append($0) }
-        defer { Telemetry._installTestSink(nil) }
-
-        for i in 0..<520 {
-            let pcm = Data(repeating: 0xAA, count: 4 * 200)
-            sink.write(pcm: pcm, pts: timespec(tv_sec: i, tv_nsec: 0))
-        }
-
-        let driftLines = box.snapshot().filter { $0.contains("\"evt\":\"write_cadence_drift\"") }
-        #expect(driftLines.isEmpty, "a never-started engine's cadence counters never move, so EngineSink must never log write_cadence_drift for it")
-    }
-
     // MARK: Sleep/wake (B6b)
-
-    /// Discover an AP2 device, select it, and wait until it's streaming (`added`).
-    /// Returns once `engine.addedIDs` contains the device and its row is selected.
-    private func connectAP2(
-        _ backend: NativeBackend, _ engine: SpyEngine, _ discovery: FakeDiscovery,
-        _ device: DiscoveredDevice
-    ) async {
-        await startAndDiscover(backend, engine, discovery, device)
-        backend.setOutputSet([device.id])
-        await pollUntil { engine.addedIDs.contains(device.outputID) }
-        await pollUntil { backend.devices.first { $0.id == device.id }?.isSelected == true }
-    }
 
     /// A willSleep → didWake cycle PRESERVES the selection intent and re-kicks
     /// convergence: the device is torn down on sleep and re-added on wake, with no
@@ -3829,133 +4517,7 @@ extension SerializedSharedState {
                        "Never must arm no watchdog — no extra un-gate stop after wake")
     }
 
-    // MARK: Helpers
-
-    /// Records the gate's capture ops in order, with no Core Audio tap / TCC prompt.
-    private final class FakeCapture: CaptureControlling, @unchecked Sendable {
-        private let lock = NSLock()
-        private var _onLevel: (@Sendable (Float) -> Void)?
-        private var _onStateChange: (@Sendable (NativeCaptureCoordinator.State) -> Void)?
-        private var _onDeviceRateRebuild: (@Sendable () -> Void)?
-        private var _ops: [String] = []
-        private var _meteringActive = false
-        /// How many times `start()` has actually been called — including a
-        /// retry-driven restart, not just the first one (T16, E10). `ops` also
-        /// records this (as another `"start"` entry), but a dedicated counter
-        /// reads clearer at the call site of a retry-recovery test.
-        private var _startCount = 0
-
-        var onLevel: (@Sendable (_ rms: Float) -> Void)? {
-            get { lock.withLock { _onLevel } }
-            set { lock.withLock { _onLevel = newValue } }
-        }
-        /// T16, E10: fired by `fireState(_:)` to script the whole-system tap's
-        /// state machine — `NativeBackend.start()` wires this exactly like the
-        /// real `NativeCaptureCoordinator.onStateChange`.
-        var onStateChange: (@Sendable (NativeCaptureCoordinator.State) -> Void)? {
-            get { lock.withLock { _onStateChange } }
-            set { lock.withLock { _onStateChange = newValue } }
-        }
-        /// Whole-system tap device/rate-rebuild seam (T2): the real coordinator
-        /// fires this ONLY when a device/nominal-rate change rebuilt the tap — the
-        /// rebuild that desyncs the AirPlay RTP timeline. Stored so a test can drive
-        /// a simulated device/rate rebuild without a real Core Audio tap, then assert
-        /// the backend's session-reset response. A benign exclusion-set rebuild (the
-        /// synced-local sink attach) is faithfully modelled by simply NOT firing this.
-        var onDeviceRateRebuild: (@Sendable () -> Void)? {
-            get { lock.withLock { _onDeviceRateRebuild } }
-            set { lock.withLock { _onDeviceRateRebuild = newValue } }
-        }
-        func start() { lock.withLock { _ops.append("start"); _startCount += 1 } }
-        func stop() { lock.withLock { _ops.append("stop") } }
-        func setMeteringActive(_ active: Bool) { lock.withLock { _meteringActive = active } }
-
-        /// R14: records every `refreshExcludedProcessSet(forRelaunchedBundleID:)`
-        /// call so a test can assert `NativeBackend.handleAppLaunched` /
-        /// `handlePerAppCaptureHealthChange` re-resolve the whole-system tap's
-        /// exclusion for a relaunched/now-audible bundle ID.
-        private var _refreshedBundleIDs: [String] = []
-        func refreshExcludedProcessSet(forRelaunchedBundleID bundleID: String) {
-            lock.withLock { _refreshedBundleIDs.append(bundleID) }
-        }
-        var refreshedBundleIDs: [String] { lock.withLock { _refreshedBundleIDs } }
-
-        /// R5: records the route table + denylist handed to `updateRouting`, in
-        /// order, so a test can assert exactly WHICH bundle IDs the whole-system tap
-        /// was told to exclude. The real coordinator turns `.device`-routed bundle
-        /// IDs plus the denylist into excluded process object ids (covered by
-        /// `NativeCaptureCoordinatorTests`); at THIS seam the question is only what
-        /// `NativeBackend` decided to send, which is what the effective route table
-        /// changes.
-        private var _routingUpdates: [(appRoutes: [AppRoute], excludedBundleIDs: Set<String>)] = []
-        func updateRouting(appRoutes: [AppRoute], excludedBundleIDs: Set<String>) {
-            lock.withLock { _routingUpdates.append((appRoutes, excludedBundleIDs)) }
-        }
-        var routingUpdates: [(appRoutes: [AppRoute], excludedBundleIDs: Set<String>)] {
-            lock.withLock { _routingUpdates }
-        }
-        /// The bundle IDs the LAST `updateRouting` call would have the whole-system
-        /// tap exclude: every `.device`-routed bundle ID unioned with the denylist —
-        /// i.e. `NativeCaptureCoordinator`'s own union rule, mirrored here.
-        var lastExcludedBundleIDs: Set<String>? {
-            guard let last = routingUpdates.last else { return nil }
-            let routedAway = last.appRoutes
-                .filter(\.destination.isDeviceRoute)
-                .map(\.bundleID)
-            return last.excludedBundleIDs.union(routedAway)
-        }
-
-        /// Fire a device/nominal-rate rebuild exactly as the real coordinator does
-        /// from `recreateTap(cause: .deviceOrRateChange)` (T2), so a test can
-        /// simulate the rate-renegotiation rebuild and observe `NativeBackend`'s
-        /// session-reset response.
-        func fireDeviceRateRebuild() {
-            let handler = lock.withLock { _onDeviceRateRebuild }
-            handler?()
-        }
-
-        /// Every start/stop, in the order they executed.
-        var ops: [String] { lock.withLock { _ops } }
-        /// Whether the tap is running right now — i.e. exactly when the real
-        /// `.mutedWhenTapped` tap has the Mac's speakers muted.
-        var isCapturing: Bool { lock.withLock { _ops.last == "start" } }
-        /// Total `start()` calls so far (T16, E10) — see `_startCount`.
-        var startCount: Int { lock.withLock { _startCount } }
-        /// The last value passed to `setMeteringActive`, `false` until called.
-        var meteringActive: Bool { lock.withLock { _meteringActive } }
-        /// Fire `onLevel` as the real coordinator would — but only if metering is
-        /// active, mirroring `NativeCaptureCoordinator.handleBuffer`'s gate so this
-        /// fake is a faithful stand-in for the T-GATE test below.
-        func fireLevelIfActive(_ rms: Float) {
-            let (handler, active) = lock.withLock { (_onLevel, _meteringActive) }
-            if active { handler?(rms) }
-        }
-        /// Fire `onStateChange` as the real coordinator would on a transition
-        /// (T16, E10) — drives `NativeBackend.handleCaptureCoordinatorStateChange`
-        /// with no real Core Audio tap in the loop.
-        func fireState(_ state: NativeCaptureCoordinator.State) {
-            let handler = lock.withLock { _onStateChange }
-            handler?(state)
-        }
-    }
-
     // MARK: Whole-system tap rebuild → AirPlay session reset (T2)
-
-    /// Bring a selected AP2 device to actually-streaming (`added`) so a whole-system
-    /// session reset has a live stream-0 session to rebind.
-    private func startSelectAndStream(
-        _ backend: NativeBackend, _ engine: SpyEngine, _ discovery: FakeDiscovery,
-        _ capture: FakeCapture, _ device: DiscoveredDevice
-    ) async {
-        backend.captureCoordinator = capture
-        backend.start()
-        await waitUntilStarted(engine)
-        _ = await collect(from: backend) { events in
-            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
-        } after: { discovery.fire(.appeared(device)) }
-        backend.setOutputSet([device.id])
-        await pollUntil { engine.addedIDs.contains(device.outputID) }
-    }
 
     /// A plain connect — the tap starts and reaches `.capturing`, the device is
     /// added by `convergeDevice` — must NOT reset any AirPlay session. The
@@ -4072,79 +4634,6 @@ extension SerializedSharedState {
                        "the fallback re-adds via single-stream addOutput: converge(1) + recovery(1)")
     }
 
-    /// MERGE COLLISION (F-REANCHOR × T-PERAPP-GATE): the takeover gate was added
-    /// to EVERY session-establishing engine op — including `performRebindRecovery`,
-    /// which at the time was always a removeOutput→addOutput. F-REANCHOR then made
-    /// the whole-system recovery try an in-place RTSP FLUSH first. Fused naively,
-    /// the gate sat in front of the flush too: a clockless verdict made the recovery
-    /// give up without even attempting the re-anchor that needs no clock (the
-    /// session and its timing are already up — flushing only re-syncs the receiver's
-    /// timeline), and every ordinary rebuild dragged the gate's real side effects —
-    /// a default-output switch-away, the "taking over" strip, a bounded activation
-    /// wait — onto the path whose entire purpose is avoiding an audible drop.
-    /// The gate belongs in front of the re-add ONLY.
-    @Test func wholeSystemFlushReanchorRunsWithoutThePTPTakeoverGate() async {
-        let engine = SpyEngine()
-        let discovery = FakeDiscovery()
-        let capture = FakeCapture()
-        let activator = ScriptedPTPHelperActivator(willWaitForClock: false, outcome: .ready)
-        let backend = NativeBackend(
-            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
-            ptpHelperActivator: activator,
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05)
-        defer { backend.stop() }
-        let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Reanchor Speaker")
-        await startSelectAndStream(backend, engine, discovery, capture, device)
-
-        let addsAfterConnect = engine.addedIDs.filter { $0 == device.outputID }.count
-        let removesAfterConnect = engine.removedIDs.filter { $0 == device.outputID }.count
-        // The clock goes away mid-session, AFTER the connect that established the
-        // session the flush will re-anchor.
-        activator.setOutcome(.needsApproval(.requiresApproval))
-
-        capture.fireDeviceRateRebuild()   // device/rate change rebuilt the tap
-        await pollUntil { engine.flushedIDs.contains(device.outputID) }
-
-        #expect(engine.flushedIDs.filter { $0 == device.outputID }.count == 1,
-                "the in-place flush re-anchor must run even with no clock available — it re-anchors a session that already exists")
-        // A successful flush ends the recovery: no teardown, so the gate is never
-        // reached and nothing extra hits the engine.
-        try? await Task.sleep(nanoseconds: 200_000_000)
-        #expect(engine.removedIDs.filter { $0 == device.outputID }.count == removesAfterConnect,
-                "a successful flush must not fall through to the teardown")
-        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == addsAfterConnect,
-                "a successful flush must not re-add the output")
-    }
-
-    /// The other half of the same seam: once the flush is NOT available (it throws,
-    /// as a receiver that NACKs it does), the recovery falls through to the
-    /// teardown+re-add — and THAT is session-establishing, so a clockless verdict
-    /// must refuse it rather than re-establish a session that plays silence.
-    @Test func wholeSystemTeardownFallbackIsStillRefusedWithoutAClock() async {
-        let engine = SpyEngine()
-        let discovery = FakeDiscovery()
-        let capture = FakeCapture()
-        let activator = ScriptedPTPHelperActivator(willWaitForClock: false, outcome: .ready)
-        let backend = NativeBackend(
-            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
-            ptpHelperActivator: activator,
-            maxRebindRecoveryAttempts: 1, rebindRecoveryRetryDelay: 0.05)
-        defer { backend.stop() }
-        let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Clockless Speaker")
-        await startSelectAndStream(backend, engine, discovery, capture, device)
-
-        engine.flushFailures = [device.outputID.rawValue]   // no in-place re-anchor available
-        let addsAfterConnect = engine.addedIDs.filter { $0 == device.outputID }.count
-        activator.setOutcome(.needsApproval(.requiresApproval))
-
-        capture.fireDeviceRateRebuild()
-        await pollUntil { engine.flushedIDs.contains(device.outputID) }
-        try? await Task.sleep(nanoseconds: 300_000_000)
-
-        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == addsAfterConnect,
-                "a clockless re-add must be refused — it would re-establish a session the receiver plays as silence")
-    }
-
     /// T8: the signal-only `.streamHealth` echo of the same recapture/rebind
     /// detection T2's test above exercises. `recovering == true` must fire the
     /// moment the whole-system recapture is detected (the rebind is enqueued,
@@ -4228,7 +4717,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.3)
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.3,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:90", name: "Single-Flight Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -4292,7 +4782,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05)
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:91", name: "Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -4348,7 +4839,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05)
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:92", name: "Reverse-Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -4415,7 +4907,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5)
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Sleep-Race Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -4465,7 +4958,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5)
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.5,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Sleep-Badge Speaker")
         await startSelectAndStream(backend, engine, discovery, capture, device)
@@ -4500,20 +4994,6 @@ extension SerializedSharedState {
     }
 
     // MARK: Per-app routing (T6)
-
-    /// Discover an AP2 device and wait until the backend knows it (so `outputIDs`
-    /// is populated and a route can bind to it).
-    private func startAndDiscover(
-        _ backend: NativeBackend, _ engine: SpyEngine, _ discovery: FakeDiscovery,
-        _ device: DiscoveredDevice
-    ) async {
-        backend.start()
-        await waitUntilStarted(engine)
-        _ = await collect(from: backend) { events in
-            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
-        } after: { discovery.fire(.appeared(device)) }
-        await pollUntil { engine.fedIDs.contains(device.outputID) }
-    }
 
     /// A `.device(id:)` route spins up that app's per-app capture (the resolver is
     /// asked to resolve its process set) and binds the destination device to a
@@ -4633,437 +5113,6 @@ extension SerializedSharedState {
     // conflict + `.routedApps` clear + audible fallback into the system mix)
     // and re-engages automatically on deselect.
 
-    /// Parse the sink's captured lines into `.airplay` JSON objects for `evt`,
-    /// optionally filtered to one device id (mirrors
-    /// `rebindRecoveryEmitsTelemetry...`'s local helpers).
-    private func telemetryLines(
-        _ box: TelemetryLineBox, evt: String, device: String? = nil
-    ) -> [[String: Any]] {
-        box.snapshot().compactMap { line -> [String: Any]? in
-            guard let data = line.data(using: .utf8),
-                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-            else { return nil }
-            return obj
-        }.filter {
-            $0["cat"] as? String == "airplay" && $0["evt"] as? String == evt
-                && (device == nil || $0["device"] as? String == device)
-        }
-    }
-
-    /// A test-controlled hold point for the SpyEngine's async hooks: `hold()`
-    /// (called from inside an engine op) marks `entered` and suspends until the
-    /// test calls `open()` — the explicit open IS the synchronization.
-    private final class HoldPoint: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _entered = false
-        private var _open = false
-        var entered: Bool { lock.withLock { _entered } }
-        func open() { lock.withLock { _open = true } }
-        func hold() async {
-            lock.withLock { _entered = true }
-            while !(lock.withLock { _open }) { try? await Task.sleep(nanoseconds: 2_000_000) }
-        }
-    }
-
-    /// A once-latch for hooks that must act on their first invocation only.
-    private final class OnceFlag: @unchecked Sendable {
-        private let lock = NSLock()
-        private var fired = false
-        /// Returns whether the flag was ALREADY set (and sets it).
-        func testAndSet() -> Bool { lock.withLock { let was = fired; fired = true; return was } }
-    }
-
-    /// A `PTPHelperActivating` that resolves `.ready` instantly until `arm()`ed,
-    /// after which every activation HOLDS until `release()` — how a race test
-    /// parks `convergeDevice` inside its widest suspension window
-    /// (`ensurePTPTakeover`) at a test-chosen moment.
-    private final class ArmableHoldingPTPActivator: PTPHelperActivating, @unchecked Sendable {
-        var willWaitForClock: Bool { false }
-        private let lock = NSLock()
-        private var armed = false
-        private let gate = HoldPoint()
-        func arm() { lock.withLock { armed = true } }
-        func release() { gate.open() }
-        var holding: Bool { gate.entered }
-        func activate(timeout: TimeInterval) async -> PTPHelperActivationOutcome {
-            if lock.withLock({ armed }) { await gate.hold() }
-            return .ready
-        }
-    }
-
-    /// Collects every `.routedApps` name list emitted for one device, in order.
-    private final class RoutedAppsLog: @unchecked Sendable {
-        private let lock = NSLock()
-        private var entries: [[String]] = []
-        func append(_ names: [String]) { lock.withLock { entries.append(names) } }
-        var last: [String]? { lock.withLock { entries.last } }
-    }
-
-    /// Subscribe a `RoutedAppsLog` for `deviceID` BEFORE firing any stimulus.
-    private func subscribeRoutedApps(
-        _ backend: NativeBackend, deviceID: String
-    ) -> (RoutedAppsLog, Task<Void, Never>) {
-        let log = RoutedAppsLog()
-        let task = Task {
-            for await event in backend.makeEventStream() {
-                if case .routedApps(let id, let names) = event, id == deviceID {
-                    log.append(names)
-                }
-            }
-        }
-        return (log, task)
-    }
-
-    /// Test 1 (sanctioned direction, steady state): selecting a device that
-    /// currently carries a per-app redirect demotes the route, clears its
-    /// `.routedApps` claim, records a queryable conflict, and leaves the engine
-    /// session on stream 0 with the whole-system domain the sole owner — the
-    /// deferred/downgraded unbind settles with a NO-OP verify, never a
-    /// session-killing removeOutput.
-    @Test func selectingARedirectTargetDemotesTheRouteAndWinsStream0() async {
-        let (backend, engine, discovery) = makeBackend(
-            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
-        defer { backend.stop() }
-        let device = ap2Device()
-        await startAndDiscover(backend, engine, discovery, device)
-
-        let box = TelemetryLineBox()
-        Telemetry._installTestSink { box.append($0) }
-        defer { Telemetry._installTestSink(nil) }
-        let (routedApps, sub) = subscribeRoutedApps(backend, deviceID: device.id)
-        defer { sub.cancel() }
-
-        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
-        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
-        await pollUntil { routedApps.last == ["Foo"] }
-
-        backend.setOutputSet([device.id])
-
-        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
-        #expect(engine.liveStream(of: device.outputID) == 0,
-                "whole-system must win the contested device onto stream 0")
-        await pollUntil { routedApps.last?.isEmpty == true }
-        #expect(routedApps.last?.isEmpty == true,
-                ".routedApps must be cleared for the demoted device — the teal dot never lies")
-        await pollUntil {
-            self.telemetryLines(box, evt: "scope_conflict", device: device.id)
-                .contains { $0["stage"] as? String == "routeDemoted" }
-        }
-        #expect(telemetryLines(box, evt: "scope_conflict", device: device.id)
-                    .contains { $0["stage"] as? String == "routeDemoted" })
-        #expect(backend.test_scopeConflict(deviceID: device.id)?.bundleIDs == ["com.foo.player"],
-                "the conflict must be queryable while it is engaged")
-
-        // The demotion's trailing unbind resolves through the verify-first
-        // settle and finds the session already on 0 — zero extra engine ops.
-        await pollUntil(timeout: 5) {
-            self.telemetryLines(box, evt: "unbind_downgraded", device: device.id)
-                .contains { $0["settled"] as? String == "noop" }
-        }
-        #expect(telemetryLines(box, evt: "unbind_downgraded", device: device.id)
-                    .contains { $0["settled"] as? String == "noop" })
-        #expect(engine.ops.filter { $0 == "remove:\(device.outputID.rawValue)" }.count == 1,
-                "exactly ONE remove — the scope rebind's own stop half; the unbind must never have issued the I4 session-killer")
-        #expect(engine.liveStream(of: device.outputID) == 0)
-    }
-
-    /// Test 2 (demote-at-decision): a route pushed at an ALREADY-selected device
-    /// is ineligible from the first read — no `.bind` op ever exists, so there is
-    /// no fire-time race to win.
-    @Test func redirectToASelectedDeviceNeverBindsAtAll() async {
-        let (backend, engine, discovery) = makeBackend(
-            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
-        defer { backend.stop() }
-        let device = ap2Device()
-        await startAndDiscover(backend, engine, discovery, device)
-
-        backend.setOutputSet([device.id])
-        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
-
-        let box = TelemetryLineBox()
-        Telemetry._installTestSink { box.append($0) }
-        defer { Telemetry._installTestSink(nil) }
-
-        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
-
-        // The conflict record engaging proves the route WAS processed — and
-        // demoted at decision, so the absence of a bind op below is a settled
-        // fact, not a not-yet.
-        await pollUntil { backend.test_scopeConflict(deviceID: device.id) != nil }
-        #expect(backend.test_scopeConflict(deviceID: device.id)?.bundleIDs == ["com.foo.player"])
-        #expect(!engine.ops.contains { $0.hasPrefix("streamAdd:\(device.outputID.rawValue):") },
-                "demoted at decision: no per-app bind op may ever be issued for a Selected Device")
-        #expect(telemetryLines(box, evt: "scope_conflict", device: device.id)
-                    .contains { $0["stage"] as? String == "routeDemoted" })
-        #expect(engine.liveStream(of: device.outputID) == 0,
-                "the whole-system session is untouched")
-    }
-
-    /// Test 3 (forces I4 — the kill-the-fresh-session bug): the demotion's
-    /// `.unbind` fires while converge's 1→0 rebind is HELD OPEN mid-op
-    /// (`onRebindBody` between the stop and add halves), so its classification
-    /// deterministically sees the whole-system op in flight → case 3, deferred —
-    /// and the release-side settle then verifies engine truth (already 0) with
-    /// zero extra ops. The stream-0 session the user just asked for survives.
-    @Test func unbindFiringDuringConvergesRebindIsDeferredThenSettles() async {
-        let (backend, engine, discovery) = makeBackend(
-            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
-        defer { backend.stop() }
-        let device = ap2Device()
-        await startAndDiscover(backend, engine, discovery, device)
-
-        let box = TelemetryLineBox()
-        Telemetry._installTestSink { box.append($0) }
-        defer { Telemetry._installTestSink(nil) }
-
-        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
-        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
-
-        // Hold converge's 1→0 rebind open between its stop and add halves.
-        let rebindHold = HoldPoint()
-        engine.onRebindBody = { id, streamId in
-            if id == device.outputID, streamId == 0 { await rebindHold.hold() }
-        }
-
-        backend.setOutputSet([device.id])
-
-        // The demotion's `.unbind` fires while the rebind is held → deferred,
-        // not executed (case 3): the converge's outcome is unknowable now.
-        await pollUntil(timeout: 5) {
-            !self.telemetryLines(box, evt: "unbind_deferred", device: device.id).isEmpty
-        }
-        #expect(!telemetryLines(box, evt: "unbind_deferred", device: device.id).isEmpty,
-                "an unbind landing inside an in-flight whole-system op must defer to its release")
-
-        rebindHold.open()
-
-        // Converge completes; its release consumes the pending settle; the
-        // verify reads live == 0 → success with zero engine ops.
-        await pollUntil(timeout: 5) {
-            self.telemetryLines(box, evt: "unbind_downgraded", device: device.id)
-                .contains { $0["settled"] as? String == "noop" }
-        }
-        #expect(telemetryLines(box, evt: "unbind_downgraded", device: device.id)
-                    .contains { $0["settled"] as? String == "noop" })
-        #expect(engine.liveStream(of: device.outputID) == 0,
-                "the fresh stream-0 session must survive the deferred unbind")
-        #expect(engine.ops.filter { $0 == "remove:\(device.outputID.rawValue)" }.count == 1,
-                "exactly one remove — the held rebind's own stop half; the deferred unbind issued none")
-        #expect(backend.devices.first { $0.id == device.id }?.isSelected == true,
-                "whole-system bookkeeping still owns the device")
-    }
-
-    /// Test 4 (forces I3 — deselect-then-redirect): the route lands strictly
-    /// INSIDE converge's teardown `removeOutput` (pushed from the
-    /// `onRemoveOutputBody` hook, which then HOLDS the teardown open until the
-    /// bind has provably bowed out — without the hold the bind would race the
-    /// slot release and the test would flake between bow-out and direct bind).
-    /// The bind bows out `ws_in_flight`; the release re-drives it; the device
-    /// ends genuinely owned by the per-app domain.
-    @Test func bindBowsOutDuringWholeSystemTeardownAndIsRedriven() async {
-        let (backend, engine, discovery) = makeBackend(
-            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
-        defer { backend.stop() }
-        let device = ap2Device()
-        await startAndDiscover(backend, engine, discovery, device)
-
-        backend.setOutputSet([device.id])
-        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
-
-        let box = TelemetryLineBox()
-        Telemetry._installTestSink { box.append($0) }
-        defer { Telemetry._installTestSink(nil) }
-
-        let appRoute = route("com.foo.player", name: "Foo", toDevice: device.id)
-        let once = OnceFlag()
-        let backendRef = backend
-        engine.onRemoveOutputBody = { id in
-            guard id == device.outputID, !once.testAndSet() else { return }
-            // Fire the other FIFO from strictly within the teardown window…
-            backendRef.updateAppRoutes([appRoute])
-            // …and hold the teardown open until the bind has bowed out.
-            while !box.snapshot().contains(where: {
-                $0.contains("bind_superseded") && $0.contains(device.id)
-            }) {
-                try? await Task.sleep(nanoseconds: 2_000_000)
-            }
-        }
-
-        backend.setOutputSet([])   // converge teardown: the removeOutput runs the hook
-
-        await pollUntil(timeout: 5) { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
-        let live = engine.liveStream(of: device.outputID)
-        #expect(live != nil && live! >= 1,
-                "the re-driven bind must land after the whole-system release")
-        #expect(telemetryLines(box, evt: "bind_superseded", device: device.id)
-                    .contains { $0["reason"] as? String == "ws_in_flight" },
-                "the bind must bow out loudly while the teardown is in flight")
-        #expect(!telemetryLines(box, evt: "per_app_redrive").isEmpty,
-                "the release side must re-drive the bowed-out bind")
-        let ops = engine.ops
-        let removeIdx = ops.firstIndex(of: "remove:\(device.outputID.rawValue)")
-        let bindIdx = ops.firstIndex { $0.hasPrefix("streamAdd:\(device.outputID.rawValue):") }
-        #expect(removeIdx != nil && bindIdx != nil && removeIdx! < bindIdx!,
-                "the teardown's remove must strictly precede the re-driven bind — no resurrection ordering")
-    }
-
-    /// Test 5 (forces I5 — recovery-backoff ping-pong): a route pushed while a
-    /// whole-system rebind recovery holds `converging[D]` across its backoff is
-    /// demoted at decision (the device is still SELECTED), so the `.bind` that
-    /// used to land between retry attempts never exists. Deselecting mid-backoff
-    /// lets the chain reach a terminal exit, release the slot, and re-drive the
-    /// per-app bind — with no alternating add(0)/streamAdd anywhere.
-    @Test func routeDuringWholeSystemRecoveryBackoffDoesNotPingPong() async {
-        let engine = SpyEngine()
-        let discovery = FakeDiscovery()
-        let capture = FakeCapture()
-        let backend = NativeBackend(
-            engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
-            systemVolume: FakeSystemVolume(),
-            ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]),
-            maxRebindRecoveryAttempts: 6, rebindRecoveryRetryDelay: 0.25)
-        defer { backend.stop() }
-        let device = ap2Device(id: "AA:BB:CC:DD:EE:A5", name: "Backoff Speaker")
-        await startSelectAndStream(backend, engine, discovery, capture, device)
-
-        let box = TelemetryLineBox()
-        Telemetry._installTestSink { box.append($0) }
-        defer { Telemetry._installTestSink(nil) }
-
-        // Make the recovery's attempt fail: flush no-ops (falls through to
-        // teardown+re-add), re-add throws → a backed-off retry holds the slot.
-        engine.flushNoOps = [device.outputID.rawValue]
-        engine.addFailures = [device.outputID.rawValue]
-        capture.fireDeviceRateRebuild()
-        await pollUntil(timeout: 5) {
-            self.telemetryLines(box, evt: "rebind", device: device.id)
-                .contains { $0["outcome"] as? String == "retry_scheduled" }
-        }
-
-        // The route lands while the recovery owns the device across its backoff.
-        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
-        await pollUntil(timeout: 5) { backend.test_scopeConflict(deviceID: device.id) != nil }
-        #expect(backend.test_scopeConflict(deviceID: device.id) != nil,
-                "the route must be demoted — the device is still selected")
-        #expect(!engine.ops.contains { $0.hasPrefix("streamAdd:\(device.outputID.rawValue):") },
-                "no per-app bind may land between the recovery's retry attempts")
-
-        // Deselect mid-backoff and let the engine accept the next attempt: the
-        // chain reaches a terminal exit, the release re-drives the route.
-        backend.setOutputSet([])
-        engine.addFailures = []
-        await pollUntil(timeout: 10) { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
-        #expect((engine.liveStream(of: device.outputID) ?? 0) >= 1,
-                "after the deselect the demoted route must re-engage by itself")
-        let bindOps = engine.ops.filter {
-            $0.hasPrefix("add:\(device.outputID.rawValue)")
-                || $0.hasPrefix("streamAdd:\(device.outputID.rawValue):")
-        }
-        #expect(bindOps.filter { $0.hasPrefix("streamAdd:") }.count == 1,
-                "exactly one per-app bind — no ping-pong")
-        #expect(bindOps.last?.hasPrefix("streamAdd:") == true,
-                "the FINAL bind for the device must be the per-app one — an add(0) after it is the ping-pong")
-    }
-
-    /// Test 6 (forces I1/I2 TOCTOU, favorable engine order): the selection lands
-    /// MID per-app add — after the bind's fire-time check passed, before the
-    /// spy's `liveStreams` write (the wired-into-`addOutput(_:streamId:)`
-    /// `onAddOutputBody`). Arming the PTP activator from the same hook parks the
-    /// kicked converge inside `ensurePTPTakeover` until the per-app session is
-    /// provably live, FORCING converge's `boundStreamId` read to see stream 1 —
-    /// so it must arbitrate on engine truth and rebind to 0.
-    @Test func selectionLandingInsidePerAppAddConvergesToWholeSystem() async {
-        let activator = ArmableHoldingPTPActivator()
-        let (backend, engine, discovery) = makeBackend(
-            ptpHelperActivator: activator,
-            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
-        defer { backend.stop() }
-        let device = ap2Device()
-        await startAndDiscover(backend, engine, discovery, device)
-
-        let box = TelemetryLineBox()
-        Telemetry._installTestSink { box.append($0) }
-        defer { Telemetry._installTestSink(nil) }
-
-        let once = OnceFlag()
-        let backendRef = backend
-        engine.onAddOutputBody = { id in
-            guard id == device.outputID, !once.testAndSet() else { return }
-            activator.arm()
-            backendRef.setOutputSet([device.id])
-        }
-
-        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
-
-        await pollUntil { engine.liveStream(of: device.outputID) == 1 }
-        #expect(engine.liveStream(of: device.outputID) == 1,
-                "precondition: the per-app session must be live while converge is still parked")
-        await pollUntil { activator.holding }
-        activator.release()
-
-        await pollUntil(timeout: 5) { engine.liveStream(of: device.outputID) == 0 }
-        #expect(engine.liveStream(of: device.outputID) == 0,
-                "converge must arbitrate on engine truth and move the session to 0")
-        #expect(engine.rebindCalls.contains { $0.0 == device.outputID && $0.1 == 0 },
-                "the move must go through the serialized rebindOutput")
-        #expect(engine.maxConcurrent == 1,
-                "the per-app add and converge's rebind must never overlap for the device")
-        await pollUntil { backend.test_scopeConflict(deviceID: device.id) != nil }
-        #expect(backend.test_scopeConflict(deviceID: device.id) != nil,
-                "the mid-op claim must surface as a queryable demotion")
-        // The demotion's deferred unbind settles with a no-op verify — no
-        // surviving per-app engine claim.
-        await pollUntil(timeout: 5) {
-            self.telemetryLines(box, evt: "unbind_downgraded", device: device.id)
-                .contains { $0["settled"] as? String == "noop" }
-        }
-        #expect(engine.liveStream(of: device.outputID) == 0)
-    }
-
-    /// Test 7 (end-to-end backend-only exclusivity, no GroupController): a
-    /// demoted route re-engages BY ITSELF on deselect — no route-table edit in
-    /// either direction, conflict record cleared, `.routedApps` repopulated.
-    @Test func demotedRouteReengagesOnDeselect() async {
-        let (backend, engine, discovery) = makeBackend(
-            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
-        defer { backend.stop() }
-        let device = ap2Device()
-        await startAndDiscover(backend, engine, discovery, device)
-
-        let box = TelemetryLineBox()
-        Telemetry._installTestSink { box.append($0) }
-        defer { Telemetry._installTestSink(nil) }
-        let (routedApps, sub) = subscribeRoutedApps(backend, deviceID: device.id)
-        defer { sub.cancel() }
-
-        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
-        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
-        await pollUntil { routedApps.last == ["Foo"] }
-
-        // Select: demoted, whole-system wins.
-        backend.setOutputSet([device.id])
-        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
-        await pollUntil { backend.test_scopeConflict(deviceID: device.id) != nil }
-        await pollUntil { routedApps.last?.isEmpty == true }
-
-        // Deselect: the route re-engages with no route-table edit. (The mixer may
-        // assign a FRESH stream id on re-engage — any per-app stream (>= 1) is
-        // the ownership fact under test.)
-        backend.setOutputSet([])
-        await pollUntil(timeout: 5) { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
-        #expect((engine.liveStream(of: device.outputID) ?? 0) >= 1,
-                "the demoted route must re-engage the moment the device is deselected")
-        await pollUntil { routedApps.last == ["Foo"] }
-        #expect(routedApps.last == ["Foo"], ".routedApps must repopulate on restore")
-        await pollUntil { backend.test_scopeConflict(deviceID: device.id) == nil }
-        #expect(backend.test_scopeConflict(deviceID: device.id) == nil,
-                "the conflict record must clear on disengage")
-        #expect(telemetryLines(box, evt: "scope_conflict", device: device.id)
-                    .contains { $0["stage"] as? String == "routeRestored" },
-                "the disengage must be loud too")
-    }
-
     /// Test 8 (constraint-2 pin): the single-domain op traces are byte-identical
     /// to the pre-arbiter sequences — zero extra engine ops on either path.
     @Test func wholeSystemOnlyAndPerAppOnlyOpTracesAreUnchanged() async {
@@ -5103,136 +5152,6 @@ extension SerializedSharedState {
         }
     }
 
-    /// Test 9 (forces the I1 interleaving the original design believed
-    /// impossible): converge reads `boundStreamId` = nil BEFORE the in-flight
-    /// per-app add lands (its `liveStreams` write is held open), then converge's
-    /// own stream-0 `addOutput` is the engine's silent `.alreadyBound` no-op —
-    /// `added` records a session the engine never moved, the engine is stuck on
-    /// stream 1. The guaranteed trailing `.unbind` (FIFO-ordered after the
-    /// astray bind) is the deterministic last word: its case-4 verify reads
-    /// engine truth AFTER the astray op completed and rebinds 1 → 0.
-    @Test func staleConvergeReadIsHealedByTheSettlingUnbind() async {
-        let (backend, engine, discovery) = makeBackend(
-            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
-        defer { backend.stop() }
-        let device = ap2Device()
-        await startAndDiscover(backend, engine, discovery, device)
-
-        let box = TelemetryLineBox()
-        Telemetry._installTestSink { box.append($0) }
-        defer { Telemetry._installTestSink(nil) }
-
-        let perAppHold = HoldPoint()
-        let wsHold = HoldPoint()
-        engine.onAddOutputHold = { id, stream in
-            guard id == device.outputID else { return }
-            if stream >= 1 { await perAppHold.hold() } else { await wsHold.hold() }
-        }
-
-        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
-        await pollUntil { perAppHold.entered }   // per-app add in flight, pre-liveStreams-write
-
-        backend.setOutputSet([device.id])
-        // Converge's boundStreamId read is FORCED to see nil (the per-app write
-        // is still held), so it falls to the plain stream-0 add — held in turn.
-        await pollUntil(timeout: 5) { wsHold.entered }
-
-        perAppHold.open()                        // per-app session lands: live → 1
-        await pollUntil { engine.liveStream(of: device.outputID) == 1 }
-        wsHold.open()                            // converge's add: silent .alreadyBound no-op
-
-        await pollUntil(timeout: 5) { engine.liveStream(of: device.outputID) == 0 }
-        #expect(engine.liveStream(of: device.outputID) == 0,
-                "the settling unbind must heal the silent-no-op corruption back to stream 0")
-        #expect(engine.rebindCalls.contains { $0.0 == device.outputID && $0.1 == 0 },
-                "the heal must be the verify-first settle's rebindOutput(_, 0)")
-        await pollUntil(timeout: 5) {
-            self.telemetryLines(box, evt: "unbind_downgraded", device: device.id)
-                .contains { $0["settled"] as? String == "rebound" }
-        }
-        #expect(telemetryLines(box, evt: "unbind_downgraded", device: device.id)
-                    .contains { $0["settled"] as? String == "rebound" },
-                "the settle must record that it found an astray session and rebound it")
-        await pollUntil { backend.test_scopeConflict(deviceID: device.id) != nil }
-        #expect(backend.test_scopeConflict(deviceID: device.id) != nil,
-                "no per-app bookkeeping survives — the demotion is queryable")
-    }
-
-    /// Test 10 (defect found in the final adversarial review): an `.unbind`
-    /// deferred mid-converge (case 3) is consumed at release by RE-ENQUEUING it —
-    /// but when the user DESELECTED while that converge was still in flight, the
-    /// restore replay has already re-decided a binding for the device and its
-    /// `.bind` sits AHEAD of the re-enqueued unbind in the FIFO (here: parked
-    /// inside `ensurePTPTakeover` on the armed activator, so the ordering is
-    /// forced, not hoped). The stale unbind would then fire with no claim left
-    /// (case 1) and removeOutput-kill the freshly re-engaged per-app session —
-    /// and with `streamBindings` still set, every replay guard
-    /// (`streamBindings == nil`) skips the device forever: silent stranding.
-    /// The consume must DROP the settle (loudly) when the decision layer already
-    /// wants the device bound again.
-    @Test func staleDeferredUnbindMustNotKillAReengagedRoute() async {
-        let activator = ArmableHoldingPTPActivator()
-        let (backend, engine, discovery) = makeBackend(
-            ptpHelperActivator: activator,
-            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
-        defer { backend.stop() }
-        let device = ap2Device()
-        await startAndDiscover(backend, engine, discovery, device)
-
-        let box = TelemetryLineBox()
-        Telemetry._installTestSink { box.append($0) }
-        defer { Telemetry._installTestSink(nil) }
-
-        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
-        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
-
-        // Hold converge's 1→0 rebind open so the demotion's unbind
-        // deterministically defers (case 3) and the deselect below lands while
-        // the converge is provably still in flight.
-        let rebindHold = HoldPoint()
-        engine.onRebindBody = { id, streamId in
-            if id == device.outputID, streamId == 0 { await rebindHold.hold() }
-        }
-
-        backend.setOutputSet([device.id])
-        await pollUntil(timeout: 5) {
-            !self.telemetryLines(box, evt: "unbind_deferred", device: device.id).isEmpty
-        }
-        #expect(!telemetryLines(box, evt: "unbind_deferred", device: device.id).isEmpty,
-                "precondition: the demotion's unbind must have deferred mid-converge")
-
-        // Deselect while the converge is held. The restore replay re-decides the
-        // binding and its `.bind` parks inside `ensurePTPTakeover` (armed) —
-        // provably queued AHEAD of anything the release later enqueues.
-        activator.arm()
-        backend.setOutputSet([])
-        await pollUntil(timeout: 5) { activator.holding }
-        #expect(activator.holding,
-                "precondition: the restored route's bind must be parked pre-gate before the release runs")
-
-        // Let the converge finish: its add-half completes, the loop tears the
-        // now-undesired session down, and the release consumes the deferred
-        // settle — which must be DROPPED, not re-enqueued behind the parked bind.
-        rebindHold.open()
-        await pollUntil(timeout: 5) {
-            self.telemetryLines(box, evt: "unbind_redrive", device: device.id)
-                .contains { $0["outcome"] as? String == "dropped_route_reengaged" }
-        }
-        #expect(telemetryLines(box, evt: "unbind_redrive", device: device.id)
-                    .contains { $0["outcome"] as? String == "dropped_route_reengaged" },
-                "the release must drop (loudly) a settle whose device the route table re-claimed")
-
-        activator.release()
-        await pollUntil(timeout: 5) { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
-        #expect((engine.liveStream(of: device.outputID) ?? 0) >= 1,
-                "the re-engaged per-app session must survive — a stale unbind here is silent stranding")
-        let ops = engine.ops
-        let lastBind = ops.lastIndex { $0.hasPrefix("streamAdd:\(device.outputID.rawValue):") }
-        let lastRemove = ops.lastIndex(of: "remove:\(device.outputID.rawValue)")
-        #expect(lastBind != nil && (lastRemove == nil || lastRemove! < lastBind!),
-                "no remove may follow the re-engaged bind — the stale unbind must never fire")
-    }
-
     // MARK: Per-app PTP takeover gate (redirect-order bug, PLAN-AIRPLAY-COEXISTENCE.md)
     //
     // The T5+T4 takeover gate originally ran only in `convergeDevice`, which made
@@ -5242,18 +5161,6 @@ extension SerializedSharedState {
     // select had already woken the helper. These pin the fix: every per-app bind
     // runs the same gate, a clockless bind is refused (not silently issued), and
     // a refused redirect self-heals on the next successful takeover.
-
-    /// A per-app capture that actually reaches `.capturing` for `com.foo.player`
-    /// — these tests are about the BIND gate, and a capture left failing (the
-    /// default `NoAudioProcesses` resolver) would mark the app dead and
-    /// republish an EMPTY topology mid-test, racing every assertion about the
-    /// bind itself.
-    private func succeedingPerAppCapture() -> PerAppCaptureCoordinator {
-        PerAppCaptureCoordinator(
-            makeTap: { FlakyThenSucceedsTap(failuresBeforeSuccess: 0) },
-            processResolver: singleProcessResolver(["com.foo.player": 4242]),
-            muteBehavior: .mutedWhenTapped)
-    }
 
     /// Redirect-FIRST (nothing selected, the launch/path-1+3 shape): the per-app
     /// bind itself must run the takeover gate — the helper activation must not
@@ -5476,7 +5383,7 @@ extension SerializedSharedState {
                 if case .routedApps(let id, let names) = $0 { return id == device.id && names == ["Foo"] }
                 return false
             }
-        } after: { backend.updateAppRoutes([self.route("com.foo", name: "Foo", toDevice: device.id)]) }
+        } after: { backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)]) }
         #expect(first.contains {
             if case .routedApps(let id, let names) = $0 { return id == device.id && names == ["Foo"] }
             return false
@@ -5490,8 +5397,8 @@ extension SerializedSharedState {
             }
         } after: {
             backend.updateAppRoutes([
-                self.route("com.foo", name: "Foo", toDevice: device.id),
-                self.route("com.bar", name: "Bar", toDevice: device.id),
+                route("com.foo", name: "Foo", toDevice: device.id),
+                route("com.bar", name: "Bar", toDevice: device.id),
             ])
         }
         #expect(second.contains {
@@ -5545,7 +5452,7 @@ extension SerializedSharedState {
                 return false
             }
         } after: {
-            backend.updateAppRoutes([self.route("com.foo", name: "Foo", toDevice: device.id)])
+            backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
         }
 
         #expect(events.contains {
@@ -5582,8 +5489,8 @@ extension SerializedSharedState {
             }
         } after: {
             backend.updateAppRoutes([
-                self.route("com.foo", name: "Foo", toDevice: device.id),
-                self.route("com.bar", name: "Bar", toDevice: device.id),
+                route("com.foo", name: "Foo", toDevice: device.id),
+                route("com.bar", name: "Bar", toDevice: device.id),
             ])
         }
         await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
@@ -5609,49 +5516,6 @@ extension SerializedSharedState {
   }, "a rebind that fails at the engine must clear .routedApps back to empty, not leave it falsely claiming Bar's stream")
 
         await pollUntil { engine.streamAddCalls.filter { $0.0 == device.outputID }.count >= 2 }
-    }
-
-    /// The failed-bind fallback above must ALSO leave a Telemetry trail — a
-    /// silently-swallowed engine failure is invisible to any post-hoc diagnosis.
-    /// Uses `Telemetry._installTestSink` (the documented capture seam,
-    /// `Telemetry.swift`), same pattern as
-    /// `testRebindRecoveryEmitsTelemetryWithIncrementingGenerationAndAttempt`.
-    @Test func failedBindLogsTelemetry() async {
-        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo"]))
-        defer { backend.stop() }
-        let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Telemetry Bind-Fail Speaker")
-        await startAndDiscover(backend, engine, discovery, device)
-        engine.addFailures = [device.outputID.rawValue]
-
-        let box = TelemetryLineBox()
-        Telemetry._installTestSink { box.append($0) }
-        defer { Telemetry._installTestSink(nil) }
-
-        backend.updateAppRoutes([self.route("com.foo", name: "Foo", toDevice: device.id)])
-
-        func parsed(_ line: String) -> [String: Any]? {
-            guard let data = line.data(using: .utf8),
-                  let raw = try? JSONSerialization.jsonObject(with: data),
-                  let obj = raw as? [String: Any]
-            else { return nil }
-            return obj
-        }
-        func bindFailedLines() -> [[String: Any]] {
-            box.snapshot().compactMap(parsed).filter {
-                $0["cat"] as? String == "airplay" && $0["evt"] as? String == "bind_failed"
-                    && $0["device"] as? String == device.id
-            }
-        }
-        // `Telemetry.log` is non-blocking (its own writer queue), so poll for the
-        // line to land rather than reading the box immediately after the
-        // `.routedApps` event that's emitted from the same `stateQueue.sync` block
-        // — same pattern as
-        // `testRebindRecoveryEmitsTelemetryWithIncrementingGenerationAndAttempt`.
-        await pollUntil(timeout: 5) { !bindFailedLines().isEmpty }
-        #expect(!bindFailedLines().isEmpty,
-                "a failed bind must log a Telemetry(.airplay, \"bind_failed\", ...) line")
-        #expect(bindFailedLines().first?["op"] as? String == "bind",
-                "the logged op must identify this as a bind (not rebind) failure")
     }
 
     // MARK: T10 cross-component gap coverage
@@ -5870,8 +5734,8 @@ extension SerializedSharedState {
             }
         } after: {
             backend.updateAppRoutes([
-                self.route("com.foo", name: "Foo", toDevice: device.id),
-                self.route("com.bar", name: "Bar", toDevice: device.id),
+                route("com.foo", name: "Foo", toDevice: device.id),
+                route("com.bar", name: "Bar", toDevice: device.id),
             ])
         }
         // `.routedApps` is emitted on stateQueue but the engine bind runs later on
@@ -6058,7 +5922,8 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            processNotYetAudibleRetryDelay: 0.05, processNotYetAudibleMaxBackoff: 0.2)
+            processNotYetAudibleRetryDelay: 0.05, processNotYetAudibleMaxBackoff: 0.2,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:83", name: "Retry Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6096,7 +5961,8 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.08)
+            processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.08,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:85", name: "Unbounded Retry Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6130,7 +5996,8 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.05)
+            processNotYetAudibleRetryDelay: 0.02, processNotYetAudibleMaxBackoff: 0.05,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:86", name: "De-routed Retry Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6191,7 +6058,8 @@ extension SerializedSharedState {
             // A generous 0.3s delay (well past the 5ms poll granularity and the
             // sub-millisecond de-route call below) so the de-route deterministically
             // lands before the timer fires, rather than racing it.
-            processNotYetAudibleRetryDelay: 0.3, processNotYetAudibleMaxBackoff: 0.6)
+            processNotYetAudibleRetryDelay: 0.3, processNotYetAudibleMaxBackoff: 0.6,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:8A", name: "Orphan Race Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6259,7 +6127,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture)
+            processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:8C", name: "Toggle Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6335,7 +6204,8 @@ extension SerializedSharedState {
         let backend = NativeBackend(
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture)
+            processResolver: singleProcessResolver(["com.foo": 4242]), injectedPerAppCapture: perAppCapture,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Terminate Relaunch Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6357,42 +6227,6 @@ extension SerializedSharedState {
         #expect(!(backend.test_hasEverCaptured(bundleID: "com.foo")), "a quit must forget everCapturedBundleIDs for the terminated bundle, per its own doc comment (\"cleared ... when its capture stops\")")
     }
 
-    /// A `ProcessAudioTap` that always succeeds and stores the
-    /// `onDefaultDeviceChanged` closure it was handed, so a test can force a
-    /// tap rebuild (`fireDeviceChange()`) at will — the per-app analogue of
-    /// `PerAppCaptureCoordinatorTests.FakeProcessTap`, needed here to drive
-    /// `NativeBackend`'s T4 rebind-recovery path (a rebuild with no death in
-    /// between is a "recapture", which triggers `resetAirPlaySessionForRoutedApp`).
-    private final class RebindTriggerTap: ProcessAudioTap, @unchecked Sendable {
-        var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
-        var onDefaultDeviceChanged: (@Sendable () -> Void)?
-        func createAndStart(processes: Set<AudioProcess>, bundleID: String, muteBehavior: TapMuteBehavior) throws -> TapFormat {
-            TapFormat(sampleRate: 48000, channels: 2, bitsPerSample: 32, isFloat: true, isInterleaved: false)
-        }
-        func teardown() {}
-        func fireDeviceChange() { onDefaultDeviceChanged?() }
-
-        /// True once `PerAppCaptureCoordinator` has installed its device-change
-        /// hook on this tap (`PerAppCaptureCoordinator.swift:355`/`:433`).
-        ///
-        /// **Every test must wait for this before calling
-        /// `fireDeviceChange()`.** `fireDeviceChange()` is
-        /// `onDefaultDeviceChanged?()` — a SILENT no-op while the hook is still
-        /// nil, so a too-early call produces no recapture, no session reset, no
-        /// rebind and no telemetry, and every downstream assertion then fails
-        /// with an empty collection rather than pointing at the real cause.
-        ///
-        /// The coordinator installs the hook on its own async start path, which
-        /// is NOT the same path as `engine.streamAddCalls` gaining the device —
-        /// the precondition these tests used to poll on. Under XCTest, where
-        /// each test method owned a whole process, the hook was always in place
-        /// by then; under swift-testing's in-process concurrency it sometimes
-        /// is not. Measured on this branch before the wait was added: the three
-        /// tests below failed in 4 of 10 full-suite runs and 7 of 10 runs of
-        /// `--filter 'NativeBackendTests|OwnToneBackendTests'`.
-        var isArmed: Bool { onDefaultDeviceChanged != nil }
-    }
-
     /// T4 fix: `resetAirPlaySessionForRoutedApp`'s bounded rebind recovery
     /// (`enqueueRebindRecovery`/`performRebindRecovery`) retries a failing
     /// `addOutput` with backoff and eventually re-binds once the engine starts
@@ -6408,7 +6242,8 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02)
+            maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:87", name: "Rebind Recovery Speaker")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6467,7 +6302,8 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: FakeSystemVolume(), ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            maxRebindRecoveryAttempts: 2, rebindRecoveryRetryDelay: 0.02)
+            maxRebindRecoveryAttempts: 2, rebindRecoveryRetryDelay: 0.02,
+            aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let device = ap2Device(id: "AA:BB:CC:DD:EE:88", name: "Gone Receiver")
         await startAndDiscover(backend, engine, discovery, device)
@@ -6503,166 +6339,6 @@ extension SerializedSharedState {
         try? await Task.sleep(nanoseconds: 300_000_000)
         #expect(engine.streamAddCalls.filter { $0.0 == device.outputID }.count == countAtCeiling,
                        "recovery must give up after maxRebindRecoveryAttempts, not retry forever")
-    }
-
-    /// Thread-safe capture box for a `Telemetry._installTestSink` — the sink runs
-    /// on Telemetry's own writer queue, a different thread than the test body, so
-    /// appending straight into a plain `[String]` there would race the read here.
-    /// Mirrors `TelemetryTests`'s own private `Locked` helper (`TelemetryTests.swift`).
-    private final class TelemetryLineBox: @unchecked Sendable {
-        private let lock = NSLock()
-        private var lines: [String] = []
-        func append(_ line: String) { lock.lock(); lines.append(line); lock.unlock() }
-        func snapshot() -> [String] { lock.lock(); defer { lock.unlock() }; return lines }
-    }
-
-    /// T4: `enqueueRebindRecovery`'s Telemetry instrumentation. Fires TWO
-    /// recaptures back-to-back on the SAME device with NO `await` between them
-    /// — `RebindTriggerTap.fireDeviceChange()` -> `PerAppCaptureCoordinator.
-    /// handleDeviceChange` -> `transition`/`onStateChange` ->
-    /// `NativeBackend.handlePerAppCaptureHealthChange` ->
-    /// `resetAirPlaySessionForRoutedApp` is a fully SYNCHRONOUS call chain on
-    /// THIS thread (no suspension point anywhere in it), so the second call's
-    /// generation bump only needs to beat gen 1's recovery `Task` — spawned by
-    /// the first call, but a freshly-spawned `Task` can start running on
-    /// another cooperative-pool thread concurrently, so being synchronous on
-    /// THIS thread alone doesn't guarantee the ordering. `engine.opDelayNanos`
-    /// below makes gen 1's engine ops (on that other thread) deterministically
-    /// slower than this thread's synchronous fireDeviceChange chain, so the
-    /// second call is guaranteed to see gen 1 still in place (its own recovery
-    /// hasn't resolved and cleared it yet) — no flaky race. Because both
-    /// recovery `Task`s share the `bindTail` FIFO, gen 1's completion (and its
-    /// `superseded` outcome) is then a hard PREREQUISITE of gen 2 ever starting
-    /// its own first attempt, not a further race to poll for.
-    ///
-    /// Asserts the emitted `airplay` lines let a reader reconstruct the exact
-    /// causal chain end to end:
-    ///  - a `session_reset` per recapture, its `gen` MONOTONICALLY INCREASING
-    ///    (1, then 2) — a fresh recapture bumps the single-flight generation
-    ///    rather than reusing it;
-    ///  - gen 1's superseded recovery says so explicitly (`outcome:superseded`)
-    ///    instead of silently vanishing;
-    ///  - gen 2 (deliberately forced to fail once before recovering, the same
-    ///    forced-failure shape `testRebindRecoveryRetriesThenSucceedsWithin
-    ///    BoundedAttempts` above uses) shows an INCREMENTING `attempt` number
-    ///    (1, then 2) before a terminal `succeeded` outcome.
-    /// Uses `Telemetry._installTestSink` (the documented capture seam,
-    /// `Telemetry.swift`) rather than touching disk; the sink is removed in a
-    /// `defer` so a later test in this same process (swift test --parallel runs
-    /// a class's methods serially in one process) never inherits it.
-    @Test func rebindRecoveryEmitsTelemetryWithIncrementingGenerationAndAttempt() async throws {
-        let tap = RebindTriggerTap()
-        let resolver = singleProcessResolver(["com.foo": 4242])
-        let perAppCapture = PerAppCaptureCoordinator(
-            makeTap: { tap }, processResolver: resolver, muteBehavior: .mutedWhenTapped)
-        let engine = SpyEngine()
-        let discovery = FakeDiscovery()
-        let backend = NativeBackend(
-            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
-            ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
-            processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02)
-        defer { backend.stop() }
-        let device = ap2Device(id: "AA:BB:CC:DD:EE:89", name: "Telemetry Speaker")
-        await startAndDiscover(backend, engine, discovery, device)
-
-        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
-        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
-
-        let box = TelemetryLineBox()
-        Telemetry._installTestSink { box.append($0) }
-        defer { Telemetry._installTestSink(nil) }
-
-        func parsed(_ line: String) -> [String: Any]? {
-            guard let data = line.data(using: .utf8),
-                  let raw = try? JSONSerialization.jsonObject(with: data),
-                  let obj = raw as? [String: Any]
-            else { return nil }
-            return obj
-        }
-        func airplayLines(evt: String) -> [[String: Any]] {
-            box.snapshot().compactMap(parsed).filter {
-                $0["cat"] as? String == "airplay" && $0["evt"] as? String == evt
-                    && $0["device"] as? String == device.id
-            }
-        }
-        func rebindLines(gen: Int) -> [[String: Any]] {
-            airplayLines(evt: "rebind").filter { $0["gen"] as? String == "\(gen)" }
-        }
-
-        // Both set BEFORE firing anything, so there is no race with the
-        // recovery `Task`'s own scheduling: a freshly spawned `Task` can start
-        // running on another cooperative-pool thread concurrently — the two
-        // `fireDeviceChange()` calls below have no `await` between them, which
-        // keeps THIS thread's own chain synchronous, but does not by itself
-        // stop gen 1's recovery `Task` from being picked up and racing ahead on
-        // a different thread. `opDelayNanos` makes gen 1's engine ops
-        // deterministically slower than this thread's synchronous
-        // fireDeviceChange→…→resetAirPlaySessionForRoutedApp chain — a GENEROUS
-        // margin (not just "large enough on an idle machine"): it must stay well
-        // above the synchronous chain's cost even under heavy contention (e.g.
-        // several `swift build`/`swift test` runs competing for cores in sibling
-        // worktrees), or the second `fireDeviceChange()` could occasionally lose
-        // the race and flake. `addFailures` set here (rather than after firing)
-        // guarantees gen 2's own first attempt actually fails, giving its trail
-        // an incrementing attempt number to assert on below.
-        engine.opDelayNanos = 200_000_000
-        engine.addFailures = [device.outputID.rawValue]
-
-        // The per-app tap's device-change hook is installed on the
-        // coordinator's own async start path, which is NOT the path the
-        // `engine.streamAddCalls` poll above waits on. Wait for it explicitly:
-        // `fireDeviceChange()` is a silent no-op until it exists (see
-        // `RebindTriggerTap.isArmed`).
-        await pollUntil(timeout: 5) { tap.isArmed }
-        #expect(tap.isArmed, "the per-app capture must have installed its device-change hook before a recapture is fired — otherwise fireDeviceChange() does nothing and every assertion below fails against an empty collection")
-
-        // Two recaptures, back-to-back, no `await` in between.
-        tap.fireDeviceChange()
-        tap.fireDeviceChange()
-
-        await pollUntil(timeout: 5) {
-            rebindLines(gen: 2).contains { $0["outcome"] as? String == "retry_scheduled" }
-        }
-        engine.addFailures = []
-        await pollUntil(timeout: 5) {
-            rebindLines(gen: 2).contains { $0["outcome"] as? String == "succeeded" }
-        }
-
-        // Monotonically increasing generation: the two `session_reset` triggers,
-        // IN THE ORDER THEY WERE LOGGED, went 1 then 2 — never resets, never repeats.
-        let resetGens = airplayLines(evt: "session_reset").compactMap { ($0["gen"] as? String).flatMap(Int.init) }
-        #expect(resetGens == [1, 2],
-                       "session_reset gen must strictly increase across the two recaptures")
-        #expect(Set(airplayLines(evt: "session_reset").compactMap { $0["scope"] as? String }) == ["com.foo"],
-                       "session_reset must record which routed app (scope) triggered it")
-
-        // Gen 1's single in-flight attempt must recognize it was superseded by
-        // gen 2 — this is a prerequisite of gen 2 ever starting (shared
-        // `bindTail`), so it is already present by now, not a further race.
-        #expect(rebindLines(gen: 1).contains { $0["outcome"] as? String == "superseded" },
-                      "gen 1's recovery must say it was superseded, not silently vanish")
-        #expect(rebindLines(gen: 1).compactMap { $0["reason"] as? String }.last == "gen_superseded")
-
-        // Incrementing attempt number WITHIN generation 2: attempts 1 and 2 both
-        // appear, and attempt numbers never go backwards across the ordered
-        // trail for this one generation.
-        let gen2Attempts = rebindLines(gen: 2).compactMap { ($0["attempt"] as? String).flatMap(Int.init) }
-        #expect(gen2Attempts.contains(1), "attempt 1 must be recorded")
-        #expect(gen2Attempts.contains(2), "attempt 2 must be recorded after the forced failure")
-        #expect(gen2Attempts == gen2Attempts.sorted(),
-                       "attempt numbers must never decrease across the ordered trail for one generation")
-
-        // Every rebind line for gen 2 carries the causal fields the trail
-        // depends on: an accurate trigger and a real outcome.
-        for obj in rebindLines(gen: 2) {
-            #expect(obj["trigger"] as? String == "recapture")
-            #expect(obj["outcome"] as? String != nil, "every rebind line must carry an outcome")
-        }
-
-        // Gen 2's trail ends in a real terminal outcome, not a lone "scheduled"
-        // or "retry_scheduled" line with no resolution.
-        #expect(rebindLines(gen: 2).contains { $0["outcome"] as? String == "succeeded" })
     }
 
     /// T8 edge case 2 (device disappears while routed), driven through the REAL
@@ -6814,45 +6490,6 @@ extension SerializedSharedState {
     }
 
     // MARK: Local playback (Bug T2 — .currentDevice as an independent local stream)
-
-    /// A ``LocalPlaybackControlling`` double: records every call so a test can
-    /// assert the NativeBackend wiring without an `AVAudioEngine` or audio
-    /// hardware (mirrors `FakeCapture` for the whole-system tap seam).
-    private final class SpyLocalPlayback: LocalPlaybackControlling, @unchecked Sendable {
-        private let lock = NSLock()
-        private var _added: [(bundleID: String, volume: Float)] = []
-        private var _removed: [String] = []
-        private var _volumes: [(bundleID: String, volume: Float)] = []
-        private var _receiveCount = 0
-        private var _started = false
-
-        func addApp(bundleID: String, tapFormat: TapFormat, volume: Float) throws {
-            lock.withLock { _added.append((bundleID, volume)) }
-        }
-        func removeApp(bundleID: String) { lock.withLock { _removed.append(bundleID) } }
-        func setVolume(_ volume: Float, for bundleID: String) {
-            lock.withLock { _volumes.append((bundleID, volume)) }
-        }
-        func receive(buffer: CapturedBuffer, for bundleID: String) {
-            lock.withLock { _receiveCount += 1 }
-        }
-        func start() throws { lock.withLock { _started = true } }
-        func stop() { lock.withLock { _started = false } }
-        var onAppLevel: (@Sendable (_ bundleID: String, _ rms: Float) -> Void)?
-        private var _meteringActive = false
-        func setMeteringActive(_ active: Bool) { lock.withLock { _meteringActive = active } }
-        var meteringActive: Bool { lock.withLock { _meteringActive } }
-
-        var addedApps: [(bundleID: String, volume: Float)] { lock.withLock { _added } }
-        var removedApps: [String] { lock.withLock { _removed } }
-        var volumeSets: [(bundleID: String, volume: Float)] { lock.withLock { _volumes } }
-        var receiveCount: Int { lock.withLock { _receiveCount } }
-        var didStart: Bool { lock.withLock { _started } }
-        /// The volume the player for `bundleID` was most recently ADDED at.
-        func addedVolume(for bundleID: String) -> Float? {
-            lock.withLock { _added.last { $0.bundleID == bundleID }?.volume }
-        }
-    }
 
     /// Routing an app to `.currentDevice` (Bug T2) must (1) exclude it from the
     /// whole-system AirPlay tap — so it doesn't ALSO play in the AirPlay mix — and
@@ -7031,66 +6668,6 @@ extension SerializedSharedState {
     }
 
     // MARK: - Metering: three real level sources (T3)
-
-    /// Records `.level`/`.appLevel` events (the two the other `collect` helpers
-    /// deliberately skip) with sync accessors so `pollUntil` can inspect them.
-    private final class LevelSink: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _device: [(id: String, rms: Float)] = []
-        private var _app: [(bundleID: String, rms: Float)] = []
-        func record(_ e: BackendEvent) {
-            switch e {
-            case .level(let id, let rms): lock.withLock { _device.append((id, rms)) }
-            case .appLevel(let b, let rms): lock.withLock { _app.append((b, rms)) }
-            default: break
-            }
-        }
-        /// The most recent `.level` for `id`, or nil if none seen.
-        func lastDeviceLevel(_ id: String) -> Float? { lock.withLock { _device.last { $0.id == id }?.rms } }
-        /// Whether any `.appLevel` has been seen for `bundleID`.
-        func hasAppLevel(_ bundleID: String) -> Bool { lock.withLock { _app.contains { $0.bundleID == bundleID } } }
-        /// The most recent `.appLevel` for `bundleID`, or nil.
-        func lastAppLevel(_ bundleID: String) -> Float? { lock.withLock { _app.last { $0.bundleID == bundleID }?.rms } }
-    }
-
-    /// Subscribe and record every `.level`/`.appLevel`. Caller cancels the task.
-    private func subscribeLevels(_ backend: NativeBackend) -> (LevelSink, Task<Void, Never>) {
-        let sink = LevelSink()
-        let stream = backend.makeEventStream()
-        let task = Task { for await event in stream { sink.record(event) } }
-        return (sink, task)
-    }
-
-    /// A per-app capture over `BundleTaggingTap`s that self-register so a test can
-    /// push content into a specific bundle's tap — same shape the cross-stream
-    /// leakage test uses, factored out for the metering tests. Every bundle id the
-    /// test will start needs its own resolvable process (T2), so callers list them.
-    private func registeringPerAppCapture(
-        muteBehavior: TapMuteBehavior, bundleIDs: [String], into registry: TapRegistry
-    ) -> PerAppCaptureCoordinator {
-        var mapping: [String: AudioObjectID] = [:]
-        for (offset, bundleID) in bundleIDs.enumerated() {
-            mapping[bundleID] = AudioObjectID(9500 + offset)
-        }
-        return PerAppCaptureCoordinator(
-            makeTap: {
-                let tap = BundleTaggingTap()
-                tap.onRegister = { bundleID in registry.register(bundleID, tap) }
-                return tap
-            },
-            processResolver: singleProcessResolver(mapping),
-            muteBehavior: muteBehavior)
-    }
-
-    /// A CapturedBuffer whose RAW bytes are Float32 samples all equal to
-    /// `amplitude` — so `NativeCaptureCoordinator.rmsOfFloat32` (the metering-only
-    /// source's RMS) yields exactly `amplitude`. Used to drive `meteringCapture`
-    /// deterministically (its RMS reads Float32, unlike the S16 stream path).
-    private func float32Buffer(amplitude: Float, frames: Int, atSecond sec: Int) -> CapturedBuffer {
-        let samples = [Float32](repeating: amplitude, count: frames * 2 /* stereo */)
-        let data = samples.withUnsafeBytes { Data($0) }
-        return CapturedBuffer(channelData: [data], frameCount: frames, pts: timespec(tv_sec: sec, tv_nsec: 0))
-    }
 
     /// T3: a device that is ONLY a per-app redirect target (never a Selected
     /// Device, so `isSelected == false`) still gets a `.level` — driven by the RMS
@@ -7355,53 +6932,6 @@ extension SerializedSharedState {
     // (see "MARK: Current (local) output device (BUG B)"). `isMeterable` now
     // substitutes `syncedLocalSinkEnabled` for the local device only.
 
-    /// A `SyncedLocalSinkControlling` spy: records start/stop calls so a test
-    /// can `pollUntil` the sink is actually enabled/disabled before asserting
-    /// on the local device's meter. Mirrors
-    /// `NativeBackendSyncedLocalSelectionTests.SpySyncedLocalSink`, duplicated
-    /// here because that one is private to its own file.
-    private final class SpySyncedLocalSink: SyncedLocalSinkControlling, @unchecked Sendable {
-        private let lock = NSLock()
-        private var _calls: [String] = []
-        func start() throws { lock.withLock { _calls.append("start") } }
-        func stop() { lock.withLock { _calls.append("stop") } }
-        func startObservingLifecycleEvents() { lock.withLock { _calls.append("startObserving") } }
-        func stopObservingLifecycleEvents() { lock.withLock { _calls.append("stopObserving") } }
-        func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {}
-        var calls: [String] { lock.withLock { _calls } }
-    }
-
-    /// A thread-safe `Bool` box standing in for the local Mac row's membership
-    /// in `GroupController.selectedDeviceIDs` — lets a test flip "is the Mac
-    /// selected" between `setOutputSet` calls. Mirrors
-    /// `NativeBackendSyncedLocalSelectionTests.LockedBool`, duplicated here for
-    /// the same reason as `SpySyncedLocalSink` above.
-    private final class LockedBool: @unchecked Sendable {
-        private let lock = NSLock()
-        private var value: Bool
-        init(_ v: Bool) { value = v }
-        func get() -> Bool { lock.withLock { value } }
-        func set(_ v: Bool) { lock.withLock { value = v } }
-    }
-
-    /// Wires a backend + `FakeCapture` + a synced-local-sink spy + a
-    /// `selectedDevicesQuery` reporting the Mac's membership from `macSelected`
-    /// — everything `setOutputSet`'s "Mac + ≥1 AirPlay" decision needs, with no
-    /// `AVAudioEngine`/real Core Audio in the loop.
-    private func makeSyncedLocalBackend(macSelectedByDefault: Bool)
-        -> (NativeBackend, SpyEngine, FakeDiscovery, FakeCapture, SpySyncedLocalSink, LockedBool) {
-        let (backend, engine, discovery) = makeBackend()
-        let capture = FakeCapture()
-        backend.captureCoordinator = capture
-        let sink = SpySyncedLocalSink()
-        backend.syncedLocalSinkFactory = { sink }
-        let macSelected = LockedBool(macSelectedByDefault)
-        backend.selectedDevicesQuery = { id in
-            id == NativeBackend.localDeviceID ? macSelected.get() : false
-        }
-        return (backend, engine, discovery, capture, sink, macSelected)
-    }
-
     /// The core fix: with Mac + 1 AirPlay device selected (synced-local sink
     /// enabled) and metering active, the SAME whole-system-tap RMS that feeds
     /// the AirPlay device's meter must ALSO reach the local device's meter —
@@ -7493,14 +7023,6 @@ extension SerializedSharedState {
         await pollUntil { levels.lastDeviceLevel(NativeBackend.localDeviceID) == 0 }
         #expect(levels.lastDeviceLevel(NativeBackend.localDeviceID) == 0,
                        "disabling the synced-local sink must emit a final .level of 0, not leave a stuck bar")
-    }
-
-    private func pollUntil(timeout: TimeInterval = 3, _ condition: @escaping () -> Bool) async {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if condition() { return }
-            try? await Task.sleep(nanoseconds: 5_000_000)
-        }
     }
 
     // MARK: Remote-control stream (speaker transport keys + the speaker's own volume)
@@ -7626,21 +7148,6 @@ extension SerializedSharedState {
         )
     }
 
-    /// Poll the spy until a `setVolume(outputID, value)` call lands (the push is
-    /// fire-and-forget through a Task, so it's not synchronous with the apply).
-    private func waitForVolumePush(
-        _ engine: SpyEngine, _ outputID: OutputID, _ value: Double, timeout: TimeInterval = 3
-    ) async -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if engine.volumeCalls.contains(where: { $0.0 == outputID && abs($0.1 - value) < 0.001 }) {
-                return true
-            }
-            try? await Task.sleep(nanoseconds: 20_000_000)
-        }
-        return false
-    }
-
     /// Closing the loop: a speaker-requested volume must be written BACK out to
     /// the engine (→ SET_PARAMETER to the receiver), not just move our slider.
     /// The sender owns AirPlay volume — without the write-back the speaker's own
@@ -7744,61 +7251,15 @@ extension SerializedSharedState {
         #expect(counter.count == 2, "updateAppRoutes is a routing action")
     }
 
-    /// Thread-safe call counter for the routing hook (fired on the caller's
-    /// thread, which for these chokepoints is the caller of `setOutputSet`).
-    private final class HookCounter: @unchecked Sendable {
-        private let lock = NSLock()
-        private var _count = 0
-        func bump() { lock.withLock { _count += 1 } }
-        var count: Int { lock.withLock { _count } }
-    }
+    // MARK: Silence watchdog (R11), system-AirPlay note (W3-T3), keep-intent (R12), exclusion refresh (R14)
 
-    // ===== PORTED ours-only tests (R11 silence watchdog / W3-T3 system-AirPlay note / R12 keep-intent / R14 exclusion refresh) =====
-
-    private final class ManualWatchdogScheduler: SilenceWatchdogScheduling, @unchecked Sendable {
-        private let lock = NSLock()
-        private var pending: [(id: Int, body: @Sendable () -> Void)] = []
-        private var nextID = 0
-        private var _armCount = 0
-        private var _delays: [TimeInterval] = []
-
-        func schedule(after delay: TimeInterval, _ body: @escaping @Sendable () -> Void) -> SilenceWatchdogToken {
-            lock.lock(); defer { lock.unlock() }
-            let id = nextID; nextID += 1; _armCount += 1
-            _delays.append(delay)
-            pending.append((id, body))
-            return Token(id: id, scheduler: self)
-        }
-
-        fileprivate func cancel(id: Int) {
-            lock.withLock { pending.removeAll { $0.id == id } }
-        }
-
-        /// Total number of countdowns ever armed (for asserting "never armed").
-        var armCount: Int { lock.withLock { _armCount } }
-        /// Whether any countdown is currently armed (scheduled, not fired/cancelled).
-        var hasPending: Bool { lock.withLock { !pending.isEmpty } }
-        /// The delay of the MOST RECENT `schedule` call (Fix C: lets a test assert
-        /// which delay — the always-on silence delay vs the wake-restore preference —
-        /// an arm used). `nil` before anything was scheduled.
-        var lastDelay: TimeInterval? { lock.withLock { _delays.last } }
-
-        /// Fire (and consume) every pending countdown — the deterministic "T elapsed".
-        func fireAll() {
-            let bodies = lock.withLock { () -> [@Sendable () -> Void] in
-                let b = pending.map(\.body); pending.removeAll(); return b
-            }
-            for body in bodies { body() }
-        }
-
-        private final class Token: SilenceWatchdogToken {
-            let id: Int
-            weak var scheduler: ManualWatchdogScheduler?
-            init(id: Int, scheduler: ManualWatchdogScheduler) { self.id = id; self.scheduler = scheduler }
-            func cancel() { scheduler?.cancel(id: id) }
-        }
-    }
-
+    /// R12: a still-desired `.failed` device self-heals with NO user action when
+    /// discovery reports a genuine COME-BACK edge. Under the 2026-08-06 storm
+    /// fix the edge is required: a same-descriptor re-resolve (a
+    /// dead-but-still-announcing receiver) deliberately stays parked (see
+    /// `sameDescriptorReResolveDoesNotRetryParkedDevice`); here the receiver
+    /// genuinely dropped OFFLINE and came back, which nils then re-arms the
+    /// descriptor memo — that edge clears the park and re-converges.
     @Test func failedDeviceReconvergesOnRediscoveryWithoutUserAction() async {
         let (backend, engine, discovery) = makeBackend()
         let device = ap2Device(id: "AA:BB:CC:DD:EE:33", name: "SelfHealer")
@@ -7818,10 +7279,15 @@ extension SerializedSharedState {
         #expect(backend.test_expectedSelected == [device.id],
                 "R12: intent (expectedSelected) is untouched by the failure")
 
-        // The receiver comes back and the engine stops NACKing — simulate ONLY
-        // rediscovery, no `setOutputSet` re-call (the popover under R12 never
-        // makes one on `.failed`).
+        // The receiver goes OFFLINE (sticky-AP2 downgrade: advert gone) and then
+        // comes back, and the engine stops NACKing — simulate ONLY discovery, no
+        // `setOutputSet` re-call (the popover under R12 never makes one on
+        // `.failed`).
         engine.addFailures = []
+        let offline = DiscoveredDevice(id: device.id, descriptor: device.descriptor,
+                                       outputID: device.outputID,
+                                       isAirPlay2Supported: true, isAvailable: false)
+        discovery.fire(.updated(offline))
         discovery.fire(.updated(device))
 
         await pollUntil(timeout: 5) {
@@ -7829,16 +7295,18 @@ extension SerializedSharedState {
         }
         let d = backend.devices.first { $0.id == device.id }
         #expect(d?.connectionState == .connected,
-                "rediscovery alone re-converged the still-desired device")
+                "an offline→online rediscovery edge alone re-converged the still-desired device")
         #expect(d?.isSelected == true)
     }
 
     /// R12/W2-T3, the explicit "Try again" path (as opposed to the rediscovery
-    /// path above): `GroupController.retryConnection(for:)` re-issues
-    /// `setOutputSet` with the SAME set — the id was never removed — so
-    /// `NativeBackend` must detect "already desired, still `.failed`" itself
-    /// and re-kick, rather than skipping because `previous == wantOn`.
-    @Test func retryOfFailedWithUnchangedSetStillReconverges() async {
+    /// path above): `GroupController.retryConnection(for:)` calls
+    /// `retryOutput(id)` — the id was never removed from the set, and a
+    /// same-membership `setOutputSet` re-issue is deliberately NOT a retry any
+    /// more (storm fix, 2026-08-06; see
+    /// `membershipNeutralSetOutputSetDoesNotRetryParkedDevice`), so the
+    /// dedicated entry point is what must reconnect the `.failed` device.
+    @Test func retryOutputReconnectsFailedDeviceWithUnchangedMembership() async {
         let (backend, engine, discovery) = makeBackend()
         let device = ap2Device(id: "AA:BB:CC:DD:EE:34", name: "TryAgainer")
         engine.addFailures = [device.outputID.rawValue]
@@ -7856,16 +7324,16 @@ extension SerializedSharedState {
         }
 
         // The receiver recovers, but nothing re-discovers it — only an explicit
-        // "Try again" re-issues the SAME output set (the id was already in it).
+        // "Try again" (the id is still in the desired set, membership unchanged).
         engine.addFailures = []
-        backend.setOutputSet([device.id])
+        backend.retryOutput(device.id)
 
         await pollUntil(timeout: 5) {
             backend.devices.first { $0.id == device.id }?.connectionState == .connected
         }
         let d = backend.devices.first { $0.id == device.id }
         #expect(d?.connectionState == .connected,
-                "a same-membership retry call must still reconnect a .failed device")
+                "retryOutput must reconnect a .failed device without a membership edge")
         #expect(d?.isSelected == true)
     }
 
@@ -8348,13 +7816,6 @@ extension SerializedSharedState {
     // ORDER the plan calls for: state 1/2 never show a transient wait, state 3
     // only shows when a bounded wait genuinely starts, and it auto-clears.
 
-    private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
-        events.compactMap { event -> TakeoverStatus?? in
-            if case .takeoverStatus(let status) = event { return .some(status) }
-            return nil
-        }
-    }
-
     /// State 1 (`.needsApproval`): `willWaitForClock == false` short-circuits
     /// `activate` instantly (proven hermetically at the seam level in
     /// `PTPHelperActivationTests`), so `convergeDevice` must resolve directly to
@@ -8369,7 +7830,7 @@ extension SerializedSharedState {
         await startAndDiscover(backend, engine, discovery, device)
 
         let events = await collect(from: backend, until: { events in
-            self.takeoverEvents(in: events).contains { $0 == .needsApproval(.requiresApproval) }
+            takeoverEvents(in: events).contains { $0 == .needsApproval(.requiresApproval) }
         }, after: { backend.setOutputSet([device.id]) })
 
         let statuses = takeoverEvents(in: events)
@@ -8392,7 +7853,7 @@ extension SerializedSharedState {
         await startAndDiscover(backend, engine, discovery, device)
 
         let events = await collect(from: backend, until: { events in
-            self.takeoverEvents(in: events).contains { $0 == .helperMissing }
+            takeoverEvents(in: events).contains { $0 == .helperMissing }
         }, after: { backend.setOutputSet([device.id]) })
 
         #expect(takeoverEvents(in: events) == [.helperMissing],
@@ -8412,7 +7873,7 @@ extension SerializedSharedState {
         await startAndDiscover(backend, engine, discovery, device)
 
         let events = await collect(from: backend, until: { events in
-            self.takeoverEvents(in: events).contains { $0 == nil }
+            takeoverEvents(in: events).contains { $0 == nil }
         }, after: { backend.setOutputSet([device.id]) })
 
         #expect(takeoverEvents(in: events) == [.takingOver, nil],
@@ -8437,13 +7898,38 @@ extension SerializedSharedState {
         await startAndDiscover(backend, engine, discovery, device)
 
         let events = await collect(from: backend, until: { events in
-            self.takeoverEvents(in: events).contains { $0 == .timedOut }
+            takeoverEvents(in: events).contains { $0 == .timedOut }
         }, after: { backend.setOutputSet([device.id]) })
 
         #expect(takeoverEvents(in: events) == [.takingOver, .timedOut],
                 "the strip must show 'taking over' before settling on the timeout backstop")
         #expect(backend.devices.first { $0.id == device.id }?.connectionState
                 == .failed(ConnectionFailure(cause: .timingUnavailable)))
+    }
+
+    /// Banner-flash fix (2026-08-06): with the production debounce in force, a
+    /// clock wait that resolves BEFORE `takeoverStripDelay` elapses must never
+    /// mount the transient `.takingOver` strip at all — no blue flash, no
+    /// double panel re-fit — even though `willWaitForClock` was true. (The
+    /// ordering tests above pass `takeoverStripDelay: 0` to keep the old
+    /// synchronous emit for a wait that IS observed.)
+    @Test func fastClockWaitNeverFlashesTakingOverStrip() async {
+        let activator = ScriptedPTPHelperActivator(willWaitForClock: true, outcome: .ready)
+        let (backend, engine, discovery) = makeBackend(
+            ptpHelperActivator: activator, takeoverStripDelay: 5)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:B6", name: "Fast Takeover Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let events = await collect(from: backend, until: { events in
+            events.contains {
+                if case .deviceUpdated(let d) = $0 { return d.id == device.id && d.connectionState == .connected }
+                else { return false }
+            }
+        }, after: { backend.setOutputSet([device.id]) })
+
+        #expect(takeoverEvents(in: events).isEmpty,
+                "a wait that resolves inside the debounce window must mount no takeover strip")
     }
 
     /// Edge-triggered discipline (mirrors `reconcileSystemAirPlayGuard`): a
@@ -8459,7 +7945,7 @@ extension SerializedSharedState {
         await startAndDiscover(backend, engine, discovery, deviceB)
 
         _ = await collect(from: backend, until: { events in
-            self.takeoverEvents(in: events).contains { $0 == .needsApproval(.requiresApproval) }
+            takeoverEvents(in: events).contains { $0 == .needsApproval(.requiresApproval) }
         }, after: { backend.setOutputSet([deviceA.id]) })
 
         // A second, independent connect attempt resolving to the SAME status
@@ -8488,11 +7974,11 @@ extension SerializedSharedState {
         await startAndDiscover(backend, engine, discovery, device)
 
         _ = await collect(from: backend, until: { events in
-            self.takeoverEvents(in: events).contains { $0 == .timedOut }
+            takeoverEvents(in: events).contains { $0 == .timedOut }
         }, after: { backend.setOutputSet([device.id]) })
 
         let events = await collect(from: backend, until: { events in
-            self.takeoverEvents(in: events).contains { $0 == nil }
+            takeoverEvents(in: events).contains { $0 == nil }
         }, after: { backend.stop() })
         #expect(takeoverEvents(in: events) == [nil], "stop() must clear a stranded takeover status")
     }
@@ -8559,7 +8045,8 @@ extension SerializedSharedState {
             engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
             ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
             processResolver: resolver, injectedPerAppCapture: perAppCapture,
-            processNotYetAudibleRetryDelay: 0.5, processNotYetAudibleMaxBackoff: 1.0)
+            processNotYetAudibleRetryDelay: 0.5, processNotYetAudibleMaxBackoff: 1.0,
+            aggregateControl: NoOpAggregateControl())
         let capture = FakeCapture()
         backend.captureCoordinator = capture
         defer { backend.stop() }
@@ -8585,50 +8072,1023 @@ extension SerializedSharedState {
 
 }
 
+extension SerializedSharedState {
+
+/// The ``NativeBackendTests`` cases that must never run alongside another test,
+/// nested here so the `.serialized` parent (`SerializedSharedStateSuite.swift`)
+/// mutually excludes them from each other AND from every other suite under it.
+///
+/// TWO kinds qualify, and nothing else does:
+///  - **`Telemetry._installTestSink` users** (15 of them). The sink is one
+///    process-global slot: a second test's `_installTestSink(nil)` teardown tears
+///    this one's sink out mid-run, and each reads back a mixture of both tests'
+///    lines. That is the hazard the parent suite exists for.
+///  - **The two that let `NativeBackend` build its DEFAULT `aggregateControl`**
+///    (`wholeSystemFlushReanchorRunsWithoutThePTPTakeoverGate`,
+///    `wholeSystemTeardownFallbackIsStillRefusedWithoutAClock`). A real
+///    `CoreAudioAggregateDeviceControl` adopts/creates/sweeps ONE macOS-wide
+///    aggregate device keyed on a fixed UID, so `start()`/`stop()` in two
+///    concurrent tests would fight over the same system object. Every other
+///    construction in this file injects `NoOpAggregateControl`; until these two
+///    do the same they are not parallel-safe.
+///
+/// Everything else asserts only on doubles it created itself, so it stays parallel
+/// — those ~183 tests were the bulk of this serialized chain's wall-clock cost.
+/// Being over-inclusive here is not free: everything under the parent runs
+/// strictly one at a time.
+///
+/// NOTE for the inner loop: `--filter NativeBackendTests` does NOT match this
+/// suite's runtime name. Use `--filter NativeBackend` to run both.
+@Suite struct NativeBackendGlobalStateTests {
+
+    /// Selecting a device (the gate's false->true edge) must re-arm the poll —
+    /// and the poll's own immediate synchronous call (inside
+    /// `startSchedulingSnapshotPolling()`) must actually log `send_sched`,
+    /// proving this isn't just bookkeeping with no observable effect.
+    @Test func wholeSystemCaptureStartArmsSchedulingPollAndLogsSendSched() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        // At launch (no device selected yet), `captureRunning` is false, so
+        // the poll must NOT be armed — the exact dead shape the investigation
+        // found; still correct after the fix, since it's the RE-arm on later
+        // selection that was missing, not this launch-time no-op.
+        #expect(!backend.test_hasPendingSchedulingPoll(), "the poll must not arm before any device is ever selected")
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A1", name: "Scheduling Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+        await pollUntil { backend.test_hasPendingSchedulingPoll() }
+        #expect(backend.test_hasPendingSchedulingPoll(), "selecting a device (captureRunning false->true) must re-arm the scheduling poll")
+
+        func sendSchedLines() -> [String] { box.snapshot().filter { $0.contains("\"evt\":\"send_sched\"") } }
+        await pollUntil { !sendSchedLines().isEmpty }
+        #expect(!sendSchedLines().isEmpty, "arming the poll must immediately log send_sched at least once — this event had never fired in production")
+    }
+
+    /// Selecting a SECOND device while already capturing (captureRunning
+    /// stays true->true) must NOT re-arm the poll a second time —
+    /// `reconcileCaptureGate`'s own `want != captureRunning` guard must
+    /// short-circuit before reaching the new arm/cancel code, so the poll arms
+    /// once per capture-start episode, not once per device added while already
+    /// streaming (which would double the `send_sched` log rate every time a
+    /// second speaker joins an already-playing session).
+    ///
+    /// Asserted on the backend's own log count rather than on the emitted
+    /// `send_sched` lines: the telemetry sink is process-global and the event
+    /// carries no backend identity, so a still-polling backend left over from
+    /// any other test in the process lands extra lines in the counting window.
+    /// Note the poll can ARM twice here — a re-arm that finds capture already
+    /// stopped logs nothing — so arming is not the observable this guards.
+    @Test func wholeSystemCaptureSelectingSecondDeviceDoesNotDoubleArmSchedulingPoll() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let deviceA = ap2Device(id: "AA:BB:CC:DD:EE:A4", name: "First Poll Speaker")
+        let deviceB = ap2Device(id: "AA:BB:CC:DD:EE:A5", name: "Second Poll Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == deviceA.id } else { return false } }
+        } after: { discovery.fire(.appeared(deviceA)) }
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == deviceB.id } else { return false } }
+        } after: { discovery.fire(.appeared(deviceB)) }
+
+        backend.setOutputSet([deviceA.id])
+        await pollUntil { capture.isCapturing }
+        await pollUntil { backend.test_schedulingPollLogCount() == 1 }
+
+        // Adding a second already-streaming device: captureRunning stays
+        // true->true, so `reconcileCaptureGate`'s own guard must return before
+        // ever reaching the arm/cancel code — no second arm.
+        backend.setOutputSet([deviceA.id, deviceB.id])
+        await pollUntil { engine.addedIDs.count == 2 }
+        #expect(backend.test_schedulingPollLogCount() == 1, "selecting an additional device while already capturing must not double the scheduling-poll log rate")
+    }
+
+    // MARK: Write-cadence drift sampling (T-ENG-CADENCE-1, whole-system-
+    // dropout investigation) — `AirPlayEngine.writeCadenceSnapshot()` was
+    // previously referenced nowhere in `AudiouterCore`. `sampleWriteCadenceIfDue()`
+    // wires it in on the per-app mixer's write path (`onMixedBuffer`), same
+    // throttled/delta-gated shape as the sibling `sampleWriteBacklogIfDue()`.
+
+    /// The delta-gate's core property: an unchanging (healthy) cadence
+    /// snapshot must never log `write_cadence_drift`, no matter how much real
+    /// per-buffer traffic flows through the sampler's trigger — this is NOT
+    /// "we never got around to sampling", it holds whether or not the
+    /// sample interval was crossed, since an unchanged snapshot reads equal to
+    /// the zero-initialized last-reported baseline either way. Then, scripting
+    /// the engine to report genuine degradation and pushing enough buffers to
+    /// cross the sample interval proves the sampler is actually wired up and
+    /// CAN log when there is something worth logging.
+    @Test func writeCadenceDriftStaysSilentWhileHealthyThenLogsOnDegradation() async {
+        let registry = TapRegistry()
+        let perAppCapture = registeringPerAppCapture(muteBehavior: .mutedWhenTapped, bundleIDs: ["com.cadence"], into: registry)
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: perAppCapture)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A6", name: "Cadence Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.cadence", name: "Cadence App", toDevice: device.id)])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+        await pollUntil {
+            if case .capturing = perAppCapture.state(for: "com.cadence") { return true }; return false
+        }
+        guard let tap = registry.tap(for: "com.cadence") else {
+            Issue.record("the routed app's per-app tap must have registered")
+            return
+        }
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+        func driftLines() -> [String] { box.snapshot().filter { $0.contains("\"evt\":\"write_cadence_drift\"") } }
+
+        // Healthy (the spy's zeroed default `writeCadenceSnapshot()`): must
+        // stay silent under real per-buffer traffic through the full pipeline.
+        for i in 0..<10 {
+            tap.push(fingerprintedBuffer(fill: 0xAA, frames: 200, atSecond: i))
+        }
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        #expect(driftLines().isEmpty, "an unchanging (healthy) cadence snapshot must never log write_cadence_drift")
+
+        // Script real degradation, then push well past the sample interval
+        // (`backlogSampleInterval`, reused by design). Each push is a
+        // single-contributor-stream buffer, which `AppRouteMixer.handleBuffer`
+        // passes straight through as exactly ONE `onMixedBuffer` emission (no
+        // hold-window accumulation on that path), so N pushes reliably cross
+        // an N-buffer sampling threshold.
+        engine.scriptCadenceSnapshot(WriteCadenceSnapshot(
+            writeCount: 999, deficitSeconds: 1.25, overrunSeconds: 0, lastGapSeconds: 0.05))
+        for i in 10..<520 {
+            tap.push(fingerprintedBuffer(fill: 0xAA, frames: 200, atSecond: i))
+        }
+
+        await pollUntil(timeout: 5) { !driftLines().isEmpty }
+        #expect(!driftLines().isEmpty, "a genuinely degraded cadence snapshot must log write_cadence_drift once the sample interval is crossed")
+        #expect(driftLines().allSatisfy { $0.contains("\"path\":\"perApp\"") },
+                      "the per-app call site must tag its own path — EngineSink's mirror in NativeCaptureCoordinator.swift tags \"wholeSystem\", and the two must stay distinguishable")
+    }
+
+    /// The whole-system (stream 0) mirror of the test above, at the ACTUAL
+    /// production `EngineSink` (not `SpyEngine` — `EngineSink.init(engine:)`
+    /// takes the concrete `AirPlayEngine`, not the `EngineControlling` seam,
+    /// so this is the one place a real engine instance is the only way to
+    /// exercise this code at all). `AirPlayEngine.init(config:)` is
+    /// documented side-effect-free ("the engine thread is created lazily in
+    /// start(), not here"), and every `write` is a no-op while `startedFlag`
+    /// is false (never set, since `start()` is never called) — so this is
+    /// still a hermetic, no-hardware test: it proves `EngineSink`'s new
+    /// cadence sampler (mirroring `sampleWriteCadenceIfDue()` byte-for-byte)
+    /// runs across real per-buffer traffic without crashing and never
+    /// spuriously logs — the delta-gate half of the mirror. It can't
+    /// exercise the "logs on real degradation" half the way the per-app test
+    /// does above, because that needs the engine's OWN wall-clock-driven
+    /// counters to move, and this spy has no way to script the concrete
+    /// `AirPlayEngine` the way `SpyEngine.scriptCadenceSnapshot` scripts the
+    /// seam — the same reason `write_backlog_drop`'s whole-system sampler
+    /// (9965bd9) has never had a dedicated unit test either. The "fires on
+    /// degradation" arithmetic itself is proven above; this test's job is
+    /// only to prove THIS call site's wiring doesn't crash and respects the
+    /// same gate.
+    @Test func engineSinkWriteCadenceStaysSilentWithRealUnstartedEngine() {
+        let engine = AirPlayEngine()
+        let sink = EngineSink(engine: engine)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        for i in 0..<520 {
+            let pcm = Data(repeating: 0xAA, count: 4 * 200)
+            sink.write(pcm: pcm, pts: timespec(tv_sec: i, tv_nsec: 0))
+        }
+
+        let driftLines = box.snapshot().filter { $0.contains("\"evt\":\"write_cadence_drift\"") }
+        #expect(driftLines.isEmpty, "a never-started engine's cadence counters never move, so EngineSink must never log write_cadence_drift for it")
+    }
+
+    /// MERGE COLLISION (F-REANCHOR × T-PERAPP-GATE): the takeover gate was added
+    /// to EVERY session-establishing engine op — including `performRebindRecovery`,
+    /// which at the time was always a removeOutput→addOutput. F-REANCHOR then made
+    /// the whole-system recovery try an in-place RTSP FLUSH first. Fused naively,
+    /// the gate sat in front of the flush too: a clockless verdict made the recovery
+    /// give up without even attempting the re-anchor that needs no clock (the
+    /// session and its timing are already up — flushing only re-syncs the receiver's
+    /// timeline), and every ordinary rebuild dragged the gate's real side effects —
+    /// a default-output switch-away, the "taking over" strip, a bounded activation
+    /// wait — onto the path whose entire purpose is avoiding an audible drop.
+    /// The gate belongs in front of the re-add ONLY.
+    @Test func wholeSystemFlushReanchorRunsWithoutThePTPTakeoverGate() async {
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let capture = FakeCapture()
+        let activator = ScriptedPTPHelperActivator(willWaitForClock: false, outcome: .ready)
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            ptpHelperActivator: activator,
+            maxRebindRecoveryAttempts: 5, rebindRecoveryRetryDelay: 0.05)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Reanchor Speaker")
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+
+        let addsAfterConnect = engine.addedIDs.filter { $0 == device.outputID }.count
+        let removesAfterConnect = engine.removedIDs.filter { $0 == device.outputID }.count
+        // The clock goes away mid-session, AFTER the connect that established the
+        // session the flush will re-anchor.
+        activator.setOutcome(.needsApproval(.requiresApproval))
+
+        capture.fireDeviceRateRebuild()   // device/rate change rebuilt the tap
+        await pollUntil { engine.flushedIDs.contains(device.outputID) }
+
+        #expect(engine.flushedIDs.filter { $0 == device.outputID }.count == 1,
+                "the in-place flush re-anchor must run even with no clock available — it re-anchors a session that already exists")
+        // A successful flush ends the recovery: no teardown, so the gate is never
+        // reached and nothing extra hits the engine.
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        #expect(engine.removedIDs.filter { $0 == device.outputID }.count == removesAfterConnect,
+                "a successful flush must not fall through to the teardown")
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == addsAfterConnect,
+                "a successful flush must not re-add the output")
+    }
+
+    /// The other half of the same seam: once the flush is NOT available (it throws,
+    /// as a receiver that NACKs it does), the recovery falls through to the
+    /// teardown+re-add — and THAT is session-establishing, so a clockless verdict
+    /// must refuse it rather than re-establish a session that plays silence.
+    @Test func wholeSystemTeardownFallbackIsStillRefusedWithoutAClock() async {
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let capture = FakeCapture()
+        let activator = ScriptedPTPHelperActivator(willWaitForClock: false, outcome: .ready)
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            ptpHelperActivator: activator,
+            maxRebindRecoveryAttempts: 1, rebindRecoveryRetryDelay: 0.05)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:94", name: "Clockless Speaker")
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+
+        engine.flushFailures = [device.outputID.rawValue]   // no in-place re-anchor available
+        let addsAfterConnect = engine.addedIDs.filter { $0 == device.outputID }.count
+        activator.setOutcome(.needsApproval(.requiresApproval))
+
+        capture.fireDeviceRateRebuild()
+        await pollUntil { engine.flushedIDs.contains(device.outputID) }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        #expect(engine.addedIDs.filter { $0 == device.outputID }.count == addsAfterConnect,
+                "a clockless re-add must be refused — it would re-establish a session the receiver plays as silence")
+    }
+
+    /// Test 1 (sanctioned direction, steady state): selecting a device that
+    /// currently carries a per-app redirect demotes the route, clears its
+    /// `.routedApps` claim, records a queryable conflict, and leaves the engine
+    /// session on stream 0 with the whole-system domain the sole owner — the
+    /// deferred/downgraded unbind settles with a NO-OP verify, never a
+    /// session-killing removeOutput.
+    @Test func selectingARedirectTargetDemotesTheRouteAndWinsStream0() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+        let (routedApps, sub) = subscribeRoutedApps(backend, deviceID: device.id)
+        defer { sub.cancel() }
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        await pollUntil { routedApps.last == ["Foo"] }
+
+        backend.setOutputSet([device.id])
+
+        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
+        #expect(engine.liveStream(of: device.outputID) == 0,
+                "whole-system must win the contested device onto stream 0")
+        await pollUntil { routedApps.last?.isEmpty == true }
+        #expect(routedApps.last?.isEmpty == true,
+                ".routedApps must be cleared for the demoted device — the teal dot never lies")
+        await pollUntil {
+            telemetryLines(box, evt: "scope_conflict", device: device.id)
+                .contains { $0["stage"] as? String == "routeDemoted" }
+        }
+        #expect(telemetryLines(box, evt: "scope_conflict", device: device.id)
+                    .contains { $0["stage"] as? String == "routeDemoted" })
+        #expect(backend.test_scopeConflict(deviceID: device.id)?.bundleIDs == ["com.foo.player"],
+                "the conflict must be queryable while it is engaged")
+
+        // The demotion's trailing unbind resolves through the verify-first
+        // settle and finds the session already on 0 — zero extra engine ops.
+        await pollUntil(timeout: 5) {
+            telemetryLines(box, evt: "unbind_downgraded", device: device.id)
+                .contains { $0["settled"] as? String == "noop" }
+        }
+        #expect(telemetryLines(box, evt: "unbind_downgraded", device: device.id)
+                    .contains { $0["settled"] as? String == "noop" })
+        #expect(engine.ops.filter { $0 == "remove:\(device.outputID.rawValue)" }.count == 1,
+                "exactly ONE remove — the scope rebind's own stop half; the unbind must never have issued the I4 session-killer")
+        #expect(engine.liveStream(of: device.outputID) == 0)
+    }
+
+    /// Test 2 (demote-at-decision): a route pushed at an ALREADY-selected device
+    /// is ineligible from the first read — no `.bind` op ever exists, so there is
+    /// no fire-time race to win.
+    @Test func redirectToASelectedDeviceNeverBindsAtAll() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+
+        // The conflict record engaging proves the route WAS processed — and
+        // demoted at decision, so the absence of a bind op below is a settled
+        // fact, not a not-yet.
+        await pollUntil { backend.test_scopeConflict(deviceID: device.id) != nil }
+        #expect(backend.test_scopeConflict(deviceID: device.id)?.bundleIDs == ["com.foo.player"])
+        #expect(!engine.ops.contains { $0.hasPrefix("streamAdd:\(device.outputID.rawValue):") },
+                "demoted at decision: no per-app bind op may ever be issued for a Selected Device")
+        // Poll for the telemetry LINE separately from the conflict RECORD: the
+        // record is written under `stateQueue` (what the poll above saw), but
+        // `Telemetry.log` hands the line to its own queue, so the sink append
+        // races a bare read of the box (flaked exactly so, 2026-08-07 — same
+        // discipline as the `unbind_downgraded` polls in the sibling tests).
+        await pollUntil {
+            telemetryLines(box, evt: "scope_conflict", device: device.id)
+                .contains { $0["stage"] as? String == "routeDemoted" }
+        }
+        #expect(telemetryLines(box, evt: "scope_conflict", device: device.id)
+                    .contains { $0["stage"] as? String == "routeDemoted" })
+        #expect(engine.liveStream(of: device.outputID) == 0,
+                "the whole-system session is untouched")
+    }
+
+    /// Test 3 (forces I4 — the kill-the-fresh-session bug): the demotion's
+    /// `.unbind` fires while converge's 1→0 rebind is HELD OPEN mid-op
+    /// (`onRebindBody` between the stop and add halves), so its classification
+    /// deterministically sees the whole-system op in flight → case 3, deferred —
+    /// and the release-side settle then verifies engine truth (already 0) with
+    /// zero extra ops. The stream-0 session the user just asked for survives.
+    @Test func unbindFiringDuringConvergesRebindIsDeferredThenSettles() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+
+        // Hold converge's 1→0 rebind open between its stop and add halves.
+        let rebindHold = HoldPoint()
+        engine.onRebindBody = { id, streamId in
+            if id == device.outputID, streamId == 0 { await rebindHold.hold() }
+        }
+
+        backend.setOutputSet([device.id])
+
+        // The demotion's `.unbind` fires while the rebind is held → deferred,
+        // not executed (case 3): the converge's outcome is unknowable now.
+        await pollUntil(timeout: 5) {
+            !telemetryLines(box, evt: "unbind_deferred", device: device.id).isEmpty
+        }
+        #expect(!telemetryLines(box, evt: "unbind_deferred", device: device.id).isEmpty,
+                "an unbind landing inside an in-flight whole-system op must defer to its release")
+
+        rebindHold.open()
+
+        // Converge completes; its release consumes the pending settle; the
+        // verify reads live == 0 → success with zero engine ops.
+        await pollUntil(timeout: 5) {
+            telemetryLines(box, evt: "unbind_downgraded", device: device.id)
+                .contains { $0["settled"] as? String == "noop" }
+        }
+        #expect(telemetryLines(box, evt: "unbind_downgraded", device: device.id)
+                    .contains { $0["settled"] as? String == "noop" })
+        #expect(engine.liveStream(of: device.outputID) == 0,
+                "the fresh stream-0 session must survive the deferred unbind")
+        #expect(engine.ops.filter { $0 == "remove:\(device.outputID.rawValue)" }.count == 1,
+                "exactly one remove — the held rebind's own stop half; the deferred unbind issued none")
+        #expect(backend.devices.first { $0.id == device.id }?.isSelected == true,
+                "whole-system bookkeeping still owns the device")
+    }
+
+    /// Test 4 (forces I3 — deselect-then-redirect): the route lands strictly
+    /// INSIDE converge's teardown `removeOutput` (pushed from the
+    /// `onRemoveOutputBody` hook, which then HOLDS the teardown open until the
+    /// bind has provably bowed out — without the hold the bind would race the
+    /// slot release and the test would flake between bow-out and direct bind).
+    /// The bind bows out `ws_in_flight`; the release re-drives it; the device
+    /// ends genuinely owned by the per-app domain.
+    @Test func bindBowsOutDuringWholeSystemTeardownAndIsRedriven() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.setOutputSet([device.id])
+        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let appRoute = route("com.foo.player", name: "Foo", toDevice: device.id)
+        let once = OnceFlag()
+        let backendRef = backend
+        engine.onRemoveOutputBody = { id in
+            guard id == device.outputID, !once.testAndSet() else { return }
+            // Fire the other FIFO from strictly within the teardown window…
+            backendRef.updateAppRoutes([appRoute])
+            // …and hold the teardown open until the bind has bowed out.
+            while !box.snapshot().contains(where: {
+                $0.contains("bind_superseded") && $0.contains(device.id)
+            }) {
+                try? await Task.sleep(nanoseconds: 2_000_000)
+            }
+        }
+
+        backend.setOutputSet([])   // converge teardown: the removeOutput runs the hook
+
+        await pollUntil(timeout: 5) { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        let live = engine.liveStream(of: device.outputID)
+        #expect(live != nil && live! >= 1,
+                "the re-driven bind must land after the whole-system release")
+        #expect(telemetryLines(box, evt: "bind_superseded", device: device.id)
+                    .contains { $0["reason"] as? String == "ws_in_flight" },
+                "the bind must bow out loudly while the teardown is in flight")
+        #expect(!telemetryLines(box, evt: "per_app_redrive").isEmpty,
+                "the release side must re-drive the bowed-out bind")
+        let ops = engine.ops
+        let removeIdx = ops.firstIndex(of: "remove:\(device.outputID.rawValue)")
+        let bindIdx = ops.firstIndex { $0.hasPrefix("streamAdd:\(device.outputID.rawValue):") }
+        #expect(removeIdx != nil && bindIdx != nil && removeIdx! < bindIdx!,
+                "the teardown's remove must strictly precede the re-driven bind — no resurrection ordering")
+    }
+
+    /// Test 5 (forces I5 — recovery-backoff ping-pong): a route pushed while a
+    /// whole-system rebind recovery holds `converging[D]` across its backoff is
+    /// demoted at decision (the device is still SELECTED), so the `.bind` that
+    /// used to land between retry attempts never exists. Deselecting mid-backoff
+    /// lets the chain reach a terminal exit, release the slot, and re-drive the
+    /// per-app bind — with no alternating add(0)/streamAdd anywhere.
+    @Test func routeDuringWholeSystemRecoveryBackoffDoesNotPingPong() async {
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let capture = FakeCapture()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
+            systemVolume: FakeSystemVolume(),
+            ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]),
+            maxRebindRecoveryAttempts: 6, rebindRecoveryRetryDelay: 0.25)
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:A5", name: "Backoff Speaker")
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        // Make the recovery's attempt fail: flush no-ops (falls through to
+        // teardown+re-add), re-add throws → a backed-off retry holds the slot.
+        engine.flushNoOps = [device.outputID.rawValue]
+        engine.addFailures = [device.outputID.rawValue]
+        capture.fireDeviceRateRebuild()
+        await pollUntil(timeout: 5) {
+            telemetryLines(box, evt: "rebind", device: device.id)
+                .contains { $0["outcome"] as? String == "retry_scheduled" }
+        }
+
+        // The route lands while the recovery owns the device across its backoff.
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        await pollUntil(timeout: 5) { backend.test_scopeConflict(deviceID: device.id) != nil }
+        #expect(backend.test_scopeConflict(deviceID: device.id) != nil,
+                "the route must be demoted — the device is still selected")
+        #expect(!engine.ops.contains { $0.hasPrefix("streamAdd:\(device.outputID.rawValue):") },
+                "no per-app bind may land between the recovery's retry attempts")
+
+        // Deselect mid-backoff and let the engine accept the next attempt: the
+        // chain reaches a terminal exit, the release re-drives the route.
+        backend.setOutputSet([])
+        engine.addFailures = []
+        await pollUntil(timeout: 10) { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        #expect((engine.liveStream(of: device.outputID) ?? 0) >= 1,
+                "after the deselect the demoted route must re-engage by itself")
+        let bindOps = engine.ops.filter {
+            $0.hasPrefix("add:\(device.outputID.rawValue)")
+                || $0.hasPrefix("streamAdd:\(device.outputID.rawValue):")
+        }
+        #expect(bindOps.filter { $0.hasPrefix("streamAdd:") }.count == 1,
+                "exactly one per-app bind — no ping-pong")
+        #expect(bindOps.last?.hasPrefix("streamAdd:") == true,
+                "the FINAL bind for the device must be the per-app one — an add(0) after it is the ping-pong")
+    }
+
+    /// Test 6 (forces I1/I2 TOCTOU, favorable engine order): the selection lands
+    /// MID per-app add — after the bind's fire-time check passed, before the
+    /// spy's `liveStreams` write (the wired-into-`addOutput(_:streamId:)`
+    /// `onAddOutputBody`). Arming the PTP activator from the same hook parks the
+    /// kicked converge inside `ensurePTPTakeover` until the per-app session is
+    /// provably live, FORCING converge's `boundStreamId` read to see stream 1 —
+    /// so it must arbitrate on engine truth and rebind to 0.
+    @Test func selectionLandingInsidePerAppAddConvergesToWholeSystem() async {
+        let activator = ArmableHoldingPTPActivator()
+        let (backend, engine, discovery) = makeBackend(
+            ptpHelperActivator: activator,
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let once = OnceFlag()
+        let backendRef = backend
+        engine.onAddOutputBody = { id in
+            guard id == device.outputID, !once.testAndSet() else { return }
+            activator.arm()
+            backendRef.setOutputSet([device.id])
+        }
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+
+        await pollUntil { engine.liveStream(of: device.outputID) == 1 }
+        #expect(engine.liveStream(of: device.outputID) == 1,
+                "precondition: the per-app session must be live while converge is still parked")
+        await pollUntil { activator.holding }
+        activator.release()
+
+        await pollUntil(timeout: 5) { engine.liveStream(of: device.outputID) == 0 }
+        #expect(engine.liveStream(of: device.outputID) == 0,
+                "converge must arbitrate on engine truth and move the session to 0")
+        #expect(engine.rebindCalls.contains { $0.0 == device.outputID && $0.1 == 0 },
+                "the move must go through the serialized rebindOutput")
+        #expect(engine.maxConcurrent == 1,
+                "the per-app add and converge's rebind must never overlap for the device")
+        await pollUntil { backend.test_scopeConflict(deviceID: device.id) != nil }
+        #expect(backend.test_scopeConflict(deviceID: device.id) != nil,
+                "the mid-op claim must surface as a queryable demotion")
+        // The demotion's deferred unbind settles with a no-op verify — no
+        // surviving per-app engine claim.
+        await pollUntil(timeout: 5) {
+            telemetryLines(box, evt: "unbind_downgraded", device: device.id)
+                .contains { $0["settled"] as? String == "noop" }
+        }
+        #expect(engine.liveStream(of: device.outputID) == 0)
+    }
+
+    /// Test 7 (end-to-end backend-only exclusivity, no GroupController): a
+    /// demoted route re-engages BY ITSELF on deselect — no route-table edit in
+    /// either direction, conflict record cleared, `.routedApps` repopulated.
+    @Test func demotedRouteReengagesOnDeselect() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+        let (routedApps, sub) = subscribeRoutedApps(backend, deviceID: device.id)
+        defer { sub.cancel() }
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        await pollUntil { routedApps.last == ["Foo"] }
+
+        // Select: demoted, whole-system wins.
+        backend.setOutputSet([device.id])
+        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
+        await pollUntil { backend.test_scopeConflict(deviceID: device.id) != nil }
+        await pollUntil { routedApps.last?.isEmpty == true }
+
+        // Deselect: the route re-engages with no route-table edit. (The mixer may
+        // assign a FRESH stream id on re-engage — any per-app stream (>= 1) is
+        // the ownership fact under test.)
+        backend.setOutputSet([])
+        await pollUntil(timeout: 5) { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        #expect((engine.liveStream(of: device.outputID) ?? 0) >= 1,
+                "the demoted route must re-engage the moment the device is deselected")
+        await pollUntil { routedApps.last == ["Foo"] }
+        #expect(routedApps.last == ["Foo"], ".routedApps must repopulate on restore")
+        await pollUntil { backend.test_scopeConflict(deviceID: device.id) == nil }
+        #expect(backend.test_scopeConflict(deviceID: device.id) == nil,
+                "the conflict record must clear on disengage")
+        // Polled like every other assertion here: `Telemetry.log` is
+        // non-blocking, so the line lands on its own queue some time after the
+        // state change that emitted it — reading the box once races it (this
+        // flaked under a loaded suite), and the `_installTestSink(nil)` flush
+        // barrier only runs in the `defer` above, i.e. after this expectation.
+        await pollUntil {
+            telemetryLines(box, evt: "scope_conflict", device: device.id)
+                .contains { $0["stage"] as? String == "routeRestored" }
+        }
+        #expect(telemetryLines(box, evt: "scope_conflict", device: device.id)
+                    .contains { $0["stage"] as? String == "routeRestored" },
+                "the disengage must be loud too")
+    }
+
+    /// Test 9 (forces the I1 interleaving the original design believed
+    /// impossible): converge reads `boundStreamId` = nil BEFORE the in-flight
+    /// per-app add lands (its `liveStreams` write is held open), then converge's
+    /// own stream-0 `addOutput` is the engine's silent `.alreadyBound` no-op —
+    /// `added` records a session the engine never moved, the engine is stuck on
+    /// stream 1. The guaranteed trailing `.unbind` (FIFO-ordered after the
+    /// astray bind) is the deterministic last word: its case-4 verify reads
+    /// engine truth AFTER the astray op completed and rebinds 1 → 0.
+    @Test func staleConvergeReadIsHealedByTheSettlingUnbind() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        let perAppHold = HoldPoint()
+        let wsHold = HoldPoint()
+        engine.onAddOutputHold = { id, stream in
+            guard id == device.outputID else { return }
+            if stream >= 1 { await perAppHold.hold() } else { await wsHold.hold() }
+        }
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        await pollUntil { perAppHold.entered }   // per-app add in flight, pre-liveStreams-write
+
+        backend.setOutputSet([device.id])
+        // Converge's boundStreamId read is FORCED to see nil (the per-app write
+        // is still held), so it falls to the plain stream-0 add — held in turn.
+        await pollUntil(timeout: 5) { wsHold.entered }
+
+        perAppHold.open()                        // per-app session lands: live → 1
+        await pollUntil { engine.liveStream(of: device.outputID) == 1 }
+        wsHold.open()                            // converge's add: silent .alreadyBound no-op
+
+        await pollUntil(timeout: 5) { engine.liveStream(of: device.outputID) == 0 }
+        #expect(engine.liveStream(of: device.outputID) == 0,
+                "the settling unbind must heal the silent-no-op corruption back to stream 0")
+        #expect(engine.rebindCalls.contains { $0.0 == device.outputID && $0.1 == 0 },
+                "the heal must be the verify-first settle's rebindOutput(_, 0)")
+        await pollUntil(timeout: 5) {
+            telemetryLines(box, evt: "unbind_downgraded", device: device.id)
+                .contains { $0["settled"] as? String == "rebound" }
+        }
+        #expect(telemetryLines(box, evt: "unbind_downgraded", device: device.id)
+                    .contains { $0["settled"] as? String == "rebound" },
+                "the settle must record that it found an astray session and rebound it")
+        await pollUntil { backend.test_scopeConflict(deviceID: device.id) != nil }
+        #expect(backend.test_scopeConflict(deviceID: device.id) != nil,
+                "no per-app bookkeeping survives — the demotion is queryable")
+    }
+
+    /// Test 10 (defect found in the final adversarial review): an `.unbind`
+    /// deferred mid-converge (case 3) is consumed at release by RE-ENQUEUING it —
+    /// but when the user DESELECTED while that converge was still in flight, the
+    /// restore replay has already re-decided a binding for the device and its
+    /// `.bind` sits AHEAD of the re-enqueued unbind in the FIFO (here: parked
+    /// inside `ensurePTPTakeover` on the armed activator, so the ordering is
+    /// forced, not hoped). The stale unbind would then fire with no claim left
+    /// (case 1) and removeOutput-kill the freshly re-engaged per-app session —
+    /// and with `streamBindings` still set, every replay guard
+    /// (`streamBindings == nil`) skips the device forever: silent stranding.
+    /// The consume must DROP the settle (loudly) when the decision layer already
+    /// wants the device bound again.
+    @Test func staleDeferredUnbindMustNotKillAReengagedRoute() async {
+        let activator = ArmableHoldingPTPActivator()
+        let (backend, engine, discovery) = makeBackend(
+            ptpHelperActivator: activator,
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+
+        // Hold converge's 1→0 rebind open so the demotion's unbind
+        // deterministically defers (case 3) and the deselect below lands while
+        // the converge is provably still in flight.
+        let rebindHold = HoldPoint()
+        engine.onRebindBody = { id, streamId in
+            if id == device.outputID, streamId == 0 { await rebindHold.hold() }
+        }
+
+        backend.setOutputSet([device.id])
+        await pollUntil(timeout: 5) {
+            !telemetryLines(box, evt: "unbind_deferred", device: device.id).isEmpty
+        }
+        #expect(!telemetryLines(box, evt: "unbind_deferred", device: device.id).isEmpty,
+                "precondition: the demotion's unbind must have deferred mid-converge")
+
+        // Deselect while the converge is held. The restore replay re-decides the
+        // binding and its `.bind` parks inside `ensurePTPTakeover` (armed) —
+        // provably queued AHEAD of anything the release later enqueues.
+        activator.arm()
+        backend.setOutputSet([])
+        await pollUntil(timeout: 5) { activator.holding }
+        #expect(activator.holding,
+                "precondition: the restored route's bind must be parked pre-gate before the release runs")
+
+        // Let the converge finish: its add-half completes, the loop tears the
+        // now-undesired session down, and the release consumes the deferred
+        // settle — which must be DROPPED, not re-enqueued behind the parked bind.
+        rebindHold.open()
+        await pollUntil(timeout: 5) {
+            telemetryLines(box, evt: "unbind_redrive", device: device.id)
+                .contains { $0["outcome"] as? String == "dropped_route_reengaged" }
+        }
+        #expect(telemetryLines(box, evt: "unbind_redrive", device: device.id)
+                    .contains { $0["outcome"] as? String == "dropped_route_reengaged" },
+                "the release must drop (loudly) a settle whose device the route table re-claimed")
+
+        activator.release()
+        await pollUntil(timeout: 5) { (engine.liveStream(of: device.outputID) ?? 0) >= 1 }
+        #expect((engine.liveStream(of: device.outputID) ?? 0) >= 1,
+                "the re-engaged per-app session must survive — a stale unbind here is silent stranding")
+        let ops = engine.ops
+        let lastBind = ops.lastIndex { $0.hasPrefix("streamAdd:\(device.outputID.rawValue):") }
+        let lastRemove = ops.lastIndex(of: "remove:\(device.outputID.rawValue)")
+        #expect(lastBind != nil && (lastRemove == nil || lastRemove! < lastBind!),
+                "no remove may follow the re-engaged bind — the stale unbind must never fire")
+    }
+
+    /// The failed-bind fallback above must ALSO leave a Telemetry trail — a
+    /// silently-swallowed engine failure is invisible to any post-hoc diagnosis.
+    /// Uses `Telemetry._installTestSink` (the documented capture seam,
+    /// `Telemetry.swift`), same pattern as
+    /// `testRebindRecoveryEmitsTelemetryWithIncrementingGenerationAndAttempt`.
+    @Test func failedBindLogsTelemetry() async {
+        let (backend, engine, discovery) = makeBackend(injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo"]))
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:93", name: "Telemetry Bind-Fail Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+        engine.addFailures = [device.outputID.rawValue]
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+
+        func parsed(_ line: String) -> [String: Any]? {
+            guard let data = line.data(using: .utf8),
+                  let raw = try? JSONSerialization.jsonObject(with: data),
+                  let obj = raw as? [String: Any]
+            else { return nil }
+            return obj
+        }
+        func bindFailedLines() -> [[String: Any]] {
+            box.snapshot().compactMap(parsed).filter {
+                $0["cat"] as? String == "airplay" && $0["evt"] as? String == "bind_failed"
+                    && $0["device"] as? String == device.id
+            }
+        }
+        // `Telemetry.log` is non-blocking (its own writer queue), so poll for the
+        // line to land rather than reading the box immediately after the
+        // `.routedApps` event that's emitted from the same `stateQueue.sync` block
+        // — same pattern as
+        // `testRebindRecoveryEmitsTelemetryWithIncrementingGenerationAndAttempt`.
+        await pollUntil(timeout: 5) { !bindFailedLines().isEmpty }
+        #expect(!bindFailedLines().isEmpty,
+                "a failed bind must log a Telemetry(.airplay, \"bind_failed\", ...) line")
+        #expect(bindFailedLines().first?["op"] as? String == "bind",
+                "the logged op must identify this as a bind (not rebind) failure")
+    }
+
+    /// T4: `enqueueRebindRecovery`'s Telemetry instrumentation. Fires TWO
+    /// recaptures back-to-back on the SAME device with NO `await` between them
+    /// — `RebindTriggerTap.fireDeviceChange()` -> `PerAppCaptureCoordinator.
+    /// handleDeviceChange` -> `transition`/`onStateChange` ->
+    /// `NativeBackend.handlePerAppCaptureHealthChange` ->
+    /// `resetAirPlaySessionForRoutedApp` is a fully SYNCHRONOUS call chain on
+    /// THIS thread (no suspension point anywhere in it), so the second call's
+    /// generation bump only needs to beat gen 1's recovery `Task` — spawned by
+    /// the first call, but a freshly-spawned `Task` can start running on
+    /// another cooperative-pool thread concurrently, so being synchronous on
+    /// THIS thread alone doesn't guarantee the ordering. `engine.opDelayNanos`
+    /// below makes gen 1's engine ops (on that other thread) deterministically
+    /// slower than this thread's synchronous fireDeviceChange chain, so the
+    /// second call is guaranteed to see gen 1 still in place (its own recovery
+    /// hasn't resolved and cleared it yet) — no flaky race. Because both
+    /// recovery `Task`s share the `bindTail` FIFO, gen 1's completion (and its
+    /// `superseded` outcome) is then a hard PREREQUISITE of gen 2 ever starting
+    /// its own first attempt, not a further race to poll for.
+    ///
+    /// Asserts the emitted `airplay` lines let a reader reconstruct the exact
+    /// causal chain end to end:
+    ///  - a `session_reset` per recapture, its `gen` MONOTONICALLY INCREASING
+    ///    (1, then 2) — a fresh recapture bumps the single-flight generation
+    ///    rather than reusing it;
+    ///  - gen 1's superseded recovery says so explicitly (`outcome:superseded`)
+    ///    instead of silently vanishing;
+    ///  - gen 2 (deliberately forced to fail once before recovering, the same
+    ///    forced-failure shape `testRebindRecoveryRetriesThenSucceedsWithin
+    ///    BoundedAttempts` above uses) shows an INCREMENTING `attempt` number
+    ///    (1, then 2) before a terminal `succeeded` outcome.
+    /// Uses `Telemetry._installTestSink` (the documented capture seam,
+    /// `Telemetry.swift`) rather than touching disk; the sink is removed in a
+    /// `defer` so a later test in this same process (swift test --parallel runs
+    /// a class's methods serially in one process) never inherits it.
+    @Test func rebindRecoveryEmitsTelemetryWithIncrementingGenerationAndAttempt() async throws {
+        let tap = RebindTriggerTap()
+        let resolver = singleProcessResolver(["com.foo": 4242])
+        let perAppCapture = PerAppCaptureCoordinator(
+            makeTap: { tap }, processResolver: resolver, muteBehavior: .mutedWhenTapped)
+        let engine = SpyEngine()
+        let discovery = FakeDiscovery()
+        let backend = NativeBackend(
+            engineControl: engine, discoverySource: discovery, systemVolume: FakeSystemVolume(),
+            ptpHelperActivator: AlwaysReadyPTPHelperActivator(),
+            processResolver: resolver, injectedPerAppCapture: perAppCapture,
+            maxRebindRecoveryAttempts: 3, rebindRecoveryRetryDelay: 0.02,
+            aggregateControl: NoOpAggregateControl())
+        defer { backend.stop() }
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:89", name: "Telemetry Speaker")
+        await startAndDiscover(backend, engine, discovery, device)
+
+        backend.updateAppRoutes([route("com.foo", name: "Foo", toDevice: device.id)])
+        await pollUntil { engine.streamAddCalls.contains { $0.0 == device.outputID } }
+
+        let box = TelemetryLineBox()
+        Telemetry._installTestSink { box.append($0) }
+        defer { Telemetry._installTestSink(nil) }
+
+        func parsed(_ line: String) -> [String: Any]? {
+            guard let data = line.data(using: .utf8),
+                  let raw = try? JSONSerialization.jsonObject(with: data),
+                  let obj = raw as? [String: Any]
+            else { return nil }
+            return obj
+        }
+        func airplayLines(evt: String) -> [[String: Any]] {
+            box.snapshot().compactMap(parsed).filter {
+                $0["cat"] as? String == "airplay" && $0["evt"] as? String == evt
+                    && $0["device"] as? String == device.id
+            }
+        }
+        func rebindLines(gen: Int) -> [[String: Any]] {
+            airplayLines(evt: "rebind").filter { $0["gen"] as? String == "\(gen)" }
+        }
+
+        // Both set BEFORE firing anything, so there is no race with the
+        // recovery `Task`'s own scheduling: a freshly spawned `Task` can start
+        // running on another cooperative-pool thread concurrently — the two
+        // `fireDeviceChange()` calls below have no `await` between them, which
+        // keeps THIS thread's own chain synchronous, but does not by itself
+        // stop gen 1's recovery `Task` from being picked up and racing ahead on
+        // a different thread. `opDelayNanos` makes gen 1's engine ops
+        // deterministically slower than this thread's synchronous
+        // fireDeviceChange→…→resetAirPlaySessionForRoutedApp chain — a GENEROUS
+        // margin (not just "large enough on an idle machine"): it must stay well
+        // above the synchronous chain's cost even under heavy contention (e.g.
+        // several `swift build`/`swift test` runs competing for cores in sibling
+        // worktrees), or the second `fireDeviceChange()` could occasionally lose
+        // the race and flake. `addFailures` set here (rather than after firing)
+        // guarantees gen 2's own first attempt actually fails, giving its trail
+        // an incrementing attempt number to assert on below.
+        engine.opDelayNanos = 200_000_000
+        engine.addFailures = [device.outputID.rawValue]
+
+        // The per-app tap's device-change hook is installed on the
+        // coordinator's own async start path, which is NOT the path the
+        // `engine.streamAddCalls` poll above waits on. Wait for it explicitly:
+        // `fireDeviceChange()` is a silent no-op until it exists (see
+        // `RebindTriggerTap.isArmed`).
+        await pollUntil(timeout: 5) { tap.isArmed }
+        #expect(tap.isArmed, "the per-app capture must have installed its device-change hook before a recapture is fired — otherwise fireDeviceChange() does nothing and every assertion below fails against an empty collection")
+
+        // Two recaptures, back-to-back, no `await` in between.
+        tap.fireDeviceChange()
+        tap.fireDeviceChange()
+
+        await pollUntil(timeout: 5) {
+            rebindLines(gen: 2).contains { $0["outcome"] as? String == "retry_scheduled" }
+        }
+        engine.addFailures = []
+        await pollUntil(timeout: 5) {
+            rebindLines(gen: 2).contains { $0["outcome"] as? String == "succeeded" }
+        }
+
+        // Monotonically increasing generation: the two `session_reset` triggers,
+        // IN THE ORDER THEY WERE LOGGED, went 1 then 2 — never resets, never repeats.
+        let resetGens = airplayLines(evt: "session_reset").compactMap { ($0["gen"] as? String).flatMap(Int.init) }
+        #expect(resetGens == [1, 2],
+                       "session_reset gen must strictly increase across the two recaptures")
+        #expect(Set(airplayLines(evt: "session_reset").compactMap { $0["scope"] as? String }) == ["com.foo"],
+                       "session_reset must record which routed app (scope) triggered it")
+
+        // Gen 1's single in-flight attempt must recognize it was superseded by
+        // gen 2 — this is a prerequisite of gen 2 ever starting (shared
+        // `bindTail`), so it is already present by now, not a further race.
+        #expect(rebindLines(gen: 1).contains { $0["outcome"] as? String == "superseded" },
+                      "gen 1's recovery must say it was superseded, not silently vanish")
+        #expect(rebindLines(gen: 1).compactMap { $0["reason"] as? String }.last == "gen_superseded")
+
+        // Incrementing attempt number WITHIN generation 2: attempts 1 and 2 both
+        // appear, and attempt numbers never go backwards across the ordered
+        // trail for this one generation.
+        let gen2Attempts = rebindLines(gen: 2).compactMap { ($0["attempt"] as? String).flatMap(Int.init) }
+        #expect(gen2Attempts.contains(1), "attempt 1 must be recorded")
+        #expect(gen2Attempts.contains(2), "attempt 2 must be recorded after the forced failure")
+        #expect(gen2Attempts == gen2Attempts.sorted(),
+                       "attempt numbers must never decrease across the ordered trail for one generation")
+
+        // Every rebind line for gen 2 carries the causal fields the trail
+        // depends on: an accurate trigger and a real outcome.
+        for obj in rebindLines(gen: 2) {
+            #expect(obj["trigger"] as? String == "recapture")
+            #expect(obj["outcome"] as? String != nil, "every rebind line must carry an outcome")
+        }
+
+        // Gen 2's trail ends in a real terminal outcome, not a lone "scheduled"
+        // or "retry_scheduled" line with no resolution.
+        #expect(rebindLines(gen: 2).contains { $0["outcome"] as? String == "succeeded" })
+    }
+
+}
+
 } // extension SerializedSharedState
 
 // MARK: - collect(after:) convenience
 
-private extension SerializedSharedState.NativeBackendTests {
-    /// Subscribe, run `after` (which fires the stimulus once the subscription is
-    /// live), then collect until `predicate`.
-    func collect(
-        from backend: NativeBackend,
-        timeout: Duration = .seconds(3),
-        until predicate: @escaping @Sendable ([BackendEvent]) -> Bool,
-        after stimulus: @escaping () -> Void
-    ) async -> [BackendEvent] {
-        let stream = backend.makeEventStream()
-        let box = EventBox()
-        await confirmation("predicate satisfied") { done in
-            let task = Task {
-                for await event in stream {
-                    if case .level = event { continue }
-                    let all = await box.append(event)
-                    if predicate(all) { done(); break }
-                }
-            }
-            defer { task.cancel() }
-            // Give the subscription a beat to register on stateQueue before stimulating.
-            try? await Task.sleep(nanoseconds: 20_000_000)
-            stimulus()
-            try? await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: timeout) }
-                try await group.next()
-                // Cancel the STREAM task, not just the group's children. `cancelAll()`
-                // cancels the child that is `await task.value`, but `Task.value` does
-                // not observe its awaiter's cancellation — it waits for `task` itself.
-                // Without this the group's implicit scope-exit await never returns when
-                // the timeout wins, and the `defer { task.cancel() }` that would free it
-                // can't run because we are still inside this closure: a test whose
-                // predicate never fires HANGS THE WHOLE SUITE instead of failing.
-                task.cancel()
-                group.cancelAll()
+/// Subscribe, run `after` (which fires the stimulus once the subscription is
+/// live), then collect until `predicate`.
+private func collect(
+    from backend: NativeBackend,
+    timeout: Duration = .seconds(3),
+    until predicate: @escaping @Sendable ([BackendEvent]) -> Bool,
+    after stimulus: @escaping () -> Void
+) async -> [BackendEvent] {
+    let stream = backend.makeEventStream()
+    let box = EventBox()
+    await confirmation("predicate satisfied") { done in
+        let task = Task {
+            for await event in stream {
+                if case .level = event { continue }
+                let all = await box.append(event)
+                if predicate(all) { done(); break }
             }
         }
-        return await box.snapshot()
+        defer { task.cancel() }
+        // Give the subscription a beat to register on stateQueue before stimulating.
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        stimulus()
+        try? await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { _ = await task.value }
+            group.addTask { try await Task.sleep(for: timeout) }
+            try await group.next()
+            // Cancel the STREAM task, not just the group's children. `cancelAll()`
+            // cancels the child that is `await task.value`, but `Task.value` does
+            // not observe its awaiter's cancellation — it waits for `task` itself.
+            // Without this the group's implicit scope-exit await never returns when
+            // the timeout wins, and the `defer { task.cancel() }` that would free it
+            // can't run because we are still inside this closure: a test whose
+            // predicate never fires HANGS THE WHOLE SUITE instead of failing.
+            task.cancel()
+            group.cancelAll()
+        }
     }
+    return await box.snapshot()
 }
 
 private extension NSLock {

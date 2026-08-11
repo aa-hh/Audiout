@@ -70,8 +70,8 @@ public enum TCPProbeResult: Sendable {
 /// Every side-effecting step is behind an injectable, `@Sendable` closure seam so
 /// unit tests can drive the whole decision matrix without any real network or
 /// filesystem access; the *default* closures wire up `Network.framework`
-/// (`NWBrowser` + `NWConnection`, macOS 13 APIs used per Apple's documentation)
-/// and read the engine log off disk. `diagnose(_:)` is bounded (~2 s browse, 3 s
+/// (`NWBrowser` + `NWConnection`) and read the engine log off disk.
+/// `diagnose(_:)` is bounded (~2 s browse, 3 s
 /// probe, well under the 4 s contract) and **never throws** — on any internal
 /// error it falls back to the caller's `priorCause`.
 ///
@@ -240,8 +240,7 @@ public struct NetworkConnectionDiagnostics: ConnectionDiagnosing {
     /// Real Bonjour browse: runs an `NWBrowser` over `_airplay._tcp` and
     /// `_raop._tcp` for ~2 s, matching an `_airplay` instance whose name equals
     /// `deviceName`, or a `_raop` instance whose name ends `"@\(deviceName)"`.
-    /// Returns the first match's endpoint (or `.absent`). macOS 13 API, used per
-    /// Apple's `NWBrowser` documentation.
+    /// Returns the first match's endpoint (or `.absent`).
     public static let defaultBonjour: @Sendable (_ deviceName: String) async -> BonjourPresence = { deviceName in
         await browse(deviceName: deviceName, timeout: browseBound)
     }
@@ -304,7 +303,6 @@ public struct NetworkConnectionDiagnostics: ConnectionDiagnosing {
 
     /// Real TCP probe: opens an `NWConnection` to the resolved Bonjour endpoint
     /// and classifies the outcome (`.ready` / refused / timeout) within 3 s.
-    /// macOS 13 API, used per Apple's `NWConnection` documentation.
     public static let defaultTCPProbe: @Sendable (_ endpoint: BonjourPresence.Endpoint) async -> TCPProbeResult = { endpoint in
         await probe(endpoint: endpoint, timeout: probeBound)
     }

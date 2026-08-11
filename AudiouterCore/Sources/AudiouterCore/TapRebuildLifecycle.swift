@@ -1,6 +1,6 @@
 import Foundation
 
-// MARK: - Shared tap-rebuild lifecycle pieces (architecture review 2026-07-26, defect A)
+// MARK: - Shared tap-rebuild lifecycle pieces
 //
 // ``NativeCaptureCoordinator``'s `recreateTap(cause:)` and
 // ``PerAppCaptureCoordinator``'s `handleDeviceChange(bundleID:)` run the same

@@ -3,6 +3,10 @@ import Testing
 import AirPlayEngine
 @testable import AudiouterCore
 
+#if canImport(CoreAudio)
+import CoreAudio
+#endif
+
 /// T-BACKEND: hermetic tests for `NativeBackend`'s "play everywhere" enable/
 /// disable decision — Mac + ≥1 AirPlay device selected turns the delayed local
 /// sink on; anything else turns it off. No `AVAudioEngine`, no Core Audio tap,
@@ -77,21 +81,53 @@ import AirPlayEngine
     /// hermeticity concern `NativeBackendTests.FakeSystemVolume` documents).
     private final class NoOpSystemVolume: SystemVolumeControlling, @unchecked Sendable {
         var onExternalChange: (@Sendable (Int?, Bool?, Bool) -> Void)?
-        func currentVolume() -> Int? { nil }
+        /// Deliberately NOT `nil`: an unreadable system volume is itself a
+        /// "we own the volume" signal, which would fold Main into the sink gain
+        /// and change every gain this file asserts. A readable level keeps these
+        /// tests about the ordinary settable output they mean to describe.
+        func currentVolume() -> Int? { 50 }
         func currentMuted() -> Bool? { nil }
-        func setVolume(_ volume: Int) {}
+        func setVolume(_ volume: Int, didWrite: (@Sendable (Bool) -> Void)?) { didWrite?(true) }
         func setMuted(_ muted: Bool) {}
         func start() {}
         func stop() {}
     }
 
+    /// No-op ``AggregateDeviceControlling`` double: every read returns nil/empty
+    /// and create/destroy never run. `NativeBackend`'s default `aggregateControl`
+    /// param (`CoreAudioAggregateDeviceControl()`) would otherwise create/destroy
+    /// a REAL public "Audiouter" aggregate device in macOS Sound settings —
+    /// `.stop()` (every test here `defer`s it) calls `sweepOrphans()`
+    /// unconditionally, even on a backend that never called `.start()`. Never
+    /// touches the real HAL — mirrors `NativeBackendTests.NoOpAggregateControl`,
+    /// kept as its own copy here since this suite keeps its own private doubles.
+    private struct NoOpAggregateControl: AggregateDeviceControlling {
+        func resolveDeviceID(forUID uid: String) -> AudioObjectID? { nil }
+        func createAggregate(uid: String, name: String, subDeviceUID: String) -> AudioObjectID? { nil }
+        func destroyAggregate(_ deviceID: AudioObjectID) -> Bool { false }
+        func aggregateDeviceUIDs() -> [String] { [] }
+        func deviceUID(_ deviceID: AudioObjectID) -> String? { nil }
+        func builtInOutputDeviceUID() -> String? { nil }
+        func setDefaultOutputDevice(_ deviceID: AudioObjectID) -> Bool { false }
+    }
+
     // MARK: Helpers
 
-    private func makeBackend(macSelectedByDefault: Bool = false) -> (NativeBackend, SpySyncedLocalSink, LockedBool) {
+    /// `weOwnVolume` picks which default output the backend believes it has: our
+    /// own aggregate (so the app owns the volume and Main folds into the Mac's sink
+    /// gain) or an ordinary settable device. Pinned explicitly rather than left to
+    /// the production HAL read — on a machine where Audiouter really IS the default
+    /// output, that read would silently flip these tests.
+    private func makeBackend(macSelectedByDefault: Bool = false, weOwnVolume: Bool = false)
+        -> (NativeBackend, SpySyncedLocalSink, LockedBool) {
         let backend = NativeBackend(
             engineControl: NoOpEngine(),
             discoverySource: NoOpDiscovery(),
-            systemVolume: NoOpSystemVolume())
+            systemVolume: NoOpSystemVolume(),
+            aggregateControl: NoOpAggregateControl(),
+            currentDefaultOutputUID: {
+                weOwnVolume ? AggregateOutputDevice.productUID : "BuiltInSpeakerDevice"
+            })
         let sink = SpySyncedLocalSink()
         backend.syncedLocalSinkFactory = { sink }
         let macSelected = LockedBool(macSelectedByDefault)
@@ -150,6 +186,10 @@ import AirPlayEngine
         let (backend, sink, _) = makeBackend(macSelectedByDefault: true)
         defer { backend.stop() }
 
+        // `start()` is what evaluates volume ownership. Without it the exclusion
+        // below would hold for the wrong reason — never evaluated, rather than
+        // evaluated and found false.
+        backend.start()
         backend.setOutputSet(["airplay-1"])   // Mac + AirPlay ⇒ sink armed
         waitFor { !sink.gains.isEmpty }
 
@@ -177,6 +217,35 @@ import AirPlayEngine
         waitFor { sink.gains.last.map { abs($0 - 0.80) < 0.0001 } ?? false }
         #expect(sink.gains.last.map { abs($0 - 0.80) < 0.0001 } ?? false,
                 "group 80 with Main pinned at 20 → 0.80, not 0.16 — Main is not in the sink gain")
+    }
+
+    /// The mirror of the test above, for the state that makes the volume-key
+    /// interceptor necessary at all: with OUR aggregate as the default output the
+    /// system volume can't be written, so nothing else is applying Main to the Mac
+    /// and it has to fold into the sink gain. Without this, pulling Main down
+    /// quietens the AirPlay speakers while the Mac's own output stays at full —
+    /// the master control visibly failing on the commonest setup.
+    @Test func syncedLocalSinkGainCarriesMainWhenWeOwnTheVolume() {
+        let (backend, sink, _) = makeBackend(macSelectedByDefault: true, weOwnVolume: true)
+        defer { backend.stop() }
+
+        backend.start()
+        backend.setOutputSet(["airplay-1"])
+        waitFor { !sink.gains.isEmpty }
+
+        // Main 20 × group 80 × Mac 100% = 0.16 — the very value the settable case
+        // above proves must NOT appear there.
+        backend.setMasterGain(mainOut: 20, group: 80, mirrorToSystemVolume: false)
+        waitFor { sink.gains.last.map { abs($0 - 0.16) < 0.0001 } ?? false }
+        #expect(sink.gains.last.map { abs($0 - 0.16) < 0.0001 } ?? false,
+                "Main 20 × group 80 → 0.16 when the app owns the volume")
+
+        // And a MAIN-ONLY move must re-push, since Main is the only thing
+        // attenuating the Mac here — the settable case deliberately does not.
+        backend.setMasterGain(mainOut: 50, group: 80, mirrorToSystemVolume: false)
+        waitFor { sink.gains.last.map { abs($0 - 0.40) < 0.0001 } ?? false }
+        #expect(sink.gains.last.map { abs($0 - 0.40) < 0.0001 } ?? false,
+                "a Main-only move re-pushes the Mac's sink gain (0.50 × 0.80 = 0.40)")
     }
 
     /// Mac + AirPlay → AirPlay-only (Mac deselected): the sink turns OFF — in
@@ -274,6 +343,7 @@ import AirPlayEngine
             lastOutputSet = ids
             onSetOutputSet?(ids)
         }
+        func retryOutput(_ id: String) {}
     }
 
     private func makeRoutingBrain() -> (GroupController, RecordingBackend) {
@@ -290,7 +360,7 @@ import AirPlayEngine
                                          // settings.mainOutVolume, so the default
                                          // AppSettings() (.standard) would make the seed
                                          // depend on the dev's real defaults domain.
-                                         settings: AppSettings(defaults: UserDefaults(suiteName: "test-\(UUID().uuidString)")!),
+                                         settings: AppSettings(defaults: makeDefaults()),
                                          loadPersisted: false)
         return (controller, router)
     }
@@ -303,7 +373,8 @@ import AirPlayEngine
         let (controller, router) = makeRoutingBrain()
         let backend = NativeBackend(engineControl: NoOpEngine(),
                                     discoverySource: NoOpDiscovery(),
-                                    systemVolume: NoOpSystemVolume())
+                                    systemVolume: NoOpSystemVolume(),
+                                    aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let sink = SpySyncedLocalSink()
         backend.syncedLocalSinkFactory = { sink }
@@ -330,7 +401,8 @@ import AirPlayEngine
         let (controller, router) = makeRoutingBrain()
         let backend = NativeBackend(engineControl: NoOpEngine(),
                                     discoverySource: NoOpDiscovery(),
-                                    systemVolume: NoOpSystemVolume())
+                                    systemVolume: NoOpSystemVolume(),
+                                    aggregateControl: NoOpAggregateControl())
         defer { backend.stop() }
         let sink = SpySyncedLocalSink()
         backend.syncedLocalSinkFactory = { sink }
@@ -357,7 +429,8 @@ import AirPlayEngine
         let backend = NativeBackend(
             engineControl: NoOpEngine(),
             discoverySource: NoOpDiscovery(),
-            systemVolume: NoOpSystemVolume())
+            systemVolume: NoOpSystemVolume(),
+            aggregateControl: NoOpAggregateControl())
         backend.selectedDevicesQuery = { $0 == NativeBackend.localDeviceID }
         defer { backend.stop() }
 

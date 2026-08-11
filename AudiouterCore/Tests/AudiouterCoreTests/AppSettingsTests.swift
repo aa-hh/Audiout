@@ -7,18 +7,11 @@ import Testing
 /// `AppSettings` is the scalar half of the persistence split — a thin typed
 /// wrapper over `UserDefaults`. These assert the defaults, the round-trip, and
 /// forward-compat (an unknown stored value falls back, doesn't trap). A
-/// throwaway suite keeps the tests off `.standard`.
+/// throwaway store keeps the tests off `.standard`.
 @Suite struct AppSettingsTests {
 
-    private let suiteName: String
-    private let defaults: UserDefaults
-
-    init() {
-        let hash = ObjectIdentifier(AppSettingsTests.self).hashValue
-        suiteName = "AudiouterTests.\(UUID().uuidString).\(hash)"
-        defaults = UserDefaults(suiteName: suiteName)!
-        defaults.removePersistentDomain(forName: suiteName)
-    }
+    private let isolation = TestIsolation(owner: "AppSettingsTests")
+    private var defaults: UserDefaults { isolation.isolatedDefaults }
 
     @Test func defaultsWhenUnset() {
         let settings = AppSettings(defaults: defaults)
@@ -359,5 +352,17 @@ import Testing
             let withSource = AppSettings.resolvedAllowRemoteControlWithSource(environment: environment, settings: settings)
             #expect(plain == withSource.value)
         }
+    }
+
+    // MARK: One-surface pin (U3)
+
+    @Test func surfacePinnedDefaultsFalseAndRoundTrips() {
+        let settings = AppSettings(defaults: defaults)
+        #expect(!settings.surfacePinned, "fresh install: the transient bubble")
+        settings.surfacePinned = true
+        #expect(settings.surfacePinned)
+        #expect(AppSettings(defaults: defaults).surfacePinned, "persisted across instances")
+        settings.surfacePinned = false
+        #expect(!AppSettings(defaults: defaults).surfacePinned)
     }
 }

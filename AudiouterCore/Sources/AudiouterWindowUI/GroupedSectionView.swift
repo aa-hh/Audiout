@@ -50,8 +50,10 @@ import AudiouterSharedUI
 /// no target, same as clicking blank pane background anywhere else.
 final class GroupedSectionView: NSView {
     /// Large enough to read as a rounded shape at this container's size — the
-    /// 6 pt first draft rendered visually square.
-    static let cornerRadius: CGFloat = 10
+    /// 6 pt first draft rendered visually square. Same value as onboarding's
+    /// `RoundedContainerView` (both model the System Settings grouped
+    /// inset-list look), so it's sourced from `Tokens.Layout.groupedSectionCornerRadius`.
+    static let cornerRadius: CGFloat = Tokens.Layout.groupedSectionCornerRadius
     /// Breathing room above the first row and below the last, so rows never
     /// touch the container's edges.
     static let verticalPadding: CGFloat = 6

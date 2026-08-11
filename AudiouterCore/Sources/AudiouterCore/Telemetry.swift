@@ -31,8 +31,7 @@ import Foundation
 ///   an injected directory without ever touching the production path.
 /// - **MUST NOT be called from the real-time IOProc/render path** — only
 ///   from the (non-realtime) decision points around it (serial-queue /
-///   main-thread state machines). This file adds no such call sites; it is
-///   the logger only — nothing calls it yet except its own tests.
+///   main-thread state machines).
 public enum Telemetry {
 
     /// One of the subsystems this instruments (PLAN-TELEMETRY-SYSTEM.md §A):

@@ -7,9 +7,10 @@ import AudiouterSharedUI
 /// A saved group's header row in the Control-Center-style popover (SPEC §9
 /// revised — "Groups section"). Left to right: an **activate** button (a
 /// selectable circle that turns the group's members ON as a preset), a
-/// disclosure **chevron**, the group **name**, a numeric master **readout**, and
-/// a group-**master slider** shown on EVERY group (SPEC §9 revised — "every
-/// group row shows its master consistently, not just the active one").
+/// disclosure **chevron**, the group **icon** and **name**, a **mute** button,
+/// and a group-**master slider** + numeric **readout** shown on EVERY group
+/// (SPEC §9 revised — "every group row shows its master consistently, not
+/// just the active one").
 ///
 /// **Click anywhere on the row toggles expansion** (SPEC §9 revised — the whole
 /// reason for leaving NSMenu). The row is a control surface: a click on empty
@@ -181,8 +182,9 @@ public final class GroupRowView: NSView {
         // row's toggle); the name is the flexible column; the master slider and
         // `%` readout are anchored off the TRAILING edge so they line up exactly
         // with the device-row and Main-Out sliders. Group rows have no trailing
-        // control (no mute), so that slot is left empty — but the readout/slider
-        // still align because they clear the reserved trailing-control column.
+        // control (no Selected checkbox), so that slot is left empty — but the
+        // readout/slider still align because they clear the reserved
+        // trailing-control column.
         NSLayoutConstraint.activate([
             heightAnchor.constraint(equalToConstant: Self.rowHeight),
 
@@ -283,7 +285,7 @@ public final class GroupRowView: NSView {
 
     // STABILITY(D4): the drag flag clears only on the .leftMouseUp coincidence — a cancelled drag leaves it stuck and leaves GroupController's drag-ratio cache stale (end-drag never fires); see dev/notes/stability-audit-2026-07-18.md
     @objc private func masterChanged(_ sender: NSSlider) {
-        let event = NSApp.currentEvent
+        let event = NSApp?.currentEvent
         if !isDraggingMaster {
             isDraggingMaster = true
             delegate?.groupRowBeginMasterDrag(self, groupID: group.id)
@@ -365,15 +367,31 @@ public final class GroupRowView: NSView {
 
     deinit { removeMouseMovedMonitor() }
 
-    public override func draw(_ dirtyRect: NSRect) {
-        // Active group → a subtle accent wash; hover → the standard row hover.
-        let rect = bounds.insetBy(dx: 5, dy: 2)
-        let path = NSBezierPath(roundedRect: rect, xRadius: 7, yRadius: 7)
+    /// Row highlight colour, `nil` when neither active nor hovered. Same
+    /// two washes and alphas as `DeviceRowView`/`AppRowView`
+    /// (`PopoverColumnGrid.rowSelectionWashAlpha`/`rowHoverWashAlpha`) so all
+    /// three row types present identical interactive-state styling — this row
+    /// used to carry its own one-off alphas (0.15/0.12). Factored out of
+    /// `draw(_:)`, mirroring `AppRowView.currentHighlightColor`, so offscreen
+    /// tests can assert it without rasterizing a draw cycle.
+    private var currentHighlightColor: NSColor? {
         if isActive {
-            NSColor.controlAccentColor.withAlphaComponent(0.15).setFill()
-            path.fill()
+            return Tokens.Color.accent.withAlphaComponent(PopoverColumnGrid.rowSelectionWashAlpha)
         } else if isHovered {
-            NSColor.selectedContentBackgroundColor.withAlphaComponent(0.12).setFill()
+            return Tokens.Color.selectedContentBackground.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha)
+        } else {
+            return nil
+        }
+    }
+
+    public override func draw(_ dirtyRect: NSRect) {
+        if let highlight = currentHighlightColor {
+            let rect = bounds.insetBy(dx: PopoverColumnGrid.selectionHighlightInsetX,
+                                      dy: PopoverColumnGrid.selectionHighlightInsetY)
+            let path = NSBezierPath(roundedRect: rect,
+                                    xRadius: PopoverColumnGrid.selectionHighlightCornerRadius,
+                                    yRadius: PopoverColumnGrid.selectionHighlightCornerRadius)
+            highlight.setFill()
             path.fill()
         }
         nameLabel.textColor = Tokens.Color.label
@@ -407,6 +425,12 @@ public final class GroupRowView: NSView {
 
     /// Whether a transient hover wash is currently active.
     var test_isHovered: Bool { isHovered }
+
+    /// The alpha of the row-highlight fill `draw(_:)` would paint (`nil` when
+    /// neither active nor hovered) — mirrors `AppRowView.test_highlightAlpha`
+    /// so a headless test can assert the resolved wash without rasterizing a
+    /// draw cycle.
+    var test_highlightAlpha: CGFloat? { currentHighlightColor?.alphaComponent }
 
     /// Simulate the pointer entering this row.
     func test_simulateMouseEntered() { setHovered(true) }

@@ -8,7 +8,7 @@ import Foundation
 /// playback engine state) — stderr isn't readable there, a file is. Appends one
 /// line per event to the file named by `$AIRPLAY_AUDIO_DIAG`; a complete no-op
 /// (zero cost, never touches disk) when that variable is unset, so it is inert
-/// in production and tests. Temporary diagnostic scaffolding.
+/// in production and tests.
 enum AudioDiag {
     private static let handle: FileHandle? = {
         guard let path = ProcessInfo.processInfo.environment["AIRPLAY_AUDIO_DIAG"] else { return nil }

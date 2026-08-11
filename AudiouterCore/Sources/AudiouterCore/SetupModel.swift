@@ -71,11 +71,16 @@ public enum SetupPermission: CaseIterable, Sendable {
     case audioCapture
     /// "Local Network" — gates the Bonjour discovery that finds AirPlay speakers.
     case localNetwork
-    /// "Accessibility" — gates simulating Mac media-key presses from the
-    /// speaker's own transport controls. Primed here AHEAD of the feature that
-    /// consumes it (speaker-side remote control isn't merged yet — see
-    /// ``RemoteControlPriming``'s doc comment) so the grant is already in place
-    /// once it lands.
+    /// "Accessibility" — gates two things now, and the second one is the reason
+    /// this stopped being a nicety: simulating Mac media-key presses from the
+    /// speaker's own transport controls (``MediaKeyController``), and INTERCEPTING
+    /// the volume keys while our aggregate is the Mac's default output
+    /// (`AudiouterApp/VolumeKeyInterceptor.swift`).
+    ///
+    /// The difference matters. Posting merely no-ops untrusted; a `CGEventTap`
+    /// cannot be created at all. So without this grant the volume keys are dead in
+    /// exactly the state where macOS has already stopped handling them itself —
+    /// see `docs/plans/PLAN-VOLUME-KEY-INTERCEPTION.md`.
     case remoteControl
 }
 
@@ -102,6 +107,11 @@ public enum SystemSettingsPane: Sendable {
     case screenAndSystemAudioRecording
     case localNetwork
     case accessibility
+    /// Not a Privacy anchor — the Bluetooth pane itself. The BT-CONNECT
+    /// fallback (PLAN-UNIVERSAL-SYNC Decision 3): when a programmatic
+    /// reconnect doesn't resolve, one tap lands the user where pairing and
+    /// manual connect live.
+    case bluetooth
 
     /// The `x-apple.systempreferences:` URL that opens this pane.
     public var url: URL {
@@ -112,6 +122,8 @@ public enum SystemSettingsPane: Sendable {
             return Self.make("Privacy_LocalNetwork")
         case .accessibility:
             return Self.make("Privacy_Accessibility")
+        case .bluetooth:
+            return URL(string: "x-apple.systempreferences:com.apple.BluetoothSettings")!
         }
     }
 
@@ -453,7 +465,7 @@ public final class SetupModel {
     /// it just adds a disabled entry to Login Items. The user-facing step is
     /// the *approval* afterwards, which `.requiresApproval` surfaces. Called
     /// once, at onboarding load (mirrors the design doc's "at first launch").
-    /// Idempotent — safe to call again (e.g. "Check Permissions…").
+    /// Idempotent — safe to call again (e.g. "Open Setup…").
     ///
     /// NOTE (Developer-ID gating): under this branch's ad-hoc signing,
     /// `register()` cannot validate and this will not progress past

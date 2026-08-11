@@ -338,8 +338,33 @@ documentation and the macOS HIG specify.** Doc URLs below are
 `developer.apple.com/documentation/appkit/<class>`.
 
 Decisions: **pure AppKit** (no SwiftUI) · **dropdown is a Control-Center-style
-NSPopover** (REVISED 2026-07-13 — see below) · full window is **sidebar + mixer**
-· volume is **horizontal rows**.
+NSPopover** (REVISED 2026-07-13, superseded 2026-08-07 — see below) · full window
+is **sidebar + mixer** · volume is **horizontal rows**.
+
+> **REVISED 2026-08-07 — ONE SURFACE replaces five windows.** The dropdown, the
+> Groups window and the Settings window are now three **screens** of a single
+> panel, chosen by a tab-bar-style switcher in its header (icon+label tabs in
+> the Mac's toolbar-tabs idiom, ⌘1/⌘2/⌘3): **Mixer** (the panel this section
+> describes below), **Groups**, **Settings**. Setup and About keep their own
+> windows — the two deliberate exceptions. Authoritative record:
+> PLAN-ONE-SURFACE-032.md.
+>
+> **Two manners, one window.** A **Pin** button beside Quit flips it, and the
+> choice persists across launches. *Unpinned* (default) it behaves as the
+> popover did: anchored under the status item with a beak, dismissed by a
+> click outside. *Pinned* it is an ordinary movable window that remembers its
+> frame, may sit behind other apps, and **closing it does not unpin it**. The
+> app stays menu-bar-only in both.
+>
+> **Sizes are per screen**, animated with the top edge anchored: Mixer keeps
+> its exact content fit, Groups opens at its designed size and remembers a
+> drag for the session, Settings sizes to the selected tab.
+>
+> **The menu-bar click has exactly four cases** (in order): first-run Setup is
+> open → re-front Setup, never the surface; unpinned → toggle the surface —
+> and the click that just dismissed it never bounces it back open; pinned and
+> open (even behind another app) → bring it to the front, never toggle it
+> shut; pinned and closed → reopen it where it was.
 
 > **REVISED 2026-07-16 — Applications card + collapsible sections + exact-fit
 > popover SHIPPED.** Per-app routing (previously a "Future (v2)" note below)
@@ -369,9 +394,9 @@ NSPopover** (REVISED 2026-07-13 — see below) · full window is **sidebar + mix
 ### Menu bar extra
 | Element | AppKit API | Documented usage we follow |
 |---|---|---|
-| Status item | `NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)` | Customize only via its `button` property; the button's action toggles the popover. Provide a user setting to hide it (HIG). |
+| Status item | `NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)` | Customize only via its `button` property; the button's action runs the four-case click policy above. Provide a user setting to hide it (HIG). |
 | Status icon | `NSImage(systemSymbolName:variableValue:accessibilityDescription:)` | SF Symbol `speaker.wave.3.fill` with `variableValue` = master volume. Template rendering → correct in dark/light menu bar. |
-| Dropdown | **`NSPopover`** (`.transient`/`.semitransient` behavior) anchored to the status button, hosting an exact-content-fit custom-view panel (no `NSScrollView`, no scrollbar — REVISED 2026-07-16, see below) | Control-Center-style. Groups + devices are stacked custom views; expansion animates; click anywhere on a row toggles it. |
+| Dropdown | The one surface's **Mixer screen**: an `NSPanel` anchored under the status button (unpinned) hosting the same exact-content-fit custom-view panel (no `NSScrollView`, no scrollbar — REVISED 2026-07-16, see below). Was an `NSPopover` until 2026-08-07 | Control-Center-style. Groups + devices are stacked custom views; expansion animates; click anywhere on a row toggles it. |
 
 ### Groups in the menu (decided 2026-07-09)
 

@@ -39,7 +39,7 @@ import Darwin   // dlopen/dlsym for the private TCC status read
 /// Each `<int>` is `TCCAccessPreflight`'s raw return for that bucket — 0
 /// granted / 1 denied / 2 undetermined — or -1 if the private framework/symbol
 /// itself couldn't be resolved at all. `control` reads a deliberately BOGUS
-/// service name that is verified (empirically, this session) to always read
+/// service name that is verified (empirically) to always read
 /// back exactly 1 when the dlsym path is actually working. A `control` value
 /// other than 1 means that path is broken, so `audio`/`screen` on the same
 /// line are void — `TCCProbeRunner`'s parser must treat that as a failure, not

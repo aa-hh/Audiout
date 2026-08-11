@@ -13,6 +13,7 @@ Goal: make a **Bluetooth speaker feel as natural to add, group, and sync as an A
 2. **v1 scope = both BT-only and BT-mixed-with-AirPlay.** BT-only (Mac → BT speaker(s) on the Mac's own clock) is the simpler sync case and users expect it; BT-mixed is the harder/more valuable case. Ship both; treat BT-mixed as the primary tested path.
 3. **Reconnect = auto-connect, then fall back.** Attempt `IOBluetoothDevice.openConnection()` for an already-paired-but-disconnected speaker; if it doesn't return as an audio device within a few seconds, one-tap deep-link into Bluetooth Settings. (Pairing itself is an unavoidable one-time Settings trip — Apple owns it.)
 4. **Magic-pair auto-offset = fast-follow.** v1 ships a genuinely good MANUAL offset flow (per-device ms + A/B "nudge until it blends", seeded by a per-brand table). Add mic-loopback auto-offset only after `BT-SPIKE-OFFSET` proves it survives on real hardware.
+   **AMENDED 2026-08-07 (Alec): auto-offset is CUT, not fast-follow.** The Mac's mic position is uncontrollable — it may not hear all speakers (different rooms is our GOOD case) and can't identify which speaker is which. Revisit only if Alec raises it. Consequences: `BT-SPIKE-OFFSET` and `BT-OFFSET-AUTO` are removed from the task list; the R-A2DP/HFP risk shrinks to runtime HFP *detection* (BT-RECONNECT) only; manual offset (BT-OFFSET-UI) is the shipping story, sharpened by the 2026-08-07 research (`dev/notes/bt-output-research-2026-08-07.md`): signed numeric ms, ±500 ms, 10 ms coarse / 1 ms fine, tuned live while music plays, persisted per device UID, per-brand seeds, plus the A/B alternating-click aid (no competitor ships one). Research also notes every product that automated calibration still kept manual as the fallback — manual-only is a complete product, not a stopgap.
 5. **License = extract a clean shared `SyncCore`.** Pull the pure timing + drift-control (PI) math into a new clean-room file (no GPL header) consumed by BOTH the Mac-local sink and the BT sink; each sink's `AVAudioEngine` wiring stays in its own file. (Note: the shipping binary is already GPL via OwnTone/RAOP — this is about keeping the individual BT sender FILE relicensable/clean, per Alec's discipline.)
 6. **Sequencing = land Mac-sync (synced-local-airplay) to `main` first,** then build BT on top of its proven delayed-sink + continuous drift-correction machinery. Avoids re-inventing the grandmaster/hostTime/PI loop and avoids two unmerged real-time-audio branches editing the same hot files.
 
@@ -159,6 +160,68 @@ Files: `BTConnectionManager.swift`, `NativeBackend` connection-state plumbing.
 What: implement the Section-D table; map to `isAvailable` greying + `connectionState`; detect HFP downgrade (transport/format flip) → pause/badge + auto-restore.
 Kind: backend · Depends on: BT-CONNECT, BT-BACKEND · **Model: sonnet 5 · Effort: medium.**
 Verify: state-transition unit tests + hardware.
+
+**UI SPEC LOCKED 2026-08-07 (Alec, via mockup review — binding for BT-OFFSET-UI and BT-UI):**
+Bluetooth devices are their own "Bluetooth Devices" subsection in OUTPUT DEVICES, rows
+identical to AirPlay rows (rail/tether select on the left, meter under the name, VOLUME
+slider + %, FEED pill far right). **SYNC is a column title in the Bluetooth subsection
+only**, sitting between VOLUME and FEED: compact − / bare-ms-value / + stepper (±500 ms,
+10 ms steps; value field allows 1 ms typing) plus an align-by-ear icon button —
+**`metronome.fill`** SF Symbol (fall back to outline `metronome` if the fill clots at
+final size) with a hover TOOLTIP explaining its purpose. Disconnected rows keep their
+saved value read-only. **AMENDED same day (Alec): no instructional sublabels** —
+BT rows express connection state through the SAME rail/node + ring vocabulary
+AirPlay rows already use (greyed row + dimmed hollow node = paired-but-
+disconnected; the node's connecting state during a reconnect attempt; failure-
+hue ring + failure headline sublabel on `.failed`). "Click to connect" is the
+row's ordinary click behavior, never a printed instruction; sublabels stay
+reserved for failure headlines ("Connected elsewhere", "Couldn't connect") and
+feed info, exactly as AirPlay rows use them.
+**Device-tier handling (Alec, 2026-08-07, locked):** (1) remembered/paired but
+disconnected → normal greyed row, click connects (the macOS-Bluetooth-menu
+behavior; already built + live-tested); selecting a greyed row = "play when
+up", auto-starts on connect. (2) pairing record genuinely deleted while app
+data (group/trim/icon) still references the id → row survives wherever that
+data puts it; click fails fast with a distinct "Not paired" failure headline +
+Bluetooth-Settings deep-link suggestion (new `ConnectionFailure.Cause`, UI
+wave); never auto-purge — the MAC-derived id resurrects trim + membership on
+re-pair. (3) never-paired → NO rows, no scanning (unpairable rows are dead
+ends); the OUTPUT DEVICES `+` menu gains "Pair a Bluetooth speaker…" →
+`SystemSettingsPane.bluetooth` deep-link, and the row auto-appears on return
+(connect notification → enumerator refresh, already built). Hide the Bluetooth
+subsection entirely when it would be empty. The align aid plays a REAL metronome-style tick (sharp woodblock
+transient — the ear detects double-hits/flams down to ~10–20 ms) on BOTH the reference
+device and the BT device on the same beat; the user nudges until the flam collapses to a
+single tick. Beat spacing must dodge offset aliasing: at 120 BPM (500 ms) a fully-offset
+device sounds aligned one beat late — use ~70–80 BPM (750–850 ms) or a slightly
+irregular interval.
+
+**ALIGNMENT WIZARD UX LOCKED 2026-08-08 (Alec — binding for the wizard track):**
+Two-tier tuning: the WIZARD is the setup-time path; everyday touch-up is a live
+scrubber (separate track, popover surface). Wizard = lateralization bisection —
+probe-validated live (clear which-side signal at 7–15 ms even on a broken
+baseline; the confusing manual-centre step of the probe does NOT exist in the
+wizard, whose bisection self-centres from the answers). **No seed table exists**
+(no data source — confirmed by research); a fresh BT speaker's default is raw,
+so the FIRST mixed playback is exactly when it sounds wrong. Hence the
+**first-mix intercept**: the click that first puts a never-aligned BT speaker
+into a mix with any other device connects the speaker and starts its stream but
+holds it SILENT; an anchored card (never a modal) explains in one sentence
+("Bluetooth speakers each run on their own delay — a quick alignment keeps
+everything in step") and offers: (1) Align with your music (unmute both, live
+tuning — control design belongs to the touch-up track), (2) Align with ticks
+(the wizard: continuous ticks + which-side buttons named after the actual
+devices + "Can't tell"; ~5 answers; narrowing progress; ms number shown only as
+a closing receipt with Keep / Try again; two "can't tell" = graceful exit
+"these speakers are far apart — they're already as aligned as they need to
+be"), (3) Not now (unmute, play as-is). The intercept fires ONCE per device
+EVER on its own — "Not now" is final, no reminders ("if they're happy, they're
+happy"); re-launch stays available forever via the row's metronome button in
+the speakers/groups window, and the wizard's closing copy educates the popover
+scrubber for everyday touch-ups. Aligned once → trim saved → never intercepted
+again. SYNC stepper column placement (popover vs window-only) is deliberately
+left to reconcile with the touch-up track's scrubber design — don't move it
+until that lands.
 
 **BT-OFFSET-UI — per-device manual offset (numeric ms + nudge) + persistence**
 Files: Settings Audio tab (match the existing "Advanced buffer ms" precedent), `AppSettings.swift`, `BTSyncedSink.swift` (consume), per-brand seed table.

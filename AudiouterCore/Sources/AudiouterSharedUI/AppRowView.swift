@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 import AppKit
-import AudiouterSharedUI
 
-/// A single row of the popover's future **Applications** card
+/// A single row of the popover's **Applications** card
 /// (PLAN-POPOVER-ROUTING.md §A/§C task T-6): app icon · truncating name ·
 /// always-visible `NSSlider` (dimmed while the app plays on the
 /// current device, decision 3) · `%` readout · a trailing "redirect audio to…"
@@ -21,7 +20,7 @@ import AudiouterSharedUI
 /// through ``Delegate`` so the host (`PopoverController`, wired to the new
 /// `AppRoutingController` per PLAN task T-8) can persist the change. This view
 /// NEVER touches a backend, a store, or (per T-6's isolation requirement) the
-/// `AppRoute`/`AppRouteStore` types being built in parallel — it takes only
+/// `AppRoute`/`AppRouteStore` types — it takes only
 /// plain values via ``Configuration``.
 public final class AppRowView: NSView {
 
@@ -113,8 +112,8 @@ public final class AppRowView: NSView {
         /// the local "Current Device" entry(ies) first, then AirPlay devices.
         public let destinations: [Destination]
         /// Whether the app's process is currently running (T4). When `false`, the
-        /// row shows a small offline badge (`exclamationmark.circle`) on the icon
-        /// and dims the name, so the user can see the route is saved but inactive.
+        /// icon dims; an unrouted row also shows the offline badge, a routed row
+        /// appends the " (idle)" suffix instead.
         /// The row remains fully interactive while offline (they can still change
         /// the route destination). Defaults to `true` so existing callers and
         /// tests that don't pass this field see no behavior change.
@@ -144,9 +143,8 @@ public final class AppRowView: NSView {
     }
 
     /// Shares `DeviceRowView`'s body-row height (`PopoverColumnGrid.bodyRowHeight`)
-    /// — a deliberate density unification: this row used to stand alone at 38pt,
-    /// now it renders at the same 42pt as every other popover row so the whole
-    /// list reads as one cohesive density instead of two interleaved ones.
+    /// — a deliberate density unification: one shared height with every other
+    /// popover row.
     public static let rowHeight: CGFloat = PopoverColumnGrid.bodyRowHeight
 
     public weak var delegate: Delegate?
@@ -173,20 +171,19 @@ public final class AppRowView: NSView {
 
     private let iconView = NSImageView()
     /// Small SF Symbol badge overlaid on the icon when the app is not running
-    /// (T4). Hidden by default; shown when `isRunning == false`. Uses
+    /// (T4). Hidden by default; shown only for an unrouted, not-running row
+    /// (routed rows show the " (idle)" suffix instead). Uses
     /// `exclamationmark.circle.fill` with a yellow-ish secondary tint so it
     /// reads as "warning/offline" without being red/alarming — the route is
     /// intact, the app just isn't running.
     private let offlineBadge = NSImageView()
 
-    /// The leading VU meter (task T4), mounted only when `showsMeter` is
-    /// true — mirrors `DeviceRowView`'s `LevelMeterView`. No per-app level
-    /// signal exists yet (see `AudiouterSharedUI/AGENTS.md`), so nothing
-    /// drives this automatically; a future per-stream metering seam calls
-    /// ``setLevel(_:)`` directly.
+    /// The under-name VU meter (task T4), mounted only when `showsMeter` is
+    /// true — mirrors `DeviceRowView`'s `LevelMeterView`. Driven by
+    /// `BackendEvent.appLevel` via `PopoverController.updateAppLevel` →
+    /// ``setLevel(_:)``.
     private let meterView = LevelMeterView()
-    /// Whether the under-name VU meter is shown. Defaults to `false` so every
-    /// existing caller (today, none pass `true`) sees no layout change.
+    /// Whether the under-name VU meter is shown.
     private let showsMeter: Bool
     /// The most recently pushed meter level, for ``test_meterLevel()``. `0`
     /// when there's no meter or after a ``resetLevel()``.
@@ -288,8 +285,7 @@ public final class AppRowView: NSView {
         // `liveAppNames`, which `PopoverController.applyRoutedApps` already
         // holds for DEVICE rows) is not plumbed into this view's inputs, so
         // routed ∧ running stands in for "live" until the host passes the real
-        // flag (noted for the staff-review gate; this stage may not rewire the
-        // controller).
+        // flag.
         //
         // A routed-but-idle app (route saved, process not running) appends the
         // spec's **" (idle)" tertiary suffix** (§3.5's `AppName (idle)`
@@ -565,10 +561,9 @@ public final class AppRowView: NSView {
             accessibilityDescription: "Not running")?
             .withSymbolConfiguration(badgeConfig)
         offlineBadge.translatesAutoresizingMaskIntoConstraints = false
-        offlineBadge.isHidden = true   // visible only when !isRunning
+        offlineBadge.isHidden = true   // visible only for an unrouted, not-running row
 
-        // Leading VU meter (task T4): mounted only when `showsMeter` — no
-        // existing caller passes `true` today, so their layout is unaffected.
+        // Under-name VU meter (task T4): mounted only when `showsMeter`.
         // Non-interactive (`LevelMeterView.hitTest` returns nil).
         meterView.translatesAutoresizingMaskIntoConstraints = false
 
@@ -688,7 +683,7 @@ public final class AppRowView: NSView {
     // STABILITY(D4): the drag flag clears only when the last change callback coincides with .leftMouseUp — Esc/cancelled drags leave it stuck and the row ignores model updates; see dev/notes/stability-audit-2026-07-18.md
     @objc private func volumeChanged(_ sender: NSSlider) {
         isDraggingSlider = true
-        let event = NSApp.currentEvent
+        let event = NSApp?.currentEvent
         if event?.type == .leftMouseUp { isDraggingSlider = false }
         readoutLabel.stringValue = "\(sender.integerValue)%"
         delegate?.appRow(self, didSetVolume: sender.integerValue, for: appID)
@@ -754,9 +749,7 @@ public final class AppRowView: NSView {
     // mouseDown, so a click landing on either NEVER reaches here. Only the
     // icon/name/dead-zone area (backed by a plain `NSImageView`/label-style
     // `NSTextField`, neither of which intercepts mouse events) and the row's
-    // background fall through to these overrides. The hover-revealed remove
-    // button is the one exception living in that dead zone; it's excluded
-    // explicitly below so a click on it removes rather than also selecting.
+    // background fall through to these overrides.
 
     public override var acceptsFirstResponder: Bool { true }
 
@@ -1174,9 +1167,9 @@ public final class AppRowView: NSView {
 
     /// Whether `point` (in the row's own coordinate space) falls inside a
     /// region that would trigger `didRequestSelect` on a real click — i.e.
-    /// outside the slider and destination popup frames, and outside the
-    /// remove button when it's visible. Test-hook wrapper around the real
-    /// production check `mouseDown`/`rightMouseDown` use (`isInSelectableDeadZone`).
+    /// outside the slider and destination popup frames. Test-hook wrapper around
+    /// the real production check `mouseDown`/`rightMouseDown` use
+    /// (`isInSelectableDeadZone`).
     public func test_pointIsInSelectableDeadZone(_ point: NSPoint) -> Bool {
         layoutSubtreeIfNeeded()
         return isInSelectableDeadZone(point)

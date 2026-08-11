@@ -67,6 +67,20 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private let engine: EngineControlling
     private let discovery: DiscoverySource
 
+    /// Bluetooth audio-output enumeration (BT-ENUM): Core Audio BT transport
+    /// merged with the IOBluetooth paired list, surfacing `.bluetooth` rows the
+    /// same way discovery surfaces AirPlay rows. `nil` (the designated init's
+    /// default, so every existing test stays BT-free) means no BT enumeration;
+    /// the production convenience init wires the real ``BTDeviceEnumerator``.
+    /// BT devices never get an `outputIDs` entry and are never fed to the
+    /// engine — structurally unroutable until BT-BACKEND partitions the output
+    /// set (plan risk R-partition).
+    private let btEnumerator: BTDeviceEnumerating?
+    /// BT-CONNECT: IOBluetooth connect/disconnect for paired BT speakers.
+    /// `nil` under most tests (like `btEnumerator`), which keeps every BT
+    /// reconnect path inert unless a fake is injected.
+    private let btConnectionManager: BTConnectionManaging?
+
     /// The Mac's own default-output volume/mute. This is the ONLY control path the
     /// local device row (``localDeviceID``) has: the Mac is the thing *sending*
     /// audio, so it is never an engine output, has no ``outputIDs`` entry, and every
@@ -233,6 +247,93 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// simple, trailing-edge only, no leading-edge fast path).
     private static let syncedLocalSettleWindow: TimeInterval = 0.25
 
+    // MARK: Bluetooth outputs — sink-manager lifecycle (BT-BACKEND, R-partition)
+
+    /// Builds the N-instance Bluetooth sink manager the first time a BT output
+    /// is selected. `makeBackend(_:)` wires the production closure (a
+    /// ``BTSyncedSink`` reading this backend's live start-buffer value — plan
+    /// risk R4 forbids a stale copy); tests inject a spy conforming to
+    /// ``BTSyncedSinkControlling``. `nil` = BT playback inert (same posture as
+    /// a nil `syncedLocalSinkFactory`).
+    var btSyncedSinkFactory: (() -> BTSyncedSinkControlling)?
+
+    /// The constructed manager (real or spy), built lazily on first enable and
+    /// reused across disable/re-enable. Confined to `captureControlQueue`.
+    private var btSink: BTSyncedSinkControlling?
+
+    // MARK: Bluetooth connect lifecycle (BT-LIFECYCLE)
+
+    /// Every BT id currently held at `.connecting`, with the instant its hold
+    /// expires. An entry exists ONLY while the row is breathing; the promotion
+    /// to `.connected` (or the degrade to `.failed`) removes it. On `stateQueue`.
+    private var btConnectingDeadlines: [String: Date] = [:]
+
+    /// The armed poll that asks the sink manager which devices have started
+    /// rendering. `nil` = nothing is breathing, so nothing is scheduled — the
+    /// poll exists only for the duration of a connect. On `stateQueue`.
+    private var btRenderPollWork: DispatchWorkItem?
+
+    /// How often the hold re-asks. Fast enough that the dot lands with the
+    /// first note rather than after it.
+    private static let btRenderPollInterval: TimeInterval = 0.1
+
+    /// Ceiling on the `.connecting` hold: engine start + the first captured
+    /// buffer + the reference delay (at most the AirPlay presentation delay).
+    /// Past it the row reads `.failed` — a spinner that never resolves is the
+    /// one outcome a connection indicator may never produce. Settable so tests
+    /// don't sleep through the real ceiling.
+    var btRenderStartTimeout: TimeInterval = 6
+
+    // MARK: Bluetooth per-device sync trim (BT-OFFSET-UI)
+
+    /// Persistence for the per-device SYNC trims. `nil` (most tests) = trims
+    /// live for the session only.
+    private let btTrimStore: BTTrimStore?
+    /// Guards ``btTrimsByUID`` alone — read from the UI thread
+    /// (``btSyncTrim(forDevice:)``), written by ``setBTSyncTrim(_:forDevice:)``,
+    /// and snapshotted by `captureControlQueue` when a sink is (re)armed; a
+    /// dedicated lock keeps those reads off `stateQueue` entirely.
+    private let btTrimLock = NSLock()
+    private var btTrimsByUID: [String: Double] = [:]   // btTrimLock
+
+    /// Test seam: a BT `Device.id` (its Core Audio UID) → the live
+    /// `AudioObjectID` a per-device sink pins its engine to. `nil` (production)
+    /// falls back to `aggregateControl.resolveDeviceID(forUID:)` — the HAL's
+    /// own translation. Resolved fresh at each apply, never cached: object ids
+    /// go stale across a disconnect/rejoin while UIDs don't.
+    var btDeviceIDForUID: (@Sendable (String) -> AudioObjectID?)?
+
+    /// The last BT decisions `setOutputSet` committed — enable, selected uids,
+    /// and group composition — so a routing call that changes none of them
+    /// re-applies nothing. All on `stateQueue`; the apply they gate runs on
+    /// `captureControlQueue` (the same decide/execute split as the capture
+    /// gate, and the same serial queue, so a BT transition can never race a
+    /// tap start/stop or a synced-local transition).
+    private var btSinkEnabled = false
+    private var btSelectedUIDs: [String] = []
+    private var btComposition = BTGroupComposition(airPlayPresent: false, macLocalPresent: false)
+
+    // MARK: First-mix alignment intercept (W3)
+
+    /// UIDs whose intercept the user answered "Not now" — FINAL, persisted in
+    /// the trim store's envelope, loaded at init. Guarded by `btTrimLock`
+    /// alongside the trims (the two records share the trigger predicate).
+    private var btAlignmentDismissedUIDs: Set<String> = []   // btTrimLock
+    /// UIDs currently HELD SILENT awaiting the card's answer. On `stateQueue`;
+    /// applied as a per-device sink gain of 0 on `captureControlQueue`.
+    private var btAlignmentHeldUIDs: Set<String> = []   // stateQueue
+    /// UIDs whose intercept already fired since launch — the once-ever guard's
+    /// in-memory half (the persistent half is a trim or dismissal record; an
+    /// abandoned, unanswered card leaves no record on purpose). On `stateQueue`.
+    private var btAlignmentPromptedUIDs: Set<String> = []   // stateQueue
+    /// Safety net: if no UI ever answers (surface never shown, event lost), a
+    /// held speaker un-mutes on its own after this long — a silent device with
+    /// no visible cause is this repo's most expensive failure shape. Settable
+    /// so tests don't wait out the real window.
+    var btAlignmentHoldTimeout: TimeInterval = 120
+    /// One pending watchdog per held uid. On `stateQueue`.
+    private var btAlignmentHoldWatchdogs: [String: DispatchWorkItem] = [:]
+
     // MARK: Per-app routing (T6)
     //
     // ADDITIVE to the whole-system "Selected Devices" path above. `captureCoordinator`
@@ -298,10 +399,30 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// unchanged; tests inject a fake.
     private let ptpHelperActivator: PTPHelperActivating
 
+    /// Fire-and-forget "let go of the PTP ports now" verb (Seamless handoff T2/T3).
+    /// Defaults to the real `PTPHelperReleaser`, so every existing caller of the
+    /// designated initializer compiles unchanged; tests inject a fake.
+    private let ptpHelperReleaser: PTPHelperReleasing
+
+    /// Builds the blocked-AirPlay-attempt watcher (Seamless handoff T1/T3), given
+    /// the callback to invoke on a detected blocked attempt. A factory (not a
+    /// stored instance) so `releaseForHandoff`/`reconcileHandoffWatcherLocked` can
+    /// create/destroy watcher instances across the backend's lifetime; tests inject
+    /// one that builds over a fake `LogStreamSpawning`.
+    private let handoffWatcherFactory: @Sendable (@escaping @Sendable () -> Void) -> AirPlayHandoffWatcher
+
     /// Bind-retry budget T2 gives the helper itself (~10 s) plus the connect
     /// click's own switch-away race — matches `AirPlayEngine/Sources/ptp-helper/main.c`'s
     /// default `AUDIOUTER_PTP_BIND_RETRY_SECS`.
     private static let ptpActivationTimeout: TimeInterval = 10
+
+    /// How long a clock wait must actually run before the `.takingOver` strip
+    /// mounts (banner-flash fix, 2026-08-06): a wait that resolves inside this
+    /// window — the common case on a warm helper, including every failed manual
+    /// retry — shows NO transient blue strip and causes no double panel re-fit;
+    /// the strip only appears when the takeover is genuinely slow. `<= 0` keeps
+    /// the old synchronous emit (tests that pin the strip's ordering use that).
+    private let takeoverStripDelay: TimeInterval
 
     /// Frees UDP 319/320 before a connect by moving the Mac's own default
     /// output off an AirPlay receiver (T5). **`nil` = inert**, and that is the
@@ -311,6 +432,50 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// every test — the same shape `syncedLocalSinkFactory` uses, for the same
     /// "must not touch the real machine from a test" reason.
     private let defaultOutputSwitcher: DefaultOutputSwitcher?
+
+    // MARK: Public aggregate device (Wave 3, T5)
+
+    /// The Core Audio operations for the PUBLIC, Sound-settings-visible "Audiouter"
+    /// aggregate. Injected (default the real HAL control) so T6 can drive the whole
+    /// lifecycle with a fake and never move the machine's real default output —
+    /// same "no test touches the real machine" discipline as ``defaultOutputSwitcher``.
+    /// ``publicAggregate`` is built FROM this exact control, so its
+    /// adopt/create/sweep/classify and our own resolve/set-default calls share one
+    /// seam. Distinct from the PRIVATE tap-capture aggregate
+    /// `NativeCaptureCoordinator.createAggregate()` builds (different UID).
+    private let aggregateControl: AggregateDeviceControlling
+
+    /// Lifecycle owner (adopt-or-create / off-switch classify / orphan sweep) for
+    /// the public aggregate — pure decision logic over ``aggregateControl``.
+    private let publicAggregate: AggregateOutputDevice
+
+    /// Reads the CURRENT system default output device's UID (`nil` if unreadable),
+    /// feeding the off-switch classification. Injectable (default the real HAL
+    /// read) exactly like ``systemDefaultOutputIsAirPlayClassProvider``, so T6 can
+    /// script "the user switched the default away" with no hardware.
+    private let currentDefaultOutputUIDProvider: @Sendable () -> String?
+
+    /// True once this session has pointed the Mac's default output at the public
+    /// aggregate (first activation, or the user's re-select). Gates the one-time
+    /// capture of ``priorDefaultUID`` and the quit-time restore. `stateQueue`.
+    private var aggregateDefaultActive = false
+
+    /// The default output UID in force at the moment we FIRST took over — restored
+    /// (by re-resolving it to a live id, never a cached one) on `stop()`/quit
+    /// before the aggregate is destroyed. `stateQueue`.
+    private var priorDefaultUID: String?
+
+    /// Echo-guard for our OWN default-output writes: the UID we just asked the HAL
+    /// to make default, pending its `defaultDeviceChanged` echo on
+    /// `systemVolume.onExternalChange`. When the listener reports this same UID we
+    /// consume it as our own write, NOT a user off-switch — ``SystemOutputVolume``'s
+    /// echo suppression covers only its VOLUME writes, not this default-device
+    /// write. `stateQueue`.
+    private var expectedDefaultWriteUID: String?
+
+    /// Last routing-blocked state pushed on the event stream, so the emit is
+    /// edge-triggered (idempotent) and can never thrash/loop. `stateQueue`.
+    private var routingBlockedEmitted = false
 
     /// The colon-hex `Device.id` ⟷ ``OutputID`` lookup, populated from discovery.
     /// Kept so `setOutputSet`/`setVolume` can translate the UI's string ids to the
@@ -433,6 +598,35 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// it and re-drives convergence.
     private var suspended = false
 
+    /// True while we have deliberately handed the PTP ports to macOS: sessions torn
+    /// down, selection INTENT preserved. Distinct from `suspended` (which is the
+    /// mechanism this reuses) so a sleep/wake cycle can't silently re-take the ports
+    /// behind the user's back. `stateQueue`.
+    private var handoffReleased = false
+
+    /// Whether the default output has genuinely left our aggregate since the current
+    /// handoff release began. Arms the D1 ".stillOurs ⇒ resume" trigger: after a
+    /// BLOCKED-ATTEMPT release the default never moved (macOS aborts the failed
+    /// AirPlay connect before switching), so ".stillOurs" is just the resting state —
+    /// resuming on it re-grabs the ports and re-blocks the user's retry (live-found
+    /// loop, 2026-08-07). A userDeselected release starts with this `true` (the
+    /// deselect IS the departure); a blockedAttempt release starts `false` and it
+    /// flips only on an observed genuine departure. `stateQueue`.
+    private var defaultLeftUsSinceRelease = true
+
+    /// The blocked-AirPlay-attempt watcher (Seamless handoff T3) — runs only while
+    /// we might plausibly be holding the PTP ports against a real routing intent
+    /// (see `reconcileHandoffWatcherLocked`). `stateQueue`.
+    private var handoffWatcher: AirPlayHandoffWatcher?
+
+    /// The release's own `engine.removeOutput` teardown, as ONE task (D2, adversarial
+    /// review). Resume's `convergeDevice` kicks are unordered against the engine
+    /// actor relative to this — a stale removal could otherwise land after the
+    /// resumed add and kill the fresh session — so a resume kick awaits this task's
+    /// value FIRST (off `stateQueue`) before converging. Cleared by
+    /// `resumeFromHandoffLocked()` and `stop()`. `stateQueue`.
+    private var handoffTeardown: Task<Void, Never>?
+
     /// The silence watchdog's override on the capture gate. When the watchdog fires
     /// (no desired non-local device is `.connected`), this flips true and the gate
     /// computes `want == false` even though `expectedSelected` is non-empty —
@@ -514,6 +708,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Polls every ~5s while capture is active; cancelled on `stop()` or when
     /// capture goes idle. Used by T2 to bridge scheduling metrics to telemetry.
     private var schedulingSnapshotPollWork: DispatchWorkItem?
+    /// How many `send_sched` lines THIS backend has logged. Arming is not the
+    /// same observable: an arm whose poll then finds capture stopped logs
+    /// nothing, so the guard this counts for is "no second line per
+    /// capture-start episode". Counting the telemetry itself cannot work — the
+    /// sink is process-global and the event carries no backend identity, so
+    /// any other still-polling backend in the same test process lands lines in
+    /// the counting window.
+    private var schedulingSnapshotLogCount = 0
 
     // MARK: Per-device op serialization + coalescing (toggle-spam converge race)
     //
@@ -888,6 +1090,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         stateQueue.sync { schedulingSnapshotPollWork != nil }
     }
 
+    /// Test-only (`@testable`): how many `send_sched` lines this backend has
+    /// logged. Proves "selecting a second device while already capturing must
+    /// not double the log rate" without reading the telemetry sink, which is
+    /// process-global and unattributable — see ``schedulingSnapshotLogCount``.
+    func test_schedulingPollLogCount() -> Int {
+        stateQueue.sync { schedulingSnapshotLogCount }
+    }
+
     /// Test-only (`@testable`): the whole-system-tap retry attempt counter
     /// (T16, E10) — lets a test prove the backoff actually grows across
     /// consecutive failures (rather than resetting or stacking) and resets to 0
@@ -1003,6 +1213,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.init(
             engineControl: EngineAdapter(engine: engine),
             discoverySource: discovery,
+            btEnumerator: BTDeviceEnumerator.production(),
+            btConnectionManager: BTConnectionManager(),
+            btTrimStore: BTTrimStore(),
             processResolver: processResolver,
             defaultOutputSwitcher: DefaultOutputSwitcher())
     }
@@ -1039,6 +1252,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     init(
         engineControl: EngineControlling,
         discoverySource: DiscoverySource,
+        btEnumerator: BTDeviceEnumerating? = nil,
+        btConnectionManager: BTConnectionManaging? = nil,
+        btTrimStore: BTTrimStore? = nil,
         dacpEndpoint: DACPEndpoint = DACPServer(),
         systemVolume: SystemVolumeControlling = SystemOutputVolume(),
         ptpHelperActivator: PTPHelperActivating = PTPHelperActivator(),
@@ -1052,12 +1268,24 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         rebindRecoveryRetryDelay: TimeInterval = 0.5,
         captureRetryDelay: TimeInterval = 2.0,
         captureRetryMaxBackoff: TimeInterval = 10.0,
+        takeoverStripDelay: TimeInterval = 0.75,
         watchdogScheduler: SilenceWatchdogScheduling? = nil,
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
         systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = NativeBackend.currentDefaultOutputIsAirPlayClass,
-        defaultOutputSwitcher: DefaultOutputSwitcher? = nil
+        defaultOutputSwitcher: DefaultOutputSwitcher? = nil,
+        aggregateControl: AggregateDeviceControlling = CoreAudioAggregateDeviceControl(),
+        currentDefaultOutputUID: @escaping @Sendable () -> String? = NativeBackend.currentDefaultOutputUID,
+        ptpHelperReleaser: PTPHelperReleasing = PTPHelperReleaser(),
+        handoffWatcherFactory: @escaping @Sendable (@escaping @Sendable () -> Void) -> AirPlayHandoffWatcher = { AirPlayHandoffWatcher(onBlockedAttempt: $0) }
     ) {
+        self.ptpHelperReleaser = ptpHelperReleaser
+        self.handoffWatcherFactory = handoffWatcherFactory
         self.defaultOutputSwitcher = defaultOutputSwitcher
+        self.aggregateControl = aggregateControl
+        // Injectable init keeps the AggregateOutputDevice built from the SAME
+        // control we hold, so its pure decisions and our HAL writes never diverge.
+        self.publicAggregate = AggregateOutputDevice(control: aggregateControl)
+        self.currentDefaultOutputUIDProvider = currentDefaultOutputUID
         // Default the silence-watchdog timer to a real dispatch-queue wrapper. Its
         // scheduled body always hops onto `stateQueue` itself (see `armSilenceWatchdog`),
         // so this queue only needs to time the delay — a plain serial queue is fine.
@@ -1066,6 +1294,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.silenceFallbackDelay = silenceFallbackDelay
         self.engine = engineControl
         self.discovery = discoverySource
+        self.btEnumerator = btEnumerator
+        self.btConnectionManager = btConnectionManager
+        self.btTrimStore = btTrimStore
+        if let loaded = (try? btTrimStore?.load()) ?? nil {
+            self.btTrimsByUID = loaded.mapValues(BTSyncTrim.clamp)
+        }
+        if let dismissed = try? btTrimStore?.loadDismissedUIDs() {
+            self.btAlignmentDismissedUIDs = dismissed
+        }
         self.dacpServer = dacpEndpoint
         self.systemVolume = systemVolume
         self.ptpHelperActivator = ptpHelperActivator
@@ -1085,6 +1322,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.rebindRecoveryRetryDelay = rebindRecoveryRetryDelay
         self.captureRetryDelay = captureRetryDelay
         self.captureRetryMaxBackoff = captureRetryMaxBackoff
+        self.takeoverStripDelay = takeoverStripDelay
 
         // Wire the per-app routing callback graph (T6/T8). All four are set once
         // here, never mutated after, so no `stateQueue` synchronization is needed
@@ -1203,6 +1441,35 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         stateQueue.sync { lastSeenSystemVolume }
     }
 
+    /// Publish who owns the volume right now (``BackendEvent/systemVolumeOwnershipChanged(_:)``).
+    ///
+    /// MUST be called on `stateQueue` — it reads `lastSeenSystemVolume`, which is
+    /// only ever mutated there. Takes the default-output UID as a parameter
+    /// rather than reading it, so callers that already resolved it (the
+    /// default-changed path has it in hand) don't pay for a second HAL round trip.
+    private func publishVolumeOwnershipLocked(defaultOutputUID: String?) {
+        let owned = VolumeOwnership.weOwnVolume(
+            defaultOutputUID: defaultOutputUID,
+            systemOutputVolume: lastSeenSystemVolume)
+        emit(.systemVolumeOwnershipChanged(owned))
+
+        guard owned != weOwnSystemVolume else { return }
+        weOwnSystemVolume = owned
+        // Main has just moved into or out of the Mac's sink gain, so the gain the
+        // sink is holding is now computed by the wrong formula. Nothing else will
+        // notice — re-push it here or the Mac keeps playing at the old level until
+        // some unrelated change happens to push again.
+        pushSyncedLocalGain()
+    }
+
+    /// Whether we — not macOS — own the volume, mirroring the last published
+    /// ``BackendEvent/systemVolumeOwnershipChanged(_:)``. On `stateQueue`.
+    ///
+    /// Read by ``syncedLocalGain``: while this is true the Mac's own output sits
+    /// behind our aggregate, so the system volume no longer applies Main to it and
+    /// Main has to be folded into the sink gain instead.
+    private var weOwnSystemVolume = false
+
     public func makeEventStream() -> AsyncStream<BackendEvent> {
         AsyncStream { continuation in
             let key = UUID()
@@ -1247,6 +1514,28 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // output, not an AirPlay receiver (guarded everywhere by
             // `isLocalDevice`, and it has no `outputIDs` entry to add).
             self.surfaceLocalDevice(name: localName, muted: localMuted)
+
+            // Wave 3 T5: make the public "Audiouter" aggregate VISIBLE in Sound
+            // settings at launch (Q1) — SWEEP any orphan left by a prior crash or
+            // the spike tool FIRST (Q3), then adopt-or-create. Deliberately NOT
+            // made the Mac's default output here: that happens only once the user
+            // actually routes audio through the app (see `reconcileAggregateDefault`).
+            // razor: create-only at launch; no default takeover, no volume surface.
+            self.publicAggregate.sweepOrphans()
+            _ = self.publicAggregate.adoptOrCreate()
+            self.aggregateDefaultActive = false
+            self.priorDefaultUID = nil
+            self.expectedDefaultWriteUID = nil
+            self.routingBlockedEmitted = false
+
+            // Seed volume ownership. Without this the only signal is a default-
+            // output CHANGE, so an aggregate left as the default by a previous
+            // session would never announce itself and the key interceptor would
+            // never install — dead volume keys for the whole launch. Safe here and
+            // nowhere earlier: `lastSeenSystemVolume` was populated above, so the
+            // nil arm of the predicate can't misfire on a launch transient.
+            self.publishVolumeOwnershipLocked(
+                defaultOutputUID: self.currentDefaultOutputUIDProvider())
         }
 
         // 1. Wire discovery → the app model + the engine descriptor feed. Every
@@ -1254,6 +1543,35 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         //    so the engine knows about it (a prerequisite for `addOutput`). Only the
         //    local Mac output is never fed (it isn't a discovered receiver).
         discovery.onEvent = { [weak self] event in self?.handleDiscovery(event) }
+
+        // 1a. Bluetooth outputs (BT-ENUM) flow through the SAME add/update/emit
+        //     path as AirPlay rows, from their own enumerator. Started here, not
+        //     inside the engine Task below: BT rows don't depend on the AirPlay
+        //     engine any more than the local row does.
+        if let btEnumerator {
+            btEnumerator.onSnapshot = { [weak self] snapshots in
+                self?.stateQueue.async { self?.applyBTSnapshots(snapshots) }
+            }
+            btEnumerator.start()
+        }
+
+        // 1a-CONNECT: IOBluetooth connect/disconnect edges re-enumerate right
+        //     away — the baseband edge lands before the Core Audio device-list
+        //     listener echoes the endpoint appearing/vanishing, so the row's
+        //     greyed state moves as fast as the OS knows. TCC-gated inside the
+        //     manager (an ungranted IOBluetooth touch kills the process).
+        if let btConnectionManager {
+            btConnectionManager.onConnectionsChanged = { [weak self] in
+                self?.btEnumerator?.refresh()
+            }
+            // Wave 4: the ~5 s "offer Bluetooth Settings" nudge. Telemetry-only
+            // until the UI wave hangs the row affordance off it
+            // (`SystemSettingsPane.bluetooth` is the destination).
+            btConnectionManager.onFallbackSuggested = { address in
+                Telemetry.log(.localPlayback, "bt_connect_fallback_suggested", ["address": address])
+            }
+            btConnectionManager.startObservingConnections()
+        }
 
         // 1b. TWO-WAY SYNC for the local row. Its slider/mute ARE the Mac's default
         //     output, so changes made outside this app have to flow back in: the
@@ -1325,6 +1643,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 if !defaultDeviceChanged, let volume, volume != previousVolume {
                     self.emit(.systemVolumeChanged(volume: volume))
                 }
+                // The volume/media KEYS themselves are not intercepted here, and
+                // must not be: the CGEventTap lives in the app target, because a
+                // tap needs a run loop and an Accessibility grant that this layer
+                // has no business owning. What this file DOES owe it is the gate —
+                // `.systemVolumeOwnershipChanged`, published below on every
+                // default-output change. See
+                // `docs/plans/PLAN-VOLUME-KEY-INTERCEPTION.md`.
 
                 // 1d. W3-T3: the default output device itself may have just BECOME (or
                 //     stopped being) AirPlay-class — re-evaluate the double-path guard.
@@ -1333,6 +1658,96 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 //     frequent path.
                 if defaultDeviceChanged {
                     self.reconcileSystemAirPlayGuard()
+
+                    // 1e. Wave 3 T5: the default output DEVICE changed. Read its UID
+                    //     once. If it's the echo of our OWN set-default write (to the
+                    //     aggregate on activation, or the prior device on restore),
+                    //     CONSUME it — `SystemOutputVolume`'s echo suppression covers
+                    //     only its own volume writes, not this default-device write, so
+                    //     without this the app's own takeover would read as a user
+                    //     off-switch. Any other change is a real user action → classify
+                    //     it against the aggregate and (re)emit the routing-blocked
+                    //     warning for the new steady state.
+                    let newDefaultUID = self.currentDefaultOutputUIDProvider()
+
+                    // Volume ownership turns on exactly this UID, so republish it
+                    // BEFORE the echo test below. Our own switch to the aggregate
+                    // is consumed as an echo down there, but it is precisely the
+                    // moment we GAIN ownership — skipping it would leave the keys
+                    // dead through the whole takeover we just performed.
+                    self.publishVolumeOwnershipLocked(defaultOutputUID: newDefaultUID)
+
+                    if let pending = self.expectedDefaultWriteUID, pending == newDefaultUID {
+                        self.expectedDefaultWriteUID = nil
+                    } else {
+                        // A genuine change that does NOT match the pending write
+                        // proves our echo is no longer the newest state — the HAL
+                        // coalesces rapid changes, so the echo of a successful write
+                        // can be swallowed entirely by a fast user switch-away. A
+                        // STALE pending left armed here would mis-consume the user's
+                        // NEXT genuine change back to the aggregate as "our own
+                        // echo", silently skipping the D1 resume — permanent silence
+                        // in exactly the scenario D1 exists for. Disarm it.
+                        self.expectedDefaultWriteUID = nil
+                        self.evaluateRoutingBlocked()
+
+                        // Seamless handoff T3.4: the user picked a DIFFERENT default
+                        // output in Sound settings while we were routing — that IS
+                        // their switch-away intent, so free the PTP ports proactively
+                        // rather than waiting for a blocked-attempt log line. A `nil`
+                        // UID (`.deviceVanished`) is an unplugged device, not a
+                        // handoff, and must NOT trigger this. `aggregateDefaultActive`
+                        // (mirrors the same guard `stop()`'s restore uses) is required
+                        // too: `classifyOffSwitch` reads "userDeselected" for ANY UID
+                        // that isn't our aggregate's, including the Mac's ordinary
+                        // default the whole time we never actually won the takeover
+                        // (aggregate resolve failed, or — in tests — a no-op aggregate
+                        // control) — without this an unrelated default-output change
+                        // would read as a handoff and tear down real streaming that was
+                        // never routed through our aggregate to begin with.
+                        if !self.expectedSelected.isEmpty, self.aggregateDefaultActive,
+                           self.publicAggregate.classifyOffSwitch(newDefaultUID: newDefaultUID) == .userDeselected {
+                            self.releaseForHandoff(reason: "userDeselected", defaultAlreadyLeftUs: true)
+                        }
+
+                        // A blocked-attempt release happens with our aggregate STILL
+                        // the default (macOS aborts the failed AirPlay connect before
+                        // any switch) — so ".stillOurs" is the default's RESTING
+                        // state after that release, not evidence of a re-pick. Arm
+                        // the D1 resume only once the default has genuinely LEFT us
+                        // post-release; before that, a stray default notification
+                        // would instantly resume, re-grab the ports, and re-block the
+                        // user's retry — the exact loop this release exists to break
+                        // (found live 2026-08-07: fail → bounce-back → re-hold →
+                        // fail, forever).
+                        if self.handoffReleased,
+                           self.publicAggregate.classifyOffSwitch(newDefaultUID: newDefaultUID) == .userDeselected {
+                            self.defaultLeftUsSinceRelease = true
+                        }
+
+                        // D1 (adversarial review): the user putting us back as
+                        // default — by ANY means, not just our own "Use Audiouter"
+                        // button (`reselectAggregateAsDefault`) — is the resume
+                        // intent. Without this, re-picking Audiouter directly in
+                        // Sound settings while a handoff release is in force clears
+                        // the routing-blocked banner (via `evaluateRoutingBlocked`
+                        // above) with no way left to un-stick `handoffReleased` /
+                        // `suspended` — permanent silence with no affordance.
+                        // Gated on `defaultLeftUsSinceRelease` (see above): a
+                        // userDeselected release sets it true immediately (the
+                        // default provably left us — that's what triggered it), so
+                        // the original D1 behavior is unchanged there.
+                        if self.handoffReleased, self.defaultLeftUsSinceRelease,
+                           self.publicAggregate.classifyOffSwitch(newDefaultUID: newDefaultUID) == .stillOurs {
+                            let (kicks, teardown) = self.resumeFromHandoffLocked()
+                            for (id, out) in kicks {
+                                Task { [weak self] in
+                                    await teardown?.value
+                                    await self?.convergeDevice(id: id, outputID: out)
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1483,6 +1898,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         localPlaybackEngine?.stop()
         discovery.onEvent = nil
         discovery.stop()
+        btEnumerator?.onSnapshot = nil
+        btEnumerator?.stop()
+        btConnectionManager?.onConnectionsChanged = nil
+        btConnectionManager?.stopObservingConnections()
         // Drop the local row's two-way sync (the row itself is removed below).
         systemVolume.onExternalChange = nil
         systemVolume.stop()
@@ -1533,7 +1952,33 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.syncedLocalCoalescedCount = 0
             self.syncedLocalSinkEnabled = false
             self.syncedLocalSinkApplied = false
+            // BT-BACKEND: reset the BT decisions; the disable itself is enqueued
+            // below alongside the capture stop, so the FIFO's last BT op is the
+            // stop (same ordering argument as the coordinator stop).
+            self.btSinkEnabled = false
+            self.btSelectedUIDs = []
+            self.btComposition = BTGroupComposition(airPlayPresent: false, macLocalPresent: false)
+            // BT-LIFECYCLE: drop every `.connecting` hold and its poll, so no
+            // spinner can outlive the backend that would have resolved it.
+            self.btRenderPollWork?.cancel()
+            self.btRenderPollWork = nil
+            self.btConnectingDeadlines.removeAll()
+            // W3: drop the alignment holds too — the sinks are going away.
+            for work in self.btAlignmentHoldWatchdogs.values { work.cancel() }
+            self.btAlignmentHoldWatchdogs.removeAll()
+            self.btAlignmentHeldUIDs.removeAll()
             self.suspended = false
+            // Seamless handoff T3.8-3: reset the release flag and stop/nil the
+            // watcher so no orphan `log` child survives quit (AppDelegate's quit
+            // path calls `stop()`).
+            self.handoffReleased = false
+            self.defaultLeftUsSinceRelease = true
+            self.handoffWatcher?.stop()
+            self.handoffWatcher = nil
+            // D2 (adversarial review): drop the reference — `engine.stop()` below
+            // tears down every session anyway, so there is nothing left for a
+            // resume kick (there can be none post-stop) to order itself against.
+            self.handoffTeardown = nil
             // T2: stop the scheduling snapshot polling.
             self.schedulingSnapshotPollWork?.cancel()
             self.schedulingSnapshotPollWork = nil
@@ -1547,6 +1992,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // Idempotent.
             if let coordinator = self.captureCoordinator {
                 self.captureControlQueue.async { coordinator.stop() }
+            }
+            self.captureControlQueue.async { [weak self] in
+                self?.applyBTSinkTransition(
+                    enable: false, uids: [],
+                    composition: BTGroupComposition(airPlayPresent: false, macLocalPresent: false))
             }
             let ids = self.order
             self.known.removeAll()
@@ -1613,6 +2063,41 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // scratch — reset to the same optimistic default `start()` reads
             // before its own engine.start() resolves.
             self.ptpClockAvailable = true
+
+            // Wave 3 T5: RESTORE the default output the user had before we took it
+            // over, THEN DESTROY the public aggregate (stop/quit teardown). Restore
+            // by RE-RESOLVING the captured UID to a live id — never a cached
+            // AudioObjectID (unstable across resolves, AggregateOutputDevice.swift
+            // header). `expectedSelected` is already cleared above, so any resulting
+            // default-device echo classifies as "not routing" (no stale warning).
+            // Destroying the aggregate while it's still the default makes macOS fall
+            // back on its own, so an unresolvable prior is still safe. `systemVolume
+            // .onExternalChange` was already detached at the top of `stop()`, so this
+            // write raises no echo to guard against.
+            //
+            // Guard on the aggregate STILL being the current default. `aggregateDefaultActive`
+            // only means "we took it over at some point" — if the user has since picked
+            // a different output in Sound settings (e.g. AirPods), the default is theirs,
+            // not ours, and `priorDefaultUID` is stale. Restoring then would yank the
+            // system output off the user's explicit later choice back to the pre-takeover
+            // device. Only restore when we genuinely still own the default; otherwise just
+            // destroy our (non-default) aggregate below and leave the user's choice intact.
+            if self.aggregateDefaultActive,
+               self.currentDefaultOutputUIDProvider() == AggregateOutputDevice.productUID,
+               let priorUID = self.priorDefaultUID,
+               priorUID != AggregateOutputDevice.productUID,
+               let priorID = self.aggregateControl.resolveDeviceID(forUID: priorUID) {
+                _ = self.aggregateControl.setDefaultOutputDevice(priorID)
+            }
+            self.publicAggregate.sweepOrphans()   // destroys the productUID aggregate we own
+            self.aggregateDefaultActive = false
+            self.priorDefaultUID = nil
+            self.expectedDefaultWriteUID = nil
+            if self.routingBlockedEmitted {
+                self.routingBlockedEmitted = false
+                self.emit(.routingBlockedNeedsDefault(false))
+            }
+
             for id in ids { self.emit(.deviceRemoved(id: id)) }
         }
     }
@@ -1659,6 +2144,20 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             return
         }
         stateQueue.async {
+            // `.bluetooth` ids are the R-partition: no `outputIDs` entry, so the
+            // engine guard below would drop the write (the reason a BT slider did
+            // nothing). Same stash-under-mute semantics as the engine arm; the
+            // push is the composed sink gain instead of an engine volume.
+            if self.known[id]?.isBluetooth == true {
+                if self.muted.contains(id) {
+                    self.stashedVolume[id] = clamped
+                    self.applyLocal(id) { $0.volume = clamped }
+                } else {
+                    self.applyLocal(id) { $0.volume = clamped }
+                    self.pushBTSinkGainLocked(id)
+                }
+                return
+            }
             guard let outputID = self.outputIDs[id] else { return }
             // If the device is muted, remember the desired level; unmute restores
             // it. Otherwise push it now. Optimistically echo so the UI is snappy.
@@ -1687,6 +2186,23 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
         stateQueue.async {
             guard self.muted.contains(id) != muted else { return }
+            // BT arm: the same stash/restore shim as the engine arm below (the
+            // sink has no mute field either) — mute pushes the composed 0,
+            // unmute restores the stashed level and pushes its composed gain.
+            if self.known[id]?.isBluetooth == true {
+                if muted {
+                    self.muted.insert(id)
+                    if self.stashedVolume[id] == nil { self.stashedVolume[id] = self.known[id]?.volume ?? 0 }
+                    self.applyLocal(id) { $0.isMuted = true; $0.volume = 0 }
+                } else {
+                    self.muted.remove(id)
+                    let intended = self.stashedVolume[id] ?? self.known[id]?.volume ?? 0
+                    self.stashedVolume[id] = nil
+                    self.applyLocal(id) { $0.isMuted = false; $0.volume = intended }
+                }
+                self.pushBTSinkGainLocked(id)
+                return
+            }
             guard let outputID = self.outputIDs[id] else { return }
             if muted {
                 // Mute = volume 0 with the pre-mute value stashed (shim pattern,
@@ -1711,25 +2227,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let main = mainOut.clampedToVolume
         let newGroup = group.clampedToVolume
         stateQueue.async {
-            // When we mirror to hardware, the system volume is about to become `main`,
-            // so record it as the last system level we've seen — BEFORE the
-            // gain-changed guard below, which would otherwise skip this on a
-            // same-value re-push. `SystemOutputVolume` suppresses the echo of that
-            // write, so `onExternalChange` never delivers it to update the memo for
-            // us; without this, a later genuine external change back to the
-            // pre-drag value compares equal to a stale memo and is silently dropped
-            // (Main desyncs from the system). Owned by `stateQueue`, like the memo.
-            //
-            // razor: KNOWN EDGE — a readable-but-UNWRITABLE default output (some USB
-            // DACs) no-ops the write below, so the system is NOT at `main`, yet this
-            // memo says it is; a later external change *to `main`* would then be
-            // dropped. Can't gate on the result — `setVolume` is fire-and-forget async
-            // (SystemOutputVolume.swift:369). This line fixes the COMMON settable case
-            // (the one the original bug bit); the writability-aware sync for unsettable
-            // outputs belongs to the follow-up (PLAN-VOLUME-KEY-INTERCEPTION §0b).
-            if mirrorToSystemVolume { self.lastSeenSystemVolume = main }
             guard main != self.mainOutGain || newGroup != self.groupGain else { return }
             let groupChanged = newGroup != self.groupGain
+            let mainChanged = main != self.mainOutGain
             self.mainOutGain = main
             self.groupGain = newGroup
 
@@ -1746,20 +2246,44 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.pushVolume(outputID, engineValue: self.engineVolume(
                     forID: id, uiVolume: self.known[id]?.volume ?? 0))
             }
-            // The Mac's own path carries `group × device` only (Main arrives there
-            // through the system volume), so only a group change moves it.
-            if groupChanged { self.pushSyncedLocalGain() }
+            // BT sinks carry the full `Main × Group × Device` product (unlike
+            // the Mac's own path below, they never see the system volume), so
+            // any master-stage move re-pushes every selected BT uid's composed
+            // gain. `pushBTSinkGainLocked` folds mute/hold in as 0, so this
+            // can't unmute or blow through a first-mix hold.
+            for uid in self.btSelectedUIDs { self.pushBTSinkGainLocked(uid) }
+            // The Mac's own path carries `group × device`, and Main too whenever we
+            // own the volume — there it is the ONLY thing applying Main to the Mac,
+            // so a Main-only move has to re-push as well. When macOS owns the
+            // volume, Main still arrives through the system-volume write instead and
+            // only a group change moves this.
+            if groupChanged || (mainChanged && self.weOwnSystemVolume) {
+                self.pushSyncedLocalGain()
+            }
         }
         // The hardware system-volume write is now the Main path's ALONE
         // (`setVolume`'s local branch no longer does it), and only when the caller
         // asked to mirror. Off `stateQueue`, like every other `systemVolume` write.
-        if mirrorToSystemVolume { systemVolume.setVolume(main) }
+        if mirrorToSystemVolume {
+            // Memoise the system level ONLY once the hardware confirms it took the
+            // write. `SystemOutputVolume` suppresses the echo of its own writes, so
+            // `onExternalChange` never delivers this value back to update the memo
+            // for us — but memoising optimistically is worse than not memoising: a
+            // readable-but-UNWRITABLE output (some USB DACs) no-ops the write, and
+            // the memo would then claim a level the system never reached, so a later
+            // genuine external change *to* that level compares equal and is silently
+            // dropped. The callback runs on the helper's own queue before any
+            // notification the write provoked, so this can't be overtaken by it.
+            systemVolume.setVolume(main) { [weak self] wrote in
+                guard let self, wrote else { return }
+                self.stateQueue.async { self.lastSeenSystemVolume = main }
+            }
+        }
     }
 
-    /// Push `group × the Mac's own fader` to the delayed local sink (W1's
-    /// ``SyncedLocalSink/setGain(_:)``). **Main is deliberately EXCLUDED**: the Mac's
-    /// own system volume already applies Main to that output, so including it here
-    /// would square the master on the Mac path. Reads state on `stateQueue`, then
+    /// Push ``syncedLocalGain`` to the delayed local sink (W1's
+    /// ``SyncedLocalSink/setGain(_:)``) — `group × the Mac's own fader`, and Main
+    /// too while we own the volume. Reads state on `stateQueue`, then
     /// hops to `captureControlQueue`, which owns `syncedLocalSink`. A no-op before
     /// the sink is built — `applySyncedLocalSinkTransition` applies the current gain
     /// as it starts, so a trim made while "play everywhere" was off is not lost.
@@ -1768,10 +2292,51 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         captureControlQueue.async { [weak self] in self?.syncedLocalSink?.setGain(gain) }
     }
 
-    /// `group × the Mac's own fader` as a 0.0…1.0 `Float`. On `stateQueue`.
+    /// `group × the Mac's own fader` as a 0.0…1.0 `Float` — times Main as well
+    /// while ``weOwnSystemVolume``. On `stateQueue`.
+    ///
+    /// Main is normally EXCLUDED because the Mac's system volume already applies it
+    /// to that output, so including it would square the master on the Mac path.
+    /// That premise dies exactly when we own the volume: the default output is our
+    /// aggregate, `setMasterGain`'s mirror write silently no-ops against it, and
+    /// nothing else is applying Main to the Mac at all. Without this arm, pulling
+    /// Main down would quieten the AirPlay speakers while the Mac's own output
+    /// stayed at full — the master control visibly failing on the commonest setup.
     private var syncedLocalGain: Float {   // on stateQueue
         let level = known[Self.localDeviceID]?.volume ?? 100
-        return Float(Double(groupGain) / 100.0 * Double(level.clampedToVolume) / 100.0)
+        let main = weOwnSystemVolume ? Double(mainOutGain) / 100.0 : 1.0
+        return Float(main * Double(groupGain) / 100.0 * Double(level.clampedToVolume) / 100.0)
+    }
+
+    /// One BT device's composed sink gain: `Main × Group × Device` on the UI's
+    /// 0–100 scale — the same product `engineVolume(forID:uiVolume:)` forms for
+    /// AirPlay outputs, linear because the sink's mixer wants a 0…1 amplitude,
+    /// not a dB wire value — forced to 0 while the id is muted (the stash shim)
+    /// or first-mix-held (W3). ONE product, one writer: every gain that reaches
+    /// `BTSyncedSinkControlling/setGain(_:forDeviceUID:)` is computed here, so
+    /// user volume and the hold can never fight over the knob. Unlike the Mac's
+    /// `syncedLocalGain`, Main IS included — a BT sink renders through its own
+    /// device, which the Mac's system volume never touches. On `stateQueue`.
+    private func btSinkGain(forUID uid: String) -> Float {   // on stateQueue
+        if btAlignmentHeldUIDs.contains(uid) || muted.contains(uid) { return 0 }
+        let level = known[uid]?.volume ?? 100
+        return Float(masterGainFraction * Double(level.clampedToVolume) / 100.0)
+    }
+
+    /// Push one uid's composed gain to the live sink (a no-op before the sink
+    /// exists — `applyBTSinkTransition` seeds the same product on arm). Reads on
+    /// `stateQueue`, then hops to `captureControlQueue`, which owns `btSink`.
+    private func pushBTSinkGainLocked(_ uid: String) {   // on stateQueue
+        let gain = btSinkGain(forUID: uid)
+        captureControlQueue.async { [weak self] in
+            self?.btSink?.setGain(gain, forDeviceUID: uid)
+        }
+    }
+
+    /// The composed gain per selected BT uid, snapshotted under `stateQueue` for
+    /// a sink transition to apply on `captureControlQueue`. On `stateQueue`.
+    private func btSinkGains(forUIDs uids: [String]) -> [String: Float] {   // on stateQueue
+        Dictionary(uniqueKeysWithValues: uids.map { ($0, btSinkGain(forUID: $0)) })
     }
 
     /// Renders a set of device ids as `"[Name1,Name2]"` for a Telemetry field —
@@ -1802,6 +2367,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // end of this critical section can log the actual added/removed diff.
             let previouslySelected = self.expectedSelected
             self.expectedSelected = ids
+            // Seamless handoff T3.8-2: an in-app routing action IS the user asking
+            // for Audiouter back — don't leave `suspended` set from a prior handoff
+            // release, which would connect speakers with the capture tap gated off
+            // (silent, since `convergeDevice` has no `suspended` guard of its own).
+            if self.handoffReleased, !ids.isEmpty {
+                self.handoffReleased = false
+                self.defaultLeftUsSinceRelease = true
+                self.suspended = false
+            }
             // Fix C: an explicit (re)selection is a fresh normal-operation context, not
             // a post-wake reconnection — so a stranding from THIS selection falls back
             // on the always-on silence delay, not the wake-restore preference.
@@ -1829,54 +2403,52 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // is excluded (`isLocalDevice`, and it has no `outputIDs` entry); AP1
             // receivers are NOT excluded any more (they drive through the same
             // engine surface as AP2, `supportsAirPlay2` notwithstanding).
+            // `.bluetooth` ids are the OTHER side of the R-partition: they have
+            // no `outputIDs` entry either, and the explicit `isBluetooth` guard
+            // keeps that structural (a BT id must never reach the AirPlay
+            // engine even if it ever acquired a handle) — they drive the BT
+            // sink manager below instead.
             var kicks: [(String, OutputID)] = []
             for id in self.order {
                 guard let device = self.known[id], !device.isLocalDevice,
+                      !device.isBluetooth,
                       let outputID = self.outputIDs[id] else { continue }
                 let wantOn = ids.contains(id)
-
-                // A user re-toggle to ON clears a terminal-failure park so the
-                // device is re-enableable after a NACK (root cause 4: no permanent
-                // wedge). Toggling OFF a parked device likewise clears the park (the
-                // device is being deselected — nothing to retry).
-                if self.failedGate.contains(id) { self.failedGate.remove(id) }
 
                 let previous = self.desiredOn[id]
                 self.desiredOn[id] = wantOn
 
-                // R12/W2-T3: `.failed` no longer drops the id from the desired
-                // set (the popover's "Try again" keeps Selected-Devices intent
-                // through a failure — it never toggles membership off first), so
-                // a retry now arrives here with `wantOn` UNCHANGED (already
-                // `true`) rather than as an off→on edge. Detect that case
-                // explicitly and treat it as a fresh attempt too — this mirrors
-                // OwnToneBackend's `setOutputSet`, which never gated retry on a
-                // membership delta in the first place: it re-checks every id's
-                // CURRENT `connectionState` on every call and re-kicks anything
-                // `.off`/`.failed` regardless of whether that id was already in
-                // the requested set.
-                var isRetryOfFailed = false
-                if wantOn, previous == true, case .failed? = self.known[id]?.connectionState {
-                    isRetryOfFailed = true
-                }
+                // A genuine MEMBERSHIP EDGE clears a terminal-failure park: a
+                // re-toggle to ON is an explicit retry after a NACK (root cause
+                // 4: no permanent wedge), and toggling OFF deselects the device
+                // (nothing left to retry). A membership-NEUTRAL call must leave
+                // a parked id ALONE — this used to be an unconditional clear
+                // plus an `isRetryOfFailed` re-kick, which turned EVERY routing
+                // call that left the set unchanged (a This-Mac toggle, a
+                // Main-Out re-pick, an unrelated selection change) into a full
+                // retry of every still-desired `.failed` device, sustaining an
+                // autonomous zero-backoff retry storm (live, 2026-08-06). The
+                // deliberate same-membership retry ("Try again") now travels
+                // its own entry point, `retryOutput(_:)`.
+                if previous != wantOn { self.failedGate.remove(id) }
 
                 // Connection-status brief §1/§3 semantics (mirrors OwnToneBackend's
                 // `setOutputSet`): a device newly desired ON goes `.connecting`
                 // immediately, before the engine op resolves, so the UI spinner is
-                // immediate. This also clears a sticky `.failed` on retry (the
-                // `failedGate` clear above is the routing-side twin of this). A
-                // device newly desired OFF drops any in-flight/failed indication
-                // back to `.off` right away — NativeBackend has no "sticky failed
-                // survives deselect" behavior (its park is cleared on toggle
-                // unconditionally, above), so the connection dot follows suit.
-                if previous != wantOn || isRetryOfFailed {
+                // immediate. This also clears a sticky `.failed` on a re-toggle
+                // (the `failedGate` clear above is the routing-side twin of
+                // this). A device newly desired OFF drops any in-flight/failed
+                // indication back to `.off` right away — NativeBackend has no
+                // "sticky failed survives deselect" behavior (its park is
+                // cleared on any toggle edge, above), so the connection dot
+                // follows suit and a deselect genuinely ENDS a failure episode.
+                if previous != wantOn {
                     self.setConnectionState(wantOn ? .connecting : .off, for: id)
                 }
-                // Kick if the desired state changed, OR this is a same-membership
-                // retry of a `.failed` device (R12) — AND no loop is already
+                // Kick iff the desired state changed AND no loop is already
                 // running for this id (a running loop re-reads `desiredOn` when
                 // its op settles).
-                if (previous != wantOn || isRetryOfFailed), !self.converging.contains(id) {
+                if previous != wantOn, !self.converging.contains(id) {
                     self.converging.insert(id)
                     kicks.append((id, outputID))
                     // Connect-latency diagnosis: T0 for "click to first audio," read
@@ -1948,6 +2520,101 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.emitCombinedLevel(forDevice: Self.localDeviceID)
             }
 
+            // BT-BACKEND (R-partition): the other half of the partition the
+            // engine loop above skipped. Selected `.bluetooth` ids drive the BT
+            // sink manager — enable/disable on the empty↔non-empty edge, the
+            // per-device set reconciled, and the group composition (BT-REFSEL)
+            // recomputed on every selection change (AirPlay joining/leaving a
+            // BT-containing selection moves every BT delay to a new reference).
+            // Decided here under `stateQueue` like the capture gate and applied
+            // on `captureControlQueue`; unchanged decisions enqueue nothing, so
+            // unrelated routing traffic never touches the running sinks.
+            let btUIDs = ids.filter { self.known[$0]?.isBluetooth == true }.sorted()
+            let wantBT = !btUIDs.isEmpty
+            // BT-LIFECYCLE: the row's own connect story, the twin of the engine
+            // loop's eager `.connecting` above. A newly-selected AVAILABLE BT id
+            // breathes until its per-device sink is genuinely audible; a
+            // newly-selected UNAVAILABLE one stays `.off` (the greyed "play when
+            // up" select — nothing is connecting until it comes back, which the
+            // availability edge in `applyBTSnapshots` picks up). A deselect ends
+            // any hold at once, but leaves a `.failed` story standing: BT rows
+            // offer "Try again" regardless of membership, so the failure the
+            // button explains must survive the deselect the loss edge triggers.
+            for id in previouslySelected.symmetricDifference(ids)
+            where self.known[id]?.isBluetooth == true {
+                if ids.contains(id) {
+                    if self.known[id]?.isAvailable == true { self.beginBTConnectingLocked(id) }
+                } else {
+                    self.btConnectingDeadlines[id] = nil
+                    if case .failed = self.known[id]?.connectionState {} else {
+                        self.setConnectionState(.off, for: id)
+                    }
+                }
+            }
+            let composition = BTGroupComposition(
+                airPlayPresent: ids.contains {
+                    self.known[$0].map { !$0.isBluetooth && !$0.isLocalDevice } == true
+                },
+                macLocalPresent: macSelected)
+
+            // W3 — the first-mix alignment intercept. The trigger is exactly
+            // the locked spec's: a BT id in a MIX (any other member — another
+            // AirPlay/BT id, or the Mac itself) with NO saved trim and NO
+            // recorded dismissal, at most once per device per session. The
+            // device connects and streams normally below but is held at sink
+            // gain 0 until the card's answer arrives via
+            // `resolveBTAlignmentPrompt` (or the watchdog gives up waiting).
+            let mixPresent = ids.count >= 2 || (!ids.isEmpty && macSelected)
+            if wantBT, mixPresent {
+                let (trims, dismissed) = self.btTrimLock.withLock {
+                    (self.btTrimsByUID, self.btAlignmentDismissedUIDs)
+                }
+                for uid in btUIDs
+                where trims[uid] == nil && !dismissed.contains(uid)
+                    && !self.btAlignmentPromptedUIDs.contains(uid) {
+                    self.btAlignmentPromptedUIDs.insert(uid)
+                    self.btAlignmentHeldUIDs.insert(uid)
+                    self.scheduleBTAlignmentHoldWatchdogLocked(uid)
+                    Telemetry.log(.localPlayback, "bt_first_mix_intercept", ["device": uid])
+                    self.emit(.btFirstMixAlignmentPrompt(deviceID: uid))
+                }
+            }
+            // A held id leaving the selection (or the whole BT side emptying)
+            // releases its hold — the card is moot once nothing streams there,
+            // and the composed-gain push keeps the manager's remembered gain
+            // clean for the next, never-again-intercepted select.
+            for uid in self.btAlignmentHeldUIDs.subtracting(wantBT ? Set(btUIDs) : []) {
+                self.releaseBTAlignmentHoldLocked(uid)
+            }
+            // Wave-4 delay agreement: a BT presence/AirPlay-presence flip moves
+            // the LOCAL sink's reference too (`localSinkReferenceDelayMs`), so
+            // capture whether the reference input changed before overwriting.
+            let localReferenceMoved =
+                (wantBT != self.btSinkEnabled)
+                || (wantBT && composition.airPlayPresent != self.btComposition.airPlayPresent)
+            if wantBT != self.btSinkEnabled || btUIDs != self.btSelectedUIDs
+                || (wantBT && composition != self.btComposition) {
+                self.btSinkEnabled = wantBT
+                self.btSelectedUIDs = btUIDs
+                self.btComposition = composition
+                let gains = self.btSinkGains(forUIDs: btUIDs)
+                self.captureControlQueue.async { [weak self] in
+                    self?.applyBTSinkTransition(
+                        enable: wantBT, uids: btUIDs, composition: composition,
+                        gains: gains)
+                }
+                if localReferenceMoved, self.syncedLocalSinkApplied {
+                    // Re-anchor the already-running local sink onto the new
+                    // reference. Same serial queue as its transitions, so this
+                    // can't race an enable/disable for the same sink; the
+                    // settle path re-samples the delay on its own when the
+                    // local sink is (re)built later.
+                    self.captureControlQueue.async { [weak self] in
+                        self?.syncedLocalSink?.requestReanchor(cause: "bt_composition_change")
+                    }
+                }
+            }
+
             // T4: log the selection diff + the resulting per-device convergence
             // target. Read-only over state already captured above, then a single
             // non-blocking `Telemetry.log` call (formats + hands off to its own
@@ -1963,6 +2630,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             return kicks
         }
 
+        // Wave 3 T5: the selection intent just changed — reconcile the public
+        // aggregate's default-output ownership off it. This is the ACTIVATION SEAM
+        // (Q1): the app takes the Mac's default output only when the user actually
+        // routes (whole-system selection becomes non-empty), never at launch. It
+        // also (re)evaluates the routing-blocked warning for the new steady state.
+        // Scheduled `async` (not inside the critical section above) so the HAL
+        // default-output write never extends the main-thread `sync` block; still
+        // serial on `stateQueue`, so it observes the just-written `expectedSelected`.
+        stateQueue.async { self.reconcileAggregateDefault() }
+
         // The synced-local transition is no longer enqueued here — it fires from
         // the debounced `fireSyncedLocalSettle` (scheduled inside the critical
         // section above via `scheduleSyncedLocalSettleLocked`), so a rapid burst
@@ -1973,6 +2650,144 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 guard let self else { return }
                 await self.convergeDevice(id: id, outputID: outputID)
             }
+        }
+    }
+
+    public func retryOutput(_ id: String) {
+        // Same routing-action chokepoint discipline as `setOutputSet` (T6-rev):
+        // a retry is a user routing gesture, and this must run OUTSIDE the lock.
+        onRoutingAction?()
+        // BT-RECONNECT: a Bluetooth row's tap-to-reconnect takes a fully
+        // separate path — BT ids have no engine OutputID, and their "converge"
+        // is a baseband reconnect (`BTConnectionManager`), not an RTSP session.
+        if retryBTOutput(id) { return }
+        let kick: OutputID? = stateQueue.sync {
+            // Only a still-DESIRED id can be retried — intent lives in
+            // `expectedSelected` (what the routing brain last asked for), and a
+            // retry never invents membership. An already-`.connected` id has
+            // nothing to retry.
+            guard self.expectedSelected.contains(id),
+                  let device = self.known[id], !device.isLocalDevice,
+                  device.connectionState != .connected,
+                  let outputID = self.outputIDs[id] else { return nil }
+            // THE explicit un-park site for a same-membership retry: `setOutputSet`
+            // only clears the park on a genuine membership edge now (storm fix,
+            // 2026-08-06), so "Try again" clears it here — for THIS id only.
+            self.failedGate.remove(id)
+            self.desiredOn[id] = true
+            // Eager `.connecting`, mirroring `setOutputSet`'s newly-desired-ON arm:
+            // the spinner is immediate, and the fresh `.failed → .connecting` edge
+            // is what marks a USER-initiated attempt (a new failure episode) for
+            // the popover's diagnosis-panel semantics — the backend's autonomous
+            // recovery paths deliberately never produce this edge.
+            self.setConnectionState(.connecting, for: id)
+            guard !self.converging.contains(id) else { return nil }
+            self.converging.insert(id)
+            // F-REBIND: the USER asked for this connect, same as a fresh toggle.
+            self.userConnectSeed.insert(id)
+            Telemetry.log(.airplay, "connect_requested", ["device": id, "trigger": "retry"])
+            return outputID
+        }
+        guard let kick else { return }
+        Task { [weak self] in await self?.convergeDevice(id: id, outputID: kick) }
+    }
+
+    /// BT-RECONNECT (Wave 4): handle `retryOutput` for a `.bluetooth` id.
+    /// Returns `false` for non-BT ids (the AirPlay path below runs instead).
+    /// Unlike the AirPlay arm, membership is NOT required — Section D's
+    /// tap-to-reconnect applies to any paired row, and a selected id that comes
+    /// back re-enters the sink set via the reapply below.
+    private func retryBTOutput(_ id: String) -> Bool {
+        var address: String?
+        let isBT: Bool = stateQueue.sync {
+            guard let device = self.known[id], device.isBluetooth else { return false }
+            // "Not paired" tier (device-tier decision 2): the id survives in app
+            // data but the OS pairing record is gone — the enumerator's merged
+            // list is the pairedness truth, so fail FAST here, before any
+            // baseband attempt that could only time out ~15 s later. The
+            // `.connecting` blip first makes each deliberate click a fresh
+            // failure episode for the popover's diagnosis-panel semantics.
+            if let paired = self.btPairedIDs, !paired.contains(id) {
+                self.setConnectionState(.connecting, for: id)
+                self.setConnectionState(.failed(ConnectionFailure(
+                    cause: .notPaired, detail: "id absent from the OS paired list")), for: id)
+                Telemetry.log(.localPlayback, "bt_connect_not_paired", ["device": id])
+                return true
+            }
+            guard self.btConnectionManager != nil,
+                  device.connectionState != .connecting,
+                  let mac = BTConnectionManager.macAddress(fromUID: id) else { return true }
+            // Eager `.connecting`, mirroring the AirPlay arm: immediate spinner,
+            // and the `.failed → .connecting` edge marks a fresh user-initiated
+            // attempt for the row's failure-episode semantics.
+            self.setConnectionState(.connecting, for: id)
+            Telemetry.log(.localPlayback, "bt_connect_requested", ["device": id, "trigger": "retry"])
+            address = mac
+            return true
+        }
+        guard isBT else { return false }
+        guard let address, let manager = btConnectionManager else { return true }
+        Task { [weak self] in
+            let outcome = await manager.connect(address: address)
+            self?.finishBTReconnect(id: id, outcome: outcome)
+        }
+        return true
+    }
+
+    /// Fold one `BTConnectionManager.connect` outcome into the row's
+    /// connection state (and, on success, the sink set). Availability itself
+    /// still arrives via the enumerator refresh the connect notification fires —
+    /// this is the row's lifecycle answer, not a parallel availability source.
+    private func finishBTReconnect(id: String, outcome: BTConnectOutcome) {
+        stateQueue.async {
+            switch outcome {
+            case .connected:
+                // BT-LIFECYCLE: a baseband connect is not yet audio. A SELECTED
+                // id keeps breathing until its sink renders; an UNSELECTED one
+                // goes straight to `.off` — nothing will flow to it by design,
+                // so a hold there could only spin forever.
+                if self.expectedSelected.contains(id) {
+                    self.beginBTConnectingLocked(id)
+                } else {
+                    self.setConnectionState(.off, for: id)
+                }
+                // Wave-3 known gap, closed: a SELECTED id that just came back
+                // re-enters the per-device sink set now, not at the next
+                // selection change.
+                self.reapplyBTSinkLocked()
+            case .unauthorized:
+                self.setConnectionState(.failed(ConnectionFailure(
+                    cause: .unknown, detail: "Bluetooth permission not granted")), for: id)
+            case .failed(let elapsed, let reason):
+                // Live-measured classification (bt-spike-findings-2026-08-07):
+                // a powered-off speaker holds the OS attempt ~15.4 s (both
+                // brands) or hits our 20 s ceiling; a speaker another host
+                // holds refuses fast. The slow case reads `.unknown` — headline
+                // "Couldn't connect", matching AirPlay's generic failure (Alec,
+                // 2026-08-07) — rather than the AirPlay-flavored `.timedOut`.
+                let cause: ConnectionFailure.Cause =
+                    (reason == "timeout" || elapsed >= 10) ? .unknown : .connectedElsewhere
+                self.setConnectionState(.failed(ConnectionFailure(
+                    cause: cause,
+                    detail: "\(reason) after \(String(format: "%.1f", elapsed))s")), for: id)
+            }
+        }
+    }
+
+    /// Wave-4 reconnect-reapply: re-run the CURRENT BT sink decision so a
+    /// selected device that just (re)appeared resolves a live `AudioObjectID`
+    /// and re-enters the per-device set (and one that vanished drops out). The
+    /// decision itself is unchanged — only the UID→device resolution is redone,
+    /// which `applyBTSinkTransition` performs fresh on every apply. On
+    /// `stateQueue`.
+    private func reapplyBTSinkLocked() {
+        guard btSinkEnabled else { return }
+        let uids = btSelectedUIDs
+        let composition = btComposition
+        let gains = btSinkGains(forUIDs: uids)
+        captureControlQueue.async { [weak self] in
+            self?.applyBTSinkTransition(
+                enable: true, uids: uids, composition: composition, gains: gains)
         }
     }
 
@@ -2083,6 +2898,193 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.resetAirPlaySessionForWholeSystem()
             }
         }
+    }
+
+    // MARK: Bluetooth sink transitions (BT-BACKEND)
+
+    /// Execute the BT enable/disable/reconcile `setOutputSet` decided. Must run
+    /// on `captureControlQueue` — serial with the capture gate's start/stop and
+    /// the synced-local transitions, so nothing here can race a tap rebuild.
+    ///
+    /// Enable order: composition first (a fresh sink's one-time anchor samples
+    /// its delay provider, so the reference must already be right), then the
+    /// device set (the manager reconciles and starts new per-device sinks while
+    /// armed), then the fan-out attach, then `start()` (idempotent). Disable
+    /// mirrors it: stop → drop the per-device sinks (releases their
+    /// `AVAudioEngine`s; offsets/trims live in the manager's own tables and
+    /// survive) → detach the fan-out.
+    ///
+    /// No settle debounce, unlike the synced-local transition: attaching the BT
+    /// fan-out never rebuilds the tap (`setBTSink` is compare-before-rebuild
+    /// and the render pid is our own already-excluded process), so the storm
+    /// that debounce exists for cannot start here.
+    private func applyBTSinkTransition(
+        enable: Bool, uids: [String], composition: BTGroupComposition,
+        gains: [String: Float] = [:]
+    ) {
+        if enable {
+            let sink: BTSyncedSinkControlling
+            if let existing = btSink {
+                sink = existing
+            } else if let factory = btSyncedSinkFactory {
+                sink = factory()
+                btSink = sink
+            } else {
+                return   // no factory wired (tests / UI-only smoke) — inert
+            }
+            sink.setComposition(composition)
+            // Persisted SYNC trims (BT-OFFSET-UI), re-pushed on every enable so
+            // a sink built after launch — or rebuilt after a reconnect — starts
+            // from the saved values. Idempotent: the sink ignores a same-value
+            // write, so this never forces a rebuild on its own.
+            for (uid, ms) in btTrimLock.withLock({ btTrimsByUID }) {
+                sink.setTrimMs(ms, forDeviceUID: uid)
+            }
+            // Composed gains (`btSinkGain`: user volume × masters, 0 while
+            // held/muted) land BEFORE the device set, so a sink created by
+            // `setDevices` below starts at the user's level — or already muted
+            // for a W3 hold (the manager remembers per-UID gains for exactly
+            // this ordering), never at a hardcoded 1 or 0.
+            for uid in uids {
+                sink.setGain(gains[uid] ?? 1, forDeviceUID: uid)
+            }
+            // UID → live AudioObjectID, resolved fresh per apply. A uid that no
+            // longer resolves (the speaker dropped between selection and apply)
+            // contributes no sink; it re-resolves on the next selection change
+            // (reconnect-driven re-application is BT-RECONNECT's, Wave 4).
+            sink.setDevices(uids.compactMap { uid in
+                let deviceID = btDeviceIDForUID?(uid) ?? aggregateControl.resolveDeviceID(forUID: uid)
+                return deviceID.map { BTSyncedSink.DeviceSpec(deviceID: $0, uid: uid) }
+            })
+            attachBTSink(sink)
+            sink.start()
+        } else {
+            guard let sink = btSink else { return }
+            sink.stop()
+            sink.setDevices([])
+            attachBTSink(nil)
+        }
+    }
+
+    // MARK: First-mix alignment intercept (W3)
+
+    /// Arm (or re-arm) the give-up watchdog for one held uid. On `stateQueue`.
+    private func scheduleBTAlignmentHoldWatchdogLocked(_ uid: String) {   // on stateQueue
+        btAlignmentHoldWatchdogs[uid]?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, self.btAlignmentHeldUIDs.contains(uid) else { return }
+            Telemetry.log(.localPlayback, "bt_alignment_hold_timeout", ["device": uid])
+            self.releaseBTAlignmentHoldLocked(uid)
+        }
+        btAlignmentHoldWatchdogs[uid] = work
+        stateQueue.asyncAfter(deadline: .now() + btAlignmentHoldTimeout, execute: work)
+    }
+
+    /// Drop one uid's hold and un-mute its sink. Records nothing — recording
+    /// (a dismissal) is the RESOLVE path's business, not the release's. On
+    /// `stateQueue`; idempotent.
+    private func releaseBTAlignmentHoldLocked(_ uid: String) {   // on stateQueue
+        btAlignmentHoldWatchdogs[uid]?.cancel()
+        btAlignmentHoldWatchdogs[uid] = nil
+        guard btAlignmentHeldUIDs.remove(uid) != nil else { return }
+        // The release pushes the COMPOSED user gain (never a hardcoded 1) —
+        // releasing the hold must not blow away the user's volume, and the
+        // push (vs merely forgetting the hold) keeps the manager's remembered
+        // gain clean for the next select.
+        pushBTSinkGainLocked(uid)
+    }
+
+    // MARK: Bluetooth connect lifecycle (BT-LIFECYCLE)
+
+    /// Start a selected BT id breathing and arm the watch that ends the hold.
+    ///
+    /// A BT id has no engine session, so no AirPlay-lifecycle transition can
+    /// ever move it off `.off` — this is the ONLY road to `.connected` for a
+    /// Bluetooth row, and `.connected` is what lights its armed dot and mounts
+    /// its meter. The hold ends on the device's own delay gate opening, not on
+    /// its engine starting: the engine is up long before a note comes out, so
+    /// promoting on "sink running" would put the dot ahead of the music.
+    ///
+    /// Callers own the precondition that a connect is even plausible — a
+    /// selected-but-unavailable row stays `.off` (nothing is connecting), while
+    /// a just-succeeded baseband connect arms regardless of whether the
+    /// enumerator snapshot has caught up yet. On `stateQueue`.
+    private func beginBTConnectingLocked(_ id: String) {   // on stateQueue
+        guard expectedSelected.contains(id), known[id]?.isBluetooth == true else { return }
+        setConnectionState(.connecting, for: id)
+        btConnectingDeadlines[id] = Date().addingTimeInterval(btRenderStartTimeout)
+        scheduleBTRenderPollLocked()
+    }
+
+    /// Arm the poll unless one is already in flight (or nothing is breathing).
+    /// On `stateQueue`.
+    private func scheduleBTRenderPollLocked() {   // on stateQueue
+        guard btRenderPollWork == nil, !btConnectingDeadlines.isEmpty else { return }
+        let work = DispatchWorkItem { [weak self] in self?.pollBTRenderStart() }
+        btRenderPollWork = work
+        stateQueue.asyncAfter(deadline: .now() + Self.btRenderPollInterval, execute: work)
+    }
+
+    /// Read the rendering set off `captureControlQueue` (which owns `btSink`)
+    /// and fold it back in on `stateQueue`. On `stateQueue` (scheduled there).
+    private func pollBTRenderStart() {   // on stateQueue
+        btRenderPollWork = nil
+        guard !btConnectingDeadlines.isEmpty else { return }
+        captureControlQueue.async { [weak self] in
+            guard let self else { return }
+            let rendering = self.btSink?.renderingDeviceUIDs() ?? []
+            let anchored = self.btSink?.anchoredDeviceUIDs()
+            self.stateQueue.async { self.applyBTRenderStart(rendering, anchored: anchored) }
+        }
+    }
+
+    /// End every hold that has an answer — rendering wins first, then the
+    /// ceiling — and re-arm the poll for whatever is still breathing. A row
+    /// deselected mid-hold just drops out: the deselect edge already wrote its
+    /// own `.off`. On `stateQueue`.
+    ///
+    /// The ceiling only means FAILURE for a device that was handed audio and
+    /// still never started playing it. A device that was handed nothing is
+    /// idle, not broken: with the Mac silent the capture fan-out never calls
+    /// `enqueue`, so no sink can anchor and none can ever render. Failing on
+    /// the ceiling alone reported "no audio started" for a perfectly healthy
+    /// speaker selected while paused — the link is up, and it will play the
+    /// moment there is anything to play. Whether sound is actually moving is
+    /// what the armed dot and the meter are for; the connection state must not
+    /// try to answer it too.
+    private func applyBTRenderStart(
+        _ rendering: Set<String>, anchored: Set<String>?
+    ) {   // on stateQueue
+        let now = Date()
+        for (id, deadline) in btConnectingDeadlines {
+            guard expectedSelected.contains(id) else {
+                btConnectingDeadlines[id] = nil
+                continue
+            }
+            if rendering.contains(id) {
+                btConnectingDeadlines[id] = nil
+                setConnectionState(.connected, for: id)
+            } else if now >= deadline {
+                btConnectingDeadlines[id] = nil
+                guard anchored?.contains(id) ?? true else {
+                    setConnectionState(.connected, for: id)
+                    Telemetry.log(.localPlayback, "bt_render_start_idle", ["device": id])
+                    continue
+                }
+                setConnectionState(.failed(ConnectionFailure(
+                    cause: .unknown, detail: "no audio started")), for: id)
+                Telemetry.log(.localPlayback, "bt_render_start_timeout", ["device": id])
+            }
+        }
+        scheduleBTRenderPollLocked()
+    }
+
+    /// Mirror of `attachSyncedLocalSink` for the BT fan-out: same render-process
+    /// identity (the per-device sinks are in-process `AVAudioEngine`s, so their
+    /// output is attributed to us), same echo-prevention contract (R-echo).
+    private func attachBTSink(_ sink: SyncedLocalPCMSink?) {
+        let renderProcessPID: pid_t? = (sink == nil) ? nil : getpid()
+        captureCoordinator?.setBTSink(sink, renderProcessPID: renderProcessPID)
     }
 
     // MARK: Per-app routing (T6 — ADDITIVE to the Selected Devices path above)
@@ -3458,11 +4460,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         Telemetry.log(.airplay, "write_cadence_drift", [
             "path": "perApp",
             "writeCount": String(snap.writeCount),
+            // THE drift number — deficit and overrun are one-sided sums that
+            // both inflate under ordinary jitter; only their difference is real.
+            "netDriftTotalSeconds": String(format: "%.3f", snap.netDriftSeconds),
+            "netDriftDeltaSeconds": String(format: "%.3f", deficitDelta - overrunDelta),
             "deficitTotalSeconds": String(format: "%.3f", snap.deficitSeconds),
             "deficitDeltaSeconds": String(format: "%.3f", deficitDelta),
             "overrunTotalSeconds": String(format: "%.3f", snap.overrunSeconds),
             "overrunDeltaSeconds": String(format: "%.3f", overrunDelta),
             "lastGapSeconds": String(format: "%.4f", snap.lastGapSeconds),
+            // Pauses, sleeps and tap rebuilds — kept out of the drift totals.
+            "stalledTotalSeconds": String(format: "%.3f", snap.stalledSeconds),
+            "stallCount": String(snap.stallCount),
             // How much of the deficit is the ENGINE's own drop site (writes the
             // backpressure guard refused) rather than a slow producer.
             "refusedWrites": String(snap.refusedWrites),
@@ -3551,6 +4560,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // one-shot CLEAR, exactly what prevents a stale value surviving into a
             // reopened popover.
             for deviceID in unboundDevices { self.emitCombinedLevel(forDevice: deviceID) }
+            // D4 (adversarial review): this is the sole `streamBindings` writer, and
+            // the handoff watcher's `shouldRun` condition reads `streamBindings` —
+            // without this, a per-app-only user (no whole-system selection) never
+            // arms the watcher, and the watcher never stops when the last route
+            // drops (`reconcileAggregateDefault`'s tail call is unreached with an
+            // empty `expectedSelected`).
+            self.reconcileHandoffWatcherLocked()
         }
     }
 
@@ -3843,12 +4859,30 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 ])
             }
         }
+        // Banner-flash fix (2026-08-06): the `.takingOver` strip is DEBOUNCED —
+        // armed only after `takeoverStripDelay` of genuine waiting, cancelled if
+        // the wait resolves first. Pre-fix the strip mounted synchronously on
+        // every attempt that waited at all, so each manual retry-that-fails
+        // flashed the blue strip (mount + unmount, two panel re-fits) over the
+        // steady-state orange fallback banner. A wait that outlives the delay
+        // still mounts it, and the `.timedOut` backstop is unaffected.
+        var takingOverArm: DispatchWorkItem?
         if ptpHelperActivator.willWaitForClock {
-            stateQueue.sync { self.setTakeoverStatus(.takingOver) }
+            if takeoverStripDelay <= 0 {
+                stateQueue.sync { self.setTakeoverStatus(.takingOver) }
+            } else {
+                let arm = DispatchWorkItem { [weak self] in self?.setTakeoverStatus(.takingOver) }
+                takingOverArm = arm
+                stateQueue.asyncAfter(deadline: .now() + takeoverStripDelay, execute: arm)
+            }
         }
         let outcome = await ptpHelperActivator.activate(timeout: Self.ptpActivationTimeout)
         let ready = (outcome == .ready)
         let becameAvailable: Bool = stateQueue.sync {
+            // Cancel inside the critical section: the arm runs on `stateQueue`
+            // too, so past this point it either already fired (a genuinely long
+            // wait — the resolved status below supersedes it) or never will.
+            takingOverArm?.cancel()
             let was = self.ptpClockAvailable
             self.ptpClockAvailable = ready
             self.setTakeoverStatus(TakeoverStatus.resolved(from: outcome))
@@ -3899,8 +4933,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     ///
     /// D4 best-effort: a failed op marks the device unavailable + parks it in
     /// `failedGate` (so we don't keep issuing sessions post-failure — root cause 5)
-    /// and stops the loop; the park is cleared by a later discovery/state update or
-    /// a user re-toggle (root cause 4).
+    /// and stops the loop; the park is cleared only on a genuine edge (storm fix,
+    /// 2026-08-06): a came-back discovery edge (changed descriptor, or reappearing
+    /// after a `disappeared`), an engine good-state transition, a membership edge
+    /// for this id, or the user's "Try again" (`retryOutput`) — never by a mere
+    /// same-descriptor re-announce.
     /// Release the `converging` slot for `id` and, if the coalesced target moved
     /// while the slot was held (a toggle — or a whole-system rebind recovery,
     /// below — landed mid-op), reclaim the slot and return the output id to kick
@@ -4035,6 +5072,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         while true {
             // Snapshot the current op to issue from the coalesced target.
             let step: (want: Bool, descriptor: DeviceDescriptor?)? = stateQueue.sync {
+                // D6 (adversarial review): a converge already in flight when a
+                // sleep/handoff release fires must not complete and silently
+                // re-insert into `added` — re-holding the ports (or streaming into
+                // dead sockets) mid-suspend with nobody the wiser. The requeue path
+                // above already re-kicks once `suspended` lifts (wake or resume), so
+                // bailing here costs nothing real work would have survived anyway.
+                guard !self.suspended else { return nil }
                 guard !self.failedGate.contains(id), let want = self.desiredOn[id] else { return nil }
                 let isOn = self.added.contains(id)
                 guard want != isOn else { return nil } // already at target
@@ -4086,6 +5130,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     try await bindOutput(outputID, toStream: 0)
                     Telemetry.log(.airplay, "connect_addoutput_resolved", ["device": id, "output": "\(outputID)"])
                     stateQueue.sync {
+                        // Re-verify D6 (post-success half): a converge whose
+                        // `addOutput` was in flight when a handoff release (or sleep)
+                        // suspended us must NOT land in `added` — it would re-hold the
+                        // PTP ports mid-handoff with the capture tap gated off (a live,
+                        // silent session macOS still can't bind past). Hand the fresh
+                        // session to the teardown chain instead of dropping it
+                        // untracked, and bail before any state write.
+                        guard !self.suspended else {
+                            let engine = self.engine
+                            self.handoffTeardown = Task { [prev = self.handoffTeardown] in
+                                await prev?.value
+                                try? await engine.removeOutput(outputID)
+                            }
+                            return
+                        }
                         // An out-of-band `.failed` for this id can arrive on the state
                         // stream between addOutput returning and this post-success
                         // write. `applyEngineState` will have set `failedGate` (device
@@ -4133,13 +5192,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 } catch {
                     // D4: no rollback of anything else. Mark THIS device
                     // unavailable + deselected and PARK it so the loop stops issuing
-                    // new sessions post-failure (root cause 5). Recoverable via a
-                    // later discovery/state update or a user re-toggle (root cause 4).
+                    // new sessions post-failure (root cause 5). The park clears only
+                    // on a genuine edge (storm fix, 2026-08-06): a came-back
+                    // discovery edge, an engine good-state transition, a membership
+                    // edge, or `retryOutput`.
+                    //
+                    // Cause mapping mirrors `applyEngineState`'s `.passwordRequired`
+                    // arm: an auth rejection is the one connect failure with a
+                    // known, actionable cause — never flatten it to `.unknown`.
+                    var cause: ConnectionFailure.Cause = .unknown
+                    if case AirPlayEngineError.passwordRequired = error { cause = .authRequired }
                     stateQueue.sync {
                         self.added.remove(id)
                         self.failedGate.insert(id)
                         self.applyLocal(id) { $0.isSelected = false; $0.isAvailable = false }
-                        self.enterFailure(id)
+                        self.enterFailure(id, cause: cause)
                     }
                     return
                 }
@@ -4293,6 +5360,40 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             AudioObjectID(kAudioObjectSystemObject), &defaultAddr, 0, nil, &size, &deviceID)
         guard devErr == noErr, deviceID != AudioObjectID(kAudioObjectUnknown) else { return fallback }
 
+        // Guard against self-referential labeling: if the default output is our
+        // public aggregate, return the wrapped built-in speaker's name instead.
+        // Read the UID inline (the same one-shot HAL read this function already
+        // uses for the name) rather than via `CoreAudioSystemTap.readDeviceUID`,
+        // which is gated `@available(macOS 14.2, *)` and would raise this
+        // function's floor above the package's macOS 14 deployment target.
+        var uidAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var uid: CFString? = nil
+        var uidSize = UInt32(MemoryLayout<CFString?>.size)
+        let uidErr = withUnsafeMutablePointer(to: &uid) { ptr -> OSStatus in
+            AudioObjectGetPropertyData(deviceID, &uidAddr, 0, nil, &uidSize, ptr)
+        }
+        if uidErr == noErr, (uid as String?) == AggregateOutputDevice.productUID {
+            if let builtInID = SystemLocalOutputResolver().builtInOutputDevice() {
+                var builtInNameAddr = AudioObjectPropertyAddress(
+                    mSelector: kAudioObjectPropertyName,
+                    mScope: kAudioObjectPropertyScopeGlobal,
+                    mElement: kAudioObjectPropertyElementMain)
+                var builtInName: CFString? = nil
+                var builtInNameSize = UInt32(MemoryLayout<CFString?>.size)
+                let builtInNameErr = withUnsafeMutablePointer(to: &builtInName) { ptr -> OSStatus in
+                    AudioObjectGetPropertyData(AudioObjectID(builtInID), &builtInNameAddr, 0, nil, &builtInNameSize, ptr)
+                }
+                if builtInNameErr == noErr, let cf = builtInName {
+                    let str = cf as String
+                    return str.isEmpty ? fallback : str
+                }
+            }
+            return fallback
+        }
+
         var nameAddr = AudioObjectPropertyAddress(
             mSelector: kAudioObjectPropertyName,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -4346,6 +5447,36 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         return transportType == kAudioDeviceTransportTypeAirPlay
     }
 
+    /// The UID of the macOS SYSTEM default output device
+    /// (`kAudioHardwarePropertyDefaultOutputDevice`), or `nil` if unreadable — the
+    /// production default for ``currentDefaultOutputUIDProvider``, feeding the
+    /// public aggregate's off-switch classification (Wave 3 T5). Same two-step HAL
+    /// read shape as ``currentDefaultOutputIsAirPlayClass()`` (resolve the default
+    /// device, then read one property on it), reused rather than re-derived.
+    static func currentDefaultOutputUID() -> String? {
+        var deviceID = AudioObjectID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioObjectID>.size)
+        var defaultAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject), &defaultAddr, 0, nil, &size, &deviceID) == noErr,
+            deviceID != AudioObjectID(kAudioObjectUnknown) else { return nil }
+
+        var uidAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var uid: CFString? = nil
+        var uidSize = UInt32(MemoryLayout<CFString?>.size)
+        let uidErr = withUnsafeMutablePointer(to: &uid) { ptr -> OSStatus in
+            AudioObjectGetPropertyData(deviceID, &uidAddr, 0, nil, &uidSize, ptr)
+        }
+        guard uidErr == noErr, let uid else { return nil }
+        return uid as String
+    }
+
     // MARK: LatencyConfigurable (PLAN-LATENCY-SETTING.md)
 
     /// The sender start buffer currently in force (ms). Seeded by
@@ -4355,6 +5486,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     public var startBufferMs: Int {
         stateQueue.sync { _startBufferMs }
+    }
+
+    /// The reference delay (ms) the Mac-local sink renders on (Wave-4 delay
+    /// agreement). AirPlay in the selection (or no BT at all) → the live
+    /// start-buffer, same as always. BT+Mac with NO AirPlay → the BT-only
+    /// buffer, the same reference every BT sink uses — otherwise the Mac leads
+    /// each BT speaker by `startBufferMs − btOnlyBufferMs` in that composition.
+    func localSinkReferenceDelayMs() -> Int {
+        stateQueue.sync {
+            (btSinkEnabled && !btComposition.airPlayPresent)
+                ? BTSyncedSink.defaultBTOnlyBufferMs : _startBufferMs
+        }
     }
 
     /// Seed the initial value without triggering an apply (`makeBackend` only —
@@ -4543,68 +5686,215 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let toRemove: [(id: String, outputID: OutputID)] = stateQueue.sync {
             guard self.started, !self.suspended else { return [] }
             self.suspended = true
-            // Abandon any in-flight silence-watchdog bookkeeping from a prior cycle:
-            // sleep re-decides everything on wake, and `suspended` already forces the
-            // gate off, so a fallback override must not linger across the sleep.
-            self.silenceWatchdog?.cancel()
-            self.silenceWatchdog = nil
-            self.awaitingWakeReconnect = false          // Fix C: sleep ends any post-wake window
-            self.clearSilenceOverride()                 // Fix B: emit the banner-clear on true→false
-            // Stop the whole-system tap (ordered on `captureControlQueue`, like every
-            // other gate decision) so the Mac isn't left muted by a tap streaming into
-            // dead sockets. `expectedSelected` is untouched.
-            self.captureRunning = false
-            // W3-T3: capture just stopped (above) — clear the double-path guard note on
-            // the true→false edge, exactly as `stop()` does. Sleep hits neither
-            // `reconcileSystemAirPlayGuard`'s else-branch nor `stop()`, so without this
-            // the note would strand ON while nothing streams (a UI-truth lie) whenever a
-            // narrow wake-with-selection-gone sequence leaves `reconcileCaptureGate` an
-            // early-return. Idempotent (no-op/no-emit unless actually active), mirroring
-            // the `clearSilenceOverride()` above.
-            self.clearSystemAirPlayGuard()
-            // Abandon any in-flight AirPlay-session rebind recovery, exactly as
-            // `stop()` does: the engine sessions are about to die, so completing a
-            // rebind — or waking one out of a backoff delay — on the far side of the
-            // sleep is meaningless. Clearing the generation supersedes a chain
-            // currently awaiting its engine op (it bows out on its own gen check) and
-            // cancelling the timers drops the backed-off attempts.
-            //
-            // Because a cancelled timer never runs, the whole-system `converging` slot
-            // those chains were holding has to be released HERE. Leaving it held is
-            // what stranded a selected speaker silent after wake with no
-            // self-recovery: `handleSystemDidWake` only re-kicks devices that are not
-            // already `converging`, so the device was never re-added. Release only the
-            // slots `rebindConverging` records — a slot a live `convergeDevice` loop
-            // owns is not ours to drop. No requeue here; the wake path issues the
-            // re-add for every still-desired device.
-            self.rebindRecoveryGen.removeAll()
-            for work in self.pendingRebindRecoveries.values { work.cancel() }
-            self.pendingRebindRecoveries.removeAll()
-            for deviceID in self.rebindConverging {
-                self.converging.remove(deviceID)
-                self.emit(.streamHealth(id: deviceID, recovering: false))
-            }
-            self.rebindConverging.removeAll()
-            // Roadmap 008: sleep tears every session down, so there is nothing
-            // left to settle — a deferred unbind surviving the sleep would only
-            // re-classify against post-wake state it has no business touching.
-            self.pendingScopeSettles.removeAll()
-            if let coordinator = self.captureCoordinator {
-                self.captureControlQueue.async { coordinator.stop() }
-            }
-            // Snapshot the streaming set, then clear `added` SYNCHRONOUSLY: the engine
-            // sessions are about to die on sleep, so the bookkeeping must reflect
-            // "torn down" immediately — otherwise a fast wake could see them still
-            // `added` and skip the re-add, leaving silence. `desiredOn` is preserved.
-            let items: [(String, OutputID)] = self.added.compactMap { id in
-                guard let outputID = self.outputIDs[id] else { return nil }
-                return (id, outputID)
-            }
-            self.added.removeAll()
-            return items
+            return self.suspendSessionsKeepingIntentLocked()
         }
         for (_, outputID) in toRemove {
             Task { [weak self] in try? await self?.engine.removeOutput(outputID) }
+        }
+    }
+
+    /// Tear every streaming engine output down cleanly while PRESERVING the
+    /// selection intent (`expectedSelected` / `desiredOn`) — shared critical section
+    /// between the sleep path (`handleSystemWillSleep`, which sets `suspended` itself
+    /// first) and the AirPlay-handoff release path (`releaseForHandoff`, which sets
+    /// `handoffReleased` instead/as well). Extracted from the former (Seamless
+    /// handoff T3.2) with no behavior change for the sleep path — callers keep their
+    /// own guard + flag flip and just forward the returned removal list. On
+    /// `stateQueue`.
+    private func suspendSessionsKeepingIntentLocked() -> [(id: String, outputID: OutputID)] {   // on stateQueue
+        // Abandon any in-flight silence-watchdog bookkeeping from a prior cycle:
+        // sleep re-decides everything on wake, and `suspended` already forces the
+        // gate off, so a fallback override must not linger across the sleep.
+        self.silenceWatchdog?.cancel()
+        self.silenceWatchdog = nil
+        self.awaitingWakeReconnect = false          // Fix C: sleep ends any post-wake window
+        self.clearSilenceOverride()                 // Fix B: emit the banner-clear on true→false
+        // Stop the whole-system tap (ordered on `captureControlQueue`, like every
+        // other gate decision) so the Mac isn't left muted by a tap streaming into
+        // dead sockets. `expectedSelected` is untouched.
+        self.captureRunning = false
+        // W3-T3: capture just stopped (above) — clear the double-path guard note on
+        // the true→false edge, exactly as `stop()` does. Sleep hits neither
+        // `reconcileSystemAirPlayGuard`'s else-branch nor `stop()`, so without this
+        // the note would strand ON while nothing streams (a UI-truth lie) whenever a
+        // narrow wake-with-selection-gone sequence leaves `reconcileCaptureGate` an
+        // early-return. Idempotent (no-op/no-emit unless actually active), mirroring
+        // the `clearSilenceOverride()` above.
+        self.clearSystemAirPlayGuard()
+        // Abandon any in-flight AirPlay-session rebind recovery, exactly as
+        // `stop()` does: the engine sessions are about to die, so completing a
+        // rebind — or waking one out of a backoff delay — on the far side of the
+        // sleep is meaningless. Clearing the generation supersedes a chain
+        // currently awaiting its engine op (it bows out on its own gen check) and
+        // cancelling the timers drops the backed-off attempts.
+        //
+        // Because a cancelled timer never runs, the whole-system `converging` slot
+        // those chains were holding has to be released HERE. Leaving it held is
+        // what stranded a selected speaker silent after wake with no
+        // self-recovery: `handleSystemDidWake` only re-kicks devices that are not
+        // already `converging`, so the device was never re-added. Release only the
+        // slots `rebindConverging` records — a slot a live `convergeDevice` loop
+        // owns is not ours to drop. No requeue here; the wake path issues the
+        // re-add for every still-desired device.
+        self.rebindRecoveryGen.removeAll()
+        for work in self.pendingRebindRecoveries.values { work.cancel() }
+        self.pendingRebindRecoveries.removeAll()
+        for deviceID in self.rebindConverging {
+            self.converging.remove(deviceID)
+            self.emit(.streamHealth(id: deviceID, recovering: false))
+        }
+        self.rebindConverging.removeAll()
+        // Roadmap 008 — SLEEP ONLY. Sleep ends every session and the machine is
+        // going down, so a deferred unbind must not survive to re-classify against
+        // post-wake state.
+        //
+        // The handoff release deliberately does NOT clear these: unlike sleep it
+        // tears down only `added` + `streamBindings`, while its own gate admits a
+        // release with devices merely `converging` — so a `.unbind` deferred for a
+        // still-converging device is real work that must survive. `suspended`
+        // makes the note unconsumable only FOR THE DURATION of the release (that
+        // is what deferring means); `resumeFromHandoffLocked` clears `suspended`
+        // and re-kicks, and the next `releaseConvergingAndRequeueIfNeeded` for
+        // that id re-drives the unbind (telemetry `unbind_redrive`). Clearing here
+        // would silently drop it and leak the per-app session.
+        if !self.handoffReleased { self.pendingScopeSettles.removeAll() }
+        if let coordinator = self.captureCoordinator {
+            self.captureControlQueue.async { coordinator.stop() }
+        }
+        // Snapshot the streaming set, then clear `added` SYNCHRONOUSLY: the engine
+        // sessions are about to die on sleep, so the bookkeeping must reflect
+        // "torn down" immediately — otherwise a fast wake could see them still
+        // `added` and skip the re-add, leaving silence. `desiredOn` is preserved.
+        let items: [(String, OutputID)] = self.added.compactMap { id in
+            guard let outputID = self.outputIDs[id] else { return nil }
+            return (id, outputID)
+        }
+        self.added.removeAll()
+        return items
+    }
+
+    // MARK: Seamless AirPlay handoff (T3) — release-on-deselect + resume
+
+    /// The user's system-output action means macOS wants the timing ports. Tear the
+    /// AirPlay sessions down (KEEPING selection intent) and free 319/320 fast, so
+    /// their next attempt in Sound settings succeeds. On `stateQueue`.
+    /// - Parameter defaultAlreadyLeftUs: whether the system default output has
+    ///   ALREADY moved off our aggregate at the moment of this release. True for a
+    ///   user deselect (that departure is what triggered it); false for a blocked
+    ///   attempt (macOS aborts before switching, so we are still the default).
+    ///   Arms `defaultLeftUsSinceRelease` — passed explicitly rather than derived
+    ///   from `reason`, which exists only for telemetry and must not carry logic.
+    private func releaseForHandoff(reason: String, defaultAlreadyLeftUs: Bool) {   // on stateQueue
+        guard self.started, !self.handoffReleased, !self.suspended else { return }
+        // The gate below is "do we plausibly hold the ports at all" — a release
+        // with nothing streaming/converging would tear down zero sessions and just
+        // leave the watcher spinning for no reason; the watcher itself must never
+        // fire while this is false.
+        //
+        // D5 (adversarial review): `converging` is included because
+        // `ptpHelperActivator.activate` binds the ports (`convergeDevice`) BEFORE a
+        // device lands in `added` — during that connecting window `added` and
+        // `streamBindings` are both still empty, so without this a blocked attempt
+        // mid-connect would slip through unreleased. Chosen over `ptpClockAvailable`
+        // (the last activation's outcome, optimistically `true` before any attempt
+        // and not reset on release) because `converging` directly tracks "an engine
+        // op that might currently be holding the ports is in flight," which is
+        // exactly the condition this gate needs.
+        guard !self.added.isEmpty || !self.streamBindings.isEmpty || !self.converging.isEmpty else { return }
+
+        self.handoffReleased = true
+        self.defaultLeftUsSinceRelease = defaultAlreadyLeftUs
+        self.suspended = true
+        let toRemove = self.suspendSessionsKeepingIntentLocked()
+        // D3 (adversarial review — corrects the T3.9 answer): a per-app-ONLY target
+        // never lands in `added`. `setOutputSet` writes `desiredOn[id] = wantOn` for
+        // every id in `order`, including one that's merely discovered, not selected
+        // (~1773); `applyEngineState`'s `.streaming`/`.connected` branch then sees
+        // `desiredOn[id] == false` for it and takes the "desired OFF" branch instead
+        // of inserting into `added` (~4846-4858). So `suspendSessionsKeepingIntentLocked`'s
+        // `added`-only removal leaves every per-app session — and its PTP hold —
+        // alive, and Option B's `.bind` resume would then no-op against a session
+        // the engine still considers live. Tear those down too, but leave
+        // `streamBindings` ITSELF intact — Option B's resume rebinds from it.
+        let perAppOutputIDs = self.streamBindings.keys.compactMap { self.outputIDs[$0] }
+        let allOutputIDs = toRemove.map(\.outputID) + perAppOutputIDs
+
+        self.reconcileHandoffWatcherLocked()
+
+        Telemetry.log(.airplay, "handoff_release", [
+            "reason": reason,
+            "devices": Self.telemetryDeviceList(Set(toRemove.map(\.id)), known: self.known),
+        ])
+
+        // D2 (adversarial review): ONE task for the whole removal, stored so a
+        // resume's `convergeDevice` kick can await it first — otherwise a stale
+        // `removeOutput` here is unordered against the engine actor relative to the
+        // resumed `addOutput` and could land after it, killing the fresh session.
+        let engine = self.engine
+        self.handoffTeardown = Task {
+            for outputID in allOutputIDs { try? await engine.removeOutput(outputID) }
+        }
+        // D8 (adversarial review): fire-and-forget, but off `stateQueue` — this is a
+        // real Mach IPC syscall, and `stateQueue` sits on the main thread's blocking
+        // path (the `devices` getter `sync`s on it).
+        let releaser = self.ptpHelperReleaser
+        DispatchQueue.global().async { releaser.release() }
+    }
+
+    /// A blocked macOS AirPlay attempt was observed in the unified log — treat it as
+    /// the user's switch-away intent. Called from the watcher's pipe I/O thread.
+    private func handleBlockedAirPlayAttempt() {
+        stateQueue.async {
+            // The watcher firing without a release that follows is otherwise
+            // invisible — `releaseForHandoff`'s guards return silently. Logging the
+            // inputs makes the REJECTING guard readable straight from telemetry
+            // instead of inferred; it earned its keep on 2026-08-07, where
+            // `added:0, bindings:0, converging:0` is what proved a blocked attempt
+            // had arrived with nothing left to release (roadmap 026, the
+            // same-device case). Cheap: fires only on a real blocked attempt.
+            Telemetry.log(.airplay, "handoff_blocked_attempt_state", [
+                "started": String(self.started),
+                "handoffReleased": String(self.handoffReleased),
+                "suspended": String(self.suspended),
+                "added": String(self.added.count),
+                "bindings": String(self.streamBindings.count),
+                "converging": String(self.converging.count),
+            ])
+            self.releaseForHandoff(reason: "blockedAttempt", defaultAlreadyLeftUs: false)
+        }
+    }
+
+    /// Start/stop the blocked-attempt watcher to match whether we currently have
+    /// anything worth protecting. `streamBindings` is deliberately part of the
+    /// condition — per-app routes participate in the handoff too. On `stateQueue`.
+    private func reconcileHandoffWatcherLocked() {   // on stateQueue
+        let shouldRun = self.started && !self.handoffReleased
+            && (!self.expectedSelected.isEmpty || !self.streamBindings.isEmpty)
+        if shouldRun, self.handoffWatcher == nil {
+            let watcher = self.handoffWatcherFactory { [weak self] in
+                self?.handleBlockedAirPlayAttempt()
+            }
+            self.handoffWatcher = watcher
+            // D8 (adversarial review): `start()` posix_spawns /usr/bin/log
+            // synchronously — publish the instance on `stateQueue` first (so a
+            // concurrent reconcile sees it and doesn't double-start), then kick the
+            // actual spawn off queue so it can't block the main thread (which
+            // `sync`s on `stateQueue` via the `devices` getter).
+            // Re-verify D8: identity re-check on the owning queue before the
+            // off-queue spawn. Without it, a `stop()`/reconcile-flap landing
+            // between the publish above and this block running would be
+            // overwritten by `start()` (`running = true`), leaking an orphan
+            // `log stream` child nothing references. If the published watcher
+            // is no longer current by the time we get here, do nothing.
+            DispatchQueue.global().async { [weak self] in
+                guard let self,
+                      self.stateQueue.sync(execute: { self.handoffWatcher === watcher })
+                else { return }
+                watcher.start()
+            }
+        } else if !shouldRun, let watcher = self.handoffWatcher {
+            watcher.stop()
+            self.handoffWatcher = nil
         }
     }
 
@@ -4617,6 +5907,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     public func handleSystemDidWake() {
         let toKick: [(id: String, outputID: OutputID)] = stateQueue.sync {
             guard self.started, self.suspended else { return [] }
+            // Seamless handoff T3.8-1: a sleep/wake during a deliberate handoff
+            // release must not silently re-grab the PTP ports and break the macOS
+            // session the user just started — only `resumeFromHandoffLocked()`
+            // (the user asking for Audiouter back) may clear `handoffReleased`.
+            guard !self.handoffReleased else { return [] }
             self.suspended = false
             self.clearSilenceOverride()                 // Fix B: emit the banner-clear on true→false
             // Fix C: entering the post-wake reconnection window. A stranding evaluated
@@ -4697,8 +5992,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private func reconcileSilenceWatchdog() {   // on stateQueue
         let desiredNonLocal = expectedSelected.filter { known[$0]?.isLocalDevice == false }
         let wantsStream = !desiredNonLocal.isEmpty
-        let anyConnected = desiredNonLocal.contains { connectionState(of: $0) == .connected }
-        let stranded = !suspended && wantsStream && !anyConnected
+        let anyAudible = desiredNonLocal.contains { desiredDeviceAudibleLocked($0) }
+        let stranded = !suspended && wantsStream && !anyAudible
 
         if stranded {
             if silenceCaptureOverride { return }        // already audible on this Mac
@@ -4718,6 +6013,22 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 reconcileCaptureGate()                  // re-mute; stream resumes to device
             }
         }
+    }
+
+    /// Whether one DESIRED non-local id is audibly carrying audio, for the
+    /// stranded test above. AirPlay: a live engine session (`.connected`). A
+    /// `.bluetooth` id holds NO engine session, and its `.connected` means
+    /// something else entirely (BT-LIFECYCLE: its own sink started rendering) —
+    /// it arrives a whole reference delay late, so the engine-lifecycle read
+    /// would brand a healthy BT-only selection stranded and un-mute the Mac
+    /// mid-playback (R-partition). A BT id's audible fact is its
+    /// Core Audio endpoint existing (`isAvailable`) — exactly what its sink
+    /// renders through; a selected-but-disconnected BT speaker therefore still
+    /// (correctly) counts as silence and falls back to the Mac. On `stateQueue`.
+    private func desiredDeviceAudibleLocked(_ id: String) -> Bool {   // on stateQueue
+        guard let device = known[id] else { return false }
+        if device.isBluetooth { return device.isAvailable }
+        return device.connectionState == .connected
     }
 
     /// Fix B: clear the silence-fallback override on a genuine true→false edge and
@@ -4769,8 +6080,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // Fix C: the restore decision has been made — the post-wake window is over.
         awaitingWakeReconnect = false
         let desiredNonLocal = expectedSelected.filter { known[$0]?.isLocalDevice == false }
-        let anyConnected = desiredNonLocal.contains { connectionState(of: $0) == .connected }
-        guard !suspended, !desiredNonLocal.isEmpty, !anyConnected else { return }
+        let anyAudible = desiredNonLocal.contains { desiredDeviceAudibleLocked($0) }
+        guard !suspended, !desiredNonLocal.isEmpty, !anyAudible else { return }
         silenceCaptureOverride = true
         reconcileCaptureGate()                          // un-gate → Mac becomes audible
         emit(.localFallbackActive(true))
@@ -4822,6 +6133,192 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         return true
     }
 
+    // MARK: Public aggregate default-output ownership + routing-blocked warning (Wave 3, T5)
+
+    /// Reconcile the public aggregate's default-output ownership off the current
+    /// selection intent, then (re)evaluate the routing-blocked warning. Called
+    /// whenever `expectedSelected` changes (the activation seam, Q1).
+    ///
+    /// AMBIGUITY FLAGGED (Q1): "actively routing" here is defined as
+    /// `!expectedSelected.isEmpty` — i.e. WHOLE-SYSTEM routing (≥1 AirPlay output
+    /// selected). That is the only path whose audio depends on the aggregate being
+    /// the Mac's default: the whole-system tap follows
+    /// `kAudioHardwarePropertyDefaultOutputDevice`, so it captures nothing unless
+    /// the default is our aggregate. Per-app `.device` redirects tap the app's
+    /// PROCESS directly (independent of the default output), so they deliberately
+    /// do NOT arm the aggregate takeover or the warning. On `stateQueue`.
+    private func reconcileAggregateDefault() {   // on stateQueue
+        if !expectedSelected.isEmpty {
+            takeOverDefaultAndReflect()
+        } else {
+            // Not routing: never take the Mac's default output (Q1), and the
+            // warning is off by definition.
+            evaluateRoutingBlocked()
+        }
+        // Seamless handoff T3.6: `expectedSelected` just settled — re-decide
+        // whether the blocked-attempt watcher should be running.
+        reconcileHandoffWatcherLocked()
+    }
+
+    /// Take the Mac's default output for the aggregate and reflect the resulting
+    /// steady state of the routing-blocked warning. Shared by the activation seam
+    /// and the user's ``reselectAggregateAsDefault()``.
+    ///
+    /// On a SUCCESSFUL set-default write we reflect the intended state
+    /// (`blocked = false`) OPTIMISTICALLY rather than reading the default straight
+    /// back: the HAL default-device change lands asynchronously, so an immediate
+    /// read can still return the PRE-write device and emit a transient `true` that
+    /// the echo-guard would then leave stuck. The listener's echo settles the real
+    /// change, and any genuine later user override re-evaluates to `true`. When no
+    /// write was issued (aggregate already default, or unresolvable) we evaluate
+    /// normally. On `stateQueue`.
+    private func takeOverDefaultAndReflect() {   // on stateQueue
+        if pointDefaultAtAggregate() {
+            setRoutingBlocked(false)
+        } else {
+            evaluateRoutingBlocked()
+        }
+    }
+
+    /// Point the Mac's default output at the public aggregate, capturing the prior
+    /// default ONCE (for the quit-time restore) the first time we take over.
+    /// Returns `true` iff it issued a SUCCESSFUL set-default write THIS call (so the
+    /// caller can reflect the intended state without racing the async change
+    /// notification); `false` when the aggregate is already the default or can't be
+    /// resolved. The write is echo-guarded via ``expectedDefaultWriteUID`` (set only
+    /// on success, so a refused write can't leave a stale guard). Used by both the
+    /// activation seam and the user's re-select — both legitimate (app routing vs.
+    /// the user's own click); neither is Q2's forbidden PROGRAMMATIC re-select
+    /// ("re-select without the user asking"). On `stateQueue`.
+    private func pointDefaultAtAggregate() -> Bool {   // on stateQueue
+        guard let aggregateID = aggregateControl.resolveDeviceID(forUID: AggregateOutputDevice.productUID) else { return false }
+        let current = currentDefaultOutputUIDProvider()
+        if !aggregateDefaultActive {
+            // Capture what the user had so `stop()` can restore it. Never remember
+            // the aggregate itself as the "prior" (we're about to destroy it).
+            if let current, current != AggregateOutputDevice.productUID {
+                priorDefaultUID = current
+            }
+            aggregateDefaultActive = true
+        }
+        guard current != AggregateOutputDevice.productUID else { return false }   // already ours
+        guard aggregateControl.setDefaultOutputDevice(aggregateID) else { return false }
+        expectedDefaultWriteUID = AggregateOutputDevice.productUID
+        return true
+    }
+
+    /// Compute the routing-blocked steady state — actively routing AND the current
+    /// default output is not our aggregate — and push it. Reuses the pure
+    /// ``AggregateOutputDevice/classifyOffSwitch(newDefaultUID:)`` decision. On
+    /// `stateQueue`.
+    private func evaluateRoutingBlocked() {   // on stateQueue
+        let blocked: Bool
+        if !expectedSelected.isEmpty {
+            let outcome = publicAggregate.classifyOffSwitch(newDefaultUID: currentDefaultOutputUIDProvider())
+            blocked = outcome != .stillOurs
+        } else {
+            blocked = false
+        }
+        setRoutingBlocked(blocked)
+    }
+
+    /// Edge-triggered emit of the routing-blocked warning: a repeat of the current
+    /// state is a no-op, so it can never thrash the event stream. On `stateQueue`.
+    private func setRoutingBlocked(_ blocked: Bool) {   // on stateQueue
+        guard blocked != routingBlockedEmitted else { return }
+        routingBlockedEmitted = blocked
+        emit(.routingBlockedNeedsDefault(blocked))
+    }
+
+    /// USER-INITIATED re-select of the aggregate as the Mac's default output — the
+    /// popover's "Use Audiouter" warning button (Q6). The user's own click IS their
+    /// intent, so this is the one sanctioned re-select and does NOT violate Q2's
+    /// "never programmatically re-select." Flips the warning off through the same
+    /// echo-guarded path as activation. Public so `AppDelegate` can wire
+    /// `PopoverController.onReselectAudiouter` to it.
+    ///
+    /// Seamless handoff T3.7: this is also the resume button — if a handoff release
+    /// is in force, put EVERYTHING back (whole-system AND per-app redirects).
+    public func reselectAggregateAsDefault() {
+        stateQueue.async {
+            self.takeOverDefaultAndReflect()
+            let (kicks, teardown) = self.resumeFromHandoffLocked()
+            for (id, outputID) in kicks {
+                Task { [weak self] in
+                    // D2 (adversarial review): await the release's own teardown
+                    // before converging — otherwise a stale `removeOutput` is
+                    // unordered against the engine actor relative to this resumed
+                    // `addOutput` and could land after it, killing the fresh session.
+                    await teardown?.value
+                    await self?.convergeDevice(id: id, outputID: outputID)
+                }
+            }
+        }
+    }
+
+    /// Put every session a handoff release tore down back: mirrors
+    /// `handleSystemDidWake()`'s re-converge critical section minus the wake-specific
+    /// bits (no `awaitingWakeReconnect` — this isn't a wake), plus Option B: also
+    /// re-issues every still-recorded per-app stream binding, since a handoff release
+    /// tears per-app sessions down too (D3) but leaves `streamBindings` itself
+    /// untouched as the record of user intent. On `stateQueue`.
+    ///
+    /// Returns the release's own teardown task (D2) alongside the kicks so every
+    /// caller can await it before converging — see the doc on `handoffTeardown`.
+    private func resumeFromHandoffLocked() -> (kicks: [(String, OutputID)], teardown: Task<Void, Never>?) {   // on stateQueue
+        guard self.started, self.handoffReleased else { return ([], nil) }
+        self.handoffReleased = false
+        self.defaultLeftUsSinceRelease = true
+        self.suspended = false
+        self.clearSilenceOverride()
+        let teardown = self.handoffTeardown
+        self.handoffTeardown = nil
+
+        var kicks: [(String, OutputID)] = []
+        let desiredIDs = self.order.filter { self.desiredOn[$0] == true }
+        for id in desiredIDs {
+            guard let outputID = self.outputIDs[id] else { continue }
+            self.failedGate.remove(id)
+            self.setConnectionState(.connecting, for: id)
+            if !self.converging.contains(id) {
+                self.converging.insert(id)
+                kicks.append((id, outputID))
+            }
+        }
+
+        // Option B: re-issue every per-app redirect too. `streamBindings` still
+        // records the user's per-app intent (a handoff release never clears it,
+        // only `stop()` does) — reuse the same `.bind` op / `enqueueBindOps` FIFO
+        // `performBindOp` normally issues from topology changes.
+        var bindOps: [StreamBindOp] = []
+        for (deviceID, stream) in self.streamBindings {
+            if let outputID = self.outputIDs[deviceID] {
+                bindOps.append(.bind(outputID, stream))
+            }
+        }
+        // Re-verify D2 (per-app half): the release folded these same per-app
+        // outputs into `handoffTeardown`, and `enqueueBindOps` chains onto
+        // `bindTail` with no knowledge of it — a re-bind landing before the old
+        // teardown's `removeOutput` would be killed by it moments later. Splice
+        // the teardown into the bind FIFO as a barrier so every re-bind runs
+        // strictly after the teardown completes (same ordering the whole-system
+        // kicks get by awaiting `teardown` directly).
+        if !bindOps.isEmpty, let teardown {
+            self.bindTail = Task { [prev = self.bindTail] in
+                await prev.value
+                await teardown.value
+            }
+        }
+        self.enqueueBindOps(bindOps)
+
+        self.reconcileCaptureGate()
+        self.reconcileSilenceWatchdog()
+        self.reconcileHandoffWatcherLocked()
+
+        Telemetry.log(.airplay, "handoff_resume", ["kicked": String(kicks.count)])
+        return (kicks, teardown)
+    }
+
     // MARK: Takeover status strip (T6, PLAN-AIRPLAY-COEXISTENCE.md)
 
     /// Update the takeover-status strip, edge-triggered exactly like
@@ -4859,6 +6356,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
         // Format and log the three metric families (each with count, p50/p95/p99/max).
         // Using snake_case to match existing telemetry key conventions in this file.
+        self.schedulingSnapshotLogCount &+= 1
         Telemetry.log(.airplay, "send_sched", [
             "wake_count": "\(snapshot.wakeLatency.count)",
             "wake_p50_ms": String(format: "%.1f", snapshot.wakeLatency.p50Ms),
@@ -5002,13 +6500,29 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // `isAvailable == true`, so it IS streamable and its descriptor is kept.
         let streamableNow = discovered.isAvailable
         if streamableNow {
+            // Availability recovery (root cause 4), EDGE-GATED (storm fix,
+            // 2026-08-06): clear a terminal-failure park only when this
+            // re-resolve is evidence the device actually CAME BACK — no
+            // descriptor was on file (first sighting, or back from sticky-AP2
+            // offline, which nils the memo) or the announced descriptor CHANGED
+            // (the receiver restarted / moved). Reappearing after a
+            // `disappeared` keeps the memo (`removeEngineDiscovery` needs it to
+            // reconstruct the deregistration) — that case auto-reconnects
+            // because `markDisappeared` itself drops the park with the episode,
+            // not through this edge check. A dead-but-still-announcing receiver
+            // re-resolving the SAME descriptor is NOT evidence of recovery:
+            // the old unconditional clear here (STABILITY(C7), "no backoff")
+            // plus the `desiredOn` re-kick below re-armed a failed device on
+            // every mDNS re-announce, one driver of the autonomous retry
+            // storm. The edge IS the backoff; a same-descriptor receiver
+            // recovers via its next engine good-state transition
+            // (`applyEngineState` clears the park), a user re-toggle, or
+            // "Try again" (`retryOutput`).
+            let cameBack = self.lastDescriptors[id].map {
+                !Self.descriptorsEqual($0, discovered.descriptor)
+            } ?? true
             self.lastDescriptors[id] = discovered.descriptor
-            // Availability recovery (root cause 4): a fresh AP2 (re-)resolution is
-            // evidence the device is reachable again, so clear any terminal-failure
-            // park — the device becomes re-enableable on the next user toggle (or,
-            // if it's still desired-on, the loop below re-kicks it).
-            // STABILITY(C7): discovery re-resolve clears the failure gate with no backoff — see dev/notes/stability-audit-2026-07-18.md
-            self.failedGate.remove(id)
+            if cameBack { self.failedGate.remove(id) }
         } else {
             self.lastDescriptors[id] = nil
             // The AP2 advert is gone (downgrade) or the device went offline: the
@@ -5044,7 +6558,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
            !self.failedGate.contains(id),
            let outputID = self.outputIDs[id] {
             self.converging.insert(id)
-            // STABILITY(C7): discovery re-resolve clears the failure gate with no backoff — see dev/notes/stability-audit-2026-07-18.md
+            // STABILITY(C7) resolved (storm fix, 2026-08-06): a parked id keeps
+            // its gate across same-descriptor re-resolves (the edge-gated clear
+            // above), so this re-kick fires only for a genuine came-back /
+            // never-failed device. Deliberately NO eager `.connecting` here —
+            // autonomous recovery must not churn the connection state machine
+            // (a fresh `.failed → .connecting → .failed` cycle would resurrect
+            // a user-dismissed diagnosis panel); success lands `.connected`
+            // via the add path, failure leaves the resting `.failed` alone.
             Task { [weak self] in await self?.convergeDevice(id: id, outputID: outputID) }
         }
 
@@ -5130,6 +6651,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // The engine descriptor is deregistered on disappear; a future re-add must
         // re-feed it. Clear the fed memo so `descriptorToFeed` doesn't skip it.
         self.fedDescriptors[id] = nil
+        // A full disappear ends any failure episode (the state clears to `.off`
+        // below), so drop the park with it — a later re-appearance is then a
+        // clean `desiredOn`-driven auto-reconnect in `addOrUpdate` even when the
+        // receiver comes back announcing the identical descriptor (the edge-gated
+        // clear there would not fire for it; this is the drop-off-and-return arm
+        // of the storm fix, 2026-08-06). The descriptor memo stays: it's what
+        // `removeEngineDiscovery` reconstructs the deregistration from.
+        self.failedGate.remove(id)
         guard var device = known[id] else { return }
         var changed = false
         if device.isAvailable { device.isAvailable = false; changed = true }
@@ -5144,6 +6673,118 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // popover ALSO resets such a route (`handleDeviceDisappeared`), but the
             // backend must never depend on a UI layer for its own audibility.
             commitKnownDevice(id, device)
+        }
+    }
+
+    // MARK: Bluetooth outputs → deviceAdded/deviceUpdated (BT-ENUM)
+
+    /// When macOS last used each known BT pairing, keyed by `Device.id`
+    /// (``BTDeviceSnapshot/lastUsed``). `Device` deliberately doesn't carry this
+    /// yet — it's stashed here so the UI wave can filter/sort the ghost rows a
+    /// forever-remembered pairing list produces, whatever surface it picks.
+    private var btLastUsed: [String: Date] = [:]   // on stateQueue
+
+    /// The ids the enumerator's LATEST merged list contains — i.e. every BT id
+    /// macOS currently knows a pairing (or live endpoint) for. `nil` until the
+    /// first snapshot arrives, so "not in the set" is never conflated with
+    /// "enumeration hasn't run yet". A known `.bluetooth` row whose id is
+    /// absent here has had its pairing record deleted out from under the app
+    /// — the `.notPaired` fast-fail in ``retryBTOutput`` keys off this.
+    /// On `stateQueue`.
+    private var btPairedIDs: Set<String>?
+
+    /// The ``btLastUsed`` stash, read safely off `stateQueue` — the
+    /// ``BTOutputControlling`` read the popover's Bluetooth-subsection sort
+    /// uses (ghost pairings sink to the bottom by recency; sort-only in v1).
+    public func lastUsedDatesForBTDevices() -> [String: Date] {
+        stateQueue.sync { btLastUsed }
+    }
+
+    /// Fold a full BT enumeration into the model, through the same
+    /// `known`/`order`/`emit` flow AirPlay discovery uses. A BT device that
+    /// leaves the merged list entirely (unpaired mid-session) goes unavailable
+    /// but keeps its row — same greyed-not-vanished contract as
+    /// ``markDisappeared``. On `stateQueue`.
+    private func applyBTSnapshots(_ snapshots: [BTDeviceSnapshot]) {
+        var seen: Set<String> = []
+        var desiredAvailabilityMoved = false
+        btPairedIDs = Set(snapshots.map(\.id))
+        for snapshot in snapshots {
+            let id = snapshot.id
+            seen.insert(id)
+            btLastUsed[id] = snapshot.lastUsed
+            if let existing = known[id] {
+                var updated = existing
+                updated.name = snapshot.name
+                updated.isAvailable = snapshot.isConnected
+                if updated != existing {
+                    let availabilityMoved = updated.isAvailable != existing.isAvailable
+                    if availabilityMoved, expectedSelected.contains(id) {
+                        desiredAvailabilityMoved = true
+                    }
+                    commitKnownDevice(id, updated)
+                    // BT-RECONNECT: the row's lifecycle follows the baseband
+                    // fact. A loss while SELECTED is DESELECTED — off =
+                    // unselected, truthfully (Alec's call, replacing the old
+                    // power-off park): the popover reacts to this exact
+                    // availability edge (`PopoverController.update(devices:)`)
+                    // and routes it through `GroupController.setDeviceSelected`,
+                    // the one selection owner. A return while STILL selected
+                    // therefore IS deliberate intent (the greyed-row "play
+                    // when up" select) and resumes below.
+                    // Sticky-failed: a `.failed` story from a user-initiated
+                    // attempt survives a loss until retry or return.
+                    if availabilityMoved {
+                        if updated.isAvailable {
+                            // BT-LIFECYCLE: the endpoint existing is not yet
+                            // audio — a selected row breathes until its sink
+                            // renders, exactly like a fresh select.
+                            if expectedSelected.contains(id) {
+                                beginBTConnectingLocked(id)
+                            } else {
+                                setConnectionState(.off, for: id)
+                            }
+                        } else {
+                            btConnectingDeadlines[id] = nil
+                            if case .failed = existing.connectionState {
+                                // keep the failure story
+                            } else {
+                                setConnectionState(.off, for: id)
+                            }
+                        }
+                    }
+                }
+            } else {
+                let device = Device(
+                    id: id,
+                    name: snapshot.name,
+                    kind: .bluetooth,
+                    isAvailable: snapshot.isConnected,
+                    supportsAirPlay2: false)
+                known[id] = device
+                order.append(id)
+                emit(.deviceAdded(device))
+            }
+        }
+        for id in order where known[id]?.kind == .bluetooth && !seen.contains(id) {
+            guard var device = known[id], device.isAvailable else { continue }
+            device.isAvailable = false
+            if expectedSelected.contains(id) { desiredAvailabilityMoved = true }
+            commitKnownDevice(id, device)
+        }
+        // BT-BACKEND: a SELECTED BT id's availability is its audible fact for
+        // the silence fallback (`desiredDeviceAudibleLocked` — BT ids never
+        // reach `.connected`), and this is the only place that fact changes.
+        // AirPlay ids get this re-evaluation from their connection-state
+        // transitions; without this call a BT speaker powering off mid-play
+        // would never arm the fallback, and one reconnecting would never
+        // clear it.
+        // The reapply (Wave 4) is the other half: a selected id that just
+        // (re)appeared resolves a live device and re-enters the sink set
+        // without waiting for a selection change — and a vanished one drops.
+        if desiredAvailabilityMoved {
+            reconcileSilenceWatchdog()
+            reapplyBTSinkLocked()
         }
     }
 
@@ -5239,13 +6880,22 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // unavailable + deselected and drop it from the streaming set. PARK
                 // it (root cause 5) so converge doesn't immediately re-issue a
                 // session against a receiver that just failed — the park is cleared
-                // by the next discovery/good-state transition or a user re-toggle.
+                // only on a genuine edge (storm fix, 2026-08-06): a came-back
+                // discovery edge, an engine good-state transition, a membership
+                // edge, or `retryOutput` — a same-descriptor re-announce keeps it.
                 device.isAvailable = false
                 device.isSelected = false
                 self.added.remove(id)
                 if self.desiredOn[id] == true {
                     self.failedGate.insert(id)
-                    device.connectionState = .failed(ConnectionFailure(cause: .unknown))
+                    // `.passwordRequired` is the one engine failure with a KNOWN,
+                    // actionable cause — don't flatten it to `.unknown` (live
+                    // 2026-08-06: an auth-blocked receiver was debugged blind
+                    // because the panel said "failed for an unknown reason" while
+                    // the engine knew it wanted a password).
+                    let cause: ConnectionFailure.Cause =
+                        state == .passwordRequired ? .authRequired : .unknown
+                    device.connectionState = .failed(ConnectionFailure(cause: cause))
                 }
             case .stopped:
                 device.isSelected = false
@@ -5953,7 +7603,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// per-app meter) — and drives the metering-only tap lifecycle (the
     /// `.noRedirect` per-app meter): on `true`, start a dedicated `.unmuted` tap
     /// for every currently-eligible listed app; on `false`, stop them all.
-    /// `PopoverController` calls this on `popoverDidShow`/`popoverDidClose` via
+    /// `PopoverController` calls this on `surfaceDidShow`/`surfaceDidHide` via
     /// `backend as? MeteringControlling`. The `?` sub-components are `nil` in
     /// tests / the UI-only smoke path (harmless no-ops).
     public func setMeteringActive(_ active: Bool) {
@@ -6465,6 +8115,13 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// `start()`/`stop()`. See ``NativeCaptureCoordinator/setMeteringActive(_:)``.
     func setMeteringActive(_ active: Bool)
 
+    /// Mode-aware align-tick seam (W2): `.wizard` carries the alignment
+    /// wizard's shape (long tick budget + keep-alive bed wake preamble) without
+    /// exposing the injector's internals through this public protocol. Default
+    /// (below) forwards to `setAlignTick(_:)`; ``NativeCaptureCoordinator``
+    /// provides the real mode → injector-config mapping.
+    func setAlignTickMode(_ mode: AlignTickMode)
+
     /// Keep the whole-system tap's exclusion set in sync with the routing table
     /// (T4/T6): individually-routed apps (`.device(id:)` routes) and user-excluded
     /// apps must not double up into the system-wide mix. Default no-op so a fake
@@ -6486,6 +8143,16 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// Default no-op so a capture-gate-only fake compiles unchanged;
     /// ``NativeCaptureCoordinator`` provides the real one.
     func setSyncedLocalSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?)
+
+    /// Attach/detach the Bluetooth sink-manager fan-out (BT-FANOUT) — same
+    /// contract as `setSyncedLocalSink`, one slot per consumer. Default no-op;
+    /// ``NativeCaptureCoordinator`` provides the real one.
+    func setBTSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?)
+
+    /// Start/stop the align-by-ear tick mixed into the captured feed
+    /// (BT-OFFSET-UI). Default no-op; ``NativeCaptureCoordinator`` provides
+    /// the real one.
+    func setAlignTick(_ active: Bool)
 }
 
 extension CaptureControlling {
@@ -6506,9 +8173,179 @@ extension CaptureControlling {
     /// Default no-op (T-FANOUT) so a fake that doesn't exercise the synced-local
     /// sink compiles unchanged; ``NativeCaptureCoordinator`` provides the real one.
     func setSyncedLocalSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {}
+    /// Default no-op (BT-FANOUT), same posture.
+    func setBTSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {}
+    /// Default no-op (BT-OFFSET-UI align tick), same posture.
+    func setAlignTick(_ active: Bool) {}
+    /// Default forwards to the flag-only seam so a fake recording plain
+    /// `setAlignTick` calls also observes wizard activations (W2).
+    func setAlignTickMode(_ mode: AlignTickMode) {
+        setAlignTick(mode != .off)
+    }
 }
 
 extension NativeCaptureCoordinator: CaptureControlling {}
+
+/// Optional backend capability for the Bluetooth device-row UI (BT-UI /
+/// BT-OFFSET-UI) — the same `backend as? Capability` pattern as
+/// ``MeteringControlling``/``AppRouteConfiguring``: `NativeBackend` is the only
+/// conformer; on `MockBackend`/`OwnToneBackend` the cast is `nil` and the
+/// popover's Bluetooth affordances degrade gracefully.
+public protocol BTOutputControlling: AnyObject {
+    /// When macOS last used each known BT pairing, keyed by `Device.id` — the
+    /// popover's ghost-pairing sort input (stale pairings to the bottom).
+    func lastUsedDatesForBTDevices() -> [String: Date]
+    /// Set a device's SYNC trim (ms, snapped to `BTSyncTrim.resolutionMs` and
+    /// clamped to ±`BTSyncTrim.rangeMs`): applied live to its `BTSyncedSink`
+    /// delay, and written to disk only when `persist` is true.
+    ///
+    /// `persist: false` is the drawer's live SCRUB (D6): the ruler emits a new
+    /// value many times a second while the user drags, and every one of those
+    /// must reach the audio path — but writing the JSON store at that rate
+    /// would be absurd. The drag's END (and every discrete gesture: a stepper
+    /// click, a typed commit, Revert) arrives separately with `persist: true`.
+    func setBTSyncTrim(_ ms: Double, forDevice id: String, persist: Bool)
+    /// The saved SYNC trim for a device (0 when none) — what a disconnected
+    /// row shows read-only, and what the drawer starts from.
+    func btSyncTrim(forDevice id: String) -> Double
+    /// Whether this device has a trim ENTRY at all — the honest answer to
+    /// D10's "tuned or never tuned?", which a value alone cannot give: a
+    /// device deliberately tuned to exactly 0.0 ms is tuned, and must not
+    /// read "Not set".
+    func btHasSyncTrim(forDevice id: String) -> Bool
+    /// Start/stop the align-by-ear tick in the captured feed (auto-limits to
+    /// ~30 s of ticks on its own).
+    func setBTAlignTickActive(_ active: Bool)
+
+    // MARK: Alignment wizard (W2)
+
+    /// Push a CANDIDATE trim live to the device's sink — clamped like
+    /// ``setBTSyncTrim(_:forDevice:persist:)`` but NEVER persisted and never
+    /// entering the stored trim table, so cancel can restore by re-pushing the
+    /// store. (A selection change mid-wizard re-pushes stored trims over the
+    /// preview; the wizard session re-applies on its next answer, so the stomp
+    /// is a beat, not a loss.)
+    func setBTWizardTrimPreview(_ ms: Double, forDevice id: String)
+    /// End a preview: `keepMs` non-nil persists it (the wizard's Keep, via the
+    /// ordinary ``setBTSyncTrim(_:forDevice:persist:)`` path); `nil` restores
+    /// the stored trim to the live sink (cancel / Try again / graceful exit).
+    func endBTWizardTrimPreview(forDevice id: String, keepMs: Double?)
+    /// The wizard's continuous tick run: long budget plus the keep-alive bed's
+    /// ~3 s wake preamble (the Sonos amp-gate live finding, 2026-08-07) —
+    /// distinct from the row button's ~30 s ``setBTAlignTickActive(_:)``.
+    func setBTWizardTickActive(_ active: Bool)
+
+    // MARK: First-mix intercept (W3)
+
+    /// Answer a ``BackendEvent/btFirstMixAlignmentPrompt(deviceID:)``: release
+    /// the hold-silent (all three card actions unmute) and, for "Not now",
+    /// record the FINAL per-device dismissal so the intercept never auto-fires
+    /// for this device again. Also the abandon path (card torn down without an
+    /// answer) with `dismissed: false` — that leaves no record, by design.
+    func resolveBTAlignmentPrompt(forDevice id: String, dismissed: Bool)
+
+    /// The usable trim range for a device (D11/T3) — the drawer's ruler and
+    /// numeric field hard-stop here instead of at the nominal ±`BTSyncTrim
+    /// .rangeMs`, because past this bound `SyncTiming.totalDelayNanos`'s ≥ 0
+    /// clamp already eats the change and the readout would be lying.
+    ///
+    /// LIVE QUERY — the range moves whenever an AirPlay device joins or
+    /// leaves the group (the reference term swaps between the fixed BT-only
+    /// buffer and the live AirPlay presentation delay), so a conformer must
+    /// answer fresh on every call, never from a value cached at some earlier
+    /// point (e.g. drawer-open time). The default implementation below
+    /// (full ±range) keeps mock/dev builds — which have no BT sink to ask —
+    /// working unchanged.
+    func btUsableTrimRangeMs(forDevice id: String) -> ClosedRange<Double>
+}
+
+extension BTOutputControlling {
+    public func btUsableTrimRangeMs(forDevice id: String) -> ClosedRange<Double> {
+        -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs
+    }
+}
+
+extension NativeBackend: BTOutputControlling {
+
+    public func setBTSyncTrim(_ ms: Double, forDevice id: String, persist: Bool) {
+        // Quantise, not merely clamp (T7 §7): the ruler resolves 0.1 ms, so
+        // snapping here is what keeps the readout, the ruler and the persisted
+        // value from ever disagreeing about what "22.4" means.
+        let value = BTSyncTrim.quantise(ms)
+        let all: [String: Double] = btTrimLock.withLock {
+            btTrimsByUID[id] = value
+            return btTrimsByUID
+        }
+        // The in-memory map updates on a scrub too — only the DISK write is
+        // skipped. `btSyncTrim`/`btHasSyncTrim` are read-back seams, and a
+        // reader mid-drag should see what the user is hearing.
+        if persist {
+            try? btTrimStore?.save(all)
+        }
+        captureControlQueue.async { [weak self] in
+            self?.btSink?.setTrimMs(value, forDeviceUID: id)
+        }
+    }
+
+    public func btSyncTrim(forDevice id: String) -> Double {
+        btTrimLock.withLock { btTrimsByUID[id] ?? 0 }
+    }
+
+    public func btHasSyncTrim(forDevice id: String) -> Bool {
+        btTrimLock.withLock { btTrimsByUID[id] != nil }
+    }
+
+    public func setBTAlignTickActive(_ active: Bool) {
+        captureCoordinator?.setAlignTick(active)
+    }
+
+    public func setBTWizardTrimPreview(_ ms: Double, forDevice id: String) {
+        let clamped = BTSyncTrim.clamp(ms)
+        captureControlQueue.async { [weak self] in
+            self?.btSink?.setTrimMs(clamped, forDeviceUID: id)
+        }
+    }
+
+    public func endBTWizardTrimPreview(forDevice id: String, keepMs: Double?) {
+        if let keepMs {
+            setBTSyncTrim(keepMs, forDevice: id, persist: true)
+        } else {
+            let stored = btSyncTrim(forDevice: id)
+            captureControlQueue.async { [weak self] in
+                self?.btSink?.setTrimMs(stored, forDeviceUID: id)
+            }
+        }
+    }
+
+    public func setBTWizardTickActive(_ active: Bool) {
+        captureCoordinator?.setAlignTickMode(active ? .wizard : .off)
+    }
+
+    public func resolveBTAlignmentPrompt(forDevice id: String, dismissed: Bool) {
+        if dismissed {
+            let all: Set<String> = btTrimLock.withLock {
+                btAlignmentDismissedUIDs.insert(id)
+                return btAlignmentDismissedUIDs
+            }
+            try? btTrimStore?.saveDismissedUIDs(all)
+            Telemetry.log(.localPlayback, "bt_alignment_prompt_dismissed", ["device": id])
+        }
+        stateQueue.async { self.releaseBTAlignmentHoldLocked(id) }
+    }
+
+    /// `btSink` is confined to `captureControlQueue` (every other touch in
+    /// this file reaches it only via `.async` there), so this hops in with
+    /// `.sync` rather than reading the property directly from whatever
+    /// thread the caller is on — the same synchronous-read-of-confined-state
+    /// pattern `stateQueue.sync` uses elsewhere in this file. The hop also
+    /// keeps the live-query contract honest: nothing here is cached on the
+    /// `NativeBackend` side to go stale between AirPlay joining/leaving.
+    public func btUsableTrimRangeMs(forDevice id: String) -> ClosedRange<Double> {
+        captureControlQueue.sync {
+            btSink?.usableTrimRangeMs(forDeviceUID: id) ?? (-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
+        }
+    }
+}
 
 /// The full lifecycle surface T-BACKEND drives on the delayed local sink: the
 /// fan-out target itself (``SyncedLocalPCMSink``, T-FANOUT) plus start/stop and
@@ -6525,9 +8362,17 @@ public protocol SyncedLocalSinkControlling: SyncedLocalPCMSink {
     /// Level this sink's output by `group × the Mac's own fader` (W1). Main is
     /// deliberately excluded — see ``NativeBackend``'s `pushSyncedLocalGain`.
     func setGain(_ gain: Float)
+
+    /// Wave-4 delay agreement: the reference timeline moved (AirPlay joined or
+    /// left a BT-containing selection) — rebuild so the fresh session anchor
+    /// re-samples the delay provider. Default no-op (spies).
+    func requestReanchor(cause: String)
 }
 
 extension SyncedLocalSinkControlling {
+    /// Default no-op — only the real ``SyncedLocalSink`` re-anchors.
+    public func requestReanchor(cause: String) {}
+
     /// Default no-op so a spy that only exercises the enable/disable lifecycle
     /// compiles unchanged; ``SyncedLocalSink`` provides the real one. (Same posture
     /// as ``CaptureControlling``'s defaults above.)
@@ -6535,3 +8380,51 @@ extension SyncedLocalSinkControlling {
 }
 
 extension SyncedLocalSink: SyncedLocalSinkControlling {}
+
+/// The lifecycle surface BT-BACKEND drives on the Bluetooth sink manager: the
+/// fan-out feed itself (``SyncedLocalPCMSink``) plus arm/disarm, the selected
+/// per-device set, and the group composition (BT-REFSEL). Lets ``NativeBackend``
+/// own WHEN Bluetooth playback turns on/off against either the real
+/// ``BTSyncedSink`` or a test spy — the exact posture of
+/// ``SyncedLocalSinkControlling`` above. Internal on purpose: nothing outside
+/// this module constructs one (`makeBackend` wires production; tests are
+/// `@testable`).
+protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
+    func start()
+    func stop()
+    func setDevices(_ specs: [BTSyncedSink.DeviceSpec])
+    func setComposition(_ composition: BTGroupComposition)
+    /// The UIDs whose per-device sink is emitting real audio right now — the
+    /// signal a Bluetooth row's `.connecting` hold ends on.
+    func renderingDeviceUIDs() -> Set<String>
+    /// The UIDs handed any captured audio at all — how the hold's ceiling tells
+    /// a silent Mac (idle, promote to `.connected`) from a device that got
+    /// audio and never played it (a real failure). `nil` means "can't tell",
+    /// which the caller reads as anchored: lifecycle-only spies then keep the
+    /// old fail-on-ceiling behaviour and their expectations are unchanged.
+    func anchoredDeviceUIDs() -> Set<String>?
+    /// Per-device signed manual trim (BT-OFFSET-UI/BT-SYNC-DRAWER). Default
+    /// no-op so lifecycle-only spies compile unchanged; ``BTSyncedSink``
+    /// provides the real one (same-value writes are already guarded there).
+    func setTrimMs(_ ms: Double, forDeviceUID uid: String)
+    /// The usable trim range for a device (D11/T3) — see
+    /// ``BTSyncedSink/usableTrimRangeMs(forDeviceUID:)``. Default returns the
+    /// full ±`BTSyncTrim.rangeMs` so lifecycle-only spies compile unchanged;
+    /// ``BTSyncedSink`` provides the live one.
+    func usableTrimRangeMs(forDeviceUID uid: String) -> ClosedRange<Double>
+    /// Per-device render gain: the backend's composed
+    /// `Main × Group × Device` product, 0 while muted or first-mix-held (W3).
+    /// Same default-no-op posture as `setTrimMs`.
+    func setGain(_ gain: Float, forDeviceUID uid: String)
+}
+
+extension BTSyncedSinkControlling {
+    func anchoredDeviceUIDs() -> Set<String>? { nil }
+    func setTrimMs(_ ms: Double, forDeviceUID uid: String) {}
+    func usableTrimRangeMs(forDeviceUID uid: String) -> ClosedRange<Double> {
+        -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs
+    }
+    func setGain(_ gain: Float, forDeviceUID uid: String) {}
+}
+
+extension BTSyncedSink: BTSyncedSinkControlling {}

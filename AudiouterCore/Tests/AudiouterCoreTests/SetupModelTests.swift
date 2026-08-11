@@ -53,6 +53,7 @@ extension SerializedSharedState {
         private let lock = NSLock()
         private var _registerCount = 0
         private var _openSettingsCount = 0
+        private var _unregisterCount = 0
         /// What `.status` reports after `register()` (default: requires approval,
         /// the expected first-run outcome once registration succeeds).
         var statusAfterRegister: PTPHelperStatus = .requiresApproval
@@ -62,6 +63,7 @@ extension SerializedSharedState {
         var status: PTPHelperStatus = .notRegistered
         var registerCount: Int { lock.withLock { _registerCount } }
         var openSettingsCount: Int { lock.withLock { _openSettingsCount } }
+        var unregisterCount: Int { lock.withLock { _unregisterCount } }
 
         func register() throws {
             lock.withLock { _registerCount += 1 }
@@ -69,6 +71,7 @@ extension SerializedSharedState {
             status = statusAfterRegister
         }
         func openSystemSettingsLoginItems() { lock.withLock { _openSettingsCount += 1 } }
+        func unregister() async throws { lock.withLock { _unregisterCount += 1 } }
     }
 
     /// Counts `onChange` fires (reference type so the escaping closure mutates it).
@@ -76,18 +79,8 @@ extension SerializedSharedState {
 
     // MARK: Helpers
 
-    private var suiteName: String
-    private var defaults: UserDefaults!
-
-    init() {
-        suiteName = "AudioControlSetupTests.\(UUID().uuidString)"
-        defaults = UserDefaults(suiteName: suiteName)
-        defaults.removePersistentDomain(forName: suiteName)
-    }
-
-    deinit {
-        defaults.removePersistentDomain(forName: suiteName)
-    }
+    private let isolation = TestIsolation(owner: "SetupModelTests")
+    private var defaults: UserDefaults { isolation.isolatedDefaults }
 
     private func makeModel(audio: PermissionStatus,
                            localNetwork: SpyLocalNetwork = SpyLocalNetwork(),
@@ -123,7 +116,7 @@ extension SerializedSharedState {
     /// On macOS < 15 there is no Local Network privacy permission, so the model is
     /// constructed with `localNetworkGated: false`: it must start `.granted`, never
     /// run a Bonjour browse, and never surface as a missing required permission
-    /// (which is what produced the dead-end "Open Settings" → nonexistent pane).
+    /// (which is what produced the dead-end "Open Settings…" → nonexistent pane).
     private func makeUngatedModel(localNetwork net: SpyLocalNetwork) -> SetupModel {
         SetupModel(audioProbe: CannedAudioProbe(result: .granted),
                    localNetwork: net,
@@ -497,7 +490,7 @@ extension SerializedSharedState {
         settings.hasCompletedSetup = true   // default gate would say "hide"
 
         // skip → never present (the testing default), even native + not completed.
-        let fresh = AppSettings(defaults: UserDefaults(suiteName: "\(suiteName).fresh")!)
+        let fresh = AppSettings(defaults: isolation.makeDefaults())
         for skip in ["skip", "off", "never", "0"] {
             #expect(!SetupModel.shouldPresentOnLaunch(
                 settings: fresh, backendKind: .native,

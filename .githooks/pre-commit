@@ -76,7 +76,12 @@ fi
 # suites writing the same defaults key or temp filename race and flake. The
 # blessed fix is to subclass `IsolatedTestCase` (Tests/AudiouterCoreTests/
 # IsolatedTestCase.swift) and use `scratchDir` / `isolatedDefaults` /
-# `uniqueName(_:)` instead of the shared globals.
+# `makeDefaults()` / `uniqueName(_:)` instead of the shared globals.
+#
+# `UserDefaults(suiteName:)` is flagged too, for a different reason: it isolates
+# correctly but every distinct name is a permanent `~/Library/Preferences` plist
+# nothing can delete afterwards (see `InMemoryDefaults`) — measured at 48,769
+# files / 200 MB on one machine.
 #
 # This scans only the ADDED lines of staged test files, so it never nags about
 # pre-existing code — only newly introduced reaches. A line that genuinely must
@@ -88,7 +93,7 @@ for f in $staged_tests; do
     case "$f" in */IsolatedTestCase.swift) continue ;; esac
     added=$(git diff --cached -U0 -- "$f" 2>/dev/null | grep -E '^\+[^+]')
     bad=$(printf '%s\n' "$added" \
-        | grep -Ei 'UserDefaults\.standard|FileManager\.default\.temporaryDirectory' \
+        | grep -Ei 'UserDefaults\.standard|UserDefaults\(suiteName:|FileManager\.default\.temporaryDirectory' \
         | grep -vi 'isolation-ok')
     if [ -n "$bad" ]; then
         iso_hits="$iso_hits\n  $f:\n$(printf '%s\n' "$bad" | sed 's/^+/    /')"
@@ -104,6 +109,22 @@ if [ -n "$iso_hits" ]; then
     echo "  If a line truly must touch a global (e.g. AppKit setFrameAutosaveName)," >&2
     echo "  append a trailing 'isolation-ok' comment to silence this." >&2
     echo "" >&2
+fi
+
+# ---------------------------------------------------------------------------
+# GUARD 7 (BLOCKING): staged Swift must pass the readability self-review.
+#
+# Numbered by arrival like every guard, but positioned HERE — before the
+# test-suite guards — so a review bounce costs seconds, not a full suite run.
+# Logic lives in guard-self-review.sh (same split as Guard 2's checker):
+# a deterministic screen over added comment lines, then a receipt proving
+# scripts/self-review.sh ran against these exact staged bytes. Rubric and
+# rationale: docs/REVIEW-RUBRIC.md. Missing helper => silently skip, same
+# principle as Guard 2 — a hook that errors on an unrelated machine is worse
+# than a hook that isn't there.
+g7="$hook_dir/guard-self-review.sh"
+if [ -f "$g7" ]; then
+    sh "$g7" || exit 1
 fi
 
 # ---------------------------------------------------------------------------

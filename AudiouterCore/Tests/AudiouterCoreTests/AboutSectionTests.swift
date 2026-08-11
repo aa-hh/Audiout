@@ -3,6 +3,7 @@
 import Foundation
 import Testing
 import AppKit
+import AudiouterSharedUI
 @testable import AudiouterSettingsUI
 
 /// Covers the About/Credits surface reachable from Settings › General ›
@@ -83,6 +84,24 @@ import AppKit
         // actual on-screen presentation behind `HeadlessRuntime.isActive`).
         controller.test_tapAbout()
         #expect(controller.test_about.window != nil)
+    }
+
+    /// A1: About's background effect view carries an opaque cover that stands
+    /// in for the blur exactly while Reduce Transparency is on — driven
+    /// through the seam because the live accessibility setting isn't
+    /// scriptable headlessly (the notification-driven live flip is on the
+    /// live checklist).
+    @Test func aboutBackgroundGetsAnOpaqueCoverOnlyUnderReduceTransparency() throws {
+        let controller = GeneralSettingsViewController(loginItem: FakeLoginItem())
+        let about = controller.test_about.test_aboutViewController
+        _ = about.view  // force loadView, which builds the background
+        let fallback = try #require(about.backgroundFallback)
+
+        fallback.test_reduceTransparencyOverride = false
+        #expect(!fallback.test_isCoveringOpaquely)
+
+        fallback.test_reduceTransparencyOverride = true
+        #expect(fallback.test_isCoveringOpaquely)
     }
 
     @Test func aboutWindowShowsTheInjectedVersionLine() {

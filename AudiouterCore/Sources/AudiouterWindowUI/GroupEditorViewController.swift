@@ -5,7 +5,7 @@ import AudiouterCore
 import AudiouterSharedUI
 
 /// The group editor pane (design revamp: the Groups window is
-/// CONFIGURATION-ONLY — renaming, membership, and "Delete group…" live here,
+/// CONFIGURATION-ONLY — renaming, membership, and "Delete Group…" live here,
 /// but activation/routing never do; that stays in the popover only). This is
 /// the absorbed T-U3: the in-menu editable field is impossible (menu item
 /// views get no keyboard events — `dev/notes/p1-menu-brief.md` §3), so a real
@@ -30,7 +30,7 @@ import AudiouterSharedUI
 ///   name when emptied — a Finder rename in a box;
 /// - a "Speakers" list of `MembershipRowView` rows, one per candidate device
 ///   (per HIG — checkboxes for membership, not switches), in a second section;
-/// - a "Delete group…" `NSButton`.
+/// - a "Delete Group…" `NSButton`.
 ///
 /// Edits write straight through the injected `GroupController`
 /// (`saveGroup`/`deleteGroup`): renaming and membership toggles call
@@ -77,7 +77,7 @@ public final class GroupEditorViewController: NSViewController {
 
     private let iconWell = DeviceIconWellView()
     private let nameField = NSTextField(string: "")
-    private let membershipStack = NSStackView()
+    private let membershipStack = RailRepaintingStackView()
     /// The checklist's recessed background + inter-row hairlines (T5) — see
     /// ``GroupedSectionView``. Sits BEHIND `membershipStack` in z-order.
     /// NAME IS LOAD-BEARING: `GroupsWindowTextColorLockTests` reaches this
@@ -211,7 +211,7 @@ public final class GroupEditorViewController: NSViewController {
         membershipStack.spacing = 6
 
         deleteButton.translatesAutoresizingMaskIntoConstraints = false
-        deleteButton.title = "Delete group…"
+        deleteButton.title = "Delete Group…"
         deleteButton.bezelStyle = .rounded
         deleteButton.target = self
         deleteButton.action = #selector(deleteTapped(_:))
@@ -219,10 +219,23 @@ public final class GroupEditorViewController: NSViewController {
 
         // A host that re-invalidates the rail on every layout pass, so the spine
         // always reflects the CURRENT row frames (rebuild, resize, pane swap)
-        // with no cached geometry — the popover's `RailHostView` pattern.
+        // with no cached geometry.
+        //
+        // TWO hooks, deliberately, and neither replaces the other (2026-08-06 —
+        // the popover's rail drew displaced by exactly the gap between them):
+        // the CONTAINER's `layout()` fires on window resize / pane swap but NOT
+        // when only descendants re-lay out inside an unchanged container frame
+        // (a checklist row growing or a mid-animation reflow); the membership
+        // STACK's fires for its own relayouts but — unlike the popover's card
+        // stack, which is pinned to its container's four edges and so covers
+        // both cases alone — this stack floats inside the elastic form column,
+        // so its `layout()` is not guaranteed to run on every container
+        // resize. The popover could DELETE its container hook; here both stay.
         let container = RailRepaintingView()
         container.railOverlay = railOverlay
         container.membershipWell = membershipWell
+        membershipStack.railOverlay = railOverlay
+        membershipStack.membershipWell = membershipWell
         // The form column: symmetric margins off the pane, ELASTIC up to
         // `GroupsPaneLayout.contentMaxWidth`. Everything hangs off this
         // column's edges rather than the container's, so both sections and the
@@ -480,7 +493,7 @@ public final class GroupEditorViewController: NSViewController {
         // Only one member → that row's checkbox is disabled with an explanation.
         if memberSet.count == 1, let onlyMemberID = memberSet.first {
             rowsByID[onlyMemberID]?.setCheckboxEnabled(
-                false, tooltip: "A group needs at least one device. Use \u{201C}Delete group\u{2026}\u{201D} to remove it.")
+                false, tooltip: "A group needs at least one device. Use \u{201C}Delete Group\u{2026}\u{201D} to remove it.")
         }
         // T5: re-point the well at the CURRENT rows so its hairlines land
         // between whatever's actually in the stack now (a rebuild can add or
@@ -610,7 +623,7 @@ public final class GroupEditorViewController: NSViewController {
             }
         } else {
             // A group must keep at least one device — refuse to remove the last
-            // member (to remove the group entirely, use "Delete group…"). Revert
+            // member (to remove the group entirely, use "Delete Group…"). Revert
             // the checkbox so the row reflects the unchanged membership and bail
             // before persisting an empty group.
             guard group.memberIDs.contains(where: { $0 != deviceID }) else {
@@ -788,7 +801,7 @@ public final class GroupEditorViewController: NSViewController {
         pickIcon(name)
     }
 
-    /// True when "Delete group…" is currently visible (always true — the
+    /// True when "Delete Group…" is currently visible (always true — the
     /// editor is edit-only).
     public var test_deleteButtonVisible: Bool { !deleteButton.isHidden }
 
@@ -916,9 +929,24 @@ extension GroupEditorViewController: RailHookProviding {
 
 /// The editor pane's container: re-invalidates the rail overlay AND the
 /// membership well (T5) on every layout pass so both track the current row
-/// frames with no cached geometry (the popover's `RailHostView` pattern). Both
+/// frames with no cached geometry. Both
 /// draw from settled frames, so `cacheDisplay` snapshots stay deterministic.
 private final class RailRepaintingView: NSView {
+    weak var railOverlay: BusRailOverlayView?
+    weak var membershipWell: GroupedSectionView?
+    override func layout() {
+        super.layout()
+        railOverlay?.needsDisplay = true
+        membershipWell?.needsDisplay = true
+    }
+}
+
+/// The checklist stack, carrying the SAME re-invalidation for relayouts that
+/// never reach the container's `layout()` — a row growing inside an unchanged
+/// container frame (see the two-hooks note in `loadView`; the popover's
+/// `RailStackView` is the precedent). Dirtying from `layout()` cannot loop:
+/// `needsDisplay` does not invalidate layout.
+final class RailRepaintingStackView: NSStackView {
     weak var railOverlay: BusRailOverlayView?
     weak var membershipWell: GroupedSectionView?
     override func layout() {

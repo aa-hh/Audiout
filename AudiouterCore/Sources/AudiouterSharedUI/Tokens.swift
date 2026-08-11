@@ -12,22 +12,13 @@ import AudiouterCore
 /// material through `Tokens`, never through a raw literal `NSColor`,
 /// `NSFont`, or magic number of its own.
 ///
-/// **At this module's creation, `Tokens` held ZERO custom values.** Every
-/// case aliased an existing stock `NSColor`/`NSFont`/`NSVisualEffectView.Material`
-/// already in use, and `Tokens.Layout` re-exported `PopoverColumnGrid` (which
-/// remains the geometry authority — nothing moved). That zero-custom-value
-/// state was the SEAM, not a permanent constraint: **warm-signal-v2** (the
-/// popover canvas + card de-nest, `dev/notes/warm-signal-v3.md` §1/§5.1) is
-/// the first wave to actually populate `Tokens.Color` with real custom
-/// values — the warm surface ladder + hairline (`canvas`, `canvasHi`,
-/// `panel`, `raised`, `well`, `hairline`; see the "Warm Signal custom
-/// palette" section below). `Tokens.Font`/`Tokens.Layout`/`Tokens.Material`
-/// remain pure forwarding aliases (plus `Font.microLabel`, the spec-named
-/// §2 micro-label voice added by S3's MUTED sublabel token); only
-/// `Tokens.Color` gains custom cases, and only ones a real call site
-/// consumes in the same wave: the S-chain has since added `ringConnected`/
-/// `failure` (S1), `gold`/`ember` (S-BUS), and `caution`/`glow`/`dotSocket`
-/// (S2+S3, the meter gradient + route-armed dot). `link` remains unadded
+/// `Tokens.Font`/`Tokens.Layout`/`Tokens.Material` are pure forwarding
+/// aliases over stock values (`Font.microLabel`, the spec-named §2
+/// micro-label voice, is the one custom Font case); `Tokens.Layout`
+/// re-exports `PopoverColumnGrid`, which remains the geometry authority.
+/// Only `Tokens.Color` holds real custom palette values — the warm surface
+/// ladder + hairline and the signal/accent/permission instruments below,
+/// each added together with its first consumer. `link` remains unadded
 /// (its call site — the reference page — doesn't exist yet).
 ///
 /// Do not add a case here for a color/font/material combination that isn't
@@ -53,18 +44,40 @@ public enum Tokens {
     /// next time AppKit asks — surfaces pick the new accent up on their next
     /// draw/rebuild with no color re-fetch needed. Main-thread-only by
     /// convention (same as every other AppKit token access here).
-    public static var accentStyle: AccentStyle = .fullGold
+    ///
+    /// Setting it BROADCASTS ``accentStyleDidChangeNotification`` — see there
+    /// for why a re-resolving `NSColor` is not enough for every instrument.
+    public static var accentStyle: AccentStyle = .fullGold {
+        didSet {
+            guard oldValue != accentStyle else { return }
+            NotificationCenter.default.post(name: Tokens.accentStyleDidChangeNotification,
+                                            object: nil)
+        }
+    }
+
+    /// Posted (on `NotificationCenter.default`) whenever ``accentStyle``
+    /// actually changes, from the property's own `didSet` — so a dial call
+    /// site cannot forget to announce it.
+    ///
+    /// A `draw(_:)`-based instrument needs nothing but an invalidation: it
+    /// re-reads its tokens every pass. A **layer-color** instrument does not —
+    /// it stamps a resolved `CGColor` onto a `CALayer` and keeps showing it
+    /// until something re-stamps. `viewDidChangeEffectiveAppearance` covers
+    /// light/dark and `NSWorkspace.accessibilityDisplayOptionsDidChangeNotification`
+    /// covers Increase Contrast, but the accent dial is neither — it is an
+    /// app-internal setting, so it needs its own broadcast (the live bug: the
+    /// Main Audio ring kept the old gold while the rail it joins had already
+    /// re-tinted). An instrument that stamps `gold`/`ember`/`glow` into a
+    /// layer must observe this the same way it observes the a11y notification.
+    public static let accentStyleDidChangeNotification =
+        Notification.Name("Audiouter.Tokens.accentStyleDidChange")
 
     // MARK: - Color
 
-    /// Semantic color aliases. Every case forwards to the exact `NSColor`
-    /// class-property the codebase already calls directly (verified via
-    /// `git grep -n "NSColor\." AudiouterCore/Sources/{AudiouterOnboardingUI,
-    /// AudiouterSharedUI,AudiouterPopoverUI,AudiouterWindowUI,
-    /// AudiouterSettingsUI}`). No custom RGB/hex value lives here — only
-    /// forwarding. When the warm palette lands in a later wave, it replaces
-    /// the right-hand side of these aliases; call sites that already route
-    /// through `Tokens.Color` won't need to change.
+    /// Semantic color aliases plus the Warm Signal custom palette. The
+    /// alias cases forward to stock `NSColor` class-properties; the
+    /// custom warm/instrument cases below each carry a documented
+    /// contrast rationale (the governance rule above).
     public enum Color {
         /// Primary label text. Alias of `NSColor.labelColor`.
         public static var label: NSColor { .labelColor }
@@ -79,10 +92,12 @@ public enum Tokens {
         public static var accent: NSColor { .controlAccentColor }
         /// Hairline/divider strokes. Alias of `NSColor.separatorColor`.
         public static var separator: NSColor { .separatorColor }
-        /// Opaque window chrome background (onboarding, Settings). Alias of
-        /// `NSColor.windowBackgroundColor`. (Its former consumer, the
-        /// control-panel backing bubble, repointed to the warm `canvas` token
-        /// in W8, spec §5.4.)
+        /// Opaque window chrome background. Alias of
+        /// `NSColor.windowBackgroundColor`. Consumed by
+        /// `ReduceTransparencyFallbackView`'s default fill (A1) — the opaque
+        /// stand-in for the system chrome MATERIALS
+        /// (`Tokens.Material.windowBackground`/`popover`) while Reduce
+        /// Transparency is on.
         public static var windowBackground: NSColor { .windowBackgroundColor }
         /// The color a decorative punch-out border is drawn in so a corner badge
         /// reads as separate from what's behind it. Alias of
@@ -104,6 +119,20 @@ public enum Tokens {
         /// Warning/failure sublabel and card tint (connection-diagnosis,
         /// onboarding failure card). Alias of `NSColor.systemOrange`.
         public static var warning: NSColor { .systemOrange }
+        /// Informational note/banner tint (`SystemAirPlayNoteBannerView`'s
+        /// `.info` tier — the system-double-path note, the takeover status
+        /// strip's default state). Alias of `NSColor.systemBlue`. Declared as
+        /// a plain semantic alias, matching how ``warning``/``destructive``
+        /// are declared immediately above — a system dynamic color already
+        /// resolves light/dark and a reasonable Increase Contrast response on
+        /// its own, so it needs no `warmDynamic` trio or authored contrast
+        /// rationale; that requirement (root AGENTS.md's "every case ships
+        /// light + dark + Increase Contrast variants with a documented
+        /// rationale") targets the CUSTOM warm-palette hex literals below,
+        /// per this file's own governing comment ("the custom warm/instrument
+        /// cases below each carry a documented contrast rationale") — not the
+        /// semantic aliases in this section, none of which carry one either.
+        public static var info: NSColor { .systemBlue }
         /// Opaque shadow color for card/panel drop shadows (`CardView`). Alias
         /// of `NSColor.black`.
         public static var shadow: NSColor { .black }
@@ -119,11 +148,7 @@ public enum Tokens {
         // light + dark + Increase Contrast variants with a documented
         // contrast rationale"). V2 (the popover canvas + card de-nest) is
         // the first consumer: the warm surface ladder + hairline from spec
-        // §1.1 (dark) / §1.2 (light). `panel`/`raised`/`well` are defined
-        // here per the spec's full palette table but are NOT YET painted
-        // anywhere — V2's de-nest removes the card's own panel fill rather
-        // than adding one; they're reserved for a later wave (ring contrast
-        // reference, slider track/well, mute-pill fill). Every case below
+        // §1.1 (dark) / §1.2 (light). Every case below
         // resolves LIVE via `NSColor(name:dynamicProvider:)` against both
         // the color's `NSAppearance` argument (light/dark) and the CURRENT
         // `NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast`
@@ -148,15 +173,12 @@ public enum Tokens {
         public static var canvasHi: NSColor {
             warmDynamic(name: "canvasHi", dark: 0x1B1712, light: 0xF7F3EC)
         }
-        /// Card/panel fill — "the reference canvas a ring sits on" (§1). Not
-        /// yet painted by any call site in V2 (cards stop drawing their own
-        /// fill when de-nested onto the canvas, §5.1); reserved for a later
-        /// wave. No stated contrast floor.
+        /// Card/panel fill — "the reference canvas a ring sits on" (§1).
+        /// No stated contrast floor.
         public static var panel: NSColor {
             warmDynamic(name: "panel", dark: 0x1D1915, light: 0xFBF8F2)
         }
-        /// Raised well fill (icon well, blocked-checkbox fill, §1). Not yet
-        /// painted by any call site in V2 — reserved for a later wave. No
+        /// Raised well fill (icon well, blocked-checkbox fill, §1). No
         /// stated contrast floor.
         public static var raised: NSColor {
             warmDynamic(name: "raised", dark: 0x241F1A, light: 0xFFFFFF)
@@ -369,6 +391,19 @@ public enum Tokens {
                           systemAccentScale: 0.55)
         }
 
+        /// **The membership rail's SPINE TONE** — `gold` while the spine is
+        /// armed, its `ember` companion otherwise (Warm Signal v4 §Call-1
+        /// rail-segment tone).
+        ///
+        /// It exists so the rail's line/hook/terminus (`BusRailOverlayView`)
+        /// and the Main Audio ring the hook LANDS ON (`HaloRingView`'s
+        /// connected stroke) resolve their tone from ONE place: the two are
+        /// required to read as a single continuous line, and while each picked
+        /// `gold`/`ember` for itself that agreement was pure convention — the
+        /// accent dial moved one and not the other. Nothing else may consume
+        /// this; a non-rail instrument wanting gold asks for ``gold``.
+        public static func spineTone(armed: Bool) -> NSColor { armed ? gold : ember }
+
         // MARK: Signal-dot + meter instruments (spec §3.3 / §1, S2+S3)
         //
         // The remaining instrument hues the route-armed corner dot and the
@@ -467,6 +502,43 @@ public enum Tokens {
         public static var dotSocket: NSColor {
             warmDynamic(name: "dotSocket", dark: 0x34302A, darkHighContrast: 0x4A443B,
                        light: 0xE0D8C6, lightHighContrast: 0xC4B89E)
+        }
+
+        // MARK: Icon-well badge instrument (V6, raw-color elimination pass)
+        //
+        // `DeviceIconWellView`'s corner edit badge: a dark disc + light rim
+        // sitting over the device/group icon GLYPH, whose color is arbitrary
+        // (an SF Symbol tint, a user-picked icon) — not the app's own
+        // light/dark surface. Like `shadow`, the hue is deliberately the SAME
+        // in both themes (a theme-adaptive hue here would force the badge to
+        // flip to a light disc in dark mode, which would in turn force the
+        // pencil glyph it hosts to flip too — rejected: the badge's whole job
+        // is to read the same "dark scrim, light rim" regardless of what it
+        // sits over). Unlike `shadow`, it needs a real Increase Contrast
+        // response, so it is NOT a plain alias: `scrimDynamic` steps the
+        // ALPHA up under Increase Contrast — the only axis left once the hue
+        // is already the endpoint (pure black / pure white) — while the base
+        // hex stays fixed. First consumer: `DeviceIconWellView`'s badge fill/
+        // border, previously two frozen `NSColor(white:alpha:)` literals
+        // stamped into a `CALayer` once at init and never re-stamped, so they
+        // sat outside Increase Contrast entirely and could never react to a
+        // live appearance/a11y change.
+
+        /// The corner edit badge's FILL (`DeviceIconWellView`) — a dark scrim,
+        /// alpha 0.55 normally. CONTRAST RATIONALE: content-agnostic overlay,
+        /// no stated floor (same precedent as `canvas`/`panel`/`raised` —
+        /// it's a backdrop for the pencil glyph, not itself a foreground
+        /// instrument). Increase Contrast steps alpha to 0.85 for real
+        /// headroom against whatever it sits over.
+        public static var iconWellBadge: NSColor {
+            scrimDynamic(name: "iconWellBadge", hex: 0x000000, alpha: 0.55, highContrastAlpha: 0.85)
+        }
+
+        /// The rim paired with ``iconWellBadge`` — same reasoning, pure
+        /// white, alpha 0.25 normally, stepping to 0.55 under Increase
+        /// Contrast.
+        public static var iconWellBadgeBorder: NSColor {
+            scrimDynamic(name: "iconWellBadgeBorder", hex: 0xFFFFFF, alpha: 0.25, highContrastAlpha: 0.55)
         }
 
         // MARK: Permission-row instruments (colour-return pass, decisions Q1-Q6/NEW-1)
@@ -706,15 +778,30 @@ public enum Tokens {
         /// The `.kern` value (in points) realizing the micro-label voice's
         /// +0.09 em tracking at ``microLabel``'s 8.5 pt size (0.09 × 8.5).
         public static var microLabelKern: CGFloat { 0.765 }
+        /// The BT sync drawer's click-to-edit value field. Monospaced digits
+        /// so the number keeps its width as it steps. Sized to sit with the
+        /// row's own controls, not to shout — two live findings cut it down in
+        /// turn (a 26 pt version dwarfed everything around it and clipped
+        /// "−410" to "−41"; a 15 pt one still overhung the small buttons it now
+        /// shares a band with). One point over ``caption``, medium weight, is
+        /// enough for the editable number to read as the focal control.
+        public static var syncReadout: NSFont {
+            .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize + 1, weight: .medium)
+        }
     }
 
     // MARK: - Layout
 
-    /// Layout aliases. `PopoverColumnGrid` remains the geometry authority —
-    /// it is not moved, renamed, or duplicated. These are forwarding
-    /// properties only, so code that wants "the app's layout tokens" has one
-    /// import (`Tokens.Layout`) without new call sites needing to know that
-    /// the underlying constants still live in `PopoverColumnGrid`.
+    /// Layout tokens. Most of these are forwarding aliases over
+    /// `PopoverColumnGrid`, which remains the geometry authority for row/card
+    /// layout — it is not moved, renamed, or duplicated; code that wants "the
+    /// app's layout tokens" has one import (`Tokens.Layout`) without new call
+    /// sites needing to know the underlying constants still live there.
+    ///
+    /// The three corner-radius constants below are the exception: each
+    /// consolidates a value that used to be typed out independently at two or
+    /// more call sites in different UI packages (V10 cleanup) — this file is
+    /// their one real declaration, not a forwarding alias over anything else.
     public enum Layout {
         /// Alias of `PopoverColumnGrid.leadingInset`.
         public static var leadingInset: CGFloat { PopoverColumnGrid.leadingInset }
@@ -734,6 +821,22 @@ public enum Tokens {
         public static var trailingControlWidth: CGFloat { PopoverColumnGrid.trailingControlWidth }
         /// Alias of `PopoverColumnGrid.bodyRowHeight`.
         public static var bodyRowHeight: CGFloat { PopoverColumnGrid.bodyRowHeight }
+
+        /// The standard rounded-panel corner radius: the control-panel
+        /// shell's bubble body (`ControlPanelBackingView`) and the
+        /// quit-in-progress HUD (`AppDelegate.QuittingIndicatorPanel`) both
+        /// draw at this radius — previously two independent `12` literals.
+        public static let panelCornerRadius: CGFloat = 12
+        /// The inset warning/note banner corner radius shared by
+        /// `SilenceFallbackBannerView` and `SystemAirPlayNoteBannerView` —
+        /// previously two independent `11` literals.
+        public static let bannerCornerRadius: CGFloat = 11
+        /// The System Settings "grouped inset-list" card corner radius,
+        /// shared by onboarding's `RoundedContainerView` (the permission
+        /// card) and the Groups window's `GroupedSectionView` — both
+        /// explicitly modeled on the same macOS grouped-list idiom;
+        /// previously two independent `10` literals.
+        public static let groupedSectionCornerRadius: CGFloat = 10
     }
 
     // MARK: - Material
@@ -743,16 +846,11 @@ public enum Tokens {
     /// here — only forwarding.
     public enum Material {
         /// The system menu-surface material. Alias of
-        /// `NSVisualEffectView.Material.menu`. UNCONSUMED as of V2: `CardView`
-        /// and `PopoverPanelViewController` both used `.menu` directly (not
-        /// through this alias) before the warm-signal-v2 de-nest, which
-        /// replaced both call sites with the custom-painted warm canvas
-        /// (`WarmCanvasView`, spec §5.1) — neither draws any
-        /// `NSVisualEffectView` material anymore. Kept as a forwarding alias
-        /// per the governance rule's spirit (it still names a real, applied-
-        /// elsewhere-in-AppKit system material) but has no current call site;
-        /// do not add a NEW consumer without checking this comment is still
-        /// accurate.
+        /// `NSVisualEffectView.Material.menu`. Consumed by the quit
+        /// indicator (`AudiouterApp.QuittingIndicatorPanel`) — the app's one
+        /// floating HUD surface; every other chrome surface paints the
+        /// custom warm canvas (`WarmCanvasView`, spec §5.1) and draws no
+        /// material.
         public static var popover: NSVisualEffectView.Material { .menu }
         /// Opaque window-chrome material (onboarding background, Settings
         /// window background, About panel). Alias of
@@ -789,6 +887,22 @@ private func warmDynamic(name: String,
             hex = increaseContrast ? (lightHighContrast ?? light) : light
         }
         return NSColor(warmSignalHex: hex)
+    }
+}
+
+/// Builds a translucent, theme-INDEPENDENT "scrim" `NSColor` — same `hex` in
+/// both appearances (an overlay meant to read consistently over arbitrary
+/// content, not the app's own light/dark surface), but the ALPHA steps to
+/// `highContrastAlpha` under Increase Contrast for real headroom, resolved
+/// live on every access exactly like `warmDynamic`. `warmDynamic` itself
+/// can't express this: its hex-only branching always resolves to an OPAQUE
+/// color (`NSColor(warmSignalHex:)` hardcodes `alpha: 1`), so a case that
+/// needs a non-1 base alpha AND an Increase-Contrast-only response needs its
+/// own constructor.
+private func scrimDynamic(name: String, hex: UInt32, alpha: CGFloat, highContrastAlpha: CGFloat) -> NSColor {
+    NSColor(name: NSColor.Name("WarmSignal.\(name)")) { _ in
+        let increaseContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        return NSColor(warmSignalHex: hex).withAlphaComponent(increaseContrast ? highContrastAlpha : alpha)
     }
 }
 

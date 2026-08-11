@@ -49,10 +49,8 @@ public final class DefaultOutputObserver: @unchecked Sendable {
         queue.sync { [self] in
             guard !isListening else { return }
 
-            // Snapshot the current default device name.
             currentDeviceName = Self.queryDefaultOutputDeviceName()
 
-            // Install the property listener.
             let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
                 guard let self else { return }
                 let name = Self.queryDefaultOutputDeviceName()
@@ -102,7 +100,6 @@ public final class DefaultOutputObserver: @unchecked Sendable {
 
     /// Returns the name of the current default output device, or "Mac" on any failure.
     private static func queryDefaultOutputDeviceName() -> String {
-        // 1. Get the default output device ID.
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultOutputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -123,7 +120,6 @@ public final class DefaultOutputObserver: @unchecked Sendable {
             return "Mac"
         }
 
-        // 2. Get the device name.
         var nameAddress = AudioObjectPropertyAddress(
             mSelector: kAudioObjectPropertyName,
             mScope: kAudioObjectPropertyScopeGlobal,

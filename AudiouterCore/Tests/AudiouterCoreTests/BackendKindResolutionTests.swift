@@ -49,12 +49,11 @@ import Testing
 
     // MARK: - AIRPLAY_START_BUFFER_MS resolution (env → setting → default)
 
+    private let isolation = TestIsolation(owner: "BackendKindResolutionTests")
+
     /// A throwaway defaults suite so these tests never read `.standard`.
     private func throwawaySettings(startBufferMs: Int? = nil) -> AppSettings {
-        let suite = "AudiouterTests.resolution.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
-        defaults.removePersistentDomain(forName: suite)
-        let settings = AppSettings(defaults: defaults)
+        let settings = AppSettings(defaults: isolation.makeDefaults())
         if let ms = startBufferMs { settings.startBufferMs = ms }
         return settings
     }

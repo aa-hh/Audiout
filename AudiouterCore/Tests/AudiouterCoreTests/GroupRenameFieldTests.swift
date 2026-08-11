@@ -4,6 +4,7 @@ import Testing
 import Foundation
 import AppKit
 @testable import AudiouterCore
+@testable import AudiouterPopoverUI
 @testable import AudiouterSharedUI
 @testable import AudiouterWindowUI
 
@@ -35,9 +36,11 @@ import AppKit
         return dir
     }
 
-    /// The editor inside a real window at the shipping default size — the
-    /// field's width is clamped by its SECTION, so a test that invents its own
-    /// pane width isn't measuring the shipping geometry.
+    /// The editor inside the real content tree at the Groups screen's shipping
+    /// content area — the field's width is clamped by its SECTION, so a test
+    /// that invents its own pane width isn't measuring the shipping geometry.
+    /// The controller owns no window (U6): the split view is laid out directly
+    /// at the area the surface's Groups screen gives it.
     private func makeWindow(named name: String = "Downstairs")
         throws -> (MixerWindowController, GroupController, Group) {
         let devices = (0..<4).map {
@@ -48,16 +51,19 @@ import AppKit
                                          loadPersisted: false)
         let group = try controller.createGroup(name: name, memberIDs: ["d0"],
                                                memberVolumes: [:]).group
-        let window = MixerWindowController(groupController: controller,
-                                           frameAutosaveName: uniqueName("GroupRenameFieldTests"))
+        let window = MixerWindowController(groupController: controller)
+        window.setHostVisible(true)
         window.update(devices: devices)
         window.test_select(.group(id: group.id))
-        window.window?.contentView?.layoutSubtreeIfNeeded()
+        // `groupsDefaultContentSize` IS the content area below the window's
+        // toolbar strip (live-review D1), so no header subtraction remains.
+        window.contentController.view.setFrameSize(AppSurfaceController.groupsDefaultContentSize)
+        settle(window)
         return (window, controller, group)
     }
 
     private func settle(_ window: MixerWindowController) {
-        window.window?.contentView?.layoutSubtreeIfNeeded()
+        window.contentController.view.layoutSubtreeIfNeeded()
     }
 
     // MARK: It is still a real text field, only skinned
@@ -181,7 +187,6 @@ import AppKit
         let (window, _, _) = try makeWindow()
         settle(window)
         let paneBefore = window.test_editor.view.frame.width
-        let windowBefore = window.window?.frame.width
 
         window.test_editor.test_commitRenameViaReturn(
             String(repeating: "Extremely long group name ", count: 4))
@@ -191,7 +196,6 @@ import AppKit
                 Comment(rawValue: "the field's width is a WEAK preference: satisfied at a higher priority it " +
                 "was answered by growing the whole content pane, squeezing the sidebar past " +
                 "its own minimum thickness"))
-        #expect(window.window?.frame.width == windowBefore)
     }
 
     @Test func theFieldGrowsWithTheNameItHolds() throws {

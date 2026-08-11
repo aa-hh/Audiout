@@ -5,7 +5,7 @@ import Foundation
 /// This is a *value type* on purpose: the backend owns the source of truth and
 /// hands out snapshots via ``BackendEvent``. The UI never mutates a `Device`
 /// directly — it calls a backend method (`setVolume`, `setMuted`, …) and waits
-/// for the echoed update. That keeps the mock and the real (OwnTone) backend
+/// for the echoed update. That keeps the mock and the real backends
 /// behaving identically from the UI's point of view.
 public struct Device: Identifiable, Equatable, Sendable {
 
@@ -18,6 +18,12 @@ public struct Device: Identifiable, Equatable, Sendable {
         case airportExpress
         case sonos
         case generic          // any other third-party AirPlay receiver
+        /// A Bluetooth audio output (A2DP speaker/headphones), enumerated via
+        /// Core Audio + the IOBluetooth paired list — not an AirPlay receiver.
+        /// `id` is the Core Audio `kAudioDevicePropertyDeviceUID` (derived from
+        /// the BT MAC address, so it survives disconnect/rejoin);
+        /// `supportsAirPlay2` is always `false` (PLAN-UNIVERSAL-SYNC BT-DEVICE).
+        case bluetooth
 
         /// SF Symbol name for the row icon (all are documented AppKit-usable
         /// symbols — see SPEC.md §9 "Device row").
@@ -29,13 +35,20 @@ public struct Device: Identifiable, Equatable, Sendable {
             case .airportExpress: return "wifi.router.fill"
             case .sonos:          return "hifispeaker.fill"
             case .generic:        return "hifispeaker.fill"
+            // SF Symbols has no Bluetooth rune (trademark); a distinct
+            // speaker glyph separates BT rows from the AirPlay kinds above.
+            // NOT "speaker.wave.2.fill" — that's the rows' mute-accessory
+            // glyph (DeviceRowView/MainOutRowView) and would collide.
+            case .bluetooth:      return "hifispeaker.2.fill"
             }
         }
     }
 
-    /// Stable identity — the Bonjour service name / device id. Survives a
-    /// device dropping off the network and coming back (that's what lets
-    /// auto-reconnect rejoin the *same* device to a saved group).
+    /// Stable identity — the Bonjour service name / device id for AirPlay
+    /// receivers; the Core Audio `kAudioDevicePropertyDeviceUID` for
+    /// `.bluetooth` devices. Survives a device dropping off (the network or
+    /// the BT link) and coming back (that's what lets auto-reconnect rejoin
+    /// the *same* device to a saved group).
     public let id: String
 
     public var name: String
@@ -51,12 +64,16 @@ public struct Device: Identifiable, Equatable, Sendable {
     public var supportsAirPlay2: Bool
 
     /// This is the Mac's own output (built-in speakers / whatever the system
-    /// default is), NOT an AirPlay receiver. It is the target of
-    /// `MainOutTarget.localSpeakers` (passthrough). SPEC.md §9 (2026-07-14): the
-    /// local device may be targeted ALONE but is BLOCKED from joining the
-    /// Selected Speakers set while that set contains AirPlay devices (pre-engine
-    /// sync limit). Exactly one device in a fleet should carry this flag.
+    /// default is), NOT an AirPlay receiver. Targeting only this device is
+    /// passthrough (SPEC.md §9b). Exactly one device in a fleet should carry
+    /// this flag.
     public var isLocalDevice: Bool
+
+    /// A Bluetooth audio output. BT devices are non-local (they mix with
+    /// AirPlay in groups) but are never engine-driven — the future `BTSyncedSink`
+    /// owns them, so AirPlay-only paths must exclude them by this, never by
+    /// `supportsAirPlay2` (AP1 receivers share that flag yet ARE engine-driven).
+    public var isBluetooth: Bool { kind == .bluetooth }
 
     // MARK: Control state (0–100 volume model, matching the UI sliders)
 

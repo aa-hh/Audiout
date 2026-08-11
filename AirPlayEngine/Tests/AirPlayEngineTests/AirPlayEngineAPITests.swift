@@ -25,9 +25,9 @@ import CAirPlayEngine
 // SerializedEngineStateSuite.swift). Do NOT repeat `.serialized` here.
 extension SerializedEngineState {
 
-    // setUp/tearDown were symmetric (both reset the dispatcher + drain the
-    // registry), so per the cookbook's §11(a) guidance the reset folds into
-    // `init` alone — no `deinit` needed, so this stays a `struct`.
+    // The dispatcher reset + registry drain fold into `init` alone
+    // (cookbook §11(a): symmetric setup/teardown) — no `deinit` needed, so
+    // this stays a `struct`.
     @Suite struct AirPlayEngineAPITests {
 
         init() {
@@ -427,8 +427,8 @@ extension SerializedEngineState {
 
         @Test func clientNameHashDiffersPerInstallSeed() {
             // Same clientName, different per-install seed -> different, non-zero
-            // libhash. This is the collision this task fixes: two installs on one
-            // LAN advertising the same clientName used to hash identically.
+            // libhash — without the per-install seed, two installs on one LAN
+            // advertising the same clientName hash identically.
             let seedA: UInt64 = 0xdead_beef_1234_5678
             let seedB: UInt64 = 0x1357_9bdf_0246_8ace
             let a = AirPlayEngine.hashClientName("My Speakers", seed: seedA)

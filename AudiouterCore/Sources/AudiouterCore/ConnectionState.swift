@@ -50,6 +50,20 @@ public struct ConnectionFailure: Equatable, Sendable {
         // but plays silence with no clock, so "connecting" would hang forever
         // with no audio.
         case timingUnavailable
+        // A Bluetooth speaker refused the connect FAST — the live-measured
+        // signature of a speaker another host (usually a phone) currently
+        // holds. A powered-off speaker instead holds the OS attempt ~15.4 s
+        // (dev/notes/bt-spike-findings-2026-08-07.md), which classifies as
+        // `.timedOut`. Never auto-fight the other host (Decision 3).
+        case connectedElsewhere
+        // A Bluetooth id the app still references (a saved group, a sync trim,
+        // an icon) whose OS pairing record is GONE — the enumerator's merged
+        // list no longer contains it, so no connect attempt can succeed until
+        // the user re-pairs in Bluetooth Settings. Classified fast, before any
+        // baseband attempt (device-tier decision 2, PLAN-UNIVERSAL-SYNC UI
+        // spec). Never auto-purged: re-pairing resurrects the same MAC-derived
+        // id, and with it the trim + membership.
+        case notPaired
         case unknown
     }
 
@@ -80,6 +94,8 @@ extension ConnectionFailure {
         case .droppedMidStream: return "Connection dropped"
         case .timedOut:         return "Took too long"
         case .timingUnavailable: return "Sync unavailable"
+        case .connectedElsewhere: return "Connected elsewhere"
+        case .notPaired:        return "Not paired"
         case .unknown:          return "Couldn't connect"
         }
     }
@@ -94,13 +110,21 @@ extension ConnectionFailure {
         case .refusedOrBusy:
             return "The speaker refused the connection — another device may hold an exclusive session. Stop playback from other apps or restart the speaker, then try again."
         case .authRequired:
-            return "This speaker requires a password or pairing, which isn't supported yet."
+            // A Mac receiver in "Current User" access-control mode is by far the
+            // most common way to hit this (live 2026-08-06: act=2 in the TXT
+            // record), and it has a receiver-side fix — name it. Entering a
+            // password in Audiouter itself is roadmapped, not shipped.
+            return "This speaker requires a password or pairing. If it's a Mac, set AirPlay Receiver to allow “Anyone on the same network” in its System Settings, then try again. Entering a password here isn't supported yet."
         case .droppedMidStream:
             return "The speaker dropped the stream and reconnecting failed. Check the speaker, then try again."
         case .timedOut:
             return "The connection attempt didn't complete. The speaker or network may be busy — try again."
         case .timingUnavailable:
             return "This speaker needs the Speaker Sync helper to stay in time, and it isn't ready. Approve it in Login Items & Extensions if prompted, then try again."
+        case .connectedElsewhere:
+            return "The speaker is connected to another device. Disconnect it there — or from this Mac's Bluetooth Settings — then try again."
+        case .notPaired:
+            return "This speaker's pairing was removed. Pair it again in Bluetooth Settings, then try again."
         case .unknown:
             return "The connection failed for an unknown reason. Try again, or check the speaker."
         }

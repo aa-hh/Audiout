@@ -2,35 +2,32 @@
 
 ## Purpose
 
-The Settings window content — General / Appearance / Audio, reachable from
-the popover header's gear icon. Sibling to `AudiouterWindowUI` (the Groups
-mixer window): same lazy-create-then-reuse controller lifecycle at the
-`AppDelegate` call site, a no-arg `showWindow()`, and `test_` structure hooks
-because the window isn't visible to a headless harness. For the app's overall
-package layout and where the settings model types (`AppSettings`,
+The Settings content — General / Appearance / Audio panes on a
+`SettingsRootViewController`, hosted as the one-surface shell's Settings
+screen (`AudiouterPopoverUI.AppSurfaceController`). There is no standalone
+Settings window anymore (retired in U5, PLAN-ONE-SURFACE-032.md); About keeps
+its own window as the one deliberate exception. For the app's overall package
+layout and where the settings model types (`AppSettings`,
 `ExcludedAppsController`, …) live, see [../../AGENTS.md](../../AGENTS.md).
 
 ## Rules
 
 - **Three tabs, not one screen** (screens follow-up, LOCKED by ahh 2026-07-22:
   "add tabs to kill the long vertical scroll: General / Appearance / Audio;
-  each tab short + scannable"). This supersedes the 2026-07-17 one-screen
-  revision — the stacked column had grown past 750pt into exactly the scroll
-  the spec calls out. `SettingsRootViewController` is now an
-  `NSTabViewController` with one `NSTabViewItem` per pane; the panes
-  themselves were not restructured. It is an **ordinary titled standalone
-  window** (traffic lights, movable, position remembered via
-  `setFrameUsingName`/`setFrameAutosaveName`), it **always opens on General**
-  (no persisted last tab), and it stays **non-resizable**
-  (`[.titled, .closable, .miniaturizable]`) — the preferences convention, and
-  it keeps per-tab sizing unambiguous.
-- **Chrome stays stock:** `tabStyle = .toolbar` + `NSWindow.toolbarStyle =
-  .preference` (the System-Settings/Safari/Xcode idiom, matching Warm Signal
-  §5.2's "no warm canvas, no gold on the chrome"). Each tab item needs an SF
-  Symbol `image` or it renders as a blank toolbar slot. The tab bar lives in
-  the title-bar area, so it costs zero height inside the content rect — the
-  window's content size IS the selected pane's fitting size, nothing to
-  subtract.
+  each tab short + scannable"). `SettingsRootViewController` is an
+  `NSTabViewController` with one `NSTabViewItem` per pane. It always starts
+  on General (no persisted last tab).
+- **One host: the surface.** The host passes `.segmentedControlOnTop`, so the
+  tabs render IN the content, beneath the surface's own screen switcher. An
+  in-content style puts the tab chrome INSIDE the content rect, so
+  `fittedContentSize` adds a chrome height it MEASURES off the freshly-built
+  view at init (probed 2026-08-07: exactly 30pt — a 24pt segmented control +
+  3pt above and below — identical per tab, headless and on screen; measured
+  rather than hardcoded because the layout is AppKit-authored and can drift).
+  The four sizing traps below bind on WHOEVER hosts these panes (plan R5).
+  The host's per-tab resize rides `onFittedContentSizeChange`, which has ONE
+  listener at a time — never hand the surface a root whose callback something
+  else still needs.
 - **The sizing trap — probe-confirmed AppKit facts. Do not weaken any of
   them.** An earlier tabbed build shipped a mostly-empty giant window on every
   tab, every launch; the one-screen rewrite dodged that bug rather than fixing
@@ -38,22 +35,22 @@ package layout and where the settings model types (`AppSettings`,
   1. `NSWindow(contentViewController:)` on an **empty** tab controller yields
      AppKit's 500×500 fallback, and that fallback **never self-corrects** —
      not when tabs are added later, not when a tab is selected. (Original bug:
-     `addTab` ran after `super.init`, then `setFrameAutosaveName` persisted the
-     bogus frame forever.) All three tabs are therefore added inside
-     `SettingsRootViewController.init`, before the window is constructed.
-  2. `NSTabViewController` **does not resize its window when the selected tab
+     `addTab` ran after `super.init`, then frame autosave persisted the bogus
+     frame forever.) All three tabs are therefore added inside
+     `SettingsRootViewController.init`, before any host wraps the controller.
+  2. `NSTabViewController` **does not resize its host when the selected tab
      changes** — probed offscreen and re-probed on a genuinely on-screen
-     window. The resize is ours: `tabView(_:didSelect:)`.
-  3. `setContentSize` preserves the window's **top** edge, so the title bar
-     stays anchored and the window grows downward per tab — the native
-     preferences feel, and why the remembered position survives a tab switch.
-  4. **Every view in this window's hierarchy must set
+     window. The resize is ours: `tabView(_:didSelect:)` republishes.
+  3. `setContentSize` preserves a window's **top** edge, so a host applying
+     the published size keeps its chrome anchored and grows downward per tab —
+     the native preferences feel; the surface's top-anchored resize rides it.
+  4. **Every view in this controller's hierarchy must set
      `translatesAutoresizingMaskIntoConstraints = false`.** An autoresized
      subview of an engine-managed superview is not neutral: AppKit synthesises
      mask constraints from the margins it holds *at synthesis time*, and here
      that caught trap 1's transient 500×500 and froze it into a **required**
      `contentHeight == subviewHeight + 308`. No conflict is ever logged, the
-     window just refuses to go under 308pt, and the surplus lands as dead
+     host just refuses to go under 308pt, and the surplus lands as dead
      space inside the pane. Recognise it by the signature: the **shorter** the
      pane, the **bigger** the bloat (every pane snaps to `500 −` its own
      height). This is why `viewDidLoad`'s background is pinned with four
@@ -74,47 +71,58 @@ package layout and where the settings model types (`AppSettings`,
   (wider AND shorter). Feeding that back would ratchet the window sideways and
   clip it vertically.
 
-  There are exactly **three re-measure trigger points**, and all three are
-  needed: `showWindow()` (a show can't inherit a stale frame), the tab-switch
-  delegate `tabView(_:didSelect:)` (trap 2), and — for a pane that grows at
-  runtime with no tab switch (`AudioSettingsViewController.rebuildList()` when
-  the excluded-apps list changes) — **KVO on each pane's
-  `preferredContentSize`**. That last one is deliberately NOT AppKit's
-  documented `preferredContentSizeDidChange(for:)`: probed, AppKit never calls
-  it for a tab item's view controller (republishing a selected pane at 600pt
-  left the window at 452pt), while KVO on the same property fires reliably.
-  The override is kept as a harmless second path only.
+  There are exactly **two re-measure trigger points inside this module**, and
+  both are needed: the tab-switch delegate `tabView(_:didSelect:)` (trap 2),
+  and — for a pane that grows at runtime with no tab switch
+  (`AudioSettingsViewController.rebuildList()` when the excluded-apps list
+  changes) — **KVO on each pane's `preferredContentSize`**. That last one is
+  deliberately NOT AppKit's documented `preferredContentSizeDidChange(for:)`:
+  probed, AppKit never calls it for a tab item's view controller (republishing
+  a selected pane at 600pt left the window at 452pt), while KVO on the same
+  property fires reliably. The override is kept as a harmless second path
+  only. The third trigger the retired window ran on every `showWindow()` is
+  the HOST's job now: the surface re-reads `fittedContentSize` when the
+  Settings screen is shown, so a show can't inherit a stale size.
 - `SettingsRootViewController` puts an explicit opaque, appearance-adaptive
-  `NSVisualEffectView` (`.windowBackground`, `.behindWindow`) behind the panes
-  rather than relying on the ambient window fill — confirmed necessary by
-  rendering in dark mode via `settings-snapshot`: without it, child controls
-  draw with dark-adapted (light) text/colors over whatever happens to sit
-  behind the window, which is illegible. It is pinned with four zero-constant
-  edge constraints and **must not** go back to an autoresizing mask (trap 4).
-  Stock material, not a `Tokens` one — Settings chrome stays system.
-- Test/snapshot hooks: `test_general` / `test_appearance` / `test_audio` reach
-  each pane's view controller directly; `test_tabLabels` and
-  `test_selectedTabIndex` read live `NSTabView` state; `test_contentFittingSize`
-  is the SELECTED tab's fitted size, so a test can assert sizing is
-  deterministic, non-degenerate, and genuinely per-tab without a live window;
-  `test_tabRootView(at:)` exposes one pane's laid-out view for offscreen
-  snapshot rendering (per-tab, because with tabs there's no single "the
-  content" view) — call it on a FRESH controller, before any show or tab
-  selection, or the pane snapshots at the stretched width described above —
-  and `test_rootView` exposes the tab controller's own root.
-  **`test_selectTab(at:)` drives real `NSTabView` selection, not a direct
-  delegate call** — that distinction is load-bearing: a hook that called a
-  delegate directly once let genuinely broken UI stay green across 78 tests
-  (`MainOutRowView.selectionChanged`), and this hook exists precisely to prove
-  the tab-switch resize path runs. The `settings-snapshot` executable target
-  renders a pane to a PNG for visual/dark-mode verification without opening a
-  real window — run it after any layout change here.
+  background behind the panes rather than relying on the ambient window fill —
+  confirmed necessary by rendering in dark mode via `settings-snapshot`:
+  without it, child controls draw with dark-adapted (light) text/colors over
+  whatever happens to sit behind the window, which is illegible. Since the
+  2026-08-07 canvas unification that background is `WarmPanelView`
+  (`AudiouterSharedUI`) — the flat warm `panel` fill every surface screen sits
+  on. Opaque by construction, so it needs no `ReduceTransparencyFallbackView`
+  (About's stock-material background still carries one). It is pinned with
+  four zero-constant edge constraints and **must not** go back to an
+  autoresizing mask (trap 4).
+- `BorderedListView` (`AudioSettingsViewController.swift`) draws its rounded
+  hairline border around the excluded-apps list in `draw(_:)` — no stock
+  control gives a rounded separator-color border, and drawing (vs a stamped
+  layer color) lets the color resolve under the current appearance each paint
+  with no manual appearance-change bookkeeping.
+- Test/snapshot seams: assemble the panes directly (the way
+  `AppDelegate.makeSettingsRoot` does), wire callbacks on the pane itself, and
+  use the root's public surface — `selectTab(at:)`, `fittedContentSize`,
+  `onFittedContentSizeChange`, `tabRootView(at:)`. **`selectTab(at:)` drives
+  real `NSTabView` selection, not a direct delegate call** — that distinction
+  is load-bearing: a hook that called a delegate directly once let genuinely
+  broken UI stay green across 78 tests (`MainOutRowView.selectionChanged`),
+  and tests go through it precisely to prove the tab-switch publish path runs.
+  `tabRootView(at:)` exposes one pane's laid-out view for offscreen snapshot
+  rendering — call it on a FRESH controller, before any show or tab
+  selection, or the pane snapshots at the stretched width described above.
+  The `settings-snapshot` executable target renders each pane to a PNG for
+  visual/dark-mode verification without any window — run it after any layout
+  change here.
 
-- **Settings chrome stays system** (Warm Signal spec §5.2): no warm canvas and
-  no gold anywhere in these panes. The ONLY warm/gold pixels are inside the
-  theme tiles' previews, and those use ABSOLUTE sRGB mirrors of the spec
-  palette on purpose — a tile depicts an appearance; live `Tokens` would adopt
-  the current appearance/accent and lie. Don't "fix" them to semantic tokens.
+- **Settings CONTROLS stay system; the BACKGROUND is the one warm surface
+  canvas.** Warm Signal §5.2's "Settings on stock chrome" is SUPERSEDED for
+  the in-surface world (owner decision, live build review 2026-08-07): the
+  screen sits on the same flat `panel` fill as the Groups content pane. The
+  controls themselves stay stock — still no gold anywhere in these panes. The
+  ONLY warm/gold pixels beyond the background are inside the theme tiles'
+  previews, and those use ABSOLUTE sRGB mirrors of the spec palette on
+  purpose — a tile depicts an appearance; live `Tokens` would adopt the
+  current appearance/accent and lie. Don't "fix" them to semantic tokens.
 - **The Appearance pane is the accent dial's writer**: a radio click persists
   `AppSettings.accentStyle` AND applies the live remap (`Tokens.accentStyle`)
   itself, then fires `onAccentChanged` as a repaint nudge only. The app layer
@@ -129,8 +137,7 @@ package layout and where the settings model types (`AppSettings`,
 
 | Type | What it is |
 |---|---|
-| `SettingsWindowController` | Owns the standalone titled window + its frame autosave, forwards `onThemeChanged`/`onExcludedAppsChanged`, applies the per-tab content size, exposes the `test_*` hooks. |
-| `SettingsRootViewController` | `NSTabViewController` (toolbar style) holding the three panes; measures `fittedContentSize` off the selected child and publishes it via `onFittedContentSizeChange`. |
-| `GeneralSettingsViewController` | Launch-at-login. |
+| `SettingsRootViewController` | Public `NSTabViewController` holding the panes; measures `fittedContentSize` (pane + in-content chrome) and publishes it via `onFittedContentSizeChange`. |
+| `GeneralSettingsViewController` | Launch-at-login + About. |
 | `AppearanceSettingsViewController` | Theme tiles (warm product previews) + Accent dial. |
 | `AudioSettingsViewController` | Excluded-apps list + Advanced › Audio buffer (when `LatencyConfigurable`). |

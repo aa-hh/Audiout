@@ -6,7 +6,7 @@ import AudiouterSharedUI
 
 /// The inline **diagnosis panel** that expands under a failed device row
 /// (`dev/notes/p1-connection-status-brief.md` §7.1): a one-line cause, a
-/// one-line suggested action, and "Try again" / "Copy details" buttons.
+/// one-line suggested action, and "Try Again" / "Copy Details" buttons.
 ///
 /// This view is a pure renderer of a `ConnectionFailure` — it owns no backend
 /// or pasteboard access. The host (`PopoverController`, T7) inserts/removes it
@@ -22,6 +22,16 @@ public final class ConnectionDiagnosisView: NSView {
     /// the tinted background reads as its own inset card rather than flush with
     /// the row (matches the mockup's "inset to align with the name column").
     private static let horizontalInset: CGFloat = 10
+    /// LEADING inset, which is NOT symmetric with the trailing one (Alec, live
+    /// 2026-08-06): the panel used `horizontalInset` on both sides, so its card
+    /// began inside the rail GUTTER — the column the membership spine owns — and
+    /// read as belonging to the whole panel rather than to the row it is about.
+    /// It now starts at the icon column (`firstElementLeading`), the same edge the
+    /// device row's own leading element uses, so the card visibly hangs off the
+    /// device it refers to and leaves the spine's column clear.
+    private static var leadingInset: CGFloat {
+        PopoverColumnGrid.firstElementLeading(indented: false)
+    }
     /// Vertical inset of the tinted background from this view's top/bottom.
     private static let verticalInset: CGFloat = 4
     /// Padding between the tinted background's edge and its content.
@@ -37,10 +47,10 @@ public final class ConnectionDiagnosisView: NSView {
     /// Inset of the dismiss button from the tinted background's top-trailing corner.
     private static let dismissButtonInset: CGFloat = 6
 
-    /// Called when the user clicks "Try again". The host owns the actual retry
+    /// Called when the user clicks "Try Again". The host owns the actual retry
     /// (re-adding the device to the Selected Devices set — brief §7.3).
     public var onRetry: (() -> Void)?
-    /// Called when the user clicks "Copy details". The host writes to
+    /// Called when the user clicks "Copy Details". The host writes to
     /// `NSPasteboard.general`; this view never touches the pasteboard.
     public var onCopyDetails: (() -> Void)?
     /// Called when the user clicks the dismiss ("x") button. The host removes
@@ -117,8 +127,8 @@ public final class ConnectionDiagnosisView: NSView {
         suggestionLabel.textColor = Tokens.Color.secondaryLabel
         background.addSubview(suggestionLabel)
 
-        configureSmallButton(retryButton, title: "Try again", action: #selector(retryClicked(_:)))
-        configureSmallButton(copyDetailsButton, title: "Copy details", action: #selector(copyDetailsClicked(_:)))
+        configureSmallButton(retryButton, title: "Try Again", action: #selector(retryClicked(_:)))
+        configureSmallButton(copyDetailsButton, title: "Copy Details", action: #selector(copyDetailsClicked(_:)))
         background.addSubview(retryButton)
         background.addSubview(copyDetailsButton)
 
@@ -131,7 +141,7 @@ public final class ConnectionDiagnosisView: NSView {
         NSLayoutConstraint.activate([
             background.topAnchor.constraint(equalTo: topAnchor, constant: Self.verticalInset),
             background.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.verticalInset),
-            background.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.horizontalInset),
+            background.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.leadingInset),
             background.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.horizontalInset),
 
             dismissButton.topAnchor.constraint(equalTo: background.topAnchor, constant: Self.dismissButtonInset),
@@ -175,10 +185,10 @@ public final class ConnectionDiagnosisView: NSView {
 
     /// The quiet dismiss ("x") control pinned to the tinted background's
     /// top-trailing corner: `bezelStyle = .accessoryBar` + `isBordered = false`
-    /// (no box at rest, matching the borderless toolbar-glyph convention used
-    /// elsewhere in this popover, e.g. `PopoverHeaderView`), a small bold glyph,
+    /// (no box at rest, matching the popover's borderless icon-glyph
+    /// convention — e.g. the card accessory buttons), a small bold glyph,
     /// and `.tertiaryLabelColor` so it reads as a quiet affordance rather than
-    /// competing with "Try again"/"Copy details".
+    /// competing with "Try Again"/"Copy Details".
     private func configureDismissButton() {
         dismissButton.translatesAutoresizingMaskIntoConstraints = false
         dismissButton.bezelStyle = .accessoryBar
@@ -235,7 +245,10 @@ public final class ConnectionDiagnosisView: NSView {
     // intrinsic content size at all).
 
     public override func layout() {
-        let available = bounds.width - 2 * Self.horizontalInset - 2 * Self.contentPadding
+        // Leading and trailing insets are NOT symmetric (see `leadingInset`), so
+        // this sums the two rather than doubling one — getting it wrong overstates
+        // the wrap width and the suggestion text clips.
+        let available = bounds.width - Self.leadingInset - Self.horizontalInset - 2 * Self.contentPadding
         if available > 0, suggestionWidthConstraint?.constant != available {
             suggestionWidthConstraint?.constant = available
         }
@@ -275,7 +288,7 @@ public final class ConnectionDiagnosisView: NSView {
     public var test_headlineText: String { headlineLabel.stringValue }
     /// The rendered suggestion body text.
     public var test_suggestionText: String { suggestionLabel.stringValue }
-    /// Whether "Copy details" is currently enabled (`failure.detail != nil`).
+    /// Whether "Copy Details" is currently enabled (`failure.detail != nil`).
     public var test_copyDetailsEnabled: Bool { copyDetailsButton.isEnabled }
     /// The tinted background's current layer color (appearance-adaptivity asserts).
     public var test_backgroundTint: CGColor? { background.layer?.backgroundColor }
@@ -283,9 +296,9 @@ public final class ConnectionDiagnosisView: NSView {
     /// Whether the dismiss button is present and has a resolved image (never blank).
     public var test_hasDismissButton: Bool { dismissButton.image != nil }
 
-    /// Simulate a "Try again" click.
+    /// Simulate a "Try Again" click.
     public func test_tapRetry() { retryClicked(retryButton) }
-    /// Simulate a "Copy details" click.
+    /// Simulate a "Copy Details" click.
     public func test_tapCopyDetails() { copyDetailsClicked(copyDetailsButton) }
     /// Simulate a dismiss ("x") click.
     public func test_tapDismiss() { dismissClicked(dismissButton) }

@@ -44,6 +44,10 @@ func describe(_ event: BackendEvent) -> String? {
         // under `mock` — this driver's default — it never fires. Handled anyway so
         // the switch stays exhaustive and `AIRPLAY_BACKEND=native` prints it.
         return "♪ system vol  \(volume) (changed outside the app)"
+    case .systemVolumeOwnershipChanged(let weOwnIt):
+        // Native-only (it turns on the aggregate being the Mac's default output);
+        // never under mock. Handled so the switch stays exhaustive.
+        return "♪ volume owner \(weOwnIt ? "app (keys intercepted)" : "macOS")"
     case .routedApps(let deviceID, let appNames):
         // Only `NativeBackend` emits this (T6 per-app routing); under `mock` it
         // never fires. Handled so the switch stays exhaustive.
@@ -70,6 +74,14 @@ func describe(_ event: BackendEvent) -> String? {
         // Also native-only (T6 takeover status strip); never under mock. Handled
         // so the switch stays exhaustive.
         return "♪ takeover status \(status.map { "\($0)" } ?? "cleared")"
+    case .routingBlockedNeedsDefault(let active):
+        // Native-only (Wave 3 T5 public-aggregate off-switch warning); never under
+        // mock. Handled so the switch stays exhaustive.
+        return "⚠ routing blocked needs default: \(active)"
+    case .btFirstMixAlignmentPrompt(let deviceID):
+        // Native-only (W3 first-mix alignment intercept); never under mock.
+        // Handled so the switch stays exhaustive.
+        return "♪ first-mix alignment prompt \(deviceID)"
     }
 }
 

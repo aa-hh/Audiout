@@ -38,6 +38,10 @@ public final class OnboardingViewController: NSViewController {
     /// longer breaks a single word ("through.") onto its own last line, and to
     /// give the permission-row descriptions more breathing room.
     static let contentWidth: CGFloat = 500
+    /// `contentWidth` minus the standard outer margin — the width every
+    /// full-bleed section (card, reassurance text, footer row) actually gets.
+    /// Named once instead of retyping `contentWidth - 56` at every site.
+    static let columnWidth: CGFloat = contentWidth - 56
 
     private let model: SetupModel
     private let reason: OnboardingReason
@@ -127,24 +131,29 @@ public final class OnboardingViewController: NSViewController {
                     await self?.model.primeLocalNetwork()
                     // The browse may have surfaced the system prompt; pull the
                     // window back to the front like the audio grant does.
-                    NSApp.activate(ignoringOtherApps: true)
+                    NSApp?.activate(ignoringOtherApps: true)
                     self?.view.window?.makeKeyAndOrderFront(nil)
                 }
             },
             onOpenSettings: { [weak self] in self?.onOpenSettings(.localNetwork) })
 
-        // Primed ahead of a not-yet-shipped feature (speaker-side transport
-        // controls simulating Mac media keys) — see SetupModel's
-        // RemoteControlPriming doc comment. Included now so the grant is already
-        // in place once that feature merges, instead of a cold THIRD prompt later.
+        // Asked for up front so neither consumer springs a cold THIRD prompt
+        // later: speaker-side transport controls simulating Mac media keys, and
+        // the volume-key interceptor. Only the second one HAS to have it — a
+        // CGEventTap can't be created untrusted, where posting merely no-ops.
+        // See SetupModel's `SetupPermission.remoteControl`.
         remoteControlRow = PermissionRowView(
             content: PermissionRowContent(
                 symbolName: "accessibility",
                 title: "Remote Control",
                 // Outcome first, then name the OS's own label for the
-                // permission so the System Settings pane is recognisable.
-                detail: "Press play or pause on a speaker and your Mac follows. "
-                    + "macOS calls this Accessibility.",
+                // permission so the System Settings pane is recognisable. The
+                // volume keys lead: macOS refuses to move the volume while
+                // Audiouter is the output device, so without this grant they do
+                // nothing at all — a far more visible loss than transport keys.
+                detail: "Use your volume keys while Audiouter is your output "
+                    + "device, and press play or pause on a speaker to control "
+                    + "your Mac. macOS calls this Accessibility.",
                 allowButtonTitle: "Allow…",
                 iconColor: Tokens.Color.permissionRemoteControl),
             onAllow: { [weak self] in self?.model.primeRemoteControl() },
@@ -252,7 +261,7 @@ public final class OnboardingViewController: NSViewController {
             ptpHelperRow.trailingAnchor.constraint(equalTo: card.trailingAnchor),
             ptpHelperRow.bottomAnchor.constraint(equalTo: card.bottomAnchor),
 
-            card.widthAnchor.constraint(equalToConstant: Self.contentWidth - 56),
+            card.widthAnchor.constraint(equalToConstant: Self.columnWidth),
         ])
         return card
     }
@@ -328,7 +337,7 @@ public final class OnboardingViewController: NSViewController {
         // impression for a paid product. Fetched from the running app so it
         // tracks whatever icon ships, with no hardcoded asset name to go stale.
         let tile = NSImageView()
-        tile.image = NSApp.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
+        tile.image = NSApp?.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
         tile.imageScaling = .scaleProportionallyUpOrDown
         tile.setAccessibilityLabel("Audiouter")
         tile.translatesAutoresizingMaskIntoConstraints = false
@@ -376,7 +385,7 @@ public final class OnboardingViewController: NSViewController {
         text.font = .systemFont(ofSize: NSFont.systemFontSize, weight: .medium)
         text.textColor = Tokens.Color.label
         text.translatesAutoresizingMaskIntoConstraints = false
-        text.preferredMaxLayoutWidth = Self.contentWidth - 56 - 32 - 16
+        text.preferredMaxLayoutWidth = Self.columnWidth - 32 - 16
         permissionBannerLabel = text
 
         let row = NSStackView(views: [icon, text])
@@ -393,7 +402,7 @@ public final class OnboardingViewController: NSViewController {
             row.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -12),
             row.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 14),
             row.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -14),
-            card.widthAnchor.constraint(equalToConstant: Self.contentWidth - 56),
+            card.widthAnchor.constraint(equalToConstant: Self.columnWidth),
         ])
         return card
     }
@@ -435,7 +444,7 @@ public final class OnboardingViewController: NSViewController {
         text.textColor = Tokens.Color.label
         text.alignment = .center
         text.translatesAutoresizingMaskIntoConstraints = false
-        text.preferredMaxLayoutWidth = Self.contentWidth - 56
+        text.preferredMaxLayoutWidth = Self.columnWidth
         return fullWidth(text)
     }
 
@@ -450,7 +459,7 @@ public final class OnboardingViewController: NSViewController {
         note.translatesAutoresizingMaskIntoConstraints = false
         note.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         note.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        note.preferredMaxLayoutWidth = Self.contentWidth - 56 - 96
+        note.preferredMaxLayoutWidth = Self.columnWidth - 96
 
         // Done is a plain (gray) button, deliberately quieter than the accent
         // "Allow…" CTAs, and NOT the Return-default — we don't want an accidental
@@ -471,7 +480,7 @@ public final class OnboardingViewController: NSViewController {
         row.distribution = .fill
         row.spacing = 12
         row.translatesAutoresizingMaskIntoConstraints = false
-        row.widthAnchor.constraint(equalToConstant: Self.contentWidth - 56).isActive = true
+        row.widthAnchor.constraint(equalToConstant: Self.columnWidth).isActive = true
         return row
     }
 
@@ -483,7 +492,7 @@ public final class OnboardingViewController: NSViewController {
         inner.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(inner)
         NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: Self.contentWidth - 56),
+            container.widthAnchor.constraint(equalToConstant: Self.columnWidth),
             inner.topAnchor.constraint(equalTo: container.topAnchor),
             inner.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             inner.centerXAnchor.constraint(equalTo: container.centerXAnchor),
@@ -541,7 +550,7 @@ public final class OnboardingViewController: NSViewController {
             // answers. When the probe returns, pull our window back to the front
             // and make the app active so the user lands right back on setup
             // instead of staring at whatever was behind it.
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp?.activate(ignoringOtherApps: true)
             view.window?.makeKeyAndOrderFront(nil)
         }
     }

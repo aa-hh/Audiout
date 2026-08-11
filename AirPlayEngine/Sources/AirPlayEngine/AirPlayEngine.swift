@@ -1,26 +1,18 @@
 // AirPlayEngine — the neutral Swift API over the vendored, license-labeled C
 // AirPlay 2 sender cluster (CAirPlayEngine). T-API-1.
 //
-// This replaces the T-PKG-1/T-BUILD-1 scaffold placeholder with the real
-// session API described in build-notes §6 and seam-map §2/§8. Design goals:
+// The session API described in build-notes §6 and seam-map §2/§8. Design goals:
 //   - One owned engine thread + libevent base (seam-map §8, risk R-B). Every C
 //     entry point is marshaled onto it via EngineThread.run/enqueue.
 //   - The C async-completion dispatcher (shims/outputs.c) is bridged to
 //     async/await via CompletionRegistry (keyed by callback_id).
 //   - Discovery is app-owned (Q5): the app feeds resolved DeviceDescriptors;
 //     the engine drives the vendored sender's own discovery callback.
-//   - Shaped so a future NativeBackend (T-BACKEND-1) can implement the app's
-//     OutputBackend protocol on top — addOutput/removeOutput/setVolume/write/
-//     stop are the primitives that protocol needs.
+//   - NativeBackend (T-BACKEND-1) implements the app's OutputBackend protocol on
+//     top — addOutput/removeOutput/setVolume/write/stop are the primitives it
+//     needs.
 //
 // SPEC.md §4: no OwnTone naming appears in any public symbol here.
-//
-// SCOPE (T-API-1): BUILD + HEADLESS TESTS ONLY. This type is complete enough to
-// drive a one-device session, but a LIVE session against a real receiver is a
-// separate GATED step (needs a receiver, OwnTone stopped for PTP 319/320, and a
-// human present). Nothing here opens a socket to a real device on its own; that
-// only happens if start()/addOutput() are called against real hardware, which
-// the probe CLI guards behind an explicit flag and this task never runs.
 
 import Foundation
 import CAirPlayEngine
@@ -123,10 +115,9 @@ extension SystemRandomNumberGenerator {
     }
 }
 
-/// What ``AirPlayEngine/addOutput(_:streamId:)`` actually did — the distinction
-/// the pre-2026-07-26 API could not express, because an already-live device took
-/// a SILENT idempotent no-op that was indistinguishable from a real bind
-/// (architecture review 2026-07-26, defect B).
+/// What ``AirPlayEngine/addOutput(_:streamId:)`` actually did. An already-live
+/// device takes a SILENT idempotent no-op — without this result it is
+/// indistinguishable from a real bind (architecture review, defect B).
 ///
 /// A caller that needs the device on a specific stream must check this:
 /// `.alreadyBound(streamId:)` with a stream other than the one requested means
@@ -352,7 +343,7 @@ public actor AirPlayEngine {
     }
 
     /// Retained scaffold status string (kept so `AirPlayEngineScaffoldTests`
-    /// stays green). Now reflects the T-API-1 milestone.
+    /// stays green).
     public static let scaffoldStatus =
         "T-API-1: Swift session API over CAirPlayEngine (build + headless tests; live session is a separate gated step)"
 
@@ -764,7 +755,7 @@ public actor AirPlayEngine {
     /// completion (STREAMING / PASSWORD / FAILED). Maps a non-STREAMING terminal
     /// state to a thrown error.
     ///
-    /// This is the primitive a future `NativeBackend.addOutput` builds on.
+    /// This is the primitive `NativeBackend.addOutput` builds on.
     ///
     /// Equivalent to `addOutput(id, streamId: 0)` — the legacy single-stream
     /// path, unchanged.
@@ -789,9 +780,8 @@ public actor AirPlayEngine {
     /// the return value is ``OutputBindResult/alreadyBound(streamId:)`` carrying
     /// the stream the live session is actually on, so a caller can tell "I bound
     /// it where I asked" from "the session never moved" instead of bookkeeping a
-    /// bind that didn't happen (architecture review 2026-07-26, defect B — audio
-    /// written to a stream the device never joined shows as routed and is
-    /// inaudible). To actually MOVE a live device, use
+    /// bind that didn't happen (audio written to a stream the device never
+    /// joined shows as routed and is inaudible). To actually MOVE a live device, use
     /// ``rebindOutput(_:toStreamId:)``.
     ///
     /// Deliberately still non-throwing on the already-bound path: existing
@@ -1081,19 +1071,7 @@ public actor AirPlayEngine {
         else if let t = engineThreadHolder.current { try? await t.run(apply) }
     }
 
-    /// The LIVE state of the vendored C `output_device` for `id` — read straight
-    /// off `device->state`, which `outputs_cb` keeps current (including the
-    /// out-of-band `outputs_cb(-1,…)` FAILED after a receiver drops RTSP). This is
-    /// the authoritative source the idempotency guards consult, immune to the
-    /// async reconcile lag on `knownOutputs`. Runs on the engine thread (or inline
-    /// in headless test mode). Returns the last cached state if the C device has
-    /// gone (e.g. deregistered), so a caller still gets a sensible value.
-    /// The LIVE `(state, stream_id)` pair of the vendored C `output_device` for
-    /// `id`, read in ONE engine-thread hop (or inline in headless test mode).
-    /// `nil` iff the C device is gone (deregistered) or there is no engine thread
-    /// to read on — a caller that needs a fallback supplies its own from
-    /// `knownOutputs`. Same authority as ``liveDeviceState(_:)``, which it does
-    /// not replace (`removeOutput` needs only the state).
+    /// The LIVE `(state, stream_id)` pair for `id` — `nil` when the C device is gone.
     private func liveBinding(_ id: OutputID) async -> (state: OutputState, streamId: UInt32)? {
         let read: () -> (state: OutputState, streamId: UInt32)? = {
             guard let device = outputs_device_get(id.rawValue) else { return nil }
@@ -1104,6 +1082,13 @@ public actor AirPlayEngine {
         return nil
     }
 
+    /// The LIVE state of the vendored C `output_device` for `id` — read straight
+    /// off `device->state`, which `outputs_cb` keeps current (including the
+    /// out-of-band `outputs_cb(-1,…)` FAILED after a receiver drops RTSP). This is
+    /// the authoritative source the idempotency guards consult, immune to the
+    /// async reconcile lag on `knownOutputs`. Runs on the engine thread (or inline
+    /// in headless test mode). Returns the last cached state if the C device has
+    /// gone (e.g. deregistered), so a caller still gets a sensible value.
     private func liveDeviceState(_ id: OutputID) async -> OutputState {
         let read: () -> OutputState? = {
             guard let device = outputs_device_get(id.rawValue) else { return nil }
@@ -1155,7 +1140,7 @@ public actor AirPlayEngine {
     /// (`airplay_write`) processes one shared `pts` per call, so batching keeps
     /// simultaneous streams phase-aligned instead of letting N independently
     /// enqueued closures race onto the engine thread with drifting timestamps.
-    /// This is the primitive a future mixer (T5) and `NativeBackend` router
+    /// This is the primitive the mixer (T5) and `NativeBackend` router
     /// (T6) build on.
     ///
     /// The bytes are copied and handed to the engine thread, which is where the
@@ -1495,13 +1480,6 @@ public actor AirPlayEngine {
                 guard cbId >= 0 else {
                     cont.resume(throwing: AirPlayEngineError.operationRejected); return
                 }
-                // Arm with BOTH a normal-delivery resumer and a cancellation
-                // resumer. The registry invokes exactly one of them (both remove
-                // the waiter under the same lock), so the continuation resumes
-                // exactly once: `state in …returning` on a real completion, or
-                // `…throwing .engineNotRunning` if `stop()`/uninstall tears the
-                // engine down with this op still in flight (no leaked
-                // continuation, no hung quit — toggle-spam session 2026-07-17).
                 // Arm with THREE resolvers: normal delivery, teardown cancel, and
                 // a bounded timeout. The registry invokes exactly one of them
                 // (each removes the waiter under the same lock), so the
@@ -1882,6 +1860,18 @@ extension TransportCommand {
 /// (never let one cancel the other — the plan explicitly wants both surfaced)
 /// while `lastGapSeconds` reports the instantaneous value.
 ///
+/// READING THESE NUMBERS: `deficitSeconds` alone is NOT the drift. It is a
+/// one-sided sum, and real scheduling jitter is symmetric — it lands in both
+/// buckets at the same rate, inflating each without a sample being lost. In
+/// live telemetry the two medians agree to three decimals. Read
+/// `netDriftSeconds` (deficit minus overrun); a deficit-only reading reports a
+/// steady slide that is not happening.
+///
+/// Gaps longer than `stallGapSeconds` are NOT cadence information — they are
+/// discontinuities (playback paused, the Mac slept, the tap was torn down and
+/// rebuilt) and land in `stalledSeconds`/`stallCount` instead. Charged to the
+/// deficit they dwarf everything else: one observed sleep contributed 173,750 s.
+///
 /// HOT-PATH CONTRACT: `record` is allocation-free — every field is a fixed-
 /// size scalar guarded by an `NSLock` (no arrays/dictionaries/closures
 /// created), matching the allocation-free requirement for `write(pcm:pts:)`,
@@ -1911,12 +1901,32 @@ final class WriteCadenceTracker: @unchecked Sendable {
     private var lastWriteMonotonic: Double?
     private var refusedWrites: UInt64 = 0
     private var refusedSeconds: Double = 0
+    private var stalledSeconds: Double = 0
+    private var stallCount: UInt64 = 0
 
     /// Deficit/overrun accumulated (independently) since the last threshold
     /// log, so repeated small gaps don't each re-trigger a log line.
     private var deficitSinceLog: Double = 0
     private var overrunSinceLog: Double = 0
     private static let logThresholdSeconds: Double = 0.25
+
+    /// A single gap longer than this is a discontinuity, not slow feeding, so
+    /// it is charged to `stalledSeconds` instead of `deficitSeconds`.
+    ///
+    /// razor: one flat threshold rather than a state machine consulting
+    /// playback/sleep/rebuild state. 5 s clears the worst gap still worth
+    /// measuring (a tap rebuild costs ~0.5 s of audio) by an order of
+    /// magnitude, and sits below the shortest idle gap seen in live telemetry
+    /// (8 s). Upgrade path if that margin ever closes: have the coordinator
+    /// call `reset()` on its own start/stop edges and drop the heuristic.
+    ///
+    /// Injectable so tests can cross it without a real five-second sleep;
+    /// production always takes the default.
+    private let stallGapSeconds: Double
+
+    init(stallGapSeconds: Double = 5.0) {
+        self.stallGapSeconds = stallGapSeconds
+    }
 
     /// Record one write's audio-time contribution against the wall clock.
     /// Called on every `write(pcm:pts:)` invocation, off the actor, possibly
@@ -1944,7 +1954,11 @@ final class WriteCadenceTracker: @unchecked Sendable {
         let gap = wallElapsed - audioSeconds
         lastGapSeconds = gap
 
-        if gap > 0 {
+        if gap > stallGapSeconds {
+            // A discontinuity, not slow feeding — see `stallGapSeconds`.
+            stalledSeconds += gap
+            stallCount &+= 1
+        } else if gap > 0 {
             deficitSeconds += gap
             deficitSinceLog += gap
         } else if gap < 0 {
@@ -1966,10 +1980,10 @@ final class WriteCadenceTracker: @unchecked Sendable {
     /// Record one write the backpressure guard REFUSED after `record` had
     /// already credited its audio time as delivered (see the call-site pairing
     /// in `AirPlayEngine.write(streams:pts:)`). Charges the refused audio back
-    /// into the cumulative deficit so `deficitSeconds` keeps equaling wall time
-    /// minus audio actually delivered (the receiver anchor slide), and tracks
-    /// the refusals separately so the engine's own drop-site contribution stays
-    /// distinguishable from a slow producer. Deliberately does NOT touch
+    /// into the cumulative deficit — refused audio is genuinely never delivered,
+    /// so it belongs in the drift — and tracks the refusals separately so the
+    /// engine's own drop-site contribution stays distinguishable from a slow
+    /// producer. Deliberately does NOT touch
     /// `deficitSinceLog` (no new os_log traffic from the hot path) nor
     /// `lastGapSeconds`/`lastWriteMonotonic` (the paired `record` already
     /// measured this write's producer gap). Same hot-path contract as `record`:
@@ -1992,7 +2006,9 @@ final class WriteCadenceTracker: @unchecked Sendable {
             overrunSeconds: overrunSeconds,
             lastGapSeconds: lastGapSeconds,
             refusedWrites: refusedWrites,
-            refusedSeconds: refusedSeconds
+            refusedSeconds: refusedSeconds,
+            stalledSeconds: stalledSeconds,
+            stallCount: stallCount
         )
     }
 
@@ -2010,6 +2026,8 @@ final class WriteCadenceTracker: @unchecked Sendable {
         overrunSinceLog = 0
         refusedWrites = 0
         refusedSeconds = 0
+        stalledSeconds = 0
+        stallCount = 0
     }
 
     /// `CLOCK_MONOTONIC_RAW` in seconds — immune to NTP/wall-clock slew,

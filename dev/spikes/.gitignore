@@ -1,0 +1,7 @@
+*.app/
+*.log
+*-out.txt
+probe
+spike
+aggprobe
+mrprobe

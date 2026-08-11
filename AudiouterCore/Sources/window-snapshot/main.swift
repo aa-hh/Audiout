@@ -1,36 +1,59 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// window-snapshot — offscreen PNG renderer for the "Groups" window (mirrors
+// window-snapshot — offscreen PNG renderer for the "Groups" screen (mirrors
 // `settings-snapshot`). The live window isn't visible to an agent shell, so
-// this assembles the REAL `MixerWindowController` against a MockBackend-backed
-// `GroupController` and renders the whole window frame (titlebar + toolbar +
-// split view) into an explicit @2x bitmap via `displayIgnoringOpacity(_:in:)`
-// (see `captureOnce` for why not `cacheDisplay(in:to:)`).
-// Also renders the control-panel shell (T11) hosting the same Groups content
-// in a sticky floating NSPanel with decorative beak chrome.
+// this assembles the REAL `MixerWindowController` (Groups content) against a
+// MockBackend-backed `GroupController`, hosts it in the REAL one-surface
+// shell (`AppSurfaceController`, PLAN-ONE-SURFACE-032 U3) — the same object
+// the shipping app builds — and renders the shell's whole frame (beak
+// backing bubble + native toolbar header + content) into an explicit @2x
+// bitmap via `displayIgnoringOpacity(_:in:)` (see `captureOnce` for why not
+// `cacheDisplay(in:to:)`). Every Groups-content state renders at the size the
+// surface really presents (`AppSurfaceController.groupsDefaultContentSize`,
+// 560×468 below the toolbar strip), never a synthetic plain-titled host: a
+// fixture built from a fake window carries none of the toolbar strip or beak
+// chrome the app actually wraps the screen in, so it can't show what a
+// sidebar layout regression would really look like on screen. `create-sheet`
+// and `icon-picker` still render standalone — they're anchored popovers with
+// no window chrome of their own to mismatch, so the synthetic-host question
+// never applied to them (see `snapshotStandaloneView`).
 //
-// States rendered (light + dark each):
+// States rendered (light + dark each), all through the real surface except
+// where noted:
 //   1. default      — fresh window, no groups saved (the state under critique)
 //   2. create-sheet — the `GroupCreationSheetController`'s own view, rendered
-//                      offscreen at its fitted size (`presentAsSheet` never
+//                      standalone at its fitted size (`presentAsSheet` never
 //                      actually draws in a headless run, so the window-frame
 //                      snapshot can't show it — this renders the sheet's view
 //                      directly instead)
 //   3. edit-group   — an existing (saved, unactivated) group selected in the
 //                      sidebar (Edit Group pane) — selecting never activates
 //   4. device-detail — a device (with a saved-group membership and an icon
-//                      OVERRIDE) selected in the sidebar; the hover scrim is
-//                      forced visible via `test_setOverlayVisible(true)` so
-//                      the approved custom-drawn element renders in the shot
-//   5. panel-chrome  — the control-panel shell (T11) hosting Groups content,
-//                      anchored to a mock menu-bar status item (top-right),
-//                      with the sticky NSPanel + decorative backing window
-//                      with beak, right-edge-aligned
+//                      OVERRIDE) selected in the sidebar; the edit badge's
+//                      hover step-up is forced visible via
+//                      `test_setOverlayVisible(true)` so the approved
+//                      custom-drawn element renders in the shot
+//   5. panel-chrome  — the same surface + device-detail selection as state 4,
+//                      captured again after the group is ACTIVATED (state 7
+//                      below) — the gold ring shows on the sidebar/detail
+//                      while the surface's toolbar+beak chrome is on screen
+//   6. icon-picker   — the icon-picker popover content (Warm Signal W3),
+//                      rendered standalone like the create sheet
+//                      (`presentIconPicker` never draws in a headless run),
+//                      carrying the shown device's CURRENT override — the
+//                      gold "current icon" selection ring — in a narrowed
+//                      search grid
+//   7. edit-active-group — the Edit Group pane while the shown group is the
+//                      ACTIVE Main Out target (thin gold ring on the icon
+//                      well); activation happens through the model — the
+//                      window stays config-only
 //
 // Run: `swift run window-snapshot [output-dir]`.
 
 import AppKit
 import AudiouterCore
+import AudiouterPopoverUI
+import AudiouterSettingsUI
 import AudiouterSharedUI
 import AudiouterWindowUI
 
@@ -49,11 +72,11 @@ func tempDir() -> URL {
 /// makes the resolution deterministic regardless of what's driving the run.
 let snapshotBackingScale: CGFloat = 2
 
-/// One capture of `view` into a fresh explicit-@2x bitmap, PNG-encoded.
-/// Explicit pixel dimensions (`snapshotBackingScale` x the point size) keep the
-/// output independent of the host screen's backingScaleFactor.
+/// One capture of `view` into a fresh explicit-@2x bitmap rep. Explicit pixel
+/// dimensions (`snapshotBackingScale` x the point size) keep the output
+/// independent of the host screen's backingScaleFactor.
 @MainActor
-private func captureOnce(view: NSView, bounds: NSRect) -> Data? {
+func captureRep(view: NSView, bounds: NSRect) -> NSBitmapImageRep? {
     let pixelsWide = Int((bounds.width * snapshotBackingScale).rounded())
     let pixelsHigh = Int((bounds.height * snapshotBackingScale).rounded())
     guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: pixelsWide,
@@ -83,7 +106,14 @@ private func captureOnce(view: NSView, bounds: NSRect) -> Data? {
     guard let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
     ctx.cgContext.setAllowsFontSmoothing(false)
     view.displayIgnoringOpacity(bounds, in: ctx)
-    return rep.representation(using: .png, properties: [:])
+    return rep
+}
+
+/// `captureRep`, PNG-encoded — the form `renderPNG`'s stabilization loop
+/// compares byte-for-byte.
+@MainActor
+private func captureOnce(view: NSView, bounds: NSRect) -> Data? {
+    captureRep(view: view, bounds: bounds)?.representation(using: .png, properties: [:])
 }
 
 @MainActor
@@ -149,57 +179,6 @@ func drain(_ interval: TimeInterval = 0.15) {
     RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(interval))
 }
 
-/// Render the WHOLE window (titlebar + toolbar + content) by snapshotting the
-/// window frame view (the contentView's superview). The window is laid out but
-/// never ordered in.
-@MainActor
-func snapshotWindow(_ window: NSWindow, label: String, appearanceName: NSAppearance.Name, outDir: URL) {
-    let appearance = NSAppearance(named: appearanceName)
-    window.appearance = appearance
-    // Pin the titlebar separator OFF: AppKit decides it dynamically from the
-    // content's perceived scroll-under state, and even with `.line` it FADES
-    // the separator view in/out, settling differently run-to-run (a 1pt
-    // full-width line at the titlebar's bottom edge flickered in and out of
-    // dark captures). `.none` removes the separator view entirely — the only
-    // end state that can't race. NSSplitViewItem carries a per-pane override,
-    // so pin those too.
-    window.titlebarSeparatorStyle = .none
-    if let split = window.contentViewController as? NSSplitViewController {
-        for item in split.splitViewItems { item.titlebarSeparatorStyle = .none }
-    }
-    // Order the window in, invisibly (alpha 0). A window that is never
-    // ordered in leaves the titlebar machinery half-initialized, and its
-    // separator decision latches mid-flight — differently run-to-run. A full
-    // order-in lets AppKit finish the titlebar lifecycle so the pinned
-    // `.none` above is actually applied; alpha 0 keeps the run headless-quiet
-    // and `cacheDisplay` reads model values, unaffected by window alpha.
-    if !window.isVisible {
-        window.alphaValue = 0
-        // An alpha-0 window still HIT-TESTS against the real cursor on the
-        // live desktop it's ordered onto — if the pointer happens to rest
-        // over the sidebar, the outline's group-row hover "Show/Hide" button
-        // fades in mid-run and lands in the capture (observed once as a
-        // ~10x6pt glyph at the sidebar row's trailing edge). Opt the window
-        // out of mouse routing entirely so no tracking area can ever fire.
-        window.ignoresMouseEvents = true
-        window.orderFront(nil)
-        drain(0.1)
-    }
-    window.layoutIfNeeded()
-    window.contentView?.layoutSubtreeIfNeeded()
-    let frameView = window.contentView?.superview ?? window.contentView!
-    pinMaterialsWithinWindow(in: frameView)
-    hideNondeterministicChrome(in: frameView)
-    drain(0.1)
-    let suffix = appearanceName == .darkAqua ? "dark" : "light"
-    renderPNG(view: frameView, to: outDir.appendingPathComponent("mixer-\(label)-\(suffix).png"))
-}
-
-/// Render a standalone view controller's view at its fitted size — used for
-/// the create sheet, which `presentAsSheet` never actually draws in a
-/// headless run. Mirrors `popover-snapshot`'s pattern: host the view in an
-/// offscreen borderless window so materials/vibrancy render under the
-/// requested appearance, then snapshot just the view.
 /// Remove overlay scrollers from a captured view subtree. Overlay scroller
 /// knobs fade on their own animation clock, so a capture races the fade and
 /// the PNG differs run-to-run (observed: mixer-2-create-sheet-dark drifting
@@ -287,7 +266,11 @@ func dumpStrip(in root: NSView) {
     walk(root, depth: 0)
 }
 
-
+/// Render a standalone view controller's view at its fitted size — used for
+/// the create sheet, which `presentAsSheet` never actually draws in a
+/// headless run. Mirrors `popover-snapshot`'s pattern: host the view in an
+/// offscreen borderless window so materials/vibrancy render under the
+/// requested appearance, then snapshot just the view.
 @MainActor
 func snapshotStandaloneView(_ view: NSView, label: String, appearanceName: NSAppearance.Name, outDir: URL) {
     let appearance = NSAppearance(named: appearanceName)
@@ -363,11 +346,16 @@ func snapshotStandaloneView(_ view: NSView, label: String, appearanceName: NSApp
 /// Render the control-panel shell (T11) with Groups content: the sticky
 /// floating NSPanel + decorative backing window with the beak. Position it
 /// with a mock menu-bar status-item anchor (top-right corner), then composite
-/// the backing window's chrome with the panel's content into an offscreen render
-/// target and snapshot that.
+/// the backing window's chrome with the panel's FRAME view — the unified
+/// toolbar header (live-review D1) plus content — into an offscreen render
+/// target and snapshot that. `present` performs the actual show so the caller
+/// can route it through the one-surface host (which mounts the screen, seats
+/// its content below the toolbar strip and sizes the window) rather than the
+/// bare shell.
 @MainActor
 func snapshotControlPanel(_ controller: ControlPanelWindowController,
-                         label: String, appearanceName: NSAppearance.Name, outDir: URL) {
+                         label: String, appearanceName: NSAppearance.Name, outDir: URL,
+                         present: (NSRect?) -> Void) {
     let appearance = NSAppearance(named: appearanceName)
 
     // Position both windows with a mock menu-bar anchor (top-right, like a
@@ -375,9 +363,9 @@ func snapshotControlPanel(_ controller: ControlPanelWindowController,
     if let screen = NSScreen.main {
         let vf = screen.visibleFrame
         let mockAnchor = NSRect(x: vf.maxX - 20, y: vf.maxY - 4, width: 24, height: 4)
-        controller.show(anchorRect: mockAnchor)
+        present(mockAnchor)
     } else {
-        controller.show(anchorRect: nil)
+        present(nil)
     }
 
     // Set appearance on both windows; keep them out of mouse routing for the
@@ -437,48 +425,42 @@ func snapshotControlPanel(_ controller: ControlPanelWindowController,
         }
     }
 
-    // Create a view for the panel's content (the Groups interface), positioned
-    // to sit visually on top of the beak at its natural position.
+    // Create a view for the panel's FRAME view — content plus titlebar chrome —
+    // positioned to sit visually on top of the beak at its natural position.
     let contentLayer = NSView(
         frame: NSRect(x: 0, y: beakHeight, width: containerWidth, height: panel.frame.height)
     )
     contentLayer.wantsLayer = true
     contentLayer.appearance = appearance
-    appearance?.performAsCurrentDrawingAppearance {
-        contentLayer.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-    }
+    // CLEAR, not `windowBackgroundColor`: the unpinned panel is transparent
+    // wherever its content doesn't paint — most visibly the toolbar strip,
+    // which the content is seated BELOW — and the backing bubble behind shows
+    // through. An opaque backdrop here would occlude the bubble render below
+    // and paint the strip stock grey, which the live window never does.
+    contentLayer.layer?.backgroundColor = NSColor.clear.cgColor
     contentLayer.layer?.cornerRadius = ControlPanelBackingView.cornerRadius
     contentLayer.layer?.masksToBounds = true
     container.addSubview(contentLayer)
 
-    // Render the panel's content view into the content layer. Materials are
-    // pinned within-window and the rep scale pinned @2x for the same
-    // determinism reasons as `renderPNG` (behind-window vibrancy samples the
-    // live desktop; `bitmapImageRepForCachingDisplay` inherits the host
-    // screen's scale).
-    panelContent.appearance = appearance
-    pinMaterialsWithinWindow(in: panelContent)
-    panelContent.layoutSubtreeIfNeeded()
-    let contentBounds = NSRect(x: 0, y: 0, width: containerWidth, height: panel.frame.height)
-    if let rep = NSBitmapImageRep(
-        bitmapDataPlanes: nil,
-        pixelsWide: Int(contentBounds.width * 2),
-        pixelsHigh: Int(contentBounds.height * 2),
-        bitsPerSample: 8,
-        samplesPerPixel: 4,
-        hasAlpha: true,
-        isPlanar: false,
-        colorSpaceName: .deviceRGB,
-        bytesPerRow: 0,
-        bitsPerPixel: 32
-    ) {
-        rep.size = contentBounds.size
-        panelContent.cacheDisplay(in: contentBounds, to: rep)
-        if let layer = contentLayer.layer,
-           let cgImage = rep.cgImage {
-            layer.contents = cgImage
-            layer.contentsGravity = .topLeft
-        }
+    // Render the panel's frame view (the contentView's superview), not the
+    // contentView: the transparent-titlebar chrome — including the standard
+    // close button, the panel's ONE close affordance (V13) — lives on the
+    // frame view, so a contentView-only capture can never show it. Same
+    // `displayIgnoringOpacity` primitive as `snapshotWindow`: it draws the
+    // hierarchy directly, so it traverses the layer-backed subtrees a bare
+    // `cacheDisplay` on this root skips. Materials pinned within-window and
+    // the rep scale pinned @2x for the same determinism reasons as
+    // `renderPNG`.
+    let frameView = panel.contentView?.superview ?? panelContent
+    frameView.appearance = appearance
+    pinMaterialsWithinWindow(in: frameView)
+    hideNondeterministicChrome(in: frameView)
+    frameView.layoutSubtreeIfNeeded()
+    if let rep = captureRep(view: frameView, bounds: frameView.bounds),
+       let layer = contentLayer.layer,
+       let cgImage = rep.cgImage {
+        layer.contents = cgImage
+        layer.contentsGravity = .topLeft
     }
 
     // Render the composite container to PNG.
@@ -487,6 +469,20 @@ func snapshotControlPanel(_ controller: ControlPanelWindowController,
 
     let suffix = appearanceName == .darkAqua ? "dark" : "light"
     renderPNG(view: container, to: outDir.appendingPathComponent("mixer-\(label)-\(suffix).png"))
+}
+
+/// Name of the throwaway defaults suite this tool's fixtures write to instead
+/// of the developer's real domain. FIXED, not per-run: `UserDefaults(suiteName:)`
+/// creates a real `~/Library/Preferences/<name>.plist`, so a `UUID` in the name
+/// leaves one behind on every run. One reused name plus a wipe before each use
+/// keeps the fixtures identical run to run at a cost of one plist, ever.
+let snapshotDefaultsSuite = "window-snapshot"
+
+@MainActor
+func makeSnapshotDefaults() -> UserDefaults {
+    let defaults = UserDefaults(suiteName: snapshotDefaultsSuite)!
+    defaults.removePersistentDomain(forName: snapshotDefaultsSuite)
+    return defaults
 }
 
 @MainActor
@@ -524,33 +520,57 @@ func run() -> Int32 {
         let deviceIconController = DeviceIconController(loadPersisted: false)
         let windowController = MixerWindowController(groupController: controller,
                                                       deviceIconController: deviceIconController)
-        // `update(devices:)` now gates its sidebar/content refresh behind
-        // `isEffectivelyVisible` (real `window.isVisible` OR this override) —
-        // this tool never truly orders the window on screen under
+        // `update(devices:)` gates its sidebar/content refresh behind
+        // `isEffectivelyVisible` (host visibility OR this override) — this
+        // tool never truly puts the content on screen under
         // `AIRPLAY_HEADLESS=1`, so without it every `update(devices:)` below
         // silently no-ops and the sidebar renders empty (caught 2026-07-26:
         // mixer-1's device list vanished the moment this gate landed).
         // Mirrors `popover-harness/main.swift`'s identical
         // `popover.test_isShownOverride = true` for the same B8 gate.
-        windowController.test_isWindowVisibleOverride = true
+        windowController.test_isVisibleOverride = true
         backend.start()
         guard waitForFleet(backend, count: 7) else {
             print("SETUP FAIL: fleet did not fully discover"); return 2
         }
         windowController.update(devices: backend.devices)
-        guard let window = windowController.window else {
-            print("SETUP FAIL: no window"); return 2
+
+        // The controller owns no window any more (U6) — host every
+        // Groups-content state through the REAL one-surface shell
+        // (`AppSurfaceController`, U3), the same object the shipping app
+        // builds, anchored to a mock menu-bar status item (top-right). Built
+        // once per appearance and reused across states 1/3/4/5/7 —
+        // `groupsContent` is lazily resolved on the FIRST `.groups` select,
+        // so every later capture just reflects the shared `windowController`
+        // mutating underneath the same mounted content controller.
+        let surfacePopover = PopoverController(
+            appRouting: AppRoutingController(store: AppRouteStore(directory: tempDir()),
+                                             loadPersisted: false),
+            runningAppsProvider: { [] })
+        let surfaceSettings = AppSettings(defaults: makeSnapshotDefaults())
+        let surface = AppSurfaceController(
+            popoverController: surfacePopover,
+            settings: surfaceSettings,
+            groupsContent: { windowController.contentController },
+            settingsContent: {
+                // Lazily built on first .settings selection — never reached
+                // in this render (only Groups is ever selected).
+                SettingsRootViewController(tabs: [], tabStyle: .segmentedControlOnTop)
+            },
+            frameAutosaveName: "WindowSnapshotSurface")
+        // `show` mounts + fronts (a no-op re-front once already shown);
+        // `select` is a no-op once Groups is already the selected screen —
+        // so calling this before every capture just guarantees the surface
+        // is showing Groups, without re-running the mount/resize dance.
+        let presentGroups: (NSRect?) -> Void = { anchor in
+            surface.show(anchorRect: anchor)
+            surface.select(.groups)
         }
-        // The SHIPPING default, not a hand-picked size: a golden rendered at a
-        // size the app never opens at can't show whether the content actually
-        // fits (it hid a pane overflowing its own window by ~22pt until the
-        // 2026-07-25 review).
-        window.setContentSize(MixerWindowController.defaultContentSize)
-        drain()
 
         // 1. Default state: no groups — the empty "No groups yet" pane (the
         //    mixer pane was removed by live-test feedback 2026-07-18).
-        snapshotWindow(window, label: "1-default", appearanceName: appearanceName, outDir: outDir)
+        snapshotControlPanel(surface.shell, label: "1-default", appearanceName: appearanceName,
+                            outDir: outDir, present: presentGroups)
 
         // 2. Create sheet: the sidebar "+" with nothing selected presents the
         // standard macOS "New Group" sheet. `presentAsSheet` doesn't actually
@@ -573,11 +593,12 @@ func run() -> Int32 {
             windowController.update(devices: backend.devices)
             windowController.test_select(.group(id: saved.id))
             drain()
-            snapshotWindow(window, label: "3-edit-group", appearanceName: appearanceName, outDir: outDir)
+            snapshotControlPanel(surface.shell, label: "3-edit-group", appearanceName: appearanceName,
+                                outDir: outDir, present: presentGroups)
 
             // 4. Device detail: select a device that's a member of the saved
-            // group above (so "In groups:" renders non-empty) and carries an
-            // icon OVERRIDE, with the hover scrim forced visible so the
+            // group above (so "In groups" renders non-empty) and carries an
+            // icon OVERRIDE, with the edit badge's hover step-up forced visible so the
             // approved custom-drawn element (`../../AGENTS.md`) shows up in
             // the render.
             deviceIconController.setSymbolName("homepod.2.fill", for: "sonos-move")
@@ -585,7 +606,8 @@ func run() -> Int32 {
             drain()
             windowController.test_detail.test_setOverlayVisible(true)
             drain()
-            snapshotWindow(window, label: "4-device-detail", appearanceName: appearanceName, outDir: outDir)
+            snapshotControlPanel(surface.shell, label: "4-device-detail", appearanceName: appearanceName,
+                                outDir: outDir, present: presentGroups)
 
             // 6. Icon picker (Warm Signal W3): the anchored popover content,
             // rendered standalone like the create sheet (`presentIconPicker`
@@ -613,24 +635,21 @@ func run() -> Int32 {
             windowController.update(devices: backend.devices)
             windowController.test_select(.group(id: saved.id))
             drain()
-            snapshotWindow(window, label: "7-edit-active-group",
-                           appearanceName: appearanceName, outDir: outDir)
+            snapshotControlPanel(surface.shell, label: "7-edit-active-group",
+                                appearanceName: appearanceName, outDir: outDir, present: presentGroups)
             // Back to the detail selection so the panel-chrome state below
             // renders the same content it always did.
             windowController.test_select(.device(id: "sonos-move"))
             windowController.test_detail.test_setOverlayVisible(true)
             drain()
 
-            // 5. Panel chrome (T11): the control-panel shell with Groups content
-            // anchored to a mock menu-bar status item (top-right). The sticky
-            // floating NSPanel + decorative backing window with the beak,
-            // right-edge-aligned and rendered together.
-            let panelController = ControlPanelWindowController(
-                contentViewController: windowController.contentController,
-                title: "Groups"
-            )
-            snapshotControlPanel(panelController, label: "5-panel-chrome",
-                                appearanceName: appearanceName, outDir: outDir)
+            // 5. Panel chrome: the same surface + device-detail selection as
+            // state 4, captured again now that the group is ACTIVE (state 7
+            // above) — the standing offscreen proof that the toolbar +
+            // beak-backed bubble (live-review D1) actually draws on the
+            // unpinned bubble.
+            snapshotControlPanel(surface.shell, label: "5-panel-chrome",
+                                appearanceName: appearanceName, outDir: outDir, present: presentGroups)
         }
     }
 

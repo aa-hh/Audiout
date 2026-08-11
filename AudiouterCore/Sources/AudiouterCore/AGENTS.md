@@ -29,6 +29,23 @@ bundle-ID resolution, `.currentDevice` anti-feedback guard, etc.) — those
 apply directly to the files in this folder and are not restated here to
 avoid drift between two copies.
 
+`SyncCore.swift` (`SyncTiming`, `FractionalResampler`, `PhaseController`) is
+deliberately LICENSE-CLEAN — it carries no GPL SPDX header, unlike every
+sibling, so the upcoming Apple-only Bluetooth sink can share its timing/drift
+math (PLAN-UNIVERSAL-SYNC Decision 5). Never add the GPL header to it and
+never move GPL-derived code into it.
+
+**A Bluetooth trim change must NEVER rebuild a sink.** The delay is physically
+the audio piled up in `BTDelayLine`'s ring when the release gate opened, so a
+trim is a move of the read position — `applyTrimDelta(ms:)`, spliced with an
+equal-power crossfade — not a new session. Rebuilding stops and restarts the
+engine and re-holds silence for the whole delay, which the drawer's live scrub
+would turn into permanent silence. The seek must also never run
+`clearSessionStateLocked`: a seek is not a new clock context, and wiping the
+drift `PhaseController` would throw away its learned rate. `requestRebuild` is
+for genuine structural changes only (`config_change`, `rate_change`,
+`offset_change`, `composition_change`).
+
 ## Architecture
 
 ```mermaid
@@ -107,6 +124,7 @@ Redirecting one app to a specific device:
 | Routing brain | `GroupController`, `AppRoutingController`, `PhaseController` |
 | Persistence | `AppRouteStore`, `RoutingStore`, `GroupStore`, `AppSettings`, `ExcludedAppsStore`, `ExcludedAppsController`, `DeviceIconStore` |
 | Local playback | `LocalPlaybackEngine`, `SyncedLocalSink`, `LocalOutputLatency`, `DefaultOutputObserver`, `SystemOutputVolume` |
+| Public aggregate device (Wave 3) | `AggregateOutputDevice` — PUBLIC aggregate "Audiouter" (UID `com.audiouter.Audiouter.aggregate`); wired by `NativeBackend` (adopt/sweep/restore on start/quit). Becomes Mac default when whole-system routing arms; restore-prior-default-then-destroy on quit. New `BackendEvent` case `routingBlockedNeedsDefault(Bool)` (in `OutputBackend.swift`) drives popover warning via `PopoverController.setRoutingBlockedNeedsDefault(_:)` and user-reselect via `PopoverController.onReselectAudiouter`. Shared `EffectiveCaptureDevice.resolve(_:)` (in `NativeCaptureCoordinator.swift`) prevents the private tap-aggregate nesting on the public aggregate (A1). **Interim ceiling:** system volume slider + hardware volume keys dead (A2); fix is `docs/plans/PLAN-VOLUME-KEY-INTERCEPTION.md`. **Seamless handoff (Wave 3 T9+):** `AirPlayHandoffWatcher` (best-effort unified-log watcher for blocked macOS AirPlay attempts; spawns `/usr/bin/log stream`; degrades silently), `BlockedAirPlayAttempt` (pure matcher), `PTPHelperReleasing` (fast ~1s port release), `releaseForHandoff`/`resumeFromHandoffLocked` (NativeBackend seam; release preserves selection intent, resume restores whole-system + per-app). |
 | Discovery/diagnostics | `NativeDiscovery`, `ConnectionDiagnostics`, `Telemetry`, `AudioDiag` |
 | Setup/permissions | `SetupModel`, `AudioCapturePermissionProbe`, `LocalNetworkPrimer`, `RemoteControlPrimer`, `PTPHelperService`, `SystemAudioCaptureTCC` |
 | Misc infra | `DACPServer`, `FIFOManager`, `AppRelaunchCommand`, `HeadlessRuntime`, `ObjCExceptionCatching` |

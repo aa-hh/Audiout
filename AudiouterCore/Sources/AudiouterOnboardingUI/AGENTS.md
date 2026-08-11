@@ -42,13 +42,23 @@ behavior changes.
   reappears next launch. Setup is "guidance, not a gate" — Done still asks
   "Continue Anyway?" via a sheet when a required permission is ungranted, but
   never hard-blocks finishing.
-- The window is deliberately a NORMAL level, not `.floating` — an earlier
-  version pinned it above every app to survive a permission prompt stealing
-  focus, but that read as "the setup keeps popping up." Recoverability comes
-  instead from the reactivate re-front plus an explicit re-front right after
-  each Allow's own prompt (`NSApp.activate` + `makeKeyAndOrderFront` in
-  `allowAudio()`/the network `onAllow`).
-- Remote Control's "Open Settings" action re-fires the Accessibility system
+- The window is deliberately `.floating` while open (owner decision
+  2026-08-07, punch-list W10 — this REVERSES an earlier reversal, so read the
+  history before touching it). The first floating version was demoted to
+  normal level because it read as "the setup keeps popping up"; the
+  normal-level compromise then relied on `NSApp.activate(ignoringOtherApps:)`
+  re-fronts, which macOS 14's cooperative activation may decline while another
+  app is frontmost — so granting a permission left the window buried, which
+  the owner judged worse. Floating is bounded two ways: the window exists only
+  for a summoned flow that dies at Done/✕, and the reactivate hook takes key
+  ONLY when no other window in the app holds it (`keyWindowProvider` seam), so
+  it never yanks focus from Settings. The per-Allow re-fronts in
+  `allowAudio()`/the network `onAllow` stay — they restore keyboard focus
+  after a TCC prompt; floating only guarantees visibility.
+- `present()` sizes and centers on the FIRST call only — a re-present (the
+  `presentSetup` re-entry guard, "Open Setup…" while open) must not
+  re-center a window the user moved.
+- Remote Control's "Open Settings…" action re-fires the Accessibility system
   PROMPT (`model.primeRemoteControl()`) rather than deep-linking to the pane —
   its own "Open System Settings" button is the only path that scrolls to/
   highlights Audiouter in the list; macOS gives no URL way to do that.

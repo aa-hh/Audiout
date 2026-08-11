@@ -19,7 +19,7 @@ import AudioToolbox
 /// Covers the plan-required path: create → buffers with advancing `mHostTime` →
 /// converted → forwarded → device-change → stop → error surfaced. Plus a focused
 /// pts-clock-domain test that would have caught the mHostTime-vs-CLOCK_MONOTONIC
-/// bug (finding 2).
+/// bug.
 ///
 /// Nested inside `SerializedSharedState` (cookbook §18): `testStartEmitsCaptureWSTransitionTelemetry`
 /// installs `Telemetry`'s process-global test sink, which would otherwise race
@@ -442,7 +442,7 @@ extension SerializedSharedState {
 
         coordinator.start()
         #expect(coordinator.state == .failed(.tapCreationFailed(reason: "denied")))
-        // Finding 3: a failed createAndStart must not leak the tap — teardown is called.
+        // A failed createAndStart must not leak the tap — teardown is called.
         #expect(tap.teardowns >= 1, "a failed start must tear the tap down (no leak)")
     }
 
@@ -1041,7 +1041,7 @@ extension SerializedSharedState {
         coordinator.stop()
     }
 
-    // MARK: - pts clock domain (finding 2): mHostTime must map onto CLOCK_MONOTONIC.
+    // MARK: - pts clock domain: mHostTime must map onto CLOCK_MONOTONIC.
 
     #if canImport(AudioToolbox)
     /// The real pts derivation (`CoreAudioSystemTap.timespec(fromHostTime:)`) must
@@ -1556,11 +1556,6 @@ extension SerializedSharedState {
     }
 
     // MARK: - R14: relaunch correctness (`refreshExcludedProcessSet`, W1-T7 Fix 1)
-    //
-    // Ported to the `AudioProcessResolver` (object-based) seam. `refreshExcludedProcessSet`
-    // + the shared compare-before-rebuild core `rebuildIfExclusionObjectsChanged`
-    // are ours-only reliability (main lacked any live exclusion re-resolution for a
-    // relaunched/child-spawning EXCLUDED app while capturing).
 
     /// An EXCLUDED app relaunches (old process gone, a fresh one under the same
     /// bundle ID). The bundle-ID union `updateRouting` tracks is unchanged, so its

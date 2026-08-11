@@ -4,8 +4,8 @@ import Testing
 import AppKit
 @testable import AudiouterPopoverUI
 
-/// Container-level coverage for `PopoverPanelViewController` (task T-PANEL,
-/// 2026-07-18): the whole-header collapse click target (C4), the header
+/// Container-level coverage for `PopoverPanelViewController`: the
+/// whole-header collapse click target (C4), the header
 /// accessory's `isEnabled` plumbing (F1), and `addCardNote` (A1). Exercises the
 /// panel directly (not through `PopoverController`/a backend) since these are
 /// pure container-layout behaviors — see `PopoverControllerTests` for the
@@ -51,29 +51,7 @@ import AppKit
                 "a non-collapsible card's header has no click gesture to fire")
     }
 
-    // MARK: F1 — header accessory isEnabled + setAccessoryEnabled
-
-    @Test func accessoryEnabledDefaultsTrueAndIsSettable() {
-        let panel = makePanel()
-        let title = "Groups"
-        var accessoryFired = 0
-        var toggleCount = 0
-        panel.beginCard(header: title,
-                        trailingAccessory: .init(symbol: "plus", label: "New group", action: {
-                            accessoryFired += 1
-                        }),
-                        collapsible: true, collapsed: false,
-                        onToggle: { toggleCount += 1 })
-
-        #expect(panel.test_accessoryEnabled(title: title) == true,
-                "HeaderAccessory.isEnabled defaults true for back-compat")
-
-        panel.setAccessoryEnabled(title: title, enabled: false)
-        #expect(panel.test_accessoryEnabled(title: title) == false)
-
-        panel.setAccessoryEnabled(title: title, enabled: true)
-        #expect(panel.test_accessoryEnabled(title: title) == true)
-    }
+    // MARK: F1 — header accessory isEnabled
 
     @Test func accessoryClickNeverTogglesCollapse() {
         let panel = makePanel()
@@ -132,9 +110,6 @@ import AppKit
         panel.test_toggleCard(title: title, animated: false)
         #expect(panel.test_isCardCollapsed(title: title) == true)
 
-        // Original used `try? #require(...)` (not a throwing test), which
-        // swallows the throw into a plain Optional — equivalent to just
-        // taking `.first` directly.
         let note = panel.test_cardNotes(title: title).first
         #expect(note != nil)
         #expect(note?.isHidden == false,

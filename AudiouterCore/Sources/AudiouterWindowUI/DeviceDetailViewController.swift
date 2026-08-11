@@ -6,7 +6,7 @@ import AudiouterSharedUI
 
 /// The read-only device detail pane (design revamp, CONFIGURATION-ONLY —
 /// `../../AGENTS.md`): shown in the Groups window's detail area when the
-/// sidebar selects a device (wiring that selection up is a separate task).
+/// sidebar selects a device.
 /// This view controller never activates a group, changes routing, or moves
 /// audio — it only ever renders a `Device` snapshot plus which saved groups
 /// it belongs to.
@@ -32,7 +32,7 @@ import AudiouterSharedUI
 ///   (renameable here) and a device's (not);
 /// - the read-only metadata in two grouped sections (secondary-colour captions
 ///   leading, values right-aligned into their own column): device STATE
-///   (Status, Available, Volume, Kind) in the first, MEMBERSHIP ("In groups:" —
+///   (Status, Available, Volume, Kind) in the first, MEMBERSHIP ("In groups" —
 ///   the saved groups from the injected `GroupController` whose `memberIDs`
 ///   contain this device) in the second. The sections' own inset hairlines
 ///   separate the rows; the old stock `NSBox` divider is gone (it drew a 185 pt
@@ -40,7 +40,7 @@ import AudiouterSharedUI
 /// - a minimal, single-line secondary-colour hint ("View-only — control
 ///   playback from the menu-bar popover.") under the form. Deliberately
 ///   terse: the fuller "configure here / play in the popover" teaching lives
-///   in a footer elsewhere in this window (a sibling task), not restated here.
+///   in a footer elsewhere in this window, not restated here.
 ///
 /// No volume slider, no mute, no Selected-Devices toggle, no group-activation
 /// control of any kind lives here — that's the popover/mixer's job, not this
@@ -116,7 +116,7 @@ public final class DeviceDetailViewController: NSViewController {
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         // Device STATE (status, availability, volume, kind) in one section,
-        // MEMBERSHIP ("In groups:") in another — the two bounded sections are
+        // MEMBERSHIP ("In groups") in another — the two bounded sections are
         // what read as sectioning now, replacing the stock `NSBox` rule that
         // used to sit between them and stop a third of the way across the pane.
         stateStack.translatesAutoresizingMaskIntoConstraints = false
@@ -141,7 +141,7 @@ public final class DeviceDetailViewController: NSViewController {
         groupsStack.orientation = .vertical
         groupsStack.alignment = .leading
         groupsStack.spacing = 10
-        let membershipRow = makeMetadataRow(caption: "In groups:", valueLabel: groupsValueLabel)
+        let membershipRow = makeMetadataRow(caption: "In groups", valueLabel: groupsValueLabel)
         groupsStack.addArrangedSubview(membershipRow)
         membershipRow.widthAnchor.constraint(equalTo: groupsStack.widthAnchor).isActive = true
 
@@ -270,7 +270,7 @@ public final class DeviceDetailViewController: NSViewController {
 
     /// Minimal one-line view-only hint. Deliberately terse — the fuller
     /// "configure here / play in the popover" teaching lives in a footer
-    /// elsewhere in this window (a sibling task); this pane only needs to
+    /// elsewhere in this window; this pane only needs to
     /// mark itself as non-interactive.
     private static let viewOnlyHint = "View-only — control playback from the menu-bar popover."
 
@@ -364,6 +364,7 @@ public final class DeviceDetailViewController: NSViewController {
         case .airportExpress: return "AirPort Express"
         case .sonos:          return "Sonos"
         case .generic:        return "AirPlay Speaker"
+        case .bluetooth:      return "Bluetooth Speaker"
         }
     }
 
@@ -456,7 +457,7 @@ public final class DeviceDetailViewController: NSViewController {
         ]
     }
 
-    /// The "In groups:" value text ("None" when the device is in no saved group).
+    /// The "In groups" value text ("None" when the device is in no saved group).
     public var test_groupMembershipText: String { groupsValueLabel.stringValue }
 
     /// The minimal view-only hint's visible text — asserts it stays a single,

@@ -154,24 +154,35 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         let meteringActive: Bool
         let syncedLocalSink: SyncedLocalPCMSink?
         let syncedLocalBaseResampler: SyncedLocalBaseResampler?
+        let btSink: SyncedLocalPCMSink?
+        let btBaseResampler: SyncedLocalBaseResampler?
+        let tickInjector: AlignmentTickInjector?
 
         /// The published value before anything has been started, and the value
         /// every teardown path returns to: no converter, so ``handleBuffer(_:)``
         /// drops the buffer at its first guard.
         static let empty = BufferSnapshot(
             converter: nil, meteringActive: false,
-            syncedLocalSink: nil, syncedLocalBaseResampler: nil)
+            syncedLocalSink: nil, syncedLocalBaseResampler: nil,
+            btSink: nil, btBaseResampler: nil,
+            tickInjector: nil)
 
         init(
             converter: PCMConverting?,
             meteringActive: Bool,
             syncedLocalSink: SyncedLocalPCMSink?,
-            syncedLocalBaseResampler: SyncedLocalBaseResampler?
+            syncedLocalBaseResampler: SyncedLocalBaseResampler?,
+            btSink: SyncedLocalPCMSink?,
+            btBaseResampler: SyncedLocalBaseResampler?,
+            tickInjector: AlignmentTickInjector?
         ) {
             self.converter = converter
             self.meteringActive = meteringActive
             self.syncedLocalSink = syncedLocalSink
             self.syncedLocalBaseResampler = syncedLocalBaseResampler
+            self.btSink = btSink
+            self.btBaseResampler = btBaseResampler
+            self.tickInjector = tickInjector
         }
     }
 
@@ -255,6 +266,27 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// Deliberately NOT a ``FractionalResampler`` — that stays the sink's ppm
     /// DRIFT corrector at ratio ≈ 1; base conversion is a distinct step here.
     private var syncedLocalBaseResampler: SyncedLocalBaseResampler?
+
+    /// BT-FANOUT: the Bluetooth sink manager to ALSO feed (the third consumer of
+    /// the same converted PCM+pts), the pid of the process that renders the BT
+    /// sinks' output, and its base-rate converter — the exact trio the
+    /// synced-local fan-out keeps above, one slot per consumer. All
+    /// queue-confined and set together via ``setBTSink(_:renderProcessPID:)``.
+    private var btSink: SyncedLocalPCMSink?
+    private var btRenderPID: pid_t?
+    private var btBaseResampler: SyncedLocalBaseResampler?
+
+    /// The align-by-ear tick source (BT-OFFSET-UI), mixed into the converted
+    /// PCM BEFORE the engine write and both fan-outs, so every consumer
+    /// renders the same tick through its own delay. Queue-confined here (set
+    /// via ``setAlignTick(_:)``), consumed only through the published
+    /// ``BufferSnapshot``. A fresh injector per activation restarts the beat
+    /// clock and its self-limiting tick budget.
+    private var tickInjector: AlignmentTickInjector?
+    /// The config the live injector was built with (`nil` = inactive) — the
+    /// idempotence key for ``setAlignTick(_:config:)``, so a wizard activation
+    /// can replace a manual one and vice versa. Confined to `queue`.
+    private var tickConfig: AlignmentTickInjector.Config?
 
     /// W1-T7 (Gap 1 + Fix 1): the excluded process-OBJECT set the CURRENT live tap
     /// was last built/recreated against — the compare-before-rebuild key for the
@@ -394,8 +426,23 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             // Make-before-break identity gate (audio-leak-on-device-switch fix): a
             // single default-output-device read. Pre-14.2 has no live capture, so
             // nil (-> break-before-make) is correct there.
+            //
+            // A1: resolved THROUGH `EffectiveCaptureDevice`, because it is compared
+            // against `tappedOutputDeviceID`, which `createAggregate` pins to the
+            // RESOLVED device. Comparing a raw read against a resolved pin would
+            // read "different device" on every rebuild while our public aggregate is
+            // the default output — forcing make-before-break onto same-device
+            // rate-only rebuilds, the exact case the comment below says must stay
+            // break-before-make (two aggregates on one physical device mid-rate-
+            // renegotiation).
             resolveDefaultOutputDeviceID: {
-                if #available(macOS 14.2, *) { return try? CoreAudioSystemTap.defaultOutputDeviceID() }
+                if #available(macOS 14.2, *) {
+                    guard let raw = try? CoreAudioSystemTap.defaultOutputDeviceID() else { return nil }
+                    return EffectiveCaptureDevice.resolve(
+                        default: raw,
+                        uidOf: { try? CoreAudioSystemTap.readDeviceUID($0) },
+                        mainSubDeviceOf: CoreAudioSystemTap.aggregateMainSubDeviceID)
+                }
                 return nil
             },
             processResolver: processResolver,
@@ -688,6 +735,52 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         recreateTap(cause: .exclusionChange)
     }
 
+    /// Attach (or detach, with `nil`) the Bluetooth sink-manager fan-out
+    /// (BT-FANOUT): the same converted PCM+pts the engine and the synced-local
+    /// sink receive is also handed to this sink, whose `enqueue` fans it to
+    /// every active per-device BT delay line. `renderProcessPID` is the process
+    /// rendering the BT sinks' output (our own pid — they are in-process
+    /// `AVAudioEngine`s) and joins the tap's exclusion set exactly like the
+    /// synced-local sink's, so delayed BT output is never re-captured as an
+    /// echo (plan risk R-echo).
+    ///
+    /// Unlike ``setSyncedLocalSink(_:renderProcessPID:)``, a pid change here
+    /// never forces an unconditional tap recreate: in production the pid is our
+    /// own process, which the unconditional self-exclude in
+    /// ``resolveExcludedObjectIDsLoggingAttribution(bundleIDs:)`` already covers
+    /// on every tap creation — so the decision is delegated to
+    /// ``rebuildIfExclusionObjectsChanged()``'s compare-before-rebuild, which
+    /// rebuilds only when the RESOLVED object set genuinely changed. Attaching
+    /// mid-capture with an already-excluded pid is therefore rebuild-free (no
+    /// per-BT-toggle tap-rebuild storm), while a genuinely new render process
+    /// still takes effect immediately.
+    public func setBTSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {
+        let checkExclusions: Bool = queue.sync {
+            self.btSink = sink
+            // Fresh converter per attach for the same clean-filter-state reason
+            // `setSyncedLocalSink` documents; identity (bit-exact passthrough)
+            // when the manager renders at the airplay rate.
+            if let sink {
+                self.btBaseResampler = SyncedLocalBaseResampler(
+                    inputRate: Double(PCMFormat.airplay.sampleRate),
+                    outputRate: sink.renderSampleRate,
+                    channelCount: PCMFormat.airplay.channels)
+            } else {
+                self.btBaseResampler = nil
+            }
+            // Republish BEFORE the pid short-circuit below, same T8 discipline
+            // as `setSyncedLocalSink`.
+            self.publishBufferSnapshot()
+            let newPID: pid_t? = (sink == nil) ? nil : renderProcessPID
+            guard newPID != btRenderPID else { return false }
+            btRenderPID = newPID
+            if case .capturing = _state { return true }
+            return false
+        }
+        guard checkExclusions else { return }
+        rebuildIfExclusionObjectsChanged()
+    }
+
     // MARK: Start sequence (on `queue`)
 
     /// Reject a tap format the converter/aggregate can't safely consume before it
@@ -724,6 +817,12 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     private func resolveExcludedProcessObjectIDs() -> Set<AudioObjectID> {   // must hold `queue`
         var result = resolveExcludedObjectIDsLoggingAttribution(bundleIDs: currentExcludedBundleIDs)
         if let renderPID = syncedLocalRenderPID {
+            result.formUnion(processResolver.resolve(pid: renderPID).map(\.objectID))
+        }
+        // BT-FANOUT self-exclude: the BT sinks' render process, same contract
+        // as the synced-local pid above (and equally redundant-but-harmless
+        // whenever it is our own already-self-excluded pid).
+        if let renderPID = btRenderPID {
             result.formUnion(processResolver.resolve(pid: renderPID).map(\.objectID))
         }
         return result
@@ -821,9 +920,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// a stale baseline that suppresses a later one. Recreates as a benign
     /// `.exclusionChange` (device/clock unchanged → no AirPlay session reset).
     private func rebuildIfExclusionObjectsChanged() {
-        let snapshot: (bundleIDs: Set<String>, renderPID: pid_t?)? = queue.sync {
+        let snapshot: (bundleIDs: Set<String>, renderPID: pid_t?, btPID: pid_t?)? = queue.sync {
             guard case .capturing = _state else { return nil }
-            return (currentExcludedBundleIDs, syncedLocalRenderPID)
+            return (currentExcludedBundleIDs, syncedLocalRenderPID, btRenderPID)
         }
         guard let snapshot else { return }
 
@@ -833,13 +932,17 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         if let renderPID = snapshot.renderPID {
             newObjects.formUnion(processResolver.resolve(pid: renderPID).map(\.objectID))
         }
+        if let btPID = snapshot.btPID {
+            newObjects.formUnion(processResolver.resolve(pid: btPID).map(\.objectID))
+        }
 
         let needsRecreate: Bool = queue.sync {
             guard case .capturing = _state else { return false }
             // Inputs unchanged since the snapshot, else a concurrent
-            // updateRouting/setSyncedLocalSink already owns the rebuild.
+            // updateRouting/setSyncedLocalSink/setBTSink already owns the rebuild.
             guard currentExcludedBundleIDs == snapshot.bundleIDs,
-                  syncedLocalRenderPID == snapshot.renderPID else { return false }
+                  syncedLocalRenderPID == snapshot.renderPID,
+                  btRenderPID == snapshot.btPID else { return false }
             guard newObjects != lastExcludedObjects else { return false } // COMPARE-BEFORE-REBUILD
             return true
         }
@@ -934,10 +1037,41 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             converter: converter,
             meteringActive: meteringActive,
             syncedLocalSink: syncedLocalSink,
-            syncedLocalBaseResampler: syncedLocalBaseResampler)
+            syncedLocalBaseResampler: syncedLocalBaseResampler,
+            btSink: btSink,
+            btBaseResampler: btBaseResampler,
+            tickInjector: tickInjector)
         snapshotLock.lock()
         _bufferSnapshot = snapshot
         snapshotLock.unlock()
+    }
+
+    /// Start/stop the align-by-ear tick (BT-OFFSET-UI). ADDITIVE seam only: it
+    /// swaps one snapshot field, never touches the tap, the exclusion set, or
+    /// the per-app routing state — the fragile parts of this coordinator stay
+    /// un-restructured. Idempotent per direction. `queue.sync` like
+    /// ``setBTSink(_:renderProcessPID:)``, so the very next delivered buffer
+    /// already carries (or has dropped) the tick.
+    public func setAlignTick(_ active: Bool) {
+        setAlignTickMode(active ? .manual : .off)
+    }
+
+    /// Mode-aware twin (W2): the wizard activates with `.wizard` — long tick
+    /// budget plus the keep-alive bed's wake preamble. Switching mode while
+    /// active swaps in a fresh injector (new beat clock + budget); a same-mode
+    /// call stays a no-op.
+    public func setAlignTickMode(_ mode: AlignTickMode) {
+        queue.sync {
+            let config: AlignmentTickInjector.Config? = switch mode {
+            case .off: nil
+            case .manual: .manual
+            case .wizard: .wizard
+            }
+            guard self.tickConfig != config else { return }
+            self.tickConfig = config
+            self.tickInjector = config.map { AlignmentTickInjector(config: $0) }
+            self.publishBufferSnapshot()
+        }
     }
 
     /// Convert one captured buffer to the engine's fixed S16LE/44100/2ch format
@@ -979,12 +1113,21 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         let baseResampler = snapshot.syncedLocalBaseResampler
         guard let converter = snapshot.converter else { return }
 
-        let pcm = converter.convertToAirPlayPCM(buffer)
+        let converted = converter.convertToAirPlayPCM(buffer)
         // Sampled AFTER the convert attempt and BEFORE the failure early-out,
         // so a converter dropping every buffer still surfaces its counters
         // (throttled + delta-gated inside — see `sampleConversionFailuresIfDue`).
         converter.sampleConversionFailuresIfDue()
-        guard let pcm, !pcm.isEmpty else { return }
+        guard var pcm = converted, !pcm.isEmpty else { return }
+
+        // Align-by-ear tick (BT-OFFSET-UI): mixed in HERE — after conversion,
+        // before the engine write and BOTH fan-outs — so the AirPlay engine,
+        // the synced-local sink, and every BT sink all render the identical
+        // tick through their own delays (that sameness is what makes nudging
+        // the trim until the flam collapses a truthful alignment).
+        if let tickInjector = snapshot.tickInjector {
+            tickInjector.mix(into: &pcm)
+        }
 
         // pts straight off the buffer's capture clock (mHostTime → timespec).
         sink.write(pcm: pcm, pts: buffer.pts)
@@ -1000,6 +1143,18 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // can't loop back as an echo.
         if let syncedSink, let baseResampler {
             Self.fanOutToSyncedLocal(pcm, pts: buffer.pts, into: syncedSink, resampler: baseResampler)
+        }
+
+        // BT-FANOUT: the third consumer of the identical converted PCM+pts —
+        // the Bluetooth sink manager, whose `enqueue` fans one block to every
+        // active per-device delay line. Same widen/base-resample helper, its
+        // own resampler instance (streaming filter state is per-consumer).
+        // Gated exactly like the synced-local fan-out above; the BT sinks'
+        // render process is excluded from this tap
+        // (``resolveExcludedProcessObjectIDs()``) so their delayed output
+        // can't loop back as an echo.
+        if let btSink = snapshot.btSink, let btResampler = snapshot.btBaseResampler {
+            Self.fanOutToSyncedLocal(pcm, pts: buffer.pts, into: btSink, resampler: btResampler)
         }
 
         // Level pass-through: compute RMS on the CONVERTED S16LE buffer once, for
@@ -1975,11 +2130,18 @@ final class EngineSink: PCMSink, @unchecked Sendable {
         Telemetry.log(.captureWS, "write_cadence_drift", [
             "path": "wholeSystem",
             "writeCount": String(snap.writeCount),
+            // THE drift number — deficit and overrun are one-sided sums that
+            // both inflate under ordinary jitter; only their difference is real.
+            "netDriftTotalSeconds": String(format: "%.3f", snap.netDriftSeconds),
+            "netDriftDeltaSeconds": String(format: "%.3f", deficitDelta - overrunDelta),
             "deficitTotalSeconds": String(format: "%.3f", snap.deficitSeconds),
             "deficitDeltaSeconds": String(format: "%.3f", deficitDelta),
             "overrunTotalSeconds": String(format: "%.3f", snap.overrunSeconds),
             "overrunDeltaSeconds": String(format: "%.3f", overrunDelta),
             "lastGapSeconds": String(format: "%.4f", snap.lastGapSeconds),
+            // Pauses, sleeps and tap rebuilds — kept out of the drift totals.
+            "stalledTotalSeconds": String(format: "%.3f", snap.stalledSeconds),
+            "stallCount": String(snap.stallCount),
             // How much of the deficit is the ENGINE's own drop site (writes the
             // backpressure guard refused) rather than a slow producer.
             "refusedWrites": String(snap.refusedWrites),
@@ -2064,9 +2226,50 @@ enum TapRebuildDecision {
     }
 }
 
+/// Pure "effective capture device" resolver — spike caveat A1
+/// (`dev/spikes/aggregate-device/SPIKE-REPORT.md` §3). An aggregate device
+/// cannot nest inside another aggregate: once the PUBLIC "Audiouter" aggregate
+/// (``AggregateOutputDevice/productUID``) is the default output, building the
+/// PRIVATE tap-capture aggregate (`CoreAudioSystemTap.createAggregate`) on top
+/// of it returns `noErr` but yields a ZOMBIE (0 output channels, nominal rate
+/// 0.0) that silently captures nothing — the all-zero-tap family this repo has
+/// been bitten by. So when the default output IS our public aggregate, resolve
+/// THROUGH to the real device it wraps (its main sub-device) and pin the
+/// tap-aggregate there; every other default passes through UNCHANGED, so the
+/// capture topology is byte-identical to today for every non-aggregate default.
+///
+/// This MUST feed BOTH the tap-aggregate build AND the compare-before-rebuild
+/// guard that ``DefaultOutputDeviceMonitor`` runs for each tap (the monitor
+/// reads the RAW default, so each tap's `tracked` closure reconciles against
+/// this resolver): pin one but compare the other and the guard reads
+/// current=aggregate ≠ tracked=real-device on every notification and
+/// rebuild-storms forever.
+///
+/// Pure (closures for the two CoreAudio reads) so T6 can unit-test both branches
+/// — our-UID → sub-device, normal device → identity — with no CoreAudio, and
+/// kept OUT of `CoreAudioSystemTap`'s `@available(macOS 14.2, *)` gate so it is
+/// testable at the package's macOS 14 floor. If the default is our aggregate but
+/// its main sub-device can't be read, it falls back to the default unchanged —
+/// the same "can't prove otherwise, don't invent a device" safety the rebuild
+/// guards use; the resolver stays deterministic either way, so the two wired
+/// sites still agree and the listener never storms.
+enum EffectiveCaptureDevice {
+    static func resolve(
+        default defaultDevice: AudioObjectID,
+        uidOf: (AudioObjectID) -> String?,
+        mainSubDeviceOf: (AudioObjectID) -> AudioObjectID?
+    ) -> AudioObjectID {
+        guard uidOf(defaultDevice) == AggregateOutputDevice.productUID,
+              let sub = mainSubDeviceOf(defaultDevice) else {
+            return defaultDevice
+        }
+        return sub
+    }
+}
+
 /// The one process-wide ``DefaultOutputDeviceMonitor`` both capture taps
-/// subscribe to (architecture review 2026-07-26, defect D: one owning component
-/// per shared resource, instead of every tap installing its own pair of HAL
+/// subscribe to (one owning component per shared resource, instead of every
+/// tap installing its own pair of HAL
 /// property listeners on the same system object and the same device).
 ///
 /// razor: a lazily-created shared instance rather than constructor injection
@@ -2301,7 +2504,15 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
         let outputID: AudioObjectID
         let outputUID: String
         do {
-            outputID = try Self.defaultOutputDeviceID()
+            // A1 (spike §3): if the default output is our PUBLIC aggregate, an
+            // aggregate cannot nest in an aggregate — resolve THROUGH to the real
+            // device it wraps and build the tap-aggregate on THAT. Identity
+            // passthrough for every non-aggregate default.
+            let rawDefault = try Self.defaultOutputDeviceID()
+            outputID = EffectiveCaptureDevice.resolve(
+                default: rawDefault,
+                uidOf: { try? Self.readDeviceUID($0) },
+                mainSubDeviceOf: Self.aggregateMainSubDeviceID)
             outputUID = try Self.readDeviceUID(outputID)
         } catch {
             throw NativeCaptureError.deviceLost(reason: String(describing: error))
@@ -2666,8 +2877,33 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
                     return DefaultOutputDeviceMonitor.Tracked(
                         deviceID: kAudioObjectUnknown, rate: 0)
                 }
+                // A1 (spike §3): the monitor reads the RAW default output
+                // device, but `createAggregate` pins `tappedOutputDeviceID`
+                // through ``EffectiveCaptureDevice/resolve(default:uidOf:mainSubDeviceOf:)``
+                // — so when the default IS our PUBLIC aggregate the tap is
+                // pinned to the real device it wraps, and reporting that pinned
+                // id here would read raw-aggregate ≠ tracked-real-device on
+                // every notification and rebuild-storm forever. Report the raw
+                // default instead whenever it still resolves to the device this
+                // tap is pinned to: the guard then compares the same value the
+                // monitor just read and correctly no-ops. Anything else — a
+                // genuine re-pin, or an unreadable default — reports the pinned
+                // id, so the guard still fires. Net effect is identical to
+                // comparing resolve(live) against `tappedOutputDeviceID`, and
+                // byte-identical to today for every non-aggregate default.
+                let pinned = self.tappedOutputDeviceID
+                let rawDefault = try? Self.defaultOutputDeviceID()
+                let reported: AudioObjectID
+                if let rawDefault, EffectiveCaptureDevice.resolve(
+                    default: rawDefault,
+                    uidOf: { try? Self.readDeviceUID($0) },
+                    mainSubDeviceOf: Self.aggregateMainSubDeviceID) == pinned {
+                    reported = rawDefault
+                } else {
+                    reported = pinned
+                }
                 return DefaultOutputDeviceMonitor.Tracked(
-                    deviceID: self.tappedOutputDeviceID, rate: self.format.sampleRate)
+                    deviceID: reported, rate: self.format.sampleRate)
             },
             onChange: { [weak self] snapshot in
                 guard let self else { return }
@@ -2884,6 +3120,42 @@ final class CoreAudioSystemTap: SystemAudioTap, @unchecked Sendable {
             throw NativeCaptureError.deviceLost(reason: "read device UID (\(err))")
         }
         return uid as String
+    }
+
+    /// A1 CoreAudio shell for ``EffectiveCaptureDevice``: the id of `aggregateID`'s
+    /// MAIN sub-device (`kAudioAggregateDevicePropertyMainSubDevice`, a CFString
+    /// UID), translated to an `AudioObjectID`, or `nil` if either read fails.
+    /// Reads the aggregate's ACTUAL main sub-device rather than hardcoding
+    /// built-in speakers, so it stays correct if our public aggregate ever wraps
+    /// a different device (the spike says it always wraps built-in today, but the
+    /// property read costs nothing and removes the assumption).
+    static func aggregateMainSubDeviceID(_ aggregateID: AudioObjectID) -> AudioObjectID? {
+        guard aggregateID != kAudioObjectUnknown else { return nil }
+        var mainAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioAggregateDevicePropertyMainSubDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var size = UInt32(MemoryLayout<CFString?>.size)
+        var subUID: CFString?
+        let readErr = withUnsafeMutablePointer(to: &subUID) { ptr -> OSStatus in
+            AudioObjectGetPropertyData(aggregateID, &mainAddr, 0, nil, &size, ptr)
+        }
+        guard readErr == noErr, let subUID else { return nil }
+
+        var translateAddr = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyTranslateUIDToDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var cfUID: CFString? = subUID
+        var deviceID = AudioObjectID(kAudioObjectUnknown)
+        var idSize = UInt32(MemoryLayout<AudioObjectID>.size)
+        let translateErr = withUnsafePointer(to: &cfUID) { qualifier -> OSStatus in
+            AudioObjectGetPropertyData(
+                AudioObjectID(kAudioObjectSystemObject), &translateAddr,
+                UInt32(MemoryLayout<CFString?>.size), qualifier, &idSize, &deviceID)
+        }
+        guard translateErr == noErr, deviceID != kAudioObjectUnknown else { return nil }
+        return deviceID
     }
 }
 

@@ -4,10 +4,11 @@ import Testing
 import AppKit
 @testable import AudiouterCore
 @testable import AudiouterPopoverUI
+@testable import AudiouterSharedUI
 
 /// Interaction + accessibility coverage for `GroupRowView` — SPEC §9 revised's
-/// "click anywhere on the row toggles expansion" contract, and task
-/// A11Y-LABELS's fix: the row claimed `.button` accessibility role but
+/// "click anywhere on the row toggles expansion" contract, and the AXPress
+/// fix: the row claimed `.button` accessibility role but
 /// VoiceOver's activate gesture (VO+Space / double-tap) did nothing, since a
 /// plain `NSView` doesn't get AXPress wired to an action the way `NSButton`
 /// does. Built directly, like `PopoverIconTests`'s group-row cases — the row
@@ -44,7 +45,7 @@ import AppKit
         return (row, delegate)
     }
 
-    // MARK: AXPress actually toggles expansion (A11Y-LABELS)
+    // MARK: AXPress actually toggles expansion
 
     /// The bug this task fixes: pressing the row via VoiceOver used to do
     /// nothing at all despite the row announcing itself as a button.
@@ -74,6 +75,27 @@ import AppKit
     @Test func accessibilityRoleIsButton() {
         let (row, _) = makeRow()
         #expect(row.accessibilityRole() == .button)
+    }
+
+    // MARK: Unified hover/selection wash tokens (V4 — matches AppRowView/DeviceRowView)
+
+    @Test func noHighlightWhenNeitherActiveNorHovered() {
+        let (row, _) = makeRow()
+        #expect(row.test_highlightAlpha == nil)
+    }
+
+    @Test func activeRowUsesUnifiedSelectionAlpha() {
+        let group = Group(id: "group-1", name: "Whole House", memberIDs: ["office"], memberVolumes: ["office": 40])
+        let row = GroupRowView(group: group, isActive: true, isExpanded: false, masterVolume: 50)
+        #expect(row.test_highlightAlpha == PopoverColumnGrid.rowSelectionWashAlpha,
+                       "an active group row must share DeviceRowView/AppRowView's selection wash alpha, not its own one-off value")
+    }
+
+    @Test func hoveredRowUsesUnifiedHoverAlpha() {
+        let (row, _) = makeRow()
+        row.test_simulateMouseEntered()
+        #expect(row.test_highlightAlpha == PopoverColumnGrid.rowHoverWashAlpha,
+                       "a hovered group row must share DeviceRowView/AppRowView's hover wash alpha, not its own one-off value")
     }
 
     /// A minimal synthetic left-mouse-down event — `GroupRowView.mouseDown`

@@ -757,17 +757,27 @@ import Testing
         #expect(!vc.test_doneExists, "Local Network is still unmet")
 
         await vc.test_tapAllow(.localNetwork)
-        #expect(vc.test_doneExists, "every required permission is in")
+        vc.test_tapSkip(.bluetooth)
+        vc.test_tapSkip(.remoteControl)
+        #expect(vc.test_doneExists, "every required permission is in, every card decided")
         #expect(vc.test_doneIsReturnDefault)
     }
 
-    /// Bluetooth and Remote Control are outside `RequiredPermission`, so leaving
-    /// them untouched can never hold the gate shut.
-    @Test func theOptionalCardsNeverHoldTheGateShut() async {
+    /// Owner decision 2026-08-11 (tightened gate): the optional cards'
+    /// permissions stay outside `RequiredPermission`, but an UNDECIDED card
+    /// holds the gate shut — the CTA must never appear beside a card still
+    /// offering Allow/Skip. Each decision (a skip here) advances it.
+    @Test func anUndecidedOptionalCardHoldsTheGateShut() async {
         let vc = makeVC(model: makeGrantableModel())
         await vc.test_allow([.audio, .localNetwork])
-        #expect(vc.test_doneExists)
         #expect(vc.test_activeStep == .bluetooth, "the flow still offers them")
+        #expect(!vc.test_doneExists, "…and the CTA waits for the answer")
+
+        vc.test_tapSkip(.bluetooth)
+        #expect(!vc.test_doneExists, "Remote Control is still undecided")
+
+        vc.test_tapSkip(.remoteControl)
+        #expect(vc.test_doneExists, "a skip is a decision — the gate opens")
     }
 
     @Test func returnBelongsToTheActiveAllowUntilDoneExists() async {
@@ -775,16 +785,21 @@ import Testing
         #expect(vc.test_allowIsReturnDefault(.audio))
 
         await vc.test_allow([.audio, .localNetwork])
+        #expect(vc.test_allowIsReturnDefault(.bluetooth),
+                "the one live Allow keeps Return while any card is undecided")
 
-        #expect(vc.test_doneIsReturnDefault)
-        #expect(!vc.test_allowIsReturnDefault(.bluetooth),
-                "Done takes Return the moment it exists")
+        vc.test_tapSkip(.bluetooth)
+        vc.test_tapSkip(.remoteControl)
+
+        #expect(vc.test_doneIsReturnDefault, "Done takes Return the moment it exists")
     }
 
     @Test func doneFinishesWhenReVerificationPasses() async {
         var doneFired = false
         let vc = makeVC(model: makeGrantableModel(), onDone: { doneFired = true })
         await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        vc.test_tapSkip(.remoteControl)
 
         await vc.test_tapDone()
 
@@ -800,6 +815,8 @@ import Testing
         let vc = makeVC(model: makeGrantableModel(silentAudio: .denied),
                         onDone: { doneFired = true })
         await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        vc.test_tapSkip(.remoteControl)
         #expect(vc.test_doneExists)
 
         await vc.test_tapDone()
@@ -824,6 +841,8 @@ import Testing
                                          ptpHelper: FakePTPHelper(status: .enabled)),
                         onDone: { doneCount += 1 })
         await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        vc.test_tapSkip(.remoteControl)
         #expect(vc.test_doneExists)
 
         net.armParking()
@@ -854,6 +873,8 @@ import Testing
                                          ptpHelper: FakePTPHelper(status: .enabled)),
                         onDone: { doneCount += 1 })
         await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        vc.test_tapSkip(.remoteControl)
 
         net.armParking()
         let first = Task { await vc.test_tapDone() }
@@ -881,6 +902,8 @@ import Testing
     @Test func theGateButtonIsTheGoldStartListeningCTA() async {
         let vc = makeVC(model: makeGrantableModel())
         await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        vc.test_tapSkip(.remoteControl)
 
         #expect(vc.test_doneExists)
         #expect(vc.test_doneTitle == "Start listening")
@@ -895,6 +918,8 @@ import Testing
         #expect(vc.test_subtitleText == OnboardingViewController.welcomeSubtitle)
 
         await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        vc.test_tapSkip(.remoteControl)
 
         #expect(vc.test_doneExists)
         #expect(vc.test_subtitleText == OnboardingViewController.welcomeSubtitle)
@@ -917,6 +942,8 @@ import Testing
                 "the warning shows while its permission is missing")
 
         await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        vc.test_tapSkip(.remoteControl)
 
         #expect(vc.test_doneExists)
         #expect(vc.test_subtitleText == OnboardingViewController.welcomeSubtitle)

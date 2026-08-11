@@ -27,7 +27,19 @@ set changes, or when the gate/motion/demo rules change.
 - **Setup is a GATE, not guidance** (owner decision 2026-08-11 — this REVERSES the
   documented "setup is guidance, not a gate" decision, so read the history before
   changing it back). Done is **ABSENT from the view hierarchy** until
-  `SetupFlowModel.isDoneAvailable`; never disabled, never alpha-hidden. There is no
+  `SetupFlowModel.isDoneAvailable`; never disabled, never alpha-hidden. **The gate
+  is two conditions** (owner decision 2026-08-11, tightened live after the CTA
+  appeared beside a still-undecided Remote Control card): every REQUIRED
+  permission granted, AND **no card still active** — every walked step granted,
+  auto-passed, or explicitly skipped. The optional cards' permissions never hold
+  Done shut, but an UNDECIDED optional card does; a skip is the decision that
+  clears it. Both the gate and the demo pane's settled finale key off
+  `activeStep == nil`, so the CTA, the finale, and its one-shot ripple land on
+  the same beat. `verifyForDone()` still re-verifies REQUIRED permissions only —
+  a skip is a decision, not a permission. On a `.permissionLost` re-entry the
+  walk starts at the lost step, so an undecided optional card BEHIND that start
+  is not walked and cannot block Done; one AFTER it (Remote Control) is shown
+  and must be decided, as the flow always re-offered it. There is no
   "Continue without every permission?" sheet — it and its paths were deleted in the
   same change. Clicking Done re-verifies (`verifyForDone()`, silent reads only) and
   on failure snaps the flow back to the card that came up short. **The verification

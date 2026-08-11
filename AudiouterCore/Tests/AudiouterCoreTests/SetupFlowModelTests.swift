@@ -111,13 +111,14 @@ import Testing
         bluetoothPrimer: BluetoothPermissionPriming? = nil,
         bluetoothPromptTimeout: TimeInterval = 10,
         ptpHelper: PTPHelperStatus = .notRegistered,
+        ptpHelperManager: PTPHelperManaging? = nil,
         remoteControlTrusted: Bool = false,
         localNetworkGated: Bool = true
     ) -> SetupModel {
         SetupModel(audioProbe: CannedAudioProbe(result: audio),
                    localNetwork: localNetwork ?? CannedLocalNetwork(reachable: localNetworkReachable),
                    remoteControl: CannedRemoteControl(trusted: remoteControlTrusted),
-                   ptpHelper: CannedPTPHelper(status: ptpHelper),
+                   ptpHelper: ptpHelperManager ?? CannedPTPHelper(status: ptpHelper),
                    bluetoothReader: SimulatedBluetoothPermission(status: bluetooth),
                    bluetoothPrimer: bluetoothPrimer ?? SimulatedBluetoothPermission(status: bluetooth),
                    settings: AppSettings(defaults: isolatedDefaults),
@@ -195,6 +196,7 @@ import Testing
 
         #expect(flow.activeStep == nil)
         #expect(SetupFlowModel.steps.allSatisfy { flow.display($0) == .completed })
+        #expect(flow.isDoneAvailable, "every card decided by a grant opens the gate")
     }
 
     // MARK: Skipping
@@ -244,7 +246,9 @@ import Testing
 
         #expect(flow.isComplete(.audio))
         #expect(setup.audioStatus == .unsupported, "the status itself is never faked")
-        #expect(flow.isDoneAvailable)
+        flow.skip(.bluetooth)
+        flow.skip(.remoteControl)
+        #expect(flow.isDoneAvailable, "the auto-pass counts as decided — it never blocks the gate")
     }
 
     /// macOS 14 has no Local Network privacy gate at all — nothing to grant, and
@@ -256,7 +260,9 @@ import Testing
 
         #expect(flow.isComplete(.localNetwork))
         #expect(flow.activeStep == .bluetooth, "the ungated card is passed, not asked")
-        #expect(flow.isDoneAvailable)
+        flow.skip(.bluetooth)
+        flow.skip(.remoteControl)
+        #expect(flow.isDoneAvailable, "the auto-pass counts as decided — it never blocks the gate")
     }
 
     // MARK: The Done gate
@@ -268,15 +274,22 @@ import Testing
         await prime(partial)
         #expect(!SetupFlowModel(setup: partial).isDoneAvailable, "Speaker Sync still unmet")
 
-        #expect(await makeFullyGrantedFlow().isDoneAvailable)
+        let flow = await makeFullyGrantedFlow()
+        flow.skip(.bluetooth)
+        flow.skip(.remoteControl)
+        #expect(flow.isDoneAvailable)
     }
 
-    /// The two skippable cards are outside `RequiredPermission`, so neither an
-    /// untouched nor a skipped one can hold Done shut.
-    @Test func skippableStepsNeverAffectTheGate() async {
+    /// Owner decision 2026-08-11 (tightened gate): the optional cards'
+    /// PERMISSIONS stay outside the gate, but an UNDECIDED card holds it shut —
+    /// Done exists only once every card is granted, auto-passed, or explicitly
+    /// skipped, so the CTA can never sit beside a card still offering
+    /// Allow/Skip. A skip is the decision that clears it.
+    @Test func anUndecidedOptionalCardHoldsTheGateAndASkipOpensIt() async {
         let flow = await makeFullyGrantedFlow()
-        #expect(flow.isDoneAvailable)
+        #expect(!flow.isDoneAvailable, "Bluetooth is still sitting undecided")
         flow.skip(.bluetooth)
+        #expect(!flow.isDoneAvailable, "…and Remote Control after it")
         flow.skip(.remoteControl)
         #expect(flow.isDoneAvailable)
     }
@@ -358,11 +371,46 @@ import Testing
     }
 
     /// Reopening a fully-satisfied setup by hand has no required step to land
-    /// on, so it offers the optional ones — and Done is available throughout.
+    /// on, so it offers the optional ones — and with the tightened gate they
+    /// must each be decided (the skip set is per-presentation) before Done
+    /// exists.
     @Test func reEntryWithNothingUnmetOffersTheOptionalSteps() async {
         let flow = await makeFullyGrantedFlow()
         #expect(flow.activeStep == .bluetooth)
+        #expect(!flow.isDoneAvailable, "the offered cards are undecided this presentation")
+        flow.skip(.bluetooth)
+        flow.skip(.remoteControl)
         #expect(flow.isDoneAvailable)
+    }
+
+    /// A `.permissionLost` re-entry: the walk starts at the lost required step,
+    /// so an undecided optional card BEHIND that start (Bluetooth here) is not
+    /// walked and can never hold the tightened gate — re-granting the lost
+    /// permission plus deciding the cards the flow actually shows (Remote
+    /// Control, which the flow re-activated on re-entry before this gate
+    /// existed too) is all Done asks for.
+    @Test func reEntryGateIgnoresOptionalCardsBehindTheStart() async {
+        let helper = MutablePTPHelper(.requiresApproval)
+        let setup = makeSetup(audio: .granted, localNetworkReachable: true, ptpHelperManager: helper)
+        await prime(setup)
+        let flow = SetupFlowModel(setup: setup)
+        #expect(flow.activeStep == .speakerSync, "the re-entry opens on the lost step")
+
+        helper.status = .enabled          // the Login Items re-grant lands…
+        await setup.refreshStatuses()     // …and the focus-return refresh sees it
+
+        #expect(flow.activeStep == .remoteControl, "the walk continues to the card it shows")
+        #expect(!flow.isDoneAvailable, "that shown card is undecided")
+        flow.skip(.remoteControl)
+        #expect(flow.isDoneAvailable, "Bluetooth, behind the start, never blocked the gate")
+    }
+
+    private final class MutablePTPHelper: PTPHelperManaging {
+        var status: PTPHelperStatus
+        init(_ status: PTPHelperStatus) { self.status = status }
+        func register() throws {}
+        func openSystemSettingsLoginItems() {}
+        func unregister() async throws {}
     }
 
     // MARK: The Allow click (sequencing rules)

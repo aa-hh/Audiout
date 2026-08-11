@@ -103,7 +103,9 @@ public final class SetupFlowModel {
     public static let steps: [SetupStep] = [.audio, .localNetwork, .bluetooth, .speakerSync, .remoteControl]
 
     /// The two steps a user may pass on. Both are excluded from
-    /// ``RequiredPermission``, so skipping one can never affect the gate.
+    /// ``RequiredPermission``, so their PERMISSIONS never hold Done shut — but
+    /// an UNDECIDED one does: the gate waits for every card to be decided, and
+    /// a skip is the decision that clears it (see ``isDoneAvailable``).
     public static let skippableSteps: Set<SetupStep> = [.bluetooth, .remoteControl]
 
     /// Steps the user explicitly passed on. Skipped is NOT granted: such a step
@@ -280,11 +282,28 @@ public final class SetupFlowModel {
     }
 
     /// Whether Done may exist at all. The Wispr gate: the button is ABSENT from
-    /// the layout until this is true, never present-but-disabled. Bluetooth and
-    /// Remote Control are outside ``RequiredPermission`` and so can never hold
-    /// it shut.
+    /// the layout until this is true, never present-but-disabled.
+    ///
+    /// Two conditions, deliberately different in kind (owner decision
+    /// 2026-08-11, tightening the required-only gate after the CTA appeared
+    /// live beside a still-undecided Remote Control card):
+    ///
+    /// - **Every required permission is granted** — the product gate.
+    ///   Bluetooth and Remote Control stay outside ``RequiredPermission``, so
+    ///   their PERMISSIONS can never hold Done shut, and ``verifyForDone()``
+    ///   still re-verifies the required set only.
+    /// - **No card is still active** — every walked step is granted,
+    ///   auto-passed, or explicitly skipped. A skip is a decision; an
+    ///   untouched optional card is not, and the finale CTA must never appear
+    ///   beside a card still offering Allow/Skip. This also puts the gate, the
+    ///   demo pane's settled finale, and its one-shot ripple on the same beat
+    ///   (both key off `activeStep == nil`).
+    ///
+    /// The required check is not redundant: `activeStep` only walks from the
+    /// re-entry start index, so a required permission GRANTED at entry but
+    /// revoked mid-presentation is caught here, not by the walk.
     public var isDoneAvailable: Bool {
-        setup.requiredPermissionsNotGranted().isEmpty
+        setup.requiredPermissionsNotGranted().isEmpty && activeStep == nil
     }
 
     /// Re-verify everything behind a Done tap: SILENT reads only — never the

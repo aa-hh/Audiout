@@ -48,6 +48,18 @@ import AudiouterCore
 import AudiouterPopoverUI
 import AudiouterSharedUI
 
+/// Resolve `name` AND pin it as the app-level appearance. On Darwin 27,
+/// system-drawn artwork (source-list selection pills, segmented controls)
+/// resolves against the APP's effective appearance, so per-window/view
+/// overrides alone leave those pieces rendered in the host system's mode
+/// (found via window-snapshot's light captures on a dark-mode host).
+@MainActor
+func snapshotAppearance(_ name: NSAppearance.Name) -> NSAppearance? {
+    let appearance = NSAppearance(named: name)
+    NSApp.appearance = appearance
+    return appearance
+}
+
 @MainActor
 func waitForFleet(_ backend: MockBackend, count: Int, timeout: TimeInterval = 3) -> Bool {
     let deadline = Date().addingTimeInterval(timeout)
@@ -165,7 +177,7 @@ func snapshot(appearanceName: NSAppearance.Name, label: String, outDir: URL) {
 
     // Host the assembled panel in an offscreen window so the card materials /
     // vibrancy render, under the requested appearance.
-    let appearance = NSAppearance(named: appearanceName)
+    let appearance = snapshotAppearance(appearanceName)
     let panelView = popover.test_panelView
     panelView.appearance = appearance
     panelView.layoutSubtreeIfNeeded()
@@ -295,7 +307,7 @@ func snapshotMeters(appearanceName: NSAppearance.Name, label: String, outDir: UR
         popover.test_pushAppLevel(rms, for: bundleID)
     }
 
-    let appearance = NSAppearance(named: appearanceName)
+    let appearance = snapshotAppearance(appearanceName)
     let panelView = popover.test_panelView
     panelView.appearance = appearance
     panelView.layoutSubtreeIfNeeded()
@@ -458,7 +470,7 @@ private func stageEnergize(fleet: [Device], reduceMotion: Bool,
     }
     popover.test_setEnergizePending(["en-office", "en-bedroom"])
 
-    let appearance = NSAppearance(named: appearanceName)
+    let appearance = snapshotAppearance(appearanceName)
     let panelView = popover.test_panelView
     panelView.appearance = appearance
     panelView.layoutSubtreeIfNeeded()
@@ -563,7 +575,7 @@ func snapshotConnectionStates(appearanceName: NSAppearance.Name, label: String, 
     popover.update(devices: fleet)
     popover.test_simulateOpen()   // reopen-style rebuild so the Devices card renders
 
-    let appearance = NSAppearance(named: appearanceName)
+    let appearance = snapshotAppearance(appearanceName)
     let panelView = popover.test_panelView
     panelView.appearance = appearance
     panelView.layoutSubtreeIfNeeded()
@@ -654,7 +666,7 @@ func snapshotLiveRouting(appearanceName: NSAppearance.Name, label: String, outDi
     popover.update(devices: backend.devices)
     popover.test_simulateOpen()   // reopen-style rebuild so the Applications card expands
 
-    let appearance = NSAppearance(named: appearanceName)
+    let appearance = snapshotAppearance(appearanceName)
     let panelView = popover.test_panelView
     panelView.appearance = appearance
     panelView.layoutSubtreeIfNeeded()
@@ -731,7 +743,7 @@ func snapshotDormantGroup(appearanceName: NSAppearance.Name, label: String, outD
     popover.update(devices: backend.devices)
     popover.test_simulateOpen()   // reopen-style rebuild mounts the card note
 
-    let appearance = NSAppearance(named: appearanceName)
+    let appearance = snapshotAppearance(appearanceName)
     let panelView = popover.test_panelView
     panelView.appearance = appearance
     panelView.layoutSubtreeIfNeeded()
@@ -788,7 +800,7 @@ func snapshotRailDepth(appearanceName: NSAppearance.Name, label: String, outDir:
     popover.update(devices: backend.devices)
     popover.test_simulateOpen()
 
-    let appearance = NSAppearance(named: appearanceName)
+    let appearance = snapshotAppearance(appearanceName)
     let panelView = popover.test_panelView
     panelView.appearance = appearance
     panelView.layoutSubtreeIfNeeded()
@@ -838,7 +850,7 @@ func snapshotRestingRing(appearanceName: NSAppearance.Name, label: String, outDi
     popover.update(devices: backend.devices)
     popover.test_simulateOpen()
 
-    let appearance = NSAppearance(named: appearanceName)
+    let appearance = snapshotAppearance(appearanceName)
     let panelView = popover.test_panelView
     panelView.appearance = appearance
     panelView.layoutSubtreeIfNeeded()
@@ -910,7 +922,7 @@ func snapshotLocalMixBlocked(appearanceName: NSAppearance.Name, label: String, o
     // animation's completion handler.
     drain(0.1)
 
-    let appearance = NSAppearance(named: appearanceName)
+    let appearance = snapshotAppearance(appearanceName)
     let panelView = popover.test_panelView
     panelView.appearance = appearance
     panelView.layoutSubtreeIfNeeded()
@@ -1018,7 +1030,7 @@ func snapshotFeedComposite(appearanceName: NSAppearance.Name, label: String, out
     popover.update(devices: backend.devices)
     popover.test_simulateOpen()   // reopen-style rebuild so the Applications card expands
 
-    let appearance = NSAppearance(named: appearanceName)
+    let appearance = snapshotAppearance(appearanceName)
     let panelView = popover.test_panelView
     panelView.appearance = appearance
     panelView.layoutSubtreeIfNeeded()

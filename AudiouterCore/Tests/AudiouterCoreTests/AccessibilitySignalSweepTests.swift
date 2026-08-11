@@ -246,11 +246,15 @@ import AudiouterCore
     @Test func flattenedCanvasIsTheFlatOpaqueBaseColor() {
         // §D: under Reduce Transparency / Increase Contrast the canvas is the
         // FLAT `canvas` color — no gradient (top pixel == bottom pixel), no
-        // grain. Light appearance sidesteps the dark-only grain so the
-        // gradient-vs-flat comparison is exact.
+        // grain. DARK appearance carries the comparison: light mode is flat
+        // even un-flattened (Circuit light theme — `canvasHi` == `canvas`,
+        // the gradient deliberately collapses), so only dark can distinguish
+        // flattened from graded. The dark-only grain doesn't confound either
+        // half — the flatten branch removes it along with the gradient, and
+        // in the graded half it only adds to the delta the assertion wants.
         let size = NSRect(x: 0, y: 0, width: 32, height: 32)
         let canvas = WarmCanvasView(frame: size)
-        canvas.appearance = NSAppearance(named: .aqua)
+        canvas.appearance = NSAppearance(named: .darkAqua)
 
         canvas.test_flattenOverride = true
         guard let flat = bitmap(of: canvas) else {

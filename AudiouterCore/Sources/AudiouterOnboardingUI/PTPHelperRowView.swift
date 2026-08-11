@@ -122,9 +122,8 @@ final class PTPHelperRowView: NSView {
     func update(status: PTPHelperStatus) {
         lastStatus = status
 
-        // Approval "lights" the icon gold, same as a granted permission row
-        // (spec §5.8; the "Enabled" chip below is the VoiceOver-visible state).
-        iconTile.setLit(status == .enabled)
+        // The glyph keeps its tint in every status, same as the permission
+        // rows — the "Enabled" chip alone carries the state.
 
         for v in accessory.arrangedSubviews { accessory.removeArrangedSubview(v); v.removeFromSuperview() }
 

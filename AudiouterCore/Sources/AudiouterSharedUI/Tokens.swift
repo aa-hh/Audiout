@@ -143,6 +143,22 @@ public enum Tokens {
 
         // MARK: Warm Signal custom palette (V2, spec §1)
         //
+        // LIGHT MODE = CIRCUIT (decision, Alec 2026-08-07 — see
+        // docs/FIGMA-DESIGN-SYSTEM.md "Light mode = Circuit theme"): the
+        // SCAFFOLDING tokens' light/lightHC values below are the resolved
+        // hexes of the `Theme · Circuit` collection (`@sumup-oss/design-tokens`
+        // light theme), pulled across from the Figma proposal. Instruments
+        // (gold family, `failure`, `caution`, rings, meters incl. `meterTrack`,
+        // fader hardware, permission hues) are NEVER Circuit-mapped in any
+        // mode — they keep their authored Warm Signal values. Dark modes stay
+        // pure Warm Signal. NOTE ON OLDER LIGHT RATIOS: rationales below that
+        // measured a light instrument against the warm-paper grounds
+        // (`#F4EFE7` canvas / `#FBF8F2` panel / `#ECE5D8` well) predate this
+        // mapping; the Circuit grounds are LIGHTER, so every such
+        // dark-instrument-on-light-ground ratio only improves (re-measured
+        // values: docs/FIGMA-DESIGN-SYSTEM.md "Contrast, measured
+        // 2026-08-07").
+        //
         // The ONE place a custom (non-semantic) RGB value may live, per root
         // AGENTS.md's governance rule ("Every `Tokens.Color` case ships
         // light + dark + Increase Contrast variants with a documented
@@ -164,24 +180,29 @@ public enum Tokens {
         /// (`ControlPanelBackingView.draw`, §5.4 — W8) so shell chrome and
         /// hosted transparent content read as one warm shape. No stated
         /// contrast floor (it's a background, not a foreground instrument),
-        /// so no separate Increase Contrast value.
+        /// so no separate Increase Contrast value. Light = Circuit
+        /// `bg/normal` `#FBFBF9`.
         public static var canvas: NSColor {
-            warmDynamic(name: "canvas", dark: 0x16130F, light: 0xF4EFE7)
+            warmDynamic(name: "canvas", dark: 0x16130F, light: 0xFBFBF9)
         }
         /// Canvas gradient top (§1.1/§1.2), paired with `canvas` by
         /// `WarmCanvasView`'s vertical gradient. No stated contrast floor.
+        /// Light = Circuit `bg/normal`, SAME as `canvas` — the gradient
+        /// deliberately collapses flat in light mode (Circuit decision).
         public static var canvasHi: NSColor {
-            warmDynamic(name: "canvasHi", dark: 0x1B1712, light: 0xF7F3EC)
+            warmDynamic(name: "canvasHi", dark: 0x1B1712, light: 0xFBFBF9)
         }
         /// Card/panel fill — "the reference canvas a ring sits on" (§1).
-        /// No stated contrast floor.
+        /// No stated contrast floor. Light = Circuit `bg/normal` (surface
+        /// separation in light comes from hairlines, not fill steps).
         public static var panel: NSColor {
-            warmDynamic(name: "panel", dark: 0x1D1915, light: 0xFBF8F2)
+            warmDynamic(name: "panel", dark: 0x1D1915, light: 0xFBFBF9)
         }
         /// Raised well fill (icon well, blocked-checkbox fill, §1). No
-        /// stated contrast floor.
+        /// stated contrast floor. Light = Circuit `bg/normal`, flush with
+        /// the flat Circuit ground.
         public static var raised: NSColor {
-            warmDynamic(name: "raised", dark: 0x241F1A, light: 0xFFFFFF)
+            warmDynamic(name: "raised", dark: 0x241F1A, light: 0xFBFBF9)
         }
         /// Inset well fill (slider track trough, dropdown fill, §1). First
         /// consumer: `WarmFaderCell`'s recessed trough. CONTRAST RATIONALE
@@ -192,13 +213,18 @@ public enum Tokens {
         /// than `canvas` (1.05:1, a true recess whose edge the `faderRim`
         /// carries) — which lifts every fill drawn on it (measured, WCAG
         /// relative luminance: `ringConnected` 4.82:1, `faderThumb` 4.44:1,
-        /// `ember` 3.86:1, `gold` 10.51:1). Light `#ECE5D8` is unchanged
-        /// (the spec hex; darkening it would LOWER the light thumb/fill
-        /// ratios, which run darker than the well). Backgrounds carry no IC
-        /// variant (same precedent as `canvas`/`panel`/`raised`); the fills
-        /// and rim drawn on the well brighten under IC instead.
+        /// `ember` 3.86:1, `gold` 10.51:1). Light = Circuit `bg/highlight`
+        /// `#E8E6DC` rather than `bg/subtle` (Alec's call on the Circuit
+        /// pull): `bg/subtle` measured 1.06:1 vs the flat Circuit `panel`,
+        /// under the membership checklist's locked 1.10:1 surface-separation
+        /// floor (`MembershipWellContrastTests`) — `bg/highlight` holds it at
+        /// 1.20:1 while staying a Circuit-family hex, and every dark fill
+        /// drawn in the well keeps its headroom (`faderThumb` 3.33:1).
+        /// Backgrounds carry no IC variant (same precedent as
+        /// `canvas`/`panel`/`raised`); the fills and rim drawn on the well
+        /// brighten under IC instead.
         public static var well: NSColor {
-            warmDynamic(name: "well", dark: 0x100D0A, light: 0xECE5D8)
+            warmDynamic(name: "well", dark: 0x100D0A, light: 0xE8E6DC)
         }
         /// 1px section-divider hairline (§5.1 — the ONLY visual separation
         /// between de-nested cards now that they no longer draw their own
@@ -215,12 +241,18 @@ public enum Tokens {
         /// sweep's job, not V2's — V2 only has to make Increase Contrast
         /// itself clear the floor. Light's table entry states NO floor
         /// ("—"), but house rule 3 requires every case to ship an IC variant
-        /// regardless, so a symmetrical darkened warm-tan (`#9B8768`,
-        /// ≈3.25:1 vs light `panel` `#FBF8F2`) is used there too — the
-        /// quietest reasonable choice, not a spec requirement.
+        /// regardless. Light base is Circuit `border/normal` `#D0CDC3`
+        /// rather than `border/divider` (Alec's call on the Circuit pull:
+        /// `border/divider` measured 1.21:1 vs the flat Circuit `panel`,
+        /// under the checklist's locked 1.25:1 separator floor —
+        /// `border/normal` holds it at 1.53:1, still a Circuit-family hex);
+        /// light IC is Circuit `fg/placeholder` `#76716B` (≈4.7:1 vs
+        /// `bg/normal` `#FBFBF9`) — a hue-consistent Circuit greige, since a
+        /// warm-tan divider would read off-family on the neutral Circuit
+        /// ground.
         public static var hairline: NSColor {
             warmDynamic(name: "hairline", dark: 0x3A332B, darkHighContrast: 0x786B5A,
-                       light: 0xE2DACC, lightHighContrast: 0x9B8768)
+                       light: 0xD0CDC3, lightHighContrast: 0x76716B)
         }
 
         /// The under-name level meter's EMPTY-track fill (`LevelMeterView`'s
@@ -276,7 +308,7 @@ public enum Tokens {
         /// `panel`).
         public static var sidebarWarmTint: NSColor {
             warmDynamic(name: "sidebarWarmTint", dark: 0x1F1A15, darkHighContrast: 0x2A241C,
-                       light: 0xF2EBDC, lightHighContrast: 0xE9DFC9)
+                       light: 0xF5F4ED, lightHighContrast: 0xE8E6DC)
         }
 
         // MARK: Connection-ring instruments (spec §3.2, S1)
@@ -339,13 +371,13 @@ public enum Tokens {
         // light `gold` `#A97F1E` ≈ 3.6:1 vs `panel` `#FBF8F2` (the deepened
         // paper-gold, spec §1.2's stated floor pick). `ember` is dimmer by design
         // (it's the connecting line, not the node): dark `#8A6A2F` ≈ 3.5:1 vs
-        // `panel`; light `#C2A05A` ≈ 2.0:1 vs `panel` — BELOW the 3:1 instrument
-        // floor as a hairline, but `ember` here is a 2 pt LINE paired with the
-        // high-contrast `gold` nodes it connects, and spec §1.2 lists `ember` at
-        // exactly this hex; per the spec's escape valve the Increase-Contrast
-        // variant is brightened/deepened to clear the floor (light IC `#9A7A2E`
-        // ≈ 3.4:1) while the base stays the spec hex (Wave-5 sweep owns any base
-        // re-tune). IC variants (my picks, flagged for the Wave-5 sweep like
+        // `panel`; light `#AC8C46` ≈ 3.07:1 vs Circuit `bg/normal` `#FBFBF9` —
+        // deeper than the spec's `#C2A05A` (≈2.4:1 on this ground, the one
+        // instrument the Circuit decision flagged as worth darkening), so it
+        // clears the floor while staying dimmer than light `gold` (`#A97F1E`,
+        // 3.53:1 on the same ground) and preserving the node/line hierarchy.
+        // The Increase-Contrast variant pushes further (light IC `#9A7A2E`
+        // ≈ 3.9:1). IC variants (my picks, flagged for the Wave-5 sweep like
         // `ringConnected`): dark `gold` `#F2C75E`, dark `ember` `#A5824A`, light
         // `gold` `#8A6614`, light `ember` `#9A7A2E`.
 
@@ -385,7 +417,7 @@ public enum Tokens {
         public static var ember: NSColor {
             accentDynamic(name: "ember",
                           full: WarmVariants(dark: 0x8A6A2F, darkHighContrast: 0xA5824A,
-                                             light: 0xC2A05A, lightHighContrast: 0x9A7A2E),
+                                             light: 0xAC8C46, lightHighContrast: 0x9A7A2E),
                           subtle: WarmVariants(dark: 0x6D5B34, darkHighContrast: 0x877146,
                                                light: 0xAE9668, lightHighContrast: 0x8A744C),
                           systemAccentScale: 0.55)
@@ -555,12 +587,16 @@ public enum Tokens {
         // `permissionRemoteControl` ("muted mauve"). Speaker Sync (previously
         // `.systemTeal`) does NOT get a warmed teal — Q1 moves it into the
         // GOLD family instead (`permissionSpeakerSync`, a deepened brass), the
-        // one row that was always going to end up gold-adjacent once granted.
+        // one gold-adjacent row.
         // Per Q3 the colour lands on the SF SYMBOL GLYPH ONLY — `IconTileView`
         // keeps its neutral `Tokens.Color.raised` fill and hairline rim
-        // untouched, exactly like every other tile. Per Q2 granting still
-        // crossfades the glyph the rest of the way to `Tokens.Color.gold` for
-        // all four rows, unchanged from the existing rule.
+        // untouched, exactly like every other tile. Q2 (grant crossfades the
+        // glyph to gold) is REVERSED (Alec, 2026-08-11): the identity hue is
+        // PERMANENT in every status — the row's "Allowed" status chip alone
+        // carries the granted state. Because the hue is a standing identity
+        // rather than a resting state, the Full columns carry real saturation
+        // (46-79 depending on family); the Subtle column stays muted, since
+        // muting is that dial position's whole job.
         //
         // DIAL RESOLUTION (Q5/NEW-1) deliberately does NOT reuse `accentDynamic`
         // (see `permissionDynamic` below for the two concrete reasons, verified
@@ -580,16 +616,17 @@ public enum Tokens {
         // there, not duplicated here): every hue below clears the gold/amber
         // window `[28°,68°)` — landing in it would misread an ungranted row as
         // already "granted" — and the failure-red window
-        // `[0°,12°) ∪ [350°,360°)`. Measured hues (own-theme Full column, all
-        // four stay within ~1-2° of these across every dial column/appearance/
-        // Increase-Contrast variant since only saturation/brightness shift):
-        // `permissionSystemAudio` ~210° (blue, already clear of both bands),
-        // `permissionLocalNetwork` ~274-276° (indigo warmed toward magenta),
-        // `permissionRemoteControl` ~321-324° (purple warmed toward pink),
-        // `permissionSpeakerSync` ~21-23° — strictly BELOW the gold band's 28°
-        // floor, the same terracotta corridor `AppTetherColor.steer` escapes a
-        // raw hue into when it steers off gold. That keeps all four ≥45° apart
-        // from each other and from both reserved bands in every one of the 32
+        // `[0°,12°) ∪ [350°,360°)`. Measured hues (own-theme Full column,
+        // stable within a few degrees across every dial column/appearance/
+        // Increase-Contrast variant since mostly saturation/brightness shift):
+        // `permissionSystemAudio` ~207-210° (blue, already clear of both
+        // bands), `permissionLocalNetwork` ~265-272° (indigo warmed toward
+        // magenta), `permissionRemoteControl` ~319-325° (purple warmed toward
+        // pink), `permissionSpeakerSync` ~23-26° — strictly BELOW the gold
+        // band's 28° floor, the same terracotta corridor
+        // `AppTetherColor.steer` escapes a raw hue into when it steers off
+        // gold. That keeps all four ≥45° apart (measured minimum 47°) from
+        // each other and from both reserved bands in every one of the 32
         // authored hexes (mutual-distinguishability check, Q1 criterion 4).
         //
         // CONTRAST (WCAG 2.x relative luminance — same formula as
@@ -609,100 +646,140 @@ public enum Tokens {
         // immediately after this case addition).
 
         /// Warmed & deepened from `.systemBlue` (System Audio's retired tile
-        /// colour) — a blue-grey "warm slate," the row's RESTING (ungranted)
-        /// glyph tint; granting crossfades to `gold` (Q2, unchanged). Hue
-        /// ~210° in every column/appearance — its own family, already clear of
-        /// both reserved bands (gold/amber `[28°,68°)`, failure-red
+        /// colour) — a blue "warm slate," the row's PERMANENT identity glyph
+        /// tint (granting never recolours it — the status chip carries state).
+        /// Hue ~207-210° in every column/appearance — its own family, already
+        /// clear of both reserved bands (gold/amber `[28°,68°)`, failure-red
         /// `[0°,12°)∪[350°,360°)`). CONTRAST RATIONALE (>=3:1 vs BOTH `panel`
-        /// and `raised`, both themes, both dial columns): Full dark `#75828F`
-        /// = 4.45:1 vs `panel` / 4.16:1 vs `raised`; Full light `#788B9E` =
-        /// 3.31:1 vs `panel` / 3.51:1 vs `raised`. Subtle (authored, not
-        /// derived): dark `#6C7680` = 3.78:1 vs `panel` / 3.53:1 vs `raised`;
-        /// light `#737D86` = 3.96:1 vs `panel` / 4.19:1 vs `raised` — clears
-        /// the same floor with the same margin discipline as Full, never
-        /// fading toward invisibility. IC variants push further from both
-        /// surfaces (my picks, flagged for a future contrast sweep like
-        /// `ringConnected`'s): Full dark `#9FAEBD` = 7.71:1 vs `panel`, Full
-        /// light `#4B5B6B` = 6.59:1 vs `panel`; Subtle dark `#8C98A3` =
-        /// 5.94:1 vs `panel`, Subtle light `#4B535B` = 7.37:1 vs `panel`.
-        /// Mutually distinguishable from the other three permission hues
-        /// (~275°/~322°/~22°) by >=45° in every column.
+        /// and `raised`, both themes, both dial columns; measured): Full dark
+        /// `#5B93C4` = 5.34:1 vs `panel` / 4.99:1 vs `raised`; Full light
+        /// `#3A79AE` = 4.48:1 vs `panel`. Subtle
+        /// (authored, not derived — the dial's mute stays muted): dark
+        /// `#6C7680` = 3.78:1 vs `panel` / 3.53:1 vs `raised`; light
+        /// `#737D86` = 3.96:1 vs `panel` / 4.19:1 vs `raised`. IC variants
+        /// push further from both surfaces: Full dark `#8FB6DC` = 8.23:1 vs
+        /// `panel`, Full light `#2A5C89` = 6.78:1 vs `panel`; Subtle dark
+        /// `#8C98A3` = 5.94:1 vs `panel`, Subtle light `#4B535B` = 7.37:1 vs
+        /// `panel`. Mutually distinguishable from the other three permission
+        /// hues (~271°/~320°/~23°) by >=47° in every column.
         public static var permissionSystemAudio: NSColor {
             permissionDynamic(name: "permissionSystemAudio",
-                              full: WarmVariants(dark: 0x75828F, darkHighContrast: 0x9FAEBD,
-                                                 light: 0x788B9E, lightHighContrast: 0x4B5B6B),
+                              full: WarmVariants(dark: 0x5B93C4, darkHighContrast: 0x8FB6DC,
+                                                 light: 0x3A79AE, lightHighContrast: 0x2A5C89),
                               subtle: WarmVariants(dark: 0x6C7680, darkHighContrast: 0x8C98A3,
                                                    light: 0x737D86, lightHighContrast: 0x4B535B))
         }
 
         /// Warmed & deepened from `.systemIndigo` (Local Network's retired tile
         /// colour) — a "dusty plum," warmed toward magenta off indigo's cooler
-        /// blue-purple; granting crossfades to `gold` (Q2, unchanged). Hue
-        /// ~274-276° in every column/appearance, clear of both reserved bands.
-        /// CONTRAST RATIONALE: Full dark `#816D8F` = 3.76:1 vs `panel` /
-        /// 3.51:1 vs `raised`; Full light `#887199` = 4.07:1 vs `panel` /
-        /// 4.31:1 vs `raised`. Subtle (authored): dark `#776882` = 3.40:1 vs
+        /// blue-purple; the row's PERMANENT identity tint (see
+        /// ``permissionSystemAudio``). Hue ~265-272° in every
+        /// column/appearance, clear of both reserved bands. CONTRAST
+        /// RATIONALE (measured): Full dark `#9A6BC6` = 4.40:1 vs `panel` /
+        /// 4.12:1 vs `raised`; Full light `#7749B5` = 5.95:1 vs `panel`.
+        /// Subtle (authored): dark `#776882` = 3.40:1 vs
         /// `panel` / 3.18:1 vs `raised`; light `#7A6E82` = 4.52:1 vs `panel` /
-        /// 4.79:1 vs `raised`. IC variants (my picks, flagged for a future
-        /// sweep): Full dark `#A78FB8` = 6.04:1 vs `panel`, Full light
-        /// `#584366` = 8.22:1 vs `panel`; Subtle dark `#9988A6` = 5.35:1 vs
-        /// `panel`, Subtle light `#4F4557` = 8.53:1 vs `panel`. Mutually
-        /// distinguishable from the other three permission hues (~210°/
-        /// ~322°/~22°) by >=45° in every column.
+        /// 4.79:1 vs `raised`. IC variants: Full dark `#BE9BDD` = 7.42:1 vs
+        /// `panel`, Full light `#5B3690` = 8.53:1 vs `panel`; Subtle dark
+        /// `#9988A6` = 5.35:1 vs `panel`, Subtle light `#4F4557` = 8.53:1 vs
+        /// `panel`. Mutually distinguishable from the other three permission
+        /// hues (~208°/~320°/~23°) by >=47° in every column.
         public static var permissionLocalNetwork: NSColor {
             permissionDynamic(name: "permissionLocalNetwork",
-                              full: WarmVariants(dark: 0x816D8F, darkHighContrast: 0xA78FB8,
-                                                 light: 0x887199, lightHighContrast: 0x584366),
+                              full: WarmVariants(dark: 0x9A6BC6, darkHighContrast: 0xBE9BDD,
+                                                 light: 0x7749B5, lightHighContrast: 0x5B3690),
                               subtle: WarmVariants(dark: 0x776882, darkHighContrast: 0x9988A6,
                                                    light: 0x7A6E82, lightHighContrast: 0x4F4557))
         }
 
         /// Warmed & deepened from `.systemPurple` (Remote Control's retired
         /// tile colour) — a "muted mauve," warmed toward pink off purple's
-        /// cooler violet; granting crossfades to `gold` (Q2, unchanged). Hue
-        /// ~321-324° in every column/appearance, clear of both reserved bands.
-        /// CONTRAST RATIONALE: Full dark `#8C6D81` = 3.84:1 vs `panel` /
-        /// 3.59:1 vs `raised`; Full light `#9E7890` = 3.57:1 vs `panel` /
-        /// 3.79:1 vs `raised`. Subtle (authored): dark `#806977` = 3.50:1 vs
+        /// cooler violet; the row's PERMANENT identity tint (see
+        /// ``permissionSystemAudio``). Hue ~319-325° in every
+        /// column/appearance, clear of both reserved bands. CONTRAST
+        /// RATIONALE (measured): Full dark `#C066A2` = 4.71:1 vs `panel` /
+        /// 4.40:1 vs `raised`; Full light `#AF3E7F` = 5.31:1 vs `panel`.
+        /// Subtle (authored): dark `#806977` = 3.50:1 vs
         /// `panel` / 3.27:1 vs `raised`; light `#86737F` = 4.15:1 vs `panel` /
-        /// 4.40:1 vs `raised`. IC variants (my picks, flagged for a future
-        /// sweep): Full dark `#BA95AC` = 6.64:1 vs `panel`, Full light
-        /// `#6B495F` = 7.22:1 vs `panel`; Subtle dark `#A3899A` = 5.49:1 vs
-        /// `panel`, Subtle light `#5B4A55` = 7.75:1 vs `panel`. Mutually
-        /// distinguishable from the other three permission hues (~210°/
-        /// ~275°/~22°) by >=45° in every column.
+        /// 4.40:1 vs `raised`. IC variants: Full dark `#D494C0` = 7.32:1 vs
+        /// `panel`, Full light `#852B66` = 8.00:1 vs `panel`; Subtle dark
+        /// `#A3899A` = 5.49:1 vs `panel`, Subtle light `#5B4A55` = 7.75:1 vs
+        /// `panel`. Mutually distinguishable from the other three permission
+        /// hues (~208°/~271°/~23°) by >=47° in every column.
         public static var permissionRemoteControl: NSColor {
             permissionDynamic(name: "permissionRemoteControl",
-                              full: WarmVariants(dark: 0x8C6D81, darkHighContrast: 0xBA95AC,
-                                                 light: 0x9E7890, lightHighContrast: 0x6B495F),
+                              full: WarmVariants(dark: 0xC066A2, darkHighContrast: 0xD494C0,
+                                                 light: 0xAF3E7F, lightHighContrast: 0x852B66),
                               subtle: WarmVariants(dark: 0x806977, darkHighContrast: 0xA3899A,
                                                    light: 0x86737F, lightHighContrast: 0x5B4A55))
         }
 
         /// Speaker Sync's retired tile colour was `.systemTeal`, but per Q1 it
         /// does NOT get a warmed teal — it moves INTO the gold family instead,
-        /// a deepened "brass." Hue ~21-23° in every column/appearance:
-        /// strictly BELOW the gold/amber reserved band's 28° floor (the same
-        /// terracotta corridor `AppTetherColor.steer` escapes a raw hue into
-        /// off gold), so a resting Speaker Sync row reads as warm/golden-
-        /// adjacent WITHOUT being mistaken for the vivid granted `gold`
-        /// (~42°) it crossfades to on grant (Q2, unchanged) — also clear of
-        /// the failure-red band. CONTRAST RATIONALE: Full dark `#916B54` =
-        /// 3.69:1 vs `panel` / 3.45:1 vs `raised`; Full light `#8F634A` =
-        /// 4.89:1 vs `panel` / 5.18:1 vs `raised`. Subtle (authored): dark
-        /// `#876A59` = 3.52:1 vs `panel` / 3.29:1 vs `raised`; light `#796356`
-        /// = 5.31:1 vs `panel` / 5.63:1 vs `raised`. IC variants (my picks,
-        /// flagged for a future sweep): Full dark `#BD8D71` = 6.00:1 vs
-        /// `panel`, Full light `#613D29` = 8.97:1 vs `panel`; Subtle dark
-        /// `#A88672` = 5.26:1 vs `panel`, Subtle light `#524036` = 9.23:1 vs
-        /// `panel`. Mutually distinguishable from the other three permission
-        /// hues (~210°/~275°/~322°) by >=45° in every column.
+        /// a deepened "brass"; the row's PERMANENT identity tint (see
+        /// ``permissionSystemAudio``). Hue ~23-25° in every
+        /// column/appearance: strictly BELOW the gold/amber reserved band's
+        /// 28° floor (the same terracotta corridor `AppTetherColor.steer`
+        /// escapes a raw hue into off gold), so the row reads as warm/golden-
+        /// adjacent WITHOUT impersonating the accent `gold` (~42°) the app's
+        /// armed instruments wear — also clear of the failure-red band.
+        /// CONTRAST RATIONALE (measured): Full dark `#B86F41` = 4.48:1 vs
+        /// `panel` / 4.19:1 vs `raised`; Full light `#A55B22` = 4.92:1 vs
+        /// `panel`. Subtle (authored): dark `#876A59` =
+        /// 3.52:1 vs `panel` / 3.29:1 vs `raised`; light `#796356` = 5.31:1
+        /// vs `panel` / 5.63:1 vs `raised`. IC variants: Full dark `#D4996E`
+        /// = 7.14:1 vs `panel`, Full light `#7E4116` = 7.63:1 vs `panel`;
+        /// Subtle dark `#A88672` = 5.26:1 vs `panel`, Subtle light `#524036`
+        /// = 9.23:1 vs `panel`. Mutually distinguishable from the other three
+        /// permission hues (~208°/~271°/~320°) by >=47° in every column.
         public static var permissionSpeakerSync: NSColor {
             permissionDynamic(name: "permissionSpeakerSync",
-                              full: WarmVariants(dark: 0x916B54, darkHighContrast: 0xBD8D71,
-                                                 light: 0x8F634A, lightHighContrast: 0x613D29),
+                              full: WarmVariants(dark: 0xB86F41, darkHighContrast: 0xD4996E,
+                                                 light: 0xA55B22, lightHighContrast: 0x7E4116),
                               subtle: WarmVariants(dark: 0x876A59, darkHighContrast: 0xA88672,
                                                    light: 0x796356, lightHighContrast: 0x524036))
+        }
+
+        // MARK: FEED-pill instruments (Circuit light pass, 2026-08-07 decision)
+        //
+        // The two tokens `FeedPillView` needs now that the pill reads by FILL
+        // ALONE (its border measured 1.14:1 dark / 1.00:1 light vs its own
+        // fill — decorative in both modes, so it was removed rather than
+        // tuned). First consumer: `FeedPillView` (fill) + `DeviceRowView`'s
+        // segment composition (text), replacing the stock
+        // `NSColor.quaternaryLabelColor` wash that measured a near-invisible
+        // 1.31:1 dark / 1.21:1 light vs `canvas`.
+
+        /// The FEED pill's fill (`FeedPillView`'s background) — a quiet but
+        /// PRESENT wash so a short value like "System" reads as a small
+        /// object. CONTRAST RATIONALE (measured for the 2026-08-07 decision):
+        /// dark `#38322B` = 1.46:1 vs `canvas` `#16130F` (was 1.31 on the
+        /// quaternary wash); light = Circuit `border/normal` `#D0CDC3` =
+        /// 1.54:1 vs `bg/normal` `#FBFBF9` (was 1.21). No instrument floor —
+        /// the pill's TEXT carries the signal; the failure-red error text
+        /// measures 3.24:1 on the dark fill and 3.50:1 on the light fill, so
+        /// an error still clears the graphical-object bar on the fill itself.
+        /// IC variants deepen the wash for definition (dark `#423B33`; light
+        /// = Circuit `bg/neutral-strong` `#C7C3B3`).
+        public static var feedPillFill: NSColor {
+            warmDynamic(name: "feedPillFill", dark: 0x38322B, darkHighContrast: 0x423B33,
+                       light: 0xD0CDC3, lightHighContrast: 0xC7C3B3)
+        }
+
+        /// The FEED pill's NEUTRAL text tone — mode-aware rather than a
+        /// forked component (design-system rule: "when one token cannot serve
+        /// both grounds, make it mode-aware"): resolves ``secondaryLabel`` in
+        /// dark but ``label`` in light, because secondary text on the light
+        /// `feedPillFill` measured 4.54:1 (barely body-passing) while `label`
+        /// lifts it to 10.66:1. Dark keeps the quieter secondary voice, which
+        /// already clears body contrast on the dark fill. App-tinted segments
+        /// keep their tether colors; this covers the neutral main-mix word,
+        /// the "+N" overflow pill, and the AP1 micro-tag.
+        public static var feedPillText: NSColor {
+            NSColor(name: NSColor.Name("WarmSignal.feedPillText")) { appearance in
+                let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                return isDark ? .secondaryLabelColor : .labelColor
+            }
         }
     }
 

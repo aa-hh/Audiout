@@ -1066,7 +1066,7 @@ public final class DeviceRowView: NSView {
         // the neutral word drops to `tertiaryLabel`, an app's tether tint
         // desaturates (never discarded outright, so the association still
         // reads once the row brightens back).
-        let neutralColor = controlsMuted ? Tokens.Color.tertiaryLabel : Tokens.Color.secondaryLabel
+        let neutralColor = controlsMuted ? Tokens.Color.tertiaryLabel : Tokens.Color.feedPillText
         if let mainMixSourceName { segments.append(.init(text: mainMixSourceName, color: neutralColor, hasChip: false)) }
         for name in feedAppNames {
             var color = appSegmentColor(for: name)
@@ -1099,7 +1099,7 @@ public final class DeviceRowView: NSView {
     /// feed entry. A name the host never mapped (defensive — every real
     /// caller populates the map from the same routes that produced
     /// `feedAppNames`) falls back to `AppTetherColor.neutralFallback` rather
-    /// than the flat `secondaryLabel` a neutral segment uses, so an app
+    /// than the flat `feedPillText` a neutral segment uses, so an app
     /// segment always reads as "a specific app," never as the neutral word.
     private func appSegmentColor(for appName: String) -> NSColor {
         appTintColors[appName] ?? AppTetherColor.neutralFallback
@@ -1141,7 +1141,7 @@ public final class DeviceRowView: NSView {
         // Item 8: the "+N" overflow pill and the AP1 micro-tag dim in
         // lockstep with the pills they sit beside — the same `controlsMuted`
         // gate ``updateFeedText()`` used to build `segments`.
-        let chromeColor = controlsMuted ? Tokens.Color.tertiaryLabel : Tokens.Color.secondaryLabel
+        let chromeColor = controlsMuted ? Tokens.Color.tertiaryLabel : Tokens.Color.feedPillText
 
         func attributed(_ segment: FeedSegment, prefixTag: Bool) -> NSAttributedString {
             let result = NSMutableAttributedString()

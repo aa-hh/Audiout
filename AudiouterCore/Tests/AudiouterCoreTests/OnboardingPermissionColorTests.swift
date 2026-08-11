@@ -221,39 +221,38 @@ extension SerializedSharedState {
         tile.layer?.displayIfNeeded()
     }
 
-    /// `PermissionRowView.update(status:)` and `PTPHelperRowView.update(status:)`
-    /// both forward straight to `IconTileView.setLit(status == .granted / .enabled)`
-    /// on their own PRIVATE `iconTile` field, and Swift's `private` is not
-    /// reachable from a different file even under `@testable import`. So this
-    /// test exercises `IconTileView.setLit` directly on a tile constructed
-    /// exactly the way both rows build theirs (`color:` = one of the four
-    /// permission tokens) — the identical call each row's `update(status:)`
-    /// makes on its own private field, just reached through a tile this test
-    /// owns instead of the row's.
-    @Test func grantedLightsGlyphGoldWithoutRecoloringTileFill() {
+    /// The glyph tint is PERMANENT (Alec, 2026-08-11 — the retired
+    /// grant-goes-gold crossfade duplicated the "Allowed" status chip): a
+    /// tile built the way both rows build theirs (`color:` = one of the four
+    /// permission tokens) must keep that exact identity hue, and the neutral
+    /// `raised` fill (Q3), through a full `update(status:)` sweep — this
+    /// exercises the REAL row, not just the tile, since nothing status-driven
+    /// touches the tile anymore and this test is what keeps it that way.
+    @Test func glyphTintAndTileFillSurviveEveryStatus() {
         for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
             for (name, color) in permissionTokens {
                 let tile = IconTileView(symbolName: "waveform", accessibility: name, color: color)
                 settle(tile, appearance: appearance)
 
-                #expect(!tile.isLit, "\(name)/\(appearance.rawValue): a freshly-built tile starts ungranted")
+                assertSameRGB(resolved(tile.test_restingTint ?? .clear, appearanceName: appearance),
+                             resolved(color, appearanceName: appearance),
+                             "\(name)/\(appearance.rawValue): the glyph wears the row's identity hue")
                 assertSameRGB(tile.test_fillColor, resolved(Tokens.Color.raised, appearanceName: appearance),
-                             "\(name)/\(appearance.rawValue): tile fill must be the neutral `raised` well before granting")
+                             "\(name)/\(appearance.rawValue): tile fill is the neutral `raised` well (Q3)")
 
-                tile.setLit(true)   // == what update(status: .granted) does to its own iconTile
-
-                #expect(tile.isLit, "\(name)/\(appearance.rawValue): granting must light the glyph")
-                // `test_litTint` is itself a dynamic (unresolved) `NSColor` —
-                // a bare `.usingColorSpace(.sRGB)` (inside `assertSameRGB`)
-                // would resolve it against the process's ambient appearance,
-                // not the one under test, so it must go through `resolved(_:
-                // appearanceName:)` explicitly first, same as the `gold`
-                // reference on the other side.
-                assertSameRGB(resolved(tile.test_litTint ?? .clear, appearanceName: appearance),
-                             resolved(Tokens.Color.gold, appearanceName: appearance),
-                             "\(name)/\(appearance.rawValue): the lit glyph tint must be gold for every row (Q2, unchanged)")
-                assertSameRGB(tile.test_fillColor, resolved(Tokens.Color.raised, appearanceName: appearance),
-                             "\(name)/\(appearance.rawValue): granting must NOT recolour the tile fill (Q3)")
+                // A full status sweep on a real row must leave its tile's
+                // glyph tint untouched — granting no longer recolours it.
+                let row = PermissionRowView(content: .init(symbolName: "waveform", title: name,
+                                                           detail: "d", allowButtonTitle: "Allow",
+                                                           iconColor: color),
+                                            onAllow: {}, onOpenSettings: {})
+                row.appearance = NSAppearance(named: appearance)
+                for status: PermissionStatus in [.unknown, .granted, .denied, .requested, .unsupported] {
+                    row.update(status: status, isProbing: false)
+                    assertSameRGB(resolved(row.test_iconTint ?? .clear, appearanceName: appearance),
+                                 resolved(color, appearanceName: appearance),
+                                 "\(name)/\(appearance.rawValue)/\(status): status changes never recolour the glyph")
+                }
             }
         }
     }

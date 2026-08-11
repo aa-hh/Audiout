@@ -8,8 +8,8 @@ import AudiouterSharedUI
 struct PermissionRowContent {
     /// SF Symbol shown in the leading icon tile. Every tile shares the same
     /// neutral `raised` well + hairline rim (Q3 of the colour-return pass —
-    /// the tile fill/rim are never coloured); the symbol's RESTING tint is
-    /// this row's ``iconColor`` and warms to gold once granted (unchanged).
+    /// the tile fill/rim are never coloured); the symbol's tint is this
+    /// row's ``iconColor``, permanent across every permission status.
     let symbolName: String
     let title: String
     /// The plain-language "why we need this," in the user's mental model.
@@ -68,7 +68,7 @@ func onboardingRowStatusLabel(_ text: String, symbol: String, tint: NSColor) -> 
 
 /// One permission row in the onboarding window: a leading icon tile — a
 /// neutral well holding a symbol tinted with this row's own
-/// ``PermissionRowContent/iconColor`` (gold-lit once granted — see
+/// ``PermissionRowContent/iconColor`` (permanent in every status — see
 /// ``IconTileView``) — a title + wrapping "why" subtitle, and a trailing
 /// accessory that swaps with the live ``PermissionStatus`` — an Allow
 /// button, a spinner while probing, a green "Allowed", or a "Denied" +
@@ -223,11 +223,9 @@ final class PermissionRowView: NSView {
         lastStatus = status
         lastProbing = isProbing
 
-        // Granting "lights" the row's icon gold (spec §5.8 — the one onboarding
-        // choreography; ≤300 ms, skipped under Reduce Motion, see
-        // `IconTileView.setLit`). The VoiceOver-visible equivalent is the
-        // "Allowed" status chip below — the gold is redundant reinforcement.
-        iconTile.setLit(status == .granted)
+        // The glyph keeps its identity hue in every status (Alec, 2026-08-11:
+        // the retired grant-goes-gold crossfade was redundant reinforcement of
+        // the "Allowed" status chip, which alone carries the state).
 
         // Clear the accessory.
         for v in accessory.arrangedSubviews { accessory.removeArrangedSubview(v); v.removeFromSuperview() }
@@ -292,6 +290,10 @@ final class PermissionRowView: NSView {
 
     /// Invoke the "Open System Settings" action.
     func test_tapOpenSettings() { openSettingsTapped() }
+
+    /// The icon tile's current glyph tint — asserted to be the row's
+    /// permanent `iconColor` in every status.
+    var test_iconTint: NSColor? { iconTile.test_restingTint }
 }
 
 // MARK: - Prominent (accent-filled) button
@@ -362,16 +364,11 @@ final class ProminentButton: NSButton {
 /// A small rounded tile holding an SF Symbol. Every tile rests on the same
 /// neutral `Tokens.Color.raised` well with a hairline rim (Q3 of the
 /// colour-return pass — the FILL/RIM are never coloured, only the glyph);
-/// the SYMBOL's resting tint is caller-supplied (`color`, one of the four
-/// `Tokens.Color.permission*` hues for the onboarding rows) and "warms to
-/// gold" once its permission is granted — the one place gold marks success
-/// outside the instruments (house rule 1's flagged onboarding exception,
-/// spec §10).
-///
-/// The gold-lit swap is the only onboarding choreography: a ≤300 ms crossfade
-/// between two stacked symbol image views, skipped entirely under Reduce
-/// Motion and whenever the tile isn't on a visible window (first render,
-/// headless tests, the snapshot harness — steady states render settled).
+/// the SYMBOL's tint is caller-supplied (`color`, one of the four
+/// `Tokens.Color.permission*` hues for the onboarding rows) and PERMANENT —
+/// granting never recolours it (Alec, 2026-08-11: the retired
+/// grant-goes-gold crossfade duplicated the "Allowed" status chip, which
+/// alone carries the state).
 ///
 /// Layer-backed and repainted in `updateLayer`, where the view's
 /// `effectiveAppearance` is the current drawing appearance, so the warm
@@ -383,13 +380,7 @@ final class IconTileView: NSView {
     /// (`PermissionRowView`, `PTPHelperRowView`) use this default.
     static let side: CGFloat = 30
 
-    /// The resting (warm-neutral) symbol and its gold-lit twin, stacked.
-    /// `setLit` crossfades their alphas rather than mutating one image view's
-    /// `contentTintColor` (which is not animatable).
-    private let restingImage = NSImageView()
-    private let litImage = NSImageView()
-    /// Whether the symbol is currently gold-lit (granted).
-    private(set) var isLit = false
+    private let symbolImage = NSImageView()
 
     init(symbolName: String,
          accessibility: String,
@@ -402,58 +393,22 @@ final class IconTileView: NSView {
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
 
-        restingImage.image = NSImage(systemSymbolName: symbolName,
-                                     accessibilityDescription: accessibility)
-        restingImage.symbolConfiguration = .init(pointSize: pointSize, weight: .semibold)
-        restingImage.contentTintColor = color
-        restingImage.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(restingImage)
-
-        // Decorative twin: VoiceOver reads the resting image (and the row's
-        // status chip carries the granted/denied state in words), so the gold
-        // layer is not its own accessibility element.
-        litImage.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil)
-        litImage.symbolConfiguration = .init(pointSize: pointSize, weight: .semibold)
-        litImage.contentTintColor = Tokens.Color.gold
-        litImage.alphaValue = 0
-        litImage.setAccessibilityElement(false)
-        litImage.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(litImage)
+        symbolImage.image = NSImage(systemSymbolName: symbolName,
+                                    accessibilityDescription: accessibility)
+        symbolImage.symbolConfiguration = .init(pointSize: pointSize, weight: .semibold)
+        symbolImage.contentTintColor = color
+        symbolImage.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(symbolImage)
 
         NSLayoutConstraint.activate([
             widthAnchor.constraint(equalToConstant: side),
             heightAnchor.constraint(equalToConstant: side),
-            restingImage.centerXAnchor.constraint(equalTo: centerXAnchor),
-            restingImage.centerYAnchor.constraint(equalTo: centerYAnchor),
-            litImage.centerXAnchor.constraint(equalTo: centerXAnchor),
-            litImage.centerYAnchor.constraint(equalTo: centerYAnchor),
+            symbolImage.centerXAnchor.constraint(equalTo: centerXAnchor),
+            symbolImage.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    /// Light (or un-light) the symbol gold. Animated only when the state
-    /// actually changes on a visible window AND Reduce Motion is off —
-    /// everywhere else (first render, snapshots, headless tests, Reduce
-    /// Motion) it's an instant swap, so steady states always render settled.
-    func setLit(_ lit: Bool) {
-        guard lit != isLit else { return }
-        isLit = lit
-        let litAlpha: CGFloat = lit ? 1 : 0
-        let restingAlpha: CGFloat = lit ? 0 : 1
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        guard !reduceMotion, window?.isVisible == true else {
-            litImage.alphaValue = litAlpha
-            restingImage.alphaValue = restingAlpha
-            return
-        }
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.25   // ≤300 ms, spec §5.8
-            context.allowsImplicitAnimation = true
-            litImage.animator().alphaValue = litAlpha
-            restingImage.animator().alphaValue = restingAlpha
-        }
-    }
 
     override var wantsUpdateLayer: Bool { true }
 
@@ -467,11 +422,9 @@ final class IconTileView: NSView {
 
     // MARK: Test-support hooks
 
-    /// The resting (ungranted) glyph tint — the row's `iconColor` (Q1/Q3).
-    var test_restingTint: NSColor? { restingImage.contentTintColor }
-
-    /// The lit (granted) glyph tint — always `Tokens.Color.gold` (Q2, unchanged).
-    var test_litTint: NSColor? { litImage.contentTintColor }
+    /// The glyph tint — the row's `iconColor` (Q1/Q3), permanent across
+    /// every permission status.
+    var test_restingTint: NSColor? { symbolImage.contentTintColor }
 
     /// The tile's own FILL colour — asserted elsewhere to confirm Q3 (the
     /// tile fill/rim never colour, only the glyph does) held across this wave.

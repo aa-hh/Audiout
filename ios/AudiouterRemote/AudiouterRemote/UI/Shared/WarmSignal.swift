@@ -170,12 +170,88 @@ enum WarmSignal {
     ///
     /// It is a `nil`-able identity rather than a `Bool` so that
     /// `.sensoryFeedback(trigger:)` sees a change on every ARRIVAL at a rail
-    /// (nil → 0, nil → 100) and none while sitting on one. Off a rail there is
-    /// nothing to feel, which is also why nothing fires for the middle of a
-    /// drag: the tick marks the end of the travel, not the travel.
+    /// (nil → 0, nil → 100) and none while sitting on one — this tick marks
+    /// the end of the travel, and it is the STRONGER of the two the finger
+    /// gets. The travel itself is ``FaderDetents``, which stays quieter and
+    /// stands down at both ends so the stop never arrives twice.
     static func faderRail(_ value: Int, dragging: Bool) -> Int? {
         guard dragging, value == 0 || value == 100 else { return nil }
         return value
+    }
+
+    /// The detent clicks a volume drag passes through — the row's dial and the
+    /// deck's fader share this one rule, exactly as they share ``faderValue``
+    /// and ``faderRail``.
+    ///
+    /// A mixer's controls click. The row's knob and the deck's fader are drawn
+    /// as instruments, and an instrument answers the hand on the way, not only
+    /// at the ends — so the finger gets a soft click every ``step`` units and
+    /// can set a level by feel without watching the number.
+    ///
+    /// Three things it deliberately does NOT do:
+    ///
+    /// - **The rails win.** 0 and 100 are multiples of ``step``, but they
+    ///   already have ``faderRail``'s stronger tick. Arriving at a stop must
+    ///   not feel like passing a notch, so the detent stays silent there —
+    ///   while still recording the position, so leaving a rail doesn't fire
+    ///   late.
+    /// - **It thins, it never queues.** A fast swipe crosses the whole track
+    ///   in a quarter second: 20 detents in 250 ms is 80 clicks a second, and
+    ///   anything past roughly 20 blurs into a buzz. Past ``minimumGap`` the
+    ///   click is DROPPED, not deferred — a queued click would land after the
+    ///   finger had moved on and feel like lag.
+    /// - **It counts crossings, not units.** One drag tick that jumps several
+    ///   detents is one click, because the hand made one movement.
+    ///
+    /// ``ticks`` is the `.sensoryFeedback` trigger: it moves only when a click
+    /// is owed, so nothing fires outside an active drag.
+    struct FaderDetents {
+        /// Detent spacing, in volume units. The same 5 the rows' VoiceOver
+        /// adjustable action steps by, so "one notch" means one thing whether
+        /// it is felt or spoken. Finer (1) is a buzz at any real drag speed;
+        /// coarser (10) gives a 100-unit track only ten notches, which is too
+        /// few to set a level by.
+        static let step = 5
+
+        /// The tick-rate ceiling: 50 ms ≈ 20 clicks a second, the point past
+        /// which separate taps stop reading as separate.
+        static let minimumGap: Duration = .milliseconds(50)
+
+        /// How hard a detent clicks, against the rails' full-strength light
+        /// impact. Same family, a fraction of the force: the two have to be
+        /// telling the finger different things. `.selection` — the picker
+        /// convention — was the other candidate and is rejected for exactly
+        /// this: it is a fixed strength with no defined relationship to the
+        /// tick already on this control.
+        static let intensity: Double = 0.4
+
+        private var lastDetent: Int?
+        private var lastTickedAt: ContinuousClock.Instant?
+
+        /// Every click this control has given the finger. Monotonic on
+        /// purpose — a trigger that returned to an earlier value would fire
+        /// nothing.
+        private(set) var ticks = 0
+
+        init() {}
+
+        /// The gesture's start. Where the finger already is is not a crossing,
+        /// and the rate limit starts fresh.
+        mutating func begin(at value: Int) {
+            lastDetent = value / Self.step
+            lastTickedAt = nil
+        }
+
+        /// One tick of the drag. Call with the value the finger just landed on.
+        mutating func advance(to value: Int, now: ContinuousClock.Instant = .now) {
+            let detent = value / Self.step
+            defer { lastDetent = detent }
+            guard detent != lastDetent else { return }
+            guard value != 0, value != 100 else { return }
+            if let last = lastTickedAt, now - last < Self.minimumGap { return }
+            lastTickedAt = now
+            ticks += 1
+        }
     }
 }
 

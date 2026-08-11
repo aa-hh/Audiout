@@ -47,6 +47,7 @@ struct DeviceRowView: View {
     @State private var axis: DragAxis?        // nil until the gesture commits
     @State private var dragStartVolume: Int?  // captured at commit — doc:1755-1765
     @State private var localVolume: Double?   // in-drag echo
+    @State private var detents = WarmSignal.FaderDetents()  // the dial's clicks
     @State private var showFailureDetail = false
     @State private var rowWidth: CGFloat = 0  // the fader track
     @State private var fingerDown = false     // touch-down, before the latch
@@ -414,13 +415,18 @@ struct DeviceRowView: View {
         .contentShape(Rectangle())
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { rowWidth = $0 }
         .simultaneousGesture(dragGesture)
-        // Two ticks, and only two. The tap's, fired off the local echo so it
-        // lands with the finger rather than a round trip later — and only on
-        // the echo being SET, never on the snapshot clearing it. And the
-        // rails, so the end of the travel is felt rather than looked for;
-        // nothing fires for the continuous middle of a drag.
+        // The tap's tick, fired off the local echo so it lands with the finger
+        // rather than a round trip later — and only on the echo being SET,
+        // never on the snapshot clearing it. Then the rails, so the end of the
+        // travel is felt rather than looked for.
         .sensoryFeedback(trigger: pendingSelection) { _, new in new == nil ? nil : .selection }
         .sensoryFeedback(trigger: rail) { _, new in new == nil ? nil : .impact(weight: .light) }
+        // And the dial's detents (``WarmSignal/FaderDetents``): the same family
+        // as the rail's tick and deliberately a fraction of its strength.
+        // Passing a notch and running out of track are both news, but they are
+        // not the same news, so they cannot be the same click.
+        .sensoryFeedback(.impact(weight: .light, intensity: WarmSignal.FaderDetents.intensity),
+                         trigger: detents.ticks)
         // Mute is confirmed rather than optimistic, exactly as Main Out's is,
         // so the tick rides the Mac's answer.
         .sensoryFeedback(.impact(weight: .light), trigger: device.isMuted)
@@ -722,6 +728,7 @@ struct DeviceRowView: View {
                     axis = abs(w) > abs(h) ? .horizontal : .vertical
                     if axis == .horizontal {
                         dragStartVolume = device.volume
+                        detents.begin(at: device.volume)
                         // The coach promised this gesture, so a row that can't
                         // answer it has to say why rather than swallow it. At
                         // the latch, which is the moment the drag became a
@@ -733,6 +740,7 @@ struct DeviceRowView: View {
                 guard axis == .horizontal, controlsEnabled, let start = dragStartVolume else { return }
                 let v = WarmSignal.faderValue(start: start, translationWidth: w, trackWidth: rowWidth)
                 localVolume = Double(v)
+                detents.advance(to: v)
                 session.setDeviceVolume(id: device.id, volume: v, isFinal: false)
             }
             .onEnded { _ in

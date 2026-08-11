@@ -521,6 +521,7 @@ struct MainOutRow: View {
     @State private var trackWidth: CGFloat = 0
     @State private var axis: DragAxis?
     @State private var dragStartVolume: Int?
+    @State private var detents = WarmSignal.FaderDetents()  // the fader's clicks
 
     @ScaledMetric(relativeTo: .subheadline) private var muteIconSize: CGFloat = 15
 
@@ -571,6 +572,11 @@ struct MainOutRow: View {
         .sensoryFeedback(trigger: WarmSignal.faderRail(value, dragging: isDragging)) { _, new in
             new == nil ? nil : .impact(weight: .light)
         }
+        // The detents the fader travels through, at a fraction of the rails'
+        // strength — the same rule and the same click the row's dial gives,
+        // because they are the same control at two scopes.
+        .sensoryFeedback(.impact(weight: .light, intensity: WarmSignal.FaderDetents.intensity),
+                         trigger: detents.ticks)
     }
 
     /// The track's rim, and so also the inset its fill has to keep.
@@ -643,6 +649,7 @@ struct MainOutRow: View {
                     axis = abs(w) > abs(h) ? .horizontal : .vertical
                     if axis == .horizontal {
                         dragStartVolume = value
+                        detents.begin(at: value)
                         // The only writer of `isDragging`. Without it the echo
                         // below clears mid-drag and the thumb rubber-bands
                         // under the finger.
@@ -652,6 +659,7 @@ struct MainOutRow: View {
                 guard axis == .horizontal, let start = dragStartVolume else { return }
                 let v = WarmSignal.faderValue(start: start, translationWidth: w, trackWidth: trackWidth)
                 localVolume = Double(v)
+                detents.advance(to: v)
                 session.setMainOutMasterVolume(v, isFinal: false)
             }
             .onEnded { _ in

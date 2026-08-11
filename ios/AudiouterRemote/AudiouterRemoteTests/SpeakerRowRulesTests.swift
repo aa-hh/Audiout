@@ -480,8 +480,8 @@ import AudiouterProtocol
     }
 
     @Test func theMiddleOfADragIsNeverARail() {
-        // Nothing continuous: everything between the two ends is silent, which
-        // is what keeps `.sensoryFeedback` from firing on every tick.
+        // The rail trigger is the ends and nothing else — the middle of the
+        // track belongs to ``WarmSignal/FaderDetents``, at its own strength.
         for value in [1, 25, 50, 75, 99] {
             #expect(WarmSignal.faderRail(value, dragging: true) == nil)
         }
@@ -492,6 +492,144 @@ import AudiouterProtocol
         // changes it nil → 0 → nil → 100, so both ends are felt. A Bool would
         // have gone true → false → true and said the same thing at both ends.
         #expect(WarmSignal.faderRail(0, dragging: true) != WarmSignal.faderRail(100, dragging: true))
+    }
+
+    // MARK: - The fader detents (the drag's clicks)
+
+    /// A clock instant far enough past the last one that the rate limit never
+    /// interferes — every test below that isn't ABOUT thinning uses it.
+    private func unhurried(_ start: ContinuousClock.Instant, _ steps: Int) -> ContinuousClock.Instant {
+        start.advanced(by: .milliseconds(200 * steps))
+    }
+
+    @Test func aDragClicksOncePerDetentCrossedGoingUp() {
+        let t0 = ContinuousClock.now
+        var detents = WarmSignal.FaderDetents()
+        detents.begin(at: 20)
+        // 20 → 40 crosses 25, 30, 35 and 40: four notches, four clicks.
+        for (i, v) in [23, 25, 29, 31, 36, 40].enumerated() {
+            detents.advance(to: v, now: unhurried(t0, i + 1))
+        }
+        #expect(detents.ticks == 4)
+    }
+
+    @Test func aDragClicksTheSameGoingDown() {
+        // The notch is a position, not a direction: 40 → 20 crosses the same
+        // four, so a level walked back feels like the walk out.
+        let t0 = ContinuousClock.now
+        var detents = WarmSignal.FaderDetents()
+        detents.begin(at: 40)
+        for (i, v) in [37, 35, 31, 29, 24, 20].enumerated() {
+            detents.advance(to: v, now: unhurried(t0, i + 1))
+        }
+        #expect(detents.ticks == 4)
+    }
+
+    @Test func standingStillIsSilent() {
+        // A finger held on the track is not adjusting anything.
+        let t0 = ContinuousClock.now
+        var detents = WarmSignal.FaderDetents()
+        detents.begin(at: 50)
+        for i in 1...10 { detents.advance(to: 50, now: unhurried(t0, i)) }
+        #expect(detents.ticks == 0)
+    }
+
+    @Test func aJitteringFingerInsideOneNotchIsSilent() {
+        // 51-54 is all the same notch as 50. Sub-detent wobble is the finger,
+        // not the value, and it must not machine-gun.
+        let t0 = ContinuousClock.now
+        var detents = WarmSignal.FaderDetents()
+        detents.begin(at: 50)
+        for (i, v) in [51, 53, 52, 54, 51].enumerated() {
+            detents.advance(to: v, now: unhurried(t0, i + 1))
+        }
+        #expect(detents.ticks == 0)
+    }
+
+    @Test func oneFastJumpAcrossManyDetentsIsOneClick() {
+        // A flick that lands 60 units away crossed twelve notches in one drag
+        // tick. The hand made ONE movement, so it gets one click — twelve
+        // queued behind it would arrive after the finger had already stopped.
+        let t0 = ContinuousClock.now
+        var detents = WarmSignal.FaderDetents()
+        detents.begin(at: 10)
+        detents.advance(to: 70, now: unhurried(t0, 1))
+        #expect(detents.ticks == 1)
+    }
+
+    @Test func aFastSwipeIsThinnedRatherThanQueued() {
+        // The whole track in 250 ms: 20 notches, which unthinned is 80 clicks
+        // a second and reads as a buzz. At a 50 ms floor that quarter second
+        // can yield at most five.
+        var now = ContinuousClock.now
+        var detents = WarmSignal.FaderDetents()
+        detents.begin(at: 1)
+        for v in stride(from: 5, through: 99, by: 5) {
+            now = now.advanced(by: .milliseconds(250 / 20))
+            detents.advance(to: v, now: now)
+        }
+        #expect(detents.ticks <= 5)
+        #expect(detents.ticks >= 4)   // and it is not silent either
+    }
+
+    @Test func theRailsOwnTheirOwnEnds() {
+        // 0 and 100 are multiples of the step, so without the guard the stop
+        // would fire a detent click on top of ``faderRail``'s stronger one.
+        // Arriving somewhere and passing through have to feel different.
+        let t0 = ContinuousClock.now
+        var detents = WarmSignal.FaderDetents()
+        detents.begin(at: 10)
+        detents.advance(to: 0, now: unhurried(t0, 1))
+        #expect(detents.ticks == 0)
+
+        var top = WarmSignal.FaderDetents()
+        top.begin(at: 90)
+        top.advance(to: 100, now: unhurried(t0, 1))
+        #expect(top.ticks == 0)
+    }
+
+    @Test func leavingARailClicksAtTheFirstNotchAndNotBefore() {
+        // The suppressed rail still records where the finger was, so pushing
+        // off 0 doesn't fire a stale click at 1 — and 6 (the first crossing of
+        // 5) does fire.
+        let t0 = ContinuousClock.now
+        var detents = WarmSignal.FaderDetents()
+        detents.begin(at: 0)
+        detents.advance(to: 3, now: unhurried(t0, 1))
+        #expect(detents.ticks == 0)
+        detents.advance(to: 6, now: unhurried(t0, 2))
+        #expect(detents.ticks == 1)
+    }
+
+    @Test func aNewGestureStartsFromWhereTheFingerLands() {
+        // Where the finger already is was never crossed. A drag that begins
+        // at 47 and moves to 48 has passed nothing.
+        let t0 = ContinuousClock.now
+        var detents = WarmSignal.FaderDetents()
+        detents.begin(at: 47)
+        detents.advance(to: 48, now: unhurried(t0, 1))
+        #expect(detents.ticks == 0)
+    }
+
+    @Test func theTickCountOnlyEverRisesSoTheTriggerAlwaysFires() {
+        // `.sensoryFeedback(trigger:)` fires on CHANGE. A counter that reset
+        // per gesture would eventually hand it a value it had already seen,
+        // and that click would be silently swallowed.
+        let t0 = ContinuousClock.now
+        var detents = WarmSignal.FaderDetents()
+        var seen: [Int] = []
+        for gesture in 0..<3 {
+            detents.begin(at: 20)
+            detents.advance(to: 30, now: unhurried(t0, gesture * 2 + 1))
+            seen.append(detents.ticks)
+        }
+        #expect(seen == [1, 2, 3])
+    }
+
+    @Test func theDetentStepMatchesTheSpokenAdjustableStep() {
+        // One notch means one thing whether it is felt or spoken: the rows'
+        // `accessibilityAdjustableAction` moves by 5 too.
+        #expect(WarmSignal.FaderDetents.step == 5)
     }
 
     // MARK: - The level's one coordinate

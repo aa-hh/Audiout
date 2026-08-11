@@ -880,12 +880,10 @@ public final class OnboardingViewController: NSViewController {
     /// Which miniature the demo pane is showing.
     public var test_demoMode: DemoMode { _ = view; return demoPane.test_mode }
 
-    /// Which surface Speaker Sync's two-stage demo rests on. `nil` for every
-    /// step whose mock has one surface.
+    /// Which surface a two-stage demo rests on — Speaker Sync's and Remote
+    /// Control's alike, since both now open on the same system alert. `nil` for
+    /// every step whose mock has one surface.
     public var test_demoStage: DemoStage? { _ = view; return demoPane.test_stage }
-
-    /// The same for Remote Control's two-stage retry.
-    public var test_demoHandoffStage: DemoHandoffStage? { _ = view; return demoPane.test_handoffStage }
 
     /// Whether the demo's timeline is running (the zero-idle-CPU rule).
     public var test_isDemoAnimating: Bool { _ = view; return demoPane.test_isAnimating }

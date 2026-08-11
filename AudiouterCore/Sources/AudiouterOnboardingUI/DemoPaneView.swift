@@ -17,15 +17,15 @@ public enum DemoMode: Equatable, Sendable {
     case settled
 }
 
-/// Where a TWO-STAGE mock is in its pass. Only Speaker Sync has one: its
-/// approval starts with a system notification and ends in a Settings toggle, so
-/// its miniature has two surfaces rather than one. Public only because the Setup
-/// window's `test_demoStage` hook exposes it.
+/// Where a TWO-STAGE mock is in its pass. Two steps have one — Speaker Sync and
+/// Remote Control — and since both now open on the same kind of surface, they
+/// share one enum rather than each minting its own. Public only because the
+/// Setup window's `test_demoStage` hook exposes it.
 public enum DemoStage: Equatable, Sendable {
-    /// The "Background Items Added" notification macOS posts when the login item
-    /// registers — the FIRST thing the user has to act on.
-    case banner
-    /// The Login Items pane that notification opens, with the switch to flip.
+    /// The system ALERT that hands the user off to Settings — the first of the
+    /// two clicks, and the thing a two-stage pass rests on.
+    case alert
+    /// The Settings pane that alert opens, with the switch to flip.
     case settingsPane
 }
 
@@ -303,9 +303,10 @@ final class DemoPaneView: NSView {
     /// Which surface a two-stage mock RESTS on; `nil` for the mocks that only
     /// ever have one. What it pins is the settled frame — a two-stage pass must
     /// rest on the FIRST thing the user will meet, not on the pane it ends at.
-    var test_stage: DemoStage? { (mock as? DemoLoginItemsMockView)?.test_stage }
-    /// The same, for Remote Control's retry, whose first surface is the ASK.
-    var test_handoffStage: DemoHandoffStage? { (mock as? DemoSettingsHandoffMockView)?.test_stage }
+    var test_stage: DemoStage? {
+        (mock as? DemoLoginItemsMockView)?.test_stage
+            ?? (mock as? DemoSettingsHandoffMockView)?.test_stage
+    }
     var test_isAnimating: Bool { (mock as? DemoMockView)?.isTimelineRunning ?? false }
     var test_isLooping: Bool { (mock as? DemoMockView)?.isLooping ?? false }
     var test_showsReplay: Bool { !replayButton.isHidden }
@@ -499,6 +500,13 @@ enum DemoSystemColor {
     /// is the SHEET's Cancel button, not a dialog's grey one.
     static let plainButton = dynamic(light: 0xD7D7D7, dark: 0x5A5A5E)
 
+    /// The privacy padlock's gold, top and bottom of its gradient. The same in
+    /// both appearances — macOS draws this icon as artwork, not as a tinted
+    /// glyph, so it does not re-resolve with the theme. Matched by eye to the
+    /// real Accessibility Access alert.
+    static let lockGoldTop = solid(0xF9D45C)
+    static let lockGoldBottom = solid(0xD79A24)
+
     static let trafficRed = solid(0xFF5F57)
     static let trafficYellow = solid(0xFEBC2E)
     static let trafficGreen = solid(0x28C840)
@@ -538,8 +546,8 @@ enum DemoBeat {
 
 /// The two-stage retry's beats, in seconds along ONE pass of
 /// ``DemoSettingsHandoffMockView``. Stage one is only as long as it takes to
-/// press a button — nothing is granted there, so there is no result to hold on;
-/// stage two then plays its whole ordinary pass inside this longer one.
+/// press a button — nothing is granted on the alert, so there is no result to
+/// hold on; stage two then plays its whole ordinary pass inside this longer one.
 enum DemoHandoffBeat {
     /// The press has landed and the two surfaces start to cross.
     static let handoff: TimeInterval = DemoBeat.pressEnd + 0.22
@@ -551,21 +559,38 @@ enum DemoHandoffBeat {
     static let loop: TimeInterval = settingsEnd + crossfade
 }
 
-// MARK: - Prompt mock
+// MARK: - Shared text parts
 
-/// What a prompt mock's confirming button DOES — which decides its two button
-/// titles and how its pass ends.
-enum DemoPromptOutcome {
-    /// The first ask: the confirming button grants, and the dialog settles into
-    /// its granted state before resetting.
-    case grants
-    /// The RE-FIRED ask: its confirming button is "Open System Settings", the
-    /// only path that scrolls to and highlights Audiouter in the Accessibility
-    /// list. Nothing is granted here, so the pass ends ON the press and the host
-    /// hands off to the Settings mock — this outcome is only ever played as
-    /// stage one of ``DemoSettingsHandoffMockView``.
-    case opensSystemSettings
+/// A wrapping, LEFT-aligned block of dialog text. Every mock's title and body
+/// are real sentences at real sizes — the recognisability of these miniatures is
+/// the whole reason they exist, so nothing a user reads is greeked or clipped.
+func demoParagraph(_ text: String, font: NSFont, color: NSColor,
+                   width: CGFloat) -> NSTextField {
+    let field = NSTextField(labelWithString: text)
+    field.font = font
+    field.textColor = color
+    field.alignment = .left
+    field.maximumNumberOfLines = 0
+    field.lineBreakMode = .byWordWrapping
+    field.preferredMaxLayoutWidth = width
+    field.translatesAutoresizingMaskIntoConstraints = false
+    return field
 }
+
+/// A tinted SF Symbol sized in points — a badge's glyph, a Help button's
+/// question mark. Symbols, not text, so the 9 pt legibility floor the labels
+/// obey doesn't apply.
+func demoGlyph(_ name: String, pointSize: CGFloat,
+               weight: NSFont.Weight, color: NSColor) -> NSImageView {
+    let view = NSImageView()
+    view.image = NSImage(systemSymbolName: name, accessibilityDescription: nil)
+    view.symbolConfiguration = .init(pointSize: pointSize, weight: weight)
+    view.contentTintColor = color
+    view.translatesAutoresizingMaskIntoConstraints = false
+    return view
+}
+
+// MARK: - Prompt mock
 
 /// A miniature of the macOS 26 privacy dialog for one step — with a drawn cursor
 /// gliding to the confirming button, pressing it, and the dialog settling into
@@ -601,7 +626,6 @@ final class DemoPromptMockView: DemoMockView {
     private static var contentWidth: CGFloat { size.width - inset * 2 }
 
     private let step: SetupStep
-    private let outcome: DemoPromptOutcome
     /// Everything the dialog ASKS with, in one layer — so the swap to the
     /// granted state stays a single opacity crossfade.
     private let ask = NSView()
@@ -609,9 +633,8 @@ final class DemoPromptMockView: DemoMockView {
     private let cursor = DemoCursorView(pointerHeight: 22)
     private var confirmButton: DemoPushButtonView!
 
-    init(step: SetupStep, outcome: DemoPromptOutcome = .grants) {
+    init(step: SetupStep) {
         self.step = step
-        self.outcome = outcome
         super.init(frame: .zero)
         wantsLayer = true
         build()
@@ -619,11 +642,7 @@ final class DemoPromptMockView: DemoMockView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    /// The handoff variant is written on its HOST's clock, because its cursor has
-    /// to be home again before the host crossfades this dialog back in.
-    override var timelineDuration: TimeInterval {
-        outcome == .grants ? DemoBeat.loop : DemoHandoffBeat.loop
-    }
+    override var timelineDuration: TimeInterval { DemoBeat.loop }
 
     private func build() {
         let icon = Self.iconView(for: step)
@@ -632,44 +651,32 @@ final class DemoPromptMockView: DemoMockView {
         // bottom-trailing corner. It is what distinguishes this dialog from any
         // other alert at a glance, so it is drawn before anything else is.
         let badge = DemoDotView(diameter: Self.badgeSide, fill: DemoSystemColor.accent)
-        let badgeGlyph = Self.glyph("hand.raised.fill", pointSize: 9,
-                                    weight: .semibold, color: .white)
+        let badgeGlyph = demoGlyph("hand.raised.fill", pointSize: 9,
+                                   weight: .semibold, color: .white)
 
         let help = DemoDotView(diameter: Self.helpSide, fill: .quaternaryLabelColor)
-        let helpGlyph = Self.glyph("questionmark", pointSize: 9,
-                                   weight: .semibold, color: .secondaryLabelColor)
+        let helpGlyph = demoGlyph("questionmark", pointSize: 9,
+                                  weight: .semibold, color: .secondaryLabelColor)
 
         // The real dialog's 15 pt title, taken down by this mock's scale and
         // rounded UP rather than down — these two blocks are the only things in
         // here the user actually reads, and the 9 pt floor is a floor, not a
         // target.
-        let title = Self.paragraph(Self.askText(for: step),
-                                   font: .boldSystemFont(ofSize: 14),
-                                   color: .labelColor)
-        let body = Self.paragraph(Self.bodyText(for: step),
-                                  font: .systemFont(ofSize: 11),
-                                  color: .secondaryLabelColor)
+        let title = demoParagraph(Self.askText(for: step),
+                                  font: .boldSystemFont(ofSize: 14),
+                                  color: .labelColor, width: Self.contentWidth)
+        let body = demoParagraph(Self.bodyText(for: step),
+                                 font: .systemFont(ofSize: 11),
+                                 color: .secondaryLabelColor, width: Self.contentWidth)
 
-        // Two neutral capsules filling the content width: refusal on the left,
-        // the confirming one on the right.
-        let deny = DemoPushButtonView(title: Self.denyTitle(for: outcome))
-        confirmButton = DemoPushButtonView(title: Self.confirmTitle(for: step, outcome: outcome))
+        // Two EQUAL neutral capsules filling the content width: refusal on the
+        // left, the confirming one on the right.
+        let deny = DemoPushButtonView(title: "Don't Allow")
+        confirmButton = DemoPushButtonView(title: Self.confirmTitle(for: step))
         let buttons = NSStackView(views: [deny, confirmButton])
         buttons.orientation = .horizontal
         buttons.spacing = 8
-        // Equal halves for the ordinary ask, whose two titles are about the same
-        // length. "Open System Settings" is four times "Deny", and half the
-        // content width does not fit it — so the re-fired ask sizes its refusal
-        // to its own title and gives the rest to the button being pressed, which
-        // is also what a real alert with two unequal titles does.
-        switch outcome {
-        case .grants:
-            buttons.distribution = .fillEqually
-        case .opensSystemSettings:
-            buttons.distribution = .fill
-            deny.setContentHuggingPriority(.required, for: .horizontal)
-            confirmButton.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        }
+        buttons.distribution = .fillEqually
         buttons.translatesAutoresizingMaskIntoConstraints = false
 
         ask.wantsLayer = true
@@ -678,10 +685,8 @@ final class DemoPromptMockView: DemoMockView {
             ask.addSubview(view)
         }
 
-        // The granted state, which only ``DemoPromptOutcome/grants`` ever reveals
-        // — a re-fired ask confirms nothing. It is built either way and simply
-        // stays at zero opacity, rather than making the whole layout conditional
-        // on the outcome for the sake of two hidden views.
+        // The granted state — what the pass crossfades to once the pointer has
+        // pressed the confirming button.
         let check = NSImageView()
         check.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil)
         check.symbolConfiguration = .init(pointSize: 28, weight: .semibold)
@@ -771,21 +776,6 @@ final class DemoPromptMockView: DemoMockView {
         applySettledState()
     }
 
-    /// A wrapping, LEFT-aligned block of dialog text. Both the title and the
-    /// body are real sentences at real sizes — the recognisability of this mock
-    /// is the whole reason it exists, so neither is greeked or clipped.
-    private static func paragraph(_ text: String, font: NSFont, color: NSColor) -> NSTextField {
-        let field = NSTextField(labelWithString: text)
-        field.font = font
-        field.textColor = color
-        field.alignment = .left
-        field.maximumNumberOfLines = 0
-        field.lineBreakMode = .byWordWrapping
-        field.preferredMaxLayoutWidth = contentWidth
-        field.translatesAutoresizingMaskIntoConstraints = false
-        return field
-    }
-
     /// The tile in the dialog's top-left corner. macOS does NOT always put the
     /// asking app's icon there: the app's own icon appears for the grants that
     /// are about capturing that app's content (System Audio), while the
@@ -825,26 +815,13 @@ final class DemoPromptMockView: DemoMockView {
     /// by eye to the Local Network screenshot, not measured.
     private static func systemTile(symbol: String) -> NSView {
         let tile = DemoPillView(radius: iconSide * 0.23, fill: DemoSystemColor.accent)
-        let mark = glyph(symbol, pointSize: iconSide * 0.55, weight: .regular, color: .white)
+        let mark = demoGlyph(symbol, pointSize: iconSide * 0.55, weight: .regular, color: .white)
         tile.addSubview(mark)
         NSLayoutConstraint.activate([
             mark.centerXAnchor.constraint(equalTo: tile.centerXAnchor),
             mark.centerYAnchor.constraint(equalTo: tile.centerYAnchor),
         ])
         return tile
-    }
-
-    /// A tinted SF Symbol sized in points — the badge's hand and the Help
-    /// button's question mark. Symbols, not text, so the 9 pt legibility floor
-    /// the labels obey doesn't apply.
-    private static func glyph(_ name: String, pointSize: CGFloat,
-                              weight: NSFont.Weight, color: NSColor) -> NSImageView {
-        let view = NSImageView()
-        view.image = NSImage(systemSymbolName: name, accessibilityDescription: nil)
-        view.symbolConfiguration = .init(pointSize: pointSize, weight: weight)
-        view.contentTintColor = color
-        view.translatesAutoresizingMaskIntoConstraints = false
-        return view
     }
 
     /// The settled frame is the dialog AS THE USER WILL FIND IT — the ask, with
@@ -867,17 +844,11 @@ final class DemoPromptMockView: DemoMockView {
         let moved = NSValue(caTransform3D: CATransform3DMakeTranslation(delta.x, delta.y, 0))
         let still = NSValue(caTransform3D: CATransform3DIdentity)
 
-        // Press: the real button darkens about 4 % for ~100 ms. The same beat
-        // either way — it is the travel and what follows that differ.
+        // Press: the real button darkens about 4 % for ~100 ms.
         confirmButton.layer?.add(keyframes("opacity", [
             (0, 1), (DemoBeat.travelEnd, 1), (DemoBeat.pressEnd, 0.85),
             (DemoBeat.pressEnd + 0.08, 1), (end, 1),
         ]), forKey: "press")
-
-        guard outcome == .grants else {
-            addHandoffAnimations(moved: moved, still: still)
-            return
-        }
 
         // The travel decelerates into the target — 80 % of the distance early,
         // then it eases in over the last third.
@@ -898,22 +869,6 @@ final class DemoPromptMockView: DemoMockView {
             (0, 0), (DemoBeat.pressEnd, 0), (DemoBeat.changeEnd, 1),
             (DemoBeat.holdEnd, 1), (DemoBeat.resetEnd, 0), (end, 0),
         ]), forKey: "grantedFade")
-    }
-
-    /// Stage one of the handoff: the same glide and press, but nothing here is
-    /// granted — the host fades this whole dialog out from under the pointer and
-    /// brings the Settings pane up in its place.
-    ///
-    /// The dialog is invisible from the crossfade to the end of the host's pass,
-    /// which is when the pointer walks back to where it started. Doing it out of
-    /// sight is the point: the pass has to END at the settled frame, and a
-    /// pointer visibly retracing its steps would read as a second instruction.
-    private func addHandoffAnimations(moved: NSValue, still: NSValue) {
-        cursor.layer?.add(keyframes("transform", [
-            (0, still), (DemoBeat.idle, still), (DemoBeat.travelEnd, moved),
-            (DemoHandoffBeat.settingsStart, moved),
-            (DemoHandoffBeat.settingsStart + 0.4, still), (timelineDuration, still),
-        ], timing: .easeOut), forKey: "cursorGlide")
     }
 
     /// How far the cursor has to travel, in this view's own coordinates, from
@@ -940,9 +895,10 @@ final class DemoPromptMockView: DemoMockView {
         // the real dialog.
         case .localNetwork:  return "Allow “Audiouter” to find devices on local networks?"
         case .bluetooth:     return "“Audiouter” would like to use Bluetooth."
+        // Neither of these reaches this mock: both raise the system ALERT
+        // (``DemoSystemAlertMockView``), which words its own ask. Kept so the
+        // table stays exhaustive and readable.
         case .remoteControl: return "“Audiouter” would like to control this Mac."
-        // Speaker Sync has no prompt (it is a Login Items approval) and never
-        // reaches the prompt mock; the settings mock is its only mode.
         case .speakerSync:   return "“Audiouter” would like to run in the background."
         }
     }
@@ -978,20 +934,12 @@ final class DemoPromptMockView: DemoMockView {
         }
     }
 
-    /// The button the cursor presses. A re-fired ask confirms nothing — its one
-    /// button leaves for System Settings, and says so.
-    static func confirmTitle(for step: SetupStep, outcome: DemoPromptOutcome = .grants) -> String {
-        guard outcome == .grants else { return "Open System Settings" }
+    /// The button the cursor presses.
+    static func confirmTitle(for step: SetupStep) -> String {
         switch step {
         case .audio, .localNetwork: return "Allow"
         case .bluetooth, .remoteControl, .speakerSync: return "OK"
         }
-    }
-
-    /// The refusal beside it. macOS words a re-fired ask's refusal "Deny", not
-    /// "Don't Allow" — there is nothing left to allow, only somewhere to go.
-    static func denyTitle(for outcome: DemoPromptOutcome) -> String {
-        outcome == .grants ? "Don't Allow" : "Deny"
     }
 
     static func grantedText(for step: SetupStep) -> String {
@@ -1002,6 +950,259 @@ final class DemoPromptMockView: DemoMockView {
         case .remoteControl: return "Control allowed"
         case .speakerSync:   return "Background use allowed"
         }
+    }
+}
+
+// MARK: - System alert mock
+
+/// A miniature of the macOS ALERT PANEL that hands a grant over to System
+/// Settings — a completely different animal from the portrait privacy card
+/// ``DemoPromptMockView`` draws, and the first surface of BOTH two-stage passes.
+///
+/// Drawn from the real "Accessibility Access" alert. Every part below is one
+/// the real panel is identified by, and the contrast with the privacy card is
+/// the point — a user who has seen this
+/// miniature will not mistake the panel for the dialog they were shown earlier:
+///
+/// 1. LANDSCAPE, with a small ~12 pt corner, not the card's tall portrait and
+///    its ~24 pt one;
+/// 2. a plain (not bold) header line naming the access being asked for;
+/// 3. a full-bleed hairline DIVIDER under it — the one structural element the
+///    privacy card has nothing like, and the fastest way to tell them apart;
+/// 4. a two-column body, gold privacy PADLOCK left and text right, the two
+///    centred against each other as a group;
+/// 5. a Help circle bottom-LEFT, and two buttons bottom-RIGHT of which the
+///    REFUSAL is the accent-filled default — the opposite emphasis from the
+///    card's two equal neutral capsules, and the reason the demo's pointer goes
+///    for the quiet button.
+///
+/// It is a passive SURFACE, not a timeline: it draws itself and exposes the
+/// button a pointer should press, while the host two-stage mock owns the one
+/// cursor and the crossfade. That is what lets ``DemoLoginItemsMockView`` keep
+/// its single pointer.
+final class DemoSystemAlertMockView: NSView {
+
+    /// Fixed width; the HEIGHT comes from the copy, so a longer sentence sits
+    /// taller instead of being clipped by a magic number. 288 leaves shadow room
+    /// inside both hosts — the Login Items pane it stands in front of is 300.
+    static let width: CGFloat = 288
+    private static let inset: CGFloat = 12
+    private static let iconSide: CGFloat = 38
+    private static let badgeSide: CGFloat = 16
+    private static let helpSide: CGFloat = 16
+    private static let buttonHeight: CGFloat = 24
+    /// The real panel's buttons are ordinary rounded rects, nowhere near the
+    /// privacy dialog's full capsule.
+    private static let buttonRadius: CGFloat = 6
+    /// What is left for the text column once the icon and the insets have had
+    /// their share.
+    private static var textWidth: CGFloat { width - inset * 2 - iconSide - 11 }
+
+    /// Where a host parks its pointer while this alert is the settled frame:
+    /// inside the panel's bottom-left, in the button row's band but clear of
+    /// both buttons and of the Help circle. Resting it ON "Open System Settings"
+    /// reads as a press that already happened. In the HOST's coordinates — both
+    /// hosts centre this alert in the same 300 × 190 frame, which is what makes
+    /// one constant enough for the two of them.
+    static let pointerRest = CGPoint(x: 66, y: 150)
+
+    private let step: SetupStep
+    /// The button the demo's pointer presses — deliberately NOT the accent-filled
+    /// one. The real alert makes "Deny" the default, so the button that actually
+    /// moves the user forward is the quiet one, and the mock has to say so.
+    private(set) var pressTarget: DemoPushButtonView!
+
+    init(step: SetupStep) {
+        self.step = step
+        super.init(frame: .zero)
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+        build()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private func build() {
+        // Smaller corner than the privacy card's 20: this is the old alert
+        // shape, and a big continuous corner is exactly what would blur the two.
+        let panel = DemoWindowSurfaceView(radius: 12)
+
+        let header = NSTextField(labelWithString: Self.headerText(for: step))
+        header.font = .systemFont(ofSize: 11, weight: .semibold)
+        header.textColor = .labelColor
+        header.lineBreakMode = .byTruncatingTail
+        header.translatesAutoresizingMaskIntoConstraints = false
+
+        let divider = NSBox()
+        divider.boxType = .separator
+        divider.translatesAutoresizingMaskIntoConstraints = false
+
+        let icon = DemoLockIconView()
+        let ask = demoParagraph(Self.askText(for: step), font: .boldSystemFont(ofSize: 11),
+                                color: .labelColor, width: Self.textWidth)
+        let body = demoParagraph(Self.bodyText(for: step), font: .systemFont(ofSize: 10),
+                                 color: .secondaryLabelColor, width: Self.textWidth)
+        let text = NSStackView(views: [ask, body])
+        text.orientation = .vertical
+        text.alignment = .leading
+        text.spacing = 5
+        text.translatesAutoresizingMaskIntoConstraints = false
+
+        let help = DemoDotView(diameter: Self.helpSide, fill: .quaternaryLabelColor)
+        let helpGlyph = demoGlyph("questionmark", pointSize: 9,
+                                  weight: .semibold, color: .secondaryLabelColor)
+
+        pressTarget = DemoPushButtonView(title: "Open System Settings",
+                                         height: Self.buttonHeight,
+                                         cornerRadius: Self.buttonRadius)
+        let deny = DemoPushButtonView(title: "Deny", emphasis: .accent,
+                                      height: Self.buttonHeight,
+                                      cornerRadius: Self.buttonRadius)
+        let buttons = NSStackView(views: [pressTarget, deny])
+        buttons.orientation = .horizontal
+        buttons.spacing = 8
+        buttons.translatesAutoresizingMaskIntoConstraints = false
+
+        panel.addSubview(header)
+        panel.addSubview(divider)
+        panel.addSubview(icon)
+        panel.addSubview(text)
+        panel.addSubview(help)
+        panel.addSubview(helpGlyph)
+        panel.addSubview(buttons)
+        addSubview(panel)
+
+        if let badge = Self.badge(for: step) {
+            panel.addSubview(badge.circle)
+            panel.addSubview(badge.glyph)
+            NSLayoutConstraint.activate([
+                badge.circle.centerXAnchor.constraint(equalTo: icon.trailingAnchor, constant: -3),
+                badge.circle.centerYAnchor.constraint(equalTo: icon.bottomAnchor, constant: -3),
+                badge.glyph.centerXAnchor.constraint(equalTo: badge.circle.centerXAnchor),
+                badge.glyph.centerYAnchor.constraint(equalTo: badge.circle.centerYAnchor),
+            ])
+        }
+
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: Self.width),
+
+            panel.leadingAnchor.constraint(equalTo: leadingAnchor),
+            panel.trailingAnchor.constraint(equalTo: trailingAnchor),
+            panel.topAnchor.constraint(equalTo: topAnchor),
+            panel.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            header.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: Self.inset),
+            header.trailingAnchor.constraint(lessThanOrEqualTo: panel.trailingAnchor,
+                                             constant: -Self.inset),
+            header.topAnchor.constraint(equalTo: panel.topAnchor, constant: 10),
+
+            // Full bleed, edge to edge: the real panel's rule runs the whole
+            // width of the alert, which is what makes it read as a header band
+            // rather than as a gap in the copy.
+            divider.leadingAnchor.constraint(equalTo: panel.leadingAnchor),
+            divider.trailingAnchor.constraint(equalTo: panel.trailingAnchor),
+            divider.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 8),
+
+            icon.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: Self.inset),
+            icon.widthAnchor.constraint(equalToConstant: Self.iconSide),
+            icon.heightAnchor.constraint(equalToConstant: Self.iconSide),
+            // Icon and text are centred against each OTHER, and the taller of
+            // the two is what sets the body band's height.
+            icon.centerYAnchor.constraint(equalTo: text.centerYAnchor),
+            icon.topAnchor.constraint(greaterThanOrEqualTo: divider.bottomAnchor, constant: 12),
+
+            text.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 11),
+            text.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -Self.inset),
+            text.topAnchor.constraint(greaterThanOrEqualTo: divider.bottomAnchor, constant: 12),
+
+            help.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: Self.inset),
+            help.centerYAnchor.constraint(equalTo: buttons.centerYAnchor),
+            helpGlyph.centerXAnchor.constraint(equalTo: help.centerXAnchor),
+            helpGlyph.centerYAnchor.constraint(equalTo: help.centerYAnchor),
+
+            buttons.trailingAnchor.constraint(equalTo: panel.trailingAnchor,
+                                              constant: -Self.inset),
+            buttons.leadingAnchor.constraint(greaterThanOrEqualTo: help.trailingAnchor,
+                                             constant: 8),
+            buttons.topAnchor.constraint(greaterThanOrEqualTo: text.bottomAnchor, constant: 12),
+            buttons.topAnchor.constraint(greaterThanOrEqualTo: icon.bottomAnchor, constant: 12),
+            buttons.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -Self.inset),
+        ])
+        setPressed(false)
+    }
+
+    // MARK: The host's handles
+
+    /// The settled (unpressed) state, applied without animation.
+    func setPressed(_ pressed: Bool) { pressTarget.alphaValue = pressed ? 0.85 : 1 }
+
+    /// The press dip, as a slice of the host's one pass. Only the BUTTON dims —
+    /// the panel's own opacity belongs to the host's crossfade, and two
+    /// animations on one property fight.
+    func addPressAnimation(on host: DemoMockView, pressedAt time: TimeInterval) {
+        pressTarget.layer?.add(host.keyframes("opacity", host.held([
+            (0, 1), (time - 0.10, 1), (time, 0.85), (time + 0.12, 1),
+        ])), forKey: "press")
+    }
+
+    /// Where the pointer's tip has to land, in `view`'s coordinates.
+    func pressPoint(in view: NSView) -> NSPoint {
+        pressTarget.convert(NSPoint(x: pressTarget.bounds.midX, y: pressTarget.bounds.midY),
+                            to: view)
+    }
+
+    // MARK: Copy
+
+    /// The header line — the ACCESS being asked for, which is how macOS titles
+    /// these panels ("Accessibility Access"). Only the two two-stage steps ever
+    /// raise this alert; the rest fall back to the name of their own pane.
+    static func headerText(for step: SetupStep) -> String {
+        switch step {
+        case .remoteControl: return "Accessibility Access"
+        // razor: the Login Items panel's own header was never screenshotted (see
+        // this folder's AGENTS.md on what the research did and didn't confirm),
+        // so it takes the name of the pane it sends the user to — the one string
+        // here we know macOS uses for this grant. Upgrade path: a real
+        // screenshot changes this line.
+        case .speakerSync:   return "Login Items"
+        case .audio, .localNetwork, .bluetooth:
+            return DemoSettingsMockView.paneTitle(for: step)
+        }
+    }
+
+    /// The bold first line. Verbatim from the real Accessibility panel, with the
+    /// same quoted app-name placeholder every other mock's copy uses.
+    static func askText(for step: SetupStep) -> String {
+        switch step {
+        case .remoteControl:
+            return "“Audiouter” would like to control this computer using accessibility features."
+        case .speakerSync:
+            return "“Audiouter” would like to run in the background."
+        case .audio, .localNetwork, .bluetooth:
+            return DemoPromptMockView.askText(for: step)
+        }
+    }
+
+    /// The instruction under it: where the grant actually gets made. macOS words
+    /// this the same way for every panel of this shape, changing only the pane
+    /// it names.
+    static func bodyText(for step: SetupStep) -> String {
+        let pane = step == .speakerSync ? "Login Items" : "Privacy & Security"
+        return "Grant access to this application in \(pane) settings, "
+            + "located in System Settings."
+    }
+
+    /// The blue circular badge overlapping the padlock, if this step has one.
+    ///
+    /// Accessibility's is the accessibility figure — the badge is what says
+    /// WHICH capability the padlock is standing for. Login Items has no
+    /// established badge to copy (no screenshot of that panel exists, and the
+    /// research found no description of one either), so it shows the padlock
+    /// alone rather than an invented marker.
+    private static func badge(for step: SetupStep) -> (circle: NSView, glyph: NSView)? {
+        guard step == .remoteControl else { return nil }
+        return (DemoDotView(diameter: badgeSide, fill: DemoSystemColor.accent),
+                demoGlyph("accessibility", pointSize: 9, weight: .semibold, color: .white))
     }
 }
 
@@ -1048,6 +1249,12 @@ class DemoSettingsMockView: DemoMockView {
     /// Slightly smaller than the prompt mock's, in step with this mock's own
     /// tighter scale.
     fileprivate let cursor = DemoCursorView(pointerHeight: 22)
+
+    /// Where the pointer waits: low in the content pane, clear of the title and
+    /// the card's first row — a cursor sitting on top of text read as a mistake.
+    /// The two-stage subclass moves it, because its settled frame is an ALERT
+    /// covering this whole area and this spot lands on the button.
+    fileprivate var cursorPark: CGPoint { CGPoint(x: 110, y: 138) }
 
     init(step: SetupStep) {
         self.step = step
@@ -1108,10 +1315,8 @@ class DemoSettingsMockView: DemoMockView {
             card.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 12),
             card.bottomAnchor.constraint(lessThanOrEqualTo: shell.bottomAnchor, constant: -12),
 
-            // Parked low in the content pane, clear of the title and the card's
-            // first row — a cursor sitting on top of text read as a mistake.
-            cursor.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 110),
-            cursor.topAnchor.constraint(equalTo: topAnchor, constant: 138),
+            cursor.leadingAnchor.constraint(equalTo: leadingAnchor, constant: cursorPark.x),
+            cursor.topAnchor.constraint(equalTo: topAnchor, constant: cursorPark.y),
         ])
         applySettledState()
     }
@@ -1247,25 +1452,27 @@ class DemoSettingsMockView: DemoMockView {
 
 // MARK: - Login Items mock (two stages)
 
-/// Speaker Sync's miniature: the ONLY two-stage mock, because its approval is
-/// the only one that takes two acts.
+/// Speaker Sync's miniature, in two stages, because its approval takes two acts
+/// on two surfaces.
 ///
-/// Registering the login item raises no permission dialog at all — macOS posts a
-/// **notification** ("Background Items Added"), and clicking THAT is what opens
-/// the Login Items pane where the switch lives. The pane on its own would leave
-/// out the harder half: a banner that appears somewhere the user isn't looking
-/// and vanishes by itself is the step they have to catch first.
+/// Registering the login item doesn't put the switch in front of anybody: the
+/// user is asked to go to Login Items and flip it there. **Stage one is the
+/// system ALERT that asks them** — see this folder's AGENTS.md for what the
+/// research could and could not confirm about that panel — and only its "Open
+/// System Settings" lands them on the pane. The pane on its own would leave out
+/// the harder half.
 ///
 /// So one pass, two surfaces, two clicks:
 ///
-/// 1. the notification banner, with the cursor gliding to it and pressing it;
+/// 1. the alert, with the cursor gliding to "Open System Settings" and pressing
+///    it;
 /// 2. a crossfade into the inherited Settings pane — the same drawn Login Items
 ///    window, the same switch — with the cursor flipping Audiouter on.
 ///
 /// It inherits rather than composes: the pane, its switch and its cursor are all
 /// the parent's, so stage 2 IS the one-stage mock, replayed later along the pass
 /// (`stage2Start`) with `DemoBeat`'s rhythm untouched. The pass still ends where
-/// it started — back on the banner, the first thing the user will really meet.
+/// it started — back on the alert, the first thing the user will really meet.
 final class DemoLoginItemsMockView: DemoSettingsMockView {
 
     /// Where stage 2 begins: the moment the crossfade has finished, so the
@@ -1275,57 +1482,57 @@ final class DemoLoginItemsMockView: DemoSettingsMockView {
     /// Stage 1's beats, in seconds along the pass. Stage 2's are `DemoBeat`'s,
     /// shifted by ``stage2Start``.
     private enum Beat {
-        /// The cursor's tip reaches the banner.
+        /// The cursor's tip reaches the alert's button.
         static let reached: TimeInterval = 1.50
         static let pressed: TimeInterval = 1.62
-        /// Banner out, pane in.
+        /// Alert out, pane in.
         static let handoffStart: TimeInterval = 1.80
         static let handoffEnd = DemoLoginItemsMockView.stage2Start
-        /// Pane out, banner back — the pass returning to its settled frame.
+        /// Pane out, alert back — the pass returning to its settled frame.
         static let returnStart: TimeInterval = handoffEnd + DemoBeat.loop
         static let returnEnd: TimeInterval = returnStart + 0.30
         static let end: TimeInterval = returnEnd + 0.30
     }
 
-    private let banner = DemoNotificationBannerView()
+    private let alert: DemoSystemAlertMockView
+
+    fileprivate override var cursorPark: CGPoint { DemoSystemAlertMockView.pointerRest }
 
     override init(step: SetupStep) {
+        alert = DemoSystemAlertMockView(step: step)
         super.init(step: step)
-        buildBanner()
+        buildAlert()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     override var timelineDuration: TimeInterval { Beat.end }
 
-    private func buildBanner() {
+    private func buildAlert() {
         // BELOW the cursor, which the parent added last: the pointer presses the
-        // banner, so it has to be drawn over it.
-        addSubview(banner, positioned: .below, relativeTo: cursor)
+        // alert's button, so it has to be drawn over it.
+        addSubview(alert, positioned: .below, relativeTo: cursor)
         NSLayoutConstraint.activate([
-            banner.centerXAnchor.constraint(equalTo: centerXAnchor),
-            // High in the frame rather than centred: it leaves the parent's
-            // parked cursor, low in the pane, well clear of it — and a
-            // notification does arrive above whatever you were looking at.
-            banner.topAnchor.constraint(equalTo: topAnchor, constant: 22),
+            alert.centerXAnchor.constraint(equalTo: centerXAnchor),
+            alert.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
         applySettledState()
     }
 
-    /// Settled: the BANNER, alone — the pane behind it hasn't been opened yet.
+    /// Settled: the ALERT, alone — the pane behind it hasn't been opened yet.
     /// The parent's rest state (switch off, cursor parked) still holds under it,
     /// so the pass returns to one frame, not two.
     override func applySettledState() {
         super.applySettledState()
         // Called once from the parent's own `build()`, before this subclass has
-        // added the banner — harmless, and it means every later call has both.
-        banner.alphaValue = 1
-        banner.setPressed(false)
+        // added the alert — harmless, and it means every later call has both.
+        alert.alphaValue = 1
+        alert.setPressed(false)
         shell?.alphaValue = 0
     }
 
     override func addTimelineAnimations() {
-        let toBanner = translation(bannerTravel())
+        let toAlert = translation(alertTravel())
         let toSwitch = translation(switchTravel())
         let still = NSValue(caTransform3D: CATransform3DIdentity)
         let stage2 = Self.stage2Start
@@ -1335,7 +1542,7 @@ final class DemoLoginItemsMockView: DemoSettingsMockView {
         // second pointer or a slide back across a pane that isn't there yet.
         cursor.layer?.add(keyframes("transform", [
             (0, still), (DemoBeat.idle, still),
-            (Beat.reached, toBanner), (Beat.handoffStart, toBanner),
+            (Beat.reached, toAlert), (Beat.handoffStart, toAlert),
             (Beat.handoffEnd, still), (stage2 + DemoBeat.idle, still),
             (stage2 + DemoBeat.travelEnd, toSwitch), (stage2 + DemoBeat.resetEnd, toSwitch),
             (Beat.returnStart, still), (Beat.end, still),
@@ -1347,15 +1554,15 @@ final class DemoLoginItemsMockView: DemoSettingsMockView {
             (Beat.returnEnd, 0), (Beat.end, 1),
         ]), forKey: "cursorFade")
 
-        // The press: a wash over the banner, not a dimmed opacity — opacity is
-        // the crossfade's channel, and two animations on one property fight.
-        banner.addPressAnimation(on: self, pressedAt: Beat.pressed)
+        // The press dips the BUTTON, not the panel — the panel's opacity is the
+        // crossfade's channel, and two animations on one property fight.
+        alert.addPressAnimation(on: self, pressedAt: Beat.pressed)
 
         // The handoff, and its mirror at the end of the pass.
-        banner.layer?.add(keyframes("opacity", [
+        alert.layer?.add(keyframes("opacity", [
             (0, 1), (Beat.handoffStart, 1), (Beat.handoffEnd, 0),
             (Beat.returnStart, 0), (Beat.returnEnd, 1), (Beat.end, 1),
-        ]), forKey: "bannerFade")
+        ]), forKey: "alertFade")
         shell.layer?.add(keyframes("opacity", [
             (0, 0), (Beat.handoffStart, 0), (Beat.handoffEnd, 1),
             (Beat.returnStart, 1), (Beat.returnEnd, 0), (Beat.end, 0),
@@ -1368,11 +1575,11 @@ final class DemoLoginItemsMockView: DemoSettingsMockView {
         NSValue(caTransform3D: CATransform3DMakeTranslation(delta.x, delta.y, 0))
     }
 
-    /// How far the cursor's TIP has to travel to the banner's middle — the whole
-    /// banner is the click target, exactly as it is on a real notification.
-    private func bannerTravel() -> CGPoint {
+    /// How far the cursor's TIP has to travel to the alert's "Open System
+    /// Settings" — the one button that gets the user to the pane.
+    private func alertTravel() -> CGPoint {
         let from = cursor.convert(cursor.tipPoint, to: self)
-        let to = banner.convert(NSPoint(x: banner.bounds.midX, y: banner.bounds.midY), to: self)
+        let to = alert.pressPoint(in: self)
         return CGPoint(x: to.x - from.x, y: to.y - from.y)
     }
 
@@ -1383,150 +1590,43 @@ final class DemoLoginItemsMockView: DemoSettingsMockView {
     /// isn't actually left painting. (A running pass is a presentation-layer
     /// affair; the model state stays settled throughout, which is exactly what
     /// makes "a pass ends where it started" checkable at all.)
-    var test_stage: DemoStage { (shell?.alphaValue ?? 0) > 0.5 ? .settingsPane : .banner }
-}
-
-/// The macOS notification banner macOS posts when a login item registers.
-///
-/// Anatomy, kept to what a banner is recognised by: a rounded card with the
-/// system's own soft shadow, the app's real icon on the left, a bold title, and
-/// the message under it. No source-app header, no timestamp, no hover actions —
-/// they add no recognisability at this size and every one of them would be
-/// chrome we invented rather than chrome macOS draws.
-///
-/// The words are the real ones: macOS titles this "Background Items Added" and
-/// says the app "added items that can run in the background. You can manage this
-/// in Login Items Settings." That last sentence is why the user clicks it, so it
-/// stays in full even though it costs a third line.
-final class DemoNotificationBannerView: NSView {
-
-    static let width: CGFloat = 250
-    private static let inset: CGFloat = 11
-    private static let iconSide: CGFloat = 28
-    private static let radius: CGFloat = 14
-
-    /// The pressed state: a wash over the whole card. A separate layer from the
-    /// card's own opacity, which the two-stage pass owns for its crossfade.
-    private let pressWash = DemoPillView(radius: radius,
-                                         fill: NSColor.labelColor.withAlphaComponent(0.10))
-
-    init() {
-        super.init(frame: .zero)
-        wantsLayer = true
-        translatesAutoresizingMaskIntoConstraints = false
-        build()
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    private func build() {
-        let card = DemoWindowSurfaceView(radius: Self.radius)
-
-        let icon = NSImageView()
-        icon.image = NSApp?.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
-        icon.imageScaling = .scaleProportionallyUpOrDown
-        icon.translatesAutoresizingMaskIntoConstraints = false
-
-        let title = NSTextField(labelWithString: "Background Items Added")
-        title.font = .boldSystemFont(ofSize: 11)
-        title.textColor = .labelColor
-        title.lineBreakMode = .byTruncatingTail
-        title.translatesAutoresizingMaskIntoConstraints = false
-
-        // 9.5 pt clears the 9 pt floor — this is a sentence the user reads, so it
-        // is text, not a greeked bar.
-        let message = NSTextField(labelWithString:
-            "“Audiouter” added items that can run in the background. "
-                + "You can manage this in Login Items Settings.")
-        message.font = .systemFont(ofSize: 9.5)
-        message.textColor = .secondaryLabelColor
-        message.maximumNumberOfLines = 0
-        message.lineBreakMode = .byWordWrapping
-        message.preferredMaxLayoutWidth =
-            Self.width - Self.inset * 2 - Self.iconSide - 9
-        message.translatesAutoresizingMaskIntoConstraints = false
-
-        for view in [card, icon, title, message, pressWash] { addSubview(view) }
-
-        NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: Self.width),
-
-            card.leadingAnchor.constraint(equalTo: leadingAnchor),
-            card.trailingAnchor.constraint(equalTo: trailingAnchor),
-            card.topAnchor.constraint(equalTo: topAnchor),
-            card.bottomAnchor.constraint(equalTo: bottomAnchor),
-
-            pressWash.leadingAnchor.constraint(equalTo: leadingAnchor),
-            pressWash.trailingAnchor.constraint(equalTo: trailingAnchor),
-            pressWash.topAnchor.constraint(equalTo: topAnchor),
-            pressWash.bottomAnchor.constraint(equalTo: bottomAnchor),
-
-            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset),
-            icon.topAnchor.constraint(equalTo: topAnchor, constant: Self.inset),
-            icon.widthAnchor.constraint(equalToConstant: Self.iconSide),
-            icon.heightAnchor.constraint(equalToConstant: Self.iconSide),
-            icon.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -Self.inset),
-
-            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 9),
-            title.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.inset),
-            title.topAnchor.constraint(equalTo: topAnchor, constant: Self.inset),
-
-            message.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            message.trailingAnchor.constraint(equalTo: title.trailingAnchor),
-            message.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 2),
-            message.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.inset),
-        ])
-        setPressed(false)
-    }
-
-    /// The settled (unpressed) state, applied without animation.
-    func setPressed(_ pressed: Bool) { pressWash.alphaValue = pressed ? 1 : 0 }
-
-    /// The press dip, as a slice of the host's one pass.
-    func addPressAnimation(on host: DemoMockView, pressedAt time: TimeInterval) {
-        pressWash.layer?.add(host.keyframes("opacity", host.held([
-            (0, 0), (time - 0.10, 0), (time, 1), (time + 0.16, 0),
-        ])), forKey: "press")
-    }
+    var test_stage: DemoStage { (shell?.alphaValue ?? 0) > 0.5 ? .settingsPane : .alert }
 }
 
 // MARK: - Two-stage retry mock
 
-/// Which of the two-stage retry's surfaces is on screen. Public only because the
-/// Setup window's `test_demoHandoffStage` hook exposes it.
-public enum DemoHandoffStage: Equatable, Sendable {
-    case prompt
-    case settings
-}
-
 /// Remote Control's retry, which is TWO surfaces rather than one.
 ///
 /// Its "Open Settings…" doesn't deep-link anywhere — it re-fires the
-/// Accessibility PROMPT, because that prompt's own "Open System Settings" button
-/// is the only path that scrolls to and highlights Audiouter in the list (see
-/// this folder's AGENTS.md). So the user has two clicks to make, on two
-/// different surfaces, and a demo that opened straight onto the Settings pane
-/// skipped the first one — it showed the toggle without showing how the pane
-/// carrying it is reached.
+/// Accessibility ask, because that panel's own "Open System Settings" button is
+/// the only path that scrolls to and highlights Audiouter in the list (see this
+/// folder's AGENTS.md). So the user has two clicks to make, on two different
+/// surfaces, and a demo that opened straight onto the Settings pane skipped the
+/// first one — it showed the toggle without showing how the pane carrying it is
+/// reached.
 ///
-/// One pass, one clock: the ask with the pointer pressing **Open System
+/// One pass, one clock: the system ALERT with the pointer pressing **Open System
 /// Settings**, a crossfade, then the ordinary Settings pass with the pointer
-/// flipping the Audiouter toggle on. Both stages are the mocks the other steps
-/// already use; this view only sequences them and owns the crossfade, laying
-/// stage two's own 0-based score onto this longer pass through
-/// ``DemoMockView/stageWindow``.
+/// flipping the Audiouter toggle on. Stage two is the mock every other step
+/// already uses; this view sequences the two, owns the crossfade and owns the
+/// stage-one pointer, laying stage two's own 0-based score onto this longer pass
+/// through ``DemoMockView/stageWindow``.
 final class DemoSettingsHandoffMockView: DemoMockView {
 
     /// As wide as the wider stage and as tall as the taller one, so neither
-    /// moves when the other takes over.
-    static let size = NSSize(width: DemoSettingsMockView.size.width,
-                             height: DemoPromptMockView.size.height)
+    /// moves when the other takes over. Both are the Settings pane's now that
+    /// stage one is a landscape alert rather than the portrait privacy card.
+    static let size = DemoSettingsMockView.size
 
-    private let prompt: DemoPromptMockView
+    private let alert: DemoSystemAlertMockView
     private let settings: DemoSettingsMockView
+    /// Stage one's pointer. Stage two draws its own inside the Settings mock, and
+    /// the two never share a frame — this one is invisible from the crossfade
+    /// until the alert comes back.
+    private let cursor = DemoCursorView(pointerHeight: 22)
 
     init(step: SetupStep) {
-        prompt = DemoPromptMockView(step: step, outcome: .opensSystemSettings)
+        alert = DemoSystemAlertMockView(step: step)
         settings = DemoSettingsMockView(step: step)
         super.init(frame: .zero)
         wantsLayer = true
@@ -1538,7 +1638,7 @@ final class DemoSettingsHandoffMockView: DemoMockView {
     override var timelineDuration: TimeInterval { DemoHandoffBeat.loop }
 
     private func build() {
-        for stage in [prompt as NSView, settings] {
+        for stage in [alert as NSView, settings] {
             // A mock is normally installed by the pane, which turns this off for
             // it; nested one stage deep, that is this view's job.
             stage.translatesAutoresizingMaskIntoConstraints = false
@@ -1548,9 +1648,15 @@ final class DemoSettingsHandoffMockView: DemoMockView {
                 stage.centerYAnchor.constraint(equalTo: centerYAnchor),
             ])
         }
+        addSubview(cursor)
         NSLayoutConstraint.activate([
             widthAnchor.constraint(equalToConstant: Self.size.width),
             heightAnchor.constraint(equalToConstant: Self.size.height),
+
+            cursor.leadingAnchor.constraint(equalTo: leadingAnchor,
+                                            constant: DemoSystemAlertMockView.pointerRest.x),
+            cursor.topAnchor.constraint(equalTo: topAnchor,
+                                        constant: DemoSystemAlertMockView.pointerRest.y),
         ])
         applySettledState()
     }
@@ -1558,36 +1664,57 @@ final class DemoSettingsHandoffMockView: DemoMockView {
     /// Settled: stage one, as the user will find it. Both stages settle
     /// themselves too, so a stopped pass leaves neither half-played.
     override func applySettledState() {
-        prompt.alphaValue = 1
-        prompt.applySettledState()
+        alert.alphaValue = 1
+        alert.setPressed(false)
         settings.alphaValue = 0
         settings.applySettledState()
+        cursor.alphaValue = 1
+        cursor.layer?.transform = CATransform3DIdentity
     }
 
     override func addTimelineAnimations() {
         let end = timelineDuration
-        prompt.layer?.add(keyframes("opacity", [
+        alert.layer?.add(keyframes("opacity", [
             (0, 1), (DemoHandoffBeat.handoff, 1), (DemoHandoffBeat.settingsStart, 0),
             (DemoHandoffBeat.settingsEnd, 0), (end, 1),
-        ]), forKey: "promptStage")
+        ]), forKey: "alertStage")
         settings.layer?.add(keyframes("opacity", [
             (0, 0), (DemoHandoffBeat.handoff, 0), (DemoHandoffBeat.settingsStart, 1),
             (DemoHandoffBeat.settingsEnd, 1), (end, 0),
         ]), forKey: "settingsStage")
 
-        // Stage one already runs on this clock; stage two is written in its own
-        // seconds and mapped onto the window it plays in.
-        prompt.addTimelineAnimations()
+        // Stage one's pointer: glide to "Open System Settings", press, then walk
+        // home while it is INVISIBLE — the pass has to end at the settled frame,
+        // and a pointer visibly retracing its steps would read as a second
+        // instruction.
+        let from = cursor.convert(cursor.tipPoint, to: self)
+        let to = alert.pressPoint(in: self)
+        let moved = NSValue(caTransform3D:
+            CATransform3DMakeTranslation(to.x - from.x, to.y - from.y, 0))
+        let still = NSValue(caTransform3D: CATransform3DIdentity)
+        cursor.layer?.add(keyframes("transform", [
+            (0, still), (DemoBeat.idle, still), (DemoBeat.travelEnd, moved),
+            (DemoHandoffBeat.settingsStart, moved),
+            (DemoHandoffBeat.settingsStart + 0.4, still), (end, still),
+        ], timing: .easeOut), forKey: "cursorGlide")
+        cursor.layer?.add(keyframes("opacity", [
+            (0, 1), (DemoHandoffBeat.handoff, 1), (DemoHandoffBeat.settingsStart, 0),
+            (DemoHandoffBeat.settingsEnd, 0), (end, 1),
+        ]), forKey: "cursorFade")
+        alert.addPressAnimation(on: self, pressedAt: DemoBeat.pressEnd)
+
+        // Stage two is written in its own seconds and mapped onto the window it
+        // plays in.
         settings.stageWindow = (hostDuration: end, start: DemoHandoffBeat.settingsStart)
         settings.addTimelineAnimations()
     }
 
     // MARK: Test-support hooks
 
-    /// Which surface is up. The settled frame must be ``DemoHandoffStage/prompt``
-    /// — the first of the two clicks the user still has to make.
-    var test_stage: DemoHandoffStage {
-        settings.alphaValue > prompt.alphaValue ? .settings : .prompt
+    /// Which surface is up. The settled frame must be ``DemoStage/alert`` — the
+    /// first of the two clicks the user still has to make.
+    var test_stage: DemoStage {
+        settings.alphaValue > alert.alphaValue ? .settingsPane : .alert
     }
 }
 
@@ -1679,20 +1806,40 @@ final class DemoWindowSurfaceView: NSView {
     }
 }
 
-/// A macOS 26 dialog button: a neutral CAPSULE with a plain label.
+/// How a drawn dialog button is filled.
+enum DemoButtonEmphasis {
+    /// The neutral grey both of the privacy dialog's buttons wear, and the one
+    /// the system alert's "Open System Settings" wears.
+    case neutral
+    /// Accent-filled with a white title — the alert's DEFAULT button, which on
+    /// the Accessibility panel is the refusal.
+    case accent
+}
+
+/// A drawn dialog button.
 ///
-/// **Both buttons are the same grey.** Liquid Glass has no accent-filled
-/// default button in the permission dialog, so painting one would date the mock
-/// and, worse, send the user looking for a blue button that won't be there.
+/// Two shapes, because the two surfaces this file mimics genuinely differ: the
+/// macOS 26 privacy dialog's are full CAPSULES and both the same grey (Liquid
+/// Glass has no accent-filled default there, and painting one would send the
+/// user looking for a blue button that won't be there), while the older system
+/// ALERT panel's are shorter rounded rects with an accent-filled default. The
+/// defaults here are the capsule, so the privacy dialog's call sites say
+/// nothing extra.
 final class DemoPushButtonView: NSView {
 
     static let height: CGFloat = 28
-    /// Air either side of the label. It only shows on a button that sizes to its
-    /// own title (the re-fired ask's "Deny"); an equal-halves button is wider
-    /// than its label anyway, so this changes nothing there.
+    /// Air either side of the label.
     private static let labelInset: CGFloat = 10
 
-    init(title: String) {
+    private let emphasis: DemoButtonEmphasis
+    private let cornerRadius: CGFloat
+
+    init(title: String,
+         emphasis: DemoButtonEmphasis = .neutral,
+         height: CGFloat = DemoPushButtonView.height,
+         cornerRadius: CGFloat? = nil) {
+        self.emphasis = emphasis
+        self.cornerRadius = cornerRadius ?? height / 2
         super.init(frame: .zero)
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
@@ -1700,11 +1847,11 @@ final class DemoPushButtonView: NSView {
         let label = NSTextField(labelWithString: title)
         label.font = .systemFont(ofSize: 12)
         label.alignment = .center
-        label.textColor = .labelColor
+        label.textColor = emphasis == .accent ? .white : .labelColor
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(label)
         NSLayoutConstraint.activate([
-            heightAnchor.constraint(equalToConstant: Self.height),
+            heightAnchor.constraint(equalToConstant: height),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
             label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.labelInset),
             label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.labelInset),
@@ -1716,8 +1863,56 @@ final class DemoPushButtonView: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        layer?.backgroundColor = DemoSystemColor.plainButton.cgColor
-        layer?.cornerRadius = Self.height / 2
+        layer?.backgroundColor = (emphasis == .accent ? DemoSystemColor.accent
+                                                      : DemoSystemColor.plainButton).cgColor
+        layer?.cornerRadius = cornerRadius
+        layer?.cornerCurve = .continuous
+    }
+}
+
+/// The gold privacy PADLOCK the system alert leads with.
+///
+/// `lock.fill` filled with a warm vertical gradient rather than a flat tint: the
+/// real icon is artwork with a little dimension in it, and a flat amber SF
+/// Symbol at this size reads as a toolbar glyph instead. The symbol IS the mask,
+/// so there is no second drawn shape to keep in step with it.
+///
+/// **TRAP: the mask has to be built in an image of its own.** Painting the
+/// gradient `.sourceAtop` straight into `draw(_:)` does not clip to the symbol —
+/// the view's backing store is not the empty destination that composite mode
+/// needs, and the whole icon rect comes out solid gold. Drawing the gradient
+/// into a fresh `NSImage` and knocking the symbol's alpha out of it with
+/// `.destinationIn` gives a surface nobody else has touched.
+final class DemoLockIconView: NSView {
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let symbol = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: bounds.height, weight: .medium)) else { return }
+        let size = symbol.size
+        guard size.width > 0, size.height > 0 else { return }
+        let scale = min(bounds.width / size.width, bounds.height / size.height)
+        let drawn = NSRect(x: bounds.midX - size.width * scale / 2,
+                           y: bounds.midY - size.height * scale / 2,
+                           width: size.width * scale,
+                           height: size.height * scale)
+
+        let gold = NSImage(size: drawn.size, flipped: false) { rect in
+            // Negative angle so the LIGHTER gold is at the top, as it is on the
+            // real icon.
+            NSGradient(starting: DemoSystemColor.lockGoldTop,
+                       ending: DemoSystemColor.lockGoldBottom)?.draw(in: rect, angle: -90)
+            symbol.draw(in: rect, from: .zero, operation: .destinationIn, fraction: 1)
+            return true
+        }
+        gold.draw(in: drawn)
     }
 }
 

@@ -661,6 +661,14 @@ public final class ControlPanelWindowController: NSWindowController {
     /// applications, so the in-app-focus-loss path needs to be driven.
     public var test_appIsActiveOverride: Bool?
 
+    /// `nil` = read the real `window.isKeyWindow`.
+    public var test_isKeyWindowOverride: Bool?
+
+    /// Run the deferred half of a resign-key dismissal now — the runloop pass
+    /// AppKit would have given it. Tests drive both halves explicitly because a
+    /// headless run has no runloop turning between them.
+    public func test_settleResignDismissal() { dismissIfStillResigned() }
+
     /// A sheet is up (e.g. group creation). Dismissing the panel out from under
     /// it would kill the sheet mid-edit — R7. Public: the surface's click
     /// policy (`AppSurfaceController.clickAction`) reads this too, to front
@@ -712,11 +720,39 @@ extension ControlPanelWindowController: NSWindowDelegate {
     ///
     /// The timestamp recorded before closing is the R1 race guard — see
     /// `consumeRecentResignDismissal(within:)` for what it protects against.
+    ///
+    /// The four conditions are evaluated TWICE: once here, and again one
+    /// runloop pass later, where the panel must also still not be key. Only a
+    /// key loss that SURVIVES that pass is a click-outside. One that reverses
+    /// itself is this window's own AppKit chrome borrowing key and handing it
+    /// straight back (a toolbar picker, a menu, field-editor churn), and this
+    /// delegate method is the ONLY path that can close the surface — so an
+    /// instant dismissal here tears the whole surface down for a transition
+    /// the user never made. The user loses nothing to the wait: the dismissal
+    /// still lands in the same runloop turn, before anything is drawn.
     public func windowDidResignKey(_ notification: Notification) {
-        guard !isPinned, isPanelVisible, !hasAttachedSheet, appIsActive else { return }
+        guard shouldDismissOnResignKey else { return }
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated { self?.dismissIfStillResigned() }
+        }
+    }
+
+    /// The four conditions a resign-key dismissal requires, each documented
+    /// above `windowDidResignKey`.
+    private var shouldDismissOnResignKey: Bool {
+        !isPinned && isPanelVisible && !hasAttachedSheet && appIsActive
+    }
+
+    private func dismissIfStillResigned() {
+        guard shouldDismissOnResignKey, !isKeyNow else { return }
         lastResignDismissalTime = CACurrentMediaTime()
         window?.performClose(nil)
     }
+
+    /// Whether the panel holds key status right now. Honors
+    /// `test_isKeyWindowOverride` — `swift test` never puts a window on screen,
+    /// so the real property is permanently `false` there.
+    private var isKeyNow: Bool { test_isKeyWindowOverride ?? (window?.isKeyWindow ?? false) }
 
     /// Resync the decorative bubble/beak window when the user drags the
     /// panel's (resizable) edge. `addChildWindow` (see `init`) tracks the

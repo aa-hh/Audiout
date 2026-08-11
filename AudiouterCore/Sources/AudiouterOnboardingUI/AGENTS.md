@@ -215,9 +215,10 @@ set changes, or when the gate/motion/demo rules change.
     and read to the owner as "an abstract allow thing"). The anatomy, which is
     generic across all five steps:
     a TALL portrait card (real 283 × 340 pt, drawn here at ~0.85 of that, with a
-    large ~24 pt continuous corner); the app icon top-LEFT with a `systemBlue`
-    circle badge carrying a white `hand.raised.fill` overlapping its
-    bottom-trailing corner — the marker that says *privacy prompt*; a small grey
+    large ~24 pt continuous corner); an ICON TILE top-LEFT (which icon depends on
+    the step — see below) with a `systemBlue` circle badge carrying a white
+    `hand.raised.fill` overlapping its bottom-trailing corner — the marker that
+    says *privacy prompt*; a small grey
     Help circle top-right; a bold LEFT-ALIGNED title over two or three lines; a
     left-aligned `secondaryLabelColor` body; and two EQUAL, NEUTRAL CAPSULE
     buttons filling the content width. **There is no accent-filled default
@@ -231,6 +232,32 @@ set changes, or when the gate/motion/demo rules change.
       Change one there, change it in `bodyText(for:)`. That sentence is why the
       card is drawn near life size at all: the type tiers still hold (nothing
       under 9 pt), which puts the title at 14 pt and the body at 11 pt.
+    - **The top-left tile is NOT always the app's icon** (owner screenshots of
+      the real dialogs, 2026-08-11). macOS shows the asking app's own icon only
+      where the grant is about capturing THAT APP's content — System Audio, which
+      really does draw `NSApp.applicationIconImage` with the hand badge on it.
+      The CAPABILITY grants show a generic SYSTEM tile instead, the same one for
+      every app: the real Local Network dialog draws the Network pane's blue
+      rounded square with a white wireframe globe, not Audiouter's icon. So
+      `DemoPromptMockView.iconView(for:)` returns the app icon for `.audio` and a
+      `systemTile` (`DemoSystemColor.accent` fill, side × 0.23 continuous corner,
+      white glyph at side × 0.55) for `.localNetwork` (`network`) and
+      `.bluetooth`. Everything else about the slot — size, position, the badge —
+      is identical either way; only the tile's CONTENTS change. `.remoteControl`
+      and `.speakerSync` never reach this path in practice and keep the app icon
+      as the safe default.
+      - **Bluetooth's glyph is a NAMED APPROXIMATION, twice over.** No screenshot
+        of the real macOS Bluetooth prompt was available and a search turned up
+        none, so the system-tile treatment is INFERRED from the Local Network
+        one; and SF Symbols ships no Bluetooth rune at all (Apple doesn't licence
+        the mark — `name_availability.plist` has no such name), so the tile
+        carries `dot.radiowaves.right`, the glyph the Bluetooth setup card beside
+        it already uses, rather than a hand-drawn rune. If a real screenshot ever
+        contradicts either half, this is the one place to change.
+    - `.localNetwork`'s title is the odd one out: macOS phrases it as a QUESTION
+      opening on "Allow" — "Allow “Audiouter” to find devices on local
+      networks?" — where the other steps use "…would like to…". Verbatim from
+      the real dialog; don't regularise it.
     - The per-step hooks stay `askText` / `bodyText` / `confirmTitle` /
       `grantedText`; the ANATOMY is shared. `DemoPaneView.surfaceSize` grew to
       336 × 336 to seat the taller card with a margin around it (the pane has

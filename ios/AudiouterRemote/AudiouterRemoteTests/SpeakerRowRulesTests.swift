@@ -364,46 +364,36 @@ import AudiouterProtocol
         #expect(WarmSignal.faderRail(0, dragging: true) != WarmSignal.faderRail(100, dragging: true))
     }
 
-    // MARK: - The level strip's track, and the finger that has to match it
+    // MARK: - The level's one coordinate
 
-    @Test func theStripsTrackIsTheRowMinusBothGutters() {
-        // The strip draws inset to the row's own content gutter at each end,
-        // so its track is the row width less two of them — the same number the
-        // halo's leading edge and the mute button's trailing edge sit on.
-        #expect(WarmSignal.faderTrackWidth(rowWidth: 365) == 365 - 2 * WarmSignal.rowGutter)
-        #expect(WarmSignal.faderTrackWidth(rowWidth: 365) == 341)
-    }
-
-    @Test func aRowNarrowerThanItsGuttersHasNoTrackRatherThanANegativeOne() {
-        // First layout pass reports 0; a negative track would run the drag
-        // maths backwards and `Capsule().frame(width:)` would trap.
-        #expect(WarmSignal.faderTrackWidth(rowWidth: 0) == 0)
-        #expect(WarmSignal.faderTrackWidth(rowWidth: 10) == 0)
-    }
-
-    @Test func fingerTravelAndStripTravelAgreeAcrossTheWholeTrack() {
-        // The coupling the whole strip stands on: the value the finger sets
-        // and the fill the strip paints are computed from ONE width, so a
-        // finger that has crossed x% of the track leaves the fill under it.
-        // Mapping the drag to the row width instead would move the fill ~7%
-        // slower than the finger on a 365 pt row — a lie you can feel.
-        let track = WarmSignal.faderTrackWidth(rowWidth: 365)
+    @Test func fingerTravelAndTheLightsEdgeAgreeAcrossTheWholeRow() {
+        // The rule the whole row rests on: the light's edge, the line on it,
+        // the rail that fades in under it and the finger that moves it all
+        // take the same fraction of the same row width. Give any one of them
+        // its own track — an inset rail, say — and the fill lands a few points
+        // off the finger, which at the exact spot the user is looking is the
+        // one error that cannot hide.
+        let row: CGFloat = 365
         for target in [0, 10, 25, 50, 65, 90, 100] {
-            let travel = CGFloat(target) / 100 * track
-            let value = WarmSignal.faderValue(start: 0, translationWidth: travel, trackWidth: track)
+            let travel = CGFloat(target) / 100 * row
+            let value = WarmSignal.faderValue(start: 0, translationWidth: travel, trackWidth: row)
             #expect(value == target)
-            // …and the fill the strip draws for that value ends where the
-            // finger is, to within the half-point the value is rounded to.
-            #expect(abs(CGFloat(value) / 100 * track - travel) < 0.5 * track / 100)
+            #expect(abs(CGFloat(value) / 100 * row - travel) < 0.5 * row / 100)
         }
     }
 
-    @Test func aDragThatCrossesTheWholeTrackCoversTheWholeRange() {
-        // Both rails are reachable inside one gesture across the strip, which
-        // is what makes the strip's ends and the fader's ends the same ends.
-        let track = WarmSignal.faderTrackWidth(rowWidth: 365)
-        #expect(WarmSignal.faderValue(start: 0, translationWidth: track, trackWidth: track) == 100)
-        #expect(WarmSignal.faderValue(start: 100, translationWidth: -track, trackWidth: track) == 0)
+    @Test func aDragAcrossTheRowCoversTheWholeRange() {
+        // Both rails are reachable inside one gesture, which is what makes the
+        // row's ends and the fader's ends the same ends.
+        let row: CGFloat = 365
+        #expect(WarmSignal.faderValue(start: 0, translationWidth: row, trackWidth: row) == 100)
+        #expect(WarmSignal.faderValue(start: 100, translationWidth: -row, trackWidth: row) == 0)
+    }
+
+    @Test func aRowWithNoWidthYetHoldsItsValueRatherThanZeroingIt() {
+        // First layout pass reports 0. Dividing by it would send the level to
+        // NaN and the light with it.
+        #expect(WarmSignal.faderValue(start: 65, translationWidth: 40, trackWidth: 0) == 65)
     }
 
     // MARK: - The one-time gesture coach

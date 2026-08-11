@@ -122,21 +122,12 @@ enum WarmSignal {
     /// The 44 pt floor every tappable control is given, however small it draws.
     static let hitTarget: CGFloat = 44
 
-    /// The gutter both fader rows keep at each end — ``DeviceRowView``'s row
-    /// padding and ``MainOutDrawerRow``'s are both this, which is why the
-    /// level strip can inset to it and land exactly on the halo's leading edge
-    /// and the mute button's trailing one.
+    /// The gutter both fader rows keep at each end, for their CONTENT. The
+    /// level does not take it: ``LevelLight``, its edge line, ``LevelStrip``
+    /// and the drag all run on the bare row width, so there is exactly one
+    /// coordinate for the value and the light's edge, the line on it, the fill
+    /// under it and the finger can never disagree about where it is.
     static let rowGutter: CGFloat = 12
-
-    /// How far the finger has to travel to fill a row's level strip, and how
-    /// wide that strip draws. Both call sites take the number from here rather
-    /// than from the row width, because the strip is inset by ``rowGutter`` at
-    /// both ends and the gesture is not: mapping the drag to the full row
-    /// width would move the fill 7% slower than the finger on a 365 pt row,
-    /// which is a lie the finger can feel.
-    static func faderTrackWidth(rowWidth: CGFloat) -> CGFloat {
-        max(0, rowWidth - 2 * rowGutter)
-    }
 
     // MARK: Elevation
 
@@ -244,94 +235,147 @@ struct Readout: ViewModifier {
     }
 }
 
-/// A row's level, drawn as an instrument rather than as light.
+/// The level, drawn as light: doc:1853's wash, with the light coming FROM the
+/// level rather than fading toward it.
 ///
-/// A DEPARTURE from doc:1853, which draws the level as a gold wash behind the
-/// row's own content — "the wash IS the level, drawn as light not as a
-/// control". The wash cannot carry it, and the reason is arithmetic rather
-/// than taste: the row's text sits on top of the wash, so the text sets a
-/// ceiling on how far the wash may go. Measured on the shipped tokens, a
-/// playing row's gold `PLAYING` sub-label reads 4.36–4.46:1 on the wash at
-/// rest and 3.70:1 under a finger — already below the 4.5:1 text floor. The
-/// wash was not merely too faint to read as a level; it was over its budget
-/// while still measuring 1.15:1 against paper.
+/// The original gradient ran bright at zero and faint at the value, so the
+/// level's own position was the dimmest part of the fill and the whole thing
+/// read as a tint that ran out. Reversed, the leading edge is the light
+/// source and the glow decays backward from it — which is both what a level
+/// looks like and what this identity is called.
 ///
-/// So the level leaves the text's ground for a strip nothing overlaps, where
-/// it can be solid: `gold` on a `well` rail is **3.04:1 in light and 10.51:1
-/// in dark**, the first time this control clears the 3:1 non-text floor on
-/// the paper ground. The rail is what makes it read as a level rather than a
-/// highlight — a fill with no visible remainder is an amount of nothing.
-///
-/// One construction, both places a row is a fader (``DeviceRowView`` and
-/// `MainOutDrawerRow`), so the screen carries one vocabulary under the Main
-/// Out deck's rather than the three it had. The deck's own fader is the
-/// reference and is deliberately untouched.
-struct LevelStrip: View {
-    /// 0...1 — the row's level. Callers pass 0 for a row with no level to
-    /// show, which draws nothing at all (see ``body``).
+/// How bright it may get is not a taste question. The row's text sits ON this
+/// wash, so the text caps it: a playing row's gold `PLAYING` sub-label
+/// measures 4.36–4.46:1 on the flat 0.14 the design shipped, against a 4.5:1
+/// floor. So the base stays at 0.05 (4.72:1 for that label, everywhere), and
+/// the brightness lives in ``bloom`` — a band held back from the text column
+/// entirely, which is what lets it be brighter than the wash has ever been at
+/// the point the eye actually needs.
+struct LevelLight: View {
+    /// 0...1. The wash, the edge and ``LevelStrip`` all take the SAME fraction
+    /// of the SAME row width, which is what keeps the light's edge, the line
+    /// on it and the fill under it at one x.
     let fraction: CGFloat
-    /// From ``WarmSignal/faderTrackWidth(rowWidth:)``, never the row width.
-    let trackWidth: CGFloat
+    let width: CGFloat
     let muted: Bool
     let dragging: Bool
 
-    /// Rest and drag. The drag state is a GEOMETRY change and not a colour
-    /// one, on purpose: on the paper ground "louder" means darker (`goldText`
-    /// is 4.63:1 on the rail where `gold` is 3.04:1), and on the dark ground
-    /// it means brighter (`glow` 14.26:1 against gold's 10.51:1). Those are
-    /// opposite moves, so a colour drag state would be two dialects for one
-    /// event. Thickness reads identically on both grounds and costs no
-    /// contrast at all.
-    private static let restHeight: CGFloat = 3
-    private static let dragHeight: CGFloat = 6
+    /// Text-safe at every level: `goldText` on it is 4.72:1, over the floor
+    /// wherever the sub-label happens to land.
+    private static let base: Double = 0.05
 
-    /// The cap only exists while a finger is down — the deck's fader cap
-    /// (`SpeakersView`) at row scale, which is the drag affordance the row
-    /// otherwise has to explain in words. Transient rather than permanent so
-    /// four rows plus the deck don't become five standing knobs.
-    ///
-    /// 8 pt tall, not the deck's 34, and the height is forced rather than
-    /// chosen: a device row is 60 pt around a 44 pt halo, which leaves exactly
-    /// 8 pt under the halo for the whole instrument. A taller cap either
-    /// crosses the halo or is sliced off by the row's own clip. At 8 on a 3 pt
-    /// rail it still straddles by more than the deck's does (2.7x its track
-    /// against the deck's 1.9x), so it reads as a cap at the size it can be.
+    /// The light at the edge. Never reaches the text because it is clipped to
+    /// start at ``bloomFloor``; at the levels where the edge itself is left of
+    /// that, there is no bloom and the edge line carries the level alone.
+    private static let bloomPeak: Double = 0.20
+    private static let bloomReach: CGFloat = 56
+
+    /// Past the name column — the `PLAYING` sub-label ends around 121 pt on
+    /// the narrowest iPhone, so the bloom may not begin before this.
+    private static let bloomFloor: CGFloat = 130
+
+    /// A muted speaker keeps its LEVEL and loses its GLOW: the base wash and
+    /// the edge line hold the value exactly where it was (the edge is
+    /// `goldText`, 3.73:1 against canvas, muted or not), and only the bloom —
+    /// the part that reads as sound in the room — goes out. Dimming the level
+    /// itself to make a point about mute is what took the old muted wash to
+    /// 1.04:1, where the value simply vanished.
+    private var showsBloom: Bool { !muted }
+
+    private var edge: CGFloat { max(0, min(1, fraction) * width) }
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            Rectangle()
+                .fill(WarmSignal.gold.opacity(Self.base))
+                .frame(width: edge)
+
+            if showsBloom, edge > Self.bloomFloor {
+                let start = max(Self.bloomFloor, edge - Self.bloomReach)
+                Rectangle()
+                    .fill(LinearGradient(
+                        colors: [WarmSignal.gold.opacity(0), WarmSignal.gold.opacity(Self.bloomPeak)],
+                        startPoint: .leading,
+                        endPoint: .trailing))
+                    .frame(width: edge - start)
+                    .offset(x: start)
+            }
+
+            // doc:1854-1856. Full height and `goldText` — on paper a dark
+            // mark is what reads, and this line is the level's only precise
+            // statement at rest: 3.73:1 against canvas, 4.17:1 at full. It
+            // stands at the bloom's brightest point, so the line and the light
+            // read as one mark rather than two.
+            Rectangle()
+                .fill(WarmSignal.goldText)
+                .frame(width: dragging ? 3 : 2.5)
+                .opacity(dragging ? 1 : 0.9)
+                .offset(x: max(0, edge - (dragging ? 1.5 : 1.25)))
+        }
+        .accessibilityHidden(true)
+    }
+}
+
+/// The instrument, and only while a finger is on it.
+///
+/// The row is a fader that looks like light until you touch it, at which point
+/// it admits what it is: a rail appears under the glow — the denominator the
+/// light alone can never give, because a fill with no visible remainder is an
+/// amount of nothing — with a cap at the value, and both melt away on release.
+/// This is the whole delight thesis in one view, so it is deliberately absent
+/// at rest: a permanent rail on every row would be four standing instruments
+/// competing with the Main Out deck's, and would take the row back to being a
+/// control rather than light.
+///
+/// Solid rather than washed, because it can be: nothing overlaps it, so `gold`
+/// on a `well` rail is **3.04:1 in light and 10.51:1 in dark** — over the 3:1
+/// non-text floor on the paper ground, which the wash above it can never
+/// reach at any opacity that keeps the text on it legible.
+///
+/// One construction, both places a row is a fader (``DeviceRowView`` and
+/// `MainOutDrawerRow`). The Main Out deck's own fader is the reference this
+/// borrows from and is deliberately untouched.
+struct LevelStrip: View {
+    /// 0...1, on the same row width ``LevelLight`` uses.
+    let fraction: CGFloat
+    let width: CGFloat
+    let muted: Bool
+
+    private static let height: CGFloat = 3
+
+    /// The deck's fader cap at row scale. 8 pt tall, and the height is forced
+    /// rather than chosen: a device row is 60 pt around a 44 pt halo, which
+    /// leaves exactly 8 pt beneath it for the whole instrument — a taller cap
+    /// either crosses the halo or is sliced off by the row's own clip. At 8 on
+    /// a 3 pt rail it still straddles by more than the deck's cap does (2.7x
+    /// its track against the deck's 1.9x).
     private static let capWidth: CGFloat = 10
     private static let capHeight: CGFloat = 8
 
-    /// The vertical room a row must reserve. The band is the CAP's height,
-    /// not the rail's, so neither the rail thickening nor the cap appearing
-    /// can reflow the row under a finger — the layout is the same in all
-    /// three states and only the paint changes.
+    /// What a row must reserve for this, whether or not it is showing.
     static let band: CGFloat = capHeight
-
-    private var height: CGFloat { dragging ? Self.dragHeight : Self.restHeight }
 
     /// Gold IS the signal in this identity, so a muted level is the same level
     /// with the signal taken out of it. `rim` holds **3.46:1 light / 4.82:1
     /// dark** against the rail, so muting costs the level no legibility at
-    /// all — it may not, because muting doesn't move the fader and the number
-    /// beside it still has to be believable. `ember` is the obvious
-    /// alternative and fails on paper at 2.06:1; every reduced-opacity gold is
-    /// worse still.
+    /// all. `ember` is the obvious alternative and fails on paper at 2.06:1;
+    /// every reduced-opacity gold is worse still.
     private var fillColor: Color { muted ? WarmSignal.rim : WarmSignal.gold }
 
     var body: some View {
         ZStack(alignment: .leading) {
-            Capsule()
+            Rectangle()
                 .fill(WarmSignal.well)
-                .overlay(Capsule().strokeBorder(WarmSignal.rim, lineWidth: 0.5))
-                .frame(height: height)
+                .overlay(Rectangle().strokeBorder(WarmSignal.rim, lineWidth: 0.5))
+                .frame(height: Self.height)
 
-            Capsule()
+            Rectangle()
                 .fill(fillColor)
-                .frame(width: max(0, min(1, fraction) * trackWidth), height: height)
+                .frame(width: max(0, min(1, fraction) * width), height: Self.height)
 
-            if dragging { cap }
+            cap
         }
-        .frame(width: trackWidth, height: Self.band)
-        // Decoration: the level is already on the row's own accessibility
-        // value, and a second element saying it would be read twice.
+        .frame(width: width, height: Self.band)
         .accessibilityHidden(true)
     }
 
@@ -350,8 +394,8 @@ struct LevelStrip: View {
                 .frame(width: 2, height: Self.capHeight - 3)
         }
         .frame(width: Self.capWidth, height: Self.capHeight)
-        .offset(x: max(0, min(trackWidth - Self.capWidth,
-                              min(1, fraction) * trackWidth - Self.capWidth / 2)))
+        .offset(x: max(0, min(width - Self.capWidth,
+                              min(1, fraction) * width - Self.capWidth / 2)))
     }
 }
 

@@ -743,6 +743,8 @@ private struct MainOutDrawerRow: View {
     @ScaledMetric(relativeTo: .caption) private var muteIconSize: CGFloat = 12
     @ScaledMetric(relativeTo: .subheadline) private var nameSize: CGFloat = 14.5
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     private var displayVolume: Int { Int((localVolume ?? Double(device.volume)).rounded()) }
     private var dragging: Bool { axis == .horizontal }
     private var controlsEnabled: Bool {
@@ -812,21 +814,31 @@ private struct MainOutDrawerRow: View {
             }
         }
         .padding(.horizontal, WarmSignal.rowGutter)
-        // Unchanged 10/10: the drawer row's own content is 28 pt, so the strip
-        // fits in the bottom padding it already had and the row keeps its
-        // height. Only the device row above trades slack for the strip.
+        // 10/10 leaves the drawer row's 28 pt of content exactly the room
+        // ``LevelStrip`` needs beneath it, so revealing the instrument never
+        // reflows the drawer.
         .padding(.vertical, 10)
-        // The device row's level, in the drawer, from the one construction
-        // both share — and the row's ONLY level mark. It carries no wash of
-        // its own: every row in this drawer is a member, so a wash would have
-        // no "this one is live" to say, and the readout sitting on bare `well`
-        // reads 4.63:1 where a gold wash under it measures 3.43:1 in light.
-        .overlay(alignment: .bottom) {
-            LevelStrip(fraction: CGFloat(displayVolume) / 100,
-                       trackWidth: WarmSignal.faderTrackWidth(rowWidth: rowWidth),
+        // The same two views the device row is built from, in the same order
+        // and for the same reasons: the light IS the level, and the rail is
+        // the instrument the row reveals under a finger. The edge line is
+        // `goldText` and reads 4.63:1 on this row's `well` ground, where a
+        // `glow` mark on the same ground measures 1.36:1 light / 2.14:1 dark
+        // and cannot carry a level at all.
+        .background(alignment: .leading) {
+            LevelLight(fraction: CGFloat(displayVolume) / 100,
+                       width: rowWidth,
                        muted: device.isMuted,
                        dragging: dragging)
         }
+        .overlay(alignment: .bottom) {
+            if dragging {
+                LevelStrip(fraction: CGFloat(displayVolume) / 100,
+                           width: rowWidth,
+                           muted: device.isMuted)
+                    .transition(.opacity)
+            }
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: dragging ? 0.18 : 0.14), value: dragging)
         .background(WarmSignal.well)
         .clipShape(RoundedRectangle(cornerRadius: WarmSignal.Radius.row, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: WarmSignal.Radius.row, style: .continuous)
@@ -848,10 +860,7 @@ private struct MainOutDrawerRow: View {
                     if axis == .horizontal { dragStartVolume = device.volume }
                 }
                 guard axis == .horizontal, controlsEnabled, let start = dragStartVolume else { return }
-                // The strip's width, not the row's — same rule the device row
-                // drags on (`WarmSignal.faderTrackWidth`).
-                let v = WarmSignal.faderValue(start: start, translationWidth: w,
-                                              trackWidth: WarmSignal.faderTrackWidth(rowWidth: rowWidth))
+                let v = WarmSignal.faderValue(start: start, translationWidth: w, trackWidth: rowWidth)
                 localVolume = Double(v)
                 session.setDeviceVolume(id: device.id, volume: v, isFinal: false)
             }

@@ -86,14 +86,14 @@ behavior changes.
   `NSColor`) and tints the SF Symbol GLYPH only, via `IconTileView`'s `color`
   param — the tile fill and rim stay `Tokens.Color.raised`/hairline on every
   row, so don't colour the tile itself.
-- Granting crossfades the glyph to `Tokens.Color.gold` for all four rows
-  alike — a deliberate exception to per-row colour; don't "fix" a granted row
-  to light its own resting hue. The four resting tints are dial-aware in
-  `.subtle` only and must NEVER route through `accentDynamic`, which collapses
-  distinct hues into one accent.
+- The glyph tint is PERMANENT across every status (Alec, 2026-08-11) — the
+  "Allowed"/"Enabled" status chip alone carries state; don't reintroduce a
+  granted-state recolour (the old grant-goes-gold crossfade was removed as
+  redundant). The four tints are dial-aware in `.subtle` only and must NEVER
+  route through `accentDynamic`, which collapses distinct hues into one
+  accent.
 - `PermissionRowContent.iconColor` has no default, so every call site picks
-  explicitly rather than inheriting a stale colour. `setLit`'s Reduce-Motion
-  and off-window guards must stay, or snapshots stop being deterministic.
+  explicitly rather than inheriting a stale colour.
 
 ## Feature Flow
 
@@ -137,4 +137,4 @@ behavior changes.
 |---|---|
 | `AudiouterCore/Tests/AudiouterCoreTests/OnboardingUITests.swift` | Row status rendering, Done/confirmation-sheet flow, `.permissionLost` banner behavior, structural `test_` hooks. |
 | `AudiouterCore/Tests/AudiouterCoreTests/SetupModelTests.swift` | The underlying `SetupModel` probes/status this UI binds to (not this folder, but the seam it depends on). |
-| `AudiouterCore/Tests/AudiouterCoreTests/OnboardingPermissionColorTests.swift` | The four per-row tile colours: distinctness, contrast floors, granted-lights-gold, tile fill unchanged. |
+| `AudiouterCore/Tests/AudiouterCoreTests/OnboardingPermissionColorTests.swift` | The four per-row tile colours: distinctness, contrast floors, tint permanent across statuses, tile fill unchanged. |

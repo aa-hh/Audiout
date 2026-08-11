@@ -66,11 +66,6 @@ public final class MembershipRowView: NSView {
     /// row but only mounted on `.warmPane`, so a `.systemSheet` row has no node
     /// in its view tree at all.
     private let busView = MembershipBusView()
-    /// This row's extent in the pane-level spine — set by the host through
-    /// ``setRail(above:below:)`` from the row's position relative to the LOWEST
-    /// checked row (the rail's terminus).
-    private var busRailAbove = true
-    private var busRailBelow = true
 
     public init(device: Device, checked: Bool, iconSymbolName: String? = nil,
                 surface: Surface = .systemSheet) {
@@ -220,18 +215,7 @@ public final class MembershipRowView: NSView {
     /// in this group". No-op on `.systemSheet`, which mounts no node at all.
     private func updateBus() {
         guard surface == .warmPane else { return }
-        busView.apply(node: checked ? .member : .nonMember,
-                      railAbove: busRailAbove, railBelow: busRailBelow)
-    }
-
-    /// Set this row's extent in the pane-level spine (Warm Signal v4 §Call-1) —
-    /// the host calls this once per rebuild from the row's position relative to
-    /// the LOWEST checked row: rows at or above it carry the rail, rows below it
-    /// are bare nodes with no rail through them. No-op on `.systemSheet`.
-    public func setRail(above: Bool, below: Bool) {
-        busRailAbove = above
-        busRailBelow = below
-        updateBus()
+        busView.apply(node: checked ? .member : .nonMember)
     }
 
     // MARK: Model
@@ -344,16 +328,11 @@ public final class MembershipRowView: NSView {
 // MARK: - Continuous rail contribution (Warm Signal v4 §Call-1)
 
 /// The warm pane's rail is drawn ONCE at pane level (`BusRailOverlayView`), not
-/// per row: the row contributes its node kind + extent and the frame the node is
-/// centred on. A `.systemSheet` row reports `nil`, so the same type can sit in an
+/// per row: the row contributes its node kind and the frame the node is centred
+/// on. A `.systemSheet` row reports `nil`, so the same type can sit in an
 /// overlay's `deviceRows` and contribute nothing.
 extension MembershipRowView: RailNodeProviding {
     public var railNode: MembershipBusView.Node? { test_busNode }
-    public var railHasSpine: Bool { surface == .warmPane && busRailAbove }
-    public var railBelow: Bool { busRailBelow }
-    /// This checklist has no dormant-divergent concept (§4.7) — membership here
-    /// is the only truth, so a node is never dimmed.
-    public var railDimmed: Bool { false }
     public var railNodeView: NSView { self }
     public var railNodeBounds: NSRect { bounds }
 }

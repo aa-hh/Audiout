@@ -326,34 +326,33 @@ import AppKit
         controller.setDeviceSelected("bt-z:output", true)
         popover.update(devices: fleet)
         popover.test_applyExactFitSize()
-        #expect(popover.test_deviceRow(for: "office")?.test_busRailBelow == true,
-                "the rail runs on past Office to the Bluetooth box below it")
-        #expect(try #require(popover.test_railPlan()).terminusDotY == nil,
+        let expanded = try #require(popover.test_railPlan())
+        #expect(expanded.signalTerminusIndex == expanded.stops.count - 1,
+                "the signal runs on past Office to the Bluetooth box below it")
+        #expect(expanded.terminusDotY == nil,
                 "expanded: the rail ends on Zed Box's own node, uncut")
 
         popover.test_fireSubsectionHeaderClick(title: bluetoothTitle)
         popover.test_applyExactFitSize()
 
-        #expect(popover.test_deviceRow(for: "office")?.test_busRailBelow == true,
-                "Office is still not the terminus — the mix reaches below it")
         #expect(try #require(popover.test_railPlan()).terminusDotY != nil,
                 "…so the rail is cut at the collapsed subsection's header, with a dot")
         #expect(controller.selectedDeviceIDs.contains("bt-z:output"),
                 "collapse is display only — Zed Box is still in the mix")
     }
 
-    /// The case that erased the rail outright: EVERY selected device inside the
-    /// subsection being collapsed. No visible node is left for the spine to run
-    /// through, so the rail is nothing BUT the cut — a dot at that subsection's
-    /// header, never a hook curling off Main Audio into mid-air.
-    @Test func collapsingTheSubsectionHoldingEverySelectedDeviceStillEndsInADot() throws {
-        let fleet = [local(), airplay()]
+    /// The case that erased the rail outright: EVERY device inside the subsection
+    /// being collapsed. No visible node is left for the channel to reach, so the
+    /// rail is nothing BUT the cut — a dot at that subsection's header, never a
+    /// hook curling off Main Audio into mid-air.
+    @Test func collapsingTheSubsectionHoldingEveryDeviceStillEndsInADot() throws {
+        let fleet = [local()]
         let (popover, controller) = makePopover(fleet: fleet)
         controller.setDeviceSelected("mac", true)   // …and nothing else
         popover.update(devices: fleet)
         popover.test_applyExactFitSize()
         #expect(!(try #require(popover.test_railPlan()).stops.isEmpty),
-                "expanded: the Mac's own node is the terminus")
+                "expanded: the Mac's own node is on the rail")
 
         popover.test_fireSubsectionHeaderClick(title: PopoverController.thisMacSubsectionTitle)
         popover.test_applyExactFitSize()

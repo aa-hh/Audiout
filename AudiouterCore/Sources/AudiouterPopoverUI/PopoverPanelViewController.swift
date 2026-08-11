@@ -373,9 +373,10 @@ final class PopoverPanelViewController: NSViewController {
     /// header's dot; `nil` leaves the whole device card as the far end.
     func setRailRows(mainOut: RailHookProviding, deviceRows: [RailNodeProviding],
                      originCardTitle: String, deviceCardTitle: String,
-                     cutSubsectionTitle: String? = nil) {
+                     cutSubsectionTitle: String? = nil, dormant: Bool = false) {
         railOverlay.mainOutRow = mainOut
         railOverlay.deviceRows = deviceRows
+        railOverlay.dormant = dormant
         railOverlay.originSection = cardsByHeader[originCardTitle]
         if let cutSubsectionTitle, let subsection = subsectionBodies[cutSubsectionTitle]?.rail {
             railOverlay.deviceSection = subsection

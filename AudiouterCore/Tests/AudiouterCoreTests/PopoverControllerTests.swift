@@ -827,31 +827,33 @@ import AppKit
 
     // MARK: Membership bus — popover-level wiring (spec §4, S-BUS)
 
-    /// The bus originates at the Main Audio row (the `.origin` hook) and runs to
-    /// the LOWEST SELECTED node (v4 §Call-1): exactly one terminus (rail above,
-    /// none below); nodes below it are BARE (no rail either side). Under the
-    /// default {current device} selection the local row (rendered first) is the
-    /// terminus and every AirPlay row below is bare.
-    @Test func busRunsFromMainAudioToTheLowestSelectedNode() async throws {
+    /// The bus originates at the Main Audio row (the `.origin` hook). Its CHANNEL
+    /// runs the whole device band — every device row is a stop, member or not —
+    /// while the SIGNAL inside it ends at the LOWEST MEMBER (v4 §Call-1), so the
+    /// gold's length still reads as "how far down the mix reaches". Under the
+    /// default {current device} selection the local row (rendered first) is that
+    /// last member, and the AirPlay rows below it are sockets on empty channel.
+    @Test func busRunsFromMainAudioAndTheSignalEndsAtTheLowestMember() async throws {
         let (popover, _, backend) = try await makePopover()
+        popover.test_applyExactFitSize()
         #expect(popover.test_mainOutRow.test_busOriginNode == .origin, "the Main Audio row launches the bus (the origin hook)")
         #expect(!(popover.test_mainOutRow.test_busOriginDimmed), "the origin renders at full ink under a Selected Devices target")
-        // Every device row carries a bus segment view.
-        let railBelows = backend.devices.compactMap {
-            popover.test_deviceRow(for: $0.id)?.test_busRailBelow
-        }
-        #expect(railBelows.count == backend.devices.count, "every device row carries a bus segment")
-        // Exactly one TERMINUS: rail above, none below (the lowest selected node).
-        let terminusCount = backend.devices.filter { d in
-            let row = popover.test_deviceRow(for: d.id)
-            return row?.test_busRailAbove == true && row?.test_busRailBelow == false
-        }.count
-        #expect(terminusCount == 1, "exactly one terminating (lowest selected) node")
-        // The local row (first, selected by default) is that terminus; AirPlay
-        // rows below it are BARE (no rail above OR below).
-        #expect(popover.test_deviceRow(for: "local-mac")?.test_busRailAbove == true)
-        #expect(popover.test_deviceRow(for: "local-mac")?.test_busRailBelow == false, "the local row terminates the spine under the default selection")
-        #expect(popover.test_deviceRow(for: "office")?.test_busRailAbove == false, "an AirPlay row below the terminus is bare — no rail through it")
+        // Every device row carries a node…
+        let nodes = backend.devices.compactMap { popover.test_deviceRow(for: $0.id)?.test_busNode }
+        #expect(nodes.count == backend.devices.count, "every device row carries a bus node")
+        // …and every one of them is a stop on the channel.
+        let plan = try #require(popover.test_railPlan())
+        #expect(plan.stops.count == nodes.count, "the channel spans the full device band")
+        // The signal ends on the local row: the last member, with none below it.
+        let terminus = try #require(plan.signalTerminusIndex)
+        #expect(plan.stops[terminus].node == .member)
+        #expect(!plan.stops.dropFirst(terminus + 1).contains { $0.node == .member },
+                "nothing below the signal's end is in the mix")
+        #expect(popover.test_deviceRow(for: "local-mac")?.test_busNode == .member,
+                "the local row is that last member under the default selection")
+        #expect(popover.test_deviceRow(for: "office")?.test_busNode == .nonMember,
+                "an AirPlay row below it keeps its socket on the empty channel")
+        #expect(!plan.dormant, "a Selected Devices target is never dormant")
     }
 
     /// Node rendering across a real popover: members filled, non-members hollow

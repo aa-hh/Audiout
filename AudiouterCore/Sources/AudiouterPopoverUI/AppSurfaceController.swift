@@ -534,7 +534,7 @@ public final class AppSurfaceController {
             window.setFrame(frame, display: true)
         } else {
             NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.2
+                context.duration = PopoverPanelViewController.collapseRevealDuration
                 context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
                 window.animator().setFrame(frame, display: true)
             }

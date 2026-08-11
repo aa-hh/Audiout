@@ -14,7 +14,7 @@
 //   onboarding-<light|dark>-step2-waiting.png    card 2's prime in flight (caption)
 //   onboarding-<light|dark>-step3-bluetooth.png  audio + network in, card 3 active
 //   onboarding-<light|dark>-denied.png           audio denied → Settings mode demo
-//   onboarding-<light|dark>-complete.png         every step in, Done visible
+//   onboarding-<light|dark>-complete.png         every step in — the settled finale + Start listening CTA
 //   onboarding-<light|dark>-permission-lost.png  the re-entry header message
 //
 // KNOWN LIMIT: prominent buttons render as plain pills here. AppKit fills a

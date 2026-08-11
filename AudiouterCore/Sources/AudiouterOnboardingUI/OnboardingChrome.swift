@@ -49,24 +49,55 @@ func onboardingActionButton(title: String, prominent: Bool,
 /// the Setup window resigns key to System Settings, which is exactly when the
 /// user is looking at it.
 ///
-/// Fix: track the window's key state and swap the title colour — white over the
-/// accent fill when key, `labelColor` (appearance-adaptive, legible on the plain
-/// bezel in both light and dark) when not.
+/// Fix: track the window's key state and swap the title colour — ink over the
+/// fill when key (forced white for the accent fill; measured white-or-black
+/// when `picksInkFromFill` is on), `labelColor` (appearance-adaptive, legible
+/// on the plain bezel in both light and dark) when not.
 final class ProminentButton: NSButton {
 
     private let plainTitle: String
+    /// The bezel fill this button was built with (`bezelColor` carries it).
+    let fill: NSColor
+    /// Whether the key-window title ink is MEASURED against the resolved fill
+    /// (white or black, whichever contrasts more) instead of forced white.
+    ///
+    /// Forced white stays the default: it is the platform's convention for the
+    /// accent fill, and a measured pick would flip a blue-accent button's ink
+    /// to black (black measures fractionally higher on system blue), which
+    /// reads off-platform. The gold "Start listening" CTA opts in because the
+    /// authored gold columns CROSS the black/white line per appearance and
+    /// Increase Contrast — dark gold is a light fill (white measures 1.8:1,
+    /// black 11.4:1), while light-IC gold is a dark one (white 5.3:1, black
+    /// 4.0:1) — so no fixed ink clears the body floor everywhere.
+    private let picksInkFromFill: Bool
     private var keyStateObservers: [NSObjectProtocol] = []
 
-    init(title: String, target: AnyObject?, action: Selector?) {
+    init(title: String, target: AnyObject?, action: Selector?,
+         fill: NSColor = Tokens.Color.accent,
+         picksInkFromFill: Bool = false) {
         self.plainTitle = title
+        self.fill = fill
+        self.picksInkFromFill = picksInkFromFill
         super.init(frame: .zero)
         self.title = title
         self.target = target
         self.action = action
         bezelStyle = .rounded
         controlSize = .regular
-        bezelColor = Tokens.Color.accent
+        bezelColor = fill
         setContentHuggingPriority(.required, for: .horizontal)
+        if picksInkFromFill {
+            // A measured ink is a STAMPED decision: the accent dial and
+            // Increase Contrast change what `fill` resolves to without touching
+            // `effectiveAppearance`, so each needs its own re-stamp trigger
+            // (the forced-white default never moves, and needs neither).
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(resolvedFillChanged),
+                name: Tokens.accentStyleDidChangeNotification, object: nil)
+            NSWorkspace.shared.notificationCenter.addObserver(
+                self, selector: #selector(resolvedFillChanged),
+                name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+        }
         applyTitleColour()
     }
 
@@ -87,15 +118,58 @@ final class ProminentButton: NSButton {
         applyTitleColour()
     }
 
-    deinit { keyStateObservers.forEach { NotificationCenter.default.removeObserver($0) } }
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTitleColour()
+    }
+
+    deinit {
+        keyStateObservers.forEach { NotificationCenter.default.removeObserver($0) }
+        NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
+    @objc private func resolvedFillChanged() { applyTitleColour() }
 
     private func applyTitleColour() {
-        let colour: NSColor = (window?.isKeyWindow ?? false) ? .white : Tokens.Color.label
+        let colour: NSColor
+        if window?.isKeyWindow ?? false {
+            colour = picksInkFromFill ? measuredKeyInk() : .white
+        } else {
+            colour = Tokens.Color.label
+        }
         attributedTitle = NSAttributedString(
             string: plainTitle,
             attributes: [.foregroundColor: colour,
                          .font: Tokens.Font.body])
     }
+
+    /// White or black over the RESOLVED fill, by WCAG contrast — except under
+    /// the `.systemAccent` dial, where `gold` resolves to the live accent (an
+    /// arbitrary hue the user picked) and forced white is the platform's own
+    /// filled-accent convention, matching every other prominent button here.
+    private func measuredKeyInk() -> NSColor {
+        guard Tokens.accentStyle != .systemAccent else { return .white }
+        var resolved = fill
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            resolved = fill.usingColorSpace(.sRGB) ?? resolved
+        }
+        guard let srgb = resolved.usingColorSpace(.sRGB) else { return .white }
+        func linear(_ component: CGFloat) -> CGFloat {
+            component <= 0.04045 ? component / 12.92 : pow((component + 0.055) / 1.055, 2.4)
+        }
+        let luminance = 0.2126 * linear(srgb.redComponent)
+            + 0.7152 * linear(srgb.greenComponent)
+            + 0.0722 * linear(srgb.blueComponent)
+        let whiteContrast = 1.05 / (luminance + 0.05)
+        let blackContrast = (luminance + 0.05) / 0.05
+        return whiteContrast >= blackContrast ? .white : .black
+    }
+
+    // MARK: Test-support hooks
+
+    /// The key-window ink the measured pick resolves right now.
+    var test_measuredKeyInk: NSColor { picksInkFromFill ? measuredKeyInk() : .white }
 }
 
 // MARK: - Appearance-adaptive rounded views

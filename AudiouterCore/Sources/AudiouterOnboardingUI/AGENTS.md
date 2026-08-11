@@ -35,7 +35,10 @@ set changes, or when the gate/motion/demo rules change.
   under the card stack (`cardsToFooterGap`), not pinned to the pane's bottom edge:
   the window is a fixed height, so the bottom pin left the complete state with the
   collapsed stack at the top and Done ~250 pt below it across an empty band. The
-  pane's lower slack now falls below the footer.
+  pane's lower slack now falls below the footer. Done's FACE is the finale CTA —
+  **"Start listening"** (owner copy 2026-08-11: closing setup is what starts the
+  deferred audio engine, so the button names that), a gold `ProminentButton` that
+  fades in on the gate's beat. The face changed; the gate contract above did not.
 - **Exactly ONE card is expanded.** `SetupCardView` renders five states
   (`SetupCardState`): `pending`, `active`, `completed`, `autoPassed(note:)`,
   `skipped`. The invariant a test pins is `test_expandedSteps == [activeStep]`.
@@ -165,9 +168,10 @@ set changes, or when the gate/motion/demo rules change.
 - **Grant choreography, in this order:** re-front
   (`NSApp?.activate` + `makeKeyAndOrderFront`) → checkmark slides in (width 0 → 20
   pt + fade, 0.2 s easeOut, delayed 0.2 s) → title rewrites → the card collapses
-  and the next expands → the demo crossfades (0.22 s) → Done fades in when the gate
-  opens. It fires on the TRANSITION into complete, never on a repaint that changed
-  nothing. **Reduce Motion, an off-window/occluded window, and `HeadlessRuntime`
+  and the next expands → the demo crossfades (0.22 s; into the COMPLETE state the
+  finale's one-shot rides this same crossfade) → the Start listening CTA fades in
+  when the gate opens. It fires on the TRANSITION into complete, never on a repaint
+  that changed nothing. **Reduce Motion, an off-window/occluded window, and `HeadlessRuntime`
   make every beat an instant swap** — steady states must render settled or
   snapshots stop being deterministic (same rule as `IconTileView.setLit`).
 - **Keyboard:** while Done doesn't exist, Return belongs to the one live Allow
@@ -192,10 +196,16 @@ set changes, or when the gate/motion/demo rules change.
   Control is deliberately excluded — it's an enhancement, not a requirement)
   revoked after setup already completed. **There is no banner VIEW any more** — the
   message rides the header subtitle tinted `Tokens.Color.warning`, so the layout is
-  identical either way. It re-words itself to the still-missing subset and reverts
-  to the welcome line once every permission it named is granted, without expanding
-  to cover anything it didn't originally flag. The `test_showsPermissionLostBanner`
-  / `test_permissionLostBannerIsVisible` / `test_permissionLostBannerText` hooks
+  identical either way. It re-words itself to the still-missing subset and stands
+  down once every permission it named is granted, without expanding to cover
+  anything it didn't originally flag. **The subtitle carries THREE messages, in
+  precedence order:** that warning → the COMPLETE line, "Your Mac's sound can
+  reach every room." (owner copy 2026-08-11 — deliberately NO found-speaker count),
+  whenever the Done gate is open → the welcome line. Which one is showing is
+  tracked as a message KIND, and that kind is what the banner hooks report — a
+  string-compare predicate ("not the welcome copy") would call the complete line a
+  warning. The `test_showsPermissionLostBanner` /
+  `test_permissionLostBannerIsVisible` / `test_permissionLostBannerText` hooks
   kept their names so the intent stayed testable across the rebuild.
 - Done and ✕ are NOT equivalent: both call `dismiss()` exactly once (single-fire
   guard) and both fire `onFinished`, but only Done calls `SetupModel.complete()`.
@@ -252,6 +262,21 @@ set changes, or when the gate/motion/demo rules change.
     `accessibilityDisplayOptionsDidChangeNotification`, and because the mocks stamp
     resolved `CGColor`s they also observe `Tokens.accentStyleDidChangeNotification`
     (SharedUI AGENTS.md's rule for any new animated/token-coloured instrument).
+  - **The settled FINALE is the one exception to the loop rule** (owner decision
+    2026-08-11): `DemoSettledMockView` plays a ONE-SHOT celebration — gold signal
+    rings rippling out of the app icon — the first time its frame is on a really
+    visible window (the grant transition, or the first presentation of a window
+    opened with everything already granted), then goes fully static. The shot is
+    CONSUMED, so a repaint that changes nothing can never re-fire it; Reduce Motion
+    spends it without motion; off-window/headless leave it UNSPENT so the
+    presentation that can show it still gets it. No loop, no Replay, no idle motion
+    after it. Its RESTING frame must read rich on its own (static gold aura +
+    display-weight "You're all set.") — it is also the model-layer state, so every
+    animation ends there and snapshots stay deterministic. The aura/rings stamp
+    resolved `gold`/`glow`, so the view observes the accent-dial and a11y
+    notifications like the mocks do. On the animated transition the shot rides the
+    step crossfade itself (fired as the fade STARTS), or the text would reveal
+    twice.
   - **A pass must END where it started.** The settled frame is the surface AS THE
     USER WILL FIND IT — the ask, or the switch off — never the finished state: the
     pane always shows the ACTIVE step's mock, so resting on "allowed" would sit
@@ -285,12 +310,20 @@ set changes, or when the gate/motion/demo rules change.
   title to match, so it goes white-on-white. Being the Return-default doesn't fix
   it — the sequential flow DOES make the one live Allow the default, and the
   white-on-white still happens the moment the window resigns key to System Settings,
-  which is exactly when the user is looking at it. **TRAP:** the shared
-  `onboardingActionButton` factory must set
+  which is exactly when the user is looking at it. It now also takes a `fill` (the
+  CTA passes `Tokens.Color.gold`) and an opt-in `picksInkFromFill`: the key-window
+  ink is then MEASURED white-or-black against the resolved fill, because the
+  authored gold columns cross that line per appearance and Increase Contrast (dark
+  gold is a light fill; light-IC gold is a dark one) — except under the
+  `.systemAccent` dial, where gold IS the live accent and forced white stays the
+  platform convention. Accent-filled Allow buttons keep forced white; don't route
+  them through the measure (it would flip a blue accent's ink to black). **TRAP:**
+  the shared `onboardingActionButton` factory must set
   `translatesAutoresizingMaskIntoConstraints = false`; the card's Allow slot
   constrains the button directly rather than through an `NSStackView` (which used to
   turn that off for us), and left on, AutoLayout synthesises width/height from the
-  zero frame and the button renders as nothing at all.
+  zero frame and the button renders as nothing at all — the directly-constructed
+  gold CTA in `refreshDone()` has to set it too, for the same reason.
 - Stock AppKit only (SF Symbols, `NSButton`, `NSProgressIndicator`, system colours)
   per repo house rules — the custom drawing is `IconTileView`/`RoundedContainerView`
   (no stock equivalent for the System Settings grouped-inset look) and the demo
@@ -351,10 +384,10 @@ set changes, or when the gate/motion/demo rules change.
 | `ClipView` | The card body's masking container — the thing whose HEIGHT the collapse animates. |
 | `DemoPaneView` / `DemoMode` | The right pane: the elevated surface, the mode swap crossfade, the motion policy, the Replay button. |
 | `DemoMockView` | Timeline base class (restartable score, settled-state hook) for the two animated mocks. |
-| `DemoPromptMockView` / `DemoSettingsMockView` / `DemoSettledMockView` | The permission-dialog miniature, the Settings-pane miniature, and the calm completion state. |
+| `DemoPromptMockView` / `DemoSettingsMockView` / `DemoSettledMockView` | The permission-dialog miniature, the Settings-pane miniature, and the completion finale (one-shot ripple, static gold-aura resting frame). |
 | `DemoDialogSurfaceView` / `DemoCapsuleView` / `DemoToggleView` / `DemoSettingsRowView` / `DemoPlaceholderBarView` / `DemoCursorView` | The drawn parts of the mocks. |
 | `SystemSettingsOpener` | `NSWorkspace` seam for opening a `SystemSettingsPane`, with a Privacy & Security root fallback. |
-| `ProminentButton` | Accent-filled CTA button with key-window-aware title color. |
+| `ProminentButton` | Fill-tinted CTA button with key-window-aware title ink (forced white, or measured from the fill). |
 | `IconTileView` / `RoundedContainerView` | Shared appearance-adaptive chrome (icon chip, grouped-inset card) — no stock AppKit equivalent. |
 
 ## Tests

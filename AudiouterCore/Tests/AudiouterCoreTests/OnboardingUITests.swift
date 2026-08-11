@@ -704,6 +704,131 @@ import Testing
         #expect(!vc.test_doneExists, "the gate closes again")
     }
 
+    // MARK: The finale (setup-complete state)
+
+    /// A model every step of the flow can be walked to completion on — the
+    /// grantable trio plus Bluetooth and Remote Control already satisfied.
+    private func makeCompleteableModel() -> SetupModel {
+        makeModel(audio: .granted, foundSpeakers: 2, bluetooth: .granted,
+                  remoteControlTrusted: true, ptpHelper: FakePTPHelper(status: .enabled))
+    }
+
+    @Test func theGateButtonIsTheGoldStartListeningCTA() async {
+        let vc = makeVC(model: makeGrantableModel())
+        await vc.test_allow([.audio, .localNetwork])
+
+        #expect(vc.test_doneExists)
+        #expect(vc.test_doneTitle == "Start listening")
+        #expect(vc.test_doneIsGoldProminent, "the finale CTA is the gold prominent button")
+        #expect(vc.test_doneIsReturnDefault)
+    }
+
+    @Test func theSubtitleBecomesTheCompleteLineWhenTheGateOpens() async {
+        let vc = makeVC(model: makeGrantableModel())
+        #expect(vc.test_subtitleText == OnboardingViewController.welcomeSubtitle)
+
+        await vc.test_allow([.audio, .localNetwork])
+
+        #expect(vc.test_subtitleText == "Your Mac's sound can reach every room.")
+    }
+
+    /// Precedence, and the honest predicate: the lost-permission warning
+    /// outranks the complete line while its permission is missing, and once the
+    /// gate opens the complete line must not read as a warning to the banner
+    /// hooks — a string-compare predicate ("not the welcome copy") would.
+    @Test func theCompleteLineNeitherOutranksNorImpersonatesTheWarning() async {
+        let vc = makeVC(model: makeGrantableModel(), reason: .permissionLost([.audioCapture]))
+        #expect(vc.test_permissionLostBannerIsVisible,
+                "the warning outranks everything while its permission is missing")
+
+        await vc.test_allow([.audio, .localNetwork])
+
+        #expect(vc.test_subtitleText == "Your Mac's sound can reach every room.",
+                "gate open: the payoff line, not the welcome")
+        #expect(!vc.test_permissionLostBannerIsVisible,
+                "a non-welcome subtitle is not evidence of a warning")
+        #expect(vc.test_permissionLostBannerText == nil)
+    }
+
+    /// The finale's one-shot fires on the transition into complete, and a
+    /// repaint that changes nothing can never re-fire it.
+    @Test func theCelebrationFiresOnceOnTheTransitionIntoComplete() async {
+        let vc = makeVC(model: makeCompleteableModel())
+        vc.test_demoReduceMotionOverride = false
+        vc.test_demoCanAnimateOverride = true
+        await vc.test_refreshStatuses()
+        #expect(vc.test_demoCelebrationRunCount == 0, "nothing to celebrate yet")
+
+        await vc.test_allow([.audio, .localNetwork])
+
+        #expect(vc.test_demoMode == .settled)
+        #expect(vc.test_demoCelebrationRunCount == 1)
+        #expect(!vc.test_demoShowsReplay, "the finale is a one-shot, never a Replay offer")
+
+        vc.test_refresh()   // a repaint that changes nothing
+
+        #expect(vc.test_demoCelebrationRunCount == 1, "the shot is spent")
+    }
+
+    /// Reduce Motion spends the shot without motion: the settled frame IS the
+    /// model state, so skipping the celebration skips nothing but movement.
+    @Test func reduceMotionSpendsTheCelebrationWithoutMotion() async {
+        let vc = makeVC(model: makeCompleteableModel())
+        vc.test_demoReduceMotionOverride = true
+        vc.test_demoCanAnimateOverride = true
+        await vc.test_refreshStatuses()
+
+        await vc.test_allow([.audio, .localNetwork])
+
+        #expect(vc.test_demoMode == .settled)
+        #expect(vc.test_demoCelebrationRunCount == 0, "no motion under Reduce Motion")
+        #expect(vc.test_demoCelebrationConsumed, "but the moment is spent — no late replay")
+    }
+
+    /// Headless (and any off-window run) renders the settled frame instantly
+    /// with the shot UNSPENT — snapshots stay deterministic, and the
+    /// presentation that can show the shot still gets it.
+    @Test func headlessSettlesTheFinaleInstantlyWithoutSpendingTheShot() async {
+        let vc = makeVC(model: makeCompleteableModel())
+        await vc.test_refreshStatuses()
+
+        await vc.test_allow([.audio, .localNetwork])
+
+        #expect(vc.test_demoMode == .settled)
+        #expect(vc.test_demoCelebrationRunCount == 0)
+        #expect(!vc.test_demoCelebrationConsumed)
+        #expect(!vc.test_isDemoAnimating)
+    }
+
+    /// A window opened with everything already granted fires the shot once on
+    /// its first real presentation — modelled through the visibility seam,
+    /// which stands in for the occlusion notification.
+    @Test func theUnspentShotFiresWhenTheFinaleFirstBecomesVisible() async {
+        let vc = makeVC(model: makeCompleteableModel())
+        await vc.test_refreshStatuses()
+        await vc.test_allow([.audio, .localNetwork])
+        #expect(vc.test_demoCelebrationRunCount == 0)
+
+        vc.test_demoReduceMotionOverride = false
+        vc.test_demoCanAnimateOverride = true   // the window lands on screen
+
+        #expect(vc.test_demoCelebrationRunCount == 1)
+    }
+
+    /// The finale is decoration like every other mock: its headline and line
+    /// must be swallowed by the accessibility opt-out — the left pane's header
+    /// and cards carry the words.
+    @Test func theFinaleStaysInvisibleToVoiceOver() async {
+        let vc = makeVC(model: makeCompleteableModel())
+        await vc.test_refreshStatuses()
+
+        await vc.test_allow([.audio, .localNetwork])
+
+        #expect(vc.test_demoMode == .settled)
+        #expect(vc.test_demoAccessibilityElements.isEmpty,
+                "still reachable: \(vc.test_demoAccessibilityElements)")
+    }
+
     // MARK: Demo pane
 
     @Test func demoShowsThePromptMockForAFirstAsk() {

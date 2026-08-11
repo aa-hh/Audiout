@@ -13,7 +13,8 @@ public enum DemoMode: Equatable, Sendable {
     /// The retry path (and Speaker Sync always, which has no prompt at all): a
     /// miniature of the System Settings pane, with a toggle switching on.
     case settings
-    /// Every permission is in — a calm resting state, no loop.
+    /// Every permission is in — the finale: a one-shot gold signal ripple on
+    /// the transition in, then a fully static resting frame. No loop.
     case settled
 }
 
@@ -35,7 +36,9 @@ public enum DemoMode: Equatable, Sendable {
 /// an idle Setup window burns no CPU. Reduce Motion ON → the mock plays ONCE
 /// when the step becomes active, rests at its settled final frame, and offers a
 /// Replay button. Off-window and headless runs never animate at all, so the
-/// snapshot fixtures always capture the settled frame.
+/// snapshot fixtures always capture the settled frame. The settled finale is
+/// the one exception to the loop rule: a ONE-SHOT celebration, never a loop
+/// and never a Replay — see ``DemoSettledMockView``.
 ///
 /// The demo is DECORATIVE: it is excluded from the accessibility tree entirely
 /// (the card copy beside it carries every word of the information). Only Replay,
@@ -191,6 +194,12 @@ final class DemoPaneView: NSView {
             return
         }
         incoming.alphaValue = 0
+        // The finale's one-shot rides the crossfade itself: its text lands
+        // while the pane fades in. Started from the completion handler instead,
+        // the pane fades in fully settled and then re-reveals its own text —
+        // a double reveal. Timelines keep the after-the-fade start (a loop's
+        // first beat is idle anyway).
+        if incoming is DemoSettledMockView { reconcileMotion(restartUnderReduceMotion: true) }
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = Self.stepCrossfadeDuration
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
@@ -245,6 +254,18 @@ final class DemoPaneView: NSView {
     ///   changed — that is the one moment a Reduce Motion user gets their single
     ///   play-through. An occlusion or preference change must not re-trigger it.
     private func reconcileMotion(restartUnderReduceMotion: Bool) {
+        if let settled = mock as? DemoSettledMockView {
+            replayButton.isHidden = true
+            // The finale is a one-shot, not a loop, so it takes its own branch
+            // of the policy: play the first time the settled frame is really
+            // visible (the grant transition, or the first presentation of a
+            // window opened already complete); Reduce Motion spends the shot
+            // without motion; off-window and headless leave it UNSPENT so the
+            // presentation that can show it still gets it.
+            guard canAnimate else { return }
+            if reduceMotion { settled.skipCelebration() } else { settled.playCelebration() }
+            return
+        }
         guard let timeline = mock as? DemoMockView else {
             replayButton.isHidden = true
             return
@@ -276,8 +297,18 @@ final class DemoPaneView: NSView {
     var test_showsReplay: Bool { !replayButton.isHidden }
     /// `nil` = the live system setting (the shared override seam).
     var test_reduceMotionOverride: Bool?
-    /// `nil` = the live window/headless check.
-    var test_canAnimateOverride: Bool?
+    /// `nil` = the live window/headless check. Setting it re-runs the motion
+    /// policy, standing in for the occlusion notification a real visibility
+    /// change delivers — the only way a headless test can reach the "window
+    /// became visible on an already-settled finale" moment.
+    var test_canAnimateOverride: Bool? {
+        didSet { reconcileMotion(restartUnderReduceMotion: false) }
+    }
+    /// How many times the finale's one-shot actually ran (the once-only rule).
+    var test_celebrationRunCount: Int { (mock as? DemoSettledMockView)?.celebrationRunCount ?? 0 }
+    /// Whether the finale's one-shot is spent — played, or skipped under
+    /// Reduce Motion.
+    var test_celebrationConsumed: Bool { (mock as? DemoSettledMockView)?.celebrationConsumed ?? false }
     func test_tapReplay() { replayTapped() }
     /// Anything in the mock subtree VoiceOver would still reach — described so a
     /// failure names the offender.
@@ -912,48 +943,258 @@ final class DemoSettingsMockView: DemoMockView {
 
 // MARK: - Settled mock
 
-/// The completion state: the app's own icon and one calm line. No loop, and none
-/// of the shadow-heavy window chrome — nothing is being asked for any more.
+/// The finale: the app's own icon resting in a soft warm-gold aura under a
+/// display-weight "You're all set." — a payoff frame that reads rich on its
+/// own, never like a paused animation. None of the mocks' shadow-heavy window
+/// chrome: nothing is being asked for any more.
+///
+/// On the TRANSITION into the complete state it plays a ONE-SHOT celebration:
+/// concentric gold signal rings ripple outward from the icon — the Warm Signal
+/// made literal — while the aura blooms and the two text lines rise in. One
+/// shot, then fully static: an idle Setup window burns no CPU, so there is no
+/// loop and no idle motion of any kind. The shot is CONSUMED (played, or spent
+/// without motion under Reduce Motion), so a repaint that changes nothing can
+/// never re-fire it. The pane decides WHEN (`DemoPaneView.reconcileMotion`):
+/// the first time this frame is on a really-visible window — the grant
+/// transition normally, or the first presentation of a window opened with
+/// everything already granted. Off-window and headless runs render the settled
+/// frame and leave the shot unspent.
+///
+/// Every animation ends at the settled MODEL values and auto-removes, so an
+/// interrupted or hidden run still lands on the exact resting frame — the same
+/// rule the timeline mocks follow.
+///
+/// This is Audiouter's own moment, not a macOS mimic, so unlike the mocks its
+/// colours come from `Tokens`. The aura and rings STAMP resolved gold/glow
+/// `CGColor`s onto layers, so the view observes the accent dial and the a11y
+/// display notification and re-stamps (SharedUI's layer-colour instrument
+/// rule); light/dark re-stamps arrive through `updateLayer`.
 final class DemoSettledMockView: NSView {
 
+    /// Fills the demo surface exactly: the ripple needs the whole stage, and a
+    /// mask at the surface's own corner radius lets the wave wash past the
+    /// frame's edge instead of spilling onto the canvas behind it. Still the
+    /// pane's fixed geometry — the surface itself never resizes.
+    static let size = DemoPaneView.surfaceSize
+
+    private static let iconSide: CGFloat = 88
+    /// Rings start just outside the icon and roughly treble before they die.
+    private static let ringBaseDiameter: CGFloat = 104
+    private static let ringEndScale: CGFloat = 3.0
+    /// Seconds into the shot each ring launches — staggered, like a broadcast.
+    private static let ringStarts: [TimeInterval] = [0.10, 0.28, 0.46]
+    private static let ringTravelDuration: TimeInterval = 1.05
+    private static let auraDiameter: CGFloat = 184
+
+    private let icon = NSImageView()
+    private let headline = NSTextField(labelWithString: "You're all set.")
+    private let line = NSTextField(labelWithString: "Every speaker is ready.")
+    /// The static warm aura behind the icon — part of the RESTING frame, not
+    /// the celebration: its model opacity is 1, and only its entrance animates.
+    private let auraLayer = CAGradientLayer()
+    /// The ripple rings. Model opacity 0 — they exist only during the shot.
+    private let ringLayers: [CAShapeLayer]
+
+    /// One-shot bookkeeping: `celebrationConsumed` is "the moment happened"
+    /// (played, or skipped under Reduce Motion) and is what stops a repaint
+    /// from re-firing it; `celebrationRunCount` counts real plays for the
+    /// once-only assertion.
+    private(set) var celebrationConsumed = false
+    private(set) var celebrationRunCount = 0
+
     init() {
+        ringLayers = Self.ringStarts.map { _ in CAShapeLayer() }
         super.init(frame: .zero)
         wantsLayer = true
         build()
+        registerForLiveColourChanges()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
     private func build() {
-        let icon = NSImageView()
+        layer?.masksToBounds = true
+        layer?.cornerRadius = Tokens.Layout.groupedSectionCornerRadius
+        layer?.cornerCurve = .continuous
+
         icon.image = NSApp?.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.translatesAutoresizingMaskIntoConstraints = false
 
-        let line = NSTextField(labelWithString: "Every speaker is ready.")
+        headline.font = .systemFont(ofSize: 24, weight: .bold)
+        headline.textColor = Tokens.Color.label
+        headline.alignment = .center
+
         line.font = .systemFont(ofSize: NSFont.systemFontSize)
-        line.textColor = .labelColor
+        line.textColor = Tokens.Color.secondaryLabel
         line.alignment = .center
 
-        let stack = NSStackView(views: [icon, line])
+        let stack = NSStackView(views: [icon, headline, line])
         stack.orientation = .vertical
         stack.alignment = .centerX
-        // Nothing is being asked for here, so the one thing on the surface may
-        // take the room: a larger icon and more air under it than the mocks,
-        // which are packed to mimic a real dialog's density.
-        stack.spacing = 22
+        stack.spacing = 4
+        stack.setCustomSpacing(18, after: icon)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
 
+        // Under the views: aura at the very back, rings between it and the
+        // icon. Sublayers this view owns, never subviews — nothing else
+        // manages their geometry, so the celebration can move them freely.
+        layer?.insertSublayer(auraLayer, at: 0)
+        for ring in ringLayers { layer?.insertSublayer(ring, above: auraLayer) }
+
+        auraLayer.type = .radial
+        auraLayer.startPoint = CGPoint(x: 0.5, y: 0.5)
+        auraLayer.endPoint = CGPoint(x: 1, y: 1)
+        for ring in ringLayers {
+            ring.fillColor = nil
+            ring.lineWidth = 2
+            ring.opacity = 0
+        }
+
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: DemoPromptMockView.size.width),
-            heightAnchor.constraint(equalToConstant: DemoPromptMockView.size.height),
-            icon.widthAnchor.constraint(equalToConstant: 88),
-            icon.heightAnchor.constraint(equalToConstant: 88),
+            widthAnchor.constraint(equalToConstant: Self.size.width),
+            heightAnchor.constraint(equalToConstant: Self.size.height),
+            icon.widthAnchor.constraint(equalToConstant: Self.iconSide),
+            icon.heightAnchor.constraint(equalToConstant: Self.iconSide),
             stack.centerXAnchor.constraint(equalTo: centerXAnchor),
             stack.centerYAnchor.constraint(equalTo: centerYAnchor),
             stack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor),
         ])
+    }
+
+    /// The aura/ring colours are STAMPED `CGColor`s: light/dark re-stamps
+    /// arrive through `updateLayer`, but the accent dial and Increase Contrast
+    /// change what the tokens resolve to without touching
+    /// `effectiveAppearance`, so each needs its own trigger.
+    private func registerForLiveColourChanges() {
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(stampedColoursChanged),
+            name: Tokens.accentStyleDidChangeNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(stampedColoursChanged),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
+    }
+
+    @objc private func stampedColoursChanged() { needsDisplay = true }
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        // `glow` for the aura (its whole job — and the Subtle dial resolves it
+        // clear, so that dial's "no glow" rule lands here for free); `gold` for
+        // the rings, which keep a real muted value under Subtle. Light glow is
+        // a paper-soft hue (floor-exempt by spec), so light takes more ALPHA
+        // to read as an aura at all — the same call-site alpha dial the
+        // sidebar wash and the mock switch's off track already use.
+        let glow = Tokens.Color.glow
+        let isDark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        let peak: CGFloat = isDark ? 0.32 : 0.50
+        auraLayer.colors = [glow.withAlphaComponent(peak).cgColor,
+                            glow.withAlphaComponent(peak * 0.38).cgColor,
+                            glow.withAlphaComponent(0).cgColor]
+        auraLayer.locations = [0, 0.55, 1]
+        let gold = Tokens.Color.gold.cgColor
+        for ring in ringLayers { ring.strokeColor = gold }
+    }
+
+    override func layout() {
+        super.layout()
+        // The aura and rings anchor on the ICON's centre, which only layout
+        // knows. Actions disabled: repositioning decoration is never a slide.
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        let centre = icon.superview.map {
+            convert(NSPoint(x: icon.frame.midX, y: icon.frame.midY), from: $0)
+        } ?? .zero
+        auraLayer.bounds = CGRect(x: 0, y: 0, width: Self.auraDiameter, height: Self.auraDiameter)
+        auraLayer.position = centre
+        let ringRect = CGRect(x: 0, y: 0, width: Self.ringBaseDiameter, height: Self.ringBaseDiameter)
+        for ring in ringLayers {
+            ring.bounds = ringRect
+            ring.position = centre
+            ring.path = CGPath(ellipseIn: ringRect.insetBy(dx: 1, dy: 1), transform: nil)
+        }
+        CATransaction.commit()
+    }
+
+    // MARK: The one-shot
+
+    /// Spend the shot without motion — Reduce Motion's path. The settled frame
+    /// is already the model state, so there is nothing else to apply.
+    func skipCelebration() { celebrationConsumed = true }
+
+    /// The one-shot: rings ripple out staggered, the aura blooms, the icon
+    /// takes a small press of emphasis, and the text lands with the ripple.
+    func playCelebration() {
+        guard !celebrationConsumed else { return }
+        celebrationConsumed = true
+        celebrationRunCount += 1
+        layoutSubtreeIfNeeded()   // ring/aura geometry comes from layout
+
+        for (ring, start) in zip(ringLayers, Self.ringStarts) {
+            addRipple(to: ring, delay: start)
+        }
+
+        let bloom = CABasicAnimation(keyPath: "opacity")
+        bloom.fromValue = 0
+        bloom.toValue = 1
+        addCelebrationAnimation(bloom, to: auraLayer, delay: 0.12, duration: 0.6, key: "bloom")
+
+        let pop = CAKeyframeAnimation(keyPath: "transform.scale")
+        pop.values = [0.92, 1.04, 1.0]
+        pop.keyTimes = [0, 0.55, 1]
+        if let iconLayer = icon.layer {
+            addCelebrationAnimation(pop, to: iconLayer, delay: 0, duration: 0.55, key: "pop")
+        }
+        addTextLanding(headline, delay: 0.34)
+        addTextLanding(line, delay: 0.48)
+    }
+
+    /// One ring's flight: scale out to death while the stroke swells and fades
+    /// — a wave dissipating, not a shape resizing.
+    private func addRipple(to ring: CAShapeLayer, delay: TimeInterval) {
+        let scale = CABasicAnimation(keyPath: "transform.scale")
+        scale.fromValue = 1.0
+        scale.toValue = Self.ringEndScale
+        let fade = CAKeyframeAnimation(keyPath: "opacity")
+        fade.values = [0, 0.55, 0]
+        fade.keyTimes = [0, 0.18, 1]
+        let flight = CAAnimationGroup()
+        flight.animations = [scale, fade]
+        addCelebrationAnimation(flight, to: ring, delay: delay,
+                                duration: Self.ringTravelDuration, key: "ripple")
+    }
+
+    /// A text line's landing: fade up from a few points below its resting spot.
+    private func addTextLanding(_ label: NSTextField, delay: TimeInterval) {
+        guard let layer = label.layer else { return }
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0
+        fade.toValue = 1
+        let rise = CABasicAnimation(keyPath: "transform.translation.y")
+        rise.fromValue = -10
+        rise.toValue = 0
+        let landing = CAAnimationGroup()
+        landing.animations = [fade, rise]
+        addCelebrationAnimation(landing, to: layer, delay: delay, duration: 0.45, key: "land")
+    }
+
+    /// Shared send-off: delayed via `beginTime` with `.backwards` fill so the
+    /// element holds its start value until its beat, ease-out, and removed on
+    /// completion so the layer lands back on its settled model value.
+    private func addCelebrationAnimation(_ animation: CAAnimation, to layer: CALayer,
+                                         delay: TimeInterval, duration: TimeInterval, key: String) {
+        animation.beginTime = layer.convertTime(CACurrentMediaTime(), from: nil) + delay
+        animation.duration = duration
+        animation.fillMode = .backwards
+        animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.add(animation, forKey: key)
     }
 }
 

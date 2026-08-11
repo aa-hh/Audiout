@@ -94,9 +94,50 @@ final class PopoverPanelViewController: NSViewController {
     /// a `RowClipView` whose height is the ONE animated dimension of a collapse
     /// (`setSubsectionCollapsed`) — `insertRow`'s choreography applied to a
     /// GROUP of rows instead of one.
+    ///
+    /// `rail` is the same body seen as a rail SECTION. It is stored HERE rather
+    /// than handed straight to the overlay because `BusRailOverlayView
+    /// .deviceSection` is `weak`: nothing else would keep it alive.
     private struct SubsectionBody {
         let clip: RowClipView
         let stack: NSStackView
+        let rail: SubsectionRailSection
+    }
+
+    /// A device-type subsection's `RailSectionProviding` face — the contract
+    /// `CardView` fills for a whole card, over this subsection's own header row
+    /// and body clip. It lets the rail cut at a collapsed SUBSECTION's header
+    /// with the same dot a collapsed CARD already gets, and the clip's live
+    /// height gives the same in-sync squeeze during the collapse animation.
+    ///
+    /// While the enclosing CARD is the one collapsed it defers to the card: the
+    /// card takes this subsection's header and clip off screen with it, and a
+    /// card collapse never re-runs the host's rail extents — so that choice has
+    /// to be read live here, not picked once in `setRailRows`.
+    private final class SubsectionRailSection: RailSectionProviding {
+        private let header: NSView
+        private let clip: RowClipView
+        private weak var card: CardView?
+        /// The subsection's own (target) collapsed state, kept in step by
+        /// `setSubsectionCollapsed`.
+        var collapsed: Bool
+
+        init(header: NSView, clip: RowClipView, card: CardView?, collapsed: Bool) {
+            self.header = header
+            self.clip = clip
+            self.card = card
+            self.collapsed = collapsed
+        }
+
+        /// The enclosing card while IT is the collapsed one — the cut belongs to
+        /// the card then, header and clip both.
+        private var cardCut: CardView? { card?.isBodyCollapsed == true ? card : nil }
+
+        var railSectionCollapsed: Bool { collapsed || cardCut != nil }
+        var railSectionHeaderView: NSView? { cardCut?.railSectionHeaderView ?? header }
+        var railSectionHeaderBounds: NSRect { cardCut?.railSectionHeaderBounds ?? header.bounds }
+        var railSectionClipView: NSView? { cardCut?.railSectionClipView ?? clip }
+        var railSectionClipBounds: NSRect { cardCut?.railSectionClipBounds ?? clip.bounds }
     }
     /// Subsection bodies keyed by subsection title, so a toggle can find the
     /// clip to animate without the host holding a view reference.
@@ -303,19 +344,30 @@ final class PopoverPanelViewController: NSViewController {
     }
 
     /// Point the continuous rail overlay at the current Main Audio row + device
-    /// rows (top-to-bottom display order) AND the two collapsible cards the rail
-    /// spans (the origin card holding Main Audio, the device card holding the
-    /// rows), then repaint it. The controller calls this at the end of every
-    /// rebuild / in-place device repaint. Passing the cards by title lets the
-    /// overlay react to a collapse: terminate the rail at the collapsed section's
-    /// header, move the origin up when the origin card collapses, and squeeze in
-    /// sync with the clip animation (collapse-reactive rail, 2026-07-22).
+    /// rows (top-to-bottom display order) AND the two collapsible sections the
+    /// rail spans (the origin card holding Main Audio, and whatever holds the
+    /// device rows), then repaint it. The controller calls this at the end of
+    /// every rebuild / in-place device repaint. Passing the sections by title
+    /// lets the overlay react to a collapse: terminate the rail at the collapsed
+    /// section's header, move the origin up when the origin card collapses, and
+    /// squeeze in sync with the clip animation (collapse-reactive rail,
+    /// 2026-07-22).
+    ///
+    /// `cutSubsectionTitle` is the host's answer to "which collapse is actually
+    /// hiding the rail's far end": a device-type SUBSECTION when its collapse
+    /// took the lowest selected device off screen, so the cut lands at THAT
+    /// header's dot; `nil` leaves the whole device card as the far end.
     func setRailRows(mainOut: RailHookProviding, deviceRows: [RailNodeProviding],
-                     originCardTitle: String, deviceCardTitle: String) {
+                     originCardTitle: String, deviceCardTitle: String,
+                     cutSubsectionTitle: String? = nil) {
         railOverlay.mainOutRow = mainOut
         railOverlay.deviceRows = deviceRows
         railOverlay.originSection = cardsByHeader[originCardTitle]
-        railOverlay.deviceSection = cardsByHeader[deviceCardTitle]
+        if let cutSubsectionTitle, let subsection = subsectionBodies[cutSubsectionTitle]?.rail {
+            railOverlay.deviceSection = subsection
+        } else {
+            railOverlay.deviceSection = cardsByHeader[deviceCardTitle]
+        }
         railOverlay.needsDisplay = true
     }
 
@@ -748,6 +800,9 @@ final class PopoverPanelViewController: NSViewController {
     func setSubsectionCollapsed(title: String, collapsed: Bool, animated: Bool,
                                 buildRows: () -> Void) -> Bool {
         guard let body = subsectionBodies[title] else { return false }
+        // The rail's far end reads this the moment the toggle lands, so it moves
+        // with the model, not with the animation that follows it.
+        body.rail.collapsed = collapsed
         if let chevron = chevronsByHeader[title] {
             assignChevron(chevron, collapsed: collapsed, for: title)
             chevron.setAccessibilityLabel(collapsed ? "Expand \(title)" : "Collapse \(title)")
@@ -1142,7 +1197,7 @@ final class PopoverPanelViewController: NSViewController {
         // subsection collapses), so close any previous subsection first.
         currentSubsectionStack = nil
         addRow(wrapper)
-        currentSubsectionStack = mountSubsectionBody(title, collapsed: collapsed)
+        currentSubsectionStack = mountSubsectionBody(title, header: wrapper, collapsed: collapsed)
     }
 
     /// Build a subsection's body clip + row stack and mount it under the header
@@ -1150,7 +1205,8 @@ final class PopoverPanelViewController: NSViewController {
     /// `.defaultHigh` (`RowClipView`), so an active height-0 constraint wins
     /// without deforming the rows: they hold their place at the top and are
     /// revealed downward as the height grows.
-    private func mountSubsectionBody(_ title: String, collapsed: Bool) -> NSStackView {
+    private func mountSubsectionBody(_ title: String, header: NSView,
+                                     collapsed: Bool) -> NSStackView {
         let stack = NSStackView()
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.orientation = .vertical
@@ -1158,7 +1214,10 @@ final class PopoverPanelViewController: NSViewController {
         stack.distribution = .fill
         stack.spacing = 0
         let clip = RowClipView(row: stack)
-        subsectionBodies[title] = SubsectionBody(clip: clip, stack: stack)
+        subsectionBodies[title] = SubsectionBody(
+            clip: clip, stack: stack,
+            rail: SubsectionRailSection(header: header, clip: clip, card: currentCard,
+                                        collapsed: collapsed))
         if collapsed {
             // The collapsed END STATE, applied synchronously — the host builds no
             // rows for a collapsed subsection, so this clip stays empty until an

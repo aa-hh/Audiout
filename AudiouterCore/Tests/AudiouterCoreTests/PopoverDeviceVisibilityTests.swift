@@ -308,27 +308,103 @@ import AppKit
                 "the Bluetooth section's own Connect affordance still renders")
     }
 
-    // MARK: The rail follows what is on screen
+    // MARK: The rail runs to the lowest selected device, hidden or not
 
-    /// The spine's terminus is the lowest selected VISIBLE node. Collapse is
-    /// the case that can strand it — a hidden device is by definition out of
-    /// the mix, but a COLLAPSED subsection takes selected rows off screen —
-    /// and it must pull the terminus up rather than leave the row above it
-    /// carrying a through-rail to nothing.
-    @Test func theRailTerminatesAtTheLowestVISIBLESelectedNode() {
+    /// The spine runs to the LOWEST SELECTED device, and a collapsed
+    /// subsection hiding that device does NOT shorten it: the rail keeps
+    /// running past the rows above and is CUT at that subsection's header with
+    /// a dot — exactly what collapsing the whole CARD already does.
+    ///
+    /// Ending it on the highest still-visible selected row instead, with no
+    /// dot, is the bug this pins: the rail's length reads as "how far down the
+    /// mix reaches", so stopping it early says the mix stopped early, and the
+    /// row it stops on renders as a terminus it isn't.
+    @Test func aCollapsedSubsectionCutsTheRailAtItsHeaderDot() throws {
         let fleet = [local(), airplay(), bt("bt-z:output", name: "Zed Box")]
         let (popover, controller) = makePopover(fleet: fleet)
         controller.setDeviceSelected("office", true)
         controller.setDeviceSelected("bt-z:output", true)
         popover.update(devices: fleet)
+        popover.test_applyExactFitSize()
         #expect(popover.test_deviceRow(for: "office")?.test_busRailBelow == true,
                 "the rail runs on past Office to the Bluetooth box below it")
+        #expect(try #require(popover.test_railPlan()).terminusDotY == nil,
+                "expanded: the rail ends on Zed Box's own node, uncut")
 
         popover.test_fireSubsectionHeaderClick(title: bluetoothTitle)
-        #expect(popover.test_deviceRow(for: "office")?.test_busRailBelow == false,
-                "with the Bluetooth rows collapsed away the rail ends at Office")
+        popover.test_applyExactFitSize()
+
+        #expect(popover.test_deviceRow(for: "office")?.test_busRailBelow == true,
+                "Office is still not the terminus — the mix reaches below it")
+        #expect(try #require(popover.test_railPlan()).terminusDotY != nil,
+                "…so the rail is cut at the collapsed subsection's header, with a dot")
         #expect(controller.selectedDeviceIDs.contains("bt-z:output"),
                 "collapse is display only — Zed Box is still in the mix")
+    }
+
+    /// The case that erased the rail outright: EVERY selected device inside the
+    /// subsection being collapsed. No visible node is left for the spine to run
+    /// through, so the rail is nothing BUT the cut — a dot at that subsection's
+    /// header, never a hook curling off Main Audio into mid-air.
+    @Test func collapsingTheSubsectionHoldingEverySelectedDeviceStillEndsInADot() throws {
+        let fleet = [local(), airplay()]
+        let (popover, controller) = makePopover(fleet: fleet)
+        controller.setDeviceSelected("mac", true)   // …and nothing else
+        popover.update(devices: fleet)
+        popover.test_applyExactFitSize()
+        #expect(!(try #require(popover.test_railPlan()).stops.isEmpty),
+                "expanded: the Mac's own node is the terminus")
+
+        popover.test_fireSubsectionHeaderClick(title: PopoverController.thisMacSubsectionTitle)
+        popover.test_applyExactFitSize()
+
+        let plan = try #require(popover.test_railPlan())
+        #expect(plan.stops.isEmpty, "no visible node is left to draw")
+        #expect(plan.terminusDotY != nil,
+                "the rail ends in a dot at the collapsed header, not in mid-air")
+    }
+
+    /// The invariant behind both cases above, stated once. With the origin
+    /// resolved and devices in the mix, a rail plan may never be BOTH stop-less
+    /// and dot-less — that pair IS the dangling hook, a rail that starts at
+    /// Main Audio and ends nowhere. Swept over every subsection, collapsing
+    /// them one after another until all three are shut.
+    @Test func aRailWithDevicesInTheMixIsNeverBothStopLessAndDotLess() throws {
+        let fleet = [local(), airplay(), bt("bt-z:output", name: "Zed Box")]
+        let (popover, controller) = makePopover(fleet: fleet)
+        controller.setDeviceSelected("office", true)
+        controller.setDeviceSelected("mac", true)
+        controller.setDeviceSelected("bt-z:output", true)
+        popover.update(devices: fleet)
+
+        for title in [PopoverController.thisMacSubsectionTitle, airPlayTitle, bluetoothTitle] {
+            popover.test_fireSubsectionHeaderClick(title: title)
+            popover.test_applyExactFitSize()
+            let plan = try #require(popover.test_railPlan())
+            #expect(!(plan.stops.isEmpty && plan.terminusDotY == nil),
+                    "collapsing \(title) left the rail with no stops AND no terminus")
+        }
+    }
+
+    /// Re-expanding restores the exact rail it had before — the plan carries no
+    /// state across a collapse → expand cycle, so the geometry is a pure
+    /// function of the settled layout (`RailPlan.resolve`).
+    @Test func reExpandingASubsectionRestoresTheExactRail() throws {
+        let fleet = [local(), airplay(), bt("bt-z:output", name: "Zed Box")]
+        let (popover, controller) = makePopover(fleet: fleet)
+        controller.setDeviceSelected("office", true)
+        controller.setDeviceSelected("bt-z:output", true)
+        popover.update(devices: fleet)
+        popover.test_applyExactFitSize()
+        let before = try #require(popover.test_railPlan())
+
+        popover.test_fireSubsectionHeaderClick(title: bluetoothTitle)
+        popover.test_applyExactFitSize()
+        popover.test_fireSubsectionHeaderClick(title: bluetoothTitle)
+        popover.test_applyExactFitSize()
+
+        let after = try #require(popover.test_railPlan())
+        #expect(after == before, "same origin, same stops, same terminus")
     }
 }
 

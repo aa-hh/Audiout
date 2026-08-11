@@ -13,6 +13,27 @@ A native AppKit macOS app that sends system audio to multiple AirPlay 2 speakers
 | `dev/` | Offline dev tooling (fake speakers, dev scripts); `dev/notes/` holds research briefs |
 | `docs/SPEC.md` | Product spec — the source of truth for *what* to build |
 | `scripts/make-app.sh` | Wraps the executable into a signed `.app` bundle (required for TCC/process-tap) |
+| `ios/` | iPhone companion app (SwiftUI). **Not in this checkout** — staged on `claude/ios-staging` until the whole app is ready to merge into `main`. See "iOS companion app" below. |
+
+## iOS companion app
+
+The iPhone companion (`ios/AudiouterRemote/`) is built entirely on
+`claude/ios-staging` — a long-lived integration branch, not a one-off
+feature branch — kept off `main` on purpose so Mac-only changes keep
+merging without waiting on the whole iOS app. `main` has no `ios/`
+directory at all right now.
+
+**Before any iOS task, start from that branch, not `main`:**
+
+```bash
+cd .claude/worktrees/ios-staging   # already checked out; git pull if stale
+# or, if that worktree doesn't exist yet:
+git worktree add .claude/worktrees/ios-staging claude/ios-staging
+```
+
+Commit iOS work there (merging other `claude/ios-*` branches into it as they
+land), and push to `origin/claude/ios-staging`. It merges into `main` as one
+unit later, on Alec's go-ahead — not per-branch.
 
 ## First steps in a fresh clone
 

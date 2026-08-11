@@ -52,6 +52,10 @@ symbol you cannot find in source, believe the source and fix the doc.
   bare `swift run` loses the grant.
 - [docs/SPEC.md](docs/SPEC.md) — the product spec. Code cites its sections ("SPEC.md §9").
 - `docs/plans/PLAN-*.md` — the phased execution plans and their resolved decisions.
+- `ios/` — the iPhone companion app. Not present in `main` or this worktree;
+  staged on `claude/ios-staging` until the whole app is ready to merge. See
+  [CLAUDE.md](CLAUDE.md#ios-companion-app) — start any iOS task from that
+  branch, never from `main`.
 
 ## Rules (all targets)
 

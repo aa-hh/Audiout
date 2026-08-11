@@ -156,7 +156,7 @@ public final class SetupFlowModel {
     }
 
     /// How many speakers the last Local Network browse saw — the Local Network
-    /// card's completed title ("Found 3 speakers") instead of a checkmark.
+    /// card's completed title ("3 speakers on your network") instead of a checkmark.
     public var localNetworkFoundSpeakers: Int { setup.localNetworkFoundSpeakers }
 
     // MARK: The Allow click

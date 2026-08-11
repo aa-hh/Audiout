@@ -92,7 +92,7 @@ public enum PermissionMode: Sendable {
             let bluetooth = SimulatedBluetoothPermission(status: .denied)
             return PermissionProviders(
                 audioProbe: SimulatedAudioCaptureProbe(status: .denied),
-                localNetwork: SimulatedLocalNetworkPrimer(reachable: false),
+                localNetwork: SimulatedLocalNetworkPrimer(reachable: false, refused: true),
                 remoteControl: SimulatedRemoteControlPrimer(trusted: false),
                 ptpHelper: SimulatedPTPHelper(status: .requiresApproval),
                 bluetoothReader: bluetooth,
@@ -150,16 +150,29 @@ public struct SimulatedAudioCaptureProbe: AudioCapturePermissionProbing {
 /// A ``LocalNetworkPriming`` that reports a fixed reachability without a Bonjour
 /// browse (so no real network access, no Local Network prompt). `foundSpeakers`
 /// is what setup's Local Network card counts — a fixed, plausible two, so the
-/// simulated flow reads "Found 2 speakers" rather than a suspiciously round one.
+/// simulated flow reads "2 speakers on your network" rather than a suspiciously round one.
 public struct SimulatedLocalNetworkPrimer: LocalNetworkPriming {
     public let reachable: Bool
     public let foundSpeakers: Int
-    public init(reachable: Bool, foundSpeakers: Int = 2) {
+    /// Whether the simulated user REFUSED. Without it `denied` mode could only
+    /// say "unreachable", which the model reads as `.requested` — so the one
+    /// mode meant to show every card in its denied shape showed Local Network
+    /// in its still-asking one.
+    public let refused: Bool
+    public init(reachable: Bool, foundSpeakers: Int = 2, refused: Bool = false) {
         self.reachable = reachable
         self.foundSpeakers = foundSpeakers
+        self.refused = refused
     }
     public func probe() async -> Bool { reachable }
     public func probeFoundSpeakers() async -> Int { reachable ? foundSpeakers : 0 }
+    public func prime(browseSeconds: TimeInterval,
+                      onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome {
+        if refused { return .denied }
+        guard reachable else { return .undecided }
+        onReachable()
+        return .granted(foundSpeakers: foundSpeakers)
+    }
 }
 
 /// A ``RemoteControlPriming`` that reports a fixed trust state and never opens

@@ -586,16 +586,20 @@ plutil -extract NSAudioCaptureUsageDescription raw -o - "$PLIST" >/dev/null || {
 #   NSBonjourServices — the service types we're allowed to browse; without it the
 #     browse is blocked even with the usage string. These MUST match every type
 #     the app browses: _airplay._tcp for AirPlay 2 and _raop._tcp for AP1
-#     (NativeDiscovery), plus _audiouter-preflight._tcp — the service setup
+#     (NativeDiscovery), plus _audiouter-pf._tcp — the service setup
 #     publishes and then browses for on this same Mac to PROVE the permission
 #     was granted (LocalNetworkPrimer's self-discovery). Leave that last one out
 #     and the self-browse is silently blocked, so setup can never confirm a
-#     grant on a network with no speaker switched on.
+#     grant on a network with no speaker switched on. That name is SHORT on
+#     purpose: Bonjour caps a service name at 15 characters, and the longer
+#     _audiouter-preflight._tcp was rejected outright (BadParam), which is
+#     exactly as invisible as leaving it out. Keep it in step with
+#     LocalNetworkPrimer.selfServiceType.
 plutil -insert NSLocalNetworkUsageDescription -string "$LOCAL_NETWORK_USAGE" "$PLIST"
 plutil -insert NSBonjourServices -array "$PLIST"
 plutil -insert NSBonjourServices.0 -string "_airplay._tcp" "$PLIST"
 plutil -insert NSBonjourServices.1 -string "_raop._tcp" "$PLIST"
-plutil -insert NSBonjourServices.2 -string "_audiouter-preflight._tcp" "$PLIST"
+plutil -insert NSBonjourServices.2 -string "_audiouter-pf._tcp" "$PLIST"
 plutil -extract NSLocalNetworkUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSLocalNetworkUsageDescription missing from Info.plist" >&2; exit 1; }
 plutil -extract NSBonjourServices.0 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices missing from Info.plist" >&2; exit 1; }
 plutil -extract NSBonjourServices.2 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices is missing the setup self-discovery type — setup could not prove a Local Network grant" >&2; exit 1; }

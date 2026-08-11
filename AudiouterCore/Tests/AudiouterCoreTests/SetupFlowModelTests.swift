@@ -435,9 +435,11 @@ import Testing
     }
 
     /// The gate condition is the PERMISSION, not the speaker: self-discovery
-    /// proves the grant with nothing switched on, so the step completes — and
-    /// the card's Try Again is still there to recount once a speaker appears.
-    @Test func aGrantedLocalNetworkWithNoSpeakersCompletesAndCanStillRecount() async {
+    /// proves the grant with nothing switched on, so the step completes. The
+    /// completed card is inert (it offers no Try Again), so the recount is not
+    /// a user action at all — it rides the same refresh the window's focus
+    /// fires, and a speaker switched on later simply appears in the title.
+    @Test func aGrantedLocalNetworkWithNoSpeakersCompletesAndRecountsOnRefresh() async {
         let setup = makeSetup(localNetwork: GrantingLocalNetwork([0, 3]))
         let flow = SetupFlowModel(setup: setup)
 
@@ -447,7 +449,7 @@ import Testing
         #expect(flow.isComplete(.localNetwork), "the permission is what completes it")
         #expect(setup.localNetworkFoundSpeakers == 0)
 
-        // Try Again on a completed step short-circuits, so the recount comes
+        // The completed step has no click of its own, so the recount comes
         // through the same refresh the window's focus fires.
         await setup.refreshStatuses()
 

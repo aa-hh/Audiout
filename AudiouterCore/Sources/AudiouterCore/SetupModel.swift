@@ -32,9 +32,13 @@ import Foundation
 public enum PermissionStatus: Equatable, Sendable {
     /// Not yet asked (the initial state for every permission).
     case unknown
-    /// Confirmed working — only ever set for audio capture (verifiable).
+    /// Confirmed working. Every permission here can reach this honestly: audio
+    /// by capturing its own tone, Local Network by finding its own published
+    /// service, Remote Control and Bluetooth by their real status APIs.
     case granted
-    /// Confirmed denied — only ever set for audio capture (verifiable).
+    /// Confirmed denied — the tone probe's silence, Local Network's mDNS policy
+    /// error, or Bluetooth's authorization read. Never inferred from a browse
+    /// that merely found nothing.
     case denied
     /// Prompt was triggered and nothing has answered it yet (Local Network's
     /// still-open dialog, Remote Control's un-flipped toggle). The UI pairs this
@@ -306,9 +310,32 @@ public protocol LocalNetworkPriming: Sendable {
     /// "Checking your network…" instead of leaving a bare spinner up.
     func prime(browseSeconds: TimeInterval,
                onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome
+
+    /// The same prime, saying whether it may PUBLISH the service the grant is
+    /// proved against. Publishing opens a listening TCP socket, which the macOS
+    /// application firewall may ask the user about — so it belongs to the first
+    /// ask, not to every background rescan of a permission already proved. See
+    /// ``LocalNetworkPrimer``. Defaulted (below) so every fake keeps compiling.
+    func prime(browseSeconds: TimeInterval,
+               selfDiscovery: Bool,
+               onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome
+
+    /// Abandon a prime that is in flight and tear its endpoints down (the
+    /// window closing mid-ask). A seam with nothing to tear down does nothing.
+    func cancel()
 }
 
 public extension LocalNetworkPriming {
+
+    /// A seam with no listener of its own has nothing for the flag to change.
+    func prime(browseSeconds: TimeInterval,
+               selfDiscovery: Bool,
+               onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome {
+        await prime(browseSeconds: browseSeconds, onReachable: onReachable)
+    }
+
+    func cancel() {}
+
     /// A seam that only implements the Bool answer reports one speaker for
     /// reachable, none otherwise — preserving `count > 0 ⇔ probe()`.
     func probeFoundSpeakers() async -> Int { await probe() ? 1 : 0 }
@@ -417,7 +444,7 @@ public final class SetupModel {
     /// prime has run, and legitimately `0` afterwards too: self-discovery proves
     /// the permission on its own, so a `.granted` Local Network with zero
     /// speakers just means none is switched on. The count is the detail the card
-    /// shows ("Found 3 speakers"), not the grant itself.
+    /// shows ("3 speakers on your network"), not the grant itself.
     public private(set) var localNetworkFoundSpeakers = 0
 
     /// Remote-control (Accessibility) status. Starts `.unknown`, becomes
@@ -614,17 +641,42 @@ public final class SetupModel {
         // with no dialog to wait for, so it stays snappy.
         let window = localNetworkStatus == .unknown ? Self.firstAskBrowseSeconds
                                                     : Self.rescanBrowseSeconds
-        switch await localNetwork.prime(browseSeconds: window, onReachable: onReachable) {
+        // A permission already PROVED granted needs no second proof, so its
+        // rescans skip the published service (and the firewall dialog that
+        // publishing can raise) and just browse.
+        let wasGranted = localNetworkStatus == .granted
+        switch await localNetwork.prime(browseSeconds: window,
+                                        selfDiscovery: !wasGranted,
+                                        onReachable: onReachable) {
         case .granted(let found):
-            localNetworkFoundSpeakers = found
+            // A later browse that saw FEWER speakers hasn't unsaid the earlier
+            // sighting — a speaker was switched off, which is not a permission
+            // event. Only a browse that actually saw something rewrites the
+            // count a granted card is showing.
+            if found > 0 || !wasGranted { localNetworkFoundSpeakers = found }
             return .granted
         case .denied:
             localNetworkFoundSpeakers = 0
             return .denied
         case .undecided:
+            // GRANTED IS PROVEN AND STICKY. Self-discovery proved the
+            // permission; a later rescan that proves nothing (an empty network,
+            // a prime already in flight, a browse that ended early) has NOT
+            // disproved it. Downgrade here and every app activation flaps the
+            // completed card to "permission lost" and back. The only thing that
+            // takes the grant away is the refusal itself — the mDNS policy
+            // error, which arrives as `.denied` above.
+            guard !wasGranted else { return .granted }
             localNetworkFoundSpeakers = 0
             return .requested
         }
+    }
+
+    /// Abandon a Local Network prime that is in flight — the window closing
+    /// mid-ask. The prime resolves `.undecided`, which unwinds
+    /// ``primeLocalNetwork()`` and releases the flow model's single-flight hold.
+    public func cancelLocalNetworkPrime() {
+        localNetwork.cancel()
     }
 
     /// Ask for Accessibility. Opens the prompt, then reads the REAL live state
@@ -741,7 +793,9 @@ public final class SetupModel {
     ///   posture as ``auditRequiredPermissions()``.
     /// - **Local Network** re-primes ONLY if already asked (browsing fires the
     ///   prompt), which upgrades `.requested` → `.granted` once the browse
-    ///   reaches the network, and can now also land on a real `.denied`.
+    ///   reaches the network, and can land on a real `.denied`. It can NEVER
+    ///   take a proved grant back on anything less than that refusal — see
+    ///   ``probeLocalNetwork(onReachable:)``.
     /// - **PTP helper** always re-reads `.status` (silent, no re-`register()` —
     ///   see ``refreshPTPHelperStatus()``), the same posture as Remote Control.
     /// - **Bluetooth** always re-reads `CBManager.authorization` (silent and
@@ -940,8 +994,8 @@ public final class SetupModel {
         if localNetworkGated, localNetworkStatus != .unknown {
             let previousFound = localNetworkFoundSpeakers
             let next = await probeLocalNetwork()
-            // The COUNT is observable too (the card reads "Found 3 speakers"),
-            // so a same-status re-count still has to repaint.
+            // The COUNT is observable too (the card reads "3 speakers on your
+            // network"), so a same-status re-count still has to repaint.
             if next != localNetworkStatus || localNetworkFoundSpeakers != previousFound {
                 localNetworkStatus = next
                 changed = true

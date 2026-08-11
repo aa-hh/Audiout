@@ -64,7 +64,9 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
         // Appear on whatever Space the user is on (incl. over a fullscreen app)
         // when summoned/re-fronted, rather than Space-switching (window-panel.md M1).
         window.collectionBehavior.formUnion([.moveToActiveSpace, .fullScreenAuxiliary])
-        // Deliberately `.floating` for the window's whole open lifetime:
+        // Deliberately `.floating` — the resting level for the window's whole
+        // open lifetime, dropped only for a System Settings trip and for the
+        // length of an unanswered permission dialog (`isPromptInFlight`):
         // granting a permission must never leave this window buried, and the
         // normal-level alternative depends on `NSApp.activate`, which macOS 14's
         // cooperative activation may decline while another app is frontmost.
@@ -78,6 +80,7 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
         super.init(window: window)
         trampoline.action = { [weak self] in self?.finish(markComplete: true) }
         levelTrampoline.action = { [weak self] in self?.yieldToSystemSettings() }
+        contentVC.onPromptInFlightChanged = { [weak self] in self?.setPromptInFlight($0) }
         window.delegate = self
         // When the app becomes active again — e.g. the user finished a system
         // permission dialog, or clicked back to us — bring the setup window
@@ -108,10 +111,35 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
     /// behaviours: `appDidBecomeActive` is the restore, and it fires whether the
     /// user comes back by granting (we activate ourselves) or by hand.
     private func yieldToSystemSettings() {
-        window?.level = .normal
+        stepAside()
         // Armed until we have ACTUALLY lost the front — see
         // `appDidBecomeActive`, which must not undo the line above.
         isYieldingToSettings = true
+    }
+
+    /// The yield itself, shared with the in-flight prompt below: drop out of
+    /// the way of whatever is about to be drawn where we are.
+    private func stepAside() { window?.level = .normal }
+
+    /// Set while a system permission dialog this flow raised is unanswered.
+    ///
+    /// Another process fighting a TCC dialog for input focus is what leaves it
+    /// frozen and unclickable, so for the length of the ask this window gives
+    /// up all three ways it competes: the floating level (dropped below), the
+    /// reactivate re-front (``appDidBecomeActive``), and the force-activate on
+    /// mouse-down (``OnboardingWindow/suppressesActivation``).
+    private var isPromptInFlight = false
+
+    private func setPromptInFlight(_ inFlight: Bool) {
+        isPromptInFlight = inFlight
+        (window as? OnboardingWindow)?.suppressesActivation = inFlight
+        if inFlight {
+            stepAside()
+        } else if !isYieldingToSettings {
+            // Resolved, and not on the way to Settings — a trip there owns the
+            // level until it comes back (see `isYieldingToSettings`).
+            window?.level = .floating
+        }
     }
 
     /// Set while a Settings trip has been started but the front has not yet
@@ -144,7 +172,9 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
         // Not a return — our own activation catching up with the deep link we
         // just fired. Re-floating (or re-ordering) here is what buried System
         // Settings; the status re-read below is still worth doing.
-        if !isYieldingToSettings {
+        // A prompt still on screen owns the front: re-floating or taking key
+        // here is exactly what freezes it (see `isPromptInFlight`).
+        if !isYieldingToSettings, !isPromptInFlight {
             // Back in our app: take the floating level again (see
             // `yieldToSystemSettings()`).
             window?.level = .floating
@@ -233,6 +263,18 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
         onFinished()
     }
 
+    /// Refuse the ✕ while a permission dialog is unanswered.
+    ///
+    /// Closing (and so deallocating) this window is a fourth way it can fight
+    /// the dialog for focus — AppKit reassigns key/main status and reorders
+    /// remaining windows on teardown, the same disturbance `isPromptInFlight`
+    /// already gives up floating level, reactivate re-front and force-activate
+    /// for. The stuck-prompt hint the content VC already shows after the 20 s
+    /// timeout is the honest explanation for why the ✕ isn't doing anything.
+    public func windowShouldClose(_ sender: NSWindow) -> Bool {
+        !isPromptInFlight
+    }
+
     public func windowWillClose(_ notification: Notification) {
         dismiss()
     }
@@ -292,10 +334,18 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
 /// one. The `acceptsFirstMouse` overrides on the CTA/cards stay regardless:
 /// they are what lets this same click also PRESS the control.
 final class OnboardingWindow: NSWindow {
+
+    /// Set while a system permission dialog is unanswered. The click is still
+    /// DELIVERED — only the force-activate is skipped, because activating this
+    /// app is what takes input focus off the dialog the user is trying to
+    /// answer (see `OnboardingWindowController.isPromptInFlight`).
+    var suppressesActivation = false
+
     override func sendEvent(_ event: NSEvent) {
         if event.type == .leftMouseDown || event.type == .leftMouseUp {
             let wasActive = NSApp?.isActive == true
-            if event.type == .leftMouseDown, !wasActive, !HeadlessRuntime.isActive {
+            if event.type == .leftMouseDown, !wasActive, !HeadlessRuntime.isActive,
+               !suppressesActivation {
                 NSApp?.activate(ignoringOtherApps: true)
                 makeKeyAndOrderFront(nil)
             }

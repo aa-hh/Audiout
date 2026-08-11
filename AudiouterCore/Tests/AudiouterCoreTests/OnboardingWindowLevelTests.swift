@@ -36,19 +36,27 @@ import Testing
         func unregister() async throws {}
     }
 
+    /// A Bluetooth prompt that never reports back — the simplest way to hold a
+    /// system dialog open for the length of an assertion.
+    private struct NeverDecidingBluetooth: BluetoothPermissionPriming {
+        func prime(onDecided: @escaping @Sendable () -> Void) {}
+    }
+
     private let isolation = TestIsolation(owner: "OnboardingWindowLevelTests")
 
-    private func makeController(audioDenied: Bool = true) -> OnboardingWindowController {
+    private func makeController(audioDenied: Bool = true,
+                                bluetoothPrimer: BluetoothPermissionPriming? = nil,
+                                bluetoothPromptTimeout: TimeInterval = 10) -> OnboardingWindowController {
         let model = SetupModel(
             audioProbe: CannedAudioProbe(result: audioDenied ? .denied : .granted),
             localNetwork: NoLocalNetwork(),
             remoteControl: NoopRemoteControl(),
             ptpHelper: FakePTPHelper(),
             bluetoothReader: SimulatedBluetoothPermission(status: .unknown),
-            bluetoothPrimer: SimulatedBluetoothPermission(status: .unknown),
+            bluetoothPrimer: bluetoothPrimer ?? SimulatedBluetoothPermission(status: .unknown),
             settings: AppSettings(defaults: isolation.isolatedDefaults),
             localNetworkGated: true,
-            bluetoothPromptTimeout: 10)
+            bluetoothPromptTimeout: bluetoothPromptTimeout)
         return OnboardingWindowController(model: model,
                                           openSettings: { _ in },
                                           onFinished: {})
@@ -120,5 +128,45 @@ import Testing
         wc.test_appDidBecomeActive()
 
         #expect(wc.test_windowLevel == .floating)
+    }
+
+    /// The freeze this window used to cause: a TCC dialog loses input focus to
+    /// any process that grabs it, and this window had three ways to grab it.
+    /// While a prompt is unanswered it gives up all three.
+    @Test func aPromptInFlightSilencesEveryWayThisWindowTakesTheFront() async {
+        let wc = makeController(audioDenied: false, bluetoothPrimer: NeverDecidingBluetooth())
+        let vc = wc.test_contentViewController
+        _ = vc.test_rootView
+        #expect(wc.test_windowLevel == .floating, "floating is the resting level")
+
+        await vc.test_tapAllow(.bluetooth)
+
+        #expect(vc.test_isPromptInFlight)
+        #expect(wc.test_windowLevel == .normal, "the level drops for the dialog")
+        #expect((wc.window as? OnboardingWindow)?.suppressesActivation == true,
+                "a click is still delivered, but must not force the app active")
+
+        wc.test_appDidBecomeActive()
+
+        #expect(wc.test_windowLevel == .normal,
+                "reactivating must not re-float over a dialog that is still up")
+    }
+
+    /// …and the window is not left demoted: the level comes back the moment the
+    /// prompt resolves (here, its undecided timeout).
+    @Test func theLevelComesBackWhenThePromptResolves() async {
+        let wc = makeController(audioDenied: false, bluetoothPrimer: NeverDecidingBluetooth(),
+                                bluetoothPromptTimeout: 0.05)
+        let vc = wc.test_contentViewController
+        _ = vc.test_rootView
+        await vc.test_tapAllow(.bluetooth)
+        #expect(wc.test_windowLevel == .normal)
+
+        for _ in 0..<600 where vc.test_isPromptInFlight {   // ≤3 s, then give up
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        #expect(wc.test_windowLevel == .floating)
+        #expect((wc.window as? OnboardingWindow)?.suppressesActivation == false)
     }
 }

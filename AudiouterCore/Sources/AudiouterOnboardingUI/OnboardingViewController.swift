@@ -76,6 +76,11 @@ public final class OnboardingViewController: NSViewController {
     /// four call sites is on the way there.
     public var onWillOpenSystemSettings: (() -> Void)?
 
+    /// Called on every edge of "a system permission dialog this flow raised is
+    /// still unanswered". The window controller goes quiet while it is true —
+    /// see ``isPromptInFlight``.
+    public var onPromptInFlightChanged: ((Bool) -> Void)?
+
     private var cards: [SetupStep: SetupCardView] = [:]
     /// The sixth row: the automatic final check, made visible (owner decision
     /// 2026-08-11 — telemetry showed five clicks swallowed while an invisible
@@ -134,7 +139,7 @@ public final class OnboardingViewController: NSViewController {
         super.init(nibName: nil, bundle: nil)
     }
 
-    deinit { remoteControlPoll?.invalidate(); ptpHelperPoll?.invalidate() }
+    deinit { remoteControlPoll?.invalidate(); ptpHelperPoll?.invalidate(); stuckPromptTimer?.invalidate() }
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
@@ -508,6 +513,9 @@ public final class OnboardingViewController: NSViewController {
         }
         refreshDone()
         refreshHeaderMessage()
+        // Last: a resolve edge pays back the deferred re-front, and the cards
+        // above have already been painted without the escape-hatch hint.
+        syncPromptInFlight()
     }
 
     // MARK: The final check
@@ -584,6 +592,7 @@ public final class OnboardingViewController: NSViewController {
     /// speakers or not), so the line must not invent a switched-off speaker as
     /// the reason; it names the actual state and leaves both doors open.
     private func hint(for step: SetupStep) -> String? {
+        if isStuck(step) { return Self.stuckPromptHint }
         guard localNetworkUnanswered(step) else { return nil }
         return "Nothing has answered yet. If the permission dialog is open, "
             + "choose Allow — or try again."
@@ -607,7 +616,8 @@ public final class OnboardingViewController: NSViewController {
     /// Local Network only, and only where that pane exists at all — macOS 14
     /// has no Local Network privacy gate, so there is nowhere to send anyone.
     private func offersSettingsLink(_ step: SetupStep) -> Bool {
-        localNetworkUnanswered(step) && model.isLocalNetworkGated
+        if isStuck(step) { return true }
+        return localNetworkUnanswered(step) && model.isLocalNetworkGated
     }
 
     /// Whether this card is waiting on a prompt or probe it fired — the spinner,
@@ -669,9 +679,57 @@ public final class OnboardingViewController: NSViewController {
         return window.occlusionState.contains(.visible)
     }
 
+    // MARK: The in-flight prompt
+
+    /// The step whose system dialog is up and unanswered, if any.
+    ///
+    /// Bluetooth's wait is the model's to report: its prompt answers on a
+    /// callback, so the Allow click returns long before the user has decided.
+    /// Everything else is covered by ``allowInFlight`` for its whole ask.
+    private var promptInFlightStep: SetupStep? {
+        if let allowInFlight { return allowInFlight }
+        return model.isPrimingBluetooth ? .bluetooth : nil
+    }
+
+    /// Whether a system permission dialog this flow raised is still unanswered.
+    ///
+    /// **Everything that pulls focus stays off while this is true.** Another
+    /// process fighting a TCC dialog for input focus is what leaves it frozen
+    /// and unclickable — and this app was doing it three ways at once (the
+    /// floating level, the re-front on every grant, and the window's
+    /// force-activate on mouse-down).
+    private var isPromptInFlight: Bool { promptInFlightStep != nil }
+
+    /// The last value pushed to the window controller, so the level yield and
+    /// its restore fire on the EDGE rather than on every repaint.
+    private var wasPromptInFlight = false
+
+    /// A return-to-front refused because a dialog was still up. At most one is
+    /// owed, and it fires when the flow next has no prompt in flight.
+    private var returnToFrontIsDeferred = false
+
+    /// Push the edge, and pay back a deferred re-front once the prompt is
+    /// really resolved (granted, denied, or timed out).
+    private func syncPromptInFlight() {
+        let inFlight = isPromptInFlight
+        guard inFlight != wasPromptInFlight else { return }
+        wasPromptInFlight = inFlight
+        onPromptInFlightChanged?(inFlight)
+        if inFlight {
+            startStuckPromptTimer()
+        } else {
+            cancelStuckPromptTimer()
+            if returnToFrontIsDeferred { returnToFront() }
+        }
+    }
+
     /// Pull the window back in front of whatever the user was just in (a TCC
     /// prompt, System Settings) and restore keyboard focus.
     private func returnToFront() {
+        // A dialog is still up: taking the front now is what leaves it dimmed
+        // and unclickable. Owed instead, and paid exactly once on resolve.
+        guard !isPromptInFlight else { returnToFrontIsDeferred = true; return }
+        returnToFrontIsDeferred = false
         // Counted before the headless bail-out: activation itself is invisible
         // to a headless test, but WHETHER to activate is what
         // `shouldReturnToFront(after:)` decides.
@@ -680,6 +738,59 @@ public final class OnboardingViewController: NSViewController {
         NSApp?.activate(ignoringOtherApps: true)
         view.window?.makeKeyAndOrderFront(nil)
     }
+
+    // MARK: The stuck-dialog escape hatch
+
+    /// How long an unanswered dialog is normal before the card offers a way
+    /// round it. Long enough that reading the prompt isn't rushed, short enough
+    /// that a frozen dialog doesn't end the setup.
+    static let stuckPromptDelay: TimeInterval = 20
+
+    /// The steps whose ask raises a system dialog that can freeze. Speaker Sync
+    /// and Remote Control are excluded because neither waits on one: both send
+    /// the user to System Settings themselves.
+    static let stuckPromptSteps: Set<SetupStep> = [.audio, .localNetwork, .bluetooth]
+
+    /// The step the timer has flagged. Only ever read through ``isStuck(_:)``,
+    /// which re-checks that the SAME prompt is still in flight — so the hint
+    /// disappears on resolve without depending on repaint ordering.
+    private var stuckPromptStep: SetupStep?
+    private var stuckPromptTimer: Timer?
+
+    /// Whether this card should offer the escape hatch. UI only — nothing here
+    /// re-asks or re-probes anything.
+    private func isStuck(_ step: SetupStep) -> Bool {
+        stuckPromptStep == step && promptInFlightStep == step
+    }
+
+    private func startStuckPromptTimer() {
+        // Wall-clock time means nothing to a headless run — a loaded test
+        // machine can hold an ask past the delay and grow a surprise button
+        // mid-assertion. Tests fire it themselves (`test_fireStuckPromptTimer`).
+        guard !HeadlessRuntime.isActive else { return }
+        guard let step = promptInFlightStep, Self.stuckPromptSteps.contains(step) else { return }
+        stuckPromptTimer?.invalidate()
+        stuckPromptTimer = Timer.scheduledTimer(withTimeInterval: Self.stuckPromptDelay,
+                                                repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated { self?.markPromptStuck() }
+        }
+    }
+
+    private func cancelStuckPromptTimer() {
+        stuckPromptTimer?.invalidate()
+        stuckPromptTimer = nil
+        stuckPromptStep = nil
+    }
+
+    private func markPromptStuck() {
+        guard let step = promptInFlightStep, Self.stuckPromptSteps.contains(step) else { return }
+        stuckPromptStep = step
+        refresh(animated: false)
+    }
+
+    /// The escape hatch's line. It names the symptom the user is looking at,
+    /// and the "Open Settings…" link beside it is the way through.
+    static let stuckPromptHint = "Dialog not responding?"
 
     // MARK: The gate
 
@@ -847,9 +958,15 @@ public final class OnboardingViewController: NSViewController {
         // Harmless when the ask short-circuits and no alert appears — the yield
         // is idempotent, and `appDidBecomeActive` restores the level the next
         // time this app comes forward.
+        // The app goes quiet BEFORE the OS prompt is triggered — by the time
+        // `allow` returns, the dialog is already up and fighting us for focus.
+        syncPromptInFlight()
         if step == .remoteControl { onWillOpenSystemSettings?() }
         let result = await flow.allow(step)
         allowInFlight = nil
+        // The resolve edge, ahead of `applyAllowResult`: a denied step's deep
+        // link yields the level again right after, and must win.
+        syncPromptInFlight()
         applyAllowResult(step, result)
         refresh()
     }
@@ -887,6 +1004,16 @@ public final class OnboardingViewController: NSViewController {
             // dialog, so take the front again — unless the surface that ask
             // raised may still be up (``shouldReturnToFront(after:)``).
             if shouldReturnToFront(after: step) { returnToFront() }
+        case .settingsPane, .loginItems:
+            openDestination(result.destination)
+        }
+    }
+
+    /// Open a destination the flow model named, yielding the window level first
+    /// so System Settings can actually come to the front.
+    private func openDestination(_ destination: SetupAllowDestination) {
+        switch destination {
+        case .none: return
         case .settingsPane(let pane):
             onWillOpenSystemSettings?()
             onOpenSettings(pane)
@@ -896,13 +1023,13 @@ public final class OnboardingViewController: NSViewController {
         }
     }
 
-    /// The demoted "Open Settings…" beside Local Network's retry. It opens the
-    /// pane directly — there is no prompt left to fire, and the flow model's
-    /// Allow deliberately re-browses instead of routing here.
+    /// The demoted "Open Settings…" — beside Local Network's retry, and beside
+    /// the stuck-dialog hint on any card whose prompt has stopped responding.
+    /// It opens the pane directly through the flow model's one deep-link table:
+    /// there is no prompt left to fire, and nothing here re-asks.
     private func settingsLinkTapped(_ step: SetupStep) {
-        guard step == .localNetwork else { return }
-        onWillOpenSystemSettings?()
-        onOpenSettings(.localNetwork)
+        guard step == .localNetwork || isStuck(step) else { return }
+        openDestination(SetupFlowModel.settingsDestination(for: step))
     }
 
     private func skipTapped(_ step: SetupStep) {
@@ -919,6 +1046,13 @@ public final class OnboardingViewController: NSViewController {
     /// that proved nothing, and a Remote Control alert that has only just
     /// opened — have no other headless signal.
     public private(set) var test_returnToFrontCount = 0
+
+    /// Whether the flow currently counts a system dialog as unanswered.
+    public var test_isPromptInFlight: Bool { isPromptInFlight }
+
+    /// Fire the stuck-dialog timer now — its 20 s is not something a test can
+    /// wait out, and the timer body is the only thing being skipped.
+    public func test_fireStuckPromptTimer() { markPromptStuck() }
 
     /// The expanded card's step (nil once every step is done or skipped).
     public var test_activeStep: SetupStep? { _ = view; return displayedActiveStep }

@@ -272,6 +272,33 @@ import AppKit
                 "the ACTIVE group's hook goes gold, like its icon well's ring")
     }
 
+    @Test func activeGroupDrivesTheNodeToneToo() throws {
+        // Gold means LIVE: an INACTIVE group's editor renders its member discs
+        // in the quiet ember idle tone (same truth as the hook/wire), and only
+        // the active group's editor goes gold end to end.
+        let (editor, controller, devices) = try makeEditor()
+        for id in editor.test_candidateDeviceIDs {
+            #expect(editor.test_isRailArmed(for: id) == false,
+                    "an inactive group's \(id) node renders idle (ember), never gold")
+        }
+
+        let group = try #require(controller.groups.first)
+        controller.activateGroup(id: group.id)
+        editor.show(groupID: group.id, devices: devices)
+        for id in editor.test_candidateDeviceIDs {
+            #expect(editor.test_isRailArmed(for: id) == true,
+                    "the ACTIVE group's \(id) node goes gold with the rest of the spine")
+        }
+    }
+
+    @Test func pinnedSoleMemberExplanationReachesVoiceOver() {
+        // The tooltip alone is not reliably announced; the "why is this
+        // disabled" line must travel as accessibilityHelp too.
+        let row = makeRow(.warmPane, checked: true)
+        row.setCheckboxEnabled(false, tooltip: "A group needs at least one device.")
+        #expect(row.test_checkboxAccessibilityHelp == "A group needs at least one device.")
+    }
+
     /// The one geometry invariant that can break silently: `BusRailOverlayView`
     /// draws the spine at the literal `railGutterCenterX` in ITS coordinate
     /// space, while each row places its node at that x from the ROW's leading

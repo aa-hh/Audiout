@@ -45,6 +45,16 @@ public final class MembershipRowView: NSView {
         case systemSheet
     }
 
+    /// Whether this row's rail node renders ARMED (gold — the group is the
+    /// active Main Out, audio flows through these members) or idle (`ember` —
+    /// pure configuration, nothing moving). Gold means LIVE everywhere in
+    /// Audiouter, so an editor showing an inactive group must not fill its
+    /// member discs gold. Host-set; `.systemSheet` rows have no node and ignore
+    /// it.
+    public var railArmed: Bool = true {
+        didSet { if railArmed != oldValue { updateBus() } }
+    }
+
     /// Fired whenever the user toggles the row's checkbox.
     /// `deviceID`/`isChecked` mirror the row's current state at call time.
     public var onToggle: ((_ deviceID: String, _ isChecked: Bool) -> Void)?
@@ -215,7 +225,7 @@ public final class MembershipRowView: NSView {
     /// in this group". No-op on `.systemSheet`, which mounts no node at all.
     private func updateBus() {
         guard surface == .warmPane else { return }
-        busView.apply(node: checked ? .member : .nonMember)
+        busView.apply(node: checked ? .member : .nonMember, armed: railArmed)
     }
 
     // MARK: Model
@@ -262,10 +272,23 @@ public final class MembershipRowView: NSView {
     public func setCheckboxEnabled(_ enabled: Bool, tooltip: String? = nil) {
         checkbox.isEnabled = enabled
         checkbox.toolTip = tooltip
+        // VoiceOver does not reliably announce `toolTip`; the "why is this
+        // disabled" explanation has to travel as accessibilityHelp too.
+        checkbox.setAccessibilityHelp(tooltip)
     }
 
     /// Whether the checkbox is currently interactive (for structural assertions).
     public var test_isCheckboxEnabled: Bool { checkbox.isEnabled }
+
+    /// The checkbox's VoiceOver help text (mirrors the tooltip — the pinned
+    /// sole member's "why is this disabled" explanation must be announced too).
+    public var test_checkboxAccessibilityHelp: String? { checkbox.accessibilityHelp() }
+
+    /// Whether this row's node renders in the armed (gold) tone; always the
+    /// host-set ``railArmed`` value, read back through the drawn node itself.
+    public var test_railArmed: Bool {
+        surface == .warmPane ? busView.test_armed : railArmed
+    }
 
     // MARK: Actions
 

@@ -59,6 +59,24 @@ lives in the Mixer screen. All group logic goes through the shared
   hosting window** (A11Y-GROUPS) — nothing else ever calls
   `makeFirstResponder`. It only fires on a genuine on-screen appearance, so
   it is invisible to headless coverage; don't remove it as dead code.
+  `ContentPaneHostViewController.setContent(_:)` re-seeds the key-view loop
+  after every pane swap (re-parenting invalidates it) — keep both halves.
+- **Gold means LIVE, so the editor's rail is armed/idle end to end.** The
+  active Main Out group's editor draws its spine — hook, wire, member discs,
+  hover ring — in gold; any other group's draws the whole spine in the quiet
+  `ember` idle tone (`MembershipRowView.railArmed` →
+  `MembershipBusView.apply(armed:)`, same truth as `railHookAnchor`'s `gold`).
+  The sidebar mirrors it: the active group's row carries the small gold
+  `speaker.wave.2.fill` "Playing now" marker (`IconLabelCellView`), the
+  sidebar's ONE sanctioned use of gold.
+- **Persistence failures are reported, never swallowed.** Every editor write
+  goes through `saveOrReport(_:)` / `performDelete(id:)`: on a throw the pane
+  re-renders from the model (no control may claim a state that never saved)
+  and a plain-words alert names the problem. Seam: `test_saveFailureReported`.
+- **The bottom add bar says what "+" will do.** With ≥2 speakers
+  multi-selected it retitles live to "New Group from N Speakers…"; the create
+  sheet then prefills its name from the selection ("Office + Sonos Move") and
+  auto-focuses the field with the text selected.
 - **Both sidebar sections are FLAT** — no expand/collapse, no nested rows;
   the Speakers section lists EVERY device (membership is previewed in the
   editor, not by expansion).

@@ -300,8 +300,9 @@ public final class MixerWindowController {
     private func presentCreateSheet(preselected: [String]) {
         let sheet = GroupCreationSheetController(groupController: groupController,
                                                 deviceIconController: deviceIconController)
-        sheet.configure(defaultName: "Group \(groupController.groups.count + 1)",
-                        devices: orderedDevices(),
+        let devices = orderedDevices()
+        sheet.configure(defaultName: suggestedGroupName(preselected: preselected, devices: devices),
+                        devices: devices,
                         preselected: Set(preselected))
         sheet.onComplete = { [weak self] result in
             guard let self else { return }
@@ -320,6 +321,21 @@ public final class MixerWindowController {
         // hooks instead.
         if let host = splitViewController.view.window, host.isVisible {
             splitViewController.presentAsSheet(sheet)
+        }
+    }
+
+    /// The name the create sheet prefills. A selection-seeded sheet names the
+    /// group after what's in it ("Office + Sonos Move") instead of the
+    /// meaningless "Group N" — the field is auto-focused with the text
+    /// selected either way, so keeping the suggestion is one glance and
+    /// replacing it is zero extra work.
+    private func suggestedGroupName(preselected: [String], devices: [Device]) -> String {
+        let names = preselected.compactMap { id in devices.first(where: { $0.id == id })?.name }
+        switch names.count {
+        case 0:  return "Group \(groupController.groups.count + 1)"
+        case 1:  return names[0]
+        case 2:  return "\(names[0]) + \(names[1])"
+        default: return "\(names[0]) + \(names.count - 1) more"
         }
     }
 
@@ -586,6 +602,12 @@ final class ContentPaneHostViewController: NSViewController {
             childView.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
         ])
         currentChild = child
+        // Re-seed Tab traversal after the swap (closes the KNOWN GAP the
+        // A11Y-GROUPS seed left): re-parenting the content pane invalidates
+        // the window's automatic key-view loop, and recalculation is reactive
+        // — without this nudge Tab could die right after a sidebar selection
+        // change. No-op headless (no window).
+        view.window?.recalculateKeyViewLoop()
     }
 
     /// The persistent footer caption's text (structural test hook).
@@ -605,7 +627,9 @@ public final class GroupsEmptyStateViewController: NSViewController {
     /// Fired when the call-to-action button is clicked.
     var onNewGroup: (() -> Void)?
 
-    private let messageLabel = NSTextField(labelWithString: "No groups yet.")
+    // No trailing period — one voice with the sidebar's own "No groups yet"
+    // placeholder row (the two used to disagree on punctuation).
+    private let messageLabel = NSTextField(labelWithString: "No groups yet")
     private let subtitleLabel = NSTextField(labelWithString:
         "Save a set of speakers as a group, then switch to it in two clicks from the menu bar.")
     private let newGroupButton = NSButton()

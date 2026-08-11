@@ -125,7 +125,10 @@ public final class DeviceDetailViewController: NSViewController {
         stateStack.spacing = 10
         for (caption, valueLabel) in [
             ("Status", statusValueLabel),
-            ("Available", availableValueLabel),
+            // "On the network", not "Available": next to "Status: Not
+            // connected" a bare "Available: Yes" read as a contradiction to a
+            // non-specialist ("it's available but not connected?").
+            ("On the network", availableValueLabel),
             ("Volume", volumeValueLabel),
             ("Kind", kindValueLabel),
         ] {

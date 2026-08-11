@@ -103,9 +103,21 @@ public final class GroupCreationSheetController: NSViewController {
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// Focus the name field with its prefilled text SELECTED the moment the
+    /// sheet appears — keeping the suggestion costs nothing and replacing it is
+    /// just typing, so the prefill never traps the user into a meaningless
+    /// name. Only fires on a genuine on-screen presentation (headless runs
+    /// never call this).
+    public override func viewDidAppear() {
+        super.viewDidAppear()
+        view.window?.makeFirstResponder(nameField)
+        nameField.currentEditor()?.selectAll(nil)
+    }
+
     public override func loadView() {
         nameField.translatesAutoresizingMaskIntoConstraints = false
         nameField.placeholderString = "Group name"
+        nameField.setAccessibilityLabel("Group name")
         nameField.target = self
         nameField.action = #selector(nameFieldReturnPressed(_:))
 
@@ -116,6 +128,7 @@ public final class GroupCreationSheetController: NSViewController {
         iconWellButton.isBordered = true
         iconWellButton.imagePosition = .imageOnly
         iconWellButton.toolTip = "Choose icon"
+        iconWellButton.setAccessibilityLabel("Choose group icon")
         iconWellButton.target = self
         iconWellButton.action = #selector(iconWellTapped(_:))
         updateIconWell()
@@ -353,6 +366,10 @@ public final class GroupCreationSheetController: NSViewController {
     public func test_setName(_ name: String) {
         nameField.stringValue = name
     }
+
+    /// The name field's current text (the caller-provided prefill until the
+    /// user edits it).
+    public var test_nameFieldText: String { nameField.stringValue }
 
     /// Simulate ticking/unticking a candidate's membership checkbox.
     public func test_setMembership(deviceID: String, isChecked: Bool) {

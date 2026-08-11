@@ -81,6 +81,12 @@ public final class SidebarViewController: NSViewController {
     /// Top-level nodes (the two section headers). Rebuilt on `reload`.
     private var roots: [Node] = []
 
+    /// The active Main Out group's id, captured on `reload` — drives the small
+    /// gold "playing" marker on that group's row. Gold is the LIVE color
+    /// (Warm Signal §3.3), and the active group IS live, so this is the one
+    /// place the sidebar may use it. Pure model state, never audio-driven.
+    private var activeGroupID: String?
+
     /// Whether THIS OS renders the sidebar's automatic Liquid Glass (macOS
     /// 26+) — the injected seam T7 needs (spec Q4-b: warm tint on 26+, opaque
     /// warm fallback below). Never read via a bare `#available` on the
@@ -131,12 +137,9 @@ public final class SidebarViewController: NSViewController {
     // nothing here ever explicitly nudged it either) and claim first
     // responder for the outline view, the top-leading control.
     //
-    // KNOWN GAP: `ContentPaneHostViewController.setContent(_:)`
-    // (MixerWindowController.swift) re-parents the content pane's view
-    // hierarchy on every sidebar selection and never re-seeds the key-view
-    // loop; if a live retest finds Tab breaks specifically AFTER switching
-    // panes, look there first — that swap may need its own
-    // `window.recalculateKeyViewLoop()` call.
+    // `ContentPaneHostViewController.setContent(_:)` re-seeds the key-view
+    // loop after every pane swap (it re-parents the content hierarchy, which
+    // invalidates the loop) — the swap-time half of this same fix.
     public override func viewDidAppear() {
         super.viewDidAppear()
         guard let window = view.window else { return }
@@ -259,6 +262,17 @@ public final class SidebarViewController: NSViewController {
         }
     }
 
+    /// Retitle the bottom-bar button to say what "+" will actually do — the
+    /// multi-select → new-group path used to be completely invisible (nothing
+    /// hinted that cmd-clicking speakers changes what the button creates).
+    private func updateAddButtonTitle() {
+        let count = selectedDeviceIDs.count
+        let title = count >= 2 ? "New Group from \(count) Speakers…" : "New Group…"
+        guard addButton.title != title else { return }
+        addButton.title = title
+        addButton.toolTip = title
+    }
+
     // MARK: Model
 
     /// Rebuild the tree from the current groups + devices and reload. Preserves
@@ -268,11 +282,13 @@ public final class SidebarViewController: NSViewController {
     /// row never carries member-device children, and the Devices section lists
     /// EVERY device rather than filtering out members of the active group —
     /// once the sidebar no longer previews membership via expansion, hiding a
-    /// device here would just make it unreachable. `activeGroupID` is kept as
-    /// a parameter for call-site compatibility but no longer affects this list.
+    /// device here would just make it unreachable. `activeGroupID` no longer
+    /// filters anything; it marks the active group's row with the gold
+    /// "playing" indicator so the user can tell which group is live without
+    /// clicking through each one.
     public func reload(groups: [Group], activeGroupID: String?, devices: [Device]) {
         let previous = currentSelection
-        _ = activeGroupID   // no longer used to filter the Devices section
+        self.activeGroupID = activeGroupID
 
         var newRoots: [Node] = []
 
@@ -304,6 +320,7 @@ public final class SidebarViewController: NSViewController {
 
         // Restore selection if the same target still exists.
         if let previous { select(previous, notify: false) }
+        updateAddButtonTitle()
     }
 
     // MARK: Selection
@@ -411,10 +428,24 @@ public final class SidebarViewController: NSViewController {
         suppressSelectionCallback = true
         outlineView.selectRowIndexes(indexes, byExtendingSelection: false)
         suppressSelectionCallback = false
+        updateAddButtonTitle()
     }
 
     /// The device ids currently multi-selected (for asserts).
     public var test_selectedDeviceIDs: [String] { selectedDeviceIDs }
+
+    /// The bottom-bar add button's current title — "New Group…" plain, "New
+    /// Group from N Speakers…" while ≥2 speakers are multi-selected.
+    public var test_addButtonTitle: String { addButton.title }
+
+    /// Whether the group row for `id` currently renders the gold "playing"
+    /// marker — built through the same delegate path a real reload uses.
+    public func test_groupRowShowsActiveMarker(id: String) -> Bool {
+        guard let node = findNode(matching: .group(id: id)),
+              let cell = self.outlineView(outlineView, viewFor: nil, item: node)
+                  as? IconLabelCellView else { return false }
+        return !cell.activeMarkerView.isHidden
+    }
 
     /// Simulate clicking the "+" button (new empty group, or new-from-selection
     /// when devices are selected).
@@ -462,6 +493,33 @@ public final class SidebarViewController: NSViewController {
     public var test_reduceTransparencyOverride: Bool? {
         get { warmSurfaceView.test_reduceTransparencyOverride }
         set { warmSurfaceView.test_reduceTransparencyOverride = newValue }
+    }
+}
+
+/// A sidebar row cell with a trailing "playing" marker slot: a small gold
+/// `speaker.wave.2.fill` glyph shown ONLY on the active Main Out group's row.
+/// Gold = LIVE (Warm Signal §3.3) and the active group is genuinely live, so
+/// this is the sidebar's one sanctioned use of it. `Tokens.Color.gold` is an
+/// instrument — it keeps its authored value in every theme. Internal (not
+/// file-private) so the controller's test hook can read the marker.
+final class IconLabelCellView: NSTableCellView {
+    /// The trailing marker, hidden by default; `setActiveMarkerVisible` shows it.
+    let activeMarkerView: NSImageView = {
+        let v = NSImageView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        v.image = NSImage(systemSymbolName: "speaker.wave.2.fill",
+                          accessibilityDescription: "Playing now")?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold))
+        v.image?.isTemplate = true
+        v.contentTintColor = Tokens.Color.gold
+        v.toolTip = "Playing now"
+        v.isHidden = true
+        v.setContentHuggingPriority(.required, for: .horizontal)
+        return v
+    }()
+
+    func setActiveMarkerVisible(_ visible: Bool) {
+        activeMarkerView.isHidden = !visible
     }
 }
 
@@ -611,7 +669,8 @@ extension SidebarViewController: NSOutlineViewDelegate {
         case .group(let group):
             let symbol = DeviceIcon.resolve(group.iconSymbolName, default: Group.defaultIconSymbolName)
             return makeIconLabel(symbol: symbol,
-                                 text: group.name, identifier: "group")
+                                 text: group.name, identifier: "group",
+                                 showsActiveMarker: group.id == activeGroupID)
         case .device(let device):
             let symbol = deviceIconController?.symbolName(for: device) ?? device.kind.symbolName
             return makeIconLabel(symbol: symbol,
@@ -621,6 +680,9 @@ extension SidebarViewController: NSOutlineViewDelegate {
     }
 
     public func outlineViewSelectionDidChange(_ notification: Notification) {
+        // The add button's title tracks the REAL selection, callback
+        // suppression or not — a programmatic restore must retitle it too.
+        updateAddButtonTitle()
         guard !suppressSelectionCallback else { return }
         onSelect?(currentSelection)
     }
@@ -681,9 +743,10 @@ extension SidebarViewController: NSOutlineViewDelegate {
         return cell
     }
 
-    private func makeIconLabel(symbol: String, text: String, identifier: String, dimmed: Bool = false) -> NSTableCellView {
+    private func makeIconLabel(symbol: String, text: String, identifier: String,
+                               dimmed: Bool = false, showsActiveMarker: Bool = false) -> NSTableCellView {
         let id = NSUserInterfaceItemIdentifier(identifier)
-        let cell = outlineView.makeView(withIdentifier: id, owner: self) as? NSTableCellView
+        let cell = outlineView.makeView(withIdentifier: id, owner: self) as? IconLabelCellView
             ?? Self.newCell(identifier: id)
         cell.imageView?.isHidden = false
         let image = NSImage(systemSymbolName: symbol, accessibilityDescription: text)
@@ -696,6 +759,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
         cell.imageView?.contentTintColor = dimmed ? .disabledControlTextColor : Tokens.Color.label
         cell.textField?.stringValue = text
         cell.textField?.textColor = dimmed ? .disabledControlTextColor : Tokens.Color.label
+        cell.setActiveMarkerVisible(showsActiveMarker)
         return cell
     }
 
@@ -704,8 +768,8 @@ extension SidebarViewController: NSOutlineViewDelegate {
     /// detail pane's large header icon).
     private static let iconSize: CGFloat = 22
 
-    private static func newCell(identifier: NSUserInterfaceItemIdentifier) -> NSTableCellView {
-        let cell = NSTableCellView()
+    private static func newCell(identifier: NSUserInterfaceItemIdentifier) -> IconLabelCellView {
+        let cell = IconLabelCellView()
         cell.identifier = identifier
 
         let imageView = NSImageView()
@@ -719,6 +783,8 @@ extension SidebarViewController: NSOutlineViewDelegate {
         cell.addSubview(textField)
         cell.textField = textField
 
+        cell.addSubview(cell.activeMarkerView)
+
         NSLayoutConstraint.activate([
             imageView.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
             imageView.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
@@ -726,8 +792,12 @@ extension SidebarViewController: NSOutlineViewDelegate {
             imageView.heightAnchor.constraint(equalToConstant: iconSize),
 
             textField.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 8),
-            textField.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
+            textField.trailingAnchor.constraint(
+                lessThanOrEqualTo: cell.activeMarkerView.leadingAnchor, constant: -6),
             textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+
+            cell.activeMarkerView.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -2),
+            cell.activeMarkerView.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
         ])
         return cell
     }

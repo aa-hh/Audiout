@@ -75,6 +75,14 @@ public final class GroupEditorViewController: NSViewController {
     /// The group currently being edited, nil before `show`.
     public private(set) var editingGroupID: String?
 
+    /// Whether the edited group is the active Main Out group. Drives the rail's
+    /// armed/idle tone end to end: gold means LIVE everywhere in Audiouter, so
+    /// an inactive group's editor renders its whole spine — hook, wire, AND
+    /// member discs — in the quiet `ember` idle tone (the hook and wire already
+    /// followed this truth via `railHookAnchor`; the rows follow it through
+    /// ``MembershipRowView/railArmed``).
+    private var isActiveGroup = false
+
     private let iconWell = DeviceIconWellView()
     private let nameField = NSTextField(string: "")
     private let membershipStack = RailRepaintingStackView()
@@ -437,6 +445,7 @@ public final class GroupEditorViewController: NSViewController {
         // ring so the state isn't color-only (flagged for the C2 sweep to
         // harmonize wording with the popover's LIVE vocabulary).
         let isActive = groupController.activeGroupID == groupID
+        isActiveGroup = isActive
         iconWell.isActiveGroup = isActive
         iconWell.setAccessibilityValue(isActive ? "Active group" : "")
         // The origin hook's tone follows the same active-group truth the well's
@@ -476,6 +485,7 @@ public final class GroupEditorViewController: NSViewController {
                 checked: memberSet.contains(device.id),
                 iconSymbolName: deviceIconController?.symbolName(for: device),
                 surface: .warmPane)
+            row.railArmed = isActiveGroup
             row.onToggle = { [weak self] deviceID, isChecked in
                 self?.membershipToggled(deviceID: deviceID, isChecked: isChecked)
             }
@@ -542,10 +552,40 @@ public final class GroupEditorViewController: NSViewController {
         guard !trimmed.isEmpty else { return restoreNameField() }
         guard trimmed != group.name else { return restoreNameField() }
         group.name = trimmed
-        _ = try? groupController.saveGroup(group)
+        guard saveOrReport(group) else { return }
         nameField.stringValue = trimmed
         updateNameFieldWidth()
         onDidEditGroup?()
+    }
+
+    /// Persist `group`, REPORTING failure instead of swallowing it (the same
+    /// "UI never lies" contract the empty-name rename fix established): on a
+    /// throw the pane re-renders from the model — so no checkbox, name, or icon
+    /// keeps claiming a state that never saved — and a plain-words alert names
+    /// the problem. Returns whether the save took.
+    @discardableResult
+    private func saveOrReport(_ group: Group) -> Bool {
+        do {
+            try groupController.saveGroup(group)
+            return true
+        } catch {
+            test_saveFailureReported = true
+            if let editingGroupID { show(groupID: editingGroupID, devices: allDevices) }
+            presentPersistFailureAlert(message: "Couldn\u{2019}t save the change.")
+            return false
+        }
+    }
+
+    /// The failure alert both `saveOrReport` and the delete path present — a
+    /// sheet when a window hosts the pane, skipped headless (the `test_*`
+    /// seams observe the failure instead).
+    private func presentPersistFailureAlert(message: String) {
+        guard let window = view.window else { return }
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.informativeText = "The group\u{2019}s saved settings couldn\u{2019}t be updated. Try again."
+        alert.alertStyle = .warning
+        alert.beginSheetModal(for: window)
     }
 
     /// Put the field back to the group's persisted name and re-measure it —
@@ -626,7 +666,7 @@ public final class GroupEditorViewController: NSViewController {
             group.memberIDs.removeAll { $0 == deviceID }
             group.memberVolumes[deviceID] = nil
         }
-        _ = try? groupController.saveGroup(group)
+        guard saveOrReport(group) else { return }   // failure re-renders from the model
         // Rebuild: an unchecked unavailable device drops out of the list.
         rebuildCandidates(memberSet: Set(group.memberIDs))
         onDidEditGroup?()
@@ -663,7 +703,7 @@ public final class GroupEditorViewController: NSViewController {
               var group = groupController.groups.first(where: { $0.id == editingGroupID }) else { return }
         guard group.iconSymbolName != name else { return }
         group.iconSymbolName = name
-        _ = try? groupController.saveGroup(group)
+        guard saveOrReport(group) else { return }   // failure re-renders from the model
         refreshIconWell(group: group)
         onDidEditGroup?()
     }
@@ -679,11 +719,7 @@ public final class GroupEditorViewController: NSViewController {
         alert.addButton(withTitle: "Delete")
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .warning
-        let performDelete = {
-            try? self.groupController.deleteGroup(id: editingGroupID)
-            self.editingGroupID = nil
-            self.onDidDeleteGroup?()
-        }
+        let performDelete = { self.performDelete(id: editingGroupID) }
         if let window = view.window {
             alert.beginSheetModal(for: window) { response in
                 if response == .alertFirstButtonReturn { performDelete() }
@@ -806,18 +842,43 @@ public final class GroupEditorViewController: NSViewController {
         return deleteButton.convert(deleteButton.bounds, to: view)
     }
 
+    /// Delete `id`, reporting failure instead of swallowing it — a failed
+    /// delete keeps the editor on the still-existing group rather than popping
+    /// to a sidebar that still lists it.
+    private func performDelete(id: String) {
+        do {
+            try groupController.deleteGroup(id: id)
+        } catch {
+            test_saveFailureReported = true
+            presentPersistFailureAlert(message: "Couldn\u{2019}t delete the group.")
+            return
+        }
+        editingGroupID = nil
+        onDidDeleteGroup?()
+    }
+
     /// Simulate confirming the delete (bypasses the confirmation sheet).
     public func test_confirmDelete() {
         guard let editingGroupID else { return }
-        try? groupController.deleteGroup(id: editingGroupID)
-        self.editingGroupID = nil
-        onDidDeleteGroup?()
+        performDelete(id: editingGroupID)
     }
+
+    /// True once a persistence failure (save or delete) has been reported to
+    /// the user instead of swallowed. Headless seam for the failure paths,
+    /// which present no sheet without a window.
+    public private(set) var test_saveFailureReported = false
 
     /// The rail geometry the overlay would draw from its CURRENT live frames.
     public func test_railPlan() -> RailPlan? {
         view.layoutSubtreeIfNeeded()
         return railOverlay.test_resolvePlan()
+    }
+
+    /// Whether a row's rail node renders armed (gold) vs idle (ember) — must
+    /// follow the SAME active-group truth as the icon well's ring and the
+    /// rail hook, or the pane claims liveness it doesn't have.
+    public func test_isRailArmed(for deviceID: String) -> Bool? {
+        rowsByID[deviceID]?.test_railArmed
     }
 
     /// Each candidate row's drawn node, in candidate order.

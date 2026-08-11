@@ -17,6 +17,18 @@ public enum DemoMode: Equatable, Sendable {
     case settled
 }
 
+/// Where a TWO-STAGE mock is in its pass. Only Speaker Sync has one: its
+/// approval starts with a system notification and ends in a Settings toggle, so
+/// its miniature has two surfaces rather than one. Public only because the Setup
+/// window's `test_demoStage` hook exposes it.
+public enum DemoStage: Equatable, Sendable {
+    /// The "Background Items Added" notification macOS posts when the login item
+    /// registers — the FIRST thing the user has to act on.
+    case banner
+    /// The Login Items pane that notification opens, with the switch to flip.
+    case settingsPane
+}
+
 /// The Setup window's right pane: a native-drawn miniature of the exact surface
 /// the active step's Allow button is about to put in front of the user, so the
 /// dialog or Settings pane is already familiar when it appears.
@@ -221,7 +233,13 @@ final class DemoPaneView: NSView {
         guard let step, mode != .settled else { return DemoSettledMockView() }
         switch mode {
         case .prompt:   return DemoPromptMockView(step: step)
-        case .settings: return DemoSettingsMockView(step: step)
+        // Speaker Sync's grant takes TWO acts, not one: registering the login
+        // item posts a system notification, and only clicking that lands the
+        // user on the pane with the switch. Every other step's Settings path
+        // starts at the pane.
+        case .settings: return step == .speakerSync
+            ? DemoLoginItemsMockView(step: step)
+            : DemoSettingsMockView(step: step)
         case .settled:  return DemoSettledMockView()
         }
     }
@@ -277,6 +295,10 @@ final class DemoPaneView: NSView {
 
     var test_mode: DemoMode { mode }
     var test_step: SetupStep? { step }
+    /// Which surface a two-stage mock RESTS on; `nil` for the mocks that only
+    /// ever have one. What it pins is the settled frame — a two-stage pass must
+    /// rest on the FIRST thing the user will meet, not on the pane it ends at.
+    var test_stage: DemoStage? { (mock as? DemoLoginItemsMockView)?.test_stage }
     var test_isAnimating: Bool { (mock as? DemoMockView)?.isTimelineRunning ?? false }
     var test_isLooping: Bool { (mock as? DemoMockView)?.isLooping ?? false }
     var test_showsReplay: Bool { !replayButton.isHidden }
@@ -380,6 +402,18 @@ class DemoMockView: NSView {
         // animation be removed on completion lands exactly there.
         animation.fillMode = .backwards
         return animation
+    }
+
+    /// Hold a score's last value out to the end of the pass.
+    ///
+    /// A score that finishes EARLY is what a multi-stage timeline writes — one
+    /// stage's animations are laid out over its own slice and have nothing to
+    /// say about the rest. Core Animation would otherwise be handed key times
+    /// that stop short of 1.0, so this repeats the final value at the end and
+    /// the stage simply rests.
+    func held(_ score: [(time: TimeInterval, value: Any)]) -> [(time: TimeInterval, value: Any)] {
+        guard let last = score.last, last.time < timelineDuration else { return score }
+        return score + [(timelineDuration, last.value)]
     }
 }
 
@@ -823,7 +857,10 @@ final class DemoPromptMockView: DemoMockView {
 /// anything that would land under 9 pt of text is REPLACED rather than shrunk —
 /// greeked bars and flat tinted tiles, because text between 6 and 8.5 pt
 /// antialiases into mush that reads as a rendering bug.
-final class DemoSettingsMockView: DemoMockView {
+/// Not `final`: ``DemoLoginItemsMockView`` extends this pane into the two-stage
+/// Speaker Sync choreography, and does it by inheriting the whole drawn pane
+/// rather than by copying its layout.
+class DemoSettingsMockView: DemoMockView {
 
     static let size = NSSize(width: 300, height: 190)
     /// The reference puts the sidebar at 80 pt (27 % of 300, deliberately less
@@ -834,10 +871,16 @@ final class DemoSettingsMockView: DemoMockView {
     private static let sidebarWidth: CGFloat = 76
 
     private let step: SetupStep
-    private var toggle: DemoSwitchView!
+    /// `fileprivate`, not `private`: the two-stage subclass drives the same
+    /// switch, cursor and window from ITS score, so a second copy of any of them
+    /// would be a second thing to keep in step.
+    fileprivate var toggle: DemoSwitchView!
+    /// The drawn Settings window — the whole of stage 2, and therefore the thing
+    /// the two-stage pass crossfades in and back out.
+    fileprivate var shell: DemoWindowSurfaceView!
     /// Slightly smaller than the prompt mock's, in step with this mock's own
     /// tighter scale.
-    private let cursor = DemoCursorView(pointerHeight: 22)
+    fileprivate let cursor = DemoCursorView(pointerHeight: 22)
 
     init(step: SetupStep) {
         self.step = step
@@ -852,6 +895,7 @@ final class DemoSettingsMockView: DemoMockView {
 
     private func build() {
         let shell = DemoWindowSurfaceView(fill: DemoSystemColor.contentPane)
+        self.shell = shell
         let sidebar = DemoSidebarView()
         let divider = NSBox()
         divider.boxType = .separator
@@ -993,7 +1037,7 @@ final class DemoSettingsMockView: DemoMockView {
 
     override func addTimelineAnimations() {
         let end = timelineDuration
-        let delta = cursorTravel()
+        let delta = switchTravel()
         let moved = NSValue(caTransform3D: CATransform3DMakeTranslation(delta.x, delta.y, 0))
         let still = NSValue(caTransform3D: CATransform3DIdentity)
         cursor.layer?.add(keyframes("transform", [
@@ -1008,7 +1052,9 @@ final class DemoSettingsMockView: DemoMockView {
         toggle.addTimeline(on: self)
     }
 
-    private func cursorTravel() -> CGPoint {
+    /// How far the cursor's TIP has to travel to the switch, in this view's own
+    /// coordinates.
+    fileprivate func switchTravel() -> CGPoint {
         let from = cursor.convert(cursor.tipPoint, to: self)
         let to = toggle.convert(NSPoint(x: toggle.bounds.midX, y: toggle.bounds.midY), to: self)
         return CGPoint(x: to.x - from.x, y: to.y - from.y)
@@ -1029,6 +1075,251 @@ final class DemoSettingsMockView: DemoMockView {
         case .remoteControl: return "Accessibility"
         case .speakerSync:   return "Login Items"
         }
+    }
+}
+
+// MARK: - Login Items mock (two stages)
+
+/// Speaker Sync's miniature: the ONLY two-stage mock, because its approval is
+/// the only one that takes two acts.
+///
+/// Registering the login item raises no permission dialog at all — macOS posts a
+/// **notification** ("Background Items Added"), and clicking THAT is what opens
+/// the Login Items pane where the switch lives. The pane on its own would leave
+/// out the harder half: a banner that appears somewhere the user isn't looking
+/// and vanishes by itself is the step they have to catch first.
+///
+/// So one pass, two surfaces, two clicks:
+///
+/// 1. the notification banner, with the cursor gliding to it and pressing it;
+/// 2. a crossfade into the inherited Settings pane — the same drawn Login Items
+///    window, the same switch — with the cursor flipping Audiouter on.
+///
+/// It inherits rather than composes: the pane, its switch and its cursor are all
+/// the parent's, so stage 2 IS the one-stage mock, replayed later along the pass
+/// (`stage2Start`) with `DemoBeat`'s rhythm untouched. The pass still ends where
+/// it started — back on the banner, the first thing the user will really meet.
+final class DemoLoginItemsMockView: DemoSettingsMockView {
+
+    /// Where stage 2 begins: the moment the crossfade has finished, so the
+    /// inherited score runs against a pane that is fully there.
+    private static let stage2Start: TimeInterval = 2.10
+
+    /// Stage 1's beats, in seconds along the pass. Stage 2's are `DemoBeat`'s,
+    /// shifted by ``stage2Start``.
+    private enum Beat {
+        /// The cursor's tip reaches the banner.
+        static let reached: TimeInterval = 1.50
+        static let pressed: TimeInterval = 1.62
+        /// Banner out, pane in.
+        static let handoffStart: TimeInterval = 1.80
+        static let handoffEnd = DemoLoginItemsMockView.stage2Start
+        /// Pane out, banner back — the pass returning to its settled frame.
+        static let returnStart: TimeInterval = handoffEnd + DemoBeat.loop
+        static let returnEnd: TimeInterval = returnStart + 0.30
+        static let end: TimeInterval = returnEnd + 0.30
+    }
+
+    private let banner = DemoNotificationBannerView()
+
+    override init(step: SetupStep) {
+        super.init(step: step)
+        buildBanner()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var timelineDuration: TimeInterval { Beat.end }
+
+    private func buildBanner() {
+        // BELOW the cursor, which the parent added last: the pointer presses the
+        // banner, so it has to be drawn over it.
+        addSubview(banner, positioned: .below, relativeTo: cursor)
+        NSLayoutConstraint.activate([
+            banner.centerXAnchor.constraint(equalTo: centerXAnchor),
+            // High in the frame rather than centred: it leaves the parent's
+            // parked cursor, low in the pane, well clear of it — and a
+            // notification does arrive above whatever you were looking at.
+            banner.topAnchor.constraint(equalTo: topAnchor, constant: 22),
+        ])
+        applySettledState()
+    }
+
+    /// Settled: the BANNER, alone — the pane behind it hasn't been opened yet.
+    /// The parent's rest state (switch off, cursor parked) still holds under it,
+    /// so the pass returns to one frame, not two.
+    override func applySettledState() {
+        super.applySettledState()
+        // Called once from the parent's own `build()`, before this subclass has
+        // added the banner — harmless, and it means every later call has both.
+        banner.alphaValue = 1
+        banner.setPressed(false)
+        shell?.alphaValue = 0
+    }
+
+    override func addTimelineAnimations() {
+        let toBanner = translation(bannerTravel())
+        let toSwitch = translation(switchTravel())
+        let still = NSValue(caTransform3D: CATransform3DIdentity)
+        let stage2 = Self.stage2Start
+
+        // ONE cursor, two targets. It goes home while it is invisible, between
+        // the press and stage 2's rest — a jump nobody sees, rather than a
+        // second pointer or a slide back across a pane that isn't there yet.
+        cursor.layer?.add(keyframes("transform", [
+            (0, still), (DemoBeat.idle, still),
+            (Beat.reached, toBanner), (Beat.handoffStart, toBanner),
+            (Beat.handoffEnd, still), (stage2 + DemoBeat.idle, still),
+            (stage2 + DemoBeat.travelEnd, toSwitch), (stage2 + DemoBeat.resetEnd, toSwitch),
+            (Beat.returnStart, still), (Beat.end, still),
+        ], timing: .easeOut), forKey: "cursorGlide")
+        cursor.layer?.add(keyframes("opacity", [
+            (0, 1), (Beat.handoffStart, 1), (Beat.handoffStart + 0.15, 0),
+            (Beat.handoffEnd + 0.35, 0), (Beat.handoffEnd + 0.50, 1),
+            (stage2 + DemoBeat.holdEnd - 0.3, 1), (stage2 + DemoBeat.holdEnd, 0),
+            (Beat.returnEnd, 0), (Beat.end, 1),
+        ]), forKey: "cursorFade")
+
+        // The press: a wash over the banner, not a dimmed opacity — opacity is
+        // the crossfade's channel, and two animations on one property fight.
+        banner.addPressAnimation(on: self, pressedAt: Beat.pressed)
+
+        // The handoff, and its mirror at the end of the pass.
+        banner.layer?.add(keyframes("opacity", [
+            (0, 1), (Beat.handoffStart, 1), (Beat.handoffEnd, 0),
+            (Beat.returnStart, 0), (Beat.returnEnd, 1), (Beat.end, 1),
+        ]), forKey: "bannerFade")
+        shell.layer?.add(keyframes("opacity", [
+            (0, 0), (Beat.handoffStart, 0), (Beat.handoffEnd, 1),
+            (Beat.returnStart, 1), (Beat.returnEnd, 0), (Beat.end, 0),
+        ]), forKey: "paneFade")
+
+        toggle.addTimeline(on: self, offset: stage2)
+    }
+
+    private func translation(_ delta: CGPoint) -> NSValue {
+        NSValue(caTransform3D: CATransform3DMakeTranslation(delta.x, delta.y, 0))
+    }
+
+    /// How far the cursor's TIP has to travel to the banner's middle — the whole
+    /// banner is the click target, exactly as it is on a real notification.
+    private func bannerTravel() -> CGPoint {
+        let from = cursor.convert(cursor.tipPoint, to: self)
+        let to = banner.convert(NSPoint(x: banner.bounds.midX, y: banner.bounds.midY), to: self)
+        return CGPoint(x: to.x - from.x, y: to.y - from.y)
+    }
+
+    // MARK: Test-support hooks
+
+    /// Which surface this mock RESTS on — read from the model state the pass
+    /// returns to, not from a stage counter, so it can't claim a stage the pane
+    /// isn't actually left painting. (A running pass is a presentation-layer
+    /// affair; the model state stays settled throughout, which is exactly what
+    /// makes "a pass ends where it started" checkable at all.)
+    var test_stage: DemoStage { (shell?.alphaValue ?? 0) > 0.5 ? .settingsPane : .banner }
+}
+
+/// The macOS notification banner macOS posts when a login item registers.
+///
+/// Anatomy, kept to what a banner is recognised by: a rounded card with the
+/// system's own soft shadow, the app's real icon on the left, a bold title, and
+/// the message under it. No source-app header, no timestamp, no hover actions —
+/// they add no recognisability at this size and every one of them would be
+/// chrome we invented rather than chrome macOS draws.
+///
+/// The words are the real ones: macOS titles this "Background Items Added" and
+/// says the app "added items that can run in the background. You can manage this
+/// in Login Items Settings." That last sentence is why the user clicks it, so it
+/// stays in full even though it costs a third line.
+final class DemoNotificationBannerView: NSView {
+
+    static let width: CGFloat = 250
+    private static let inset: CGFloat = 11
+    private static let iconSide: CGFloat = 28
+    private static let radius: CGFloat = 14
+
+    /// The pressed state: a wash over the whole card. A separate layer from the
+    /// card's own opacity, which the two-stage pass owns for its crossfade.
+    private let pressWash = DemoPillView(radius: radius,
+                                         fill: NSColor.labelColor.withAlphaComponent(0.10))
+
+    init() {
+        super.init(frame: .zero)
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+        build()
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    private func build() {
+        let card = DemoWindowSurfaceView(radius: Self.radius)
+
+        let icon = NSImageView()
+        icon.image = NSApp?.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.translatesAutoresizingMaskIntoConstraints = false
+
+        let title = NSTextField(labelWithString: "Background Items Added")
+        title.font = .boldSystemFont(ofSize: 11)
+        title.textColor = .labelColor
+        title.lineBreakMode = .byTruncatingTail
+        title.translatesAutoresizingMaskIntoConstraints = false
+
+        // 9.5 pt clears the 9 pt floor — this is a sentence the user reads, so it
+        // is text, not a greeked bar.
+        let message = NSTextField(labelWithString:
+            "“Audiouter” added items that can run in the background. "
+                + "You can manage this in Login Items Settings.")
+        message.font = .systemFont(ofSize: 9.5)
+        message.textColor = .secondaryLabelColor
+        message.maximumNumberOfLines = 0
+        message.lineBreakMode = .byWordWrapping
+        message.preferredMaxLayoutWidth =
+            Self.width - Self.inset * 2 - Self.iconSide - 9
+        message.translatesAutoresizingMaskIntoConstraints = false
+
+        for view in [card, icon, title, message, pressWash] { addSubview(view) }
+
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: Self.width),
+
+            card.leadingAnchor.constraint(equalTo: leadingAnchor),
+            card.trailingAnchor.constraint(equalTo: trailingAnchor),
+            card.topAnchor.constraint(equalTo: topAnchor),
+            card.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            pressWash.leadingAnchor.constraint(equalTo: leadingAnchor),
+            pressWash.trailingAnchor.constraint(equalTo: trailingAnchor),
+            pressWash.topAnchor.constraint(equalTo: topAnchor),
+            pressWash.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: Self.inset),
+            icon.topAnchor.constraint(equalTo: topAnchor, constant: Self.inset),
+            icon.widthAnchor.constraint(equalToConstant: Self.iconSide),
+            icon.heightAnchor.constraint(equalToConstant: Self.iconSide),
+            icon.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -Self.inset),
+
+            title.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 9),
+            title.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -Self.inset),
+            title.topAnchor.constraint(equalTo: topAnchor, constant: Self.inset),
+
+            message.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            message.trailingAnchor.constraint(equalTo: title.trailingAnchor),
+            message.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 2),
+            message.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.inset),
+        ])
+        setPressed(false)
+    }
+
+    /// The settled (unpressed) state, applied without animation.
+    func setPressed(_ pressed: Bool) { pressWash.alphaValue = pressed ? 1 : 0 }
+
+    /// The press dip, as a slice of the host's one pass.
+    func addPressAnimation(on host: DemoMockView, pressedAt time: TimeInterval) {
+        pressWash.layer?.add(host.keyframes("opacity", host.held([
+            (0, 0), (time - 0.10, 0), (time, 1), (time + 0.16, 0),
+        ])), forKey: "press")
     }
 }
 
@@ -1335,22 +1626,28 @@ final class DemoSwitchView: NSView {
     /// leading → trailing while the track CROSS-FADES to blue, never wipes), the
     /// hold, and back off — a pass has to end where it started, both so the loop is
     /// seamless and so the resting frame is the state the user will really find.
-    func addTimeline(on host: DemoMockView) {
-        let end = host.timelineDuration
+    ///
+    /// - Parameter offset: where along the host's pass this stage begins. Zero
+    ///   for a single-stage mock; the two-stage Speaker Sync pass hands over its
+    ///   handoff beat, so the switch keeps the exact same rhythm as everywhere
+    ///   else, just later.
+    func addTimeline(on host: DemoMockView, offset: TimeInterval = 0) {
         let off = Self.offTrackColor.cgColor, on = DemoSystemColor.accent.cgColor
-        layer?.add(host.keyframes("backgroundColor", [
-            (0, off), (DemoBeat.pressEnd, off), (DemoBeat.changeEnd, on),
-            (DemoBeat.holdEnd, on), (DemoBeat.resetEnd, off), (end, off),
-        ]), forKey: "tint")
+        layer?.add(host.keyframes("backgroundColor", host.held([
+            (offset, off), (offset + DemoBeat.pressEnd, off),
+            (offset + DemoBeat.changeEnd, on), (offset + DemoBeat.holdEnd, on),
+            (offset + DemoBeat.resetEnd, off), (offset + DemoBeat.loop, off),
+        ])), forKey: "tint")
 
         let offCentre = NSValue(point: CGPoint(x: knobFrame(on: false).midX,
                                               y: knobFrame(on: false).midY))
         let onCentre = NSValue(point: CGPoint(x: knobFrame(on: true).midX,
                                              y: knobFrame(on: true).midY))
-        knobLayer.add(host.keyframes("position", [
-            (0, offCentre), (DemoBeat.pressEnd, offCentre), (DemoBeat.changeEnd, onCentre),
-            (DemoBeat.holdEnd, onCentre), (DemoBeat.resetEnd, offCentre), (end, offCentre),
-        ]), forKey: Self.knobAnimationKey)
+        knobLayer.add(host.keyframes("position", host.held([
+            (offset, offCentre), (offset + DemoBeat.pressEnd, offCentre),
+            (offset + DemoBeat.changeEnd, onCentre), (offset + DemoBeat.holdEnd, onCentre),
+            (offset + DemoBeat.resetEnd, offCentre), (offset + DemoBeat.loop, offCentre),
+        ])), forKey: Self.knobAnimationKey)
     }
 
     /// The off track.

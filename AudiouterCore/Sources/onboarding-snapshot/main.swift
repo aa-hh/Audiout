@@ -86,6 +86,9 @@ struct SnapshotWorld {
     /// Which cards' Allow to fire before rendering — how the flow is walked to
     /// the step this fixture is about.
     var allow: [SetupStep] = []
+    /// Cards to Skip, after the allows. The only way past an optional step the
+    /// fixture's world can't satisfy.
+    var skip: [SetupStep] = []
     var reason: OnboardingReason = .firstRun
 }
 
@@ -163,6 +166,7 @@ func snapshot(appearanceName: NSAppearance.Name,
     // fixture that means "these are already granted" has to wait for it.
     await controller.test_refreshStatuses()
     await controller.test_allow(world.allow)
+    world.skip.forEach(controller.test_tapSkip)
     rootView.layoutSubtreeIfNeeded()
     let size = rootView.fittingSize
     let frame = NSRect(origin: .zero, size: size)
@@ -217,6 +221,13 @@ func run() async -> Int32 {
                        world: SnapshotWorld(allow: [.audio]), outDir: outDir)
         await snapshot(appearanceName: name, label: "\(tag)-step3-bluetooth",
                        world: SnapshotWorld(allow: [.audio, .localNetwork]), outDir: outDir)
+        // Speaker Sync active: the one TWO-STAGE demo, resting on stage 1 — the
+        // "Background Items Added" notification, which is what the user has to
+        // act on before the Login Items pane ever opens.
+        await snapshot(appearanceName: name, label: "\(tag)-step4-speakersync",
+                       world: SnapshotWorld(allow: [.audio, .localNetwork],
+                                            skip: [.bluetooth]),
+                       outDir: outDir)
         // Audio denied: the card's Allow has become the Settings deep link, and
         // the demo swaps to the Settings-pane miniature.
         await snapshot(appearanceName: name, label: "\(tag)-denied",

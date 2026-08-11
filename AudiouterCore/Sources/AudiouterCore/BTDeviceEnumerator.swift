@@ -83,6 +83,10 @@ protocol BTDeviceEnumerating: AnyObject, Sendable {
     /// connect/disconnect notification hook (BT-CONNECT) calls this so a
     /// baseband edge lands before the Core Audio device-list listener echoes it.
     func refresh()
+    /// A user just asked for something Bluetooth-shaped: under the deferred ask
+    /// policy this is the ONLY thing that may fire the TCC prompt, setup owning
+    /// it otherwise. Idempotent, and a no-op once the status is decided.
+    func requestAuthorizationForUserAction()
 }
 
 // MARK: - Enumerator
@@ -98,7 +102,9 @@ protocol BTDeviceEnumerating: AnyObject, Sendable {
 /// (`CBManager.authorization`, a prompt-free read); ungranted, the enumerator
 /// degrades to Core-Audio-only enumeration (connected speakers still surface,
 /// paired-but-disconnected ones don't) instead of crashing the app or the test
-/// runner. Requesting the grant is a later wave's job (BT-CONNECT).
+/// runner. Who ASKS for the grant is a policy — see
+/// `asksAuthorizationOnEnumeration`; in the app it is setup's Bluetooth step or
+/// a user's own first Bluetooth gesture, never enumeration itself.
 final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
 
     /// Fires on the enumerator's own serial queue with the full merged list
@@ -118,6 +124,7 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
     private let isBluetoothAuthorized: @Sendable () -> Bool
     private let isBluetoothUndetermined: @Sendable () -> Bool
     private let makeAuthorizationRequest: @Sendable (@escaping @Sendable () -> Void) -> AnyObject?
+    private let asksAuthorizationOnEnumeration: Bool
     /// The in-flight (then decided) authorization request — retained for the
     /// enumerator's lifetime so the `CBCentralManager` behind it survives long
     /// enough to fire the prompt AND deliver the decision callback. Confined
@@ -132,27 +139,40 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
     /// to "never asks" (the ask instantiates a real `CBCentralManager`, and a
     /// TCC prompt popping mid-`swift test` is exactly the class of accident
     /// the injected seams exist to prevent).
+    ///
+    /// It is also the DEFERRED-ask configuration: setup's own Bluetooth step
+    /// owns the prompt now, so the app must never spring it as a side effect of
+    /// `NativeBackend.start()`.
     static func production() -> BTDeviceEnumerator {
         BTDeviceEnumerator(
             isBluetoothUndetermined: { CBManager.authorization == .notDetermined },
-            makeAuthorizationRequest: { BTAuthorizationRequest(onDecided: $0) })
+            makeAuthorizationRequest: { BTAuthorizationRequest(onDecided: $0) },
+            asksAuthorizationOnEnumeration: false)
     }
 
     /// `listOutputs`/`listPaired`/`isBluetoothAuthorized` default to the real
     /// HAL / IOBluetooth reads; the authorization-ASK pair defaults inert (see
     /// ``production()``). Tests inject whichever seams they exercise.
+    ///
+    /// `asksAuthorizationOnEnumeration` is the ask POLICY. `true` (the default)
+    /// asks on the first enumeration that finds the status undetermined; `false`
+    /// — what the app wires — waits for ``requestAuthorizationForUserAction()``,
+    /// because the prompt otherwise landed right after the setup window closed,
+    /// unexplained and unasked-for.
     init(
         listOutputs: @escaping @Sendable () -> [BTCoreAudioOutput] = BTDeviceEnumerator.systemOutputs,
         listPaired: @escaping @Sendable () -> [BTPairedRecord] = BTDeviceEnumerator.systemPairedRecords,
         isBluetoothAuthorized: @escaping @Sendable () -> Bool = { CBManager.authorization == .allowedAlways },
         isBluetoothUndetermined: @escaping @Sendable () -> Bool = { false },
-        makeAuthorizationRequest: @escaping @Sendable (@escaping @Sendable () -> Void) -> AnyObject? = { _ in nil }
+        makeAuthorizationRequest: @escaping @Sendable (@escaping @Sendable () -> Void) -> AnyObject? = { _ in nil },
+        asksAuthorizationOnEnumeration: Bool = true
     ) {
         self.listOutputs = listOutputs
         self.listPaired = listPaired
         self.isBluetoothAuthorized = isBluetoothAuthorized
         self.isBluetoothUndetermined = isBluetoothUndetermined
         self.makeAuthorizationRequest = makeAuthorizationRequest
+        self.asksAuthorizationOnEnumeration = asksAuthorizationOnEnumeration
     }
 
     /// Initial enumeration + a `kAudioHardwarePropertyDevices` listener so a
@@ -179,6 +199,14 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
         }
     }
 
+    /// See ``BTDeviceEnumerating/requestAuthorizationForUserAction()``. The
+    /// once-only and still-undetermined guards live in
+    /// `requestAuthorizationIfNeededLocked`, so a user hammering a Bluetooth
+    /// control fires at most one prompt.
+    func requestAuthorizationForUserAction() {
+        queue.async { self.requestAuthorizationIfNeededLocked() }
+    }
+
     func stop() {
         queue.sync {
             removeDeviceListListenerLocked()
@@ -194,13 +222,17 @@ final class BTDeviceEnumerator: BTDeviceEnumerating, @unchecked Sendable {
     }
 
     private func refreshLocked() {
-        // The Bluetooth grant is REQUESTED here, on the first enumeration that
-        // finds it `.notDetermined`: the status is a passive read that never
-        // resolves on its own, so without an ask the gate below degrades to
-        // Core-Audio-only forever — the paired list, and every ghost/
-        // disconnected row with it, never loads (found live: only already-
-        // connected speakers ever surfaced).
-        requestAuthorizationIfNeededLocked()
+        // The status is a passive read that never resolves on its own, so
+        // SOMETHING has to ask or the gate below degrades to Core-Audio-only
+        // forever — the paired list, and every ghost/disconnected row with it,
+        // never loads (found live: only already-connected speakers surfaced).
+        // Asking HERE, though, means asking as a side effect of the backend
+        // starting, which is the jarring post-setup prompt; under the deferred
+        // policy the asker is setup's Bluetooth step or
+        // `requestAuthorizationForUserAction()` instead.
+        if asksAuthorizationOnEnumeration {
+            requestAuthorizationIfNeededLocked()
+        }
         let paired = isBluetoothAuthorized() ? listPaired() : []
         let merged = Self.merge(outputs: listOutputs(), paired: paired)
         guard merged != lastEmitted else { return }

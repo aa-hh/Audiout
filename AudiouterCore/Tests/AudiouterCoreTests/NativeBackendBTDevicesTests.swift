@@ -34,6 +34,7 @@ import CoreAudio
         func start() { lock.withLock { _startCount += 1 } }
         func stop() { lock.withLock { _stopCount += 1 } }
         func refresh() {}
+        func requestAuthorizationForUserAction() {}
         func fire(_ snapshots: [BTDeviceSnapshot]) { onSnapshot?(snapshots) }
     }
 

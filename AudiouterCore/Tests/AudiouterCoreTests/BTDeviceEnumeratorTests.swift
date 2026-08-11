@@ -200,7 +200,9 @@ import Testing
     }
 
     private func makeAskingEnumerator(
-        _ script: AuthScript, listPaired: @escaping @Sendable () -> [BTPairedRecord]
+        _ script: AuthScript,
+        asksAuthorizationOnEnumeration: Bool = true,
+        listPaired: @escaping @Sendable () -> [BTPairedRecord]
     ) -> BTDeviceEnumerator {
         let output = btOutput()
         return BTDeviceEnumerator(
@@ -208,7 +210,8 @@ import Testing
             listPaired: listPaired,
             isBluetoothAuthorized: { script.authorized },
             isBluetoothUndetermined: { script.undetermined },
-            makeAuthorizationRequest: { script.makeRequest($0) })
+            makeAuthorizationRequest: { script.makeRequest($0) },
+            asksAuthorizationOnEnumeration: asksAuthorizationOnEnumeration)
     }
 
     private func waitFor(timeout: TimeInterval = 2, _ cond: @escaping () -> Bool) {
@@ -276,6 +279,68 @@ import Testing
         let enumerator = makeAskingEnumerator(script) { [record] }
         enumerator.onSnapshot = { _ in }
         enumerator.refresh()
+        #expect(script.requestCount == 0)
+    }
+
+    // MARK: The DEFERRED ask policy (what the app wires)
+
+    /// The jarring prompt this policy exists to kill: the backend starting is
+    /// not a reason to ask. Neither `start()` nor any re-enumeration may fire it
+    /// — enumeration still degrades to Core-Audio-only, silently.
+    @Test func deferredPolicyNeverAsksFromEnumeration() {
+        let script = AuthScript()
+        let received = SnapshotBox()
+        let record = paired()
+        let enumerator = makeAskingEnumerator(script, asksAuthorizationOnEnumeration: false) { [record] }
+        enumerator.onSnapshot = { received.append($0) }
+
+        enumerator.start()
+        defer { enumerator.stop() }
+        // `refresh()` is synchronous on the enumerator's queue, so it also acts
+        // as the barrier proving `start()`'s enqueued enumeration has run.
+        enumerator.refresh()
+
+        #expect(script.requestCount == 0, "backend startup must never spring the prompt")
+        #expect(received.all.last?.map(\.id) == [sonosUID], "still enumerates, Core-Audio-only")
+    }
+
+    /// …and the user's own first Bluetooth gesture is what asks instead: once,
+    /// however often it is repeated, and the grant lands the paired list with no
+    /// relaunch.
+    @Test func deferredPolicyAsksOnUserAction() {
+        let script = AuthScript()
+        let received = SnapshotBox()
+        let record = paired()
+        let enumerator = makeAskingEnumerator(script, asksAuthorizationOnEnumeration: false) { [record] }
+        enumerator.onSnapshot = { received.append($0) }
+        enumerator.refresh()
+
+        enumerator.requestAuthorizationForUserAction()
+        waitFor { script.requestCount == 1 }
+        #expect(script.requestCount == 1)
+
+        enumerator.requestAuthorizationForUserAction()
+        waitFor(timeout: 0.2) { false }
+        #expect(script.requestCount == 1, "one prompt per process, however often the user taps")
+
+        script.authorized = true
+        script.undetermined = false
+        script.decide()
+        waitFor { received.all.last?.count == 2 }
+        #expect(received.all.last?.count == 2, "the grant lands the paired list without a relaunch")
+    }
+
+    /// A decided status is never re-asked, user gesture or not.
+    @Test func userActionNeverReAsksOnceDecided() {
+        let script = AuthScript()
+        script.undetermined = false
+        script.authorized = false   // the user denied at some earlier point
+        let record = paired()
+        let enumerator = makeAskingEnumerator(script, asksAuthorizationOnEnumeration: false) { [record] }
+        enumerator.onSnapshot = { _ in }
+
+        enumerator.requestAuthorizationForUserAction()
+        waitFor(timeout: 0.2) { false }
         #expect(script.requestCount == 0)
     }
 

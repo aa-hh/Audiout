@@ -482,6 +482,33 @@ public enum Tokens {
                           systemAccentScale: 1.25)
         }
 
+        /// The Setup finale CTA's fill (`OnboardingViewController`'s "Start
+        /// listening" button) — the gold family deepened until WHITE ink wins
+        /// decisively. The flagship ``gold`` cannot fill a text-bearing
+        /// control: its light hex `#A97F1E` gives white only 3.66:1 (under the
+        /// 4.5:1 body floor) and black 5.74:1, and that mid-gold-plus-black
+        /// pairing is what the owner rejected live (2026-08-11).
+        /// CONTRAST RATIONALE (WCAG relative luminance; ink is white in every
+        /// variant, and the fill must ALSO clear ≥3:1 vs ``canvas``, the Setup
+        /// window's true background): light `#775913` = 6.52:1 white / 6.29:1
+        /// vs canvas `#FBFBF9`; light IC `#7F5D10` = 6.04:1 / 5.83:1; dark
+        /// `#815E0E` = 5.93:1 white / 3.12:1 vs canvas `#16130F`; dark IC
+        /// `#866209` = 5.58:1 / 3.32:1. STRUCTURAL CEILING: the near-black
+        /// dark canvas caps how deep the dark fill can go — pushing white ink
+        /// to ≥6:1 in dark drops fill-vs-canvas under the 3:1 floor, so dark
+        /// tops out ~5.9:1 (comfortably over the 4.5 minimum) and the dark IC
+        /// variant spends its step on CANVAS separation, not ink (the canvas
+        /// floor holds in every variant, per the project's measured-contrast
+        /// commitment). All four hexes sit at
+        /// ~42°, the flagship gold's own hue. NOT remapped by the accent dial:
+        /// this fill is contrast-governed on both sides, and resolving it to
+        /// the live accent would reintroduce exactly the unmeasured-ink
+        /// problem it exists to close.
+        public static var goldCTA: NSColor {
+            warmDynamic(name: "goldCTA", dark: 0x815E0E, darkHighContrast: 0x866209,
+                       light: 0x775913, lightHighContrast: 0x7F5D10)
+        }
+
         // MARK: Fader instruments (spec §5 slider skin, fader-legibility pass)
         //
         // The two hues `WarmFaderCell` needs beyond the surface ladder — the
@@ -914,6 +941,28 @@ public enum Tokens {
         /// explicitly modeled on the same macOS grouped-list idiom;
         /// previously two independent `10` literals.
         public static let groupedSectionCornerRadius: CGFloat = 10
+    }
+
+    // MARK: - Motion
+
+    /// Motion durations shared across surfaces (spec §6, "one motion
+    /// language"). Only values a SECOND surface would otherwise re-declare
+    /// belong here — a duration used in exactly one place stays where it is
+    /// used.
+    public enum Motion {
+        /// How long ANY collapsible element in the app takes to unfold into —
+        /// or fold out of — its host, on one curve (`.easeInEaseOut`): the
+        /// popover's inserted rows, device-type subsections and card bodies
+        /// (`CardView.setBodyCollapsed`), and the Setup window's permission
+        /// cards (`SetupCardView`). ONE value, so an expand is the exact
+        /// mirror of its collapse and every clip in the app reads as the same
+        /// gesture — a second constant kept in step by hand silently drifts
+        /// (live report 2026-08-10: the cards' own 0.2 s "don't follow the
+        /// same system"). 0.15 s is Alec's live call on the previous 0.22 s
+        /// ("it's also not that snappy") — short enough to feel immediate,
+        /// long enough that neighbouring content still reads as being PUSHED
+        /// rather than jumping.
+        public static let collapseRevealDuration: TimeInterval = 0.15
     }
 
     // MARK: - Material

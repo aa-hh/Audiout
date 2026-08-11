@@ -69,6 +69,11 @@ import Testing
 ///  - `PerAppCaptureCoordinatorTests`
 ///  - `NativeBackendGlobalStateTests` (NOT `NativeBackendTests` — see below)
 ///  - `SetupModelTests`
+///  - `SetupTelemetryTests`          (the setup_allow/setup_done decision-log
+///                                    tests, split out of `SetupFlowModelTests`
+///                                    which had been installing the sink from
+///                                    OUTSIDE this parent — a live collision
+///                                    caught 2026-08-11)
 ///
 /// `NativeBackendTests` itself is deliberately NOT here: 183 of its 200 tests
 /// touch no process-global state, and holding them in this chain made it the

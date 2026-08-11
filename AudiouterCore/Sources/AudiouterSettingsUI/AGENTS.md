@@ -86,8 +86,14 @@ layout and where the settings model types (`AppSettings`,
   controlled value, and the content's bottom pin into the wrapper is
   `.defaultHigh` — the clip always wins, no conflict, and the stack only
   ever sees the wrapper. Toggling that one constraint is the whole
-  collapse — see `advancedDisclosureToggled()`. (This also keeps the door
-  open to a `FoldAnimator`-style animated fold: one animated value.)
+  collapse — see `advancedDisclosureToggled()`. The fold is ANIMATED on
+  `FoldAnimator.shared` (now public in `AudiouterSharedUI`), the app's one
+  fold clock: the pane conforms to `FoldFollowing` and republishes its
+  `preferredContentSize` every tick, and the surface's settings subscriber
+  applies those per-tick sizes instantly (`FoldAnimator.shared.isFolding`
+  gates its `animated:`) — the window is laid out FROM the fold, never
+  animated alongside it. Instant under Reduce Motion and `HeadlessRuntime`,
+  per the popover module's fold rules.
 
   **Only the HEIGHT is ever measured.** The width is pinned to
   `SettingsForm.contentWidth`, and the height is taken from the pane's own

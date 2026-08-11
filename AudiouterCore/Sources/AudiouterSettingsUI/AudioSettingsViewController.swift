@@ -456,13 +456,67 @@ public final class AudioSettingsViewController: NSViewController {
             bottomPin,
         ])
         advancedClipCollapsed.isActive = true
+        advancedContent.isHidden = true
 
         return [hairline, header, advancedClip]
     }
 
     @objc private func advancedDisclosureToggled() {
-        advancedClipCollapsed.isActive = advancedDisclosure.state != .on
-        republishFittedHeight()
+        // Instant under Reduce Motion AND headless (module rule, AudiouterPopoverUI
+        // AGENTS.md): the fold clock ticks off the main runloop, which the harness
+        // tools and `swift test` don't reliably spin — a deferred terminal state
+        // would be stranded.
+        setAdvancedExpanded(
+            advancedDisclosure.state == .on,
+            animated: !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                && !HeadlessRuntime.isActive)
+    }
+
+    /// The same choreography as `CardView.setBodyCollapsed` (the app's one fold
+    /// gesture, `Tokens.Motion.collapseRevealDuration`): the clip height is the
+    /// single animated value on `FoldAnimator`'s clock, this pane republishes
+    /// its `preferredContentSize` from it every tick (`foldAnimatorDidTick`),
+    /// and the surface follows each published size instantly — no second clock.
+    /// Expand un-hides before travel and hands the rest height back to the
+    /// content's bottom pin on arrival; collapse seeds the constraint from the
+    /// LIVE clip height (so a first-ever or retargeted fold travels instead of
+    /// snapping) and hides only on arrival. `animated == false` (Reduce
+    /// Motion) applies the end state directly.
+    private func setAdvancedExpanded(_ expanded: Bool, animated: Bool) {
+        if expanded {
+            advancedContent.isHidden = false
+            guard animated else {
+                advancedClipCollapsed.isActive = false
+                republishFittedHeight()
+                return
+            }
+            advancedContent.layoutSubtreeIfNeeded()
+            let target = advancedContent.fittingSize.height + 4
+            advancedClipCollapsed.isActive = true
+            FoldAnimator.shared.animate(advancedClipCollapsed, to: target, follower: self) { [weak self] in
+                guard let self else { return }
+                self.advancedClipCollapsed.isActive = false
+                self.republishFittedHeight()
+            }
+        } else {
+            guard animated else {
+                advancedClipCollapsed.constant = 0
+                advancedClipCollapsed.isActive = true
+                advancedContent.isHidden = true
+                republishFittedHeight()
+                return
+            }
+            if !advancedClipCollapsed.isActive {
+                advancedClipCollapsed.constant = advancedClip.frame.height
+                advancedClipCollapsed.isActive = true
+                view.layoutSubtreeIfNeeded()
+            }
+            FoldAnimator.shared.animate(advancedClipCollapsed, to: 0, follower: self) { [weak self] in
+                guard let self else { return }
+                self.advancedContent.isHidden = true
+                self.republishFittedHeight()
+            }
+        }
     }
 
     /// Republish `preferredContentSize` from the COLUMN's fitting height, not
@@ -1074,16 +1128,25 @@ public final class AudioSettingsViewController: NSViewController {
     /// Whether the Advanced disclosure content is currently expanded.
     public var test_advancedExpanded: Bool {
         _ = view
-        return latency != nil && !advancedClipCollapsed.isActive
+        return latency != nil && !advancedContent.isHidden
     }
 
     /// Drive the disclosure triangle, running the same expand/collapse +
-    /// republish a click would.
+    /// republish a click would, then settle the fold — the runloop time a
+    /// headless test cannot spend (`FoldAnimator.test_settleNow`).
     public func test_toggleAdvanced() {
         _ = view
         advancedDisclosure.state = advancedDisclosure.state == .on ? .off : .on
         advancedDisclosureToggled()
+        FoldAnimator.shared.test_settleNow()
     }
+}
+
+extension AudioSettingsViewController: FoldFollowing {
+    /// Per-tick follow: the pane's published size IS the clip's current
+    /// height, frame by frame — the surface applies it instantly during a
+    /// fold (`AppSurfaceController`, `FoldAnimator.shared.isFolding`).
+    public func foldAnimatorDidTick() { republishFittedHeight() }
 }
 
 /// A rounded hairline border around the excluded-apps list. Drawn with

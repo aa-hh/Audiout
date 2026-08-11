@@ -428,8 +428,12 @@ public final class AppSurfaceController {
         // this is the surface-side subscriber the window controller used to be).
         root.onFittedContentSizeChange = { [weak self] _ in
             guard let self, self.selectedScreen == .settings else { return }
+            // During a fold (the Audio pane's Advanced disclosure) the sizes
+            // arrive per tick of the ONE fold clock — apply them instantly,
+            // exactly like the Mixer panel's `foldAnimatorDidTick` path. An
+            // animated window resize here would be the second clock.
             self.applyWindowContentSize(self.settingsTargetContentSize(),
-                                        animated: self.isShown)
+                                        animated: self.isShown && !FoldAnimator.shared.isFolding)
         }
         let screen = SurfaceScreenViewController(content: root)
         settingsScreen = screen

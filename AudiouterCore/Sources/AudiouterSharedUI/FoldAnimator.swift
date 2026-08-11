@@ -3,9 +3,17 @@
 import AppKit
 import QuartzCore
 
-/// The ONE clock every fold on this surface runs on — a card body
-/// (`CardView.setBodyCollapsed`), a device-type subsection, and a single-row
-/// reveal (`insertRow`/`removeRow`).
+/// What lays itself out from an in-flight fold on every tick — the popover
+/// panel re-fits and republishes its size; the Settings Audio pane republishes
+/// its `preferredContentSize`. Weakly held by the driver.
+@MainActor
+public protocol FoldFollowing: AnyObject {
+    func foldAnimatorDidTick()
+}
+
+/// The ONE clock every fold in the app runs on — a popover card body
+/// (`CardView.setBodyCollapsed`), a device-type subsection, a single-row
+/// reveal (`insertRow`/`removeRow`), and the Settings Advanced disclosure.
 ///
 /// A fold used to be TWO separately-clocked animations: the clip-height
 /// constraint under `NSAnimationContext` (easeInOut) and the surface window
@@ -27,12 +35,17 @@ import QuartzCore
 /// `NSAnimationContext`, never with `allowsImplicitAnimation`. Any of those
 /// puts a second clock back on the one value this driver owns.
 @MainActor
-final class FoldAnimator {
+public final class FoldAnimator {
 
     /// One driver for the process: a `CardView` can be folded without a panel
     /// (the trajectory unit tests build a bare card), so the fold clock cannot
     /// hang off the panel.
-    static let shared = FoldAnimator()
+    public static let shared = FoldAnimator()
+
+    /// Whether any fold is in flight. Surface subscribers use this to publish
+    /// per-tick sizes INSTANTLY during a fold instead of starting a window
+    /// animation of their own — the second clock this driver exists to forbid.
+    public var isFolding: Bool { !tweens.isEmpty }
 
     /// One in-flight fold.
     private struct Tween {
@@ -42,9 +55,9 @@ final class FoldAnimator {
         let start: CGFloat
         let target: CGFloat
         let startTime: CFTimeInterval
-        /// The panel that lays itself out from this fold each tick. `nil` when
-        /// there is no panel above the folding view.
-        weak var follower: PopoverPanelViewController?
+        /// What lays itself out from this fold each tick. `nil` when there is
+        /// nothing above the folding view to keep in step.
+        weak var follower: (any FoldFollowing)?
         let completion: () -> Void
     }
 
@@ -60,10 +73,10 @@ final class FoldAnimator {
     /// content to a rest height first makes it momentarily TALLER than the
     /// surface, the one deformation the panel's surplus shield cannot absorb
     /// (rows riding up to the window top on rapid toggles).
-    func animate(_ constraint: NSLayoutConstraint,
-                 to target: CGFloat,
-                 follower: PopoverPanelViewController?,
-                 completion: @escaping () -> Void) {
+    public func animate(_ constraint: NSLayoutConstraint,
+                        to target: CGFloat,
+                        follower: (any FoldFollowing)?,
+                        completion: @escaping () -> Void) {
         tweens.removeAll { $0.constraint === constraint }
         tweens.append(Tween(constraint: constraint,
                             start: constraint.constant,
@@ -80,7 +93,7 @@ final class FoldAnimator {
 
     /// Test hook: run every in-flight fold straight to its end state — the
     /// runloop time a headless test cannot spend. Same tick order as the timer.
-    func test_settleNow() { advance(to: .greatestFiniteMagnitude) }
+    public func test_settleNow() { advance(to: .greatestFiniteMagnitude) }
 
     private func startTimerIfNeeded() {
         guard timer == nil, !tweens.isEmpty else { return }
@@ -103,7 +116,7 @@ final class FoldAnimator {
     /// Any other order lets the window be sized from a value the content has
     /// not been laid out at.
     private func advance(to now: CFTimeInterval) {
-        let duration = PopoverPanelViewController.collapseRevealDuration
+        let duration = Tokens.Motion.collapseRevealDuration
         var running: [Tween] = []
         var arrived: [Tween] = []
 

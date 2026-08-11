@@ -562,10 +562,14 @@ enum DemoBeat {
     static let idle: TimeInterval = 0.80
     static let travelEnd: TimeInterval = 1.80
     static let pressEnd: TimeInterval = 1.90
-    static let changeEnd: TimeInterval = 2.08
-    static let holdEnd: TimeInterval = 3.48
-    static let resetEnd: TimeInterval = 3.78
-    static let loop: TimeInterval = 4.50
+    // The gap between press and the granted crossfade is a deliberate DWELL,
+    // not the fastest possible flip — too tight and the click doesn't read
+    // before the reward. Everything after it shifts by the same amount so the
+    // hold (1.40s) and reset (0.30s) keep their own length.
+    static let changeEnd: TimeInterval = 2.25
+    static let holdEnd: TimeInterval = 3.65
+    static let resetEnd: TimeInterval = 3.95
+    static let loop: TimeInterval = 4.67
 }
 
 /// The two-stage retry's beats, in seconds along ONE pass of
@@ -960,13 +964,12 @@ final class DemoPromptMockView: DemoMockView {
         }
     }
 
-    /// The button the cursor presses.
-    static func confirmTitle(for step: SetupStep) -> String {
-        switch step {
-        case .audio, .localNetwork: return "Allow"
-        case .bluetooth, .remoteControl, .speakerSync: return "OK"
-        }
-    }
+    /// The button the cursor presses. Every step that reaches this mock uses
+    /// the same TCC-family dialog shape, and Apple's own confirming button
+    /// across that family is "Allow" (verified against the real audio and
+    /// Local Network dialogs) — never "OK", which was an unverified guess
+    /// from before any real dialog had been checked.
+    static func confirmTitle(for step: SetupStep) -> String { "Allow" }
 
     static func grantedText(for step: SetupStep) -> String {
         switch step {

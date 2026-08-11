@@ -83,6 +83,12 @@ public final class BusRailOverlayView: NSView {
     private static let pulseKey = "busRail.connectPulse"
     /// The pulse window's length as a fraction of the whole wire.
     private static let pulseWindow: CGFloat = 0.3
+    /// The arrival bloom's disc radius (its light halo doubles the visual
+    /// footprint via the shadow).
+    private static let arrivalBloomRadius: CGFloat = 5
+    /// The transient arrival bloom currently playing at the wire's start, if
+    /// any (mounted by the bead's completion; dies with any cancel).
+    private var arrivalLayer: CAShapeLayer?
     /// The last drawn plan's energize signature. `nil` = no baseline yet, so the
     /// next draw stamps one WITHOUT firing — the first render in a window is
     /// always settled (no transient fires on open, spec §6).
@@ -435,12 +441,21 @@ public final class BusRailOverlayView: NSView {
             .compactMap { Self.fraction(atY: $0, along: joined) }
             .max() ?? 1
         let path = joined.cgPath
+        // Where the bead lands: the wire's own start — the hook's spot on the
+        // Main Audio ring's edge, or the collapsed-origin header dot.
+        let arrival: NSPoint
+        switch plan.origin {
+        case let .ring(centerY, ringCenterX, ringRadius):
+            arrival = NSPoint(x: ringCenterX - ringRadius, y: centerY)
+        case let .headerDot(y):
+            arrival = NSPoint(x: PopoverColumnGrid.railGutterCenterX, y: y)
+        }
         // A run-loop block, not `DispatchQueue.main.async`: it defers the layer
         // mutation out of the draw pass just the same, and a nested run-loop
         // spin (tests) can execute it, which the main dispatch queue's
         // non-reentrancy forbids.
         RunLoop.main.perform { [weak self] in
-            self?.runConnectPulse(along: path, from: departure)
+            self?.runConnectPulse(along: path, from: departure, arrivingAt: arrival)
         }
     }
 
@@ -481,39 +496,52 @@ public final class BusRailOverlayView: NSView {
         return min(max((crossing ?? total) / total, 0), 1)
     }
 
-    /// Mount the bright pulse over the settled wire and play its travel from
+    /// Mount the glowing bead over the settled wire and play its travel from
     /// `departure` (the joining room's spot on the wire; 1 = terminus) up into
-    /// the Main Audio ring: a short `glow` window slides up the wire, shrinking
-    /// as it goes, and is absorbed to nothing at the ring. Travel time scales
-    /// with the distance (constant speed — `railConnectPulseDuration` is the
+    /// the Main Audio ring, where an arrival bloom receives it.
+    ///
+    /// The bead has BODY (Alec's live read of the flat cut: "too subtle and
+    /// invisible"): it strokes WIDER than the wire with a soft same-hue light
+    /// emission, so it reads as a bead of signal riding ON the line rather
+    /// than a recolored stretch of it — visibility comes from geometry and
+    /// light, not from shouting with a hotter color. Travel time scales with
+    /// the distance (constant speed — `railConnectPulseDuration` is the
     /// full-wire time), floored so a short hop still reads as motion.
-    /// The pulse's MODEL is fully absorbed (`strokeStart = strokeEnd = 0`,
+    ///
+    /// The bead's MODEL is fully absorbed (`strokeStart = strokeEnd = 0`,
     /// invisible) — only the presentation animates — so a `cacheDisplay` at any
     /// instant captures the settled wire, never the transient. Self-removing on
     /// completion: nothing runs, or exists, at rest. A fresh surge replaces an
     /// in-flight one (the newest room restarts the pulse from its own spot).
-    func runConnectPulse(along path: CGPath, from departure: CGFloat) {
+    func runConnectPulse(along path: CGPath, from departure: CGFloat, arrivingAt arrival: NSPoint) {
         guard window != nil, !reduceMotion, let hostLayer = layer else { return }
         test_lastPulseDeparture = departure
-        pulseLayer?.removeFromSuperlayer()
-        let pulse = CAShapeLayer()
-        pulse.frame = hostLayer.bounds
-        pulse.path = path
-        pulse.fillColor = nil
-        pulse.lineWidth = PopoverColumnGrid.busLineWidth
-        pulse.lineCap = .round
-        pulse.lineJoin = .round
+        cancelConnectPulse()
+        let bead = CAShapeLayer()
+        bead.frame = hostLayer.bounds
+        bead.path = path
+        bead.fillColor = nil
+        // Wider than the wire + a soft zero-offset halo: light emission, the
+        // physics of a bright bead, not a depth shadow.
+        bead.lineWidth = PopoverColumnGrid.busLineWidth * 2
+        bead.lineCap = .round
+        bead.lineJoin = .round
+        bead.shadowOffset = .zero
+        bead.shadowRadius = 4
+        bead.shadowOpacity = 0.85
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            pulse.strokeColor = Tokens.Color.glow.cgColor
+            let glow = Tokens.Color.glow.cgColor
+            bead.strokeColor = glow
+            bead.shadowColor = glow
         }
-        pulse.strokeStart = 0
-        pulse.strokeEnd = 0
-        hostLayer.addSublayer(pulse)
-        pulseLayer = pulse
+        bead.strokeStart = 0
+        bead.strokeEnd = 0
+        hostLayer.addSublayer(bead)
+        pulseLayer = bead
 
         // Both edges run to 0 on one clock, so the visible window narrows as
-        // it climbs — the ring swallows the pulse rather than the pulse dying
-        // in place. easeIn: it accelerates INTO the ring.
+        // it climbs — the ring swallows the bead rather than the bead dying
+        // in place. easeIn: it accelerates INTO the ring's receiving bloom.
         let leading = CABasicAnimation(keyPath: "strokeStart")
         leading.fromValue = max(0, departure - Self.pulseWindow)
         leading.toValue = 0
@@ -526,18 +554,81 @@ public final class BusRailOverlayView: NSView {
             PopoverColumnGrid.railConnectPulseDuration * Double(departure),
             PopoverColumnGrid.railConnectPulseDuration * 0.3)
         travel.timingFunction = CAMediaTimingFunction(name: .easeIn)
-        CATransaction.begin()
-        CATransaction.setCompletionBlock { [weak self, weak pulse] in
-            pulse?.removeFromSuperlayer()
-            if let self, self.pulseLayer === pulse { self.pulseLayer = nil }
+        bead.add(travel, forKey: Self.pulseKey)
+
+        // The bead→bloom handoff rides OUR run-loop clock, not a
+        // `CATransaction` completion: CA only delivers those under an
+        // app-driven commit loop (a test process never gets one — measured),
+        // and CA completions are exactly the sharp edge the CATransition-key
+        // trap already documents. At travel's end the animation has removed
+        // itself and the bead's model is already invisible, so cleanup timing
+        // is not visual. A cancel (RM, accent dial, remount, replacement)
+        // nils/replaces `pulseLayer` first, so the stale timer no-ops.
+        Timer.scheduledTimer(withTimeInterval: travel.duration, repeats: false) { [weak self, weak bead] _ in
+            MainActor.assumeIsolated {
+                guard let self, let bead, self.pulseLayer === bead else { return }
+                self.test_pulseHandoffRuns += 1
+                bead.removeFromSuperlayer()
+                self.pulseLayer = nil
+                self.runArrivalBloom(at: arrival)
+            }
         }
-        pulse.add(travel, forKey: Self.pulseKey)
-        CATransaction.commit()
+    }
+
+    /// The receiving end of the pulse: a soft `glow` burst at the wire's start
+    /// (the Main Audio ring's edge, or the collapsed-origin header dot) that
+    /// swells and fades as the bead is absorbed — the desk acknowledging the
+    /// room. Same settled-model contract as the bead: model opacity 0, only
+    /// the presentation plays, self-removing.
+    func runArrivalBloom(at point: NSPoint) {
+        guard window != nil, !reduceMotion, let hostLayer = layer else { return }
+        test_arrivalBloomRuns += 1
+        arrivalLayer?.removeFromSuperlayer()
+        let radius = Self.arrivalBloomRadius
+        let bloom = CAShapeLayer()
+        bloom.frame = hostLayer.bounds
+        bloom.path = CGPath(
+            ellipseIn: CGRect(x: point.x - radius, y: point.y - radius,
+                              width: radius * 2, height: radius * 2),
+            transform: nil)
+        bloom.shadowOffset = .zero
+        bloom.shadowRadius = radius
+        bloom.shadowOpacity = 1
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let glow = Tokens.Color.glow.cgColor
+            bloom.fillColor = glow
+            bloom.shadowColor = glow
+        }
+        bloom.opacity = 0
+        hostLayer.addSublayer(bloom)
+        arrivalLayer = bloom
+
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0.9
+        fade.toValue = 0
+        let swell = CABasicAnimation(keyPath: "transform.scale")
+        swell.fromValue = 0.5
+        swell.toValue = 1.6
+        let burst = CAAnimationGroup()
+        burst.animations = [fade, swell]
+        burst.duration = PopoverColumnGrid.railConnectPulseArrivalDuration
+        burst.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        bloom.add(burst, forKey: Self.pulseKey)
+        // Same run-loop cleanup clock as the bead (see runConnectPulse): the
+        // spent bloom's model is already invisible, this only frees the layer.
+        Timer.scheduledTimer(withTimeInterval: burst.duration, repeats: false) { [weak self, weak bloom] _ in
+            MainActor.assumeIsolated {
+                bloom?.removeFromSuperlayer()
+                if let self, self.arrivalLayer === bloom { self.arrivalLayer = nil }
+            }
+        }
     }
 
     private func cancelConnectPulse() {
         pulseLayer?.removeFromSuperlayer()
         pulseLayer = nil
+        arrivalLayer?.removeFromSuperlayer()
+        arrivalLayer = nil
     }
 
     // MARK: Test-support hooks
@@ -560,6 +651,23 @@ public final class BusRailOverlayView: NSView {
     /// Whether the connect pulse is currently mounted mid-flight (present the
     /// instant it's added — no run loop needed to assert it fired).
     public var test_isConnectPulsing: Bool { pulseLayer != nil }
+
+    /// Whether the arrival bloom is currently playing at the wire's start.
+    public var test_isArrivalBlooming: Bool { arrivalLayer != nil }
+
+    /// How many arrival blooms have PLAYED — a landed bead increments this; a
+    /// cancelled one never does. Counts survive the bloom's own (fast,
+    /// headless-timing-dependent) self-removal, so tests assert on this rather
+    /// than racing the transient layer.
+    public private(set) var test_arrivalBloomRuns = 0
+
+    /// How many bead→bloom handoffs have FIRED (the travel-end timer found its
+    /// bead still current) — a cancelled bead never hands off.
+    public var test_pulseHandoffRuns = 0
+
+    /// The bloom's MODEL opacity — the settled-model-layer contract says it is
+    /// always 0 (invisible) while the presentation plays.
+    public var test_arrivalModelOpacity: Float? { arrivalLayer?.opacity }
 
     /// The pulse's MODEL stroke window — the settled-model-layer contract says
     /// it is always (0, 0) (fully absorbed / invisible) while the presentation

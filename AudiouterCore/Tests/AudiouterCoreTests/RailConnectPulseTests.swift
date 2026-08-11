@@ -201,6 +201,62 @@ import Testing
                 "arming lights every room at once — the pulse runs the whole wire")
     }
 
+    // MARK: Arrival bloom (the ring receives the bead)
+
+    /// Spin the main run loop in small steps until `condition` holds or
+    /// `deadline` passes — headless runners play CA timelines on their own
+    /// clock, so transient states are caught by polling, never a fixed sleep.
+    private func polls(within deadline: TimeInterval, _ condition: () -> Bool) -> Bool {
+        let end = Date().addingTimeInterval(deadline)
+        while Date() < end {
+            if condition() { return true }
+            RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+        }
+        return condition()
+    }
+
+    @Test func theBloomMountsWithASettledModel() {
+        // Synchronous contract check — the layer is inspectable the instant
+        // `runArrivalBloom` returns, before any timeline can remove it.
+        let scene = makeScene(nodes: [.member])
+        scene.overlay.runArrivalBloom(at: NSPoint(x: 25, y: 300))
+        #expect(scene.overlay.test_isArrivalBlooming)
+        #expect(scene.overlay.test_arrivalModelOpacity == 0,
+                "the bloom's MODEL stays invisible — only the presentation plays")
+    }
+
+    @Test func aCompletedPulseBloomsAtTheWiresStart() {
+        // On-glass window: an undisplayed window's layer tree never starts its
+        // CA timeline, so the bead's completion (the bloom's trigger) would
+        // never fire — same requirement as the presentation probe above.
+        let scene = makeScene(nodes: [.member])
+        scene.window.orderFrontRegardless()
+        scene.overlay.test_reconcileEnergize()          // baseline: idle
+        scene.hook.gold = true
+        scene.overlay.test_reconcileEnergize()
+        drainMainQueue()
+        #expect(scene.overlay.test_isConnectPulsing)
+        let bloomed = polls(within: 2.5) { scene.overlay.test_arrivalBloomRuns == 1 }
+        #expect(bloomed, "the ring receives the landed bead with a bloom — handoffs fired: \(scene.overlay.test_pulseHandoffRuns), still pulsing: \(scene.overlay.test_isConnectPulsing)")
+    }
+
+    @Test func aCancelledPulseNeverBlooms() {
+        let scene = makeScene(nodes: [.member])
+        scene.overlay.test_reconcileEnergize()          // baseline: idle
+        scene.hook.gold = true
+        scene.overlay.test_reconcileEnergize()
+        drainMainQueue()
+        #expect(scene.overlay.test_isConnectPulsing)
+
+        scene.overlay.test_reduceMotionOverride = true
+        NSWorkspace.shared.notificationCenter.post(
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: NSWorkspace.shared)
+        #expect(!scene.overlay.test_isConnectPulsing)
+        let bloomed = polls(within: 1.6) { scene.overlay.test_arrivalBloomRuns > 0 }
+        #expect(!bloomed, "a bead that never landed has nothing to bloom")
+    }
+
     @Test func theFirstReconcileOnlyStampsTheBaseline() {
         let scene = makeScene(nodes: [.member])
         scene.hook.gold = true

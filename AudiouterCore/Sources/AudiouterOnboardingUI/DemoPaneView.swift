@@ -566,10 +566,10 @@ enum DemoBeat {
     // not the fastest possible flip — too tight and the click doesn't read
     // before the reward. Everything after it shifts by the same amount so the
     // hold (1.40s) and reset (0.30s) keep their own length.
-    static let changeEnd: TimeInterval = 2.25
-    static let holdEnd: TimeInterval = 3.65
-    static let resetEnd: TimeInterval = 3.95
-    static let loop: TimeInterval = 4.67
+    static let changeEnd: TimeInterval = 2.95
+    static let holdEnd: TimeInterval = 4.35
+    static let resetEnd: TimeInterval = 4.65
+    static let loop: TimeInterval = 5.37
 }
 
 /// The two-stage retry's beats, in seconds along ONE pass of
@@ -616,6 +616,21 @@ func demoGlyph(_ name: String, pointSize: CGFloat,
     view.contentTintColor = color
     view.translatesAutoresizingMaskIntoConstraints = false
     return view
+}
+
+/// The app's OWN icon, exactly as a THIRD-PARTY process reads it. The real TCC
+/// alert and System Settings are drawn by processes other than this one, so
+/// they cannot call `NSApp.applicationIconImage` — that only resolves inside
+/// the process that owns it. They ask Launch Services for the icon at our
+/// bundle's path instead, which is a SEPARATE cache from what this process
+/// already knows to be current, and a notoriously sticky one. A mock whose
+/// whole job is to preview "the surface you're about to see" has to ask the
+/// same way the real surface will, staleness included: showing our own
+/// fresher in-process icon here would make the preview WRONG on a Mac where
+/// Launch Services hasn't caught up to the latest build yet (verified against
+/// live testing, where the real dialog and this mock visibly disagreed).
+func demoIconAsAThirdPartyProcessSeesIt() -> NSImage {
+    NSWorkspace.shared.icon(forFile: Bundle.main.bundlePath)
 }
 
 // MARK: - Prompt mock
@@ -815,21 +830,24 @@ final class DemoPromptMockView: DemoMockView {
     private static func iconView(for step: SetupStep) -> NSView {
         switch step {
         case .localNetwork:
-            return systemTile(symbol: "network")
-        // razor: a NAMED APPROXIMATION on two counts — no screenshot of the
-        // real Bluetooth dialog was available, so the system tile is inferred
-        // from Local Network's; and SF Symbols carries no Bluetooth rune, so
-        // the glyph is the `dot.radiowaves.right` the Bluetooth setup card
-        // beside it already uses. Upgrade path: a real screenshot, or a rune
-        // symbol, changes this one line.
+            return systemTile { demoGlyph("network", pointSize: iconSide * 0.55,
+                                          weight: .regular, color: .white) }
+        // Verified against the real Bluetooth dialog (owner screenshot,
+        // 2026-08-11): the tile IS the same blue system tile Local Network
+        // uses, carrying the actual Bluetooth rune rather than an
+        // approximation. SF Symbols still carries no such glyph, so it's
+        // hand-drawn — see `DemoBluetoothGlyphView`.
         case .bluetooth:
-            return systemTile(symbol: "dot.radiowaves.right")
+            return systemTile { DemoBluetoothGlyphView(size: iconSide * 0.55, color: .white) }
         // System Audio is a content-capture grant and really does show the
-        // app's icon. The other two never reach this mock; the app icon is the
-        // safe default for them.
+        // app's icon — but the DIALOG'S icon, which a separate system process
+        // draws from Launch Services, not this process's own fresher
+        // `NSApp.applicationIconImage` (see `demoIconAsAThirdPartyProcessSeesIt`).
+        // The other two steps never reach this mock; the app icon is the safe
+        // default for them.
         case .audio, .remoteControl, .speakerSync:
             let icon = NSImageView()
-            icon.image = NSApp?.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
+            icon.image = demoIconAsAThirdPartyProcessSeesIt()
             icon.imageScaling = .scaleProportionallyUpOrDown
             icon.translatesAutoresizingMaskIntoConstraints = false
             return icon
@@ -840,10 +858,12 @@ final class DemoPromptMockView: DemoMockView {
     /// glyph, drawn at the app icon's size so the badge lands where it always
     /// does. Corner and glyph are fractions of the side rather than points, so
     /// changing `iconSide` alone keeps the tile in proportion; both are matched
-    /// by eye to the Local Network screenshot, not measured.
-    private static func systemTile(symbol: String) -> NSView {
+    /// by eye to the Local Network screenshot, not measured. `glyph` is a
+    /// builder rather than a plain view so a caller can hand it a plain SF
+    /// Symbol OR a hand-drawn one (Bluetooth's rune has no symbol to name).
+    private static func systemTile(glyph: () -> NSView) -> NSView {
         let tile = DemoPillView(radius: iconSide * 0.23, fill: DemoSystemColor.accent)
-        let mark = demoGlyph(symbol, pointSize: iconSide * 0.55, weight: .regular, color: .white)
+        let mark = glyph()
         tile.addSubview(mark)
         NSLayoutConstraint.activate([
             mark.centerXAnchor.constraint(equalTo: tile.centerXAnchor),
@@ -1782,6 +1802,66 @@ final class DemoLockIconView: NSView {
     }
 }
 
+/// The Bluetooth rune. No SF Symbol carries it (checked directly against
+/// `name_availability.plist`, which lists neither `bluetooth` nor any
+/// synonym, on the Xcode 27 toolchain this repo builds with), so it is drawn
+/// as the mark's own standard construction — a bind rune combining ᚼ and ᛒ:
+/// a vertical stem crossed by two diagonal "flags" that meet the stem at its
+/// top, middle and bottom. Verified against the real macOS Bluetooth
+/// permission dialog (owner screenshot, 2026-08-11), which is also what
+/// confirmed the tile itself is the plain system-blue `DemoSystemColor.accent`
+/// this view is drawn on top of, not a separate measured hue.
+final class DemoBluetoothGlyphView: NSView {
+
+    private let color: NSColor
+
+    init(size: CGFloat, color: NSColor) {
+        self.color = color
+        super.init(frame: .zero)
+        wantsLayer = true
+        translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            widthAnchor.constraint(equalToConstant: size),
+            heightAnchor.constraint(equalToConstant: size),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let w = bounds.width, h = bounds.height
+        let top = NSPoint(x: w * 0.5, y: h * 0.10)
+        let upperRight = NSPoint(x: w * 0.80, y: h * 0.30)
+        let center = NSPoint(x: w * 0.5, y: h * 0.5)
+        let lowerRight = NSPoint(x: w * 0.80, y: h * 0.70)
+        let bottom = NSPoint(x: w * 0.5, y: h * 0.90)
+
+        // The vertical stem and the diagonal flags share endpoints but are not
+        // the same path — the flags never travel straight down, so the stem
+        // needs its own stroke.
+        let stem = NSBezierPath()
+        stem.move(to: top)
+        stem.line(to: bottom)
+
+        let flags = NSBezierPath()
+        flags.move(to: top)
+        flags.line(to: upperRight)
+        flags.line(to: center)
+        flags.line(to: lowerRight)
+        flags.line(to: bottom)
+
+        color.setStroke()
+        for path in [stem, flags] {
+            path.lineWidth = w * 0.10
+            path.lineCapStyle = .round
+            path.lineJoinStyle = .round
+            path.stroke()
+        }
+    }
+}
+
 /// The Settings sidebar sliver: traffic lights, a greeked search field, and a few
 /// greeked rows one of which carries the blue selected pill. No legible text —
 /// every label here would land under the 9 pt floor, so all of them are bars.
@@ -2047,10 +2127,11 @@ final class DemoSettingsRowView: NSView {
 
         let leading: NSView
         if name != nil {
-            // Settings shows the app's REAL icon beside its name, and so does
-            // this row.
+            // Settings shows the app's REAL icon beside its name, read the
+            // same way System Settings itself reads it — see
+            // `demoIconAsAThirdPartyProcessSeesIt`.
             let icon = NSImageView()
-            icon.image = NSApp?.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
+            icon.image = demoIconAsAThirdPartyProcessSeesIt()
             icon.imageScaling = .scaleProportionallyUpOrDown
             icon.translatesAutoresizingMaskIntoConstraints = false
             leading = icon

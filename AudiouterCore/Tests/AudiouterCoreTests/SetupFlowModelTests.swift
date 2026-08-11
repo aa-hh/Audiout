@@ -432,14 +432,18 @@ import Testing
         #expect(result.destination == .loginItems)
     }
 
-    /// Remote Control's exception: its retry re-fires the Accessibility PROMPT
-    /// (whose own button highlights this app in the list) and never deep-links.
-    @Test func remoteControlNeverDeepLinks() async {
+    /// Remote Control asks ONCE, then deep-links. Prompting is what registers
+    /// this app's row in the Accessibility list, so the first fire has to be the
+    /// prompt; the second would silently no-op, so it goes to the pane instead.
+    @Test func remoteControlPromptsOnceThenDeepLinksToAccessibility() async {
         let flow = SetupFlowModel(setup: makeSetup(remoteControlTrusted: false))
+
         let first = await flow.allow(.remoteControl)
         let second = await flow.allow(.remoteControl)
-        #expect(first.destination == .none)
-        #expect(second.destination == .none)
+
+        #expect(first.destination == .none, "the prompt is what registers our row at all")
+        #expect(second.outcome == .settingsFallbackDenied)
+        #expect(second.destination == .settingsPane(.accessibility))
     }
 
     /// Never send someone to Settings to fix what isn't broken.

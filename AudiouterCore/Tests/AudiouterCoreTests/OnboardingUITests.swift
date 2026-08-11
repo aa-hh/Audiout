@@ -448,18 +448,47 @@ import Testing
         #expect(opened.isEmpty, "Login Items is not a privacy pane deep link")
     }
 
-    /// Remote Control's "Open Settings…" re-fires the Accessibility PROMPT (whose
-    /// own button highlights the app in the list) and never deep-links.
-    @Test func remoteControlNeverRoutesThroughTheDeepLinkOpener() async {
+    /// Remote Control's first click is the PROMPT — that is what registers our
+    /// row in the Accessibility list — and its "Open Settings…" retry then deep-
+    /// links to that pane like every other step.
+    @Test func remoteControlPromptsFirstThenOpensTheAccessibilityPane() async {
         var opened: [SystemSettingsPane] = []
         let vc = makeVC(model: makeGrantableModel(), onOpenSettings: { opened.append($0) })
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
-        vc.test_tapSkip(.remoteControl)   // ignored below — it isn't active yet
+
+        await vc.test_tapAllow(.remoteControl)
+        #expect(opened.isEmpty, "the first ask is the prompt, not a deep link")
+
+        await vc.test_tapAllow(.remoteControl)
+        #expect(opened == [.accessibility])
+    }
+
+    /// The Accessibility Access prompt is an ordinary alert panel at normal
+    /// level, NOT a TCC dialog a system process draws above everything — so the
+    /// window has to yield BEFORE the ask, and must not front itself back over
+    /// the alert it just raised (owner live observation 2026-08-11).
+    @Test func askingForRemoteControlYieldsTheLevelAndDoesNotReFrontOverTheAlert() async {
+        let wc = OnboardingWindowController(model: makeGrantableModel(),
+                                            openSettings: { _ in },
+                                            onFinished: {})
+        let vc = wc.test_contentViewController
+        _ = vc.test_rootView
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        #expect(vc.test_activeStep == .remoteControl)
+        #expect(wc.test_windowLevel == .floating)
+        let before = vc.test_returnToFrontCount
 
         await vc.test_tapAllow(.remoteControl)
 
-        #expect(opened.isEmpty)
+        #expect(wc.test_windowLevel == .normal,
+                "the alert is ordinary window chrome — floating buries it")
+        #expect(vc.test_returnToFrontCount == before,
+                "the dialog just OPENED; re-fronting would re-bury it")
+
+        wc.test_appDidBecomeActive()
+        #expect(wc.test_windowLevel == .floating, "back in our app, back on top")
     }
 
     // MARK: The gate
@@ -674,29 +703,39 @@ import Testing
 
     // MARK: The two-stage Remote Control demo
 
-    /// Remote Control's "Open Settings…" re-fires the ASK rather than
-    /// deep-linking, because that panel's own "Open System Settings" button is
-    /// the only path that highlights Audiouter in the list. So the user has TWO
-    /// clicks to make, on two surfaces — and a demo that opened straight onto the
-    /// pane showed the toggle without showing how the pane carrying it is
-    /// reached. The pass starts and ends on the alert, the click still to make.
-    @Test func remoteControlsRetryDemoIsTwoStageAndRestsOnTheAsk() async {
+    /// Remote Control's FIRST ask raises the Accessibility alert, whose own
+    /// button is what opens the pane — two clicks on two surfaces, and a demo
+    /// that opened straight onto the pane showed the toggle without showing how
+    /// the pane carrying it is reached. The pass starts and ends on the alert,
+    /// the click still to make.
+    @Test func remoteControlsFirstAskDemoIsTwoStageAndRestsOnTheAlert() async {
         let vc = makeVC(model: makeGrantableModel())
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
         #expect(vc.test_activeStep == .remoteControl)
 
-        await vc.test_tapAllow(.remoteControl)   // the prompt is spent: `.requested`
-
-        #expect(vc.test_demoMode == .settings)
+        #expect(vc.test_demoMode == .prompt)
         #expect(vc.test_demoStage == .alert)
         // The opt-out has to reach a mock nested one stage deeper than before.
         #expect(vc.test_demoAccessibilityElements.isEmpty,
                 "still reachable: \(vc.test_demoAccessibilityElements)")
     }
 
-    /// Every other step's retry really does land on the pane, so only this one
-    /// pays for the second surface.
+    /// Once the prompt is spent the retry deep-links straight to the pane, so
+    /// there is no alert left to rehearse — one surface, like everyone else's.
+    @Test func remoteControlsRetryDemoIsThePlainSettingsPane() async {
+        let vc = makeVC(model: makeGrantableModel())
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+
+        await vc.test_tapAllow(.remoteControl)   // the prompt is spent: `.requested`
+
+        #expect(vc.test_demoMode == .settings)
+        #expect(vc.test_demoStage == nil)
+    }
+
+    /// Every other step's ask really is one surface, so only Remote Control pays
+    /// for the second one.
     @Test func everyOtherRetryDemoIsASingleSurface() async {
         let vc = makeVC(model: makeModel(audio: .denied))
         await vc.test_tapAllow(.audio)
@@ -704,9 +743,9 @@ import Testing
         #expect(vc.test_demoStage == nil)
     }
 
-    /// Remote Control's two-stage retry ends where it started — resting on the
+    /// Remote Control's two-stage pass ends where it started — resting on the
     /// alert, the first of the two clicks the user still has to make.
-    @Test func theRemoteControlRetryDemoRestsOnTheAlert() {
+    @Test func theRemoteControlFirstAskDemoRestsOnTheAlert() {
         let mock = DemoSettingsHandoffMockView(step: .remoteControl)
         mock.layoutSubtreeIfNeeded()
         #expect(mock.test_stage == .alert)

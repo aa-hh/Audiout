@@ -159,7 +159,7 @@ This document describes the system. These four files *are* it, and they win over
 ### Three things a reader must know before trusting a value
 
 1. The `ios/` directory lives on the `claude/ios-staging` branch and is absent from `main`, so the iOS pointer above dangles in a `main` checkout.
-2. The two platforms have **drifted apart in light mode** — see *The Light-Mode Drift* under Colors. Dark mode is identical across both.
+2. The two platforms **ship different light grounds on purpose** — flat near-white on Mac, a stepped ladder on iOS. See *The Two Light Grounds Rule* under Colors before assuming either is wrong. Dark mode is identical across both.
 3. **Parts of the Figma file are stand-ins, not code truths.** Do not "fix" the code to match them: JetBrains Mono stands in for SF Mono (SF Mono is unavailable in Figma); SF Symbols are placeholder vectors, not the real glyphs; the dark canvas grain is not rendered at all (it exists only in `WarmCanvasView.swift`); `separator`, `underPageBackground`, `selectedContentBackground` and `tertiarySystemFill` are approximations of dynamic system colours; computed blends (the armed fader's ember-toward-gold gradient, the diagnosis panel's failure-tinted fill) are stored as dark-appearance literals because the code computes them at runtime; and the System-accent dial position is documented text rather than a variable mode, because an accent multiplier cannot be one.
 
 ## Overview
@@ -228,7 +228,15 @@ Text, dividers, selection washes and system fills are stock semantic `NSColor`s 
 
 **The Reserved-Bands Rule.** Two hue windows are reserved and no derived or identity colour may land in them: the gold/amber window `[28°, 68°)`, because a colour there misreads as "armed"; and the failure-red window `[0°, 12°) ∪ [350°, 360°)`. Runtime-derived colours (per-app tether tints) steer out of both, and the permission hues sit ≥47° apart from each other and from both bands.
 
-**The Light-Mode Drift.** *Descriptive, not prescriptive — this records a real divergence rather than endorsing it.* Mac light mode is the **Circuit theme**: the scaffolding tokens' light values are resolved hexes from `Theme · Circuit`, giving a near-white `#FBFBF9` ground. The iOS companion's light values are still the earlier **warm-paper** palette (`#F4F2EA` canvas, `#A97F1E` gold). Dark mode is byte-identical across both platforms; light mode is not. Anything shared between the two surfaces in light needs checking against both.
+**The Two Light Grounds Rule.** Dark mode is byte-identical across both platforms. Light mode is deliberately **not**, and the difference is a decision rather than drift.
+
+Mac light is the **Circuit theme**: `canvas`, `canvasHi`, `panel` and `raised` all resolve to the same near-white `#FBFBF9`, and surface separation comes entirely from hairlines. iOS light keeps a **stepped ladder** — `#F4F2EA` canvas rising to `#FFFFFF` raised in ~1.12:1 steps, about what a white cell gets from `systemGroupedBackground`. That was chosen against the flat ground on 2026-08-10 (`cb9b30a7`), because a flat light ground left "a speaker's halo, a panel and the screen behind them … one pixel value — instruments floating on nothing, while dark read as built." Moving the ground down rather than pushing surfaces up is what paper does, and what grouped tables do on that platform.
+
+**Do not flatten the iOS light ladder to match the Mac.** If the two are ever unified, the open question runs the other way: whether the Mac's flat light ground should gain elevation, not whether iOS should lose it.
+
+What *was* genuine drift on iOS — three instrument values that had gone stale or never cleared their floor — is fixed on `claude/ios-light-circuit`: `hairline` `#E7E6DF` → `#D0CDC3` (it measured 1.04:1 against `well`), `ember` `#C2A05A` → `#9C7E3C` (it cleared 3:1 against nothing — 2.06:1 on `well`), and `gold` `#A97F1E` → `#A67C1E`. Instruments are shared across platforms; grounds are not.
+
+**Open, and it needs both platforms decided at once:** `ringConnected` / `ring` `#A08C66` measures 3.08:1 against the Mac's light `panel` — passing, tight, already flagged for the accessibility sweep — but only **2.71:1** against the iOS light `well` it is actually drawn over there. One hex, two grounds, one pass and one fail. Retuning either platform alone trades one divergence for another.
 
 ## Typography
 

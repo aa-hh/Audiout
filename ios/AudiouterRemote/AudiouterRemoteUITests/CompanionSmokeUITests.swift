@@ -15,7 +15,7 @@ import XCTest
 /// Speaker"; one group "Living Room"; two app routes "Demo Music"/"Demo
 /// Browser" plus one addable "Demo Video") — the one path guaranteed to work
 /// with no Mac on the CI/simulator network, and the app's own documented way
-/// to demo itself without one (`MacListView`'s labeled "Demo system" row).
+/// to demo itself without one (`ConnectGateView`'s labeled "Demo system" row).
 ///
 /// Screenshots double as the first draft of the App Store screenshot set
 /// (`docs/companion-app-store.md`) — attached to the test report AND copied
@@ -77,18 +77,14 @@ final class CompanionSmokeUITests: XCTestCase {
     /// calls of it were the entire runtime of this test.
     ///
     /// Rows and headers carry `.isButton`; the rest of what this looks for is
-    /// plain text. Two narrow queries beat one walk of the tree.
-    /// Each query builds its own `NSPredicate`: the type is not `Sendable`, so
-    /// reusing one instance across two queries is a strict-concurrency error.
+    /// One query over every element type: the element being waited for may
+    /// not exist yet when this is called, so picking a narrower query by
+    /// probing `exists` first would lock the wait onto whichever type was
+    /// probed last — and a later `waitForExistence` can never match an
+    /// element of a different type.
     private func anyElement(containing text: String) -> XCUIElement {
-        func match(_ query: XCUIElementQuery) -> XCUIElement {
-            query.matching(NSPredicate(format: "label CONTAINS[c] %@", text)).firstMatch
-        }
-        for query in [app.buttons, app.staticTexts, app.otherElements] {
-            let element = match(query)
-            if element.exists { return element }
-        }
-        return match(app.otherElements)
+        app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS[c] %@", text)).firstMatch
     }
 
     private func attachAndSaveScreenshot(name: String, filename: String) {
@@ -111,26 +107,34 @@ final class CompanionSmokeUITests: XCTestCase {
 
     func testDemoModeSmokeAcrossAllTabs() throws {
         let tabBar = app.tabBars.firstMatch
-        let connectionTab = tabBar.buttons["Connection"]
+        let settingsTab = tabBar.buttons["Settings"]
         let speakersTab = tabBar.buttons["Speakers"]
         let appsTab = tabBar.buttons["Apps"]
         let groupsTab = tabBar.buttons["Groups"]
 
-        // 1. Lands on the Connection tab, with the "no Mac found" help
-        // (EmptyStateView's checklist — shown whether the browser is still
-        // looking or has given up, so this doesn't race NWBrowser timing).
-        XCTAssertTrue(connectionTab.waitForExistence(timeout: 5), "Connection tab should exist on launch")
-        XCTAssertTrue(connectionTab.isSelected, "App should land on the Connection tab")
+        // 1. No tab bar on launch: the full-screen Connect gate sits on the
+        // searching junction (no Mac reachable under `-uitest-isolated`), and
+        // its checklist unfolds once the search-patience timer elapses
+        // (`ConnectGateView.searchPatience`, 8 s).
         XCTAssertTrue(
-            anyElement(containing: "Open Audiouter on your Mac").waitForExistence(timeout: 10),
-            "Expected the no-Mac-found help checklist on first launch"
+            anyElement(containing: "Looking for your Mac").waitForExistence(timeout: 5),
+            "Expected the searching junction on first launch"
+        )
+        XCTAssertTrue(
+            // 20 s, not 10: the in-app patience timer is 8 s and starts at
+            // launch, so a 10 s wait left ~2 s of slack on a loaded shared
+            // test Mac — and it flaked there once.
+            anyElement(containing: "Open Audiouter on your Mac").waitForExistence(timeout: 20),
+            "Expected the no-Mac-found help checklist once the search-patience timer elapses"
         )
 
-        // 2. Tap the labelled Demo system row; assert it connects.
+        // 2. Tap the labelled Demo system row on the gate; assert the tab
+        // bar appears (the shell lands on Speakers) and it connects.
         let demoRow = app.buttons["Demo system"]
         XCTAssertTrue(demoRow.waitForExistence(timeout: 5), "Demo system row should always be visible")
         demoRow.tap()
 
+        XCTAssertTrue(tabBar.waitForExistence(timeout: 5), "Tab bar should appear once demo mode connects")
         XCTAssertTrue(anyElement(containing: "Demo Mac").waitForExistence(timeout: 5),
                       "Demo Mac's server name should appear once demo mode connects")
 
@@ -181,13 +185,13 @@ final class CompanionSmokeUITests: XCTestCase {
         XCTAssertTrue(anyElement(containing: "Living Room").waitForExistence(timeout: 5),
                       "Cancelling group creation should return to the unchanged Groups list")
 
-        // 6. Visit Connection again: assert Mac Settings / About rows and
-        // the connected Demo Mac header render.
-        connectionTab.tap()
+        // 6. Visit Settings: assert Mac Settings / About rows and the
+        // connected Demo Mac status render.
+        settingsTab.tap()
         XCTAssertTrue(anyElement(containing: "Demo Mac").waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Mac Settings"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["About"].waitForExistence(timeout: 5))
-        attachAndSaveScreenshot(name: "Connection", filename: "04-connection.png")
+        attachAndSaveScreenshot(name: "Settings", filename: "04-settings.png")
 
         // 7. No crash, and the earlier speaker toggle stuck (it's session
         // state, not view-local state that a tab switch would reset).

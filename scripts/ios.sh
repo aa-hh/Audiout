@@ -93,13 +93,14 @@ newest_iphone='xcrun simctl list devices available 2>/dev/null | awk "
 # a remote run writes into the synced tree (relative, fetchable), a local run
 # writes straight where the caller asked.
 #
-# WHICH TAB YOU GET: the Connection tab, not Speakers. `-uitest-isolated` (the
-# app's only launch argument, RootView.swift:65) skips Bonjour browsing, and
-# `RootView` starts on `.connection` and only jumps to Speakers once a session
-# goes live. Nothing reaches Speakers from outside the process: the app has no
-# URL scheme and no `onOpenURL`, tab selection is plain `@State` (not
-# `@SceneStorage`), and `simctl` has no tap subcommand. The only clean fix is a
-# launch argument in the app itself.
+# WHICH TAB YOU GET: no tab at all — the full-screen Connect gate, sitting on
+# the searching junction. `-uitest-isolated` (the app's isolation launch
+# argument, read in `AppSessionModel.init` in RootView.swift) skips Bonjour
+# browsing, and `RootView` shows `ConnectGateView` in place of the tab shell
+# until a session goes live. Nothing reaches Speakers (or any tab) from
+# outside the process: the app has no URL scheme and no `onOpenURL`, tab
+# selection is plain `@State` (not `@SceneStorage`), and `simctl` has no tap
+# subcommand. The only clean fix is a launch argument in the app itself.
 # razor: filenames stay `speakers-<mode>.png` as specified; upgrade path is a
 # tab launch argument in RootView, after which the name becomes true.
 #

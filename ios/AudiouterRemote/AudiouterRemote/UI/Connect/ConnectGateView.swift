@@ -42,9 +42,20 @@ struct ConnectGateView: View {
     var onEnterDemo: () -> Void = {}
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var typeSize
     /// Set by the searching junction's own `.task`, so it can only elapse
     /// while that junction is actually on screen.
     @State private var searchIsTakingLong = false
+
+    /// The waves stand down at accessibility text sizes: the copy alone runs
+    /// most of the screen there, and the room they want is the room it needs.
+    private var typeSizeAllowsWaves: Bool { typeSize < .accessibility1 }
+
+    /// Whether the waves are what is on screen right now — the one junction
+    /// that wants the whole viewport to lay itself out in.
+    private var isShowingSearchWaves: Bool {
+        currentJunction == .searching && !searchIsTakingLong && typeSizeAllowsWaves
+    }
 
     /// How long "Looking for your Mac…" stands alone before the checklist
     /// unfolds under it. Long enough that a normal discovery never shows a
@@ -56,12 +67,21 @@ struct ConnectGateView: View {
             WarmSignal.canvasGradient.ignoresSafeArea()
 
             VStack(spacing: 0) {
-                ScrollView {
-                    junction
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 22)
-                        .padding(.top, isFullScreen ? 44 : 28)
-                        .padding(.bottom, 24)
+                GeometryReader { viewport in
+                    ScrollView {
+                        junction
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 22)
+                            .padding(.top, isFullScreen ? 44 : 28)
+                            .padding(.bottom, 24)
+                            // The waves centre in whatever the copy leaves, so
+                            // their junction claims the viewport rather than
+                            // sizing to content and stacking tight under the
+                            // headline with the rest of the screen left bare.
+                            .frame(minHeight: isShowingSearchWaves ? viewport.size.height : nil,
+                                   alignment: .top)
+                            .animation(motionCurve, value: searchIsTakingLong)
+                    }
                 }
 
                 if isFullScreen {
@@ -71,9 +91,13 @@ struct ConnectGateView: View {
                 }
             }
         }
-        .animation(reduceMotion ? .easeInOut(duration: 0.25) : .snappy(duration: 0.35),
-                   value: currentJunction)
+        .animation(motionCurve, value: currentJunction)
         .toastOverlay(session.toasts)
+    }
+
+    /// One tempo for every change this screen makes.
+    private var motionCurve: Animation {
+        reduceMotion ? .easeInOut(duration: 0.25) : .snappy(duration: 0.35)
     }
 
     // MARK: - Which junction
@@ -235,11 +259,7 @@ struct ConnectGateView: View {
 
     private var searchingJunction: some View {
         VStack(alignment: .leading, spacing: 24) {
-            HStack(alignment: .top, spacing: 12) {
-                JunctionCopy(eyebrow: "Searching", instruction: "Looking for your Mac…")
-                SearchPulse()
-                    .padding(.top, 4)
-            }
+            JunctionCopy(eyebrow: "Searching", instruction: "Looking for your Mac…")
 
             if searchIsTakingLong {
                 // The App Store review requirement (T19): a reviewer with no
@@ -253,6 +273,14 @@ struct ConnectGateView: View {
                 .padding(18)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .glassPanel(cornerRadius: WarmSignal.Radius.panel)
+                .transition(.opacity)
+            } else if typeSizeAllowsWaves {
+                // The waves give way to the checklist rather than sitting
+                // above it: once there is something useful to say, saying it
+                // beats atmosphere.
+                SearchWaves()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .transition(.opacity)
             }
         }
         .task {
@@ -510,24 +538,91 @@ private struct MacBand: View {
     }
 }
 
-// MARK: - The search pulse
+// MARK: - The search waves
 
-/// A gold dot breathing while the browser looks. It is the screen's only
-/// motion, and it stands still under Reduce Motion rather than being replaced
-/// by something else that moves.
-private struct SearchPulse: View {
+/// The screen below "Looking for your Mac…", given to the one thing the app
+/// is doing: calling across the house. A gold core with rings leaving it on a
+/// slow even beat — Warm Signal's own signal, going out and not yet answered.
+///
+/// It claims NO progress. Nothing fills, counts, or estimates, because a
+/// Bonjour browse cannot say how much is left either; the rings say "still
+/// listening" and stop there. That is also why the far end of each ring is a
+/// fade rather than an arrival: nothing has arrived.
+///
+/// Decorative and hidden from VoiceOver — the headline above already carries
+/// the whole state in words. It holds still under Reduce Motion rather than
+/// swapping in something else that moves.
+private struct SearchWaves: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var lit = false
+    @Environment(\.colorScheme) private var scheme
+
+    /// One ring's whole journey, core to edge. Slow on purpose: the honest
+    /// mood here is patience — most of the time the Mac is simply not awake
+    /// yet, and a brisk sweep would tell the reader to expect an answer.
+    private static let period: Double = 2.8
+    /// Rings in flight at once, evenly spaced along the period.
+    private static let ringCount = 3
+    private static let coreDiameter: CGFloat = 10
+    private static let lineWidth: CGFloat = 2
+    /// The beat Reduce Motion rests on. Not 0: a ring's alpha starts there, so
+    /// phase 0 would rest one of the three invisible and pose the other two.
+    private static let stillPhase: Double = 0.22
+    /// Height ceiling, so the field stays a field and not a full screen of
+    /// circles on a tall phone. Below it the square simply takes the width,
+    /// which is what binds on a small one.
+    private static let maxHeight: CGFloat = 360
 
     var body: some View {
-        Circle()
-            .fill(WarmSignal.gold)
-            .frame(width: 9, height: 9)
-            .opacity(lit ? 1 : 0.3)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 1.1).repeatForever(autoreverses: true),
-                       value: lit)
-            .onAppear { lit = true }
-            .accessibilityHidden(true)
+        TimelineView(.animation(paused: reduceMotion)) { timeline in
+            Canvas { context, size in
+                draw(context, size: size, phase: phase(at: timeline.date))
+            }
+        }
+        .aspectRatio(1, contentMode: .fit)
+        .frame(maxWidth: .infinity, maxHeight: Self.maxHeight)
+        .accessibilityHidden(true)
+    }
+
+    private func phase(at date: Date) -> Double {
+        guard !reduceMotion else { return Self.stillPhase }
+        return (date.timeIntervalSinceReferenceDate / Self.period)
+            .truncatingRemainder(dividingBy: 1)
+    }
+
+    /// Peak ring alpha, per ground. Dark takes more: gold fading toward a
+    /// near-black canvas loses its edge much faster than the same fade toward
+    /// cream, so matched alphas leave the dark rings a stop quieter.
+    private var ringPeak: Double { scheme == .dark ? 0.72 : 0.62 }
+
+    private func draw(_ context: GraphicsContext, size: CGSize, phase: Double) {
+        let centre = CGPoint(x: size.width / 2, y: size.height / 2)
+        let coreRadius = Self.coreDiameter / 2
+        let maxRadius = min(size.width, size.height) / 2 - Self.lineWidth
+        guard maxRadius > coreRadius else { return }
+
+        for index in 0..<Self.ringCount {
+            let progress = (phase + Double(index) / Double(Self.ringCount))
+                .truncatingRemainder(dividingBy: 1)
+            // Ease-out travel: a wave spreads fastest as it leaves and slows as
+            // it widens, which is also what stops the rings bunching at the rim.
+            let radius = coreRadius + (maxRadius - coreRadius) * pow(progress, 0.72)
+            // In over the first sliver so no ring pops into being at the core;
+            // out across the whole journey so the rim is a fade, not a stop.
+            let alpha = ringPeak * min(1, progress / 0.14) * pow(1 - progress, 1.5)
+            context.stroke(
+                Path(ellipseIn: CGRect(x: centre.x - radius, y: centre.y - radius,
+                                       width: radius * 2, height: radius * 2)),
+                with: .color(WarmSignal.gold.opacity(alpha)),
+                lineWidth: Self.lineWidth)
+        }
+
+        // The core brightens as each ring leaves it, so the rings come FROM
+        // somewhere rather than simply existing.
+        let breath = 0.86 + 0.14 * cos(phase * Double(Self.ringCount) * 2 * .pi)
+        context.fill(
+            Path(ellipseIn: CGRect(x: centre.x - coreRadius, y: centre.y - coreRadius,
+                                   width: Self.coreDiameter, height: Self.coreDiameter)),
+            with: .color(WarmSignal.gold.opacity(breath)))
     }
 }
 

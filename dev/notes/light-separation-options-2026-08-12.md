@@ -173,6 +173,10 @@ read as two different materials. **The surface ladder does not disappear; it
 moves from fill to edge weight.** That is a ladder that costs nothing, works on
 a ground of any lightness, and is exactly what the flat ground has room for.
 
+*(Option 5 renders no image of its own: its only patch to the shipping sources
+is the stronger hairline, so it renders byte-identical to `01`. `01` **is** the
+recommendation's render, with `well` and the geometry at their shipping values.)*
+
 *(This needs one small change in `GroupedSectionView.draw`: the container
 stroke and the inset divider fill currently both read `Tokens.Color.hairline`.
 Two token cases, or one plus a derived lighter companion. Not prototyped as a
@@ -444,7 +448,7 @@ owner and it is the one place I would not act without seeing it on a phone.
 
 | | |
 |---|---|
-| Renders | `dev/notes/light-separation-options/*.png` — 6 options × 2 screens, light |
+| Renders | `dev/notes/light-separation-options/*.png` — 5 options × 2 screens (Edit Group, Device Detail), light, cropped to the content pane |
 | Measurement tool | `dev/notes/light-separation-options/measure.py` (throwaway) |
 | Render driver | `dev/notes/light-separation-options/render.py` (throwaway) |
 | Branch | `claude/light-separation-options` — pushed, **not merged** |

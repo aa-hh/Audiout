@@ -1971,17 +1971,39 @@ import Testing
         }
     }
 
-    /// Nothing inside a mock is saturated blue or gold any more: blue pulled the
-    /// eye off the one gold thing on screen, which is the CTA.
-    @Test func theMocksAreDesaturated() {
+    /// The mocks are stylised, but a SYSTEM DIALOG is mimicked truthfully: its
+    /// icon symbol, its colours, its shape and its button words are what macOS
+    /// really shows, and only the COPY is abstracted to grey bars (owner,
+    /// 2026-08-13, reversing the 2026-08-12 pass that drained these to slate —
+    /// a dusty-rose record mark and a grey-blue Bluetooth tile stopped reading
+    /// as the thing they are mimicking).
+    ///
+    /// The Settings-window chrome is deliberately NOT included in that reversal:
+    /// the owner named that surface as the one that got the balance right, so
+    /// its switch and selected row keep the muted slate.
+    @Test func systemDialogColoursAreTrueAndSettingsChromeStaysMuted() {
         for appearance in [NSAppearance(named: .aqua)!, NSAppearance(named: .darkAqua)!] {
             appearance.performAsCurrentDrawingAppearance {
-                let accent = DemoSystemColor.accent.usingColorSpace(.sRGB)!
-                #expect(accent.saturationComponent < 0.35,
-                        "the mock accent is saturated: \(accent.saturationComponent)")
-                let systemBlue = NSColor.systemBlue.usingColorSpace(.sRGB)!
-                #expect(accent.saturationComponent < systemBlue.saturationComponent)
+                // The privacy dialog mimics macOS: real blue badge and tiles,
+                // real red record mark. Asserted as full saturation rather than
+                // as an exact hex so the system colours stay free to shift with
+                // the OS — what is pinned is "true to life", not a value.
+                let blue = DemoSystemColor.systemBlue.usingColorSpace(.sRGB)!
+                #expect(blue.saturationComponent > 0.5,
+                        "the privacy badge/tile went muted again: \(blue.saturationComponent)")
+                let record = DemoSystemColor.recordTile.usingColorSpace(.sRGB)!
+                #expect(record.saturationComponent > 0.5,
+                        "the record tile went muted again: \(record.saturationComponent)")
 
+                // The Settings mock's own chrome stays where it was.
+                let settings = DemoSystemColor.settingsAccent.usingColorSpace(.sRGB)!
+                #expect(settings.saturationComponent < 0.35,
+                        "the settings switch drifted saturated: \(settings.saturationComponent)")
+                #expect(settings.saturationComponent < blue.saturationComponent,
+                        "the settings chrome must stay quieter than a real system colour")
+
+                // Unchanged by the reversal: gold is spent on the CTA alone, so
+                // the padlock stays a warm grey rather than the real icon's gold.
                 let lock = DemoSystemColor.lockTop.usingColorSpace(.sRGB)!
                 #expect(lock.saturationComponent < 0.15,
                         "the padlock is still gold: \(lock.saturationComponent)")

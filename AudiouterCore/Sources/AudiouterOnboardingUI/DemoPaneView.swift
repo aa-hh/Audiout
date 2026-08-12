@@ -665,19 +665,29 @@ enum DemoSystemColor {
     static let trafficYellow = solid(0xFEBC2E)
     static let trafficGreen = solid(0x28C840)
 
-    /// The mock's accent — a DESATURATED slate, not `systemBlue`, and never
+    /// The privacy/system-dialog accent — TRUE `NSColor.systemBlue`, not
     /// `controlAccentColor` (which follows the user's Appearance setting, so on
-    /// a Mac set to pink this "system" surface would come out pink). The
-    /// rehearsal is an abstraction of the real dialog, not a copy of it, and a
-    /// saturated blue inside it pulled the eye off the gold button the step
-    /// actually wants pressed (owner decision 2026-08-12). It still carries the
-    /// blue FAMILY, so the badge and the switch stay recognisable as what they
-    /// are.
-    static let accent = dynamic(light: 0x8A97A6, dark: 0x6C7684)
+    /// a Mac set to pink this "system" surface would come out pink; `systemBlue`
+    /// is fixed regardless of the user's accent). Owner decision 2026-08-13,
+    /// reversing an 2026-08-12 desaturation: the icon symbols, colours, shape and
+    /// CTA words of a real macOS surface are the four things this rehearsal must
+    /// get right, so the privacy hand badge and the Local Network / Bluetooth /
+    /// Accessibility system tiles read at the same saturation macOS actually
+    /// draws them at. Everything else in the mock (title, body, gist copy) stays
+    /// abstract — the desaturation was masking the wrong thing.
+    static let systemBlue = NSColor.systemBlue
 
-    /// The recording mark's tile, desaturated with the rest of the mock for the
-    /// same reason.
-    static let recordTile = dynamic(light: 0xB08A88, dark: 0x8C6664)
+    /// The Settings mock's switch track and the sidebar's selected-row pill —
+    /// kept at the DESATURATED slate from the 2026-08-12 pass. The owner named
+    /// the Settings mock the reference for "just right" when reversing the
+    /// privacy-dialog desaturation (2026-08-13), so this surface is explicitly
+    /// OUT of scope for that reversal and keeps its muted value.
+    static let settingsAccent = dynamic(light: 0x8A97A6, dark: 0x6C7684)
+
+    /// The recording mark's tile — TRUE `NSColor.systemRed`. Owner decision
+    /// 2026-08-13, reversing the 2026-08-12 desaturation: macOS leads the
+    /// system-audio ask with a vivid red record mark, not a dusty rose.
+    static let recordTile = NSColor.systemRed
 
     private static func dynamic(light: Int, dark: Int) -> NSColor {
         NSColor(name: nil) { appearance in
@@ -802,10 +812,12 @@ func demoIconAsAThirdPartyProcessSeesIt() -> NSImage {
 /// 5. two EQUAL capsules filling the width, carrying their REAL labels — the
 ///    confirming one MARKED (brighter fill, thin ring), "Don't Allow" ghosted.
 ///
-/// The copy is abstracted and the colour is desaturated (owner decision
-/// 2026-08-12) — see ``demoGistBlock(widths:height:spacing:fill:)`` and
-/// ``DemoSystemColor/accent`` for why. What that buys is the CARD: with the two
-/// paragraphs gone it fits the preview frame's real 278 pt at 240 tall, where
+/// The copy is abstracted but the colour is TRUE (owner decision 2026-08-13,
+/// reversing the 2026-08-12 desaturation) — see
+/// ``demoGistBlock(widths:height:spacing:fill:)`` for the copy and
+/// ``DemoSystemColor/systemBlue`` for the colour. What the copy abstraction
+/// buys is the CARD: with the two paragraphs gone it fits the preview frame's
+/// real 278 pt at 240 tall, where
 /// the near-life-size drawing was being cropped by ~50 pt at the bottom — the
 /// buttons the rehearsal exists to point at were the part going off the edge.
 final class DemoPromptMockView: DemoMockView {
@@ -843,7 +855,7 @@ final class DemoPromptMockView: DemoMockView {
         // The privacy marker: a blue hand badge overlapping the icon's
         // bottom-trailing corner. It is what distinguishes this dialog from any
         // other alert at a glance, so it is drawn before anything else is.
-        let badge = DemoDotView(diameter: Self.badgeSide, fill: DemoSystemColor.accent)
+        let badge = DemoDotView(diameter: Self.badgeSide, fill: DemoSystemColor.systemBlue)
         let badgeGlyph = demoGlyph("hand.raised.fill", pointSize: 9,
                                    weight: .semibold, color: .white)
 
@@ -1021,7 +1033,7 @@ final class DemoPromptMockView: DemoMockView {
     /// `glyph` is a builder rather than a plain view so a caller can hand it a
     /// plain SF Symbol OR a hand-drawn one (Bluetooth's rune has no symbol to
     /// name).
-    private static func systemTile(fill: NSColor = DemoSystemColor.accent,
+    private static func systemTile(fill: NSColor = DemoSystemColor.systemBlue,
                                    glyph: () -> NSView) -> NSView {
         let tile = DemoPillView(radius: iconSide * 0.23, fill: fill)
         let mark = glyph()
@@ -1309,7 +1321,7 @@ final class DemoSystemAlertMockView: NSView {
     /// alert, so no other step earns a marker.
     private static func badge(for step: SetupStep) -> (circle: NSView, glyph: NSView)? {
         guard step == .remoteControl else { return nil }
-        return (DemoDotView(diameter: badgeSide, fill: DemoSystemColor.accent),
+        return (DemoDotView(diameter: badgeSide, fill: DemoSystemColor.systemBlue),
                 demoGlyph("accessibility", pointSize: 9, weight: .semibold, color: .white))
     }
 }
@@ -1760,10 +1772,11 @@ final class DemoSettledMockView: NSView {
     private static let ringTravelDuration: TimeInterval = 1.05
     /// Uniform tempo for the whole finale. Every beat's delay AND duration is
     /// multiplied by this in ``addCelebrationAnimation``, so the choreography
-    /// stays in proportion: 1.0 is the authored speed, 1.25 plays it 25% slower
-    /// (owner, live-tuned). razor: the single tempo knob — retune here, never
-    /// per-beat, or the stagger and the travel drift out of sync.
-    private static let celebrationTimeScale: TimeInterval = 1.25
+    /// stays in proportion: 1.0 is the authored speed, higher is slower
+    /// (owner, live-tuned to 1.5625 — a calm, unhurried celebration). razor:
+    /// the single tempo knob — retune here, never per-beat, or the stagger and
+    /// the travel drift out of sync.
+    private static let celebrationTimeScale: TimeInterval = 1.5625
     private static let auraDiameter: CGFloat = 184
 
     private let icon = NSImageView()
@@ -2385,7 +2398,7 @@ final class DemoLockIconView: NSView {
 /// a vertical stem crossed by two diagonal "flags" that meet the stem at its
 /// top, middle and bottom. Verified against the real macOS Bluetooth
 /// permission dialog (owner screenshot, 2026-08-11), which is also what
-/// confirmed the tile itself is the plain system-blue `DemoSystemColor.accent`
+/// confirmed the tile itself is the plain system-blue `DemoSystemColor.systemBlue`
 /// this view is drawn on top of, not a separate measured hue.
 final class DemoBluetoothGlyphView: NSView {
 
@@ -2524,7 +2537,7 @@ final class DemoSidebarRowView: NSView {
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
 
-        let pill = DemoPillView(radius: 5, fill: isSelected ? DemoSystemColor.accent : .clear)
+        let pill = DemoPillView(radius: 5, fill: isSelected ? DemoSystemColor.settingsAccent : .clear)
         let tile = DemoPillView(radius: 3, fill: isSelected ? .white : tint)
         // A selected row's label goes white, like its text would.
         let label = DemoGreekBarView(width: labelWidth, fill: isSelected ? .white : .tertiaryLabelColor)
@@ -2618,7 +2631,7 @@ final class DemoSwitchView: NSView {
     /// A staged host (Remote Control's handoff) shifts this score through its
     /// ``DemoMockView/stageWindow``, so there is nothing per-stage in here.
     func addTimeline(on host: DemoMockView) {
-        let off = Self.offTrackColor.cgColor, on = DemoSystemColor.accent.cgColor
+        let off = Self.offTrackColor.cgColor, on = DemoSystemColor.settingsAccent.cgColor
         layer?.add(host.keyframes("backgroundColor", host.held([
             (0, off), (DemoBeat.pressEnd, off),
             (DemoBeat.changeEnd, on), (DemoBeat.holdEnd, on),
@@ -2653,7 +2666,7 @@ final class DemoSwitchView: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        layer?.backgroundColor = (isOn ? DemoSystemColor.accent : Self.offTrackColor).cgColor
+        layer?.backgroundColor = (isOn ? DemoSystemColor.settingsAccent : Self.offTrackColor).cgColor
         // No hairline border: the real one is dropped below a ~13 pt track.
         layer?.cornerRadius = bounds.height / 2
         // The knob is white in BOTH appearances.

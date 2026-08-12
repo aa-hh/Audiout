@@ -582,7 +582,7 @@ gate/motion/demo/selection rules change.
       the real Local Network dialog draws the Network pane's blue rounded square
       with a white wireframe globe, not Audiouter's icon. So
       `DemoPromptMockView.iconView(for:)` returns a `systemTile`
-      (`DemoSystemColor.accent` fill, side × 0.23 continuous corner, white glyph
+      (`DemoSystemColor.systemBlue` fill, side × 0.23 continuous corner, white glyph
       at side × 0.55) for `.localNetwork` (`network`) and `.bluetooth`, and a RED
       one carrying `record.circle` for `.audio`. `.remoteControl` and
       `.speakerSync` never reach this path in practice and keep the app icon as
@@ -858,7 +858,7 @@ gate/motion/demo/selection rules change.
       presses at 1.90 s and its cursor is fully faded by 2.08 s). A longer
       splash gets clipped by the cursor fade it rides inside.
     - **Colour judgment call:** neutral `labelColor` ink — NOT `Tokens` gold and
-      not `DemoSystemColor.accent`. The splash is arguably cursor chrome rather
+      not `DemoSystemColor.systemBlue`. The splash is arguably cursor chrome rather
       than mock content, but it plays ON surfaces that must read as macOS, and a
       gold burst would claim macOS draws Audiouter-coloured feedback; the ripple
       FORM carries the product note instead. `labelColor` also guarantees

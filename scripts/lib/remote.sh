@@ -108,6 +108,23 @@ remote_sync() {
           "$_root/" "$remote_host:$_esc/" >/dev/null 2>&1
 }
 
+# Kill remote runs whose local caller is gone. A caller killed mid-run (crashed
+# session, cancelled agent) used to leave its remote command alive: without a
+# tty, sshd sends the remote side nothing when the connection dies, so the
+# orphan kept the package build lock and every later run queued behind it at 0%
+# CPU — observed twice, 40+ minutes each. The `-tt` on remote_run's ssh is the
+# real fix (connection death now hangs up the remote); this sweep catches runs
+# started before that fix, and the sleep/crash case where the socket never
+# closes. Orphan = parented to PID 1 AND working under $remote_root — never a
+# run whose ssh leg is still alive, so concurrent live sessions are untouched.
+remote_sweep_orphans() {
+    ssh -o BatchMode=yes "$remote_host" \
+        "ps -axo pid=,ppid=,pgid=,command= | \
+         awk -v root=\"$remote_root\" '\$2 == 1 && index(\$0, root) { print \$3 }' | \
+         sort -u | while read -r _g; do kill -TERM -- \"-\$_g\" 2>/dev/null; done" \
+        2>/dev/null || true
+}
+
 # Run a command in the synced tree on the remote.
 #   remote_run <repo_root> <shell command string>
 # Sets $remote_status to the command's own exit code when it ACTUALLY RAN.
@@ -135,6 +152,7 @@ remote_run() {
         echo "  remote: rsync failed — staying local." >&2
         return 1
     fi
+    remote_sweep_orphans
     # PATH is set explicitly: a non-interactive ssh shell often lacks
     # /opt/homebrew/bin, and Package.swift shells out to `brew --prefix` to find
     # the keg-only C dependencies.
@@ -142,12 +160,21 @@ remote_run() {
     # (directory missing, no swift) as opposed to "the work failed". Without it,
     # a broken remote reports as a failure of the caller's code — exactly the
     # confusion this function exists to prevent.
-    _out=$(ssh -o BatchMode=yes "$remote_host" \
+    # -tt ties the remote command's life to this connection: with a tty, sshd
+    # HUPs the remote process group the moment the local side dies — even
+    # SIGKILL, since the kernel still closes the socket. Without it an
+    # interrupted caller strands its run on the remote, where it holds the
+    # package build lock (see remote_sweep_orphans). The tty's price is CRLF
+    # line endings, stripped right below before anything parses $_out.
+    _out=$(ssh -tt -o BatchMode=yes -o LogLevel=QUIET \
+        -o ServerAliveInterval=15 -o ServerAliveCountMax=4 \
+        "$remote_host" \
         "export PATH=/opt/homebrew/bin:\$PATH; \
          cd \"$_rdir\" || exit 97; \
          command -v swift >/dev/null 2>&1 || exit 97; \
          $* ; echo \"REMOTE_EXIT:\$?\"" 2>&1)
     _rc=$?
+    _out=$(printf '%s' "$_out" | tr -d '\r')
     # `|| true` on both greps: a grep that matches nothing exits 1, and callers
     # run with `set -e` (make-app.sh adds `pipefail`), so a remote command whose
     # only output was the marker line would kill the CALLER outright instead of

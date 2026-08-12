@@ -331,6 +331,23 @@ gate/motion/demo/selection rules change.
     `returnToFront()`, both of which follow a genuine resign) restores float.
     `test_appDidResignActive()` is the seam; true cross-app z-order is not
     observable headless, so this pair of hooks is what tests can pin.
+  - **AMENDMENT — the app goes QUIET while a prompt is unanswered.** A macOS
+    permission dialog loses input focus to any process that grabs it, and comes
+    back frozen and unclickable; this window had three ways to grab it. So for
+    the length of an ask (`OnboardingViewController.isPromptInFlight` — the
+    Allow in flight, plus `SetupModel.isPrimingBluetooth`, whose prompt outlives
+    the click) the level drops BEFORE the prompt is triggered, the reactivate
+    hook re-floats and takes key for nobody, `OnboardingWindow`'s
+    force-activate-on-click is suppressed (the click is still DELIVERED — only
+    the activation is skipped), and a re-front a grant would earn is OWED, then
+    paid exactly ONCE on resolve. Resolve = granted, denied, or timed out.
+  - **Escape hatch for a frozen dialog.** After
+    `OnboardingViewController.stuckPromptDelay` unanswered, the card adds the
+    existing hint line + demoted "Open Settings…" (`stuckPromptSteps` — the
+    three that raise a dialog of ours). It is UI ONLY: nothing re-asks, and it
+    routes through the one deep-link table,
+    `SetupFlowModel.settingsDestination(for:)`, which the denied-path Allow
+    shares. `test_fireStuckPromptTimer()` is the seam (20 s is not waitable).
 - **The window is `OnboardingWindow`, the click witness** (live symptom: the
   first "Start listening" click left NO telemetry at all — not even the
   single-flight swallow — so the failure sat somewhere no view-level fix or

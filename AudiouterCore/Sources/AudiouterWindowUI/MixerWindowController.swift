@@ -107,11 +107,23 @@ public final class MixerWindowController {
         // Sidebar item — the documented `.sidebar(withViewController:)`
         // constructor applies source-list material/vibrancy + collapse behavior.
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarViewController)
-        sidebarItem.minimumThickness = 200
-        // Capped so the sidebar can't eat a narrower window's content pane —
-        // it holds one column of short names, and every point past this is
-        // taken from the pane that actually has a form in it.
-        sidebarItem.maximumThickness = 260
+        // PINNED at 210 — minimum AND maximum, deliberately (2026-08-12).
+        // The sidebar's own fitting width is ≥260, and the split view hands
+        // an item its fitting width clamped to `maximumThickness`, so the old
+        // 260 ceiling WAS the sidebar's width; worse, the whole screen's
+        // width is the split's fitting width (sidebar + form column + margins)
+        // and AppKit widens the Groups window up to it, overriding the size
+        // the surface asks for. Those 60 pt of source-list padding were
+        // therefore charged to the window, not to the sidebar: Groups mounted
+        // 707 pt wide against the Mixer's 623, so switching screens jumped.
+        // Pinning it spends them on the form instead and lets
+        // `AppSurfaceController.groupsDefaultContentSize`'s 623 hold. 210, not
+        // the old 200 floor: 200 truncated "MacBook Pro Speakers", the longest
+        // name every Mac has. The cost is a divider the user can no longer
+        // drag; a longer name still truncates, which is what a source list
+        // does anyway.
+        sidebarItem.minimumThickness = 210
+        sidebarItem.maximumThickness = 210
         // NOT collapsible: a collapse here is a ONE-WAY DOOR. The sidebar is
         // the only way to change selection, and nothing can bring it back —
         // the surface has no toolbar sidebar toggle and no View menu, and this
@@ -151,6 +163,22 @@ public final class MixerWindowController {
         // exactly those speakers.
         sidebarViewController.onNewGroupFromSelection = { [weak self] deviceIDs in
             self?.presentCreateSheet(preselected: deviceIDs)
+        }
+        // Context-menu "Rename…" / double-click on a group row: open its
+        // editor and drop focus straight into the rename field.
+        sidebarViewController.onRequestRename = { [weak self] groupID in
+            guard let self else { return }
+            self.sidebarViewController.select(.group(id: groupID), notify: false)
+            self.showEditor(for: groupID)
+            self.editorViewController.focusRenameField()
+        }
+        // Context-menu "Delete Group…": open the group's editor and run the
+        // same confirm-then-delete flow its button does.
+        sidebarViewController.onRequestDelete = { [weak self] groupID in
+            guard let self else { return }
+            self.sidebarViewController.select(.group(id: groupID), notify: false)
+            self.showEditor(for: groupID)
+            self.editorViewController.requestDelete()
         }
         // The empty pane's call-to-action runs the same creation sheet.
         emptyStateViewController.onNewGroup = { [weak self] in
@@ -300,8 +328,9 @@ public final class MixerWindowController {
     private func presentCreateSheet(preselected: [String]) {
         let sheet = GroupCreationSheetController(groupController: groupController,
                                                 deviceIconController: deviceIconController)
-        sheet.configure(defaultName: "Group \(groupController.groups.count + 1)",
-                        devices: orderedDevices(),
+        let devices = orderedDevices()
+        sheet.configure(defaultName: suggestedGroupName(preselected: preselected, devices: devices),
+                        devices: devices,
                         preselected: Set(preselected))
         sheet.onComplete = { [weak self] result in
             guard let self else { return }
@@ -320,6 +349,21 @@ public final class MixerWindowController {
         // hooks instead.
         if let host = splitViewController.view.window, host.isVisible {
             splitViewController.presentAsSheet(sheet)
+        }
+    }
+
+    /// The name the create sheet prefills. A selection-seeded sheet names the
+    /// group after what's in it ("Office + Sonos Move") instead of the
+    /// meaningless "Group N" — the field is auto-focused with the text
+    /// selected either way, so keeping the suggestion is one glance and
+    /// replacing it is zero extra work.
+    private func suggestedGroupName(preselected: [String], devices: [Device]) -> String {
+        let names = preselected.compactMap { id in devices.first(where: { $0.id == id })?.name }
+        switch names.count {
+        case 0:  return "Group \(groupController.groups.count + 1)"
+        case 1:  return names[0]
+        case 2:  return "\(names[0]) + \(names[1])"
+        default: return "\(names[0]) + \(names.count - 1) more"
         }
     }
 
@@ -493,7 +537,7 @@ final class ContentPaneHostViewController: NSViewController {
     /// (`GroupsEmptyStateViewController.subtitleLabel`): the footer is the one
     /// full teaching line; the empty-state subtitle is a shorter contextual
     /// nudge shown only when there's nothing else on screen.
-    private let footerLabel = NSTextField(labelWithString: "Set up here — play from the menu-bar icon")
+    private let footerLabel = NSTextField(labelWithString: "Set up groups here — switch to the Mixer to play")
 
     /// The container the swapped child view fills; sits above the footer.
     private let contentContainer = NSView()
@@ -586,6 +630,12 @@ final class ContentPaneHostViewController: NSViewController {
             childView.bottomAnchor.constraint(equalTo: contentContainer.bottomAnchor),
         ])
         currentChild = child
+        // Re-seed Tab traversal after the swap (closes the KNOWN GAP the
+        // A11Y-GROUPS seed left): re-parenting the content pane invalidates
+        // the window's automatic key-view loop, and recalculation is reactive
+        // — without this nudge Tab could die right after a sidebar selection
+        // change. No-op headless (no window).
+        view.window?.recalculateKeyViewLoop()
     }
 
     /// The persistent footer caption's text (structural test hook).
@@ -605,10 +655,23 @@ public final class GroupsEmptyStateViewController: NSViewController {
     /// Fired when the call-to-action button is clicked.
     var onNewGroup: (() -> Void)?
 
-    private let messageLabel = NSTextField(labelWithString: "No groups yet.")
-    private let subtitleLabel = NSTextField(labelWithString:
+    // Deliberately NOT "No groups yet" — the sidebar's own placeholder row
+    // (a different file/owner) already says that right above this pane, so
+    // repeating it here read as the same message twice on one screen. This
+    // headline instead states the feature promise the subtitle explains.
+    private let messageLabel = NSTextField(labelWithString: "Group your speakers")
+    /// A PARAGRAPH, not a width driver. On one line this sentence measures
+    /// ~480 pt, which made it the widest required thing on the whole Groups
+    /// screen — AppKit widened the window to fit it, so the empty screen
+    /// mounted ~85 pt wider than every other one (probed 2026-08-12). It wraps
+    /// inside the form column's own measure instead (see `loadView`).
+    private let subtitleLabel = NSTextField(wrappingLabelWithString:
         "Save a set of speakers as a group, then switch to it in two clicks from the menu bar.")
     private let newGroupButton = NSButton()
+
+    /// The measure this pane's copy wraps to: the form column the editor and
+    /// detail panes use, less this pane's own 16pt margins.
+    private static let emptyPaneTextWidth: CGFloat = GroupsPaneLayout.contentMaxWidth - 32
 
     public override func loadView() {
         messageLabel.font = Tokens.Font.titleLarge
@@ -618,6 +681,12 @@ public final class GroupsEmptyStateViewController: NSViewController {
         subtitleLabel.font = Tokens.Font.subtitleLarge
         subtitleLabel.textColor = Tokens.Color.tertiaryLabel
         subtitleLabel.alignment = .center
+        subtitleLabel.isSelectable = false
+        // Wraps within the form column's measure, minus this pane's own 16pt
+        // margins — so the empty screen is exactly as wide as every other
+        // Groups screen instead of setting the window's width by itself.
+        subtitleLabel.preferredMaxLayoutWidth = Self.emptyPaneTextWidth
+        subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         newGroupButton.title = "New Group…"
         newGroupButton.bezelStyle = .rounded
@@ -639,6 +708,7 @@ public final class GroupsEmptyStateViewController: NSViewController {
             stack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             stack.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 16),
             stack.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16),
+            subtitleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: Self.emptyPaneTextWidth),
         ])
 
         view = container

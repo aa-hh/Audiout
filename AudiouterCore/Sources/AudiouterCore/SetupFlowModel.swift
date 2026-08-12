@@ -191,6 +191,20 @@ public final class SetupFlowModel {
     /// the card shut for the rest of the presentation.
     private var didPrimeBluetooth = false
 
+    /// Where a step's Settings deep link goes. ONE table, shared by the
+    /// denied-path Allow below and the UI's stuck-dialog escape hatch — a
+    /// second copy is how the two would drift onto different panes.
+    public static func settingsDestination(for step: SetupStep) -> SetupAllowDestination {
+        switch step {
+        case .audio: return .settingsPane(.screenAndSystemAudioRecording)
+        case .localNetwork: return .settingsPane(.localNetwork)
+        case .bluetooth: return .settingsPane(.bluetoothPrivacy)
+        // Not a privacy pane at all — approval only exists in Login Items.
+        case .speakerSync: return .loginItems
+        case .remoteControl: return .settingsPane(.accessibility)
+        }
+    }
+
     /// Run one Allow click for `step` and report what it did.
     ///
     /// Three rules hold for every step (Wispr's habits, brief §"Window layering
@@ -226,8 +240,7 @@ public final class SetupFlowModel {
             // A confirmed denial is the one audio state a re-probe can't fix
             // (and re-probing replays the audible tone for nothing).
             if setup.audioStatus == .denied {
-                return SetupAllowResult(.settingsFallbackDenied,
-                                        .settingsPane(.screenAndSystemAudioRecording))
+                return SetupAllowResult(.settingsFallbackDenied, Self.settingsDestination(for: step))
             }
             await setup.requestAudioCapture()
             return SetupAllowResult(setup.audioStatus == .granted ? .promptTriggered : .probeTimeout)
@@ -237,7 +250,7 @@ public final class SetupFlowModel {
             // the prompt exactly like a denied TCC grant — so this preflight is
             // as real as Bluetooth's.
             if setup.localNetworkStatus == .denied {
-                return SetupAllowResult(.settingsFallbackDenied, .settingsPane(.localNetwork))
+                return SetupAllowResult(.settingsFallbackDenied, Self.settingsDestination(for: step))
             }
             // Short of a proven refusal there is no two-mode flip: this card's
             // "prompt" IS the browse, so a browse that found nothing must be
@@ -251,7 +264,7 @@ public final class SetupFlowModel {
             // The one permission with an honest three-valued read, so the
             // preflight here is real: denied means the prompt is spent.
             if setup.bluetoothStatus == .denied {
-                return SetupAllowResult(.settingsFallbackDenied, .settingsPane(.bluetoothPrivacy))
+                return SetupAllowResult(.settingsFallbackDenied, Self.settingsDestination(for: step))
             }
             // In flight means "asked, and the answer hasn't landed" — held by
             // the model, which also un-holds it if the prompt never decides, so
@@ -265,7 +278,7 @@ public final class SetupFlowModel {
         case .speakerSync:
             // Not a TCC permission at all: registration already happened at
             // load, and approval only exists in Login Items.
-            return SetupAllowResult(.settingsOpened, .loginItems)
+            return SetupAllowResult(.settingsOpened, Self.settingsDestination(for: step))
 
         case .remoteControl:
             // The FIRST fire has to be the prompt, because prompting is what
@@ -278,7 +291,7 @@ public final class SetupFlowModel {
             // the alert was believed to highlight us in that list, which no live
             // run has ever shown it doing — see this app's onboarding AGENTS.md.
             if setup.remoteControlStatus == .requested {
-                return SetupAllowResult(.settingsFallbackDenied, .settingsPane(.accessibility))
+                return SetupAllowResult(.settingsFallbackDenied, Self.settingsDestination(for: step))
             }
             setup.primeRemoteControl()
             return SetupAllowResult(setup.remoteControlStatus == .granted ? .promptTriggered : .probeTimeout)

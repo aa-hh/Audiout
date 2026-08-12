@@ -66,8 +66,9 @@ public final class AppearanceSettingsViewController: NSViewController {
         tileRow.spacing = 12
         tileRow.translatesAutoresizingMaskIntoConstraints = false
 
-        let heading = SettingsForm.label("Theme")
-        heading.font = Tokens.Font.body
+        // Section-header voice (roadmap 050 typeset pass): the same role must
+        // read the same in every pane — Audio's headers already use it.
+        let heading = SettingsForm.sectionHeader("Theme")
         let subtitle = SettingsForm.label("Follow the system, or force light or dark.")
         subtitle.font = Tokens.Font.caption
         subtitle.textColor = Tokens.Color.secondaryLabel
@@ -91,8 +92,8 @@ public final class AppearanceSettingsViewController: NSViewController {
         hairline.boxType = .separator
         hairline.translatesAutoresizingMaskIntoConstraints = false
 
-        let heading = SettingsForm.label("Accent")
-        heading.font = Tokens.Font.body
+        // Same section-header voice as Theme and the Audio pane's headers.
+        let heading = SettingsForm.sectionHeader("Accent")
 
         let subtitle = SettingsForm.label("How strongly meters, dots, and rings use the brand gold.")
         subtitle.font = Tokens.Font.caption
@@ -333,16 +334,16 @@ final class ThemeTileButton: NSButton {
 
         /// Circuit light (the 2026-08-07 light-theme decision — `canvas` is
         /// Circuit `bg/normal`, `well` the deepened Circuit `bg/highlight`,
-        /// `ember` the darkened light instrument; `gold` keeps spec §1.2's
-        /// deepened paper-gold).
+        /// `ember` and `gold` the light instruments darkened until each clears
+        /// 3:1 on the `well` they are drawn over, 2026-08-12).
         static let light = WarmPreviewPalette(
             chrome: Mock.lightChrome, stroke: Mock.lightStroke,
             canvas: NSColor(srgbRed: 0xFB / 255, green: 0xFB / 255, blue: 0xF9 / 255, alpha: 1),
             well: NSColor(srgbRed: 0xE2 / 255, green: 0xDF / 255, blue: 0xD3 / 255, alpha: 1),
             name: NSColor(srgbRed: 0x2B / 255, green: 0x25 / 255, blue: 0x19 / 255, alpha: 1),
             nameDim: NSColor(srgbRed: 0x9A / 255, green: 0x8F / 255, blue: 0x7D / 255, alpha: 1),
-            gold: NSColor(srgbRed: 0xA9 / 255, green: 0x7F / 255, blue: 0x1E / 255, alpha: 1),
-            ember: NSColor(srgbRed: 0xAC / 255, green: 0x8C / 255, blue: 0x46 / 255, alpha: 1))
+            gold: NSColor(srgbRed: 0xA6 / 255, green: 0x7C / 255, blue: 0x1E / 255, alpha: 1),
+            ember: NSColor(srgbRed: 0x9C / 255, green: 0x7E / 255, blue: 0x3C / 255, alpha: 1))
     }
 
     override func draw(_ dirtyRect: NSRect) {

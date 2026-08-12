@@ -81,6 +81,11 @@ public final class DeviceRowView: NSView {
         /// also where the align-by-ear toggle moved (D9). Default no-op for
         /// hosts without the SYNC column.
         func deviceRow(_ row: DeviceRowView, didToggleSyncDrawerFor id: String)
+        /// The user clicked the transient "Removed — Undo" affordance after
+        /// taking a live room out of Main Audio. The host puts the membership
+        /// back through the SAME path a checkbox re-check takes. Default no-op
+        /// for hosts that never offer the undo.
+        func deviceRowDidRequestUndoRemoval(_ row: DeviceRowView)
     }
 
     /// Control-Center row density: comfortable height that seats a mini switch,
@@ -160,13 +165,6 @@ public final class DeviceRowView: NSView {
     /// member … showsToggle=false rows carry no membership control"), so the bus
     /// never claims a membership the row can't toggle.
     private var busActive: Bool { showsBus && showsToggle }
-    /// This row's rail extent (Warm Signal v4 §Call-1) — set by the host via
-    /// ``setBusRail(above:below:)`` so the rail runs Main Audio → the LOWEST
-    /// SELECTED node and rows below it render BARE (no rail). Structural, not
-    /// per-device, so it survives an in-place `apply` repaint. Defaults to a
-    /// full through-rail; the host narrows it per its position in the spine.
-    private var busRailAbove = true
-    private var busRailBelow = true
     /// The current dormant-divergent tint state of the bus node (spec §4.7) —
     /// mirrors `selectionDimmed` for a bus row, where dimming is a node TINT, not
     /// the checkbox alpha (§4.7 "dim via tint … checkbox at full alpha").
@@ -220,6 +218,19 @@ public final class DeviceRowView: NSView {
     /// its real checkbox there and never mounts this stack. See
     /// ``updateFeedText()``.
     private let feedStack = NSStackView()
+    /// The transient **"Removed — Undo"** affordance shown after the user takes
+    /// a LIVE room out of Main Audio (the highest-stakes click in the app: it
+    /// silences a playing room instantly). The host decides when it is offered
+    /// and owns its lifetime — the row only renders what it is handed. It sits
+    /// in the reserved TRAILING slot, which is empty in exactly this state (a
+    /// just-removed device feeds nothing, so `feedStack` has nothing to show),
+    /// so the offer costs no column reflow and the name never re-truncates.
+    private let removalUndoStack = NSStackView()
+    private let removalUndoLabel = NSTextField(labelWithString: "Removed —")
+    private let removalUndoButton = NSButton()
+    /// Whether the host is currently offering the undo (mirrors the stack's
+    /// visibility; read by the test hook and the FEED/SYNC suppression above).
+    private var removalUndoOffered = false
     /// The FEED column's main-mix segment text, or `nil` when this row is not
     /// currently a member of the ACTIVE main-mix target (a redirect-only row
     /// can still show app segments alone). "System" for a manual Selected-
@@ -255,7 +266,7 @@ public final class DeviceRowView: NSView {
     /// DRAWING-ONLY flag the host raises on the members of a Main-Audio source
     /// switch that haven't started connecting yet (`connectionState == .off`),
     /// so at the switch instant the rail drops to ember PENDING and those nodes
-    /// render hollow-dashed (`MembershipBusView.Node.pending`) BEFORE the
+    /// render hollow-dashed (`MembershipBusView.Node.connecting`) BEFORE the
     /// backend reports `.connecting`. It NEVER changes the model — the moment
     /// the device's real `connectionState` leaves `.off` (→ `.connecting`, then
     /// `.member`), that model state supersedes this beat in ``updateBus()``, so
@@ -487,16 +498,21 @@ public final class DeviceRowView: NSView {
                       iconSymbolName: String? = nil,
                       syncTrimMs: Double = 0,
                       syncTrimIsSet: Bool = false,
-                      syncDrawerExpanded: Bool = false) {
+                      syncDrawerExpanded: Bool = false,
+                      removalUndoOffered: Bool = false) {
         self.device = device
         self.isSelectedInSet = selected
         self.isToggleBlocked = blocked
         self.energizePending = energizePending
         self.blockReasonText = blocked ? blockReason : nil
+        self.removalUndoOffered = removalUndoOffered
         // Any model refresh (select OR deselect) clears a transient hover so the
         // row can't keep a stale hover wash after the pointer left the popover
         // (T-U8 root-cause fix — hover is transient, selection is model-driven).
+        // The gutter's socket hover is the same kind of transient state, cleared
+        // on the same beat and re-established by the mouse-moved monitor.
         self.isHovered = false
+        setGutterHovered(false)
 
         // Primary membership control: ON iff the device is in the Selected
         // Devices set. Don't fight a live toggle animation. Group-member rows
@@ -684,30 +700,16 @@ public final class DeviceRowView: NSView {
             updateSyncChip()
         }
 
+        // The transient live-removal offer, AFTER `updateFeedText()`/the SYNC
+        // chip above — it borrows the slot they normally own.
+        updateRemovalUndo()
+
         // Membership bus (spec §4): re-derive the node from the freshly-applied
         // membership/blocked/dim state. No-op when `showsBus` is false.
         updateBus()
 
         configureAccessibility()
         setNeedsDisplay(bounds)
-    }
-
-    /// Set this row's rail extent (Warm Signal v4 §Call-1) — the host calls this
-    /// once per rebuild from the row's position in the spine: `above`/`below`
-    /// gate the vertical rail segments so the rail runs Main Audio → the LOWEST
-    /// SELECTED node, and a row BELOW that terminus passes `above: false,
-    /// below: false` (a bare hollow node with no rail). Structural, so it
-    /// survives an in-place `apply` repaint.
-    public func setBusRail(above: Bool, below: Bool) {
-        busRailAbove = above
-        busRailBelow = below
-        updateBus()
-    }
-
-    /// Convenience for the terminating (lowest selected) node: rail above, none
-    /// below. Retained for callers/tests that only distinguish "terminates".
-    public func setBusTerminates(_ terminates: Bool) {
-        setBusRail(above: true, below: !terminates)
     }
 
     /// Re-derive and push the bus node rendering from the current membership /
@@ -744,13 +746,14 @@ public final class DeviceRowView: NSView {
         } else if energizePending, !reduceMotion, case .off = device.connectionState {
             // Energize "press-play" pending beat (v4.1 item 9): a member of a
             // source switch that hasn't started connecting yet renders the
-            // hollow ember DASHED pending node ON the spine, instantly, before
-            // the backend reports `.connecting`. Guarded to `.off` so the beat
-            // never overrides a real in-flight/resolved state — the moment
-            // `connectionState` advances, the branches below take over. Reduce
+            // hollow gold DASHED `.connecting` node ON the spine, instantly,
+            // before the backend reports `.connecting` — the beat has no node
+            // form of its own. Guarded to `.off` so it never overrides a real
+            // in-flight/resolved state — the moment `connectionState` advances,
+            // the branches below take over (and draw the same node). Reduce
             // Motion drops the beat entirely (the node falls through to its
             // settled member/non-member rendering — "snap to resolved").
-            node = .pending
+            node = .connecting
         } else if isSelectedInSet {
             // Selected members key their node off the CONNECTION state (v4
             // §Call-1 node vocabulary): connecting/reconnecting → gold dashed;
@@ -767,7 +770,7 @@ public final class DeviceRowView: NSView {
         // dormancy — never dim its node (the red ring carries it, and the node
         // stays in the spine until an honest toggle-off).
         if case .failed = device.connectionState { dim = false }
-        busView.apply(node: node, railAbove: busRailAbove, railBelow: busRailBelow, dimmed: dim)
+        busView.apply(node: node, dimmed: dim)
     }
 
     // MARK: Connect-edge brighten (v4.1 item 8)
@@ -1372,6 +1375,29 @@ public final class DeviceRowView: NSView {
         feedStack.wantsLayer = true
         feedStack.layer?.masksToBounds = true
 
+        // Live-removal undo: "Removed —" beside a link-style Undo button, in
+        // the trailing slot. Stock `NSButton`, borderless, gold title — the
+        // actionable half of the sentence carries the app's action tone while
+        // the "Removed —" half stays secondary text.
+        removalUndoLabel.translatesAutoresizingMaskIntoConstraints = false
+        removalUndoLabel.font = Tokens.Font.caption
+        removalUndoLabel.textColor = Tokens.Color.secondaryLabel
+        removalUndoButton.translatesAutoresizingMaskIntoConstraints = false
+        removalUndoButton.bezelStyle = .accessoryBar
+        removalUndoButton.isBordered = false
+        removalUndoButton.attributedTitle = NSAttributedString(
+            string: "Undo",
+            attributes: [.font: Tokens.Font.caption, .foregroundColor: Tokens.Color.gold])
+        removalUndoButton.target = self
+        removalUndoButton.action = #selector(undoRemovalClicked(_:))
+        removalUndoStack.translatesAutoresizingMaskIntoConstraints = false
+        removalUndoStack.orientation = .horizontal
+        removalUndoStack.alignment = .centerY
+        removalUndoStack.spacing = 2
+        removalUndoStack.addArrangedSubview(removalUndoLabel)
+        removalUndoStack.addArrangedSubview(removalUndoButton)
+        removalUndoStack.isHidden = true
+
         slider.translatesAutoresizingMaskIntoConstraints = false
         // Warm fader skin: install the drawing-only cell BEFORE the value/
         // target configuration below (a cell swap resets cell-held state, so
@@ -1434,7 +1460,10 @@ public final class DeviceRowView: NSView {
         addSubview(readoutLabel)
         addSubview(muteButton)
         // FEED column (v4.1 item 3): only a bus row has the free trailing slot.
-        if busActive { addSubview(feedStack) }
+        if busActive {
+            addSubview(feedStack)
+            addSubview(removalUndoStack)   // same slot, shown only while offered
+        }
         // Bluetooth SYNC chip (T6), sharing that slot's left portion — sync
         // rows re-anchor the FEED pill to the far right below.
         if showsSyncControls {
@@ -1526,12 +1555,28 @@ public final class DeviceRowView: NSView {
                     equalTo: leadingAnchor, constant: PopoverColumnGrid.railGutterCenterX),
                 enableCheckbox.centerYAnchor.constraint(equalTo: centerYAnchor),
                 // A deterministic hit area over the node (the no-op cell draws
-                // nothing; without an explicit size its hit target is undefined).
+                // nothing; without an explicit size its hit target is undefined),
+                // sized to the WHOLE leading gutter — the region that reads as
+                // "the node" — rather than the drawn disc alone. Nothing else
+                // claims that region: the row's only gutter behaviour IS this
+                // checkbox (the bus skin never hit-tests, and a blocked row's
+                // disabled checkbox still falls through to the row body).
                 enableCheckbox.widthAnchor.constraint(
-                    equalToConstant: PopoverColumnGrid.busNodeDiameter + 8),
-                enableCheckbox.heightAnchor.constraint(
-                    equalToConstant: PopoverColumnGrid.busNodeDiameter + 8),
+                    equalToConstant: PopoverColumnGrid.busHitTargetWidth),
+                enableCheckbox.heightAnchor.constraint(equalTo: heightAnchor),
                 feedStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+                // The undo offer takes the trailing slot's leading edge, the
+                // same anchor the (then-empty) FEED pills use, on every bus row
+                // — one placement for AirPlay and Bluetooth rows alike, so the
+                // offer can never land in a slot too narrow to read it.
+                removalUndoStack.leadingAnchor.constraint(
+                    equalTo: trailingAnchor,
+                    constant: -(PopoverColumnGrid.trailingControlTrailing
+                                + PopoverColumnGrid.trailingControlWidth)),
+                removalUndoStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+                // ≥24 pt of hit height for the inline link button.
+                removalUndoButton.heightAnchor.constraint(
+                    greaterThanOrEqualToConstant: PopoverColumnGrid.removalUndoButtonHeight),
             ])
             if showsSyncControls {
                 // Bluetooth rows (BT-OFFSET-UI): the FEED pill hugs the FAR
@@ -1722,6 +1767,33 @@ public final class DeviceRowView: NSView {
     /// one-at-a-time rule). It never edits the trim itself.
     @objc private func syncChipTapped(_ sender: NSButton) {
         delegate?.deviceRow(self, didToggleSyncDrawerFor: device.id)
+    }
+
+    // MARK: Live-removal undo
+
+    /// The transient offer's one gesture: put the membership back. The host
+    /// re-adds through the checkbox's own path, so there is no second re-add
+    /// implementation to drift — and the membership change speaks through the
+    /// existing row plumbing, so this posts no announcement of its own.
+    @objc private func undoRemovalClicked(_ sender: NSButton) {
+        delegate?.deviceRowDidRequestUndoRemoval(self)
+    }
+
+    /// Show/hide the offer. It borrows the reserved trailing slot, so whatever
+    /// normally lives there yields for as long as the offer stands: the FEED
+    /// pills (empty anyway on a just-removed device) and, on a Bluetooth row,
+    /// the SYNC chip — there is nothing to tune on a room you just silenced.
+    private func updateRemovalUndo() {
+        guard busActive else { return }
+        removalUndoStack.isHidden = !removalUndoOffered
+        removalUndoButton.setAccessibilityLabel(
+            "Undo removing \(device.name) from Main Audio")
+        if removalUndoOffered {
+            feedStack.isHidden = true
+            if showsSyncControls { syncChipButton.isHidden = true }
+        } else if showsSyncControls {
+            syncChipButton.isHidden = false
+        }
     }
 
     // MARK: Context menu (BT rows)
@@ -2190,16 +2262,6 @@ public final class DeviceRowView: NSView {
     /// so it can't drift from the pixels.
     public var test_busNode: MembershipBusView.Node? { busActive ? busView.test_node : nil }
 
-    /// Whether the bus draws a rail BELOW this row's node — `false` on the
-    /// terminating (lowest selected) node and on a bare node below it (spec v4
-    /// §Call-1). `nil` when the row has no bus.
-    public var test_busRailBelow: Bool? { busActive ? busView.test_railBelow : nil }
-
-    /// Whether the bus draws a rail ABOVE this row's node — `false` only on a
-    /// BARE node below the rail terminus (spec v4 §Call-1 "bare hollow nodes …
-    /// no rail through them"). `nil` when the row has no bus.
-    public var test_busRailAbove: Bool? { busActive ? busView.test_railAbove : nil }
-
     /// Whether the bus node is ACTUALLY drawn in the de-emphasis tint — reads
     /// the drawn value (dormant tint, unavailable tint, and the failed-member
     /// never-dim exemption included), unlike `test_isSelectionDimmed` which
@@ -2282,7 +2344,7 @@ public final class DeviceRowView: NSView {
 
     /// Whether the host has raised the energize "press-play" pending beat on this
     /// row (item 9) — the drawing-only input, distinct from `test_busNode` which
-    /// reads the RESOLVED node (the beat only becomes a `.pending` node while the
+    /// reads the RESOLVED node (the beat only becomes a `.connecting` node while the
     /// device is `.off` AND Reduce Motion is off).
     public var test_energizePending: Bool { energizePending }
 
@@ -2294,6 +2356,40 @@ public final class DeviceRowView: NSView {
         layoutSubtreeIfNeeded()
         return busView.frame.midX
     }
+
+    /// Whether the transient live-removal offer is currently mounted, and the
+    /// Undo button's spoken label (structural hooks — the same state the
+    /// drawing reads).
+    public var test_removalUndoOffered: Bool { removalUndoOffered && !removalUndoStack.isHidden }
+    public var test_removalUndoAXLabel: String? { removalUndoButton.accessibilityLabel() }
+    /// Drive the Undo button through REAL AppKit action dispatch (the click the
+    /// user makes), not the delegate shortcut.
+    public func test_clickUndoRemoval() { removalUndoButton.performClick(nil) }
+
+    /// The membership checkbox's HIT rect in this row's coordinates (the
+    /// expanded gutter target), after layout — asserts the click target really
+    /// covers the drawn socket. `nil` when the row has no bus.
+    public func test_membershipHitRect() -> NSRect? {
+        guard busActive else { return nil }
+        layoutSubtreeIfNeeded()
+        return enableCheckbox.frame
+    }
+
+    /// The drawn node's outer rect (disc plus hover ring) in this row's
+    /// coordinates — what the hit rect above has to contain.
+    public func test_nodeRect() -> NSRect? {
+        guard busActive else { return nil }
+        layoutSubtreeIfNeeded()
+        let r = PopoverColumnGrid.busNodeHoverRingRadius
+        return NSRect(x: busView.frame.midX - r, y: busView.frame.midY - r,
+                      width: 2 * r, height: 2 * r)
+    }
+
+    /// Drive the gutter hover through the same private path the tracking area
+    /// uses (a real pointer crossing can't be synthesized headlessly).
+    public func test_setGutterHovered(_ hovered: Bool) { setGutterHovered(hovered) }
+    /// Whether the node currently draws its gold hover ring.
+    public var test_drawsHoverRing: Bool { busActive && busView.test_drawsHoverRing }
 
     /// The membership control's (the node-skinned checkbox's) current VoiceOver
     /// label — asserts the bus node speaks as the SAME real checkbox (spec §4.8:
@@ -2334,18 +2430,57 @@ public final class DeviceRowView: NSView {
 
     // MARK: Highlight + hover (brief §2/§5 — menu host only)
 
+    /// Marks the SECOND tracking area (the bus gutter) so the shared
+    /// `mouseEntered`/`mouseExited` owner can tell the two apart.
+    private static let gutterTrackingKey = "gutter"
+
     public override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach(removeTrackingArea)
+        // Re-tracking means the geometry moved under the pointer — drop the
+        // gutter hover rather than leaving a socket lit for a region that has
+        // shifted; the mouse-moved monitor re-establishes it on the next move.
+        setGutterHovered(false)
         addTrackingArea(NSTrackingArea(
             rect: bounds,
             options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
             owner: self
         ))
+        // The bus gutter's own region: hovering it wakes the socket rim (the
+        // node's "I am clickable" affordance). Same rect as the checkbox's
+        // expanded hit box, read off the control itself so the two can't drift.
+        if busActive {
+            // Explicit rect, so NO `.inVisibleRect` here — that option makes
+            // AppKit ignore the rect and track the whole visible bounds, which
+            // would make the gutter area a duplicate of the row area above.
+            addTrackingArea(NSTrackingArea(
+                rect: gutterHitRect,
+                options: [.mouseEnteredAndExited, .activeInActiveApp],
+                owner: self,
+                userInfo: ["zone": Self.gutterTrackingKey]
+            ))
+        }
     }
 
-    public override func mouseEntered(with event: NSEvent) { setHovered(true) }
-    public override func mouseExited(with event: NSEvent) { setHovered(false) }
+    /// The bus gutter's hit/hover rect in this row's coordinates — the
+    /// membership checkbox's own frame, so the click target and the hover
+    /// affordance are the same region by construction. Read WITHOUT forcing
+    /// layout: `updateTrackingAreas` runs inside AppKit's own layout pass.
+    private var gutterHitRect: NSRect {
+        busActive ? enableCheckbox.frame : .zero
+    }
+
+    private func isGutterArea(_ event: NSEvent) -> Bool {
+        (event.trackingArea?.userInfo?["zone"] as? String) == Self.gutterTrackingKey
+    }
+
+    public override func mouseEntered(with event: NSEvent) {
+        if isGutterArea(event) { setGutterHovered(true) } else { setHovered(true) }
+    }
+
+    public override func mouseExited(with event: NSEvent) {
+        if isGutterArea(event) { setGutterHovered(false) } else { setHovered(false) }
+    }
 
     /// A click on the BODY of a BLOCKED row (spec §4.6) surfaces the refusal note
     /// — the reachable trigger the disabled checkbox + tooltip alone lacked
@@ -2391,20 +2526,20 @@ public final class DeviceRowView: NSView {
         window?.invalidateCursorRects(for: self)
     }
 
+    /// Push the gutter hover into the bus skin. Only a LIVE membership control
+    /// ever reports a hover: an honestly-disabled checkbox (blocked row, or an
+    /// unavailable+unselected one) must not have its socket invite a click it
+    /// would refuse.
+    private func setGutterHovered(_ hovered: Bool) {
+        guard busActive else { return }
+        busView.setHovered(hovered && enableCheckbox.isEnabled)
+    }
+
     /// Set the transient hover flag and repaint only when it actually changes.
     private func setHovered(_ hovered: Bool) {
         guard isHovered != hovered else { return }
         isHovered = hovered
         setNeedsDisplay(bounds)
-    }
-
-    /// True iff the pointer is currently inside this row's bounds. Used by the
-    /// mouse-moved monitor to clear a hover the tracking area failed to exit.
-    private func pointerIsInside() -> Bool {
-        guard let window = window else { return false }
-        let windowPoint = window.mouseLocationOutsideOfEventStream
-        let local = convert(windowPoint, from: nil)
-        return bounds.contains(local)
     }
 
     /// Re-evaluate hover from the *actual* pointer position. This is the general
@@ -2414,7 +2549,16 @@ public final class DeviceRowView: NSView {
     /// the card's bottom padding, the inter-card gap and the footer, none of them
     /// tracked) never receives an exit. Driving hover off the real pointer
     /// position makes the highlight clear for ANY row, last or not.
-    private func refreshHoverFromPointer() { setHovered(pointerIsInside()) }
+    private func refreshHoverFromPointer() {
+        guard let window = window else {
+            setHovered(false)
+            setGutterHovered(false)
+            return
+        }
+        let local = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        setHovered(bounds.contains(local))
+        setGutterHovered(gutterHitRect.contains(local))
+    }
 
     /// Belt-and-suspenders against a sticky hover: whenever the row is added to /
     /// removed from a window (a popover rebuild, scroll, or close), drop any
@@ -2424,6 +2568,7 @@ public final class DeviceRowView: NSView {
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         isHovered = false
+        setGutterHovered(false)
         setNeedsDisplay(bounds)
         if window != nil {
             installMouseMovedMonitor()
@@ -2703,13 +2848,6 @@ public final class DeviceRowView: NSView {
 extension DeviceRowView: RailNodeProviding {
     /// The node this row renders, or `nil` when it hosts no bus.
     public var railNode: MembershipBusView.Node? { busActive ? busView.test_node : nil }
-    /// Within the rail span iff it carries a rail above it (false on a bare node
-    /// below the terminus).
-    public var railHasSpine: Bool { busRailAbove }
-    /// Whether the rail continues below this node (false on the terminus).
-    public var railBelow: Bool { busRailBelow }
-    /// Whether the node renders dimmed (dormant-divergent tint).
-    public var railDimmed: Bool { busView.test_dimmed }
     /// The node is centred on the row's own centre-y.
     public var railNodeView: NSView { self }
     public var railNodeBounds: NSRect { bounds }
@@ -2794,6 +2932,8 @@ public extension DeviceRowView.Delegate {
     func deviceRow(_ row: DeviceRowView, didToggleSyncDrawerFor id: String) {}
     /// Default no-op — only the popover hosts the alignment wizard.
     func deviceRowDidRequestAlignmentWizard(_ row: DeviceRowView) {}
+    /// Default no-op — only the popover offers the live-removal undo.
+    func deviceRowDidRequestUndoRemoval(_ row: DeviceRowView) {}
 }
 
 // MARK: - Invisible switch cell (spec §4.8)

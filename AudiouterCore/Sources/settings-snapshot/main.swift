@@ -27,6 +27,18 @@ import AppKit
 import AudiouterCore
 import AudiouterSettingsUI
 
+/// Resolve `name` AND pin it as the app-level appearance. On Darwin 27,
+/// system-drawn artwork (source-list selection pills, segmented controls)
+/// resolves against the APP's effective appearance, so per-window/view
+/// overrides alone leave those pieces rendered in the host system's mode
+/// (found via window-snapshot's light captures on a dark-mode host).
+@MainActor
+func snapshotAppearance(_ name: NSAppearance.Name) -> NSAppearance? {
+    let appearance = NSAppearance(named: name)
+    NSApp.appearance = appearance
+    return appearance
+}
+
 /// A `LoginItemManaging` fake so the snapshot never touches `SMAppService`.
 final class SnapshotLoginItem: LoginItemManaging {
     var isEnabled: Bool { false }
@@ -130,7 +142,8 @@ func makeRoot() -> SettingsRootViewController {
     // `.segmentedControlOnTop` style.
     return SettingsRootViewController(tabs: [
         .init(title: "General", symbolName: "gearshape",
-              viewController: GeneralSettingsViewController(loginItem: SnapshotLoginItem())),
+              viewController: GeneralSettingsViewController(loginItem: SnapshotLoginItem(),
+                                                            settings: settings)),
         .init(title: "Appearance", symbolName: "paintpalette",
               viewController: AppearanceSettingsViewController(settings: settings)),
         .init(title: "Audio", symbolName: "speaker.wave.2",
@@ -184,7 +197,7 @@ func snapshotTab(index: Int, tabLabel: String, appearanceName: NSAppearance.Name
     // AudiouterSettingsUI. Any drift shows up at once as a changed golden width.
     let contentWidth: CGFloat = 460
     let root = makeRoot()
-    let appearance = NSAppearance(named: appearanceName)
+    let appearance = snapshotAppearance(appearanceName)
     let paneView = root.tabRootView(at: index)
     paneView.removeFromSuperview()
 

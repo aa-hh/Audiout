@@ -836,6 +836,84 @@ import Testing
         #expect(opened == [.screenAndSystemAudioRecording])
     }
 
+    // MARK: The in-flight prompt
+
+    /// A permission dialog fights any other process that grabs input focus, and
+    /// loses — frozen, unclickable. So the re-front a grant would normally take
+    /// is OWED while the dialog is still up, and paid exactly once when it
+    /// resolves (here: the Bluetooth prompt's undecided timeout).
+    @Test func aReFrontOwedDuringAPromptFiresOnceWhenThePromptResolves() async {
+        let model = makeModel(audio: .granted, foundSpeakers: 2,
+                              bluetoothPrimer: NeverDecidingBluetooth(),
+                              bluetoothPromptTimeout: 0.05)
+        let vc = makeVC(model: model)
+        await vc.test_allow([.audio, .localNetwork])
+        let before = vc.test_returnToFrontCount
+
+        await vc.test_tapAllow(.bluetooth)
+        #expect(vc.test_isPromptInFlight, "the prompt is up and unanswered")
+        #expect(vc.test_returnToFrontCount == before,
+                "the dialog owns the front while it is up")
+
+        await waitUntil { !model.isPrimingBluetooth }
+
+        #expect(!vc.test_isPromptInFlight)
+        #expect(vc.test_returnToFrontCount == before + 1,
+                "exactly one re-front, and only once the prompt resolved")
+    }
+
+    /// The escape hatch: a dialog that has stopped responding must not end the
+    /// setup. After the delay the ribbon says so and offers the SAME pane the
+    /// denied path deep-links to — nothing is re-asked.
+    @Test func aPromptThatStopsRespondingOffersAWayIntoSystemSettings() async {
+        var opened: [SystemSettingsPane] = []
+        let model = makeModel(audio: .granted, foundSpeakers: 2,
+                              bluetoothPrimer: NeverDecidingBluetooth())
+        let vc = makeVC(model: model, onOpenSettings: { opened.append($0) })
+        await vc.test_allow([.audio, .localNetwork])
+        await vc.test_tapAllow(.bluetooth)
+        #expect(vc.test_ribbonStatusText != "Dialog not responding?",
+                "waiting is normal at first")
+
+        vc.test_fireStuckPromptTimer()
+
+        #expect(vc.test_ribbonStatusText == "Dialog not responding?")
+        #expect(vc.test_ribbonButtonTitles.contains("Open Settings…"))
+
+        vc.test_ribbonTapQuietLink()
+
+        #expect(opened == [.bluetoothPrivacy], "the denied path's pane, not a second table")
+    }
+
+    /// …and it is only ever an escape from a LIVE wait: once the prompt
+    /// resolves the hint and its link go with it.
+    @Test func theStuckDialogHintClearsWhenThePromptResolves() async {
+        let model = makeModel(audio: .granted, foundSpeakers: 2,
+                              bluetoothPrimer: NeverDecidingBluetooth(),
+                              bluetoothPromptTimeout: 0.05)
+        let vc = makeVC(model: model)
+        await vc.test_allow([.audio, .localNetwork])
+        await vc.test_tapAllow(.bluetooth)
+        vc.test_fireStuckPromptTimer()
+        #expect(vc.test_ribbonStatusText == "Dialog not responding?")
+
+        await waitUntil { !model.isPrimingBluetooth }
+
+        #expect(vc.test_ribbonStatusText != "Dialog not responding?",
+                "nothing is stuck any more")
+        #expect(!vc.test_ribbonButtonTitles.contains("Open Settings…"))
+    }
+
+    /// Wait for something a background timeout will make true. A fixed sleep is a
+    /// flake here: the main actor is shared with every other test in the run, so
+    /// how soon that work lands is not this test's to decide.
+    private func waitUntil(_ satisfied: () -> Bool) async {
+        for _ in 0..<600 {                                   // ≤3 s, then give up
+            if satisfied() { return }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+    }
+
     @Test func speakerSyncRoutesToLoginItemsThroughTheModelSeam() async {
         let ptpHelper = FakePTPHelper(status: .requiresApproval)
         var opened: [SystemSettingsPane] = []

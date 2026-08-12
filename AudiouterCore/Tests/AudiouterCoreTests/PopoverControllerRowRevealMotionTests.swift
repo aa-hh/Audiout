@@ -3,6 +3,7 @@
 import Testing
 import AppKit
 @testable import AudiouterPopoverUI
+@testable import AudiouterSharedUI
 
 /// The expand's MOTION, not its end state (live report, 2026-08-08:
 /// "collapsing: smooth. Expanding: abrupt").

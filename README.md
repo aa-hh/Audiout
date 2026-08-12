@@ -59,8 +59,13 @@ Every line should print `OK`. If one prints `MISSING`, run `brew install
 
 ```bash
 cd AudiouterCore
-swift test            # run the core test suite against the mock backend
+swift test --build-system native   # run the core test suite against the mock backend
 ```
+
+`--build-system native` is required on every `swift build`/`test`/`run` here —
+the default engine relinks every executable on each invocation and keeps a
+separate cache, so mixing the two costs a cold rebuild. See
+[CLAUDE.md](CLAUDE.md#build--run).
 
 The app talks to speakers through an `OutputBackend` protocol with three
 implementations (mock, OwnTone, native); UI/control work should target the

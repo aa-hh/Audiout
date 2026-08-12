@@ -12,6 +12,8 @@ import AudiouterSharedUI
 /// no routing. Activation lives in the app's popover, not here.
 ///
 /// Layout, top to bottom, form capped to ``formWidth``:
+/// - a "New Group" title line (design critique: the sheet used to open as an
+///   anonymous form with no heading);
 /// - a `Name` `NSTextField`, prefilled by the caller via ``configure``;
 /// - a "Speakers" label + a scrollable checklist of `MembershipRowView` rows.
 ///   Candidates are ONLY devices with `isAvailable == true` — unlike the
@@ -32,11 +34,12 @@ import AudiouterSharedUI
 /// whether to select the new/resolved group in the sidebar — this controller
 /// never activates it.
 ///
-/// An icon well sits beside the Name field: a bordered square button showing
-/// ``Group/defaultIconSymbolName`` until the user picks something else via an
-/// anchored `IconPickerViewController` popover (same construction as the
-/// group editor's icon well). The chosen name (`nil` = default) is threaded
-/// through ``commit()`` into `createGroup`.
+/// An icon well sits beside the Name field: a bordered square button, corner
+/// pencil badge included (`../../AGENTS.md`'s "bordered + pencil = editable"),
+/// showing ``Group/defaultIconSymbolName`` until the user picks something else
+/// via an anchored `IconPickerViewController` popover (same construction as
+/// the group editor's icon well). The chosen name (`nil` = default) is
+/// threaded through ``commit()`` into `createGroup`.
 public final class GroupCreationSheetController: NSViewController {
 
     private let groupController: GroupController
@@ -58,15 +61,31 @@ public final class GroupCreationSheetController: NSViewController {
     /// at 220 a 7-row list overflowed by a few points and scrolled for no
     /// visible reason. Recompute this if `MembershipRowView.rowHeight` or the
     /// stack spacing changes: 7 rows + 6 gaps + the document view's 4pt top and
-    /// bottom insets.
-    private static let checklistMaxHeight: CGFloat = 240
+    /// bottom insets — 7×32 + 6×4 + 8 = 256, plus the same ~8pt of slack the
+    /// 28pt-row value carried (`rowHeight` grew to 32 on 2026-08-12).
+    private static let checklistMaxHeight: CGFloat = 264
 
     /// Icon well square size (matches `IconPickerViewController`'s curated
     /// grid cells so the well previews at the same scale as the grid it opens).
     private static let iconWellSize: CGFloat = 32
 
+    /// Pencil badge diameter, scaled down from `DeviceIconWellView`'s 22pt (at
+    /// its 64pt well) to this sheet's smaller 32pt well — same proportion,
+    /// smaller stage. Corner-badge overlay, not a second custom control: see
+    /// `iconWellPencilBadge`.
+    private static let pencilBadgeDiameter: CGFloat = 14
+
     private let nameField = NSTextField(string: "")
+    private let titleLabel = NSTextField(labelWithString: "New Group")
     private let iconWellButton = NSButton()
+    /// Corner pencil badge overlaid on `iconWellButton` — the sheet's icon
+    /// well is a plain bordered square with no edit cue otherwise, breaking
+    /// the house rule "bordered + pencil = editable" (`../../AGENTS.md`) that
+    /// `DeviceIconWellView` teaches everywhere else in this screen. Click-
+    /// through and non-interactive (`PencilBadgeView.hitTest` is nil) so the
+    /// button underneath keeps handling the click; this is cosmetic parity,
+    /// not a second custom control.
+    private let iconWellPencilBadge = PencilBadgeView(diameter: GroupCreationSheetController.pencilBadgeDiameter)
     private let stackView = NSStackView()
     private let scrollView = NSScrollView()
     private let countLabel = NSTextField(labelWithString: "")
@@ -103,9 +122,27 @@ public final class GroupCreationSheetController: NSViewController {
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
+    /// Focus the name field with its prefilled text SELECTED the moment the
+    /// sheet appears — keeping the suggestion costs nothing and replacing it is
+    /// just typing, so the prefill never traps the user into a meaningless
+    /// name. Only fires on a genuine on-screen presentation (headless runs
+    /// never call this).
+    public override func viewDidAppear() {
+        super.viewDidAppear()
+        view.window?.makeFirstResponder(nameField)
+        nameField.currentEditor()?.selectAll(nil)
+    }
+
     public override func loadView() {
+        // Standard sheet message style: the anonymous form's missing title
+        // line (design critique — a sheet with no heading reads as an
+        // unlabeled form).
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel.font = Tokens.Font.bodyEmphasized
+
         nameField.translatesAutoresizingMaskIntoConstraints = false
         nameField.placeholderString = "Group name"
+        nameField.setAccessibilityLabel("Group name")
         nameField.target = self
         nameField.action = #selector(nameFieldReturnPressed(_:))
 
@@ -116,9 +153,22 @@ public final class GroupCreationSheetController: NSViewController {
         iconWellButton.isBordered = true
         iconWellButton.imagePosition = .imageOnly
         iconWellButton.toolTip = "Choose icon"
+        iconWellButton.setAccessibilityLabel("Choose group icon")
         iconWellButton.target = self
         iconWellButton.action = #selector(iconWellTapped(_:))
         updateIconWell()
+
+        // Corner pencil badge — "bordered + pencil = editable" parity with
+        // `DeviceIconWellView`. Added after `updateIconWell()` so it draws
+        // above the resolved glyph.
+        iconWellPencilBadge.translatesAutoresizingMaskIntoConstraints = false
+        iconWellButton.addSubview(iconWellPencilBadge)
+        NSLayoutConstraint.activate([
+            iconWellPencilBadge.widthAnchor.constraint(equalToConstant: Self.pencilBadgeDiameter),
+            iconWellPencilBadge.heightAnchor.constraint(equalToConstant: Self.pencilBadgeDiameter),
+            iconWellPencilBadge.trailingAnchor.constraint(equalTo: iconWellButton.trailingAnchor, constant: -1),
+            iconWellPencilBadge.bottomAnchor.constraint(equalTo: iconWellButton.bottomAnchor, constant: -1),
+        ])
 
         let speakersLabel = NSTextField(labelWithString: "Speakers")
         speakersLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -159,14 +209,18 @@ public final class GroupCreationSheetController: NSViewController {
         createButton.action = #selector(createTapped(_:))
 
         let container = NSView()
-        for v in [iconWellButton, nameField, speakersLabel, scrollView, countLabel, cancelButton, createButton] {
+        for v in [titleLabel, iconWellButton, nameField, speakersLabel, scrollView, countLabel, cancelButton, createButton] {
             container.addSubview(v)
         }
 
         NSLayoutConstraint.activate([
             container.widthAnchor.constraint(equalToConstant: Self.formWidth),
 
-            iconWellButton.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
+            titleLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
+            titleLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16),
+
+            iconWellButton.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 14),
             iconWellButton.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
 
             nameField.centerYAnchor.constraint(equalTo: iconWellButton.centerYAnchor),
@@ -354,6 +408,10 @@ public final class GroupCreationSheetController: NSViewController {
         nameField.stringValue = name
     }
 
+    /// The name field's current text (the caller-provided prefill until the
+    /// user edits it).
+    public var test_nameFieldText: String { nameField.stringValue }
+
     /// Simulate ticking/unticking a candidate's membership checkbox.
     public func test_setMembership(deviceID: String, isChecked: Bool) {
         guard let row = rowsByID[deviceID] else { return }
@@ -403,10 +461,64 @@ public final class GroupCreationSheetController: NSViewController {
     /// bypassing the popover exactly like `IconPickerViewController`'s own
     /// `test_pickCurated`/`test_useDefault` hooks bypass presentation.
     public func test_pickIcon(_ name: String?) { pickIcon(name) }
+
+    /// The sheet's title line ("New Group"). `loadViewIfNeeded()` first since a
+    /// headless test may ask before the sheet has ever been presented (the
+    /// view loads lazily, same as every other hook below that reads it).
+    public var test_titleText: String {
+        loadViewIfNeeded()
+        return titleLabel.stringValue
+    }
+
+    /// True while the icon well's corner pencil badge is mounted — the
+    /// "bordered + pencil = editable" cue this sheet's icon well otherwise
+    /// lacked. `loadViewIfNeeded()` for the same reason as `test_titleText`.
+    public var test_iconWellShowsPencil: Bool {
+        loadViewIfNeeded()
+        return iconWellPencilBadge.superview === iconWellButton
+    }
 }
 
 /// A flipped document view so the checklist scrolls from the top rather than
 /// bottom-gravitating with dead space above the rows. File-scoped on purpose.
 private final class FlippedView: NSView {
     override var isFlipped: Bool { true }
+}
+
+/// The creation sheet's icon-well corner pencil — a cosmetic echo of
+/// `DeviceIconWellView`'s badge (`../../AGENTS.md`'s "bordered + pencil =
+/// editable"), NOT a second custom control: no hover step-up, no keyboard
+/// handling, nothing the well itself doesn't already provide. `hitTest`
+/// always returns `nil` so a click anywhere on the badge still reaches
+/// `iconWellButton` underneath it.
+private final class PencilBadgeView: NSView {
+    init(diameter: CGFloat) {
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.cornerRadius = diameter / 2
+        layer?.backgroundColor = Tokens.Color.iconWellBadge.cgColor
+        layer?.borderWidth = 1
+        layer?.borderColor = Tokens.Color.iconWellBadgeBorder.cgColor
+
+        let pencil = NSImage(systemSymbolName: "pencil", accessibilityDescription: nil)
+        pencil?.isTemplate = true
+        let pencilView = NSImageView(image: pencil ?? NSImage())
+        // Fixed white, matching `DeviceIconWellView.badgePencilImageView` —
+        // the badge fill it sits on is a fixed dark scrim in both themes, so
+        // this glyph never has to chase the appearance either.
+        pencilView.contentTintColor = .white
+        pencilView.imageScaling = .scaleProportionallyUpOrDown
+        pencilView.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(pencilView)
+        NSLayoutConstraint.activate([
+            pencilView.centerXAnchor.constraint(equalTo: centerXAnchor),
+            pencilView.centerYAnchor.constraint(equalTo: centerYAnchor),
+            pencilView.widthAnchor.constraint(equalTo: widthAnchor, multiplier: 0.55),
+            pencilView.heightAnchor.constraint(equalTo: heightAnchor, multiplier: 0.55),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }

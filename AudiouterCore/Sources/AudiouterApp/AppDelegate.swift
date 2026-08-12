@@ -1160,7 +1160,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// title bar the surface doesn't have.
     @MainActor
     private func makeSettingsRoot() -> SettingsRootViewController {
-        let general = GeneralSettingsViewController(loginItem: SMAppServiceLoginItem())
+        let general = GeneralSettingsViewController(loginItem: SMAppServiceLoginItem(),
+                                                    settings: settings)
         // "Open Setup…" (General pane) re-opens the first-run priming window;
         // the backend is already running, so its onFinished is a guarded no-op.
         general.onRunSetupAgain = { [weak self] in self?.presentSetup() }

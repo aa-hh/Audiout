@@ -71,7 +71,7 @@ import AppKit
             groupsContent: {
                 groupsBuilds += 1
                 let vc = NSViewController()
-                vc.view = NSView(frame: NSRect(x: 0, y: 0, width: 560, height: 464))
+                vc.view = NSView(frame: NSRect(x: 0, y: 0, width: 623, height: 464))
                 return vc
             },
             settingsContent: { [self] in
@@ -195,7 +195,9 @@ import AppKit
         var expected = AppSurfaceController.groupsDefaultContentSize
         expected.height += surface.test_chromeTopInset
         #expect(window.frame.size == expected,
-                "Groups opens at its designed 560×468 content plus the measured toolbar strip")
+                "Groups opens at its designed content size plus the measured toolbar strip")
+        #expect(expected.width == mixerFit.width,
+                "…and at the Mixer's own width, so switching screens never changes it")
     }
 
     @Test func settingsSizesPerTabThroughTheFittedChannel() throws {
@@ -398,6 +400,8 @@ import AppKit
         surface.shell.test_hasAttachedSheetOverride = false
         surface.shell.windowDidResignKey(
             Notification(name: NSWindow.didResignKeyNotification, object: surface.shell.window))
+        // The dismissal decides a runloop pass later; headless, nothing turns.
+        surface.shell.test_settleResignDismissal()
     }
 
     /// (a) Setup owns the click outright: no surface action of any kind, so a

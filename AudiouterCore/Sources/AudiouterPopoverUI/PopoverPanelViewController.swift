@@ -30,7 +30,7 @@ import AudiouterSharedUI
 /// `contentViewController.preferredContentSize` and animates on its own when
 /// `popover.animates` is true; see `panelContentDidChangeHeight`).
 @MainActor
-final class PopoverPanelViewController: NSViewController {
+final class PopoverPanelViewController: NSViewController, FoldFollowing {
 
     /// A borderless icon button mounted on the right of a section's module header
     /// (task D — the Groups "+" / New group).
@@ -373,9 +373,10 @@ final class PopoverPanelViewController: NSViewController {
     /// header's dot; `nil` leaves the whole device card as the far end.
     func setRailRows(mainOut: RailHookProviding, deviceRows: [RailNodeProviding],
                      originCardTitle: String, deviceCardTitle: String,
-                     cutSubsectionTitle: String? = nil) {
+                     cutSubsectionTitle: String? = nil, dormant: Bool = false) {
         railOverlay.mainOutRow = mainOut
         railOverlay.deviceRows = deviceRows
+        railOverlay.dormant = dormant
         railOverlay.originSection = cardsByHeader[originCardTitle]
         if let cutSubsectionTitle, let subsection = subsectionBodies[cutSubsectionTitle]?.rail {
             railOverlay.deviceSection = subsection

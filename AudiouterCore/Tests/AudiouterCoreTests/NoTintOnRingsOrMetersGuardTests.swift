@@ -199,7 +199,7 @@ import AudiouterCore
         let node = row.test_busNode
         #expect(node != nil)
         #expect(
-            [.member, .connecting, .pending, .failed, .nonMember, .blocked, .origin]
+            [.member, .connecting, .failed, .nonMember, .blocked, .origin]
                 .contains(node ?? .nonMember)
         )
     }

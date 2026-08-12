@@ -4,7 +4,7 @@ import AppKit
 import AudiouterCore
 import AudiouterSharedUI
 
-/// The static identity of one permission card — the parts that never change
+/// The static identity of one permission step — the parts that never change
 /// with state. The TITLE is not here: it is per-state (imperative while asking,
 /// earned capability once granted) and Local Network's even carries a count, so
 /// ``title(for:foundSpeakers:)`` resolves it in one place instead of letting
@@ -14,29 +14,36 @@ struct SetupCardContent {
     let step: SetupStep
     /// SF Symbol for the leading icon tile. Every tile shares the same neutral
     /// `raised` well + hairline rim (the fill is never coloured); only the
-    /// glyph carries ``iconColor``, and it warms to gold once granted.
+    /// glyph carries ``iconColor``, and the tint is permanent.
     let symbolName: String
     /// This card's resting glyph tint — one of the four
     /// `Tokens.Color.permission*` hues.
     let iconColor: NSColor
     /// The imperative ask, shown while the card is active (and on any state
     /// that has NOT earned a checkmark — skipped, or auto-passed because the OS
-    /// can't grant it).
+    /// can't grant it). The RIBBON carries this now; the spine has its own
+    /// shorter table below.
     let activeTitle: String
     /// The earned capability, shown only alongside a checkmark.
     let completedTitle: String
-    /// The plain-language "why", shown only while the card is expanded. Reused
-    /// verbatim from the pre-sequential rows — these strings are TCC-framing
-    /// tested (they defuse the OS's "recording" wording before it appears).
+    /// The plain-language "why" — the ribbon's body copy. Reused verbatim from
+    /// the pre-sequential rows: these strings are TCC-framing tested (they
+    /// defuse the OS's "recording" wording before it appears).
     let detail: String
     /// First-fire call to action.
     let allowTitle: String
-    /// Whether this card offers Skip (Bluetooth and Remote Control only — both
+    /// Whether this step offers Skip (Bluetooth and Remote Control only — both
     /// are outside `RequiredPermission`, so passing on one can't touch the gate).
     let isSkippable: Bool
+    /// The SPINE's own imperative title — a short form of ``activeTitle`` that
+    /// fits the 288 pt column.
+    let spineAskTitle: String
+    /// The SPINE's own earned title — a short form of ``completedTitle``.
+    let spineDoneTitle: String
 
     /// The one place the per-state title table lives (brief §"Card anatomy":
-    /// imperative → earned capability).
+    /// imperative → earned capability). The RIBBON reads this; the spine reads
+    /// ``spineTitle(for:foundSpeakers:)``.
     ///
     /// `foundSpeakers` only matters for Local Network, whose completed title
     /// carries the browse's real count — "3 speakers on your network" is
@@ -63,107 +70,105 @@ struct SetupCardContent {
             }
         }
     }
+
+    /// The SPINE's title table — a SECOND title source, deliberately, and one
+    /// that has to be kept in step with the long one above.
+    ///
+    /// The 288 pt spine column can't carry the ribbon's full sentences, and
+    /// truncating reviewed copy is worse than writing a short form of it. Same
+    /// grammar as ``title(for:foundSpeakers:)``: the earned title appears only
+    /// for `.completed`, and Local Network's earned title is still the COUNT —
+    /// shortened here too, because "No speakers found yet — switch one on and
+    /// it'll appear" is a ribbon sentence, not a row label.
+    func spineTitle(for state: SetupCardState, foundSpeakers: Int? = nil) -> String {
+        switch state {
+        case .active, .pending, .skipped, .autoPassed:
+            return spineAskTitle
+        case .completed:
+            guard step == .localNetwork else { return spineDoneTitle }
+            switch foundSpeakers {
+            case nil: return spineDoneTitle
+            case 0: return "No speakers found yet"
+            case 1: return "1 speaker on your network"
+            case let count?: return "\(count) speakers on your network"
+            }
+        }
+    }
 }
 
-/// How a card renders right now — derived from ``SetupFlowModel`` by the view
+/// How a row renders right now — derived from ``SetupFlowModel`` by the view
 /// controller, never decided here.
 enum SetupCardState: Equatable {
-    /// Not reached yet: a collapsed strip, imperative title, no checkmark. NOT
-    /// dimmed — a pending step is a promise, not a disabled control.
+    /// Not reached yet: LOCKED — dimmed, with the padlock in the trailing slot.
     case pending
-    /// The one expanded card.
+    /// The one live step. The hero pane is showing its rehearsal, and the
+    /// ribbon beneath it carries its ask and its buttons.
     case active
-    /// Verified: collapsed strip, capability title, checkmark.
+    /// Verified: capability title, checkmark. Browsable.
     case completed
     /// Complete only because this OS cannot grant it at all (the pre-14.2
-    /// process tap). The strip carries `note` where the checkmark would be —
+    /// process tap). The row carries `note` where the checkmark would be —
     /// claiming a grant nobody made would be a lie.
     case autoPassed(note: String)
-    /// The user passed on it: collapsed, imperative title, no checkmark. The
-    /// app asks again the next time it genuinely needs the capability.
+    /// The user passed on it. Clicking it re-arms the ask.
     case skipped
 }
 
-/// One permission card in the Setup window's sequential flow: a collapsed strip
-/// (icon tile, title, and — once verified — a checkmark) that expands, for
-/// exactly one step at a time, into the same strip plus the "why" copy and an
-/// accessory row (Allow…, a spinner while probing, Open Settings… after a
-/// denial, and Skip on the two optional steps).
+/// One row of the Setup window's SPINE: a compact status strip — icon tile,
+/// short title, and exactly one trailing marker (padlock, checkmark, skip
+/// slash, broken-permission alert, or the auto-pass note) — plus a leading edge
+/// bar that marks the live row gold and a broken one red.
 ///
-/// Expanding and collapsing animate the body's CLIP HEIGHT on
-/// `Tokens.Motion.collapseRevealDuration` — the same one motion language every
-/// collapsible element in the app uses (`CardView.setBodyCollapsed` in
-/// `AudiouterPopoverUI` is the reference implementation, and the source of the
-/// two traps handled below: SEED the clip with its current height before
-/// animating it shut, and lay the collapsed start state out before animating it
-/// open, or the travel has nowhere to go).
+/// It carries no body, no buttons and no copy beyond its title (Direction 04,
+/// owner-chosen): the rehearsal is the onboarding's actual idea, so the mock
+/// and the ribbon of real UI beneath it own the stage, and the left column
+/// shrinks to a browsable index of where you are. A row is PRESSABLE in every
+/// state the user has already reached — the live one fires its primary action,
+/// a decided one browses it in the hero pane, a skipped one re-arms its ask —
+/// and refuses silently when locked, because the flow is sequential and jumping
+/// ahead would ask for a permission out of order.
 ///
-/// Stock AppKit only (SF Symbols, `NSButton`, `NSProgressIndicator`, system
-/// colours) — the only custom drawing is the shared `IconTileView` /
-/// `RoundedContainerView` chrome, which has no stock equivalent for the System
-/// Settings grouped-inset look.
-final class SetupCardView: NSView {
+/// Stock AppKit only (SF Symbols, `NSImageView`, system colours) — the only
+/// custom drawing is the shared `IconTileView` / `RoundedContainerView` chrome,
+/// which has no stock equivalent for the System Settings grouped-inset look.
+final class SetupSpineRowView: NSView {
 
     // MARK: Metrics
 
-    /// Inset from the card edge to its content.
-    static let horizontalInset: CGFloat = 14
-    /// Padding above/below the header strip — with `iconSide` this IS the
-    /// collapsed card height.
-    static let headerVerticalInset: CGFloat = 7
-    /// Icon-tile side for a card (smaller than `IconTileView.side`: five
-    /// collapsed strips plus one expanded card have to fit a fixed-height
-    /// window without the stack scrolling).
-    static let iconSide: CGFloat = 26
-    /// Gap from the icon tile to the text column — also the left edge every
-    /// expanded line aligns to.
-    static let iconGap: CGFloat = 12
-    /// Width of the leading accessory slot that holds Allow… / Open Settings… /
-    /// the probe spinner. FIXED, for the same reason the old parallel rows
-    /// pinned a 184 pt accessory column: whatever the slot currently holds, the
-    /// Skip button beside it sits at the same x, so a state change never nudges
-    /// a control sideways.
-    ///
-    /// Sized for the widest occupant that ever SHARES the row with Skip —
-    /// "Open Settings…" — not for the widest occupant overall. Speaker Sync's
-    /// longer "Open Login Items…" simply overflows the slot, which is safe
-    /// because that card isn't skippable and nothing sits to its right; sizing
-    /// the slot for it instead left a visible dead gap between Allow… and Skip
-    /// on the two cards that do pair them.
-    static let primarySlotWidth: CGFloat = 134
-    /// Height reserved for the accessory row, so swapping a button for the
-    /// spinner never changes the card's height.
-    static let accessoryHeight: CGFloat = 24
-    /// What the in-flight caption's spinner + its gap take out of the text
-    /// column, so the caption wraps inside the same column the copy does.
-    static let captionSpinnerColumn: CGFloat = 22
-    /// The checkmark's grown width (Wispr's 0 → 20 slide-in).
-    static let checkmarkWidth: CGFloat = 20
+    /// Inset from the row edge to its content.
+    static let horizontalInset: CGFloat = 12
+    /// Padding above/below the tile — with `iconSide` this IS the row height.
+    static let headerVerticalInset: CGFloat = 6
+    /// Icon-tile side. Smaller than the card era's: six rows plus a header have
+    /// to sit in a 288 pt column without the spine ever scrolling.
+    static let iconSide: CGFloat = 24
+    /// Gap from the icon tile to the title.
+    static let iconGap: CGFloat = 9
+    /// The row's floor height — `iconSide` + both insets, stated so the check
+    /// row and the permission rows can never drift apart.
+    static let minHeight: CGFloat = iconSide + headerVerticalInset * 2
+    /// Corner radius of the row surface.
+    static let cornerRadius: CGFloat = 9
+    /// The trailing marker slot: one position that says locked, then earned.
+    /// Also the checkmark's grown width (the 0 → 16 slide-in).
+    static let markerSlot: CGFloat = 16
+    /// The leading edge bar — gold on the live row, red on a broken one, gone
+    /// otherwise. Clipped by the surface's own corner radius.
+    static let edgeBarWidth: CGFloat = 3
     /// How far a locked step's icon tile fades. Enough to read as not-yet-yours
-    /// beside the active card, not so far that the glyph stops being legible.
+    /// beside the live row, not so far that the glyph stops being legible.
     static let lockedTileAlpha: CGFloat = 0.5
-    /// The active card's pointer-hover wash, in the app's shared hover colour and
-    /// alpha (`PopoverColumnGrid.rowHoverWashAlpha`) so a hovered card feels like
-    /// a hovered row.
+    /// A skipped row's tile — dimmed, but less than locked: the user reached
+    /// this one, they just said no.
+    static let skippedTileAlpha: CGFloat = 0.55
+    /// The pressable row's pointer-hover wash, in the app's shared hover colour
+    /// and alpha (`PopoverColumnGrid.rowHoverWashAlpha`) so a hovered row feels
+    /// like a hovered row everywhere else in the app.
     static var hoverWashFraction: CGFloat { PopoverColumnGrid.rowHoverWashAlpha }
-    /// The exact width the wrapping copy gets, derived from the FIXED left pane.
-    ///
-    /// This is the wrap-stability rule in its new form. The old parallel rows
-    /// pinned a 184 pt accessory column so the text's right edge never moved
-    /// between states; here the accessory sits BELOW the copy, so the text width
-    /// is a constant of the layout — and pinning `preferredMaxLayoutWidth` to it
-    /// once, at build time, is what makes an expanded card's height
-    /// deterministic. Deriving it from the resolved frame in `layout()` instead
-    /// made the height depend on WHEN AutoLayout got there, which showed up as
-    /// snapshot fixtures of the same state rendering at different heights.
-    static var textColumnWidth: CGFloat {
-        OnboardingViewController.leftPaneWidth - OnboardingViewController.paneMargin * 2
-            - horizontalInset - iconSide - iconGap - horizontalInset
-    }
 
     // MARK: Choreography timing
 
-    /// The checkmark's slide-in: width 0 → 20 pt plus a fade, on the
+    /// The checkmark's slide-in: width 0 → 16 pt plus a fade, on the
     /// system-driven motion band (warm-signal-v3 §6: 180–260 ms easeOut)…
     static let checkmarkDuration: TimeInterval = 0.2
     /// …delayed by the same amount after the grant lands, so the re-fronted
@@ -173,66 +178,49 @@ final class SetupCardView: NSView {
     // MARK: Wiring
 
     private let content: SetupCardContent
-    private let onAllow: () -> Void
-    private let onSkip: () -> Void
-    private let onOpenSettings: () -> Void
+    private let onPress: () -> Void
 
     private var iconTile: IconTileView!
     private let titleLabel = NSTextField(labelWithString: "")
-    private let detailLabel = NSTextField(labelWithString: "")
-    /// The honest "asked, found nothing" line under Local Network's copy — nil
-    /// (hidden) for every other state and step.
-    private let hintLabel = NSTextField(labelWithString: "")
-    /// What the card says WHILE a prompt or probe is in flight — a Local
-    /// Network prime can sit a full minute on an unanswered dialog, and a bare
-    /// spinner for that long reads as a hang. Lives in the TEXT column beside
-    /// its spinner, never in the fixed accessory column, so nothing about it can
-    /// move a button or re-wrap the copy.
-    private let captionLabel = NSTextField(labelWithString: "")
-    private let captionRow = NSStackView()
     private let checkmark = NSImageView()
     /// Sits in the same trailing slot as the checkmark, for a step the flow
     /// hasn't reached: locked steps have to READ locked, not merely un-ticked.
     private let lockGlyph = NSImageView()
+    /// Same slot again, for a step the user passed on.
+    private let skipGlyph = NSImageView()
+    /// Same slot again, for a permission that was on and is off now.
+    private let brokenGlyph = NSImageView()
     /// Sits where the checkmark would, for a step this OS cannot grant.
     private let noteLabel = NSTextField(labelWithString: "")
 
     private var surface: RoundedContainerView!
+    /// The 3 pt leading bar. A `RoundedContainerView` with no corner of its own:
+    /// it re-stamps its fill per appearance for free, and the SURFACE's radius
+    /// (via `masksToBounds`) is what rounds its ends.
+    private var edgeBar: RoundedContainerView!
     private var isHovered = false
     private var hoverTracking: NSTrackingArea?
 
-    private let primarySlot = NSView()
-    private let spinner = NSProgressIndicator()
-    private var allowButton: NSButton?
-    private var skipButton: NSButton?
-    /// The quiet SECOND path, offered beside the primary rather than replacing
-    /// it: Local Network's retry IS its own browse, so the pane is a demotion,
-    /// not the two-mode flip every other card does.
-    private var settingsLinkButton: NSButton!
-
-    private let bodyClip = ClipView()
-    private let bodyStack = NSStackView()
-    private var bodyHeight: NSLayoutConstraint!
     private var checkmarkWidthConstraint: NSLayoutConstraint!
+    private var checkmarkGeneration = 0
 
     private(set) var state: SetupCardState = .pending
-    /// Whether a prompt/probe for this step is in flight — the spinner is showing
-    /// and the card-level click target is inert.
-    private var isProbing = false
-    private var isBodyCollapsed = true
-    private var collapseGeneration = 0
+    /// Whether this row is the flow's live step — the gold edge, the lifted
+    /// surface, and the press that fires the ribbon's primary action.
+    private(set) var isLive = false
+    /// Whether the hero pane is currently browsing this (decided) row.
+    private(set) var isBrowseSelected = false
+    /// Whether this step's permission was granted and has since been switched
+    /// off — the red edge and the alert marker.
+    private(set) var isBroken = false
 
-    init(content: SetupCardContent,
-         onAllow: @escaping () -> Void,
-         onSkip: @escaping () -> Void,
-         onOpenSettings: @escaping () -> Void = {}) {
+    init(content: SetupCardContent, onPress: @escaping () -> Void) {
         self.content = content
-        self.onAllow = onAllow
-        self.onSkip = onSkip
-        self.onOpenSettings = onOpenSettings
+        self.onPress = onPress
         super.init(frame: .zero)
         build()
-        apply(.pending, foundSpeakers: nil, isProbing: false, offersSettingsFallback: false, animated: false)
+        apply(.pending, foundSpeakers: nil, isLive: false, isBrowseSelected: false,
+              isBroken: false, animated: false)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -242,14 +230,23 @@ final class SetupCardView: NSView {
     private func build() {
         translatesAutoresizingMaskIntoConstraints = false
 
-        surface = RoundedContainerView()
+        surface = RoundedContainerView(radius: Self.cornerRadius)
+        // The edge bar is a child, and the surface's own radius is what rounds
+        // its ends — one clip, no second shape to keep in step.
+        surface.wantsLayer = true
+        surface.layer?.masksToBounds = true
         addSubview(surface)
 
+        edgeBar = RoundedContainerView(fill: Tokens.Color.gold, border: .clear, radius: 0)
+        edgeBar.borderWidth = 0
+        edgeBar.isHidden = true
+        surface.addSubview(edgeBar)
+
         iconTile = IconTileView(symbolName: content.symbolName,
-                                accessibility: content.activeTitle,
+                                accessibility: content.spineAskTitle,
                                 color: content.iconColor,
                                 side: Self.iconSide,
-                                pointSize: 13)
+                                pointSize: 11)
 
         titleLabel.font = Tokens.Font.bodyEmphasized
         titleLabel.lineBreakMode = .byTruncatingTail
@@ -261,126 +258,58 @@ final class SetupCardView: NSView {
 
         checkmark.image = NSImage(systemSymbolName: "checkmark.circle.fill",
                                   accessibilityDescription: "Allowed")
-        checkmark.symbolConfiguration = .init(pointSize: 14, weight: .semibold)
-        checkmark.contentTintColor = .systemGreen
+        checkmark.symbolConfiguration = .init(pointSize: 13, weight: .semibold)
+        checkmark.contentTintColor = Tokens.Color.success
         checkmark.translatesAutoresizingMaskIntoConstraints = false
         checkmark.alphaValue = 0
 
-        lockGlyph.image = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: "Locked")
-        lockGlyph.symbolConfiguration = .init(pointSize: 11, weight: .semibold)
-        lockGlyph.contentTintColor = Tokens.Color.tertiaryLabel
-        lockGlyph.translatesAutoresizingMaskIntoConstraints = false
-        lockGlyph.isHidden = true
+        configureMarker(lockGlyph, symbolName: "lock.fill", accessibility: "Locked",
+                        tint: Tokens.Color.tertiaryLabel)
+        // razor: a skipped row is the slash glyph plus a dimmed title, NOT a
+        // dashed rim. `RoundedContainerView` draws its border on the layer, and
+        // a dash pattern needs a `CAShapeLayer` of its own — a whole second
+        // drawing path for one state. Upgrade path: if a dashed rim is ever
+        // wanted, give that view an optional shape-layer border.
+        configureMarker(skipGlyph, symbolName: "slash.circle", accessibility: "Skipped",
+                        tint: Tokens.Color.warningText)
+        configureMarker(brokenGlyph, symbolName: "exclamationmark.triangle.fill",
+                        accessibility: "Turned off", tint: Tokens.Color.failure)
 
         noteLabel.font = Tokens.Font.caption
-        noteLabel.textColor = Tokens.Color.secondaryLabel
+        noteLabel.textColor = Tokens.Color.inkSecondary
         noteLabel.translatesAutoresizingMaskIntoConstraints = false
         noteLabel.setContentHuggingPriority(.required, for: .horizontal)
         noteLabel.isHidden = true
-
-        detailLabel.font = Tokens.Font.caption
-        detailLabel.textColor = Tokens.Color.secondaryLabel
-        detailLabel.lineBreakMode = .byWordWrapping
-        detailLabel.maximumNumberOfLines = 0
-        detailLabel.stringValue = content.detail
-        detailLabel.preferredMaxLayoutWidth = Self.textColumnWidth
-        detailLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        hintLabel.font = Tokens.Font.caption
-        hintLabel.textColor = Tokens.Color.warning
-        hintLabel.lineBreakMode = .byWordWrapping
-        hintLabel.maximumNumberOfLines = 0
-        hintLabel.preferredMaxLayoutWidth = Self.textColumnWidth
-        hintLabel.translatesAutoresizingMaskIntoConstraints = false
-        hintLabel.isHidden = true
-
-        spinner.style = .spinning
-        spinner.controlSize = .small
-        spinner.isDisplayedWhenStopped = false
-        spinner.translatesAutoresizingMaskIntoConstraints = false
-
-        captionLabel.font = Tokens.Font.caption
-        captionLabel.textColor = Tokens.Color.secondaryLabel
-        // ONE line, always. The row is permanently in the layout (see below), so
-        // a caption that wrapped would move every card under this one — the
-        // thing the reserved band exists to prevent. Both captions fit the
-        // column with room to spare.
-        captionLabel.lineBreakMode = .byTruncatingTail
-        captionLabel.maximumNumberOfLines = 1
-        captionLabel.preferredMaxLayoutWidth = Self.textColumnWidth - Self.captionSpinnerColumn
-        captionLabel.translatesAutoresizingMaskIntoConstraints = false
-        captionRow.orientation = .horizontal
-        // Centre, not baseline: a progress indicator has no baseline to align
-        // text to, and AppKit resolves that by not aligning anything.
-        captionRow.alignment = .centerY
-        captionRow.spacing = 6
-        captionRow.translatesAutoresizingMaskIntoConstraints = false
-        captionRow.addArrangedSubview(spinner)
-        captionRow.addArrangedSubview(captionLabel)
-        // The row NEVER leaves the layout: an expanded card's height is a
-        // constant of its copy, and a caption that appeared when Allow was
-        // tapped grew the card ~50 pt and shoved every card below it down. It
-        // is emptied and faded instead (see `apply`).
-        captionRow.alphaValue = 0
-
-        primarySlot.translatesAutoresizingMaskIntoConstraints = false
-
-        let accessory = NSStackView(views: [primarySlot])
-        accessory.orientation = .horizontal
-        accessory.alignment = .centerY
-        accessory.spacing = 8
-        accessory.translatesAutoresizingMaskIntoConstraints = false
-        if content.isSkippable {
-            let skip = onboardingActionButton(title: "Skip", prominent: false,
-                                              target: self, action: #selector(skipTapped))
-            skipButton = skip
-            accessory.addArrangedSubview(skip)
-        }
-        settingsLinkButton = onboardingActionButton(title: "Open Settings…", prominent: false,
-                                                    target: self, action: #selector(settingsTapped))
-        settingsLinkButton.isHidden = true
-        accessory.addArrangedSubview(settingsLinkButton)
-
-        bodyStack.orientation = .vertical
-        bodyStack.alignment = .leading
-        bodyStack.spacing = 8
-        bodyStack.translatesAutoresizingMaskIntoConstraints = false
-        bodyStack.addArrangedSubview(detailLabel)
-        bodyStack.addArrangedSubview(hintLabel)
-        bodyStack.addArrangedSubview(captionRow)
-        bodyStack.addArrangedSubview(accessory)
-
-        bodyClip.translatesAutoresizingMaskIntoConstraints = false
-        bodyClip.addSubview(bodyStack)
 
         surface.addSubview(iconTile)
         surface.addSubview(titleLabel)
         surface.addSubview(checkmark)
         surface.addSubview(lockGlyph)
+        surface.addSubview(skipGlyph)
+        surface.addSubview(brokenGlyph)
         surface.addSubview(noteLabel)
-        surface.addSubview(bodyClip)
 
         let inset = Self.horizontalInset
         let vInset = Self.headerVerticalInset
         let textLeading = inset + Self.iconSide + Self.iconGap
 
-        bodyHeight = bodyClip.heightAnchor.constraint(equalToConstant: 0)
         checkmarkWidthConstraint = checkmark.widthAnchor.constraint(equalToConstant: 0)
 
-        // The body's bottom pin is deliberately breakable: the clip is shorter
-        // than its content for the whole collapse, and a required pin would
-        // fight the animated height instead of being clipped by it.
-        let bodyBottom = bodyStack.bottomAnchor.constraint(equalTo: bodyClip.bottomAnchor)
-        bodyBottom.priority = .defaultHigh
-
-        NSLayoutConstraint.activate([
+        var constraints: [NSLayoutConstraint] = [
             surface.leadingAnchor.constraint(equalTo: leadingAnchor),
             surface.trailingAnchor.constraint(equalTo: trailingAnchor),
             surface.topAnchor.constraint(equalTo: topAnchor),
             surface.bottomAnchor.constraint(equalTo: bottomAnchor),
+            surface.heightAnchor.constraint(greaterThanOrEqualToConstant: Self.minHeight),
+
+            edgeBar.leadingAnchor.constraint(equalTo: surface.leadingAnchor),
+            edgeBar.topAnchor.constraint(equalTo: surface.topAnchor),
+            edgeBar.bottomAnchor.constraint(equalTo: surface.bottomAnchor),
+            edgeBar.widthAnchor.constraint(equalToConstant: Self.edgeBarWidth),
 
             iconTile.leadingAnchor.constraint(equalTo: surface.leadingAnchor, constant: inset),
             iconTile.topAnchor.constraint(equalTo: surface.topAnchor, constant: vInset),
+            iconTile.bottomAnchor.constraint(equalTo: surface.bottomAnchor, constant: -vInset),
 
             titleLabel.leadingAnchor.constraint(equalTo: surface.leadingAnchor, constant: textLeading),
             titleLabel.centerYAnchor.constraint(equalTo: iconTile.centerYAnchor),
@@ -388,35 +317,35 @@ final class SetupCardView: NSView {
             checkmark.trailingAnchor.constraint(equalTo: surface.trailingAnchor, constant: -inset),
             checkmark.centerYAnchor.constraint(equalTo: iconTile.centerYAnchor),
             checkmarkWidthConstraint,
-            checkmark.heightAnchor.constraint(equalToConstant: 16),
-
-            // The lock shares the checkmark's slot — the trailing marker is ONE
-            // position that says locked, then earned. Pinned to the same trailing
-            // inset rather than to the checkmark, whose width is 0 when hidden.
-            lockGlyph.trailingAnchor.constraint(equalTo: surface.trailingAnchor, constant: -inset),
-            lockGlyph.centerYAnchor.constraint(equalTo: iconTile.centerYAnchor),
+            checkmark.heightAnchor.constraint(equalToConstant: Self.markerSlot),
 
             noteLabel.trailingAnchor.constraint(equalTo: surface.trailingAnchor, constant: -inset),
             noteLabel.centerYAnchor.constraint(equalTo: iconTile.centerYAnchor),
 
-            // The title yields to whichever trailing accessory is showing.
             titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: checkmark.leadingAnchor, constant: -8),
             titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: noteLabel.leadingAnchor, constant: -8),
-            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: lockGlyph.leadingAnchor, constant: -8),
+        ]
+        // The three static markers share the checkmark's ONE slot: only one can
+        // ever show, so they are pinned to the same trailing inset (never to
+        // each other, whose widths are zero when hidden).
+        for glyph in [lockGlyph, skipGlyph, brokenGlyph] {
+            constraints += [
+                glyph.trailingAnchor.constraint(equalTo: surface.trailingAnchor, constant: -inset),
+                glyph.centerYAnchor.constraint(equalTo: iconTile.centerYAnchor),
+                glyph.widthAnchor.constraint(equalToConstant: Self.markerSlot),
+                titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: glyph.leadingAnchor, constant: -8),
+            ]
+        }
+        NSLayoutConstraint.activate(constraints)
+    }
 
-            bodyClip.topAnchor.constraint(equalTo: iconTile.bottomAnchor, constant: vInset),
-            bodyClip.leadingAnchor.constraint(equalTo: surface.leadingAnchor),
-            bodyClip.trailingAnchor.constraint(equalTo: surface.trailingAnchor),
-            bodyClip.bottomAnchor.constraint(equalTo: surface.bottomAnchor),
-
-            bodyStack.topAnchor.constraint(equalTo: bodyClip.topAnchor),
-            bodyStack.leadingAnchor.constraint(equalTo: bodyClip.leadingAnchor, constant: textLeading),
-            bodyStack.trailingAnchor.constraint(equalTo: bodyClip.trailingAnchor, constant: -inset),
-            bodyBottom,
-
-            primarySlot.widthAnchor.constraint(equalToConstant: Self.primarySlotWidth),
-            primarySlot.heightAnchor.constraint(equalToConstant: Self.accessoryHeight),
-        ])
+    private func configureMarker(_ view: NSImageView, symbolName: String,
+                                 accessibility: String, tint: NSColor) {
+        view.image = NSImage(systemSymbolName: symbolName, accessibilityDescription: accessibility)
+        view.symbolConfiguration = .init(pointSize: 11, weight: .semibold)
+        view.contentTintColor = tint
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.isHidden = true
     }
 
     // MARK: State
@@ -424,50 +353,44 @@ final class SetupCardView: NSView {
     /// Repaint for `state`.
     ///
     /// - Parameters:
-    ///   - foundSpeakers: Local Network's browse count, for the completed title.
-    ///   - isProbing: a prompt/probe for this step is in flight — the Allow
-    ///     button leaves (never a second prompt) and `statusCaption` says why.
-    ///   - offersSettingsFallback: the two-mode Allow's second mode — the
-    ///     prompt is spent, so the button becomes the Settings deep link.
-    ///   - hint: an extra honest line under the copy (Local Network's "no
-    ///     speakers found yet"), or nil.
-    ///   - primaryTitle: replaces the Allow title without changing what the
-    ///     click does (Local Network's "Try Again" — the retry is the same
-    ///     browse, so it must not become a Settings link).
-    ///   - offersSettingsLink: show the quiet secondary "Open Settings…"
-    ///     BESIDE the primary, rather than in place of it.
-    ///   - animated: run the grant choreography (checkmark slide-in, clip
-    ///     collapse/expand). Callers pass false for the first build, Reduce
-    ///     Motion, and any off-window/occluded window — steady states must
-    ///     render settled or snapshots stop being deterministic.
+    ///   - foundSpeakers: Local Network's browse count, for the earned title.
+    ///   - isLive: this row is the flow's current step — the gold edge and the
+    ///     lifted surface, and a press that fires the ribbon's primary action.
+    ///   - isBrowseSelected: the hero pane is showing this (decided) row.
+    ///   - isBroken: this permission was granted and is off now.
+    ///   - animated: run the grant choreography (the checkmark slide-in).
+    ///     Callers pass false for the first build, Reduce Motion, and any
+    ///     off-window/occluded window — steady states must render settled or
+    ///     snapshots stop being deterministic.
     func apply(_ state: SetupCardState,
                foundSpeakers: Int?,
-               isProbing: Bool,
-               offersSettingsFallback: Bool,
-               hint: String? = nil,
-               statusCaption: String? = nil,
-               primaryTitle: String? = nil,
-               offersSettingsLink: Bool = false,
+               isLive: Bool,
+               isBrowseSelected: Bool,
+               isBroken: Bool,
                animated: Bool) {
         let wasCompleted = isCheckmarked(self.state)
         self.state = state
-        self.isProbing = isProbing
+        self.isLive = isLive
+        self.isBrowseSelected = isBrowseSelected
+        self.isBroken = isBroken
 
-        titleLabel.stringValue = content.title(for: state, foundSpeakers: foundSpeakers)
-        // A step the flow hasn't reached is LOCKED and must read locked (owner
-        // decision 2026-08-11): dimmed text and tile, plus the lock below.
-        // Completed and skipped steps stay legible — the user did reach those.
+        titleLabel.stringValue = content.spineTitle(for: state, foundSpeakers: foundSpeakers)
+        // A step the flow hasn't reached is LOCKED and must read locked: dimmed
+        // text and tile, plus the padlock below. Every state the user HAS
+        // reached keeps authored secondary ink, which clears the 4.5:1 text
+        // floor in both appearances where the system alias did not.
         titleLabel.textColor = switch state {
         case .active: Tokens.Color.label
         case .pending: Tokens.Color.tertiaryLabel
-        case .completed, .autoPassed, .skipped: Tokens.Color.secondaryLabel
+        case .completed, .autoPassed, .skipped: Tokens.Color.inkSecondary
         }
         // Dimming is the tile's ONLY state role: its glyph tint is permanent,
-        // and the checkmark below is what says "earned".
-        iconTile.alphaValue = state == .pending ? Self.lockedTileAlpha : 1
-        // The lock and the checkmark share one slot, so only one can show; a
-        // skipped step gets neither (the user answered, they just said no).
-        lockGlyph.isHidden = state != .pending
+        // and the trailing marker is what says "earned".
+        iconTile.alphaValue = switch state {
+        case .pending: Self.lockedTileAlpha
+        case .skipped: Self.skippedTileAlpha
+        case .active, .completed, .autoPassed: 1
+        }
 
         if case .autoPassed(let note) = state {
             noteLabel.stringValue = note
@@ -476,49 +399,61 @@ final class SetupCardView: NSView {
             noteLabel.isHidden = true
         }
 
-        hintLabel.stringValue = hint ?? ""
-        hintLabel.isHidden = hint == nil
-
-        // The caption belongs to the ACTIVE card only, and it owns the spinner:
-        // a wait that says nothing reads as a hang.
-        let caption = state == .active ? statusCaption : nil
-        captionLabel.stringValue = caption ?? ""
-        // Faded, never hidden — the band stays reserved so no wait can resize
-        // the card it appears on.
-        captionRow.alphaValue = caption == nil ? 0 : 1
-        if caption == nil { spinner.stopAnimation(nil) } else { spinner.startAnimation(nil) }
-
-        applyCheckmark(shown: isCheckmarked(state),
+        // One trailing slot, one occupant — and a broken permission outranks
+        // every other marker, because it is the only one asking for something.
+        lockGlyph.isHidden = isBroken || state != .pending
+        skipGlyph.isHidden = isBroken || state != .skipped
+        brokenGlyph.isHidden = !isBroken
+        applyCheckmark(shown: !isBroken && isCheckmarked(state),
                        animated: animated && !wasCompleted && isCheckmarked(state))
-        rebuildPrimarySlot(isProbing: isProbing, offersSettingsFallback: offersSettingsFallback,
-                           primaryTitle: primaryTitle)
-        settingsLinkButton.isHidden = !(state == .active && offersSettingsLink)
-        setBodyCollapsed(state != .active, animated: animated)
+
         applySurface()
         applyAccessibility()
-        // Only the active card is a click target, so its tracking area comes and
-        // goes with the state.
+        // Pressability comes and goes with the state, and the cursor rect with it.
         window?.invalidateCursorRects(for: self)
     }
 
-    /// Fill and border by state: the active card is the one lifted off the
-    /// canvas, so current-vs-locked can't be mistaken. Elevation is one rung up
-    /// the warm surface ladder (`raised` over `panel`) plus a heavier neutral
-    /// rim — no new colour, and nothing gold (that budget belongs to the
-    /// instruments and the granted tile).
+    /// Fill, rim and edge bar by state.
+    ///
+    /// The live row is the one lifted off the canvas — one rung up the warm
+    /// surface ladder (`raised` over `panel`) plus a gold edge bar, so
+    /// current-vs-locked can't be mistaken. A BROKEN row overrides that with
+    /// the failure hue, because it is the only row asking to be looked at. The
+    /// browse selection is a neutral rim ON TOP of whatever the base state
+    /// drew — browsing is a reading position, not a change of state.
+    ///
+    /// Every blend goes through ``dynamicBlend(_:fraction:of:)``: blending a
+    /// dynamic token in place would flatten it to whichever appearance happened
+    /// to be current, which is exactly the 1.13:1 dark rim the critique
+    /// measured on the old active card.
     private func applySurface() {
-        guard state == .active else {
-            surface.fill = Tokens.Color.panel
-            surface.border = Tokens.Color.hairline
-            surface.borderWidth = 1
-            return
+        let baseFill = isLive ? Tokens.Color.raised : Tokens.Color.panel
+        var fill = baseFill
+        var border = Tokens.Color.hairline
+        var borderWidth: CGFloat = 1
+
+        if isLive {
+            border = dynamicBlend(Tokens.Color.hairline, fraction: 0.22, of: Tokens.Color.label)
         }
-        surface.fill = isHovered
-            ? Tokens.Color.raised.blended(withFraction: Self.hoverWashFraction,
-                                          of: NSColor.selectedContentBackgroundColor) ?? Tokens.Color.raised
-            : Tokens.Color.raised
-        surface.border = Tokens.Color.label.withAlphaComponent(0.18)
-        surface.borderWidth = 1.5
+        if isBroken {
+            fill = dynamicBlend(Tokens.Color.panel, fraction: 0.06, of: Tokens.Color.failure)
+            border = dynamicBlend(Tokens.Color.hairline, fraction: 0.55, of: Tokens.Color.failure)
+        }
+        if isBrowseSelected {
+            border = dynamicBlend(Tokens.Color.hairline, fraction: 0.38, of: Tokens.Color.label)
+            borderWidth = 1.5
+        }
+        if isHovered, isPressable {
+            fill = dynamicBlend(fill, fraction: Self.hoverWashFraction,
+                                of: NSColor.selectedContentBackgroundColor)
+        }
+
+        surface.fill = fill
+        surface.border = border
+        surface.borderWidth = borderWidth
+
+        edgeBar.isHidden = !(isLive || isBroken)
+        edgeBar.fill = isBroken ? Tokens.Color.failure : Tokens.Color.gold
     }
 
     /// Whether this state has EARNED a checkmark. Only a real verification
@@ -526,168 +461,77 @@ final class SetupCardView: NSView {
     /// visibly unfinished.
     private func isCheckmarked(_ state: SetupCardState) -> Bool { state == .completed }
 
-    /// Rebuild the leading accessory slot: the two-mode Allow button, or NOTHING
-    /// while a prompt/probe is in flight. The wait's spinner and its caption
-    /// live in the text column (see ``captionRow``) — the slot keeps its fixed
-    /// size either way, so Skip never moves.
-    private func rebuildPrimarySlot(isProbing: Bool, offersSettingsFallback: Bool,
-                                    primaryTitle: String?) {
-        for view in primarySlot.subviews { view.removeFromSuperview() }
-        allowButton = nil
-        guard state == .active, !isProbing else { return }
-
-        let title = primaryTitle ?? (offersSettingsFallback ? "Open Settings…" : content.allowTitle)
-        let button = onboardingActionButton(title: title, prominent: true,
-                                            target: self, action: #selector(allowTapped))
-        allowButton = button
-        primarySlot.addSubview(button)
-        NSLayoutConstraint.activate([
-            button.leadingAnchor.constraint(equalTo: primarySlot.leadingAnchor),
-            button.centerYAnchor.constraint(equalTo: primarySlot.centerYAnchor),
-            // A BUTTON fills the slot rather than sitting in it: "Allow…" is far
-            // narrower than "Open Settings…", and a button hugging its own title
-            // inside a fixed slot leaves a dead gap before Skip that reads as a
-            // layout mistake. `>=` so a wider button (Speaker Sync's "Open Login
-            // Items…") overflows instead of being squeezed.
-            button.trailingAnchor.constraint(greaterThanOrEqualTo: primarySlot.trailingAnchor),
-        ])
-    }
-
-    /// The checkmark's width-0 → 20 pt slide plus fade, delayed after the grant
+    /// The checkmark's width-0 → 16 pt slide plus fade, delayed after the grant
     /// (Wispr's exact figures — see the brief's "Wispr reference"). Instant
-    /// whenever the choreography is off.
+    /// whenever the choreography is off; every other marker swap is instant by
+    /// construction, there being no clip height left to animate.
     private func applyCheckmark(shown: Bool, animated: Bool) {
+        checkmarkGeneration += 1
         guard animated else {
-            checkmarkWidthConstraint.constant = shown ? Self.checkmarkWidth : 0
+            checkmarkWidthConstraint.constant = shown ? Self.markerSlot : 0
             checkmark.alphaValue = shown ? 1 : 0
             return
         }
         checkmarkWidthConstraint.constant = 0
         checkmark.alphaValue = 0
-        let generation = collapseGeneration
+        let generation = checkmarkGeneration
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.checkmarkDelay) { [weak self] in
-            guard let self, self.collapseGeneration == generation,
+            guard let self, self.checkmarkGeneration == generation,
                   self.isCheckmarked(self.state) else { return }
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = Self.checkmarkDuration
                 context.timingFunction = CAMediaTimingFunction(name: .easeOut)
                 context.allowsImplicitAnimation = true
-                self.checkmarkWidthConstraint.animator().constant = Self.checkmarkWidth
+                self.checkmarkWidthConstraint.animator().constant = Self.markerSlot
                 self.checkmark.animator().alphaValue = 1
                 self.layoutSubtreeIfNeeded()
             }
         }
     }
 
-    /// Collapse/expand the body by animating its CLIP HEIGHT and nothing else —
-    /// the house collapse language (`CardView.setBodyCollapsed`). Carries both
-    /// of that implementation's traps: SEED the clip with its current height
-    /// before animating it to 0 (or the first collapse snaps), and lay the
-    /// collapsed start state out before animating open (or the expand has
-    /// nothing to travel).
-    private func setBodyCollapsed(_ collapsed: Bool, animated: Bool) {
-        if animated && collapsed == isBodyCollapsed { return }
-        isBodyCollapsed = collapsed
+    // MARK: Interaction
 
-        if !animated {
-            // End state applied directly (initial build, Reduce Motion,
-            // off-window). EXPANDED deactivates the pinned height entirely, so
-            // the clip takes the body's own intrinsic height — a measured
-            // constant here would freeze whatever the copy happened to wrap to
-            // at that instant.
-            if collapsed {
-                bodyHeight.constant = 0
-                bodyHeight.isActive = true
-                bodyClip.isHidden = true
-            } else {
-                bodyClip.isHidden = false
-                bodyHeight.isActive = false
-            }
-            return
+    /// Whether a click on this row does anything. The live row fires its primary
+    /// action, a granted one browses it in the hero pane, a skipped one re-arms
+    /// its ask. Two states are not pressable: a LOCKED row (the flow is
+    /// sequential, and jumping ahead would ask for a permission out of order),
+    /// and an AUTO-PASSED one (its permanent note is the whole story, and there
+    /// is no honest hero for a grant macOS cannot make). Both refuse SILENTLY
+    /// (owner decision: no padlock shake — a refusal that animates invites a
+    /// second try).
+    var isPressable: Bool {
+        switch state {
+        case .pending, .autoPassed: return false
+        case .active: return isLive
+        case .completed, .skipped: return true
         }
-
-        // Settle the body's natural height BEFORE animating, so the expand
-        // target is exact.
-        layoutSubtreeIfNeeded()
-        let target = bodyStack.fittingSize.height
-
-        collapseGeneration += 1
-        let generation = collapseGeneration
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = Tokens.Motion.collapseRevealDuration
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            context.allowsImplicitAnimation = true
-            if collapsed {
-                // SEED the current height before animating to 0: activating the
-                // constraint alone pins the clip shut instantly, and the
-                // animation then travels 0 → 0 (the "first collapse snaps" trap).
-                bodyHeight.constant = bodyClip.frame.height
-                bodyHeight.isActive = true
-                layoutSubtreeIfNeeded()
-                bodyHeight.animator().constant = 0
-            } else {
-                // Clear hidden and lay the collapsed START state out before
-                // animating up, or the expand has nothing to travel.
-                bodyClip.isHidden = false
-                bodyHeight.isActive = true
-                bodyHeight.constant = 0
-                layoutSubtreeIfNeeded()
-                bodyHeight.animator().constant = target
-            }
-            layoutSubtreeIfNeeded()
-        }, completionHandler: { [weak self] in
-            guard let self, generation == self.collapseGeneration else { return }
-            // A superseded animation must not touch the terminal state — the
-            // newest one owns it.
-            if self.isBodyCollapsed {
-                self.bodyClip.isHidden = true
-            } else {
-                // Expanded: drop the pin so the body flexes with its content again.
-                self.bodyHeight.isActive = false
-            }
-        })
     }
 
-    // MARK: Actions
+    /// A pressable row must act on the click that ACTIVATES the app — same rule
+    /// as `ProminentButton.acceptsFirstMouse` (the bounce-to-Settings-and-back
+    /// loop returns the user to an inactive app, where a stock view spends the
+    /// first click on activation). A locked row refuses the click either way,
+    /// so it keeps stock behaviour.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { isPressable }
 
-    @objc private func allowTapped() { onAllow() }
-    @objc private func skipTapped() { onSkip() }
-    @objc private func settingsTapped() { onOpenSettings() }
-
-    /// Whether a click anywhere on this card should fire its Allow (owner
-    /// decision 2026-08-11: the whole active card is the target, the button is
-    /// just the visible affordance). A locked strip is NOT clickable — the flow
-    /// is sequential, and jumping ahead would ask for a permission out of order.
-    /// The in-flight guard is the UI half of single-flight.
-    private var isCardClickable: Bool { state == .active && !isProbing }
-
-    /// The live card is a button, and it must act on the click that ACTIVATES
-    /// the app — same rule as `ProminentButton.acceptsFirstMouse` (the
-    /// bounce-to-Settings-and-back loop returns the user to an inactive app,
-    /// where a stock view spends the first click on activation). A non-live
-    /// card refuses the click either way, so it keeps stock behaviour.
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { isCardClickable }
-
-    /// AppKit hit-tests the deepest view first, so a click that lands on Skip,
-    /// Allow… or the spinner never reaches here — the sub-controls sit above the
-    /// card-level target by construction, with no coordinate maths to keep in
-    /// step.
+    /// AppKit hit-tests the deepest view first, so nothing inside the row can
+    /// swallow this — the spine has no sub-controls left at all.
     override func mouseUp(with event: NSEvent) {
-        guard isCardClickable else { super.mouseUp(with: event); return }
+        guard isPressable else { super.mouseUp(with: event); return }
         let point = convert(event.locationInWindow, from: nil)
         guard bounds.contains(point) else { super.mouseUp(with: event); return }
-        allowTapped()
+        onPress()
     }
 
-    /// Swallow the press half too, so the card doesn't pass an unhandled
+    /// Swallow the press half too, so the row doesn't pass an unhandled
     /// mouseDown up to whatever is behind it while it's acting as a button.
     override func mouseDown(with event: NSEvent) {
-        guard isCardClickable else { super.mouseDown(with: event); return }
+        guard isPressable else { super.mouseDown(with: event); return }
     }
 
     override func resetCursorRects() {
         super.resetCursorRects()
-        guard isCardClickable else { return }
+        guard isPressable else { return }
         addCursorRect(bounds, cursor: .pointingHand)
     }
 
@@ -711,85 +555,91 @@ final class SetupCardView: NSView {
         applySurface()
     }
 
-    /// The card IS the button as far as VoiceOver is concerned, named for what
-    /// pressing it does. A card that isn't the live one is a plain group — its
-    /// press would be refused, and offering it would be a lie.
+    // MARK: Keyboard
+
+    /// A row that can be clicked can be tabbed to and pressed — the spine is
+    /// the window's only navigation, so it cannot be mouse-only.
+    override var acceptsFirstResponder: Bool { isPressable }
+
+    override func keyDown(with event: NSEvent) {
+        guard isPressable else { super.keyDown(with: event); return }
+        switch event.charactersIgnoringModifiers {
+        case " ", "\r": onPress()
+        default: super.keyDown(with: event)
+        }
+    }
+
+    override var focusRingMaskBounds: NSRect { bounds }
+
+    override func drawFocusRingMask() {
+        NSBezierPath(roundedRect: bounds,
+                     xRadius: Self.cornerRadius,
+                     yRadius: Self.cornerRadius).fill()
+    }
+
+    // MARK: Accessibility
+
+    /// The row IS the button as far as VoiceOver is concerned, named for what
+    /// pressing it does. A locked row is a plain group — its press would be
+    /// refused, and offering it would be a lie. The LABEL carries the state
+    /// too: the trailing marker is the only thing that distinguishes an allowed
+    /// row from a skipped one on screen, and a marker VoiceOver can't see is a
+    /// marker that isn't there.
     private func applyAccessibility() {
         setAccessibilityElement(true)
-        setAccessibilityRole(isCardClickable ? .button : .group)
-        setAccessibilityLabel(titleLabel.stringValue)
-        let action = allowButton?.title ?? content.allowTitle
-        setAccessibilityHelp(isCardClickable ? action : nil)
+        setAccessibilityRole(isPressable ? .button : .group)
+        setAccessibilityLabel(titleLabel.stringValue + stateSuffix)
+        setAccessibilityHelp(accessibilityAction)
+    }
+
+    private var stateSuffix: String {
+        if isBroken { return ", turned off \u{2014} needs attention" }
+        switch state {
+        case .active: return ""
+        case .pending: return ", locked"
+        case .completed, .autoPassed: return ", allowed"
+        case .skipped: return ", skipped"
+        }
+    }
+
+    /// What pressing does: the live row runs its ask, a decided one opens it in
+    /// the hero pane. Nothing for a locked row, which refuses.
+    private var accessibilityAction: String? {
+        guard isPressable else { return nil }
+        return isLive ? content.allowTitle : "Show"
     }
 
     override func accessibilityPerformPress() -> Bool {
-        guard isCardClickable else { return false }
-        allowTapped()
+        guard isPressable else { return false }
+        onPress()
         return true
-    }
-
-    /// Make (or stop making) this card's Allow button the window's
-    /// Return-default. While Done doesn't exist yet, Return belongs to the one
-    /// live Allow; once Done appears, Done takes it.
-    func setAllowIsReturnDefault(_ isDefault: Bool) {
-        allowButton?.keyEquivalent = isDefault ? "\r" : ""
     }
 
     // MARK: Test-support hooks
 
     var test_title: String { titleLabel.stringValue }
     var test_hasCheckmark: Bool { checkmarkWidthConstraint.constant > 0 && checkmark.alphaValue > 0 }
-    /// Whether the trailing slot is showing the lock (a step the flow hasn't
+    /// Whether the trailing slot is showing the padlock (a step the flow hasn't
     /// reached yet).
     var test_isLocked: Bool { !lockGlyph.isHidden }
+    /// Whether the trailing slot is showing the skip slash.
+    var test_isSkipped: Bool { !skipGlyph.isHidden }
+    /// Whether the row is drawing the broken-permission treatment.
+    var test_isBroken: Bool { isBroken }
+    /// Whether the hero pane is browsing this row.
+    var test_isBrowseSelected: Bool { isBrowseSelected }
     /// The title colour, so a test can pin that a locked step is dimmed further
     /// than a completed one.
     var test_titleColor: NSColor? { titleLabel.textColor }
     var test_iconTileAlpha: CGFloat { iconTile.alphaValue }
-    /// The tile's glyph tint — the card's `iconColor` in EVERY state.
+    /// The tile's glyph tint — the row's `iconColor` in EVERY state.
     var test_iconTint: NSColor? { iconTile.test_restingTint }
-    /// Whether the surface is drawing the active card's emphasis.
-    var test_isEmphasized: Bool { surface.borderWidth > 1 }
-    /// Whether a click anywhere on the card fires Allow right now.
-    var test_isCardClickable: Bool { isCardClickable }
+    /// Whether a click on the row does anything right now.
+    var test_isPressable: Bool { isPressable }
     var test_accessibilityIsButton: Bool { accessibilityRole() == .button }
     var test_accessibilityAction: String? { accessibilityHelp() }
-    /// Press the CARD (not its button) exactly as AppKit/VoiceOver would.
+    var test_accessibilityLabel: String? { accessibilityLabel() }
+    /// Press the ROW exactly as AppKit/VoiceOver would.
     func test_pressCard() -> Bool { accessibilityPerformPress() }
     var test_note: String? { noteLabel.isHidden ? nil : noteLabel.stringValue }
-    var test_hint: String? { hintLabel.isHidden ? nil : hintLabel.stringValue }
-    var test_isBodyCollapsed: Bool { isBodyCollapsed }
-    /// Whether a wait is on screen. The caption ROW is always in the layout (a
-    /// reserved band, so it can't resize the card) — what comes and goes is its
-    /// visibility.
-    var test_isProbing: Bool { captionRow.alphaValue > 0 }
-    /// The in-flight caption's text, or nil when no wait is on screen.
-    var test_statusCaption: String? { test_isProbing ? captionLabel.stringValue : nil }
-    var test_offersSkip: Bool { skipButton != nil && state == .active }
-    /// The titles of the buttons the card currently offers, in order.
-    var test_buttonTitles: [String] {
-        var titles = (primarySlot.subviews.compactMap { ($0 as? NSButton)?.title })
-        if state == .active, let skip = skipButton { titles.append(skip.title) }
-        if !settingsLinkButton.isHidden { titles.append(settingsLinkButton.title) }
-        return titles
-    }
-    /// Press the demoted "Open Settings…" link exactly as the button does.
-    func test_tapSettingsLink() { settingsTapped() }
-    var test_allowIsReturnDefault: Bool { allowButton?.keyEquivalent == "\r" }
-
-    func test_tapAllow() { allowTapped() }
-    func test_tapSkip() { skipTapped() }
-}
-
-/// A plain clipping container: the card body lives inside one so animating the
-/// clip's HEIGHT reveals/hides the content instead of resizing it.
-final class ClipView: NSView {
-    override var wantsUpdateLayer: Bool { true }
-    override func updateLayer() { layer?.masksToBounds = true }
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.masksToBounds = true
-    }
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 }

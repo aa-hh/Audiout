@@ -338,7 +338,7 @@ final class ThemeTileButton: NSButton {
         static let light = WarmPreviewPalette(
             chrome: Mock.lightChrome, stroke: Mock.lightStroke,
             canvas: NSColor(srgbRed: 0xFB / 255, green: 0xFB / 255, blue: 0xF9 / 255, alpha: 1),
-            well: NSColor(srgbRed: 0xE8 / 255, green: 0xE6 / 255, blue: 0xDC / 255, alpha: 1),
+            well: NSColor(srgbRed: 0xE2 / 255, green: 0xDF / 255, blue: 0xD3 / 255, alpha: 1),
             name: NSColor(srgbRed: 0x2B / 255, green: 0x25 / 255, blue: 0x19 / 255, alpha: 1),
             nameDim: NSColor(srgbRed: 0x9A / 255, green: 0x8F / 255, blue: 0x7D / 255, alpha: 1),
             gold: NSColor(srgbRed: 0xA9 / 255, green: 0x7F / 255, blue: 0x1E / 255, alpha: 1),

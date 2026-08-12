@@ -19,10 +19,19 @@ public enum OnboardingReason: Equatable, Sendable {
     case permissionLost([RequiredPermission])
 }
 
-/// The Setup window's content: a two-pane screen. LEFT, a fixed column with the
-/// hero, the five permission cards asked ONE AT A TIME (``SetupCardView``), and
-/// the Done footer. RIGHT, a native-drawn miniature of whatever surface the
-/// active card's Allow button is about to raise (``DemoPaneView``).
+/// The Setup window's content: a SPINE and a HERO.
+///
+/// LEFT, a narrow column of six compact status rows (``SetupSpineRowView`` plus
+/// the final check) — where you are, and nothing else. RIGHT, the hero pane:
+/// the native-drawn rehearsal of whatever surface this step's ask is about to
+/// raise (``DemoPaneView``), with a ribbon of REAL UI beneath it
+/// (``SetupRibbonView``) carrying the ask, the reassurance, the honesty line
+/// and the buttons.
+///
+/// That split is the point (Direction 04, owner-chosen): the rehearsal is this
+/// window's actual idea, so it takes the stage, and the copy that explains it
+/// sits directly under it rather than across the window in a card the eye has
+/// to pair up by hand.
 ///
 /// A thin renderer over two Core models and holding no permission logic of its
 /// own: ``SetupModel`` owns the statuses and the probes, ``SetupFlowModel``
@@ -30,32 +39,27 @@ public enum OnboardingReason: Equatable, Sendable {
 /// This class turns those into views and turns clicks back into calls.
 ///
 /// **Setup is a GATE** (owner decision 2026-08-11, reversing "guidance, not a
-/// gate"): Done is ABSENT from the view hierarchy — not disabled, not
-/// alpha-hidden — until every required permission verifies, and there is no
-/// "continue anyway" escape. The ✕ close remains the one ungated exit, and it
-/// deliberately doesn't persist completion, so the flow returns next launch.
+/// gate"): the CTA is ABSENT from the view hierarchy — not disabled, not
+/// alpha-hidden — until every required permission verifies and the final check
+/// passes, and there is no "continue anyway" escape. The ✕ close remains the
+/// one ungated exit, and it deliberately doesn't persist completion, so the
+/// flow returns next launch.
 @MainActor
 public final class OnboardingViewController: NSViewController {
 
     /// Fixed content size. The window is fixed at exactly this (see
     /// ``OnboardingWindowController/present()``), so no step's copy can resize
-    /// the window under the user mid-flow — the slack lands in the gap above
-    /// the footer instead.
+    /// the window under the user mid-flow.
     static let contentWidth: CGFloat = 820
     static let contentHeight: CGFloat = 560
-    /// The left column's fixed width; the demo pane takes the rest.
-    ///
-    /// Sized to the longest earned title ("Audiouter can now hear your Mac's
-    /// sound") plus its checkmark: a collapsed strip truncates below about 410,
-    /// and the titles are reviewed copy, so the column fits the words rather
-    /// than the words fitting the column. The demo's fixed surface still clears
-    /// its margins in what's left (`DemoPaneView.surfaceSize`).
-    static let leftPaneWidth: CGFloat = 420
-    /// Outer margin inside each pane.
-    static let paneMargin: CGFloat = 22
-    /// Gap from the card stack down to the Done footer — Done belongs to the
-    /// stack it completes, not to the bottom of the window.
-    static let cardsToFooterGap: CGFloat = 24
+    /// The SPINE's fixed width. It carries short row titles and nothing else —
+    /// the sentences moved to the ribbon — so it is a fraction of the 420 pt
+    /// the card column needed.
+    static let spineWidth: CGFloat = 288
+    /// Outer margin around both columns.
+    static let paneMargin: CGFloat = 26
+    /// Gap from the spine to the hero pane.
+    static let paneGap: CGFloat = 18
 
     private let model: SetupModel
     private let flow: SetupFlowModel
@@ -76,36 +80,79 @@ public final class OnboardingViewController: NSViewController {
     /// four call sites is on the way there.
     public var onWillOpenSystemSettings: (() -> Void)?
 
-    private var cards: [SetupStep: SetupCardView] = [:]
+    private var rows: [SetupStep: SetupSpineRowView] = [:]
     /// The sixth row: the automatic final check, made visible (owner decision
     /// 2026-08-11 — telemetry showed five clicks swallowed while an invisible
     /// ~2 s verification ran, so the check became a line item and the payoff
     /// waits for it).
     private var checkRow: SetupCheckRowView!
-    private var cardStack: NSStackView!
+    private var spineStack: NSStackView!
     private var demoPane: DemoPaneView!
+    private var ribbon: SetupRibbonView!
+    private var titleLabel: NSTextField!
     private var subtitleLabel: NSTextField!
-    private var footer: NSView!
-    private var doneButton: NSButton?
 
-    /// The step whose Allow is in flight — the spinner, and the UI half of the
-    /// single-flight rule the flow model enforces.
+    /// The step whose Allow is in flight — the waiting beat, and the UI half of
+    /// the single-flight rule the flow model enforces.
     private var allowInFlight: SetupStep?
 
     /// The most recent Allow's work, so a headless press can await exactly what
-    /// the real click started (`test_pressCard`) instead of re-implementing it.
+    /// the real click started (`test_pressRow`) instead of re-implementing it.
     private var allowTask: Task<Void, Never>?
 
-    /// Set by a failed Done verification: the card to snap back to. It overrides
+    /// Set by a failed Done verification: the step to snap back to. It overrides
     /// the flow model's own active step, which is anchored to where this
     /// presentation STARTED and so can't reach back to a step that was fine
     /// when the window opened and has since been revoked.
     private var snapBackStep: SetupStep?
 
+    /// The DECIDED row the hero pane is currently browsing, if any.
+    ///
+    /// Browsing is pure presentation and deliberately lives here rather than in
+    /// ``SetupFlowModel``: it must never touch the sequence or the gate. A
+    /// second click on the same row puts it back.
+    private var browseStep: SetupStep?
+
+    /// Steps whose skip the user has taken back by clicking the row again. It
+    /// only drives the "you skipped this earlier" reassurance — the flow model
+    /// has already forgotten the skip by then.
+    private var reopenedSteps: Set<SetupStep> = []
+
     /// Steps already completed at the last repaint — the transition edge the
-    /// grant choreography fires on (a repaint that changes nothing must not
-    /// re-run it).
+    /// grant choreography and the announcements fire on (a repaint that changes
+    /// nothing must not re-run them).
     private var completedAtLastRefresh: Set<SetupStep> = []
+    /// Same idea for refusals: a denial is announced when it first becomes
+    /// visible, not on every repaint that still shows it.
+    private var deniedAtLastRefresh: Set<SetupStep> = []
+    private var announcedCheckPassed = false
+    private var announcedSnapBack: SetupStep?
+    /// Flips true once the load-time silent status read has LANDED. Before that,
+    /// every already-granted step reads as "newly completed" against the empty
+    /// `completedAtLastRefresh` it seeds — real state, not a real transition the
+    /// user witnessed — so announcements, the re-front and the choreography all
+    /// stay off until this is true. The sync first paint is not enough of a
+    /// gate: `bluetoothStatus`/`remoteControlStatus` only reach their real value
+    /// through the ASYNC read, so a pre-granted step would otherwise announce
+    /// itself and re-front the window as the window opens.
+    /// The edge sets themselves (`completedAtLastRefresh`, `deniedAtLastRefresh`,
+    /// etc.) are seeded on those passes exactly as before.
+    private var initialStatusesSettled = false
+
+    /// The load-time status read's own task — the seam a headless walk awaits
+    /// (``test_awaitInitialStatuses()``).
+    private var initialStatusesTask: Task<Void, Never>?
+
+    /// The active step (and whether the CTA exists) the keyboard focus was last
+    /// placed for — focus moves on those transitions and at no other time.
+    private var focusAnchorStep: SetupStep??
+    private var focusAnchorHadCTA = false
+
+    /// Whether this presentation opened with every REQUIRED permission already
+    /// granted and an optional step still undecided — the "you came back for
+    /// the one you passed on" header. Fixed at init like the flow's own start
+    /// position: a grant made later must not re-word the greeting.
+    private let opensAsResume: Bool
 
     /// Polls the silent Accessibility trust read while the window is open, so a
     /// grant made in System Settings shows up even if `AXIsProcessTrusted()` only
@@ -127,10 +174,19 @@ public final class OnboardingViewController: NSViewController {
         // the flow's start position is fixed at init from the first unmet
         // required step, and building it after a grant would read as a
         // re-entry and open on a different card.
-        self.flow = SetupFlowModel(setup: model)
+        let flow = SetupFlowModel(setup: model)
+        self.flow = flow
         self.reason = reason
         self.onOpenSettings = onOpenSettings
         self.onDone = onDone
+        // "Everything required is in, one optional is still open" — the only
+        // state where the welcome copy would be wrong in both directions.
+        let optionalStillOpen = SetupFlowModel.skippableSteps.contains {
+            !flow.isComplete($0) && !flow.skippedSteps.contains($0)
+        }
+        self.opensAsResume = reason == .firstRun
+            && model.requiredPermissionsNotGranted().isEmpty
+            && optionalStillOpen
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -144,102 +200,119 @@ public final class OnboardingViewController: NSViewController {
         let background = WarmCanvasView()
         background.translatesAutoresizingMaskIntoConstraints = false
 
-        let leftPane = makeLeftPane()
-        let rightPane = makeRightPane()
-        background.addSubview(leftPane)
-        background.addSubview(rightPane)
+        let spine = makeSpine()
+        let hero = makeHeroPane()
+        background.addSubview(spine)
+        background.addSubview(hero)
 
+        let margin = Self.paneMargin
         NSLayoutConstraint.activate([
             background.widthAnchor.constraint(equalToConstant: Self.contentWidth),
             background.heightAnchor.constraint(equalToConstant: Self.contentHeight),
 
-            leftPane.leadingAnchor.constraint(equalTo: background.leadingAnchor),
-            leftPane.topAnchor.constraint(equalTo: background.topAnchor),
-            leftPane.bottomAnchor.constraint(equalTo: background.bottomAnchor),
-            leftPane.widthAnchor.constraint(equalToConstant: Self.leftPaneWidth),
+            spine.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: margin),
+            spine.widthAnchor.constraint(equalToConstant: Self.spineWidth),
+            spine.topAnchor.constraint(equalTo: background.topAnchor, constant: margin),
+            spine.bottomAnchor.constraint(equalTo: background.bottomAnchor, constant: -margin),
 
-            rightPane.leadingAnchor.constraint(equalTo: leftPane.trailingAnchor),
-            rightPane.trailingAnchor.constraint(equalTo: background.trailingAnchor),
-            rightPane.topAnchor.constraint(equalTo: background.topAnchor),
-            rightPane.bottomAnchor.constraint(equalTo: background.bottomAnchor),
+            hero.leadingAnchor.constraint(equalTo: spine.trailingAnchor, constant: Self.paneGap),
+            hero.trailingAnchor.constraint(equalTo: background.trailingAnchor, constant: -margin),
+            hero.topAnchor.constraint(equalTo: background.topAnchor, constant: margin),
+            hero.bottomAnchor.constraint(equalTo: background.bottomAnchor, constant: -margin),
         ])
         view = background
     }
 
-    /// Hero, card stack, footer — the column that carries every word and every
-    /// control.
-    private func makeLeftPane() -> NSView {
+    /// The spine: the hero header over six compact rows. No buttons, no copy —
+    /// everything a step SAYS lives in the ribbon now.
+    private func makeSpine() -> NSView {
         let pane = NSView()
         pane.translatesAutoresizingMaskIntoConstraints = false
 
         let header = makeHeader()
-        cardStack = NSStackView()
-        cardStack.orientation = .vertical
-        cardStack.alignment = .leading
-        cardStack.spacing = 6
-        cardStack.distribution = .fill
-        cardStack.translatesAutoresizingMaskIntoConstraints = false
+        spineStack = NSStackView()
+        spineStack.orientation = .vertical
+        spineStack.alignment = .leading
+        spineStack.spacing = 6
+        spineStack.distribution = .fill
+        spineStack.translatesAutoresizingMaskIntoConstraints = false
         for step in SetupFlowModel.steps {
-            let card = makeCard(for: step)
-            cards[step] = card
-            cardStack.addArrangedSubview(card)
-            card.widthAnchor.constraint(equalTo: cardStack.widthAnchor).isActive = true
+            let row = makeRow(for: step)
+            rows[step] = row
+            spineStack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: spineStack.widthAnchor).isActive = true
         }
         checkRow = SetupCheckRowView()
-        cardStack.addArrangedSubview(checkRow)
-        checkRow.widthAnchor.constraint(equalTo: cardStack.widthAnchor).isActive = true
-
-        footer = makeFooter()
+        spineStack.addArrangedSubview(checkRow)
+        checkRow.widthAnchor.constraint(equalTo: spineStack.widthAnchor).isActive = true
 
         pane.addSubview(header)
-        pane.addSubview(cardStack)
-        pane.addSubview(footer)
+        pane.addSubview(spineStack)
 
-        let margin = Self.paneMargin
-        // Done rides DIRECTLY under the card stack, not at the pane's bottom edge.
-        // The window is a FIXED size, so a footer pinned down there strands the
-        // complete state's collapsed stack at the top with the button ~250 pt below
-        // it across an empty band. The pane's lower slack falls BELOW the footer.
-        let cardsToFooter = footer.topAnchor.constraint(equalTo: cardStack.bottomAnchor,
-                                                       constant: Self.cardsToFooterGap)
-        // Weakest constraint in the column: a step whose copy wraps one line
-        // further than expected bends the bottom margin rather than resizing the
-        // window under the user or breaking a required constraint.
-        let footerAboveBottom = footer.bottomAnchor.constraint(lessThanOrEqualTo: pane.bottomAnchor,
-                                                              constant: -20)
-        footerAboveBottom.priority = .defaultLow
+        // Weakest constraint in the column: the spine hangs from the header and
+        // the pane's lower slack falls below it.
+        let stackAboveBottom = spineStack.bottomAnchor.constraint(lessThanOrEqualTo: pane.bottomAnchor)
+        stackAboveBottom.priority = .defaultLow
 
         NSLayoutConstraint.activate([
-            header.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: margin),
-            header.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -margin),
-            header.topAnchor.constraint(equalTo: pane.topAnchor, constant: margin),
+            header.leadingAnchor.constraint(equalTo: pane.leadingAnchor),
+            header.trailingAnchor.constraint(equalTo: pane.trailingAnchor),
+            header.topAnchor.constraint(equalTo: pane.topAnchor),
 
-            cardStack.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: margin),
-            cardStack.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -margin),
-            cardStack.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 18),
-            cardsToFooter,
-
-            footer.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: margin),
-            footer.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -margin),
-            footerAboveBottom,
+            spineStack.leadingAnchor.constraint(equalTo: pane.leadingAnchor),
+            spineStack.trailingAnchor.constraint(equalTo: pane.trailingAnchor),
+            spineStack.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 18),
+            stackAboveBottom,
         ])
         return pane
     }
 
-    /// The demo, centred on a subtly elevated surface.
-    private func makeRightPane() -> NSView {
-        let pane = NSView()
-        pane.translatesAutoresizingMaskIntoConstraints = false
+    /// The hero: one warm panel holding the STAGE (the drawn rehearsal) over the
+    /// RIBBON (the real UI). The panel owns the chrome, which is why the demo
+    /// pane inside it no longer draws a surface of its own.
+    private func makeHeroPane() -> NSView {
+        let pane = RoundedContainerView(fill: Tokens.Color.panel,
+                                        border: Tokens.Color.hairline,
+                                        radius: 12)
         demoPane = DemoPaneView()
-        pane.addSubview(demoPane)
+        ribbon = SetupRibbonView()
+        ribbon.onPrimary = { [weak self] in self?.ribbonPrimaryTapped() }
+        ribbon.onSkip = { [weak self] in self?.ribbonSkipTapped() }
+        ribbon.onQuietLink = { [weak self] in self?.ribbonQuietLinkTapped() }
+
+        // The flexible upper region: whatever the ribbon leaves. The stage is a
+        // fixed size and simply centres in it, so a step whose copy wraps one
+        // line further moves the stage a few points rather than resizing it.
+        let stageRegion = NSView()
+        stageRegion.translatesAutoresizingMaskIntoConstraints = false
+
+        pane.addSubview(stageRegion)
+        pane.addSubview(ribbon)
+        stageRegion.addSubview(demoPane)
+
+        let padding = Self.heroPadding
         NSLayoutConstraint.activate([
-            demoPane.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: Self.paneMargin),
-            demoPane.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -Self.paneMargin),
-            demoPane.topAnchor.constraint(equalTo: pane.topAnchor, constant: Self.paneMargin),
-            demoPane.bottomAnchor.constraint(equalTo: pane.bottomAnchor, constant: -Self.paneMargin),
+            stageRegion.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: padding),
+            stageRegion.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -padding),
+            stageRegion.topAnchor.constraint(equalTo: pane.topAnchor, constant: padding),
+            stageRegion.bottomAnchor.constraint(equalTo: ribbon.topAnchor,
+                                                constant: -Self.heroStageToRibbonGap),
+
+            demoPane.centerXAnchor.constraint(equalTo: stageRegion.centerXAnchor),
+            demoPane.centerYAnchor.constraint(equalTo: stageRegion.centerYAnchor),
+
+            ribbon.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: padding),
+            ribbon.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -padding),
+            ribbon.bottomAnchor.constraint(equalTo: pane.bottomAnchor, constant: -padding),
         ])
         return pane
     }
+
+    /// Interior padding of the hero pane. The stage's own width is derived from
+    /// it (`DemoPaneView.surfaceSize`).
+    static let heroPadding: CGFloat = 22
+    /// Minimum air between the stage and the ribbon under it.
+    static let heroStageToRibbonGap: CGFloat = 14
 
     private func makeHeader() -> NSView {
         // Show the app's REAL icon (not a generic glyph) — a stronger first
@@ -251,20 +324,23 @@ public final class OnboardingViewController: NSViewController {
         tile.setAccessibilityLabel("Audiouter")
         tile.translatesAutoresizingMaskIntoConstraints = false
 
-        let title = NSTextField(labelWithString: "Welcome to Audiouter")
-        title.font = .systemFont(ofSize: 20, weight: .bold)
-        title.translatesAutoresizingMaskIntoConstraints = false
+        titleLabel = NSTextField(labelWithString: "")
+        titleLabel.font = .systemFont(ofSize: 20, weight: .bold)
+        titleLabel.lineBreakMode = .byWordWrapping
+        titleLabel.maximumNumberOfLines = 2
+        titleLabel.preferredMaxLayoutWidth = Self.spineWidth
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
 
         // Plain "speakers", never "AirPlay" (spec §5.8, decision m). This one
         // label is also where a `.permissionLost` re-entry says what went off —
         // no separate banner view, so the layout is identical either way.
         subtitleLabel = NSTextField(wrappingLabelWithString: "")
-        subtitleLabel.font = Tokens.Font.body
-        subtitleLabel.maximumNumberOfLines = 3
+        subtitleLabel.font = Tokens.Font.caption
+        subtitleLabel.maximumNumberOfLines = 4
         subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
-        subtitleLabel.preferredMaxLayoutWidth = Self.leftPaneWidth - Self.paneMargin * 2
+        subtitleLabel.preferredMaxLayoutWidth = Self.spineWidth
 
-        let stack = NSStackView(views: [tile, title, subtitleLabel])
+        let stack = NSStackView(views: [tile, titleLabel, subtitleLabel])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 4
@@ -274,28 +350,15 @@ public final class OnboardingViewController: NSViewController {
         NSLayoutConstraint.activate([
             tile.widthAnchor.constraint(equalToConstant: 52),
             tile.heightAnchor.constraint(equalToConstant: 52),
+            titleLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
             subtitleLabel.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
         return stack
     }
 
-    /// The Done area. The button itself is NOT built here — it only enters the
-    /// hierarchy once the gate opens (see ``refreshDone()``).
-    private func makeFooter() -> NSView {
-        let footer = NSView()
-        footer.translatesAutoresizingMaskIntoConstraints = false
-        // Reserve the button's height so the card stack doesn't shift when Done
-        // appears — the gate is about the BUTTON's absence, not about the
-        // layout jumping.
-        footer.heightAnchor.constraint(equalToConstant: 32).isActive = true
-        return footer
-    }
-
-    private func makeCard(for step: SetupStep) -> SetupCardView {
-        SetupCardView(content: Self.content(for: step),
-                      onAllow: { [weak self] in self?.allowTapped(step) },
-                      onSkip: { [weak self] in self?.skipTapped(step) },
-                      onOpenSettings: { [weak self] in self?.settingsLinkTapped(step) })
+    private func makeRow(for step: SetupStep) -> SetupSpineRowView {
+        SetupSpineRowView(content: Self.content(for: step),
+                          onPress: { [weak self] in self?.rowPressed(step) })
     }
 
     public override func viewDidLoad() {
@@ -303,16 +366,23 @@ public final class OnboardingViewController: NSViewController {
         // Bind as soon as the view exists (not only in `viewWillAppear`, which a
         // headless test/harness never triggers) so a model status change — the
         // async audio probe resolving, the Bluetooth prompt being answered —
-        // repaints the cards.
+        // repaints the rows.
         model.onChange = { [weak self] in self?.refresh() }
         // Register the PTP helper daemon once, at load: unlike the probes,
         // registering shows no system prompt of its own, so it's safe to run
         // unconditionally rather than waiting for a tap.
         model.registerPTPHelper()
-        // Reflect real current state up front — without this the Bluetooth card
+        // Reflect real current state up front — without this the Bluetooth row
         // paints undetermined even when the grant is already in place
         // (`bluetoothStatus` starts `.unknown`). Silent: never springs a prompt.
-        refreshStatuses()
+        // Held rather than fired and forgotten: what this read LANDS is the
+        // window's opening state, not a transition, so nothing announces or
+        // re-fronts until it has finished arriving.
+        initialStatusesTask = Task { @MainActor in
+            await model.refreshStatuses()
+            initialStatusesSettled = true
+            refresh(animated: false)
+        }
         refresh(animated: false)
         startRemoteControlPoll()
         startPTPHelperPoll()
@@ -330,14 +400,14 @@ public final class OnboardingViewController: NSViewController {
 
     /// Re-derive every permission's live status (see ``SetupModel/refreshStatuses()``).
     /// Called on load, on appear, and — via the window controller — whenever the app
-    /// regains focus, so returning from System Settings updates the cards to reality.
+    /// regains focus, so returning from System Settings updates the rows to reality.
     /// Safe to call freely: it never springs a prompt on an un-engaged permission.
     public func refreshStatuses() {
         Task { @MainActor in await model.refreshStatuses() }
     }
 
     /// Poll the silent Accessibility read every ~1.5 s until it's granted, so a
-    /// toggle flipped in System Settings lands on the card even without a re-focus.
+    /// toggle flipped in System Settings lands on the row even without a re-focus.
     private func startRemoteControlPoll() {
         guard remoteControlPoll == nil else { return }
         remoteControlPoll = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] timer in
@@ -350,7 +420,7 @@ public final class OnboardingViewController: NSViewController {
     }
 
     /// Poll the PTP helper's `SMAppService.status` every ~1.5 s until it's
-    /// `.enabled`, so approving it in Login Items lands on the card without a
+    /// `.enabled`, so approving it in Login Items lands on the row without a
     /// re-focus. Same shape as `startRemoteControlPoll()`.
     private func startPTPHelperPoll() {
         guard ptpHelperPoll == nil else { return }
@@ -363,12 +433,13 @@ public final class OnboardingViewController: NSViewController {
         }
     }
 
-    // MARK: Card copy
+    // MARK: Step copy
 
-    /// The per-step card copy. The DETAIL strings are reused verbatim from the
+    /// The per-step copy. The DETAIL strings are reused verbatim from the
     /// pre-sequential rows: each one is TCC-framing tested (it defuses the OS's
     /// own wording before that prompt appears), so they are not re-written for
-    /// the new layout.
+    /// the new layout. The SPINE titles are the short forms the 288 pt column
+    /// can carry.
     static func content(for step: SetupStep) -> SetupCardContent {
         switch step {
         case .audio:
@@ -380,14 +451,16 @@ public final class OnboardingViewController: NSViewController {
                 completedTitle: "Audiouter can now hear your Mac's sound",
                 // Outcome-framed reassurance FIRST (spec §5.8 house voice: the
                 // OS prompt will say "screen recording", so defuse it here —
-                // the card names the AUDIO half, which is all we ask for),
+                // the copy names the AUDIO half, which is all we ask for),
                 // then the honest heads-up about the confirmation tone the
                 // probe really does play.
                 detail: "macOS calls this audio recording. Your audio flows "
                     + "straight to your speakers — nothing is stored or sent. "
                     + "Allowing plays a brief tone to confirm it's working.",
                 allowTitle: "Allow…",
-                isSkippable: false)
+                isSkippable: false,
+                spineAskTitle: "Hear your Mac's sound",
+                spineDoneTitle: "Hearing your Mac's sound")
         case .localNetwork:
             return SetupCardContent(
                 step: step,
@@ -405,7 +478,9 @@ public final class OnboardingViewController: NSViewController {
                 detail: "Find the speakers on your Wi\u{2011}Fi so they show up "
                     + "in your list.",
                 allowTitle: "Allow…",
-                isSkippable: false)
+                isSkippable: false,
+                spineAskTitle: "Find speakers on Wi\u{2011}Fi",
+                spineDoneTitle: "Speakers already reachable")
         case .bluetooth:
             return SetupCardContent(
                 step: step,
@@ -414,7 +489,7 @@ public final class OnboardingViewController: NSViewController {
                 // minting a fifth `Tokens.Color.permission*` token, which would
                 // need authored light/dark/Increase-Contrast values and a
                 // measured contrast rationale from the palette owner. The two
-                // cards are never adjacent, so the repeat doesn't read as a
+                // rows are never adjacent, so the repeat doesn't read as a
                 // mistake. Upgrade path: add `permissionBluetooth` to `Tokens`
                 // with those three variants and swap this one line.
                 iconColor: Tokens.Color.permissionRemoteControl,
@@ -424,7 +499,9 @@ public final class OnboardingViewController: NSViewController {
                     + "off, straight from Audiouter. Without this you can still "
                     + "use one that's already connected.",
                 allowTitle: "Allow…",
-                isSkippable: true)
+                isSkippable: true,
+                spineAskTitle: "Bluetooth speakers",
+                spineDoneTitle: "Bluetooth speakers")
         case .speakerSync:
             return SetupCardContent(
                 step: step,
@@ -435,7 +512,9 @@ public final class OnboardingViewController: NSViewController {
                 detail: "Your speakers play in perfect time by sharing one "
                     + "clock, through a small helper. Approve it once in Login Items.",
                 allowTitle: "Open Login Items…",
-                isSkippable: false)
+                isSkippable: false,
+                spineAskTitle: "Keep speakers in time",
+                spineDoneTitle: "Speakers stay in time")
         case .remoteControl:
             return SetupCardContent(
                 step: step,
@@ -447,14 +526,16 @@ public final class OnboardingViewController: NSViewController {
                     + "device, and press play or pause on a speaker to control "
                     + "your Mac.",
                 allowTitle: "Allow…",
-                isSkippable: true)
+                isSkippable: true,
+                spineAskTitle: "Volume-key control",
+                spineDoneTitle: "Volume-key control")
         }
     }
 
     // MARK: State
 
-    /// The card that is expanded right now. Normally the flow model's own
-    /// answer; a failed Done verification overrides it (see ``snapBackStep``).
+    /// The step the flow is on. Normally the flow model's own answer; a failed
+    /// Done verification overrides it (see ``snapBackStep``).
     private var displayedActiveStep: SetupStep? {
         if let snapBackStep, !flow.isComplete(snapBackStep) { return snapBackStep }
         return flow.activeStep
@@ -466,48 +547,70 @@ public final class OnboardingViewController: NSViewController {
     ///   the edge where a step becomes complete, and only on a window that is
     ///   really on screen with Reduce Motion off. Callers pass `false` for the
     ///   initial build and `true`/`canAnimate` for a UI-initiated change (a skip,
-    ///   a snap-back) that isn't a grant.
+    ///   a browse, a snap-back) that isn't a grant.
     private func refresh(animated: Bool? = nil) {
         let completedNow = Set(SetupFlowModel.steps.filter { flow.isComplete($0) })
         let newlyCompleted = completedNow.subtracting(completedAtLastRefresh)
-        let shouldAnimate = animated ?? (!newlyCompleted.isEmpty && canAnimate)
+        // Nothing the OPENING state lands is a transition, so the initial read
+        // paints settled however it arrives.
+        let shouldAnimate = animated ?? (!newlyCompleted.isEmpty && canAnimate && initialStatusesSettled)
         completedAtLastRefresh = completedNow
 
         // A grant lands while the user is looking at System Settings or a TCC
         // prompt — pull ourselves back to the front FIRST, so the rest of the
-        // choreography happens somewhere the user can see it.
-        if !newlyCompleted.isEmpty { returnToFront() }
+        // choreography happens somewhere the user can see it. A permission that
+        // was already in place when the window opened is not that.
+        if !newlyCompleted.isEmpty, initialStatusesSettled { returnToFront() }
         if let snapBackStep, flow.isComplete(snapBackStep) { self.snapBackStep = nil }
+
+        // A browse is a reading position on a DECIDED row, and it yields to
+        // anything that actually moved the flow.
+        if !newlyCompleted.isEmpty { browseStep = nil }
+        if let browsed = browseStep, !flow.isComplete(browsed) { browseStep = nil }
 
         let active = displayedActiveStep
         for step in SetupFlowModel.steps {
-            cards[step]?.apply(state(for: step, active: active),
-                               // No browse ever runs on an ungated OS (macOS
-                               // 14), so there is no count to report there —
-                               // nil, where zero means a real browse that saw
-                               // nothing.
-                               foundSpeakers: model.isLocalNetworkGated ? flow.localNetworkFoundSpeakers : nil,
-                               isProbing: isPrompting(step),
-                               offersSettingsFallback: offersSettingsFallback(step),
-                               hint: hint(for: step),
-                               statusCaption: statusCaption(for: step),
-                               primaryTitle: primaryTitle(for: step),
-                               offersSettingsLink: offersSettingsLink(step),
-                               animated: shouldAnimate)
+            rows[step]?.apply(state(for: step, active: active),
+                              // No browse ever runs on an ungated OS (macOS
+                              // 14), so there is no count to report there —
+                              // nil, where zero means a real browse that saw
+                              // nothing.
+                              foundSpeakers: model.isLocalNetworkGated ? flow.localNetworkFoundSpeakers : nil,
+                              isLive: step == active,
+                              isBrowseSelected: step == browseStep,
+                              isBroken: isBroken(step),
+                              animated: shouldAnimate)
         }
         runFinalCheckIfReady()
         checkRow.apply(displayedCheckState)
-        // The beat: the pane HOLDS while the check is pending/running — the
-        // finale (crossfade + one-shot ripple) and the CTA arrive together on
-        // the pass, in this same repaint.
-        if active != nil || flow.finalCheckState == .passed {
-            demoPane.show(step: active, mode: demoMode(for: active),
-                          animated: shouldAnimate)
+        refreshHero(active: active, animated: shouldAnimate)
+        ribbon.apply(ribbonContent(active: active))
+        refreshHeaderMessage()
+        announceTransitions(newlyCompleted: newlyCompleted, active: active)
+        refreshKeyboardFocus(active: active)
+    }
+
+    /// The hero pane's two halves: which rehearsal is on stage, and whether the
+    /// stage is standing back for a real dialog.
+    private func refreshHero(active: SetupStep?, animated: Bool) {
+        if let browsed = browseStep {
+            // Awkward cell B: a GRANTED Local Network on macOS 14 was never
+            // gated, so there is no privacy pane to show — the dialog it never
+            // raised is the honest picture, at rest.
+            let mode: DemoMode = browsed == .localNetwork && !model.isLocalNetworkGated
+                ? .prompt : .settings
+            demoPane.show(step: browsed, mode: mode, animated: animated,
+                          restingSwitchOn: mode == .settings, asBrowse: true)
+        } else if active != nil || flow.finalCheckState == .passed {
+            // The beat: the pane HOLDS while the check is pending/running — the
+            // finale (crossfade + one-shot ripple) and the CTA arrive together
+            // on the pass, in this same repaint.
+            demoPane.show(step: active, mode: demoMode(for: active), animated: animated)
         } else {
             demoPane.holdCurrentFrame()
         }
-        refreshDone()
-        refreshHeaderMessage()
+        let waiting = active.map { isPrompting($0) } ?? false
+        demoPane.setStageDimmed(waiting, animated: canAnimate)
     }
 
     // MARK: The final check
@@ -526,8 +629,8 @@ public final class OnboardingViewController: NSViewController {
         return state
     }
 
-    /// Start the automatic check the moment every card is decided. A failure
-    /// uses the existing snap-back machinery — the offending card re-opens and
+    /// Start the automatic check the moment every row is decided. A failure
+    /// uses the existing snap-back machinery — the offending step re-opens and
     /// the row reverts to pending (the readiness conjunct in
     /// `SetupFlowModel.finalCheckState` does the reverting).
     private func runFinalCheckIfReady() {
@@ -536,7 +639,8 @@ public final class OnboardingViewController: NSViewController {
         finalCheckTask = Task { @MainActor in
             let verdict = await flow.runFinalCheck()
             finalCheckTask = nil
-            if case .unmet(let step) = verdict { snapBackStep = step }
+            // A snap-back must land on a VISIBLE stage: the browse yields to it.
+            if case .unmet(let step) = verdict { snapBackStep = step; browseStep = nil }
             refresh(animated: canAnimate)
         }
     }
@@ -547,12 +651,14 @@ public final class OnboardingViewController: NSViewController {
             return flow.skippedSteps.contains(step) ? .skipped : .pending
         }
         // Auto-passed, not granted: this OS has no such permission to give, so
-        // the strip says why instead of claiming a grant nobody made.
+        // the row says why instead of claiming a grant nobody made.
         if step == .audio, model.audioStatus == .unsupported {
-            return .autoPassed(note: "Requires macOS 14.2 or later")
+            return .autoPassed(note: Self.audioAutoPassNote)
         }
         return .completed
     }
+
+    static let audioAutoPassNote = "Requires macOS 14.2 or later"
 
     /// Whether this step's Allow has spent its prompt, so the next click is the
     /// Settings deep link instead (the two-mode Allow). Kept in lockstep with
@@ -562,7 +668,7 @@ public final class OnboardingViewController: NSViewController {
         switch step {
         case .audio:         return model.audioStatus == .denied
         // A PROVEN refusal spends this prompt like any other (the browse would
-        // only be refused again). Short of that it is NOT two-mode: the card's
+        // only be refused again). Short of that it is NOT two-mode: this step's
         // prompt IS the browse, so an empty browse keeps its retry and offers
         // the pane beside it (`offersSettingsLink`).
         case .localNetwork:  return model.localNetworkStatus == .denied
@@ -577,74 +683,69 @@ public final class OnboardingViewController: NSViewController {
         }
     }
 
-    /// The one extra line the flow ever adds to a card. `.requested` means the
-    /// ask went out and NOTHING answered it — the permission dialog is
-    /// presumably still up, or its window expired. It does NOT mean the browse
-    /// found no speaker (a browse that reached the network proves the grant,
-    /// speakers or not), so the line must not invent a switched-off speaker as
-    /// the reason; it names the actual state and leaves both doors open.
-    private func hint(for step: SetupStep) -> String? {
-        guard localNetworkUnanswered(step) else { return nil }
-        return "Nothing has answered yet. If the permission dialog is open, "
-            + "choose Allow — or try again."
-    }
-
     /// Local Network was asked and nothing answered. Something still has to be
-    /// able to re-ask, which is why this card keeps a primary retry instead of
+    /// able to re-ask, which is why this step keeps a primary retry instead of
     /// flipping to Settings.
     private func localNetworkUnanswered(_ step: SetupStep) -> Bool {
         step == .localNetwork && step == displayedActiveStep
             && model.localNetworkStatus == .requested
     }
 
-    /// The Allow slot's label when it isn't the plain first ask. Only Local
-    /// Network has one: same click, same browse, honestly named.
-    private func primaryTitle(for step: SetupStep) -> String? {
-        localNetworkUnanswered(step) ? "Try Again" : nil
-    }
-
-    /// Whether the card shows the demoted "Open Settings…" beside its primary.
+    /// Whether the ribbon shows the demoted "Open Settings…" beside its primary.
     /// Local Network only, and only where that pane exists at all — macOS 14
     /// has no Local Network privacy gate, so there is nowhere to send anyone.
     private func offersSettingsLink(_ step: SetupStep) -> Bool {
         localNetworkUnanswered(step) && model.isLocalNetworkGated
     }
 
-    /// Whether this card is waiting on a prompt or probe it fired — the spinner,
-    /// and the inert card-level click target. Bluetooth's wait is the model's to
-    /// report: its prompt answers on a callback, so the click returns long before
-    /// the user has answered anything.
+    /// Whether this step is waiting on a prompt or probe it fired — the dimmed
+    /// stage, the spinner, and no buttons. Bluetooth's wait is the model's to
+    /// report: its prompt answers on a callback, so the click returns long
+    /// before the user has answered anything.
     private func isPrompting(_ step: SetupStep) -> Bool {
         if allowInFlight == step { return true }
         return step == .bluetooth && model.isPrimingBluetooth
     }
 
-    /// What the card says while it waits. Two phases, and the difference is the
-    /// point: ``waitingCaption`` points at the system dialog the user still has
-    /// to answer (up to a minute for Local Network — a bare spinner that long
-    /// reads as a hang), while the verifying captions cover our own brief
-    /// wrap-up AFTER the answer landed. A refusal has no wrap-up: it goes
-    /// straight to the denied card. Speaker Sync has nothing to name — its
-    /// Login Items approval is a poll, not a prompt of ours.
-    private func statusCaption(for step: SetupStep) -> String? {
-        if step == .localNetwork {
-            switch model.localNetworkPhase {
-            case .idle: return isPrompting(step) ? Self.waitingCaption : nil
-            case .waitingForAnswer: return Self.waitingCaption
-            case .verifying: return "Checking your network\u{2026}"
-            }
-        }
-        guard isPrompting(step) else { return nil }
+    /// Whether this step's own permission is PROVABLY refused. Only three steps
+    /// have a refusal we can read: Speaker Sync has no denied state at all, and
+    /// Accessibility never reports one (an unanswered ask stays `.requested`).
+    private func isProvablyDenied(_ step: SetupStep) -> Bool {
         switch step {
-        case .audio, .bluetooth, .remoteControl: return Self.waitingCaption
-        case .speakerSync, .localNetwork: return nil
+        case .audio:         return model.audioStatus == .denied
+        case .localNetwork:  return model.localNetworkStatus == .denied
+        case .bluetooth:     return model.bluetoothStatus == .denied
+        case .speakerSync, .remoteControl: return false
         }
     }
 
-    /// The one line every unanswered system dialog gets. It names what the user
-    /// is waiting ON — themselves, in another window — rather than implying the
-    /// app is busy.
-    static let waitingCaption = "Waiting for your answer\u{2026}"
+    /// Whether this step is one the `.permissionLost` re-entry named and which
+    /// is STILL missing — the row that opened this window.
+    private func isPermissionLost(_ step: SetupStep) -> Bool {
+        guard case .permissionLost(let originallyUnmet) = reason,
+              let permission = Self.requiredPermission(for: step),
+              originallyUnmet.contains(permission) else { return false }
+        return model.requiredPermissionsNotGranted().contains(permission)
+    }
+
+    /// Whether the row draws BROKEN: something that was on is off now, or the
+    /// live step has just been refused. Either way it is the one row on the
+    /// spine asking to be looked at.
+    private func isBroken(_ step: SetupStep) -> Bool {
+        if step == displayedActiveStep, isProvablyDenied(step) { return true }
+        return isPermissionLost(step)
+    }
+
+    static func requiredPermission(for step: SetupStep) -> RequiredPermission? {
+        switch step {
+        case .audio:         return .audioCapture
+        case .localNetwork:  return .localNetwork
+        case .speakerSync:   return .ptpHelper
+        // Neither is a `RequiredPermission` — both are skippable, and a
+        // revocation of one never re-opens this window.
+        case .bluetooth, .remoteControl: return nil
+        }
+    }
 
     private func demoMode(for step: SetupStep?) -> DemoMode {
         guard let step else { return .settled }
@@ -681,58 +782,297 @@ public final class OnboardingViewController: NSViewController {
         view.window?.makeKeyAndOrderFront(nil)
     }
 
-    // MARK: The gate
+    // MARK: The ribbon's copy
 
-    /// Add or remove Done. It is ABSENT until the final check has passed —
-    /// never present-but-disabled, which reads as "the app is broken" rather
-    /// than "there is one more thing to do".
-    private func refreshDone() {
-        let shouldExist = flow.isDoneAvailable
-        if shouldExist, doneButton == nil {
-            // The finale CTA (owner copy 2026-08-11): closing setup is what
-            // starts the deferred audio engine, so the button names that —
-            // and it wears the DEEP gold authored for white ink (`goldCTA`,
-            // measured rationale on the token) where the everyday Allow wears
-            // the system accent. Ink is still measured off the resolved fill
-            // (see `ProminentButton.picksInkFromFill`).
-            let done = ProminentButton(title: "Start listening", target: self,
-                                       action: #selector(doneTapped),
-                                       fill: Tokens.Color.goldCTA, picksInkFromFill: true,
-                                       titleFont: Tokens.Font.bodyEmphasized)
-            // Constrained directly below (no stack view to do it for us): left
-            // on, AutoLayout synthesises size from the zero frame and the
-            // button renders as nothing at all.
-            done.translatesAutoresizingMaskIntoConstraints = false
-            done.controlSize = .large
-            // Once Done exists it IS the Return-default; until then Return
-            // belongs to the one live Allow (below).
-            done.keyEquivalent = "\r"
-            doneButton = done
-            footer.addSubview(done)
-            NSLayoutConstraint.activate([
-                done.trailingAnchor.constraint(equalTo: footer.trailingAnchor),
-                done.centerYAnchor.constraint(equalTo: footer.centerYAnchor),
-            ])
-            if canAnimate {
-                done.alphaValue = 0
-                NSAnimationContext.runAnimationGroup { context in
-                    context.duration = 0.2
-                    context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-                    done.animator().alphaValue = 1
-                }
-            }
-        } else if !shouldExist, let done = doneButton {
-            done.removeFromSuperview()
-            doneButton = nil
+    /// The one line every unanswered system dialog gets. It names what the user
+    /// is waiting ON — themselves, in another window — rather than implying the
+    /// app is busy.
+    static let waitingStatus = "Waiting for your answer \u{2014} the real dialog is on screen now."
+    /// `.requested` means the ask went out and NOTHING answered it — the
+    /// permission dialog is presumably still up, or its window expired. It does
+    /// NOT mean the browse found no speaker (a browse that reached the network
+    /// proves the grant, speakers or not), so the line must not invent a
+    /// switched-off speaker as the reason; it names the actual state and leaves
+    /// both doors open.
+    static let localNetworkUnansweredStatus = "Nothing has answered yet. If the permission "
+        + "dialog is open, choose Allow — or try again."
+    static let alertSymbol = "exclamationmark.triangle.fill"
+    /// The gate's CTA (owner copy 2026-08-11: closing setup is what starts the
+    /// deferred audio engine, so the button names that). Named once — a browse
+    /// opened after the gate builds the same button.
+    static let ctaTitle = "Start listening"
+
+    /// Everything the ribbon shows, for whatever the window is doing right now.
+    private func ribbonContent(active: SetupStep?) -> RibbonContent {
+        if let browsed = browseStep {
+            var content = browseRibbonContent(browsed)
+            // The gate contract, unchanged in meaning: the CTA exists iff the
+            // final check passed — so a browse opened AFTER the gate keeps it.
+            // Browsing is a reading position, and taking the CTA away for it
+            // would read as the gate closing on something the user only looked
+            // at. The row's own quiet "Open Settings…" sits beside it.
+            if flow.isDoneAvailable { content.primary = (Self.ctaTitle, .cta) }
+            return content
         }
-        let active = displayedActiveStep
-        for step in SetupFlowModel.steps {
-            cards[step]?.setAllowIsReturnDefault(!shouldExist && step == active)
+        if flow.isDoneAvailable {
+            var content = RibbonContent()
+            content.primary = (Self.ctaTitle, .cta)
+            return content
+        }
+        // The hold beat: every row is decided and the check is still running.
+        // No CTA, no ask — the payoff waits for the pass.
+        guard let active else { return RibbonContent() }
+        return activeRibbonContent(active)
+    }
+
+    private func activeRibbonContent(_ step: SetupStep) -> RibbonContent {
+        var content = RibbonContent()
+        let copy = Self.content(for: step)
+
+        // A wait takes every button away: the answer is somewhere else now.
+        if step == .localNetwork, model.localNetworkPhase == .verifying {
+            content.status = (nil, "Checking your network\u{2026}", Tokens.Color.inkSecondary, true)
+            content.body = Self.ribbonBody(copy.detail)
+            return content
+        }
+        if isPrompting(step) || (step == .localNetwork && model.localNetworkPhase == .waitingForAnswer) {
+            content.status = (nil, Self.waitingStatus, Tokens.Color.warningText, true)
+            content.body = Self.ribbonBody(copy.detail)
+            return content
+        }
+
+        // Something that was ON is off now — the reason this window re-opened.
+        if isPermissionLost(step) {
+            content.status = (Self.alertSymbol, "This was on \u{2014} macOS says it's off now.",
+                              Tokens.Color.failure, false)
+            content.body = Self.ribbonBody(
+                "Everything else you set up is still in place. Turn **Audiouter** back on under "
+                + "\(Self.settingsPath(for: step)) — this is the only switch to flip.")
+            content.primary = (copy.allowTitle == "Open Login Items…" ? "Open Login Items…"
+                                                                     : "Open Settings…", .prominent)
+            return content
+        }
+
+        // A refusal. macOS only asks once, so the honest next move is a switch.
+        if isProvablyDenied(step) {
+            content.status = (Self.alertSymbol,
+                              "You chose Don't Allow. macOS only asks once \u{2014} from here it's "
+                              + "a switch in System Settings.", Tokens.Color.failure, false)
+            content.body = Self.ribbonBody(
+                "Turn **Audiouter** on under \(Self.settingsPath(for: step)), then come back — "
+                + "this row ticks itself.")
+            content.primary = ("Open Settings…", .prominent)
+            content.showsSkip = copy.isSkippable
+            return content
+        }
+
+        // Asked, nothing answered — and Local Network's retry IS its own browse,
+        // so the pane is a demotion beside it, never a replacement.
+        if localNetworkUnanswered(step) {
+            content.status = (Self.alertSymbol, Self.localNetworkUnansweredStatus,
+                              Tokens.Color.warningText, false)
+            content.body = Self.ribbonBody(copy.detail)
+            content.primary = ("Try Again", .prominent)
+            content.quietLink = offersSettingsLink(step) ? "Open Settings…" : nil
+            return content
+        }
+
+        // Accessibility asked once and can't tell us the answer.
+        if step == .remoteControl, model.remoteControlStatus == .requested {
+            content.body = Self.ribbonBody(
+                "In Settings, switch **Audiouter** on under Privacy & Security \u{25B8} Accessibility.")
+            content.honesty = Self.remoteControlHonesty
+            content.primary = ("Open Settings…", .prominent)
+            content.showsSkip = true
+            return content
+        }
+
+        // The first ask.
+        content = firstAskRibbonContent(step)
+        if reopenedSteps.contains(step) {
+            content.status = ("slash.circle", "You skipped this earlier \u{2014} nothing's lost.",
+                              Tokens.Color.warningText, false)
+        }
+        return content
+    }
+
+    /// What macOS is about to put in front of the user, said before it appears.
+    private func firstAskRibbonContent(_ step: SetupStep) -> RibbonContent {
+        var content = RibbonContent()
+        let copy = Self.content(for: step)
+        content.primary = (copy.allowTitle, .prominent)
+        content.showsSkip = copy.isSkippable
+
+        switch step {
+        case .remoteControl:
+            // The one ask that is TWO surfaces, and the one where the blue
+            // button is the wrong answer — so the ribbon says so in words as
+            // well as showing it.
+            content.ask = "Two clicks, on two different windows."
+            content.body = Self.ribbonBody(
+                "The alert's **blue button is Deny** — the quiet one, Open System Settings, is "
+                + "the way through. In Settings, switch **Audiouter** on.")
+            content.honesty = Self.remoteControlHonesty
+        case .speakerSync:
+            content.ask = "One switch, in Login Items."
+            content.body = Self.ribbonBody(copy.detail)
+            content.honesty = "This row ticks itself when you approve it."
+        case .audio, .localNetwork, .bluetooth:
+            content.ask = "This is what macOS will ask you next."
+            content.body = Self.ribbonBody(copy.detail)
+            // Only the skippable one needs to say what skipping costs.
+            if step == .bluetooth {
+                content.honesty = "Skip and it stays available in Settings \u{25B8} General "
+                    + "\u{25B8} Open Setup\u{2026}"
+            }
+        }
+        return content
+    }
+
+    static let remoteControlHonesty = "macOS won't tell us when you do \u{2014} this row ticks "
+        + "itself when you switch it on."
+
+    /// A decided row, opened for READING: what it bought, and where the switch
+    /// lives if the user ever wants it back.
+    private func browseRibbonContent(_ step: SetupStep) -> RibbonContent {
+        var content = RibbonContent()
+        // No auto-passed case here: those rows are not browsable at all.
+        // macOS 14 never gated Local Network, so there is no pane to name and
+        // nowhere to send anyone.
+        let hasPane = !(step == .localNetwork && !model.isLocalNetworkGated)
+        var sentence = browseCapabilitySentence(step)
+        if hasPane, step != .speakerSync {
+            sentence += " It lives under Privacy & Security \u{25B8} \(Self.paneName(for: step)) "
+                + "if you ever want to change it."
+        }
+        content.body = Self.ribbonBody(sentence)
+        content.quietLink = hasPane ? "Open Settings\u{2026}" : nil
+        return content
+    }
+
+    private func browseCapabilitySentence(_ step: SetupStep) -> String {
+        switch step {
+        case .audio: return "Audiouter can hear your Mac's sound."
+        // The earned title verbatim, as a sentence — the count is the detail a
+        // user can check, so it is what a browse repeats back.
+        case .localNetwork:
+            let count = model.isLocalNetworkGated ? flow.localNetworkFoundSpeakers : nil
+            return Self.content(for: step).title(for: .completed, foundSpeakers: count) + "."
+        case .bluetooth: return "Audiouter can use Bluetooth speakers."
+        // This one carries its own location: Login Items isn't under Privacy &
+        // Security, so the shared path sentence would send the user wrong.
+        case .speakerSync: return "Your speakers stay in perfect time. It lives in Login Items\u{2026}"
+        case .remoteControl: return "Your volume keys control Audiouter."
         }
     }
 
+    /// The System Settings pane each step's switch lives on, named the way the
+    /// pane itself is named.
+    static func paneName(for step: SetupStep) -> String {
+        switch step {
+        case .audio:         return "Screen & System Audio Recording"
+        case .localNetwork:  return "Local Network"
+        case .bluetooth:     return "Bluetooth"
+        case .remoteControl: return "Accessibility"
+        case .speakerSync:   return "Login Items"
+        }
+    }
+
+    /// The full path a user types into their head: Login Items is NOT under
+    /// Privacy & Security, so it names itself.
+    static func settingsPath(for step: SetupStep) -> String {
+        step == .speakerSync ? "Login Items"
+                             : "Privacy & Security \u{25B8} \(paneName(for: step))"
+    }
+
+    /// Body copy with `**bold**` runs. The ribbon is the only place in this
+    /// window with rich text, and it earns it: the word that matters is the
+    /// button that is the WRONG answer, or the app's own name in a list of
+    /// twenty.
+    static func ribbonBody(_ source: String) -> NSAttributedString {
+        let result = NSMutableAttributedString()
+        var isBold = false
+        for piece in source.components(separatedBy: "**") {
+            if !piece.isEmpty {
+                result.append(NSAttributedString(string: piece, attributes: [
+                    // The bold run is the CAPTION's own emphasized weight: the
+                    // body is 11 pt caption, and a `bodyEmphasized` run inside
+                    // it sets a bigger face on the one word that matters.
+                    .font: isBold ? Tokens.Font.captionEmphasized : Tokens.Font.caption,
+                    .foregroundColor: Tokens.Color.inkSecondary,
+                ]))
+            }
+            isBold.toggle()
+        }
+        return result
+    }
+
+    // MARK: Announcements
+
+    /// Speak a state change VoiceOver would otherwise miss. Everything this
+    /// window does happens somewhere other than the keyboard focus — a grant
+    /// lands from System Settings, a check passes on its own — so without this
+    /// the whole flow is silent (critique P1).
+    private func announce(_ text: String) {
+        guard initialStatusesSettled else { return }
+        test_announcements.append(text)
+        NSAccessibility.post(element: view, notification: .announcementRequested,
+                             userInfo: [.announcement: text,
+                                        .priority: NSAccessibilityPriorityLevel.high.rawValue])
+    }
+
+    /// One announcement per real transition — driven by the same edge sets the
+    /// repaint already computes, so a repaint that changes nothing says nothing.
+    private func announceTransitions(newlyCompleted: Set<SetupStep>, active: SetupStep?) {
+        for step in SetupFlowModel.steps where newlyCompleted.contains(step) {
+            let count = model.isLocalNetworkGated ? flow.localNetworkFoundSpeakers : nil
+            announce(Self.content(for: step).spineTitle(for: .completed, foundSpeakers: count))
+        }
+
+        let deniedNow = Set(SetupFlowModel.steps.filter { isProvablyDenied($0) })
+        let newlyDenied = deniedNow.subtracting(deniedAtLastRefresh)
+        deniedAtLastRefresh = deniedNow
+        for step in SetupFlowModel.steps where newlyDenied.contains(step) {
+            if let status = ribbonContent(active: active).status, step == active {
+                announce(status.text)
+            }
+        }
+
+        if flow.finalCheckState == .passed {
+            if !announcedCheckPassed {
+                announcedCheckPassed = true
+                announce(SetupCheckRowView.title(for: .passed))
+            }
+        } else {
+            announcedCheckPassed = false
+        }
+
+        if let snapBackStep, snapBackStep != announcedSnapBack {
+            announcedSnapBack = snapBackStep
+            if let status = ribbonContent(active: active).status { announce(status.text) }
+        } else if snapBackStep == nil {
+            announcedSnapBack = nil
+        }
+    }
+
+    // MARK: Keyboard
+
+    /// Put the keyboard on the button that matters, when — and only when — the
+    /// step changes or the gate opens. Moving it on every repaint would fight
+    /// a user who has tabbed onto the spine.
+    private func refreshKeyboardFocus(active: SetupStep?) {
+        guard !HeadlessRuntime.isActive, let window = view.window else { return }
+        let hasCTA = ribbon.test_primaryIsCTA
+        guard focusAnchorStep != .some(active) || hasCTA != focusAnchorHadCTA else { return }
+        focusAnchorStep = .some(active)
+        focusAnchorHadCTA = hasCTA
+        if let button = ribbon.primaryButton { window.makeFirstResponder(button) }
+    }
+
+    // MARK: The gate
+
     /// Done re-verifies before finishing: something may have been revoked while
-    /// the window sat open. A failure snaps the flow back to the card that came
+    /// the window sat open. A failure snaps the flow back to the step that came
     /// up short — no sheet, no "continue anyway".
     @objc private func doneTapped() {
         Task { @MainActor in await verifyThenFinish() }
@@ -759,67 +1099,81 @@ public final class OnboardingViewController: NSViewController {
             onDone()
         case .unmet(let step):
             snapBackStep = step
+            // A snap-back must land on a VISIBLE stage: the browse yields to it.
+            browseStep = nil
             refresh(animated: canAnimate)
         }
     }
 
     // MARK: Header message
 
-    /// Which message the header subtitle is carrying — tracked as a KIND so the
-    /// banner hooks report what is showing instead of inferring it from copy.
-    /// The welcome line holds in EVERY state including complete (owner decision
-    /// 2026-08-11: the payoff line lives on the demo pane's finale card, not in
-    /// the header) — only the lost-permission warning ever displaces it.
-    private enum HeaderMessage { case welcome, permissionLost }
+    /// Which message the header is carrying — tracked as a KIND so the banner
+    /// hooks report what is showing instead of inferring it from copy. The
+    /// welcome line holds in EVERY state including complete (owner decision
+    /// 2026-08-11: the payoff line lives on the finale card, not in the
+    /// header); only the lost-permission warning and the resume greeting ever
+    /// displace it.
+    private enum HeaderMessage { case welcome, permissionLost, resume }
     private var headerMessage: HeaderMessage = .welcome
 
     /// Show the `.permissionLost` warning while any permission it ORIGINALLY
     /// flagged is still missing (re-worded to the still-missing subset, never
-    /// expanded to nag about something it didn't open for); the welcome line
-    /// otherwise.
+    /// expanded to nag about something it didn't open for); the resume or
+    /// welcome line otherwise.
     private func refreshHeaderMessage() {
         if case .permissionLost(let originallyUnmet) = reason {
             let notGranted = model.requiredPermissionsNotGranted()
             let stillMissing = originallyUnmet.filter { notGranted.contains($0) }
             if !stillMissing.isEmpty {
                 headerMessage = .permissionLost
+                titleLabel.stringValue = "Let's get your sound back"
                 subtitleLabel.stringValue = Self.permissionLostText(for: stillMissing)
-                subtitleLabel.textColor = Tokens.Color.warning
+                subtitleLabel.textColor = Tokens.Color.warningText
                 return
             }
         }
+        if opensAsResume {
+            headerMessage = .resume
+            titleLabel.stringValue = "Pick up where you left off"
+            subtitleLabel.stringValue = Self.resumeSubtitle
+            subtitleLabel.textColor = Tokens.Color.inkSecondary
+            return
+        }
         headerMessage = .welcome
+        titleLabel.stringValue = "Welcome to Audiouter"
         subtitleLabel.stringValue = Self.welcomeSubtitle
-        subtitleLabel.textColor = Tokens.Color.secondaryLabel
+        subtitleLabel.textColor = Tokens.Color.inkSecondary
     }
 
     static let welcomeSubtitle = "Play your Mac's sound on the speakers around your home. "
         + "A few one-time permissions, one at a time."
 
+    static let resumeSubtitle = "Everything you set up is still in place. One step is still "
+        + "open — it's yours whenever you want it."
+
     /// The specific unmet permission(s), named plainly, so the user knows
-    /// exactly what to look for below.
+    /// exactly what to look for on the spine.
     static func permissionLostText(for unmet: [RequiredPermission]) -> String {
         let names = unmet.map(displayName(for:))
         let joined: String
         switch names.count {
-        case 0: joined = "a permission"   // shouldn't happen — reason is only built with a non-empty set
+        case 0: joined = "A permission"   // shouldn't happen — reason is only built with a non-empty set
         case 1: joined = names[0]
         case 2: joined = "\(names[0]) and \(names[1])"
         default: joined = names.dropLast().joined(separator: ", ") + ", and \(names[names.count - 1])"
         }
-        // The PRONOUN has to agree too: with two permissions named, "Re-enable
-        // it below" is a broken sentence on screen.
+        // The PRONOUN has to agree too: with two permissions named, "Flip it
+        // back on" is a broken sentence on screen.
         let isPlural = names.count > 1
-        return "Audiouter needs the \(joined) \(isPlural ? "permissions" : "permission"), "
-            + "currently turned off. Re-enable \(isPlural ? "them" : "it") below "
-            + "so the app can keep working."
+        return "\(joined) access was switched off after setup. "
+            + "Flip \(isPlural ? "them" : "it") back on and your speakers pick up where they left off."
     }
 
     static func displayName(for permission: RequiredPermission) -> String {
         switch permission {
         case .audioCapture: return "System Audio"
         case .localNetwork: return "Local Network"
-        // Matches the card's on-screen title (was "PTP helper" — jargon the
+        // Matches the row's on-screen title (was "PTP helper" — jargon the
         // user never sees anywhere else; spec §5.8's plain-speakers voice).
         case .ptpHelper:    return "Speaker Sync"
         }
@@ -827,10 +1181,78 @@ public final class OnboardingViewController: NSViewController {
 
     // MARK: Actions
 
+    /// A click on a spine row. What it does depends entirely on where the row
+    /// stands: the live one fires the ribbon's own primary (the whole row is
+    /// that button's target), a decided one opens for reading, a skipped one
+    /// takes the skip back, and a locked one refuses without a sound.
+    private func rowPressed(_ step: SetupStep) {
+        if step == displayedActiveStep { ribbonPrimaryTapped(); return }
+        switch state(for: step, active: displayedActiveStep) {
+        case .completed:
+            browseStep = browseStep == step ? nil : step
+            refresh(animated: canAnimate)
+        case .skipped:
+            flow.reopen(step)
+            browseStep = nil
+            reopenedSteps.insert(step)
+            refresh(animated: canAnimate)
+        // An auto-passed row refuses alongside a locked one: its permanent note
+        // carries the whole story, and no honest hero exists for a grant macOS
+        // cannot make.
+        case .pending, .active, .autoPassed:
+            break
+        }
+    }
+
+    /// The ribbon's one action button. Which call it makes is the same question
+    /// the ribbon asked when it chose the button's shape.
+    private func ribbonPrimaryTapped() {
+        // A primary that fires a prompt must OWN the stage: browse content
+        // would mask the waiting dim, the denied status line and that line's
+        // announcement — the P0 this window exists to fix.
+        if browseStep != nil {
+            browseStep = nil
+            refresh(animated: false)
+        }
+        // The CTA survives a browse (see `ribbonContent(active:)`), so it has to
+        // still FINISH from one — the browse condition that used to sit here
+        // would have left the button on screen doing nothing.
+        if flow.isDoneAvailable { doneTapped(); return }
+        guard let step = displayedActiveStep else { return }
+        allowTapped(step)
+    }
+
+    private func ribbonSkipTapped() {
+        guard let step = displayedActiveStep else { return }
+        skipTapped(step)
+    }
+
+    /// The quiet second path. For the live step that is Local Network's pane
+    /// (its retry keeps the browse); for a browsed row it is that row's own
+    /// pane, which is the only way a granted permission can be reached again.
+    private func ribbonQuietLinkTapped() {
+        if let browsed = browseStep { openSettings(for: browsed); return }
+        guard let step = displayedActiveStep else { return }
+        settingsLinkTapped(step)
+    }
+
+    private func openSettings(for step: SetupStep) {
+        onWillOpenSystemSettings?()
+        switch step {
+        case .audio:         onOpenSettings(.screenAndSystemAudioRecording)
+        case .localNetwork:  onOpenSettings(.localNetwork)
+        case .bluetooth:     onOpenSettings(.bluetoothPrivacy)
+        case .remoteControl: onOpenSettings(.accessibility)
+        // Login Items has no `SystemSettingsPane` of its own — the model owns
+        // that destination, the same one this step's Allow uses.
+        case .speakerSync:   model.openPTPHelperLoginItems()
+        }
+    }
+
     private func allowTapped(_ step: SetupStep) {
         guard allowInFlight == nil else { return }   // single-flight, UI half
         allowInFlight = step
-        refresh(animated: false)                     // spinner in, instantly
+        refresh(animated: false)                     // the wait, instantly
         allowTask = Task { @MainActor in await performAllow(step) }
     }
 
@@ -907,6 +1329,7 @@ public final class OnboardingViewController: NSViewController {
 
     private func skipTapped(_ step: SetupStep) {
         flow.skip(step)
+        announce("Skipped. \(Self.content(for: step).spineTitle(for: .skipped))")
         // Skipping is UI-initiated, and `SetupFlowModel` has no change hook of
         // its own, so the repaint is this call site's job.
         refresh(animated: canAnimate)
@@ -920,90 +1343,95 @@ public final class OnboardingViewController: NSViewController {
     /// opened — have no other headless signal.
     public private(set) var test_returnToFrontCount = 0
 
-    /// The expanded card's step (nil once every step is done or skipped).
+    /// Everything this window has asked VoiceOver to say, in order.
+    public private(set) var test_announcements: [String] = []
+
+    /// The live step (nil once every step is done or skipped).
     public var test_activeStep: SetupStep? { _ = view; return displayedActiveStep }
 
-    /// Which cards are collapsed — the sequencing invariant: exactly one open.
-    public var test_expandedSteps: [SetupStep] {
+    /// The decided row the hero pane is browsing, if any.
+    public var test_browseStep: SetupStep? { _ = view; return browseStep }
+
+    /// The on-screen title of a spine row, so a test can pin the imperative →
+    /// capability rewrite in its short form.
+    public func test_spineTitle(of step: SetupStep) -> String {
         _ = view
-        return SetupFlowModel.steps.filter { cards[$0]?.test_isBodyCollapsed == false }
+        return rows[step]?.test_title ?? ""
     }
 
-    /// The on-screen title of a card, so a test can pin the imperative →
-    /// capability rewrite.
-    public func test_title(of step: SetupStep) -> String { _ = view; return cards[step]?.test_title ?? "" }
+    /// Whether a row is showing its earned checkmark.
+    public func test_hasCheckmark(_ step: SetupStep) -> Bool { _ = view; return rows[step]?.test_hasCheckmark ?? false }
 
-    /// The buttons a card currently offers, in order.
-    public func test_buttonTitles(of step: SetupStep) -> [String] {
+    /// The note a row shows in place of a checkmark (auto-passed steps).
+    public func test_note(of step: SetupStep) -> String? { _ = view; return rows[step]?.test_note }
+
+    /// Whether a row is showing the LOCK — a step the flow hasn't reached.
+    public func test_isLocked(_ step: SetupStep) -> Bool { _ = view; return rows[step]?.test_isLocked ?? false }
+
+    /// Whether a row is showing the skip slash.
+    public func test_isSkipped(_ step: SetupStep) -> Bool { _ = view; return rows[step]?.test_isSkipped ?? false }
+
+    /// Whether a row is drawing the broken-permission treatment.
+    public func test_rowIsBroken(_ step: SetupStep) -> Bool { _ = view; return rows[step]?.test_isBroken ?? false }
+
+    /// Whether a row is drawing the browse selection.
+    public func test_rowIsBrowseSelected(_ step: SetupStep) -> Bool {
         _ = view
-        return cards[step]?.test_buttonTitles ?? []
+        return rows[step]?.test_isBrowseSelected ?? false
     }
 
-    /// Whether a card is showing its earned checkmark.
-    public func test_hasCheckmark(_ step: SetupStep) -> Bool { _ = view; return cards[step]?.test_hasCheckmark ?? false }
+    /// Whether a click on this row does anything.
+    public func test_isRowPressable(_ step: SetupStep) -> Bool { _ = view; return rows[step]?.test_isPressable ?? false }
 
-    /// The note a card shows in place of a checkmark (auto-passed steps).
-    public func test_note(of step: SetupStep) -> String? { _ = view; return cards[step]?.test_note }
-
-    /// The extra honest line under a card's copy, if any.
-    public func test_hint(of step: SetupStep) -> String? { _ = view; return cards[step]?.test_hint }
-
-    /// Whether a card is showing the in-flight wait (spinner + caption).
-    public func test_isProbing(_ step: SetupStep) -> Bool { _ = view; return cards[step]?.test_isProbing ?? false }
-
-    /// What that wait currently SAYS — nil when no wait is on screen.
-    public func test_statusCaption(of step: SetupStep) -> String? {
+    /// Whether VoiceOver sees this row as a button, under what action name, and
+    /// what it reads out.
+    public func test_rowIsAccessibilityButton(_ step: SetupStep) -> Bool {
         _ = view
-        return cards[step]?.test_statusCaption
+        return rows[step]?.test_accessibilityIsButton ?? false
+    }
+    public func test_rowAccessibilityAction(_ step: SetupStep) -> String? {
+        _ = view
+        return rows[step]?.test_accessibilityAction
+    }
+    public func test_rowAccessibilityLabel(_ step: SetupStep) -> String? {
+        _ = view
+        return rows[step]?.test_accessibilityLabel
     }
 
-    /// Whether a card is showing the LOCK — a step the flow hasn't reached.
-    public func test_isLocked(_ step: SetupStep) -> Bool { _ = view; return cards[step]?.test_isLocked ?? false }
-
-    /// Whether a card is drawing the active-step emphasis.
-    public func test_isEmphasized(_ step: SetupStep) -> Bool { _ = view; return cards[step]?.test_isEmphasized ?? false }
-
-    /// Whether a click anywhere on this card fires its Allow.
-    public func test_isCardClickable(_ step: SetupStep) -> Bool { _ = view; return cards[step]?.test_isCardClickable ?? false }
-
-    /// Whether VoiceOver sees this card as a button, and under what action name.
-    public func test_cardIsAccessibilityButton(_ step: SetupStep) -> Bool {
-        _ = view
-        return cards[step]?.test_accessibilityIsButton ?? false
-    }
-    public func test_cardAccessibilityAction(_ step: SetupStep) -> String? {
-        _ = view
-        return cards[step]?.test_accessibilityAction
-    }
-
-    /// Press the CARD itself (not its Allow button) and wait for whatever that
-    /// starts.
+    /// Press a spine ROW and wait for whatever that starts.
     ///
-    /// This drives the card view's REAL press entry
-    /// (`accessibilityPerformPress`, the same path `mouseUp` takes) through
-    /// `allowTapped` INCLUDING its single-flight guard, and then awaits the work
-    /// that press started. It deliberately does not call ``test_tapAllow(_:)``:
-    /// a hook that re-implements the dispatch it claims to exercise is how a
-    /// real break in row selection stayed hidden once already.
-    public func test_pressCard(_ step: SetupStep) async -> Bool {
+    /// This drives the row view's REAL press entry (`accessibilityPerformPress`,
+    /// the same path `mouseUp` takes) and then awaits the work that press
+    /// started. It deliberately does not re-implement the dispatch: a hook that
+    /// re-implements what it claims to exercise is how a real break in row
+    /// selection stayed hidden once already.
+    public func test_pressRow(_ step: SetupStep) async -> Bool {
         _ = view
-        guard cards[step]?.test_pressCard() == true else { return false }
+        guard rows[step]?.test_pressCard() == true else { return false }
         await allowTask?.value
         return true
     }
 
-    /// Whether the card's OWN press action is refused (a locked strip, or one
-    /// whose probe is in flight) — the no-jump-ahead and single-flight guards.
-    public func test_cardPressIsRefused(_ step: SetupStep) -> Bool {
+    /// Whether the row's OWN press action is refused (a locked row) — the
+    /// no-jump-ahead guard.
+    public func test_rowPressIsRefused(_ step: SetupStep) -> Bool {
         _ = view
-        guard let card = cards[step] else { return true }
-        return !card.test_isCardClickable && card.test_pressCard() == false
+        guard let row = rows[step] else { return true }
+        return !row.test_isPressable && row.test_pressCard() == false
     }
 
-    /// Drive a card's Allow exactly as the button does, and wait for it — the
-    /// same ``performAllow(_:)`` the real click runs — the same single-flight
-    /// bookkeeping, the same level yield and the same ``applyAllowResult(_:_:)``
-    /// — so none of those rules can be true here and false on screen.
+    /// Whether this row acts on the click that ACTIVATES the app (the
+    /// bounce-to-Settings-and-back fix — see `SetupSpineRowView.acceptsFirstMouse`).
+    public func test_rowAcceptsFirstMouse(_ step: SetupStep) -> Bool {
+        _ = view
+        return rows[step]?.acceptsFirstMouse(for: nil) ?? false
+    }
+
+    /// Drive a step's Allow exactly as the ribbon's button does, and wait for it
+    /// — the same ``performAllow(_:)`` the real click runs, the same
+    /// single-flight bookkeeping, the same level yield and the same
+    /// ``applyAllowResult(_:_:)`` — so none of those rules can be true here and
+    /// false on screen.
     public func test_tapAllow(_ step: SetupStep) async {
         _ = view
         allowInFlight = step
@@ -1011,13 +1439,37 @@ public final class OnboardingViewController: NSViewController {
     }
 
     /// Drive each step's Allow in order — how the snapshot harness reaches
-    /// "card 3 is the active one" without a live prompt.
+    /// "step 3 is the live one" without a live prompt.
     public func test_allow(_ steps: [SetupStep]) async {
         for step in steps { await test_tapAllow(step) }
     }
 
-    /// Drive a card's Skip exactly as the button does.
+    /// Drive Skip exactly as the ribbon's button does.
     public func test_tapSkip(_ step: SetupStep) { _ = view; skipTapped(step) }
+
+    // MARK: Ribbon hooks
+
+    public var test_ribbonAskText: String? { _ = view; return ribbon.test_askText }
+    public var test_ribbonStatusText: String? { _ = view; return ribbon.test_statusText }
+    public var test_ribbonBodyText: String? { _ = view; return ribbon.test_bodyText }
+    public var test_ribbonHonestyText: String? { _ = view; return ribbon.test_honestyText }
+    public var test_ribbonButtonTitles: [String] { _ = view; return ribbon.test_buttonTitles }
+    /// Whether a wait is on screen (the spinner beat, with every button gone).
+    public var test_ribbonIsWaiting: Bool { _ = view; return ribbon.test_isWaiting }
+    /// Press the ribbon's primary and wait for whatever it starts.
+    public func test_ribbonTapPrimary() async {
+        _ = view
+        ribbon.test_tapPrimary()
+        await allowTask?.value
+    }
+    public func test_ribbonTapSkip() { _ = view; ribbon.test_tapSkip() }
+    public func test_ribbonTapQuietLink() { _ = view; ribbon.test_tapQuietLink() }
+    /// Whether the ribbon's controls are real, reachable AppKit controls — it
+    /// sits inside the hero pane, beside a demo that is deliberately invisible
+    /// to VoiceOver, and must never be swept into that.
+    public var test_ribbonIsAccessible: Bool { _ = view; return ribbon.test_isAccessible }
+
+    // MARK: Check-row hooks
 
     /// The check row's displayed state.
     public var test_checkRowState: SetupFinalCheckState { _ = view; return displayedCheckState }
@@ -1038,19 +1490,31 @@ public final class OnboardingViewController: NSViewController {
         return checkRow.test_accessibilityLabel
     }
 
-    /// Await the automatic final check the last card decision started, if one
+    /// Await the automatic final check the last row decision started, if one
     /// is in flight — a headless walk asserts on the state AFTER the beat.
     public func test_awaitFinalCheck() async { _ = view; await finalCheckTask?.value }
 
-    /// Whether Done is in the view hierarchy at all — the gate contract is
-    /// ABSENT, not disabled, so this is the assertion that matters.
-    public var test_doneExists: Bool { _ = view; return doneButton?.superview != nil }
+    // MARK: Gate hooks
 
-    /// Whether Done is the window's Return-default (it is, the moment it exists).
-    public var test_doneIsReturnDefault: Bool { _ = view; return doneButton?.keyEquivalent == "\r" }
+    /// Whether the gate's CTA is in the view hierarchy at all — the gate
+    /// contract is ABSENT, not disabled, so this is the assertion that matters.
+    public var test_doneExists: Bool {
+        _ = view
+        return ribbon.test_primaryIsCTA && ribbon.primaryButton?.superview != nil
+    }
+
+    /// Whether the CTA is the window's Return-default (it is, the moment it
+    /// exists — every primary owns Return, and the CTA is the primary).
+    public var test_doneIsReturnDefault: Bool {
+        _ = view
+        return ribbon.test_primaryIsCTA && ribbon.primaryButton?.keyEquivalent == "\r"
+    }
 
     /// The gate button's title (nil while the gate is shut).
-    public var test_doneTitle: String? { _ = view; return doneButton?.title }
+    public var test_doneTitle: String? {
+        _ = view
+        return ribbon.test_primaryIsCTA ? ribbon.primaryButton?.title : nil
+    }
 
     /// Whether the gate button is the gold prominent CTA — a `ProminentButton`
     /// carrying the `goldCTA` fill, not a plain bezel. Compared by RESOLVED
@@ -1059,7 +1523,8 @@ public final class OnboardingViewController: NSViewController {
     /// through the provider.
     public var test_doneIsGoldProminent: Bool {
         _ = view
-        guard let done = doneButton as? ProminentButton else { return false }
+        guard ribbon.test_primaryIsCTA,
+              let done = ribbon.primaryButton as? ProminentButton else { return false }
         var matches = false
         NSAppearance(named: .darkAqua)?.performAsCurrentDrawingAppearance {
             matches = done.fill.usingColorSpace(.sRGB) == Tokens.Color.goldCTA.usingColorSpace(.sRGB)
@@ -1067,24 +1532,11 @@ public final class OnboardingViewController: NSViewController {
         return matches
     }
 
-    /// Whether the active card's Allow currently owns Return (it does while
-    /// Done doesn't exist).
-    public func test_allowIsReturnDefault(_ step: SetupStep) -> Bool {
-        _ = view
-        return cards[step]?.test_allowIsReturnDefault ?? false
-    }
-
-    /// Whether this card acts on the click that ACTIVATES the app (the
-    /// bounce-to-Settings-and-back fix — see `SetupCardView.acceptsFirstMouse`).
-    public func test_cardAcceptsFirstMouse(_ step: SetupStep) -> Bool {
-        _ = view
-        return cards[step]?.acceptsFirstMouse(for: nil) ?? false
-    }
-
     /// Whether the CTA acts on the activating click (the v4 two-clicks fix).
     public var test_doneAcceptsFirstMouse: Bool {
         _ = view
-        return doneButton?.acceptsFirstMouse(for: nil) ?? false
+        guard ribbon.test_primaryIsCTA else { return false }
+        return ribbon.primaryButton?.acceptsFirstMouse(for: nil) ?? false
     }
 
     /// Tap Done: re-verifies, then either finishes or snaps back.
@@ -1097,7 +1549,9 @@ public final class OnboardingViewController: NSViewController {
     /// The step a failed Done verification snapped back to, if any.
     public var test_snapBackStep: SetupStep? { _ = view; return snapBackStep }
 
-    /// Which miniature the demo pane is showing.
+    // MARK: Hero-pane hooks
+
+    /// Which miniature the hero stage is showing.
     public var test_demoMode: DemoMode { _ = view; return demoPane.test_mode }
 
     /// Which surface a two-stage demo rests on. Remote Control's first ask is
@@ -1109,6 +1563,12 @@ public final class OnboardingViewController: NSViewController {
 
     /// Whether the demo is offering its Reduce Motion Replay button.
     public var test_demoShowsReplay: Bool { _ = view; return demoPane.test_showsReplay }
+
+    /// Whether the stage is standing back for a real dialog (the waiting beat).
+    public var test_stageIsDimmed: Bool { _ = view; return demoPane.test_isStageDimmed }
+
+    /// Whether the browsed pane rests with its switch already on.
+    public var test_heroRestingSwitchOn: Bool { _ = view; return demoPane.test_restingSwitchOn }
 
     /// Reduce Motion override for the demo pane (`nil` = the live setting).
     public var test_demoReduceMotionOverride: Bool? {
@@ -1142,7 +1602,7 @@ public final class OnboardingViewController: NSViewController {
     public func test_tapReplay() { _ = view; demoPane.test_tapReplay() }
 
     /// Anything inside the demo that VoiceOver would still reach. The demo is
-    /// decorative — the card copy beside it carries every word — so this must be
+    /// decorative — the ribbon beside it carries every word — so this must be
     /// empty, Replay (outside the mock host) aside.
     public var test_demoAccessibilityElements: [String] {
         _ = view
@@ -1152,10 +1612,9 @@ public final class OnboardingViewController: NSViewController {
     /// Whether Replay — a real control — is still reachable.
     public var test_replayIsAccessible: Bool { _ = view; return demoPane.test_replayIsAccessible }
 
-    /// Press the demoted "Open Settings…" link on a card, as the button does.
-    public func test_tapSettingsLink(_ step: SetupStep) { _ = view; cards[step]?.test_tapSettingsLink() }
+    // MARK: Misc hooks
 
-    /// Re-read model status into the cards (the `viewWillAppear` bind, headless).
+    /// Re-read model status into the rows (the `viewWillAppear` bind, headless).
     public func test_refresh() { _ = view; refresh(animated: false) }
 
     /// The silent status re-read, AWAITED — `refreshStatuses()` fires a detached
@@ -1167,29 +1626,23 @@ public final class OnboardingViewController: NSViewController {
         refresh(animated: false)
     }
 
-    /// The footer's laid-out frame in its pane (whose height is the fixed
-    /// window height). Its bottom pin is deliberately the column's weakest
-    /// constraint: with a card expanded the EMPTY reserve may cross the pane
-    /// edge, and the fit test pins that the visible content never does.
-    public var test_footerFrame: NSRect {
-        _ = view
-        view.layoutSubtreeIfNeeded()
-        return footer.frame
-    }
-
-    /// The card column's laid-out frame in its pane — everything visible the
-    /// left pane stacks (five cards + the check row).
-    public var test_cardStackFrame: NSRect {
-        _ = view
-        view.layoutSubtreeIfNeeded()
-        return cardStack.frame
-    }
+    /// Await the LOAD-TIME status read — the pass that decides what the window
+    /// opened with, and the point after which a grant is a real transition.
+    public func test_awaitInitialStatuses() async { _ = view; await initialStatusesTask?.value }
 
     /// The laid-out root view (for offscreen snapshot rendering).
     public var test_rootView: NSView {
         _ = view
         view.layoutSubtreeIfNeeded()
         return view
+    }
+
+    /// The spine column's laid-out frame in its pane — everything the left
+    /// column stacks (five permission rows + the check row).
+    public var test_spineStackFrame: NSRect {
+        _ = view
+        view.layoutSubtreeIfNeeded()
+        return spineStack.frame
     }
 
     /// Whether this presentation was opened for a lost permission (the banner's
@@ -1203,16 +1656,23 @@ public final class OnboardingViewController: NSViewController {
     /// Whether the lost-permission message is currently VISIBLE — distinct from
     /// ``test_showsPermissionLostBanner`` (was one ever warranted) so a test can
     /// assert the message CLEARS once its permission is granted. Reports the
-    /// tracked message KIND: the subtitle also carries the completion line, so
+    /// tracked message KIND: the subtitle also carries the resume greeting, so
     /// "not the welcome copy" is no longer evidence of a warning.
     public var test_permissionLostBannerIsVisible: Bool {
         _ = view
         return headerMessage == .permissionLost
     }
 
-    /// The header subtitle currently on screen (welcome, completion, or the
+    /// The header title currently on screen.
+    public var test_titleText: String { _ = view; return titleLabel.stringValue }
+
+    /// The header subtitle currently on screen (welcome, resume, or the
     /// lost-permission warning).
     public var test_subtitleText: String { _ = view; return subtitleLabel.stringValue }
+
+    /// Whether the header is showing the "you came back for the optional step"
+    /// greeting.
+    public var test_showsResumeHeader: Bool { _ = view; return headerMessage == .resume }
 
     /// The lost-permission copy, if it's showing (nil for `.firstRun`, and nil
     /// once it clears).

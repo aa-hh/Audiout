@@ -46,6 +46,10 @@ public enum SetupAllowOutcome: String, Equatable, Sendable {
     /// this click asked again rather than reporting a prompt still in flight —
     /// the un-wedge, named so a live session shows it happened.
     case promptRearmed = "prompt_rearmed"
+    /// A skipped, skippable step was re-opened (a click on a decided-skipped
+    /// row in the spine) — the skip never spent a prompt, so the step goes
+    /// back to being undecided.
+    case skipReopened = "skip_reopened"
 }
 
 /// Where an Allow click sends the user, when it sends them anywhere. The flow
@@ -300,6 +304,22 @@ public final class SetupFlowModel {
     public func skip(_ step: SetupStep) {
         guard Self.skippableSteps.contains(step) else { return }
         skippedSteps.insert(step)
+    }
+
+    /// Re-open a previously skipped step so it can be decided again. A skip
+    /// never spent a prompt, so re-deciding simply re-opens exactly one step —
+    /// ``activeStep`` picks it back up on its own (it walks every undecided,
+    /// unskipped step), and ``finalCheckState`` reverts to ``.pending`` on its
+    /// own too (its readiness conjunct at `isReadyForFinalCheck` above already
+    /// requires `activeStep == nil`, which this breaks). No-op for a step that
+    /// was never skipped, or isn't skippable at all.
+    public func reopen(_ step: SetupStep) {
+        guard Self.skippableSteps.contains(step), skippedSteps.contains(step) else { return }
+        skippedSteps.remove(step)
+        Telemetry.log(.permission, "setup_allow", [
+            "step": Self.telemetryName(step),
+            "outcome": SetupAllowOutcome.skipReopened.rawValue,
+        ])
     }
 
     /// Whether every card is decided AND every required permission's cached

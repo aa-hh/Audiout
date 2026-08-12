@@ -58,28 +58,33 @@ public enum DemoStage: Equatable, Sendable {
 /// a real control, stays accessible.
 final class DemoPaneView: NSView {
 
-    /// The elevated surface both mocks sit on — fixed, so consecutive steps
-    /// read at the same scale rather than the pane resizing under the user.
-    /// The WIDTH serves the permission dialog, which became a portrait card
-    /// (macOS 26): 336 is the prompt mock's 288 plus the margin the mock had
-    /// before, so the dialog sits ON the surface rather than filling it edge to
-    /// edge. Every other mock is narrower still.
+    /// The STAGE the mocks play on — fixed, so consecutive steps read at the
+    /// same scale rather than the pane resizing under the user.
     ///
-    /// The HEIGHT is set by the FINALE, not the mocks: the settled view fills
-    /// this surface, its ripple sweeps the whole stage and crosses the frame
-    /// on every side, and a soft feather mask on the ring layers dissolves the
-    /// crossing (owner calls 2026-08-11: first "grow the stage, don't shrink
-    /// the wave" after a live hard clip, then rejecting the shrunken-travel
-    /// fix as "one little line" — see `DemoSettledMockView`). The mocks are
-    /// centred, so the extra height over the width is simply more margin for
-    /// them. The right pane absorbs it: 560 − 2×22 pane margin leaves 516, and
-    /// Replay still fits below at +14.
-    static let surfaceSize = NSSize(width: 336, height: 360)
+    /// There is no drawn surface under it any more (Direction 04, the
+    /// rehearsal-led restructure): the HERO PANE owns the chrome, and this view
+    /// is the bare stage inside it. The WIDTH is that pane's interior — 462
+    /// hero pane − 2 × 22 interior padding = 418 — because the FINALE fills the
+    /// stage exactly: its ripple sweeps the whole of it and deliberately
+    /// crosses the frame on every side, and a soft feather mask on the ring
+    /// layers dissolves the crossing (owner calls 2026-08-11: first "grow the
+    /// stage, don't shrink the wave" after a live hard clip, then rejecting the
+    /// shrunken-travel fix as "one little line" — see `DemoSettledMockView`,
+    /// whose `size` tracks this constant, so the travel derivation follows a
+    /// bigger stage for free). The HEIGHT leaves the ribbon its room beneath.
+    /// Every mock is smaller than the stage and centred on it, so the slack is
+    /// simply margin for them, and Replay still fits below at +14.
+    static let surfaceSize = NSSize(width: 418, height: 330)
 
     /// The step-to-step content crossfade.
     static let stepCrossfadeDuration: TimeInterval = 0.22
 
-    private let surface = RoundedContainerView()
+    /// How long the waiting beat's dim takes.
+    static let stageDimDuration: TimeInterval = 0.2
+    /// How far the stage dims while a real system dialog is on screen — the
+    /// rehearsal steps back when the real thing is in front of the user.
+    static let stageDimmedAlpha: CGFloat = 0.5
+
     /// Hosts the current mock; the accessibility opt-out lives here so Replay
     /// (outside it) stays reachable.
     private let mockHost = NSView()
@@ -88,6 +93,11 @@ final class DemoPaneView: NSView {
 
     private var step: SetupStep?
     private var mode: DemoMode = .prompt
+    /// Whether what's on stage is a read-only BROWSE of an already-decided
+    /// step. A browse never animates — only the active step's rehearsal loops.
+    private var isBrowse = false
+    /// Whether a browsed Settings mock rests with its switch already ON.
+    private var restingSwitchOn = false
 
     private var occlusionObserver: NSObjectProtocol?
 
@@ -120,8 +130,7 @@ final class DemoPaneView: NSView {
         mockHost.setAccessibilityElement(false)
         mockHost.setAccessibilityChildren([])
 
-        surface.addSubview(mockHost)
-        addSubview(surface)
+        addSubview(mockHost)
 
         replayButton.bezelStyle = .rounded
         replayButton.controlSize = .small
@@ -131,20 +140,21 @@ final class DemoPaneView: NSView {
         replayButton.isHidden = true
         addSubview(replayButton)
 
-        // Only the surface's own size is required: the pane's height comes from
-        // the window, and nothing in here may push the fixed window taller.
-        let replayBelow = replayButton.topAnchor.constraint(equalTo: surface.bottomAnchor, constant: 14)
+        // Nothing in here may push the fixed window taller, so Replay's own
+        // placement is the breakable one.
+        let replayBelow = replayButton.topAnchor.constraint(equalTo: mockHost.bottomAnchor, constant: 14)
         replayBelow.priority = .defaultHigh
         NSLayoutConstraint.activate([
-            surface.centerXAnchor.constraint(equalTo: centerXAnchor),
-            surface.centerYAnchor.constraint(equalTo: centerYAnchor),
-            surface.widthAnchor.constraint(equalToConstant: Self.surfaceSize.width),
-            surface.heightAnchor.constraint(equalToConstant: Self.surfaceSize.height),
+            // The STAGE is a fixed size — the finale fills it exactly, and a
+            // stage that resized per mock would move the ribbon under it every
+            // time the step changed.
+            widthAnchor.constraint(equalToConstant: Self.surfaceSize.width),
+            heightAnchor.constraint(equalToConstant: Self.surfaceSize.height),
 
-            mockHost.centerXAnchor.constraint(equalTo: surface.centerXAnchor),
-            mockHost.centerYAnchor.constraint(equalTo: surface.centerYAnchor),
+            mockHost.centerXAnchor.constraint(equalTo: centerXAnchor),
+            mockHost.centerYAnchor.constraint(equalTo: centerYAnchor),
 
-            replayButton.centerXAnchor.constraint(equalTo: surface.centerXAnchor),
+            replayButton.centerXAnchor.constraint(equalTo: mockHost.centerXAnchor),
             replayBelow,
         ])
     }
@@ -196,14 +206,25 @@ final class DemoPaneView: NSView {
     /// Show the miniature for `step` in `mode`. `animated` crossfades the swap
     /// (the grant choreography's last beat); pass false for the first build,
     /// Reduce Motion, and any off-screen window.
-    func show(step: SetupStep?, mode: DemoMode, animated: Bool) {
+    ///
+    /// - Parameters:
+    ///   - restingSwitchOn: the browsed Settings pane rests with its switch
+    ///     already ON — the scoped amendment to "a pass ends where it started".
+    ///     A granted step really would be found switched on.
+    ///   - asBrowse: this is a read-only look at an already-decided step, not
+    ///     the live rehearsal. It never animates.
+    func show(step: SetupStep?, mode: DemoMode, animated: Bool,
+              restingSwitchOn: Bool = false, asBrowse: Bool = false) {
         let changed = step != self.step || mode != self.mode || mock == nil
+            || restingSwitchOn != self.restingSwitchOn || asBrowse != self.isBrowse
         self.step = step
         self.mode = mode
+        self.restingSwitchOn = restingSwitchOn
+        self.isBrowse = asBrowse
         guard changed else { return }
 
         let outgoing = mock
-        let incoming = Self.makeMock(step: step, mode: mode)
+        let incoming = Self.makeMock(step: step, mode: mode, restingSwitchOn: restingSwitchOn)
         mock = incoming
         incoming.translatesAutoresizingMaskIntoConstraints = false
         Self.installAccessibilityOptOut(incoming)
@@ -247,6 +268,19 @@ final class DemoPaneView: NSView {
         replayButton.isHidden = true
     }
 
+    /// The WAITING beat: a real system dialog is on screen now, so the
+    /// rehearsal of it steps back rather than competing with it.
+    func setStageDimmed(_ dimmed: Bool, animated: Bool) {
+        let target = dimmed ? Self.stageDimmedAlpha : 1
+        guard animated else { mockHost.alphaValue = target; return }
+        guard mockHost.alphaValue != target else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.stageDimDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            mockHost.animator().alphaValue = target
+        }
+    }
+
     /// Take a whole drawn mock out of the accessibility tree, view by view. The
     /// container-level opt-out hoists rather than prunes, and these subtrees
     /// carry real `NSTextField`s and images that are elements by default.
@@ -256,7 +290,8 @@ final class DemoPaneView: NSView {
         view.subviews.forEach(installAccessibilityOptOut)
     }
 
-    private static func makeMock(step: SetupStep?, mode: DemoMode) -> NSView {
+    private static func makeMock(step: SetupStep?, mode: DemoMode,
+                                 restingSwitchOn: Bool = false) -> NSView {
         guard let step, mode != .settled else { return DemoSettledMockView() }
         switch mode {
         // Remote Control's FIRST ask isn't the privacy card at all: it raises
@@ -270,8 +305,13 @@ final class DemoPaneView: NSView {
             }
         // Every retry lands on the pane itself — Remote Control's included, now
         // that its second click deep-links there, and Speaker Sync's, whose
-        // "Open Login Items…" opens System Settings directly.
-        case .settings: return DemoSettingsMockView(step: step)
+        // "Open Login Items…" opens System Settings directly. Standing alone
+        // (rather than as the handoff's nested stage two) it plays at 1.35×,
+        // which is what fills the bigger stage a landscape pane leaves half
+        // empty at life scale.
+        case .settings:
+            return DemoSettingsMockView(step: step, switchRestsOn: restingSwitchOn,
+                                        metricScale: 1.35)
         case .settled:  return DemoSettledMockView()
         }
     }
@@ -317,6 +357,15 @@ final class DemoPaneView: NSView {
             replayButton.isHidden = true
             return
         }
+        // A BROWSE is a read-only look at a step already decided — it rests at
+        // its settled frame and offers no Replay. Only the ACTIVE step's
+        // rehearsal ever loops, so browsing three granted rows in a row can
+        // never put three timelines' worth of motion on screen.
+        guard !isBrowse else {
+            timeline.stopTimeline()
+            replayButton.isHidden = true
+            return
+        }
         guard canAnimate else {
             timeline.stopTimeline()
             replayButton.isHidden = true
@@ -344,6 +393,13 @@ final class DemoPaneView: NSView {
     /// rest on the FIRST thing the user will meet, not on the pane it ends at.
     var test_stage: DemoStage? { (mock as? DemoSettingsHandoffMockView)?.test_stage }
     var test_isAnimating: Bool { (mock as? DemoMockView)?.isTimelineRunning ?? false }
+    /// Whether the stage is standing back for a real dialog (the waiting beat).
+    var test_isStageDimmed: Bool { mockHost.alphaValue < 1 }
+    /// Whether the mock on stage rests with its switch already on (a browse of
+    /// a granted step).
+    var test_restingSwitchOn: Bool { (mock as? DemoSettingsMockView)?.test_switchRestsOn ?? false }
+    /// Whether what's on stage is a read-only browse.
+    var test_isBrowse: Bool { isBrowse }
     var test_isLooping: Bool { (mock as? DemoMockView)?.isLooping ?? false }
     var test_showsReplay: Bool { !replayButton.isHidden }
     /// `nil` = the live system setting (the shared override seam).
@@ -702,16 +758,17 @@ func demoIconAsAThirdPartyProcessSeesIt() -> NSImage {
 /// 5. two EQUAL, NEUTRAL capsules filling the width — there is no accent-filled
 ///    default button in this dialog any more.
 ///
-/// Drawn at ~0.85 of the real 283 × 340 pt card: the closest to life size that
-/// leaves the whole thing, at real proportions, inside the pane's fixed surface.
-/// Nothing is greeked — the purpose string is the sentence the user will
-/// actually read, so it is the one thing the mock cannot fake.
+/// Drawn at 0.95 of the real 283 × 340 pt card — near life size, which the
+/// bigger stage of the rehearsal-led layout (Direction 04) has the room for:
+/// the dialog is the hero of this window now, not an inset illustration beside
+/// the copy. Nothing is greeked — the purpose string is the sentence the user
+/// will actually read, so it is the one thing the mock cannot fake.
 final class DemoPromptMockView: DemoMockView {
 
-    static let size = NSSize(width: 240, height: 288)
+    static let size = NSSize(width: 269, height: 323)
     /// Content inset on all four sides.
-    private static let inset: CGFloat = 16
-    private static let iconSide: CGFloat = 56
+    private static let inset: CGFloat = 17
+    private static let iconSide: CGFloat = 60
     private static let badgeSide: CGFloat = 20
     private static let helpSide: CGFloat = 18
     private static var contentWidth: CGFloat { size.width - inset * 2 }
@@ -867,16 +924,26 @@ final class DemoPromptMockView: DemoMockView {
         applySettledState()
     }
 
-    /// The tile in the dialog's top-left corner. macOS does NOT always put the
-    /// asking app's icon there: the app's own icon appears for the grants that
-    /// are about capturing that app's content (System Audio), while the
-    /// CAPABILITY grants show a generic SYSTEM tile — the same one for every
-    /// app. Verified from the real Local Network dialog, which draws the
-    /// Network pane's blue globe rather than Audiouter's icon. The badge, the
-    /// size and the slot are identical either way; only the tile's contents
-    /// change.
+    /// The tile in the dialog's top-left corner. macOS does NOT put the asking
+    /// app's icon there: every grant that reaches this dialog leads with a
+    /// SYSTEM tile — the same one for every app, in the colour of the thing
+    /// being asked for. Verified from the real dialogs (owner screenshots and a
+    /// live run, 2026-08-11): Local Network draws the Network pane's blue globe
+    /// and System Audio draws macOS's RED RECORD glyph — NOT Audiouter's icon,
+    /// which is what this table used to return for it. The badge, the size and
+    /// the slot are identical either way; only the tile's contents change.
+    /// `.remoteControl` and `.speakerSync` never reach this mock (one raises the
+    /// Accessibility alert, the other has no dialog at all) and keep the app
+    /// icon as the safe default for a branch nothing takes.
     private static func iconView(for step: SetupStep) -> NSView {
         switch step {
+        // The live-confirmed red record tile: macOS leads its system-audio ask
+        // with the recording mark, not with the asking app.
+        case .audio:
+            return systemTile(fill: .systemRed) {
+                demoGlyph("record.circle", pointSize: iconSide * 0.55,
+                          weight: .regular, color: .white)
+            }
         case .localNetwork:
             return systemTile { demoGlyph("network", pointSize: iconSide * 0.55,
                                           weight: .regular, color: .white) }
@@ -887,13 +954,11 @@ final class DemoPromptMockView: DemoMockView {
         // hand-drawn — see `DemoBluetoothGlyphView`.
         case .bluetooth:
             return systemTile { DemoBluetoothGlyphView(size: iconSide * 0.55, color: .white) }
-        // System Audio is a content-capture grant and really does show the
-        // app's icon — but the DIALOG'S icon, which a separate system process
-        // draws from Launch Services, not this process's own fresher
-        // `NSApp.applicationIconImage` (see `demoIconAsAThirdPartyProcessSeesIt`).
-        // The other two steps never reach this mock; the app icon is the safe
-        // default for them.
-        case .audio, .remoteControl, .speakerSync:
+        // Neither step reaches this mock. When the app icon IS drawn it is the
+        // DIALOG'S icon — the one a separate system process reads out of Launch
+        // Services, not this process's own fresher `NSApp.applicationIconImage`
+        // (see `demoIconAsAThirdPartyProcessSeesIt`).
+        case .remoteControl, .speakerSync:
             let icon = NSImageView()
             icon.image = demoIconAsAThirdPartyProcessSeesIt()
             icon.imageScaling = .scaleProportionallyUpOrDown
@@ -902,15 +967,18 @@ final class DemoPromptMockView: DemoMockView {
         }
     }
 
-    /// A macOS system-pane tile: a blue rounded square carrying one white
-    /// glyph, drawn at the app icon's size so the badge lands where it always
-    /// does. Corner and glyph are fractions of the side rather than points, so
+    /// A macOS system-pane tile: a rounded square carrying one white glyph,
+    /// drawn at the app icon's size so the badge lands where it always does.
+    /// Corner and glyph are fractions of the side rather than points, so
     /// changing `iconSide` alone keeps the tile in proportion; both are matched
-    /// by eye to the Local Network screenshot, not measured. `glyph` is a
-    /// builder rather than a plain view so a caller can hand it a plain SF
-    /// Symbol OR a hand-drawn one (Bluetooth's rune has no symbol to name).
-    private static func systemTile(glyph: () -> NSView) -> NSView {
-        let tile = DemoPillView(radius: iconSide * 0.23, fill: DemoSystemColor.accent)
+    /// by eye to the Local Network screenshot, not measured. `fill` is the
+    /// pane's own colour — blue for the capability panes, red for recording.
+    /// `glyph` is a builder rather than a plain view so a caller can hand it a
+    /// plain SF Symbol OR a hand-drawn one (Bluetooth's rune has no symbol to
+    /// name).
+    private static func systemTile(fill: NSColor = DemoSystemColor.accent,
+                                   glyph: () -> NSView) -> NSView {
+        let tile = DemoPillView(radius: iconSide * 0.23, fill: fill)
         let mark = glyph()
         tile.addSubview(mark)
         NSLayoutConstraint.activate([
@@ -1312,6 +1380,9 @@ final class DemoSystemAlertMockView: NSView {
 /// antialiases into mush that reads as a rendering bug.
 final class DemoSettingsMockView: DemoMockView {
 
+    /// The BASE size, at `metricScale` 1. An instance draws at
+    /// ``scaledSize``; this static is what the handoff container (which nests
+    /// an unscaled stage two) sizes itself from.
     static let size = NSSize(width: 300, height: 190)
     /// The reference puts the sidebar at 80 pt (27 % of 300, deliberately less
     /// than the real 30 % so it isn't mostly empty chrome). 76 here: the longest
@@ -1321,6 +1392,19 @@ final class DemoSettingsMockView: DemoMockView {
     private static let sidebarWidth: CGFloat = 76
 
     private let step: SetupStep
+    /// Whether the SETTLED frame rests with the Audiouter switch already ON.
+    ///
+    /// The standing rule is that a pass ends where it started — the surface as
+    /// the user will FIND it, which for an ask is the switch off. This is the
+    /// one scoped amendment: a read-only BROWSE of an already-granted step is
+    /// not an ask, and showing that pane with the switch off would claim the
+    /// user still has something to flip. Ask, denied and requested all rest OFF
+    /// exactly as before.
+    private let switchRestsOn: Bool
+    /// Multiplies every point metric this view authors. The standalone pane
+    /// plays at 1.35 to fill the rehearsal-led stage; nested as the handoff's
+    /// stage two it stays at 1, where it shares a frame with the alert.
+    private let metricScale: CGFloat
     private var toggle: DemoSwitchView!
     /// Slightly smaller than the prompt mock's, in step with this mock's own
     /// tighter scale.
@@ -1330,12 +1414,26 @@ final class DemoSettingsMockView: DemoMockView {
     /// the card's first row — a cursor sitting on top of text read as a mistake.
     private let cursorPark = CGPoint(x: 110, y: 138)
 
-    init(step: SetupStep) {
+    init(step: SetupStep, switchRestsOn: Bool = false, metricScale: CGFloat = 1) {
         self.step = step
+        self.switchRestsOn = switchRestsOn
+        self.metricScale = metricScale
         super.init(frame: .zero)
         wantsLayer = true
         build()
     }
+
+    /// This instance's drawn size.
+    var scaledSize: NSSize { NSSize(width: m(Self.size.width), height: m(Self.size.height)) }
+
+    /// A point metric at this instance's scale, on the half-point grid — the
+    /// finest division AppKit lays out cleanly on a 2× display.
+    private func m(_ points: CGFloat) -> CGFloat { (points * metricScale * 2).rounded() / 2 }
+
+    /// A font size at this instance's scale, rounded DOWN to a whole point: type
+    /// sizes are whole numbers, and rounding up is what pushes a pane title into
+    /// truncation.
+    private func t(_ points: CGFloat) -> CGFloat { (points * metricScale).rounded(.down) }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
@@ -1359,8 +1457,8 @@ final class DemoSettingsMockView: DemoMockView {
         addSubview(cursor)
 
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: Self.size.width),
-            heightAnchor.constraint(equalToConstant: Self.size.height),
+            widthAnchor.constraint(equalToConstant: scaledSize.width),
+            heightAnchor.constraint(equalToConstant: scaledSize.height),
 
             shell.leadingAnchor.constraint(equalTo: leadingAnchor),
             shell.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -1370,26 +1468,28 @@ final class DemoSettingsMockView: DemoMockView {
             sidebar.leadingAnchor.constraint(equalTo: shell.leadingAnchor),
             sidebar.topAnchor.constraint(equalTo: shell.topAnchor),
             sidebar.bottomAnchor.constraint(equalTo: shell.bottomAnchor),
-            sidebar.widthAnchor.constraint(equalToConstant: Self.sidebarWidth),
+            sidebar.widthAnchor.constraint(equalToConstant: m(Self.sidebarWidth)),
 
             divider.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
             divider.topAnchor.constraint(equalTo: shell.topAnchor),
             divider.bottomAnchor.constraint(equalTo: shell.bottomAnchor),
+            // A HAIRLINE, not a metric: separators stay one point at any scale,
+            // the way macOS draws them.
             divider.widthAnchor.constraint(equalToConstant: 1),
 
-            header.leadingAnchor.constraint(equalTo: divider.trailingAnchor, constant: 12),
+            header.leadingAnchor.constraint(equalTo: divider.trailingAnchor, constant: m(12)),
             // Required, not `<=`: the title has to be clipped by the pane's own
             // edge rather than drawn past it.
-            header.trailingAnchor.constraint(equalTo: shell.trailingAnchor, constant: -12),
-            header.topAnchor.constraint(equalTo: shell.topAnchor, constant: 14),
+            header.trailingAnchor.constraint(equalTo: shell.trailingAnchor, constant: -m(12)),
+            header.topAnchor.constraint(equalTo: shell.topAnchor, constant: m(14)),
 
-            card.leadingAnchor.constraint(equalTo: divider.trailingAnchor, constant: 12),
-            card.trailingAnchor.constraint(equalTo: shell.trailingAnchor, constant: -12),
-            card.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 12),
-            card.bottomAnchor.constraint(lessThanOrEqualTo: shell.bottomAnchor, constant: -12),
+            card.leadingAnchor.constraint(equalTo: divider.trailingAnchor, constant: m(12)),
+            card.trailingAnchor.constraint(equalTo: shell.trailingAnchor, constant: -m(12)),
+            card.topAnchor.constraint(equalTo: header.bottomAnchor, constant: m(12)),
+            card.bottomAnchor.constraint(lessThanOrEqualTo: shell.bottomAnchor, constant: -m(12)),
 
-            cursor.leadingAnchor.constraint(equalTo: leadingAnchor, constant: cursorPark.x),
-            cursor.topAnchor.constraint(equalTo: topAnchor, constant: cursorPark.y),
+            cursor.leadingAnchor.constraint(equalTo: leadingAnchor, constant: m(cursorPark.x)),
+            cursor.topAnchor.constraint(equalTo: topAnchor, constant: m(cursorPark.y)),
         ])
         applySettledState()
     }
@@ -1403,12 +1503,12 @@ final class DemoSettingsMockView: DemoMockView {
     private func makeHeader() -> NSView {
         let back = NSImageView()
         back.image = NSImage(systemSymbolName: "chevron.backward", accessibilityDescription: nil)
-        back.symbolConfiguration = .init(pointSize: 9, weight: .semibold)
+        back.symbolConfiguration = .init(pointSize: t(9), weight: .semibold)
         back.contentTintColor = .tertiaryLabelColor
         back.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let title = NSTextField(labelWithString: Self.paneTitle(for: step))
-        title.font = .systemFont(ofSize: 11, weight: .semibold)
+        title.font = .systemFont(ofSize: t(11), weight: .semibold)
         title.textColor = .labelColor
         title.lineBreakMode = .byTruncatingTail
         title.allowsDefaultTighteningForTruncation = true
@@ -1416,7 +1516,7 @@ final class DemoSettingsMockView: DemoMockView {
         let row = NSStackView(views: [back, title])
         row.orientation = .horizontal
         row.alignment = .centerY
-        row.spacing = 8
+        row.spacing = m(8)
         row.translatesAutoresizingMaskIntoConstraints = false
         return row
     }
@@ -1430,12 +1530,12 @@ final class DemoSettingsMockView: DemoMockView {
                                         radius: 6)
         toggle = DemoSwitchView()
 
-        let caption = DemoGreekBarView(width: 96)
+        let caption = DemoGreekBarView(width: m(96))
         card.addSubview(caption)
 
         let rows: [NSView] = [
-            DemoSettingsRowView.placeholder(labelWidth: 58, isOn: true),
-            DemoSettingsRowView.placeholder(labelWidth: 44, isOn: true),
+            DemoSettingsRowView.placeholder(labelWidth: m(58), isOn: true),
+            DemoSettingsRowView.placeholder(labelWidth: m(44), isOn: true),
             DemoSettingsRowView.app(name: "Audiouter", switchView: toggle),
         ]
         var previous: NSView?
@@ -1458,24 +1558,25 @@ final class DemoSettingsMockView: DemoMockView {
                     row.topAnchor.constraint(equalTo: previous.bottomAnchor),
                 ])
             } else {
-                row.topAnchor.constraint(equalTo: caption.bottomAnchor, constant: 6).isActive = true
+                row.topAnchor.constraint(equalTo: caption.bottomAnchor, constant: m(6)).isActive = true
             }
             previous = row
         }
 
         NSLayoutConstraint.activate([
-            caption.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 10),
-            caption.topAnchor.constraint(equalTo: card.topAnchor, constant: 8),
+            caption.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: m(10)),
+            caption.topAnchor.constraint(equalTo: card.topAnchor, constant: m(8)),
             previous!.bottomAnchor.constraint(equalTo: card.bottomAnchor),
         ])
         return card
     }
 
-    /// Settled: the switch OFF, cursor waiting — the pane as the user will find
-    /// it (see ``DemoPromptMockView/applySettledState()`` for why the rest state
-    /// is never the finished one).
+    /// Settled: the pane as the user will FIND it — switch off for an ask (see
+    /// ``DemoPromptMockView/applySettledState()`` for why the rest state is
+    /// never the finished one), switch ON for the browse of a step that is
+    /// already granted, where "as the user will find it" means on.
     override func applySettledState() {
-        toggle.setOn(false)
+        toggle.setOn(switchRestsOn)
         cursor.alphaValue = 1
         cursor.layer?.transform = CATransform3DIdentity
     }
@@ -1523,6 +1624,11 @@ final class DemoSettingsMockView: DemoMockView {
         case .speakerSync:   return "Login Items"
         }
     }
+
+    // MARK: Test-support hooks
+
+    /// Whether this instance's settled frame rests with the switch on.
+    var test_switchRestsOn: Bool { switchRestsOn }
 }
 
 // MARK: - Two-stage first-ask mock

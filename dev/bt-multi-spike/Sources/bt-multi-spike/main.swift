@@ -440,6 +440,16 @@ if args.contains("--soak") {
     exit(SoakProbe.run(args.filter { $0 != "--soak" }))
 }
 
+// MARK: - Drift meter (acoustic inter-speaker clock drift via the built-in mic)
+
+if args.contains("--drift-meter-selftest") {
+    exit(DriftMeterProbe.runSelfTest())
+}
+
+if args.contains("--drift-meter") {
+    exit(DriftMeterProbe.run(args.filter { $0 != "--drift-meter" }))
+}
+
 // MARK: - T5: --selftest (flow-proof against the built-in output device)
 
 if args.contains("--selftest") {
@@ -462,6 +472,8 @@ if args.contains("-h") || args.contains("--help") {
     print("       bt-multi-spike --pacing-probe <name-or-uid> [--seconds N]")
     print("       bt-multi-spike --lateralization-probe <A> <B> [--demo | --smoke]")
     print("       bt-multi-spike --soak [--minutes N] [--interval S] [--devices a,b] [--log path]")
+    print("       bt-multi-spike --drift-meter <deviceA> <deviceB> [--seconds N] [--freqA hz] [--freqB hz] [--log path]")
+    print("       bt-multi-spike --drift-meter-selftest")
     exit(0)
 }
 

@@ -325,18 +325,31 @@ public enum Tokens {
         /// The **connected** solid ring hue — a hue-neutral warm-grey (gold is
         /// reserved for the route-armed dot/meter). Also the color of the
         /// **connecting** dashed ring (form, not color, carries pending — §3.2).
-        /// CONTRAST RATIONALE: spec §1.1/§1.2 set a NORMATIVE ≥3:1 floor tested
-        /// at the 21 px ring circle, dark vs BOTH `panel` and `raised`, light vs
-        /// `panel`. Measured (WCAG relative luminance): dark `#8D7D5E` = 4.35:1
-        /// vs `panel` / 4.07:1 vs `raised`; light `#A08C66` = 3.08:1 vs `panel`
-        /// (passes, tight — spec §10 flagged the exact hex for the Wave-5 sweep).
-        /// Both clear the floor as-is, so the spec hexes stand (no escape-valve
-        /// brightening needed). Increase-Contrast variants push further from
-        /// `panel` for headroom (dark `#A99A78` = 6.31:1; light `#8A7550` =
-        /// 4.18:1), per house rule 3 (every case ships an IC variant).
+        /// CONTRAST RATIONALE: spec §1.1/§1.2 set a NORMATIVE ≥3:1 floor (WCAG
+        /// 1.4.11, graphical objects) tested at the 21 px ring circle. The
+        /// light value is held against EVERY light ground the ring is drawn
+        /// over on EITHER platform, not just `panel` — the ring is a shared
+        /// instrument, and the iPhone companion draws the same hex over its
+        /// own, darker ladder. The tightest of those grounds is the Mac's
+        /// `well` `#E8E6DC` (darkest ⇒ least contrast for a dark ink), NOT
+        /// white; solve `well` and the rest follow. Measured (WCAG relative
+        /// luminance): light `#8B7958` = 3.37:1 vs Mac `well`, 3.51:1 vs iOS
+        /// `well` `#EDEAE0`, 3.77:1 vs iOS `canvas` `#F4F2EA`, 3.87:1 vs iOS
+        /// `canvasHi` `#F7F5EF`, 4.08:1 vs Mac `canvas`/`panel`/`raised`
+        /// `#FBFBF9` and iOS `panel` `#FCFBF7`, 4.22:1 vs iOS `raised`
+        /// `#FFFFFF` — ≥3.37:1 everywhere, headroom deliberately banked so a
+        /// future move in the light grounds cannot push it back under the
+        /// floor. Dark `#8D7D5E` = 4.35:1 vs `panel` / 4.07:1 vs `raised`.
+        /// Increase-Contrast variants push further for headroom (dark
+        /// `#A99A78` = 6.31:1 vs `panel`; light `#7A6847` = 4.30:1 vs Mac
+        /// `well`, 5.20:1 vs `panel`), per house rule 3 (every case ships an
+        /// IC variant). Both light values hold ~38.8° at ~0.37/0.42
+        /// saturation — the same hue-neutral warm grey as before, a re-tune of
+        /// brightness only; what keeps this off gold is its chroma (gold is
+        /// ~0.82 saturated at ~41.5°), not its hue.
         public static var ringConnected: NSColor {
             warmDynamic(name: "ringConnected", dark: 0x8D7D5E, darkHighContrast: 0xA99A78,
-                       light: 0xA08C66, lightHighContrast: 0x8A7550)
+                       light: 0x8B7958, lightHighContrast: 0x7A6847)
         }
 
         /// The **FAILURE-EXCLUSIVE** hue (house rule 8): the failed connection

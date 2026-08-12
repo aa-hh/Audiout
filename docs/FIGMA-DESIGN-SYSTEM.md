@@ -310,8 +310,10 @@ banners, sidebar. This is a color theme only — no Circuit UI components.
 | Warm Signal (Light alias) | Circuit token |
 |---|---|
 | `canvas`, `canvasHi` (gradient collapses flat), `panel`, `raised`, `underPageBackground`, `windowBackground` | `bg/normal` |
-| `well`, `sidebarWarmTint` | `bg/subtle` |
-| `hairline`, `separator` | `border/divider` |
+| `well` | `bg/highlight` `#E8E6DC` — **not** `bg/subtle` (Alec's call on the pull: `bg/subtle` measured 1.06:1 vs the flat Circuit `panel`, under the locked 1.10:1 surface-separation floor in `MembershipWellContrastTests`; `bg/highlight` holds 1.20:1 and stays Circuit-family) |
+| `sidebarWarmTint` | light `#F5F4ED`, light-HC `bg/highlight` `#E8E6DC` |
+| `hairline` | `border/normal` `#D0CDC3` — **not** `border/divider` (same reason: `border/divider` measured 1.21:1, under the locked 1.25:1 separator floor; `border/normal` holds 1.53:1). Light-HC is `fg/placeholder` `#76716B`, a hue-consistent Circuit greige — a warm-tan divider reads off-family on the neutral ground |
+| `separator` | `border/divider` |
 | `label` / `secondaryLabel` / `tertiaryLabel` | `fg/normal` / `fg/subtle` / `fg/placeholder` |
 | `quaternaryLabel`, `tertiarySystemFill` | `bg/highlight` |
 | `destructive` / `warning` | `fg/danger` / `fg/warning` |
@@ -328,8 +330,9 @@ meterTrack 1.77, glow 1.78, dotSocket 1.37 — those three are intentionally
 quiet backdrops, not signal-bearers. Circuit's own text tokens all pass body
 contrast (fg/normal 16.4, fg/subtle 5.48, fg/placeholder 4.67).
 
-**Two NEW tokens the code does not have yet** (added 2026-08-07 fixing a measured
-FEED-pill contrast failure; both carry iOS code syntax and land with roadmap 035):
+**Two tokens Figma added first** (2026-08-07, fixing a measured FEED-pill
+contrast failure; both carry iOS code syntax and **landed in code with roadmap
+035** — they are in `Tokens.swift` now):
 
 - `feedPillFill` — dark `#38322B` / dark-HC `#423B33`, light aliases Circuit
   `border/normal`, light-HC `bg/neutral-strong`. Replaces
@@ -343,16 +346,30 @@ The pill now reads by fill alone — 1.46:1 vs canvas dark (was 1.31), 1.54:1
 light (was 1.21) — while keeping the error pill at 3.24:1 and lifting light
 neutral text from 4.54 to **10.66:1**. `feedPillBorderWidth` becomes unused.
 
-**Figma light is AHEAD of code.** `Tokens.swift`'s light/lightHC columns still
-hold the original warm-paper values (canvas #F4EFE7 …), so the shipping app is
-unchanged — Figma holds the proposal until those Circuit hexes are pulled
-across. The warm-paper light values remain recoverable from the code.
+**Code and Figma are now in sync on light** (roadmap 035, landed 2026-08-11).
+`Tokens.swift`'s light/lightHC columns hold the resolved Circuit hexes — canvas
+`#FBFBF9`, well `#E8E6DC`, hairline `#D0CDC3` — not the original warm-paper
+values. *(This paragraph previously said Figma was ahead of code and the app
+still shipped warm paper. That stopped being true when 035 landed; corrected
+2026-08-12.)* The warm-paper light values remain recoverable from git history.
+
+**Contrast rationales in `Tokens.swift` are a mixed vintage.** Cases written
+before the Circuit pull still cite the retired warm-paper grounds (`#F4EFE7`
+canvas / `#FBF8F2` panel / `#ECE5D8` well) in their measured ratios. The
+Circuit grounds are LIGHTER, so every dark-instrument-on-light-ground ratio
+quoted there only improves — the tokens are safe, the numbers are stale. The
+re-measured values are in "Contrast, measured 2026-08-07" above. `gold`,
+`ember`, `well`, `hairline`, `feedPillFill`, `goldCTA` and `sidebarWarmTint`
+carry current numbers; the rest have not been re-measured one by one.
 
 `accent` deliberately KEEPS the macOS system accent in light (Alec's call).
 Any frame showing light mode must also pin `Theme · Circuit` → Light (`79:0`)
-so the alias chain resolves (all light twins already do). Pulling light values
-to code now means pulling the resolved Circuit hexes into `Tokens.swift`'s
-light/lightHC columns.
+so the alias chain resolves (all light twins already do).
+
+**The iOS companion has NOT followed Circuit.** `ios/AudiouterRemote/` (on
+`claude/ios-staging`) still carries the warm-paper light palette — canvas
+`#F4F2EA`, gold `#A97F1E`. Dark mode is identical across both platforms; light
+mode is not. Reconciliation is in flight on `claude/ios-light-circuit`.
 
 ## Pull direction (Figma → code)
 

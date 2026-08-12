@@ -416,7 +416,22 @@ public final class AudioSettingsViewController: NSViewController {
         advancedDisclosure.action = #selector(advancedDisclosureToggled)
         advancedDisclosure.setAccessibilityLabel("Advanced")
 
-        let header = NSStackView(views: [advancedDisclosure, SettingsForm.sectionHeader("Advanced")])
+        // The title is a click target too, not just the triangle — a
+        // disclosure whose label is dead misses most of the clicks aimed at
+        // it. Borderless button in the section-header voice, same action.
+        let advancedTitle = NSButton()
+        advancedTitle.translatesAutoresizingMaskIntoConstraints = false
+        advancedTitle.isBordered = false
+        advancedTitle.setButtonType(.momentaryChange)
+        advancedTitle.attributedTitle = NSAttributedString(
+            string: "Advanced",
+            attributes: [.font: Tokens.Font.captionEmphasized,
+                         .foregroundColor: Tokens.Color.secondaryLabel])
+        advancedTitle.target = self
+        advancedTitle.action = #selector(advancedTitleTapped)
+        advancedTitle.setAccessibilityLabel("Advanced")
+
+        let header = NSStackView(views: [advancedDisclosure, advancedTitle])
         header.orientation = .horizontal
         header.alignment = .centerY
         header.spacing = 4
@@ -459,6 +474,14 @@ public final class AudioSettingsViewController: NSViewController {
         advancedContent.isHidden = true
 
         return [hairline, header, advancedClip]
+    }
+
+    /// Clicking the word "Advanced" mirrors the triangle exactly: flip the
+    /// disclosure's state (so its rotation animates as if clicked), then run
+    /// the same fold.
+    @objc private func advancedTitleTapped() {
+        advancedDisclosure.state = advancedDisclosure.state == .on ? .off : .on
+        advancedDisclosureToggled()
     }
 
     @objc private func advancedDisclosureToggled() {
@@ -1138,6 +1161,14 @@ public final class AudioSettingsViewController: NSViewController {
         _ = view
         advancedDisclosure.state = advancedDisclosure.state == .on ? .off : .on
         advancedDisclosureToggled()
+        FoldAnimator.shared.test_settleNow()
+    }
+
+    /// Click the word "Advanced" — the label is a click target mirroring the
+    /// triangle — then settle the fold.
+    public func test_tapAdvancedTitle() {
+        _ = view
+        advancedTitleTapped()
         FoldAnimator.shared.test_settleNow()
     }
 }

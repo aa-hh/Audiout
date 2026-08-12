@@ -82,7 +82,10 @@ enum SettingsForm {
     /// re-write-on-change contract) and returns the wrapping well.
     static func readoutWell(_ field: NSTextField, width: CGFloat) -> NSView {
         field.translatesAutoresizingMaskIntoConstraints = false
-        field.font = .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .medium)
+        // The app's ONE readout voice (`Tokens.Font.syncReadout`, shared with
+        // the BT sync drawer's value field) — not a second hand-minted
+        // monospaced size that drifts from it.
+        field.font = Tokens.Font.syncReadout
         field.textColor = Tokens.Color.secondaryLabel
         field.alignment = .center
 

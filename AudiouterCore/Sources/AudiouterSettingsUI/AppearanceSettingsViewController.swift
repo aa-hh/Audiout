@@ -66,8 +66,9 @@ public final class AppearanceSettingsViewController: NSViewController {
         tileRow.spacing = 12
         tileRow.translatesAutoresizingMaskIntoConstraints = false
 
-        let heading = SettingsForm.label("Theme")
-        heading.font = Tokens.Font.body
+        // Section-header voice (roadmap 050 typeset pass): the same role must
+        // read the same in every pane — Audio's headers already use it.
+        let heading = SettingsForm.sectionHeader("Theme")
         let subtitle = SettingsForm.label("Follow the system, or force light or dark.")
         subtitle.font = Tokens.Font.caption
         subtitle.textColor = Tokens.Color.secondaryLabel
@@ -91,8 +92,8 @@ public final class AppearanceSettingsViewController: NSViewController {
         hairline.boxType = .separator
         hairline.translatesAutoresizingMaskIntoConstraints = false
 
-        let heading = SettingsForm.label("Accent")
-        heading.font = Tokens.Font.body
+        // Same section-header voice as Theme and the Audio pane's headers.
+        let heading = SettingsForm.sectionHeader("Accent")
 
         let subtitle = SettingsForm.label("How strongly meters, dots, and rings use the brand gold.")
         subtitle.font = Tokens.Font.caption

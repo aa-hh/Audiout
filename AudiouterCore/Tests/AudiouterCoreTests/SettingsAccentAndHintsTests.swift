@@ -234,7 +234,9 @@ extension SerializedSharedState {
                 "expanding must republish a taller preferredContentSize")
 
         let expandedHeight = pane.preferredContentSize.height
-        pane.test_toggleAdvanced()
+        // Collapse via the TITLE, not the triangle — the word "Advanced" is a
+        // click target mirroring it.
+        pane.test_tapAdvancedTitle()
         #expect(!pane.test_advancedExpanded)
         // Not an exact == against the pre-toggle height: AppKit's rounding
         // grid shifts layout by fractions of a point between passes.

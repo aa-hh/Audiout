@@ -139,9 +139,28 @@ components:
 
 # Design System: Audiouter
 
-**Scope.** This is the cross-platform record: the shared Warm Signal world, and how each of the two native surfaces expresses it. The macOS app (AppKit) is documented here in full — its normative source is `AudiouterCore/Sources/AudiouterSharedUI/Tokens.swift` (colour, type, motion, material) and `PopoverColumnGrid.swift` (geometry). The iPhone companion is summarised here and documented in depth in **`ios/AudiouterRemote/DESIGN.md`**, which is the authority for that surface and is not superseded by this file.
+**Scope.** This is the cross-platform record: the shared Warm Signal world, and how each of the two native surfaces expresses it. The macOS app (AppKit) is documented here in full; the iPhone companion is summarised here and documented in depth in its own file.
 
-**Two things a reader must know before trusting a value.** First, the `ios/` directory lives on the `claude/ios-staging` branch and is absent from `main`, so the iOS pointer above dangles in a `main` checkout. Second, the two platforms have **drifted apart in light mode** — see *The Light-Mode Drift* under Colors. Dark mode is identical across both.
+### Sources of truth
+
+This document describes the system. These four files *are* it, and they win over anything written here:
+
+| Source | Owns |
+|---|---|
+| `AudiouterCore/Sources/AudiouterSharedUI/Tokens.swift` | Every colour, type, motion and material token on macOS — and the only place in the codebase a hex literal may appear |
+| `AudiouterCore/Sources/AudiouterSharedUI/PopoverColumnGrid.swift` | All macOS geometry: rows, columns, gaps, instrument dimensions |
+| `docs/FIGMA-DESIGN-SYSTEM.md` | The code↔Figma contract, the Circuit light mapping and its measured contrast, and the upkeep rubric for keeping the Figma file true to the code |
+| `ios/AudiouterRemote/DESIGN.md` | The iPhone surface in full. Its own authority; not superseded by this file |
+
+**The Figma file** (`aGvr1qZ3tbqGD2e3jmA1Ru`) is bound to the code by *naming, not tooling* — Code Connect is blocked on seat licensing. Colour variables mirror `Tokens.Color` case names 1:1, layout variables mirror `PopoverColumnGrid` constants 1:1, and every variable carries its exact Swift constant as Code Syntax. That string is how a design change made in Figma names its own landing spot in code. Component descriptions name their Swift source file. Variant properties are named after the code's state enums. **Code wins over spec** — the file draws what the code does today; spec-only ideas live on the *Reference · Spec backlog* page.
+
+**Layers are tagged `SYSTEM` or `OURS`.** `SYSTEM` layers are instances from the macOS 27 UI kit and are never rebuilt or restyled — only re-instanced. `OURS` layers are Warm Signal custom drawings. That tag is the "native structure, custom instruments" split made checkable.
+
+### Three things a reader must know before trusting a value
+
+1. The `ios/` directory lives on the `claude/ios-staging` branch and is absent from `main`, so the iOS pointer above dangles in a `main` checkout.
+2. The two platforms have **drifted apart in light mode** — see *The Light-Mode Drift* under Colors. Dark mode is identical across both.
+3. **Parts of the Figma file are stand-ins, not code truths.** Do not "fix" the code to match them: JetBrains Mono stands in for SF Mono (SF Mono is unavailable in Figma); SF Symbols are placeholder vectors, not the real glyphs; the dark canvas grain is not rendered at all (it exists only in `WarmCanvasView.swift`); `separator`, `underPageBackground`, `selectedContentBackground` and `tertiarySystemFill` are approximations of dynamic system colours; computed blends (the armed fader's ember-toward-gold gradient, the diagnosis panel's failure-tinted fill) are stored as dark-appearance literals because the code computes them at runtime; and the System-accent dial position is documented text rather than a variable mode, because an accent multiplier cannot be one.
 
 ## Overview
 
@@ -342,6 +361,10 @@ The companion's signature surface: a frosted `.ultraThinMaterial` panel at 26pt 
 - **Do** honour Reduce Motion at every animation site, and run every fold and reveal on the one shared 0.15s clock (`Tokens.Motion.collapseRevealDuration`) so an expand is the exact mirror of its collapse.
 - **Do** state facts in the tracked uppercase monospaced micro-voice and prose in plain system type.
 - **Do** show bare numbers and units in readouts, never named presets.
+- **Do** mirror a new or changed token into the Figma file in **all four appearance modes**, with its scopes and its exact Swift constant as Code Syntax, and update the swatch table on the matching Foundations page. The upkeep rubric in `docs/FIGMA-DESIGN-SYSTEM.md` is the step-by-step.
+- **Do** resolve every new element in **both** appearances. Light is not a coat of paint applied later; it is the second half of every token. Bind scaffolding to tokens and light mode is free — hardcode and you have silently shipped a dark-only element.
+- **Do** add a new element to the **light twin** of every Figma screen it appears on. Twins are clones, not instances, so an edit mirrored into only one of them diverges silently.
+- **Do** verify a screen change against the checked-in snapshot PNGs under `dev/notes/*-snapshots/` (popover, window, settings, onboarding — light and dark).
 
 ### Don't:
 
@@ -353,5 +376,9 @@ The companion's signature surface: a frosted `.ultraThinMaterial` panel at 26pt 
 - **Don't** reuse a surface token as an instrument. `raised` as a fader thumb measured 1.09:1; `hairline` as its rim measured 1.21:1.
 - **Don't** draw the membership rail as a recessed groove or as separate aligned segments. It is one continuous wire.
 - **Don't** run a second animation clock alongside `FoldAnimator`. Two clocks kept in step by hand silently drift.
-- **Don't** invent a Figma component for a stock control the macOS 27 kit doesn't ship. Leave a labelled positional placeholder and point at the HIG — a hand-built stand-in diverges from the real control, which is worse than nothing.
+- **Don't** invent a Figma component for a stock control the macOS 27 kit doesn't ship. Leave a labelled positional placeholder and point at the HIG — a hand-built stand-in diverges from the real control, which is worse than nothing. Tab views are the known case, and the components that briefly existed for them were deleted for exactly this reason.
 - **Don't** reuse a dark-mode hex in light mode. It measured 2.17:1 the one time it happened.
+- **Don't** rebuild, restyle or redraw a layer tagged `SYSTEM`. Re-instance it from the macOS 27 kit. (The file is also subscribed to a macOS 26 kit — do not use it.)
+- **Don't** change the code to match a Figma stand-in. The list of known stand-ins is in the preamble above; treat anything on it as a Figma limitation, not a spec.
+- **Don't** add an `Appearance=Light|Dark` variant axis to a Figma component. Appearance is a variable **mode**, never a variant axis — an axis doubles every set and duplicates all future edits.
+- **Don't** put paint-level opacity on a variable-bound paint in Figma. Use a full-strength bound fill on a child node and set that node's opacity.

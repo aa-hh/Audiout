@@ -1148,7 +1148,11 @@ public final class OnboardingViewController: NSViewController {
             announce(Self.content(for: step).spineTitle(for: .completed, foundSpeakers: count))
         }
 
-        let deniedNow = Set(SetupFlowModel.steps.filter { isProvablyDenied($0) })
+        // A step still prompting keeps its denied edge un-consumed: the status
+        // may flip to .denied while the ask is mid-flight (ribbon still on the
+        // waiting line), and speaking then would announce the wait instead of
+        // the refusal. The edge fires on the repaint after the prompt resolves.
+        let deniedNow = Set(SetupFlowModel.steps.filter { isProvablyDenied($0) && !isPrompting($0) })
         let newlyDenied = deniedNow.subtracting(deniedAtLastRefresh)
         deniedAtLastRefresh = deniedNow
         for step in SetupFlowModel.steps where newlyDenied.contains(step) {

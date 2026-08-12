@@ -482,12 +482,12 @@ import Testing
         #expect(vc.test_ribbonStatusText?.contains("macOS only asks once") ?? false,
                 "the refusal is what the ribbon is saying, not the browsed row's copy")
         #expect(vc.test_rowIsBroken(.localNetwork))
-        // The refusal's own edge SPOKE. It speaks the line the ribbon was
-        // carrying when the status flipped, which is the wait the prompt put on
-        // screen; the point here is that it was spoken at all — browse content
-        // has no status line, so the whole transition would have gone silent.
-        #expect(vc.test_announcements.last == OnboardingViewController.waitingStatus,
-                "the refusal's edge was announced, not swallowed: \(vc.test_announcements)")
+        // The refusal's own edge SPOKE — and it speaks the refusal, not the
+        // waiting line: the edge is held while the prompt is in flight and
+        // fires on the repaint after it resolves, when the ribbon carries the
+        // denied copy.
+        #expect(vc.test_announcements.last == vc.test_ribbonStatusText,
+                "the refusal's edge announced the denied copy: \(vc.test_announcements)")
     }
 
     /// Awkward cell B: a GRANTED Local Network on macOS 14 was never gated, so

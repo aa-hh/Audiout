@@ -822,7 +822,15 @@ func demoIconAsAThirdPartyProcessSeesIt() -> NSImage {
 /// buttons the rehearsal exists to point at were the part going off the edge.
 final class DemoPromptMockView: DemoMockView {
 
-    static let size = NSSize(width: 269, height: 240)
+    /// PORTRAIT, like the dialog it mimics. macOS's privacy card is taller than
+    /// it is wide (roughly 0.8 w∶h — icon, then a title, then a four-line
+    /// purpose string stacked above the buttons), and this was drawn wider than
+    /// tall, which read as a different KIND of window (owner, 2026-08-13: "too
+    /// wide and not tall enough"). The width floor is the button row: two
+    /// side-by-side 12 pt labels, and "Don't Allow" is the long one — go much
+    /// under 228 and the CTA words, which must stay true, start truncating.
+    /// The height ceiling is ``DemoPaneView/surfaceSize`` (278) less a margin.
+    static let size = NSSize(width: 228, height: 264)
     /// Content inset on all four sides.
     private static let inset: CGFloat = 17
     private static let iconSide: CGFloat = 60
@@ -2421,33 +2429,35 @@ final class DemoBluetoothGlyphView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         let w = bounds.width, h = bounds.height
-        let top = NSPoint(x: w * 0.5, y: h * 0.10)
-        let upperRight = NSPoint(x: w * 0.80, y: h * 0.30)
-        let center = NSPoint(x: w * 0.5, y: h * 0.5)
-        let lowerRight = NSPoint(x: w * 0.80, y: h * 0.70)
-        let bottom = NSPoint(x: w * 0.5, y: h * 0.90)
+        let top = NSPoint(x: w * 0.5, y: h * 0.06)
+        let bottom = NSPoint(x: w * 0.5, y: h * 0.94)
+        let upperRight = NSPoint(x: w * 0.78, y: h * 0.28)
+        let lowerRight = NSPoint(x: w * 0.78, y: h * 0.72)
+        let upperLeft = NSPoint(x: w * 0.22, y: h * 0.28)
+        let lowerLeft = NSPoint(x: w * 0.22, y: h * 0.72)
 
-        // The vertical stem and the diagonal flags share endpoints but are not
-        // the same path — the flags never travel straight down, so the stem
-        // needs its own stroke.
-        let stem = NSBezierPath()
-        stem.move(to: top)
-        stem.line(to: bottom)
-
-        let flags = NSBezierPath()
-        flags.move(to: top)
-        flags.line(to: upperRight)
-        flags.line(to: center)
-        flags.line(to: lowerRight)
-        flags.line(to: bottom)
+        // ONE unbroken stroke that crosses the stem twice, which is what makes
+        // this the bind rune and not a letter B: each diagonal runs from one
+        // side clean through to the other, so it OVERSHOOTS the stem and leaves
+        // a short tail on the left. Drawing it as a stem plus two right-hand
+        // flags — which is what this did — produces a tidy B and reads as the
+        // wrong mark at a glance (owner, 2026-08-13: "missing its tail").
+        //
+        // The stem is not a separate path any more: the middle leg of this one
+        // (top → bottom) IS the stem, so there is nothing to keep in sync.
+        let rune = NSBezierPath()
+        rune.move(to: lowerLeft)
+        rune.line(to: upperRight)
+        rune.line(to: top)
+        rune.line(to: bottom)
+        rune.line(to: lowerRight)
+        rune.line(to: upperLeft)
 
         color.setStroke()
-        for path in [stem, flags] {
-            path.lineWidth = w * 0.10
-            path.lineCapStyle = .round
-            path.lineJoinStyle = .round
-            path.stroke()
-        }
+        rune.lineWidth = w * 0.10
+        rune.lineCapStyle = .round
+        rune.lineJoinStyle = .round
+        rune.stroke()
     }
 }
 

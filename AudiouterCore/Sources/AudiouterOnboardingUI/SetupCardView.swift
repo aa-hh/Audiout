@@ -149,6 +149,14 @@ enum SetupCardState: Equatable {
 /// Stock AppKit only (SF Symbols, `NSImageView`, system colours) — the only
 /// custom drawing is the shared `IconTileView` / `RoundedContainerView` chrome,
 /// which has no stock equivalent for the System Settings grouped-inset look.
+/// The row itself draws no border and no corner of its own (Direction 04
+/// grouped-inset pass, owner critique): it is a full-bleed strip living inside
+/// the ONE `RoundedContainerView` `OnboardingViewController.makeSpine()`
+/// builds around the whole column, separated from its neighbours by a
+/// hairline that container draws — the same anatomy `DemoPaneView`'s Login
+/// Items mock already draws for its grouped list. A row's own state paints a
+/// SELECTION FILL, never a stroke, so "current" reads as one row lit inside a
+/// group rather than one card singled out among six.
 final class SetupSpineRowView: NSView {
 
     // MARK: Metrics
@@ -165,7 +173,11 @@ final class SetupSpineRowView: NSView {
     /// The row's floor height — `iconSide` + both insets, stated so the check
     /// row and the permission rows can never drift apart.
     static let minHeight: CGFloat = iconSide + headerVerticalInset * 2
-    /// Corner radius of the row surface.
+    /// Corner radius of the shared group container the spine's rows sit inside
+    /// (`OnboardingViewController.makeSpine()`), and of the keyboard focus
+    /// ring a single row draws over itself — the two are visually the same
+    /// radius on purpose, since a focused first/last row's ring should read as
+    /// part of the one rounded group, not a corner of its own.
     static let cornerRadius: CGFloat = 9
     /// The trailing marker slot: one position that says locked, then earned.
     /// Also the checkmark's grown width (the 0 → 16 slide-in).
@@ -248,9 +260,15 @@ final class SetupSpineRowView: NSView {
     private func build() {
         translatesAutoresizingMaskIntoConstraints = false
 
-        surface = RoundedContainerView(radius: Self.cornerRadius)
-        // The edge bar is a child, and the surface's own radius is what rounds
-        // its ends — one clip, no second shape to keep in step.
+        // No radius and no border of its own (owner critique, Direction 04
+        // grouped-inset pass): the row is a plain full-bleed strip inside the
+        // SPINE's one shared `RoundedContainerView` (built by
+        // `OnboardingViewController.makeSpine()`), which owns the rounding, the
+        // rim and the hairline separators between rows. A per-row border/radius
+        // is exactly the "six separate cards" shape the grouped-inset list
+        // replaces — masking still matters here, so the edge bar can't paint
+        // past a row it belongs to.
+        surface = RoundedContainerView(fill: Tokens.Color.panel, border: .clear, radius: 0)
         surface.wantsLayer = true
         surface.layer?.masksToBounds = true
         addSubview(surface)
@@ -431,40 +449,38 @@ final class SetupSpineRowView: NSView {
         window?.invalidateCursorRects(for: self)
     }
 
-    /// Fill, rim and edge bar by state.
+    /// Fill and edge bar by state — a SELECTION FILL inside the shared group,
+    /// never a per-row border (owner critique, Direction 04 grouped-inset
+    /// pass: six individually bordered cards with gaps between them read as a
+    /// generic wizard, not the macOS grouped-inset list `DemoPaneView`'s own
+    /// Login Items mock already draws correctly).
     ///
-    /// The live row is the one lifted off the canvas — one rung up the warm
-    /// surface ladder (`raised` over `panel`) plus an EMBER edge bar, so
+    /// The live row is the one lifted off the group's own `panel` fill — one
+    /// rung up the warm surface ladder (`raised`) plus an EMBER edge bar, so
     /// current-vs-locked can't be mistaken. Ember, not gold (owner decision
-    /// 2026-08-12): gold is now spent entirely on the ONE button the step wants
+    /// 2026-08-12): gold is spent entirely on the ONE button the step wants
     /// pressed, and a gold bar on the spine competed with it from across the
     /// window. Ember is gold's dimmer companion in the same hue family, so the
-    /// live row still reads warm without claiming the accent.
-    /// A BROKEN row overrides that with
-    /// the failure hue, because it is the only row asking to be looked at. The
-    /// browse selection is a neutral rim ON TOP of whatever the base state
-    /// drew — browsing is a reading position, not a change of state.
+    /// live row still reads warm without claiming the accent. A BROKEN row
+    /// overrides that with the failure hue, because it is the only row asking
+    /// to be looked at. The browse selection is its own neutral tinted fill —
+    /// browsing is a reading position, not a change of state, so it never
+    /// stacks with the live/broken tint, only with hover.
     ///
     /// Every blend goes through ``dynamicBlend(_:fraction:of:)``: blending a
     /// dynamic token in place would flatten it to whichever appearance happened
     /// to be current, which is exactly the 1.13:1 dark rim the critique
     /// measured on the old active card.
     private func applySurface() {
-        let baseFill = isLive ? Tokens.Color.raised : Tokens.Color.panel
-        var fill = baseFill
-        var border = Tokens.Color.hairline
-        var borderWidth: CGFloat = 1
+        var fill = Tokens.Color.panel
 
-        if isLive {
-            border = dynamicBlend(Tokens.Color.hairline, fraction: 0.22, of: Tokens.Color.label)
-        }
         if isBroken {
-            fill = dynamicBlend(Tokens.Color.panel, fraction: 0.06, of: Tokens.Color.failure)
-            border = dynamicBlend(Tokens.Color.hairline, fraction: 0.55, of: Tokens.Color.failure)
-        }
-        if isBrowseSelected {
-            border = dynamicBlend(Tokens.Color.hairline, fraction: 0.38, of: Tokens.Color.label)
-            borderWidth = 1.5
+            fill = dynamicBlend(Tokens.Color.panel, fraction: 0.08, of: Tokens.Color.failure)
+        } else if isLive {
+            fill = Tokens.Color.raised
+        } else if isBrowseSelected {
+            fill = dynamicBlend(Tokens.Color.panel, fraction: 0.16,
+                                of: NSColor.selectedContentBackgroundColor)
         }
         if isHovered, isPressable {
             fill = dynamicBlend(fill, fraction: Self.hoverWashFraction,
@@ -472,11 +488,15 @@ final class SetupSpineRowView: NSView {
         }
 
         surface.fill = fill
-        surface.border = border
-        surface.borderWidth = borderWidth
 
-        edgeBar.isHidden = !(isLive || isBroken)
-        edgeBar.fill = isBroken ? Tokens.Color.failure : Tokens.Color.ember
+        // The bar is the FAILURE mark, and nothing else. A live row is already
+        // the one carrying the selection fill inside the group, so an ember
+        // rule beside it said the same thing twice — and a coloured leading
+        // edge is not a shape macOS's own grouped lists draw (owner,
+        // 2026-08-13). A broken row keeps it: that row is asking to be looked
+        // at, which the fill alone does not say.
+        edgeBar.isHidden = !isBroken
+        edgeBar.fill = Tokens.Color.failure
     }
 
     /// Whether this state has EARNED a checkmark. Only a real verification

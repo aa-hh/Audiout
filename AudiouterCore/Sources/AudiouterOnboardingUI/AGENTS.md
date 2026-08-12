@@ -6,9 +6,23 @@ The first-run Setup window (pure AppKit): a **two-pane** screen that asks for th
 five permissions **one at a time**. LEFT, the **SPINE** — a fixed 288 pt column
 of the header over six compact status rows (the five permissions plus the
 final-check row), carrying short titles and nothing else. RIGHT, the **HERO** —
-one warm panel holding the STAGE (a native-drawn miniature of the exact surface
-this step's ask is about to raise) over the **RIBBON** of real UI beneath it: the
-status line, the ask, the reassurance body, the honesty line and the buttons.
+one warm panel read top to bottom (owner-approved 2026-08-12):
+
+1. the **HEAD BLOCK** (`SetupHeroHeadView`) — a ~20 pt headline over a ~14.5 pt
+   why line in primary ink, and NOTHING else: no overline, no support line, no
+   ask line;
+2. the **PREVIEW FRAME** (`SetupPreviewFrameView`) — a `well` with a caption band
+   on its top edge ("You'll see this from macOS") holding the STAGE, the
+   native-drawn miniature of the exact surface this step's ask is about to raise;
+3. the **RIBBON**'s lower region (`SetupRibbonView`) — the status line and the
+   recovery paragraph, for the states that have to instruct rather than ask;
+4. the **BARE BOTTOM BAR** — a hairline, then the buttons trailing-aligned, and
+   nothing else: the gold primary at the trailing edge with a borderless "Skip
+   for now" to its left on the skippable steps.
+
+**A FIRST ASK IS ONLY (1), (2) AND (4).** The ask line, the reassurance
+paragraph and the honesty line were DELETED, not moved: each explained a picture
+the user is already looking at.
 
 That split is the rebuild's whole point (Direction 04, "the rehearsal leads",
 owner-chosen 2026-08-11 — it REPLACES the expanding-card column, so read the
@@ -149,8 +163,10 @@ gate/motion/demo/selection rules change.
   locked, then earned. Completed = checkmark (`Tokens.Color.success`). Skipped =
   a `slash.circle` in that same slot, with the imperative title kept: the user
   answered, they just said no. The LIVE row is lifted instead — one rung up the
-  warm ladder (`raised` over `panel`) plus a heavier neutral rim and a 3 pt gold
-  EDGE BAR down its leading side — so current-vs-locked is unmistakable. A
+  warm ladder (`raised` over `panel`) plus a heavier neutral rim and a 3 pt **EMBER**
+  EDGE BAR down its leading side (ember, NOT gold — owner decision 2026-08-12:
+  gold is spent entirely on the ONE button the step wants pressed, and a gold
+  bar across the window competed with it. `test_rowEdgeBarFill` pins it) — so current-vs-locked is unmistakable. A
   BROKEN row takes the same shape in the failure hue (tinted fill, red edge bar,
   `exclamationmark.triangle.fill` in the one slot), and a BROWSED row adds a
   heavier neutral rim ON TOP of whatever its base state drew, because browsing is
@@ -214,6 +230,26 @@ gate/motion/demo/selection rules change.
 
   **OWNER-PENDING:** these short titles are the rebuild's own wording, not
   reviewed copy — they await Alec's sign-off like the long table already has.
+- **There are THREE title tables now, and the HERO's is owner-verbatim.**
+  `SetupCardContent.heroHeadline` + `whyLine` are the owner's copy deck (decision
+  2026-08-12, VERBATIM — do not re-word), and `allowTitle` names the
+  CAPABILITY rather than repeating the OS's "Allow": the gold button is the
+  app's promise, and "Allow" is a word that appears in the rehearsal beside it.
+
+  | Step | Hero headline | Why line | Button |
+  |---|---|---|---|
+  | System Audio | Hear your Mac's sound | Audiouter needs this to send your music to your speakers. | Enable System Audio |
+  | Local Network | Find speakers on your Wi‑Fi | Audiouter needs this to reach the speakers on your network. | Enable Local Network |
+  | Bluetooth | Use Bluetooth speakers | Audiouter needs this to stream to Bluetooth speakers and wake ones that are off. | Enable Bluetooth Access |
+  | Speaker Sync | Keep speakers in perfect time | A small helper shares one clock so your speakers never drift. | Turn On at Login |
+  | Remote Control | Use your volume keys | Audiouter needs this so your volume keys keep working while it's your output. | Set Up Remote Control… |
+
+  Skip's own label is **"Skip for now"** (`SetupRibbonView.skipTitle`).
+  The HEADLINE holds in every one of a step's states — it is the step's
+  identity — while the WHY line is the first ask's alone: once a state has to
+  instruct (denied, permission-lost, a wait, a stuck dialog, Local Network
+  unanswered), its status + body carry the words instead. `SetupCardContent
+  .detail` survives for exactly those states; a first ask no longer shows one.
 - **The two-mode Allow** (now the RIBBON's primary button, not a per-card one —
   everything below is otherwise unchanged). First fire runs the native
   prompt/probe; once that prompt
@@ -373,6 +409,18 @@ gate/motion/demo/selection rules change.
   process is not a foreground app — until the whole run ends. This window is
   more disruptive than the others when it leaks, which is why it is called out
   here as well as in `HeadlessRuntime`'s own doc comment.
+- **Hero layout constants** (all on `OnboardingViewController` unless noted):
+  `heroPadding` 22 → a 418 × 464 interior; `heroHeadToFrameGap` 13;
+  `heroFrameToRibbonGap` 13; `SetupPreviewFrameView.labelBandHeight` 24 and
+  `bodyPadding` 8; `SetupRibbonView.actionRowHeight` 32 (the `.large` gold
+  button's own height, so the reserved band IS the bar) and `barTopPadding` 12.
+  **The frame is the flexible one and it CLIPS**: the window is a fixed
+  820 × 560, so the head block and the bar take what their words need and the
+  rehearsal gets the rest — the demo pane is CENTRED in the frame body, never
+  pinned to it, and anything taller than the frame is cropped by the well. That
+  leaves roughly **278 pt** for the surface on a two-line why; `DemoPaneView
+  .surfaceSize` is still 330 tall, which is the fit the abstraction pass is
+  sized against.
 - **The spine is 288 pt wide** (`spineWidth`; it REPLACES the card era's
   `leftPaneWidth` of 420, itself a widening of an original 380 to stop the long
   earned titles truncating). The column carries short titles now, so it can be
@@ -791,9 +839,14 @@ gate/motion/demo/selection rules change.
   the resolved fill per appearance and Increase Contrast, proving the ink instead
   of assuming it (white wins on every authored `goldCTA` variant). The
   `.systemAccent` dial keeps forced white regardless — platform convention for a
-  live-accent fill. Accent-filled Allow buttons keep forced white and
-  `Tokens.Font.body`; don't route them through the measure (it would flip a blue
-  accent's ink to black). **TRAP:**
+  live-accent fill. **EVERY ribbon primary wears `goldCTA`** (owner decision 2026-08-12) — the
+  everyday step button and the gate's CTA alike, because only ever one of them
+  is on screen and it is always the thing to press; both therefore route through
+  the measure. `RibbonContent.PrimaryKind` survives the merge because the GATE
+  contract is written in it (`test_primaryIsCTA` = "the final check passed"), not
+  because the two look different. Accent-filled Allow buttons elsewhere keep
+  forced white and `Tokens.Font.body`; don't route THOSE through the measure (it
+  would flip a blue accent's ink to black). **TRAP:**
   the shared `onboardingActionButton` factory must set
   `translatesAutoresizingMaskIntoConstraints = false`;
   `SetupRibbonView.rebuildActionsIfNeeded` constrains the factory's buttons and
@@ -842,7 +895,7 @@ gate/motion/demo/selection rules change.
   app's own name in a list of twenty). The body is 11 pt caption, so the bold run
   is the CAPTION's emphasized weight — `bodyEmphasized` inside it sets a visibly
   bigger face on that one word. `bodyEmphasized` stays right for the things that
-  really are body-sized: the ribbon's ASK line, the spine's row titles, the CTA.
+  really are body-sized: the spine's row titles and the bar's gold button.
 - `test_` hooks throughout, because this window isn't visible to a headless
   harness: sequencing and the spine (`test_activeStep`, `test_browseStep`,
   `test_spineTitle(of:)`, `test_hasCheckmark`, `test_note(of:)`, `test_isLocked`,
@@ -850,9 +903,11 @@ gate/motion/demo/selection rules change.
   dispatch (`test_pressRow` — which drives the row's REAL press entry and then
   awaits what it started — `test_isRowPressable`, `test_rowPressIsRefused`,
   `test_rowAcceptsFirstMouse`, and the row a11y trio), the ribbon
-  (`test_ribbonAskText` / `StatusText` / `BodyText` / `HonestyText` /
-  `ButtonTitles`, `test_ribbonIsWaiting`, `test_ribbonTapPrimary` / `TapSkip` /
-  `TapQuietLink`, `test_ribbonIsAccessible`), the real Allow/Skip
+  (`test_heroHeadline` / `test_heroWhy` / `test_previewFrameLabel`,
+  `test_ribbonStatusText` / `BodyText` / `ButtonTitles` — the titles read
+  leading-to-trailing, so the primary is LAST — `test_ribbonIsWaiting`,
+  `test_ribbonTapPrimary` / `TapSkip` / `TapQuietLink`,
+  `test_ribbonIsAccessible`, `test_rowEdgeBarFill`), the real Allow/Skip
   paths (`test_tapAllow`, `test_allow([steps])`, `test_tapSkip`), the gate
   (`test_doneExists`, `test_doneIsReturnDefault`, `test_snapBackStep`), the check
   row (`test_checkRowState`, `test_awaitFinalCheck()`), the announcements
@@ -901,7 +956,9 @@ gate/motion/demo/selection rules change.
 | `OnboardingViewController` | Assembles the spine and the hero; turns `SetupModel` + `SetupFlowModel` into row states and ribbon content; owns `browseStep`, the press dispatch, the grant choreography, the Done gate, the announcements, the header message and both polling timers. |
 | `OnboardingReason` | `.firstRun` vs `.permissionLost([RequiredPermission])` — drives the header message. |
 | `SetupSpineRowView` / `SetupCardContent` / `SetupCardState` | One SPINE row: the compact status strip, its one trailing marker, the live/broken/browsed surface treatment, and the whole-row press target. Both per-state title tables (ribbon sentence and spine short form) live on `SetupCardContent`. |
-| `SetupRibbonView` / `RibbonContent` | The real UI under the rehearsal: status line, ask, body, honesty line, and the one reserved action row (primary + Skip + quiet link). `RibbonContent` is a plain description of a state and decides nothing. |
+| `SetupHeroHeadView` | The hero's top block: the headline over the why line, and nothing else. |
+| `SetupPreviewFrameView` | The labelled well the rehearsal plays inside — caption band ("You'll see this from macOS", off for the finale) over a clipping body. Flexible: it takes whatever the head block and the bar leave. |
+| `SetupRibbonView` / `RibbonContent` | The hero's lower half: the status line and the recovery paragraph over the bare bottom bar (hairline + trailing-aligned primary, Skip and quiet link). `RibbonContent` describes the WHOLE hero — the head block reads its `headline`/`why` — and decides nothing. |
 | `SetupCheckRowView` | The sixth row: the automatic final check's pending/running/passed status strip. |
 | `DemoPaneView` / `DemoMode` | The hero's STAGE: the mock swap crossfade, the browse/settled resting rules, the waiting dim, the motion policy, the Replay button. |
 | `DemoMockView` | Timeline base class for the animated mocks: restartable score, settled-state hook, and the two multi-stage seams — `held(_:)` and the `stageWindow` offset. |

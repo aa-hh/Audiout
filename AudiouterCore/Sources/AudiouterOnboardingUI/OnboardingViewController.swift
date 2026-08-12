@@ -92,6 +92,8 @@ public final class OnboardingViewController: NSViewController {
     /// waits for it).
     private var checkRow: SetupCheckRowView!
     private var spineStack: NSStackView!
+    private var heroHead: SetupHeroHeadView!
+    private var previewFrame: SetupPreviewFrameView!
     private var demoPane: DemoPaneView!
     private var ribbon: SetupRibbonView!
     private var titleLabel: NSTextField!
@@ -272,39 +274,52 @@ public final class OnboardingViewController: NSViewController {
         return pane
     }
 
-    /// The hero: one warm panel holding the STAGE (the drawn rehearsal) over the
-    /// RIBBON (the real UI). The panel owns the chrome, which is why the demo
-    /// pane inside it no longer draws a surface of its own.
+    /// The hero: one warm panel, read top to bottom (owner-approved 2026-08-12).
+    ///
+    /// 1. the HEAD block — headline over the why line, and nothing else;
+    /// 2. the labelled PREVIEW FRAME, holding the drawn rehearsal;
+    /// 3. the ribbon's lower region — a status line and a paragraph, for the
+    ///    states that have to instruct rather than ask;
+    /// 4. the BARE BOTTOM BAR — a hairline and the buttons, nothing else.
+    ///
+    /// The frame is the flexible one: the window is a fixed 820 × 560, so the
+    /// head block and the bar take what their words need and the rehearsal gets
+    /// everything left over.
     private func makeHeroPane() -> NSView {
         let pane = RoundedContainerView(fill: Tokens.Color.panel,
                                         border: Tokens.Color.hairline,
                                         radius: 12)
+        heroHead = SetupHeroHeadView(width: SetupRibbonView.textWidth)
+        previewFrame = SetupPreviewFrameView()
         demoPane = DemoPaneView()
         ribbon = SetupRibbonView()
         ribbon.onPrimary = { [weak self] in self?.ribbonPrimaryTapped() }
         ribbon.onSkip = { [weak self] in self?.ribbonSkipTapped() }
         ribbon.onQuietLink = { [weak self] in self?.ribbonQuietLinkTapped() }
 
-        // The flexible upper region: whatever the ribbon leaves. The stage is a
-        // fixed size and simply centres in it, so a step whose copy wraps one
-        // line further moves the stage a few points rather than resizing it.
-        let stageRegion = NSView()
-        stageRegion.translatesAutoresizingMaskIntoConstraints = false
-
-        pane.addSubview(stageRegion)
+        pane.addSubview(heroHead)
+        pane.addSubview(previewFrame)
         pane.addSubview(ribbon)
-        stageRegion.addSubview(demoPane)
+        previewFrame.body.addSubview(demoPane)
 
         let padding = Self.heroPadding
         NSLayoutConstraint.activate([
-            stageRegion.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: padding),
-            stageRegion.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -padding),
-            stageRegion.topAnchor.constraint(equalTo: pane.topAnchor, constant: padding),
-            stageRegion.bottomAnchor.constraint(equalTo: ribbon.topAnchor,
-                                                constant: -Self.heroStageToRibbonGap),
+            heroHead.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: padding),
+            heroHead.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -padding),
+            heroHead.topAnchor.constraint(equalTo: pane.topAnchor, constant: padding),
 
-            demoPane.centerXAnchor.constraint(equalTo: stageRegion.centerXAnchor),
-            demoPane.centerYAnchor.constraint(equalTo: stageRegion.centerYAnchor),
+            previewFrame.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: padding),
+            previewFrame.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -padding),
+            previewFrame.topAnchor.constraint(equalTo: heroHead.bottomAnchor,
+                                              constant: Self.heroHeadToFrameGap),
+            previewFrame.bottomAnchor.constraint(equalTo: ribbon.topAnchor,
+                                                 constant: -Self.heroFrameToRibbonGap),
+
+            // Centred, never pinned: the pane owns its own size, and a
+            // rehearsal taller than the frame is CLIPPED by the well rather
+            // than fighting the fixed window for room.
+            demoPane.centerXAnchor.constraint(equalTo: previewFrame.body.centerXAnchor),
+            demoPane.centerYAnchor.constraint(equalTo: previewFrame.body.centerYAnchor),
 
             ribbon.leadingAnchor.constraint(equalTo: pane.leadingAnchor, constant: padding),
             ribbon.trailingAnchor.constraint(equalTo: pane.trailingAnchor, constant: -padding),
@@ -313,11 +328,13 @@ public final class OnboardingViewController: NSViewController {
         return pane
     }
 
-    /// Interior padding of the hero pane. The stage's own width is derived from
-    /// it (`DemoPaneView.surfaceSize`).
+    /// Interior padding of the hero pane. The preview frame's width is derived
+    /// from it (`SetupRibbonView.textWidth`, itself `DemoPaneView.surfaceSize`).
     static let heroPadding: CGFloat = 22
-    /// Minimum air between the stage and the ribbon under it.
-    static let heroStageToRibbonGap: CGFloat = 14
+    /// Air between the head block and the preview frame.
+    static let heroHeadToFrameGap: CGFloat = 13
+    /// Air between the preview frame and the ribbon under it.
+    static let heroFrameToRibbonGap: CGFloat = 13
 
     private func makeHeader() -> NSView {
         // Show the app's REAL icon (not a generic glyph) — a stronger first
@@ -440,11 +457,15 @@ public final class OnboardingViewController: NSViewController {
 
     // MARK: Step copy
 
-    /// The per-step copy. The DETAIL strings are reused verbatim from the
-    /// pre-sequential rows: each one is TCC-framing tested (it defuses the OS's
-    /// own wording before that prompt appears), so they are not re-written for
-    /// the new layout. The SPINE titles are the short forms the 288 pt column
-    /// can carry.
+    /// The per-step copy. THREE title tables, each sized to its own place: the
+    /// HERO's headline + why line (owner-verbatim — what a first ask shows), the
+    /// ribbon's `activeTitle` sentence, and the SPINE's short form for the
+    /// 288 pt column. Change one and check the others.
+    ///
+    /// The DETAIL strings are still reused verbatim from the pre-sequential
+    /// rows — each one is TCC-framing tested — but a FIRST ask no longer shows
+    /// one: they are the recovery states' copy now (denied, permission-lost, a
+    /// wait, a stuck dialog), where the words are the instruction.
     static func content(for step: SetupStep) -> SetupCardContent {
         switch step {
         case .audio:
@@ -462,7 +483,9 @@ public final class OnboardingViewController: NSViewController {
                 detail: "macOS calls this audio recording. Your audio flows "
                     + "straight to your speakers — nothing is stored or sent. "
                     + "Allowing plays a brief tone to confirm it's working.",
-                allowTitle: "Allow…",
+                heroHeadline: "Hear your Mac's sound",
+                whyLine: "Audiouter needs this to send your music to your speakers.",
+                allowTitle: "Enable System Audio",
                 isSkippable: false,
                 spineAskTitle: "Hear your Mac's sound",
                 spineDoneTitle: "Hearing your Mac's sound")
@@ -482,7 +505,9 @@ public final class OnboardingViewController: NSViewController {
                 // from wrapping to an orphan "Fi."
                 detail: "Find the speakers on your Wi\u{2011}Fi so they show up "
                     + "in your list.",
-                allowTitle: "Allow…",
+                heroHeadline: "Find speakers on your Wi\u{2011}Fi",
+                whyLine: "Audiouter needs this to reach the speakers on your network.",
+                allowTitle: "Enable Local Network",
                 isSkippable: false,
                 spineAskTitle: "Find speakers on Wi\u{2011}Fi",
                 spineDoneTitle: "Speakers already reachable")
@@ -503,7 +528,10 @@ public final class OnboardingViewController: NSViewController {
                 detail: "Reconnect a paired Bluetooth speaker that's switched "
                     + "off, straight from Audiouter. Without this you can still "
                     + "use one that's already connected.",
-                allowTitle: "Allow…",
+                heroHeadline: "Use Bluetooth speakers",
+                whyLine: "Audiouter needs this to stream to Bluetooth speakers and "
+                    + "wake ones that are off.",
+                allowTitle: "Enable Bluetooth Access",
                 isSkippable: true,
                 spineAskTitle: "Bluetooth speakers",
                 spineDoneTitle: "Bluetooth speakers")
@@ -516,7 +544,9 @@ public final class OnboardingViewController: NSViewController {
                 completedTitle: "Your speakers stay in perfect time",
                 detail: "Your speakers play in perfect time by sharing one "
                     + "clock, through a small helper. Approve it once in Login Items.",
-                allowTitle: "Open Login Items…",
+                heroHeadline: "Keep speakers in perfect time",
+                whyLine: "A small helper shares one clock so your speakers never drift.",
+                allowTitle: "Turn On at Login",
                 isSkippable: false,
                 spineAskTitle: "Keep speakers in time",
                 spineDoneTitle: "Speakers stay in time")
@@ -530,7 +560,10 @@ public final class OnboardingViewController: NSViewController {
                 detail: "Use your volume keys while Audiouter is your output "
                     + "device, and press play or pause on a speaker to control "
                     + "your Mac.",
-                allowTitle: "Allow…",
+                heroHeadline: "Use your volume keys",
+                whyLine: "Audiouter needs this so your volume keys keep working while "
+                    + "it's your output.",
+                allowTitle: "Set Up Remote Control\u{2026}",
                 isSkippable: true,
                 spineAskTitle: "Volume-key control",
                 spineDoneTitle: "Volume-key control")
@@ -589,7 +622,9 @@ public final class OnboardingViewController: NSViewController {
         runFinalCheckIfReady()
         checkRow.apply(displayedCheckState)
         refreshHero(active: active, animated: shouldAnimate)
-        ribbon.apply(ribbonContent(active: active))
+        let content = ribbonContent(active: active)
+        heroHead.apply(content)
+        ribbon.apply(content)
         refreshHeaderMessage()
         announceTransitions(newlyCompleted: newlyCompleted, active: active)
         refreshKeyboardFocus(active: active)
@@ -606,11 +641,17 @@ public final class OnboardingViewController: NSViewController {
                 ? .prompt : .settings
             demoPane.show(step: browsed, mode: mode, animated: animated,
                           restingSwitchOn: mode == .settings, asBrowse: true)
-        } else if active != nil || flow.finalCheckState == .passed {
+            previewFrame.caption = Self.previewFrameLabel
+        } else if active != nil {
+            demoPane.show(step: active, mode: demoMode(for: active), animated: animated)
+            previewFrame.caption = Self.previewFrameLabel
+        } else if flow.finalCheckState == .passed {
             // The beat: the pane HOLDS while the check is pending/running — the
             // finale (crossfade + one-shot ripple) and the CTA arrive together
             // on the pass, in this same repaint.
             demoPane.show(step: active, mode: demoMode(for: active), animated: animated)
+            // The finale card is OURS, not macOS's: captioning it would be a lie.
+            previewFrame.caption = nil
         } else {
             demoPane.holdCurrentFrame()
         }
@@ -911,6 +952,10 @@ public final class OnboardingViewController: NSViewController {
     /// deferred audio engine, so the button names that). Named once — a browse
     /// opened after the gate builds the same button.
     static let ctaTitle = "Start listening"
+    /// The preview frame's caption — the sentence the layout used to spend a
+    /// whole ribbon line on ("This is what macOS will ask you next."), said by
+    /// the frame instead.
+    static let previewFrameLabel = "You'll see this from macOS"
 
     /// Everything the ribbon shows, for whatever the window is doing right now.
     private func ribbonContent(active: SetupStep?) -> RibbonContent {
@@ -938,6 +983,11 @@ public final class OnboardingViewController: NSViewController {
     private func activeRibbonContent(_ step: SetupStep) -> RibbonContent {
         var content = RibbonContent()
         let copy = Self.content(for: step)
+        // The headline is the step's IDENTITY, so it holds in every one of its
+        // states — a wait, a refusal and a re-entry are all still this step.
+        // Only the FIRST ask adds the why line under it: once a state has to
+        // instruct, its status and body carry the words instead.
+        content.headline = copy.heroHeadline
 
         // A wait takes every button away: the answer is somewhere else now.
         if step == .localNetwork, model.localNetworkPhase == .verifying {
@@ -967,8 +1017,8 @@ public final class OnboardingViewController: NSViewController {
             content.body = Self.ribbonBody(
                 "Everything else you set up is still in place. Turn **Audiouter** back on under "
                 + "\(Self.settingsPath(for: step)) — this is the only switch to flip.")
-            content.primary = (copy.allowTitle == "Open Login Items…" ? "Open Login Items…"
-                                                                     : "Open Settings…", .prominent)
+            content.primary = (step == .speakerSync ? "Open Login Items…"
+                                                    : "Open Settings…", .prominent)
             return content
         }
 
@@ -999,8 +1049,8 @@ public final class OnboardingViewController: NSViewController {
         // Accessibility asked once and can't tell us the answer.
         if step == .remoteControl, model.remoteControlStatus == .requested {
             content.body = Self.ribbonBody(
-                "In Settings, switch **Audiouter** on under Privacy & Security \u{25B8} Accessibility.")
-            content.honesty = Self.remoteControlHonesty
+                "In Settings, switch **Audiouter** on under Privacy & Security \u{25B8} Accessibility. "
+                + "macOS won't tell us when you do \u{2014} this row ticks itself.")
             content.primary = ("Open Settings…", .prominent)
             content.showsSkip = true
             return content
@@ -1015,41 +1065,24 @@ public final class OnboardingViewController: NSViewController {
         return content
     }
 
-    /// What macOS is about to put in front of the user, said before it appears.
+    /// The FIRST ask: the headline, the why line, and the button. Nothing else.
+    ///
+    /// Everything that used to sit here — the ask line ("This is what macOS will
+    /// ask you next.", "Two clicks, on two different windows."), the reassurance
+    /// paragraph and the honesty line — was DELETED rather than restyled (owner
+    /// decision 2026-08-12). Each was a sentence explaining a picture the user
+    /// is already looking at: the labelled preview frame says whose surface it is,
+    /// and the rehearsal inside it shows which button to press, including Remote
+    /// Control's two surfaces and its ghosted Deny.
     private func firstAskRibbonContent(_ step: SetupStep) -> RibbonContent {
         var content = RibbonContent()
         let copy = Self.content(for: step)
+        content.headline = copy.heroHeadline
+        content.why = copy.whyLine
         content.primary = (copy.allowTitle, .prominent)
         content.showsSkip = copy.isSkippable
-
-        switch step {
-        case .remoteControl:
-            // The one ask that is TWO surfaces, and the one where the blue
-            // button is the wrong answer — so the ribbon says so in words as
-            // well as showing it.
-            content.ask = "Two clicks, on two different windows."
-            content.body = Self.ribbonBody(
-                "The alert's **blue button is Deny** — the quiet one, Open System Settings, is "
-                + "the way through. In Settings, switch **Audiouter** on.")
-            content.honesty = Self.remoteControlHonesty
-        case .speakerSync:
-            content.ask = "One switch, in Login Items."
-            content.body = Self.ribbonBody(copy.detail)
-            content.honesty = "This row ticks itself when you approve it."
-        case .audio, .localNetwork, .bluetooth:
-            content.ask = "This is what macOS will ask you next."
-            content.body = Self.ribbonBody(copy.detail)
-            // Only the skippable one needs to say what skipping costs.
-            if step == .bluetooth {
-                content.honesty = "Skip and it stays available in Settings \u{25B8} General "
-                    + "\u{25B8} Open Setup\u{2026}"
-            }
-        }
         return content
     }
-
-    static let remoteControlHonesty = "macOS won't tell us when you do \u{2014} this row ticks "
-        + "itself when you switch it on."
 
     /// A decided row, opened for READING: what it bought, and where the switch
     /// lives if the user ever wants it back.
@@ -1058,6 +1091,7 @@ public final class OnboardingViewController: NSViewController {
         // No auto-passed case here: those rows are not browsable at all.
         // macOS 14 never gated Local Network, so there is no pane to name and
         // nowhere to send anyone.
+        content.headline = Self.content(for: step).heroHeadline
         let hasPane = !(step == .localNetwork && !model.isLocalNetworkGated)
         var sentence = browseCapabilitySentence(step)
         if hasPane, step != .speakerSync {
@@ -1520,6 +1554,13 @@ public final class OnboardingViewController: NSViewController {
     /// Whether a row is drawing the broken-permission treatment.
     public func test_rowIsBroken(_ step: SetupStep) -> Bool { _ = view; return rows[step]?.test_isBroken ?? false }
 
+    /// A row's leading edge bar fill, or nil when it draws none — the live
+    /// row's is EMBER, gold being reserved for the one button to press.
+    public func test_rowEdgeBarFill(_ step: SetupStep) -> NSColor? {
+        _ = view
+        return rows[step]?.test_edgeBarFill
+    }
+
     /// Whether a row is drawing the browse selection.
     public func test_rowIsBrowseSelected(_ step: SetupStep) -> Bool {
         _ = view
@@ -1595,10 +1636,14 @@ public final class OnboardingViewController: NSViewController {
 
     // MARK: Ribbon hooks
 
-    public var test_ribbonAskText: String? { _ = view; return ribbon.test_askText }
+    /// The hero's headline and the why line under it — the whole of a first
+    /// ask's copy.
+    public var test_heroHeadline: String? { _ = view; return heroHead.test_headline }
+    public var test_heroWhy: String? { _ = view; return heroHead.test_why }
+    /// The preview frame's caption band, or nil when the frame carries none.
+    public var test_previewFrameLabel: String? { _ = view; return previewFrame.test_caption }
     public var test_ribbonStatusText: String? { _ = view; return ribbon.test_statusText }
     public var test_ribbonBodyText: String? { _ = view; return ribbon.test_bodyText }
-    public var test_ribbonHonestyText: String? { _ = view; return ribbon.test_honestyText }
     public var test_ribbonButtonTitles: [String] { _ = view; return ribbon.test_buttonTitles }
     /// Whether a wait is on screen (the spinner beat, with every button gone).
     public var test_ribbonIsWaiting: Bool { _ = view; return ribbon.test_isWaiting }

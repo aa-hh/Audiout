@@ -4,32 +4,50 @@ import AppKit
 import AudiouterCore
 import AudiouterSharedUI
 
-/// Everything the ribbon is showing right now, built by
+/// Everything the hero is saying right now, built by
 /// ``OnboardingViewController`` and applied in one call. A plain description of
 /// a state — it holds no logic and decides nothing.
+///
+/// It is split across two views: ``headline``/``why`` are the TOP block
+/// (``SetupHeroHeadView``, above the rehearsal), and everything else belongs to
+/// the ``SetupRibbonView`` under it.
 struct RibbonContent {
 
     /// Which shape the one action button takes.
+    ///
+    /// Both kinds WEAR the same deep gold (owner decision 2026-08-12: gold
+    /// appears on exactly one thing per screen, the button this step wants
+    /// pressed). The distinction survives because the GATE contract is written
+    /// in it — the CTA exists iff the final check passed, and
+    /// `test_primaryIsCTA` is what pins that.
     enum PrimaryKind: Equatable {
-        /// The everyday accent-filled Allow / Try Again / Open Settings….
+        /// The everyday step button — Enable System Audio, Try Again, Open
+        /// Settings….
         case prominent
-        /// The finale's gold "Start listening" — the gate's CTA.
+        /// The finale's "Start listening" — the gate's CTA.
         case cta
     }
 
+    /// The hero's headline: what pressing the button gets you. Owner-verbatim
+    /// per step (``SetupCardContent/heroHeadline``).
+    var headline: String?
+    /// The one line under it: why Audiouter needs this. On a first ask these
+    /// two ARE the copy — there is no overline, no support line and no ask
+    /// line under them.
+    var why: String?
+
     /// The status line: what just happened, or what we are waiting for. `spins`
     /// swaps the glyph for a small spinner — a wait on screen always says what
-    /// it is waiting for.
+    /// it is waiting for. It sits in the hero's LOWER region, between the
+    /// preview frame and the bar, so a first ask (which has none) leaves the
+    /// rehearsal all of that space.
     var status: (symbolName: String?, text: String, color: NSColor, spins: Bool)?
-    /// The one-line ask above the copy ("This is what macOS will ask you next.").
-    var ask: String?
-    /// The reassurance paragraph. Attributed, because a few of these bold one
-    /// word — the button that is the wrong answer, the app's own name in a
-    /// Settings list.
+    /// The recovery paragraph — denied, permission-lost, a stuck dialog. A
+    /// FIRST ask has none: the headline and the why line say it, and
+    /// the rehearsal shows it. Attributed, because a few of these bold one word
+    /// — the button that is the wrong answer, the app's own name in a Settings
+    /// list.
     var body: NSAttributedString?
-    /// The quieter honesty line under the copy ("macOS won't tell us when you
-    /// do…").
-    var honesty: String?
     var primary: (title: String, kind: PrimaryKind)?
     var showsSkip = false
     /// A demoted text-button path offered BESIDE the primary, never instead of
@@ -47,15 +65,198 @@ struct RibbonContent {
     }
 }
 
-/// The REAL UI under the rehearsal: the ask, the reassurance, the honesty line
-/// and the buttons — all of it relocated out of the old left-column card so the
-/// drawn mock above it can take the stage (Direction 04, owner-chosen).
+/// The hero's TOP block: the headline over the why line, and nothing else
+/// (owner-approved 2026-08-12 — this REPLACES the overline/ask/support stack the
+/// ribbon used to carry under the stage, so read the history before adding a
+/// third line back).
+///
+/// The order is the point. A user meets the promise, then the reason, then the
+/// picture of what macOS is about to put in front of them, then one button.
+/// Everything that used to sit between those — the "This is what macOS will ask
+/// you next." ask line, the reassurance paragraph, the honesty line — was
+/// deleted rather than moved: they were three more things to read before the
+/// one thing to do.
+final class SetupHeroHeadView: NSView {
+
+    /// Air between the headline and the why line.
+    private static let gap: CGFloat = 9
+
+    private let headlineLabel = NSTextField(wrappingLabelWithString: "")
+    private let whyLabel = NSTextField(wrappingLabelWithString: "")
+
+    init(width: CGFloat) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        headlineLabel.font = .systemFont(ofSize: 20, weight: .bold)
+        headlineLabel.textColor = Tokens.Color.label
+        headlineLabel.maximumNumberOfLines = 2
+
+        // Primary ink, not secondary: this is the sentence the whole step rests
+        // on, and it is the only body copy a first ask has.
+        whyLabel.font = .systemFont(ofSize: 14.5, weight: .medium)
+        whyLabel.textColor = Tokens.Color.label
+        whyLabel.maximumNumberOfLines = 3
+
+        for label in [headlineLabel, whyLabel] {
+            label.preferredMaxLayoutWidth = width
+            label.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(label)
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: leadingAnchor),
+                label.trailingAnchor.constraint(equalTo: trailingAnchor),
+            ])
+        }
+        NSLayoutConstraint.activate([
+            headlineLabel.topAnchor.constraint(equalTo: topAnchor),
+            whyLabel.topAnchor.constraint(equalTo: headlineLabel.bottomAnchor, constant: Self.gap),
+            whyLabel.bottomAnchor.constraint(equalTo: bottomAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func apply(_ content: RibbonContent) {
+        headlineLabel.stringValue = content.headline ?? ""
+        headlineLabel.isHidden = content.headline == nil
+        whyLabel.stringValue = content.why ?? ""
+        whyLabel.isHidden = content.why == nil
+    }
+
+    // MARK: Test-support hooks
+
+    var test_headline: String? { headlineLabel.isHidden ? nil : headlineLabel.stringValue }
+    var test_why: String? { whyLabel.isHidden ? nil : whyLabel.stringValue }
+}
+
+/// The LABELLED frame the rehearsal plays inside: a warm well with a caption
+/// band along its top edge saying whose surface this is.
+///
+/// The label is the whole reason the frame exists (owner-approved 2026-08-12).
+/// The mock is a drawing of somebody else's window sitting inside ours, and
+/// without a boundary and a caption a user has no way to know which of the two
+/// things on screen macOS will actually show them — the earlier layout answered
+/// that with a sentence ("This is what macOS will ask you next."), which cost a
+/// line of reading for something a frame says for free.
+///
+/// The frame is FLEXIBLE and its content is CLIPPED: the hero is a fixed
+/// 462 × 508 inside a fixed window, so the frame takes whatever the head block
+/// and the bar leave, and whatever plays inside it has to fit that.
+final class SetupPreviewFrameView: NSView {
+
+    /// Height of the caption band.
+    static let labelBandHeight: CGFloat = 24
+    /// Air around the surface playing inside the frame.
+    static let bodyPadding: CGFloat = 8
+    private static let cornerRadius: CGFloat = 10
+    private static let labelInset: CGFloat = 12
+
+    /// Where the caller installs whatever plays in here (the demo pane). Its
+    /// contents are centred and clipped, never resized — the pane owns its own
+    /// size.
+    let body = NSView()
+
+    private let well: RoundedContainerView
+    private let labelBand = NSView()
+    private let captionLabel = NSTextField(labelWithString: "")
+    private let bandRule = RoundedContainerView(fill: Tokens.Color.hairline,
+                                                border: .clear, radius: 0)
+    private var bandHeight: NSLayoutConstraint!
+
+    init() {
+        well = RoundedContainerView(fill: Tokens.Color.well,
+                                    border: Tokens.Color.hairline,
+                                    radius: Self.cornerRadius)
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+
+        // The well clips: a rehearsal larger than the frame is cropped by it
+        // rather than spilling over the bar below.
+        well.wantsLayer = true
+        well.layer?.masksToBounds = true
+        addSubview(well)
+
+        captionLabel.textColor = Tokens.Color.tertiaryLabel
+        captionLabel.translatesAutoresizingMaskIntoConstraints = false
+        bandRule.borderWidth = 0
+        labelBand.translatesAutoresizingMaskIntoConstraints = false
+        labelBand.addSubview(captionLabel)
+        labelBand.addSubview(bandRule)
+        body.translatesAutoresizingMaskIntoConstraints = false
+        well.addSubview(labelBand)
+        well.addSubview(body)
+
+        bandHeight = labelBand.heightAnchor.constraint(equalToConstant: Self.labelBandHeight)
+        NSLayoutConstraint.activate([
+            well.leadingAnchor.constraint(equalTo: leadingAnchor),
+            well.trailingAnchor.constraint(equalTo: trailingAnchor),
+            well.topAnchor.constraint(equalTo: topAnchor),
+            well.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+            labelBand.leadingAnchor.constraint(equalTo: well.leadingAnchor),
+            labelBand.trailingAnchor.constraint(equalTo: well.trailingAnchor),
+            labelBand.topAnchor.constraint(equalTo: well.topAnchor),
+            bandHeight,
+
+            captionLabel.leadingAnchor.constraint(equalTo: labelBand.leadingAnchor,
+                                                  constant: Self.labelInset),
+            captionLabel.centerYAnchor.constraint(equalTo: labelBand.centerYAnchor),
+
+            bandRule.leadingAnchor.constraint(equalTo: labelBand.leadingAnchor),
+            bandRule.trailingAnchor.constraint(equalTo: labelBand.trailingAnchor),
+            bandRule.bottomAnchor.constraint(equalTo: labelBand.bottomAnchor),
+            bandRule.heightAnchor.constraint(equalToConstant: 1),
+
+            body.leadingAnchor.constraint(equalTo: well.leadingAnchor),
+            body.trailingAnchor.constraint(equalTo: well.trailingAnchor),
+            body.topAnchor.constraint(equalTo: labelBand.bottomAnchor,
+                                      constant: Self.bodyPadding),
+            body.bottomAnchor.constraint(equalTo: well.bottomAnchor,
+                                         constant: -Self.bodyPadding),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    /// The band's words — nil takes the whole band away, for the one surface
+    /// that is NOT macOS's: the finale card is ours, and captioning it "You'll
+    /// see this from macOS" would be a lie.
+    var caption: String? {
+        didSet {
+            guard caption != oldValue else { return }
+            captionLabel.attributedStringValue = Self.captionText(caption ?? "")
+            labelBand.isHidden = caption == nil
+            bandHeight.constant = caption == nil ? 0 : Self.labelBandHeight
+        }
+    }
+
+    /// Small, tracked-out, quiet — a frame label, deliberately not a heading:
+    /// it names the picture without competing with the headline above it.
+    private static func captionText(_ text: String) -> NSAttributedString {
+        NSAttributedString(string: text.uppercased(), attributes: [
+            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .kern: 0.85,
+            .foregroundColor: Tokens.Color.tertiaryLabel,
+        ])
+    }
+
+    // MARK: Test-support hooks
+
+    /// The caption as drawn (uppercased), or nil when the band is away.
+    var test_caption: String? {
+        labelBand.isHidden ? nil : captionLabel.attributedStringValue.string
+    }
+}
+
+/// The hero's lower half: the recovery copy (a status line and, where a state
+/// has one, its paragraph) over a BARE BOTTOM BAR — a hairline, then the
+/// buttons, trailing-aligned, and nothing else.
 ///
 /// It lives INSIDE the hero pane but OUTSIDE ``DemoPaneView``, which is what
 /// makes it accessible by construction: the demo's accessibility opt-out walks
 /// the mock subtree only, so it can never reach this. Everything the user is
-/// told is here, in stock controls VoiceOver reads, while the pane above is
-/// decorative.
+/// told is here or in ``SetupHeroHeadView``, in stock controls VoiceOver reads,
+/// while the pane between them is decorative.
 ///
 /// **The action row never leaves the layout.** It is a fixed reserved band, so
 /// the moment a click sends the answer over to macOS — the beat where the
@@ -63,25 +264,27 @@ struct RibbonContent {
 final class SetupRibbonView: NSView {
 
     /// The wrapping width every paragraph in here is measured at: the hero
-    /// pane's interior, which is also the stage's width.
+    /// pane's interior, which is also the preview frame's width.
     static let textWidth: CGFloat = DemoPaneView.surfaceSize.width
-    /// The reserved height of the action row.
-    static let actionRowHeight: CGFloat = 24
+    /// The reserved height of the action row — the `.large` gold button's own
+    /// height, so the bar is the same band whether it holds one button or none.
+    static let actionRowHeight: CGFloat = 32
+    /// Air between the bar's hairline and the buttons under it.
+    static let barTopPadding: CGFloat = 12
     /// The status line's leading glyph/spinner column.
     private static let statusGlyphSide: CGFloat = 13
     private static let statusGap: CGFloat = 6
-    /// The honesty line is the quietest thing here — a shade under the body it
-    /// qualifies, without inventing a fifth ink.
-    private static let honestyAlpha: CGFloat = 0.85
+    /// Gap between the buttons in the bar.
+    private static let buttonGap: CGFloat = 8
 
     private let stack = NSStackView()
     private let statusRow = NSStackView()
     private let statusGlyph = NSImageView()
     private let statusSpinner = NSProgressIndicator()
     private let statusLabel = NSTextField(wrappingLabelWithString: "")
-    private let askLabel = NSTextField(wrappingLabelWithString: "")
     private let bodyLabel = NSTextField(wrappingLabelWithString: "")
-    private let honestyLabel = NSTextField(wrappingLabelWithString: "")
+    private let barRule = RoundedContainerView(fill: Tokens.Color.hairline,
+                                               border: .clear, radius: 0)
     private let actionRow = NSView()
 
     /// The one action button, whatever shape it is taking. The view controller
@@ -135,35 +338,24 @@ final class SetupRibbonView: NSView {
         statusRow.addArrangedSubview(statusSpinner)
         statusRow.addArrangedSubview(statusLabel)
 
-        askLabel.font = Tokens.Font.bodyEmphasized
-        askLabel.textColor = Tokens.Color.label
-        askLabel.maximumNumberOfLines = 0
-        askLabel.preferredMaxLayoutWidth = Self.textWidth
-        askLabel.translatesAutoresizingMaskIntoConstraints = false
-
         bodyLabel.font = Tokens.Font.caption
         bodyLabel.textColor = Tokens.Color.inkSecondary
         bodyLabel.maximumNumberOfLines = 0
         bodyLabel.preferredMaxLayoutWidth = Self.textWidth
         bodyLabel.translatesAutoresizingMaskIntoConstraints = false
 
-        honestyLabel.font = Tokens.Font.caption
-        honestyLabel.textColor = Tokens.Color.inkSecondary
-        honestyLabel.alphaValue = Self.honestyAlpha
-        honestyLabel.maximumNumberOfLines = 0
-        honestyLabel.preferredMaxLayoutWidth = Self.textWidth
-        honestyLabel.translatesAutoresizingMaskIntoConstraints = false
-
+        barRule.borderWidth = 0
+        barRule.translatesAutoresizingMaskIntoConstraints = false
         actionRow.translatesAutoresizingMaskIntoConstraints = false
 
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
-        for view in [statusRow, askLabel, bodyLabel, honestyLabel, actionRow] {
+        for view in [statusRow, bodyLabel, barRule, actionRow] {
             stack.addArrangedSubview(view)
         }
-        stack.setCustomSpacing(14, after: honestyLabel)
+        stack.setCustomSpacing(Self.barTopPadding, after: barRule)
         addSubview(stack)
 
         NSLayoutConstraint.activate([
@@ -172,13 +364,15 @@ final class SetupRibbonView: NSView {
             stack.topAnchor.constraint(equalTo: topAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
 
+            barRule.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
+            barRule.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
+            barRule.heightAnchor.constraint(equalToConstant: 1),
+
             actionRow.leadingAnchor.constraint(equalTo: stack.leadingAnchor),
             actionRow.trailingAnchor.constraint(equalTo: stack.trailingAnchor),
             // RESERVED: the row keeps its height whether or not it holds a
             // button, so a wait — which takes every button away — cannot move
-            // the stage above it. A `.large` CTA is taller than the band and is
-            // allowed to overflow it, exactly as the old fixed primary slot let
-            // its widest button overflow.
+            // the preview frame above it.
             actionRow.heightAnchor.constraint(equalToConstant: Self.actionRowHeight),
         ])
     }
@@ -203,9 +397,6 @@ final class SetupRibbonView: NSView {
             statusSpinner.stopAnimation(nil)
         }
 
-        askLabel.stringValue = content.ask ?? ""
-        askLabel.isHidden = content.ask == nil
-
         if let body = content.body {
             bodyLabel.attributedStringValue = body
             bodyLabel.isHidden = false
@@ -214,15 +405,15 @@ final class SetupRibbonView: NSView {
             bodyLabel.isHidden = true
         }
 
-        honestyLabel.stringValue = content.honesty ?? ""
-        honestyLabel.isHidden = content.honesty == nil
-
         rebuildActionsIfNeeded(content)
     }
 
     /// Rebuild the action row — but only when the buttons themselves changed.
     /// A repaint that changes nothing must not re-run the CTA's entrance, and
     /// must not take the keyboard focus back off a button the user is on.
+    ///
+    /// The bar is TRAILING-aligned and reads right to left: the primary sits at
+    /// the trailing edge, Skip and any quiet link fall to its left.
     private func rebuildActionsIfNeeded(_ content: RibbonContent) {
         let signature = content.buttonSignature
         guard signature != appliedButtonSignature else { return }
@@ -235,33 +426,24 @@ final class SetupRibbonView: NSView {
         quietLinkButton = nil
         primaryKind = content.primary?.kind
 
-        var leading: NSLayoutXAxisAnchor = actionRow.leadingAnchor
+        var trailing: NSLayoutXAxisAnchor = actionRow.trailingAnchor
         var spacing: CGFloat = 0
 
         if let primary = content.primary {
-            let button: NSButton
-            switch primary.kind {
-            case .cta:
-                // The finale CTA (owner copy 2026-08-11): closing setup is what
-                // starts the deferred audio engine, so the button names that —
-                // and it wears the DEEP gold authored for white ink (`goldCTA`,
-                // measured rationale on the token) where the everyday Allow
-                // wears the system accent. Ink is measured off the resolved
-                // fill (see `ProminentButton.picksInkFromFill`).
-                let cta = ProminentButton(title: primary.title, target: self,
-                                          action: #selector(primaryTapped),
-                                          fill: Tokens.Color.goldCTA, picksInkFromFill: true,
-                                          titleFont: Tokens.Font.bodyEmphasized)
-                // Constrained directly (no stack view to do it for us): left
-                // on, AutoLayout synthesises size from the zero frame and the
-                // button renders as nothing at all.
-                cta.translatesAutoresizingMaskIntoConstraints = false
-                cta.controlSize = .large
-                button = cta
-            case .prominent:
-                button = onboardingActionButton(title: primary.title, prominent: true,
-                                                target: self, action: #selector(primaryTapped))
-            }
+            // Both kinds wear the DEEP gold authored for white ink (`goldCTA`,
+            // measured rationale on the token) — the everyday step button and
+            // the finale's CTA alike, because there is only ever one of them on
+            // screen and it is always the thing to press. Ink is measured off
+            // the resolved fill (see `ProminentButton.picksInkFromFill`).
+            let button = ProminentButton(title: primary.title, target: self,
+                                         action: #selector(primaryTapped),
+                                         fill: Tokens.Color.goldCTA, picksInkFromFill: true,
+                                         titleFont: Tokens.Font.bodyEmphasized)
+            // Constrained directly (no stack view to do it for us): left on,
+            // AutoLayout synthesises size from the zero frame and the button
+            // renders as nothing at all.
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.controlSize = .large
             // Whatever the primary is, it owns Return — and when the gate opens
             // the CTA IS the primary, so the old "Done takes Return from the
             // live Allow" contract holds with nothing left to hand over.
@@ -269,33 +451,39 @@ final class SetupRibbonView: NSView {
             primaryButton = button
             actionRow.addSubview(button)
             NSLayoutConstraint.activate([
-                button.leadingAnchor.constraint(equalTo: leading),
+                button.trailingAnchor.constraint(equalTo: trailing),
                 button.centerYAnchor.constraint(equalTo: actionRow.centerYAnchor),
             ])
-            leading = button.trailingAnchor
-            spacing = 8
+            trailing = button.leadingAnchor
+            spacing = Self.buttonGap
         }
 
         if content.showsSkip {
-            let skip = onboardingActionButton(title: "Skip", prominent: false,
+            // Borderless and quiet: skipping is a real answer, but it is not
+            // the one the step is asking for.
+            let skip = onboardingActionButton(title: Self.skipTitle, prominent: false,
                                               target: self, action: #selector(skipTapped))
+            skip.isBordered = false
+            skip.controlSize = .regular
             skipButton = skip
             actionRow.addSubview(skip)
             NSLayoutConstraint.activate([
-                skip.leadingAnchor.constraint(equalTo: leading, constant: spacing),
+                skip.trailingAnchor.constraint(equalTo: trailing, constant: -spacing),
                 skip.centerYAnchor.constraint(equalTo: actionRow.centerYAnchor),
             ])
-            leading = skip.trailingAnchor
-            spacing = 8
+            trailing = skip.leadingAnchor
+            spacing = Self.buttonGap
         }
 
         if let title = content.quietLink {
             let link = onboardingActionButton(title: title, prominent: false,
                                               target: self, action: #selector(quietLinkTapped))
+            link.isBordered = false
+            link.controlSize = .regular
             quietLinkButton = link
             actionRow.addSubview(link)
             NSLayoutConstraint.activate([
-                link.leadingAnchor.constraint(equalTo: leading, constant: spacing),
+                link.trailingAnchor.constraint(equalTo: trailing, constant: -spacing),
                 link.centerYAnchor.constraint(equalTo: actionRow.centerYAnchor),
             ])
         }
@@ -309,6 +497,10 @@ final class SetupRibbonView: NSView {
             }
         }
     }
+
+    /// Skip's own words (owner copy deck): "for now" is the honest half —
+    /// a skipped step is re-armed by clicking its row, and nothing is spent.
+    static let skipTitle = "Skip for now"
 
     /// Whether the CTA's entrance may animate: a real, on-screen window with
     /// Reduce Motion off. Everywhere else it simply exists — steady states must
@@ -328,17 +520,18 @@ final class SetupRibbonView: NSView {
 
     // MARK: Test-support hooks
 
-    var test_askText: String? { askLabel.isHidden ? nil : askLabel.stringValue }
     var test_statusText: String? { statusRow.isHidden ? nil : statusLabel.stringValue }
     var test_bodyText: String? { bodyLabel.isHidden ? nil : bodyLabel.stringValue }
-    var test_honestyText: String? { honestyLabel.isHidden ? nil : honestyLabel.stringValue }
     /// Whether a wait is on screen (the spinner beat).
     var test_isWaiting: Bool { !statusRow.isHidden && !statusSpinner.isHidden }
-    /// The titles of the buttons the ribbon currently offers, in order.
+    /// The titles of the buttons the ribbon currently offers, in the order they
+    /// read on screen (leading to trailing, so the primary is LAST).
     var test_buttonTitles: [String] {
-        [primaryButton, skipButton, quietLinkButton].compactMap { $0?.title }
+        [quietLinkButton, skipButton, primaryButton].compactMap { $0?.title }
     }
-    /// Whether the primary is the gate's gold CTA rather than an everyday Allow.
+    /// Whether the primary is the gate's CTA rather than an everyday step
+    /// button. Both wear the same gold, so this is the only thing that can tell
+    /// them apart — and the gate contract is written in it.
     var test_primaryIsCTA: Bool { primaryKind == .cta }
     func test_tapPrimary() { primaryTapped() }
     func test_tapSkip() { skipTapped() }

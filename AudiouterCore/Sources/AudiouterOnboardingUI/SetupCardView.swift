@@ -29,8 +29,26 @@ struct SetupCardContent {
     /// The plain-language "why" — the ribbon's body copy. Reused verbatim from
     /// the pre-sequential rows: these strings are TCC-framing tested (they
     /// defuse the OS's "recording" wording before it appears).
+    ///
+    /// It is NOT shown on a first ask (owner-approved 2026-08-12): the
+    /// hero leads with ``heroHeadline`` over ``whyLine`` and then shows the
+    /// rehearsal, and a paragraph between them was the third thing to read
+    /// before the one button. The recovery states — denied, permission-lost,
+    /// a wait, a stuck dialog — still carry it, because there the words ARE
+    /// the instruction.
     let detail: String
-    /// First-fire call to action.
+    /// The HERO's headline for this step: what pressing the button gets you,
+    /// in the fewest words that still say it (owner copy deck, VERBATIM).
+    /// Deliberately a third title source beside ``activeTitle`` and
+    /// ``spineAskTitle`` — the hero has 418 pt and a 20 pt face, which is
+    /// neither the ribbon's sentence nor the spine's label.
+    let heroHeadline: String
+    /// The one line under the headline: why Audiouter needs it. Owner-verbatim,
+    /// and the ONLY body copy a first ask shows.
+    let whyLine: String
+    /// First-fire call to action. It names the CAPABILITY rather than repeating
+    /// the OS's "Allow" (owner copy 2026-08-12): the gold button in the bar is
+    /// the app's promise, and the rehearsal beside it is where "Allow" appears.
     let allowTitle: String
     /// Whether this step offers Skip (Bluetooth and Remote Control only — both
     /// are outside `RequiredPermission`, so passing on one can't touch the gate).
@@ -117,7 +135,7 @@ enum SetupCardState: Equatable {
 /// One row of the Setup window's SPINE: a compact status strip — icon tile,
 /// short title, and exactly one trailing marker (padlock, checkmark, skip
 /// slash, broken-permission alert, or the auto-pass note) — plus a leading edge
-/// bar that marks the live row gold and a broken one red.
+/// bar that marks the live row EMBER and a broken one red.
 ///
 /// It carries no body, no buttons and no copy beyond its title (Direction 04,
 /// owner-chosen): the rehearsal is the onboarding's actual idea, so the mock
@@ -152,7 +170,7 @@ final class SetupSpineRowView: NSView {
     /// The trailing marker slot: one position that says locked, then earned.
     /// Also the checkmark's grown width (the 0 → 16 slide-in).
     static let markerSlot: CGFloat = 16
-    /// The leading edge bar — gold on the live row, red on a broken one, gone
+    /// The leading edge bar — EMBER on the live row, red on a broken one, gone
     /// otherwise. Clipped by the surface's own corner radius.
     static let edgeBarWidth: CGFloat = 3
     /// How far a locked step's icon tile fades. Enough to read as not-yet-yours
@@ -237,7 +255,7 @@ final class SetupSpineRowView: NSView {
         surface.layer?.masksToBounds = true
         addSubview(surface)
 
-        edgeBar = RoundedContainerView(fill: Tokens.Color.gold, border: .clear, radius: 0)
+        edgeBar = RoundedContainerView(fill: Tokens.Color.ember, border: .clear, radius: 0)
         edgeBar.borderWidth = 0
         edgeBar.isHidden = true
         surface.addSubview(edgeBar)
@@ -416,8 +434,13 @@ final class SetupSpineRowView: NSView {
     /// Fill, rim and edge bar by state.
     ///
     /// The live row is the one lifted off the canvas — one rung up the warm
-    /// surface ladder (`raised` over `panel`) plus a gold edge bar, so
-    /// current-vs-locked can't be mistaken. A BROKEN row overrides that with
+    /// surface ladder (`raised` over `panel`) plus an EMBER edge bar, so
+    /// current-vs-locked can't be mistaken. Ember, not gold (owner decision
+    /// 2026-08-12): gold is now spent entirely on the ONE button the step wants
+    /// pressed, and a gold bar on the spine competed with it from across the
+    /// window. Ember is gold's dimmer companion in the same hue family, so the
+    /// live row still reads warm without claiming the accent.
+    /// A BROKEN row overrides that with
     /// the failure hue, because it is the only row asking to be looked at. The
     /// browse selection is a neutral rim ON TOP of whatever the base state
     /// drew — browsing is a reading position, not a change of state.
@@ -453,7 +476,7 @@ final class SetupSpineRowView: NSView {
         surface.borderWidth = borderWidth
 
         edgeBar.isHidden = !(isLive || isBroken)
-        edgeBar.fill = isBroken ? Tokens.Color.failure : Tokens.Color.gold
+        edgeBar.fill = isBroken ? Tokens.Color.failure : Tokens.Color.ember
     }
 
     /// Whether this state has EARNED a checkmark. Only a real verification
@@ -628,6 +651,9 @@ final class SetupSpineRowView: NSView {
     var test_isBroken: Bool { isBroken }
     /// Whether the hero pane is browsing this row.
     var test_isBrowseSelected: Bool { isBrowseSelected }
+    /// The leading edge bar's fill, or nil when no bar is drawn — the ember-not-
+    /// gold rule has no other headless signal.
+    var test_edgeBarFill: NSColor? { edgeBar.isHidden ? nil : edgeBar.fill }
     /// The title colour, so a test can pin that a locked step is dimmed further
     /// than a completed one.
     var test_titleColor: NSColor? { titleLabel.textColor }

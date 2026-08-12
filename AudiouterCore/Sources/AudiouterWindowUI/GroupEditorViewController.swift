@@ -1127,6 +1127,13 @@ extension GroupEditorViewController: RailHookProviding {
             NSPoint(x: iconWell.bounds.midX, y: iconWell.bounds.midY), to: view)
         return (center.y, center.x, DeviceIconWellView.size / 2, iconWell.isActiveGroup)
     }
+
+    /// No-op: this pane's origin is the group's rounded-rect ICON WELL, not a
+    /// stroked ring, so there is no circumference to bloom. The Groups screen
+    /// also never mounts the connect pulse's firing conditions today — if it
+    /// ever grows one, the well's §5.3 gold ring is where the acknowledgment
+    /// would live.
+    public func receiveRailPulse() {}
 }
 
 /// The editor pane's container: re-invalidates the rail overlay AND the

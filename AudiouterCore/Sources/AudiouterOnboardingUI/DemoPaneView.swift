@@ -1876,9 +1876,14 @@ final class DemoSettledMockView: NSView {
         // sidebar wash and the mock switch's off track already use.
         let glow = Tokens.Color.glow
         let isDark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        let peak: CGFloat = isDark ? 0.32 : 0.50
+        // The peak is scaled PER APPEARANCE: light glow is a paper-soft hue
+        // (floor-exempt by spec) with nothing but alpha to read as an aura at
+        // all, so it carries a much higher one — the same call-site alpha dial
+        // the sidebar wash and the mock switch's off track already use. The
+        // finale draws unframed, with no well fill under it to lift it.
+        let peak: CGFloat = isDark ? 0.40 : 0.70
         auraLayer.colors = [glow.withAlphaComponent(peak).cgColor,
-                            glow.withAlphaComponent(peak * 0.38).cgColor,
+                            glow.withAlphaComponent(peak * 0.46).cgColor,
                             glow.withAlphaComponent(0).cgColor]
         auraLayer.locations = [0, 0.55, 1]
         let gold = Tokens.Color.gold.cgColor
@@ -1974,10 +1979,19 @@ final class DemoSettledMockView: NSView {
             addRipple(to: ring, delay: start, endScale: endScale)
         }
 
-        let bloom = CABasicAnimation(keyPath: "opacity")
-        bloom.fromValue = 0
-        bloom.toValue = 1
-        addCelebrationAnimation(bloom, to: auraLayer, delay: 0.12, duration: 0.6, key: "bloom")
+        // The aura swells past its resting size as it fades up, then settles
+        // back onto it. The overshoot is in SCALE, never opacity: the settled
+        // alpha IS the model value, so the shot still ends exactly on the
+        // resting frame an interrupted or headless run renders.
+        let bloomFade = CAKeyframeAnimation(keyPath: "opacity")
+        bloomFade.values = [0, 1, 1]
+        bloomFade.keyTimes = [0, 0.45, 1]
+        let bloomSwell = CAKeyframeAnimation(keyPath: "transform.scale")
+        bloomSwell.values = [0.86, 1.16, 1.0]
+        bloomSwell.keyTimes = [0, 0.45, 1]
+        let bloom = CAAnimationGroup()
+        bloom.animations = [bloomFade, bloomSwell]
+        addCelebrationAnimation(bloom, to: auraLayer, delay: 0.12, duration: 0.7, key: "bloom")
 
         let pop = CAKeyframeAnimation(keyPath: "transform.scale")
         pop.values = [0.92, 1.04, 1.0]
@@ -2019,7 +2033,7 @@ final class DemoSettledMockView: NSView {
         // finishes as the wave dies INTO the feather, never mid-stage (the
         // old 0.55-peak ramp-down left it ghostly by the halfway mark).
         let fade = CAKeyframeAnimation(keyPath: "opacity")
-        fade.values = [0, 0.85, 0.85, 0]
+        fade.values = [0, 0.95, 0.95, 0]
         fade.keyTimes = [0, 0.12, 0.5, 1]
         let flight = CAAnimationGroup()
         flight.animations = [scale, fade]

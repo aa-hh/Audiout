@@ -230,6 +230,24 @@ final class SetupPreviewFrameView: NSView {
         }
     }
 
+    /// Take the frame's VISUAL chrome away — well fill, rim and clip — leaving
+    /// the geometry exactly where it is.
+    ///
+    /// For the finale only (owner-approved 2026-08-12): that card is ours, so
+    /// a frame around it boxes in the one moment that should feel like the
+    /// window opening up, and its clip crops the gold ripple at the rim. A
+    /// permission step keeps the framed look — there the boundary is the whole
+    /// point, because the picture inside it is somebody else's window.
+    var isChromeless: Bool = false {
+        didSet {
+            guard isChromeless != oldValue else { return }
+            well.fill = isChromeless ? .clear : Tokens.Color.well
+            well.border = isChromeless ? .clear : Tokens.Color.hairline
+            well.borderWidth = isChromeless ? 0 : 1
+            well.layer?.masksToBounds = !isChromeless
+        }
+    }
+
     /// Small, tracked-out, quiet — a frame label, deliberately not a heading:
     /// it names the picture without competing with the headline above it.
     private static func captionText(_ text: String) -> NSAttributedString {
@@ -245,6 +263,11 @@ final class SetupPreviewFrameView: NSView {
     /// The caption as drawn (uppercased), or nil when the band is away.
     var test_caption: String? {
         labelBand.isHidden ? nil : captionLabel.attributedStringValue.string
+    }
+
+    /// Whether the well is actually drawing chrome (fill, rim, clip).
+    var test_drawsChrome: Bool {
+        well.fill != .clear && well.border != .clear && well.borderWidth > 0
     }
 }
 

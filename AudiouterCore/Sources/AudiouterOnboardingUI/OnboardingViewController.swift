@@ -642,16 +642,21 @@ public final class OnboardingViewController: NSViewController {
             demoPane.show(step: browsed, mode: mode, animated: animated,
                           restingSwitchOn: mode == .settings, asBrowse: true)
             previewFrame.caption = Self.previewFrameLabel
+            previewFrame.isChromeless = false
         } else if active != nil {
             demoPane.show(step: active, mode: demoMode(for: active), animated: animated)
             previewFrame.caption = Self.previewFrameLabel
+            previewFrame.isChromeless = false
         } else if flow.finalCheckState == .passed {
             // The beat: the pane HOLDS while the check is pending/running — the
             // finale (crossfade + one-shot ripple) and the CTA arrive together
             // on the pass, in this same repaint.
             demoPane.show(step: active, mode: demoMode(for: active), animated: animated)
-            // The finale card is OURS, not macOS's: captioning it would be a lie.
+            // The finale card is OURS, not macOS's: captioning it would be a
+            // lie, and framing it would box in the moment. The frame goes away
+            // chrome and all, so the ripple radiates unclipped.
             previewFrame.caption = nil
+            previewFrame.isChromeless = true
         } else {
             demoPane.holdCurrentFrame()
         }
@@ -1642,6 +1647,9 @@ public final class OnboardingViewController: NSViewController {
     public var test_heroWhy: String? { _ = view; return heroHead.test_why }
     /// The preview frame's caption band, or nil when the frame carries none.
     public var test_previewFrameLabel: String? { _ = view; return previewFrame.test_caption }
+
+    /// Whether the preview frame is drawing its well, rim and clip.
+    public var test_previewFrameDrawsChrome: Bool { _ = view; return previewFrame.test_drawsChrome }
     public var test_ribbonStatusText: String? { _ = view; return ribbon.test_statusText }
     public var test_ribbonBodyText: String? { _ = view; return ribbon.test_bodyText }
     public var test_ribbonButtonTitles: [String] { _ = view; return ribbon.test_buttonTitles }

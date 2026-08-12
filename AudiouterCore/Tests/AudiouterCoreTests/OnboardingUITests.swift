@@ -2137,6 +2137,24 @@ import Testing
                 "the finale card is ours — captioning it as macOS's would be a lie")
     }
 
+    /// And the frame's CHROME goes with the caption: a permission step is a
+    /// picture inside a boundary, the finale is our own moment on the panel —
+    /// no well, no rim, and nothing to clip the ripple.
+    @Test func thePreviewFrameDropsItsChromeOnTheFinale() async {
+        let vc = makeVC(model: makeGrantableModel())
+        #expect(vc.test_previewFrameDrawsChrome, "a permission step keeps the framed look")
+
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        await vc.test_tapAllow(.speakerSync)
+        vc.test_tapSkip(.remoteControl)
+        await vc.test_awaitFinalCheck()
+
+        #expect(vc.test_doneExists, "the gate opened")
+        #expect(!vc.test_previewFrameDrawsChrome,
+                "the finale sits on the hero panel, unframed and unclipped")
+    }
+
     /// Resolve a dynamic token to comparable components: two accesses of a
     /// provider-backed colour are distinct instances whose `isEqual` is not
     /// documented to see through the provider.

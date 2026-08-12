@@ -301,6 +301,8 @@ public final class OnboardingViewController: NSViewController {
         pane.addSubview(previewFrame)
         pane.addSubview(ribbon)
         previewFrame.body.addSubview(demoPane)
+        // The finale ripple fills this panel and fades before its edges.
+        demoPane.heroPanelForFinale = pane
 
         let padding = Self.heroPadding
         NSLayoutConstraint.activate([

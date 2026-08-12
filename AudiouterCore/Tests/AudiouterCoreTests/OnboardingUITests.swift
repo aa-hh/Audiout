@@ -262,6 +262,18 @@ import Testing
         return vc
     }
 
+    /// Drive a real top-down layout pass at the fixed window size — the moment
+    /// the demo pane's finale launch waits for (its centres only resolve once
+    /// the enclosing pass has positioned it). The live window lays out for free;
+    /// a headless VC test has to ask.
+    private func layoutRoot(_ vc: OnboardingViewController) {
+        let root = vc.test_rootView
+        root.frame = NSRect(x: 0, y: 0,
+                            width: OnboardingViewController.contentWidth,
+                            height: OnboardingViewController.contentHeight)
+        root.layoutSubtreeIfNeeded()
+    }
+
     /// A model where every required permission is satisfiable, so the flow can
     /// be walked to the gate.
     private func makeGrantableModel(silentAudio: PermissionStatus? = nil) -> SetupModel {
@@ -1483,6 +1495,83 @@ import Testing
         #expect(settled.test_lineText == "Your Mac's sound can reach every room.")
     }
 
+    /// The finale's first play launches from the ICON CENTRE, not the
+    /// bottom-left origin. `playCelebration()` runs ON the step crossfade,
+    /// before the enclosing pass has positioned the view — the exact ordering
+    /// the first-play bloom used to bloom from the corner. Spending the shot is
+    /// immediate; its launch waits for the first real layout with a centre.
+    @Test func theFinaleLaunchesFromTheIconCentreOnTheFirstPlay() {
+        let host = NSView()
+        let settled = DemoSettledMockView()
+        settled.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(settled)
+        NSLayoutConstraint.activate([
+            settled.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            settled.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            settled.topAnchor.constraint(equalTo: host.topAnchor),
+            settled.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+        ])
+
+        settled.playCelebration()   // before any layout — the real crossfade order
+        #expect(settled.celebrationConsumed, "the shot is spent immediately")
+        #expect(settled.celebrationRunCount == 0,
+                "but it does NOT launch off a centre layout hasn't resolved")
+
+        // Drive layout the way the window does: resolve the tree (the icon gets
+        // its real frame), then the pass that lays out this view with that frame
+        // fires the deferred launch. (A live window resolves frames before it
+        // calls `layout()`; a detached tree needs the resolve made explicit.)
+        host.setFrameSize(DemoSettledMockView.size)
+        host.layoutSubtreeIfNeeded()
+        #expect(settled.test_iconCentre != .zero, "the icon has a real frame now")
+        settled.needsLayout = true
+        settled.layoutSubtreeIfNeeded()
+
+        #expect(settled.celebrationRunCount == 1, "the deferred launch fires once, now")
+        #expect(settled.test_auraPosition == settled.test_iconCentre,
+                "the bloom is anchored on the icon centre")
+        #expect(settled.test_auraPosition != .zero, "never the bottom-left origin")
+    }
+
+    /// The finale rings fill the hero PANEL but every ring is fully faded (opacity
+    /// 0) by the panel's NEAREST edge, so no side ever shows a ring hitting a
+    /// wall — and they now travel PAST the 418×278 stage to do it.
+    @Test func theFinaleRingsFadeOutBeforeTheNearestPanelEdge() {
+        // A host standing in for the hero panel, larger than the stage on every
+        // side so nearest ≠ farthest and the stage cap would clip if kept.
+        let panel = NSView(frame: NSRect(x: 0, y: 0, width: 462, height: 508))
+        let settled = DemoSettledMockView()
+        settled.rippleBoundsView = panel
+        settled.translatesAutoresizingMaskIntoConstraints = false
+        panel.addSubview(settled)
+        NSLayoutConstraint.activate([
+            settled.centerXAnchor.constraint(equalTo: panel.centerXAnchor),
+            settled.centerYAnchor.constraint(equalTo: panel.centerYAnchor),
+        ])
+        panel.layoutSubtreeIfNeeded()
+        settled.playCelebration()
+        panel.layoutSubtreeIfNeeded()   // fire the deferred launch
+
+        guard let nearest = settled.test_nearestPanelEdgeRadius,
+              let farthest = settled.test_farthestPanelEdgeRadius,
+              let endRadius = settled.test_rippleEndRadius else {
+            Issue.record("the ripple did not launch against the panel geometry")
+            return
+        }
+
+        // The stage's farthest icon-centre-to-edge distance is 209 (a 418×278
+        // stage centred on its own middle). The rings must now reach past it.
+        #expect(endRadius > 209, "the rings radiate past the 418×278 stage")
+        #expect(endRadius >= farthest - 0.5, "and out to the panel's farthest edge")
+
+        let fadeRadii = settled.test_rippleFadeOutRadii
+        #expect(fadeRadii.count == 3, "every staggered ring carries a ripple")
+        for radius in fadeRadii {
+            #expect(radius <= nearest + 0.5,
+                    "opacity is 0 by the nearest panel edge (\(radius) vs \(nearest))")
+        }
+    }
+
     /// The warning stands down to the WELCOME line once its permission is
     /// re-granted — even with the gate open — and the banner hooks report the
     /// tracked message kind.
@@ -1515,10 +1604,14 @@ import Testing
         await vc.test_awaitFinalCheck()
 
         #expect(vc.test_demoMode == .settled)
+        // The shot is spent immediately, but launches from the first real
+        // layout — so drive one, exactly as the live window does.
+        layoutRoot(vc)
         #expect(vc.test_demoCelebrationRunCount == 1)
         #expect(!vc.test_demoShowsReplay, "the finale is a one-shot, never a Replay offer")
 
         vc.test_refresh()   // a repaint that changes nothing
+        layoutRoot(vc)
 
         #expect(vc.test_demoCelebrationRunCount == 1, "the shot is spent")
     }
@@ -1567,6 +1660,7 @@ import Testing
 
         vc.test_demoReduceMotionOverride = false
         vc.test_demoCanAnimateOverride = true   // the window lands on screen
+        layoutRoot(vc)                          // the layout the launch waits for
 
         #expect(vc.test_demoCelebrationRunCount == 1)
     }

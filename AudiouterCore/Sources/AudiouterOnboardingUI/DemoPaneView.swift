@@ -64,14 +64,15 @@ final class DemoPaneView: NSView {
     /// There is no drawn surface under it any more (Direction 04, the
     /// rehearsal-led restructure): the HERO PANE owns the chrome, and this view
     /// is the bare stage inside it. The WIDTH is that pane's interior — 462
-    /// hero pane − 2 × 22 interior padding = 418 — because the FINALE fills the
-    /// stage exactly: its ripple sweeps the whole of it and deliberately
-    /// crosses the frame on every side, with nothing clipping or feathering it
-    /// on the way out (owner calls 2026-08-11: first "grow the
-    /// stage, don't shrink the wave" after a live hard clip, then rejecting the
-    /// shrunken-travel fix as "one little line" — see `DemoSettledMockView`,
-    /// whose `size` tracks this constant, so the travel derivation follows a
-    /// bigger stage for free). The HEIGHT is what the preview FRAME really has
+    /// hero pane − 2 × 22 interior padding = 418 — because the FINALE's ripple
+    /// radiates PAST this stage to fill the whole hero PANEL, crossing the stage
+    /// frame on every side with nothing clipping or feathering it (owner calls
+    /// 2026-08-11: first "grow the stage, don't shrink the wave" after a live
+    /// hard clip, then rejecting the shrunken-travel fix as "one little line";
+    /// owner call 2026-08-12: the wave must not halt at the stage edge, so it now
+    /// fills the panel and fades to nothing BEFORE the panel's nearest edge — see
+    /// `DemoSettledMockView.ringEndScale()` / `rippleFadeFraction`). The HEIGHT
+    /// is what the preview FRAME really has
     /// to give on a two-line why line — 278 — rather than the 330 the frame was
     /// silently cropping 50 pt off. Every mock is smaller than the stage and
     /// centred on it, so the slack is simply margin for them, and Replay still
@@ -102,6 +103,11 @@ final class DemoPaneView: NSView {
     private var restingSwitchOn = false
 
     private var occlusionObserver: NSObjectProtocol?
+
+    /// The hero PANEL the finale ripple fills — wired by the view controller so
+    /// the rings fade out before the panel's edges instead of halting at the
+    /// stage boundary. Handed to each settled mock as it is built.
+    weak var heroPanelForFinale: NSView?
 
     init() {
         replayButton = NSButton(title: "Replay", target: nil, action: nil)
@@ -228,6 +234,9 @@ final class DemoPaneView: NSView {
         let outgoing = mock
         let incoming = Self.makeMock(step: step, mode: mode, restingSwitchOn: restingSwitchOn)
         mock = incoming
+        // The finale's rings fade out before the hero panel's edges, so the
+        // settled mock needs to know the panel it lives in.
+        (incoming as? DemoSettledMockView)?.rippleBoundsView = heroPanelForFinale
         incoming.translatesAutoresizingMaskIntoConstraints = false
         Self.installAccessibilityOptOut(incoming)
         mockHost.addSubview(incoming)
@@ -1762,6 +1771,18 @@ final class DemoSettledMockView: NSView {
     private(set) var celebrationConsumed = false
     private(set) var celebrationRunCount = 0
 
+    /// Set when `playCelebration()` fired before layout had resolved the icon's
+    /// frame: the shot is SPENT (consumed) at the call, but its launch waits for
+    /// the first real `layout()` so the ripple blooms from the icon centre, not
+    /// the collapsed bottom-left origin the first synchronous play would see.
+    private var pendingLaunch = false
+
+    /// The view whose edges the RINGS must be fully faded out before they cross
+    /// — the hero PANEL, wired by the pane. It lets the wave fill the panel yet
+    /// never visibly terminate against a boundary. `nil` (a mock built with no
+    /// panel wired — a headless unit test) falls back to the stage-bound travel.
+    weak var rippleBoundsView: NSView?
+
     init() {
         ringLayers = Self.ringStarts.map { _ in CAShapeLayer() }
         super.init(frame: .zero)
@@ -1873,9 +1894,7 @@ final class DemoSettledMockView: NSView {
         // knows. Actions disabled: repositioning decoration is never a slide.
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        let centre = icon.superview.map {
-            convert(NSPoint(x: icon.frame.midX, y: icon.frame.midY), from: $0)
-        } ?? .zero
+        let centre = iconCentre
         auraLayer.bounds = CGRect(x: 0, y: 0, width: Self.auraDiameter, height: Self.auraDiameter)
         auraLayer.position = centre
         let ringRect = CGRect(x: 0, y: 0, width: Self.ringBaseDiameter, height: Self.ringBaseDiameter)
@@ -1885,6 +1904,33 @@ final class DemoSettledMockView: NSView {
             ring.path = CGPath(ellipseIn: ringRect.insetBy(dx: 1, dy: 1), transform: nil)
         }
         CATransaction.commit()
+
+        // A one-shot deferred because `playCelebration()` ran before this view
+        // had a resolved icon fires now — the first layout with a real centre,
+        // exactly once. Every later play (and Replay) is already laid out and
+        // launches straight from `playCelebration()`.
+        if pendingLaunch, hasResolvedIconCentre {
+            pendingLaunch = false
+            launchCelebration()
+        }
+    }
+
+    /// The icon's centre in this view's coordinates — where the aura and rings
+    /// anchor. Collapses to ~`.zero` (bottom-left) until layout resolves the
+    /// icon's frame; ``hasResolvedIconCentre`` is the guard against reading it
+    /// too early.
+    private var iconCentre: CGPoint {
+        icon.superview.map {
+            convert(NSPoint(x: icon.frame.midX, y: icon.frame.midY), from: $0)
+        } ?? .zero
+    }
+
+    /// Whether layout has given the icon a real frame. `DemoSettledMockView`
+    /// does not override `isFlipped`, so an unresolved icon frame leaves the
+    /// centre at the bottom-left origin — launching the ripple from there is the
+    /// first-play bug this guards.
+    private var hasResolvedIconCentre: Bool {
+        bounds.width > 0 && icon.frame.width > 0 && icon.frame.height > 0
     }
 
     // MARK: The one-shot
@@ -1893,23 +1939,36 @@ final class DemoSettledMockView: NSView {
     /// is already the model state, so there is nothing else to apply.
     func skipCelebration() { celebrationConsumed = true }
 
-    /// The one-shot: rings ripple out staggered, the aura blooms, the icon
-    /// takes a small press of emphasis, and the text lands with the ripple.
+    /// Spend the one-shot. The shot is CONSUMED here (so a repaint can never
+    /// re-fire it), but it only LAUNCHES once the icon has a real frame: the
+    /// shot starts ON the step crossfade, before the enclosing pass has
+    /// positioned this view, so its centres are still collapsed at the
+    /// bottom-left origin. When that is the case the launch is DEFERRED to the
+    /// first real ``layout()``; every later play (and Replay) is already laid
+    /// out and launches immediately.
     func playCelebration() {
         guard !celebrationConsumed else { return }
         celebrationConsumed = true
+        guard hasResolvedIconCentre else {
+            pendingLaunch = true
+            needsLayout = true
+            return
+        }
+        launchCelebration()
+    }
+
+    /// The one-shot itself: rings ripple out staggered, the aura blooms, the
+    /// icon takes a small press of emphasis, and the text lands with the ripple.
+    /// Only ever reached with a resolved icon frame — from ``playCelebration()``
+    /// when the view is already laid out, or from ``layout()`` when a deferred
+    /// launch comes due — so the ripple always blooms from the icon centre.
+    private func launchCelebration() {
         celebrationRunCount += 1
-        // Ring and aura geometry come from layout, and the shot starts ON the
-        // crossfade — before the enclosing pass has given this view its frame.
-        // Laying out a zero-sized subtree puts the icon, and with it both
-        // centres, at the bottom-left corner, and the wave launches from there
-        // instead of the icon. The stage is a fixed size, so take it first.
-        if bounds.size != Self.size { setFrameSize(Self.size) }
-        layoutSubtreeIfNeeded()
 
         let endScale = ringEndScale()
+        let fadeFraction = rippleFadeFraction(endScale: endScale)
         for (ring, start) in zip(ringLayers, Self.ringStarts) {
-            addRipple(to: ring, delay: start, endScale: endScale)
+            addRipple(to: ring, delay: start, endScale: endScale, fadeFraction: fadeFraction)
         }
 
         // The aura swells past its resting size as it fades up, then settles
@@ -1936,39 +1995,82 @@ final class DemoSettledMockView: NSView {
         addTextLanding(line, delay: 0.48)
     }
 
-    /// How far a ring scales before it dies: enough that its leading edge
-    /// reaches the icon centre's real distance to the FARTHEST surface edge —
-    /// a wave that washes the WHOLE stage and deliberately crosses the frame
-    /// on every side and keeps going into the chromeless hero pane, since
-    /// nothing clips it. Derived per play rather than authored, so a resized
-    /// surface
-    /// or re-balanced stack keeps full-stage travel without re-introducing a
-    /// hard clip. (Aiming at the NEAREST edge instead was the over-correction
-    /// the owner rejected as "one little line that goes out".) At scale 1 the
-    /// stroke's outer edge sits at `ringBaseDiameter / 2` (the path is inset
-    /// 1 pt and half the 2 pt stroke rides back outside it), and the whole
-    /// assembly scales together.
+    /// How far a ring scales before it dies. It fills the HERO PANEL now, not
+    /// just the 418×278 stage: the leading edge travels to the panel's farthest
+    /// icon-centre-to-edge distance (``rippleBoundsView``), so the wave washes
+    /// the whole panel rather than halting at the invisible stage boundary the
+    /// owner saw partway across it. The panel's own rounded clip is never
+    /// reached because the ring is already fully faded before the NEAREST edge
+    /// (``rippleFadeFraction(endScale:)``). Derived per play rather than
+    /// authored, so a resized stage or panel keeps full travel. With no panel
+    /// wired (a headless unit test) it falls back to the old stage-bound cap. At
+    /// scale 1 the stroke's outer edge sits at `ringBaseDiameter / 2` (the path
+    /// is inset 1 pt and half the 2 pt stroke rides back outside it), and the
+    /// whole assembly scales together.
     private func ringEndScale() -> CGFloat {
+        let base = Self.ringBaseDiameter / 2
+        if let radii = panelEdgeRadii() {
+            return max(radii.farthest / base, 1)
+        }
         let centre = ringLayers.first?.position ?? .zero
         let farthestEdge = max(centre.x, bounds.width - centre.x,
                                centre.y, bounds.height - centre.y)
-        return max(farthestEdge / (Self.ringBaseDiameter / 2), 1)
+        return max(farthestEdge / base, 1)
     }
 
-    /// One ring's flight: scale out to death while the stroke swells and fades
-    /// — a wave dissipating, not a shape resizing.
-    private func addRipple(to ring: CAShapeLayer, delay: TimeInterval, endScale: CGFloat) {
+    /// The travel FRACTION at which a ring's opacity must already be 0 — the
+    /// point where its radius equals the panel's NEAREST icon-centre-to-edge
+    /// distance. The nearest edge governs, so no side ever shows a ring hitting
+    /// a wall; the ring keeps expanding (invisibly) past it, out to
+    /// ``ringEndScale()``. `1` (no compression — the old full-length fade) when
+    /// no panel is wired.
+    private func rippleFadeFraction(endScale: CGFloat) -> CGFloat {
+        let base = Self.ringBaseDiameter / 2
+        guard let radii = panelEdgeRadii(), endScale > 1 else { return 1 }
+        let scaleAtNearest = radii.nearest / base
+        let fraction = (scaleAtNearest - 1) / (endScale - 1)
+        return min(max(fraction, 0.05), 1)
+    }
+
+    /// The icon centre's distances to the hero PANEL's four edges, in this
+    /// view's coordinates (`rippleBoundsView` converted into `self`). `nil` when
+    /// no panel is wired. Distances are clamped at 0 so a centre that momentarily
+    /// resolves outside the panel can't produce a negative radius.
+    private func panelEdgeRadii() -> (nearest: CGFloat, farthest: CGFloat)? {
+        guard let panel = rippleBoundsView else { return nil }
+        let centre = iconCentre
+        let rect = convert(panel.bounds, from: panel)
+        let edges = [centre.x - rect.minX, rect.maxX - centre.x,
+                     centre.y - rect.minY, rect.maxY - centre.y].map { max($0, 0) }
+        guard let nearest = edges.min(), let farthest = edges.max(), farthest > 0 else { return nil }
+        return (nearest, farthest)
+    }
+
+    /// One ring's flight: scale out to death while the stroke swells and fades.
+    /// The fade completes at `fadeFraction` of the travel — the moment the ring
+    /// reaches the panel's nearest edge — then holds 0 while the ring keeps
+    /// expanding to fill the panel, so a wave dissipates in open air and never
+    /// visibly terminates against a boundary. `fadeFraction == 1` restores the
+    /// old full-length fade (the no-panel fallback), byte for byte.
+    private func addRipple(to ring: CAShapeLayer, delay: TimeInterval,
+                           endScale: CGFloat, fadeFraction: CGFloat) {
         let scale = CABasicAnimation(keyPath: "transform.scale")
         scale.fromValue = 1.0
         scale.toValue = endScale
-        // Rise fast, HOLD bright across the middle of the stage, then spend
-        // the whole back half of the flight fading — under the group's
-        // ease-out the ring is past the frame edges by then, so the wave
-        // spends itself out in the open air rather than mid-stage (the old
-        // 0.55-peak ramp-down left it ghostly by the halfway mark).
         let fade = CAKeyframeAnimation(keyPath: "opacity")
-        fade.values = [0, 0.95, 0.95, 0]
-        fade.keyTimes = [0, 0.12, 0.5, 1]
+        if fadeFraction >= 1 {
+            // Rise fast, hold bright, then fade across the back half of the
+            // flight — the ring is past the stage edges by then.
+            fade.values = [0, 0.95, 0.95, 0]
+            fade.keyTimes = [0, 0.12, 0.5, 1]
+        } else {
+            // Same rise/hold/fade shape, compressed into [0, fadeFraction] so
+            // opacity is 0 by the nearest panel edge; 0 held to the end while
+            // the ring keeps growing invisibly to fill the panel.
+            let f = fadeFraction
+            fade.values = [0, 0.95, 0.95, 0, 0]
+            fade.keyTimes = [0, 0.12 * f, 0.5 * f, f, 1].map { NSNumber(value: Double($0)) }
+        }
         let flight = CAAnimationGroup()
         flight.animations = [scale, fade]
         addCelebrationAnimation(flight, to: ring, delay: delay,
@@ -2005,6 +2107,64 @@ final class DemoSettledMockView: NSView {
 
     var test_headlineText: String { headline.stringValue }
     var test_lineText: String { line.stringValue }
+
+    /// The icon centre and the aura's launch anchor, for the first-play origin
+    /// regression: after a real layout the aura sits ON the icon centre, never
+    /// the bottom-left origin the first synchronous play used to bloom from.
+    var test_iconCentre: CGPoint { iconCentre }
+    var test_auraPosition: CGPoint { auraLayer.position }
+
+    /// The nearest / farthest icon-centre-to-hero-panel-edge distances the
+    /// ripple is tuned against — `nil` with no panel wired. Exposed so a test
+    /// computes them from the same real geometry the launch does.
+    var test_nearestPanelEdgeRadius: CGFloat? { panelEdgeRadii()?.nearest }
+    var test_farthestPanelEdgeRadius: CGFloat? { panelEdgeRadii()?.farthest }
+
+    /// The ripple's maximum radius (fill reach), to prove the rings now travel
+    /// PAST the 418×278 stage into the panel.
+    var test_rippleEndRadius: CGFloat? {
+        ringEndScale(from: ringLayers.first).map { (Self.ringBaseDiameter / 2) * $0 }
+    }
+
+    /// The radius (icon-centre distance, this view's coordinates) at which each
+    /// launched ripple's opacity first reaches 0. Each must be ≤ the nearest
+    /// hero-panel edge so no ring is ever seen hitting a wall.
+    var test_rippleFadeOutRadii: [CGFloat] {
+        let base = Self.ringBaseDiameter / 2
+        return ringLayers.compactMap { ring -> CGFloat? in
+            guard let group = ring.animation(forKey: "ripple") as? CAAnimationGroup,
+                  let anims = group.animations else { return nil }
+            let scale = anims.compactMap { $0 as? CABasicAnimation }
+                .first { $0.keyPath == "transform.scale" }
+            let fade = anims.compactMap { $0 as? CAKeyframeAnimation }
+                .first { $0.keyPath == "opacity" }
+            let values = (fade?.values ?? []).compactMap { $0 as? NSNumber }.map { CGFloat(truncating: $0) }
+            let keyTimes = (fade?.keyTimes ?? []).map { CGFloat(truncating: $0) }
+            guard let endScale = (scale?.toValue as? NSNumber).map({ CGFloat(truncating: $0) }),
+                  values.count == keyTimes.count,
+                  let zeroIndex = Self.firstZeroAfterPeak(values)
+            else { return nil }
+            let scaleAtZero = 1 + keyTimes[zeroIndex] * (endScale - 1)
+            return base * scaleAtZero
+        }
+    }
+
+    /// The launched scale factor of one ring (`nil` if it has no ripple).
+    private func ringEndScale(from ring: CAShapeLayer?) -> CGFloat? {
+        guard let group = ring?.animation(forKey: "ripple") as? CAAnimationGroup,
+              let scale = group.animations?.compactMap({ $0 as? CABasicAnimation })
+                  .first(where: { $0.keyPath == "transform.scale" }),
+              let end = (scale.toValue as? NSNumber).map({ CGFloat(truncating: $0) })
+        else { return nil }
+        return end
+    }
+
+    /// Index of the first opacity keyframe that is 0 after the ring has risen to
+    /// its peak — the moment the ring goes invisible.
+    private static func firstZeroAfterPeak(_ values: [CGFloat]) -> Int? {
+        guard let peak = values.firstIndex(where: { $0 > 0 }) else { return nil }
+        return values[peak...].firstIndex(where: { $0 == 0 })
+    }
 }
 
 // MARK: - Drawn parts

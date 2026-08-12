@@ -46,12 +46,29 @@ enum WarmSignal {
     /// raised thing can be paper-white and still lift. The steps are small on
     /// purpose — 1.12:1 from canvas to raised, about what `systemGroupedBackground`
     /// gives a white cell. Elevation you can see is not elevation you notice.
+    ///
+    /// It is also why these five light values do NOT match the Mac app's,
+    /// which runs `#FBFBF9` flat across canvas/canvasHi/panel/raised: the Mac
+    /// separates surfaces with hairlines and a window chrome iOS has no
+    /// equivalent of, so a flat ground costs it nothing and costs this screen
+    /// every instrument's footing. NEVER flatten these to match it. The
+    /// divergence stops at the ladder — `hairline` and every instrument below
+    /// hold the Mac's values exactly.
     static let canvas   = warm(light: 0xF4F2EA, dark: 0x16130F)
     static let canvasHi = warm(light: 0xF7F5EF, dark: 0x1B1712)
     static let panel    = warm(light: 0xFCFBF7, dark: 0x1D1915)
     static let raised   = warm(light: 0xFFFFFF, dark: 0x241F1A)
     static let well     = warm(light: 0xEDEAE0, dark: 0x100D0A)
-    static let hairline = warm(light: 0xE7E6DF, dark: 0x3A332B)
+
+    /// The one drawn edge, and the only separation most surfaces on this
+    /// screen get — so it carries a real floor where the grounds above carry
+    /// none: ≥1.25:1 against the surface it divides, the same floor the Mac
+    /// holds its divider to. Light `#D0CDC3` measures 1.54:1 against `panel`
+    /// and 1.42:1 against `canvas`. Anything lighter fails on the paper
+    /// ground (`#E7E6DF` lands at 1.21:1 on `panel` and 1.04:1 on `well` —
+    /// an edge nobody can see). Unlike the ladder, this token is the Mac's
+    /// hex exactly; nothing about it is iOS-specific.
+    static let hairline = warm(light: 0xD0CDC3, dark: 0x3A332B)
 
     // MARK: Ink
 
@@ -68,19 +85,34 @@ enum WarmSignal {
 
     // MARK: Signal
 
-    static let gold    = warm(light: 0xA97F1E, dark: 0xE8B84B)
+    /// The signal, as a GRAPHIC — held to the 3:1 control floor against the
+    /// tightest ground it draws on, which is `well` (the level arc's own
+    /// track), not `panel`. Light `#A67C1E` measures well 3.16:1, canvas
+    /// 3.39:1, deckFill 3.52:1, panel 3.67:1, raised 3.80:1; the Mac app
+    /// carries the same hex at the same ~41.5° hue. For text, see ``goldText``.
+    static let gold    = warm(light: 0xA67C1E, dark: 0xE8B84B)
 
-    /// Light-mode `gold` measures 3.04–3.53:1 against every surface it sits
-    /// on as text (canvas 3.26:1, well 3.04:1, deckFill 3.38:1, panel
-    /// 3.53:1) — all fail the 4.5:1 text floor, even though the same hex
+    /// Light-mode `gold` measures 3.16–3.80:1 against every surface it sits
+    /// on as text (well 3.16:1, canvas 3.39:1, deckFill 3.52:1, panel
+    /// 3.67:1) — all fail the 4.5:1 text floor, even though the same hex
     /// clears 3:1 everywhere as a graphic (fader fill, wash, dots), so only
     /// text uses need to move. `#866210` clears 4.5:1 against all four
-    /// (well is the tightest: 4.64:1; canvas 4.97:1, deckFill 5.15:1, panel
+    /// (well is the tightest: 4.63:1; canvas 4.97:1, deckFill 5.16:1, panel
     /// 5.38:1) while staying in the same hue family. Dark is untouched —
     /// dark `gold` already clears 7.4–10.5:1 everywhere. Use this instead of
     /// `gold` for any text, at or below 16 pt, that must read as gold.
     static let goldText = warm(light: 0x866210, dark: 0xE8B84B)
-    static let ember   = warm(light: 0xC2A05A, dark: 0x8A6A2F)
+
+    /// Gold's dim companion, and an instrument in its own right, so it carries
+    /// ``gold``'s 3:1 floor rather than being free to fade: light `#9C7E3C`
+    /// measures well 3.19:1, canvas 3.43:1, deckFill 3.56:1, panel 3.71:1 —
+    /// the Mac's hex, exactly. A lighter tan reads as "dimmer" and clears
+    /// nothing (`#C2A05A` is 2.06:1 on `well`). Pinning both inks just over
+    /// 3:1 on the same ground puts their luminances within 0.03 of each other,
+    /// so in LIGHT this reads dimmer than `gold` by CHROMA, not by luminance —
+    /// a muted brown beside a saturated gold. Dark keeps the luminance
+    /// hierarchy. Same trade the Mac makes.
+    static let ember   = warm(light: 0x9C7E3C, dark: 0x8A6A2F)
     static let glow    = warm(light: 0xE8B84B, dark: 0xFFD97A)
     static let ring    = warm(light: 0xA08C66, dark: 0x8D7D5E)
     static let fail    = warm(light: 0xBB3A2F, dark: 0xD9564A)
@@ -382,7 +414,7 @@ extension View {
 /// the text column at all.
 ///
 /// Track `well` rather than the halo's usual `ring`: a gold arc on `ring`
-/// measures 1.12:1 in light, which is no arc at all. On `well` it is 3.04:1
+/// measures 1.17:1 in light, which is no arc at all. On `well` it is 3.16:1
 /// light / 10.51:1 dark, over the 3:1 floor in both, and the muted arc's `rim`
 /// is 3.46:1 / 4.82:1 on the same track.
 ///

@@ -57,6 +57,26 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   actually on screen. The real app (`AudiouterApp`) never sets the env var and
   links neither test library, so a live launch always shows its windows
   normally.
+- **`window-snapshot` REFUSES to run on macOS 27 (exit 3) — do not work around
+  it, and do not overwrite `dev/notes/window-snapshots/`.** macOS 27 stopped
+  compositing system materials into an offscreen capture: an `NSVisualEffectView`
+  has no window backdrop to sample during `displayIgnoringOpacity(_:in:)` and
+  fills opaque instead of degrading to its flat tint the way macOS 26 did. The
+  sidebar's source-list selection pill comes out BLACK (goldens: `#D6D6D6`
+  light / `#424242` dark) and the toolbar's selected segment comes out WHITE
+  over its icons. **Both passes are wrong, not just light** — the dark ones only
+  look plausible because black-on-near-black hides it, which is why
+  `hostCaptureFault()` measures a probe material against
+  `NSColor.unemphasizedSelectedContentBackgroundColor` instead of trusting the
+  eye. The second Mac is NOT the way round it: over ssh it renders the whole
+  sidebar as a white void (it passes the probe, so nothing stops you — this is
+  the one silent failure left). `SNAPSHOT_ALLOW_BROKEN_CHROME=1` renders anyway
+  for the custom-drawn content pane, which is unaffected; crop to the content
+  and never commit the result as a golden. The other three snapshot tools are
+  fine here — `settings-snapshot` still reproduces its goldens byte-for-byte.
+  db198ff0's `NSApp.appearance` pin was a misdiagnosis of this (it read as a
+  light-on-dark-host appearance leak); the pin is harmless and stays, but it
+  fixes nothing.
 - **`Device.isSelected` means "currently in the backend's output set"
   (streaming now) — NOT membership in the UI's Selected Devices set**
   (`GroupController.selectedDeviceIDs`). The output set is exactly the Selected

@@ -242,6 +242,18 @@ e. **Verify** against the checked-in snapshot PNGs under `dev/notes/*-snapshots/
    (`popover-snapshots/`, `window-snapshots/`, `settings-snapshots/`,
    `onboarding-snapshots/`, light + dark).
 
+   **`window-snapshots/` cannot be regenerated on macOS 27** — `window-snapshot`
+   detects the host and refuses (exit 3) rather than writing. macOS 27 does not
+   composite system materials into an offscreen capture, so the sidebar's
+   source-list selection pill fills opaque BLACK and the toolbar's selected
+   segment fills opaque WHITE over its icons, in the light AND the dark pass
+   alike (black-on-near-black just hides it in the dark ones). The second Mac
+   is not a way round it: over ssh it draws the whole sidebar as a white void.
+   Content Audiouter draws itself is unaffected, so `SNAPSHOT_ALLOW_BROKEN_CHROME=1`
+   renders anyway for content-pane comparisons — crop to the content, and never
+   commit the result as a golden. The other three tools are unaffected
+   (`settings-snapshot` reproduces its goldens byte-for-byte here).
+
 f. **Known Plugin-API traps** (from the build ledger, verbatim — they prevent
    repeated debugging):
    - "paint opacity + variable binding: NEVER paint-level opacity on bound paints — use full-strength bound fill on a child node with node.opacity"

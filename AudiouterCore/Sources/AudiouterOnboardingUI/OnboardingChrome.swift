@@ -32,6 +32,27 @@ func onboardingActionButton(title: String, prominent: Bool,
     return button
 }
 
+/// Blend two colours WITHOUT flattening either of them to one appearance.
+///
+/// `NSColor.blended(withFraction:of:)` resolves both operands immediately, so
+/// calling it on a dynamic token outside a drawing appearance freezes whichever
+/// appearance happened to be current — which is how the active row's rim came
+/// out at 1.13:1 in dark (`Tokens.Color.label.withAlphaComponent(0.18)`, the
+/// critique's measured P1). Wrapping the blend in a dynamic provider defers it:
+/// each appearance blends its OWN resolved operands when it draws.
+///
+/// **Rule for this folder: never call `withAlphaComponent` or `blended` on a
+/// dynamic colour outside a drawing appearance.** Route it through here.
+func dynamicBlend(_ base: NSColor, fraction: CGFloat, of other: NSColor) -> NSColor {
+    NSColor(name: nil) { appearance in
+        var blended = base
+        appearance.performAsCurrentDrawingAppearance {
+            blended = base.blended(withFraction: fraction, of: other) ?? base
+        }
+        return blended
+    }
+}
+
 // MARK: - Prominent (accent-filled) button
 
 /// An accent-filled push button (`bezelColor`) whose title stays legible whether
@@ -45,7 +66,7 @@ func onboardingActionButton(title: String, prominent: Bool,
 /// turns white-on-white the moment the window loses key, and the button reads as
 /// an empty pill. Being made the Return-default doesn't fix it either — the
 /// sequential flow DOES make the one live Allow the default while Done is
-/// absent (`SetupCardView`), and the white-on-white still happens the moment
+/// absent (`SetupRibbonView`), and the white-on-white still happens the moment
 /// the Setup window resigns key to System Settings, which is exactly when the
 /// user is looking at it.
 ///
@@ -273,7 +294,7 @@ final class IconTileView: NSView {
 /// rows + hairline separators) are laid out by the caller.
 /// The fill/border are settable rather than fixed at init: a permission card
 /// re-tints its own surface to mark which step is the live one (see
-/// `SetupCardView.applySurface`), so this has to be re-stampable after the fact.
+/// `SetupSpineRowView.applySurface`), so this has to be re-stampable after the fact.
 final class RoundedContainerView: NSView {
 
     var fill: NSColor { didSet { needsDisplay = true } }

@@ -240,6 +240,56 @@ import Testing
         #expect(flow.display(.bluetooth) == .completed)
     }
 
+    // MARK: Reopening a skip
+
+    /// A click on a decided-skipped row re-arms exactly that step: it drops
+    /// out of `skippedSteps`, so the walk (which already skips over anything
+    /// in that set) picks it right back up as the active card.
+    @Test func reopeningASkippedStepMakesItActiveAgain() async {
+        let flow = await makeFullyGrantedFlow()
+        flow.skip(.bluetooth)
+        flow.skip(.remoteControl)
+        #expect(flow.activeStep == nil, "every step is decided or skipped")
+
+        flow.reopen(.bluetooth)
+
+        #expect(!flow.skippedSteps.contains(.bluetooth))
+        #expect(flow.activeStep == .bluetooth, "the walk picks the re-armed step back up")
+        #expect(flow.display(.bluetooth) == .active)
+    }
+
+    /// Reopening after the gate has already opened closes it again — the
+    /// readiness conjunct (`activeStep == nil`) is what the reopen breaks, and
+    /// `finalCheckState` derives `.pending` the instant readiness is lost, the
+    /// same mechanism a real revocation uses.
+    @Test func reopeningAfterThePassClosesTheGate() async {
+        let flow = await makeFullyGrantedFlow()
+        flow.skip(.bluetooth)
+        flow.skip(.remoteControl)
+        #expect(await flow.runFinalCheck() == .complete)
+        #expect(flow.isDoneAvailable)
+
+        flow.reopen(.bluetooth)
+
+        #expect(!flow.isReadyForFinalCheck, "a reopened card is undecided again")
+        #expect(flow.finalCheckState == .pending, "readiness lost reverts the row from .passed")
+        #expect(!flow.isDoneAvailable)
+    }
+
+    /// `reopen` is a no-op outside its one job: a step that was never skipped
+    /// (nothing to re-arm), and a required step (not in `skippableSteps` at
+    /// all — the gate is the product decision, same guard `skip` uses).
+    @Test func reopenIsANoOpForANeverSkippedOrRequiredStep() async {
+        let flow = await makeFullyGrantedFlow()
+
+        flow.reopen(.audio)
+        #expect(flow.isComplete(.audio), "a required, already-decided step is untouched")
+
+        flow.reopen(.bluetooth)
+        #expect(flow.skippedSteps.isEmpty, "bluetooth was never skipped — nothing to reopen")
+        #expect(flow.activeStep == .bluetooth, "unaffected by the no-op")
+    }
+
     // MARK: Auto-pass (a hard gate must never demand the impossible)
 
     /// macOS < 14.2 has no process-tap API, so no grant exists to give: the card

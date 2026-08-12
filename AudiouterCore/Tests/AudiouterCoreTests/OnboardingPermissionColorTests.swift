@@ -274,8 +274,8 @@ extension SerializedSharedState {
 
     /// The card's glyph tint is its step's identity hue in EVERY
     /// `SetupCardState` — state is carried by the checkmark/lock slot alone.
-    /// Driven through the real `SetupCardView.apply(...)`, the same call the
-    /// view controller makes, because the tile itself is private to the card.
+    /// Driven through the real `SetupSpineRowView.apply(...)`, the same call the
+    /// view controller makes, because the tile itself is private to the row.
     @Test func glyphTintIsPermanentAcrossEveryCardState() {
         let states: [SetupCardState] = [.pending, .active, .completed,
                                         .autoPassed(note: "Requires macOS 14.2 or later"),
@@ -283,12 +283,12 @@ extension SerializedSharedState {
         for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
             for step in SetupStep.allCases {
                 let content = OnboardingViewController.content(for: step)
-                let card = SetupCardView(content: content, onAllow: {}, onSkip: {})
+                let row = SetupSpineRowView(content: content, onPress: {})
                 let expected = resolved(content.iconColor, appearanceName: appearance)
                 for state in states {
-                    card.apply(state, foundSpeakers: nil, isProbing: false,
-                               offersSettingsFallback: false, animated: false)
-                    assertSameRGB(resolved(card.test_iconTint ?? .clear, appearanceName: appearance), expected,
+                    row.apply(state, foundSpeakers: nil, isLive: state == .active,
+                              isBrowseSelected: false, isBroken: false, animated: false)
+                    assertSameRGB(resolved(row.test_iconTint ?? .clear, appearanceName: appearance), expected,
                         "\(step)/\(state)/\(appearance.rawValue): the glyph tint must stay the card's own iconColor in every state")
                 }
             }
@@ -314,6 +314,75 @@ extension SerializedSharedState {
                              "\(name)/\(appearance.rawValue): the glyph tint must be this row's own token")
             }
         }
+    }
+
+    // MARK: 7 — Direction 04's extended ladder (warningText/inkSecondary/success/raised)
+
+    /// `warningText` is the onboarding header's warning message and the
+    /// rehearsal-led Setup ribbon's status line — a TEXT consumer, so it is
+    /// held to the 4.5:1 body floor, unlike `warning` itself (untouched,
+    /// still the bare `.systemOrange` alias other non-text consumers keep).
+    @Test func warningTextClearsTheBodyFloorInBothAppearances() {
+        let floor: CGFloat = 4.5
+        for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
+            let warningText = resolved(Tokens.Color.warningText, appearanceName: appearance)
+            let canvas = resolved(Tokens.Color.canvas, appearanceName: appearance)
+            let panel = resolved(Tokens.Color.panel, appearanceName: appearance)
+            let canvasRatio = contrastRatio(warningText, canvas)
+            let panelRatio = contrastRatio(warningText, panel)
+            #expect(canvasRatio >= floor,
+                    "warningText/\(appearance.rawValue) vs canvas: \(canvasRatio):1 under the \(floor):1 floor")
+            #expect(panelRatio >= floor,
+                    "warningText/\(appearance.rawValue) vs panel: \(panelRatio):1 under the \(floor):1 floor")
+        }
+    }
+
+    /// `inkSecondary` is the rehearsal-led spine/ribbon's secondary text —
+    /// held to the same 4.5:1 body floor on every warm surface it might sit
+    /// on, unlike the system `secondaryLabel` alias it replaces there (which
+    /// measures under floor in light).
+    @Test func inkSecondaryClearsTheBodyFloorInBothAppearances() {
+        let floor: CGFloat = 4.5
+        for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
+            let ink = resolved(Tokens.Color.inkSecondary, appearanceName: appearance)
+            let canvas = resolved(Tokens.Color.canvas, appearanceName: appearance)
+            let panel = resolved(Tokens.Color.panel, appearanceName: appearance)
+            let raised = resolved(Tokens.Color.raised, appearanceName: appearance)
+            for (name, surface) in [("canvas", canvas), ("panel", panel), ("raised", raised)] {
+                let ratio = contrastRatio(ink, surface)
+                #expect(ratio >= floor,
+                        "inkSecondary/\(appearance.rawValue) vs \(name): \(ratio):1 under the \(floor):1 floor")
+            }
+        }
+    }
+
+    /// `success` is the rehearsal-led spine/ribbon's earned-checkmark green —
+    /// held to the 3:1 UI floor against `panel`/`raised`, unlike the bare
+    /// `.systemGreen` it replaces there (which measures under floor in
+    /// light).
+    @Test func successClearsTheUIFloorInBothAppearances() {
+        let floor: CGFloat = 3.0
+        for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
+            let success = resolved(Tokens.Color.success, appearanceName: appearance)
+            let panel = resolved(Tokens.Color.panel, appearanceName: appearance)
+            let raised = resolved(Tokens.Color.raised, appearanceName: appearance)
+            let panelRatio = contrastRatio(success, panel)
+            let raisedRatio = contrastRatio(success, raised)
+            #expect(panelRatio >= floor,
+                    "success/\(appearance.rawValue) vs panel: \(panelRatio):1 under the \(floor):1 floor")
+            #expect(raisedRatio >= floor,
+                    "success/\(appearance.rawValue) vs raised: \(raisedRatio):1 under the \(floor):1 floor")
+        }
+    }
+
+    /// `raised` now carries a real one-rung surface ladder in light mode too
+    /// (Direction 04) — assert it genuinely resolves to a DIFFERENT colour
+    /// from `panel` in light, not merely documented as one. Dark already had
+    /// this separation and is untouched.
+    @Test func raisedIsDistinctFromPanelInLight() {
+        let panel = resolved(Tokens.Color.panel, appearanceName: .aqua)
+        let raised = resolved(Tokens.Color.raised, appearanceName: .aqua)
+        #expect(panel != raised, "light mode needs a real raised step above panel, not an identical fill")
     }
 }
 

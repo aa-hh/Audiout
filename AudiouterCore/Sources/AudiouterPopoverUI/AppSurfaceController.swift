@@ -402,11 +402,36 @@ public final class AppSurfaceController {
             restoreFrameAfterSwap(previousFrame)
             applyWindowContentSize(settingsTargetContentSize(), animated: animated)
         }
+        crossfadeMountedContent(animated: animated)
     }
 
     private func restoreFrameAfterSwap(_ frame: NSRect?) {
         guard let frame else { return }
         shell.window?.setFrame(frame, display: false)
+    }
+
+    /// Fade the just-mounted screen in as the window glides to its size, so a
+    /// switch reads as ONE soft motion instead of a hard content cut under a
+    /// sliding frame (owner direction 2026-08-12: "lock width, morph height,
+    /// crossfade"). The old screen is already gone by the time content swaps
+    /// (`setContent` reassigns `contentViewController` wholesale — R3), so this
+    /// is a fade-IN of the arriving screen, the same opacity idiom the shell's
+    /// own open uses (`ControlPanelWindowController.animateAppearance`), on the
+    /// SAME `collapseRevealDuration` clock the height glide rides — one clock,
+    /// so fade and resize stay in phase (the folder's one-motion rule). Only on
+    /// a real switch (`animated`); a fresh show already runs the shell's open
+    /// fade, and Reduce Motion / headless skip it exactly as that path does.
+    private func crossfadeMountedContent(animated: Bool) {
+        guard animated,
+              !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+              !HeadlessRuntime.isActive,
+              let layer = shell.window?.contentViewController?.view.layer else { return }
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0
+        fade.toValue = 1
+        fade.duration = PopoverPanelViewController.collapseRevealDuration
+        fade.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        layer.add(fade, forKey: "surfaceScreenCrossfade")
     }
 
     // MARK: Lazy screens
@@ -524,10 +549,18 @@ public final class AppSurfaceController {
         return size
     }
 
+    /// WIDTH is LOCKED to the Mixer's, exactly as Groups' is (see
+    /// `groupsDefaultContentSize`): Settings' own fitted width is the ~460pt
+    /// form column (`SettingsForm.contentWidth`), far narrower than the Mixer's
+    /// 623 — so honoring it made a Mixer→Settings switch shrink the window
+    /// ~160pt sideways and grow back, the width twitch the owner called out
+    /// (2026-08-12). All three screens now share ONE width, so a switch only
+    /// ever changes HEIGHT; the wider frame just gives the form column more
+    /// margin, it never clips (623 > 460). HEIGHT stays per-tab fitted.
     private func settingsTargetContentSize() -> NSSize {
         guard let settingsRoot else { return Self.groupsDefaultContentSize }
         let fitted = settingsRoot.fittedContentSize
-        return NSSize(width: fitted.width, height: fitted.height + chromeTopInset)
+        return NSSize(width: Self.mixerSeedContentSize.width, height: fitted.height + chromeTopInset)
     }
 
     /// Resize the shell to `contentSize`, TOP edge anchored (the surface hangs

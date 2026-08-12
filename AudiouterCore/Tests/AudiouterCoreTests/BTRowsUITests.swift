@@ -189,20 +189,25 @@ import AppKit
                 "one de-emphasis tone, spoken by both the text and its outline")
     }
 
-    /// The engaged treatment is the MUTE PILL's recipe — a translucent accent
-    /// fill — never a solid gold fill: gold is the route-armed/primary
-    /// vocabulary, and a drawer disclosure is neither.
-    @Test func openDrawerChipWearsTheEngagedAccentTreatmentNotGold() {
+    /// The engaged treatment is the MUTE PILL's recipe — a translucent
+    /// ``Tokens/Color/engagedChrome`` fill — and never gold: gold is the
+    /// route-armed/primary vocabulary, and a drawer disclosure is neither.
+    /// Neutral is the point, so this also pins that the chip never picks up the
+    /// system accent, which follows the user's macOS colour setting and would
+    /// put a foreign hue on a warm panel.
+    @Test func openDrawerChipWearsTheEngagedChromeTreatmentNotGold() {
         let row = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: 24,
                           syncTrimIsSet: true, syncDrawerExpanded: true)
         #expect(row.test_syncChipChevronSymbolName == "chevron.down", "expanded ⇒ rotated down to reveal")
         #expect(row.test_syncChipIsEngaged)
         #expect(row.test_syncChipFill
-                == Tokens.Color.accent.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha),
+                == Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha),
                 "exactly the mute pill's engaged fill")
         #expect(row.test_syncChipFill != Tokens.Color.gold, "…and never the gold accent")
-        #expect(row.test_syncChipTitleColor == Tokens.Color.accent)
-        #expect(row.test_syncChipBorderColor == Tokens.Color.accent)
+        #expect(row.test_syncChipTitleColor == Tokens.Color.engagedChrome)
+        #expect(row.test_syncChipBorderColor == Tokens.Color.engagedChrome)
+        #expect(row.test_syncChipBorderColor != Tokens.Color.accent,
+                "…nor the user's system accent")
 
         let collapsed = makeRow(btDevice(), delegate: SpyDelegate(), syncTrimMs: 24,
                                 syncTrimIsSet: true)

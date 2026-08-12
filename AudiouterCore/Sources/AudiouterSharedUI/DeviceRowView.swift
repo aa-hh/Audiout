@@ -851,12 +851,12 @@ public final class DeviceRowView: NSView {
     /// `viewDidChangeEffectiveAppearance` (the pill fill is a static CGColor).
     private func updateMuteTint() {
         let engaged = muteButton.state == .on
-        muteButton.contentTintColor = engaged ? Tokens.Color.accent : Tokens.Color.secondaryLabel
+        muteButton.contentTintColor = engaged ? Tokens.Color.engagedChrome : Tokens.Color.secondaryLabel
         muteButton.wantsLayer = true
         muteButton.layer?.cornerRadius = PopoverColumnGrid.mutePillCornerRadius
         effectiveAppearance.performAsCurrentDrawingAppearance {
             muteButton.layer?.backgroundColor = engaged
-                ? Tokens.Color.accent.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha).cgColor
+                ? Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha).cgColor
                 : nil
         }
     }
@@ -1718,16 +1718,18 @@ public final class DeviceRowView: NSView {
     ///   while "Not set" reads as an invitation;
     /// - **drawer open** — the app's established ENGAGED-CONTROL treatment,
     ///   identical in recipe to the mute pill (``updateMuteTint()``): a
-    ///   translucent `accent` fill at `mutePillFillAlpha` plus an
-    ///   accent-tinted glyph and label. Deliberately NOT a solid gold fill —
-    ///   gold is the route-armed/primary vocabulary and this chip is a
+    ///   translucent ``Tokens/Color/engagedChrome`` fill at
+    ///   `mutePillFillAlpha` plus a matching glyph, label and border. Its TEXT
+    ///   colour therefore matches the tuned-resting state — the FILL and border
+    ///   are what carry "open", exactly as the pill does for mute. Deliberately
+    ///   not gold: gold is the route-armed/primary vocabulary and this chip is a
     ///   secondary, transient affordance.
     private func updateSyncChip() {
         let engaged = syncDrawerExpanded
         let title = syncTrimIsSet ? Self.syncChipTrimText(syncTrimMs) : "Not set"
         let color: NSColor
         if engaged {
-            color = Tokens.Color.accent
+            color = Tokens.Color.engagedChrome
         } else if syncTrimIsSet {
             color = Tokens.Color.label
         } else {
@@ -2618,10 +2620,10 @@ public final class DeviceRowView: NSView {
                                     xRadius: PopoverColumnGrid.selectionHighlightCornerRadius,
                                     yRadius: PopoverColumnGrid.selectionHighlightCornerRadius)
             if isSelectedInSet && paintsSelectionBackground {
-                Tokens.Color.accent.withAlphaComponent(PopoverColumnGrid.rowSelectionWashAlpha).setFill()
+                Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowSelectionWashAlpha).setFill()
                 path.fill()
             } else if isHovered {
-                Tokens.Color.selectedContentBackground.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha).setFill()
+                Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha).setFill()
                 path.fill()
             }
         }
@@ -2639,6 +2641,10 @@ public final class DeviceRowView: NSView {
     /// layer never touches those flags or calls `setNeedsDisplay`, so a flash
     /// can never corrupt the persistent hover/selection state (the same
     /// transient-vs-persistent discipline documented on `isHovered` above).
+    /// The one place on this row that keeps `Tokens.Color.accent`, on purpose:
+    /// the flash is an ATTENTION signal ("look here, now"), not engaged-control
+    /// chrome, and it is over in under a second. ``Tokens/Color/engagedChrome``
+    /// is neutral by design, which is exactly what a flash must not be.
     private lazy var flashLayer: CALayer = {
         let layer = CALayer()
         layer.backgroundColor = Tokens.Color.accent.cgColor
@@ -2896,18 +2902,18 @@ private final class SyncChipCell: NSButtonCell {
     }
 
     /// The engaged fill — the mute pill's exact recipe
-    /// (`Tokens.Color.accent` at `mutePillFillAlpha`), never a solid gold.
+    /// (``Tokens/Color/engagedChrome`` at `mutePillFillAlpha`), never a solid gold.
     /// `nil` in every other state: a resting chip is an outline only.
     var fillColor: NSColor? {
         guard isEngaged else { return nil }
-        return Tokens.Color.accent.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha)
+        return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha)
     }
 
-    /// Engaged borrows the accent; untuned uses the same `tertiaryLabel` its
+    /// Engaged borrows the engaged-chrome tone; untuned uses the `tertiaryLabel` its
     /// "Not set" text does (one de-emphasis, spoken twice); a tuned resting
     /// chip wears the shared `hairline`, the codebase's border tone.
     var borderColor: NSColor {
-        if isEngaged { return Tokens.Color.accent }
+        if isEngaged { return Tokens.Color.engagedChrome }
         return isUntuned ? Tokens.Color.tertiaryLabel : Tokens.Color.hairline
     }
 }

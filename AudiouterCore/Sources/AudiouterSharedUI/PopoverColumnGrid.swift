@@ -530,19 +530,21 @@ public enum PopoverColumnGrid {
     /// `NSColor.selectedContentBackgroundColor` at this opacity. Shared by
     /// DeviceRowView and AppRowView to establish consistent hover interaction.
     public static let rowHoverWashAlpha: CGFloat = 0.10
-    /// Alpha for the accent selection wash, drawn in `NSColor.controlAccentColor`.
+    /// Alpha for the selection wash, drawn in ``Tokens/Color/engagedChrome``.
     /// Shared by AppRowView's single-selection highlight and DeviceRowView's
     /// mixer-window selection pill.
     public static let rowSelectionWashAlpha: CGFloat = 0.18
 
     // MARK: Engaged mute pill (Warm Signal v3 §3.4/§3.5, S3)
     //
-    // A muted row's mute button gains a filled accent-tinted PILL behind its
-    // (never-slashed — locked decision) speaker glyph: drawing only, on the
-    // real `NSButton`'s backing layer; behavior/keyboard/VoiceOver untouched.
+    // A muted row's mute button gains a filled PILL behind its (never-slashed
+    // — locked decision) speaker glyph: drawing only, on the real `NSButton`'s
+    // backing layer; behavior/keyboard/VoiceOver untouched.
 
-    /// Alpha of the engaged pill's accent fill (subtle — config-adjacent, not
-    /// a signal; the gold budget governs gold, accent chrome is permitted).
+    /// Alpha of the engaged pill's ``Tokens/Color/engagedChrome`` fill —
+    /// subtle, because mute is config-adjacent, not a signal. The strongest
+    /// alpha in that token's ladder, since a pill is smaller than a row wash
+    /// and needs the extra weight to read at glyph scale.
     public static let mutePillFillAlpha: CGFloat = 0.22
     /// Corner radius of the engaged pill (capsule-ish over the `muteWidth`
     /// column's glyph box). Tuned live.

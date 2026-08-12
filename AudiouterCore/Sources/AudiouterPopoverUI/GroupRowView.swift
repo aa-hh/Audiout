@@ -376,9 +376,9 @@ public final class GroupRowView: NSView {
     /// tests can assert it without rasterizing a draw cycle.
     private var currentHighlightColor: NSColor? {
         if isActive {
-            return Tokens.Color.accent.withAlphaComponent(PopoverColumnGrid.rowSelectionWashAlpha)
+            return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowSelectionWashAlpha)
         } else if isHovered {
-            return Tokens.Color.selectedContentBackground.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha)
+            return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha)
         } else {
             return nil
         }

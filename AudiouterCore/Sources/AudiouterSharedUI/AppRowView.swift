@@ -655,9 +655,9 @@ public final class AppRowView: NSView {
     /// tests (which never rasterize `draw(_:)`'s actual pixels) can assert it.
     private var currentHighlightColor: NSColor? {
         if isSelected {
-            return Tokens.Color.accent.withAlphaComponent(PopoverColumnGrid.rowSelectionWashAlpha)
+            return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowSelectionWashAlpha)
         } else if isHovered {
-            return Tokens.Color.selectedContentBackground.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha)
+            return Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.rowHoverWashAlpha)
         } else {
             return nil
         }

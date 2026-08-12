@@ -86,6 +86,8 @@ public final class BusRailOverlayView: NSView {
     /// on a tall wire — Alec's live read of that cut.) Capped at 45% of a very
     /// short wire so the bead never IS the wire.
     private static let beadLength: CGFloat = 26
+    /// How long the landed bubble takes to dissolve into the ring.
+    private static let beadAbsorbDuration: CFTimeInterval = 0.12
     /// The arrival bloom's disc radius (its light halo doubles the visual
     /// footprint via the shadow).
     private static let arrivalBloomRadius: CGFloat = 5
@@ -568,42 +570,66 @@ public final class BusRailOverlayView: NSView {
         hostLayer.addSublayer(bead)
         pulseLayer = bead
 
-        // Both edges run to 0 on one clock, so the visible window narrows as
-        // it climbs — the ring swallows the bead rather than the bead dying
-        // in place. easeIn: it accelerates INTO the ring's receiving bloom.
+        // A self-contained bubble (Alec's brief): the window keeps its FULL
+        // length for the entire climb — both edges slide by the same delta on
+        // one clock — landing ON the hook curve, then fading out as it slips
+        // into the ring. (The first cut shrank the window across the whole
+        // flight so it would hit zero size exactly at the ring — which
+        // extinguished it near the top of the wire before it ever reached the
+        // curve, and the bloom then read as an unprovoked explosion.)
+        let clampedWindow = min(window, departure)
+        let travelDelta = departure - clampedWindow
+        let travelTime = max(
+            PopoverColumnGrid.railConnectPulseDuration * Double(travelDelta),
+            PopoverColumnGrid.railConnectPulseDuration * 0.3)
+        let absorbTime = Self.beadAbsorbDuration
+
         let leading = CABasicAnimation(keyPath: "strokeStart")
-        leading.fromValue = max(0, departure - window)
+        leading.fromValue = travelDelta
         leading.toValue = 0
         let trailing = CABasicAnimation(keyPath: "strokeEnd")
         trailing.fromValue = departure
-        trailing.toValue = 0
-        let travel = CAAnimationGroup()
-        travel.animations = [leading, trailing]
-        travel.duration = max(
-            PopoverColumnGrid.railConnectPulseDuration * Double(departure),
-            PopoverColumnGrid.railConnectPulseDuration * 0.3)
-        travel.timingFunction = CAMediaTimingFunction(name: .easeIn)
-        bead.add(travel, forKey: Self.pulseKey)
+        trailing.toValue = clampedWindow
+        for edge in [leading, trailing] {
+            edge.duration = travelTime
+            edge.timingFunction = CAMediaTimingFunction(name: .easeIn)
+            edge.fillMode = .forwards
+        }
+        // Absorption: once parked over the hook, the bubble dissolves into the
+        // ring while the bloom answers — no pop-off to the invisible model.
+        let dissolve = CABasicAnimation(keyPath: "opacity")
+        dissolve.fromValue = 1
+        dissolve.toValue = 0
+        dissolve.beginTime = travelTime
+        dissolve.duration = absorbTime
+        dissolve.fillMode = .forwards
+        let flight = CAAnimationGroup()
+        flight.animations = [leading, trailing, dissolve]
+        flight.duration = travelTime + absorbTime
+        bead.add(flight, forKey: Self.pulseKey)
 
-        // The bead→bloom handoff rides OUR run-loop clock, not a
-        // `CATransaction` completion: CA only delivers those under an
-        // app-driven commit loop (a test process never gets one — measured),
-        // and CA completions are exactly the sharp edge the CATransition-key
-        // trap already documents. The timer runs a BEAT PAST the travel time —
-        // CA's own clock starts a frame or two after this line, and easeIn
-        // packs the landing into the last frames, so an exact-duration timer
-        // beheads the arrival (live bug: the bead died at the hook curve).
-        // Landing needs no cleanup precision anyway: the animation removes
-        // itself at its natural end and the model underneath is invisible.
-        // A cancel (RM, accent dial, remount, replacement) nils/replaces
-        // `pulseLayer` first, so the stale timer no-ops.
-        Timer.scheduledTimer(withTimeInterval: travel.duration + 0.08, repeats: false) { [weak self, weak bead] _ in
+        // Both handoffs ride OUR run-loop clock, not `CATransaction`
+        // completions: CA only delivers those under an app-driven commit loop
+        // (a test process never gets one — measured), and CA completions are
+        // exactly the sharp edge the CATransition-key trap already documents.
+        // Each timer runs a BEAT past its CA moment — CA's own clock starts a
+        // frame or two after this line, and easeIn packs the landing into the
+        // last frames, so an exact-time timer beheads the arrival (live bug:
+        // the bead died at the hook curve). A cancel (RM, accent dial,
+        // remount, replacement) nils/replaces `pulseLayer` first, so stale
+        // timers no-op.
+        Timer.scheduledTimer(withTimeInterval: travelTime + 0.06, repeats: false) { [weak self, weak bead] _ in
             MainActor.assumeIsolated {
                 guard let self, let bead, self.pulseLayer === bead else { return }
                 self.test_pulseHandoffRuns += 1
+                self.runArrivalBloom(at: arrival)
+            }
+        }
+        Timer.scheduledTimer(withTimeInterval: flight.duration + 0.08, repeats: false) { [weak self, weak bead] _ in
+            MainActor.assumeIsolated {
+                guard let self, let bead, self.pulseLayer === bead else { return }
                 bead.removeFromSuperlayer()
                 self.pulseLayer = nil
-                self.runArrivalBloom(at: arrival)
             }
         }
     }
@@ -619,14 +645,18 @@ public final class BusRailOverlayView: NSView {
         arrivalLayer?.removeFromSuperlayer()
         let radius = Self.arrivalBloomRadius
         let bloom = CAShapeLayer()
-        bloom.frame = hostLayer.bounds
+        // Disc-sized and centred on the landing point, so the swell scales
+        // around the disc's own centre — a full-panel layer would scale (and
+        // so TRANSLATE the disc) around the panel's centre instead.
+        bloom.frame = CGRect(x: point.x - radius * 2, y: point.y - radius * 2,
+                             width: radius * 4, height: radius * 4)
         bloom.path = CGPath(
-            ellipseIn: CGRect(x: point.x - radius, y: point.y - radius,
+            ellipseIn: CGRect(x: radius, y: radius,
                               width: radius * 2, height: radius * 2),
             transform: nil)
         bloom.shadowOffset = .zero
-        bloom.shadowRadius = radius
-        bloom.shadowOpacity = 1
+        bloom.shadowRadius = radius * 0.8
+        bloom.shadowOpacity = 0.7
         effectiveAppearance.performAsCurrentDrawingAppearance {
             let glow = Tokens.Color.glow.cgColor
             bloom.fillColor = glow
@@ -636,12 +666,14 @@ public final class BusRailOverlayView: NSView {
         hostLayer.addSublayer(bloom)
         arrivalLayer = bloom
 
+        // A received light, not an explosion (Alec's read of the 1.6x burst):
+        // modest swell, gentler peak.
         let fade = CABasicAnimation(keyPath: "opacity")
-        fade.fromValue = 0.9
+        fade.fromValue = 0.65
         fade.toValue = 0
         let swell = CABasicAnimation(keyPath: "transform.scale")
-        swell.fromValue = 0.5
-        swell.toValue = 1.6
+        swell.fromValue = 0.6
+        swell.toValue = 1.2
         let burst = CAAnimationGroup()
         burst.animations = [fade, swell]
         burst.duration = PopoverColumnGrid.railConnectPulseArrivalDuration

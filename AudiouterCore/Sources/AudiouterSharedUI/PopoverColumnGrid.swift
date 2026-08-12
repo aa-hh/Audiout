@@ -442,6 +442,21 @@ public enum PopoverColumnGrid {
     /// the affordance lands in the same place whether the row is in the mix or
     /// out of it, and so the gutter reserve can be sized against one number.
     public static let busNodeHoverRingRadius: CGFloat = 10
+    /// FULL-WIRE travel time of the rail's one-shot CONNECT PULSE (Warm Signal
+    /// v4.1 item 9, reshaped per Alec 2026-08-12): the glowing bead's climb
+    /// from the joining room's node into the Main Audio ring. A mid-wire
+    /// departure takes proportionally less (constant speed). Settled by Alec's
+    /// live reads — slowed 0.45 → 0.7 → 1.05 ("too fast… too subtle"), then
+    /// back up 25% to 0.84 once the arrival bloom was right: the bead is the
+    /// connect story's one authored moment, so it may take a visible beat —
+    /// but it stays under a second because live audio is high-stakes and the
+    /// panel must never feel like it lags the room.
+    public static let railConnectPulseDuration: CFTimeInterval = 0.84
+    /// The arrival bloom's life: the soft `glow` burst at the Main Audio ring
+    /// as the bead is absorbed. Same ≤450 ms ease-out beat as
+    /// `routeArmedBloomDuration`, so every connect-edge instrument breathes on
+    /// the house clock.
+    public static let railConnectPulseArrivalDuration: CFTimeInterval = 0.4
     /// Width of the non-interactive bus-overlay column view a row hosts, centered
     /// on `railGutterCenterX`. Wide enough to contain the largest node plus its
     /// hover ring without clipping — the detour arcs are drawn by the panel-level

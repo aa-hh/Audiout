@@ -47,6 +47,7 @@ enum DriftMeterProbe {
     private static let wobbleFraction = 0.03
     private static let wobbleHz = 0.5
     private static let a2dpRate = 44_100.0
+    private static let cleanReason = "tone present and coherent throughout"
 
     // MARK: - Hardware run
 
@@ -117,21 +118,24 @@ enum DriftMeterProbe {
         // probe uses).
         let engineA = BTOutputEngine(deviceID: devA.id, deviceName: devA.name, mode: .tone)
         let engineB = BTOutputEngine(deviceID: devB.id, deviceName: devB.name, mode: .tone)
-        do {
-            try engineA.start()
-            try engineB.start()
-        } catch {
-            log.write("drift-meter: engine start FAILED: \(error)")
-            engineA.stop(); engineB.stop(); log.close()
-            return 1
+        // A power-gated speaker (the Sonos Move parks its amp when idle) can fail
+        // the first start outright — the device isn't ready to accept audio while
+        // the amp wakes. Retry before giving up; name the speaker that won't come up.
+        for (engine, dev) in [(engineA, devA), (engineB, devB)] {
+            guard startWithRetry(engine, log: log, name: dev.name) else {
+                log.write("drift-meter: \"\(dev.name)\" would not start after retries — it may be asleep; play any audio to it for a few seconds to wake it, then rerun.")
+                engineA.stop(); engineB.stop(); log.close()
+                return 1
+            }
         }
         engineA.playLoopingBuffer(makeToneBuffer(freq: freqA))
         engineB.playLoopingBuffer(makeToneBuffer(freq: freqB))
 
-        // Let the A2DP profile settle, then confirm neither speaker collapsed to
-        // a call-mode rate. On Bluetooth a mic-holding path can flip a speaker to
-        // 16 k/24 k HFP, which is silent-but-"healthy" and would poison the run.
-        Thread.sleep(forTimeInterval: 1.0)
+        // Warm-up before measuring: a parked amp swallows the first few seconds of
+        // tone after silence, so let both speakers come fully up to level first.
+        // Then confirm neither collapsed to a call-mode (HFP 16k/24k) rate, which
+        // is silent-but-"healthy" and would poison the run.
+        Thread.sleep(forTimeInterval: 3.0)
         for d in [devA, devB] {
             let rate = BTOutputEngine.readNominalSampleRate(d.id) ?? 0
             if rate <= 24_000 {
@@ -217,10 +221,28 @@ enum DriftMeterProbe {
         return (a.reliable && b.reliable) ? 0 : 1
     }
 
+    /// Start an engine, retrying a parked-amp start failure a few times. A Sonos
+    /// Move that has been idle rejects the first start while its amp wakes; a
+    /// short wait and another attempt succeeds.
+    private static func startWithRetry(_ engine: BTOutputEngine, log: DriftLog, name: String) -> Bool {
+        for attempt in 1...4 {
+            do {
+                try engine.start()
+                return true
+            } catch {
+                log.write("drift-meter: \"\(name)\" start attempt \(attempt)/4 failed (\(error)) — waking and retrying")
+                Thread.sleep(forTimeInterval: 0.8)
+            }
+        }
+        return false
+    }
+
     private static func report(name: String, freq: Double, analysis: ToneAnalysis, log: DriftLog) {
         log.write("drift-meter: ---- \"\(name)\" @ \(Int(freq)) Hz ----")
         if !analysis.reliable {
             log.write("drift-meter: *** UNRELIABLE — \(analysis.reason). The ppm below is NOT trustworthy for this speaker. ***")
+        } else if analysis.reason != cleanReason {
+            log.write("drift-meter: note — \(analysis.reason).")
         }
         log.write(String(format: "drift-meter: %@ = %+.2f ppm vs mic  (%+.3f ms/min)", name, analysis.ppmVsMic, analysis.ppmVsMic * 0.06))
         log.write("drift-meter: per-\(Int(windowSeconds))s window (instantaneous ppm, phase at window end):")
@@ -294,6 +316,14 @@ enum DriftMeterProbe {
         elog("         A reliable=\(a4.reliable); B reliable=\(b4.reliable) reason=\"\(b4.reason)\"")
         check("B flagged UNRELIABLE", !b4.reliable, b4.reason)
         check("A stays reliable", a4.reliable, a4.reason)
+
+        // Case 5: B silent for only the last ~2% (a stop tail / transient) —
+        // must NOT flag the whole run; the ppm is still good.
+        elog("drift-meter-selftest: case 5 — B silent for last ~2% (stop tail), expect B still reliable")
+        let buf5 = synthesize(fs: fs, seconds: secs, fA: fA, fB: fB, ppmB: 0, stepOnB: nil, silenceBAfter: secs * 0.98)
+        let b5 = analyze(samples: buf5, fs: fs, f0: fB)
+        elog("         B reliable=\(b5.reliable) reason=\"\(b5.reason)\"")
+        check("brief tail stays reliable", b5.reliable, b5.reason)
 
         if failures == 0 {
             elog("DRIFT-METER-SELFTEST: PASS")
@@ -449,16 +479,21 @@ enum DriftMeterProbe {
         // absolute test, needs no healthy baseline), or it dropped out for part of
         // the run (relative level test above). Either makes ppm/shape untrustworthy.
         var reliable = true
-        var reason = "tone present and coherent throughout"
+        var reason = cleanReason
+        let lowPct = lowSignalBlocks * 100 / blockCount
         if mad > 0.3 {
             reliable = false
             reason = String(format: "tone incoherent (phase-noise %.2f rad/block) — likely not present; check the speaker is actually playing", mad)
-        } else if lowSignalBlocks * 4 > blockCount {
+        } else if lowSignalBlocks * 20 > blockCount {
+            // >5% of the run silent is a real collapse (HFP flip, amp standby, or
+            // the speaker gone), not a transient — the number can't be trusted.
             reliable = false
-            reason = "tone dropped out for \(lowSignalBlocks * 100 / blockCount)% of the run — a mid-run HFP collapse or amp standby"
+            reason = "tone dropped out for \(lowPct)% of the run — a mid-run HFP collapse or amp standby"
         } else if lowSignalBlocks > 0 {
-            reliable = false
-            reason = "tone dropped below level in \(lowSignalBlocks) block(s) — a brief dropout; rerun in a quieter room or re-check the link"
+            // A handful of brief dips — a cough, a chair, one BT hiccup, or the
+            // moment the run was stopped — don't invalidate an otherwise coherent
+            // record. Surface them, keep the result.
+            reason = "\(lowSignalBlocks) brief low-signal block(s) (\(lowPct)%) — within tolerance, result kept"
         }
 
         // Per-window instantaneous ppm + phase, marking windows that contain a step.

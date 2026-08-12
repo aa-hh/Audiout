@@ -459,8 +459,12 @@ public enum Tokens {
         /// owns its contrast behavior).
         public static var gold: NSColor {
             accentDynamic(name: "gold",
+                          // Light re-tuned #A67C1E → #9E761D when Direction 04
+                          // deepened light `well` to #E2DFD3: measured 3.11:1 on
+                          // well / 4.00:1 on panel (≥3.0 non-text floor, pinned
+                          // in MembershipWellContrastTests).
                           full: WarmVariants(dark: 0xE8B84B, darkHighContrast: 0xF2C75E,
-                                             light: 0xA67C1E, lightHighContrast: 0x8A6614),
+                                             light: 0x9E761D, lightHighContrast: 0x8A6614),
                           subtle: WarmVariants(dark: 0xB99B53, darkHighContrast: 0xCBAF6A,
                                                light: 0x8F7B4A, lightHighContrast: 0x6F5E33),
                           systemAccentScale: 1.0)
@@ -480,8 +484,13 @@ public enum Tokens {
         /// luminance (spec's own formula; component-scaled sRGB).
         public static var ember: NSColor {
             accentDynamic(name: "ember",
+                          // Light re-tuned #9C7E3C → #947637 (IC #9A7A2E →
+                          // #8F702F, kept strictly darker than base) for the
+                          // same well deepening: measured 3.21:1 on well /
+                          // 4.13:1 on panel, still gold's dimmer, duller
+                          // companion (sat gap 0.19, same hue family).
                           full: WarmVariants(dark: 0x8A6A2F, darkHighContrast: 0xA5824A,
-                                             light: 0x9C7E3C, lightHighContrast: 0x9A7A2E),
+                                             light: 0x947637, lightHighContrast: 0x8F702F),
                           subtle: WarmVariants(dark: 0x6D5B34, darkHighContrast: 0x877146,
                                                light: 0xAE9668, lightHighContrast: 0x8A744C),
                           systemAccentScale: 0.55)

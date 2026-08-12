@@ -342,8 +342,8 @@ final class ThemeTileButton: NSButton {
             well: NSColor(srgbRed: 0xE2 / 255, green: 0xDF / 255, blue: 0xD3 / 255, alpha: 1),
             name: NSColor(srgbRed: 0x2B / 255, green: 0x25 / 255, blue: 0x19 / 255, alpha: 1),
             nameDim: NSColor(srgbRed: 0x9A / 255, green: 0x8F / 255, blue: 0x7D / 255, alpha: 1),
-            gold: NSColor(srgbRed: 0xA6 / 255, green: 0x7C / 255, blue: 0x1E / 255, alpha: 1),
-            ember: NSColor(srgbRed: 0x9C / 255, green: 0x7E / 255, blue: 0x3C / 255, alpha: 1))
+            gold: NSColor(srgbRed: 0x9E / 255, green: 0x76 / 255, blue: 0x1D / 255, alpha: 1),
+            ember: NSColor(srgbRed: 0x94 / 255, green: 0x76 / 255, blue: 0x37 / 255, alpha: 1))
     }
 
     override func draw(_ dirtyRect: NSRect) {

@@ -445,12 +445,13 @@ public enum PopoverColumnGrid {
     /// FULL-WIRE travel time of the rail's one-shot CONNECT PULSE (Warm Signal
     /// v4.1 item 9, reshaped per Alec 2026-08-12): the glowing bead's climb
     /// from the joining room's node into the Main Audio ring. A mid-wire
-    /// departure takes proportionally less (constant speed). Tuned DOWN twice
-    /// on Alec's live reads (0.45 → 0.7 → 1.05, "too fast… too subtle"): the
-    /// bead is the connect story's one authored moment, so it may take a
-    /// visible beat — but it stays near a second because live audio is
-    /// high-stakes and the panel must never feel like it lags the room.
-    public static let railConnectPulseDuration: CFTimeInterval = 1.05
+    /// departure takes proportionally less (constant speed). Settled by Alec's
+    /// live reads — slowed 0.45 → 0.7 → 1.05 ("too fast… too subtle"), then
+    /// back up 25% to 0.84 once the arrival bloom was right: the bead is the
+    /// connect story's one authored moment, so it may take a visible beat —
+    /// but it stays under a second because live audio is high-stakes and the
+    /// panel must never feel like it lags the room.
+    public static let railConnectPulseDuration: CFTimeInterval = 0.84
     /// The arrival bloom's life: the soft `glow` burst at the Main Audio ring
     /// as the bead is absorbed. Same ≤450 ms ease-out beat as
     /// `routeArmedBloomDuration`, so every connect-edge instrument breathes on

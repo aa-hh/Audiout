@@ -94,7 +94,10 @@ import AppKit
     /// is the whole reason the two header controls read as a pair — so the
     /// separation between the control fill and the section fill gets the same
     /// measured floor the other surface pairs carry. Measured: 1.186:1 dark /
-    /// 1.251:1 light.
+    /// 1.208:1 light — the light figure on the Circuit ground `raised` resolves
+    /// to (`#FBFBF9`) over `well` `#E8E6DC`. The assertion below is a FLOOR, so
+    /// a stale figure in this sentence still passes; re-measure it when either
+    /// token moves.
     @Test func raisedVsWellClearsTheControlOnSectionFloorBothAppearances() {
         let floor: CGFloat = 1.15
 

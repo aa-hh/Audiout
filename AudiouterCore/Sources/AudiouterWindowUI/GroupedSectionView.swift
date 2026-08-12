@@ -14,10 +14,13 @@ import AudiouterSharedUI
 /// post-fix tones: `panel` vs `canvas` ~1.06:1 dark / ~1.08:1 light,
 /// effectively invisible). Measured floors for THIS view's own tokens (WCAG
 /// relative luminance, both ≥ their required floor — see
-/// `MembershipWellContrastTests`): `well` vs `panel` 1.109:1 dark / 1.182:1
-/// light (floor 1.10:1); `hairline` vs `panel` 1.404:1 dark / 1.309:1 light
+/// `MembershipWellContrastTests`): `well` vs `panel` 1.109:1 dark / 1.208:1
+/// light (floor 1.10:1); `hairline` vs `panel` 1.404:1 dark / 1.535:1 light
 /// (floor 1.25:1, the same separator floor `Tokens.Color.hairline` itself
-/// documents against `panel`).
+/// documents against `panel`). The light figures are measured on the Circuit
+/// ground `panel` resolves to (`#FBFBF9`); the tests assert the floors rather
+/// than these numbers, so a stale figure here passes silently — re-measure
+/// when either token moves.
 ///
 /// It is now the Groups window's ONE section shape, used by BOTH content panes
 /// — the group editor's header + membership list, and the device detail pane's

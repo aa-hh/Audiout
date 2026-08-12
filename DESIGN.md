@@ -382,7 +382,7 @@ The companion's signature surface: a frosted `.ultraThinMaterial` panel at 26pt 
 - **Do** mirror a new or changed token into the Figma file in **all four appearance modes**, with its scopes and its exact Swift constant as Code Syntax, and update the swatch table on the matching Foundations page. The upkeep rubric in `docs/FIGMA-DESIGN-SYSTEM.md` is the step-by-step.
 - **Do** resolve every new element in **both** appearances. Light is not a coat of paint applied later; it is the second half of every token. Bind scaffolding to tokens and light mode is free — hardcode and you have silently shipped a dark-only element.
 - **Do** add a new element to the **light twin** of every Figma screen it appears on. Twins are clones, not instances, so an edit mirrored into only one of them diverges silently.
-- **Do** verify a screen change against the checked-in snapshot PNGs under `dev/notes/*-snapshots/` (popover, window, settings, onboarding — light and dark).
+- **Do** verify a screen change against the checked-in snapshot PNGs under `dev/notes/*-snapshots/` — with one exception. **`window-snapshot` cannot be regenerated on any host we have** (2026-08-12): on macOS 27 `displayIgnoringOpacity` composites an `NSVisualEffectView` fully opaque, so the sidebar's selection pill renders solid black and the toolbar's selected segment solid white, in *both* appearances — dark only hides it, black on near-black. The tool now refuses rather than writing a corrupt golden. Treat `window-snapshots/` as a reference you compare against, never one you regenerate; `popover`, `settings` and `onboarding` reproduce byte-for-byte and are unaffected.
 
 ### Don't:
 

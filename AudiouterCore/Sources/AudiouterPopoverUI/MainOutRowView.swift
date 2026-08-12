@@ -752,4 +752,10 @@ extension MainOutRowView: RailHookProviding {
         let iconCenter = convert(NSPoint(x: iconRectInSelf.midX, y: iconRectInSelf.midY), to: view)
         return (iconCenter.y, iconCenter.x, PopoverColumnGrid.mainAudioRingDiameter / 2, isSpineLive)
     }
+
+    /// The rail's bead landed on this row's ring — forward it to the ring, which
+    /// owns the bloom (and its Reduce Motion / settled-model contract).
+    public func receiveRailPulse() {
+        haloRingView.receiveRailPulse()
+    }
 }

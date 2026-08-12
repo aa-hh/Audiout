@@ -91,8 +91,9 @@ public final class BusRailOverlayView: NSView {
     /// The arrival bloom's disc radius (its light halo doubles the visual
     /// footprint via the shadow).
     private static let arrivalBloomRadius: CGFloat = 5
-    /// The transient arrival bloom currently playing at the wire's start, if
-    /// any (mounted by the bead's completion; dies with any cancel).
+    /// The transient header-dot bloom currently playing at a COLLAPSED origin,
+    /// if any (mounted by the bead's completion; dies with any cancel). An
+    /// uncollapsed origin has a real ring, which blooms itself.
     private var arrivalLayer: CAShapeLayer?
     /// The last drawn plan's energize signature. `nil` = no baseline yet, so the
     /// next draw stamps one WITHOUT firing — the first render in a window is
@@ -446,14 +447,14 @@ public final class BusRailOverlayView: NSView {
             .compactMap { Self.fraction(atY: $0, along: joined) }
             .max() ?? 1
         let path = joined.cgPath
-        // Where the bead lands: the wire's own start — the hook's spot on the
-        // Main Audio ring's edge, or the collapsed-origin header dot.
-        let arrival: NSPoint
+        // Where the bead lands: the wire's own start — the Main Audio ring
+        // (which blooms itself), or the collapsed-origin header dot.
+        let arrival: Arrival
         switch plan.origin {
-        case let .ring(centerY, ringCenterX, ringRadius):
-            arrival = NSPoint(x: ringCenterX - ringRadius, y: centerY)
+        case .ring:
+            arrival = .ring
         case let .headerDot(y):
-            arrival = NSPoint(x: PopoverColumnGrid.railGutterCenterX, y: y)
+            arrival = .headerDot(NSPoint(x: PopoverColumnGrid.railGutterCenterX, y: y))
         }
         // A run-loop block, not `DispatchQueue.main.async`: it defers the layer
         // mutation out of the draw pass just the same, and a nested run-loop
@@ -544,7 +545,17 @@ public final class BusRailOverlayView: NSView {
     /// instant captures the settled wire, never the transient. Self-removing on
     /// completion: nothing runs, or exists, at rest. A fresh surge replaces an
     /// in-flight one (the newest room restarts the pulse from its own spot).
-    func runConnectPulse(along path: CGPath, from departure: CGFloat, window: CGFloat, arrivingAt arrival: NSPoint) {
+    /// Who receives the landed bead. The Main Audio ring owns its own
+    /// acknowledgment (`RailHookProviding.receiveRailPulse`) — the bloom belongs
+    /// to the ring, not to a disc floating at the contact point. Only the
+    /// collapsed-origin case, where the wire ends at a bare gutter dot with no
+    /// ring to bloom, still needs the overlay's local disc.
+    enum Arrival {
+        case ring
+        case headerDot(NSPoint)
+    }
+
+    func runConnectPulse(along path: CGPath, from departure: CGFloat, window: CGFloat, arrivingAt arrival: Arrival) {
         guard window != nil, !reduceMotion, let hostLayer = layer else { return }
         test_lastPulseDeparture = departure
         cancelConnectPulse()
@@ -622,7 +633,17 @@ public final class BusRailOverlayView: NSView {
             MainActor.assumeIsolated {
                 guard let self, let bead, self.pulseLayer === bead else { return }
                 self.test_pulseHandoffRuns += 1
-                self.runArrivalBloom(at: arrival)
+                switch arrival {
+                case .ring:
+                    // The RING blooms, not the overlay: the bead melts into it.
+                    // The bead's own 0.12s dissolve already covers the contact
+                    // point, so no residual disc is drawn here — a second glow
+                    // at the join would just re-introduce the floating dot the
+                    // ring bloom replaced.
+                    self.mainOutRow?.receiveRailPulse()
+                case let .headerDot(point):
+                    self.runHeaderDotBloom(at: point)
+                }
             }
         }
         Timer.scheduledTimer(withTimeInterval: flight.duration + 0.08, repeats: false) { [weak self, weak bead] _ in
@@ -634,14 +655,19 @@ public final class BusRailOverlayView: NSView {
         }
     }
 
-    /// The receiving end of the pulse: a soft `glow` burst at the wire's start
-    /// (the Main Audio ring's edge, or the collapsed-origin header dot) that
-    /// swells and fades as the bead is absorbed — the desk acknowledging the
-    /// room. Same settled-model contract as the bead: model opacity 0, only
-    /// the presentation plays, self-removing.
-    func runArrivalBloom(at point: NSPoint) {
+    /// The COLLAPSED-ORIGIN receiving end: a soft `glow` burst at the bare
+    /// gutter dot the wire starts from when the origin section is collapsed —
+    /// the desk acknowledging the room. The uncollapsed case has a real ring
+    /// and blooms THAT instead (`RailHookProviding.receiveRailPulse`); the dot
+    /// survives here because it is only `railCollapsedTerminusDotDiameter`
+    /// across — dissolving the bead onto something that small, with no stroke
+    /// of its own to swell, would read as the pulse simply vanishing.
+    ///
+    /// Same settled-model contract as the bead: model opacity 0, only the
+    /// presentation plays, self-removing.
+    func runHeaderDotBloom(at point: NSPoint) {
         guard window != nil, !reduceMotion, let hostLayer = layer else { return }
-        test_arrivalBloomRuns += 1
+        test_headerDotBloomRuns += 1
         arrivalLayer?.removeFromSuperlayer()
         let radius = Self.arrivalBloomRadius
         let bloom = CAShapeLayer()
@@ -717,22 +743,23 @@ public final class BusRailOverlayView: NSView {
     /// instant it's added — no run loop needed to assert it fired).
     public var test_isConnectPulsing: Bool { pulseLayer != nil }
 
-    /// Whether the arrival bloom is currently playing at the wire's start.
-    public var test_isArrivalBlooming: Bool { arrivalLayer != nil }
+    /// Whether the collapsed-origin header-dot bloom is currently playing.
+    public var test_isHeaderDotBlooming: Bool { arrivalLayer != nil }
 
-    /// How many arrival blooms have PLAYED — a landed bead increments this; a
-    /// cancelled one never does. Counts survive the bloom's own (fast,
-    /// headless-timing-dependent) self-removal, so tests assert on this rather
-    /// than racing the transient layer.
-    public private(set) var test_arrivalBloomRuns = 0
+    /// How many header-dot blooms have PLAYED — a bead landing on a COLLAPSED
+    /// origin increments this; one landing on the ring hands off to the ring
+    /// instead, and a cancelled one never lands at all. Counts survive the
+    /// bloom's own (fast, headless-timing-dependent) self-removal, so tests
+    /// assert on this rather than racing the transient layer.
+    public private(set) var test_headerDotBloomRuns = 0
 
     /// How many bead→bloom handoffs have FIRED (the travel-end timer found its
     /// bead still current) — a cancelled bead never hands off.
     public var test_pulseHandoffRuns = 0
 
-    /// The bloom's MODEL opacity — the settled-model-layer contract says it is
-    /// always 0 (invisible) while the presentation plays.
-    public var test_arrivalModelOpacity: Float? { arrivalLayer?.opacity }
+    /// The header-dot bloom's MODEL opacity — the settled-model-layer contract
+    /// says it is always 0 (invisible) while the presentation plays.
+    public var test_headerDotBloomModelOpacity: Float? { arrivalLayer?.opacity }
 
     /// The pulse's MODEL stroke window — the settled-model-layer contract says
     /// it is always (0, 0) (fully absorbed / invisible) while the presentation
@@ -932,6 +959,14 @@ public protocol RailHookProviding: AnyObject {
     /// out). The overlay curves the rail from the gutter column up to this
     /// ring's left edge (`ringCenterX - ringRadius`, `centerY`).
     func railHookAnchor(in view: NSView) -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, gold: Bool)?
+
+    /// The connect pulse's bead has landed on this hook: bloom the RING ITSELF
+    /// (`HaloRingView.receiveRailPulse`), so the acknowledgment visibly belongs
+    /// to the thing the bead melted into rather than to a disc floating at the
+    /// contact point. Reduce Motion, on-screen-ness and the settled-model
+    /// contract are the ring's own business — the overlay only reports the
+    /// arrival. A hook with no ring to bloom implements this as a no-op.
+    func receiveRailPulse()
 }
 
 /// A collapsible section the rail passes through (the origin's "System Audio"

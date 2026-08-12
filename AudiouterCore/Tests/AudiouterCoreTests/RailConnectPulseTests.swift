@@ -2,6 +2,7 @@
 
 import AppKit
 import Testing
+@testable import AudiouterCore
 @testable import AudiouterSharedUI
 
 /// The rail's CONNECT PULSE (Warm Signal v4.1 item 9, reshaped per Alec
@@ -69,10 +70,14 @@ import Testing
 
     private final class StubHook: RailHookProviding {
         var gold = false
+        /// How many landed beads this hook was handed — the ring's bloom is the
+        /// ring's own business, so the overlay's contract is exactly this call.
+        var receivedPulses = 0
         func railHookAnchor(in view: NSView)
             -> (centerY: CGFloat, ringCenterX: CGFloat, ringRadius: CGFloat, gold: Bool)? {
             (centerY: 300, ringCenterX: 40, ringRadius: 15, gold: gold)
         }
+        func receiveRailPulse() { receivedPulses += 1 }
     }
 
     private final class StubRow: RailNodeProviding {
@@ -201,7 +206,7 @@ import Testing
                 "arming lights every room at once — the pulse runs the whole wire")
     }
 
-    // MARK: Arrival bloom (the ring receives the bead)
+    // MARK: Arrival (the ring receives the bead)
 
     /// Spin the main run loop in small steps until `condition` holds or
     /// `deadline` passes — headless runners play CA timelines on their own
@@ -215,17 +220,17 @@ import Testing
         return condition()
     }
 
-    @Test func theBloomMountsWithASettledModel() {
+    @Test func theHeaderDotBloomMountsWithASettledModel() {
         // Synchronous contract check — the layer is inspectable the instant
-        // `runArrivalBloom` returns, before any timeline can remove it.
+        // `runHeaderDotBloom` returns, before any timeline can remove it.
         let scene = makeScene(nodes: [.member])
-        scene.overlay.runArrivalBloom(at: NSPoint(x: 25, y: 300))
-        #expect(scene.overlay.test_isArrivalBlooming)
-        #expect(scene.overlay.test_arrivalModelOpacity == 0,
+        scene.overlay.runHeaderDotBloom(at: NSPoint(x: 25, y: 300))
+        #expect(scene.overlay.test_isHeaderDotBlooming)
+        #expect(scene.overlay.test_headerDotBloomModelOpacity == 0,
                 "the bloom's MODEL stays invisible — only the presentation plays")
     }
 
-    @Test func aCompletedPulseBloomsAtTheWiresStart() {
+    @Test func aCompletedPulseHandsOffToTheRing() {
         // On-glass window: an undisplayed window's layer tree never starts its
         // CA timeline, so the bead's completion (the bloom's trigger) would
         // never fire — same requirement as the presentation probe above.
@@ -236,11 +241,13 @@ import Testing
         scene.overlay.test_reconcileEnergize()
         drainMainQueue()
         #expect(scene.overlay.test_isConnectPulsing)
-        let bloomed = polls(within: 2.5) { scene.overlay.test_arrivalBloomRuns == 1 }
-        #expect(bloomed, "the ring receives the landed bead with a bloom — handoffs fired: \(scene.overlay.test_pulseHandoffRuns), still pulsing: \(scene.overlay.test_isConnectPulsing)")
+        let received = polls(within: 2.5) { scene.hook.receivedPulses == 1 }
+        #expect(received, "the landed bead is handed to the RING, which owns the bloom — handoffs fired: \(scene.overlay.test_pulseHandoffRuns), still pulsing: \(scene.overlay.test_isConnectPulsing)")
+        #expect(scene.overlay.test_headerDotBloomRuns == 0,
+                "an uncollapsed origin has a ring — the overlay draws no disc of its own")
     }
 
-    @Test func aCancelledPulseNeverBlooms() {
+    @Test func aCancelledPulseNeverReachesTheRing() {
         let scene = makeScene(nodes: [.member])
         scene.overlay.test_reconcileEnergize()          // baseline: idle
         scene.hook.gold = true
@@ -253,8 +260,74 @@ import Testing
             name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
             object: NSWorkspace.shared)
         #expect(!scene.overlay.test_isConnectPulsing)
-        let bloomed = polls(within: 1.6) { scene.overlay.test_arrivalBloomRuns > 0 }
-        #expect(!bloomed, "a bead that never landed has nothing to bloom")
+        let received = polls(within: 1.6) { scene.hook.receivedPulses > 0 }
+        #expect(!received, "a bead that never landed has nothing to hand the ring")
+    }
+
+    // MARK: The ring's own bloom (`HaloRingView` receives the bead)
+
+    /// A windowed ring, connected, at the Main Audio ring's own geometry.
+    private func makeRing() -> (window: NSWindow, ring: HaloRingView) {
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+                              styleMask: .borderless, backing: .buffered, defer: false)
+        let ring = HaloRingView()
+        ring.test_reduceMotionOverride = false
+        ring.frame = NSRect(x: 20, y: 20, width: 40, height: 40)
+        window.contentView!.addSubview(ring)
+        ring.apply(.connected)
+        ring.layoutSubtreeIfNeeded()
+        return (window, ring)
+    }
+
+    @Test func theRingBloomMountsWithASettledModel() {
+        let scene = makeRing()
+        scene.ring.receiveRailPulse()
+        #expect(scene.ring.test_isReceivingRailPulse, "the ring itself acknowledges the bead")
+        #expect(scene.ring.test_receivedRailPulses == 1)
+        #expect(scene.ring.test_receiveModelOpacity == 0,
+                "the bloom's MODEL stays invisible — only the presentation plays, so cacheDisplay is deterministic mid-flight")
+    }
+
+    @Test func reduceMotionRemovesTheRingBloom() {
+        let scene = makeRing()
+        scene.ring.test_reduceMotionOverride = true
+        scene.ring.receiveRailPulse()
+        #expect(!scene.ring.test_isReceivingRailPulse,
+                "Reduce Motion means no bloom at all — the ring stays on its settled stroke")
+        #expect(scene.ring.test_receivedRailPulses == 0)
+    }
+
+    @Test func aMidFlightReduceMotionToggleCancelsTheRingBloom() {
+        let scene = makeRing()
+        scene.ring.receiveRailPulse()
+        #expect(scene.ring.test_isReceivingRailPulse)
+
+        scene.ring.test_reduceMotionOverride = true
+        NSWorkspace.shared.notificationCenter.post(
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: NSWorkspace.shared)
+        #expect(!scene.ring.test_isReceivingRailPulse,
+                "the in-flight bloom dies the instant the user asks for no motion")
+    }
+
+    @Test func anAccentDialChangeCancelsTheRingBloom() {
+        let scene = makeRing()
+        scene.ring.receiveRailPulse()
+        #expect(scene.ring.test_isReceivingRailPulse)
+
+        NotificationCenter.default.post(name: Tokens.accentStyleDidChangeNotification,
+                                        object: nil)
+        #expect(!scene.ring.test_isReceivingRailPulse,
+                "the bloom's stamped `glow` can't re-tint mid-flight — it drops")
+    }
+
+    @Test func anOffScreenRingNeverBlooms() {
+        let ring = HaloRingView()
+        ring.test_reduceMotionOverride = false
+        ring.frame = NSRect(x: 0, y: 0, width: 40, height: 40)
+        ring.apply(.connected)
+        ring.receiveRailPulse()
+        #expect(!ring.test_isReceivingRailPulse, "no window, nothing to acknowledge")
     }
 
     @Test func theFirstReconcileOnlyStampsTheBaseline() {

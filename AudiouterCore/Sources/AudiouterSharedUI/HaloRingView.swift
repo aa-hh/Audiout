@@ -83,6 +83,11 @@ public final class HaloRingView: NSView {
 
     private let ringLayer = CAShapeLayer()
     private static let breathKey = "haloRing.breathe"
+    private static let receiveKey = "haloRing.receive"
+    /// The transient rail-arrival bloom currently playing, if any. Nothing
+    /// exists at rest — it is mounted by ``receiveRailPulse()`` and removed by
+    /// its own run-loop timer (or any cancel).
+    private var receiveLayer: CAShapeLayer?
 
     /// The connection state currently being rendered — drives the ring's form,
     /// visibility, color, stroke, dashing, and whether the breathing animation
@@ -163,6 +168,9 @@ public final class HaloRingView: NSView {
     /// follows the dial in the same instant the rail does.
     @objc private func accentStyleDidChange() {
         updateLayerAppearance()
+        // The transient bloom stamped the OLD accent's `glow`; it can't
+        // re-tint mid-flight, so it drops rather than finish in a dead hue.
+        cancelReceiveBloom()
     }
 
     /// A mid-session Reduce Motion / Increase Contrast toggle: re-stamp colors
@@ -173,6 +181,9 @@ public final class HaloRingView: NSView {
     @objc private func accessibilityDisplayOptionsDidChange() {
         updateLayerAppearance()
         reconcileBreathing()
+        // Reduce Motion turning ON strips an in-flight bloom, same as the rail
+        // drops its bead — the ring lands on its settled stroke instantly.
+        if reduceMotion { cancelReceiveBloom() }
     }
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -271,6 +282,16 @@ public final class HaloRingView: NSView {
         updateLayerAppearance()
     }
 
+    /// The visible ring circle (the stroke centerline) inscribed in the view's
+    /// box — one definition shared by the settled ring and the transient
+    /// rail-arrival bloom, so the bloom can never sit off the ring it belongs to.
+    private var ringRect: NSRect {
+        let diameter = diameterOverride ?? PopoverColumnGrid.haloRingDiameter
+        return NSRect(x: bounds.midX - diameter / 2,
+                      y: bounds.midY - diameter / 2,
+                      width: diameter, height: diameter)
+    }
+
     public override func layout() {
         super.layout()
         // The visible ring circle sits centered in the view at `haloRingDiameter`
@@ -278,11 +299,7 @@ public final class HaloRingView: NSView {
         // matches the 26 pt icon box). The layer fills the view; the path is the
         // inscribed circle.
         ringLayer.frame = bounds
-        let diameter = diameterOverride ?? PopoverColumnGrid.haloRingDiameter
-        let rect = NSRect(x: bounds.midX - diameter / 2,
-                          y: bounds.midY - diameter / 2,
-                          width: diameter, height: diameter)
-        ringLayer.path = CGPath(ellipseIn: rect, transform: nil)
+        ringLayer.path = CGPath(ellipseIn: ringRect, transform: nil)
         // Scale animation pulses about the ring's own center.
         ringLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
         ringLayer.frame = bounds
@@ -332,6 +349,79 @@ public final class HaloRingView: NSView {
         super.viewDidMoveToWindow()
         // Re-add after re-parenting: CA removed the animation with the layer.
         reconcileBreathing()
+        // A remount renders settled — a bloom from the previous mount dies with it.
+        cancelReceiveBloom()
+    }
+
+    // MARK: Rail-arrival bloom (the ring receives the bead)
+
+    /// The receiving end of the rail's connect pulse (`BusRailOverlayView`):
+    /// the bead melts INTO this ring, so the acknowledgment is the RING's own
+    /// stroke blooming — a `glow`-toned copy of the ring's circle that starts
+    /// a touch wide of the circumference and CONTRACTS onto it as it fades.
+    /// Light spreading inward, not an explosion outward, and quiet (peak
+    /// opacity well under 1): the desk taking the room in.
+    ///
+    /// Same settled-model contract as every other transient here
+    /// (`RouteArmedDotView`, the rail's own bead): the bloom layer's MODEL
+    /// opacity stays 0 (invisible) and only its presentation plays, so a
+    /// `cacheDisplay` at any instant captures the settled ring. Self-removing
+    /// on a run-loop timer — CA completion blocks never fire without an
+    /// app-driven commit loop — so nothing exists at rest.
+    ///
+    /// Gone entirely under Reduce Motion, and off-screen (no window = nothing
+    /// to acknowledge).
+    public func receiveRailPulse() {
+        guard window != nil, !reduceMotion, let hostLayer = layer else { return }
+        test_receivedRailPulses += 1
+        cancelReceiveBloom()
+
+        let bloom = CAShapeLayer()
+        bloom.frame = bounds
+        // Same inscribed circle as the settled ring, and the layer's own centre
+        // is the ring's centre — so the scale animation contracts ONTO the
+        // stroke rather than sliding the halo across the view.
+        bloom.path = CGPath(ellipseIn: ringRect, transform: nil)
+        bloom.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+        bloom.fillColor = nil
+        bloom.lineWidth = ringLayer.lineWidth * 2
+        bloom.shadowOffset = .zero
+        bloom.shadowRadius = 4
+        bloom.shadowOpacity = 0.8
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            let glow = Tokens.Color.glow.cgColor
+            bloom.strokeColor = glow
+            bloom.shadowColor = glow
+        }
+        bloom.opacity = 0
+        hostLayer.addSublayer(bloom)
+        receiveLayer = bloom
+
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 0.6
+        fade.toValue = 0
+        let settle = CABasicAnimation(keyPath: "transform.scale")
+        settle.fromValue = 1.22
+        settle.toValue = 1.0
+        let receive = CAAnimationGroup()
+        receive.animations = [fade, settle]
+        receive.duration = PopoverColumnGrid.railConnectPulseArrivalDuration
+        receive.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        bloom.add(receive, forKey: Self.receiveKey)
+
+        Timer.scheduledTimer(withTimeInterval: receive.duration, repeats: false) { [weak self, weak bloom] _ in
+            MainActor.assumeIsolated {
+                bloom?.removeFromSuperlayer()
+                if let self, self.receiveLayer === bloom { self.receiveLayer = nil }
+            }
+        }
+    }
+
+    /// Drop an in-flight bloom (Reduce Motion turning on, an accent-dial change
+    /// its stamped `CGColor` can't follow, a remount, or a replacement).
+    private func cancelReceiveBloom() {
+        receiveLayer?.removeFromSuperlayer()
+        receiveLayer = nil
     }
 
     // MARK: Test-support hooks
@@ -363,6 +453,19 @@ public final class HaloRingView: NSView {
     /// The ring's current stroke width — lets tests assert the failed ring's
     /// heavier weight vs the connected ring.
     public var test_lineWidth: CGFloat { ringLayer.lineWidth }
+
+    /// Whether the rail-arrival bloom is currently mounted on the ring
+    /// (present the instant ``receiveRailPulse()`` returns — no run loop needed).
+    public var test_isReceivingRailPulse: Bool { receiveLayer != nil }
+
+    /// How many rail-arrival blooms have PLAYED. Survives the bloom's own
+    /// (fast, headless-timing-dependent) self-removal, so tests assert on this
+    /// rather than racing the transient layer.
+    public private(set) var test_receivedRailPulses = 0
+
+    /// The bloom's MODEL opacity — the settled-model-layer contract says it is
+    /// always 0 (invisible) while the presentation plays.
+    public var test_receiveModelOpacity: Float? { receiveLayer?.opacity }
 
     /// Whether the ring is currently dashed (the connecting "incomplete" form),
     /// including under Reduce Motion where the dash survives without the pulse.

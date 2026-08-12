@@ -114,10 +114,12 @@ field:
 - [ ] **Change a value in the Mac's Groups window** (rename a group, edit membership).
   Expected: phone's Groups tab reflects it — this exercises a different Mac-side
   change-hook path than the popover, so don't skip it.
-- [ ] **Open the Simulator alongside the physical phone**, connect it to the same Mac
-  as a second client. Expected: both clients converge on the same state; an action
-  from either shows up on the other and on the Mac. This is the multi-client
-  guarantee, not just phone-Mac.
+- [ ] **Connect a second client alongside the physical phone** — another real iOS
+  device if one is to hand; otherwise a simulator, purely as a stand-in body on the
+  network. Expected: both clients converge on the same state; an action from either
+  shows up on the other and on the Mac. This is the multi-client guarantee, not just
+  phone-Mac. The phone remains the device under test — the second client is here to
+  prove convergence, never to stand in for the phone's own verdict.
 
 ---
 

@@ -297,7 +297,7 @@ import AppKit
     @Test func hintIsAMinimalSingleLineViewOnlyNotice() {
         let detail = DeviceDetailViewController(groupController: makeController())
         detail.show(device: makeDevice())
-        #expect(detail.test_hintText == "View-only — control playback from the menu-bar popover.")
+        #expect(detail.test_hintText == "Playback is controlled from the Mixer — this page only describes the speaker.")
         #expect(!detail.test_hintText.contains("\n"), "stays a single line")
     }
 

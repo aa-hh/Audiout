@@ -72,6 +72,87 @@ import AppKit
         #expect(!row.test_isCheckboxEnabled)
     }
 
+    // MARK: The whole row is the click target (warm pane only)
+
+    @Test func aRowClickTogglesMembershipExactlyOnce() {
+        let row = makeRow(.warmPane, checked: false)
+        var reported: [(String, Bool)] = []
+        row.onToggle = { reported.append(($0, $1)) }
+
+        row.test_clickRow()
+        #expect(row.test_isChecked, "the body click flipped the real control")
+        #expect(row.test_busNode == .member, "…and the node followed it")
+        #expect(reported.count == 1, "one click, one report — never the checkbox's AND the row's")
+        #expect(reported.first?.0 == "office")
+        #expect(reported.first?.1 == true)
+
+        row.test_clickRow()
+        #expect(!row.test_isChecked, "a second click toggles back")
+        #expect(reported.count == 2)
+    }
+
+    @Test func aPinnedRowRefusesARowClick() {
+        // The sole remaining member's checkbox is honestly disabled, so the row
+        // body must refuse the click too — otherwise the body is a way around
+        // the "a group needs at least one device" rule.
+        let row = makeRow(.warmPane, checked: true)
+        row.setCheckboxEnabled(false, tooltip: "A group needs at least one device.")
+        var fired = 0
+        row.onToggle = { _, _ in fired += 1 }
+
+        row.test_clickRow()
+        #expect(fired == 0)
+        #expect(row.test_isChecked, "it is still a member")
+    }
+
+    @Test func aSystemSheetRowIgnoresARowClick() {
+        // The sheet's checkbox is VISIBLE, so the row is not an affordance —
+        // stock behaviour, unchanged by the warm pane's whole-row target.
+        let row = makeRow(.systemSheet, checked: false)
+        var fired = 0
+        row.onToggle = { _, _ in fired += 1 }
+
+        row.test_clickRow()
+        #expect(fired == 0)
+        #expect(!row.test_isChecked)
+    }
+
+    // MARK: The hover ring — the row's "this is clickable" affordance
+
+    @Test func hoveringAWarmRowRingsItsNode() {
+        let row = makeRow(.warmPane, checked: false)
+        #expect(!row.test_drawsHoverRing, "no ring at rest")
+
+        row.test_setHovered(true)
+        #expect(row.test_drawsHoverRing,
+                "the whole row is clickable now, so a pointer anywhere on it lights the ring")
+
+        row.test_setHovered(false)
+        #expect(!row.test_drawsHoverRing)
+    }
+
+    @Test func aPinnedRowNeverRingsItself() {
+        // `MembershipBusView` refuses the ring for a `.blocked` node on its own,
+        // but a PINNED row keeps its `.member` node (it IS a member) — so the
+        // refusal for that case has to come from the row's checkbox enablement.
+        let row = makeRow(.warmPane, checked: true)
+        row.test_setHovered(true)
+        #expect(row.test_drawsHoverRing)
+
+        row.setCheckboxEnabled(false, tooltip: "A group needs at least one device.")
+        #expect(!row.test_drawsHoverRing,
+                "pinning happens under a stationary pointer — the invitation is withdrawn there")
+
+        row.test_setHovered(true)
+        #expect(!row.test_drawsHoverRing, "and a fresh hover never revives it")
+    }
+
+    @Test func aSystemSheetRowDrawsNoHoverRing() {
+        let row = makeRow(.systemSheet, checked: true)
+        row.test_setHovered(true)
+        #expect(!row.test_drawsHoverRing, "no node on the Apple sheet, so no ring")
+    }
+
     // MARK: The system sheet draws no node and no rail
 
     @Test func systemSheetRowDrawsNoNodeAndNoRail() {
@@ -270,6 +351,121 @@ import AppKit
         editor.view.layoutSubtreeIfNeeded()
         #expect(editor.test_railPlan()?.gold == true,
                 "the ACTIVE group's hook goes gold, like its icon well's ring")
+    }
+
+    @Test func activeGroupDrivesTheNodeToneToo() throws {
+        // Gold means LIVE: an INACTIVE group's editor renders its member discs
+        // in the quiet ember idle tone (same truth as the hook/wire), and only
+        // the active group's editor goes gold end to end.
+        let (editor, controller, devices) = try makeEditor()
+        for id in editor.test_candidateDeviceIDs {
+            #expect(editor.test_isRailArmed(for: id) == false,
+                    "an inactive group's \(id) node renders idle (ember), never gold")
+        }
+
+        let group = try #require(controller.groups.first)
+        controller.activateGroup(id: group.id)
+        editor.show(groupID: group.id, devices: devices)
+        for id in editor.test_candidateDeviceIDs {
+            #expect(editor.test_isRailArmed(for: id) == true,
+                    "the ACTIVE group's \(id) node goes gold with the rest of the spine")
+        }
+    }
+
+    @Test func aRowClickInTheEditorPersistsLikeACheckboxClick() throws {
+        let (editor, controller, _) = try makeEditor()
+        #expect(editor.test_checkedDeviceIDs == ["office", "mixer"])
+
+        editor.test_clickRow(for: "a")
+        #expect(editor.test_checkedDeviceIDs.contains("a"))
+        let group = try #require(controller.groups.first)
+        #expect(group.memberIDs.contains("a"),
+                "the row body reaches the same save path the checkbox does")
+    }
+
+    @Test func hoveringAnEditorRowRingsItsNode() throws {
+        let (editor, _, _) = try makeEditor()
+        #expect(!editor.test_rowDrawsHoverRing(for: "a"))
+        editor.test_setRowHovered(true, for: "a")
+        #expect(editor.test_rowDrawsHoverRing(for: "a"))
+        editor.test_setRowHovered(false, for: "a")
+        #expect(!editor.test_rowDrawsHoverRing(for: "a"))
+    }
+
+    // MARK: "Playing now" + the reassurance line (the active editor only)
+
+    @Test func onlyTheActiveGroupsEditorSaysPlayingNowAndReassures() throws {
+        let (editor, controller, devices) = try makeEditor()
+        #expect(!editor.test_playingBadgeVisible,
+                "an inactive group is not playing, so it must not claim to be")
+        #expect(!editor.test_reassuranceVisible,
+                "…and its editor raises no fear to answer")
+
+        let group = try #require(controller.groups.first)
+        controller.activateGroup(id: group.id)
+        editor.show(groupID: group.id, devices: devices)
+
+        #expect(editor.test_playingBadgeVisible)
+        #expect(editor.test_reassuranceVisible)
+        #expect(editor.test_reassuranceText
+                == "Changes here are saved for next time \u{2014} they don\u{2019}t change "
+                + "what\u{2019}s playing now.")
+    }
+
+    @Test func theActiveMarkersNeverMoveTheHeaderBand() throws {
+        // Header parity is geometric (`GroupsHeaderParityTests`): the badge sits
+        // INSIDE the band, hanging off the rename field, so activating a group
+        // may not shift the icon, the title, or the section around them.
+        let (editor, controller, devices) = try makeEditor()
+        let icon = editor.test_headerIconFrame
+        let title = editor.test_headerTitleAlignmentFrame
+        let header = editor.test_headerSectionFrame
+
+        let group = try #require(controller.groups.first)
+        controller.activateGroup(id: group.id)
+        editor.show(groupID: group.id, devices: devices)
+        editor.view.layoutSubtreeIfNeeded()
+
+        #expect(abs(editor.test_headerSectionFrame.height - header.height) <= 0.01)
+        #expect(abs(editor.test_headerIconFrame.minY - icon.minY) <= 0.01)
+        #expect(abs(editor.test_headerIconFrame.minX - icon.minX) <= 0.01)
+        #expect(abs(editor.test_headerTitleAlignmentFrame.minY - title.minY) <= 0.01)
+    }
+
+    /// The pane has NO scroll view and, at a seven-device fleet, no spare
+    /// points: the shipping budget is met exactly. So the two active-group
+    /// markers have to cost ZERO fitting height — the badge inside the header
+    /// band, the reassurance line inside the delete button's bottom margin.
+    @Test func theActiveGroupsMarkersAddNoHeightToTheEditorPane() throws {
+        let devices = (0..<7).map { makeDevice(id: "d\($0)", name: "Device \($0)") }
+        let controller = GroupController(backend: MockBackend(fleet: []),
+                                         store: GroupStore(directory: tempDirectory()),
+                                         loadPersisted: false)
+        let group = try controller.createGroup(name: "Downstairs", memberIDs: ["d0"],
+                                               memberVolumes: [:]).group
+        let editor = GroupEditorViewController(groupController: controller)
+        editor.loadView()
+        editor.show(groupID: group.id, devices: devices)
+        editor.view.frame = NSRect(x: 0, y: 0, width: 520, height: 460)
+        editor.view.layoutSubtreeIfNeeded()
+        let idle = editor.view.fittingSize.height
+
+        controller.activateGroup(id: group.id)
+        editor.show(groupID: group.id, devices: devices)
+        editor.view.layoutSubtreeIfNeeded()
+
+        #expect(editor.test_playingBadgeVisible && editor.test_reassuranceVisible)
+        #expect(abs(editor.view.fittingSize.height - idle) <= 0.01,
+                Comment(rawValue: "the active editor needs \(editor.view.fittingSize.height)pt against " +
+                "\(idle)pt idle — the markers must ride inside space the pane already spends"))
+    }
+
+    @Test func pinnedSoleMemberExplanationReachesVoiceOver() {
+        // The tooltip alone is not reliably announced; the "why is this
+        // disabled" line must travel as accessibilityHelp too.
+        let row = makeRow(.warmPane, checked: true)
+        row.setCheckboxEnabled(false, tooltip: "A group needs at least one device.")
+        #expect(row.test_checkboxAccessibilityHelp == "A group needs at least one device.")
     }
 
     /// The one geometry invariant that can break silently: `BusRailOverlayView`

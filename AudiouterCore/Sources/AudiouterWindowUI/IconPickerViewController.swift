@@ -106,7 +106,10 @@ public final class IconPickerViewController: NSViewController {
         buildGridRows()
 
         searchField.translatesAutoresizingMaskIntoConstraints = false
-        searchField.placeholderString = "Symbol name"
+        // Plain words — "Symbol name" leaked SF Symbols jargon onto a
+        // general-user surface (the exact-name power path still works: the
+        // same field accepts any valid symbol name).
+        searchField.placeholderString = "Search icons"
         searchField.target = self
         searchField.action = #selector(searchFieldChanged(_:))
         searchField.delegate = self

@@ -110,6 +110,81 @@ import AppKit
                 "raised vs well (light): \(lightRatio):1 below the \(floor):1 floor")
     }
 
+    // MARK: The rail's idle ink, measured on the surface it actually runs over
+
+    /// `ember` is a NON-TEXT instrument (the rail's idle wire and its member
+    /// discs), so it carries the ≥3:1 floor — and in the group editor it is
+    /// drawn on the section's `well` fill, not on `panel`. Measured against
+    /// `panel` alone it passed while failing on the ground under it: light
+    /// `#AC8C46` was 3.07:1 on `panel` but 2.55:1 on `well` (2026-08-12).
+    ///
+    /// Increase Contrast can't be forced from a test (`Tokens` reads the LIVE
+    /// `NSWorkspace` flag, there is no appearance name for it), so this pins the
+    /// BASE light value; the IC variant is authored strictly darker still.
+    @Test func lightEmberClearsTheNonTextFloorOnBothSurfaces() {
+        let floor: CGFloat = 3.0
+        let ember = resolved(Tokens.Color.ember, appearanceName: .aqua)
+
+        let onWell = contrastRatio(ember, resolved(Tokens.Color.well, appearanceName: .aqua))
+        #expect(onWell >= floor,
+                Comment(rawValue: "light ember vs well: \(onWell):1 below the \(floor):1 non-text floor — " +
+                "the editor's rail runs over the section fill, not the pane"))
+
+        let onPanel = contrastRatio(ember, resolved(Tokens.Color.panel, appearanceName: .aqua))
+        #expect(onPanel >= floor,
+                "light ember vs panel: \(onPanel):1 below the \(floor):1 non-text floor")
+    }
+
+    /// `gold` carries the same ≥3:1 non-text floor on the same two surfaces —
+    /// the node discs sit on the section's `well` fill, where the pre-retune
+    /// `#A97F1E` measured only 2.92:1 (2026-08-12). Same base-value-only
+    /// caveat as ember's: Increase Contrast can't be forced from a test, and
+    /// the IC variant is authored strictly darker still.
+    @Test func lightGoldClearsTheNonTextFloorOnBothSurfaces() {
+        let floor: CGFloat = 3.0
+        let gold = resolved(Tokens.Color.gold, appearanceName: .aqua)
+
+        let onWell = contrastRatio(gold, resolved(Tokens.Color.well, appearanceName: .aqua))
+        #expect(onWell >= floor,
+                Comment(rawValue: "light gold vs well: \(onWell):1 below the \(floor):1 non-text floor — " +
+                "the editor's nodes sit on the section fill, not the pane"))
+
+        let onPanel = contrastRatio(gold, resolved(Tokens.Color.panel, appearanceName: .aqua))
+        #expect(onPanel >= floor,
+                "light gold vs panel: \(onPanel):1 below the \(floor):1 non-text floor")
+    }
+
+    /// …and darkening GOLD must not let ember catch up: gold stays the louder
+    /// instrument on both axes it can still spend in light mode — chroma, and
+    /// (narrowly, since both inks are pinned just over 3:1 on the same ground)
+    /// luminance.
+    @Test func lightGoldStaysTheLouderInkBesideEmber() {
+        let gold = resolved(Tokens.Color.gold, appearanceName: .aqua)
+        let ember = resolved(Tokens.Color.ember, appearanceName: .aqua)
+
+        #expect(gold.saturationComponent > ember.saturationComponent,
+                "gold must stay the more saturated ink")
+        #expect(relativeLuminance(gold) > relativeLuminance(ember),
+                Comment(rawValue: "gold \(relativeLuminance(gold)) vs ember \(relativeLuminance(ember)) — " +
+                "gold must not converge with (or drop below) its own dim companion"))
+    }
+
+    /// …and darkening it must not walk it into `gold`. The two are the rail's
+    /// idle/armed pair, so they have to stay visibly different inks. In LIGHT
+    /// mode that separation is CHROMA, not luminance: nothing clearing 3:1 on
+    /// `well` can also be lighter than light gold (see `Tokens`' rationale).
+    @Test func lightEmberStaysTheDullerInkBesideGold() {
+        let ember = resolved(Tokens.Color.ember, appearanceName: .aqua)
+        let gold = resolved(Tokens.Color.gold, appearanceName: .aqua)
+
+        #expect(gold.saturationComponent - ember.saturationComponent >= 0.15,
+                Comment(rawValue: "ember \(ember.saturationComponent) vs gold \(gold.saturationComponent) — " +
+                "ember is gold's DIM companion; converged chroma makes the idle rail " +
+                "read as the live one"))
+        #expect(abs(gold.hueComponent - ember.hueComponent) <= 0.03,
+                "…while staying in the same warm family, not becoming a second hue")
+    }
+
     // MARK: Structural — the editor's checklist actually wears the new surface
 
     /// A group editor showing two members over a four-device candidate list,

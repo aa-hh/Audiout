@@ -34,7 +34,7 @@ enum GroupsPaneLayout {
     /// Gap from the top of the content pane's SAFE AREA (the window is
     /// `.fullSizeContentView`, so the pane runs under the title bar) to the
     /// header section's top border.
-    static let columnTopInset: CGFloat = 16
+    static let columnTopInset: CGFloat = 20
 
     /// Caps the form column's width so the sections don't stretch
     /// edge-to-edge in a very wide window. It is a CAP, not a width: the
@@ -42,7 +42,19 @@ enum GroupsPaneLayout {
     /// `GroupEditorViewController.loadView`'s high-priority "fill" constraint),
     /// which is what stopped the sections hugging their ~277 pt intrinsic
     /// content and leaving a dead strip to their right.
-    static let contentMaxWidth: CGFloat = 420
+    ///
+    /// **THIS NUMBER SETS THE WHOLE SCREEN'S WIDTH — it is not cosmetic.**
+    /// (Probed 2026-08-12 by re-rendering `window-snapshot` at several caps.)
+    /// The split view's fitting width is `sidebar + cap + 2 × columnInset`,
+    /// and AppKit widens the Groups window to it, overriding whatever
+    /// `AppSurfaceController.groupsDefaultContentSize` asks for: at the old
+    /// 420 the screen mounted 707 pt wide — 84 pt WIDER than the Mixer, so
+    /// switching screens jumped. 385 = 623 (the Mixer's fixed width) − 210
+    /// (`MixerWindowController`'s pinned sidebar) − 28 (both column margins),
+    /// which is what makes 623 actually stick. Raise it and the whole screen
+    /// grows with it; the sections already fill the pane exactly here, so
+    /// there is nothing to gain by doing so.
+    static let contentMaxWidth: CGFloat = 385
 
     /// Where content STARTS inside the column: the group editor's left spine
     /// gutter (Warm Signal v4 §Call-1), which the membership rail owns
@@ -67,9 +79,35 @@ enum GroupsPaneLayout {
     static let contentTrailingInset: CGFloat = PopoverColumnGrid.trailingInset
 
     /// Inset from the header section's top/bottom borders to the icon well.
-    static let headerPadding: CGFloat = 14
+    static let headerPadding: CGFloat = 16
     /// Gap between the icon well and the title beside it.
     static let iconToTitleGap: CGFloat = 12
+
+    // MARK: The vertical cadence (4 pt base)
+    //
+    // One rhythm for both panes, tighter WITHIN a group of things than
+    // BETWEEN them, so the eye gets the grouping for free: 6 pt inside a
+    // section (`GroupedSectionView.verticalPadding`), 20 pt between sections,
+    // 22 pt down to the pane's action band. The numbers below are what is
+    // VISIBLE on screen; a constraint that pins a section's row STACK rather
+    // than its border adds `GroupedSectionView.verticalPadding` on top (the
+    // call sites do that explicitly, so the visible value stays readable
+    // here).
+
+    /// Visible gap between one section's bottom border and whatever starts the
+    /// next block — the following section's top border, or the label titling it.
+    static let sectionGap: CGFloat = 20
+    /// Visible gap from a label that TITLES a section ("Speakers") down to that
+    /// section's top border. Deliberately far tighter than ``sectionGap``: the
+    /// label belongs to the section under it, not to the one above.
+    static let labelToSectionGap: CGFloat = 6
+    /// Visible gap from the last section to the pane's ACTION BAND — the
+    /// editor's "Delete Group…" + reassurance line, the detail pane's hint.
+    /// Wider than ``sectionGap`` so the band reads as leaving the form rather
+    /// than as one more section of it.
+    static let actionBandGap: CGFloat = 22
+    /// Gap from the action band to the pane's own bottom edge.
+    static let paneBottomInset: CGFloat = 20
 
     /// The header band's height. SIDE-BY-SIDE (design review 2026-07-25): the
     /// icon and the name share one horizontal band rather than stacking, which

@@ -66,8 +66,8 @@ final class DemoPaneView: NSView {
     /// is the bare stage inside it. The WIDTH is that pane's interior — 462
     /// hero pane − 2 × 22 interior padding = 418 — because the FINALE fills the
     /// stage exactly: its ripple sweeps the whole of it and deliberately
-    /// crosses the frame on every side, and a soft feather mask on the ring
-    /// layers dissolves the crossing (owner calls 2026-08-11: first "grow the
+    /// crosses the frame on every side, with nothing clipping or feathering it
+    /// on the way out (owner calls 2026-08-11: first "grow the
     /// stage, don't shrink the wave" after a live hard clip, then rejecting the
     /// shrunken-travel fix as "one little line" — see `DemoSettledMockView`,
     /// whose `size` tracks this constant, so the travel derivation follows a
@@ -1727,27 +1727,18 @@ final class DemoSettingsHandoffMockView: DemoMockView {
 /// rule); light/dark re-stamps arrive through `updateLayer`.
 final class DemoSettledMockView: NSView {
 
-    /// Fills the demo surface exactly: the ripple needs the whole stage. The
-    /// rounded-corner clip keeps the wave off the canvas behind the surface,
-    /// and the ring layers' feather mask (below) makes sure nothing visible
-    /// ever reaches that clip's hard edge. Still the pane's fixed geometry —
-    /// the surface itself never resizes.
+    /// Fills the demo surface exactly: the ripple needs the whole stage. This
+    /// view draws WITHOUT a clip of its own — the wave leaves the stage and
+    /// keeps going into the (chromeless) hero pane, which is the whole point
+    /// of the moment. Still the pane's fixed geometry — the surface itself
+    /// never resizes.
     static let size = DemoPaneView.surfaceSize
 
     private static let iconSide: CGFloat = 88
     /// Rings start just outside the icon and travel PAST every frame edge —
     /// full-stage energy, derived (never authored) in ``ringEndScale()``. The
-    /// feather band below, not a clearance, is what keeps the exit soft.
+    /// ring's own fade to zero, not a mask, is what keeps the exit soft.
     private static let ringBaseDiameter: CGFloat = 104
-    /// Width of the soft band inside each stage edge over which the RING
-    /// layers' feather mask fades from opaque to clear, so a wave crossing the
-    /// frame dissolves instead of being truncated by the rounded-corner clip.
-    /// History, both owner calls: the hard truncation was the original live
-    /// bug, and the first fix — shrinking the travel to die inside the frame —
-    /// read as "one little line that goes out". The feather delivers both
-    /// qualities: big travel AND no hard edge. Only the rings are masked
-    /// (`ringHost`); the aura and text sit outside it, untouched.
-    private static let ringFeatherWidth: CGFloat = 24
     /// Seconds into the shot each ring launches — staggered, like a broadcast.
     private static let ringStarts: [TimeInterval] = [0.10, 0.28, 0.46]
     private static let ringTravelDuration: TimeInterval = 1.05
@@ -1763,15 +1754,6 @@ final class DemoSettledMockView: NSView {
     private let auraLayer = CAGradientLayer()
     /// The ripple rings. Model opacity 0 — they exist only during the shot.
     private let ringLayers: [CAShapeLayer]
-    /// The rings' container, and the ONLY thing the feather mask applies to:
-    /// the resting frame (aura, icon, text — rings at opacity 0) is outside it
-    /// by construction, so the mask cannot alter the settled render. Static in
-    /// the view's own coordinate space; the rings move by transform inside it.
-    private let ringHost = CALayer()
-    /// The feather: a pre-drawn PURE-ALPHA image (opaque interior, fading to
-    /// clear over the last `ringFeatherWidth` points before each edge), so it
-    /// stamps no token colours and needs none of the re-stamp observers.
-    private let featherMask = CALayer()
 
     /// One-shot bookkeeping: `celebrationConsumed` is "the moment happened"
     /// (played, or skipped under Reduce Motion) and is what stops a repaint
@@ -1796,10 +1778,9 @@ final class DemoSettledMockView: NSView {
     }
 
     private func build() {
-        layer?.masksToBounds = true
-        layer?.cornerRadius = Tokens.Layout.groupedSectionCornerRadius
-        layer?.cornerCurve = .continuous
-
+        // NOTHING here clips: no `masksToBounds`, no corner rounding, no mask.
+        // This card is ours and draws unframed, and the ripple has to cross
+        // the stage edge rather than end at it.
         icon.image = NSApp?.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.translatesAutoresizingMaskIntoConstraints = false
@@ -1823,12 +1804,8 @@ final class DemoSettledMockView: NSView {
         // Under the views: aura at the very back, rings between it and the
         // icon. Sublayers this view owns, never subviews — nothing else
         // manages their geometry, so the celebration can move them freely.
-        // The rings ride inside `ringHost` so the feather mask reaches them
-        // and nothing else.
         layer?.insertSublayer(auraLayer, at: 0)
-        ringHost.mask = featherMask
-        layer?.insertSublayer(ringHost, above: auraLayer)
-        for ring in ringLayers { ringHost.addSublayer(ring) }
+        for ring in ringLayers { layer?.insertSublayer(ring, above: auraLayer) }
 
         auraLayer.type = .radial
         auraLayer.startPoint = CGPoint(x: 0.5, y: 0.5)
@@ -1901,15 +1878,6 @@ final class DemoSettledMockView: NSView {
         } ?? .zero
         auraLayer.bounds = CGRect(x: 0, y: 0, width: Self.auraDiameter, height: Self.auraDiameter)
         auraLayer.position = centre
-        // The ring host and its feather mask track the view's bounds the same
-        // way (the host's origin is the view's, so ring positions below are
-        // still in view coordinates). The mask image is redrawn only when the
-        // size actually changes — in practice once, the stage is fixed.
-        ringHost.frame = bounds
-        if bounds.size != .zero, featherMask.frame.size != bounds.size {
-            featherMask.contents = Self.featherMaskImage(size: bounds.size)
-        }
-        featherMask.frame = CGRect(origin: .zero, size: bounds.size)
         let ringRect = CGRect(x: 0, y: 0, width: Self.ringBaseDiameter, height: Self.ringBaseDiameter)
         for ring in ringLayers {
             ring.bounds = ringRect
@@ -1917,47 +1885,6 @@ final class DemoSettledMockView: NSView {
             ring.path = CGPath(ellipseIn: ringRect.insetBy(dx: 1, dy: 1), transform: nil)
         }
         CATransaction.commit()
-    }
-
-    /// The feather mask's image: alpha 1 in the interior, ramping to 0 over
-    /// the last `ringFeatherWidth` points before each edge — one horizontal
-    /// and one vertical ramp multiplied together (`.destinationIn`), which
-    /// rounds the falloff in the corners like a blur would. A rectangular
-    /// per-edge feather, NOT a radial one centred on the icon: the icon sits
-    /// above the vertical middle, so its edge distances differ by ~68 pt
-    /// (top ~146, bottom ~214) — a radial fade reaching clear at the nearest
-    /// edge would kill the wave stage-wide at the top's distance (the "one
-    /// little line" failure again), and one reaching the farthest would still
-    /// be half-opaque AT the top edge, i.e. the original hard cut. Distance-
-    /// to-nearest-edge is the only shape that is soft at every edge and
-    /// opaque everywhere mid-stage. Pure alpha, no colours to re-stamp.
-    private static func featherMaskImage(size: CGSize) -> CGImage? {
-        let scale: CGFloat = 2   // enough for a soft ramp on any backing store
-        guard let ctx = CGContext(
-            data: nil, width: Int(size.width * scale), height: Int(size.height * scale),
-            bitsPerComponent: 8, bytesPerRow: 0,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        ctx.scaleBy(x: scale, y: scale)
-        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
-        ctx.fill(CGRect(origin: .zero, size: size))
-        let colors = [CGColor(red: 1, green: 1, blue: 1, alpha: 0),
-                      CGColor(red: 1, green: 1, blue: 1, alpha: 1),
-                      CGColor(red: 1, green: 1, blue: 1, alpha: 1),
-                      CGColor(red: 1, green: 1, blue: 1, alpha: 0)]
-        ctx.setBlendMode(.destinationIn)
-        for vertical in [false, true] {
-            let length = vertical ? size.height : size.width
-            let inset = ringFeatherWidth / length
-            guard let gradient = CGGradient(
-                colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors as CFArray,
-                locations: [0, inset, 1 - inset, 1]) else { return nil }
-            ctx.drawLinearGradient(
-                gradient, start: .zero,
-                end: vertical ? CGPoint(x: 0, y: size.height) : CGPoint(x: size.width, y: 0),
-                options: [])
-        }
-        return ctx.makeImage()
     }
 
     // MARK: The one-shot
@@ -1972,7 +1899,13 @@ final class DemoSettledMockView: NSView {
         guard !celebrationConsumed else { return }
         celebrationConsumed = true
         celebrationRunCount += 1
-        layoutSubtreeIfNeeded()   // ring/aura geometry comes from layout
+        // Ring and aura geometry come from layout, and the shot starts ON the
+        // crossfade — before the enclosing pass has given this view its frame.
+        // Laying out a zero-sized subtree puts the icon, and with it both
+        // centres, at the bottom-left corner, and the wave launches from there
+        // instead of the icon. The stage is a fixed size, so take it first.
+        if bounds.size != Self.size { setFrameSize(Self.size) }
+        layoutSubtreeIfNeeded()
 
         let endScale = ringEndScale()
         for (ring, start) in zip(ringLayers, Self.ringStarts) {
@@ -2006,8 +1939,9 @@ final class DemoSettledMockView: NSView {
     /// How far a ring scales before it dies: enough that its leading edge
     /// reaches the icon centre's real distance to the FARTHEST surface edge —
     /// a wave that washes the WHOLE stage and deliberately crosses the frame
-    /// on every side, with the feather mask (not a clearance) dissolving the
-    /// crossing. Derived per play rather than authored, so a resized surface
+    /// on every side and keeps going into the chromeless hero pane, since
+    /// nothing clips it. Derived per play rather than authored, so a resized
+    /// surface
     /// or re-balanced stack keeps full-stage travel without re-introducing a
     /// hard clip. (Aiming at the NEAREST edge instead was the over-correction
     /// the owner rejected as "one little line that goes out".) At scale 1 the
@@ -2029,9 +1963,9 @@ final class DemoSettledMockView: NSView {
         scale.toValue = endScale
         // Rise fast, HOLD bright across the middle of the stage, then spend
         // the whole back half of the flight fading — under the group's
-        // ease-out the ring is at the frame edges by then, so the fade
-        // finishes as the wave dies INTO the feather, never mid-stage (the
-        // old 0.55-peak ramp-down left it ghostly by the halfway mark).
+        // ease-out the ring is past the frame edges by then, so the wave
+        // spends itself out in the open air rather than mid-stage (the old
+        // 0.55-peak ramp-down left it ghostly by the halfway mark).
         let fade = CAKeyframeAnimation(keyPath: "opacity")
         fade.values = [0, 0.95, 0.95, 0]
         fade.keyTimes = [0, 0.12, 0.5, 1]

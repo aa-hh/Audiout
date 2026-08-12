@@ -768,14 +768,19 @@ gate/motion/demo/selection rules change.
     model-layer state, so every animation ends there and snapshots stay
     deterministic. The rings' travel is DERIVED, never authored — from the icon
     centre's real distance to the FARTHEST surface edge, so the wave sweeps the
-    whole stage and deliberately crosses the frame on every side — and the RING
-    LAYERS ONLY are masked by a soft per-edge feather (`ringFeatherWidth`, ~24 pt
-    fading to clear at each edge), so a crossing ring dissolves instead of being
-    truncated by the rounded-corner clip. Both halves are owner-tested history:
-    an authored end-scale hard-clipped the ripple live, and the nearest-edge
-    derivation that replaced it was rejected live as "one little line that goes
-    out" — big travel PLUS feather is the fix, and the feather must never touch
-    the aura/text or the settled render (rings rest at opacity 0).
+    whole stage and deliberately crosses the frame on every side — and NOTHING
+    clips or feathers it on the way out: the finale view has no `masksToBounds`
+    of its own and the preview frame is chromeless for this state, so the wave
+    simply leaves the stage and dies by its own fade. Owner-tested history: an
+    authored end-scale hard-clipped the ripple live; the nearest-edge derivation
+    that replaced it was rejected live as "one little line that goes out"; and a
+    per-edge feather mask added to soften the crossing was itself rejected live
+    (2026-08-12) as visible cropping — the ring's arcs cut and faded well before
+    completing the circle. **Never re-introduce a clip or a mask here.**
+    The one-shot starts on the crossfade, BEFORE the enclosing layout pass, so
+    `playCelebration()` takes the fixed stage size first: a zero-sized layout
+    puts both centres at the bottom-left corner and the wave visibly launches
+    off the icon (live bug, 2026-08-12).
     The aura/rings stamp resolved `gold`/`glow`, so the view observes the
     accent-dial and a11y notifications like the mocks do. On the animated
     transition the shot rides the step crossfade itself (fired as the fade

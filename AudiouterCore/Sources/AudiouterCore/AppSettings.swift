@@ -28,20 +28,10 @@ public enum AccentStyle: String, CaseIterable, Sendable {
     case systemAccent
 }
 
-/// Row/icon density for the popover (Settings › Appearance). Two levels for now
-/// — `.comfortable` is today's Control-Center spacing; `.compact` fits more
-/// devices on screen at once. A third (`.large`, accessibility) is intentionally
-/// left for later; callers must treat the set as open (`switch` with a default),
-/// not exhaustive.
-public enum InterfaceDensity: String, CaseIterable, Sendable {
-    case comfortable
-    case compact
-}
-
 /// The app's **scalar** user preferences, backed by `UserDefaults`.
 ///
 /// This is the deliberate other half of the persistence split (decided with the
-/// popover-routing work): *scalars* (theme, density, small booleans) live in
+/// popover-routing work): *scalars* (theme, small booleans) live in
 /// `UserDefaults` — the platform norm, trivial, and what a Settings window
 /// expects — while *list* data keeps the Codable-store idiom (`AppRouteStore`,
 /// `GroupStore`, `RoutingStore`, and the future `ExcludedAppsStore`). Don't grow
@@ -64,10 +54,10 @@ public struct AppSettings {
 
     private enum Keys {
         static let theme = "appearance.theme"
-        static let density = "appearance.density"
         static let accentStyle = "appearance.accentStyle"
         static let startBufferMs = "audio.startBufferMs"
         static let hasCompletedSetup = "setup.hasCompleted"
+        static let reconnectAtLaunch = "general.reconnectAtLaunch"
         static let wakeRestoreMinutes = "audio.wakeRestoreMinutes"
         static let connectVolume = "audio.connectVolume"
         static let mainOutVolume = "audio.mainOutVolume"
@@ -93,12 +83,6 @@ public struct AppSettings {
     public var theme: AppearanceTheme {
         get { defaults.string(forKey: Keys.theme).flatMap(AppearanceTheme.init(rawValue:)) ?? .system }
         nonmutating set { defaults.set(newValue.rawValue, forKey: Keys.theme) }
-    }
-
-    /// The popover density. Defaults to `.comfortable` when unset or unrecognised.
-    public var density: InterfaceDensity {
-        get { defaults.string(forKey: Keys.density).flatMap(InterfaceDensity.init(rawValue:)) ?? .comfortable }
-        nonmutating set { defaults.set(newValue.rawValue, forKey: Keys.density) }
     }
 
     /// The accent dial (Settings › Appearance › Accent, spec §1.3). Defaults to
@@ -130,6 +114,17 @@ public struct AppSettings {
     public var hasCompletedSetup: Bool {
         get { defaults.bool(forKey: Keys.hasCompletedSetup) }
         nonmutating set { defaults.set(newValue, forKey: Keys.hasCompletedSetup) }
+    }
+
+    /// Settings › General "Reconnect last speakers when Audiouter starts"
+    /// (roadmap 050). Defaults to **off**: the locked launch behavior (ahh,
+    /// 2026-07-17 — see `GroupController.init`) is that a previously-selected
+    /// AirPlay device never auto-streams when the app opens; this bool is the
+    /// sanctioned opt-in that lets `GroupController.ensureDefaultSelection()`
+    /// resume the persisted routing set instead of seeding {local}.
+    public var reconnectAtLaunch: Bool {
+        get { defaults.bool(forKey: Keys.reconnectAtLaunch) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.reconnectAtLaunch) }
     }
 
     /// Options (in MINUTES) for the post-wake "restore Mac audio if speakers don't

@@ -53,7 +53,7 @@ The menu-bar popover UI (pure AppKit), and — since U3 — the **one-surface ho
 | `PopoverPanelViewController` | Card container: build/collapse by header title. |
 | `CardView` | Rounded module: header rows + collapsible body. |
 | `RowClipView` | Per-row clip an `insertRow` row unfolds downward inside; its height is the animated dimension. |
-| `FoldAnimator` | The one fold clock: drives every clip height directly and lays the panel + window out from it each tick. |
+| `FoldAnimator` | The one fold clock: drives every clip height directly and lays the panel + window out from it each tick. Lives in `AudiouterSharedUI` (public, `FoldFollowing` protocol) since the Settings Advanced disclosure joined the same clock — still the only driver. |
 | `MainOutRowView` | System Audio "Main Audio" row — slider, mute, "Output" destination dropdown, under-name `LevelMeterView`, and the membership rail's `.origin` hook (rises in the left gutter and turns into the meter). |
 | `ConnectionDiagnosisView` | "Couldn't connect" panel under a failed row. |
 | `BTAlignmentPromptView` | First-mix alignment card under a held-silent BT row: three actions. |

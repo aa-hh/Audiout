@@ -60,6 +60,41 @@ layout and where the settings model types (`AppSettings`,
   A fifth "fact" was retired: the tab controller's own `view.fittingSize` does
   **not** inherently lie — it was reading trap 4's frozen floor.
 
+  **A sixth fact, probed 2026-08-12 (roadmap 050, the Advanced disclosure):
+  a pane's own `fittingSize` is safe for GROWTH only, never for SHRINK.**
+  `layoutSubtreeIfNeeded` on a windowless top-level view installs a
+  priority-501 height constraint pinning the ROOT to its current frame;
+  `fittingSize`'s pull-to-zero sits at priority 50 and loses to it every
+  time, so a root-based measure can grow but can never shrink back down —
+  probed live, the root held `h==424` while its own column stack had
+  already solved to `214`. `AudioSettingsViewController` therefore never
+  reads its own `view.fittingSize` to republish; `republishFittedHeight()`
+  measures the COLUMN stack's `fittingSize` (which carries no such lock)
+  plus the standard vertical insets instead, and both `rebuildList()` and
+  the Advanced disclosure toggle route through it. Any future pane that
+  can shrink at runtime must measure its column, not its root, or it will
+  keep dead space forever after the shrink.
+
+  Also probed there: **`NSStackView` does not release an in-place
+  arranged child's height** once the child has been shown — not via
+  `isHidden`, not via `setVisibilityPriority(.notVisible)`, not via a
+  priority-999 zero-height constraint fighting the child's own required
+  internals. All three left the stack still demanding the expanded height.
+  The Advanced disclosure therefore uses the app's one collapse idiom, the
+  `CardView` clip (AudiouterPopoverUI): the content lives inside a
+  layer-clipped wrapper whose REQUIRED height==0 constraint is the single
+  controlled value, and the content's bottom pin into the wrapper is
+  `.defaultHigh` — the clip always wins, no conflict, and the stack only
+  ever sees the wrapper. Toggling that one constraint is the whole
+  collapse — see `advancedDisclosureToggled()`. The fold is ANIMATED on
+  `FoldAnimator.shared` (now public in `AudiouterSharedUI`), the app's one
+  fold clock: the pane conforms to `FoldFollowing` and republishes its
+  `preferredContentSize` every tick, and the surface's settings subscriber
+  applies those per-tick sizes instantly (`FoldAnimator.shared.isFolding`
+  gates its `animated:`) — the window is laid out FROM the fold, never
+  animated alongside it. Instant under Reduce Motion and `HeadlessRuntime`,
+  per the popover module's fold rules.
+
   **Only the HEIGHT is ever measured.** The width is pinned to
   `SettingsForm.contentWidth`, and the height is taken from the pane's own
   `preferredContentSize` (every pane publishes one) rather than its live
@@ -131,13 +166,22 @@ layout and where the settings model types (`AppSettings`,
 - **Consequential controls carry a LIVE hint line** (spec §5.2,
   `SettingsForm.hintLabel`): the owning pane re-writes the hint on every value
   change so it always states the current value's consequence — don't replace
-  one with a static subtitle.
+  one with a static subtitle. Kill static explanation paragraphs instead: the
+  sync-offset row (roadmap 050) moved its old five-line subtitle into a stock
+  `.helpButton`'s `NSPopover`, leaving only the live hint on the pane itself.
+- **Section headers and value readouts share one look across panes**
+  (roadmap 050, `SettingsForm`): `sectionHeader(_:)` is a semibold caption in
+  the secondary color; `readoutWell(_:width:)` draws a monospaced-digit value
+  label on `Tokens.Color.well`, in `draw(_:)` like `BorderedListView`, so it
+  re-resolves under the current appearance with no bookkeeping. Both connect
+  volume and sync offset use `readoutWell` at `width: 56` so their sliders'
+  value columns line up.
 
 ## Map
 
 | Type | What it is |
 |---|---|
 | `SettingsRootViewController` | Public `NSTabViewController` holding the panes; measures `fittedContentSize` (pane + in-content chrome) and publishes it via `onFittedContentSizeChange`. |
-| `GeneralSettingsViewController` | Launch-at-login + About. |
+| `GeneralSettingsViewController` | Launch at login / "Reconnect last speakers when Audiouter starts" (switch on `AppSettings.reconnectAtLaunch`, live hint) / a hairline + footer button strip (`Setup…`, `About Audiouter…`) in place of the old full-row Setup and About. |
 | `AppearanceSettingsViewController` | Theme tiles (warm product previews) + Accent dial. |
-| `AudioSettingsViewController` | Excluded-apps list + Advanced › Audio buffer (when `LatencyConfigurable`). |
+| `AudioSettingsViewController` | Excluded-apps list (heading via `SettingsForm.sectionHeader`) + connect volume + wake restore + Advanced (Audio buffer, sync offset), Advanced a disclosure collapsed by default via the CardView-style clip (required height==0 vs a `.defaultHigh` bottom pin). |

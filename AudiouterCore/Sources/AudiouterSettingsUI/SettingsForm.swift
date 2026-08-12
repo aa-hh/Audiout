@@ -64,6 +64,43 @@ enum SettingsForm {
         return field
     }
 
+    /// A **section header** (roadmap 050 visual pass): semibold caption in the
+    /// secondary color, so headers carry real weight separation from body-font
+    /// row titles. One helper so every pane's headers match.
+    static func sectionHeader(_ string: String) -> NSTextField {
+        let field = label(string)
+        field.font = Tokens.Font.captionEmphasized
+        field.textColor = Tokens.Color.secondaryLabel
+        return field
+    }
+
+    /// A **value readout** (`35%`, `0 ms` — roadmap 050 visual pass): monospaced
+    /// digits on the panel's `well` fill, so live numbers read as instrument and
+    /// rhyme with the Mixer. Fixed `width` so the row never shifts as the digit
+    /// count changes.
+    /// Styles the caller's own `field` (panes keep their stored label for the
+    /// re-write-on-change contract) and returns the wrapping well.
+    static func readoutWell(_ field: NSTextField, width: CGFloat) -> NSView {
+        field.translatesAutoresizingMaskIntoConstraints = false
+        // The app's ONE readout voice (`Tokens.Font.syncReadout`, shared with
+        // the BT sync drawer's value field) — not a second hand-minted
+        // monospaced size that drifts from it.
+        field.font = Tokens.Font.syncReadout
+        field.textColor = Tokens.Color.secondaryLabel
+        field.alignment = .center
+
+        let well = ReadoutWellView()
+        well.translatesAutoresizingMaskIntoConstraints = false
+        well.addSubview(field)
+        NSLayoutConstraint.activate([
+            well.widthAnchor.constraint(equalToConstant: width),
+            well.heightAnchor.constraint(equalToConstant: 20),
+            field.centerXAnchor.constraint(equalTo: well.centerXAnchor),
+            field.centerYAnchor.constraint(equalTo: well.centerYAnchor),
+        ])
+        return well
+    }
+
     /// One form row: a `title` (plus optional wrapping `subtitle` beneath it) on
     /// the leading edge, `control` pinned to the trailing edge and vertically
     /// centred on the title text. The returned view sizes its own height from its
@@ -147,6 +184,18 @@ enum SettingsForm {
             row.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
         return container
+    }
+}
+
+/// The value-readout backing: the panel's inset `well` fill in a rounded rect,
+/// drawn in `draw(_:)` (not a stamped layer color) so it re-resolves under the
+/// current appearance with no manual bookkeeping — same reasoning as
+/// `BorderedListView`.
+private final class ReadoutWellView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        Tokens.Color.well.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 5, yRadius: 5).fill()
     }
 }
 

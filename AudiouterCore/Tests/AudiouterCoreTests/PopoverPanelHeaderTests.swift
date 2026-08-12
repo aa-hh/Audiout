@@ -87,7 +87,12 @@ import AppKit
 
     // MARK: A1 — addCardNote
 
-    @Test func cardNoteRendersWithTertiaryColorAndText() {
+    /// The note is the only thing explaining why every row in the card went
+    /// inert, so it is read, not glanced at: dimming the EXPLANATION of the
+    /// dimming leaves the card looking broken rather than dormant. Tertiary puts
+    /// it under the 4.5:1 text floor in light — legitimate for a label on a
+    /// DISABLED control (the dimmed `%` readouts), wrong for live state.
+    @Test func cardNoteIsReadableStateTextNotDimmedChrome() {
         let panel = makePanel()
         let title = "Devices"
         let text = "Inactive — Audio Out is using 'Living Room'"
@@ -97,7 +102,7 @@ import AppKit
         let notes = panel.test_cardNotes(title: title)
         #expect(notes.count == 1)
         #expect(notes.first?.stringValue == text)
-        #expect(notes.first?.textColor == .tertiaryLabelColor)
+        #expect(notes.first?.textColor == .secondaryLabelColor)
     }
 
     @Test func cardNoteSurvivesBodyCollapse() {

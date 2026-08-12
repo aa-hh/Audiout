@@ -71,6 +71,19 @@ public enum PopoverColumnGrid {
         (indented ? indentedLeadingInset : leadingInset) + busGutterWidth
     }
 
+    /// Width of a card / subsection header's leading disclosure chevron.
+    public static let headerChevronWidth: CGFloat = 16
+    /// Gap between that chevron and the title following it.
+    public static let headerChevronToTitle: CGFloat = 4
+    /// Leading edge of a header's TITLE TEXT — the x a section title, a
+    /// subsection label, and anything annotating them all start at. A card note
+    /// is a subtitle to its section title, so it belongs on this column, not on
+    /// `firstElementLeading` (where only chevrons and device icons live) and not
+    /// on `nameColumnLeading` (where the rows themselves live).
+    public static var headerTitleLeading: CGFloat {
+        firstElementLeading(indented: false) + headerChevronWidth + headerChevronToTitle
+    }
+
     /// Leading edge of the **name column** on a top-level row — the x every
     /// device/app name starts at, and therefore the x an ICON-LESS secondary row
     /// (a placeholder line, an empty-state link, a footer note) must start at to

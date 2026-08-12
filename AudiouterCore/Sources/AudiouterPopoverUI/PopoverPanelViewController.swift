@@ -578,10 +578,11 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
                 chevron.leadingAnchor.constraint(equalTo: headerWrap.leadingAnchor,
                                                  constant: sectionLeadingInset),
                 chevron.centerYAnchor.constraint(equalTo: headerWrap.centerYAnchor),
-                chevron.widthAnchor.constraint(equalToConstant: 16),
+                chevron.widthAnchor.constraint(
+                    equalToConstant: PopoverColumnGrid.headerChevronWidth),
             ])
             titleLeadingAnchor = chevron.trailingAnchor
-            titleLeadingConstant = 4
+            titleLeadingConstant = PopoverColumnGrid.headerChevronToTitle
             chevronsByHeader[header] = chevron
             assignChevron(chevron, collapsed: collapsed, for: header)
         } else {
@@ -1177,10 +1178,11 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
                 chevron.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor,
                                                  constant: leadingInset),
                 chevron.centerYAnchor.constraint(equalTo: label.centerYAnchor),
-                chevron.widthAnchor.constraint(equalToConstant: 16),
+                chevron.widthAnchor.constraint(
+                    equalToConstant: PopoverColumnGrid.headerChevronWidth),
             ])
             titleLeadingAnchor = chevron.trailingAnchor
-            titleLeadingConstant = 4
+            titleLeadingConstant = PopoverColumnGrid.headerChevronToTitle
             chevronsByHeader[title] = chevron
             assignChevron(chevron, collapsed: collapsed, for: title)
 
@@ -1255,7 +1257,13 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         let label = NSTextField(labelWithString: text)
         label.translatesAutoresizingMaskIntoConstraints = false
         label.font = .systemFont(ofSize: 11)
-        label.textColor = Tokens.Color.tertiaryLabel
+        // `secondaryLabel`, NOT tertiary. This note is live state — it says the
+        // card's rows are inert and names what took over — so it is the highest-
+        // stakes sentence on the panel whenever it appears, and tertiary leaves
+        // it the FAINTEST text there, under the 4.5:1 floor in light. The dimmed
+        // `%` readouts sit at tertiary legitimately (they label DISABLED
+        // sliders); a note about live routing does not.
+        label.textColor = Tokens.Color.secondaryLabel
         label.lineBreakMode = .byTruncatingTail
         label.maximumNumberOfLines = 1
         let wrapper = NSView()
@@ -1263,10 +1271,13 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         wrapper.addSubview(label)
         NSLayoutConstraint.activate([
             wrapper.heightAnchor.constraint(equalToConstant: 18),
-            // Align to the icon column (Warm Signal v4 §Call-1) — clear of the rail gutter.
+            // The note is a subtitle to the section TITLE, so it starts where
+            // that title's text does. `firstElementLeading` is the chevron/icon
+            // column — putting text there gives the card a third text column
+            // that nothing else in it uses.
             label.leadingAnchor.constraint(
                 equalTo: wrapper.leadingAnchor,
-                constant: PopoverColumnGrid.firstElementLeading(indented: false)),
+                constant: PopoverColumnGrid.headerTitleLeading),
             label.trailingAnchor.constraint(lessThanOrEqualTo: wrapper.trailingAnchor,
                                             constant: -PopoverColumnGrid.leadingInset),
             label.centerYAnchor.constraint(equalTo: wrapper.centerYAnchor),

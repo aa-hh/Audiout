@@ -98,7 +98,15 @@ public final class MembershipRowView: NSView {
     /// Fixed row height matching the shared row rhythm used elsewhere in the
     /// window (`DeviceRowView.rowHeight` is 42; a checklist row carries no
     /// slider/sublabel, so it can afford to be shorter).
-    public static let rowHeight: CGFloat = 28
+    ///
+    /// 28 → 32 (2026-08-12): the WHOLE row is the click target on `.warmPane`
+    /// now, and a 28pt target with a 6pt gap read as a cramped list rather
+    /// than something to hit. Two budgets follow this number — the editor
+    /// pane's fitting height (`AppSurfaceController.groupsDefaultContentSize`,
+    /// `MembershipRailTests`) and the create sheet's
+    /// `GroupCreationSheetController.checklistMaxHeight` — so re-check both if
+    /// it moves again.
+    public static let rowHeight: CGFloat = 32
 
     public var deviceID: String { device.id }
 

@@ -107,11 +107,23 @@ public final class MixerWindowController {
         // Sidebar item — the documented `.sidebar(withViewController:)`
         // constructor applies source-list material/vibrancy + collapse behavior.
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarViewController)
-        sidebarItem.minimumThickness = 200
-        // Capped so the sidebar can't eat a narrower window's content pane —
-        // it holds one column of short names, and every point past this is
-        // taken from the pane that actually has a form in it.
-        sidebarItem.maximumThickness = 260
+        // PINNED at 210 — minimum AND maximum, deliberately (2026-08-12).
+        // The sidebar's own fitting width is ≥260, and the split view hands
+        // an item its fitting width clamped to `maximumThickness`, so the old
+        // 260 ceiling WAS the sidebar's width; worse, the whole screen's
+        // width is the split's fitting width (sidebar + form column + margins)
+        // and AppKit widens the Groups window up to it, overriding the size
+        // the surface asks for. Those 60 pt of source-list padding were
+        // therefore charged to the window, not to the sidebar: Groups mounted
+        // 707 pt wide against the Mixer's 623, so switching screens jumped.
+        // Pinning it spends them on the form instead and lets
+        // `AppSurfaceController.groupsDefaultContentSize`'s 623 hold. 210, not
+        // the old 200 floor: 200 truncated "MacBook Pro Speakers", the longest
+        // name every Mac has. The cost is a divider the user can no longer
+        // drag; a longer name still truncates, which is what a source list
+        // does anyway.
+        sidebarItem.minimumThickness = 210
+        sidebarItem.maximumThickness = 210
         // NOT collapsible: a collapse here is a ONE-WAY DOOR. The sidebar is
         // the only way to change selection, and nothing can bring it back —
         // the surface has no toolbar sidebar toggle and no View menu, and this
@@ -648,9 +660,18 @@ public final class GroupsEmptyStateViewController: NSViewController {
     // repeating it here read as the same message twice on one screen. This
     // headline instead states the feature promise the subtitle explains.
     private let messageLabel = NSTextField(labelWithString: "Group your speakers")
-    private let subtitleLabel = NSTextField(labelWithString:
+    /// A PARAGRAPH, not a width driver. On one line this sentence measures
+    /// ~480 pt, which made it the widest required thing on the whole Groups
+    /// screen — AppKit widened the window to fit it, so the empty screen
+    /// mounted ~85 pt wider than every other one (probed 2026-08-12). It wraps
+    /// inside the form column's own measure instead (see `loadView`).
+    private let subtitleLabel = NSTextField(wrappingLabelWithString:
         "Save a set of speakers as a group, then switch to it in two clicks from the menu bar.")
     private let newGroupButton = NSButton()
+
+    /// The measure this pane's copy wraps to: the form column the editor and
+    /// detail panes use, less this pane's own 16pt margins.
+    private static let emptyPaneTextWidth: CGFloat = GroupsPaneLayout.contentMaxWidth - 32
 
     public override func loadView() {
         messageLabel.font = Tokens.Font.titleLarge
@@ -660,6 +681,12 @@ public final class GroupsEmptyStateViewController: NSViewController {
         subtitleLabel.font = Tokens.Font.subtitleLarge
         subtitleLabel.textColor = Tokens.Color.tertiaryLabel
         subtitleLabel.alignment = .center
+        subtitleLabel.isSelectable = false
+        // Wraps within the form column's measure, minus this pane's own 16pt
+        // margins — so the empty screen is exactly as wide as every other
+        // Groups screen instead of setting the window's width by itself.
+        subtitleLabel.preferredMaxLayoutWidth = Self.emptyPaneTextWidth
+        subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         newGroupButton.title = "New Group…"
         newGroupButton.bezelStyle = .rounded
@@ -681,6 +708,7 @@ public final class GroupsEmptyStateViewController: NSViewController {
             stack.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             stack.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 16),
             stack.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor, constant: -16),
+            subtitleLabel.widthAnchor.constraint(lessThanOrEqualToConstant: Self.emptyPaneTextWidth),
         ])
 
         view = container

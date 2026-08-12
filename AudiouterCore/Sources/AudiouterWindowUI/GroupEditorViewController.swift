@@ -411,7 +411,8 @@ public final class GroupEditorViewController: NSViewController {
 
             // Sits BETWEEN the two sections, on bare pane — the gap below the
             // header section's bottom border, above the list section's top.
-            speakersLabel.topAnchor.constraint(equalTo: headerWell.bottomAnchor, constant: 14),
+            speakersLabel.topAnchor.constraint(equalTo: headerWell.bottomAnchor,
+                                               constant: GroupsPaneLayout.sectionGap),
             speakersLabel.leadingAnchor.constraint(equalTo: column.leadingAnchor,
                                                    constant: GroupsPaneLayout.contentLeadingInset),
 
@@ -430,11 +431,13 @@ public final class GroupEditorViewController: NSViewController {
             // (`buildRows` pins each row to the stack) so a row's trailing
             // annotation lands at the section's own inset edge instead of
             // wherever the widest device name happens to end.
-            // 8 → 10: the container now extends `verticalPadding` ABOVE the
-            // first row, so the visible gap from the "Speakers" label to the
-            // container's top edge is this minus that padding. Nudged up so the
-            // label doesn't crowd the container's new border.
-            membershipStack.topAnchor.constraint(equalTo: speakersLabel.bottomAnchor, constant: 10),
+            // The container extends `verticalPadding` ABOVE the first row, so
+            // the VISIBLE gap from the "Speakers" label to the container's top
+            // border is `labelToSectionGap` and this constraint carries the
+            // padding on top of it.
+            membershipStack.topAnchor.constraint(
+                equalTo: speakersLabel.bottomAnchor,
+                constant: GroupsPaneLayout.labelToSectionGap + GroupedSectionView.verticalPadding),
             membershipStack.leadingAnchor.constraint(equalTo: column.leadingAnchor),
             membershipStack.trailingAnchor.constraint(
                 equalTo: column.trailingAnchor, constant: -GroupsPaneLayout.contentTrailingInset),
@@ -458,11 +461,13 @@ public final class GroupEditorViewController: NSViewController {
             // everything it belongs under.
             deleteButton.leadingAnchor.constraint(equalTo: column.leadingAnchor,
                                                   constant: GroupsPaneLayout.contentLeadingInset),
-            // 16 → 20: the grouped-list container extends `verticalPadding`
-            // BELOW the last row, so this gap minus that padding is what's
-            // actually visible between the container's bottom border and the
-            // button. 16 left it reading cramped against the border.
-            deleteButton.topAnchor.constraint(equalTo: column.bottomAnchor, constant: 20),
+            // The grouped-list container extends `verticalPadding` BELOW the
+            // last row, so the VISIBLE gap between its bottom border and the
+            // button is `actionBandGap` — wider than the gap between sections,
+            // so the destructive action reads as its own band.
+            deleteButton.topAnchor.constraint(
+                equalTo: column.bottomAnchor,
+                constant: GroupsPaneLayout.actionBandGap + GroupedSectionView.verticalPadding),
             // `<=`, NOT `==`: pinning the button to the PANE's bottom made the
             // whole chain above it stretch to reach — the column grew, the row
             // stack (pinned to the column's bottom) grew with it, and the
@@ -472,13 +477,13 @@ public final class GroupEditorViewController: NSViewController {
             // content keeps its natural height and the slack falls BELOW the
             // button, where nothing is drawn.
             deleteButton.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor,
-                                                 constant: -16),
+                                                 constant: -GroupsPaneLayout.paneBottomInset),
 
             // Beside the button, centred on it, with NO bottom pin: the line's
-            // overhang rides inside the 16pt margin above, so the pane's fitting
-            // height is unchanged (see ``reassuranceLabel``).
+            // overhang rides inside the `paneBottomInset` margin above, so the
+            // pane's fitting height is unchanged (see ``reassuranceLabel``).
             reassuranceLabel.leadingAnchor.constraint(
-                greaterThanOrEqualTo: deleteButton.trailingAnchor, constant: 12),
+                greaterThanOrEqualTo: deleteButton.trailingAnchor, constant: 16),
             reassuranceLabel.centerYAnchor.constraint(equalTo: deleteButton.centerYAnchor),
             reassuranceTrailing,
 

@@ -72,7 +72,12 @@ public final class DeviceDetailViewController: NSViewController {
     // Text is set at declaration (not in `loadView`) so it's correct even
     // before the view hierarchy is lazily loaded — `refreshUI()` mutates the
     // other labels the same way, independent of `loadView` having run.
-    private let hintLabel = NSTextField(labelWithString: DeviceDetailViewController.viewOnlyHint)
+    /// WRAPPING, not truncating: on one line this sentence is wider than the
+    /// form column, so a plain label ended it in an ellipsis — a hint nobody
+    /// can finish reading is not a hint. It still refuses to widen the pane
+    /// (low compression resistance + the wrap width below).
+    private let hintLabel = NSTextField(
+        wrappingLabelWithString: DeviceDetailViewController.viewOnlyHint)
 
     private let statusValueLabel = NSTextField(labelWithString: "")
     private let availableValueLabel = NSTextField(labelWithString: "")
@@ -152,7 +157,8 @@ public final class DeviceDetailViewController: NSViewController {
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
         hintLabel.font = Tokens.Font.caption
         hintLabel.textColor = Tokens.Color.secondaryLabel
-        hintLabel.lineBreakMode = .byTruncatingTail
+        hintLabel.isSelectable = false
+        hintLabel.preferredMaxLayoutWidth = GroupsPaneLayout.contentMaxWidth
         // A pane-level footnote, not a form row: it spans the column's FULL
         // width (see its constraints) and yields before the pane does. At its
         // intrinsic ~310 pt it is wider than the content lane inside the
@@ -228,8 +234,9 @@ public final class DeviceDetailViewController: NSViewController {
             nameLabel.trailingAnchor.constraint(lessThanOrEqualTo: headerWell.trailingAnchor,
                                                 constant: -GroupsPaneLayout.contentTrailingInset),
 
-            stateStack.topAnchor.constraint(equalTo: headerWell.bottomAnchor,
-                                            constant: 14 + GroupedSectionView.verticalPadding),
+            stateStack.topAnchor.constraint(
+                equalTo: headerWell.bottomAnchor,
+                constant: GroupsPaneLayout.sectionGap + GroupedSectionView.verticalPadding),
             stateStack.leadingAnchor.constraint(
                 equalTo: column.leadingAnchor,
                 constant: GroupsPaneLayout.railFreeContentLeadingInset),
@@ -243,8 +250,9 @@ public final class DeviceDetailViewController: NSViewController {
             stateWell.bottomAnchor.constraint(equalTo: stateStack.bottomAnchor,
                                               constant: GroupedSectionView.verticalPadding),
 
-            groupsStack.topAnchor.constraint(equalTo: stateWell.bottomAnchor,
-                                             constant: 14 + GroupedSectionView.verticalPadding),
+            groupsStack.topAnchor.constraint(
+                equalTo: stateWell.bottomAnchor,
+                constant: GroupsPaneLayout.sectionGap + GroupedSectionView.verticalPadding),
             groupsStack.leadingAnchor.constraint(
                 equalTo: column.leadingAnchor,
                 constant: GroupsPaneLayout.railFreeContentLeadingInset),
@@ -258,7 +266,11 @@ public final class DeviceDetailViewController: NSViewController {
             groupsWell.bottomAnchor.constraint(equalTo: groupsStack.bottomAnchor,
                                                constant: GroupedSectionView.verticalPadding),
 
-            hintLabel.topAnchor.constraint(equalTo: groupsWell.bottomAnchor, constant: 16),
+            // The pane's ACTION BAND (this pane's is a footnote, not a button),
+            // one shared gap below the last section — the same break the
+            // editor puts above "Delete Group…".
+            hintLabel.topAnchor.constraint(equalTo: groupsWell.bottomAnchor,
+                                           constant: GroupsPaneLayout.actionBandGap),
             // The full column, NOT the content lane inside the sections: this
             // is a footnote about the pane, so it reads across it (the same way
             // the window's own footer caption spans the whole pane) and gets

@@ -61,8 +61,9 @@ public final class GroupCreationSheetController: NSViewController {
     /// at 220 a 7-row list overflowed by a few points and scrolled for no
     /// visible reason. Recompute this if `MembershipRowView.rowHeight` or the
     /// stack spacing changes: 7 rows + 6 gaps + the document view's 4pt top and
-    /// bottom insets.
-    private static let checklistMaxHeight: CGFloat = 240
+    /// bottom insets — 7×32 + 6×4 + 8 = 256, plus the same ~8pt of slack the
+    /// 28pt-row value carried (`rowHeight` grew to 32 on 2026-08-12).
+    private static let checklistMaxHeight: CGFloat = 264
 
     /// Icon well square size (matches `IconPickerViewController`'s curated
     /// grid cells so the well previews at the same scale as the grid it opens).

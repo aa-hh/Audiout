@@ -48,10 +48,23 @@ lives in the Mixer screen. All group logic goes through the shared
   strip) minus the footer strip (`test_contentPaneChromeHeight`). The
   surface's default height is DERIVED from this budget; grow it there, never
   by letting the editor overflow (`MembershipRailTests`).
+- **The screen's WIDTH is not the surface's to choose either — this pane's
+  numbers set it.** AppKit widens the Groups window to the split view's
+  fitting width, which is the sidebar's thickness + `GroupsPaneLayout
+  .contentMaxWidth` + both column margins; the size
+  `AppSurfaceController.groupsDefaultContentSize` asks for only holds while it
+  matches. That is why the sidebar is PINNED at 210 (min == max: its own
+  fitting width is ≥260, and every point past 210 was being charged to the
+  window, which mounted 707 pt wide against the Mixer's 623) and why the
+  column cap is 385. Raising either widens the whole screen.
 - **Header parity is GEOMETRIC and lives in `GroupsPaneLayout`.** Editor and
   detail pane swap behind one sidebar; every shared number is read from that
   one enum — hand-copied literals once drifted ~22.5pt and made the header
-  jump. `GroupsHeaderParityTests` asserts real laid-out frames. TRAP: some of
+  jump. `GroupsHeaderParityTests` asserts real laid-out frames. The VERTICAL
+  cadence is shared the same way (`sectionGap`, `labelToSectionGap`,
+  `actionBandGap`, `paneBottomInset` — tighter within a group of things than
+  between them); both panes must breathe identically, so a gap that only one
+  of them changes is a bug. TRAP: some of
   those numbers are HALF POINTS (`GroupsPaneLayout.contentLeadingInset` is
   38.5), and auto layout snaps every frame onto a rounding grid whose pitch
   varies BETWEEN RUNS of the same binary — so a 0.5pt failure there is the

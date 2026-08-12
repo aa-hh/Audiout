@@ -2077,10 +2077,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     private func repaintStructuralStateIfChanged() {
         guard structuralStateGate.shouldRepaint(selection: groupController.selectedDeviceIDs,
-                                                groups: groupController.groups) else { return }
+                                                groups: groupController.groups,
+                                                target: groupController.mainOut) else { return }
         popoverController.refreshDeviceMembership()
+        // NEVER with an empty fleet. This hook fires off model changes, which
+        // are not synchronised with device discovery, so `devicesByID` can
+        // still be empty here — and the Groups editor rebuilds its membership
+        // list from exactly the array it is handed, so an empty one blanks the
+        // pane outright (`GroupEditorViewController.rebuildCandidates`). The
+        // fleet arriving is itself a repaint via `repaintFromCurrentState`, so
+        // skipping costs nothing.
+        //
         // Its own hidden-means-idle gate drops this whenever the user is
         // looking at another screen, so this costs a dictionary rebuild there.
+        guard !devicesByID.isEmpty else { return }
         mixerWindowController?.update(devices: Array(devicesByID.values))
     }
 

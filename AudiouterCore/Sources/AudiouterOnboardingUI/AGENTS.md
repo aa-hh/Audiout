@@ -767,20 +767,35 @@ gate/motion/demo/selection rules change.
     display-weight "You're all set." over the payoff line) — it is also the
     model-layer state, so every animation ends there and snapshots stay
     deterministic. The rings' travel is DERIVED, never authored — from the icon
-    centre's real distance to the FARTHEST surface edge, so the wave sweeps the
-    whole stage and deliberately crosses the frame on every side — and NOTHING
-    clips or feathers it on the way out: the finale view has no `masksToBounds`
-    of its own and the preview frame is chromeless for this state, so the wave
-    simply leaves the stage and dies by its own fade. Owner-tested history: an
-    authored end-scale hard-clipped the ripple live; the nearest-edge derivation
-    that replaced it was rejected live as "one little line that goes out"; and a
-    per-edge feather mask added to soften the crossing was itself rejected live
-    (2026-08-12) as visible cropping — the ring's arcs cut and faded well before
-    completing the circle. **Never re-introduce a clip or a mask here.**
+    centre's real distance to the farthest edge of the WHOLE Setup window
+    (`DemoPaneView.finaleRippleBounds`, wired to the window-spanning canvas), so
+    the wave sweeps the entire window and deliberately crosses the stage frame,
+    the hero panel and — faintly, already dissolving — the left spine on every
+    side (owner call 2026-08-12: the hero-panel fill gained ~6 px over the stage;
+    the celebration is the whole window now). NOTHING clips or feathers it on the
+    way out: the finale view has no `masksToBounds` of its own, the preview frame
+    is chromeless for this state, and `RoundedContainerView`/the canvas set no
+    mask either, so the wave simply leaves the stage and dies by its own fade —
+    the reach change needed only re-pointing the bounds, never reparenting the
+    layers. Owner-tested history: an authored end-scale hard-clipped the ripple
+    live; the nearest-edge derivation that replaced it was rejected live as "one
+    little line that goes out"; a per-edge feather mask added to soften the
+    crossing was itself rejected live (2026-08-12) as visible cropping — the
+    ring's arcs cut and faded well before completing the circle; and the
+    hero-panel fill that followed was rejected as barely wider than the stage.
+    The fade still completes before the NEAREST window edge, on every side, so no
+    edge shows a hard stop; the spine sits farther out than that, so the pass
+    over it is a soft glow, not a line. **Never re-introduce a clip or a mask
+    here.**
     The one-shot starts on the crossfade, BEFORE the enclosing layout pass, so
     `playCelebration()` takes the fixed stage size first: a zero-sized layout
     puts both centres at the bottom-left corner and the wave visibly launches
-    off the icon (live bug, 2026-08-12).
+    off the icon (live bug, 2026-08-12). For the same reason the AURA is born
+    HIDDEN (model opacity 0) and revealed to its resting 1 only by the first
+    `layout()` that resolves a real icon centre: its resting opacity is 1, so —
+    unlike the rings, whose model 0 protects them — a paint before layout would
+    bloom it from that same bottom-left corner (live bug, 2026-08-12, caught on
+    the recording after the ring launch was already fixed).
     The aura/rings stamp resolved `gold`/`glow`, so the view observes the
     accent-dial and a11y notifications like the mocks do. On the animated
     transition the shot rides the step crossfade itself (fired as the fade

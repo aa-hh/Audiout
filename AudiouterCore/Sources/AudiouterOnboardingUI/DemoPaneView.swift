@@ -64,13 +64,15 @@ final class DemoPaneView: NSView {
     /// There is no drawn surface under it any more (Direction 04, the
     /// rehearsal-led restructure): the HERO PANE owns the chrome, and this view
     /// is the bare stage inside it. The WIDTH is that pane's interior — 462
-    /// hero pane − 2 × 22 interior padding = 418 — because the FINALE's ripple
-    /// radiates PAST this stage to fill the whole hero PANEL, crossing the stage
-    /// frame on every side with nothing clipping or feathering it (owner calls
+    /// hero pane − 2 × 22 interior padding = 418 — but the FINALE's ripple is no
+    /// longer bounded by this stage OR the hero panel: it radiates across the
+    /// WHOLE Setup window, crossing the stage frame and the hero panel's edges
+    /// on every side with nothing clipping or feathering it (owner calls
     /// 2026-08-11: first "grow the stage, don't shrink the wave" after a live
     /// hard clip, then rejecting the shrunken-travel fix as "one little line";
-    /// owner call 2026-08-12: the wave must not halt at the stage edge, so it now
-    /// fills the panel and fades to nothing BEFORE the panel's nearest edge — see
+    /// owner call 2026-08-12: fill the panel, not the stage; then, the panel
+    /// gaining almost nothing over the stage, radiate across the whole window and
+    /// fade to nothing BEFORE the window's nearest edge — see
     /// `DemoSettledMockView.ringEndScale()` / `rippleFadeFraction`). The HEIGHT
     /// is what the preview FRAME really has
     /// to give on a two-line why line — 278 — rather than the 330 the frame was
@@ -104,10 +106,15 @@ final class DemoPaneView: NSView {
 
     private var occlusionObserver: NSObjectProtocol?
 
-    /// The hero PANEL the finale ripple fills — wired by the view controller so
-    /// the rings fade out before the panel's edges instead of halting at the
-    /// stage boundary. Handed to each settled mock as it is built.
-    weak var heroPanelForFinale: NSView?
+    /// The window-spanning view the finale ripple radiates across — the Setup
+    /// window's whole content, wired by the view controller so the rings sweep
+    /// the entire window and fade out before its nearest edge, rather than
+    /// halting at the hero panel (a whole-window celebration, owner call
+    /// 2026-08-12). Handed to each settled mock as it is built. Nothing between
+    /// the stage and this host clips in the finale state — the chromeless well,
+    /// the (unmasked) hero panel and the canvas all pass the rings through — so
+    /// widening the reach needed only this re-pointing, no reparenting.
+    weak var finaleRippleBounds: NSView?
 
     init() {
         replayButton = NSButton(title: "Replay", target: nil, action: nil)
@@ -234,9 +241,9 @@ final class DemoPaneView: NSView {
         let outgoing = mock
         let incoming = Self.makeMock(step: step, mode: mode, restingSwitchOn: restingSwitchOn)
         mock = incoming
-        // The finale's rings fade out before the hero panel's edges, so the
-        // settled mock needs to know the panel it lives in.
-        (incoming as? DemoSettledMockView)?.rippleBoundsView = heroPanelForFinale
+        // The finale's rings fade out before the whole window's edges, so the
+        // settled mock needs to know the window-spanning host it radiates across.
+        (incoming as? DemoSettledMockView)?.rippleBoundsView = finaleRippleBounds
         incoming.translatesAutoresizingMaskIntoConstraints = false
         Self.installAccessibilityOptOut(incoming)
         mockHost.addSubview(incoming)
@@ -1759,7 +1766,12 @@ final class DemoSettledMockView: NSView {
     // 2026-08-11): the header keeps its welcome subtitle in every state.
     private let line = NSTextField(labelWithString: "Your Mac's sound can reach every room.")
     /// The static warm aura behind the icon — part of the RESTING frame, not
-    /// the celebration: its model opacity is 1, and only its entrance animates.
+    /// the celebration. It is born HIDDEN (model opacity 0) and revealed to its
+    /// resting opacity of 1 by ``layout()``, but ONLY once the icon has a real
+    /// centre: unlike the rings (whose model opacity 0 keeps them safe on their
+    /// own), a visible aura painted before layout resolves the centre blooms
+    /// from the bottom-left origin — the launch bug the recording caught. Only
+    /// its entrance animates from there.
     private let auraLayer = CAGradientLayer()
     /// The ripple rings. Model opacity 0 — they exist only during the shot.
     private let ringLayers: [CAShapeLayer]
@@ -1778,9 +1790,11 @@ final class DemoSettledMockView: NSView {
     private var pendingLaunch = false
 
     /// The view whose edges the RINGS must be fully faded out before they cross
-    /// — the hero PANEL, wired by the pane. It lets the wave fill the panel yet
-    /// never visibly terminate against a boundary. `nil` (a mock built with no
-    /// panel wired — a headless unit test) falls back to the stage-bound travel.
+    /// — the window-spanning host (the Setup window's whole content), wired by
+    /// the pane. It lets the wave sweep the entire window yet never visibly
+    /// terminate against a boundary; the rings pass faintly over the left spine
+    /// on the way out, already dissolving by then. `nil` (a mock built with no
+    /// host wired — a headless unit test) falls back to the stage-bound travel.
     weak var rippleBoundsView: NSView?
 
     init() {
@@ -1831,6 +1845,8 @@ final class DemoSettledMockView: NSView {
         auraLayer.type = .radial
         auraLayer.startPoint = CGPoint(x: 0.5, y: 0.5)
         auraLayer.endPoint = CGPoint(x: 1, y: 1)
+        // Hidden until layout sits it on the icon centre — see the property doc.
+        auraLayer.opacity = 0
         for ring in ringLayers {
             ring.fillColor = nil
             ring.lineWidth = 2
@@ -1897,6 +1913,12 @@ final class DemoSettledMockView: NSView {
         let centre = iconCentre
         auraLayer.bounds = CGRect(x: 0, y: 0, width: Self.auraDiameter, height: Self.auraDiameter)
         auraLayer.position = centre
+        // Commit the aura's resting opacity ONLY now that it sits on a real
+        // centre — actions disabled, so no slide and no un-suppressed fade. Held
+        // at 0 (from `build()`) through every layout that hasn't resolved the
+        // icon yet, so it can never paint at the bottom-left origin; the bloom's
+        // own 0→1 keyframe still owns the animated entrance from here.
+        if hasResolvedIconCentre { auraLayer.opacity = 1 }
         let ringRect = CGRect(x: 0, y: 0, width: Self.ringBaseDiameter, height: Self.ringBaseDiameter)
         for ring in ringLayers {
             ring.bounds = ringRect
@@ -1995,21 +2017,23 @@ final class DemoSettledMockView: NSView {
         addTextLanding(line, delay: 0.48)
     }
 
-    /// How far a ring scales before it dies. It fills the HERO PANEL now, not
-    /// just the 418×278 stage: the leading edge travels to the panel's farthest
+    /// How far a ring scales before it dies. It fills the whole WINDOW now, not
+    /// the 418×278 stage or even the hero panel (which gained almost nothing over
+    /// the stage): the leading edge travels to the window's farthest
     /// icon-centre-to-edge distance (``rippleBoundsView``), so the wave washes
-    /// the whole panel rather than halting at the invisible stage boundary the
-    /// owner saw partway across it. The panel's own rounded clip is never
-    /// reached because the ring is already fully faded before the NEAREST edge
-    /// (``rippleFadeFraction(endScale:)``). Derived per play rather than
-    /// authored, so a resized stage or panel keeps full travel. With no panel
-    /// wired (a headless unit test) it falls back to the old stage-bound cap. At
-    /// scale 1 the stroke's outer edge sits at `ringBaseDiameter / 2` (the path
-    /// is inset 1 pt and half the 2 pt stroke rides back outside it), and the
-    /// whole assembly scales together.
+    /// the entire Setup window rather than halting at the invisible stage
+    /// boundary the owner saw partway across it. Nothing along the way clips —
+    /// the chromeless well, the unmasked hero panel and the canvas all pass the
+    /// ring through — and it is already fully faded before the NEAREST window
+    /// edge (``rippleFadeFraction(endScale:)``), so no side ever shows it hit a
+    /// wall. Derived per play rather than authored, so a resized window keeps
+    /// full travel. With no host wired (a headless unit test) it falls back to
+    /// the old stage-bound cap. At scale 1 the stroke's outer edge sits at
+    /// `ringBaseDiameter / 2` (the path is inset 1 pt and half the 2 pt stroke
+    /// rides back outside it), and the whole assembly scales together.
     private func ringEndScale() -> CGFloat {
         let base = Self.ringBaseDiameter / 2
-        if let radii = panelEdgeRadii() {
+        if let radii = boundsEdgeRadii() {
             return max(radii.farthest / base, 1)
         }
         let centre = ringLayers.first?.position ?? .zero
@@ -2019,27 +2043,29 @@ final class DemoSettledMockView: NSView {
     }
 
     /// The travel FRACTION at which a ring's opacity must already be 0 — the
-    /// point where its radius equals the panel's NEAREST icon-centre-to-edge
+    /// point where its radius equals the window's NEAREST icon-centre-to-edge
     /// distance. The nearest edge governs, so no side ever shows a ring hitting
     /// a wall; the ring keeps expanding (invisibly) past it, out to
-    /// ``ringEndScale()``. `1` (no compression — the old full-length fade) when
-    /// no panel is wired.
+    /// ``ringEndScale()``. Because the window is so much bigger than the panel,
+    /// this fraction now spreads the fade over a far longer travel, which is what
+    /// keeps the pass over the left spine a soft glow rather than a hard line.
+    /// `1` (no compression — the old full-length fade) when no host is wired.
     private func rippleFadeFraction(endScale: CGFloat) -> CGFloat {
         let base = Self.ringBaseDiameter / 2
-        guard let radii = panelEdgeRadii(), endScale > 1 else { return 1 }
+        guard let radii = boundsEdgeRadii(), endScale > 1 else { return 1 }
         let scaleAtNearest = radii.nearest / base
         let fraction = (scaleAtNearest - 1) / (endScale - 1)
         return min(max(fraction, 0.05), 1)
     }
 
-    /// The icon centre's distances to the hero PANEL's four edges, in this
-    /// view's coordinates (`rippleBoundsView` converted into `self`). `nil` when
-    /// no panel is wired. Distances are clamped at 0 so a centre that momentarily
-    /// resolves outside the panel can't produce a negative radius.
-    private func panelEdgeRadii() -> (nearest: CGFloat, farthest: CGFloat)? {
-        guard let panel = rippleBoundsView else { return nil }
+    /// The icon centre's distances to the window-spanning host's four edges, in
+    /// this view's coordinates (`rippleBoundsView` converted into `self`). `nil`
+    /// when no host is wired. Distances are clamped at 0 so a centre that
+    /// momentarily resolves outside the host can't produce a negative radius.
+    private func boundsEdgeRadii() -> (nearest: CGFloat, farthest: CGFloat)? {
+        guard let host = rippleBoundsView else { return nil }
         let centre = iconCentre
-        let rect = convert(panel.bounds, from: panel)
+        let rect = convert(host.bounds, from: host)
         let edges = [centre.x - rect.minX, rect.maxX - centre.x,
                      centre.y - rect.minY, rect.maxY - centre.y].map { max($0, 0) }
         guard let nearest = edges.min(), let farthest = edges.max(), farthest > 0 else { return nil }
@@ -2048,10 +2074,10 @@ final class DemoSettledMockView: NSView {
 
     /// One ring's flight: scale out to death while the stroke swells and fades.
     /// The fade completes at `fadeFraction` of the travel — the moment the ring
-    /// reaches the panel's nearest edge — then holds 0 while the ring keeps
-    /// expanding to fill the panel, so a wave dissipates in open air and never
+    /// reaches the window's nearest edge — then holds 0 while the ring keeps
+    /// expanding to fill the window, so a wave dissipates in open air and never
     /// visibly terminates against a boundary. `fadeFraction == 1` restores the
-    /// old full-length fade (the no-panel fallback), byte for byte.
+    /// old full-length fade (the no-host fallback), byte for byte.
     private func addRipple(to ring: CAShapeLayer, delay: TimeInterval,
                            endScale: CGFloat, fadeFraction: CGFloat) {
         let scale = CABasicAnimation(keyPath: "transform.scale")
@@ -2113,22 +2139,27 @@ final class DemoSettledMockView: NSView {
     /// the bottom-left origin the first synchronous play used to bloom from.
     var test_iconCentre: CGPoint { iconCentre }
     var test_auraPosition: CGPoint { auraLayer.position }
+    /// The aura's MODEL opacity: 0 until layout has committed it onto the icon
+    /// centre, 1 afterwards. The transient corner-bloom the recording caught is
+    /// a pre-layout paint no headless frame can see, so this is what pins the
+    /// fix — the aura is never visible (opacity > 0) at the origin.
+    var test_auraOpacity: Float { auraLayer.opacity }
 
-    /// The nearest / farthest icon-centre-to-hero-panel-edge distances the
-    /// ripple is tuned against — `nil` with no panel wired. Exposed so a test
-    /// computes them from the same real geometry the launch does.
-    var test_nearestPanelEdgeRadius: CGFloat? { panelEdgeRadii()?.nearest }
-    var test_farthestPanelEdgeRadius: CGFloat? { panelEdgeRadii()?.farthest }
+    /// The nearest / farthest icon-centre-to-window-edge distances the ripple is
+    /// tuned against — `nil` with no host wired. Exposed so a test computes them
+    /// from the same real geometry the launch does.
+    var test_nearestEdgeRadius: CGFloat? { boundsEdgeRadii()?.nearest }
+    var test_farthestEdgeRadius: CGFloat? { boundsEdgeRadii()?.farthest }
 
     /// The ripple's maximum radius (fill reach), to prove the rings now travel
-    /// PAST the 418×278 stage into the panel.
+    /// PAST the 418×278 stage and the hero panel, out across the whole window.
     var test_rippleEndRadius: CGFloat? {
         ringEndScale(from: ringLayers.first).map { (Self.ringBaseDiameter / 2) * $0 }
     }
 
     /// The radius (icon-centre distance, this view's coordinates) at which each
     /// launched ripple's opacity first reaches 0. Each must be ≤ the nearest
-    /// hero-panel edge so no ring is ever seen hitting a wall.
+    /// window edge so no ring is ever seen hitting a wall.
     var test_rippleFadeOutRadii: [CGFloat] {
         let base = Self.ringBaseDiameter / 2
         return ringLayers.compactMap { ring -> CGFloat? in

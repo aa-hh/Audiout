@@ -1533,42 +1533,82 @@ import Testing
         #expect(settled.test_auraPosition != .zero, "never the bottom-left origin")
     }
 
-    /// The finale rings fill the hero PANEL but every ring is fully faded (opacity
-    /// 0) by the panel's NEAREST edge, so no side ever shows a ring hitting a
-    /// wall — and they now travel PAST the 418×278 stage to do it.
-    @Test func theFinaleRingsFadeOutBeforeTheNearestPanelEdge() {
-        // A host standing in for the hero panel, larger than the stage on every
-        // side so nearest ≠ farthest and the stage cap would clip if kept.
-        let panel = NSView(frame: NSRect(x: 0, y: 0, width: 462, height: 508))
+    /// The AURA never paints at the bottom-left origin. Its resting opacity is 1
+    /// (the rings' model 0 keeps THEM safe on their own), so before layout
+    /// resolves the icon centre it is held fully transparent, then revealed only
+    /// once it sits on that centre — the specific corner-bloom regression the
+    /// finale recording caught. (The transient paint itself is invisible to a
+    /// headless frame; the model opacity gate is what a test can pin.)
+    @Test func theFinaleAuraStaysHiddenUntilItSitsOnTheIconCentre() {
+        let host = NSView()
         let settled = DemoSettledMockView()
-        settled.rippleBoundsView = panel
         settled.translatesAutoresizingMaskIntoConstraints = false
-        panel.addSubview(settled)
+        host.addSubview(settled)
         NSLayoutConstraint.activate([
-            settled.centerXAnchor.constraint(equalTo: panel.centerXAnchor),
-            settled.centerYAnchor.constraint(equalTo: panel.centerYAnchor),
+            settled.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            settled.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            settled.topAnchor.constraint(equalTo: host.topAnchor),
+            settled.bottomAnchor.constraint(equalTo: host.bottomAnchor),
         ])
-        panel.layoutSubtreeIfNeeded()
-        settled.playCelebration()
-        panel.layoutSubtreeIfNeeded()   // fire the deferred launch
 
-        guard let nearest = settled.test_nearestPanelEdgeRadius,
-              let farthest = settled.test_farthestPanelEdgeRadius,
+        #expect(settled.test_auraOpacity == 0, "born hidden — no corner bloom possible")
+        settled.playCelebration()   // before layout — the real crossfade order
+        #expect(settled.test_auraOpacity == 0,
+                "still hidden: the centre isn't resolved, so it must not paint")
+
+        host.setFrameSize(DemoSettledMockView.size)
+        host.layoutSubtreeIfNeeded()
+        settled.needsLayout = true
+        settled.layoutSubtreeIfNeeded()
+
+        #expect(settled.test_auraPosition == settled.test_iconCentre,
+                "revealed ON the icon centre")
+        #expect(settled.test_auraPosition != .zero, "never the bottom-left origin")
+        #expect(settled.test_auraOpacity == 1, "and only once it has that centre")
+    }
+
+    /// The finale rings sweep the WHOLE window now — far past the hero panel that
+    /// gained almost nothing over the stage — yet every ring is fully faded
+    /// (opacity 0) by the window's NEAREST edge, so no side ever shows a ring
+    /// hitting a wall.
+    @Test func theFinaleRingsFadeOutBeforeTheNearestWindowEdge() {
+        // A host standing in for the whole 820×560 Setup window, with the stage
+        // where the hero really puts it: 354 pt in from the leading edge (26
+        // margin + 288 spine + 18 gap + 22 hero padding), so the icon centre
+        // sits well right-of-centre and the left edge (across the spine) is the
+        // farthest — nearest ≠ farthest, and the old panel cap would fall short.
+        let window = NSView(frame: NSRect(x: 0, y: 0, width: 820, height: 560))
+        let settled = DemoSettledMockView()
+        settled.rippleBoundsView = window
+        settled.translatesAutoresizingMaskIntoConstraints = false
+        window.addSubview(settled)
+        NSLayoutConstraint.activate([
+            settled.leadingAnchor.constraint(equalTo: window.leadingAnchor, constant: 354),
+            settled.centerYAnchor.constraint(equalTo: window.centerYAnchor),
+        ])
+        window.layoutSubtreeIfNeeded()
+        settled.playCelebration()
+        window.layoutSubtreeIfNeeded()   // fire the deferred launch
+
+        guard let nearest = settled.test_nearestEdgeRadius,
+              let farthest = settled.test_farthestEdgeRadius,
               let endRadius = settled.test_rippleEndRadius else {
-            Issue.record("the ripple did not launch against the panel geometry")
+            Issue.record("the ripple did not launch against the window geometry")
             return
         }
 
-        // The stage's farthest icon-centre-to-edge distance is 209 (a 418×278
-        // stage centred on its own middle). The rings must now reach past it.
-        #expect(endRadius > 209, "the rings radiate past the 418×278 stage")
-        #expect(endRadius >= farthest - 0.5, "and out to the panel's farthest edge")
+        // The icon sits right-of-centre, so the leading edge is > half the 820
+        // window away — the reach now spans the window, not the ~231 pt half of
+        // the hero panel it barely cleared before.
+        #expect(farthest > 410, "the ripple reaches across the window's midline")
+        #expect(endRadius > 209, "and far past the 418×278 stage")
+        #expect(endRadius >= farthest - 0.5, "out to the window's farthest edge")
 
         let fadeRadii = settled.test_rippleFadeOutRadii
         #expect(fadeRadii.count == 3, "every staggered ring carries a ripple")
         for radius in fadeRadii {
             #expect(radius <= nearest + 0.5,
-                    "opacity is 0 by the nearest panel edge (\(radius) vs \(nearest))")
+                    "opacity is 0 by the nearest window edge (\(radius) vs \(nearest))")
         }
     }
 

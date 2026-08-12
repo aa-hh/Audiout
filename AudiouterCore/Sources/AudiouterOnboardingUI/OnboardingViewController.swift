@@ -211,6 +211,12 @@ public final class OnboardingViewController: NSViewController {
         let hero = makeHeroPane()
         background.addSubview(spine)
         background.addSubview(hero)
+        // The finale ripple radiates across the WHOLE window (owner call
+        // 2026-08-12), not just the hero panel — so it fades before the window's
+        // nearest edge, and passes faintly over the spine on the way out.
+        // Nothing in the chromeless finale hierarchy clips, so the rings reach
+        // here from where they live in the stage; this only supplies the bounds.
+        demoPane.finaleRippleBounds = background
 
         let margin = Self.paneMargin
         NSLayoutConstraint.activate([
@@ -301,8 +307,6 @@ public final class OnboardingViewController: NSViewController {
         pane.addSubview(previewFrame)
         pane.addSubview(ribbon)
         previewFrame.body.addSubview(demoPane)
-        // The finale ripple fills this panel and fades before its edges.
-        demoPane.heroPanelForFinale = pane
 
         let padding = Self.heroPadding
         NSLayoutConstraint.activate([

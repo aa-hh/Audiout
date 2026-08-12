@@ -194,6 +194,12 @@ enum DriftMonitor {
     struct DriftReadout {
         let lines: [String]
         let baselinePoisoned: Bool
+        /// True only when `lines` carries an actual ppm comparison. Every other
+        /// return here also produces lines -- warm-up notices, "not enough data
+        /// yet", restart notices -- so a caller counting non-empty `lines` as a
+        /// successful reading would over-report. Callers that summarise whether
+        /// drift was ever measured must read THIS, not `lines`.
+        let measured: Bool
     }
 
     /// How far off its OWN nominal a device's measured rate must be before we
@@ -207,7 +213,7 @@ enum DriftMonitor {
         current: [DriftSample]
     ) -> DriftReadout {
         guard baseline.count == current.count, current.count >= 2 else {
-            return DriftReadout(lines: [], baselinePoisoned: false)
+            return DriftReadout(lines: [], baselinePoisoned: false, measured: false)
         }
 
         struct DeviceOffset {
@@ -224,7 +230,7 @@ enum DriftMonitor {
             if c.mSampleTime < b.mSampleTime {
                 return DriftReadout(
                     lines: ["drift: \(current[i].deviceName)'s clock restarted (IO reset) -- starting a fresh \(Int(minWindowSeconds))s window"],
-                    baselinePoisoned: true)
+                    baselinePoisoned: true, measured: false)
             }
             guard c.hostTimeNanos > b.hostTimeNanos else { continue } // stale/degenerate read
             let dtNanos = c.hostTimeNanos - b.hostTimeNanos
@@ -239,7 +245,7 @@ enum DriftMonitor {
             if abs(ppm) > discontinuityPpm {
                 return DriftReadout(
                     lines: [String(format: "drift: %@ read %.0f ppm off its own clock -- a device restarted mid-window; restarting the %.0fs window", current[i].deviceName, ppm, minWindowSeconds)],
-                    baselinePoisoned: true)
+                    baselinePoisoned: true, measured: false)
             }
             offsets.append(DeviceOffset(name: current[i].deviceName, ppmVsOwnNominal: ppm))
         }
@@ -247,7 +253,7 @@ enum DriftMonitor {
         guard offsets.count >= 2 else {
             return DriftReadout(
                 lines: ["drift: not enough data yet (need >=2 devices with a >= \(Int(minWindowSeconds))s window of valid DAC-clock reads)"],
-                baselinePoisoned: false)
+                baselinePoisoned: false, measured: false)
         }
 
         let reference = offsets[0]
@@ -273,7 +279,7 @@ enum DriftMonitor {
                 o.name, reference.name, ppm, msPerMinute, beatHz, swellDescription
             ))
         }
-        return DriftReadout(lines: lines, baselinePoisoned: false)
+        return DriftReadout(lines: lines, baselinePoisoned: false, measured: true)
     }
 }
 

@@ -13,10 +13,23 @@ import Foundation
 /// interval. A device whose frames or sample-time stop advancing between two
 /// samples is a stall — the dropout signal. Ends with a per-device summary.
 
+/// Interrupt flag, written from a signal handler and polled by the run loop.
+///
+/// Swift has no strictly async-signal-safe global: this is still lazily
+/// initialised through an accessor, and `nonisolated(unsafe)` only silences the
+/// concurrency check -- it changes no codegen. Safety here rests on two things
+/// the code actually does: the type is single-word so the write cannot tear,
+/// and `run()` touches the flag on the main thread BEFORE installing the
+/// handlers, so initialisation can never happen inside one.
+private nonisolated(unsafe) var gSoakInterrupted: sig_atomic_t = 0
+
 enum SoakProbe {
 
     private static let defaultMinutes = 45
-    private static let defaultIntervalSeconds = 60.0
+    /// Every health signal here is cumulative across one interval, so a
+    /// dropout shorter than the interval that self-recovers leaves no trace.
+    /// The interval IS the blind window — keep it short.
+    private static let defaultIntervalSeconds = 10.0
     /// The first minutes after connect are the documented warm-up: clock jumps
     /// are expected and their ppm is meaningless. Drift is measured from a
     /// baseline captured AFTER this, so the reported figure is settled drift.
@@ -30,10 +43,6 @@ enum SoakProbe {
         var stalls = 0
         var silentSamples = 0
     }
-
-    /// Set from the SIGINT handler so a Ctrl-C ends the run at the next sample
-    /// instead of killing the process before the summary prints.
-    private static var interrupted = false
 
     static func run(_ rawArgs: [String]) -> Int32 {
         var minutes = defaultMinutes
@@ -72,7 +81,7 @@ enum SoakProbe {
         }
 
         let log = SoakLog(path: logPath)
-        log.write("soak: \(devices.count) device(s), \(minutes) min, sampling every \(Int(interval))s")
+        log.write(String(format: "soak: %d device(s), %d min, sampling every %.1fs", devices.count, minutes, interval))
         for d in devices { log.write("  - \(d.name)  uid=\(d.uid)") }
 
         // Start every device, then phase-align them on one shared instant so the
@@ -94,17 +103,31 @@ enum SoakProbe {
         let sharedStart = AVAudioTime(hostTime: mach_absolute_time() &+ AVAudioTime.hostTime(forSeconds: 0.3))
         for r in runs { r.engine.restartLoop(at: sharedStart) }
 
-        signal(SIGINT) { _ in SoakProbe.interrupted = true }
-        signal(SIGTERM) { _ in SoakProbe.interrupted = true }
+        // Force initialisation on this thread first: a signal arriving before
+        // the flag's first main-thread touch would otherwise run the lazy-init
+        // accessor inside the handler, which is not async-signal-safe.
+        gSoakInterrupted = 0
+        signal(SIGINT) { _ in gSoakInterrupted = 1 }
+        signal(SIGTERM) { _ in gSoakInterrupted = 1 }
 
         let startedAt = Date()
         let deadline = startedAt.addingTimeInterval(Double(minutes) * 60)
         var driftBaseline: [DriftSample] = []
         var baselineAt = Date()
+        var ioRestarts = 0
+        var driftReadings = 0
 
-        while Date() < deadline, !interrupted {
-            Thread.sleep(forTimeInterval: interval)
-            if interrupted { break }
+        while Date() < deadline, gSoakInterrupted == 0 {
+            // Sliced so an interrupt lands within a second rather than waiting
+            // out a whole interval — an operator who has to reach for kill -9
+            // loses the summary this run exists to produce.
+            let wakeAt = Date().addingTimeInterval(interval)
+            while gSoakInterrupted == 0 {
+                let remaining = wakeAt.timeIntervalSinceNow
+                if remaining <= 0 { break }
+                Thread.sleep(forTimeInterval: min(1, remaining))
+            }
+            if gSoakInterrupted != 0 { break }
             let elapsed = Date().timeIntervalSince(startedAt)
 
             var line = String(format: "[%5.1f min]", elapsed / 60)
@@ -145,27 +168,62 @@ enum SoakProbe {
             let readout = DriftMonitor.relativeDrift(baseline: driftBaseline, current: current)
             for l in readout.lines { log.write("  " + l) }
             if readout.baselinePoisoned {
-                // A device's IO restarted and reset its DAC clock — which is
-                // itself a dropout, and it invalidates the fixed baseline.
-                log.write(String(format: "  drift: baseline dropped after %.1f min — a device's IO restarted mid-window",
+                // A device's IO restarted and reset its DAC clock. That is a
+                // dropout in its own right, and the stall check cannot see it:
+                // the engine's frame counter accumulates across the restart, so
+                // it keeps advancing and never trips.
+                ioRestarts += 1
+                log.write(String(format: "  drift: baseline dropped after %.1f min — a device's IO restarted mid-window (counts as a dropout)",
                                  Date().timeIntervalSince(baselineAt) / 60))
                 driftBaseline = []
+            } else if readout.measured {
+                driftReadings += 1
             }
         }
 
-        log.write(interrupted ? "soak: interrupted — stopping" : "soak: duration reached — stopping")
+        let wasInterrupted = gSoakInterrupted != 0
+        log.write(wasInterrupted ? "soak: interrupted — stopping" : "soak: duration reached — stopping")
         for r in runs { r.engine.stop() }
 
         let ranMinutes = Date().timeIntervalSince(startedAt) / 60
-        log.write(String(format: "soak SUMMARY after %.1f min, %d device(s):", ranMinutes, runs.count))
+        log.write(String(format: "soak SUMMARY after %.1f of %d min, %d device(s):", ranMinutes, minutes, runs.count))
         var clean = true
         for r in runs {
             log.write("  \(r.device.name): \(r.stalls) stall sample(s), \(r.silentSamples) silent sample(s)")
             if r.stalls > 0 || r.silentSamples > 0 { clean = false }
         }
-        log.write(clean
-            ? "  VERDICT: no stalls or silence — this device count held for the whole run."
-            : "  VERDICT: stalls/silence present — this device count is above the reliable ceiling.")
+        if ioRestarts > 0 {
+            log.write("  \(ioRestarts) sample(s) in which a device's IO restarted — each is a dropout")
+            clean = false
+        }
+        if !clean {
+            log.write("  VERDICT: dropouts present — this device count is above the reliable ceiling.")
+        } else if wasInterrupted {
+            log.write(String(format: "  VERDICT: no dropouts seen, but the run was cut short at %.1f of %d min — not a clean bill of health for the full duration.", ranMinutes, minutes))
+        } else {
+            log.write("  VERDICT: no stalls, silence or IO restarts — this device count held for the whole run.")
+        }
+
+        // Whatever the verdict says, it is bounded by what this tool can see.
+        // Stating the bounds beside the result is the difference between
+        // evidence and a number someone over-reads later.
+        log.write("  scope of that verdict:")
+        log.write(String(format: "    - blind to any dropout shorter than the %.1fs sampling interval that recovers on its own", interval))
+        log.write("    - level is the MEAN over each interval, so partial silence inside one is invisible at any interval length — only a fully dead interval trips SILENT")
+        log.write("    - level is read at the mixer, upstream of the speaker: a connected-but-silent device (e.g. a headset flipped to call mode) reads as healthy here")
+        log.write(String(format: "    - the IO-restart check rides on the drift baseline, so it is OFF for the first %.0fs of any run%@",
+                         warmUpSeconds, runs.count < 2 ? " and for this single-device run entirely" : ""))
+        if wasInterrupted {
+            log.write(String(format: "    - INTERRUPTED at %.1f min of %d — not the full run", ranMinutes, minutes))
+        }
+        if runs.count < 2 {
+            log.write("    - drift not measured: needs 2+ devices")
+        } else if driftReadings == 0 {
+            log.write(String(format: "    - drift never measured: needs %.0fs warm-up plus a %.0fs window of valid clock reads",
+                             warmUpSeconds, DriftMonitor.minWindowSeconds))
+        } else {
+            log.write("    - drift on Bluetooth reads the host pacing clock, not each speaker's converter — treat it as unverified")
+        }
         if let p = log.path { log.write("  log written to \(p)") }
         log.close()
         return 0

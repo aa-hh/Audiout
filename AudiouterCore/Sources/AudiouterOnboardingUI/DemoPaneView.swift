@@ -71,10 +71,12 @@ final class DemoPaneView: NSView {
     /// stage, don't shrink the wave" after a live hard clip, then rejecting the
     /// shrunken-travel fix as "one little line" — see `DemoSettledMockView`,
     /// whose `size` tracks this constant, so the travel derivation follows a
-    /// bigger stage for free). The HEIGHT leaves the ribbon its room beneath.
-    /// Every mock is smaller than the stage and centred on it, so the slack is
-    /// simply margin for them, and Replay still fits below at +14.
-    static let surfaceSize = NSSize(width: 418, height: 330)
+    /// bigger stage for free). The HEIGHT is what the preview FRAME really has
+    /// to give on a two-line why line — 278 — rather than the 330 the frame was
+    /// silently cropping 50 pt off. Every mock is smaller than the stage and
+    /// centred on it, so the slack is simply margin for them, and Replay still
+    /// fits below at +14.
+    static let surfaceSize = NSSize(width: 418, height: 278)
 
     /// The step-to-step content crossfade.
     static let stepCrossfadeDuration: TimeInterval = 0.22
@@ -623,26 +625,43 @@ enum DemoSystemColor {
     /// the pane and defines it by its border alone; at mock scale that vanishes,
     /// so this is lifted ~2.5 % — a readability adjustment, not a measurement.
     static let card = dynamic(light: 0xFAFAFA, dark: 0x333336)
-    /// A dialog button — BOTH of them: macOS 26's permission dialog has no
-    /// accent-filled default. `controlColor` is white-ish in light mode, which
-    /// is the SHEET's Cancel button, not a dialog's grey one.
-    static let plainButton = dynamic(light: 0xD7D7D7, dark: 0x5A5A5E)
+    /// A WRONG button — the one the rehearsal is telling the user not to press.
+    /// It is drawn as a ghost (see ``DemoPushButtonView``), so this is only its
+    /// hairline; the fill is clear.
+    static let ghostButtonRim = dynamic(light: 0xC4C4C4, dark: 0x5A5A5E)
+    /// The CORRECT button's fill — the same grey family a step brighter, so the
+    /// button the pointer is going to press is the lit one in the row without
+    /// borrowing an accent the real dialog doesn't have.
+    static let markedButton = dynamic(light: 0xE4E2DC, dark: 0x6E6E74)
+    /// The thin ring around that fill, one further step again.
+    static let markedButtonRim = dynamic(light: 0xA8A6A0, dark: 0x8E8E96)
 
-    /// The privacy padlock's gold, top and bottom of its gradient. The same in
-    /// both appearances — macOS draws this icon as artwork, not as a tinted
-    /// glyph, so it does not re-resolve with the theme. Matched by eye to the
-    /// real Accessibility Access alert.
-    static let lockGoldTop = solid(0xF9D45C)
-    static let lockGoldBottom = solid(0xD79A24)
+    /// The privacy padlock's gradient, top and bottom. Warm GREY, not the real
+    /// icon's gold: gold is spent entirely on the one button the step wants
+    /// pressed, and a gold padlock inside the rehearsal competed with it (owner
+    /// decision 2026-08-12). The gradient itself stays — the real icon is
+    /// artwork with some dimension in it, and a flat symbol at this size reads
+    /// as a toolbar glyph.
+    static let lockTop = solid(0xD8D6D0)
+    static let lockBottom = solid(0x9C9A94)
 
     static let trafficRed = solid(0xFF5F57)
     static let trafficYellow = solid(0xFEBC2E)
     static let trafficGreen = solid(0x28C840)
 
-    /// The mock's accent. **Never `controlAccentColor`:** that follows the user's
-    /// Appearance setting, so on a Mac set to pink this "system" dialog would come
-    /// out pink — the exact opposite of a generic macOS read.
-    static var accent: NSColor { .systemBlue }
+    /// The mock's accent — a DESATURATED slate, not `systemBlue`, and never
+    /// `controlAccentColor` (which follows the user's Appearance setting, so on
+    /// a Mac set to pink this "system" surface would come out pink). The
+    /// rehearsal is an abstraction of the real dialog, not a copy of it, and a
+    /// saturated blue inside it pulled the eye off the gold button the step
+    /// actually wants pressed (owner decision 2026-08-12). It still carries the
+    /// blue FAMILY, so the badge and the switch stay recognisable as what they
+    /// are.
+    static let accent = dynamic(light: 0x8A97A6, dark: 0x6C7684)
+
+    /// The recording mark's tile, desaturated with the rest of the mock for the
+    /// same reason.
+    static let recordTile = dynamic(light: 0xB08A88, dark: 0x8C6664)
 
     private static func dynamic(light: Int, dark: Int) -> NSColor {
         NSColor(name: nil) { appearance in
@@ -693,20 +712,30 @@ enum DemoHandoffBeat {
 
 // MARK: - Shared text parts
 
-/// A wrapping, LEFT-aligned block of dialog text. Every mock's title and body
-/// are real sentences at real sizes — the recognisability of these miniatures is
-/// the whole reason they exist, so nothing a user reads is greeked or clipped.
-func demoParagraph(_ text: String, font: NSFont, color: NSColor,
-                   width: CGFloat) -> NSTextField {
-    let field = NSTextField(labelWithString: text)
-    field.font = font
-    field.textColor = color
-    field.alignment = .left
-    field.maximumNumberOfLines = 0
-    field.lineBreakMode = .byWordWrapping
-    field.preferredMaxLayoutWidth = width
-    field.translatesAutoresizingMaskIntoConstraints = false
-    return field
+/// A block of GIST bars where a paragraph of dialog copy would be — a ragged
+/// stack of rounded bars, last line short, like the Settings mock's greeked
+/// labels.
+///
+/// **A mock's prose is abstracted, never verbatim** (owner decision 2026-08-12;
+/// this folder's AGENTS.md carries the full rationale, including the verbatim
+/// Info.plist purpose strings this REPLACES). What makes the surface
+/// recognisable is its anatomy — the icon, a title band, two buttons with their
+/// real labels — and two dense paragraphs of small type inside the rehearsal
+/// only sent the eye reading the words instead of the shape. The sentences are
+/// "close enough" as bars, exactly as the Settings mock's rows already were.
+///
+/// `widths` is the ragged run, longest first is NOT required — write the shape
+/// you want. Everything is leading-aligned, because the real copy is.
+func demoGistBlock(widths: [CGFloat], height: CGFloat, spacing: CGFloat,
+                   fill: NSColor = .tertiaryLabelColor) -> NSStackView {
+    let stack = NSStackView(views: widths.map {
+        DemoGreekBarView(width: $0, height: height, fill: fill)
+    })
+    stack.orientation = .vertical
+    stack.alignment = .leading
+    stack.spacing = spacing
+    stack.translatesAutoresizingMaskIntoConstraints = false
+    return stack
 }
 
 /// A tinted SF Symbol sized in points — a badge's glyph, a Help button's
@@ -744,28 +773,28 @@ func demoIconAsAThirdPartyProcessSeesIt() -> NSImage {
 /// its granted state.
 ///
 /// **The anatomy is the point.** A dialog the user doesn't recognise is worth
-/// nothing, and every part below is one the real one is identified by. A tall
+/// nothing, and every part below is one the real one is identified by. A
 /// portrait card, everything LEFT-aligned under an icon row:
 ///
-/// 1. an icon tile — the app's own for a content-capture grant, a blue system
-///    tile for a capability grant (see ``iconView(for:)``) — with the blue
+/// 1. an icon tile — the app's own for a content-capture grant, a system tile
+///    for a capability grant (see ``iconView(for:)``) — with the
 ///    `hand.raised.fill` badge overlapping its bottom-trailing corner, the
 ///    marker that says *privacy prompt*;
 /// 2. a small grey Help button in the opposite corner;
-/// 3. the bold title, wrapping over two or three lines;
-/// 4. the app's own Info.plist purpose string as the body, in
-///    `secondaryLabelColor`;
-/// 5. two EQUAL, NEUTRAL capsules filling the width — there is no accent-filled
-///    default button in this dialog any more.
+/// 3. a heavier two-bar title band;
+/// 4. a lighter gist block where the purpose string goes;
+/// 5. two EQUAL capsules filling the width, carrying their REAL labels — the
+///    confirming one MARKED (brighter fill, thin ring), "Don't Allow" ghosted.
 ///
-/// Drawn at 0.95 of the real 283 × 340 pt card — near life size, which the
-/// bigger stage of the rehearsal-led layout (Direction 04) has the room for:
-/// the dialog is the hero of this window now, not an inset illustration beside
-/// the copy. Nothing is greeked — the purpose string is the sentence the user
-/// will actually read, so it is the one thing the mock cannot fake.
+/// The copy is abstracted and the colour is desaturated (owner decision
+/// 2026-08-12) — see ``demoGistBlock(widths:height:spacing:fill:)`` and
+/// ``DemoSystemColor/accent`` for why. What that buys is the CARD: with the two
+/// paragraphs gone it fits the preview frame's real 278 pt at 240 tall, where
+/// the near-life-size drawing was being cropped by ~50 pt at the bottom — the
+/// buttons the rehearsal exists to point at were the part going off the edge.
 final class DemoPromptMockView: DemoMockView {
 
-    static let size = NSSize(width: 269, height: 323)
+    static let size = NSSize(width: 269, height: 240)
     /// Content inset on all four sides.
     private static let inset: CGFloat = 17
     private static let iconSide: CGFloat = 60
@@ -806,21 +835,22 @@ final class DemoPromptMockView: DemoMockView {
         let helpGlyph = demoGlyph("questionmark", pointSize: 9,
                                   weight: .semibold, color: .secondaryLabelColor)
 
-        // The real dialog's 15 pt title, taken down by this mock's scale and
-        // rounded UP rather than down — these two blocks are the only things in
-        // here the user actually reads, and the 9 pt floor is a floor, not a
-        // target.
-        let title = demoParagraph(Self.askText(for: step),
-                                  font: .boldSystemFont(ofSize: 14),
-                                  color: .labelColor, width: Self.contentWidth)
-        let body = demoParagraph(Self.bodyText(for: step),
-                                 font: .systemFont(ofSize: 11),
-                                 color: .secondaryLabelColor, width: Self.contentWidth)
+        // Where the real dialog's title and purpose string were. Two tiers, so
+        // the band still reads as a bold heading over lighter body: the title's
+        // bars are taller, darker and nearly full width; the body's are thinner
+        // and ragged.
+        let title = demoGistBlock(widths: [Self.contentWidth, Self.contentWidth * 0.58],
+                                  height: 6, spacing: 8, fill: .secondaryLabelColor)
+        let body = demoGistBlock(widths: [Self.contentWidth, Self.contentWidth,
+                                          Self.contentWidth, Self.contentWidth * 0.46],
+                                 height: 4, spacing: 7)
 
-        // Two EQUAL neutral capsules filling the content width: refusal on the
-        // left, the confirming one on the right.
+        // Two EQUAL capsules filling the content width: the refusal on the left,
+        // ghosted, and the confirming one on the right, MARKED — the whole
+        // reason the rehearsal is on screen is to say which of the two to press.
         let deny = DemoPushButtonView(title: "Don't Allow")
-        confirmButton = DemoPushButtonView(title: Self.confirmTitle(for: step))
+        confirmButton = DemoPushButtonView(title: Self.confirmTitle(for: step),
+                                           emphasis: .correct)
         let buttons = NSStackView(views: [deny, confirmButton])
         buttons.orientation = .horizontal
         buttons.spacing = 8
@@ -841,10 +871,9 @@ final class DemoPromptMockView: DemoMockView {
         check.contentTintColor = .systemGreen
         check.translatesAutoresizingMaskIntoConstraints = false
 
-        let capability = NSTextField(labelWithString: Self.grantedText(for: step))
-        capability.font = .systemFont(ofSize: 13, weight: .medium)
-        capability.textColor = .labelColor
-        capability.alignment = .center
+        // The checkmark already says "granted"; the line under it is a gist bar
+        // like every other line inside a mock.
+        let capability = DemoGreekBarView(width: 116, height: 5, fill: .secondaryLabelColor)
 
         grantedStack.orientation = .vertical
         grantedStack.alignment = .centerX
@@ -940,7 +969,7 @@ final class DemoPromptMockView: DemoMockView {
         // The live-confirmed red record tile: macOS leads its system-audio ask
         // with the recording mark, not with the asking app.
         case .audio:
-            return systemTile(fill: .systemRed) {
+            return systemTile(fill: DemoSystemColor.recordTile) {
                 demoGlyph("record.circle", pointSize: iconSide * 0.55,
                           weight: .regular, color: .white)
             }
@@ -1047,75 +1076,12 @@ final class DemoPromptMockView: DemoMockView {
 
     // MARK: Copy
 
-    /// The dialog's TITLE, per step — quoted app name, sentence case, full stop.
-    /// It wraps on its own now that the layout is left-aligned; a hard line
-    /// break would fight the wrap at any other text size.
-    static func askText(for step: SetupStep) -> String {
-        switch step {
-        // Verbatim, because macOS composes this one from the permission itself
-        // and the owner checked it against the real dialog.
-        case .audio:         return "“Audiouter” would like access to record your system audio."
-        // Local Network is the odd one out: macOS phrases it as a QUESTION
-        // opening on "Allow", not the "would like to…" pattern. Verbatim from
-        // the real dialog.
-        case .localNetwork:  return "Allow “Audiouter” to find devices on local networks?"
-        case .bluetooth:     return "“Audiouter” would like to use Bluetooth."
-        // Neither of these reaches this mock: Remote Control raises the system
-        // ALERT (``DemoSystemAlertMockView``), which words its own ask, and
-        // Speaker Sync has no prompt at all. Kept so the table stays exhaustive
-        // and readable.
-        case .remoteControl: return "“Audiouter” would like to control this Mac."
-        case .speakerSync:   return "“Audiouter” would like to run in the background."
-        }
-    }
-
-    /// The dialog's BODY: the app's own purpose string, which is exactly what
-    /// macOS puts in the dialog — not a paraphrase. The first three are
-    /// word-for-word the `*_USAGE` strings `scripts/make-app.sh` stamps into the
-    /// bundle's Info.plist; change one there and change it here, because this
-    /// sentence is what the user reads before deciding. The last two have no
-    /// Info.plist string to quote (Accessibility's wording is the OS's own, and
-    /// Login Items has no dialog at all), so they are a likeness.
-    static func bodyText(for step: SetupStep) -> String {
-        switch step {
-        case .audio:
-            return "Audiouter needs to capture your Mac's audio so it can send it to the "
-                + "AirPlay speakers you choose. Audio goes only to those speakers — it is "
-                + "never recorded, saved, or sent anywhere else."
-        case .localNetwork:
-            return "Audiouter looks for AirPlay speakers on your local network so you can "
-                + "play your Mac's audio to them. It only finds speakers — it doesn't read "
-                + "or collect anything else about your network."
-        case .bluetooth:
-            return "Audiouter connects to Bluetooth speakers you've already paired so it can "
-                + "play your Mac's audio on them. It only reaches speakers you choose — it "
-                + "never scans for or reads anything else."
-        case .remoteControl:
-            return "Audiouter needs to control this Mac so the keys on your keyboard can "
-                + "start, pause and skip what is playing. It watches for those keys and "
-                + "nothing else."
-        case .speakerSync:
-            return "Audiouter runs a small background helper that keeps your speakers in "
-                + "step with each other. It starts with your Mac and does nothing else."
-        }
-    }
-
     /// The button the cursor presses. Every step that reaches this mock uses
     /// the same TCC-family dialog shape, and Apple's own confirming button
     /// across that family is "Allow" (verified against the real audio and
     /// Local Network dialogs) — never "OK", which was an unverified guess
     /// from before any real dialog had been checked.
     static func confirmTitle(for step: SetupStep) -> String { "Allow" }
-
-    static func grantedText(for step: SetupStep) -> String {
-        switch step {
-        case .audio:         return "Sound access allowed"
-        case .localNetwork:  return "Network access allowed"
-        case .bluetooth:     return "Bluetooth allowed"
-        case .remoteControl: return "Control allowed"
-        case .speakerSync:   return "Background use allowed"
-        }
-    }
 }
 
 // MARK: - System alert mock
@@ -1132,15 +1098,20 @@ final class DemoPromptMockView: DemoMockView {
 ///
 /// 1. LANDSCAPE, with a small ~12 pt corner, not the card's tall portrait and
 ///    its ~24 pt one;
-/// 2. a plain (not bold) header line naming the access being asked for;
+/// 2. a short header BAND naming the access being asked for;
 /// 3. a full-bleed hairline DIVIDER under it — the one structural element the
 ///    privacy card has nothing like, and the fastest way to tell them apart;
-/// 4. a two-column body, gold privacy PADLOCK left and text right, the two
-///    centred against each other as a group;
-/// 5. a Help circle bottom-LEFT, and two buttons bottom-RIGHT of which the
-///    REFUSAL is the accent-filled default — the opposite emphasis from the
-///    card's two equal neutral capsules, and the reason the demo's pointer goes
-///    for the quiet button.
+/// 4. a two-column body, the privacy PADLOCK left and a gist block right, the
+///    two centred against each other as a group;
+/// 5. a Help circle bottom-LEFT, and two buttons bottom-RIGHT.
+///
+/// **The marking is the deliberate departure from the real panel.** On the real
+/// alert the REFUSAL is the accent-filled default, and drawing that faithfully
+/// put the emphasis on the one button the user must not press — the deleted
+/// warning line was what carried the correction, and with that line gone the
+/// mock has to carry it itself. So "Open System Settings" is the MARKED button
+/// here and "Deny" is a ghost: the shape still tells the two surfaces apart,
+/// and the emphasis now tells the truth about which one moves the user forward.
 ///
 /// It is a passive SURFACE, not a timeline: it draws itself and exposes the
 /// button a pointer should press, while the host two-stage mock owns the one
@@ -1148,8 +1119,8 @@ final class DemoPromptMockView: DemoMockView {
 /// pointer on screen.
 final class DemoSystemAlertMockView: NSView {
 
-    /// Fixed width; the HEIGHT comes from the copy, so a longer sentence sits
-    /// taller instead of being clipped by a magic number. 288 leaves shadow room
+    /// Fixed width; the HEIGHT comes from the content, so the gist block sets it
+    /// rather than a magic number. 288 leaves shadow room
     /// inside both hosts — the Login Items pane it stands in front of is 300.
     static let width: CGFloat = 288
     private static let inset: CGFloat = 12
@@ -1172,9 +1143,10 @@ final class DemoSystemAlertMockView: NSView {
     static let pointerRest = CGPoint(x: 66, y: 150)
 
     private let step: SetupStep
-    /// The button the demo's pointer presses — deliberately NOT the accent-filled
-    /// one. The real alert makes "Deny" the default, so the button that actually
-    /// moves the user forward is the quiet one, and the mock has to say so.
+    /// The button the demo's pointer presses, and the MARKED one — the real
+    /// alert makes "Deny" its default, so the button that actually moves the
+    /// user forward is the one the panel de-emphasises, and the mock has to say
+    /// so the other way round.
     private(set) var pressTarget: DemoPushButtonView!
 
     init(step: SetupStep) {
@@ -1192,25 +1164,22 @@ final class DemoSystemAlertMockView: NSView {
         // shape, and a big continuous corner is exactly what would blur the two.
         let panel = DemoWindowSurfaceView(radius: 12)
 
-        let header = NSTextField(labelWithString: Self.headerText(for: step))
-        header.font = .systemFont(ofSize: 11, weight: .semibold)
-        header.textColor = .labelColor
-        header.lineBreakMode = .byTruncatingTail
-        header.translatesAutoresizingMaskIntoConstraints = false
+        let header = DemoGreekBarView(width: 86, height: 5, fill: .secondaryLabelColor)
 
         let divider = NSBox()
         divider.boxType = .separator
         divider.translatesAutoresizingMaskIntoConstraints = false
 
         let icon = DemoLockIconView()
-        let ask = demoParagraph(Self.askText(for: step), font: .boldSystemFont(ofSize: 11),
-                                color: .labelColor, width: Self.textWidth)
-        let body = demoParagraph(Self.bodyText(for: step), font: .systemFont(ofSize: 10),
-                                 color: .secondaryLabelColor, width: Self.textWidth)
+        // The bold ask over the Settings instruction, as two tiers of bars.
+        let ask = demoGistBlock(widths: [Self.textWidth, Self.textWidth * 0.66],
+                                height: 5, spacing: 7, fill: .secondaryLabelColor)
+        let body = demoGistBlock(widths: [Self.textWidth, Self.textWidth * 0.52],
+                                 height: 3.5, spacing: 6)
         let text = NSStackView(views: [ask, body])
         text.orientation = .vertical
         text.alignment = .leading
-        text.spacing = 5
+        text.spacing = 8
         text.translatesAutoresizingMaskIntoConstraints = false
 
         let help = DemoDotView(diameter: Self.helpSide, fill: .quaternaryLabelColor)
@@ -1218,9 +1187,10 @@ final class DemoSystemAlertMockView: NSView {
                                   weight: .semibold, color: .secondaryLabelColor)
 
         pressTarget = DemoPushButtonView(title: "Open System Settings",
+                                         emphasis: .correct,
                                          height: Self.buttonHeight,
                                          cornerRadius: Self.buttonRadius)
-        let deny = DemoPushButtonView(title: "Deny", emphasis: .accent,
+        let deny = DemoPushButtonView(title: "Deny",
                                       height: Self.buttonHeight,
                                       cornerRadius: Self.buttonRadius)
         let buttons = NSStackView(views: [pressTarget, deny])
@@ -1314,37 +1284,6 @@ final class DemoSystemAlertMockView: NSView {
     func pressPoint(in view: NSView) -> NSPoint {
         pressTarget.convert(NSPoint(x: pressTarget.bounds.midX, y: pressTarget.bounds.midY),
                             to: view)
-    }
-
-    // MARK: Copy
-
-    /// The header line — the ACCESS being asked for, which is how macOS titles
-    /// these panels ("Accessibility Access"). Only Remote Control ever raises
-    /// this alert; the rest fall back to the name of their own pane.
-    static func headerText(for step: SetupStep) -> String {
-        switch step {
-        case .remoteControl: return "Accessibility Access"
-        case .audio, .localNetwork, .bluetooth, .speakerSync:
-            return DemoSettingsMockView.paneTitle(for: step)
-        }
-    }
-
-    /// The bold first line. Verbatim from the real Accessibility panel, with the
-    /// same quoted app-name placeholder every other mock's copy uses.
-    static func askText(for step: SetupStep) -> String {
-        switch step {
-        case .remoteControl:
-            return "“Audiouter” would like to control this computer using accessibility features."
-        case .audio, .localNetwork, .bluetooth, .speakerSync:
-            return DemoPromptMockView.askText(for: step)
-        }
-    }
-
-    /// The instruction under it: where the grant actually gets made. Verbatim
-    /// from the real Accessibility panel.
-    static func bodyText(for step: SetupStep) -> String {
-        "Grant access to this application in Privacy & Security settings, "
-            + "located in System Settings."
     }
 
     /// The blue circular badge overlapping the padlock, if this step has one.
@@ -2161,48 +2100,62 @@ final class DemoWindowSurfaceView: NSView {
     }
 }
 
-/// How a drawn dialog button is filled.
+/// How a drawn dialog button is marked.
+///
+/// The rehearsal's job is to say WHICH button to press, so the two cases are
+/// not "how macOS fills this button" any more — they are right answer and wrong
+/// answer. That is the one place the mock deliberately departs from the real
+/// surface: on the real Accessibility alert the refusal is the accent-filled
+/// DEFAULT, and drawing that faithfully emphasised exactly the button the user
+/// must not press.
 enum DemoButtonEmphasis {
-    /// The neutral grey both of the privacy dialog's buttons wear, and the one
-    /// the system alert's "Open System Settings" wears.
-    case neutral
-    /// Accent-filled with a white title — the alert's DEFAULT button, which on
-    /// the Accessibility panel is the refusal.
-    case accent
+    /// The button this step wants pressed: a slightly brighter fill and a thin
+    /// ring around it.
+    case correct
+    /// Every other button: a ghost — no fill, just a hairline, so it still
+    /// reads as a button without competing.
+    case ghost
 }
 
 /// A drawn dialog button.
 ///
-/// Two shapes, because the two surfaces this file mimics genuinely differ: the
-/// macOS 26 privacy dialog's are full CAPSULES and both the same grey (Liquid
-/// Glass has no accent-filled default there, and painting one would send the
-/// user looking for a blue button that won't be there), while the older system
-/// ALERT panel's are shorter rounded rects with an accent-filled default. The
-/// defaults here are the capsule, so the privacy dialog's call sites say
-/// nothing extra.
+/// Two SHAPES, because the two surfaces this file mimics genuinely differ: the
+/// macOS 26 privacy dialog's are full CAPSULES, while the older system ALERT
+/// panel's are shorter rounded rects. The defaults here are the capsule, so the
+/// privacy dialog's call sites say nothing extra. The MARKING is orthogonal to
+/// the shape — see ``DemoButtonEmphasis``.
 final class DemoPushButtonView: NSView {
 
     static let height: CGFloat = 28
     /// Air either side of the label.
     private static let labelInset: CGFloat = 10
 
+    /// The real label this button carries — the one string a mock never fakes.
+    let buttonTitle: String
     private let emphasis: DemoButtonEmphasis
     private let cornerRadius: CGFloat
 
+    /// Whether this is the button the step wants pressed.
+    var isMarked: Bool { emphasis == .correct }
+
     init(title: String,
-         emphasis: DemoButtonEmphasis = .neutral,
+         emphasis: DemoButtonEmphasis = .ghost,
          height: CGFloat = DemoPushButtonView.height,
          cornerRadius: CGFloat? = nil) {
+        self.buttonTitle = title
         self.emphasis = emphasis
         self.cornerRadius = cornerRadius ?? height / 2
         super.init(frame: .zero)
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
 
+        // The LABEL is the one thing in a mock that is never abstracted: the
+        // user has to recognise the words on the buttons when the real surface
+        // arrives, and a greeked "Don't Allow" would teach them nothing.
         let label = NSTextField(labelWithString: title)
         label.font = .systemFont(ofSize: 12)
         label.alignment = .center
-        label.textColor = emphasis == .accent ? .white : .labelColor
+        label.textColor = emphasis == .correct ? .labelColor : .secondaryLabelColor
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(label)
         NSLayoutConstraint.activate([
@@ -2218,24 +2171,32 @@ final class DemoPushButtonView: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        layer?.backgroundColor = (emphasis == .accent ? DemoSystemColor.accent
-                                                      : DemoSystemColor.plainButton).cgColor
+        let isCorrect = emphasis == .correct
+        layer?.backgroundColor = isCorrect ? DemoSystemColor.markedButton.cgColor
+                                           : NSColor.clear.cgColor
+        // One hairline either way, so a ghost keeps a button's outline and the
+        // marked one gets its ring — the difference is the fill behind it.
+        layer?.borderWidth = 1
+        layer?.borderColor = (isCorrect ? DemoSystemColor.markedButtonRim
+                                        : DemoSystemColor.ghostButtonRim).cgColor
         layer?.cornerRadius = cornerRadius
         layer?.cornerCurve = .continuous
     }
 }
 
-/// The gold privacy PADLOCK the system alert leads with.
+/// The privacy PADLOCK the system alert leads with.
 ///
-/// `lock.fill` filled with a warm vertical gradient rather than a flat tint: the
-/// real icon is artwork with a little dimension in it, and a flat amber SF
-/// Symbol at this size reads as a toolbar glyph instead. The symbol IS the mask,
-/// so there is no second drawn shape to keep in step with it.
+/// `lock.fill` filled with a vertical gradient rather than a flat tint: the real
+/// icon is artwork with a little dimension in it, and a flat symbol at this size
+/// reads as a toolbar glyph instead. The symbol IS the mask, so there is no
+/// second drawn shape to keep in step with it. The gradient is warm GREY, not
+/// the real icon's gold — gold is spent on the CTA alone now (see
+/// ``DemoSystemColor/lockTop``).
 ///
 /// **TRAP: the mask has to be built in an image of its own.** Painting the
 /// gradient `.sourceAtop` straight into `draw(_:)` does not clip to the symbol —
 /// the view's backing store is not the empty destination that composite mode
-/// needs, and the whole icon rect comes out solid gold. Drawing the gradient
+/// needs, and the whole icon rect comes out a solid rectangle. Drawing the gradient
 /// into a fresh `NSImage` and knocking the symbol's alpha out of it with
 /// `.destinationIn` gives a surface nobody else has touched.
 final class DemoLockIconView: NSView {
@@ -2259,15 +2220,15 @@ final class DemoLockIconView: NSView {
                            width: size.width * scale,
                            height: size.height * scale)
 
-        let gold = NSImage(size: drawn.size, flipped: false) { rect in
-            // Negative angle so the LIGHTER gold is at the top, as it is on the
+        let shaded = NSImage(size: drawn.size, flipped: false) { rect in
+            // Negative angle so the LIGHTER end is at the top, as it is on the
             // real icon.
-            NSGradient(starting: DemoSystemColor.lockGoldTop,
-                       ending: DemoSystemColor.lockGoldBottom)?.draw(in: rect, angle: -90)
+            NSGradient(starting: DemoSystemColor.lockTop,
+                       ending: DemoSystemColor.lockBottom)?.draw(in: rect, angle: -90)
             symbol.draw(in: rect, from: .zero, operation: .destinationIn, fraction: 1)
             return true
         }
-        gold.draw(in: drawn)
+        shaded.draw(in: drawn)
     }
 }
 
@@ -2651,28 +2612,28 @@ final class DemoSettingsRowView: NSView {
 /// mush and reads as a rendering bug rather than as words.
 final class DemoGreekBarView: NSView {
 
-    init(width: CGFloat, fill: NSColor = .tertiaryLabelColor) {
+    init(width: CGFloat, height: CGFloat = 3, fill: NSColor = .tertiaryLabelColor) {
+        self.fill = fill
+        self.barHeight = height
         super.init(frame: .zero)
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
-        layer?.backgroundColor = fill.cgColor
-        layer?.cornerRadius = 1.5
         NSLayoutConstraint.activate([
             widthAnchor.constraint(equalToConstant: width),
-            heightAnchor.constraint(equalToConstant: 3),
+            heightAnchor.constraint(equalToConstant: height),
         ])
-        self.fill = fill
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    private var fill: NSColor = .tertiaryLabelColor
+    private let fill: NSColor
+    private let barHeight: CGFloat
 
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
         layer?.backgroundColor = fill.cgColor
-        layer?.cornerRadius = 1.5
+        layer?.cornerRadius = barHeight / 2
     }
 }
 
@@ -2886,4 +2847,23 @@ final class DemoCursorView: NSView {
 extension NSView {
     /// Every descendant, for the "re-stamp resolved colours" sweep.
     var subviewsRecursively: [NSView] { subviews + subviews.flatMap(\.subviewsRecursively) }
+
+    // MARK: Test-support hooks
+
+    /// Every drawn dialog button in this surface, leading to trailing — one
+    /// walk that serves the prompt card, the alert panel and the two-stage host
+    /// alike, so no mock needs a hook of its own.
+    private var demoButtons: [DemoPushButtonView] {
+        subviewsRecursively.compactMap { $0 as? DemoPushButtonView }
+    }
+
+    /// The REAL labels this surface's buttons carry.
+    var test_demoButtonTitles: [String] { demoButtons.map(\.buttonTitle) }
+
+    /// The one button marked as the right answer — `nil` if none is, and a
+    /// crash-free way to catch two being marked (the array would have two).
+    var test_demoMarkedButtonTitle: String? {
+        let marked = demoButtons.filter(\.isMarked)
+        return marked.count == 1 ? marked[0].buttonTitle : nil
+    }
 }

@@ -1790,18 +1790,69 @@ import Testing
         #expect(mock.test_stage == .alert, "a pass must end where it started")
     }
 
-    /// The system alert is the real panel's copy, not the privacy dialog's: the
-    /// access as a header, the OS's own ask, and the instruction that names the
-    /// pane the grant is actually made in. The privacy dialog's own titles are
-    /// untouched.
-    @Test func theSystemAlertCarriesTheRealPanelsCopy() {
-        #expect(DemoSystemAlertMockView.headerText(for: .remoteControl) == "Accessibility Access")
-        #expect(DemoSystemAlertMockView.askText(for: .remoteControl)
-            == "“Audiouter” would like to control this computer using accessibility features.")
-        #expect(DemoSystemAlertMockView.bodyText(for: .remoteControl)
-            .contains("Privacy & Security settings"))
-
+    /// A mock's prose is abstracted to gist bars, but its BUTTON LABELS are
+    /// real: the words are what the user has to recognise when the real surface
+    /// arrives, and a greeked "Don't Allow" would teach them nothing.
+    @Test func theMocksKeepTheirRealButtonLabels() {
         #expect(DemoPromptMockView.confirmTitle(for: .audio) == "Allow")
+
+        let alert = DemoSystemAlertMockView(step: .remoteControl)
+        alert.layoutSubtreeIfNeeded()
+        #expect(alert.test_demoButtonTitles == ["Open System Settings", "Deny"])
+    }
+
+    /// The rehearsal has to say WHICH button to press — the copy that used to
+    /// warn about the alert's accent-filled refusal is gone, so the marking
+    /// carries it. Exactly one button per surface is marked, and it is the one
+    /// the pointer presses.
+    @Test func exactlyTheCorrectButtonIsMarkedOnEverySurface() {
+        let prompt = DemoPromptMockView(step: .audio)
+        prompt.layoutSubtreeIfNeeded()
+        #expect(prompt.test_demoMarkedButtonTitle == "Allow")
+
+        let alert = DemoSystemAlertMockView(step: .remoteControl)
+        alert.layoutSubtreeIfNeeded()
+        #expect(alert.test_demoMarkedButtonTitle == "Open System Settings",
+                "the real panel emphasises Deny — the mock must not")
+    }
+
+    /// Every mock has to FIT the stage. The preview frame clips, so a mock
+    /// taller than `surfaceSize` is not "a bit tight" — it loses its bottom
+    /// edge, which is where the buttons the rehearsal exists to point at live.
+    /// The near-life-size privacy card was over by ~50 pt before the copy came
+    /// out of it.
+    @Test func everyMockFitsTheStage() {
+        let stage = DemoPaneView.surfaceSize
+        let mocks: [NSView] = [
+            DemoPromptMockView(step: .audio),
+            DemoSettingsMockView(step: .localNetwork, metricScale: 1.35),
+            DemoSettingsHandoffMockView(step: .remoteControl),
+            DemoSystemAlertMockView(step: .remoteControl),
+        ]
+        for mock in mocks {
+            mock.layoutSubtreeIfNeeded()
+            let size = mock.fittingSize
+            #expect(size.width <= stage.width && size.height <= stage.height,
+                    "\(type(of: mock)) is \(size), stage is \(stage)")
+        }
+    }
+
+    /// Nothing inside a mock is saturated blue or gold any more: blue pulled the
+    /// eye off the one gold thing on screen, which is the CTA.
+    @Test func theMocksAreDesaturated() {
+        for appearance in [NSAppearance(named: .aqua)!, NSAppearance(named: .darkAqua)!] {
+            appearance.performAsCurrentDrawingAppearance {
+                let accent = DemoSystemColor.accent.usingColorSpace(.sRGB)!
+                #expect(accent.saturationComponent < 0.35,
+                        "the mock accent is saturated: \(accent.saturationComponent)")
+                let systemBlue = NSColor.systemBlue.usingColorSpace(.sRGB)!
+                #expect(accent.saturationComponent < systemBlue.saturationComponent)
+
+                let lock = DemoSystemColor.lockTop.usingColorSpace(.sRGB)!
+                #expect(lock.saturationComponent < 0.15,
+                        "the padlock is still gold: \(lock.saturationComponent)")
+            }
+        }
     }
 
     /// A stage writes its score in its OWN seconds; the host lays it down at an

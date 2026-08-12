@@ -418,9 +418,12 @@ gate/motion/demo/selection rules change.
   820 × 560, so the head block and the bar take what their words need and the
   rehearsal gets the rest — the demo pane is CENTRED in the frame body, never
   pinned to it, and anything taller than the frame is cropped by the well. That
-  leaves roughly **278 pt** for the surface on a two-line why; `DemoPaneView
-  .surfaceSize` is still 330 tall, which is the fit the abstraction pass is
-  sized against.
+  leaves roughly **278 pt** for the surface on a two-line why, and
+  `DemoPaneView.surfaceSize` is now exactly that (418 × 278). It was 330 for one
+  commit, which the frame silently cropped ~50 pt off the BOTTOM of — the
+  buttons the rehearsal exists to point at. The abstraction pass is what paid
+  for the fit: with the mocks' paragraphs gone, the privacy card is 240 tall
+  instead of 323. `everyMockFitsTheStage` pins it.
 - **The spine is 288 pt wide** (`spineWidth`; it REPLACES the card era's
   `leftPaneWidth` of 420, itself a widening of an original 380 to stop the long
   earned titles truncating). The column carries short titles now, so it can be
@@ -515,7 +518,7 @@ gate/motion/demo/selection rules change.
     inside a mock is painted in SEMANTIC SYSTEM colours and the system font —
     `windowBackgroundColor` for the dialog/pane body, `controlBackgroundColor` for
     the grouped list, `labelColor`/`secondaryLabelColor`, `separatorColor` rims,
-    `controlAccentColor` on the confirming button, `systemBlue` on the switch, and
+    a DESATURATED accent on the switch and the badges, and
     the app's REAL icon in the Settings row. Never `Tokens` — the point is that it
     reads instantly as "this is what macOS will show you", and a warm surface or a
     dial-remapped accent inside it would read as Audiouter drawing its own dialog.
@@ -530,25 +533,49 @@ gate/motion/demo/selection rules change.
     buttons with an accent-filled default" drawing, which was the pre-26 shape
     and read to the owner as "an abstract allow thing"). The anatomy, which is
     generic across all five steps:
-    a TALL portrait card (real 283 × 340 pt, drawn here at ~0.95 of that
-    — 269 × 323, Direction 04's hero scale — with a
-    large ~24 pt continuous corner); an ICON TILE top-LEFT (which icon depends on
-    the step — see below) with a `systemBlue` circle badge carrying a white
+    a PORTRAIT card (269 × 240) with a
+    large ~24 pt continuous corner; an ICON TILE top-LEFT (which icon depends on
+    the step — see below) with a circle badge carrying a white
     `hand.raised.fill` overlapping its bottom-trailing corner — the marker that
     says *privacy prompt*; a small grey
-    Help circle top-right; a bold LEFT-ALIGNED title over two or three lines; a
-    left-aligned `secondaryLabelColor` body; and two EQUAL, NEUTRAL CAPSULE
-    buttons filling the content width. **There is no accent-filled default
-    button any more** — drawing one would date the mock and, worse, send the user
-    looking for a blue button that won't be there. Nothing is centred, and
-    nothing is greeked.
-    - **The body is the app's REAL Info.plist purpose string** — the same words
-      `scripts/make-app.sh` stamps into `NSAudioCaptureUsageDescription` /
-      `NSLocalNetworkUsageDescription` / `NSBluetoothAlwaysUsageDescription`, so
-      the paragraph the user rehearses here is the paragraph macOS will show.
-      Change one there, change it in `bodyText(for:)`. That sentence is why the
-      card is drawn near life size at all: the type tiers still hold (nothing
-      under 9 pt), which puts the title at 14 pt and the body at 11 pt.
+    Help circle top-right; a heavier two-bar TITLE band; a lighter four-bar gist
+    block where the purpose string was; and two EQUAL CAPSULE
+    buttons filling the content width, carrying their REAL labels. **There is no
+    accent-filled default button** — drawing one would date the mock and, worse,
+    send the user looking for a blue button that won't be there. Nothing is
+    centred.
+    - **The prose is ABSTRACTED and the colour DESATURATED** (owner decision
+      2026-08-12 — this REPLACES "nothing is greeked", and with it the rule that
+      "the body is the app's REAL Info.plist purpose string"). The card used to
+      carry that string verbatim, so the paragraph rehearsed here was the
+      paragraph macOS would show; what that bought in fidelity it lost in the
+      thing the window is for. Two dense paragraphs of small type sat inside the
+      rehearsal under a headline and a why line that had already said the same
+      thing, so the eye read the WORDS instead of the SHAPE — and the card they
+      made necessary was 323 tall, 50 pt more than the frame has. The anatomy is
+      what makes the surface recognisable; the sentences are "close enough" as
+      bars (`demoGistBlock`), exactly as the Settings mock's rows already were.
+      The per-step copy tables were DELETED rather than left orphaned — they are
+      in git history with the Info.plist linkage if the premise revives, and
+      that history is also where the one title macOS phrases as a QUESTION
+      ("Allow “Audiouter” to find devices on local networks?") is recorded.
+    - **The BUTTON LABELS are the exception, and they are marked.** They stay
+      real text ("Don't Allow"/"Allow", "Open System Settings"/"Deny"): those
+      words are what the user has to recognise when the real surface arrives.
+      The CORRECT one wears `DemoButtonEmphasis.correct` — a slightly brighter
+      fill plus a thin ring — and every other one is a `.ghost`: no fill, a 1 pt
+      hairline, so it still reads as a button without competing.
+      `exactlyTheCorrectButtonIsMarkedOnEverySurface` pins that exactly one per
+      surface is marked.
+    - **Nothing inside a mock is saturated blue or gold.** `DemoSystemColor
+      .accent` is a desaturated slate rather than `systemBlue` (still the blue
+      FAMILY, so the badge and the switch stay recognisable), the record tile is
+      a muted red, and the alert's padlock gradient is warm GREY. Gold is spent
+      entirely on the one button the step wants pressed, and a saturated
+      rehearsal pulled the eye off it. `theMocksAreDesaturated` pins the accent
+      and the padlock. The window's three traffic lights KEEP their real
+      colours — 7 pt each, and they are the signature that says "a macOS
+      window".
     - **The top-left tile is NOT the app's icon for any of the three real steps**
       (owner screenshots of the real dialogs, 2026-08-11). macOS draws a generic
       SYSTEM tile — the same one for every app — and only its CONTENTS change:
@@ -577,14 +604,12 @@ gate/motion/demo/selection rules change.
         carries `dot.radiowaves.right`, the glyph the Bluetooth setup row beside
         it already uses, rather than a hand-drawn rune. If a real screenshot ever
         contradicts either half, this is the one place to change.
-    - `.localNetwork`'s title is the odd one out: macOS phrases it as a QUESTION
-      opening on "Allow" — "Allow “Audiouter” to find devices on local
-      networks?" — where the other steps use "…would like to…". Verbatim from
-      the real dialog; don't regularise it.
-    - The per-step hooks stay `askText` / `bodyText` / `confirmTitle` /
-      `grantedText`; the ANATOMY is shared. `DemoPaneView.surfaceSize` is
-      418 × 330 — the Direction-04 stage inside the hero pane (interior 418 wide
-      × 464 tall); the ribbon sits below the stage and Replay below the mock.
+    - The one per-step hook left is `confirmTitle`; the ANATOMY is shared and
+      nothing else in the card varies by step but its icon tile.
+      `DemoPaneView.surfaceSize` is
+      418 × 278 — the Direction-04 stage inside the hero pane, sized to what the
+      preview frame really has; the ribbon sits below the stage and Replay below
+      the mock.
   - **ONE step has a two-stage demo: Remote Control's FIRST ASK** (owner
     decisions 2026-08-11 — a live run showed its demo jumping straight to a
     Settings pane the user had no idea how to reach). Its first ask takes two
@@ -613,27 +638,32 @@ gate/motion/demo/selection rules change.
     whole reason to exist is that the real panel is a completely different
     SHAPE from the macOS 26 privacy card above, and the earlier drawing
     implied the user would meet the card twice:
-    - LANDSCAPE (288 pt wide, height from the copy — about 1.8 : 1) with a small
-      ~12 pt corner, against the card's tall portrait and its ~24 pt one;
-    - a plain, non-bold HEADER line naming the access ("Accessibility Access");
+    - LANDSCAPE (288 pt wide, height from the content) with a small
+      ~12 pt corner, against the card's portrait and its ~24 pt one;
+    - a short HEADER BAND where the access is named;
     - a **full-bleed hairline divider** under it — the one structural element the
       privacy card has nothing like, and the fastest way to tell them apart;
-    - a two-column body: the gold privacy PADLOCK left, bold ask and Settings
-      instruction right, the two centred against each other as a group;
-    - a Help circle bottom-LEFT; bottom-RIGHT "Open System Settings" (neutral)
-      then "Deny" — and **the REFUSAL is the accent-filled default**, the
-      opposite emphasis from the card's two equal neutral capsules. That is why
-      the pointer goes for the QUIET button: on this panel the blue one is the
-      wrong answer, and the demo has to show that.
-    - The padlock is `lock.fill` filled with a gold GRADIENT, because the real
-      icon is artwork with some dimension in it and a flat amber symbol at this
+    - a two-column body: the privacy PADLOCK left, a two-tier gist block right,
+      the two centred against each other as a group;
+    - a Help circle bottom-LEFT; bottom-RIGHT "Open System Settings" then
+      "Deny". **The marking is the deliberate departure from the real panel**
+      (owner decision 2026-08-12): the real alert makes the REFUSAL its
+      accent-filled default, and drawing that faithfully emphasised the one
+      button the user must not press. The warning line that used to correct it
+      was deleted with the rest of the first-ask copy, so the mock carries the
+      correction itself — "Open System Settings" is the MARKED button and "Deny"
+      is a ghost. The SHAPE still tells the two surfaces apart; the emphasis now
+      tells the truth about which one moves the user forward.
+    - The padlock is `lock.fill` filled with a warm-GREY gradient (gold left
+      with the rest of the desaturation), because the real
+      icon is artwork with some dimension in it and a flat symbol at this
       size reads as a toolbar glyph. **TRAP: the mask has to be built in an
       `NSImage` of its own** — compositing the gradient `.sourceAtop` straight
       into `draw(_:)` does not clip to the symbol (the view's backing store is
       not the empty destination that mode needs) and the whole icon rect comes
-      out a solid gold rectangle. Draw the gradient into a fresh image and knock
+      out a solid rectangle. Draw the gradient into a fresh image and knock
       the symbol's alpha out of it with `.destinationIn`.
-    - Accessibility's padlock carries a blue circular badge with the
+    - Accessibility's padlock carries a circular accent badge with the
       `accessibility` glyph (SF Symbols 5 / macOS 14 — checked against
       `name_availability.plist`, and the package floor is macOS 14). No other
       step raises this alert, so no other step earns a marker.
@@ -665,11 +695,12 @@ gate/motion/demo/selection rules change.
       `test_demoHandoffStage` folded into `test_demoStage`.
     - `DemoPromptOutcome` went with it. It existed only to relabel the privacy
       card's buttons for the re-fired ask; with a real alert drawn for that job,
-      the card is back to one shape (two equal neutral capsules, "Don't Allow"
+      the card is back to one shape (two equal capsules, "Don't Allow"
       beside its confirming title) and `confirmTitle(for:)` lost its `outcome:`.
-    - `surfaceSize` changed with the Direction-04 hero (418 × 330): the alert
-      (288 × ~158) and the handoff container (the Settings pane's 300 × 190)
-      still clear their margins inside it.
+    - `surfaceSize` is 418 × 278: the alert (288 × ~118), the privacy card
+      (269 × 240), the standalone Settings pane (405 × 256.5 at `metricScale`
+      1.35) and the handoff container (the Settings pane's 300 × 190) all clear
+      their margins inside it, which `everyMockFitsTheStage` pins.
     - **A stage keeps writing its score in its OWN seconds.** `DemoMockView`
       .`stageWindow` is the seam: set it and `keyframes(_:_:timing:)` lays that
       score onto the host's longer pass at an offset, holding the first and last
@@ -913,7 +944,9 @@ gate/motion/demo/selection rules change.
   row (`test_checkRowState`, `test_awaitFinalCheck()`), the announcements
   (`test_announcements`), the hero (`test_demoMode`, `test_demoStage`,
   `test_isDemoAnimating`, `test_demoShowsReplay`, `test_stageIsDimmed`,
-  `test_heroRestingSwitchOn`), and the window
+  `test_heroRestingSwitchOn`), the mocks' buttons
+  (`test_demoButtonTitles` / `test_demoMarkedButtonTitle`, one NSView walk that
+  serves every surface), and the window
   level (`test_windowLevel`). `test_refreshStatuses()` is the AWAITED silent
   re-read — the load-time one fires a detached task, so a caller that needs its
   result (Bluetooth and Remote Control only reach `.granted` through it) has to be
@@ -963,9 +996,9 @@ gate/motion/demo/selection rules change.
 | `DemoPaneView` / `DemoMode` | The hero's STAGE: the mock swap crossfade, the browse/settled resting rules, the waiting dim, the motion policy, the Replay button. |
 | `DemoMockView` | Timeline base class for the animated mocks: restartable score, settled-state hook, and the two multi-stage seams — `held(_:)` and the `stageWindow` offset. |
 | `DemoPromptMockView` / `DemoSettingsMockView` / `DemoSettledMockView` | The privacy-dialog miniature, the Settings-pane miniature, and the completion finale (one-shot ripple, static gold-aura resting frame). |
-| `DemoSystemAlertMockView` / `DemoLockIconView` | The classic macOS ALERT panel Remote Control's two-stage pass opens on — header, divider, gold padlock, accent-filled refusal — and the gradient-filled padlock it leads with. A passive surface: the host owns the cursor and the crossfade. |
+| `DemoSystemAlertMockView` / `DemoLockIconView` | The classic macOS ALERT panel Remote Control's two-stage pass opens on — header, divider, padlock, a MARKED "Open System Settings" beside a ghosted "Deny" — and the gradient-filled padlock it leads with. A passive surface: the host owns the cursor and the crossfade. |
 | `DemoSettingsHandoffMockView` / `DemoStage` | Remote Control's two-stage FIRST ASK: the Accessibility alert handing off to the Settings pane in one pass, the owner of stage one's pointer, and which of its two surfaces the pass rests on. |
-| `DemoWindowSurfaceView` / `DemoPushButtonView` / `DemoButtonEmphasis` / `DemoSwitchView` / `DemoSidebarView` / `DemoSettingsRowView` / `DemoGreekBarView` / `DemoPillView` / `DemoDotView` / `DemoBluetoothGlyphView` / `DemoCursorView` | The drawn parts of the mocks — window body, dialog button (neutral capsule or accent rounded rect), switch, sidebar, list row, greeked label, pill, circle, the hand-drawn Bluetooth rune, pointer. |
+| `DemoWindowSurfaceView` / `DemoPushButtonView` / `DemoButtonEmphasis` / `DemoSwitchView` / `DemoSidebarView` / `DemoSettingsRowView` / `DemoGreekBarView` / `DemoPillView` / `DemoDotView` / `DemoBluetoothGlyphView` / `DemoCursorView` | The drawn parts of the mocks — window body, dialog button (capsule or rounded rect, marked or ghosted), switch, sidebar, list row, greeked label — `demoGistBlock` stacks those into the ragged blocks that stand in for a mock's prose — pill, circle, the hand-drawn Bluetooth rune, pointer. |
 | `SystemSettingsOpener` | `NSWorkspace` seam for opening a `SystemSettingsPane`, with a Privacy & Security root fallback. |
 | `ProminentButton` | Fill-tinted CTA button with key-window-aware title ink (forced white, or measured from the fill). |
 | `IconTileView` / `RoundedContainerView` | Shared appearance-adaptive chrome (icon chip, grouped-inset card) — no stock AppKit equivalent. |

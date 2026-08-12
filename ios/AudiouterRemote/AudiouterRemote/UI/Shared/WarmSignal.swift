@@ -114,7 +114,19 @@ enum WarmSignal {
     /// hierarchy. Same trade the Mac makes.
     static let ember   = warm(light: 0x9C7E3C, dark: 0x8A6A2F)
     static let glow    = warm(light: 0xE8B84B, dark: 0xFFD97A)
-    static let ring    = warm(light: 0xA08C66, dark: 0x8D7D5E)
+    /// The connected solid halo and the connecting/reconnecting dashed halo —
+    /// a graphic, so it carries the 3:1 control floor against every ground it
+    /// draws on, and it is a SHARED instrument, so the light value must clear
+    /// that floor on the Mac's ladder too. The tightest ground across both
+    /// platforms is the Mac's `well` `#E8E6DC` (the darkest light surface ⇒
+    /// least contrast for a dark ink), not this screen's `raised` white.
+    /// Light `#8B7958` measures Mac well 3.37:1, well 3.51:1, canvas 3.77:1,
+    /// canvasHi 3.87:1, panel 4.08:1, raised 4.22:1 — headroom banked on
+    /// purpose so a later move in the light ladder cannot drop it back under
+    /// the floor. Still the same hue-neutral warm grey (~38.8° at 0.37
+    /// saturation); it is chroma, not hue, that keeps it from reading as
+    /// `gold`. The Mac carries this hex exactly. Dark is untouched.
+    static let ring    = warm(light: 0x8B7958, dark: 0x8D7D5E)
     static let fail    = warm(light: 0xBB3A2F, dark: 0xD9564A)
     static let caution = warm(light: 0xB3701C, dark: 0xE29A3D)
 

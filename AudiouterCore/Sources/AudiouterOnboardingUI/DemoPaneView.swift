@@ -1758,6 +1758,12 @@ final class DemoSettledMockView: NSView {
     /// Seconds into the shot each ring launches — staggered, like a broadcast.
     private static let ringStarts: [TimeInterval] = [0.10, 0.28, 0.46]
     private static let ringTravelDuration: TimeInterval = 1.05
+    /// Uniform tempo for the whole finale. Every beat's delay AND duration is
+    /// multiplied by this in ``addCelebrationAnimation``, so the choreography
+    /// stays in proportion: 1.0 is the authored speed, 1.25 plays it 25% slower
+    /// (owner, live-tuned). razor: the single tempo knob — retune here, never
+    /// per-beat, or the stagger and the travel drift out of sync.
+    private static let celebrationTimeScale: TimeInterval = 1.25
     private static let auraDiameter: CGFloat = 184
 
     private let icon = NSImageView()
@@ -2122,8 +2128,9 @@ final class DemoSettledMockView: NSView {
     /// completion so the layer lands back on its settled model value.
     private func addCelebrationAnimation(_ animation: CAAnimation, to layer: CALayer,
                                          delay: TimeInterval, duration: TimeInterval, key: String) {
-        animation.beginTime = layer.convertTime(CACurrentMediaTime(), from: nil) + delay
-        animation.duration = duration
+        animation.beginTime = layer.convertTime(CACurrentMediaTime(), from: nil)
+            + delay * Self.celebrationTimeScale
+        animation.duration = duration * Self.celebrationTimeScale
         animation.fillMode = .backwards
         animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
         layer.add(animation, forKey: key)

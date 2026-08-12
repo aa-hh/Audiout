@@ -139,9 +139,9 @@ to paper and gold is deepened for text contrast.
 - **well** (`#100D0A` / `#EDEAE0`): recessed — fader tracks, mute-button
   fill, the routed-dot's unlit state.
 - **hairline** (`#3A332B` / `#D0CDC3`): every drawn edge that stands in for
-  a shadow. Light is the Mac app's own hairline hex; the previous `#E7E6DF`
-  measured 1.21:1 against `panel` and 1.04:1 against `well`, which is an edge
-  you cannot see.
+  a shadow. Light is the Mac app's own hairline hex, held to a ≥1.25:1 floor
+  against the surface it divides (1.54:1 on `panel`, 1.42:1 on `canvas`);
+  anything lighter is an edge you cannot see — `#E7E6DF` lands at 1.21:1.
 
 The steps are small on purpose — about 1.12:1 canvas→raised, close to what
 `systemGroupedBackground` gives a white cell — because elevation you can see
@@ -166,9 +166,10 @@ instrument — is the same value on both platforms.
 
 ### Instruments
 - **ember** (`#8A6A2F` / `#9C7E3C`) and **glow** (`#FFD97A` / `#E8B84B`):
-  reserved signal variants, not yet drawn on this screen. Light ember was
-  `#C2A05A`, which cleared 3:1 against nothing here (2.06:1 on `well`); it is
-  now the Mac's own retuned hex, which holds the floor on every ground.
+  reserved signal variants, not yet drawn on this screen. Light ember is the
+  Mac's own hex and carries `gold`'s 3:1 floor on every ground (3.19:1 on
+  `well`) — a lighter tan reads as "dimmer" and clears nothing (`#C2A05A` is
+  2.06:1 on `well`).
 - **ring** (`#8D7D5E` / `#A08C66`): the dashed connecting/reconnecting halo
   ring.
 - **rim** (`#8D7D5E` / `#8A7A62`): the stroke on every raised control —

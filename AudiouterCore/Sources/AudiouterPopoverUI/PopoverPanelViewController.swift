@@ -474,21 +474,27 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     }
 
     /// Start a new section **card** whose FIRST element is a single combined
-    /// header row (change 1 — save vertical space): the prominent Control
-    /// Center–style section title (label color, medium weight, 14pt — like
-    /// "Sound" / "Display" in CC) on the LEFT, and the column header labels on the
-    /// RIGHT of the SAME row, each centered over its column against the shared
-    /// `PopoverColumnGrid` (VOLUME over the slider column, the trailing-column
-    /// header over the trailing control). This replaces the old two-row layout (a
-    /// ~30pt title row followed by a separate ~22pt column-header row). Subsequent
+    /// header row (change 1 — save vertical space): the section title on the
+    /// LEFT and the column header labels on the RIGHT of the SAME row, each
+    /// centered over its column against the shared `PopoverColumnGrid`. One row,
+    /// not a title row above a column-header row — the panel has no scroll view,
+    /// so every header line it spends is a device row it can't show. Subsequent
     /// `addRow` / `addSubsectionHeader` calls fill this card until the next
     /// `beginCard`.
     ///
-    /// `volumeTitle` / `trailingTitle` are the two column headers; passing `nil`
-    /// omits that label (e.g. the System card has no "Volume"-less variant, but a
-    /// card without a trailing control can pass `trailingTitle: nil`). The System
-    /// card passes `trailingTitle: "Device"` (over the destination dropdown); the
-    /// Selected Devices card passes `"Enabled"` (over the membership toggle).
+    /// Title and column titles share ONE `makeLegendLabel` voice — the whole row
+    /// is a single quiet legend line naming the content below it, never a banner
+    /// competing with it. The hairline divider `beginCard` inserts before each
+    /// card (plus the chevron) is what separates sections now; the type doesn't
+    /// have to shout to do it.
+    ///
+    /// `trailingTitle` names the trailing control column (OUTPUT / FEED /
+    /// REDIRECT); `nil` omits it for a card with no trailing control. There is
+    /// deliberately NO parameter for a title over the SLIDER column — a fader
+    /// with a live `%` beside it names itself, and every card shares that one
+    /// column, so any title over it prints the same word once per card. The
+    /// column stays aligned across cards through `PopoverColumnGrid`'s trailing
+    /// anchors, never through a repeated label.
     ///
     /// `trailingAccessory` optionally mounts a borderless icon button on the RIGHT
     /// of the module header (task D — the Groups section's "+" / New group). The
@@ -516,7 +522,6 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// re-driving `test_toggleCard`/`setCardCollapsed`); this method only builds
     /// the affordance.
     func beginCard(header: String,
-                   volumeTitle: String? = nil,
                    trailingTitle: String? = nil,
                    trailingAccessory accessory: HeaderAccessory? = nil,
                    collapsible: Bool = false,
@@ -538,10 +543,8 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         // The section title DISPLAYS uppercased (Warm Signal §5.1 silkscreen
         // vocabulary / v4 §Call-1 "SYSTEM AUDIO"); the `header` argument stays the
         // title-case lookup/collapse KEY.
-        let label = NSTextField(labelWithString: header.uppercased())
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = .systemFont(ofSize: 14, weight: .medium)
-        label.textColor = Tokens.Color.label
+        let label = Self.makeLegendLabel(header, weight: .semibold,
+                                         color: Tokens.Color.secondaryLabel)
         let headerWrap = NSView()
         headerWrap.translatesAutoresizingMaskIntoConstraints = false
         headerWrap.autoresizingMask = [.width]
@@ -591,19 +594,9 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
             label.centerYAnchor.constraint(equalTo: headerWrap.centerYAnchor),
         ])
 
-        // Column-header labels on the RIGHT of the same row, each centered over
-        // its column via the shared grid's trailing-anchored center helpers so
-        // they line up with the slider / trailing control in the rows below.
-        if let volumeTitle {
-            let volumeLabel = Self.makeColumnHeaderLabel(volumeTitle)
-            headerWrap.addSubview(volumeLabel)
-            NSLayoutConstraint.activate([
-                volumeLabel.centerXAnchor.constraint(
-                    equalTo: headerWrap.trailingAnchor,
-                    constant: -PopoverColumnGrid.sliderCenterFromTrailing),
-                volumeLabel.centerYAnchor.constraint(equalTo: headerWrap.centerYAnchor),
-            ])
-        }
+        // The column-header label on the RIGHT of the same row, centered over its
+        // column via the shared grid's trailing-anchored center helper so it lines
+        // up with the trailing control in the rows below.
         if let trailingTitle {
             let trailingLabel = Self.makeColumnHeaderLabel(trailingTitle)
             headerWrap.addSubview(trailingLabel)
@@ -1092,13 +1085,34 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
                                     follower: self, completion: detach)
     }
 
-    /// A small uppercase secondary column-header label (VOLUME / DEVICE / ENABLED),
-    /// centered over its column in the combined header row built by `beginCard`.
-    private static func makeColumnHeaderLabel(_ text: String) -> NSTextField {
-        let label = NSTextField(labelWithString: text.uppercased())
+    /// Tracking for the uppercase legend voice, in points at the caption size —
+    /// ~0.045 em, half ``Tokens/Font/microLabel``'s +0.09 em because this voice
+    /// is set in the proportional system face, not SF Mono. Small uppercase needs
+    /// the air to read as a silkscreen caption rather than as shrunken words.
+    private static let legendKern: CGFloat = 0.5
+
+    /// The **legend voice**: one small tracked uppercase caption shared by the
+    /// card's section title (semibold, secondary) and the column titles on the
+    /// same line (medium, secondary). Both are chrome that NAMES the content, so
+    /// both sit BELOW the device names in the hierarchy — set a section title at
+    /// `label` weight and the panel spends its loudest type on the words nobody
+    /// opens the mixer to read.
+    private static func makeLegendLabel(_ text: String,
+                                        weight: NSFont.Weight,
+                                        color: NSColor) -> NSTextField {
+        let font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: weight)
+        let label = NSTextField(labelWithAttributedString: NSAttributedString(
+            string: text.uppercased(),
+            attributes: [.font: font, .foregroundColor: color, .kern: legendKern]))
         label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = Tokens.Font.captionMedium
-        label.textColor = Tokens.Color.secondaryLabel
+        return label
+    }
+
+    /// A column-header label (OUTPUT / FEED / SYNC / REDIRECT), centered over its
+    /// column in the combined header row built by `beginCard`. VOLUME is
+    /// deliberately NOT among them — see `PopoverController.rebuild()`.
+    private static func makeColumnHeaderLabel(_ text: String) -> NSTextField {
+        let label = makeLegendLabel(text, weight: .medium, color: Tokens.Color.secondaryLabel)
         label.alignment = .center
         return label
     }

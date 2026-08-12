@@ -71,6 +71,19 @@ public enum PopoverColumnGrid {
         (indented ? indentedLeadingInset : leadingInset) + busGutterWidth
     }
 
+    /// Leading edge of the **name column** on a top-level row — the x every
+    /// device/app name starts at, and therefore the x an ICON-LESS secondary row
+    /// (a placeholder line, an empty-state link, a footer note) must start at to
+    /// sit in the same column as the names above it.
+    ///
+    /// Derived off `firstElementLeading`, never hand-rolled as `leadingInset +
+    /// iconWidth + iconToName`: that spelling omits the v4 rail gutter, so it
+    /// lands ~24 pt LEFT of the names it is meant to align with, and it silently
+    /// stops tracking the gutter the moment `busNodeClearance` moves.
+    public static var nameColumnLeading: CGFloat {
+        firstElementLeading(indented: false) + iconWidth + iconToName
+    }
+
     // MARK: Under-name level meter (Warm Signal v4 §Call-1 — meter relocation)
     //
     // The live-level bar moves out of the leading column into the identity

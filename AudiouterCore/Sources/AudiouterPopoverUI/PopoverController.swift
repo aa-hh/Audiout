@@ -1137,15 +1137,23 @@ public final class PopoverController: NSObject {
 
         // 1. Main Audio card — the single Main Out row. Combined header row
         // (change 1): "Main Audio" title (Warm Signal §5.1 silkscreen vocabulary)
-        // on the left, "VOLUME" over the slider and "OUTPUT" over the destination
-        // dropdown on the right ("Output" framing, decision m).
+        // on the left, "OUTPUT" over the destination dropdown on the right
+        // ("Output" framing, decision m).
+        //
+        // NO card names the SLIDER column. All three share ONE trailing-anchored
+        // slider column, so a title over it prints the same word three times —
+        // and a horizontal fader with a live `%` beside it is the most
+        // self-evident control on the surface. The TRAILING titles stay: OUTPUT /
+        // FEED / SYNC / REDIRECT each name a different, genuinely non-obvious
+        // thing occupying one shared column. The asymmetry is the point; don't
+        // restore a slider title for symmetry.
         //
         // Collapsible (T-4, PLAN decision 5): the chevron/title toggle the body.
         // Collapse-DEFAULT policy (T-5, PLAN §B): defaults are recomputed on
         // every OPEN (Main Audio starts expanded); a rebuild WITHIN one open
         // (backend events, etc.) instead preserves whatever the transient state
         // currently is — `collapsedState(for:default:)` picks the right one.
-        panel.beginCard(header: Self.mainAudioCardTitle, volumeTitle: "Volume", trailingTitle: "Output",
+        panel.beginCard(header: Self.mainAudioCardTitle, trailingTitle: "Output",
                         collapsible: true,
                         collapsed: collapsedState(for: Self.mainAudioCardTitle, default: false),
                         onToggle: { [weak self] in self?.toggleCard(Self.mainAudioCardTitle) })
@@ -1162,9 +1170,10 @@ public final class PopoverController: NSObject {
         renderedSubsectionTitles = []
         renderedBluetoothOrder = []
         renderedBTConnectShown = false
+        renderedSyncColumnTitleShown = false
         bluetoothConnectButton = nil
-        // Combined header row: "Output Devices" title on the left, "VOLUME" over
-        // the slider. The membership "Selected" column MOVED to the left spine
+        // Combined header row: "Output Devices" title on the left. The
+        // membership "Selected" column MOVED to the left spine
         // (v4 §Call-1), so this card no longer heads a membership column — but
         // its device rows' trailing dropdown column, once left empty, now
         // fills the FEED composite (v4.1 item 3), so the header names it
@@ -1172,7 +1181,7 @@ public final class PopoverController: NSObject {
         // carries NO accessory: the "+" that fronts the add MENU is the card's
         // bottom footer strip now (`devicesFooter`, added after every
         // subsection below).
-        panel.beginCard(header: Self.outputDevicesCardTitle, volumeTitle: "Volume", trailingTitle: "Feed",
+        panel.beginCard(header: Self.outputDevicesCardTitle, trailingTitle: "Feed",
                         collapsible: true,
                         collapsed: collapsedState(for: Self.outputDevicesCardTitle, default: false),
                         onToggle: { [weak self] in self?.toggleCard(Self.outputDevicesCardTitle) })
@@ -1193,13 +1202,22 @@ public final class PopoverController: NSObject {
         // affordance (`rendersHeader`). A COLLAPSED one keeps its header and
         // renders no rows.
         for section in sections where rendersHeader(section) {
-            let bluetooth = section.title == Self.bluetoothSubsectionTitle
+            // The SYNC column title lives in the Bluetooth subsection's header
+            // line only (BT-OFFSET-UI) — and ONLY when that subsection actually
+            // has rows carrying a sync chip. The Bluetooth header renders even
+            // with nothing listed (its empty body IS the Connect affordance), so
+            // ungating this leaves "SYNC" floating over a column that does not
+            // exist: chrome naming absent content, the one thing a legend line
+            // must never do. Gated on the SECTION, not on `collapsed` — a
+            // collapsed subsection still HAS its rows, exactly as a collapsed
+            // card keeps its own column titles.
+            let showsSync = section.title == Self.bluetoothSubsectionTitle
+                && !section.devices.isEmpty
+            if showsSync { renderedSyncColumnTitleShown = true }
             let collapsed = addSubsection(
                 section.title,
-                // The SYNC column title lives in the Bluetooth subsection's
-                // header line only, between VOLUME and FEED (BT-OFFSET-UI).
-                columnTitle: bluetooth ? "Sync" : nil,
-                columnCenterFromTrailing: bluetooth ? PopoverColumnGrid.syncCenterFromTrailing : 0)
+                columnTitle: showsSync ? "Sync" : nil,
+                columnCenterFromTrailing: showsSync ? PopoverColumnGrid.syncCenterFromTrailing : 0)
             guard !collapsed else { continue }
             addSubsectionRows(section)
         }
@@ -1239,7 +1257,7 @@ public final class PopoverController: NSObject {
             selectedAppBundleID = nil
         }
         let title = Self.applicationsCardTitle
-        panel.beginCard(header: title, volumeTitle: "Volume", trailingTitle: "Redirect",
+        panel.beginCard(header: title, trailingTitle: "Redirect",
                         collapsible: true,
                         collapsed: collapsedState(for: title, default: !applicationsDefaultExpanded),
                         onToggle: { [weak self] in self?.toggleCard(title) })
@@ -1354,6 +1372,13 @@ public final class PopoverController: NSObject {
     /// Whether the LAST `rebuild()` mounted the Bluetooth empty-state Connect
     /// row (BT-LIST) — `test_bluetoothConnectRowShown()`.
     private var renderedBTConnectShown = false
+
+    /// Whether the LAST `rebuild()` printed the "SYNC" column title on the
+    /// Bluetooth subsection header — `test_syncColumnTitleShown()`. Recorded
+    /// rather than derived because the title is a RENDER decision (it must never
+    /// name a column with no rows under it), and nothing else on this surface
+    /// would notice it silently going missing.
+    private var renderedSyncColumnTitleShown = false
 
     /// The mounted Bluetooth empty-state Connect button, for
     /// `test_fireBluetoothConnectClick()` to drive real target/action dispatch.
@@ -2289,8 +2314,7 @@ public final class PopoverController: NSObject {
         let wrapper = NSView()
         wrapper.translatesAutoresizingMaskIntoConstraints = false
         wrapper.addSubview(label)
-        let nameColumnLeading = PopoverColumnGrid.leadingInset
-            + PopoverColumnGrid.iconWidth + PopoverColumnGrid.iconToName
+        let nameColumnLeading = PopoverColumnGrid.nameColumnLeading
         NSLayoutConstraint.activate([
             wrapper.heightAnchor.constraint(equalToConstant: DeviceRowView.rowHeight),
             label.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: nameColumnLeading),
@@ -2304,18 +2328,37 @@ public final class PopoverController: NSObject {
     /// The Bluetooth subsection's empty state (BT-LIST): pairing/connecting is
     /// Apple-owned, so the affordance is the Settings trip — the fresh row then
     /// arrives through the ordinary connected-only listing.
+    ///
+    /// A LINK, never a push button: a bordered pill is the only chrome-drawn
+    /// control in a card of borderless rows, which lets an ABSENCE — a section
+    /// with nothing in it — pull more eye than the live speakers above it.
+    /// Borderless at `menuItem`/secondary puts it in the same voice as
+    /// `makePlaceholderRow`'s "no apps" line, one step quieter than a device
+    /// name, while staying a real `NSButton` (same action, same focus ring, same
+    /// `test_fireBluetoothConnectClick`). Deliberately NOT accent-tinted: gold is
+    /// spoken for here — it means "in the mix" — and a gold link in a device list
+    /// would claim a membership it doesn't have.
     private func makeBluetoothConnectRow() -> NSView {
         let button = NSButton(title: "Connect a Bluetooth device…",
                               target: self, action: #selector(bluetoothConnectRowClicked(_:)))
         button.translatesAutoresizingMaskIntoConstraints = false
-        button.bezelStyle = .rounded
+        button.bezelStyle = .accessoryBar
+        button.isBordered = false
         button.controlSize = .small
+        // The title's colour is set through `attributedTitle`, not
+        // `contentTintColor` — that property reliably tints a button's template
+        // IMAGE, but its effect on a title varies by bezel style. The dynamic
+        // token resolves per appearance at draw time (the same way the FEED
+        // pills' attributed colours do), so a live light/dark switch follows.
+        button.attributedTitle = NSAttributedString(
+            string: button.title,
+            attributes: [.font: Tokens.Font.menuItem,
+                         .foregroundColor: Tokens.Color.secondaryLabel])
         bluetoothConnectButton = button
         let wrapper = NSView()
         wrapper.translatesAutoresizingMaskIntoConstraints = false
         wrapper.addSubview(button)
-        let nameColumnLeading = PopoverColumnGrid.leadingInset
-            + PopoverColumnGrid.iconWidth + PopoverColumnGrid.iconToName
+        let nameColumnLeading = PopoverColumnGrid.nameColumnLeading
         NSLayoutConstraint.activate([
             wrapper.heightAnchor.constraint(equalToConstant: DeviceRowView.rowHeight),
             button.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: nameColumnLeading),
@@ -2366,8 +2409,7 @@ public final class PopoverController: NSObject {
         label.maximumNumberOfLines = 1
         wrapper.addSubview(icon)
         wrapper.addSubview(label)
-        let nameColumnLeading = PopoverColumnGrid.leadingInset
-            + PopoverColumnGrid.iconWidth + PopoverColumnGrid.iconToName
+        let nameColumnLeading = PopoverColumnGrid.nameColumnLeading
         NSLayoutConstraint.activate([
             wrapper.heightAnchor.constraint(equalToConstant: PopoverColumnGrid.applicationsFooterRowHeight),
             icon.leadingAnchor.constraint(equalTo: wrapper.leadingAnchor, constant: nameColumnLeading),
@@ -3296,6 +3338,10 @@ public final class PopoverController: NSObject {
     /// Whether the last rebuild mounted the Bluetooth empty-state Connect row
     /// (BT-LIST).
     public func test_bluetoothConnectRowShown() -> Bool { renderedBTConnectShown }
+
+    /// Whether the last rebuild printed the "SYNC" column title on the Bluetooth
+    /// subsection header.
+    public func test_syncColumnTitleShown() -> Bool { renderedSyncColumnTitleShown }
 
     /// Fire the Bluetooth empty-state Connect button through real AppKit
     /// target/action dispatch (never a bypass seam).

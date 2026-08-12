@@ -115,6 +115,9 @@ import Testing
         // Pin the seam so the host machine's real Reduce Motion setting can't
         // skew a result either way; the RM tests flip it explicitly.
         overlay.test_reduceMotionOverride = false
+        // Headless test windows are never ordered front; pin the visibility
+        // seam so the ordered-out-window veto can't skew a result either way.
+        overlay.test_windowVisibleOverride = true
         overlay.frame = content.bounds
         content.addSubview(overlay)
         let hook = StubHook()
@@ -160,6 +163,47 @@ import Testing
         let presented = scene.overlay.test_pulsePresentationStrokeEnd
         #expect(presented != nil && presented! > 0.01,
                 "mid-flight the PRESENTATION must differ from the absorbed model — \(String(describing: presented))")
+    }
+
+    @Test func aReopenNeverDiffsAgainstTheStalePreCloseBaseline() {
+        // The popover reuses its view across open/close, so the overlay must
+        // forget its baseline when the window orders out — otherwise a room
+        // that joined WHILE CLOSED fires a pulse the instant the panel reopens,
+        // an animation that follows nothing.
+        let scene = makeScene(nodes: [.member, .nonMember])
+        scene.hook.gold = true
+        scene.overlay.test_reconcileEnergize()          // baseline: armed, 1 room
+        drainMainQueue()
+
+        // Popover closes (the window orders out)…
+        NotificationCenter.default.post(
+            name: NSWindow.didChangeOcclusionStateNotification, object: scene.window)
+        // …a second room joins while closed, then the panel reopens and draws.
+        scene.rows[1].node = .member
+        scene.overlay.test_reconcileEnergize()
+        drainMainQueue()
+        #expect(!scene.overlay.test_isConnectPulsing,
+                "the first draw after a reopen is settled — no pulse from a stale diff")
+
+        // A join AFTER that settled draw is a live transition again.
+        let extraRow = NSView(frame: NSRect(x: 10, y: 160, width: 20, height: 20))
+        scene.window.contentView!.addSubview(extraRow)
+        scene.overlay.deviceRows = scene.rows + [StubRow(view: extraRow, node: .member)]
+        scene.overlay.test_reconcileEnergize()
+        drainMainQueue()
+        #expect(scene.overlay.test_isConnectPulsing,
+                "…and pulses normally once the reopened panel is the baseline")
+    }
+
+    @Test func anOrderedOutWindowNeverPulses() {
+        let scene = makeScene(nodes: [.member])
+        scene.overlay.test_windowVisibleOverride = nil  // read the real window
+        scene.overlay.test_reconcileEnergize()          // baseline: idle
+        scene.hook.gold = true
+        scene.overlay.test_reconcileEnergize()
+        drainMainQueue()
+        #expect(!scene.overlay.test_isConnectPulsing,
+                "a window that is not on screen has nothing to animate")
     }
 
     // MARK: Departure point (the pulse leaves from the room that joined)

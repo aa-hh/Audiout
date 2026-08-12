@@ -140,6 +140,32 @@ public final class BusRailOverlayView: NSView {
     /// previous mount dies with it.
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        settleBaseline()
+        // The popover REUSES this view across open/close — no remount, so this
+        // method never re-fires on a reopen. Watch the window's own visibility
+        // instead: ordering out (popover close) settles the baseline, so the
+        // first draw after a reopen can never diff against a stale pre-close
+        // plan and fire a pulse that follows nothing (spec §6).
+        NotificationCenter.default.removeObserver(
+            self, name: NSWindow.didChangeOcclusionStateNotification, object: nil)
+        if let window {
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(windowOcclusionStateDidChange),
+                name: NSWindow.didChangeOcclusionStateNotification,
+                object: window)
+        }
+    }
+
+    @objc private func windowOcclusionStateDidChange(_ note: Notification) {
+        guard let window = note.object as? NSWindow,
+              !window.occlusionState.contains(.visible) else { return }
+        settleBaseline()
+    }
+
+    /// Forget the transition baseline and kill anything mid-flight: the next
+    /// draw stamps a fresh baseline WITHOUT firing.
+    private func settleBaseline() {
         lastEnergy = nil
         lastMemberYs = []
         cancelConnectPulse()
@@ -431,7 +457,7 @@ public final class BusRailOverlayView: NSView {
         let previousMemberYs = lastMemberYs
         lastEnergy = signature
         lastMemberYs = plan.dormant ? [] : plan.stops.filter { $0.node == .member }.map(\.y)
-        guard fires, window != nil, !reduceMotion else { return }
+        guard fires, windowIsVisible, !reduceMotion else { return }
         let joined = NSBezierPath()
         for run in wireRuns(for: plan) { joined.append(run.path) }
         guard !joined.isEmpty else { return }
@@ -734,6 +760,15 @@ public final class BusRailOverlayView: NSView {
     /// `nil` (the default) reads the live workspace value; tests flip it and
     /// post the real `accessibilityDisplayOptionsDidChangeNotification`.
     public var test_reduceMotionOverride: Bool?
+
+    /// Window-visibility override seam — headless test windows are never
+    /// ordered front, so `NSWindow.isVisible` would veto every pulse there.
+    /// `nil` (the default) reads the live window.
+    public var test_windowVisibleOverride: Bool?
+
+    private var windowIsVisible: Bool {
+        test_windowVisibleOverride ?? (window?.isVisible ?? false)
+    }
 
     /// Where the LAST pulse departed from (fraction of the wire; 1 = terminus,
     /// smaller = a mid-wire room's own node). `nil` until a pulse has run.

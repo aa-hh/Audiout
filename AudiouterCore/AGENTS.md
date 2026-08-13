@@ -688,6 +688,7 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `AppRouteConfiguring` | Optional backend capability (T6/T7): `updateAppRoutes` streams a routed app to its device. `NativeBackend` only. |
 | `AppRouteStore` / `RoutingStore` / `GroupStore` | Versioned-JSON persistence. |
 | `DeviceIconStore` | Persists per-device icon overrides (bare SF Symbol name strings only) for `AudiouterSharedUI.DeviceIconController`. |
+| `HiddenSpeakersStore` | Persists the speakers hidden from the Groups sidebar's list. DISPLAY-ONLY — never consulted for membership or routing. |
 | `BackendEvent` | Backend→UI push channel: add/remove/update/level/app-level/volume-changed/routedApps. |
 | `OutputBackend` | The protocol seam between app and audio routing. |
 | `MockBackend` | Fully-working offline backend for tests/demos. |

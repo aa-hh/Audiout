@@ -46,10 +46,46 @@ import AppKit
                 == ["Rename…", "Delete Group…"])
     }
 
-    @Test func speakerRowMenuOffersNewGroupFromSelection() {
+    @Test func speakerRowMenuOffersNewGroupFromSelectionAndHide() {
         let sidebar = makeSidebar()
+        // The separator between the grouping action and the list-tidying one
+        // reports an empty title.
         #expect(sidebar.test_contextMenuItems(for: .device(id: "kitchen"))
-                == ["New Group from Selection…"])
+                == ["New Group from Selection…", "", "Hide Speaker"])
+    }
+
+    /// The reveal toggle only exists once there is something to reveal — with
+    /// nothing hidden it must not clutter every speaker's menu.
+    @Test func theRevealToggleAppearsOnlyWhileSomethingIsHidden() {
+        let sidebar = makeSidebar()
+        #expect(!sidebar.test_contextMenuItems(for: .device(id: "kitchen"))
+                    .contains { $0.hasPrefix("Show Hidden Speakers") })
+        #expect(sidebar.test_contextMenuItems(forRowTitled: "Speakers").isEmpty)
+    }
+
+    /// The sidebar reports hide requests and renders the host's answer; it
+    /// never hides a row on its own (the host owns the set and its file).
+    @Test func hidingIsReportedToTheHostRatherThanAppliedLocally() {
+        let sidebar = makeSidebar()
+        var toggled: [String] = []
+        sidebar.onToggleSpeakerHidden = { toggled.append($0) }
+
+        sidebar.test_clickContextMenuItem("Hide Speaker", for: .device(id: "patio"))
+
+        #expect(toggled == ["patio"])
+        #expect(sidebar.test_deviceRowCount == 3, "the row list only changes on the next reload")
+    }
+
+    @Test func hidingActsOnTheClickedRowAloneEvenInsideASelection() {
+        let sidebar = makeSidebar()
+        var toggled: [String] = []
+        sidebar.onToggleSpeakerHidden = { toggled.append($0) }
+
+        sidebar.test_selectDevices(["office", "patio"])
+        sidebar.test_clickContextMenuItem("Hide Speaker", for: .device(id: "patio"))
+
+        #expect(toggled == ["patio"],
+                "one mis-aimed right-click must not empty the section")
     }
 
     @Test func headerAndPlaceholderRowsHaveNoMenu() {

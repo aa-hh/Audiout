@@ -107,9 +107,17 @@ lives in the Mixer screen. All group logic goes through the shared
   "Delete Group…" — beside, not below: the editor pane's fitting height has
   ZERO headroom at a 7-device fleet, so new bands need surface-height budget
   first (`theActiveGroupsMarkersAddNoHeightToTheEditorPane`).
-- **Both sidebar sections are FLAT** — no expand/collapse, no nested rows;
-  the Speakers section lists EVERY device (membership is previewed in the
-  editor, not by expansion).
+- **Both sidebar sections are FLAT** — no expand/collapse, no nested rows
+  (membership is previewed in the editor, not by expansion).
+- **`SidebarViewController` draws the rows it is given; the HOST decides
+  which speakers and in what order.** Hiding a speaker is DISPLAY-ONLY and
+  scoped to that list alone: it must never reach membership, selection or
+  routing (a hidden speaker in a group keeps playing), and the editor's and
+  creation sheet's checklists keep listing the WHOLE fleet or a hidden
+  speaker becomes ungroupable. Only the ids the host can still see are
+  passed as hidden, so the reveal toggle's count never promises rows the
+  list cannot produce. Revealing is transient by design — it resets every
+  launch, so the tidy list is what the user comes back to.
 - **Edit-affordance vocabulary: bordered + pencil = editable, bare =
   read-only.** The group name wears `WarmNameFieldCell`; a device name is a
   plain label at identical geometry. Both edit cues share

@@ -22,8 +22,10 @@ public enum SidebarSelection: Equatable, Sendable {
 /// chevron and no child device rows — previewing a group's members happens in
 /// the group editor's own "Speakers" checklist, not by expanding the sidebar
 /// row, so nesting here was pure duplication (design review 2026-07-18). The
-/// Speakers section lists every device, grouped or not, since membership is no
-/// longer previewed via expansion. Selection is reported through `onSelect`.
+/// Speakers section draws exactly the devices the host hands it, in the order
+/// it hands them over — which speakers those are (a fleet with previously-
+/// paired Bluetooth clutter hidden, or all of them) is the host's decision,
+/// not this list's. Selection is reported through `onSelect`.
 ///
 /// The outline model is still a small tree of reference-typed `Node`s (one
 /// level: section header → leaf rows) so the `NSOutlineViewDataSource`
@@ -80,6 +82,16 @@ public final class SidebarViewController: NSViewController {
     /// reports the request.
     public var onRequestDelete: ((String) -> Void)?
 
+    /// Called when the user asks to hide (or unhide) the speaker with this id.
+    /// The host owns the hidden set and its persistence; the sidebar only
+    /// reports the request and renders whatever comes back on the next
+    /// `reload`.
+    public var onToggleSpeakerHidden: ((String) -> Void)?
+
+    /// Called when the user picks "Show Hidden Speakers" — the host flips its
+    /// transient reveal state and reloads.
+    public var onToggleShowHiddenSpeakers: (() -> Void)?
+
     /// Resolves per-device icon overrides (set via the icon picker) so sidebar
     /// device rows show the same glyph as the popover/mixer. `nil` (the
     /// default) falls back to `Device.Kind.symbolName` — old behavior.
@@ -98,6 +110,14 @@ public final class SidebarViewController: NSViewController {
     /// (Warm Signal §3.3), and the active group IS live, so this is the one
     /// place the sidebar may use it. Pure model state, never audio-driven.
     private var activeGroupID: String?
+
+    /// The hidden speakers among the CURRENT fleet, captured on `reload`. Two
+    /// jobs: a row for one of these ids is a revealed hidden row (drawn muted,
+    /// and its menu offers "Unhide"), and a non-empty set is what puts the
+    /// "Show Hidden Speakers" toggle on the menus at all. The host passes the
+    /// hidden ids it can still see, never its whole saved set, so the count in
+    /// that title only ever promises rows this list can actually produce.
+    private var hiddenDeviceIDs: Set<String> = []
 
     /// Whether THIS OS renders the sidebar's automatic Liquid Glass (macOS
     /// 26+) — the injected seam T7 needs (spec Q4-b: warm tint on 26+, opaque
@@ -357,6 +377,15 @@ public final class SidebarViewController: NSViewController {
         onNewGroupFromSelection?(ids)
     }
 
+    @objc private func toggleSpeakerHiddenMenuItemSelected(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        onToggleSpeakerHidden?(id)
+    }
+
+    @objc private func toggleShowHiddenSpeakersMenuItemSelected(_ sender: NSMenuItem) {
+        onToggleShowHiddenSpeakers?()
+    }
+
     /// A device row's double-click does nothing on purpose: the first click
     /// already opened its (read-only) detail pane, so there is nothing further
     /// to open.
@@ -371,16 +400,20 @@ public final class SidebarViewController: NSViewController {
     /// the selection by `SidebarSelection` identity where possible.
     ///
     /// Both sections are flat leaf lists (design review 2026-07-18): a group
-    /// row never carries member-device children, and the Devices section lists
-    /// EVERY device rather than filtering out members of the active group —
-    /// once the sidebar no longer previews membership via expansion, hiding a
-    /// device here would just make it unreachable. `activeGroupID` no longer
-    /// filters anything; it marks the active group's row with the gold
-    /// "playing" indicator so the user can tell which group is live without
-    /// clicking through each one.
-    public func reload(groups: [Group], activeGroupID: String?, devices: [Device]) {
+    /// row never carries member-device children, and membership is never
+    /// previewed by expansion. `activeGroupID` filters nothing; it marks the
+    /// active group's row with the gold "playing" indicator so the user can
+    /// tell which group is live without clicking through each one.
+    ///
+    /// `devices` is exactly the rows to draw — the host decides which speakers
+    /// the user has hidden and in what order they come. `hiddenDeviceIDs` is
+    /// the hidden ids among the fleet the host knows about, whether or not
+    /// their rows are in `devices` right now; see the property.
+    public func reload(groups: [Group], activeGroupID: String?, devices: [Device],
+                       hiddenDeviceIDs: Set<String> = []) {
         let previous = currentSelection
         self.activeGroupID = activeGroupID
+        self.hiddenDeviceIDs = hiddenDeviceIDs
 
         var newRoots: [Node] = []
 
@@ -397,8 +430,7 @@ public final class SidebarViewController: NSViewController {
         }
         newRoots.append(groupsHeader)
 
-        // 2. Speakers section — every device, grouped or not, so it stays
-        //    reachable now that membership isn't previewed via expansion.
+        // 2. Speakers section — whatever the host handed over, grouped or not.
         if !devices.isEmpty {
             let devicesHeader = Node(.header("Speakers"))
             devicesHeader.children = devices.map { Node(.device($0)) }
@@ -456,6 +488,12 @@ public final class SidebarViewController: NSViewController {
         return search(roots)
     }
 
+    /// The rows under the "Speakers" header, in row order.
+    private var deviceNodes: [Node] {
+        roots.first { if case .header("Speakers") = $0.payload { return true } else { return false } }?
+            .children ?? []
+    }
+
     /// The non-selectable row (a section header or the "No groups yet"
     /// placeholder) showing `title` — the rows that carry no identity, so
     /// `findNode(matching:)` can't reach them.
@@ -501,12 +539,24 @@ public final class SidebarViewController: NSViewController {
             }.count ?? 0
     }
 
-    /// Number of device rows under the "Speakers" header. Lists every device
-    /// (grouped or not) since the flat model no longer previews membership
-    /// via expansion.
-    public var test_deviceRowCount: Int {
-        roots.first { if case .header("Speakers") = $0.payload { return true } else { return false } }?
-            .children.count ?? 0
+    /// Number of device rows under the "Speakers" header.
+    public var test_deviceRowCount: Int { deviceNodes.count }
+
+    /// The device ids under the "Speakers" header, in row order.
+    public var test_deviceRowIDs: [String] {
+        deviceNodes.compactMap {
+            if case .device(let device) = $0.payload { return device.id } else { return nil }
+        }
+    }
+
+    /// True when the device row for `id` renders muted — a speaker that is
+    /// unavailable, or a hidden one currently revealed. Built through the same
+    /// delegate path a real reload uses.
+    public func test_deviceRowIsDimmed(id: String) -> Bool {
+        guard let node = findNode(matching: .device(id: id)),
+              let cell = self.outlineView(outlineView, viewFor: nil, item: node) as? NSTableCellView
+        else { return false }
+        return cell.textField?.textColor == .disabledControlTextColor
     }
 
     /// True when every group row has no expandable children (flat model:
@@ -588,6 +638,24 @@ public final class SidebarViewController: NSViewController {
         guard let index = menu.items.firstIndex(where: { $0.title == title }) else { return false }
         menu.performActionForItem(at: index)
         return true
+    }
+
+    /// Same, for a row with no identity (the section headers / the "No groups
+    /// yet" placeholder).
+    @discardableResult
+    public func test_clickContextMenuItem(_ title: String, forRowTitled rowTitle: String) -> Bool {
+        let menu = contextMenu(clickedNode: findNode(titled: rowTitle))
+        guard let index = menu.items.firstIndex(where: { $0.title == title }) else { return false }
+        menu.performActionForItem(at: index)
+        return true
+    }
+
+    /// The `NSControl.StateValue` of the context item titled `title` on
+    /// `target`'s row — `.on` while the reveal toggle is active.
+    public func test_contextMenuItemState(_ title: String,
+                                          for target: SidebarSelection) -> NSControl.StateValue? {
+        contextMenu(clickedNode: findNode(matching: target))
+            .items.first { $0.title == title }?.state
     }
 
     /// Press Cmd-N in the sidebar — a real `NSEvent` through the real
@@ -815,6 +883,11 @@ extension SidebarViewController: NSMenuDelegate {
         menu.autoenablesItems = false
         guard let node = clickedNode else { return }
         switch node.payload {
+        case .header("Speakers"):
+            // The section's own row carries no identity, but it is the one
+            // place to get hidden speakers back once the last visible row's
+            // menu is out of reach.
+            addShowHiddenSpeakersItem(to: menu)
         case .header, .emptyState:
             break   // no identity to act on — an empty menu shows nothing at all
         case .group(let group):
@@ -832,6 +905,36 @@ extension SidebarViewController: NSMenuDelegate {
             let ids = selected.contains(device.id) ? selected : [device.id]
             menu.addItem(contextMenuItem("New Group from Selection…",
                                          #selector(newGroupFromSelectionMenuItemSelected(_:)), ids))
+            menu.addItem(.separator())
+            // Hiding is per-CLICKED-row, never batched over the selection: it
+            // is a list-tidying gesture, and one mis-aimed right-click should
+            // not empty the section.
+            let hidden = hiddenDeviceIDs.contains(device.id)
+            menu.addItem(contextMenuItem(hidden ? "Unhide Speaker" : "Hide Speaker",
+                                         #selector(toggleSpeakerHiddenMenuItemSelected(_:)), device.id))
+            addShowHiddenSpeakersItem(to: menu)
+        }
+    }
+
+    /// Append the reveal toggle when there is anything to reveal. Its `.on`
+    /// state is read off the rows themselves — a hidden speaker with a row is
+    /// a speaker currently being shown — so the toggle can't disagree with
+    /// what the list is doing.
+    private func addShowHiddenSpeakersItem(to menu: NSMenu) {
+        guard !hiddenDeviceIDs.isEmpty else { return }
+        let item = NSMenuItem(title: "Show Hidden Speakers (\(hiddenDeviceIDs.count))",
+                              action: #selector(toggleShowHiddenSpeakersMenuItemSelected(_:)),
+                              keyEquivalent: "")
+        item.target = self
+        item.state = isShowingHiddenSpeakers ? .on : .off
+        menu.addItem(item)
+    }
+
+    /// True while the Speakers section is drawing rows for hidden speakers.
+    private var isShowingHiddenSpeakers: Bool {
+        deviceNodes.contains { node in
+            guard case .device(let device) = node.payload else { return false }
+            return hiddenDeviceIDs.contains(device.id)
         }
     }
 }
@@ -887,9 +990,12 @@ extension SidebarViewController: NSOutlineViewDelegate {
                                  showsActiveMarker: group.id == activeGroupID)
         case .device(let device):
             let symbol = deviceIconController?.symbolName(for: device) ?? device.kind.symbolName
+            // A revealed hidden row wears the same muted treatment an
+            // unavailable one does — it is present but not part of the list
+            // the user chose to keep.
             return makeIconLabel(symbol: symbol,
                                  text: device.name, identifier: "device",
-                                 dimmed: !device.isAvailable)
+                                 dimmed: !device.isAvailable || hiddenDeviceIDs.contains(device.id))
         }
     }
 

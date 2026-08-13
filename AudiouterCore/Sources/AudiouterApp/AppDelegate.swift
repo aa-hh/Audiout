@@ -1148,7 +1148,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func groupsScreenContent() -> NSViewController {
         let controller = mixerWindowController ?? MixerWindowController(
             groupController: groupController,
-            deviceIconController: deviceIconController)
+            deviceIconController: deviceIconController,
+            hiddenSpeakersStore: HiddenSpeakersStore())
         mixerWindowController = controller
         controller.update(devices: Array(devicesByID.values))
         return controller.contentController

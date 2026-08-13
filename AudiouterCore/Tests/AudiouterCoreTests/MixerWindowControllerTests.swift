@@ -694,6 +694,129 @@ import AppKit
         #expect(candidates.contains("office") && candidates.contains("sonos-move"))
         #expect(sheet.test_nameFieldText == "Office + Sonos Move")
     }
+
+    // MARK: Speakers list order + hiding
+
+    /// A window over a hand-built mixed-kind fleet. The names are chosen so a
+    /// case-SENSITIVE sort would produce a different order than the one
+    /// asserted below, and two speakers share a name so the id tie-break is
+    /// exercised too.
+    private func makeWindowWithMixedFleet(hiddenSpeakersStore: HiddenSpeakersStore? = nil) async throws
+        -> (MixerWindowController, GroupController) {
+        let fleet = [
+            Device(id: "bt-sony", name: "Sony WH-1000", kind: .bluetooth),
+            Device(id: "ap-office", name: "Office", kind: .homePod),
+            Device(id: "ap-kitchen-b", name: "Kitchen", kind: .sonos),
+            Device(id: "bt-beats", name: "beats pill", kind: .bluetooth),
+            Device(id: "ap-attic", name: "attic", kind: .sonos),
+            Device(id: "ap-kitchen-a", name: "Kitchen", kind: .sonos),
+            Device(id: "local-mac", name: "MacBook Pro Speakers", kind: .localMac,
+                   isLocalDevice: true),
+        ]
+        let backend = MockBackend(fleet: fleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        try await waitForFleet(backend, count: fleet.count)
+        let controller = GroupController(backend: backend,
+                                         store: GroupStore(directory: tempDirectory()),
+                                         loadPersisted: false)
+        let window = MixerWindowController(groupController: controller,
+                                           hiddenSpeakersStore: hiddenSpeakersStore)
+        window.test_isVisibleOverride = true
+        window.update(devices: backend.devices)
+        return (window, controller)
+    }
+
+    @Test func speakersAreOrderedLocalThenAirPlayThenBluetooth() async throws {
+        let (window, _) = try await makeWindowWithMixedFleet()
+        #expect(window.test_sidebar.test_deviceRowIDs
+                == ["local-mac",
+                    "ap-attic", "ap-kitchen-a", "ap-kitchen-b", "ap-office",
+                    "bt-beats", "bt-sony"],
+                "this Mac first, then AirPlay, then Bluetooth; by name case-insensitively inside each, id breaking a tie")
+    }
+
+    @Test func hidingASpeakerRemovesItsRowAndPersists() async throws {
+        let store = HiddenSpeakersStore(directory: tempDirectory())
+        let (window, _) = try await makeWindowWithMixedFleet(hiddenSpeakersStore: store)
+
+        #expect(window.test_sidebar.test_clickContextMenuItem("Hide Speaker",
+                                                              for: .device(id: "bt-sony")))
+
+        #expect(!window.test_sidebar.test_deviceRowIDs.contains("bt-sony"))
+        #expect(window.test_sidebar.test_deviceRowCount == 6)
+        #expect(try store.load() == ["bt-sony"])
+    }
+
+    @Test func hiddenSpeakersStayHiddenOnTheNextLaunch() async throws {
+        let store = HiddenSpeakersStore(directory: tempDirectory())
+        try store.save(["bt-sony"])
+
+        let (window, _) = try await makeWindowWithMixedFleet(hiddenSpeakersStore: store)
+
+        #expect(!window.test_sidebar.test_deviceRowIDs.contains("bt-sony"),
+                "the saved set is loaded at init")
+        #expect(window.test_sidebar.test_contextMenuItemState("Show Hidden Speakers (1)",
+                                                              for: .device(id: "bt-beats")) == .off,
+                "revealing is transient — a fresh launch starts back at the tidy list")
+    }
+
+    @Test func showHiddenSpeakersBringsTheRowBackMutedAndOfferingUnhide() async throws {
+        let store = HiddenSpeakersStore(directory: tempDirectory())
+        let (window, _) = try await makeWindowWithMixedFleet(hiddenSpeakersStore: store)
+        window.test_sidebar.test_clickContextMenuItem("Hide Speaker", for: .device(id: "bt-sony"))
+
+        #expect(window.test_sidebar.test_clickContextMenuItem("Show Hidden Speakers (1)",
+                                                              for: .device(id: "bt-beats")))
+
+        #expect(window.test_sidebar.test_deviceRowIDs.contains("bt-sony"))
+        #expect(window.test_sidebar.test_deviceRowIsDimmed(id: "bt-sony"),
+                "a revealed hidden row reads muted")
+        #expect(!window.test_sidebar.test_deviceRowIsDimmed(id: "bt-beats"))
+        #expect(window.test_sidebar.test_contextMenuItems(for: .device(id: "bt-sony"))
+                == ["New Group from Selection…", "", "Unhide Speaker", "Show Hidden Speakers (1)"],
+                "the separator is an empty title; the hidden row offers Unhide")
+        #expect(window.test_sidebar.test_contextMenuItemState("Show Hidden Speakers (1)",
+                                                              for: .device(id: "bt-sony")) == .on)
+
+        #expect(window.test_sidebar.test_clickContextMenuItem("Unhide Speaker",
+                                                              for: .device(id: "bt-sony")))
+        #expect(try store.load() == [], "unhiding persists too")
+        #expect(window.test_sidebar.test_deviceRowIDs.count == 7)
+        #expect(!window.test_sidebar.test_deviceRowIsDimmed(id: "bt-sony"))
+    }
+
+    /// The last visible speaker's menu can be out of reach (or every speaker
+    /// hidden at once), so the section header carries the reveal toggle too.
+    @Test func theSpeakersHeaderAlsoOffersTheRevealToggle() async throws {
+        let (window, _) = try await makeWindowWithMixedFleet(
+            hiddenSpeakersStore: HiddenSpeakersStore(directory: tempDirectory()))
+        window.test_sidebar.test_clickContextMenuItem("Hide Speaker", for: .device(id: "bt-sony"))
+
+        #expect(window.test_sidebar.test_contextMenuItems(forRowTitled: "Speakers")
+                == ["Show Hidden Speakers (1)"])
+        #expect(window.test_sidebar.test_clickContextMenuItem("Show Hidden Speakers (1)",
+                                                              forRowTitled: "Speakers"))
+        #expect(window.test_sidebar.test_deviceRowIDs.contains("bt-sony"))
+    }
+
+    /// Hiding is DISPLAY-ONLY: it must never touch group membership, and the
+    /// editor's checklist must keep offering the hidden speaker so it stays
+    /// groupable.
+    @Test func hidingASpeakerLeavesItsGroupMembershipAndTheEditorChecklistAlone() async throws {
+        let (window, controller) = try await makeWindowWithMixedFleet(
+            hiddenSpeakersStore: HiddenSpeakersStore(directory: tempDirectory()))
+        _ = controller.setDeviceSelected("bt-sony", true)
+        _ = controller.setDeviceSelected("ap-office", true)
+        let saved = try controller.saveCurrentSetupAsGroup(name: "Group 1").group
+
+        window.test_sidebar.test_clickContextMenuItem("Hide Speaker", for: .device(id: "bt-sony"))
+
+        #expect(controller.groups.first { $0.id == saved.id }?.memberIDs.contains("bt-sony") == true,
+                "a hidden speaker keeps playing in its group")
+        window.test_sidebar.test_select(.group(id: saved.id))
+        #expect(window.test_editor.test_candidateDeviceIDs.contains("bt-sony"),
+                "the membership checklist still lists it, hidden or not")
+    }
 }
 
 private actor WindowTestCountBox {

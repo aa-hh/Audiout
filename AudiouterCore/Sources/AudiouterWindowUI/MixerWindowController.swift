@@ -58,6 +58,22 @@ public final class MixerWindowController {
     /// Latest device snapshot the app pushed via `update(devices:)`, keyed by id.
     private var devicesByID: [String: Device] = [:]
 
+    /// Persistence for ``hiddenDeviceIDs``. `nil` — the default — means this
+    /// controller neither loads nor saves them, which is what keeps the many
+    /// tests that build a bare controller off the real Application Support
+    /// directory; the app passes a real store, tests a temp-directory one.
+    private let hiddenSpeakersStore: HiddenSpeakersStore?
+
+    /// The speakers the user has hidden from the sidebar's Speakers list.
+    /// DISPLAY-ONLY — never consulted for membership, selection or routing.
+    private var hiddenDeviceIDs: Set<String>
+
+    /// Whether hidden speakers are currently revealed (muted rows, offering
+    /// "Unhide Speaker"). Deliberately NOT persisted: revealing is a trip into
+    /// the drawer to fix something, not a setting, so every launch starts back
+    /// at the tidy list the user asked for.
+    private var showHiddenSpeakers = false
+
     /// The device the detail pane is currently showing, so `refreshAll()` can
     /// re-render it from a fresher snapshot (or fall back to the default
     /// content when the device has since disappeared). `nil` when the detail
@@ -91,9 +107,14 @@ public final class MixerWindowController {
     private let sidebarSplitItem: NSSplitViewItem
 
     public init(groupController: GroupController,
-               deviceIconController: DeviceIconController = DeviceIconController(loadPersisted: false)) {
+               deviceIconController: DeviceIconController = DeviceIconController(loadPersisted: false),
+               hiddenSpeakersStore: HiddenSpeakersStore? = nil) {
         self.groupController = groupController
         self.deviceIconController = deviceIconController
+        self.hiddenSpeakersStore = hiddenSpeakersStore
+        // No store, an unreadable file, or a first run all mean the same thing:
+        // nothing hidden. A list that is merely untidy is never wrong.
+        self.hiddenDeviceIDs = hiddenSpeakersStore.flatMap { (try? $0.load()) ?? nil } ?? []
         self.sidebarViewController = SidebarViewController()
         self.editorViewController = GroupEditorViewController(groupController: groupController)
         self.detailViewController = DeviceDetailViewController(groupController: groupController)
@@ -179,6 +200,17 @@ public final class MixerWindowController {
             self.sidebarViewController.select(.group(id: groupID), notify: false)
             self.showEditor(for: groupID)
             self.editorViewController.requestDelete()
+        }
+        // Context-menu "Hide Speaker" / "Unhide Speaker" on a speaker row.
+        sidebarViewController.onToggleSpeakerHidden = { [weak self] deviceID in
+            self?.toggleSpeakerHidden(deviceID)
+        }
+        // Context-menu "Show Hidden Speakers" — reveal or re-hide them until
+        // the app is relaunched.
+        sidebarViewController.onToggleShowHiddenSpeakers = { [weak self] in
+            guard let self else { return }
+            self.showHiddenSpeakers.toggle()
+            self.refreshSidebar()
         }
         // The empty pane's call-to-action runs the same creation sheet.
         emptyStateViewController.onNewGroup = { [weak self] in
@@ -388,10 +420,10 @@ public final class MixerWindowController {
         // it has to be whole.
         if sidebarSplitItem.isCollapsed { sidebarSplitItem.isCollapsed = false }
 
+        // The sidebar shows the user's tidied list; the editor below it keeps
+        // getting the full fleet, so a hidden speaker stays groupable.
         let devices = orderedDevices()
-        sidebarViewController.reload(groups: groupController.groups,
-                                     activeGroupID: groupController.activeGroupID,
-                                     devices: devices)
+        refreshSidebar()
         // Refresh whichever content pane is showing. The create sheet is a
         // separate presentation (not the content pane) — it is never disturbed
         // here.
@@ -424,11 +456,63 @@ public final class MixerWindowController {
     private func refreshSidebar() {
         sidebarViewController.reload(groups: groupController.groups,
                                      activeGroupID: groupController.activeGroupID,
-                                     devices: orderedDevices())
+                                     devices: sidebarDevices(),
+                                     hiddenDeviceIDs: knownHiddenDeviceIDs)
     }
 
+    /// Every known device, ordered the way the Groups screen reads a fleet:
+    /// this Mac first, then the AirPlay receivers, then Bluetooth — which puts
+    /// the pile of previously-paired Bluetooth speakers at the bottom instead
+    /// of interleaved through the list. Within a bucket it is by name,
+    /// case-insensitively (a lowercase name sorting after every capitalised
+    /// one is the kind of "order" that reads as no order at all), and by id
+    /// for two speakers sharing a name so the sequence is deterministic.
+    ///
+    /// This is the FULL list: the editor's and creation sheet's membership
+    /// checklists take it as-is, so a hidden speaker is still groupable.
     private func orderedDevices() -> [Device] {
-        devicesByID.values.sorted { ($0.name, $0.id) < ($1.name, $1.id) }
+        devicesByID.values.sorted { a, b in
+            if typeBucket(a) != typeBucket(b) { return typeBucket(a) < typeBucket(b) }
+            let byName = a.name.localizedCaseInsensitiveCompare(b.name)
+            if byName != .orderedSame { return byName == .orderedAscending }
+            return a.id < b.id
+        }
+    }
+
+    private func typeBucket(_ device: Device) -> Int {
+        if device.isLocalDevice { return 0 }
+        return device.isBluetooth ? 2 : 1
+    }
+
+    /// The Speakers section's rows: `orderedDevices()` minus whatever the user
+    /// hid, unless they are currently revealing them.
+    private func sidebarDevices() -> [Device] {
+        let devices = orderedDevices()
+        guard !showHiddenSpeakers else { return devices }
+        return devices.filter { !hiddenDeviceIDs.contains($0.id) }
+    }
+
+    /// The hidden ids that name a device in the current snapshot. The saved
+    /// set keeps ids the fleet has lost (a Bluetooth speaker that is merely
+    /// switched off is exactly the sort of clutter the user hid), but only
+    /// these can produce a row, so only these may be counted or revealed.
+    private var knownHiddenDeviceIDs: Set<String> {
+        hiddenDeviceIDs.filter { devicesByID[$0] != nil }
+    }
+
+    // MARK: Hidden speakers
+
+    /// Hide `deviceID` from the Speakers list, or unhide it if it is already
+    /// hidden. DISPLAY-ONLY: group membership, selection and routing are all
+    /// untouched — a hidden speaker in a group keeps playing.
+    private func toggleSpeakerHidden(_ deviceID: String) {
+        if hiddenDeviceIDs.contains(deviceID) {
+            hiddenDeviceIDs.remove(deviceID)
+        } else {
+            hiddenDeviceIDs.insert(deviceID)
+        }
+        try? hiddenSpeakersStore?.save(hiddenDeviceIDs)
+        refreshSidebar()
     }
 
     // MARK: Test-support hooks

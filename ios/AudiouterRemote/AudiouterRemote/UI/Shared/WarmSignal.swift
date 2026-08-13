@@ -34,41 +34,57 @@ enum WarmSignal {
 
     // MARK: Grounds
 
-    /// Four grounds and a well, and in BOTH appearances they are four different
-    /// values. The document gives light one paper colour for all of them
-    /// (`#FBFBF9` at doc:1693-1699), which leaves the light build with no
-    /// elevation at all: a speaker's halo, a panel and the screen behind them
-    /// are the same pixel, so instruments float on nothing while dark mode
-    /// reads as built.
+    /// Dark keeps a graded ladder; LIGHT is one flat near-white ground, and
+    /// separation there is carried by ``containerEdge`` below instead of by a
+    /// fill step. Both platforms hold the same five light values, so a surface
+    /// named `panel` is the same pixel on a Mac and on a phone.
     ///
-    /// The fix is the one paper actually uses, and the one iOS uses for grouped
-    /// tables: move the GROUND down rather than pushing surfaces up, so a
-    /// raised thing can be paper-white and still lift. The steps are small on
-    /// purpose — 1.12:1 from canvas to raised, about what `systemGroupedBackground`
-    /// gives a white cell. Elevation you can see is not elevation you notice.
+    /// The flat ground is Alec's decision (2026-08-12), taken on measurements
+    /// against a rendered comparison of every alternative — it is not a
+    /// correction of anything. A stepped light ladder is the intuitive answer
+    /// and it does not survive measurement twice over. Its steps land at
+    /// 1.04–1.08:1, under this project's own 1.10:1 surface floor, so it buys
+    /// perception without buying separation; and every ink and instrument
+    /// measures BEST on the flat near-white and worse on each rung down
+    /// (`label2` gives up 0.4 of a contrast point on a stepped canvas, `gold`
+    /// falls from 3.67:1 to 3.39:1). To make those steps measure, the ground
+    /// has to stop being a near-white ground.
     ///
-    /// It is also why these five light values do NOT match the Mac app's,
-    /// which runs `#FBFBF9` flat across canvas/canvasHi/panel/raised: the Mac
-    /// separates surfaces with hairlines and a window chrome iOS has no
-    /// equivalent of, so a flat ground costs it nothing and costs this screen
-    /// every instrument's footing. NEVER flatten these to match it. The
-    /// divergence stops at the ladder — `hairline` and every instrument below
-    /// hold the Mac's values exactly.
-    static let canvas   = warm(light: 0xF4F2EA, dark: 0x16130F)
-    static let canvasHi = warm(light: 0xF7F5EF, dark: 0x1B1712)
-    static let panel    = warm(light: 0xFCFBF7, dark: 0x1D1915)
-    static let raised   = warm(light: 0xFFFFFF, dark: 0x241F1A)
-    static let well     = warm(light: 0xEDEAE0, dark: 0x100D0A)
+    /// An edge costs neither, because nothing on this screen is ever drawn ON
+    /// an edge — which is what makes it the one lever with slack in it.
+    static let canvas   = warm(light: 0xFBFBF9, dark: 0x16130F)
+    static let canvasHi = warm(light: 0xFBFBF9, dark: 0x1B1712)
+    static let panel    = warm(light: 0xFBFBF9, dark: 0x1D1915)
+    static let raised   = warm(light: 0xFBFBF9, dark: 0x241F1A)
+    static let well     = warm(light: 0xE8E6DC, dark: 0x100D0A)
 
-    /// The one drawn edge, and the only separation most surfaces on this
-    /// screen get — so it carries a real floor where the grounds above carry
-    /// none: ≥1.25:1 against the surface it divides, the same floor the Mac
-    /// holds its divider to. Light `#D0CDC3` measures 1.54:1 against `panel`
-    /// and 1.42:1 against `canvas`. Anything lighter fails on the paper
-    /// ground (`#E7E6DF` lands at 1.21:1 on `panel` and 1.04:1 on `well` —
-    /// an edge nobody can see). Unlike the ladder, this token is the Mac's
-    /// hex exactly; nothing about it is iOS-specific.
+    /// The rule INSIDE a container — a row separator, a section-header lead-in
+    /// — as opposed to the container's own edge, which is ``containerEdge``.
+    /// It carries a real floor where the grounds above carry none: ≥1.25:1
+    /// against the surface it divides, the same floor the Mac holds its
+    /// divider to. Light `#D0CDC3` measures 1.54:1 against the flat ground and
+    /// 1.27:1 against `well`. Anything lighter fails on paper (`#E7E6DF` lands
+    /// at 1.21:1 on the ground and 1.00:1 on `well` — an edge nobody can see).
+    /// The Mac's hex exactly; nothing about it is iOS-specific.
     static let hairline = warm(light: 0xD0CDC3, dark: 0x3A332B)
+
+    /// A container's OWN outer edge — the resting rim of a halo, a card, a
+    /// seat — where ``hairline`` rules that container's interior. Two weights
+    /// of one mechanism, and the split is what replaces the light fill ladder:
+    /// on a flat ground the edge is the only boundary pixel a surface gets.
+    ///
+    /// Light `#C4C0B4` measures 1.76:1 against the flat ground and 1.45:1
+    /// against `well`, both over the 1.25:1 edge floor, and it clears the
+    /// ``hairline`` divider by 1.14:1 — enough to rank the two, short of
+    /// reading as two different materials. Dark resolves to `hairline`'s own
+    /// value by decision: dark still HAS a fill ladder, and its single
+    /// hairline already measures 1.40:1 against `panel` and 1.56:1 against
+    /// `well`, at or above where the light edge lands.
+    ///
+    /// The Mac's `Tokens.Color.containerEdge` carries the same name and the
+    /// same two hexes. It also ships an Increase Contrast pair, which this
+    /// palette has no layer for — every token here is a light/dark pair only.
+    static let containerEdge = warm(light: 0xC4C0B4, dark: 0x3A332B)
 
     // MARK: Ink
 
@@ -87,26 +103,30 @@ enum WarmSignal {
 
     /// The signal, as a GRAPHIC — held to the 3:1 control floor against the
     /// tightest ground it draws on, which is `well` (the level arc's own
-    /// track), not `panel`. Light `#A67C1E` measures well 3.16:1, canvas
-    /// 3.39:1, deckFill 3.52:1, panel 3.67:1, raised 3.80:1; the Mac app
-    /// carries the same hex at the same ~41.5° hue. For text, see ``goldText``.
+    /// track), not the flat ground. Light `#A67C1E` measures well 3.04:1,
+    /// deckFill 3.58:1, flat ground 3.67:1; the Mac app carries the same hex
+    /// at the same ~41.5° hue. For text, see ``goldText``.
     static let gold    = warm(light: 0xA67C1E, dark: 0xE8B84B)
 
-    /// Light-mode `gold` measures 3.16–3.80:1 against every surface it sits
-    /// on as text (well 3.16:1, canvas 3.39:1, deckFill 3.52:1, panel
-    /// 3.67:1) — all fail the 4.5:1 text floor, even though the same hex
+    /// Light-mode `gold` measures 3.04–3.67:1 against every surface it sits on
+    /// as text — all fail the 4.5:1 text floor, even though the same hex
     /// clears 3:1 everywhere as a graphic (fader fill, wash, dots), so only
-    /// text uses need to move. `#866210` clears 4.5:1 against all four
-    /// (well is the tightest: 4.63:1; canvas 4.97:1, deckFill 5.16:1, panel
-    /// 5.38:1) while staying in the same hue family. Dark is untouched —
-    /// dark `gold` already clears 7.4–10.5:1 everywhere. Use this instead of
-    /// `gold` for any text, at or below 16 pt, that must read as gold.
-    static let goldText = warm(light: 0x866210, dark: 0xE8B84B)
+    /// text uses need to move. `#825E0F` clears the floor on all three: `well`
+    /// is the tightest at 4.72:1, then deckFill 5.55:1 and the flat ground
+    /// 5.70:1, all while staying in the same hue family (41.2°, within a
+    /// degree of `gold`). `well` is where the App-routing destination badge
+    /// draws it, so that is the surface the value is set from; the headroom
+    /// over 4.5 is banked deliberately, the same way ``ring`` banks its own,
+    /// so a later move in the light ground cannot drop it back under. Dark is
+    /// untouched — dark `gold` already clears 7.4–10.5:1 everywhere. Use this
+    /// instead of `gold` for any text, at or below 16 pt, that must read as
+    /// gold.
+    static let goldText = warm(light: 0x825E0F, dark: 0xE8B84B)
 
     /// Gold's dim companion, and an instrument in its own right, so it carries
     /// ``gold``'s 3:1 floor rather than being free to fade: light `#9C7E3C`
-    /// measures well 3.19:1, canvas 3.43:1, deckFill 3.56:1, panel 3.71:1 —
-    /// the Mac's hex, exactly. A lighter tan reads as "dimmer" and clears
+    /// measures well 3.07:1, deckFill 3.62:1, flat ground 3.71:1 — the Mac's
+    /// hex, exactly. A lighter tan reads as "dimmer" and clears
     /// nothing (`#C2A05A` is 2.06:1 on `well`). Pinning both inks just over
     /// 3:1 on the same ground puts their luminances within 0.03 of each other,
     /// so in LIGHT this reads dimmer than `gold` by CHROMA, not by luminance —
@@ -118,13 +138,13 @@ enum WarmSignal {
     /// a graphic, so it carries the 3:1 control floor against every ground it
     /// draws on, and it is a SHARED instrument, so the light value must clear
     /// that floor on the Mac's ladder too. The tightest ground across both
-    /// platforms is the Mac's `well` `#E8E6DC` (the darkest light surface ⇒
-    /// least contrast for a dark ink), not this screen's `raised` white.
-    /// Light `#8B7958` measures Mac well 3.37:1, well 3.51:1, canvas 3.77:1,
-    /// canvasHi 3.87:1, panel 4.08:1, raised 4.22:1 — headroom banked on
-    /// purpose so a later move in the light ladder cannot drop it back under
-    /// the floor. Still the same hue-neutral warm grey (~38.8° at 0.37
-    /// saturation); it is chroma, not hue, that keeps it from reading as
+    /// platforms is `well` `#E8E6DC` (the darkest light surface ⇒ least
+    /// contrast for a dark ink), which both platforms now share.
+    /// Light `#8B7958` measures well 3.37:1, deckFill 3.97:1, flat ground
+    /// 4.08:1 — headroom banked on purpose so a later move in the light
+    /// ground cannot drop it back under the floor. Still the same hue-neutral
+    /// warm grey (~38.8° at 0.37 saturation); it is chroma, not hue, that
+    /// keeps it from reading as
     /// `gold`. The Mac carries this hex exactly. Dark is untouched.
     static let ring    = warm(light: 0x8B7958, dark: 0x8D7D5E)
     static let fail    = warm(light: 0xBB3A2F, dark: 0xD9564A)
@@ -426,9 +446,9 @@ extension View {
 /// the text column at all.
 ///
 /// Track `well` rather than the halo's usual `ring`: a gold arc on `ring`
-/// measures 1.17:1 in light, which is no arc at all. On `well` it is 3.16:1
+/// measures 1.11:1 in light, which is no arc at all. On `well` it is 3.04:1
 /// light / 10.51:1 dark, over the 3:1 floor in both, and the muted arc's `rim`
-/// is 3.46:1 / 4.82:1 on the same track.
+/// is 3.33:1 / 4.82:1 on the same track.
 ///
 /// A KNOB, NOT A FULL CIRCLE, and the routed dot is why: ``DeviceRowView``'s
 /// `routedDot` sits on the halo's lower right and is gold too, so any arc that

@@ -8,6 +8,7 @@ colors:
   raised: "#241F1A"
   well: "#100D0A"
   hairline: "#3A332B"
+  containerEdge: "#3A332B"
   label: "rgba(255,255,255,0.92)"
   label2: "rgba(255,255,255,0.55)"
   label3: "rgba(255,255,255,0.47)"
@@ -91,9 +92,10 @@ and its scope is the whole companion app; Groups already draws from the same
 palette, and the Speakers tab is documented here as its richest, most fully
 worked expression.
 
-Depth in both grounds comes from a graded ladder of surfaces and a hairline
-stroke, not shadows — the one exception is the floating Main Out deck, the
-only thing genuinely floating over moving content. Every state the screen
+Depth comes from drawn edges, not shadows: a graded ladder of surfaces in
+dark, and in light a single flat near-white ground where the edge carries the
+separation alone — the one exception is the floating Main Out deck, the only
+thing genuinely floating over moving content. Every state the screen
 draws is also spoken: VoiceOver's value is built from the same source the
 pixels are, optimistic echoes are bounded and time out back to truth, and a
 control the current rule won't let you touch says why on its own hint
@@ -107,8 +109,8 @@ rather than going silently dead.
 - Three sections — PLAYING / READY / UNAVAILABLE — address every speaker by
   what it is doing right now, never by transport (no separate Bluetooth or
   Pinned heading)
-- Depth is a ground ladder and hairlines; one shadow exists on the entire
-  screen
+- Depth is a ground ladder in dark and edge weight in light; one shadow
+  exists on the entire screen
 - A bold, tracked-out, uppercase monospaced micro-voice carries every state
   word; sentence case is reserved for text the app didn't write itself (a
   failure headline is the Mac's own sentence)
@@ -124,35 +126,44 @@ to paper and gold is deepened for text contrast.
 - **Gold** (`#E8B84B` dark / `#A67C1E` light): the live signal — fader fill,
   the halo's level arc, the routed-app dot, a fader cap's index bar. Graphic
   use only; clears 3:1 in both grounds but fails 4.5:1 as light-mode text.
-- **Gold Text** (`#E8B84B` dark / `#866210` light): the same signal,
+- **Gold Text** (`#E8B84B` dark / `#825E0F` light): the same signal,
   repurposed for anything at or under 16pt that must read as gold — MAIN
   OUT, a live volume readout, the PLAYING sub-label. Deepened in light so
   the identical hue clears the text floor instead of the graphic one.
 
-### Neutral — the ground ladder
-- **canvas** (`#16130F` dark / `#F4F2EA` light): the screen behind
+### Neutral — the grounds and the two edges
+- **canvas** (`#16130F` dark / `#FBFBF9` light): the screen behind
   everything.
-- **canvasHi** (`#1B1712` / `#F7F5EF`): the top stop of the canvas gradient.
-- **panel** (`#1D1915` / `#FCFBF7`): one step up from canvas.
-- **raised** (`#241F1A` / `#FFFFFF`): halos, fader caps — things that sit on
+- **canvasHi** (`#1B1712` / `#FBFBF9`): the top stop of the canvas gradient,
+  which collapses flat in light.
+- **panel** (`#1D1915` / `#FBFBF9`): one step up from canvas in dark.
+- **raised** (`#241F1A` / `#FBFBF9`): halos, fader caps — things that sit on
   top.
-- **well** (`#100D0A` / `#EDEAE0`): recessed — fader tracks, mute-button
-  fill, the routed-dot's unlit state.
-- **hairline** (`#3A332B` / `#D0CDC3`): every drawn edge that stands in for
-  a shadow. Light is the Mac app's own hairline hex, held to a ≥1.25:1 floor
-  against the surface it divides (1.54:1 on `panel`, 1.42:1 on `canvas`);
-  anything lighter is an edge you cannot see — `#E7E6DF` lands at 1.21:1.
+- **well** (`#100D0A` / `#E8E6DC`): recessed — fader tracks, mute-button
+  fill, the routed-dot's unlit state, the level arc's track.
+- **hairline** (`#3A332B` / `#D0CDC3`): the rule INSIDE a container — a row
+  separator, a section-header lead-in. Held to a ≥1.25:1 floor against the
+  surface it divides: 1.54:1 on the flat light ground, 1.27:1 on `well`.
+  Anything lighter is an edge you cannot see — `#E7E6DF` lands at 1.21:1.
+- **containerEdge** (`#3A332B` / `#C4C0B4`): a container's OWN outer edge.
+  Light measures 1.76:1 on the flat ground and 1.45:1 on `well`, ranking
+  1.14:1 above the `hairline` divider — enough to tell the two apart, short of
+  reading as two materials. Dark is `hairline`'s own value by decision: dark
+  still has a fill ladder, and its hairline already measures 1.40:1 on `panel`
+  and 1.56:1 on `well`, at or above where the light edge lands.
 
-The steps are small on purpose — about 1.12:1 canvas→raised, close to what
-`systemGroupedBackground` gives a white cell — because elevation you can see
-is not elevation you notice.
+Both edges are the Mac app's hexes exactly, under the same two names.
 
-The five light grounds are the one place this palette deliberately does not
-match the Mac app, which took `#FBFBF9` flat across canvas/canvasHi/panel/
-raised. The Mac separates surfaces with hairlines and window chrome that iOS
-has no equivalent of; here a flat ground leaves a halo, a panel and the screen
-behind them the same pixel. Everything below the ladder — `hairline` and every
-instrument — is the same value on both platforms.
+**Light is one flat ground, and separation there is edge weight, not fill.**
+This is Alec's decision (2026-08-12), taken on measurements against a rendered
+comparison of every alternative. A stepped light ladder is the intuitive answer
+and it fails measurement twice: its steps land at 1.04–1.08:1, under this
+project's own 1.10:1 surface floor, so it buys perception without buying
+separation; and every ink and instrument measures BEST on the flat near-white
+and worse on each rung down (`label2` gives up 0.4 of a contrast point on a
+stepped canvas, `gold` falls from 3.67:1 to 3.39:1). Moving an edge costs
+neither, because nothing on this screen is ever drawn ON an edge. All five
+light grounds now match the Mac app value for value.
 
 ### Ink
 - **label** (92% white dark / `#1E1C1C` light): primary text — a playing
@@ -167,15 +178,15 @@ instrument — is the same value on both platforms.
 ### Instruments
 - **ember** (`#8A6A2F` / `#9C7E3C`) and **glow** (`#FFD97A` / `#E8B84B`):
   reserved signal variants, not yet drawn on this screen. Light ember is the
-  Mac's own hex and carries `gold`'s 3:1 floor on every ground (3.19:1 on
+  Mac's own hex and carries `gold`'s 3:1 floor on every ground (3.07:1 on
   `well`) — a lighter tan reads as "dimmer" and clears nothing (`#C2A05A` is
   2.06:1 on `well`).
 - **ring** (`#8D7D5E` / `#8B7958`): the connected solid halo and the dashed
   connecting/reconnecting halo. A graphic, so it holds the 3:1 floor on every
   ground it draws on — and being shared with the Mac, on the Mac's grounds
-  too. The tightest is the Mac's `well` `#E8E6DC` at 3.37:1; on this screen
-  the tightest is `well` at 3.51:1, the loosest `raised` at 4.22:1. The Mac's
-  hex exactly.
+  too. The tightest ground on either platform is the now-shared `well`
+  `#E8E6DC` at 3.37:1; the loosest is the flat light ground at 4.08:1. The
+  Mac's hex exactly.
 - **rim** (`#8D7D5E` / `#8A7A62`): the stroke on every raised control —
   fader track, fader cap, mute button.
 - **fail** (`#D9564A` / `#BB3A2F`): the one red on the screen, and it is
@@ -268,9 +279,9 @@ where the fill's own edge is.
 
 ## Elevation & Depth
 
-Almost entirely flat. Depth comes from the six-step ground ladder (canvas →
-canvasHi → panel → raised → well, plus a hairline stroke) rather than
-shadows — a drawn edge is cheaper than a shadow and doesn't smear across a
+Almost entirely flat. Depth comes from the dark ground ladder (canvas →
+canvasHi → panel → raised, with `well` recessed below), and in light from
+`containerEdge` and `hairline` alone, rather than from shadows — a drawn edge is cheaper than a shadow and doesn't smear across a
 paper ground. Exactly one shadow exists on the whole screen, on the Main Out
 deck, because it is the only element genuinely floating over moving content;
 even that shadow is tuned per appearance, because the same 0.4-black-at-17pt
@@ -310,10 +321,13 @@ The row is its own fader and its own button: a tap starts or stops the
 speaker; a horizontal drag anywhere across the row sets its level. There is
 no drawn slider.
 - **Halo:** a 44pt circle, `raised` fill, an SF Symbol glyph tinted by
-  state, ringed by `LevelDial` while live (a knob-style 300°-of-360° gold
-  arc with a 60° dead zone centred on the routed-app dot — drawn on `well`,
-  never `ring`, because a gold arc on `ring` measures 1.12:1 in light,
-  under the 3:1 control floor).
+  state, and a resting 1pt `containerEdge` rim — the fill matches the ground
+  in light, so the rim is the halo's whole boundary. The rim is replaced,
+  never joined, by each state ring: `LevelDial` while live (a knob-style
+  300°-of-360° gold arc with a 60° dead zone centred on the routed-app dot —
+  drawn on `well`, never `ring`, because a gold arc on `ring` measures 1.11:1
+  in light, under the 3:1 control floor), a dashed `ring` while connecting, a
+  `fail` ring when it failed.
 - **Wash:** while playing, a flat 5%-opacity gold rectangle sits behind the
   whole row — a "this row is live" signal, never the level itself.
 - **Drag instrument:** mid-drag, the row tints its own untouched remainder

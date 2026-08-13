@@ -279,9 +279,9 @@ struct AppRouteRowView: View {
             // `well` + `rim`, the recessed-control recipe the mute button and
             // both fader tracks already wear — NOT `pill`, which was never a
             // text backdrop anywhere in the app and fails as one: `label2` on
-            // light `pill` measures 3.57:1 and `goldText` 3.49:1, both under
-            // the 4.5:1 text floor. On `well` the same inks measure 4.73:1 /
-            // 6.22:1 and 4.64:1 / 10.51:1 (light / dark) — `well` is
+            // light `pill` measures 3.57:1 and `goldText` 3.71:1, both under
+            // the 4.5:1 text floor. On `well` the same inks measure 4.54:1 /
+            // 6.22:1 and 4.72:1 / 10.51:1 (light / dark) — `well` is
             // goldText's documented tightest surface, and it clears.
             .background(Capsule().fill(WarmSignal.well))
             .overlay(Capsule().strokeBorder(WarmSignal.rim, lineWidth: 0.5))

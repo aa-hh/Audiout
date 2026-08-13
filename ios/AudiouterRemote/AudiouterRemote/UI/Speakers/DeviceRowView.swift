@@ -540,6 +540,15 @@ struct DeviceRowView: View {
             Circle().strokeBorder(WarmSignal.ring, style: StrokeStyle(lineWidth: 2.5, dash: [4, 3]))
         } else if isLive {
             LevelDial(fraction: volumeFraction, muted: device.isMuted, dragging: dragging)
+        } else {
+            // An idle halo is the one surface on this screen whose fill alone
+            // used to hold it: `raised` over `canvas`. Neither ground separates
+            // it now (1.00:1 light, 1.07:1 dark), so its own edge is the whole
+            // boundary — which is exactly what `containerEdge` is the weight
+            // for. 1.76:1 light / 1.43:1 dark against the fill it outlines, and
+            // a 1 pt neutral resting rim the three state rings above overrule
+            // by both colour and width.
+            Circle().strokeBorder(WarmSignal.containerEdge, lineWidth: 1)
         }
     }
 

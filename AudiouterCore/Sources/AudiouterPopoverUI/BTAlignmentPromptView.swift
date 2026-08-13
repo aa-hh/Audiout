@@ -116,17 +116,19 @@ final class BTAlignmentPromptView: NSView {
         button.setContentCompressionResistancePriority(.required, for: .horizontal)
     }
 
-    /// The inset container seat — `well` fill + `hairline` rim (the
+    /// The inset container seat — `well` fill + `containerEdge` rim (the
     /// `GroupedSectionView` pair), NO failure tint (house rule 8: the failure
     /// red stays failure-exclusive).
     private func applyBackgroundTint() {
         effectiveAppearance.performAsCurrentDrawingAppearance {
-            // Inset containers use the well + hairline pair, never bare `panel`:
-            // panel vs canvas is ~1.06:1 dark / ~1.08:1 light — "effectively
-            // invisible as a boundary" (`MembershipWellContrastTests`, and the
-            // `GroupedSectionView` precedent this mirrors).
+            // Inset containers use the well + containerEdge pair, never bare
+            // `panel`: panel vs canvas is 1.060:1 dark / 1.000:1 light —
+            // "effectively invisible as a boundary" (`MembershipWellContrastTests`,
+            // and the `GroupedSectionView` precedent this mirrors). This seat's
+            // outer rim is a container edge, so it takes the heavier weight;
+            // `hairline` stays for rules drawn inside a container.
             background.layer?.backgroundColor = Tokens.Color.well.cgColor
-            background.layer?.borderColor = Tokens.Color.hairline.cgColor
+            background.layer?.borderColor = Tokens.Color.containerEdge.cgColor
             background.layer?.borderWidth = 1
         }
     }

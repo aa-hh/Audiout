@@ -290,6 +290,43 @@ public enum Tokens {
                        light: 0xD0CDC3, lightHighContrast: 0x76716B)
         }
 
+        /// A container's OWN outer edge — the stroke around a grouped section
+        /// or an inset seat. `hairline` above is its sibling one rank down: the
+        /// dividers BETWEEN rows INSIDE such a container. Two weights of one
+        /// mechanism, and the mechanism is free, because nothing in this app is
+        /// ever drawn ON a hairline — each is only ever a stroke or a divider
+        /// fill — so ranking them spends no text and no instrument contrast.
+        /// CONTRAST RATIONALE (WCAG relative luminance, each ratio against the
+        /// surface that edge actually borders):
+        ///
+        /// LIGHT `#C4C0B4` — 1.755:1 vs the flat ground `#FBFBF9` (in light
+        /// `canvas`/`canvasHi`/`panel`/`raised` are all one value) and 1.454:1
+        /// vs `well` `#E8E6DC`, both over the 1.25:1 separator floor
+        /// (`MembershipWellContrastTests`). It clears the `hairline` divider by
+        /// 1.143:1 — enough to rank the two, short of reading as two different
+        /// materials.
+        ///
+        /// LIGHT Increase Contrast `#6C6761` — 5.404:1 vs the ground, 4.475:1
+        /// vs `well`, and 1.158:1 over the IC divider `#76716B`, so the
+        /// container-vs-divider rank survives the mode whose users most depend
+        /// on structure. Same neutral-greige hue line as that divider
+        /// (R−B = 11): a warm-tan edge reads off-family on the neutral ground.
+        ///
+        /// DARK resolves to `hairline`'s own two values — a decision, not an
+        /// oversight. The second weight exists because light's fill ladder is
+        /// FLAT: a `panel`- or `raised`-filled container on `canvas` measures
+        /// 1.000:1 there, leaving its edge as the only boundary pixel. Dark
+        /// keeps a real ladder (`panel` vs `canvas` 1.060:1, `raised` vs
+        /// `panel` 1.070:1, `well` vs `panel` 1.109:1) AND a hairline already
+        /// measuring 1.404:1 vs `panel`, 1.489:1 vs `canvas`, 1.558:1 vs
+        /// `well` — at or above where light's new edge lands (1.755/1.454). A
+        /// third dark value would buy separation dark already has and start
+        /// drawing frames around things.
+        public static var containerEdge: NSColor {
+            warmDynamic(name: "containerEdge", dark: 0x3A332B, darkHighContrast: 0x786B5A,
+                       light: 0xC4C0B4, lightHighContrast: 0x6C6761)
+        }
+
         /// The under-name level meter's EMPTY-track fill (`LevelMeterView`'s
         /// `trackLayer`). Added in the UX spacing/contrast pass (2026-07-23,
         /// owner live-build feedback): the track was `NSColor.tertiarySystemFill`,
@@ -360,18 +397,31 @@ public enum Tokens {
         /// The **connected** solid ring hue — a hue-neutral warm-grey (gold is
         /// reserved for the route-armed dot/meter). Also the color of the
         /// **connecting** dashed ring (form, not color, carries pending — §3.2).
-        /// CONTRAST RATIONALE: spec §1.1/§1.2 set a NORMATIVE ≥3:1 floor tested
-        /// at the 21 px ring circle, dark vs BOTH `panel` and `raised`, light vs
-        /// `panel`. Measured (WCAG relative luminance): dark `#8D7D5E` = 4.35:1
-        /// vs `panel` / 4.07:1 vs `raised`; light `#A08C66` = 3.08:1 vs `panel`
-        /// (passes, tight — spec §10 flagged the exact hex for the Wave-5 sweep).
-        /// Both clear the floor as-is, so the spec hexes stand (no escape-valve
-        /// brightening needed). Increase-Contrast variants push further from
-        /// `panel` for headroom (dark `#A99A78` = 6.31:1; light `#8A7550` =
-        /// 4.18:1), per house rule 3 (every case ships an IC variant).
+        /// CONTRAST RATIONALE: spec §1.1/§1.2 set a NORMATIVE ≥3:1 floor (WCAG
+        /// 1.4.11, graphical objects) tested at the 21 px ring circle. The
+        /// light value is held against EVERY light ground the ring is drawn
+        /// over on EITHER platform, not just `panel` — the ring is a shared
+        /// instrument, and the iPhone companion draws the same hex over its
+        /// own, darker ladder. The tightest of those grounds is the Mac's
+        /// `well` `#E8E6DC` (darkest ⇒ least contrast for a dark ink), NOT
+        /// white; solve `well` and the rest follow. Measured (WCAG relative
+        /// luminance): light `#8B7958` = 3.37:1 vs Mac `well`, 3.51:1 vs iOS
+        /// `well` `#EDEAE0`, 3.77:1 vs iOS `canvas` `#F4F2EA`, 3.87:1 vs iOS
+        /// `canvasHi` `#F7F5EF`, 4.08:1 vs Mac `canvas`/`panel`/`raised`
+        /// `#FBFBF9` and iOS `panel` `#FCFBF7`, 4.22:1 vs iOS `raised`
+        /// `#FFFFFF` — ≥3.37:1 everywhere, headroom deliberately banked so a
+        /// future move in the light grounds cannot push it back under the
+        /// floor. Dark `#8D7D5E` = 4.35:1 vs `panel` / 4.07:1 vs `raised`.
+        /// Increase-Contrast variants push further for headroom (dark
+        /// `#A99A78` = 6.31:1 vs `panel`; light `#7A6847` = 4.30:1 vs Mac
+        /// `well`, 5.20:1 vs `panel`), per house rule 3 (every case ships an
+        /// IC variant). Both light values hold ~38.8° at ~0.37/0.42
+        /// saturation — the same hue-neutral warm grey as before, a re-tune of
+        /// brightness only; what keeps this off gold is its chroma (gold is
+        /// ~0.82 saturated at ~41.5°), not its hue.
         public static var ringConnected: NSColor {
             warmDynamic(name: "ringConnected", dark: 0x8D7D5E, darkHighContrast: 0xA99A78,
-                       light: 0xA08C66, lightHighContrast: 0x8A7550)
+                       light: 0x8B7958, lightHighContrast: 0x7A6847)
         }
 
         /// The **FAILURE-EXCLUSIVE** hue (house rule 8): the failed connection

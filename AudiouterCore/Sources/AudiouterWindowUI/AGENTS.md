@@ -161,5 +161,5 @@ lives in the Mixer screen. All group logic goes through the shared
 | `MembershipRowView` | Checkbox/node row shared by creation sheet and editor. |
 | `DeviceIconWellView` | Large icon + at-rest edit badge (the one approved custom element). |
 | `GroupsPaneLayout` | The panes' shared grid constants — the single parity source. |
-| `GroupedSectionView` | The one grouped-section container (well fill, hairline, inset dividers). |
+| `GroupedSectionView` | The one grouped-section container (well fill, `containerEdge` rim, inset `hairline` dividers). |
 | `SidebarSelection` | Enum: `.group(id:)` or `.device(id:)`. |

@@ -88,14 +88,46 @@ import AppKit
                 "hairline vs panel (light): \(lightRatio):1 below the \(floor):1 separator floor")
     }
 
+    /// `Tokens.Color.containerEdge` is the heavier of the two hairline weights
+    /// — a container's own outer edge, where `hairline` rules that container's
+    /// interior — so it carries the SAME separator floor, and it must never
+    /// rank below the divider it outranks. Dark resolves the two to one value
+    /// by decision (dark still has a fill ladder; light's is flat), which is
+    /// why the rank is asserted as ">=" rather than ">".
+    ///
+    /// The figures in the token's own rationale — light 1.755:1 vs the ground,
+    /// 1.454:1 vs `well` — are prose and UNGUARDED: only the floors below fail
+    /// a build. Re-measure before quoting them anywhere (three comments in this
+    /// repo sat wrong-but-green for exactly that reason).
+    @Test func containerEdgeClearsTheSeparatorFloorAndOutranksTheDivider() {
+        let floor: CGFloat = 1.25
+
+        for appearanceName in [NSAppearance.Name.darkAqua, .aqua] {
+            let panel = resolved(Tokens.Color.panel, appearanceName: appearanceName)
+            let edgeRatio = contrastRatio(resolved(Tokens.Color.containerEdge,
+                                                   appearanceName: appearanceName), panel)
+            #expect(edgeRatio >= floor,
+                    Comment(rawValue: "containerEdge vs panel (\(appearanceName.rawValue)): " +
+                    "\(edgeRatio):1 below the \(floor):1 separator floor"))
+
+            let dividerRatio = contrastRatio(resolved(Tokens.Color.hairline,
+                                                      appearanceName: appearanceName), panel)
+            #expect(edgeRatio >= dividerRatio,
+                    Comment(rawValue: "containerEdge (\(edgeRatio):1) ranks BELOW the hairline " +
+                    "divider (\(dividerRatio):1) in \(appearanceName.rawValue) — a container's " +
+                    "edge must never read lighter than the rules inside it"))
+        }
+    }
+
     /// FOR THE RECORD (design review 2026-07-25): the inline rename field is
     /// filled with `raised` and sits beside the icon well, which is filled with
     /// the same token, inside a header section filled with `well`. That pairing
     /// is the whole reason the two header controls read as a pair — so the
     /// separation between the control fill and the section fill gets the same
     /// measured floor the other surface pairs carry. Measured: 1.186:1 dark /
-    /// 1.172:1 light (light re-measured 2026-08-12 when Direction 04
-    /// re-authored light `raised`/`well`).
+    /// 1.172:1 light (re-measured 2026-08-12 when Direction 04 re-authored
+    /// light `raised`/`well`; prose, unguarded — the floor below is what fails
+    /// a build).
     @Test func raisedVsWellClearsTheControlOnSectionFloorBothAppearances() {
         let floor: CGFloat = 1.15
 

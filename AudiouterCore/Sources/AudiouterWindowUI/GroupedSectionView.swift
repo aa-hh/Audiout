@@ -4,8 +4,10 @@ import AppKit
 import AudiouterSharedUI
 
 /// A GROUPED-SECTION container (the macOS System Settings idiom) — a rounded
-/// `Tokens.Color.well` fill with a `Tokens.Color.hairline` border, plus an
-/// inset hairline divider between each pair of ADJACENT rows handed to it.
+/// `Tokens.Color.well` fill edged with `Tokens.Color.containerEdge`, plus an
+/// inset `Tokens.Color.hairline` divider between each pair of ADJACENT rows
+/// handed to it. The two tokens are the same mechanism at two weights: the
+/// heavier one bounds the container, the lighter one rules its interior.
 ///
 /// It started life (T5) as the membership checklist's recessed background:
 /// before it, the checklist carried no surface of its own at all —
@@ -13,11 +15,12 @@ import AudiouterSharedUI
 /// separation either between rows or against the pane (measured on the real
 /// post-fix tones: `panel` vs `canvas` ~1.06:1 dark / ~1.08:1 light,
 /// effectively invisible). Measured floors for THIS view's own tokens (WCAG
-/// relative luminance, both ≥ their required floor — see
-/// `MembershipWellContrastTests`): `well` vs `panel` 1.109:1 dark / 1.182:1
-/// light (floor 1.10:1); `hairline` vs `panel` 1.404:1 dark / 1.309:1 light
-/// (floor 1.25:1, the same separator floor `Tokens.Color.hairline` itself
-/// documents against `panel`).
+/// relative luminance, all ≥ their required floor — see
+/// `MembershipWellContrastTests`, which owns the guarded assertions; these
+/// figures are unguarded prose): `well` vs `panel` 1.109:1 dark / 1.208:1
+/// light (floor 1.10:1); `hairline` vs `panel` 1.404:1 dark / 1.535:1 light
+/// and `containerEdge` vs `panel` 1.404:1 dark / 1.755:1 light (floor 1.25:1,
+/// the separator floor both tokens document against `panel`).
 ///
 /// It is now the Groups window's ONE section shape, used by BOTH content panes
 /// — the group editor's header + membership list, and the device detail pane's
@@ -81,7 +84,11 @@ final class GroupedSectionView: NSView {
                                  xRadius: Self.cornerRadius, yRadius: Self.cornerRadius)
         Tokens.Color.well.setFill()
         shape.fill()
-        Tokens.Color.hairline.setStroke()
+        // The container's own edge takes the heavier of the two hairline
+        // weights; the row dividers below stay at the lighter one. That rank is
+        // what tells a bounded section from the rules inside it on a ground
+        // where the fills no longer differ.
+        Tokens.Color.containerEdge.setStroke()
         shape.lineWidth = Self.borderWidth
         shape.stroke()
 

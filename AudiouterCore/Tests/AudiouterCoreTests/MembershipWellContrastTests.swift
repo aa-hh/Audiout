@@ -127,7 +127,7 @@ import AppKit
     /// measured floor the other surface pairs carry. Measured: 1.186:1 dark /
     /// 1.172:1 light (re-measured 2026-08-12 when Direction 04 re-authored
     /// light `raised`/`well`; prose, unguarded — the floor below is what fails
-    /// a build).
+    /// a build, so re-measure this figure when either token moves).
     @Test func raisedVsWellClearsTheControlOnSectionFloorBothAppearances() {
         let floor: CGFloat = 1.15
 

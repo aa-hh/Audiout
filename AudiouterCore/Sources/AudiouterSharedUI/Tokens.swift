@@ -366,18 +366,18 @@ public enum Tokens {
         /// use): dark `#1F1A15` is 1.07:1 vs `canvas` `#16130F` / 1.01:1 vs
         /// `panel` `#1D1915` (a near-invisible step, deliberately — the
         /// sidebar should read as part of the same warm surface family, not a
-        /// clashing plane); light `#F2EBDC` is 1.04:1 vs `canvas` `#F4EFE7` /
-        /// 1.12:1 vs `panel` `#FBF8F2`, and 1.04:1 against today's neutral
-        /// sidebar grey `#F0F0F0` it replaces — enough of a warm hue shift to
-        /// read visibly warmer while staying a quiet background. Row text
+        /// clashing plane); light `#F5F4ED` is 1.06:1 vs BOTH `canvas` and
+        /// `panel` (Circuit collapses them to the same `#FBFBF9`), and 1.03:1
+        /// against the neutral sidebar grey `#F0F0F0` it replaces — enough of
+        /// a warm hue shift to read visibly warmer while staying a quiet
+        /// background. Row text
         /// (`Tokens.Color.label`/`secondaryLabel`) is unaffected — those are
         /// system dynamic colors already proven legible over the warm
         /// canvas/panel ladder elsewhere, and the 26+ overlay's low alpha
         /// makes any shift negligible. IC variants (my picks, flagged for a
         /// future accessibility sweep like `ringConnected`'s) deepen/lighten
         /// for a slightly more distinct plane under Increase Contrast: dark
-        /// `#2A241C` (1.21:1 vs `canvas`), light `#E9DFC9` (1.25:1 vs
-        /// `panel`).
+        /// `#2A241C` (1.21:1 vs `canvas`), light `#E8E6DC` (1.21:1 vs both).
         public static var sidebarWarmTint: NSColor {
             warmDynamic(name: "sidebarWarmTint", dark: 0x1F1A15, darkHighContrast: 0x2A241C,
                        light: 0xF5F4ED, lightHighContrast: 0xE8E6DC)

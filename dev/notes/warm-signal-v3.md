@@ -1,6 +1,23 @@
 # Warm Signal v3 — LOCKED design spec
 
-**Status: LOCKED contract.** This is the single source of truth that every later
+> **HISTORICAL (marked 2026-08-12). This is the original locked proposal, not
+> current truth.** It was the source of truth when written, and the reasoning in
+> it still stands — but the palette table in §1 has been overtaken by later
+> measured retunes and no longer matches the code. Known drift as of
+> 2026-08-12: light `gold` is `#A67C1E` (not `#A97F1E`), light `ember` is
+> `#9C7E3C` (not `#C2A05A`), light `ring-connected` is `#8B7958` (not
+> `#A08C66`), and the whole light scaffolding column is now the Circuit theme
+> (`canvas` `#FBFBF9`, not `#F4EFE7`). **For any current value, read
+> `AudiouterCore/Sources/AudiouterSharedUI/Tokens.swift`** — it is the only
+> normative source, and every case there carries its own measured rationale.
+> `DESIGN.md` at the repo root describes the system those tokens make.
+>
+> The table is deliberately NOT being refreshed value-by-value: it would go
+> stale again at the next retune, and a document that looks current but is not
+> is worse than one that says plainly what it is.
+
+**Status: LOCKED contract** *(for the reasoning; see the historical note above
+for the values).* This is the single source of truth that every later
 Warm Signal visual task implements. It supersedes the illustrative proposal
 (`warm-signal-proposal.html`) wherever they disagree; where the owner's locked
 decisions disagree with the proposal mockup, the locked decision wins and the

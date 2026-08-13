@@ -1,5 +1,15 @@
 # PLAN — iOS companion: Warm Signal token layer + Speakers redesign
 
+> **SUPERSEDED ON ONE POINT (2026-08-12): ignore every simulator destination in
+> this plan.** It instructs pinning `-destination 'platform=iOS Simulator,name=iPhone 17 Pro Max'`
+> into `ios/AGENTS.md`. That device no longer exists, and the standing rule is
+> that the companion app is **verified on Alec's physical iPhone 15 Pro, always** —
+> never on a simulator, and never with a hard-coded model name. See
+> `ios/AGENTS.md` › Build / test, and `scripts/ios.sh`, which resolves the
+> destination by asking the machine. The recorded commands and test output below
+> are left exactly as they were run, because they are a record of what happened,
+> not instructions to repeat.
+
 **Status: scoped, spec-checked twice, patched. NOT executed. No implementation code has been written.**
 
 This branch (`claude/ios-warm-signal-2a`, cut from `claude/companion-app-phase2-ios` @ `381a0f63`) carries a

@@ -21,10 +21,18 @@
 # before the two meet on main. After they merge it can be omitted.
 #
 # THE DESTINATION IS RESOLVED, NEVER NAMED. The two machines carry different
-# Xcode versions and therefore different simulator runtimes — iOS 27 here,
-# 26.4 there — so any hard-coded `name=iPhone 17 Pro Max` is wrong on one of
-# them, and goes stale on both at the next Xcode update. ios/AGENTS.md already
-# documented a device that no longer exists. Ask the machine instead.
+# Xcode versions and therefore different simulator runtimes, so any hard-coded
+# `name=iPhone <model>` is wrong on one of them, and goes stale on both at the
+# next Xcode update. ios/AGENTS.md already documented a device that stopped
+# existing. Ask the machine instead.
+#
+# AND NOTE WHAT THIS SCRIPT IS NOT. The companion app is VERIFIED on Alec's
+# physical iPhone 15 Pro, always — see ios/AGENTS.md. `test` and `shot` below
+# drive a resolved simulator, which makes them a compile-and-smoke signal and
+# nothing more: device and Simulator builds are separate paths, and the
+# Simulator cannot discover a real Mac over Bonjour, raise the local-network
+# prompt, or make a speaker play. Never report an iOS change as verified on
+# the strength of this script.
 
 set -eu
 

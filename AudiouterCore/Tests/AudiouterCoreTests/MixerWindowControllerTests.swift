@@ -799,6 +799,24 @@ import AppKit
         #expect(window.test_sidebar.test_deviceRowIDs.contains("bt-sony"))
     }
 
+    /// With EVERY speaker hidden there are no device rows left to right-click,
+    /// so the header must survive an empty section — otherwise the reveal
+    /// toggle is unreachable and the hidden speakers are stranded.
+    @Test func hidingEverySpeakerKeepsTheHeaderAsTheWayBack() async throws {
+        let (window, _) = try await makeWindowWithMixedFleet(
+            hiddenSpeakersStore: HiddenSpeakersStore(directory: tempDirectory()))
+        for id in window.test_sidebar.test_deviceRowIDs.reversed() {
+            window.test_sidebar.test_clickContextMenuItem("Hide Speaker", for: .device(id: id))
+        }
+
+        #expect(window.test_sidebar.test_deviceRowCount == 0)
+        #expect(window.test_sidebar.test_contextMenuItems(forRowTitled: "Speakers")
+                == ["Show Hidden Speakers (7)"])
+        #expect(window.test_sidebar.test_clickContextMenuItem("Show Hidden Speakers (7)",
+                                                              forRowTitled: "Speakers"))
+        #expect(window.test_sidebar.test_deviceRowCount == 7)
+    }
+
     /// Hiding is DISPLAY-ONLY: it must never touch group membership, and the
     /// editor's checklist must keep offering the hidden speaker so it stays
     /// groupable.

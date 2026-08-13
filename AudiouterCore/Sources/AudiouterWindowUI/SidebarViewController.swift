@@ -431,7 +431,9 @@ public final class SidebarViewController: NSViewController {
         newRoots.append(groupsHeader)
 
         // 2. Speakers section — whatever the host handed over, grouped or not.
-        if !devices.isEmpty {
+        //    The header also stays when every speaker is hidden: its menu is
+        //    then the ONLY remaining path to "Show Hidden Speakers".
+        if !devices.isEmpty || !hiddenDeviceIDs.isEmpty {
             let devicesHeader = Node(.header("Speakers"))
             devicesHeader.children = devices.map { Node(.device($0)) }
             newRoots.append(devicesHeader)

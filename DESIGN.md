@@ -8,6 +8,7 @@ colors:
   raised: "#241F1A"
   well: "#100D0A"
   hairline: "#3A332B"
+  containerEdge: "#3A332B"
   sidebarWarmTint: "#1F1A15"
   gold: "#E8B84B"
   ember: "#8A6A2F"
@@ -211,7 +212,8 @@ Four hues that give onboarding's permission rows a permanent identity, warmed an
 - **Lifted Near-Black** (`#1B1712` / `#FBFBF9`): the canvas gradient's top stop. In light it is identical to canvas — the gradient collapses flat on purpose.
 - **Panel** (`#1D1915` / `#FBFBF9`) and **Raised** (`#241F1A` / `#FBFBF9`): card fill and icon wells. In light, all three collapse to one value; surface separation there comes from hairlines, not fill steps.
 - **Deep Well** (`#100D0A` / `#E8E6DC`): the recess — fader troughs, dropdown fills. In dark it is *darker* than canvas, so the recess is real rather than a faintly raised strip.
-- **Hairline** (`#3A332B` / `#D0CDC3`): the 1px section divider, and the only visual separation between de-nested cards.
+- **Hairline** (`#3A332B` dark / `#D0CDC3` light): the 1px divider **between rows inside** a container.
+- **Container Edge** (`#3A332B` dark / `#C4C0B4` light, IC `#6C6761`): a container's **own outer** stroke — the rank above `hairline`, and the token that carries surface separation now that light's fill ladder is flat. In **dark it resolves to `hairline`'s own values on purpose**: the second weight exists because light's fills collapse (a panel on canvas measures 1.000:1 there, so its edge is the only boundary pixel), while dark keeps a real ladder *and* a hairline already at 1.40–1.56:1. A third dark value would buy separation dark already has and start drawing frames around things.
 - **Warm Sidebar Wash** (`#1F1A15` / `#F5F4ED`): the Groups sidebar. On macOS 26+ it rides at ~0.30 alpha over Apple's automatic Liquid Glass sidebar (there is no public API to tint the glass itself); below 26 the same colour is drawn fully opaque as the whole backing.
 
 Text, dividers, selection washes and system fills are stock semantic `NSColor`s — `labelColor`, `secondaryLabelColor`, `separatorColor`, `controlAccentColor` and their siblings. They already resolve appearance and Increase Contrast correctly, so they are aliased, not re-authored.
@@ -244,7 +246,14 @@ Why this one won, and the property to protect: **nothing in the app is ever draw
 
 **Do not add anything that draws content on top of the edge token** — that is the assumption the whole choice rests on.
 
-Implementation is in flight on `claude/edge-weight-mac` and `claude/edge-weight-ios`; until it lands, the values above describe the decision rather than the shipping code.
+**Implemented** as `containerEdge` on `claude/edge-weight-mac` (`a242fbc9`) and `claude/edge-weight-ios` (`260a72ff`) — both unmerged, and **the iOS half is unseen on hardware**. iOS now matches the Mac's light grounds value for value.
+
+Flattening the iOS ground exposed two things that were already wrong and merely hidden by the old ladder:
+
+- **`goldText` was under the text floor on a surface it actually renders on.** It measured 4.45:1 against `well`, and `well` is a live text ground — the destination badge fills with it and draws `goldText` on top. Retuned `#866210` → `#825E0F` (4.72:1 on `well`, 5.70:1 on the ground).
+- **The idle speaker halo had no edge at all.** Its view builder had branches for failed, pending and live and no `else`, so a resting halo was a `raised` fill alone — 1.12:1 on the old ladder and **1.000:1** once the ground went flat, i.e. invisible. It now draws a 1 pt `containerEdge` rim. This is the one behavioural change in the work, and it improves dark too, which was 1.07:1.
+
+**Watch `label2` at 4.54:1** on the `well` badge — the thinnest passing ink in the system, clearing the text floor by 0.04. Any future darkening of `well` breaks that first.
 
 What *was* genuine drift on iOS — three instrument values that had gone stale or never cleared their floor — is fixed on `claude/ios-light-circuit`: `hairline` `#E7E6DF` → `#D0CDC3` (it measured 1.04:1 against `well`), `ember` `#C2A05A` → `#9C7E3C` (it cleared 3:1 against nothing — 2.06:1 on `well`), and `gold` `#A97F1E` → `#A67C1E`. Instruments are shared across platforms; grounds are not.
 
@@ -332,6 +341,7 @@ iOS runs a larger radius family suited to a touch surface: 10pt controls, 16pt r
 - **Character:** the app's most-repeated instrument, and the reason gold stays scarce.
 - **Shape:** a 30pt ring with 6pt of breathing room around a 26pt icon.
 - **States:** connected is a 1.6pt solid `ringConnected` stroke; connecting is the *same colour* as a 2.6/2.6 dash — form carries pending, not a new hue; failed is a 1.8pt `failure` stroke. Driven by connection state alone.
+- **Idle must still draw an edge.** A halo with no connection state is not "no ring" — it is a 1 pt `containerEdge` rim. iOS had no such branch and rendered a bare fill, which measured 1.000:1 the moment the light ground went flat. A resting instrument still has to be visible.
 
 ### Membership rail
 

@@ -17,9 +17,12 @@ import AudiouterCore
 
     private func makeDevice(connectionState: ConnectionState = .connected,
                             isAvailable: Bool = true,
-                            supportsAirPlay2: Bool = true) -> Device {
-        Device(id: "dev-1", name: "Test Speaker", kind: .homePod,
+                            supportsAirPlay2: Bool = true,
+                            kind: Device.Kind = .homePod,
+                            isLocalDevice: Bool = false) -> Device {
+        Device(id: "dev-1", name: "Test Speaker", kind: kind,
                isAvailable: isAvailable, supportsAirPlay2: supportsAirPlay2,
+               isLocalDevice: isLocalDevice,
                connectionState: connectionState)
     }
 
@@ -143,6 +146,24 @@ import AudiouterCore
     @Test func aP2DeviceNeverGetsATag() {
         let row = makeBusRow()
         row.apply(makeDevice(supportsAirPlay2: true), selected: true, controllable: true)
+        #expect(!(row.test_feedHasAP1Tag))
+    }
+
+    @Test func bluetoothDeviceNeverGetsTheAP1Tag() {
+        // Bluetooth carries supportsAirPlay2 == false by design, but it is not
+        // an AirPlay receiver — the AP1 (AirPlay-1) tag must not leak onto it.
+        let row = makeBusRow()
+        row.apply(makeDevice(supportsAirPlay2: false, kind: .bluetooth),
+                  selected: true, controllable: true)
+        #expect(!(row.test_feedHasAP1Tag))
+    }
+
+    @Test func localMacOutputNeverGetsTheAP1Tag() {
+        // The Mac's own output also reports supportsAirPlay2 == false and is not
+        // AirPlay either.
+        let row = makeBusRow()
+        row.apply(makeDevice(supportsAirPlay2: false, kind: .localMac, isLocalDevice: true),
+                  selected: true, controllable: true)
         #expect(!(row.test_feedHasAP1Tag))
     }
 

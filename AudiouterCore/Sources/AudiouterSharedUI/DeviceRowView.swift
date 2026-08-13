@@ -1073,7 +1073,12 @@ public final class DeviceRowView: NSView {
             if controlsMuted { color = color.withAlphaComponent(Self.feedMutedTintAlpha) }
             segments.append(.init(text: name, color: color, hasChip: true))
         }
-        let tag = device.supportsAirPlay2 ? nil : Self.ap1FeedTag
+        // AP1 badges a genuine AirPlay-1 receiver. Bluetooth and the local Mac
+        // output also report supportsAirPlay2 == false but are not AirPlay at all
+        // (see Device.isBluetooth's note), so gate them out or the AirPlay-1 tag
+        // leaks onto their rows.
+        let tag = (device.supportsAirPlay2 || device.isBluetooth || device.isLocalDevice)
+            ? nil : Self.ap1FeedTag
         setFeedSegments(segments, tag: tag)
     }
 

@@ -121,7 +121,7 @@ instrument hues keep their authored values in light, where the ground moves
 to paper and gold is deepened for text contrast.
 
 ### Primary
-- **Gold** (`#E8B84B` dark / `#A97F1E` light): the live signal — fader fill,
+- **Gold** (`#E8B84B` dark / `#A67C1E` light): the live signal — fader fill,
   the halo's level arc, the routed-app dot, a fader cap's index bar. Graphic
   use only; clears 3:1 in both grounds but fails 4.5:1 as light-mode text.
 - **Gold Text** (`#E8B84B` dark / `#866210` light): the same signal,
@@ -138,12 +138,21 @@ to paper and gold is deepened for text contrast.
   top.
 - **well** (`#100D0A` / `#EDEAE0`): recessed — fader tracks, mute-button
   fill, the routed-dot's unlit state.
-- **hairline** (`#3A332B` / `#E7E6DF`): every drawn edge that stands in for
-  a shadow.
+- **hairline** (`#3A332B` / `#D0CDC3`): every drawn edge that stands in for
+  a shadow. Light is the Mac app's own hairline hex, held to a ≥1.25:1 floor
+  against the surface it divides (1.54:1 on `panel`, 1.42:1 on `canvas`);
+  anything lighter is an edge you cannot see — `#E7E6DF` lands at 1.21:1.
 
 The steps are small on purpose — about 1.12:1 canvas→raised, close to what
 `systemGroupedBackground` gives a white cell — because elevation you can see
 is not elevation you notice.
+
+The five light grounds are the one place this palette deliberately does not
+match the Mac app, which took `#FBFBF9` flat across canvas/canvasHi/panel/
+raised. The Mac separates surfaces with hairlines and window chrome that iOS
+has no equivalent of; here a flat ground leaves a halo, a panel and the screen
+behind them the same pixel. Everything below the ladder — `hairline` and every
+instrument — is the same value on both platforms.
 
 ### Ink
 - **label** (92% white dark / `#1E1C1C` light): primary text — a playing
@@ -156,10 +165,17 @@ is not elevation you notice.
   4.5:1 text floor.
 
 ### Instruments
-- **ember** (`#8A6A2F` / `#C2A05A`) and **glow** (`#FFD97A` / `#E8B84B`):
-  reserved signal variants, not yet drawn on this screen.
-- **ring** (`#8D7D5E` / `#A08C66`): the dashed connecting/reconnecting halo
-  ring.
+- **ember** (`#8A6A2F` / `#9C7E3C`) and **glow** (`#FFD97A` / `#E8B84B`):
+  reserved signal variants, not yet drawn on this screen. Light ember is the
+  Mac's own hex and carries `gold`'s 3:1 floor on every ground (3.19:1 on
+  `well`) — a lighter tan reads as "dimmer" and clears nothing (`#C2A05A` is
+  2.06:1 on `well`).
+- **ring** (`#8D7D5E` / `#8B7958`): the connected solid halo and the dashed
+  connecting/reconnecting halo. A graphic, so it holds the 3:1 floor on every
+  ground it draws on — and being shared with the Mac, on the Mac's grounds
+  too. The tightest is the Mac's `well` `#E8E6DC` at 3.37:1; on this screen
+  the tightest is `well` at 3.51:1, the loosest `raised` at 4.22:1. The Mac's
+  hex exactly.
 - **rim** (`#8D7D5E` / `#8A7A62`): the stroke on every raised control —
   fader track, fader cap, mute button.
 - **fail** (`#D9564A` / `#BB3A2F`): the one red on the screen, and it is

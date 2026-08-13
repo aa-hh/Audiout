@@ -212,6 +212,16 @@ import AppKit
         #expect(controller.groups.count == 0, "presenting the sheet creates nothing")
     }
 
+    @Test func createSheetShowsATitleAndAnEditablePencilOnItsIconWell() async throws {
+        let (window, _, _) = try await makeWindow()
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        let sheet = try #require(window.test_createSheet)
+
+        #expect(sheet.test_titleText == "New Group", "the sheet names itself instead of opening as a bare form")
+        #expect(sheet.test_iconWellShowsPencil, "bordered + pencil = editable — the icon well is editable, so it wears the same cue DeviceIconWellView does")
+    }
+
     @Test func createSheetPrefillsPreselectedMembersChecked() async throws {
         let (window, _, _) = try await makeWindow()
         window.test_presentCreateSheet(preselected: ["office", "appletv-lr"])
@@ -643,6 +653,46 @@ import AppKit
         host.contentViewController = window.contentController
         window.test_sidebar.test_simulateViewDidAppear()
         #expect(window.test_sidebar.test_isOutlineViewFirstResponder, "the sidebar's outline view must become first responder once the content appears, or Tab has nothing to advance from")
+    }
+
+    // MARK: Active-group marker (sidebar)
+
+    @Test func sidebarMarksTheActiveGroupsRow() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        #expect(!window.test_sidebar.test_groupRowShowsActiveMarker(id: saved.id),
+                "no marker while the group isn't the active Main Out")
+
+        controller.activateGroup(id: saved.id)
+        window.update(devices: backend.devices)
+        #expect(window.test_sidebar.test_groupRowShowsActiveMarker(id: saved.id),
+                "the active group's row carries the gold playing marker")
+    }
+
+    // MARK: Add-button retitle (multi-select discoverability)
+
+    @Test func addButtonRetitlesWhileSpeakersAreMultiSelected() async throws {
+        let (window, _, _) = try await makeWindow()
+        #expect(window.test_sidebar.test_addButtonTitle == "New Group…")
+
+        window.test_sidebar.test_selectDevices(["office", "sonos-move", "sonos-move-2"])
+        #expect(window.test_sidebar.test_addButtonTitle == "New Group from 3 Speakers…",
+                "the button says what + will actually do while speakers are multi-selected")
+
+        window.test_sidebar.test_selectDevices([])
+        #expect(window.test_sidebar.test_addButtonTitle == "New Group…")
+    }
+
+    // MARK: Selection-seeded create-sheet name
+
+    @Test func createSheetPrefillsNameFromTheSelectedSpeakers() async throws {
+        let (window, _, _) = try await makeWindow()
+        window.test_presentCreateSheet(preselected: ["office", "sonos-move"])
+        let sheet = try #require(window.test_createSheet)
+        let candidates = sheet.test_candidateDeviceIDs   // sanity: both offered
+        #expect(candidates.contains("office") && candidates.contains("sonos-move"))
+        #expect(sheet.test_nameFieldText == "Office + Sonos Move")
     }
 }
 

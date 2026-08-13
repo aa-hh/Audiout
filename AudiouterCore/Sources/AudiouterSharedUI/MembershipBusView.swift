@@ -78,6 +78,14 @@ public final class MembershipBusView: NSView {
     /// connected members are feeding it) vs the quiet `ember` idle tone (v4
     /// §Call-1 rail-segment tone). Ignored for every non-origin node.
     private var originGold = false
+    /// Whether this row's rail is ARMED — audio is (or would be) flowing through
+    /// it. Gold is the LIVE color everywhere in Audiouter, so an idle context
+    /// (the Groups editor showing a group that is NOT the active Main Out — pure
+    /// configuration, no audio moving) renders its `.member` discs in the quiet
+    /// `ember` idle tone instead, matching the wire's own armed/idle split
+    /// (`Tokens.Color.spineTone`). Defaults to true: the popover's rows ARE the
+    /// live signal path and keep their gold unchanged.
+    private var armed = true
     /// Whether the pointer is over the row's bus-gutter region — a thin gold ring
     /// appears around the node so it admits it is clickable. The HOST row owns the
     /// tracking (this view stays non-interactive) and only reports a hover its
@@ -97,10 +105,12 @@ public final class MembershipBusView: NSView {
 
     /// Point the bus at a rendering. Idempotent — safe to re-apply on every row
     /// repaint.
-    public func apply(node: Node, dimmed: Bool = false, originGold: Bool = false) {
+    public func apply(node: Node, dimmed: Bool = false, originGold: Bool = false,
+                      armed: Bool = true) {
         self.node = node
         self.dimmed = dimmed
         self.originGold = originGold
+        self.armed = armed
         needsDisplay = true
     }
 
@@ -142,11 +152,12 @@ public final class MembershipBusView: NSView {
             drawHoverRing(centerX: cx, centerY: cy)
             let rect = NSRect(x: cx - r, y: cy - r, width: 2 * r, height: 2 * r)
             if node == .member {
-                // Filled gold disc + gold rim.
-                (dimmed ? Tokens.Color.tertiaryLabel : Tokens.Color.gold).setFill()
+                // Filled disc + rim in the spine's own tone: gold on an armed
+                // rail, ember on an idle one (same split the wire draws with).
+                let fill = dimmed ? Tokens.Color.tertiaryLabel : Tokens.Color.spineTone(armed: armed)
+                fill.setFill()
                 NSBezierPath(ovalIn: rect).fill()
-                strokeNodeRim(in: rect, color: dimmed ? Tokens.Color.tertiaryLabel : Tokens.Color.gold,
-                              dashed: false)
+                strokeNodeRim(in: rect, color: fill, dashed: false)
             } else {
                 // Hollow node: connecting = gold dashed, failed = heavier
                 // failure-red ring, non-member/blocked = plain rim.
@@ -167,7 +178,9 @@ public final class MembershipBusView: NSView {
         let ring = NSBezierPath(ovalIn: NSRect(x: centerX - r, y: centerY - r,
                                                width: 2 * r, height: 2 * r))
         ring.lineWidth = 1
-        Tokens.Color.gold.setStroke()
+        // The ring is an affordance, but it still speaks the spine's tone: an
+        // idle rail must never flash gold (the LIVE color) just for a hover.
+        Tokens.Color.spineTone(armed: armed).setStroke()
         ring.stroke()
     }
 
@@ -231,6 +244,9 @@ public final class MembershipBusView: NSView {
     public var test_nodeRadius: CGFloat { Self.nodeRadius(for: node) }
     /// Whether the host row is currently reporting a gutter hover.
     public var test_hovered: Bool { hovered }
+    /// Whether the node currently renders in the armed (gold) tone vs the quiet
+    /// ember idle tone — the same flag `draw` reads for `.member`'s fill.
+    public var test_armed: Bool { armed }
     /// Whether the node currently draws its gold hover ring (structural hook —
     /// the same condition `drawHoverRing` guards on).
     public var test_drawsHoverRing: Bool { hovered && node != .blocked }

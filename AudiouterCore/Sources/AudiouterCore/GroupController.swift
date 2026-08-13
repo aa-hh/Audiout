@@ -153,9 +153,10 @@ public final class GroupController {
     ///     don't care about persistence can skip the disk hit. Scoped to groups
     ///     ONLY — it deliberately does not resume the live Selected-Devices
     ///     routing set (see the decision note in the body).
-    ///   - routingStore: persistence for the live routing set. WRITE-ONLY at
-    ///     launch by design — `persistRouting()` saves to it, nothing reads it
-    ///     back (same decision note).
+    ///   - routingStore: persistence for the live routing set. Not read in
+    ///     `init` by design — `persistRouting()` saves to it, and only
+    ///     `ensureDefaultSelection()` reads it back, gated on the opt-in
+    ///     `AppSettings.reconnectAtLaunch` (same decision note).
     ///   - settings: where the Main Out master level persists. Injected so tests
     ///     can pass an isolated defaults suite.
     public init(backend: OutputBackend,
@@ -178,8 +179,9 @@ public final class GroupController {
         // {local} once the fleet (incl. the current device) is known.
         //
         // `routingStore` is retained so ongoing changes are still SAVED (via
-        // `persistRouting()`), which keeps the field live and lets a future
-        // "resume last routing" option read it back without a signature change.
+        // `persistRouting()`); `ensureDefaultSelection()` reads it back ONLY
+        // under the opt-in `AppSettings.reconnectAtLaunch` (roadmap 050) —
+        // with the setting off, every launch still resets to {local}.
         //
         // MERGE NOTE (2026-07-17, phase2b ← main): main branched before this
         // decision and its side of this hunk restored routing here via
@@ -212,8 +214,25 @@ public final class GroupController {
     public func ensureDefaultSelection() {
         guard !loadedPersistedRouting, selectedDeviceIDs.isEmpty else { return }
         guard let local = backend.devices.first(where: \.isLocalDevice) else { return }
-        selectedDeviceIDs = [local.id]
-        mainOut = .selectedDevices
+        // Opt-in resume (Settings › General "Reconnect last speakers when
+        // Audiouter starts", roadmap 050) — the "future 'resume last routing'
+        // option" the init decision note reserved `routingStore` for. OFF (the
+        // default) keeps the locked 2026-07-17 behavior below untouched. A
+        // resumed `.group` target whose group has since been deleted falls
+        // back to `.selectedDevices`.
+        if settings.reconnectAtLaunch,
+           let stored = try? routingStore.load(),
+           !stored.selectedDeviceIDs.isEmpty {
+            selectedDeviceIDs = Set(stored.selectedDeviceIDs)
+            if case .group(let id) = stored.mainOut, !groups.contains(where: { $0.id == id }) {
+                mainOut = .selectedDevices
+            } else {
+                mainOut = stored.mainOut
+            }
+        } else {
+            selectedDeviceIDs = [local.id]
+            mainOut = .selectedDevices
+        }
         loadedPersistedRouting = true
         mainOutMasterVolume = (backend.systemOutputVolume ?? settings.mainOutVolume).clampedToVolume
         pushMasterGain(mirrorToSystemVolume: false)

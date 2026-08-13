@@ -9,14 +9,19 @@
 // `dev/notes/onboarding-snapshots/` in both light and dark appearances.
 //
 // It writes, per appearance:
-//   onboarding-<light|dark>-step1-audio.png      card 1 active, nothing granted
-//   onboarding-<light|dark>-step2-network.png    audio granted, card 2 active
-//   onboarding-<light|dark>-step2-waiting.png    card 2's prime in flight (caption)
-//   onboarding-<light|dark>-step3-bluetooth.png  audio + network in, card 3 active
-//   onboarding-<light|dark>-denied.png           audio denied → Settings mode demo
-//   onboarding-<light|dark>-checking.png         every card decided, the sixth row's check mid-flight
-//   onboarding-<light|dark>-complete.png         check passed — six checked rows, settled finale + Start listening CTA
-//   onboarding-<light|dark>-permission-lost.png  the re-entry header message
+//   onboarding-<light|dark>-step1-audio.png        row 1 live, nothing granted
+//   onboarding-<light|dark>-step2-network.png      audio granted, row 2 live
+//   onboarding-<light|dark>-step3-bluetooth.png    audio + network in, row 3 live
+//   onboarding-<light|dark>-step2-waiting.png      row 2's prime in flight (the ribbon's wait)
+//   onboarding-<light|dark>-step4-speakersync.png  bluetooth skipped, Login Items live
+//   onboarding-<light|dark>-denied.png             audio denied → Settings mode demo
+//   onboarding-<light|dark>-step5-remotecontrol.png  the two-stage handoff at rest
+//   onboarding-<light|dark>-remote-control-retry.png the prompt is spent → plain pane
+//   onboarding-<light|dark>-browse-granted.png     a decided row opened for reading
+//   onboarding-<light|dark>-skip-reopened.png      a skipped row pressed again — the ask re-armed
+//   onboarding-<light|dark>-checking.png           every row decided, the sixth row's check mid-flight
+//   onboarding-<light|dark>-complete.png           check passed — six checked rows, settled finale + Start listening CTA
+//   onboarding-<light|dark>-permission-lost.png    the re-entry header message
 //
 // KNOWN LIMIT: prominent buttons render as plain pills here. AppKit fills a
 // `bezelColor` only in the active app's key window, and making this offscreen
@@ -142,6 +147,9 @@ struct SnapshotWorld {
     /// Cards to Skip, after the allows. The only way past an optional step the
     /// fixture's world can't satisfy.
     var skip: [SetupStep] = []
+    /// A spine row to PRESS once every decision above is made — a decided row
+    /// opens for reading in the hero pane, a skipped one re-arms its ask.
+    var press: SetupStep?
     var reason: OnboardingReason = .firstRun
 }
 
@@ -230,11 +238,15 @@ func snapshot(appearanceName: NSAppearance.Name,
     // Before any waiting: a skipped card is a DECIDED card, and the final
     // check below is what waits on every card being decided.
     world.skip.forEach(controller.test_tapSkip)
+    // The row press comes last, on a spine where every decision is already made:
+    // a browse is a reading position on a DECIDED row, and a re-arm needs the
+    // skip to have happened.
+    if let press = world.press { _ = await controller.test_pressRow(press) }
     if world.waitingOnLocalNetwork {
         // Deliberately NOT awaited: this prime never answers, and the fixture is
-        // the wait itself. Poll for the caption rather than sleeping a guess.
+        // the wait itself. Poll for the ribbon's wait rather than sleeping a guess.
         Task { await controller.test_tapAllow(.localNetwork) }
-        for _ in 0..<200 where controller.test_statusCaption(of: .localNetwork) == nil {
+        for _ in 0..<200 where !controller.test_ribbonIsWaiting {
             try? await Task.sleep(nanoseconds: 5_000_000)
         }
     }
@@ -330,6 +342,17 @@ func run() async -> Int32 {
         await snapshot(appearanceName: name, label: "\(tag)-remote-control-retry",
                        world: SnapshotWorld(bluetooth: .granted, ptpHelper: .enabled,
                                             allow: [.audio, .localNetwork, .remoteControl]),
+                       outDir: outDir)
+        // A DECIDED row opened for reading: the hero shows the pane its switch
+        // lives on, resting already ON, with the quiet way back to it.
+        await snapshot(appearanceName: name, label: "\(tag)-browse-granted",
+                       world: SnapshotWorld(allow: [.audio, .localNetwork], press: .audio),
+                       outDir: outDir)
+        // A skipped row pressed again: the skip comes back, and the ribbon says
+        // it cost nothing.
+        await snapshot(appearanceName: name, label: "\(tag)-skip-reopened",
+                       world: SnapshotWorld(allow: [.audio, .localNetwork],
+                                            skip: [.bluetooth], press: .bluetooth),
                        outDir: outDir)
         // Every card decided, the sixth row's automatic check still running:
         // no CTA, no finale yet — the beat the redesign exists to show.

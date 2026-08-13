@@ -37,10 +37,11 @@ import AudiouterSharedUI
 ///   contain this device) in the second. The sections' own inset hairlines
 ///   separate the rows; the old stock `NSBox` divider is gone (it drew a 185 pt
 ///   rule that stopped a third of the way across the pane);
-/// - a minimal, single-line secondary-colour hint ("View-only — control
-///   playback from the menu-bar popover.") under the form. Deliberately
-///   terse: the fuller "configure here / play in the popover" teaching lives
-///   in a footer elsewhere in this window, not restated here.
+/// - a minimal, single-line secondary-colour hint ("Playback is controlled
+///   from the Mixer — this page only describes the speaker.") under the
+///   form. Deliberately terse: the fuller "configure here / play in the
+///   Mixer" teaching lives in a footer elsewhere in this window, not
+///   restated here.
 ///
 /// No volume slider, no mute, no Selected-Devices toggle, no group-activation
 /// control of any kind lives here — that's the popover/mixer's job, not this
@@ -71,7 +72,12 @@ public final class DeviceDetailViewController: NSViewController {
     // Text is set at declaration (not in `loadView`) so it's correct even
     // before the view hierarchy is lazily loaded — `refreshUI()` mutates the
     // other labels the same way, independent of `loadView` having run.
-    private let hintLabel = NSTextField(labelWithString: DeviceDetailViewController.viewOnlyHint)
+    /// WRAPPING, not truncating: on one line this sentence is wider than the
+    /// form column, so a plain label ended it in an ellipsis — a hint nobody
+    /// can finish reading is not a hint. It still refuses to widen the pane
+    /// (low compression resistance + the wrap width below).
+    private let hintLabel = NSTextField(
+        wrappingLabelWithString: DeviceDetailViewController.viewOnlyHint)
 
     private let statusValueLabel = NSTextField(labelWithString: "")
     private let availableValueLabel = NSTextField(labelWithString: "")
@@ -125,7 +131,10 @@ public final class DeviceDetailViewController: NSViewController {
         stateStack.spacing = 10
         for (caption, valueLabel) in [
             ("Status", statusValueLabel),
-            ("Available", availableValueLabel),
+            // "On the network", not "Available": next to "Status: Not
+            // connected" a bare "Available: Yes" read as a contradiction to a
+            // non-specialist ("it's available but not connected?").
+            ("On the network", availableValueLabel),
             ("Volume", volumeValueLabel),
             ("Kind", kindValueLabel),
         ] {
@@ -148,7 +157,8 @@ public final class DeviceDetailViewController: NSViewController {
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
         hintLabel.font = Tokens.Font.caption
         hintLabel.textColor = Tokens.Color.secondaryLabel
-        hintLabel.lineBreakMode = .byTruncatingTail
+        hintLabel.isSelectable = false
+        hintLabel.preferredMaxLayoutWidth = GroupsPaneLayout.contentMaxWidth
         // A pane-level footnote, not a form row: it spans the column's FULL
         // width (see its constraints) and yields before the pane does. At its
         // intrinsic ~310 pt it is wider than the content lane inside the
@@ -224,8 +234,9 @@ public final class DeviceDetailViewController: NSViewController {
             nameLabel.trailingAnchor.constraint(lessThanOrEqualTo: headerWell.trailingAnchor,
                                                 constant: -GroupsPaneLayout.contentTrailingInset),
 
-            stateStack.topAnchor.constraint(equalTo: headerWell.bottomAnchor,
-                                            constant: 14 + GroupedSectionView.verticalPadding),
+            stateStack.topAnchor.constraint(
+                equalTo: headerWell.bottomAnchor,
+                constant: GroupsPaneLayout.sectionGap + GroupedSectionView.verticalPadding),
             stateStack.leadingAnchor.constraint(
                 equalTo: column.leadingAnchor,
                 constant: GroupsPaneLayout.railFreeContentLeadingInset),
@@ -239,8 +250,9 @@ public final class DeviceDetailViewController: NSViewController {
             stateWell.bottomAnchor.constraint(equalTo: stateStack.bottomAnchor,
                                               constant: GroupedSectionView.verticalPadding),
 
-            groupsStack.topAnchor.constraint(equalTo: stateWell.bottomAnchor,
-                                             constant: 14 + GroupedSectionView.verticalPadding),
+            groupsStack.topAnchor.constraint(
+                equalTo: stateWell.bottomAnchor,
+                constant: GroupsPaneLayout.sectionGap + GroupedSectionView.verticalPadding),
             groupsStack.leadingAnchor.constraint(
                 equalTo: column.leadingAnchor,
                 constant: GroupsPaneLayout.railFreeContentLeadingInset),
@@ -254,7 +266,11 @@ public final class DeviceDetailViewController: NSViewController {
             groupsWell.bottomAnchor.constraint(equalTo: groupsStack.bottomAnchor,
                                                constant: GroupedSectionView.verticalPadding),
 
-            hintLabel.topAnchor.constraint(equalTo: groupsWell.bottomAnchor, constant: 16),
+            // The pane's ACTION BAND (this pane's is a footnote, not a button),
+            // one shared gap below the last section — the same break the
+            // editor puts above "Delete Group…".
+            hintLabel.topAnchor.constraint(equalTo: groupsWell.bottomAnchor,
+                                           constant: GroupsPaneLayout.actionBandGap),
             // The full column, NOT the content lane inside the sections: this
             // is a footnote about the pane, so it reads across it (the same way
             // the window's own footer caption spans the whole pane) and gets
@@ -269,10 +285,14 @@ public final class DeviceDetailViewController: NSViewController {
     }
 
     /// Minimal one-line view-only hint. Deliberately terse — the fuller
-    /// "configure here / play in the popover" teaching lives in a footer
-    /// elsewhere in this window; this pane only needs to
-    /// mark itself as non-interactive.
-    private static let viewOnlyHint = "View-only — control playback from the menu-bar popover."
+    /// "configure here / play in the Mixer" teaching lives in a footer
+    /// elsewhere in this window; this pane only needs to mark itself as
+    /// non-interactive. Names the Mixer (not "menu-bar popover" — the user
+    /// reading this is already inside the one surface, one toolbar click from
+    /// it) and avoids "View-only" as an opener: the icon well right above
+    /// this pane IS editable, so a blanket "view-only" read as a
+    /// contradiction next to its edit pencil.
+    private static let viewOnlyHint = "Playback is controlled from the Mixer — this page only describes the speaker."
 
     /// Build one "Caption ······ Value" row: a secondary-colour caption on the
     /// leading edge and its value RIGHT-ALIGNED on the trailing edge, so the

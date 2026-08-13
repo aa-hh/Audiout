@@ -27,8 +27,8 @@ final class SetupCheckRowView: NSView {
     private let iconTile = IconTileView(symbolName: "checklist",
                                         accessibility: "Setup check",
                                         color: Tokens.Color.gold,
-                                        side: SetupCardView.iconSide,
-                                        pointSize: 13)
+                                        side: SetupSpineRowView.iconSide,
+                                        pointSize: 11)
     private let titleLabel = NSTextField(labelWithString: "")
     private let checkmark = NSImageView()
     private let spinner = NSProgressIndicator()
@@ -47,7 +47,12 @@ final class SetupCheckRowView: NSView {
     private func build() {
         translatesAutoresizingMaskIntoConstraints = false
 
-        surface = RoundedContainerView()
+        // No radius, no border: the sixth row is a full-bleed strip inside the
+        // spine's one shared grouped container, same as every permission row
+        // above it (`SetupSpineRowView`) — see that file's Direction 04
+        // grouped-inset note. The group's own rounding + hairline separators
+        // do the work a per-row card used to.
+        surface = RoundedContainerView(fill: Tokens.Color.panel, border: .clear, radius: 0)
         addSubview(surface)
 
         titleLabel.font = Tokens.Font.bodyEmphasized
@@ -57,8 +62,8 @@ final class SetupCheckRowView: NSView {
 
         checkmark.image = NSImage(systemSymbolName: "checkmark.circle.fill",
                                   accessibilityDescription: "Ready")
-        checkmark.symbolConfiguration = .init(pointSize: 14, weight: .semibold)
-        checkmark.contentTintColor = .systemGreen
+        checkmark.symbolConfiguration = .init(pointSize: 13, weight: .semibold)
+        checkmark.contentTintColor = Tokens.Color.success
         checkmark.translatesAutoresizingMaskIntoConstraints = false
 
         spinner.style = .spinning
@@ -71,20 +76,21 @@ final class SetupCheckRowView: NSView {
         surface.addSubview(checkmark)
         surface.addSubview(spinner)
 
-        let inset = SetupCardView.horizontalInset
-        let vInset = SetupCardView.headerVerticalInset
+        let inset = SetupSpineRowView.horizontalInset
+        let vInset = SetupSpineRowView.headerVerticalInset
         NSLayoutConstraint.activate([
             surface.leadingAnchor.constraint(equalTo: leadingAnchor),
             surface.trailingAnchor.constraint(equalTo: trailingAnchor),
             surface.topAnchor.constraint(equalTo: topAnchor),
             surface.bottomAnchor.constraint(equalTo: bottomAnchor),
+            surface.heightAnchor.constraint(greaterThanOrEqualToConstant: SetupSpineRowView.minHeight),
 
             iconTile.leadingAnchor.constraint(equalTo: surface.leadingAnchor, constant: inset),
             iconTile.topAnchor.constraint(equalTo: surface.topAnchor, constant: vInset),
             iconTile.bottomAnchor.constraint(equalTo: surface.bottomAnchor, constant: -vInset),
 
             titleLabel.leadingAnchor.constraint(equalTo: surface.leadingAnchor,
-                                                constant: inset + SetupCardView.iconSide + SetupCardView.iconGap),
+                                                constant: inset + SetupSpineRowView.iconSide + SetupSpineRowView.iconGap),
             titleLabel.centerYAnchor.constraint(equalTo: iconTile.centerYAnchor),
 
             // Checkmark and spinner share the cards' one trailing slot.
@@ -105,7 +111,7 @@ final class SetupCheckRowView: NSView {
                                                  : Tokens.Color.secondaryLabel
         // The tile's only state role is the dormant dimming — the glyph tint
         // itself never changes (the no-flash rule).
-        iconTile.alphaValue = state == .pending ? SetupCardView.lockedTileAlpha : 1
+        iconTile.alphaValue = state == .pending ? SetupSpineRowView.lockedTileAlpha : 1
         checkmark.isHidden = state != .passed
         if state == .running { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
         applyAccessibility()

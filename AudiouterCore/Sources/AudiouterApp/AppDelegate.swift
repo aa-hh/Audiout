@@ -1288,6 +1288,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func makeSettingsRoot() -> SettingsRootViewController {
         let general = GeneralSettingsViewController(loginItem: SMAppServiceLoginItem(),
+                                                    settings: settings,
                                                     approvals: companionApprovals)
         // "Open Setup…" (General pane) re-opens the first-run priming window;
         // the backend is already running, so its onFinished is a guarded no-op.

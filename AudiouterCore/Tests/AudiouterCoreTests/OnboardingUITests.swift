@@ -13,6 +13,11 @@ import Testing
 /// permission seams (no Core Audio, no network). The window isn't visible to a
 /// headless test, so these assert via the `test_` hooks — the same approach the
 /// popover/settings UI tests use.
+///
+/// The window is a SPINE (six compact status rows) and a HERO (the drawn
+/// rehearsal over a ribbon of real UI), so the assertions come in two kinds:
+/// the row hooks for where the flow stands, and the ribbon hooks for what it is
+/// saying and offering.
 @MainActor
 @Suite final class OnboardingUITests {
 
@@ -257,6 +262,18 @@ import Testing
         return vc
     }
 
+    /// Drive a real top-down layout pass at the fixed window size — the moment
+    /// the demo pane's finale launch waits for (its centres only resolve once
+    /// the enclosing pass has positioned it). The live window lays out for free;
+    /// a headless VC test has to ask.
+    private func layoutRoot(_ vc: OnboardingViewController) {
+        let root = vc.test_rootView
+        root.frame = NSRect(x: 0, y: 0,
+                            width: OnboardingViewController.contentWidth,
+                            height: OnboardingViewController.contentHeight)
+        root.layoutSubtreeIfNeeded()
+    }
+
     /// A model where every required permission is satisfiable, so the flow can
     /// be walked to the gate.
     private func makeGrantableModel(silentAudio: PermissionStatus? = nil) -> SetupModel {
@@ -264,23 +281,38 @@ import Testing
                   ptpHelper: FakePTPHelper(status: .enabled))
     }
 
-    // MARK: Sequencing
-
-    @Test func flowOpensOnTheFirstCardWithEveryOtherCollapsed() {
-        let vc = makeVC(model: makeModel(audio: .unknown))
-        #expect(vc.test_activeStep == .audio)
-        #expect(vc.test_expandedSteps == [.audio], "exactly one card is ever open")
+    /// Wait for something a background timeout will make true. A fixed sleep is a
+    /// flake here: the main actor is shared with every other test in the run, so
+    /// how soon that work lands is not this test's to decide.
+    private func waitUntil(_ satisfied: () -> Bool) async {
+        for _ in 0..<600 {                                   // ≤3 s, then give up
+            if satisfied() { return }
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
     }
 
-    @Test func grantingACardAdvancesToTheNextAndRewritesItsTitle() async {
+    // MARK: Sequencing
+
+    @Test func flowOpensOnTheFirstStepWithItsAskInTheRibbon() {
+        let vc = makeVC(model: makeModel(audio: .unknown))
+        #expect(vc.test_activeStep == .audio)
+        #expect(vc.test_heroHeadline == "Hear your Mac's sound")
+        #expect(vc.test_heroWhy == "Audiouter needs this to send your music to your speakers.")
+        #expect(vc.test_ribbonBodyText == nil, "a first ask has no paragraph under it")
+        #expect(vc.test_previewFrameLabel?.contains("MACOS") ?? false,
+                "the frame says whose surface this is, so no line of copy has to")
+        #expect(vc.test_ribbonButtonTitles == ["Enable System Audio"])
+        #expect(vc.test_browseStep == nil)
+    }
+
+    @Test func grantingAStepAdvancesTheFlowAndRewritesItsSpineTitle() async {
         let vc = makeVC(model: makeModel(audio: .granted))
-        #expect(vc.test_title(of: .audio) == "Let Audiouter hear your Mac's sound")
+        #expect(vc.test_spineTitle(of: .audio) == "Hear your Mac's sound")
 
         await vc.test_tapAllow(.audio)
 
         #expect(vc.test_activeStep == .localNetwork)
-        #expect(vc.test_expandedSteps == [.localNetwork])
-        #expect(vc.test_title(of: .audio) == "Audiouter can now hear your Mac's sound")
+        #expect(vc.test_spineTitle(of: .audio) == "Hearing your Mac's sound")
         #expect(vc.test_hasCheckmark(.audio))
     }
 
@@ -290,36 +322,17 @@ import Testing
     @Test func localNetworkCompletedTitleReportsTheFoundCount() async {
         let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 3))
         await vc.test_allow([.audio, .localNetwork])
-        #expect(vc.test_title(of: .localNetwork) == "3 speakers on your network")
+        #expect(vc.test_spineTitle(of: .localNetwork) == "3 speakers on your network")
     }
 
-    /// A card the user already finished is DONE — clicking it must do nothing
-    /// at all. Live, clicking the completed Local Network card flashed an error
-    /// state that then dismissed itself: the click landed on a card that a
-    /// rescan had just downgraded out of completed (fixed in `SetupModel`), so
-    /// this pins the inertness the flash was hiding — no press accepted, no
-    /// buttons, no probe, and the flow does not move.
-    @Test func aCompletedCardIsInertToClicks() async {
-        let net = CannedLocalNetwork(found: 3)
-        let vc = makeVC(model: makeModel(audio: .granted, localNetwork: net))
+    @Test func oneFoundSpeakerReadsSingular() async {
+        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 1))
         await vc.test_allow([.audio, .localNetwork])
-        #expect(vc.test_activeStep == .bluetooth)
-        let frontCount = vc.test_returnToFrontCount
-
-        for done in [SetupStep.audio, .localNetwork] {
-            #expect(!vc.test_isCardClickable(done), "\(done) is finished")
-            #expect(vc.test_cardPressIsRefused(done), "\(done) must refuse a press")
-            #expect(!vc.test_cardIsAccessibilityButton(done), "and offer VoiceOver no action")
-            #expect(vc.test_buttonTitles(of: done).isEmpty, "a finished card offers no controls")
-        }
-
-        #expect(vc.test_activeStep == .bluetooth, "nothing moved")
-        #expect(vc.test_title(of: .localNetwork) == "3 speakers on your network")
-        #expect(vc.test_returnToFrontCount == frontCount)
+        #expect(vc.test_spineTitle(of: .localNetwork) == "1 speaker on your network")
     }
 
-    /// The model half of the same rule: an Allow routed at a finished step is a
-    /// no-op that says so, and never re-runs the probe.
+    /// The model half of the inertness rule: an Allow routed at a finished step
+    /// is a no-op that says so, and never re-runs the probe.
     @Test func allowingACompletedStepIsANoOp() async {
         let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 3))
         await vc.test_allow([.audio, .localNetwork])
@@ -327,54 +340,57 @@ import Testing
 
         await vc.test_tapAllow(.localNetwork)
 
-        #expect(vc.test_activeStep == .bluetooth)
-        #expect(vc.test_hint(of: .localNetwork) == nil, "no error state on a finished card")
-        #expect(vc.test_statusCaption(of: .localNetwork) == nil)
-    }
-
-    @Test func oneFoundSpeakerReadsSingular() async {
-        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 1))
-        await vc.test_allow([.audio, .localNetwork])
-        #expect(vc.test_title(of: .localNetwork) == "1 speaker on your network")
+        #expect(vc.test_activeStep == .bluetooth, "nothing moved")
+        #expect(!vc.test_ribbonIsWaiting, "no wait on a finished step")
+        #expect(!vc.test_rowIsBroken(.localNetwork), "and no error state on it")
     }
 
     /// On a macOS with no Local Network gate the step is satisfied without any
     /// browse, so the copy must not claim the user found anything.
     @Test func ungatedLocalNetworkNeverClaimsAFind() {
         let vc = makeVC(model: makeModel(audio: .unknown, localNetworkGated: false))
-        #expect(vc.test_title(of: .localNetwork) == "Speakers on your Wi\u{2011}Fi are already reachable")
+        #expect(vc.test_spineTitle(of: .localNetwork) == "Speakers already reachable")
     }
 
-    /// Auto-passed because the OS can't grant it at all: the strip says why,
+    /// Auto-passed because the OS can't grant it at all: the row says why,
     /// rather than showing a checkmark for a grant nobody made.
-    @Test func autoPassedAudioShowsTheOSNoteNotACheckmark() {
-        let vc = makeVC(model: makeModel(audio: .unsupported))
-        // `.unsupported` only lands after a probe runs.
-        #expect(vc.test_activeStep == .audio)
-    }
-
     @Test func autoPassedAudioAfterProbingCarriesTheNote() async {
         let vc = makeVC(model: makeModel(audio: .unsupported))
         await vc.test_tapAllow(.audio)
         #expect(!vc.test_hasCheckmark(.audio), "nobody granted anything")
         #expect(vc.test_note(of: .audio) == "Requires macOS 14.2 or later")
-        #expect(vc.test_title(of: .audio) == "Let Audiouter hear your Mac's sound",
-                "a card with no checkmark keeps the imperative title")
+        #expect(vc.test_spineTitle(of: .audio) == "Hear your Mac's sound",
+                "a row with no checkmark keeps the imperative title")
     }
 
-    // MARK: Locked / active rendering (owner decision 2026-08-11)
+    /// And it is not browsable either: the note is the whole story, and there is
+    /// no honest hero for a grant macOS cannot make — so the row refuses the
+    /// press and VoiceOver sees a plain group, not a button.
+    @Test func anAutoPassedRowRefusesThePress() async {
+        let vc = makeVC(model: makeModel(audio: .unsupported))
+        await vc.test_tapAllow(.audio)
+        #expect(vc.test_note(of: .audio) == "Requires macOS 14.2 or later")
+
+        #expect(!vc.test_isRowPressable(.audio))
+        #expect(await vc.test_pressRow(.audio) == false)
+
+        #expect(vc.test_browseStep == nil, "nothing opened for reading")
+        #expect(!vc.test_rowIsAccessibilityButton(.audio))
+        #expect(vc.test_rowAccessibilityAction(.audio) == nil, "no action to offer")
+    }
+
+    // MARK: Locked / live rendering
 
     /// A step the flow hasn't reached must READ locked, not merely un-ticked: the
-    /// lock sits in the slot the checkmark will eventually take, and the content
-    /// is dimmed past the completed steps' own secondary tone.
+    /// padlock sits in the slot the checkmark will eventually take.
     @Test func stepsTheFlowHasNotReachedRenderLocked() {
         // Nothing granted, so every step behind the first really is unreached —
         // an already-satisfied one would carry a checkmark instead.
         let vc = makeVC(model: makeModel(audio: .unknown))
         for step: SetupStep in [.localNetwork, .bluetooth, .speakerSync, .remoteControl] {
-            #expect(vc.test_isLocked(step), "\(step) is behind the active card")
+            #expect(vc.test_isLocked(step), "\(step) is behind the live row")
         }
-        #expect(!vc.test_isLocked(.audio), "the active card is not locked")
+        #expect(!vc.test_isLocked(.audio), "the live row is not locked")
     }
 
     @Test func completedAndSkippedStepsCarryNoLock() async {
@@ -385,109 +401,219 @@ import Testing
         #expect(!vc.test_isLocked(.audio), "completed: it has a checkmark instead")
         #expect(vc.test_hasCheckmark(.audio))
         #expect(!vc.test_isLocked(.bluetooth), "skipped: the user answered, they just said no")
+        #expect(vc.test_isSkipped(.bluetooth))
         #expect(!vc.test_hasCheckmark(.bluetooth))
     }
 
-    /// The active card is lifted off the canvas so current-vs-locked can't be
-    /// mistaken, and the emphasis travels with the active step.
-    @Test func onlyTheActiveCardIsEmphasized() async {
+    // MARK: Row press dispatch
+
+    /// The live row IS the ribbon's primary button: pressing anywhere on it runs
+    /// the same Allow.
+    @Test func pressingTheLiveRowFiresTheRibbonsPrimary() async {
         let vc = makeVC(model: makeGrantableModel())
-        #expect(vc.test_isEmphasized(.audio))
-        #expect(!vc.test_isEmphasized(.localNetwork))
+        #expect(vc.test_isRowPressable(.audio))
 
-        await vc.test_tapAllow(.audio)
+        #expect(await vc.test_pressRow(.audio))
 
-        #expect(!vc.test_isEmphasized(.audio))
-        #expect(vc.test_isEmphasized(.localNetwork))
-    }
-
-    // MARK: The whole active card is the click target
-
-    @Test func pressingTheActiveCardFiresItsAllow() async {
-        let vc = makeVC(model: makeGrantableModel())
-        #expect(vc.test_isCardClickable(.audio))
-
-        #expect(await vc.test_pressCard(.audio))
-
-        #expect(vc.test_hasCheckmark(.audio), "the card press ran the real Allow path")
+        #expect(vc.test_hasCheckmark(.audio), "the row press ran the real Allow path")
         #expect(vc.test_activeStep == .localNetwork)
     }
 
-    /// No jump-ahead: the flow is sequential, so a locked strip must refuse the
-    /// press rather than asking for a permission out of order.
-    @Test func lockedCardsAreNotClickable() {
-        let vc = makeVC(model: makeGrantableModel())
+    /// No jump-ahead: the flow is sequential, so a locked row refuses the press
+    /// rather than asking for a permission out of order — silently, and with
+    /// nothing else moving.
+    @Test func lockedRowsRefuseThePress() async {
+        // Nothing satisfied, so every row behind the first really is locked — an
+        // already-complete one (Speaker Sync in the grantable model) would be
+        // browsable, which is a different rule.
+        let vc = makeVC(model: makeModel(audio: .unknown))
         for step: SetupStep in [.localNetwork, .bluetooth, .speakerSync, .remoteControl] {
-            #expect(!vc.test_isCardClickable(step))
-            #expect(vc.test_cardPressIsRefused(step), "\(step) must refuse a press")
+            #expect(!vc.test_isRowPressable(step))
+            #expect(vc.test_rowPressIsRefused(step), "\(step) must refuse a press")
         }
+
+        #expect(await vc.test_pressRow(.bluetooth) == false)
+
+        #expect(vc.test_activeStep == .audio, "nothing moved")
+        #expect(vc.test_browseStep == nil, "and nothing opened for reading")
     }
 
-    /// The card-level target is two-mode aware for free — it fires whatever the
-    /// button currently offers, so after a denial it opens Settings.
-    @Test func theCardPressFollowsTheTwoModeAllow() async {
+    /// The row-level target is two-mode aware for free — it fires whatever the
+    /// ribbon currently offers, so after a denial it opens Settings.
+    @Test func theRowPressFollowsTheTwoModePrimary() async {
         var opened: [SystemSettingsPane] = []
         let vc = makeVC(model: makeModel(audio: .denied), onOpenSettings: { opened.append($0) })
-        _ = await vc.test_pressCard(.audio)   // first press: the probe lands denied
+        _ = await vc.test_pressRow(.audio)   // first press: the probe lands denied
         #expect(opened.isEmpty)
 
-        _ = await vc.test_pressCard(.audio)
+        _ = await vc.test_pressRow(.audio)
 
         #expect(opened == [.screenAndSystemAudioRecording])
     }
 
-    /// VoiceOver sees the card itself as the button, named for what pressing it
-    /// does; a card that isn't live is a plain group, since its press is refused.
-    @Test func theActiveCardIsAccessibleAsAButtonNamedLikeItsAllow() async {
-        let vc = makeVC(model: makeModel(audio: .denied))
-        #expect(vc.test_cardIsAccessibilityButton(.audio))
-        #expect(vc.test_cardAccessibilityAction(.audio) == "Allow…")
-        #expect(!vc.test_cardIsAccessibilityButton(.localNetwork))
+    /// A DECIDED row opens for reading: the hero shows the pane its switch lives
+    /// on, resting already ON, and nothing about the flow moves. A second press
+    /// puts it back.
+    @Test func browsingADoneRowRestsItsPaneWithTheSwitchOn() async {
+        let vc = makeVC(model: makeGrantableModel())
+        vc.test_demoReduceMotionOverride = false
+        vc.test_demoCanAnimateOverride = true
+        await vc.test_allow([.audio, .localNetwork])
+        #expect(vc.test_activeStep == .bluetooth)
 
-        await vc.test_tapAllow(.audio)   // spends the prompt → the label changes
+        #expect(await vc.test_pressRow(.audio))
 
-        #expect(vc.test_cardAccessibilityAction(.audio) == "Open Settings…")
+        #expect(vc.test_browseStep == .audio)
+        #expect(vc.test_rowIsBrowseSelected(.audio))
+        #expect(vc.test_demoMode == .settings)
+        #expect(vc.test_heroRestingSwitchOn, "a granted step really would be found switched on")
+        #expect(!vc.test_isDemoAnimating, "a browse is a reading position, not a rehearsal")
+        #expect(vc.test_ribbonButtonTitles == ["Open Settings…"], "the quiet way back to it")
+        #expect(vc.test_activeStep == .bluetooth, "browsing never touches the sequence")
+
+        #expect(await vc.test_pressRow(.audio))
+
+        #expect(vc.test_browseStep == nil, "a second press puts it back")
+        #expect(!vc.test_rowIsBrowseSelected(.audio))
+    }
+
+    /// A browse is a reading position on a decided row — and the moment the LIVE
+    /// row fires its ask, the stage belongs to that ask. Browse content left in
+    /// place would mask the waiting dim, the denied status line, and the
+    /// announcement that line drives.
+    @Test func firingTheLiveRowsAskClosesAnyBrowse() async {
+        let vc = makeVC(model: makeModel(audio: .granted,
+                                         localNetwork: CannedOutcomeLocalNetwork(outcome: .denied),
+                                         ptpHelper: FakePTPHelper(status: .enabled)))
+        await vc.test_awaitInitialStatuses()
+        await vc.test_tapAllow(.audio)
+        #expect(vc.test_activeStep == .localNetwork)
+
+        #expect(await vc.test_pressRow(.audio))
+        #expect(vc.test_browseStep == .audio, "the decided row is open for reading")
+
+        #expect(await vc.test_pressRow(.localNetwork))
+
+        #expect(vc.test_browseStep == nil, "the live ask took the stage back")
+        #expect(vc.test_ribbonStatusText?.contains("macOS only asks once") ?? false,
+                "the refusal is what the ribbon is saying, not the browsed row's copy")
+        #expect(vc.test_rowIsBroken(.localNetwork))
+        // The refusal's own edge SPOKE — and it speaks the refusal, not the
+        // waiting line: the edge is held while the prompt is in flight and
+        // fires on the repaint after it resolves, when the ribbon carries the
+        // denied copy.
+        #expect(vc.test_announcements.last == vc.test_ribbonStatusText,
+                "the refusal's edge announced the denied copy: \(vc.test_announcements)")
+    }
+
+    /// Awkward cell B: a GRANTED Local Network on macOS 14 was never gated, so
+    /// there is no privacy pane to browse — the dialog it never raised is the
+    /// honest picture, at rest, with nowhere to send anyone.
+    @Test func browsingAnUngatedLocalNetworkFallsBackToThePromptMock() async {
+        let vc = makeVC(model: makeModel(audio: .granted, localNetworkGated: false))
+        await vc.test_tapAllow(.audio)
+        #expect(vc.test_activeStep == .bluetooth)
+
+        #expect(await vc.test_pressRow(.localNetwork))
+
+        #expect(vc.test_browseStep == .localNetwork)
+        #expect(vc.test_demoMode == .prompt)
+        #expect(!vc.test_heroRestingSwitchOn)
+        #expect(vc.test_ribbonButtonTitles.isEmpty, "no pane exists, so no link to it")
+    }
+
+    /// A SKIPPED row takes the skip back: the ask is re-armed, the check row
+    /// derives back to pending, and the ribbon says the skip cost nothing.
+    @Test func pressingASkippedRowReArmsItsAsk() async {
+        let vc = makeVC(model: makeGrantableModel())
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        vc.test_tapSkip(.remoteControl)
+        await vc.test_awaitFinalCheck()
+        #expect(vc.test_checkRowState == .passed)
+
+        #expect(await vc.test_pressRow(.bluetooth))
+
+        #expect(vc.test_activeStep == .bluetooth, "the ask is back")
+        #expect(!vc.test_isSkipped(.bluetooth))
+        #expect(vc.test_checkRowState == .pending, "the check reverts with the re-opened row")
+        #expect(!vc.test_doneExists, "and the gate closes with it")
+        #expect(vc.test_ribbonStatusText == "You skipped this earlier \u{2014} nothing's lost.")
+        #expect(vc.test_ribbonButtonTitles == ["Skip for now", "Enable Bluetooth Access"])
+    }
+
+    /// VoiceOver sees a pressable row as the button, named for what pressing it
+    /// does, with the trailing marker's meaning carried in the label — a marker
+    /// VoiceOver can't see is a marker that isn't there.
+    @Test func rowsSpeakTheirStateAndTheirAction() async {
+        let vc = makeVC(model: makeGrantableModel())
+        #expect(vc.test_rowIsAccessibilityButton(.audio))
+        #expect(vc.test_rowAccessibilityAction(.audio) == "Enable System Audio")
+        #expect(!vc.test_rowIsAccessibilityButton(.localNetwork), "a locked row offers no action")
+        #expect(vc.test_rowAccessibilityLabel(.localNetwork) == "Find speakers on Wi\u{2011}Fi, locked")
+
+        await vc.test_tapAllow(.audio)
+
+        #expect(vc.test_rowAccessibilityAction(.audio) == "Show", "a decided row browses")
+        #expect(vc.test_rowAccessibilityLabel(.audio) == "Hearing your Mac's sound, allowed")
     }
 
     // MARK: Skip
 
-    @Test func skipIsOfferedOnlyOnTheOptionalCards() async {
+    @Test func skipIsOfferedOnlyOnTheOptionalSteps() async {
         let vc = makeVC(model: makeGrantableModel())
-        #expect(vc.test_buttonTitles(of: .audio) == ["Allow…"], "System Audio is required")
+        #expect(vc.test_ribbonButtonTitles == ["Enable System Audio"], "System Audio is required")
 
         await vc.test_allow([.audio, .localNetwork])
 
         #expect(vc.test_activeStep == .bluetooth)
-        #expect(vc.test_buttonTitles(of: .bluetooth) == ["Allow…", "Skip"])
+        #expect(vc.test_ribbonButtonTitles == ["Skip for now", "Enable Bluetooth Access"])
+        #expect(vc.test_heroWhy == "Audiouter needs this to stream to Bluetooth speakers "
+                + "and wake ones that are off.")
+        #expect(vc.test_ribbonBodyText == nil, "the honesty line went with the rest of the copy")
     }
 
     @Test func skippingAdvancesWithoutACheckmark() async {
         let vc = makeVC(model: makeGrantableModel())
         await vc.test_allow([.audio, .localNetwork])
 
-        vc.test_tapSkip(.bluetooth)
+        vc.test_ribbonTapSkip()
 
         // Speaker Sync is already satisfied in this model, so the next step the
-        // flow can offer is Remote Control — skipping advances PAST a card, it
+        // flow can offer is Remote Control — skipping advances PAST a row, it
         // doesn't step onto the next index blindly.
         #expect(vc.test_activeStep == .remoteControl)
         #expect(!vc.test_hasCheckmark(.bluetooth), "skipped is not granted")
-        #expect(vc.test_title(of: .bluetooth) == "Let Audiouter use Bluetooth speakers",
-                "a skipped card keeps the imperative title")
+        #expect(vc.test_spineTitle(of: .bluetooth) == "Bluetooth speakers")
     }
 
-    @Test func skipIsIgnoredOnARequiredCard() async {
+    @Test func skipIsIgnoredOnARequiredStep() async {
         let vc = makeVC(model: makeModel(audio: .unknown))
         vc.test_tapSkip(.audio)
         #expect(vc.test_activeStep == .audio, "the gate is not negotiable")
     }
 
-    // MARK: Two-mode Allow + deep links
+    // MARK: The ribbon's two-mode primary + deep links
 
-    @Test func deniedAudioSwitchesAllowToOpenSettings() async {
+    @Test func deniedAudioSwitchesThePrimaryToOpenSettings() async {
         let vc = makeVC(model: makeModel(audio: .denied))
         await vc.test_tapAllow(.audio)
-        #expect(vc.test_buttonTitles(of: .audio) == ["Open Settings…"])
+        #expect(vc.test_ribbonButtonTitles == ["Open Settings…"])
+    }
+
+    /// The refusal state, in the ribbon's own words: macOS only asks once, so
+    /// the honest next move is a switch — and the row that was refused is the
+    /// one on the spine drawing attention to itself.
+    @Test func aRefusalSaysMacOSOnlyAsksOnceAndBreaksItsRow() async {
+        let vc = makeVC(model: makeModel(audio: .denied))
+
+        await vc.test_tapAllow(.audio)
+
+        #expect(vc.test_ribbonStatusText
+                == "You chose Don't Allow. macOS only asks once \u{2014} from here it's "
+                   + "a switch in System Settings.")
+        #expect(vc.test_rowIsBroken(.audio))
+        #expect(vc.test_ribbonButtonTitles == ["Open Settings…"])
     }
 
     @Test func theSecondAllowOnDeniedAudioRoutesToTheRecordingPane() async {
@@ -503,10 +629,9 @@ import Testing
 
     /// An unanswered ask can't be called a denial — it gets a line naming what
     /// actually happened (nothing answered) rather than an accusation or an
-    /// invented switched-off speaker, and the primary click keeps being the
-    /// retry that line asks for. Settings is demoted beside it, never instead of
-    /// it: a card whose only button opened Settings left NOTHING able to
-    /// re-browse, so the flow dead-ended on a speaker the user had just switched on.
+    /// invented switched-off speaker, and the primary keeps being the retry that
+    /// line asks for. Settings is demoted beside it, never instead of it: a step
+    /// whose only button opened Settings left NOTHING able to re-browse.
     @Test func anUnprovenLocalNetworkOffersARetryNotADeadEnd() async {
         var opened: [SystemSettingsPane] = []
         let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 0),
@@ -514,17 +639,18 @@ import Testing
         await vc.test_allow([.audio, .localNetwork])
 
         #expect(vc.test_activeStep == .localNetwork, "an unproven browse does not advance")
-        #expect(vc.test_hint(of: .localNetwork)
+        #expect(vc.test_ribbonStatusText
                 == "Nothing has answered yet. If the permission dialog is open, choose Allow — or try again.")
-        #expect(vc.test_buttonTitles(of: .localNetwork) == ["Try Again", "Open Settings…"])
+        #expect(vc.test_ribbonButtonTitles == ["Open Settings…", "Try Again"],
+                "the bar reads leading to trailing, so the primary is last")
 
-        await vc.test_tapAllow(.localNetwork)
+        await vc.test_ribbonTapPrimary()
 
-        #expect(opened.isEmpty, "the primary click browses again — it must not open Settings")
-        #expect(vc.test_buttonTitles(of: .localNetwork) == ["Try Again", "Open Settings…"])
+        #expect(opened.isEmpty, "the primary browses again — it must not open Settings")
+        #expect(vc.test_ribbonButtonTitles == ["Open Settings…", "Try Again"])
     }
 
-    /// The retry really re-runs the browse, and the card reports what the second
+    /// The retry really re-runs the browse, and the row reports what the second
     /// one found — the whole point of keeping it a retry.
     @Test func theLocalNetworkRetryBrowsesAgainAndReportsWhatItFinds() async {
         let vc = makeVC(model: makeModel(audio: .granted,
@@ -534,9 +660,9 @@ import Testing
 
         await vc.test_tapAllow(.localNetwork)
 
-        #expect(vc.test_title(of: .localNetwork) == "2 speakers on your network")
-        #expect(vc.test_hint(of: .localNetwork) == nil, "nothing left to explain")
+        #expect(vc.test_spineTitle(of: .localNetwork) == "2 speakers on your network")
         #expect(vc.test_activeStep == .bluetooth)
+        #expect(vc.test_ribbonStatusText == nil, "nothing left to explain")
     }
 
     /// A Local Network browse that proves nothing is NOT evidence the user is
@@ -582,9 +708,9 @@ import Testing
     }
 
     /// A refused Local Network is the one state where re-browsing is pointless,
-    /// so the card stops offering a retry and becomes the Settings deep link —
-    /// the same two-mode shape a denied System Audio or Bluetooth card takes.
-    @Test func aRefusedLocalNetworkCardOffersSettingsInsteadOfARetry() async {
+    /// so the ribbon stops offering a retry and becomes the Settings deep link —
+    /// the same two-mode shape a denied System Audio or Bluetooth step takes.
+    @Test func aRefusedLocalNetworkOffersSettingsInsteadOfARetry() async {
         var opened: [SystemSettingsPane] = []
         let vc = makeVC(model: makeModel(audio: .granted,
                                          localNetwork: CannedOutcomeLocalNetwork(outcome: .denied)),
@@ -592,8 +718,9 @@ import Testing
         await vc.test_allow([.audio, .localNetwork])
 
         #expect(vc.test_activeStep == .localNetwork, "a refusal does not advance the flow")
-        #expect(vc.test_buttonTitles(of: .localNetwork) == ["Open Settings…"])
-        #expect(vc.test_hint(of: .localNetwork) == nil, "no speaker advice — a speaker isn't the problem")
+        #expect(vc.test_ribbonButtonTitles == ["Open Settings…"])
+        #expect(vc.test_ribbonStatusText?.contains("macOS only asks once") ?? false,
+                "a refusal reads as a refusal — no speaker advice, a speaker isn't the problem")
 
         await vc.test_tapAllow(.localNetwork)
 
@@ -609,15 +736,14 @@ import Testing
         await vc.test_allow([.audio, .localNetwork])
 
         #expect(vc.test_activeStep == .bluetooth, "the permission landed, so the flow moves on")
-        #expect(vc.test_title(of: .localNetwork)
-                == "No speakers found yet \u{2014} switch one on and it'll appear")
+        #expect(vc.test_spineTitle(of: .localNetwork) == "No speakers found yet")
         #expect(vc.test_hasCheckmark(.localNetwork))
     }
 
     /// A Local Network prime can sit a full minute on an unanswered dialog, so
-    /// the card has to say what it is waiting for — and then say something
+    /// the ribbon has to say what it is waiting for — and then say something
     /// different once the answer lands and only the count is left.
-    @Test func theLocalNetworkCardNamesBothHalvesOfItsWait() async {
+    @Test func theRibbonNamesBothHalvesOfTheLocalNetworkWait() async {
         let net = SteppedLocalNetwork(found: 2)
         let vc = makeVC(model: makeModel(audio: .granted, localNetwork: net))
         await vc.test_tapAllow(.audio)
@@ -625,74 +751,51 @@ import Testing
         let priming = Task { await vc.test_tapAllow(.localNetwork) }
 
         await net.waitUntilParked()
-        await waitUntil { vc.test_statusCaption(of: .localNetwork) != nil }
-        #expect(vc.test_statusCaption(of: .localNetwork) == "Waiting for your answer\u{2026}")
-        #expect(vc.test_buttonTitles(of: .localNetwork).isEmpty, "no second ask while one is in flight")
+        await waitUntil { vc.test_ribbonStatusText == OnboardingViewController.waitingStatus }
+        #expect(vc.test_ribbonStatusText == OnboardingViewController.waitingStatus)
+        #expect(vc.test_ribbonIsWaiting)
 
         net.resume()                                    // the browse reaches the network
         await net.waitUntilParked()
-        await waitUntil { vc.test_statusCaption(of: .localNetwork) == "Checking your network\u{2026}" }
-        #expect(vc.test_statusCaption(of: .localNetwork) == "Checking your network\u{2026}")
+        await waitUntil { vc.test_ribbonStatusText == "Checking your network\u{2026}" }
+        #expect(vc.test_ribbonStatusText == "Checking your network\u{2026}")
+        #expect(vc.test_ribbonIsWaiting)
 
         net.resume()
         await priming.value
 
-        #expect(vc.test_statusCaption(of: .localNetwork) == nil, "the wait clears with the answer")
-        #expect(vc.test_title(of: .localNetwork) == "2 speakers on your network")
+        #expect(!vc.test_ribbonIsWaiting, "the wait clears with the answer")
+        #expect(vc.test_spineTitle(of: .localNetwork) == "2 speakers on your network")
     }
 
     /// A refusal skips the second half entirely — there is nothing left to
-    /// check, so the card goes straight to its actionable denied state.
+    /// check, so the ribbon goes straight to its actionable denied state.
     @Test func aRefusedLocalNetworkLeavesNoWaitOnScreen() async {
         let vc = makeVC(model: makeModel(audio: .granted,
                                          localNetwork: CannedOutcomeLocalNetwork(outcome: .denied)))
         await vc.test_allow([.audio, .localNetwork])
 
-        #expect(vc.test_statusCaption(of: .localNetwork) == nil)
-        #expect(!vc.test_isProbing(.localNetwork))
-        #expect(vc.test_buttonTitles(of: .localNetwork) == ["Open Settings…"])
+        #expect(!vc.test_ribbonIsWaiting)
+        #expect(!vc.test_stageIsDimmed)
+        #expect(vc.test_ribbonButtonTitles == ["Open Settings…"])
     }
 
     /// An undecided prime (the dialog is still up when the ceiling expires) must
-    /// leave the card ACTIONABLE, never stuck saying it is waiting.
-    @Test func anUndecidedLocalNetworkPrimeLeavesTheCardActionable() async {
+    /// leave the step ACTIONABLE, never stuck saying it is waiting.
+    @Test func anUndecidedLocalNetworkPrimeLeavesTheStepActionable() async {
         let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 0))
         await vc.test_allow([.audio, .localNetwork])
 
-        #expect(vc.test_statusCaption(of: .localNetwork) == nil, "never a stuck wait")
-        #expect(vc.test_buttonTitles(of: .localNetwork) == ["Try Again", "Open Settings…"])
-        #expect(vc.test_isCardClickable(.localNetwork))
+        #expect(!vc.test_ribbonIsWaiting, "never a stuck wait")
+        #expect(vc.test_ribbonButtonTitles == ["Open Settings…", "Try Again"])
+        #expect(vc.test_isRowPressable(.localNetwork))
     }
 
-    /// The waiting line is shared: every card whose Allow raises a system dialog
-    /// says the same thing while that dialog is unanswered.
-    @Test func anUndecidedBluetoothPromptSaysWhatItIsWaitingFor() async {
-        let model = makeModel(audio: .granted, foundSpeakers: 2,
-                              bluetoothPrimer: NeverDecidingBluetooth())
-        let vc = makeVC(model: model)
-        await vc.test_allow([.audio, .localNetwork])
-
-        await vc.test_tapAllow(.bluetooth)
-
-        #expect(vc.test_statusCaption(of: .bluetooth) == "Waiting for your answer\u{2026}")
-    }
-
-    /// The demoted link still works, and still goes to the Local Network pane.
-    @Test func theDemotedSettingsLinkOpensTheLocalNetworkPane() async {
-        var opened: [SystemSettingsPane] = []
-        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 0),
-                        onOpenSettings: { opened.append($0) })
-        await vc.test_allow([.audio, .localNetwork])
-
-        vc.test_tapSettingsLink(.localNetwork)
-
-        #expect(opened == [.localNetwork])
-    }
-
-    /// Bluetooth's answer arrives on a callback, so the click returns long before
-    /// the user has answered — the card has to LOOK like it is waiting, or an
-    /// undecided prompt is a click into nothing.
-    @Test func anUndecidedBluetoothPromptShowsTheCardWaiting() async {
+    /// The waiting beat, whole: the shared line, the spinner, a stage that steps
+    /// back for the real dialog, and NO buttons — the answer is somewhere else
+    /// now. Bluetooth's answer arrives on a callback the click can't await, so
+    /// it is the step that shows the beat at rest.
+    @Test func anUndecidedPromptDimsTheStageAndTakesEveryButtonAway() async {
         let model = makeModel(audio: .granted, foundSpeakers: 2,
                               bluetoothPrimer: NeverDecidingBluetooth())
         let vc = makeVC(model: model)
@@ -701,12 +804,14 @@ import Testing
 
         await vc.test_tapAllow(.bluetooth)
 
-        #expect(vc.test_isProbing(.bluetooth), "the wait is visible")
-        #expect(!vc.test_isCardClickable(.bluetooth), "and the card is inert while it waits")
+        #expect(vc.test_ribbonStatusText == OnboardingViewController.waitingStatus)
+        #expect(vc.test_ribbonIsWaiting, "the wait is visible")
+        #expect(vc.test_stageIsDimmed, "the rehearsal steps back for the real dialog")
+        #expect(vc.test_ribbonButtonTitles.isEmpty, "no second ask while one is in flight")
     }
 
-    /// …and the wait expires, so the card comes back to life instead of staying
-    /// wedged for the rest of the presentation.
+    /// …and the wait expires, so the ask comes back instead of staying wedged
+    /// for the rest of the presentation.
     @Test func anUndecidedBluetoothPromptStopsWaitingAfterItsTimeout() async {
         let model = makeModel(audio: .granted, foundSpeakers: 2,
                               bluetoothPrimer: NeverDecidingBluetooth(),
@@ -714,12 +819,40 @@ import Testing
         let vc = makeVC(model: model)
         await vc.test_allow([.audio, .localNetwork])
         await vc.test_tapAllow(.bluetooth)
-        #expect(vc.test_isProbing(.bluetooth))
+        #expect(vc.test_ribbonIsWaiting)
 
         await waitUntil { !model.isPrimingBluetooth }
+        vc.test_refresh()
 
-        #expect(!vc.test_isProbing(.bluetooth), "the spinner clears itself")
-        #expect(vc.test_isCardClickable(.bluetooth), "and the card can ask again")
+        #expect(!vc.test_ribbonIsWaiting, "the spinner clears itself")
+        #expect(!vc.test_stageIsDimmed)
+        #expect(vc.test_ribbonButtonTitles == ["Skip for now", "Enable Bluetooth Access"],
+                "and the step can ask again")
+    }
+
+    /// The demoted link still works, and still goes to the Local Network pane.
+    @Test func theQuietLinkOpensTheLocalNetworkPane() async {
+        var opened: [SystemSettingsPane] = []
+        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 0),
+                        onOpenSettings: { opened.append($0) })
+        await vc.test_allow([.audio, .localNetwork])
+
+        vc.test_ribbonTapQuietLink()
+
+        #expect(opened == [.localNetwork])
+    }
+
+    /// A browsed row's quiet link is that row's OWN pane — the only way back to
+    /// a permission that is already granted.
+    @Test func aBrowsedRowsQuietLinkOpensThatRowsPane() async {
+        var opened: [SystemSettingsPane] = []
+        let vc = makeVC(model: makeGrantableModel(), onOpenSettings: { opened.append($0) })
+        await vc.test_allow([.audio, .localNetwork])
+        #expect(await vc.test_pressRow(.audio))
+
+        vc.test_ribbonTapQuietLink()
+
+        #expect(opened == [.screenAndSystemAudioRecording])
     }
 
     // MARK: The in-flight prompt
@@ -749,7 +882,7 @@ import Testing
     }
 
     /// The escape hatch: a dialog that has stopped responding must not end the
-    /// setup. After the delay the card says so and offers the SAME pane the
+    /// setup. After the delay the ribbon says so and offers the SAME pane the
     /// denied path deep-links to — nothing is re-asked.
     @Test func aPromptThatStopsRespondingOffersAWayIntoSystemSettings() async {
         var opened: [SystemSettingsPane] = []
@@ -758,14 +891,15 @@ import Testing
         let vc = makeVC(model: model, onOpenSettings: { opened.append($0) })
         await vc.test_allow([.audio, .localNetwork])
         await vc.test_tapAllow(.bluetooth)
-        #expect(vc.test_hint(of: .bluetooth) == nil, "waiting is normal at first")
+        #expect(vc.test_ribbonStatusText != "Dialog not responding?",
+                "waiting is normal at first")
 
         vc.test_fireStuckPromptTimer()
 
-        #expect(vc.test_hint(of: .bluetooth) == "Dialog not responding?")
-        #expect(vc.test_buttonTitles(of: .bluetooth).contains("Open Settings…"))
+        #expect(vc.test_ribbonStatusText == "Dialog not responding?")
+        #expect(vc.test_ribbonButtonTitles.contains("Open Settings…"))
 
-        vc.test_tapSettingsLink(.bluetooth)
+        vc.test_ribbonTapQuietLink()
 
         #expect(opened == [.bluetoothPrivacy], "the denied path's pane, not a second table")
     }
@@ -780,22 +914,13 @@ import Testing
         await vc.test_allow([.audio, .localNetwork])
         await vc.test_tapAllow(.bluetooth)
         vc.test_fireStuckPromptTimer()
-        #expect(vc.test_hint(of: .bluetooth) != nil)
+        #expect(vc.test_ribbonStatusText == "Dialog not responding?")
 
         await waitUntil { !model.isPrimingBluetooth }
 
-        #expect(vc.test_hint(of: .bluetooth) == nil, "nothing is stuck any more")
-        #expect(!vc.test_buttonTitles(of: .bluetooth).contains("Open Settings…"))
-    }
-
-    /// Wait for something a background timeout will make true. A fixed sleep is a
-    /// flake here: the main actor is shared with every other test in the run, so
-    /// how soon that work lands is not this test's to decide.
-    private func waitUntil(_ satisfied: () -> Bool) async {
-        for _ in 0..<600 {                                   // ≤3 s, then give up
-            if satisfied() { return }
-            try? await Task.sleep(nanoseconds: 5_000_000)
-        }
+        #expect(vc.test_ribbonStatusText != "Dialog not responding?",
+                "nothing is stuck any more")
+        #expect(!vc.test_ribbonButtonTitles.contains("Open Settings…"))
     }
 
     @Test func speakerSyncRoutesToLoginItemsThroughTheModelSeam() async {
@@ -806,7 +931,9 @@ import Testing
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
         #expect(vc.test_activeStep == .speakerSync)
-        #expect(vc.test_buttonTitles(of: .speakerSync) == ["Open Login Items…"])
+        #expect(vc.test_ribbonButtonTitles == ["Turn On at Login"])
+        #expect(vc.test_heroHeadline == "Keep speakers in perfect time")
+        #expect(vc.test_heroWhy == "A small helper shares one clock so your speakers never drift.")
 
         await vc.test_tapAllow(.speakerSync)
 
@@ -822,6 +949,10 @@ import Testing
         let vc = makeVC(model: makeGrantableModel(), onOpenSettings: { opened.append($0) })
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
+        #expect(vc.test_ribbonButtonTitles == ["Skip for now", "Set Up Remote Control\u{2026}"])
+        #expect(vc.test_heroHeadline == "Use your volume keys")
+        #expect(vc.test_ribbonBodyText == nil,
+                "the two-surface warning is the rehearsal's job now, not a paragraph's")
 
         await vc.test_tapAllow(.remoteControl)
         #expect(opened.isEmpty, "the first ask is the prompt, not a deep link")
@@ -880,15 +1011,15 @@ import Testing
         vc.test_tapSkip(.remoteControl)
         #expect(!vc.test_doneExists, "decided is not yet checked — the CTA waits for the pass")
         await vc.test_awaitFinalCheck()
-        #expect(vc.test_doneExists, "every required permission is in, every card decided, check passed")
+        #expect(vc.test_doneExists, "every required permission is in, every row decided, check passed")
         #expect(vc.test_doneIsReturnDefault)
     }
 
-    /// Owner decision 2026-08-11 (tightened gate): the optional cards'
-    /// permissions stay outside `RequiredPermission`, but an UNDECIDED card
-    /// holds the gate shut — the CTA must never appear beside a card still
+    /// Owner decision 2026-08-11 (tightened gate): the optional steps'
+    /// permissions stay outside `RequiredPermission`, but an UNDECIDED one
+    /// holds the gate shut — the CTA must never appear beside a row still
     /// offering Allow/Skip. Each decision (a skip here) advances it.
-    @Test func anUndecidedOptionalCardHoldsTheGateShut() async {
+    @Test func anUndecidedOptionalStepHoldsTheGateShut() async {
         let vc = makeVC(model: makeGrantableModel())
         await vc.test_allow([.audio, .localNetwork])
         #expect(vc.test_activeStep == .bluetooth, "the flow still offers them")
@@ -902,10 +1033,39 @@ import Testing
         #expect(vc.test_doneExists, "a skip is a decision — the check runs and the gate opens")
     }
 
+    /// The gate contract is "the CTA exists iff the final check passed", so a
+    /// browse opened AFTER the gate must not read as the gate closing: the CTA
+    /// stays, the browsed row's own quiet link sits beside it, Return stays with
+    /// the CTA, and pressing it still finishes.
+    @Test func browsingWithTheGateOpenKeepsTheCTA() async {
+        var doneFired = false
+        let vc = makeVC(model: makeGrantableModel(), onDone: { doneFired = true })
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        vc.test_tapSkip(.remoteControl)
+        await vc.test_awaitFinalCheck()
+        #expect(vc.test_doneExists)
+
+        #expect(await vc.test_pressRow(.audio))
+
+        #expect(vc.test_browseStep == .audio)
+        #expect(vc.test_doneExists, "a browse is a reading position, not the gate closing")
+        #expect(vc.test_doneTitle == "Start listening")
+        #expect(vc.test_ribbonButtonTitles.contains("Start listening"))
+        #expect(vc.test_ribbonButtonTitles.contains("Open Settings…"),
+                "the browsed row's own pane, beside the CTA")
+        #expect(vc.test_doneIsReturnDefault, "Return stays with the CTA")
+
+        await vc.test_ribbonTapPrimary()
+        await waitUntil { doneFired }
+
+        #expect(doneFired, "the CTA still finishes from a browse")
+    }
+
     // MARK: The final check (the sixth row + the beat)
 
-    /// The sixth row's walk: dormant "One last check" while any card is
-    /// undecided, auto-running the moment the last card is decided — with
+    /// The sixth row's walk: dormant "One last check" while any row is
+    /// undecided, auto-running the moment the last one is decided — with
     /// NOTHING payoff-ish on screen while it runs — then the pass lands the
     /// checkmark, the settled finale, and the CTA together.
     @Test func theCheckRowRunsOnTheLastDecisionAndGatesThePayoff() async {
@@ -951,14 +1111,10 @@ import Testing
         #expect(vc.test_checkRowAccessibilityLabel == "Everything's ready")
     }
 
-    /// The fixed 820×560 fit, pinned at what is load-bearing. In the tallest
-    /// expanded states (audio's long copy; Local Network with its unanswered
-    /// hint) the EMPTY footer reserve crosses the pane edge — its bottom pin
-    /// is deliberately the column's weakest constraint, and the reserve only
-    /// carries the CTA once the stack is collapsed — so the fit contract is:
-    /// every VISIBLE row stays inside the pane in every state, and the footer
-    /// holds its full margin whenever the CTA can exist.
-    @Test func theLeftColumnFitsTheFixedWindowInItsTallestStates() async {
+    /// The fixed 820×560 fit, re-pinned on the spine: the header plus six rows
+    /// must stay inside the pane in every state, including the tallest header
+    /// (a two-permission lost-permission warning) and the complete state.
+    @Test func theSpineFitsTheFixedWindowInItsTallestStates() async {
         func layout(_ vc: OnboardingViewController) {
             let root = vc.test_rootView
             root.frame = NSRect(x: 0, y: 0,
@@ -969,14 +1125,14 @@ import Testing
 
         let fresh = makeVC(model: makeModel(audio: .unknown))
         layout(fresh)
-        #expect(fresh.test_cardStackFrame.minY >= 0,
-                "audio expanded: the six rows overrun the pane by \(-fresh.test_cardStackFrame.minY) pt")
+        #expect(fresh.test_spineStackFrame.minY >= 0,
+                "first run: the six rows overrun the pane by \(-fresh.test_spineStackFrame.minY) pt")
 
-        let hinted = makeVC(model: makeModel(audio: .granted, foundSpeakers: 0))
-        await hinted.test_allow([.audio, .localNetwork])   // unproven browse → hint + Try Again
-        layout(hinted)
-        #expect(hinted.test_cardStackFrame.minY >= 0,
-                "local network with hint: the six rows overrun the pane by \(-hinted.test_cardStackFrame.minY) pt")
+        let lost = makeVC(model: makeModel(audio: .denied),
+                          reason: .permissionLost([.audioCapture, .ptpHelper]))
+        layout(lost)
+        #expect(lost.test_spineStackFrame.minY >= 0,
+                "the tallest header: the six rows overrun the pane by \(-lost.test_spineStackFrame.minY) pt")
 
         let complete = makeVC(model: makeGrantableModel())
         await complete.test_allow([.audio, .localNetwork])
@@ -985,40 +1141,23 @@ import Testing
         await complete.test_awaitFinalCheck()
         layout(complete)
         #expect(complete.test_doneExists)
-        #expect(complete.test_footerFrame.minY >= 19,
-                "with the CTA on screen the footer holds its full bottom margin: \(complete.test_footerFrame.minY)")
-    }
-
-    @Test func returnBelongsToTheActiveAllowUntilDoneExists() async {
-        let vc = makeVC(model: makeGrantableModel())
-        #expect(vc.test_allowIsReturnDefault(.audio))
-
-        await vc.test_allow([.audio, .localNetwork])
-        #expect(vc.test_allowIsReturnDefault(.bluetooth),
-                "the one live Allow keeps Return while any card is undecided")
-
-        vc.test_tapSkip(.bluetooth)
-        vc.test_tapSkip(.remoteControl)
-        await vc.test_awaitFinalCheck()
-
-        #expect(vc.test_doneIsReturnDefault, "Done takes Return the moment it exists")
+        #expect(complete.test_spineStackFrame.minY >= 0,
+                "complete: the six rows overrun the pane by \(-complete.test_spineStackFrame.minY) pt")
     }
 
     /// v4 live fix ("Start listening took two clicks"): the last grant is often
     /// detected by the poll while the user is still IN System Settings, whose
     /// frontmost app can make macOS decline our re-activation — so the user
     /// returns to an INACTIVE app, where a stock control spends the first click
-    /// activating the window. The CTA, every prominent Allow, and the live
-    /// card target act on that activating click; a locked strip keeps stock
-    /// behaviour. (The earlier headless `acceptsFirstMouse` probe on a bare
-    /// NSButton never exercised this path — this pins the overrides that do.)
-    @Test func theCTAAndLiveCardActOnTheActivatingClick() async {
+    /// activating the window. The CTA, every prominent Allow, and the live row
+    /// act on that activating click; a locked row keeps stock behaviour.
+    @Test func theCTAAndLiveRowActOnTheActivatingClick() async {
         let vc = makeVC(model: makeGrantableModel())
-        #expect(vc.test_cardAcceptsFirstMouse(.audio), "the live card acts on first mouse")
-        #expect(!vc.test_cardAcceptsFirstMouse(.bluetooth), "a locked strip keeps stock behaviour")
+        #expect(vc.test_rowAcceptsFirstMouse(.audio), "the live row acts on first mouse")
+        #expect(!vc.test_rowAcceptsFirstMouse(.bluetooth), "a locked row keeps stock behaviour")
         #expect(ProminentButton(title: "Allow…", target: nil, action: nil)
                     .acceptsFirstMouse(for: nil),
-                "every prominent button — the card Allows live the same bounce loop")
+                "every prominent button — the ribbon's Allow lives the same bounce loop")
 
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
@@ -1043,10 +1182,10 @@ import Testing
     }
 
     /// The revocation case: Done's re-verify finds the silent audio read has gone
-    /// denied since, so the flow snaps back to that card instead of finishing —
+    /// denied since, so the flow snaps back to that step instead of finishing —
     /// no sheet, no "continue anyway". The revocation lands AFTER the automatic
     /// check passed (a flip caught BY the check is the auto-check failure test).
-    @Test func doneSnapsBackToARevokedCardInsteadOfFinishing() async {
+    @Test func doneSnapsBackToARevokedStepInsteadOfFinishing() async {
         var doneFired = false
         let audio = MutableSilentAudioProbe(silent: .granted)
         let vc = makeVC(model: makeModel(audio: .granted, audioProbe: audio, foundSpeakers: 3,
@@ -1065,13 +1204,36 @@ import Testing
         #expect(!doneFired, "a hard gate does not finish on an unmet permission")
         #expect(vc.test_snapBackStep == .audio)
         #expect(vc.test_activeStep == .audio)
-        #expect(vc.test_expandedSteps == [.audio])
         #expect(!vc.test_doneExists, "the gate closes again")
         #expect(vc.test_checkRowState == .pending, "the check row reverts with the snap-back")
     }
 
+    /// A snap-back must land on a VISIBLE stage: the browse the user opened
+    /// after the gate opened is on a DIFFERENT row from the one that came up
+    /// short, and leaving it up would hide the step that needs attention.
+    @Test func aSnapBackClosesAnOpenBrowse() async {
+        let audio = MutableSilentAudioProbe(silent: .granted)
+        let vc = makeVC(model: makeModel(audio: .granted, audioProbe: audio, foundSpeakers: 3,
+                                         ptpHelper: FakePTPHelper(status: .enabled)))
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        vc.test_tapSkip(.remoteControl)
+        await vc.test_awaitFinalCheck()
+
+        #expect(await vc.test_pressRow(.localNetwork))
+        #expect(vc.test_browseStep == .localNetwork, "browsing a decided row keeps the CTA")
+
+        audio.silent = .denied   // revoked while the browse sat open
+
+        await vc.test_tapDone()
+
+        #expect(vc.test_snapBackStep == .audio)
+        #expect(vc.test_activeStep == .audio)
+        #expect(vc.test_browseStep == nil, "the browse yielded to the step that came up short")
+    }
+
     /// The automatic check itself catches a revocation: the row reverts to
-    /// pending, the offending card re-opens through the same snap-back
+    /// pending, the offending step re-opens through the same snap-back
     /// machinery, and nothing payoff-ish ever appears.
     @Test func aFailedAutoCheckRevertsTheRowAndSnapsBack() async {
         let vc = makeVC(model: makeGrantableModel(silentAudio: .denied))
@@ -1223,6 +1385,71 @@ import Testing
         #expect(net.test_primeCount == 4, "the second click fired no browse of its own")
     }
 
+    // MARK: Announcements + the ribbon's accessibility
+
+    /// Everything this window does happens somewhere other than the keyboard
+    /// focus — a grant lands from System Settings, a check passes on its own —
+    /// so each transition is spoken, and a repaint that changed nothing says
+    /// nothing. The load-time paint is silent even though Speaker Sync is
+    /// already satisfied in this model: every already-granted step reads as
+    /// "newly completed" against the freshly-seeded edge set on that first
+    /// paint, but the user never witnessed a transition, so it must not speak.
+    @Test func everyTransitionIsAnnouncedExactlyOnce() async {
+        let vc = makeVC(model: makeGrantableModel())
+        // Through the ASYNC landing, not just the sync first paint: the silent
+        // read is what decides the window's opening state.
+        await vc.test_awaitInitialStatuses()
+
+        #expect(vc.test_announcements.isEmpty, "the load-time paint says nothing")
+
+        await vc.test_allow([.audio, .localNetwork])
+
+        #expect(vc.test_announcements
+                == ["Hearing your Mac's sound", "3 speakers on your network"])
+
+        vc.test_refresh()   // a repaint that changes nothing
+
+        #expect(vc.test_announcements.count == 2, "a repaint says nothing new")
+
+        vc.test_tapSkip(.bluetooth)
+        vc.test_tapSkip(.remoteControl)
+        await vc.test_awaitFinalCheck()
+
+        #expect(vc.test_announcements == ["Hearing your Mac's sound",
+                                          "3 speakers on your network",
+                                          "Skipped. Bluetooth speakers",
+                                          "Skipped. Volume-key control",
+                                          "Everything's ready"])
+    }
+
+    /// A permission already in place when the window opens is the opening
+    /// STATE, not a transition the user witnessed — so the async status read
+    /// landing it must neither speak nor pull the window to the front. Both
+    /// arm only once that read has settled.
+    @Test func thePreGrantedStatusLandingIsSilentAndDoesNotReFront() async {
+        let vc = makeVC(model: makeModel(audio: .granted, bluetooth: .granted))
+
+        await vc.test_awaitInitialStatuses()
+
+        #expect(vc.test_hasCheckmark(.bluetooth), "the row still lands on the real status")
+        #expect(vc.test_announcements.isEmpty, "nobody granted anything just now")
+        #expect(vc.test_returnToFrontCount == 0, "and nothing came back from System Settings")
+
+        await vc.test_tapAllow(.audio)   // a grant the user really did make
+
+        #expect(vc.test_announcements == ["Hearing your Mac's sound"])
+    }
+
+    /// The ribbon is REAL UI sitting inside the hero pane beside a demo that is
+    /// deliberately invisible to VoiceOver — its controls must never be swept up
+    /// in that opt-out.
+    @Test func theRibbonStaysReachableBesideTheDecorativeMock() {
+        let vc = makeVC(model: makeModel(audio: .unknown))
+        #expect(vc.test_ribbonIsAccessible)
+        #expect(vc.test_demoAccessibilityElements.isEmpty,
+                "still reachable: \(vc.test_demoAccessibilityElements)")
+    }
+
     // MARK: The finale (setup-complete state)
 
     /// A model every step of the flow can be walked to completion on — the
@@ -1268,6 +1495,123 @@ import Testing
         #expect(settled.test_lineText == "Your Mac's sound can reach every room.")
     }
 
+    /// The finale's first play launches from the ICON CENTRE, not the
+    /// bottom-left origin. `playCelebration()` runs ON the step crossfade,
+    /// before the enclosing pass has positioned the view — the exact ordering
+    /// the first-play bloom used to bloom from the corner. Spending the shot is
+    /// immediate; its launch waits for the first real layout with a centre.
+    @Test func theFinaleLaunchesFromTheIconCentreOnTheFirstPlay() {
+        let host = NSView()
+        let settled = DemoSettledMockView()
+        settled.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(settled)
+        NSLayoutConstraint.activate([
+            settled.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            settled.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            settled.topAnchor.constraint(equalTo: host.topAnchor),
+            settled.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+        ])
+
+        settled.playCelebration()   // before any layout — the real crossfade order
+        #expect(settled.celebrationConsumed, "the shot is spent immediately")
+        #expect(settled.celebrationRunCount == 0,
+                "but it does NOT launch off a centre layout hasn't resolved")
+
+        // Drive layout the way the window does: resolve the tree (the icon gets
+        // its real frame), then the pass that lays out this view with that frame
+        // fires the deferred launch. (A live window resolves frames before it
+        // calls `layout()`; a detached tree needs the resolve made explicit.)
+        host.setFrameSize(DemoSettledMockView.size)
+        host.layoutSubtreeIfNeeded()
+        #expect(settled.test_iconCentre != .zero, "the icon has a real frame now")
+        settled.needsLayout = true
+        settled.layoutSubtreeIfNeeded()
+
+        #expect(settled.celebrationRunCount == 1, "the deferred launch fires once, now")
+        #expect(settled.test_auraPosition == settled.test_iconCentre,
+                "the bloom is anchored on the icon centre")
+        #expect(settled.test_auraPosition != .zero, "never the bottom-left origin")
+    }
+
+    /// The AURA never paints at the bottom-left origin. Its resting opacity is 1
+    /// (the rings' model 0 keeps THEM safe on their own), so before layout
+    /// resolves the icon centre it is held fully transparent, then revealed only
+    /// once it sits on that centre — the specific corner-bloom regression the
+    /// finale recording caught. (The transient paint itself is invisible to a
+    /// headless frame; the model opacity gate is what a test can pin.)
+    @Test func theFinaleAuraStaysHiddenUntilItSitsOnTheIconCentre() {
+        let host = NSView()
+        let settled = DemoSettledMockView()
+        settled.translatesAutoresizingMaskIntoConstraints = false
+        host.addSubview(settled)
+        NSLayoutConstraint.activate([
+            settled.leadingAnchor.constraint(equalTo: host.leadingAnchor),
+            settled.trailingAnchor.constraint(equalTo: host.trailingAnchor),
+            settled.topAnchor.constraint(equalTo: host.topAnchor),
+            settled.bottomAnchor.constraint(equalTo: host.bottomAnchor),
+        ])
+
+        #expect(settled.test_auraOpacity == 0, "born hidden — no corner bloom possible")
+        settled.playCelebration()   // before layout — the real crossfade order
+        #expect(settled.test_auraOpacity == 0,
+                "still hidden: the centre isn't resolved, so it must not paint")
+
+        host.setFrameSize(DemoSettledMockView.size)
+        host.layoutSubtreeIfNeeded()
+        settled.needsLayout = true
+        settled.layoutSubtreeIfNeeded()
+
+        #expect(settled.test_auraPosition == settled.test_iconCentre,
+                "revealed ON the icon centre")
+        #expect(settled.test_auraPosition != .zero, "never the bottom-left origin")
+        #expect(settled.test_auraOpacity == 1, "and only once it has that centre")
+    }
+
+    /// The finale rings sweep the WHOLE window now — far past the hero panel that
+    /// gained almost nothing over the stage — yet every ring is fully faded
+    /// (opacity 0) by the window's NEAREST edge, so no side ever shows a ring
+    /// hitting a wall.
+    @Test func theFinaleRingsFadeOutBeforeTheNearestWindowEdge() {
+        // A host standing in for the whole 820×560 Setup window, with the stage
+        // where the hero really puts it: 354 pt in from the leading edge (26
+        // margin + 288 spine + 18 gap + 22 hero padding), so the icon centre
+        // sits well right-of-centre and the left edge (across the spine) is the
+        // farthest — nearest ≠ farthest, and the old panel cap would fall short.
+        let window = NSView(frame: NSRect(x: 0, y: 0, width: 820, height: 560))
+        let settled = DemoSettledMockView()
+        settled.rippleBoundsView = window
+        settled.translatesAutoresizingMaskIntoConstraints = false
+        window.addSubview(settled)
+        NSLayoutConstraint.activate([
+            settled.leadingAnchor.constraint(equalTo: window.leadingAnchor, constant: 354),
+            settled.centerYAnchor.constraint(equalTo: window.centerYAnchor),
+        ])
+        window.layoutSubtreeIfNeeded()
+        settled.playCelebration()
+        window.layoutSubtreeIfNeeded()   // fire the deferred launch
+
+        guard let nearest = settled.test_nearestEdgeRadius,
+              let farthest = settled.test_farthestEdgeRadius,
+              let endRadius = settled.test_rippleEndRadius else {
+            Issue.record("the ripple did not launch against the window geometry")
+            return
+        }
+
+        // The icon sits right-of-centre, so the leading edge is > half the 820
+        // window away — the reach now spans the window, not the ~231 pt half of
+        // the hero panel it barely cleared before.
+        #expect(farthest > 410, "the ripple reaches across the window's midline")
+        #expect(endRadius > 209, "and far past the 418×278 stage")
+        #expect(endRadius >= farthest - 0.5, "out to the window's farthest edge")
+
+        let fadeRadii = settled.test_rippleFadeOutRadii
+        #expect(fadeRadii.count == 3, "every staggered ring carries a ripple")
+        for radius in fadeRadii {
+            #expect(radius <= nearest + 0.5,
+                    "opacity is 0 by the nearest window edge (\(radius) vs \(nearest))")
+        }
+    }
+
     /// The warning stands down to the WELCOME line once its permission is
     /// re-granted — even with the gate open — and the banner hooks report the
     /// tracked message kind.
@@ -1300,10 +1644,14 @@ import Testing
         await vc.test_awaitFinalCheck()
 
         #expect(vc.test_demoMode == .settled)
+        // The shot is spent immediately, but launches from the first real
+        // layout — so drive one, exactly as the live window does.
+        layoutRoot(vc)
         #expect(vc.test_demoCelebrationRunCount == 1)
         #expect(!vc.test_demoShowsReplay, "the finale is a one-shot, never a Replay offer")
 
         vc.test_refresh()   // a repaint that changes nothing
+        layoutRoot(vc)
 
         #expect(vc.test_demoCelebrationRunCount == 1, "the shot is spent")
     }
@@ -1352,13 +1700,14 @@ import Testing
 
         vc.test_demoReduceMotionOverride = false
         vc.test_demoCanAnimateOverride = true   // the window lands on screen
+        layoutRoot(vc)                          // the layout the launch waits for
 
         #expect(vc.test_demoCelebrationRunCount == 1)
     }
 
     /// The finale is decoration like every other mock: its headline and line
-    /// must be swallowed by the accessibility opt-out — the left pane's header
-    /// and cards carry the words.
+    /// must be swallowed by the accessibility opt-out — the spine and the
+    /// ribbon carry the words.
     @Test func theFinaleStaysInvisibleToVoiceOver() async {
         let vc = makeVC(model: makeCompleteableModel())
         await vc.test_refreshStatuses()
@@ -1417,7 +1766,7 @@ import Testing
         #expect(!vc.test_demoShowsReplay, "Replay is for a Reduce Motion user watching a live window")
     }
 
-    /// The demo is decoration: every word of the information is in the card copy
+    /// The demo is decoration: every word of the information is in the ribbon
     /// beside it. Un-electing only the container HOISTS its children, which left
     /// the mock's real text fields ("Allow", "Don't Allow", the pane title)
     /// reachable — VoiceOver reading out a picture of a dialog.
@@ -1549,6 +1898,8 @@ import Testing
 
         #expect(vc.test_demoMode == .settings)
         #expect(vc.test_demoStage == nil)
+        #expect(vc.test_ribbonBodyText?.contains("macOS won't tell us when you do") ?? false,
+                "macOS won't tell us when the switch flips — the ribbon says so")
     }
 
     /// Every other step's ask really is one surface, so only Remote Control pays
@@ -1573,18 +1924,121 @@ import Testing
         #expect(mock.test_stage == .alert, "a pass must end where it started")
     }
 
-    /// The system alert is the real panel's copy, not the privacy dialog's: the
-    /// access as a header, the OS's own ask, and the instruction that names the
-    /// pane the grant is actually made in. The privacy dialog's own titles are
-    /// untouched.
-    @Test func theSystemAlertCarriesTheRealPanelsCopy() {
-        #expect(DemoSystemAlertMockView.headerText(for: .remoteControl) == "Accessibility Access")
-        #expect(DemoSystemAlertMockView.askText(for: .remoteControl)
-            == "“Audiouter” would like to control this computer using accessibility features.")
-        #expect(DemoSystemAlertMockView.bodyText(for: .remoteControl)
-            .contains("Privacy & Security settings"))
-
+    /// A mock's prose is abstracted to gist bars, but its BUTTON LABELS are
+    /// real: the words are what the user has to recognise when the real surface
+    /// arrives, and a greeked "Don't Allow" would teach them nothing.
+    @Test func theMocksKeepTheirRealButtonLabels() {
         #expect(DemoPromptMockView.confirmTitle(for: .audio) == "Allow")
+
+        let alert = DemoSystemAlertMockView(step: .remoteControl)
+        alert.layoutSubtreeIfNeeded()
+        #expect(alert.test_demoButtonTitles == ["Open System Settings", "Deny"])
+    }
+
+    /// The rehearsal has to say WHICH button to press — the copy that used to
+    /// warn about the alert's accent-filled refusal is gone, so the marking
+    /// carries it. Exactly one button per surface is marked, and it is the one
+    /// the pointer presses.
+    @Test func exactlyTheCorrectButtonIsMarkedOnEverySurface() {
+        let prompt = DemoPromptMockView(step: .audio)
+        prompt.layoutSubtreeIfNeeded()
+        #expect(prompt.test_demoMarkedButtonTitle == "Allow")
+
+        let alert = DemoSystemAlertMockView(step: .remoteControl)
+        alert.layoutSubtreeIfNeeded()
+        #expect(alert.test_demoMarkedButtonTitle == "Open System Settings",
+                "the real panel emphasises Deny — the mock must not")
+    }
+
+    /// Every mock has to FIT the stage. The preview frame clips, so a mock
+    /// taller than `surfaceSize` is not "a bit tight" — it loses its bottom
+    /// edge, which is where the buttons the rehearsal exists to point at live.
+    /// The near-life-size privacy card was over by ~50 pt before the copy came
+    /// out of it.
+    @Test func everyMockFitsTheStage() {
+        let stage = DemoPaneView.surfaceSize
+        let mocks: [NSView] = [
+            DemoPromptMockView(step: .audio),
+            DemoSettingsMockView(step: .localNetwork, metricScale: 1.35),
+            DemoSettingsHandoffMockView(step: .remoteControl),
+            DemoSystemAlertMockView(step: .remoteControl),
+        ]
+        for mock in mocks {
+            mock.layoutSubtreeIfNeeded()
+            let size = mock.fittingSize
+            #expect(size.width <= stage.width && size.height <= stage.height,
+                    "\(type(of: mock)) is \(size), stage is \(stage)")
+        }
+    }
+
+    /// Increase Contrast picks the widened value, and a token that declares no
+    /// widened value falls back rather than going blank. Driven through the
+    /// pure resolver because the real setting is a workspace flag with no
+    /// override seam — faking it through a mutable static would leak into this
+    /// suite's other tests, which run in parallel.
+    @Test func increaseContrastSelectsTheWidenedValuePerAppearance() {
+        // Both axes, all four corners.
+        #expect(DemoSystemColor.resolvedHex(light: 0x111111, dark: 0x222222,
+                                            lightHighContrast: 0x333333, darkHighContrast: 0x444444,
+                                            isDark: false, increaseContrast: false) == 0x111111)
+        #expect(DemoSystemColor.resolvedHex(light: 0x111111, dark: 0x222222,
+                                            lightHighContrast: 0x333333, darkHighContrast: 0x444444,
+                                            isDark: true, increaseContrast: false) == 0x222222)
+        #expect(DemoSystemColor.resolvedHex(light: 0x111111, dark: 0x222222,
+                                            lightHighContrast: 0x333333, darkHighContrast: 0x444444,
+                                            isDark: false, increaseContrast: true) == 0x333333)
+        #expect(DemoSystemColor.resolvedHex(light: 0x111111, dark: 0x222222,
+                                            lightHighContrast: 0x333333, darkHighContrast: 0x444444,
+                                            isDark: true, increaseContrast: true) == 0x444444)
+
+        // A token with no widened variant keeps its normal value under
+        // Increase Contrast — the fallback every unchanged case relies on.
+        #expect(DemoSystemColor.resolvedHex(light: 0x111111, dark: 0x222222,
+                                            lightHighContrast: nil, darkHighContrast: nil,
+                                            isDark: false, increaseContrast: true) == 0x111111)
+        #expect(DemoSystemColor.resolvedHex(light: 0x111111, dark: 0x222222,
+                                            lightHighContrast: nil, darkHighContrast: nil,
+                                            isDark: true, increaseContrast: true) == 0x222222)
+    }
+
+    /// The mocks are stylised, but a SYSTEM DIALOG is mimicked truthfully: its
+    /// icon symbol, its colours, its shape and its button words are what macOS
+    /// really shows, and only the COPY is abstracted to grey bars (owner,
+    /// 2026-08-13, reversing the 2026-08-12 pass that drained these to slate —
+    /// a dusty-rose record mark and a grey-blue Bluetooth tile stopped reading
+    /// as the thing they are mimicking).
+    ///
+    /// The Settings-window chrome is deliberately NOT included in that reversal:
+    /// the owner named that surface as the one that got the balance right, so
+    /// its switch and selected row keep the muted slate.
+    @Test func systemDialogColoursAreTrueAndSettingsChromeStaysMuted() {
+        for appearance in [NSAppearance(named: .aqua)!, NSAppearance(named: .darkAqua)!] {
+            appearance.performAsCurrentDrawingAppearance {
+                // The privacy dialog mimics macOS: real blue badge and tiles,
+                // real red record mark. Asserted as full saturation rather than
+                // as an exact hex so the system colours stay free to shift with
+                // the OS — what is pinned is "true to life", not a value.
+                let blue = DemoSystemColor.systemBlue.usingColorSpace(.sRGB)!
+                #expect(blue.saturationComponent > 0.5,
+                        "the privacy badge/tile went muted again: \(blue.saturationComponent)")
+                let record = DemoSystemColor.recordTile.usingColorSpace(.sRGB)!
+                #expect(record.saturationComponent > 0.5,
+                        "the record tile went muted again: \(record.saturationComponent)")
+
+                // The Settings mock's own chrome stays where it was.
+                let settings = DemoSystemColor.settingsAccent.usingColorSpace(.sRGB)!
+                #expect(settings.saturationComponent < 0.35,
+                        "the settings switch drifted saturated: \(settings.saturationComponent)")
+                #expect(settings.saturationComponent < blue.saturationComponent,
+                        "the settings chrome must stay quieter than a real system colour")
+
+                // Unchanged by the reversal: gold is spent on the CTA alone, so
+                // the padlock stays a warm grey rather than the real icon's gold.
+                let lock = DemoSystemColor.lockTop.usingColorSpace(.sRGB)!
+                #expect(lock.saturationComponent < 0.15,
+                        "the padlock is still gold: \(lock.saturationComponent)")
+            }
+        }
     }
 
     /// A stage writes its score in its OWN seconds; the host lays it down at an
@@ -1605,8 +2059,8 @@ import Testing
 
     // MARK: One motion language
 
-    /// The cards clip on the SAME constant every other collapsible element in
-    /// the app uses — a second hand-synced copy is exactly what drifted before.
+    /// Collapsible elements clip on the SAME constant every other one in the app
+    /// uses — a second hand-synced copy is exactly what drifted before.
     @Test func collapseSharesTheOneMotionDuration() {
         #expect(Tokens.Motion.collapseRevealDuration == 0.15)
         #expect(PopoverPanelViewController.collapseRevealDuration == Tokens.Motion.collapseRevealDuration)
@@ -1618,6 +2072,18 @@ import Testing
         let vc = makeVC(model: makeModel(audio: .granted), reason: .firstRun)
         #expect(!vc.test_showsPermissionLostBanner)
         #expect(vc.test_permissionLostBannerText == nil)
+    }
+
+    /// A `.permissionLost` re-entry re-titles the whole window and marks the row
+    /// that went off as BROKEN — the one row on the spine asking to be looked at.
+    @Test func aPermissionLostReEntryRetitlesTheWindowAndBreaksItsRow() {
+        let vc = makeVC(model: makeModel(audio: .denied), reason: .permissionLost([.audioCapture]))
+
+        #expect(vc.test_titleText == "Let's get your sound back")
+        #expect(vc.test_rowIsBroken(.audio))
+        #expect(!vc.test_rowIsBroken(.localNetwork))
+        #expect(vc.test_ribbonStatusText == "This was on \u{2014} macOS says it's off now.")
+        #expect(vc.test_ribbonButtonTitles == ["Open Settings…"])
     }
 
     @Test func permissionLostNamesTheUnmetPermissionInTheHeader() {
@@ -1634,21 +2100,21 @@ import Testing
                         reason: .permissionLost([.audioCapture, .ptpHelper]))
         let text = vc.test_permissionLostBannerText ?? ""
         #expect(text.contains("System Audio"), "\(text)")
-        // "Speaker Sync", not "PTP helper" — the card was named out of jargon.
+        // "Speaker Sync", not "PTP helper" — the row was named out of jargon.
         #expect(text.contains("Speaker Sync"), "\(text)")
     }
 
-    /// The pronoun has to agree with the count: "Re-enable it below" beside two
+    /// The pronoun has to agree with the count: "Flip it back on" beside two
     /// named permissions is a broken sentence, on the one screen whose whole job
     /// is explaining what went wrong.
     @Test func theLostPermissionMessageAgreesWithHowManyItNamed() {
         let one = OnboardingViewController.permissionLostText(for: [.audioCapture])
-        #expect(one.contains("permission, currently turned off"), "\(one)")
-        #expect(one.contains("Re-enable it below"), "\(one)")
+        #expect(one.contains("access was switched off after setup"), "\(one)")
+        #expect(one.contains("Flip it back on"), "\(one)")
 
         let two = OnboardingViewController.permissionLostText(for: [.audioCapture, .ptpHelper])
-        #expect(two.contains("permissions, currently turned off"), "\(two)")
-        #expect(two.contains("Re-enable them below"), "\(two)")
+        #expect(two.contains("System Audio and Speaker Sync"), "\(two)")
+        #expect(two.contains("Flip them back on"), "\(two)")
     }
 
     @Test func permissionLostMessageClearsOnceItsFlaggedPermissionIsGranted() async {
@@ -1661,6 +2127,7 @@ import Testing
         #expect(!vc.test_permissionLostBannerIsVisible,
                 "the message must clear once the permission it warned about is granted")
         #expect(vc.test_showsPermissionLostBanner, "it cleared, it was never not-warranted")
+        #expect(!vc.test_rowIsBroken(.audio), "and the row stops asking to be looked at")
     }
 
     @Test func windowControllerThreadsReasonThroughToTheContentViewController() {
@@ -1686,7 +2153,7 @@ import Testing
         #expect(ptpHelper.registerCount == 1)
     }
 
-    /// Without the load-time silent re-read the Bluetooth card paints
+    /// Without the load-time silent re-read the Bluetooth row paints
     /// undetermined even when the grant is already in place (`bluetoothStatus`
     /// starts `.unknown`).
     @Test func loadReadsAnAlreadyGrantedBluetoothStatus() async {
@@ -1807,6 +2274,83 @@ import Testing
         #expect(!AppSettings(defaults: defaults).hasCompletedSetup,
                 "Closing with ✕ leaves setup to reappear next launch")
         #expect(counter.count == 1)
+    }
+
+    // MARK: The setup-v3 hero — gold spent once, ember on the spine
+
+    /// The live row draws NO leading bar. It is already the row carrying the
+    /// selection fill inside the grouped list, and a coloured rule beside it
+    /// both repeated that and drew a shape macOS's own grouped lists don't
+    /// have. Gold stays the accent of exactly ONE thing on screen — the button
+    /// this step wants pressed — which is now true of the whole window rather
+    /// than true only after the spine settled for ember.
+    @Test func theLiveRowDrawsNoEdgeBarAndOnlyTheButtonIsGold() async {
+        let vc = makeVC(model: makeGrantableModel())
+
+        #expect(vc.test_rowEdgeBarFill(.audio) == nil, "the live row is marked by its fill, not a bar")
+        #expect(vc.test_rowEdgeBarFill(.localNetwork) == nil, "a locked row draws no bar")
+
+        await vc.test_tapAllow(.audio)
+
+        // Advancing the flow must not introduce one either.
+        #expect(vc.test_rowEdgeBarFill(.audio) == nil)
+        #expect(vc.test_rowEdgeBarFill(.localNetwork) == nil,
+                "the newly-live row is marked the same way the last one was")
+    }
+
+    /// A broken permission still outranks it — that row is the one asking to be
+    /// looked at, and it says so in the failure hue.
+    @Test func aBrokenRowsEdgeBarStaysTheFailureHue() {
+        let vc = makeVC(model: makeModel(audio: .denied), reason: .permissionLost([.audioCapture]))
+        #expect(resolvedSRGB(vc.test_rowEdgeBarFill(.audio))
+                == resolvedSRGB(Tokens.Color.failure))
+    }
+
+    /// The frame's caption is the layout's answer to "whose window is this?".
+    /// It comes off for the ONE surface that isn't macOS's — our own finale.
+    @Test func thePreviewFrameIsCaptionedExceptOnTheFinale() async {
+        let vc = makeVC(model: makeGrantableModel())
+        #expect(vc.test_previewFrameLabel == "YOU'LL SEE THIS FROM MACOS")
+
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        await vc.test_tapAllow(.speakerSync)
+        vc.test_tapSkip(.remoteControl)
+        await vc.test_awaitFinalCheck()
+
+        #expect(vc.test_doneExists, "the gate opened")
+        #expect(vc.test_previewFrameLabel == nil,
+                "the finale card is ours — captioning it as macOS's would be a lie")
+    }
+
+    /// And the frame's CHROME goes with the caption: a permission step is a
+    /// picture inside a boundary, the finale is our own moment on the panel —
+    /// no well, no rim, and nothing to clip the ripple.
+    @Test func thePreviewFrameDropsItsChromeOnTheFinale() async {
+        let vc = makeVC(model: makeGrantableModel())
+        #expect(vc.test_previewFrameDrawsChrome, "a permission step keeps the framed look")
+
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        await vc.test_tapAllow(.speakerSync)
+        vc.test_tapSkip(.remoteControl)
+        await vc.test_awaitFinalCheck()
+
+        #expect(vc.test_doneExists, "the gate opened")
+        #expect(!vc.test_previewFrameDrawsChrome,
+                "the finale sits on the hero panel, unframed and unclipped")
+    }
+
+    /// Resolve a dynamic token to comparable components: two accesses of a
+    /// provider-backed colour are distinct instances whose `isEqual` is not
+    /// documented to see through the provider.
+    private func resolvedSRGB(_ color: NSColor?) -> NSColor? {
+        guard let color else { return nil }
+        var resolved: NSColor?
+        NSAppearance(named: .darkAqua)?.performAsCurrentDrawingAppearance {
+            resolved = color.usingColorSpace(.sRGB)
+        }
+        return resolved
     }
 
     @Test func finishIsSingleFire() {

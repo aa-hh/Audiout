@@ -58,7 +58,14 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
         contentVC.onWillOpenSystemSettings = { levelTrampoline.fire() }
 
         let window = OnboardingWindow(contentViewController: contentVC)
-        window.styleMask = [.titled, .closable]
+        // `.miniaturizable` alongside `.titled, .closable`: nothing about the
+        // fixed-size/no-zoom decisions below depends on the window staying on
+        // top of the Dock — minimizing while a permission dialog or System
+        // Settings has the front is exactly what a user reaches for, and there
+        // was no reason found to withhold the affordance a titled window
+        // normally has. Not `.resizable` — that's the decision the rest of
+        // this file (and the folder's AGENTS.md) documents at length.
+        window.styleMask = [.titled, .closable, .miniaturizable]
         window.title = "Setup"
         window.isRestorable = false   // fixed-size, centered; never restored
         // Appear on whatever Space the user is on (incl. over a fullscreen app)
@@ -227,12 +234,44 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
             hasBeenPresented = true
             contentVC.view.layoutSubtreeIfNeeded()
             window?.setContentSize(contentVC.view.fittingSize)
-            window?.center()
+            positionWindow()
         }
         guard !HeadlessRuntime.isActive else { return }
         NSApp?.activate(ignoringOtherApps: true)
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
+    }
+
+    /// Center the window, but never let a screen shorter than the fixed
+    /// 820 × 560 content push the ribbon's action row — the bottom bar
+    /// carrying the one button the user needs — off the visible frame.
+    ///
+    /// A small display, or a "More Space"/"Larger Text" display-scaling
+    /// setting, can leave `visibleFrame` shorter than 560 pt; the window
+    /// still CANNOT resize (that stays the documented decision — see
+    /// `present()`'s doc comment and this folder's AGENTS.md), so the only
+    /// thing left to move is where it sits. Plain `center()` overflows both
+    /// edges equally, which crops the bottom exactly as much as the top —
+    /// this instead pins the BOTTOM edge to the visible frame's floor
+    /// whenever the window doesn't fit, sacrificing headroom at the top (the
+    /// header/spine) rather than the action row at the bottom. Width is
+    /// clamped the same way for a narrow screen, though 820 pt rarely if
+    /// ever exceeds a real display's usable width.
+    private func positionWindow() {
+        guard let window, let screen = window.screen ?? NSScreen.main else {
+            window?.center()
+            return
+        }
+        let visible = screen.visibleFrame
+        let frame = window.frame
+        var origin = NSPoint(x: visible.midX - frame.width / 2, y: visible.midY - frame.height / 2)
+        origin.y = frame.height > visible.height
+            ? visible.minY
+            : max(visible.minY, min(origin.y, visible.maxY - frame.height))
+        origin.x = frame.width > visible.width
+            ? visible.minX
+            : max(visible.minX, min(origin.x, visible.maxX - frame.width))
+        window.setFrameOrigin(origin)
     }
 
     // MARK: Dismissal

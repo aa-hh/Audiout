@@ -48,10 +48,23 @@ lives in the Mixer screen. All group logic goes through the shared
   strip) minus the footer strip (`test_contentPaneChromeHeight`). The
   surface's default height is DERIVED from this budget; grow it there, never
   by letting the editor overflow (`MembershipRailTests`).
+- **The screen's WIDTH is not the surface's to choose either — this pane's
+  numbers set it.** AppKit widens the Groups window to the split view's
+  fitting width, which is the sidebar's thickness + `GroupsPaneLayout
+  .contentMaxWidth` + both column margins; the size
+  `AppSurfaceController.groupsDefaultContentSize` asks for only holds while it
+  matches. That is why the sidebar is PINNED at 210 (min == max: its own
+  fitting width is ≥260, and every point past 210 was being charged to the
+  window, which mounted 707 pt wide against the Mixer's 623) and why the
+  column cap is 385. Raising either widens the whole screen.
 - **Header parity is GEOMETRIC and lives in `GroupsPaneLayout`.** Editor and
   detail pane swap behind one sidebar; every shared number is read from that
   one enum — hand-copied literals once drifted ~22.5pt and made the header
-  jump. `GroupsHeaderParityTests` asserts real laid-out frames. TRAP: some of
+  jump. `GroupsHeaderParityTests` asserts real laid-out frames. The VERTICAL
+  cadence is shared the same way (`sectionGap`, `labelToSectionGap`,
+  `actionBandGap`, `paneBottomInset` — tighter within a group of things than
+  between them); both panes must breathe identically, so a gap that only one
+  of them changes is a bug. TRAP: some of
   those numbers are HALF POINTS (`GroupsPaneLayout.contentLeadingInset` is
   38.5), and auto layout snaps every frame onto a rounding grid whose pitch
   varies BETWEEN RUNS of the same binary — so a 0.5pt failure there is the
@@ -64,6 +77,36 @@ lives in the Mixer screen. All group logic goes through the shared
   hosting window** (A11Y-GROUPS) — nothing else ever calls
   `makeFirstResponder`. It only fires on a genuine on-screen appearance, so
   it is invisible to headless coverage; don't remove it as dead code.
+  `ContentPaneHostViewController.setContent(_:)` re-seeds the key-view loop
+  after every pane swap (re-parenting invalidates it) — keep both halves.
+- **Gold means LIVE, so the editor's rail is armed/idle end to end.** The
+  active Main Out group's editor draws its spine — hook, wire, member discs,
+  hover ring — in gold; any other group's draws the whole spine in the quiet
+  `ember` idle tone (`MembershipRowView.railArmed` →
+  `MembershipBusView.apply(armed:)`, same truth as `railHookAnchor`'s `gold`).
+  The sidebar mirrors it: the active group's row carries the small gold
+  `speaker.wave.2.fill` "Playing now" marker (`IconLabelCellView`), the
+  sidebar's ONE sanctioned use of gold.
+- **Persistence failures are reported, never swallowed.** Every editor write
+  goes through `saveOrReport(_:)` / `performDelete(id:)`: on a throw the pane
+  re-renders from the model (no control may claim a state that never saved)
+  and a plain-words alert names the problem. Seam: `test_saveFailureReported`.
+- **The bottom add bar says what "+" will do.** With ≥2 speakers
+  multi-selected it retitles live to "New Group from N Speakers…"; the create
+  sheet then prefills its name from the selection ("Office + Sonos Move") and
+  auto-focuses the field with the text selected.
+- **Power paths live in the sidebar:** right-click context menu (group row →
+  "Rename…"/"Delete Group…", speaker row → "New Group from Selection…" with
+  clicked-vs-selected arbitration), Cmd-N (view-local key equivalent), and
+  double-click-to-rename. The menu fires `onRequestRename`/`onRequestDelete`;
+  `MixerWindowController` wires them to `focusRenameField()`/`requestDelete()`.
+- **On `.warmPane` the WHOLE membership row is the toggle** (hitTest collapses
+  non-checkbox hits onto the row; drag-off cancels; disabled row refuses), and
+  hovering the row shows the node's ring. The active group's editor carries a
+  "Playing now" badge in the header band and a reassurance caption beside
+  "Delete Group…" — beside, not below: the editor pane's fitting height has
+  ZERO headroom at a 7-device fleet, so new bands need surface-height budget
+  first (`theActiveGroupsMarkersAddNoHeightToTheEditorPane`).
 - **Both sidebar sections are FLAT** — no expand/collapse, no nested rows;
   the Speakers section lists EVERY device (membership is previewed in the
   editor, not by expansion).
@@ -109,7 +152,7 @@ lives in the Mixer screen. All group logic goes through the shared
 |---|---|
 | `MixerWindowController` | Screen-content controller: owns the split view, sheet flow, auto-select rule; vends `contentController`; visibility via `setHostVisible(_:)`. |
 | `ContentPaneHostViewController` | Swapped editor/detail/empty pane + the persistent footer caption. |
-| `GroupsEmptyStateViewController` | "No groups yet" pane: message + §5.9 teaching subtitle + New Group… |
+| `GroupsEmptyStateViewController` | Empty pane: "Group your speakers" + §5.9 teaching subtitle + New Group… |
 | `SidebarViewController` | Source-list (Groups + Speakers), both FLAT; selection drives the content pane. |
 | `GroupEditorViewController` | Edit-only pane: rename, membership toggles, delete. |
 | `GroupCreationSheetController` | Standard macOS sheet for new groups; never activates. |

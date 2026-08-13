@@ -3,20 +3,46 @@
 ## Purpose
 
 The first-run Setup window (pure AppKit): a **two-pane** screen that asks for the
-five permissions **one at a time**. LEFT, a fixed column with the hero, the five
-sequential cards, the final-check status row, and the Done footer. RIGHT, a native-drawn miniature of the
-exact surface the active card's Allow button is about to raise. It reframes the
-OS's "recording" language before any TCC prompt fires, and (unlike the
-popover/window/settings surfaces) is also re-shown later if a required permission
-gets revoked. All permission logic lives in Core — `SetupModel` owns the statuses
-and probes, `SetupFlowModel` owns the sequence, the skip set, the Done gate and
-the Allow decision table; this folder only renders them and forwards taps. Keep
-this file up to date when a card is added or removed, when the required-permission
-set changes, or when the gate/motion/demo rules change.
+five permissions **one at a time**. LEFT, the **SPINE** — a fixed 288 pt column
+of the header over six compact status rows (the five permissions plus the
+final-check row), carrying short titles and nothing else. RIGHT, the **HERO** —
+one warm panel read top to bottom (owner-approved 2026-08-12):
+
+1. the **HEAD BLOCK** (`SetupHeroHeadView`) — a ~20 pt headline over a ~14.5 pt
+   why line in primary ink, and NOTHING else: no overline, no support line, no
+   ask line;
+2. the **PREVIEW FRAME** (`SetupPreviewFrameView`) — a `well` with a caption band
+   on its top edge ("You'll see this from macOS") holding the STAGE, the
+   native-drawn miniature of the exact surface this step's ask is about to raise;
+3. the **RIBBON**'s lower region (`SetupRibbonView`) — the status line and the
+   recovery paragraph, for the states that have to instruct rather than ask;
+4. the **BARE BOTTOM BAR** — a hairline, then the buttons trailing-aligned, and
+   nothing else: the gold primary at the trailing edge with a borderless "Skip
+   for now" to its left on the skippable steps.
+
+**A FIRST ASK IS ONLY (1), (2) AND (4).** The ask line, the reassurance
+paragraph and the honesty line were DELETED, not moved: each explained a picture
+the user is already looking at.
+
+That split is the rebuild's whole point (Direction 04, "the rehearsal leads",
+owner-chosen 2026-08-11 — it REPLACES the expanding-card column, so read the
+history before pulling the copy back into the left column): the rehearsal is this
+window's actual idea, so it takes the stage, and the words that explain it sit
+directly under it instead of across the window in a card the eye has to pair up
+by hand. There are no expanding cards left, no per-card buttons, and no footer.
+
+It reframes the OS's "recording" language before any TCC prompt fires, and
+(unlike the popover/window/settings surfaces) is also re-shown later if a
+required permission gets revoked. All permission logic lives in Core —
+`SetupModel` owns the statuses and probes, `SetupFlowModel` owns the sequence,
+the skip set, the Done gate and the Allow decision table; this folder only
+renders them and forwards taps. Keep this file up to date when a row is added or
+removed, when the required-permission set changes, or when the
+gate/motion/demo/selection rules change.
 
 ## Rules
 
-- **Five cards, four kinds of thing:** **System Audio** and **Local Network** are
+- **Five steps, four kinds of thing:** **System Audio** and **Local Network** are
   real `PermissionStatus`-backed TCC probes; **Bluetooth** is the one permission
   with a fully honest status API (`CBManager.authorization` — granted/denied/
   undetermined all real); **Remote Control** (Accessibility) is primed ahead of a
@@ -66,61 +92,117 @@ set changes, or when the gate/motion/demo rules change.
   record as a real "not granted": that fabricated answer is how clicking Done while
   the reactivation `refreshStatuses()` was still browsing refused to finish (live,
   2026-08-11 — "Start listening took two clicks"). The ✕ close remains
-  the one ungated exit and still doesn't persist completion. Done rides DIRECTLY
-  under the card stack (`cardsToFooterGap`), not pinned to the pane's bottom edge:
-  the window is a fixed height, so the bottom pin left the complete state with the
-  collapsed stack at the top and Done ~250 pt below it across an empty band. The
-  pane's lower slack now falls below the footer. Done's FACE is the finale CTA —
+  the one ungated exit and still doesn't persist completion. **Done lives in the
+  RIBBON's action row** — there is no footer any more: the gate's CTA is simply
+  the ribbon's one primary button (`RibbonContent.PrimaryKind.cta`), so "absent
+  until the check passes" is now literally "the ribbon builds no primary at all".
+  The action row is a RESERVED fixed band, so the beat where every button goes
+  away moves nothing above it. Done's FACE is the finale CTA —
   **"Start listening"** (owner copy 2026-08-11: closing setup is what starts the
   deferred audio engine, so the button names that), a gold `ProminentButton` that
-  fades in on the gate's beat. The face changed; the gate contract above did not.
+  fades in on the gate's beat. The face and the place changed; the gate contract
+  above did not.
+  - **AMENDMENT — the CTA PERSISTS during a browse** (Direction 04): a browse is
+    a reading position on a row that is ALREADY decided, so opening one after the
+    gate must not read as the gate closing. `ribbonContent(active:)` keeps the CTA
+    as the primary for every browse built while `isDoneAvailable`, with the
+    browsed row's own quiet "Open Settings…" beside it, and Return stays with the
+    CTA. `ribbonPrimaryTapped()` therefore finishes on `isDoneAvailable`
+    REGARDLESS of `browseStep` — gated on "no browse", the button would sit on
+    screen doing nothing. The gate contract is unchanged in meaning: the CTA
+    exists iff the final check passed.
 - **The final-check row is a STATUS row, not a card** (`SetupCheckRowView`,
   sixth in the column below Remote Control): never expandable, no body, no
   Allow/Skip — but in the column's grammar (same surface/inset, icon tile,
   title, one trailing slot). Three states, copy is owner-reviewed and EXACT:
-  pending **"One last check"** (dormant like the locked cards' dimming but with
+  pending **"One last check"** (dormant like the locked rows' dimming but with
   NO padlock — it isn't permission-locked, it's waiting its turn), running
   **"Making sure everything's ready…"** (small spinner in the trailing slot),
-  passed **"Everything's ready"** (the completed cards' green checkmark). Icon:
+  passed **"Everything's ready"** (the completed rows' green checkmark). Icon:
   SF "checklist" tinted `Tokens.Color.gold` — deliberately NOT a permission
   hue: the row is the first note of the finale's colour story, and the tint is
   PERMANENT like every tile (gold-on-`raised` ≥3:1 is measured in
   `OnboardingPermissionColorTests`). Unlike the demo pane the row is REAL UI:
   one VoiceOver element whose label is the state-carrying title, so the pixels
   and the spoken state can never disagree.
-- **Exactly ONE card is expanded.** `SetupCardView` renders five states
-  (`SetupCardState`): `pending`, `active`, `completed`, `autoPassed(note:)`,
-  `skipped`. The invariant a test pins is `test_expandedSteps == [activeStep]`.
+- **Nothing expands any more — the SPINE selects, the HERO shows.**
+  `SetupSpineRowView` renders the same five states (`SetupCardState`: `pending`,
+  `active`, `completed`, `autoPassed(note:)`, `skipped`) as a compact strip: icon
+  tile, short title, and exactly ONE trailing marker. What the hero pane is
+  showing is decided by two variables and no third:
+  - `SetupFlowModel.activeStep` (overridden by a snap-back) is the LIVE row. Its
+    rehearsal is on stage and its ask is in the ribbon.
+  - `OnboardingViewController.browseStep` is a read-only look at a DECIDED row.
+    It is the VC's alone, deliberately NOT the flow model's: browsing must never
+    touch the sequence, the skip set or the gate. A browse yields to anything
+    that really moved the flow (a new grant clears it), and a second press on the
+    same row puts it back.
+  Selection rules, in the order the press dispatch applies them:
+  - live row → runs the ribbon's primary (the whole row is that button);
+  - completed row → browses it: the hero shows the pane that row's
+    switch lives on, resting ON (see the K2 amendment below), the ribbon says
+    what it bought and offers that pane;
+  - AUTO-PASSED row → refused, silently, like a locked one: the row's permanent
+    note carries the whole story, and no honest hero exists for a grant macOS
+    cannot make;
+  - skipped row → `SetupFlowModel.reopen(_:)` re-arms the ask (a skip never spent
+    a prompt), and the ribbon leads with "You skipped this earlier — nothing's
+    lost."; `finalCheckState` reverts to pending on its own, because readiness is
+    a derived read;
+  - locked row → refused, silently (owner decision: no padlock shake — a refusal
+    that animates invites a second try);
+  - a BROKEN permission (granted once, off now, or the live step just refused)
+    overrides the row's other markers and routes the ribbon to Settings: it is
+    the one row on the spine asking to be looked at, and it says so with the
+    failure hue, the red edge bar and the alert glyph.
 - **Locked steps READ locked** (owner decision 2026-08-11 — this REPLACES an
   earlier "pending strips render at full opacity, never disabled-looking" rule).
   A step the flow hasn't reached is dimmed (`tertiaryLabel` title,
   `lockedTileAlpha` on the icon tile) and carries a tertiary `lock.fill` in the
   SAME trailing slot the checkmark will eventually take — one position that says
-  locked, then earned. Completed = checkmark. Skipped = neither, with the
-  imperative title kept: the user answered, they just said no. The ACTIVE card is
-  lifted instead — one rung up the warm ladder (`raised` over `panel`) plus a
-  heavier neutral rim — so current-vs-locked is unmistakable without inventing a
-  colour or spending gold.
-- **The whole ACTIVE card is the click target** (owner decision 2026-08-11): a
-  click anywhere on it fires the same action as its Allow button, which stays as
-  the visible affordance. It is two-mode aware for free (it fires whatever the
-  button currently offers) and inert while a probe is in flight — the UI half of
-  single-flight. Locked strips are NOT clickable: the flow is sequential, and
-  jumping ahead would ask for a permission out of order. **Sub-controls sit above
-  the card-level target by CONSTRUCTION, not by arithmetic** — AppKit hit-tests
-  the deepest view first, so a click on Skip, Allow… or the spinner never reaches
-  `mouseUp`; there are no coordinates to keep in step. The card takes a
-  `pointingHand` cursor rect and the shared row hover wash while it's live, and
-  VoiceOver sees it as a `.button` named for the action (a non-live card is a
-  plain `.group`, because its press is refused). **The live card, every
-  prominent Allow, and the CTA act on the click that ACTIVATES the app**
-  (`acceptsFirstMouse` overrides on `ProminentButton` and `SetupCardView`; v4
+  locked, then earned. Completed = checkmark (`Tokens.Color.success`). Skipped =
+  a `slash.circle` in that same slot, with the imperative title kept: the user
+  answered, they just said no. The LIVE row is lifted instead — one rung up the
+  warm ladder (`raised` over `panel`) plus a heavier neutral rim and a 3 pt **EMBER**
+  EDGE BAR down its leading side (ember, NOT gold — owner decision 2026-08-12:
+  gold is spent entirely on the ONE button the step wants pressed, and a gold
+  bar across the window competed with it. `test_rowEdgeBarFill` pins it) — so current-vs-locked is unmistakable. A
+  BROKEN row takes the same shape in the failure hue (tinted fill, red edge bar,
+  `exclamationmark.triangle.fill` in the one slot), and a BROWSED row adds a
+  heavier neutral rim ON TOP of whatever its base state drew, because browsing is
+  a reading position and not a change of state. Every blend goes through
+  `dynamicBlend(_:fraction:of:)`: blending a dynamic token in place flattens it
+  to whichever appearance happened to be current, which is exactly the 1.13:1
+  dark rim the critique measured on the old active card.
+- **THE WHOLE ROW IS THE PRESS TARGET, and the row has no sub-controls at all**
+  (this SUPERSEDES the "whole ACTIVE card is the click target" rule, which had to
+  keep Allow/Skip hit-testing above the card by construction — the spine has no
+  buttons left to hit-test above anything). Every state the user has already
+  DECIDED is pressable; a locked row and an auto-passed one refuse, silently.
+  `SetupSpineRowView.mouseUp` and `accessibilityPerformPress()` are the same one
+  entry (`onPress`), and `OnboardingViewController.rowPressed(_:)` is the whole
+  dispatch table — the selection rules above. The ACTIONS live in the ribbon:
+  `onPrimary` (which is the live step's Allow, or the gate's CTA), `onSkip`, and
+  `onQuietLink` (Local Network's demoted pane while live; a browsed row's own
+  pane while browsing). A pressable row takes a `pointingHand` cursor rect and the
+  shared row hover wash, is a first responder with Space/Return, and VoiceOver
+  sees it as a `.button` named for what pressing it does ("Allow…" live, "Show"
+  for a decided row) with its STATE in the label (", locked" / ", allowed" /
+  ", skipped" / ", turned off — needs attention") — a marker VoiceOver can't see
+  is a marker that isn't there. A locked row is a plain `.group`. **The live row,
+  every prominent Allow, and the CTA act on the click that ACTIVATES the app**
+  (`acceptsFirstMouse` overrides on `ProminentButton` and `SetupSpineRowView`; v4
   live fix 2026-08-11, "Start listening took two clicks"): the bounce to System
   Settings and back often returns the user to an INACTIVE app — the poll grants
-  the last card while Settings is frontmost, where macOS may decline our
+  the last step while Settings is frontmost, where macOS may decline our
   re-activation — and a stock control spends the returning click on activation.
   Skip and other secondary controls keep stock first-mouse behaviour.
-- **Checkmark ⇔ capability title.** A card that has EARNED a checkmark shows the
+  - **The row is NOT inert while a probe is in flight** (a scoped change from the
+    card era, where the card blocked its own second click). The UI half of
+    single-flight now sits where the action does: `allowTapped(_:)` returns
+    immediately while `allowInFlight != nil`, and the ribbon has taken every
+    button off screen for the wait anyway.
+- **Checkmark ⇔ capability title.** A row that has EARNED a checkmark shows the
   capability title; every state that hasn't (pending, skipped, and an auto-passed
   step the OS can't grant) keeps the imperative one. The auto-pass carries a NOTE
   where the checkmark would be ("Requires macOS 14.2 or later"), because claiming a
@@ -130,7 +212,47 @@ set changes, or when the gate/motion/demo rules change.
   The count is an `Int?`: `nil` means no browse ran at all (macOS 14, ungated), and
   `0` means a real browse that saw nothing on a permission that IS granted — two
   different sentences, neither implying the user did something they didn't.
-- **The two-mode Allow.** First fire runs the native prompt/probe; once that prompt
+- **There are TWO title tables, and the spine's is a deliberate second source of
+  truth.** `SetupCardContent.title(for:foundSpeakers:)` is the RIBBON's sentence;
+  `spineTitle(for:foundSpeakers:)` is the SHORT form the 288 pt column can carry,
+  same grammar (earned title only for `.completed`, Local Network's still the
+  count). The column can't hold the reviewed sentences, and truncating reviewed
+  copy is worse than writing a short form of it — but the two tables have to be
+  kept in step by hand, so change one and check the other. The short table today:
+
+  | Step | Spine ask | Spine earned |
+  |---|---|---|
+  | System Audio | Hear your Mac's sound | Hearing your Mac's sound |
+  | Local Network | Find speakers on Wi‑Fi | Speakers already reachable (or the count) |
+  | Bluetooth | Bluetooth speakers | Bluetooth speakers |
+  | Speaker Sync | Keep speakers in time | Speakers stay in time |
+  | Remote Control | Volume-key control | Volume-key control |
+
+  **OWNER-PENDING:** these short titles are the rebuild's own wording, not
+  reviewed copy — they await Alec's sign-off like the long table already has.
+- **There are THREE title tables now, and the HERO's is owner-verbatim.**
+  `SetupCardContent.heroHeadline` + `whyLine` are the owner's copy deck (decision
+  2026-08-12, VERBATIM — do not re-word), and `allowTitle` names the
+  CAPABILITY rather than repeating the OS's "Allow": the gold button is the
+  app's promise, and "Allow" is a word that appears in the rehearsal beside it.
+
+  | Step | Hero headline | Why line | Button |
+  |---|---|---|---|
+  | System Audio | Hear your Mac's sound | Audiouter needs this to send your music to your speakers. | Enable System Audio |
+  | Local Network | Find speakers on your Wi‑Fi | Audiouter needs this to reach the speakers on your network. | Enable Local Network |
+  | Bluetooth | Use Bluetooth speakers | Audiouter needs this to stream to Bluetooth speakers and wake ones that are off. | Enable Bluetooth Access |
+  | Speaker Sync | Keep speakers in perfect time | A small helper shares one clock so your speakers never drift. | Turn On at Login |
+  | Remote Control | Use your volume keys | Audiouter needs this so your volume keys keep working while it's your output. | Set Up Remote Control… |
+
+  Skip's own label is **"Skip for now"** (`SetupRibbonView.skipTitle`).
+  The HEADLINE holds in every one of a step's states — it is the step's
+  identity — while the WHY line is the first ask's alone: once a state has to
+  instruct (denied, permission-lost, a wait, a stuck dialog, Local Network
+  unanswered), its status + body carry the words instead. `SetupCardContent
+  .detail` survives for exactly those states; a first ask no longer shows one.
+- **The two-mode Allow** (now the RIBBON's primary button, not a per-card one —
+  everything below is otherwise unchanged). First fire runs the native
+  prompt/probe; once that prompt
   is spent the same slot becomes "Open Settings…". Which statuses count as spent
   lives in `offersSettingsFallback(_:)` and MUST stay in lockstep with
   `SetupFlowModel.allow(_:)`'s own preflight — the button must not promise a prompt
@@ -150,16 +272,16 @@ set changes, or when the gate/motion/demo rules change.
   pane), never the radio pane. Speaker Sync has ONE mode: Login Items. **Local
   Network is NOT two-mode** — see below. Bluetooth's wait is the MODEL's to report
   (`SetupModel.isPrimingBluetooth`), because its answer arrives on a callback the
-  click can't await: the card shows the spinner for as long as that wait lasts, and
+  click can't await: the ribbon shows the spinner for as long as that wait lasts, and
   the wait expires after `bluetoothPromptTimeout` (10 s) so a prompt whose decision
-  callback never fires can't latch the card shut — the next click asks again under
+  callback never fires can't latch the ask shut — the next click asks again under
   the `prompt_rearmed` outcome.
 - **Local Network now proves BOTH answers, and still must never dead-end**
   (2026-08-11 — this REPLACES the earlier "must never claim a denial" rule, which
   was true only while the browse was the sole signal). `LocalNetworkPrimer`
   publishes its own Bonjour service and browses for it, so the GRANT is provable
   with no speaker on the network, and an mDNS `kDNSServiceErr_PolicyDenied` is a
-  real refusal. Three card shapes follow:
+  real refusal. Three shapes follow:
   - **granted** completes the step — the permission is the gate, not the speaker.
     The earned title carries the real count, including the honest zero ("No
     speakers found yet — switch one on and it'll appear"); `nil` (macOS 14,
@@ -178,19 +300,21 @@ set changes, or when the gate/motion/demo rules change.
     quiet SECONDARY beside it where that pane exists (`isLocalNetworkGated`,
     macOS 15+). Flipping this state to Settings-only left nothing able to
     re-browse the speaker the user had just switched on.
-- **A wait on screen always SAYS what it is waiting for.** The active card's
-  in-flight state is a small spinner plus a caption in the TEXT column (never the
-  fixed accessory column — the wrap-stability rule is untouched). **The caption's
-  band is RESERVED**: the expanded card's height is identical with and without it
-  (the deterministic-height rule), so tapping Allow never shifts the cards below —
-  the show/hide height flap was a review-caught defect of 2026-08-11. The hint
-  label does not yet have the same reservation (known follow-up). Two phases:
-  "Waiting for your answer…" while a system dialog is unanswered (Local Network
-  up to its 60 s ceiling, Bluetooth, System Audio, Remote Control), then
-  "Checking your network…" for Local Network's brief post-grant count, driven by
-  the primer's OWN reachability callback (`SetupModel.localNetworkPhase`) — never
-  a timer. A refusal has no second phase, and an undecided prime clears the
-  caption and returns the card to its actionable state; a wait must never latch.
+- **A wait on screen always SAYS what it is waiting for**, and the whole ribbon
+  stands back for it. The in-flight state is the ribbon's STATUS line — a small
+  spinner plus the wait's own words — with **every button gone** (the answer is
+  somewhere else now) and the STAGE dimmed (`DemoPaneView.setStageDimmed`),
+  because a rehearsal of a dialog must not compete with the real dialog that is
+  on screen. Nothing above the buttons moves while this happens: the ribbon's
+  action row is a RESERVED fixed band (`SetupRibbonView.actionRowHeight`), which
+  is this layout's successor to the old card's reserved caption band. The line
+  is: **"Waiting for your answer — the real dialog is on screen now."** while a
+  system dialog is unanswered (Local Network up to its 60 s ceiling, Bluetooth,
+  System Audio, Remote Control), then **"Checking your network…"** for Local
+  Network's brief post-grant count, driven by the primer's OWN reachability
+  callback (`SetupModel.localNetworkPhase`) — never a timer. A refusal has no
+  second phase, and an undecided prime clears the wait and returns the step to
+  its actionable state; a wait must never latch.
   Speaker Sync is unchanged (its Login Items approval is a poll, not our prompt).
 - **The window is deliberately `.floating` while open** (owner decision 2026-08-07,
   punch-list W10 — this REVERSES an earlier reversal, so read the history before
@@ -274,7 +398,8 @@ set changes, or when the gate/motion/demo rules change.
   `presentSetup` re-entry guard, "Open Setup…" while open) must not re-center a
   window the user moved. The content's `fittingSize` is a FIXED
   `contentWidth × contentHeight` (820 × 560), not a per-step measurement: the
-  window must not resize under the user as cards expand and collapse.
+  window must not resize under the user — and nothing in it expands or collapses
+  any more either.
 - **Both on-screen paths are gated on `HeadlessRuntime`** — `present()` and the
   `appDidBecomeActive` re-front. The sizing/centering and the take-key DECISION
   still run headless (the latter counted into `test_frontCount`), so both
@@ -284,40 +409,63 @@ set changes, or when the gate/motion/demo rules change.
   process is not a foreground app — until the whole run ends. This window is
   more disruptive than the others when it leaks, which is why it is called out
   here as well as in `HeadlessRuntime`'s own doc comment.
-- **`leftPaneWidth` is 420, not the 380 the layout was first specified at.** The
-  longest earned title truncated on a collapsed strip at 380, and the titles are
-  reviewed copy — the column moves, not the words. The demo's fixed surface still
-  clears its margins in the 400 left over.
-- **Wrap stability, new form.** The old parallel rows pinned a 184 pt accessory
-  column so the text's right edge never moved between states. In the sequential
-  card the accessory sits BELOW the copy, so the text width is a constant of the
-  layout — `SetupCardView.textColumnWidth`, derived from the fixed left pane and
-  stamped into `preferredMaxLayoutWidth` once at build time. Deriving it from the
-  resolved frame in `layout()` instead made an expanded card's height depend on
-  WHEN AutoLayout got there, which showed up as snapshot fixtures of the same state
-  rendering at different heights. `primarySlotWidth` is the same idea for controls:
-  a fixed slot so Allow… → Open Settings… can't nudge Skip sideways, sized for the
-  widest occupant that ever SHARES the row with Skip (buttons stretch to fill it;
-  Speaker Sync's longer lone button is allowed to overflow).
-- **One motion language.** Expand/collapse animates the body's CLIP HEIGHT and
-  nothing else, on `Tokens.Motion.collapseRevealDuration` — the same constant every
-  collapsible element in the app uses (`CardView.setBodyCollapsed` in
-  `AudiouterPopoverUI` is the reference implementation, and
-  `PopoverPanelViewController.collapseRevealDuration` now aliases the token so there
-  is one home). Both of that implementation's traps are carried here: SEED the clip
-  with its current height before animating it shut, and lay the collapsed START
-  state out before animating it open.
+- **Hero layout constants** (all on `OnboardingViewController` unless noted):
+  `heroPadding` 22 → a 418 × 464 interior; `heroHeadToFrameGap` 13;
+  `heroFrameToRibbonGap` 13; `SetupPreviewFrameView.labelBandHeight` 24 and
+  `bodyPadding` 8; `SetupRibbonView.actionRowHeight` 32 (the `.large` gold
+  button's own height, so the reserved band IS the bar) and `barTopPadding` 12.
+  **The frame is the flexible one and it CLIPS**: the window is a fixed
+  820 × 560, so the head block and the bar take what their words need and the
+  rehearsal gets the rest — the demo pane is CENTRED in the frame body, never
+  pinned to it, and anything taller than the frame is cropped by the well. That
+  leaves roughly **278 pt** for the surface on a two-line why, and
+  `DemoPaneView.surfaceSize` is now exactly that (418 × 278). It was 330 for one
+  commit, which the frame silently cropped ~50 pt off the BOTTOM of — the
+  buttons the rehearsal exists to point at. The abstraction pass is what paid
+  for the fit: with the mocks' paragraphs gone, the privacy card is 240 tall
+  instead of 323. `everyMockFitsTheStage` pins it.
+- **The spine is 288 pt wide** (`spineWidth`; it REPLACES the card era's
+  `leftPaneWidth` of 420, itself a widening of an original 380 to stop the long
+  earned titles truncating). The column carries short titles now, so it can be
+  narrow — and the width the sentences needed went to the HERO, which is what the
+  rebuild is for. The stage's own size is derived from what is left
+  (`DemoPaneView.surfaceSize`), so widening the spine narrows the rehearsal.
+- **Wrap stability is one constant now, and the old machinery is GONE.**
+  `SetupCardView.textColumnWidth` and `primarySlotWidth` were deleted with the
+  expanding card: the spine's single title truncates by tail (there is nothing
+  below it whose height could depend on the wrap), and the ribbon measures every
+  paragraph at ONE width — `SetupRibbonView.textWidth`, which is the stage's
+  width, stamped into `preferredMaxLayoutWidth` at build time. The rule that
+  survived both layouts: derive the wrapping width from a FIXED constant, never
+  from a resolved frame in `layout()` — doing that made a state's height depend
+  on when AutoLayout got there, and showed up as snapshot fixtures of the same
+  state rendering at different heights. The button row needs no fixed slot any
+  more: it is a plain leading-to-trailing run inside the reserved action band, so
+  Allow… → Open Settings… simply moves Skip, which nothing else is aligned to.
+- **One motion language.** There is no expand/collapse left in this window —
+  `Tokens.Motion.collapseRevealDuration` is still the app's one clip-height
+  constant (`CardView.setBodyCollapsed` in `AudiouterPopoverUI` is the reference
+  implementation, and `PopoverPanelViewController.collapseRevealDuration` aliases
+  the token so there is one home), and the Setup window simply no longer uses it.
+  What moves here is the checkmark slide-in, the stage crossfade, the stage dim,
+  and the CTA fade.
 - **Grant choreography, in this order:** re-front
-  (`NSApp?.activate` + `makeKeyAndOrderFront`) → checkmark slides in (width 0 → 20
-  pt + fade, 0.2 s easeOut, delayed 0.2 s) → title rewrites → the card collapses
-  and the next expands → the demo crossfades (0.22 s; into the COMPLETE state the
-  finale's one-shot rides this same crossfade) → the Start listening CTA fades in
-  when the gate opens. It fires on the TRANSITION into complete, never on a repaint
+  (`NSApp?.activate` + `makeKeyAndOrderFront`) → the checkmark slides into the
+  row's trailing slot (width 0 → 16 pt + fade, 0.2 s easeOut, delayed 0.2 s) →
+  the row's title rewrites to the earned one → the live edge bar moves to the
+  next row → the stage crossfades (0.22 s; into the COMPLETE state the finale's
+  one-shot rides this same crossfade) → the Start listening CTA fades in when the
+  gate opens. It fires on the TRANSITION into complete, never on a repaint
   that changed nothing. **Reduce Motion, an off-window/occluded window, and `HeadlessRuntime`
   make every beat an instant swap** — steady states must render settled or
   snapshots stop being deterministic.
-- **Keyboard:** while Done doesn't exist, Return belongs to the one live Allow
-  (`SetupCardView.setAllowIsReturnDefault`); the moment Done exists, Done takes it.
+- **Keyboard:** the ribbon's PRIMARY owns Return, whatever it currently is — so
+  "the one live Allow has Return until Done takes it" now holds with nothing to
+  hand over, because when the gate opens the CTA *is* the primary. Focus is moved
+  onto that button only when the live step changes or the gate opens
+  (`refreshKeyboardFocus`); moving it on every repaint would fight a user who has
+  tabbed onto the spine, which is itself keyboard-reachable (each pressable row is
+  a first responder answering Space/Return, with a drawn focus ring).
 - Accessibility and the PTP helper can only be confirmed by a silent poll, not a
   single re-focus check: `OnboardingViewController` runs
   `remoteControlPoll`/`ptpHelperPoll` `Timer`s (~1.5 s) while the window is open,
@@ -325,7 +473,7 @@ set changes, or when the gate/motion/demo rules change.
   `OnboardingWindowController` additionally re-fronts the window and calls
   `refreshStatuses()` on `NSApplication.didBecomeActiveNotification`. **The
   load-time `refreshStatuses()` is not optional:** `bluetoothStatus` starts
-  `.unknown`, so without it the Bluetooth card paints undetermined even when the
+  `.unknown`, so without it the Bluetooth row paints undetermined even when the
   grant is already in place.
 - **`SetupFlowModel` is constructed in the VC's `init`** — at presentation time,
   before anything can be granted. Its start position is fixed at construction from
@@ -337,8 +485,11 @@ set changes, or when the gate/motion/demo rules change.
   `SetupModel.auditRequiredPermissions()` finds a REQUIRED permission (Remote
   Control is deliberately excluded — it's an enhancement, not a requirement)
   revoked after setup already completed. **There is no banner VIEW any more** — the
-  message rides the header subtitle tinted `Tokens.Color.warning`, so the layout is
-  identical either way. It re-words itself to the still-missing subset and stands
+  message rides the header subtitle tinted `Tokens.Color.warningText` (the
+  authored text hue, not the `warning` alias, which is under the 4.5:1 body floor
+  in light), so the layout is identical either way; a lost-permission re-entry
+  also re-titles the header itself ("Let's get your sound back"), and its row is
+  drawn BROKEN on the spine. It re-words itself to the still-missing subset and stands
   down to the welcome line once every permission it named is granted, without
   expanding to cover anything it didn't originally flag. **The welcome subtitle
   holds in EVERY other state, complete included** (owner decision 2026-08-11): the
@@ -348,7 +499,11 @@ set changes, or when the gate/motion/demo rules change.
   message KIND, and that kind is what the banner hooks report — never a
   string-compare against the welcome copy. The `test_showsPermissionLostBanner` /
   `test_permissionLostBannerIsVisible` / `test_permissionLostBannerText` hooks
-  kept their names so the intent stayed testable across the rebuild.
+  kept their names so the intent stayed testable across the rebuild. There is a
+  THIRD kind now, `.resume` ("Pick up where you left off"), for a presentation
+  that opens with every REQUIRED permission already in and one optional step still
+  undecided — fixed at `init` like the flow's own start position, so a grant made
+  later cannot re-word the greeting.
 - Done and ✕ are NOT equivalent: both call `dismiss()` exactly once (single-fire
   guard) and both fire `onFinished`, but only Done calls `SetupModel.complete()`.
   Closing with ✕ leaves setup incomplete so the flow reappears next launch.
@@ -363,7 +518,7 @@ set changes, or when the gate/motion/demo rules change.
     inside a mock is painted in SEMANTIC SYSTEM colours and the system font —
     `windowBackgroundColor` for the dialog/pane body, `controlBackgroundColor` for
     the grouped list, `labelColor`/`secondaryLabelColor`, `separatorColor` rims,
-    `controlAccentColor` on the confirming button, `systemBlue` on the switch, and
+    a DESATURATED accent on the switch and the badges, and
     the app's REAL icon in the Settings row. Never `Tokens` — the point is that it
     reads instantly as "this is what macOS will show you", and a warm surface or a
     dial-remapped accent inside it would read as Audiouter drawing its own dialog.
@@ -378,54 +533,83 @@ set changes, or when the gate/motion/demo rules change.
     buttons with an accent-filled default" drawing, which was the pre-26 shape
     and read to the owner as "an abstract allow thing"). The anatomy, which is
     generic across all five steps:
-    a TALL portrait card (real 283 × 340 pt, drawn here at ~0.85 of that, with a
-    large ~24 pt continuous corner); an ICON TILE top-LEFT (which icon depends on
-    the step — see below) with a `systemBlue` circle badge carrying a white
+    a PORTRAIT card (269 × 240) with a
+    large ~24 pt continuous corner; an ICON TILE top-LEFT (which icon depends on
+    the step — see below) with a circle badge carrying a white
     `hand.raised.fill` overlapping its bottom-trailing corner — the marker that
     says *privacy prompt*; a small grey
-    Help circle top-right; a bold LEFT-ALIGNED title over two or three lines; a
-    left-aligned `secondaryLabelColor` body; and two EQUAL, NEUTRAL CAPSULE
-    buttons filling the content width. **There is no accent-filled default
-    button any more** — drawing one would date the mock and, worse, send the user
-    looking for a blue button that won't be there. Nothing is centred, and
-    nothing is greeked.
-    - **The body is the app's REAL Info.plist purpose string** — the same words
-      `scripts/make-app.sh` stamps into `NSAudioCaptureUsageDescription` /
-      `NSLocalNetworkUsageDescription` / `NSBluetoothAlwaysUsageDescription`, so
-      the paragraph the user rehearses here is the paragraph macOS will show.
-      Change one there, change it in `bodyText(for:)`. That sentence is why the
-      card is drawn near life size at all: the type tiers still hold (nothing
-      under 9 pt), which puts the title at 14 pt and the body at 11 pt.
-    - **The top-left tile is NOT always the app's icon** (owner screenshots of
-      the real dialogs, 2026-08-11). macOS shows the asking app's own icon only
-      where the grant is about capturing THAT APP's content — System Audio, which
-      really does draw `NSApp.applicationIconImage` with the hand badge on it.
-      The CAPABILITY grants show a generic SYSTEM tile instead, the same one for
-      every app: the real Local Network dialog draws the Network pane's blue
-      rounded square with a white wireframe globe, not Audiouter's icon. So
-      `DemoPromptMockView.iconView(for:)` returns the app icon for `.audio` and a
-      `systemTile` (`DemoSystemColor.accent` fill, side × 0.23 continuous corner,
-      white glyph at side × 0.55) for `.localNetwork` (`network`) and
-      `.bluetooth`. Everything else about the slot — size, position, the badge —
-      is identical either way; only the tile's CONTENTS change. `.remoteControl`
-      and `.speakerSync` never reach this path in practice and keep the app icon
-      as the safe default.
+    Help circle top-right; a heavier two-bar TITLE band; a lighter four-bar gist
+    block where the purpose string was; and two EQUAL CAPSULE
+    buttons filling the content width, carrying their REAL labels. **There is no
+    accent-filled default button** — drawing one would date the mock and, worse,
+    send the user looking for a blue button that won't be there. Nothing is
+    centred.
+    - **The prose is ABSTRACTED and the colour DESATURATED** (owner decision
+      2026-08-12 — this REPLACES "nothing is greeked", and with it the rule that
+      "the body is the app's REAL Info.plist purpose string"). The card used to
+      carry that string verbatim, so the paragraph rehearsed here was the
+      paragraph macOS would show; what that bought in fidelity it lost in the
+      thing the window is for. Two dense paragraphs of small type sat inside the
+      rehearsal under a headline and a why line that had already said the same
+      thing, so the eye read the WORDS instead of the SHAPE — and the card they
+      made necessary was 323 tall, 50 pt more than the frame has. The anatomy is
+      what makes the surface recognisable; the sentences are "close enough" as
+      bars (`demoGistBlock`), exactly as the Settings mock's rows already were.
+      The per-step copy tables were DELETED rather than left orphaned — they are
+      in git history with the Info.plist linkage if the premise revives, and
+      that history is also where the one title macOS phrases as a QUESTION
+      ("Allow “Audiouter” to find devices on local networks?") is recorded.
+    - **The BUTTON LABELS are the exception, and they are marked.** They stay
+      real text ("Don't Allow"/"Allow", "Open System Settings"/"Deny"): those
+      words are what the user has to recognise when the real surface arrives.
+      The CORRECT one wears `DemoButtonEmphasis.correct` — a slightly brighter
+      fill plus a thin ring — and every other one is a `.ghost`: no fill, a 1 pt
+      hairline, so it still reads as a button without competing.
+      `exactlyTheCorrectButtonIsMarkedOnEverySurface` pins that exactly one per
+      surface is marked.
+    - **Nothing inside a mock is saturated blue or gold.** `DemoSystemColor
+      .accent` is a desaturated slate rather than `systemBlue` (still the blue
+      FAMILY, so the badge and the switch stay recognisable), the record tile is
+      a muted red, and the alert's padlock gradient is warm GREY. Gold is spent
+      entirely on the one button the step wants pressed, and a saturated
+      rehearsal pulled the eye off it. `theMocksAreDesaturated` pins the accent
+      and the padlock. The window's three traffic lights KEEP their real
+      colours — 7 pt each, and they are the signature that says "a macOS
+      window".
+    - **The top-left tile is NOT the app's icon for any of the three real steps**
+      (owner screenshots of the real dialogs, 2026-08-11). macOS draws a generic
+      SYSTEM tile — the same one for every app — and only its CONTENTS change:
+      the real Local Network dialog draws the Network pane's blue rounded square
+      with a white wireframe globe, not Audiouter's icon. So
+      `DemoPromptMockView.iconView(for:)` returns a `systemTile`
+      (`DemoSystemColor.systemBlue` fill, side × 0.23 continuous corner, white glyph
+      at side × 0.55) for `.localNetwork` (`network`) and `.bluetooth`, and a RED
+      one carrying `record.circle` for `.audio`. `.remoteControl` and
+      `.speakerSync` never reach this path in practice and keep the app icon as
+      the safe default. Everything else about the slot — size, position, the
+      privacy badge — is identical either way.
+      - **CORRECTION (live-confirmed 2026-08-11): System Audio's tile is the RED
+        RECORD MARK, not the app icon.** This file used to claim macOS shows the
+        asking app's own icon "where the grant is about capturing THAT APP's
+        content", with System Audio as the example; the real dialog, seen live,
+        leads with the recording mark instead. This is exactly the "if a real
+        screenshot ever contradicts it, this is the one place to change" escape
+        hatch below being used. It is also why `systemTile` takes a `fill`: red
+        for recording, the accent blue for the capability panes.
       - **Bluetooth's glyph is a NAMED APPROXIMATION, twice over.** No screenshot
         of the real macOS Bluetooth prompt was available and a search turned up
         none, so the system-tile treatment is INFERRED from the Local Network
         one; and SF Symbols ships no Bluetooth rune at all (Apple doesn't licence
         the mark — `name_availability.plist` has no such name), so the tile
-        carries `dot.radiowaves.right`, the glyph the Bluetooth setup card beside
+        carries `dot.radiowaves.right`, the glyph the Bluetooth setup row beside
         it already uses, rather than a hand-drawn rune. If a real screenshot ever
         contradicts either half, this is the one place to change.
-    - `.localNetwork`'s title is the odd one out: macOS phrases it as a QUESTION
-      opening on "Allow" — "Allow “Audiouter” to find devices on local
-      networks?" — where the other steps use "…would like to…". Verbatim from
-      the real dialog; don't regularise it.
-    - The per-step hooks stay `askText` / `bodyText` / `confirmTitle` /
-      `grantedText`; the ANATOMY is shared. `DemoPaneView.surfaceSize` grew to
-      336 × 336 to seat the taller card with a margin around it (the pane has
-      516 pt of height, so Replay still clears underneath).
+    - The one per-step hook left is `confirmTitle`; the ANATOMY is shared and
+      nothing else in the card varies by step but its icon tile.
+      `DemoPaneView.surfaceSize` is
+      418 × 278 — the Direction-04 stage inside the hero pane, sized to what the
+      preview frame really has; the ribbon sits below the stage and Replay below
+      the mock.
   - **ONE step has a two-stage demo: Remote Control's FIRST ASK** (owner
     decisions 2026-08-11 — a live run showed its demo jumping straight to a
     Settings pane the user had no idea how to reach). Its first ask takes two
@@ -454,27 +638,32 @@ set changes, or when the gate/motion/demo rules change.
     whole reason to exist is that the real panel is a completely different
     SHAPE from the macOS 26 privacy card above, and the earlier drawing
     implied the user would meet the card twice:
-    - LANDSCAPE (288 pt wide, height from the copy — about 1.8 : 1) with a small
-      ~12 pt corner, against the card's tall portrait and its ~24 pt one;
-    - a plain, non-bold HEADER line naming the access ("Accessibility Access");
+    - LANDSCAPE (288 pt wide, height from the content) with a small
+      ~12 pt corner, against the card's portrait and its ~24 pt one;
+    - a short HEADER BAND where the access is named;
     - a **full-bleed hairline divider** under it — the one structural element the
       privacy card has nothing like, and the fastest way to tell them apart;
-    - a two-column body: the gold privacy PADLOCK left, bold ask and Settings
-      instruction right, the two centred against each other as a group;
-    - a Help circle bottom-LEFT; bottom-RIGHT "Open System Settings" (neutral)
-      then "Deny" — and **the REFUSAL is the accent-filled default**, the
-      opposite emphasis from the card's two equal neutral capsules. That is why
-      the pointer goes for the QUIET button: on this panel the blue one is the
-      wrong answer, and the demo has to show that.
-    - The padlock is `lock.fill` filled with a gold GRADIENT, because the real
-      icon is artwork with some dimension in it and a flat amber symbol at this
+    - a two-column body: the privacy PADLOCK left, a two-tier gist block right,
+      the two centred against each other as a group;
+    - a Help circle bottom-LEFT; bottom-RIGHT "Open System Settings" then
+      "Deny". **The marking is the deliberate departure from the real panel**
+      (owner decision 2026-08-12): the real alert makes the REFUSAL its
+      accent-filled default, and drawing that faithfully emphasised the one
+      button the user must not press. The warning line that used to correct it
+      was deleted with the rest of the first-ask copy, so the mock carries the
+      correction itself — "Open System Settings" is the MARKED button and "Deny"
+      is a ghost. The SHAPE still tells the two surfaces apart; the emphasis now
+      tells the truth about which one moves the user forward.
+    - The padlock is `lock.fill` filled with a warm-GREY gradient (gold left
+      with the rest of the desaturation), because the real
+      icon is artwork with some dimension in it and a flat symbol at this
       size reads as a toolbar glyph. **TRAP: the mask has to be built in an
       `NSImage` of its own** — compositing the gradient `.sourceAtop` straight
       into `draw(_:)` does not clip to the symbol (the view's backing store is
       not the empty destination that mode needs) and the whole icon rect comes
-      out a solid gold rectangle. Draw the gradient into a fresh image and knock
+      out a solid rectangle. Draw the gradient into a fresh image and knock
       the symbol's alpha out of it with `.destinationIn`.
-    - Accessibility's padlock carries a blue circular badge with the
+    - Accessibility's padlock carries a circular accent badge with the
       `accessibility` glyph (SF Symbols 5 / macOS 14 — checked against
       `name_availability.plist`, and the package floor is macOS 14). No other
       step raises this alert, so no other step earns a marker.
@@ -506,11 +695,12 @@ set changes, or when the gate/motion/demo rules change.
       `test_demoHandoffStage` folded into `test_demoStage`.
     - `DemoPromptOutcome` went with it. It existed only to relabel the privacy
       card's buttons for the re-fired ask; with a real alert drawn for that job,
-      the card is back to one shape (two equal neutral capsules, "Don't Allow"
+      the card is back to one shape (two equal capsules, "Don't Allow"
       beside its confirming title) and `confirmTitle(for:)` lost its `outcome:`.
-    - `surfaceSize` did NOT change: at 288 pt wide and ~158 tall the alert clears
-      its margins inside the existing 336 × 336, and the handoff container is now
-      the Settings pane's 300 × 190 rather than the card's taller box.
+    - `surfaceSize` is 418 × 278: the alert (288 × ~118), the privacy card
+      (269 × 240), the standalone Settings pane (405 × 256.5 at `metricScale`
+      1.35) and the handoff container (the Settings pane's 300 × 190) all clear
+      their margins inside it, which `everyMockFitsTheStage` pins.
     - **A stage keeps writing its score in its OWN seconds.** `DemoMockView`
       .`stageWindow` is the seam: set it and `keyframes(_:_:timing:)` lays that
       score onto the host's longer pass at an offset, holding the first and last
@@ -554,6 +744,17 @@ set changes, or when the gate/motion/demo rules change.
     `accessibilityDisplayOptionsDidChangeNotification`, and because the mocks stamp
     resolved `CGColor`s they also observe `Tokens.accentStyleDidChangeNotification`
     (SharedUI AGENTS.md's rule for any new animated/token-coloured instrument).
+    - **Decision D1 — ONE stage that crossfades (K3), not stacked beats.** The
+      alternative considered for the rebuild was showing an ask and its rehearsal
+      as two stacked bands, each with its own moment. REJECTED on fit math: the
+      window is a FIXED 820 × 560, the stage alone is `DemoPaneView.surfaceSize`
+      and the ribbon needs its status/ask/body/honesty lines plus a reserved
+      action row under it, and a second band could only be paid for out of the
+      stage — which is the thing the whole direction exists to enlarge. So the
+      hero keeps ONE stage, and step-to-step change is the existing 0.22 s
+      crossfade (`stepCrossfadeDuration`), which is also what the finale's
+      one-shot rides. If a second beat is ever wanted, the window height is the
+      constraint to renegotiate first.
   - **The settled FINALE is the one exception to the loop rule** (owner decision
     2026-08-11): `DemoSettledMockView` plays a ONE-SHOT celebration — gold signal
     rings rippling out of the app icon — the first time its frame is on a really
@@ -566,37 +767,75 @@ set changes, or when the gate/motion/demo rules change.
     display-weight "You're all set." over the payoff line) — it is also the
     model-layer state, so every animation ends there and snapshots stay
     deterministic. The rings' travel is DERIVED, never authored — from the icon
-    centre's real distance to the FARTHEST surface edge, so the wave sweeps the
-    whole stage and deliberately crosses the frame on every side — and the RING
-    LAYERS ONLY are masked by a soft per-edge feather (`ringFeatherWidth`, ~24 pt
-    fading to clear at each edge), so a crossing ring dissolves instead of being
-    truncated by the rounded-corner clip. Both halves are owner-tested history:
-    an authored end-scale hard-clipped the ripple live, and the nearest-edge
-    derivation that replaced it was rejected live as "one little line that goes
-    out" — big travel PLUS feather is the fix, and the feather must never touch
-    the aura/text or the settled render (rings rest at opacity 0).
+    centre's real distance to the farthest edge of the WHOLE Setup window
+    (`DemoPaneView.finaleRippleBounds`, wired to the window-spanning canvas), so
+    the wave sweeps the entire window and deliberately crosses the stage frame,
+    the hero panel and — faintly, already dissolving — the left spine on every
+    side (owner call 2026-08-12: the hero-panel fill gained ~6 px over the stage;
+    the celebration is the whole window now). NOTHING clips or feathers it on the
+    way out: the finale view has no `masksToBounds` of its own, the preview frame
+    is chromeless for this state, and `RoundedContainerView`/the canvas set no
+    mask either, so the wave simply leaves the stage and dies by its own fade —
+    the reach change needed only re-pointing the bounds, never reparenting the
+    layers. Owner-tested history: an authored end-scale hard-clipped the ripple
+    live; the nearest-edge derivation that replaced it was rejected live as "one
+    little line that goes out"; a per-edge feather mask added to soften the
+    crossing was itself rejected live (2026-08-12) as visible cropping — the
+    ring's arcs cut and faded well before completing the circle; and the
+    hero-panel fill that followed was rejected as barely wider than the stage.
+    The fade still completes before the NEAREST window edge, on every side, so no
+    edge shows a hard stop; the spine sits farther out than that, so the pass
+    over it is a soft glow, not a line. **Never re-introduce a clip or a mask
+    here.**
+    The one-shot starts on the crossfade, BEFORE the enclosing layout pass, so
+    `playCelebration()` takes the fixed stage size first: a zero-sized layout
+    puts both centres at the bottom-left corner and the wave visibly launches
+    off the icon (live bug, 2026-08-12). For the same reason the AURA is born
+    HIDDEN (model opacity 0) and revealed to its resting 1 only by the first
+    `layout()` that resolves a real icon centre: its resting opacity is 1, so —
+    unlike the rings, whose model 0 protects them — a paint before layout would
+    bloom it from that same bottom-left corner (live bug, 2026-08-12, caught on
+    the recording after the ring launch was already fixed).
     The aura/rings stamp resolved `gold`/`glow`, so the view observes the
     accent-dial and a11y notifications like the mocks do. On the animated
     transition the shot rides the step crossfade itself (fired as the fade
     STARTS), or the text would reveal twice.
   - **A pass must END where it started.** The settled frame is the surface AS THE
     USER WILL FIND IT — the ask, or the switch off — never the finished state: the
-    pane always shows the ACTIVE step's mock, so resting on "allowed" would sit
-    beside a card still asking for that very permission and claim it was already
+    pane shows the LIVE step's mock, so resting on "allowed" would sit beside a
+    row still asking for that very permission and claim it was already
     given. Ending at the start also makes the loop seamless and gives the play-once
     path a truthful resting frame.
+    - **AMENDMENT (K2, Direction 04) — the read-only BROWSE rests ON.** The one
+      exception, and it is the same rule read the other way: a browse is a look
+      at a step that IS granted, so the switch the user would really find on that
+      pane is on. `DemoPaneView.show(step:mode:animated:restingSwitchOn:asBrowse:)`
+      carries both flags — `restingSwitchOn` seeds `DemoSettingsMockView` with the
+      switch already flipped, and `asBrowse` stops the timeline outright (a browse
+      never loops, never offers Replay, and never animates, so browsing three
+      granted rows in a row cannot put three timelines' worth of motion on
+      screen). The LIVE step's rehearsal is untouched by this: it still rests at
+      the ask.
   - Each loop is ONE restartable timeline: keyframes laid out over a single
     duration (`DemoMockView.keyframes` takes its score in SECONDS) driven by a
     sentinel animation whose completion decides whether to loop, so play,
     play-once, and stop are the same code path with a flag. The cursor moves by
     TRANSFORM, never by `position` — AutoLayout owns its frame and would reset it.
-  - The demo is DECORATIVE and excluded from the accessibility tree; the card copy
-    beside it carries every word of the information. Un-electing `mockHost` alone is
+  - **The a11y boundary runs between the STAGE and the RIBBON, and it is now a
+    boundary between SIBLINGS.** The demo is DECORATIVE and excluded from the
+    accessibility tree; the ribbon directly beneath it carries every word of the
+    information in stock controls VoiceOver reads. That the ribbon lives INSIDE
+    the hero pane but OUTSIDE `DemoPaneView` is what makes it safe by
+    construction: the opt-out walks the mock subtree only, so it can never reach
+    the ribbon's buttons. Un-electing `mockHost` alone is
     NOT enough — an ignored container HOISTS its children, so the mock's real
     `NSTextField`s ("Allow", "Don't Allow", the pane title) stayed reachable. Every
     descendant is un-elected as the mock is installed
     (`DemoPaneView.installAccessibilityOptOut`), and a test walks the host asserting
-    nothing is left. Replay, a real control, stays accessible.
+    nothing is left. Replay, a real control, stays accessible. The two halves are
+    pinned by SIBLING tests: `test_demoAccessibilityElements` must stay empty and
+    `test_ribbonIsAccessible` must stay true — one without the other would let a
+    broadened opt-out swallow the real UI and nothing would notice.
   - **The pointer is the real macOS arrow** (`NSCursor.arrow.image`), ~1.5× life
     size, and every motion path anchors on its HOT SPOT (the tip), never the image
     centre — an image-centre anchor lands the press off the button. The arrow's ink
@@ -619,7 +858,7 @@ set changes, or when the gate/motion/demo rules change.
       presses at 1.90 s and its cursor is fully faded by 2.08 s). A longer
       splash gets clipped by the cursor fade it rides inside.
     - **Colour judgment call:** neutral `labelColor` ink — NOT `Tokens` gold and
-      not `DemoSystemColor.accent`. The splash is arguably cursor chrome rather
+      not `DemoSystemColor.systemBlue`. The splash is arguably cursor chrome rather
       than mock content, but it plays ON surfaces that must read as macOS, and a
       gold burst would claim macOS draws Audiouter-coloured feedback; the ripple
       FORM carries the product note instead. `labelColor` also guarantees
@@ -635,7 +874,7 @@ set changes, or when the gate/motion/demo rules change.
       pin both halves.
 - **Bluetooth SHARES Remote Control's `Tokens.Color.permission*` hue** rather than
   minting a fifth token, which would need authored light/dark/Increase-Contrast
-  values and a measured contrast rationale from the palette owner. The two cards are
+  values and a measured contrast rationale from the palette owner. The two rows are
   never adjacent, so the repeat doesn't read as a mistake. Upgrade path: add
   `permissionBluetooth` to `Tokens` with those three variants and swap one line.
 - `ProminentButton` exists only to fix a real AppKit bug: a `bezelColor` fill drops
@@ -651,36 +890,83 @@ set changes, or when the gate/motion/demo rules change.
   the resolved fill per appearance and Increase Contrast, proving the ink instead
   of assuming it (white wins on every authored `goldCTA` variant). The
   `.systemAccent` dial keeps forced white regardless — platform convention for a
-  live-accent fill. Accent-filled Allow buttons keep forced white and
-  `Tokens.Font.body`; don't route them through the measure (it would flip a blue
-  accent's ink to black). **TRAP:**
+  live-accent fill. **EVERY ribbon primary wears `goldCTA`** (owner decision 2026-08-12) — the
+  everyday step button and the gate's CTA alike, because only ever one of them
+  is on screen and it is always the thing to press; both therefore route through
+  the measure. `RibbonContent.PrimaryKind` survives the merge because the GATE
+  contract is written in it (`test_primaryIsCTA` = "the final check passed"), not
+  because the two look different. Accent-filled Allow buttons elsewhere keep
+  forced white and `Tokens.Font.body`; don't route THOSE through the measure (it
+  would flip a blue accent's ink to black). **TRAP:**
   the shared `onboardingActionButton` factory must set
-  `translatesAutoresizingMaskIntoConstraints = false`; the card's Allow slot
-  constrains the button directly rather than through an `NSStackView` (which used to
-  turn that off for us), and left on, AutoLayout synthesises width/height from the
-  zero frame and the button renders as nothing at all — the directly-constructed
-  gold CTA in `refreshDone()` has to set it too, for the same reason.
+  `translatesAutoresizingMaskIntoConstraints = false`;
+  `SetupRibbonView.rebuildActionsIfNeeded` constrains the factory's buttons and
+  the directly-constructed gold CTA without an `NSStackView` doing the flag for
+  them, so both must set it — left on, AutoLayout synthesises width/height from
+  the zero frame and the button renders as nothing at all.
 - Stock AppKit only (SF Symbols, `NSButton`, `NSProgressIndicator`, system colours)
   per repo house rules — the custom drawing is `IconTileView`/`RoundedContainerView`
   (no stock equivalent for the System Settings grouped-inset look) and the demo
   pane's mocks (above).
-- Per-card tile colour lives ONLY in `Tokens.Color` (never a hardcoded `NSColor`)
+- Per-row tile colour lives ONLY in `Tokens.Color` (never a hardcoded `NSColor`)
   and tints the SF Symbol GLYPH only, via `IconTileView`'s `color` param — the tile
-  fill and rim stay `Tokens.Color.raised`/hairline on every card. **The tint is
+  fill and rim stay `Tokens.Color.raised`/hairline on every row. **The tint is
   PERMANENT** (owner decision 2026-08-11 — this REPLACES the earlier
   "granting crossfades the glyph to `Tokens.Color.gold`" rule): the grant-goes-gold
   crossfade duplicated the checkmark/status the row already shows, so the glyph
-  never recolours and `IconTileView` has no `setLit`/`isLit` at all. The card's
-  only state role for the tile is the locked dimming (`lockedTileAlpha`). The
+  never recolours and `IconTileView` has no `setLit`/`isLit` at all. The row's
+  only state role for the tile is DIMMING (`lockedTileAlpha`, and a shallower
+  `skippedTileAlpha` — the user reached that one, they just said no). The
   tints are dial-aware in `.subtle` only and must NEVER route through
   `accentDynamic`, which collapses distinct hues into one accent.
+- **Four token changes came in with this rebuild** (all in `Tokens.Color`, all
+  with their measured contrast rationale on the token itself — read that before
+  re-tuning any of them):
+  - `warningText` — authored warm warning INK for the header's lost-permission
+    message and the ribbon's status line. `warning` itself is untouched (still the
+    bare `.systemOrange` alias its non-text consumers use); it measures 2.24:1 vs
+    `panel` in light, so a text consumer needed its own token rather than a
+    re-tuned shared one.
+  - `inkSecondary` — authored secondary text for these surfaces, because the
+    system `secondaryLabel` alias is 3.95:1 vs `panel` in light, under the body
+    floor. It is the spine's decided-row title ink and the ribbon's body ink.
+  - `success` — the earned checkmark's green; the bare `.systemGreen` it replaces
+    is 2.14:1 vs `panel` in light, under the 3:1 UI floor.
+  - light `raised` is now `#F2F0EA` (was `#FBFBF9`, i.e. identical to
+    `canvas`/`panel` — light mode had no surface ladder at all). The live row's
+    lift is real in both appearances now. Other `raised` consumers
+    (`WarmNameFieldCell`, `DeviceIconWellView`) pick up a faint warm well in
+    light: intended, not a side effect to chase out.
+  **OWNER-PENDING:** the three authored colour values are the rebuild's own
+  choices, measured against the floors but not yet through the palette owner —
+  they await Alec's sign-off.
+- **Rich text is the RIBBON's alone, and its bold runs are `captionEmphasized`.**
+  `OnboardingViewController.ribbonBody(_:)` turns `**bold**` runs into attributed
+  text for the one word that matters (the button that is the WRONG answer, the
+  app's own name in a list of twenty). The body is 11 pt caption, so the bold run
+  is the CAPTION's emphasized weight — `bodyEmphasized` inside it sets a visibly
+  bigger face on that one word. `bodyEmphasized` stays right for the things that
+  really are body-sized: the spine's row titles and the bar's gold button.
 - `test_` hooks throughout, because this window isn't visible to a headless
-  harness: sequencing (`test_activeStep`, `test_expandedSteps`, `test_title(of:)`,
-  `test_hasCheckmark`, `test_note(of:)`, `test_hint(of:)`), the real Allow/Skip
+  harness: sequencing and the spine (`test_activeStep`, `test_browseStep`,
+  `test_spineTitle(of:)`, `test_hasCheckmark`, `test_note(of:)`, `test_isLocked`,
+  `test_isSkipped`, `test_rowIsBroken`, `test_rowIsBrowseSelected`), the press
+  dispatch (`test_pressRow` — which drives the row's REAL press entry and then
+  awaits what it started — `test_isRowPressable`, `test_rowPressIsRefused`,
+  `test_rowAcceptsFirstMouse`, and the row a11y trio), the ribbon
+  (`test_heroHeadline` / `test_heroWhy` / `test_previewFrameLabel`,
+  `test_ribbonStatusText` / `BodyText` / `ButtonTitles` — the titles read
+  leading-to-trailing, so the primary is LAST — `test_ribbonIsWaiting`,
+  `test_ribbonTapPrimary` / `TapSkip` / `TapQuietLink`,
+  `test_ribbonIsAccessible`, `test_rowEdgeBarFill`), the real Allow/Skip
   paths (`test_tapAllow`, `test_allow([steps])`, `test_tapSkip`), the gate
-  (`test_doneExists`, `test_doneIsReturnDefault`, `test_snapBackStep`), the demo
-  (`test_demoMode`, `test_demoStage`, `test_isDemoAnimating`,
-  `test_demoShowsReplay`), and the window
+  (`test_doneExists`, `test_doneIsReturnDefault`, `test_snapBackStep`), the check
+  row (`test_checkRowState`, `test_awaitFinalCheck()`), the announcements
+  (`test_announcements`), the hero (`test_demoMode`, `test_demoStage`,
+  `test_isDemoAnimating`, `test_demoShowsReplay`, `test_stageIsDimmed`,
+  `test_heroRestingSwitchOn`), the mocks' buttons
+  (`test_demoButtonTitles` / `test_demoMarkedButtonTitle`, one NSView walk that
+  serves every surface), and the window
   level (`test_windowLevel`). `test_refreshStatuses()` is the AWAITED silent
   re-read — the load-time one fires a detached task, so a caller that needs its
   result (Bluetooth and Remote Control only reach `.granted` through it) has to be
@@ -694,15 +980,19 @@ set changes, or when the gate/motion/demo rules change.
 2. `OnboardingViewController.init` builds the `SetupFlowModel` (fixing where the
    flow starts). `viewDidLoad()` binds `model.onChange`, registers the PTP helper,
    kicks the silent `refreshStatuses()`, paints, and starts both polls.
-3. The user clicks the active card's Allow. `SetupFlowModel.allow(_:)` decides:
+3. The user presses the ribbon's primary — or anywhere on the live ROW, which is
+   the same call. `SetupFlowModel.allow(_:)` decides:
    short-circuit an already-granted step, preflight a determined-and-denied one
    straight to Settings, single-flight anything already in flight, otherwise fire
    the prompt/probe — and logs exactly one named outcome per click to `Telemetry`
    (`setup_allow` + `outcome`). The VC performs any Settings destination (dropping
-   the window level first) or re-fronts after a prompt.
-4. `model.onChange` fires → `refresh()` recomputes every card, runs the grant
-   choreography on any newly-completed step, updates the demo pane, the gate and
-   the header message.
+   the window level first) or re-fronts after a prompt. A press on any OTHER row
+   browses it, re-arms its skip, or is refused (`rowPressed(_:)`).
+4. `model.onChange` fires → `refresh()` recomputes every row, runs the grant
+   choreography on any newly-completed step, re-derives the hero (which mock, and
+   whether the stage is dimmed), rebuilds the ribbon, runs the final check when
+   every row is decided, updates the gate and the header message, and speaks any
+   transition VoiceOver would otherwise miss.
 5. Returning from System Settings (`didBecomeActiveNotification`) restores the
    floating level, re-fronts, and re-reads live status; the polls independently
    catch Accessibility/Login-Items grants made without a focus change.
@@ -716,17 +1006,19 @@ set changes, or when the gate/motion/demo rules change.
 | Type | What it is |
 |---|---|
 | `OnboardingWindowController` | Owns the window; lazy-create-then-reuse lifecycle; Done-vs-✕ dismissal contract; reactivate re-front; the floating level and its yield-to-Settings amendment. |
-| `OnboardingViewController` | Assembles the two panes; turns `SetupModel` + `SetupFlowModel` into card states; owns the grant choreography, the Done gate, the header message and both polling timers. |
+| `OnboardingViewController` | Assembles the spine and the hero; turns `SetupModel` + `SetupFlowModel` into row states and ribbon content; owns `browseStep`, the press dispatch, the grant choreography, the Done gate, the announcements, the header message and both polling timers. |
 | `OnboardingReason` | `.firstRun` vs `.permissionLost([RequiredPermission])` — drives the header message. |
-| `SetupCardView` / `SetupCardContent` / `SetupCardState` | One permission card: collapsed strip ↔ expanded body on the shared clip-height motion, the locked/active surface treatment, and the card-level click target. The per-state title table lives on `SetupCardContent`. |
+| `SetupSpineRowView` / `SetupCardContent` / `SetupCardState` | One SPINE row: the compact status strip, its one trailing marker, the live/broken/browsed surface treatment, and the whole-row press target. Both per-state title tables (ribbon sentence and spine short form) live on `SetupCardContent`. |
+| `SetupHeroHeadView` | The hero's top block: the headline over the why line, and nothing else. |
+| `SetupPreviewFrameView` | The labelled well the rehearsal plays inside — caption band ("You'll see this from macOS", off for the finale) over a clipping body. Flexible: it takes whatever the head block and the bar leave. |
+| `SetupRibbonView` / `RibbonContent` | The hero's lower half: the status line and the recovery paragraph over the bare bottom bar (hairline + trailing-aligned primary, Skip and quiet link). `RibbonContent` describes the WHOLE hero — the head block reads its `headline`/`why` — and decides nothing. |
 | `SetupCheckRowView` | The sixth row: the automatic final check's pending/running/passed status strip. |
-| `ClipView` | The card body's masking container — the thing whose HEIGHT the collapse animates. |
-| `DemoPaneView` / `DemoMode` | The right pane: the elevated surface, the mode swap crossfade, the motion policy, the Replay button. |
+| `DemoPaneView` / `DemoMode` | The hero's STAGE: the mock swap crossfade, the browse/settled resting rules, the waiting dim, the motion policy, the Replay button. |
 | `DemoMockView` | Timeline base class for the animated mocks: restartable score, settled-state hook, and the two multi-stage seams — `held(_:)` and the `stageWindow` offset. |
 | `DemoPromptMockView` / `DemoSettingsMockView` / `DemoSettledMockView` | The privacy-dialog miniature, the Settings-pane miniature, and the completion finale (one-shot ripple, static gold-aura resting frame). |
-| `DemoSystemAlertMockView` / `DemoLockIconView` | The classic macOS ALERT panel Remote Control's two-stage pass opens on — header, divider, gold padlock, accent-filled refusal — and the gradient-filled padlock it leads with. A passive surface: the host owns the cursor and the crossfade. |
+| `DemoSystemAlertMockView` / `DemoLockIconView` | The classic macOS ALERT panel Remote Control's two-stage pass opens on — header, divider, padlock, a MARKED "Open System Settings" beside a ghosted "Deny" — and the gradient-filled padlock it leads with. A passive surface: the host owns the cursor and the crossfade. |
 | `DemoSettingsHandoffMockView` / `DemoStage` | Remote Control's two-stage FIRST ASK: the Accessibility alert handing off to the Settings pane in one pass, the owner of stage one's pointer, and which of its two surfaces the pass rests on. |
-| `DemoWindowSurfaceView` / `DemoPushButtonView` / `DemoButtonEmphasis` / `DemoSwitchView` / `DemoSidebarView` / `DemoSettingsRowView` / `DemoGreekBarView` / `DemoPillView` / `DemoDotView` / `DemoBluetoothGlyphView` / `DemoCursorView` | The drawn parts of the mocks — window body, dialog button (neutral capsule or accent rounded rect), switch, sidebar, list row, greeked label, pill, circle, the hand-drawn Bluetooth rune, pointer. |
+| `DemoWindowSurfaceView` / `DemoPushButtonView` / `DemoButtonEmphasis` / `DemoSwitchView` / `DemoSidebarView` / `DemoSettingsRowView` / `DemoGreekBarView` / `DemoPillView` / `DemoDotView` / `DemoBluetoothGlyphView` / `DemoCursorView` | The drawn parts of the mocks — window body, dialog button (capsule or rounded rect, marked or ghosted), switch, sidebar, list row, greeked label — `demoGistBlock` stacks those into the ragged blocks that stand in for a mock's prose — pill, circle, the hand-drawn Bluetooth rune, pointer. |
 | `SystemSettingsOpener` | `NSWorkspace` seam for opening a `SystemSettingsPane`, with a Privacy & Security root fallback. |
 | `ProminentButton` | Fill-tinted CTA button with key-window-aware title ink (forced white, or measured from the fill). |
 | `IconTileView` / `RoundedContainerView` | Shared appearance-adaptive chrome (icon chip, grouped-inset card) — no stock AppKit equivalent. |
@@ -735,8 +1027,8 @@ set changes, or when the gate/motion/demo rules change.
 
 | File | Focus |
 |---|---|
-| `AudiouterCore/Tests/AudiouterCoreTests/OnboardingUITests.swift` | Sequencing, locked/active rendering, the card-level click target and its refusals, skip, the two-mode Allow and its deep links, the Done gate + snap-back, the demo pane's mode/idle rules, the lost-permission header, window level/float/re-present, Done-vs-✕. |
+| `AudiouterCore/Tests/AudiouterCoreTests/OnboardingUITests.swift` | Sequencing, locked/live rendering, the ROW press dispatch (live fire, browse toggle, skip re-arm, locked refusal), the ribbon's copy/buttons/waiting beat, the two-mode Allow and its deep links, the Done gate + snap-back + the browse that keeps the CTA, the final-check row, the announcements, the a11y boundary, the demo pane's mode/idle rules, the lost-permission header, the fixed-window fit, window level/float/re-present, Done-vs-✕. |
 | `AudiouterCore/Tests/AudiouterCoreTests/SetupFlowModelTests.swift` | The sequence, gate and Allow decision table this UI renders (Core, not this folder, but the seam it depends on). |
 | `AudiouterCore/Tests/AudiouterCoreTests/SetupModelTests.swift` | The underlying `SetupModel` probes/status, the Local Network found count, and the version-gated System Settings deep links. |
-| `AudiouterCore/Tests/AudiouterCoreTests/OnboardingPermissionColorTests.swift` | The four per-card tile colours: distinctness, contrast floors, tint permanence across every card state, tile fill unchanged. |
-| `AudiouterCore/Sources/onboarding-snapshot` | Offscreen PNG fixtures (per-step — including the in-flight wait and Remote Control's two-stage first ask at rest — remote-control-retry, the running final check, denied, complete, permission-lost × light/dark) in `dev/notes/onboarding-snapshots/`. |
+| `AudiouterCore/Tests/AudiouterCoreTests/OnboardingPermissionColorTests.swift` | The four per-row tile colours: distinctness, contrast floors, tint permanence across every row state, tile fill unchanged — plus the rebuild's four token changes (`warningText`, `inkSecondary`, `success`, light `raised`) against their stated floors. |
+| `AudiouterCore/Sources/onboarding-snapshot` | Offscreen PNG fixtures (per-step — including the in-flight wait and Remote Control's two-stage first ask at rest — remote-control-retry, a browsed granted row, a re-armed skip, the running final check, denied, complete, permission-lost × light/dark) in `dev/notes/onboarding-snapshots/`. |

@@ -30,7 +30,7 @@ import AudiouterSharedUI
 /// `contentViewController.preferredContentSize` and animates on its own when
 /// `popover.animates` is true; see `panelContentDidChangeHeight`).
 @MainActor
-final class PopoverPanelViewController: NSViewController {
+final class PopoverPanelViewController: NSViewController, FoldFollowing {
 
     /// A borderless icon button mounted on the right of a section's module header
     /// (task D — the Groups "+" / New group).

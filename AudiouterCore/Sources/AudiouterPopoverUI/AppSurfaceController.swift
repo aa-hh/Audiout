@@ -57,7 +57,8 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
 /// - **Groups** — the caller-provided content controller
 ///   (`MixerWindowController.contentController` in the app), seated below the
 ///   toolbar strip in a `SurfaceScreenViewController`. Fixed default content
-///   size 560×468 below the strip — derived so the 7-device group editor fits
+///   size 623×528 below the strip — the Mixer's width, and a height derived
+///   so the 7-device group editor fits
 ///   (see `groupsDefaultContentSize`) — and the one screen whose user-dragged
 ///   size is remembered for the session (the shell's drag-holds philosophy).
 /// - **Settings** — a caller-provided `SettingsRootViewController` (in-content
@@ -146,14 +147,27 @@ public final class AppSurfaceController {
     /// surface) never re-announces.
     private var publishedVisibleScreen: SurfaceScreen?
 
-    /// Groups' default content size, BELOW the toolbar strip. The height is
-    /// DERIVED, not picked: the group editor pane has no scroll view, so a
-    /// 7-device fleet's editor (fitting height 440, measured —
-    /// `MembershipRailTests`) plus the screen's footer strip (28) must fit.
-    /// The window's real content size adds the MEASURED toolbar-strip inset
-    /// on top (`groupsTargetContentSize()`) — the strip is window chrome now,
-    /// not a 52pt in-content header row.
-    public static let groupsDefaultContentSize = NSSize(width: 560, height: 468)
+    /// Groups' default content size, BELOW the toolbar strip.
+    ///
+    /// WIDTH: the Mixer's, to the point — read from `mixerSeedContentSize` so
+    /// the two can't drift, because a screen switch that changes the window's
+    /// width reads as the surface twitching (owner, 2026-08-12). It only holds
+    /// if the Groups split view doesn't ask for more: AppKit widens the window
+    /// to the split's fitting width, which is
+    /// `MixerWindowController`'s pinned 200pt sidebar plus
+    /// `GroupsPaneLayout.contentMaxWidth` plus both column margins. Those three
+    /// add up to this width on purpose — change one and this stops holding.
+    ///
+    /// HEIGHT: DERIVED, not picked. The group editor pane has no scroll view,
+    /// so a 7-device fleet's editor plus the screen's footer strip (28) must
+    /// fit (`MembershipRailTests`). 468 → 528 (2026-08-12) buys the pane's
+    /// vertical cadence — taller rows and real gaps between sections — plus a
+    /// few points of headroom, where the old value was an exact fit with none.
+    /// The window's real content size adds the MEASURED toolbar-strip inset on
+    /// top (`groupsTargetContentSize()`) — the strip is window chrome now, not
+    /// a 52pt in-content header row.
+    public static let groupsDefaultContentSize = NSSize(width: mixerSeedContentSize.width,
+                                                        height: 528)
 
     /// The Mixer panel's width is fixed (623); height is always exact-fit, so
     /// this seed only positions the very first mount before the fit lands.
@@ -428,8 +442,12 @@ public final class AppSurfaceController {
         // this is the surface-side subscriber the window controller used to be).
         root.onFittedContentSizeChange = { [weak self] _ in
             guard let self, self.selectedScreen == .settings else { return }
+            // During a fold (the Audio pane's Advanced disclosure) the sizes
+            // arrive per tick of the ONE fold clock — apply them instantly,
+            // exactly like the Mixer panel's `foldAnimatorDidTick` path. An
+            // animated window resize here would be the second clock.
             self.applyWindowContentSize(self.settingsTargetContentSize(),
-                                        animated: self.isShown)
+                                        animated: self.isShown && !FoldAnimator.shared.isFolding)
         }
         let screen = SurfaceScreenViewController(content: root)
         settingsScreen = screen

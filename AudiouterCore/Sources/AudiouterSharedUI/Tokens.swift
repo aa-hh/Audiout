@@ -199,10 +199,16 @@ public enum Tokens {
             warmDynamic(name: "panel", dark: 0x1D1915, light: 0xFBFBF9)
         }
         /// Raised well fill (icon well, blocked-checkbox fill, §1). No
-        /// stated contrast floor. Light = Circuit `bg/normal`, flush with
-        /// the flat Circuit ground.
+        /// stated contrast floor. Light is `#F2F0EA` (Direction 04's authored
+        /// light active fill, rehearsal-led Setup rebuild) — this REPLACES the
+        /// earlier `#FBFBF9`, which was identical to `canvas`/`panel` and left
+        /// light mode with no one-rung surface ladder at all (critique P1);
+        /// `#F2F0EA` gives light a real raised step the way dark already has
+        /// one. `WarmNameFieldCell` and `DeviceIconWellView` also draw with
+        /// `raised`, so they pick up a faint warm well in light too —
+        /// intended, not a side effect to chase out.
         public static var raised: NSColor {
-            warmDynamic(name: "raised", dark: 0x241F1A, light: 0xFBFBF9)
+            warmDynamic(name: "raised", dark: 0x241F1A, light: 0xF2F0EA)
         }
         /// Inset well fill (slider track trough, dropdown fill, §1). First
         /// consumer: `WarmFaderCell`'s recessed trough. CONTRAST RATIONALE
@@ -213,18 +219,23 @@ public enum Tokens {
         /// than `canvas` (1.05:1, a true recess whose edge the `faderRim`
         /// carries) — which lifts every fill drawn on it (measured, WCAG
         /// relative luminance: `ringConnected` 4.82:1, `faderThumb` 4.44:1,
-        /// `ember` 3.86:1, `gold` 10.51:1). Light = Circuit `bg/highlight`
+        /// `ember` 3.86:1, `gold` 10.51:1). Light was Circuit `bg/highlight`
         /// `#E8E6DC` rather than `bg/subtle` (Alec's call on the Circuit
         /// pull): `bg/subtle` measured 1.06:1 vs the flat Circuit `panel`,
         /// under the membership checklist's locked 1.10:1 surface-separation
-        /// floor (`MembershipWellContrastTests`) — `bg/highlight` holds it at
-        /// 1.20:1 while staying a Circuit-family hex, and every dark fill
-        /// drawn in the well keeps its headroom (`faderThumb` 3.33:1).
-        /// Backgrounds carry no IC variant (same precedent as
+        /// floor (`MembershipWellContrastTests`). Re-tuned to `#E2DFD3` —
+        /// one step deeper, off the Circuit sheet — because Direction 04's
+        /// light `raised` `#F2F0EA` measured 1.098:1 against `#E8E6DC`,
+        /// under `MembershipWellContrastTests`' locked 1.15:1
+        /// control-on-section floor. Measured against the new value: well
+        /// vs panel 1.289:1 (floor 1.10), raised vs well 1.172:1 (floor
+        /// 1.15), light `faderThumb` 3.12:1 (IC 4.56:1). Awaits Alec's
+        /// palette sign-off alongside the other Direction-04 authored
+        /// values. Backgrounds carry no IC variant (same precedent as
         /// `canvas`/`panel`/`raised`); the fills and rim drawn on the well
         /// brighten under IC instead.
         public static var well: NSColor {
-            warmDynamic(name: "well", dark: 0x100D0A, light: 0xE8E6DC)
+            warmDynamic(name: "well", dark: 0x100D0A, light: 0xE2DFD3)
         }
         /// 1px section-divider hairline (§5.1 — the ONLY visual separation
         /// between de-nested cards now that they no longer draw their own
@@ -353,6 +364,43 @@ public enum Tokens {
                        light: 0xBB3A2F, lightHighContrast: 0xA62A20)
         }
 
+        /// Warm warning **text** — the onboarding header's permission-lost
+        /// message and the rehearsal-led Setup ribbon's status line (Direction
+        /// 04). Distinct from ``warning``, which stays the bare `.systemOrange`
+        /// alias other consumers keep using: that alias measures 2.24:1 vs
+        /// `panel` in light, under the 4.5:1 text floor, so a text consumer
+        /// needs an authored replacement rather than a re-tuned shared token.
+        /// CONTRAST RATIONALE (>=4.5:1 vs both `canvas` and `panel`, both
+        /// appearances; measured, WCAG relative luminance): dark `#D08A45` =
+        /// 6.3:1 vs `panel` (`#16130F`); light `#A55B22` = 4.9:1 vs `panel`
+        /// (`#FBFBF9`).
+        public static var warningText: NSColor {
+            warmDynamic(name: "warningText", dark: 0xD08A45, light: 0xA55B22)
+        }
+
+        /// Authored secondary text for onboarding surfaces that commit to the
+        /// 4.5:1 text floor — the rehearsal-led Setup spine/ribbon's secondary
+        /// copy (Direction 04). Distinct from ``secondaryLabel``, whose system
+        /// `NSColor.secondaryLabelColor` alias measures 3.95:1 vs `panel` in
+        /// light, under floor for body text. CONTRAST RATIONALE (>=4.5:1 vs
+        /// `canvas`/`panel`/`raised`, both appearances; measured): dark
+        /// `#B4ADA0` = 7.3:1 vs `panel`; light `#5C574C` = 7.1:1 vs `panel`
+        /// (`#FBFBF9`).
+        public static var inkSecondary: NSColor {
+            warmDynamic(name: "inkSecondary", dark: 0xB4ADA0, light: 0x5C574C)
+        }
+
+        /// The earned-checkmark green — the rehearsal-led Setup spine/ribbon's
+        /// granted-state glyph (Direction 04). No existing green token: the
+        /// checkmarks it replaces used the bare `.systemGreen` alias, which
+        /// measures 2.14:1 vs `panel` in light, under the 3:1 UI floor.
+        /// CONTRAST RATIONALE (>=3:1 vs `panel`/`raised`, both appearances;
+        /// measured): dark `#5FC27E` = clears floor vs `panel` (`#1D1915`);
+        /// light `#2C7A46` = 5.2:1 vs `panel` (`#FBFBF9`).
+        public static var success: NSColor {
+            warmDynamic(name: "success", dark: 0x5FC27E, light: 0x2C7A46)
+        }
+
         // MARK: Gold accent instruments (spec §1, S-BUS)
         //
         // THE accent (spec §1.1/§1.2): `gold` is the bus-node fill / route-armed
@@ -367,19 +415,33 @@ public enum Tokens {
         //
         // CONTRAST RATIONALE (spec §1 "instruments clear ≥3:1 vs every surface"):
         // the bus draws on the warm `canvas`/`panel` surfaces. Measured (WCAG
-        // relative luminance): dark `gold` `#E8B84B` ≈ 8.9:1 vs `panel` `#1D1915`;
-        // light `gold` `#A97F1E` ≈ 3.6:1 vs `panel` `#FBF8F2` (the deepened
-        // paper-gold, spec §1.2's stated floor pick). `ember` is dimmer by design
-        // (it's the connecting line, not the node): dark `#8A6A2F` ≈ 3.5:1 vs
-        // `panel`; light `#AC8C46` ≈ 3.07:1 vs Circuit `bg/normal` `#FBFBF9` —
-        // deeper than the spec's `#C2A05A` (≈2.4:1 on this ground, the one
-        // instrument the Circuit decision flagged as worth darkening), so it
-        // clears the floor while staying dimmer than light `gold` (`#A97F1E`,
-        // 3.53:1 on the same ground) and preserving the node/line hierarchy.
-        // The Increase-Contrast variant pushes further (light IC `#9A7A2E`
-        // ≈ 3.9:1). IC variants (my picks, flagged for the Wave-5 sweep like
-        // `ringConnected`): dark `gold` `#F2C75E`, dark `ember` `#A5824A`, light
-        // `gold` `#8A6614`, light `ember` `#9A7A2E`.
+        // relative luminance): dark `gold` `#E8B84B` ≈ 9.5:1 vs `panel` `#1D1915`.
+        // `ember` is dimmer by design (it's the connecting line, not the node):
+        // dark `#8A6A2F` ≈ 3.5:1 vs `panel`.
+        //
+        // BOTH LIGHT INSTRUMENTS ARE MEASURED AGAINST `well`, NOT ONLY `panel`
+        // (2026-08-12): the Groups editor's sections are filled with `well`, so
+        // the rail and its nodes run over the darker of the two surfaces. Light
+        // ember's previous `#AC8C46` measured 3.07:1 on `panel` but only 2.55:1
+        // on `well` `#E8E6DC`; light gold's previous `#A97F1E` measured 3.53:1
+        // on `panel` but only 2.92:1 on `well` — both under the ≥3:1 non-text
+        // floor on the ground they are actually drawn on. Retuned: light
+        // `ember` `#9C7E3C` (3.71:1 panel / 3.07:1 well), light `gold`
+        // `#A67C1E` (3.67:1 panel / 3.04:1 well) — gold darkened by a whisker
+        // at its own ~41.5° hue, a re-tune, not a new accent.
+        //
+        // NOTE the consequence, deliberately accepted: with BOTH inks pinned
+        // just over 3:1 on the same ground, their luminances are necessarily
+        // close (gold 0.226 vs ember 0.223), so in LIGHT mode ember's "dimmer"
+        // reads as LESS CHROMATIC rather than lighter — saturation 0.62 against
+        // gold's 0.82 at the same ~41° hue, a muted brown beside a saturated
+        // gold. Dark mode keeps the luminance hierarchy unchanged. Under
+        // Increase Contrast the light pair BOTH deepen and the ordering flips
+        // to gold-is-darker (light IC `gold` `#8A6614` 5.08:1 panel / 4.21:1
+        // well vs light IC `ember` `#9A7A2E` 3.90:1 / 3.23:1) — gold still
+        // reads as MORE, by ink weight and by chroma (0.86 vs 0.70). IC
+        // variants are my picks, flagged for the Wave-5 sweep like
+        // `ringConnected`'s: dark `gold` `#F2C75E`, dark `ember` `#A5824A`.
 
         /// THE gold accent — the bus-node fill (spec §4.2), route-armed dot, and
         /// meter hot end (spec §1). Remapped ONLY by the accent dial
@@ -397,15 +459,21 @@ public enum Tokens {
         /// owns its contrast behavior).
         public static var gold: NSColor {
             accentDynamic(name: "gold",
+                          // Light re-tuned #A67C1E → #9E761D when Direction 04
+                          // deepened light `well` to #E2DFD3: measured 3.11:1 on
+                          // well / 4.00:1 on panel (≥3.0 non-text floor, pinned
+                          // in MembershipWellContrastTests).
                           full: WarmVariants(dark: 0xE8B84B, darkHighContrast: 0xF2C75E,
-                                             light: 0xA97F1E, lightHighContrast: 0x8A6614),
+                                             light: 0x9E761D, lightHighContrast: 0x8A6614),
                           subtle: WarmVariants(dark: 0xB99B53, darkHighContrast: 0xCBAF6A,
                                                light: 0x8F7B4A, lightHighContrast: 0x6F5E33),
                           systemAccentScale: 1.0)
         }
 
         /// Gold's dim companion — the bus LINE ink (spec §4.1), the filled node's
-        /// rim (§4.2), and the meter low end (§1). Dimmer than `gold` by design.
+        /// rim (§4.2), and the meter low end (§1). Dimmer than `gold` by design
+        /// — by luminance in dark, by CHROMA in light (see the block above, and
+        /// `MembershipWellContrastTests` for the pinned light floor).
         /// Accent-dial columns (§1.3 — W1): Subtle dark `#6D5B34` is the spec
         /// hex (2.66:1 vs dark `panel` — below the instrument floor exactly
         /// like Full-gold light ember already is: `ember` is a 2 pt line
@@ -416,8 +484,13 @@ public enum Tokens {
         /// luminance (spec's own formula; component-scaled sRGB).
         public static var ember: NSColor {
             accentDynamic(name: "ember",
+                          // Light re-tuned #9C7E3C → #947637 (IC #9A7A2E →
+                          // #8F702F, kept strictly darker than base) for the
+                          // same well deepening: measured 3.21:1 on well /
+                          // 4.13:1 on panel, still gold's dimmer, duller
+                          // companion (sat gap 0.19, same hue family).
                           full: WarmVariants(dark: 0x8A6A2F, darkHighContrast: 0xA5824A,
-                                             light: 0xAC8C46, lightHighContrast: 0x9A7A2E),
+                                             light: 0x947637, lightHighContrast: 0x8F702F),
                           subtle: WarmVariants(dark: 0x6D5B34, darkHighContrast: 0x877146,
                                                light: 0xAE9668, lightHighContrast: 0x8A744C),
                           systemAccentScale: 0.55)
@@ -485,8 +558,8 @@ public enum Tokens {
         /// The Setup finale CTA's fill (`OnboardingViewController`'s "Start
         /// listening" button) — the gold family deepened until WHITE ink wins
         /// decisively. The flagship ``gold`` cannot fill a text-bearing
-        /// control: its light hex `#A97F1E` gives white only 3.66:1 (under the
-        /// 4.5:1 body floor) and black 5.74:1, and that mid-gold-plus-black
+        /// control: its light hex `#A67C1E` gives white only 3.80:1 (under the
+        /// 4.5:1 body floor) and black 5.52:1, and that mid-gold-plus-black
         /// pairing is what the owner rejected live (2026-08-11).
         /// CONTRAST RATIONALE (WCAG relative luminance; ink is white in every
         /// variant, and the fill must ALSO clear ≥3:1 vs ``canvas``, the Setup
@@ -525,8 +598,8 @@ public enum Tokens {
         /// and `well`** in both themes. Measured (WCAG relative luminance):
         /// dark `#857762` = 4.44:1 vs `well` `#100D0A` / 4.24:1 vs `canvas`
         /// `#16130F`; light `#8A7A62` (a warm mid-brown knob on paper —
-        /// `raised`'s pure white measured 1.25:1, unusable) = 3.33:1 vs
-        /// `well` `#ECE5D8` / 3.64:1 vs `canvas` `#F4EFE7`. IC variants push
+        /// `raised`'s pure white measured 1.25:1, unusable) = 3.12:1 vs
+        /// `well` `#E2DFD3` / 3.64:1 vs `canvas` `#F4EFE7`. IC variants push
         /// further (dark `#9A8C74` = 5.88:1 / 5.62:1; light `#6E6050` =
         /// 4.86:1 / 5.31:1).
         public static var faderThumb: NSColor {
@@ -953,8 +1026,9 @@ public enum Tokens {
         /// How long ANY collapsible element in the app takes to unfold into —
         /// or fold out of — its host, on one curve (`.easeInEaseOut`): the
         /// popover's inserted rows, device-type subsections and card bodies
-        /// (`CardView.setBodyCollapsed`), and the Setup window's permission
-        /// cards (`SetupCardView`). ONE value, so an expand is the exact
+        /// (`CardView.setBodyCollapsed`). The Setup window's permission cards
+        /// were replaced by the non-collapsing spine (Direction 04), so it is no
+        /// longer one of them. ONE value, so an expand is the exact
         /// mirror of its collapse and every clip in the app reads as the same
         /// gesture — a second constant kept in step by hand silently drifts
         /// (live report 2026-08-10: the cards' own 0.2 s "don't follow the

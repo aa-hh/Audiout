@@ -4,8 +4,10 @@ import AppKit
 import AudiouterCore
 import AudiouterSharedUI
 
-/// Settings › **General** pane. Step 1: a single "Launch at login" switch wired
-/// to the `LoginItemManaging` seam. Also the entry point to **About Audiouter…**
+/// Settings › **General** pane: "Launch at login" (wired to the
+/// `LoginItemManaging` seam), "Reconnect last speakers when Audiouter starts"
+/// (`AppSettings.reconnectAtLaunch`, roadmap 050), and a rare-use footer strip
+/// with **Setup…** and **About Audiouter…**
 /// (app identity/version, GPL license + source link, third-party credits,
 /// support contact) — the app's only in-app About/Credits surface, required
 /// for GPL attribution before charging money for the app. The About content
@@ -23,6 +25,8 @@ public final class GeneralSettingsViewController: NSViewController {
     private let loginItem: LoginItemManaging
     private let settings: AppSettings
     private let launchSwitch = NSSwitch()
+    private let reconnectSwitch = NSSwitch()
+    private let reconnectHint = SettingsForm.hintLabel()
     private let remoteControlCheckbox = NSButton()
     private let remoteControlOverrideNote = SettingsForm.label("")
     private let setupButton = NSButton()
@@ -103,6 +107,19 @@ public final class GeneralSettingsViewController: NSViewController {
             subtitle: "Open Audiouter automatically when you log in.",
             control: launchSwitch)
 
+        // Reconnect-at-launch (roadmap 050): the opt-in that lets
+        // `GroupController.ensureDefaultSelection()` resume the persisted
+        // routing set instead of starting on this Mac's speakers only.
+        reconnectSwitch.target = self
+        reconnectSwitch.action = #selector(reconnectToggled)
+        reconnectSwitch.state = settings.reconnectAtLaunch ? .on : .off
+        reconnectSwitch.setAccessibilityLabel("Reconnect last speakers when Audiouter starts")
+        let reconnectRow = SettingsForm.row(
+            title: "Reconnect last speakers when Audiouter starts",
+            control: reconnectSwitch)
+        // Live hint (spec §5.2) — re-written on every toggle.
+        reconnectHint.stringValue = Self.reconnectHintLine(settings.reconnectAtLaunch)
+
         // AppKit checkbox (matches DeviceRowView/MembershipRowView's boolean
         // idiom) — no inline title, the row label carries it. Reflects the
         // EFFECTIVE state (`remoteControlResolution.value`), not the raw
@@ -134,44 +151,64 @@ public final class GeneralSettingsViewController: NSViewController {
         remoteControlOverrideNote.maximumNumberOfLines = 0
         remoteControlOverrideNote.preferredMaxLayoutWidth = SettingsForm.contentWidth - 40
 
+        // Footer strip (roadmap 050): Setup and About are rare-use, so they
+        // share one quiet button strip instead of two full title+subtitle rows.
         // "Open Setup…" re-opens the first-run permission-priming window — the
         // way a user re-checks the System Audio / Local Network grants after
         // changing them in System Settings (the flow itself deep-links there).
-        setupButton.title = "Open Setup…"
-        setupButton.bezelStyle = .rounded
-        setupButton.target = self
-        setupButton.action = #selector(runSetupAgainTapped)
-        let setupRow = SettingsForm.row(
-            title: "Setup",
-            subtitle: "Verify that required permissions are granted.",
-            control: setupButton)
-
         // "About Audiouter…" opens the standalone About/Credits window (app
         // identity, GPL license + source link, third-party credits, support) —
         // see the type doc comment for why that content isn't inline here.
+        setupButton.title = "Setup…"
+        setupButton.bezelStyle = .rounded
+        setupButton.controlSize = .small
+        setupButton.target = self
+        setupButton.action = #selector(runSetupAgainTapped)
+        setupButton.setAccessibilityLabel("Open Setup")
+
         aboutButton.title = "About Audiouter…"
         aboutButton.bezelStyle = .rounded
+        aboutButton.controlSize = .small
         aboutButton.target = self
         aboutButton.action = #selector(aboutTapped)
-        let aboutRow = SettingsForm.row(
-            title: "About",
-            subtitle: "Version, license, and third-party credits.",
-            control: aboutButton)
 
-        var rows = [launchRow, remoteControlRow]
+        let hairline = NSBox()
+        hairline.boxType = .separator
+        hairline.translatesAutoresizingMaskIntoConstraints = false
+
+        let strip = NSStackView(views: [setupButton, aboutButton])
+        strip.orientation = .horizontal
+        strip.alignment = .centerY
+        strip.spacing = 8
+        strip.translatesAutoresizingMaskIntoConstraints = false
+
+        var rows = [launchRow, reconnectRow, reconnectHint, remoteControlRow]
         if remoteControlResolution.isForced {
             rows.append(remoteControlOverrideNote)
         }
         if approvals != nil {
             rows.append(contentsOf: makePhoneListViews())
         }
-        rows.append(contentsOf: [setupRow, aboutRow])
+        rows.append(contentsOf: [hairline, strip])
         view = SettingsForm.paneView(rows: rows)
         rebuildPhoneList()
         // Claimed here (single-assignment, like the app layer's claims on
         // this pane's own callbacks): a prompt answered or a phone revoked
         // while the window is open repaints the list live.
         approvals?.onChange = { [weak self] in self?.rebuildPhoneList() }
+    }
+
+    /// The reconnect-at-launch live hint: what the NEXT launch will do.
+    private static func reconnectHintLine(_ enabled: Bool) -> String {
+        enabled
+            ? "Next launch reconnects the speakers you last used."
+            : "Audiouter starts on this Mac's speakers only."
+    }
+
+    @objc private func reconnectToggled() {
+        let enabled = reconnectSwitch.state == .on
+        settings.reconnectAtLaunch = enabled
+        reconnectHint.stringValue = Self.reconnectHintLine(enabled)
     }
 
     /// The "Remembered iPhones" section (T24): a caption + bordered
@@ -338,6 +375,26 @@ public final class GeneralSettingsViewController: NSViewController {
         _ = view
         launchSwitch.state = on ? .on : .off
         launchToggled()
+    }
+
+    /// Whether the reconnect-at-launch switch currently reads "on".
+    public var test_reconnectAtLaunchIsOn: Bool {
+        _ = view
+        return reconnectSwitch.state == .on
+    }
+
+    /// Drive the reconnect-at-launch switch and run the toggle action
+    /// (persists immediately).
+    public func test_toggleReconnectAtLaunch(_ on: Bool) {
+        _ = view
+        reconnectSwitch.state = on ? .on : .off
+        reconnectToggled()
+    }
+
+    /// The reconnect-at-launch live hint line (spec §5.2).
+    public var test_reconnectHint: String {
+        _ = view
+        return reconnectHint.stringValue
     }
 
     /// Invoke "Open Setup…" as a click would.

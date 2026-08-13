@@ -16,7 +16,7 @@ import Testing
     @Test func defaultsWhenUnset() {
         let settings = AppSettings(defaults: defaults)
         #expect(settings.theme == .system)
-        #expect(settings.density == .comfortable)
+        #expect(settings.reconnectAtLaunch == false)
     }
 
     @Test func themeRoundTrips() {
@@ -27,11 +27,11 @@ import Testing
         #expect(AppSettings(defaults: defaults).theme == .dark)
     }
 
-    @Test func densityRoundTrips() {
+    @Test func reconnectAtLaunchRoundTrips() {
         let settings = AppSettings(defaults: defaults)
-        settings.density = .compact
-        #expect(settings.density == .compact)
-        #expect(AppSettings(defaults: defaults).density == .compact)
+        settings.reconnectAtLaunch = true
+        #expect(settings.reconnectAtLaunch == true)
+        #expect(AppSettings(defaults: defaults).reconnectAtLaunch == true)
     }
 
     @Test func unknownStoredValueFallsBack() {

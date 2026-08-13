@@ -43,3 +43,8 @@ ios/**/DerivedData/
 
 # Impeccable design-skill scratch state (local config + generated critique notes).
 .impeccable/
+
+# Python bytecode cache, for the scripts under scripts/ (only appears if one of
+# them is ever imported rather than run directly).
+__pycache__/
+*.pyc

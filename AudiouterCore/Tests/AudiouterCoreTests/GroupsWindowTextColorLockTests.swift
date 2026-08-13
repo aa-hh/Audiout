@@ -286,7 +286,7 @@ import AppKit
         content.view.layoutSubtreeIfNeeded()
         assertAllLabelsFrozen(in: content.view, host: "MixerWindowController content (footer + empty state)")
         #expect(window.test_isShowingEmptyState, "expected the empty state pane with zero groups/devices")
-        #expect(window.test_emptyState.test_messageText == "No groups yet.")
+        #expect(window.test_emptyState.test_messageText == "Group your speakers")
         #expect(window.test_emptyState.test_subtitleText ==
                 "Save a set of speakers as a group, then switch to it in two clicks from the menu bar.")
     }

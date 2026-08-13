@@ -58,28 +58,38 @@ public enum DemoStage: Equatable, Sendable {
 /// a real control, stays accessible.
 final class DemoPaneView: NSView {
 
-    /// The elevated surface both mocks sit on — fixed, so consecutive steps
-    /// read at the same scale rather than the pane resizing under the user.
-    /// The WIDTH serves the permission dialog, which became a portrait card
-    /// (macOS 26): 336 is the prompt mock's 288 plus the margin the mock had
-    /// before, so the dialog sits ON the surface rather than filling it edge to
-    /// edge. Every other mock is narrower still.
+    /// The STAGE the mocks play on — fixed, so consecutive steps read at the
+    /// same scale rather than the pane resizing under the user.
     ///
-    /// The HEIGHT is set by the FINALE, not the mocks: the settled view fills
-    /// this surface, its ripple sweeps the whole stage and crosses the frame
-    /// on every side, and a soft feather mask on the ring layers dissolves the
-    /// crossing (owner calls 2026-08-11: first "grow the stage, don't shrink
-    /// the wave" after a live hard clip, then rejecting the shrunken-travel
-    /// fix as "one little line" — see `DemoSettledMockView`). The mocks are
-    /// centred, so the extra height over the width is simply more margin for
-    /// them. The right pane absorbs it: 560 − 2×22 pane margin leaves 516, and
-    /// Replay still fits below at +14.
-    static let surfaceSize = NSSize(width: 336, height: 360)
+    /// There is no drawn surface under it any more (Direction 04, the
+    /// rehearsal-led restructure): the HERO PANE owns the chrome, and this view
+    /// is the bare stage inside it. The WIDTH is that pane's interior — 462
+    /// hero pane − 2 × 22 interior padding = 418 — but the FINALE's ripple is no
+    /// longer bounded by this stage OR the hero panel: it radiates across the
+    /// WHOLE Setup window, crossing the stage frame and the hero panel's edges
+    /// on every side with nothing clipping or feathering it (owner calls
+    /// 2026-08-11: first "grow the stage, don't shrink the wave" after a live
+    /// hard clip, then rejecting the shrunken-travel fix as "one little line";
+    /// owner call 2026-08-12: fill the panel, not the stage; then, the panel
+    /// gaining almost nothing over the stage, radiate across the whole window and
+    /// fade to nothing BEFORE the window's nearest edge — see
+    /// `DemoSettledMockView.ringEndScale()` / `rippleFadeFraction`). The HEIGHT
+    /// is what the preview FRAME really has
+    /// to give on a two-line why line — 278 — rather than the 330 the frame was
+    /// silently cropping 50 pt off. Every mock is smaller than the stage and
+    /// centred on it, so the slack is simply margin for them, and Replay still
+    /// fits below at +14.
+    static let surfaceSize = NSSize(width: 418, height: 278)
 
     /// The step-to-step content crossfade.
     static let stepCrossfadeDuration: TimeInterval = 0.22
 
-    private let surface = RoundedContainerView()
+    /// How long the waiting beat's dim takes.
+    static let stageDimDuration: TimeInterval = 0.2
+    /// How far the stage dims while a real system dialog is on screen — the
+    /// rehearsal steps back when the real thing is in front of the user.
+    static let stageDimmedAlpha: CGFloat = 0.5
+
     /// Hosts the current mock; the accessibility opt-out lives here so Replay
     /// (outside it) stays reachable.
     private let mockHost = NSView()
@@ -88,8 +98,23 @@ final class DemoPaneView: NSView {
 
     private var step: SetupStep?
     private var mode: DemoMode = .prompt
+    /// Whether what's on stage is a read-only BROWSE of an already-decided
+    /// step. A browse never animates — only the active step's rehearsal loops.
+    private var isBrowse = false
+    /// Whether a browsed Settings mock rests with its switch already ON.
+    private var restingSwitchOn = false
 
     private var occlusionObserver: NSObjectProtocol?
+
+    /// The window-spanning view the finale ripple radiates across — the Setup
+    /// window's whole content, wired by the view controller so the rings sweep
+    /// the entire window and fade out before its nearest edge, rather than
+    /// halting at the hero panel (a whole-window celebration, owner call
+    /// 2026-08-12). Handed to each settled mock as it is built. Nothing between
+    /// the stage and this host clips in the finale state — the chromeless well,
+    /// the (unmasked) hero panel and the canvas all pass the rings through — so
+    /// widening the reach needed only this re-pointing, no reparenting.
+    weak var finaleRippleBounds: NSView?
 
     init() {
         replayButton = NSButton(title: "Replay", target: nil, action: nil)
@@ -120,8 +145,7 @@ final class DemoPaneView: NSView {
         mockHost.setAccessibilityElement(false)
         mockHost.setAccessibilityChildren([])
 
-        surface.addSubview(mockHost)
-        addSubview(surface)
+        addSubview(mockHost)
 
         replayButton.bezelStyle = .rounded
         replayButton.controlSize = .small
@@ -131,32 +155,37 @@ final class DemoPaneView: NSView {
         replayButton.isHidden = true
         addSubview(replayButton)
 
-        // Only the surface's own size is required: the pane's height comes from
-        // the window, and nothing in here may push the fixed window taller.
-        let replayBelow = replayButton.topAnchor.constraint(equalTo: surface.bottomAnchor, constant: 14)
+        // Nothing in here may push the fixed window taller, so Replay's own
+        // placement is the breakable one.
+        let replayBelow = replayButton.topAnchor.constraint(equalTo: mockHost.bottomAnchor, constant: 14)
         replayBelow.priority = .defaultHigh
         NSLayoutConstraint.activate([
-            surface.centerXAnchor.constraint(equalTo: centerXAnchor),
-            surface.centerYAnchor.constraint(equalTo: centerYAnchor),
-            surface.widthAnchor.constraint(equalToConstant: Self.surfaceSize.width),
-            surface.heightAnchor.constraint(equalToConstant: Self.surfaceSize.height),
+            // The STAGE is a fixed size — the finale fills it exactly, and a
+            // stage that resized per mock would move the ribbon under it every
+            // time the step changed.
+            widthAnchor.constraint(equalToConstant: Self.surfaceSize.width),
+            heightAnchor.constraint(equalToConstant: Self.surfaceSize.height),
 
-            mockHost.centerXAnchor.constraint(equalTo: surface.centerXAnchor),
-            mockHost.centerYAnchor.constraint(equalTo: surface.centerYAnchor),
+            mockHost.centerXAnchor.constraint(equalTo: centerXAnchor),
+            mockHost.centerYAnchor.constraint(equalTo: centerYAnchor),
 
-            replayButton.centerXAnchor.constraint(equalTo: surface.centerXAnchor),
+            replayButton.centerXAnchor.constraint(equalTo: mockHost.centerXAnchor),
             replayBelow,
         ])
     }
 
     /// A layer-colour instrument has to reconcile its live re-resolution triggers
     /// itself (SharedUI AGENTS.md), because none of them reach a view through
-    /// `viewDidChangeEffectiveAppearance` or a model push. Two apply here: a
-    /// mid-session Reduce Motion toggle, which changes the motion POLICY, and the
+    /// `viewDidChangeEffectiveAppearance` or a model push. Three apply here: a
+    /// mid-session Reduce Motion toggle, which changes the motion POLICY; the
     /// user's macOS accent, which the mock's confirming button stamps as a
-    /// resolved `CGColor`. The app's OWN accent dial is deliberately not one of
-    /// them — nothing inside a mock is painted from `Tokens`, that is the point of
-    /// the system-look rule.
+    /// resolved `CGColor`; and Increase Contrast, which `DemoSystemColor`'s
+    /// surface-ladder and button-emphasis values resolve differently (see the
+    /// enum's doc comment) but which — like the accent — doesn't touch
+    /// `effectiveAppearance`, so a toggle mid-session needs its own trigger too.
+    /// The app's OWN accent dial is deliberately not one of them — nothing
+    /// inside a mock is painted from `Tokens`, that is the point of the
+    /// system-look rule.
     private func registerForLiveDisplayChanges() {
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(accessibilityDisplayOptionsChanged),
@@ -169,6 +198,11 @@ final class DemoPaneView: NSView {
     @objc private func accessibilityDisplayOptionsChanged() {
         // The policy itself changed — re-derive it from scratch.
         reconcileMotion(restartUnderReduceMotion: false)
+        // Increase Contrast doesn't change `effectiveAppearance`, so the mock's
+        // `DemoSystemColor` fills won't otherwise re-resolve until something else
+        // forces a repaint — same reasoning as `systemColorsChanged` below.
+        mock?.subviewsRecursively.forEach { $0.needsDisplay = true }
+        mock?.needsDisplay = true
     }
 
     @objc private func systemColorsChanged() {
@@ -196,15 +230,29 @@ final class DemoPaneView: NSView {
     /// Show the miniature for `step` in `mode`. `animated` crossfades the swap
     /// (the grant choreography's last beat); pass false for the first build,
     /// Reduce Motion, and any off-screen window.
-    func show(step: SetupStep?, mode: DemoMode, animated: Bool) {
+    ///
+    /// - Parameters:
+    ///   - restingSwitchOn: the browsed Settings pane rests with its switch
+    ///     already ON — the scoped amendment to "a pass ends where it started".
+    ///     A granted step really would be found switched on.
+    ///   - asBrowse: this is a read-only look at an already-decided step, not
+    ///     the live rehearsal. It never animates.
+    func show(step: SetupStep?, mode: DemoMode, animated: Bool,
+              restingSwitchOn: Bool = false, asBrowse: Bool = false) {
         let changed = step != self.step || mode != self.mode || mock == nil
+            || restingSwitchOn != self.restingSwitchOn || asBrowse != self.isBrowse
         self.step = step
         self.mode = mode
+        self.restingSwitchOn = restingSwitchOn
+        self.isBrowse = asBrowse
         guard changed else { return }
 
         let outgoing = mock
-        let incoming = Self.makeMock(step: step, mode: mode)
+        let incoming = Self.makeMock(step: step, mode: mode, restingSwitchOn: restingSwitchOn)
         mock = incoming
+        // The finale's rings fade out before the whole window's edges, so the
+        // settled mock needs to know the window-spanning host it radiates across.
+        (incoming as? DemoSettledMockView)?.rippleBoundsView = finaleRippleBounds
         incoming.translatesAutoresizingMaskIntoConstraints = false
         Self.installAccessibilityOptOut(incoming)
         mockHost.addSubview(incoming)
@@ -247,6 +295,19 @@ final class DemoPaneView: NSView {
         replayButton.isHidden = true
     }
 
+    /// The WAITING beat: a real system dialog is on screen now, so the
+    /// rehearsal of it steps back rather than competing with it.
+    func setStageDimmed(_ dimmed: Bool, animated: Bool) {
+        let target = dimmed ? Self.stageDimmedAlpha : 1
+        guard animated else { mockHost.alphaValue = target; return }
+        guard mockHost.alphaValue != target else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = Self.stageDimDuration
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            mockHost.animator().alphaValue = target
+        }
+    }
+
     /// Take a whole drawn mock out of the accessibility tree, view by view. The
     /// container-level opt-out hoists rather than prunes, and these subtrees
     /// carry real `NSTextField`s and images that are elements by default.
@@ -256,7 +317,8 @@ final class DemoPaneView: NSView {
         view.subviews.forEach(installAccessibilityOptOut)
     }
 
-    private static func makeMock(step: SetupStep?, mode: DemoMode) -> NSView {
+    private static func makeMock(step: SetupStep?, mode: DemoMode,
+                                 restingSwitchOn: Bool = false) -> NSView {
         guard let step, mode != .settled else { return DemoSettledMockView() }
         switch mode {
         // Remote Control's FIRST ask isn't the privacy card at all: it raises
@@ -270,8 +332,13 @@ final class DemoPaneView: NSView {
             }
         // Every retry lands on the pane itself — Remote Control's included, now
         // that its second click deep-links there, and Speaker Sync's, whose
-        // "Open Login Items…" opens System Settings directly.
-        case .settings: return DemoSettingsMockView(step: step)
+        // "Open Login Items…" opens System Settings directly. Standing alone
+        // (rather than as the handoff's nested stage two) it plays at 1.35×,
+        // which is what fills the bigger stage a landscape pane leaves half
+        // empty at life scale.
+        case .settings:
+            return DemoSettingsMockView(step: step, switchRestsOn: restingSwitchOn,
+                                        metricScale: 1.35)
         case .settled:  return DemoSettledMockView()
         }
     }
@@ -317,6 +384,15 @@ final class DemoPaneView: NSView {
             replayButton.isHidden = true
             return
         }
+        // A BROWSE is a read-only look at a step already decided — it rests at
+        // its settled frame and offers no Replay. Only the ACTIVE step's
+        // rehearsal ever loops, so browsing three granted rows in a row can
+        // never put three timelines' worth of motion on screen.
+        guard !isBrowse else {
+            timeline.stopTimeline()
+            replayButton.isHidden = true
+            return
+        }
         guard canAnimate else {
             timeline.stopTimeline()
             replayButton.isHidden = true
@@ -344,6 +420,13 @@ final class DemoPaneView: NSView {
     /// rest on the FIRST thing the user will meet, not on the pane it ends at.
     var test_stage: DemoStage? { (mock as? DemoSettingsHandoffMockView)?.test_stage }
     var test_isAnimating: Bool { (mock as? DemoMockView)?.isTimelineRunning ?? false }
+    /// Whether the stage is standing back for a real dialog (the waiting beat).
+    var test_isStageDimmed: Bool { mockHost.alphaValue < 1 }
+    /// Whether the mock on stage rests with its switch already on (a browse of
+    /// a granted step).
+    var test_restingSwitchOn: Bool { (mock as? DemoSettingsMockView)?.test_switchRestsOn ?? false }
+    /// Whether what's on stage is a read-only browse.
+    var test_isBrowse: Bool { isBrowse }
     var test_isLooping: Bool { (mock as? DemoMockView)?.isLooping ?? false }
     var test_showsReplay: Bool { !replayButton.isHidden }
     /// `nil` = the live system setting (the shared override seam).
@@ -559,40 +642,118 @@ extension DemoMockView: CAAnimationDelegate {
 /// app proper to paint with them. Measured from real Settings recordings —
 /// `dev/notes/wispr-permissions-brief.md` names the source.
 enum DemoSystemColor {
-    /// Sidebar fill — darker than the content pane in BOTH appearances.
-    static let sidebar = dynamic(light: 0xE8E8E8, dark: 0x232326)
+    /// Sidebar fill — darker than the content pane in BOTH appearances, and
+    /// pushed a further step darker under Increase Contrast: the sidebar/
+    /// content/card ladder and the button-emphasis pair below are the values
+    /// that carry this mock's STRUCTURE (which surface is which, which button
+    /// is correct), so they are the ones Increase Contrast separates further —
+    /// exactly what the setting is for, and unlike the real macOS chrome this
+    /// mock paints (a permission alert, a Settings pane), which visibly widens
+    /// its own greys and adds control outlines under the same setting; a mock
+    /// that stayed flat under it would be the one surface in this rehearsal
+    /// that didn't look like macOS. `DemoButtonEmphasis`'s ghost/marked pair
+    /// gets the same treatment for the same reason.
+    static let sidebar = dynamic(light: 0xE8E8E8, dark: 0x232326,
+                                  lightHighContrast: 0xD2D2D2, darkHighContrast: 0x18181A)
     /// Content-pane fill.
     static let contentPane = dynamic(light: 0xF4F4F4, dark: 0x2C2C2E)
     /// The grouped list's fill. Real Settings draws the card within one level of
     /// the pane and defines it by its border alone; at mock scale that vanishes,
     /// so this is lifted ~2.5 % — a readability adjustment, not a measurement.
-    static let card = dynamic(light: 0xFAFAFA, dark: 0x333336)
-    /// A dialog button — BOTH of them: macOS 26's permission dialog has no
-    /// accent-filled default. `controlColor` is white-ish in light mode, which
-    /// is the SHEET's Cancel button, not a dialog's grey one.
-    static let plainButton = dynamic(light: 0xD7D7D7, dark: 0x5A5A5E)
+    /// Pushed a step lighter under Increase Contrast, widening it from the
+    /// sidebar the same way the real pane does.
+    static let card = dynamic(light: 0xFAFAFA, dark: 0x333336,
+                               lightHighContrast: 0xFFFFFF, darkHighContrast: 0x3D3D40)
+    /// A WRONG button — the one the rehearsal is telling the user not to press.
+    /// It is drawn as a ghost (see ``DemoPushButtonView``), so this is only its
+    /// hairline; the fill is clear. Darkened/lightened under Increase Contrast
+    /// so the ghost's rim doesn't fade against the marked button's brighter fill.
+    static let ghostButtonRim = dynamic(light: 0xC4C4C4, dark: 0x5A5A5E,
+                                         lightHighContrast: 0xA0A0A0, darkHighContrast: 0x7A7A80)
+    /// The CORRECT button's fill — the same grey family a step brighter, so the
+    /// button the pointer is going to press is the lit one in the row without
+    /// borrowing an accent the real dialog doesn't have. Lifted further under
+    /// Increase Contrast, same reasoning as the ghost rim above.
+    static let markedButton = dynamic(light: 0xE4E2DC, dark: 0x6E6E74,
+                                       lightHighContrast: 0xEDEBE4, darkHighContrast: 0x86868C)
+    /// The thin ring around that fill, one further step again — also widened
+    /// under Increase Contrast.
+    static let markedButtonRim = dynamic(light: 0xA8A6A0, dark: 0x8E8E96,
+                                          lightHighContrast: 0x88867E, darkHighContrast: 0xACACB4)
 
-    /// The privacy padlock's gold, top and bottom of its gradient. The same in
-    /// both appearances — macOS draws this icon as artwork, not as a tinted
-    /// glyph, so it does not re-resolve with the theme. Matched by eye to the
-    /// real Accessibility Access alert.
-    static let lockGoldTop = solid(0xF9D45C)
-    static let lockGoldBottom = solid(0xD79A24)
+    /// The privacy padlock's gradient, top and bottom. Warm GREY, not the real
+    /// icon's gold: gold is spent entirely on the one button the step wants
+    /// pressed, and a gold padlock inside the rehearsal competed with it (owner
+    /// decision 2026-08-12). The gradient itself stays — the real icon is
+    /// artwork with some dimension in it, and a flat symbol at this size reads
+    /// as a toolbar glyph.
+    static let lockTop = solid(0xD8D6D0)
+    static let lockBottom = solid(0x9C9A94)
 
     static let trafficRed = solid(0xFF5F57)
     static let trafficYellow = solid(0xFEBC2E)
     static let trafficGreen = solid(0x28C840)
 
-    /// The mock's accent. **Never `controlAccentColor`:** that follows the user's
-    /// Appearance setting, so on a Mac set to pink this "system" dialog would come
-    /// out pink — the exact opposite of a generic macOS read.
-    static var accent: NSColor { .systemBlue }
+    /// The privacy/system-dialog accent — TRUE `NSColor.systemBlue`, not
+    /// `controlAccentColor` (which follows the user's Appearance setting, so on
+    /// a Mac set to pink this "system" surface would come out pink; `systemBlue`
+    /// is fixed regardless of the user's accent). Owner decision 2026-08-13,
+    /// reversing an 2026-08-12 desaturation: the icon symbols, colours, shape and
+    /// CTA words of a real macOS surface are the four things this rehearsal must
+    /// get right, so the privacy hand badge and the Local Network / Bluetooth /
+    /// Accessibility system tiles read at the same saturation macOS actually
+    /// draws them at. Everything else in the mock (title, body, gist copy) stays
+    /// abstract — the desaturation was masking the wrong thing.
+    static let systemBlue = NSColor.systemBlue
 
-    private static func dynamic(light: Int, dark: Int) -> NSColor {
+    /// The Settings mock's switch track and the sidebar's selected-row pill —
+    /// kept at the DESATURATED slate from the 2026-08-12 pass. The owner named
+    /// the Settings mock the reference for "just right" when reversing the
+    /// privacy-dialog desaturation (2026-08-13), so this surface is explicitly
+    /// OUT of scope for that reversal and keeps its muted value.
+    static let settingsAccent = dynamic(light: 0x8A97A6, dark: 0x6C7684)
+
+    /// The recording mark's tile — TRUE `NSColor.systemRed`. Owner decision
+    /// 2026-08-13, reversing the 2026-08-12 desaturation: macOS leads the
+    /// system-audio ask with a vivid red record mark, not a dusty rose.
+    static let recordTile = NSColor.systemRed
+
+    /// `lightHighContrast`/`darkHighContrast` default to `nil` (no change under
+    /// Increase Contrast) because most of these values are already the OS's own
+    /// semantic-adjacent greys, not the structural ladder Increase Contrast
+    /// exists to separate. Increase Contrast is a WORKSPACE setting, not an
+    /// appearance, so it can't be read from `appearance` the way light/dark can
+    /// — `NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast` is read
+    /// directly instead (the same seam `Tokens.swift`'s `warmDynamic` uses), and
+    /// the caller must force a repaint on
+    /// `NSWorkspace.accessibilityDisplayOptionsDidChangeNotification` for a
+    /// mid-session toggle to actually show — see `accessibilityDisplayOptionsChanged`.
+    private static func dynamic(light: Int, dark: Int,
+                                 lightHighContrast: Int? = nil, darkHighContrast: Int? = nil) -> NSColor {
         NSColor(name: nil) { appearance in
-            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            return solid(isDark ? dark : light)
+            solid(resolvedHex(light: light, dark: dark,
+                              lightHighContrast: lightHighContrast,
+                              darkHighContrast: darkHighContrast,
+                              isDark: appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua,
+                              increaseContrast: NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast))
         }
+    }
+
+    /// Which of the four values wins, as a PURE function of the two axes.
+    ///
+    /// Split out of the resolver above so the choice is testable without the
+    /// ambient settings it normally reads: Increase Contrast is a workspace
+    /// setting with no override seam, and faking it through a mutable static
+    /// would leak across this suite's parallel tests. Passing both axes in
+    /// leaves nothing global to leak.
+    ///
+    /// A token with no high-contrast variant falls back to its normal value, so
+    /// only the cases that carry structure need to declare one.
+    static func resolvedHex(light: Int, dark: Int,
+                            lightHighContrast: Int?, darkHighContrast: Int?,
+                            isDark: Bool, increaseContrast: Bool) -> Int {
+        if isDark { return increaseContrast ? (darkHighContrast ?? dark) : dark }
+        return increaseContrast ? (lightHighContrast ?? light) : light
     }
 
     private static func solid(_ hex: Int) -> NSColor {
@@ -637,20 +798,30 @@ enum DemoHandoffBeat {
 
 // MARK: - Shared text parts
 
-/// A wrapping, LEFT-aligned block of dialog text. Every mock's title and body
-/// are real sentences at real sizes — the recognisability of these miniatures is
-/// the whole reason they exist, so nothing a user reads is greeked or clipped.
-func demoParagraph(_ text: String, font: NSFont, color: NSColor,
-                   width: CGFloat) -> NSTextField {
-    let field = NSTextField(labelWithString: text)
-    field.font = font
-    field.textColor = color
-    field.alignment = .left
-    field.maximumNumberOfLines = 0
-    field.lineBreakMode = .byWordWrapping
-    field.preferredMaxLayoutWidth = width
-    field.translatesAutoresizingMaskIntoConstraints = false
-    return field
+/// A block of GIST bars where a paragraph of dialog copy would be — a ragged
+/// stack of rounded bars, last line short, like the Settings mock's greeked
+/// labels.
+///
+/// **A mock's prose is abstracted, never verbatim** (owner decision 2026-08-12;
+/// this folder's AGENTS.md carries the full rationale, including the verbatim
+/// Info.plist purpose strings this REPLACES). What makes the surface
+/// recognisable is its anatomy — the icon, a title band, two buttons with their
+/// real labels — and two dense paragraphs of small type inside the rehearsal
+/// only sent the eye reading the words instead of the shape. The sentences are
+/// "close enough" as bars, exactly as the Settings mock's rows already were.
+///
+/// `widths` is the ragged run, longest first is NOT required — write the shape
+/// you want. Everything is leading-aligned, because the real copy is.
+func demoGistBlock(widths: [CGFloat], height: CGFloat, spacing: CGFloat,
+                   fill: NSColor = .tertiaryLabelColor) -> NSStackView {
+    let stack = NSStackView(views: widths.map {
+        DemoGreekBarView(width: $0, height: height, fill: fill)
+    })
+    stack.orientation = .vertical
+    stack.alignment = .leading
+    stack.spacing = spacing
+    stack.translatesAutoresizingMaskIntoConstraints = false
+    return stack
 }
 
 /// A tinted SF Symbol sized in points — a badge's glyph, a Help button's
@@ -688,30 +859,41 @@ func demoIconAsAThirdPartyProcessSeesIt() -> NSImage {
 /// its granted state.
 ///
 /// **The anatomy is the point.** A dialog the user doesn't recognise is worth
-/// nothing, and every part below is one the real one is identified by. A tall
+/// nothing, and every part below is one the real one is identified by. A
 /// portrait card, everything LEFT-aligned under an icon row:
 ///
-/// 1. an icon tile — the app's own for a content-capture grant, a blue system
-///    tile for a capability grant (see ``iconView(for:)``) — with the blue
+/// 1. an icon tile — the app's own for a content-capture grant, a system tile
+///    for a capability grant (see ``iconView(for:)``) — with the
 ///    `hand.raised.fill` badge overlapping its bottom-trailing corner, the
 ///    marker that says *privacy prompt*;
 /// 2. a small grey Help button in the opposite corner;
-/// 3. the bold title, wrapping over two or three lines;
-/// 4. the app's own Info.plist purpose string as the body, in
-///    `secondaryLabelColor`;
-/// 5. two EQUAL, NEUTRAL capsules filling the width — there is no accent-filled
-///    default button in this dialog any more.
+/// 3. a heavier two-bar title band;
+/// 4. a lighter gist block where the purpose string goes;
+/// 5. two EQUAL capsules filling the width, carrying their REAL labels — the
+///    confirming one MARKED (brighter fill, thin ring), "Don't Allow" ghosted.
 ///
-/// Drawn at ~0.85 of the real 283 × 340 pt card: the closest to life size that
-/// leaves the whole thing, at real proportions, inside the pane's fixed surface.
-/// Nothing is greeked — the purpose string is the sentence the user will
-/// actually read, so it is the one thing the mock cannot fake.
+/// The copy is abstracted but the colour is TRUE (owner decision 2026-08-13,
+/// reversing the 2026-08-12 desaturation) — see
+/// ``demoGistBlock(widths:height:spacing:fill:)`` for the copy and
+/// ``DemoSystemColor/systemBlue`` for the colour. What the copy abstraction
+/// buys is the CARD: with the two paragraphs gone it fits the preview frame's
+/// real 278 pt at 240 tall, where
+/// the near-life-size drawing was being cropped by ~50 pt at the bottom — the
+/// buttons the rehearsal exists to point at were the part going off the edge.
 final class DemoPromptMockView: DemoMockView {
 
-    static let size = NSSize(width: 240, height: 288)
+    /// PORTRAIT, like the dialog it mimics. macOS's privacy card is taller than
+    /// it is wide (roughly 0.8 w∶h — icon, then a title, then a four-line
+    /// purpose string stacked above the buttons), and this was drawn wider than
+    /// tall, which read as a different KIND of window (owner, 2026-08-13: "too
+    /// wide and not tall enough"). The width floor is the button row: two
+    /// side-by-side 12 pt labels, and "Don't Allow" is the long one — go much
+    /// under 228 and the CTA words, which must stay true, start truncating.
+    /// The height ceiling is ``DemoPaneView/surfaceSize`` (278) less a margin.
+    static let size = NSSize(width: 228, height: 264)
     /// Content inset on all four sides.
-    private static let inset: CGFloat = 16
-    private static let iconSide: CGFloat = 56
+    private static let inset: CGFloat = 17
+    private static let iconSide: CGFloat = 60
     private static let badgeSide: CGFloat = 20
     private static let helpSide: CGFloat = 18
     private static var contentWidth: CGFloat { size.width - inset * 2 }
@@ -741,7 +923,7 @@ final class DemoPromptMockView: DemoMockView {
         // The privacy marker: a blue hand badge overlapping the icon's
         // bottom-trailing corner. It is what distinguishes this dialog from any
         // other alert at a glance, so it is drawn before anything else is.
-        let badge = DemoDotView(diameter: Self.badgeSide, fill: DemoSystemColor.accent)
+        let badge = DemoDotView(diameter: Self.badgeSide, fill: DemoSystemColor.systemBlue)
         let badgeGlyph = demoGlyph("hand.raised.fill", pointSize: 9,
                                    weight: .semibold, color: .white)
 
@@ -749,21 +931,22 @@ final class DemoPromptMockView: DemoMockView {
         let helpGlyph = demoGlyph("questionmark", pointSize: 9,
                                   weight: .semibold, color: .secondaryLabelColor)
 
-        // The real dialog's 15 pt title, taken down by this mock's scale and
-        // rounded UP rather than down — these two blocks are the only things in
-        // here the user actually reads, and the 9 pt floor is a floor, not a
-        // target.
-        let title = demoParagraph(Self.askText(for: step),
-                                  font: .boldSystemFont(ofSize: 14),
-                                  color: .labelColor, width: Self.contentWidth)
-        let body = demoParagraph(Self.bodyText(for: step),
-                                 font: .systemFont(ofSize: 11),
-                                 color: .secondaryLabelColor, width: Self.contentWidth)
+        // Where the real dialog's title and purpose string were. Two tiers, so
+        // the band still reads as a bold heading over lighter body: the title's
+        // bars are taller, darker and nearly full width; the body's are thinner
+        // and ragged.
+        let title = demoGistBlock(widths: [Self.contentWidth, Self.contentWidth * 0.58],
+                                  height: 6, spacing: 8, fill: .secondaryLabelColor)
+        let body = demoGistBlock(widths: [Self.contentWidth, Self.contentWidth,
+                                          Self.contentWidth, Self.contentWidth * 0.46],
+                                 height: 4, spacing: 7)
 
-        // Two EQUAL neutral capsules filling the content width: refusal on the
-        // left, the confirming one on the right.
+        // Two EQUAL capsules filling the content width: the refusal on the left,
+        // ghosted, and the confirming one on the right, MARKED — the whole
+        // reason the rehearsal is on screen is to say which of the two to press.
         let deny = DemoPushButtonView(title: "Don't Allow")
-        confirmButton = DemoPushButtonView(title: Self.confirmTitle(for: step))
+        confirmButton = DemoPushButtonView(title: Self.confirmTitle(for: step),
+                                           emphasis: .correct)
         let buttons = NSStackView(views: [deny, confirmButton])
         buttons.orientation = .horizontal
         buttons.spacing = 8
@@ -784,10 +967,9 @@ final class DemoPromptMockView: DemoMockView {
         check.contentTintColor = .systemGreen
         check.translatesAutoresizingMaskIntoConstraints = false
 
-        let capability = NSTextField(labelWithString: Self.grantedText(for: step))
-        capability.font = .systemFont(ofSize: 13, weight: .medium)
-        capability.textColor = .labelColor
-        capability.alignment = .center
+        // The checkmark already says "granted"; the line under it is a gist bar
+        // like every other line inside a mock.
+        let capability = DemoGreekBarView(width: 116, height: 5, fill: .secondaryLabelColor)
 
         grantedStack.orientation = .vertical
         grantedStack.alignment = .centerX
@@ -867,16 +1049,26 @@ final class DemoPromptMockView: DemoMockView {
         applySettledState()
     }
 
-    /// The tile in the dialog's top-left corner. macOS does NOT always put the
-    /// asking app's icon there: the app's own icon appears for the grants that
-    /// are about capturing that app's content (System Audio), while the
-    /// CAPABILITY grants show a generic SYSTEM tile — the same one for every
-    /// app. Verified from the real Local Network dialog, which draws the
-    /// Network pane's blue globe rather than Audiouter's icon. The badge, the
-    /// size and the slot are identical either way; only the tile's contents
-    /// change.
+    /// The tile in the dialog's top-left corner. macOS does NOT put the asking
+    /// app's icon there: every grant that reaches this dialog leads with a
+    /// SYSTEM tile — the same one for every app, in the colour of the thing
+    /// being asked for. Verified from the real dialogs (owner screenshots and a
+    /// live run, 2026-08-11): Local Network draws the Network pane's blue globe
+    /// and System Audio draws macOS's RED RECORD glyph — NOT Audiouter's icon,
+    /// which is what this table used to return for it. The badge, the size and
+    /// the slot are identical either way; only the tile's contents change.
+    /// `.remoteControl` and `.speakerSync` never reach this mock (one raises the
+    /// Accessibility alert, the other has no dialog at all) and keep the app
+    /// icon as the safe default for a branch nothing takes.
     private static func iconView(for step: SetupStep) -> NSView {
         switch step {
+        // The live-confirmed red record tile: macOS leads its system-audio ask
+        // with the recording mark, not with the asking app.
+        case .audio:
+            return systemTile(fill: DemoSystemColor.recordTile) {
+                demoGlyph("record.circle", pointSize: iconSide * 0.55,
+                          weight: .regular, color: .white)
+            }
         case .localNetwork:
             return systemTile { demoGlyph("network", pointSize: iconSide * 0.55,
                                           weight: .regular, color: .white) }
@@ -887,13 +1079,11 @@ final class DemoPromptMockView: DemoMockView {
         // hand-drawn — see `DemoBluetoothGlyphView`.
         case .bluetooth:
             return systemTile { DemoBluetoothGlyphView(size: iconSide * 0.55, color: .white) }
-        // System Audio is a content-capture grant and really does show the
-        // app's icon — but the DIALOG'S icon, which a separate system process
-        // draws from Launch Services, not this process's own fresher
-        // `NSApp.applicationIconImage` (see `demoIconAsAThirdPartyProcessSeesIt`).
-        // The other two steps never reach this mock; the app icon is the safe
-        // default for them.
-        case .audio, .remoteControl, .speakerSync:
+        // Neither step reaches this mock. When the app icon IS drawn it is the
+        // DIALOG'S icon — the one a separate system process reads out of Launch
+        // Services, not this process's own fresher `NSApp.applicationIconImage`
+        // (see `demoIconAsAThirdPartyProcessSeesIt`).
+        case .remoteControl, .speakerSync:
             let icon = NSImageView()
             icon.image = demoIconAsAThirdPartyProcessSeesIt()
             icon.imageScaling = .scaleProportionallyUpOrDown
@@ -902,15 +1092,18 @@ final class DemoPromptMockView: DemoMockView {
         }
     }
 
-    /// A macOS system-pane tile: a blue rounded square carrying one white
-    /// glyph, drawn at the app icon's size so the badge lands where it always
-    /// does. Corner and glyph are fractions of the side rather than points, so
+    /// A macOS system-pane tile: a rounded square carrying one white glyph,
+    /// drawn at the app icon's size so the badge lands where it always does.
+    /// Corner and glyph are fractions of the side rather than points, so
     /// changing `iconSide` alone keeps the tile in proportion; both are matched
-    /// by eye to the Local Network screenshot, not measured. `glyph` is a
-    /// builder rather than a plain view so a caller can hand it a plain SF
-    /// Symbol OR a hand-drawn one (Bluetooth's rune has no symbol to name).
-    private static func systemTile(glyph: () -> NSView) -> NSView {
-        let tile = DemoPillView(radius: iconSide * 0.23, fill: DemoSystemColor.accent)
+    /// by eye to the Local Network screenshot, not measured. `fill` is the
+    /// pane's own colour — blue for the capability panes, red for recording.
+    /// `glyph` is a builder rather than a plain view so a caller can hand it a
+    /// plain SF Symbol OR a hand-drawn one (Bluetooth's rune has no symbol to
+    /// name).
+    private static func systemTile(fill: NSColor = DemoSystemColor.systemBlue,
+                                   glyph: () -> NSView) -> NSView {
+        let tile = DemoPillView(radius: iconSide * 0.23, fill: fill)
         let mark = glyph()
         tile.addSubview(mark)
         NSLayoutConstraint.activate([
@@ -979,75 +1172,12 @@ final class DemoPromptMockView: DemoMockView {
 
     // MARK: Copy
 
-    /// The dialog's TITLE, per step — quoted app name, sentence case, full stop.
-    /// It wraps on its own now that the layout is left-aligned; a hard line
-    /// break would fight the wrap at any other text size.
-    static func askText(for step: SetupStep) -> String {
-        switch step {
-        // Verbatim, because macOS composes this one from the permission itself
-        // and the owner checked it against the real dialog.
-        case .audio:         return "“Audiouter” would like access to record your system audio."
-        // Local Network is the odd one out: macOS phrases it as a QUESTION
-        // opening on "Allow", not the "would like to…" pattern. Verbatim from
-        // the real dialog.
-        case .localNetwork:  return "Allow “Audiouter” to find devices on local networks?"
-        case .bluetooth:     return "“Audiouter” would like to use Bluetooth."
-        // Neither of these reaches this mock: Remote Control raises the system
-        // ALERT (``DemoSystemAlertMockView``), which words its own ask, and
-        // Speaker Sync has no prompt at all. Kept so the table stays exhaustive
-        // and readable.
-        case .remoteControl: return "“Audiouter” would like to control this Mac."
-        case .speakerSync:   return "“Audiouter” would like to run in the background."
-        }
-    }
-
-    /// The dialog's BODY: the app's own purpose string, which is exactly what
-    /// macOS puts in the dialog — not a paraphrase. The first three are
-    /// word-for-word the `*_USAGE` strings `scripts/make-app.sh` stamps into the
-    /// bundle's Info.plist; change one there and change it here, because this
-    /// sentence is what the user reads before deciding. The last two have no
-    /// Info.plist string to quote (Accessibility's wording is the OS's own, and
-    /// Login Items has no dialog at all), so they are a likeness.
-    static func bodyText(for step: SetupStep) -> String {
-        switch step {
-        case .audio:
-            return "Audiouter needs to capture your Mac's audio so it can send it to the "
-                + "AirPlay speakers you choose. Audio goes only to those speakers — it is "
-                + "never recorded, saved, or sent anywhere else."
-        case .localNetwork:
-            return "Audiouter looks for AirPlay speakers on your local network so you can "
-                + "play your Mac's audio to them. It only finds speakers — it doesn't read "
-                + "or collect anything else about your network."
-        case .bluetooth:
-            return "Audiouter connects to Bluetooth speakers you've already paired so it can "
-                + "play your Mac's audio on them. It only reaches speakers you choose — it "
-                + "never scans for or reads anything else."
-        case .remoteControl:
-            return "Audiouter needs to control this Mac so the keys on your keyboard can "
-                + "start, pause and skip what is playing. It watches for those keys and "
-                + "nothing else."
-        case .speakerSync:
-            return "Audiouter runs a small background helper that keeps your speakers in "
-                + "step with each other. It starts with your Mac and does nothing else."
-        }
-    }
-
     /// The button the cursor presses. Every step that reaches this mock uses
     /// the same TCC-family dialog shape, and Apple's own confirming button
     /// across that family is "Allow" (verified against the real audio and
     /// Local Network dialogs) — never "OK", which was an unverified guess
     /// from before any real dialog had been checked.
     static func confirmTitle(for step: SetupStep) -> String { "Allow" }
-
-    static func grantedText(for step: SetupStep) -> String {
-        switch step {
-        case .audio:         return "Sound access allowed"
-        case .localNetwork:  return "Network access allowed"
-        case .bluetooth:     return "Bluetooth allowed"
-        case .remoteControl: return "Control allowed"
-        case .speakerSync:   return "Background use allowed"
-        }
-    }
 }
 
 // MARK: - System alert mock
@@ -1064,15 +1194,20 @@ final class DemoPromptMockView: DemoMockView {
 ///
 /// 1. LANDSCAPE, with a small ~12 pt corner, not the card's tall portrait and
 ///    its ~24 pt one;
-/// 2. a plain (not bold) header line naming the access being asked for;
+/// 2. a short header BAND naming the access being asked for;
 /// 3. a full-bleed hairline DIVIDER under it — the one structural element the
 ///    privacy card has nothing like, and the fastest way to tell them apart;
-/// 4. a two-column body, gold privacy PADLOCK left and text right, the two
-///    centred against each other as a group;
-/// 5. a Help circle bottom-LEFT, and two buttons bottom-RIGHT of which the
-///    REFUSAL is the accent-filled default — the opposite emphasis from the
-///    card's two equal neutral capsules, and the reason the demo's pointer goes
-///    for the quiet button.
+/// 4. a two-column body, the privacy PADLOCK left and a gist block right, the
+///    two centred against each other as a group;
+/// 5. a Help circle bottom-LEFT, and two buttons bottom-RIGHT.
+///
+/// **The marking is the deliberate departure from the real panel.** On the real
+/// alert the REFUSAL is the accent-filled default, and drawing that faithfully
+/// put the emphasis on the one button the user must not press — the deleted
+/// warning line was what carried the correction, and with that line gone the
+/// mock has to carry it itself. So "Open System Settings" is the MARKED button
+/// here and "Deny" is a ghost: the shape still tells the two surfaces apart,
+/// and the emphasis now tells the truth about which one moves the user forward.
 ///
 /// It is a passive SURFACE, not a timeline: it draws itself and exposes the
 /// button a pointer should press, while the host two-stage mock owns the one
@@ -1080,8 +1215,8 @@ final class DemoPromptMockView: DemoMockView {
 /// pointer on screen.
 final class DemoSystemAlertMockView: NSView {
 
-    /// Fixed width; the HEIGHT comes from the copy, so a longer sentence sits
-    /// taller instead of being clipped by a magic number. 288 leaves shadow room
+    /// Fixed width; the HEIGHT comes from the content, so the gist block sets it
+    /// rather than a magic number. 288 leaves shadow room
     /// inside both hosts — the Login Items pane it stands in front of is 300.
     static let width: CGFloat = 288
     private static let inset: CGFloat = 12
@@ -1104,9 +1239,10 @@ final class DemoSystemAlertMockView: NSView {
     static let pointerRest = CGPoint(x: 66, y: 150)
 
     private let step: SetupStep
-    /// The button the demo's pointer presses — deliberately NOT the accent-filled
-    /// one. The real alert makes "Deny" the default, so the button that actually
-    /// moves the user forward is the quiet one, and the mock has to say so.
+    /// The button the demo's pointer presses, and the MARKED one — the real
+    /// alert makes "Deny" its default, so the button that actually moves the
+    /// user forward is the one the panel de-emphasises, and the mock has to say
+    /// so the other way round.
     private(set) var pressTarget: DemoPushButtonView!
 
     init(step: SetupStep) {
@@ -1124,25 +1260,22 @@ final class DemoSystemAlertMockView: NSView {
         // shape, and a big continuous corner is exactly what would blur the two.
         let panel = DemoWindowSurfaceView(radius: 12)
 
-        let header = NSTextField(labelWithString: Self.headerText(for: step))
-        header.font = .systemFont(ofSize: 11, weight: .semibold)
-        header.textColor = .labelColor
-        header.lineBreakMode = .byTruncatingTail
-        header.translatesAutoresizingMaskIntoConstraints = false
+        let header = DemoGreekBarView(width: 86, height: 5, fill: .secondaryLabelColor)
 
         let divider = NSBox()
         divider.boxType = .separator
         divider.translatesAutoresizingMaskIntoConstraints = false
 
         let icon = DemoLockIconView()
-        let ask = demoParagraph(Self.askText(for: step), font: .boldSystemFont(ofSize: 11),
-                                color: .labelColor, width: Self.textWidth)
-        let body = demoParagraph(Self.bodyText(for: step), font: .systemFont(ofSize: 10),
-                                 color: .secondaryLabelColor, width: Self.textWidth)
+        // The bold ask over the Settings instruction, as two tiers of bars.
+        let ask = demoGistBlock(widths: [Self.textWidth, Self.textWidth * 0.66],
+                                height: 5, spacing: 7, fill: .secondaryLabelColor)
+        let body = demoGistBlock(widths: [Self.textWidth, Self.textWidth * 0.52],
+                                 height: 3.5, spacing: 6)
         let text = NSStackView(views: [ask, body])
         text.orientation = .vertical
         text.alignment = .leading
-        text.spacing = 5
+        text.spacing = 8
         text.translatesAutoresizingMaskIntoConstraints = false
 
         let help = DemoDotView(diameter: Self.helpSide, fill: .quaternaryLabelColor)
@@ -1150,9 +1283,10 @@ final class DemoSystemAlertMockView: NSView {
                                   weight: .semibold, color: .secondaryLabelColor)
 
         pressTarget = DemoPushButtonView(title: "Open System Settings",
+                                         emphasis: .correct,
                                          height: Self.buttonHeight,
                                          cornerRadius: Self.buttonRadius)
-        let deny = DemoPushButtonView(title: "Deny", emphasis: .accent,
+        let deny = DemoPushButtonView(title: "Deny",
                                       height: Self.buttonHeight,
                                       cornerRadius: Self.buttonRadius)
         let buttons = NSStackView(views: [pressTarget, deny])
@@ -1248,37 +1382,6 @@ final class DemoSystemAlertMockView: NSView {
                             to: view)
     }
 
-    // MARK: Copy
-
-    /// The header line — the ACCESS being asked for, which is how macOS titles
-    /// these panels ("Accessibility Access"). Only Remote Control ever raises
-    /// this alert; the rest fall back to the name of their own pane.
-    static func headerText(for step: SetupStep) -> String {
-        switch step {
-        case .remoteControl: return "Accessibility Access"
-        case .audio, .localNetwork, .bluetooth, .speakerSync:
-            return DemoSettingsMockView.paneTitle(for: step)
-        }
-    }
-
-    /// The bold first line. Verbatim from the real Accessibility panel, with the
-    /// same quoted app-name placeholder every other mock's copy uses.
-    static func askText(for step: SetupStep) -> String {
-        switch step {
-        case .remoteControl:
-            return "“Audiouter” would like to control this computer using accessibility features."
-        case .audio, .localNetwork, .bluetooth, .speakerSync:
-            return DemoPromptMockView.askText(for: step)
-        }
-    }
-
-    /// The instruction under it: where the grant actually gets made. Verbatim
-    /// from the real Accessibility panel.
-    static func bodyText(for step: SetupStep) -> String {
-        "Grant access to this application in Privacy & Security settings, "
-            + "located in System Settings."
-    }
-
     /// The blue circular badge overlapping the padlock, if this step has one.
     ///
     /// Accessibility's is the accessibility figure — the badge is what says
@@ -1286,7 +1389,7 @@ final class DemoSystemAlertMockView: NSView {
     /// alert, so no other step earns a marker.
     private static func badge(for step: SetupStep) -> (circle: NSView, glyph: NSView)? {
         guard step == .remoteControl else { return nil }
-        return (DemoDotView(diameter: badgeSide, fill: DemoSystemColor.accent),
+        return (DemoDotView(diameter: badgeSide, fill: DemoSystemColor.systemBlue),
                 demoGlyph("accessibility", pointSize: 9, weight: .semibold, color: .white))
     }
 }
@@ -1312,6 +1415,9 @@ final class DemoSystemAlertMockView: NSView {
 /// antialiases into mush that reads as a rendering bug.
 final class DemoSettingsMockView: DemoMockView {
 
+    /// The BASE size, at `metricScale` 1. An instance draws at
+    /// ``scaledSize``; this static is what the handoff container (which nests
+    /// an unscaled stage two) sizes itself from.
     static let size = NSSize(width: 300, height: 190)
     /// The reference puts the sidebar at 80 pt (27 % of 300, deliberately less
     /// than the real 30 % so it isn't mostly empty chrome). 76 here: the longest
@@ -1321,6 +1427,19 @@ final class DemoSettingsMockView: DemoMockView {
     private static let sidebarWidth: CGFloat = 76
 
     private let step: SetupStep
+    /// Whether the SETTLED frame rests with the Audiouter switch already ON.
+    ///
+    /// The standing rule is that a pass ends where it started — the surface as
+    /// the user will FIND it, which for an ask is the switch off. This is the
+    /// one scoped amendment: a read-only BROWSE of an already-granted step is
+    /// not an ask, and showing that pane with the switch off would claim the
+    /// user still has something to flip. Ask, denied and requested all rest OFF
+    /// exactly as before.
+    private let switchRestsOn: Bool
+    /// Multiplies every point metric this view authors. The standalone pane
+    /// plays at 1.35 to fill the rehearsal-led stage; nested as the handoff's
+    /// stage two it stays at 1, where it shares a frame with the alert.
+    private let metricScale: CGFloat
     private var toggle: DemoSwitchView!
     /// Slightly smaller than the prompt mock's, in step with this mock's own
     /// tighter scale.
@@ -1330,12 +1449,26 @@ final class DemoSettingsMockView: DemoMockView {
     /// the card's first row — a cursor sitting on top of text read as a mistake.
     private let cursorPark = CGPoint(x: 110, y: 138)
 
-    init(step: SetupStep) {
+    init(step: SetupStep, switchRestsOn: Bool = false, metricScale: CGFloat = 1) {
         self.step = step
+        self.switchRestsOn = switchRestsOn
+        self.metricScale = metricScale
         super.init(frame: .zero)
         wantsLayer = true
         build()
     }
+
+    /// This instance's drawn size.
+    var scaledSize: NSSize { NSSize(width: m(Self.size.width), height: m(Self.size.height)) }
+
+    /// A point metric at this instance's scale, on the half-point grid — the
+    /// finest division AppKit lays out cleanly on a 2× display.
+    private func m(_ points: CGFloat) -> CGFloat { (points * metricScale * 2).rounded() / 2 }
+
+    /// A font size at this instance's scale, rounded DOWN to a whole point: type
+    /// sizes are whole numbers, and rounding up is what pushes a pane title into
+    /// truncation.
+    private func t(_ points: CGFloat) -> CGFloat { (points * metricScale).rounded(.down) }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
@@ -1359,8 +1492,8 @@ final class DemoSettingsMockView: DemoMockView {
         addSubview(cursor)
 
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: Self.size.width),
-            heightAnchor.constraint(equalToConstant: Self.size.height),
+            widthAnchor.constraint(equalToConstant: scaledSize.width),
+            heightAnchor.constraint(equalToConstant: scaledSize.height),
 
             shell.leadingAnchor.constraint(equalTo: leadingAnchor),
             shell.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -1370,26 +1503,28 @@ final class DemoSettingsMockView: DemoMockView {
             sidebar.leadingAnchor.constraint(equalTo: shell.leadingAnchor),
             sidebar.topAnchor.constraint(equalTo: shell.topAnchor),
             sidebar.bottomAnchor.constraint(equalTo: shell.bottomAnchor),
-            sidebar.widthAnchor.constraint(equalToConstant: Self.sidebarWidth),
+            sidebar.widthAnchor.constraint(equalToConstant: m(Self.sidebarWidth)),
 
             divider.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
             divider.topAnchor.constraint(equalTo: shell.topAnchor),
             divider.bottomAnchor.constraint(equalTo: shell.bottomAnchor),
+            // A HAIRLINE, not a metric: separators stay one point at any scale,
+            // the way macOS draws them.
             divider.widthAnchor.constraint(equalToConstant: 1),
 
-            header.leadingAnchor.constraint(equalTo: divider.trailingAnchor, constant: 12),
+            header.leadingAnchor.constraint(equalTo: divider.trailingAnchor, constant: m(12)),
             // Required, not `<=`: the title has to be clipped by the pane's own
             // edge rather than drawn past it.
-            header.trailingAnchor.constraint(equalTo: shell.trailingAnchor, constant: -12),
-            header.topAnchor.constraint(equalTo: shell.topAnchor, constant: 14),
+            header.trailingAnchor.constraint(equalTo: shell.trailingAnchor, constant: -m(12)),
+            header.topAnchor.constraint(equalTo: shell.topAnchor, constant: m(14)),
 
-            card.leadingAnchor.constraint(equalTo: divider.trailingAnchor, constant: 12),
-            card.trailingAnchor.constraint(equalTo: shell.trailingAnchor, constant: -12),
-            card.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 12),
-            card.bottomAnchor.constraint(lessThanOrEqualTo: shell.bottomAnchor, constant: -12),
+            card.leadingAnchor.constraint(equalTo: divider.trailingAnchor, constant: m(12)),
+            card.trailingAnchor.constraint(equalTo: shell.trailingAnchor, constant: -m(12)),
+            card.topAnchor.constraint(equalTo: header.bottomAnchor, constant: m(12)),
+            card.bottomAnchor.constraint(lessThanOrEqualTo: shell.bottomAnchor, constant: -m(12)),
 
-            cursor.leadingAnchor.constraint(equalTo: leadingAnchor, constant: cursorPark.x),
-            cursor.topAnchor.constraint(equalTo: topAnchor, constant: cursorPark.y),
+            cursor.leadingAnchor.constraint(equalTo: leadingAnchor, constant: m(cursorPark.x)),
+            cursor.topAnchor.constraint(equalTo: topAnchor, constant: m(cursorPark.y)),
         ])
         applySettledState()
     }
@@ -1403,12 +1538,12 @@ final class DemoSettingsMockView: DemoMockView {
     private func makeHeader() -> NSView {
         let back = NSImageView()
         back.image = NSImage(systemSymbolName: "chevron.backward", accessibilityDescription: nil)
-        back.symbolConfiguration = .init(pointSize: 9, weight: .semibold)
+        back.symbolConfiguration = .init(pointSize: t(9), weight: .semibold)
         back.contentTintColor = .tertiaryLabelColor
         back.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let title = NSTextField(labelWithString: Self.paneTitle(for: step))
-        title.font = .systemFont(ofSize: 11, weight: .semibold)
+        title.font = .systemFont(ofSize: t(11), weight: .semibold)
         title.textColor = .labelColor
         title.lineBreakMode = .byTruncatingTail
         title.allowsDefaultTighteningForTruncation = true
@@ -1416,7 +1551,7 @@ final class DemoSettingsMockView: DemoMockView {
         let row = NSStackView(views: [back, title])
         row.orientation = .horizontal
         row.alignment = .centerY
-        row.spacing = 8
+        row.spacing = m(8)
         row.translatesAutoresizingMaskIntoConstraints = false
         return row
     }
@@ -1430,12 +1565,12 @@ final class DemoSettingsMockView: DemoMockView {
                                         radius: 6)
         toggle = DemoSwitchView()
 
-        let caption = DemoGreekBarView(width: 96)
+        let caption = DemoGreekBarView(width: m(96))
         card.addSubview(caption)
 
         let rows: [NSView] = [
-            DemoSettingsRowView.placeholder(labelWidth: 58, isOn: true),
-            DemoSettingsRowView.placeholder(labelWidth: 44, isOn: true),
+            DemoSettingsRowView.placeholder(labelWidth: m(58), isOn: true),
+            DemoSettingsRowView.placeholder(labelWidth: m(44), isOn: true),
             DemoSettingsRowView.app(name: "Audiouter", switchView: toggle),
         ]
         var previous: NSView?
@@ -1458,24 +1593,25 @@ final class DemoSettingsMockView: DemoMockView {
                     row.topAnchor.constraint(equalTo: previous.bottomAnchor),
                 ])
             } else {
-                row.topAnchor.constraint(equalTo: caption.bottomAnchor, constant: 6).isActive = true
+                row.topAnchor.constraint(equalTo: caption.bottomAnchor, constant: m(6)).isActive = true
             }
             previous = row
         }
 
         NSLayoutConstraint.activate([
-            caption.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 10),
-            caption.topAnchor.constraint(equalTo: card.topAnchor, constant: 8),
+            caption.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: m(10)),
+            caption.topAnchor.constraint(equalTo: card.topAnchor, constant: m(8)),
             previous!.bottomAnchor.constraint(equalTo: card.bottomAnchor),
         ])
         return card
     }
 
-    /// Settled: the switch OFF, cursor waiting — the pane as the user will find
-    /// it (see ``DemoPromptMockView/applySettledState()`` for why the rest state
-    /// is never the finished one).
+    /// Settled: the pane as the user will FIND it — switch off for an ask (see
+    /// ``DemoPromptMockView/applySettledState()`` for why the rest state is
+    /// never the finished one), switch ON for the browse of a step that is
+    /// already granted, where "as the user will find it" means on.
     override func applySettledState() {
-        toggle.setOn(false)
+        toggle.setOn(switchRestsOn)
         cursor.alphaValue = 1
         cursor.layer?.transform = CATransform3DIdentity
     }
@@ -1523,6 +1659,11 @@ final class DemoSettingsMockView: DemoMockView {
         case .speakerSync:   return "Login Items"
         }
     }
+
+    // MARK: Test-support hooks
+
+    /// Whether this instance's settled frame rests with the switch on.
+    var test_switchRestsOn: Bool { switchRestsOn }
 }
 
 // MARK: - Two-stage first-ask mock
@@ -1682,30 +1823,28 @@ final class DemoSettingsHandoffMockView: DemoMockView {
 /// rule); light/dark re-stamps arrive through `updateLayer`.
 final class DemoSettledMockView: NSView {
 
-    /// Fills the demo surface exactly: the ripple needs the whole stage. The
-    /// rounded-corner clip keeps the wave off the canvas behind the surface,
-    /// and the ring layers' feather mask (below) makes sure nothing visible
-    /// ever reaches that clip's hard edge. Still the pane's fixed geometry —
-    /// the surface itself never resizes.
+    /// Fills the demo surface exactly: the ripple needs the whole stage. This
+    /// view draws WITHOUT a clip of its own — the wave leaves the stage and
+    /// keeps going into the (chromeless) hero pane, which is the whole point
+    /// of the moment. Still the pane's fixed geometry — the surface itself
+    /// never resizes.
     static let size = DemoPaneView.surfaceSize
 
     private static let iconSide: CGFloat = 88
     /// Rings start just outside the icon and travel PAST every frame edge —
     /// full-stage energy, derived (never authored) in ``ringEndScale()``. The
-    /// feather band below, not a clearance, is what keeps the exit soft.
+    /// ring's own fade to zero, not a mask, is what keeps the exit soft.
     private static let ringBaseDiameter: CGFloat = 104
-    /// Width of the soft band inside each stage edge over which the RING
-    /// layers' feather mask fades from opaque to clear, so a wave crossing the
-    /// frame dissolves instead of being truncated by the rounded-corner clip.
-    /// History, both owner calls: the hard truncation was the original live
-    /// bug, and the first fix — shrinking the travel to die inside the frame —
-    /// read as "one little line that goes out". The feather delivers both
-    /// qualities: big travel AND no hard edge. Only the rings are masked
-    /// (`ringHost`); the aura and text sit outside it, untouched.
-    private static let ringFeatherWidth: CGFloat = 24
     /// Seconds into the shot each ring launches — staggered, like a broadcast.
     private static let ringStarts: [TimeInterval] = [0.10, 0.28, 0.46]
     private static let ringTravelDuration: TimeInterval = 1.05
+    /// Uniform tempo for the whole finale. Every beat's delay AND duration is
+    /// multiplied by this in ``addCelebrationAnimation``, so the choreography
+    /// stays in proportion: 1.0 is the authored speed, higher is slower
+    /// (owner, live-tuned to 1.5625 — a calm, unhurried celebration). razor:
+    /// the single tempo knob — retune here, never per-beat, or the stagger and
+    /// the travel drift out of sync.
+    private static let celebrationTimeScale: TimeInterval = 1.5625
     private static let auraDiameter: CGFloat = 184
 
     private let icon = NSImageView()
@@ -1714,19 +1853,15 @@ final class DemoSettledMockView: NSView {
     // 2026-08-11): the header keeps its welcome subtitle in every state.
     private let line = NSTextField(labelWithString: "Your Mac's sound can reach every room.")
     /// The static warm aura behind the icon — part of the RESTING frame, not
-    /// the celebration: its model opacity is 1, and only its entrance animates.
+    /// the celebration. It is born HIDDEN (model opacity 0) and revealed to its
+    /// resting opacity of 1 by ``layout()``, but ONLY once the icon has a real
+    /// centre: unlike the rings (whose model opacity 0 keeps them safe on their
+    /// own), a visible aura painted before layout resolves the centre blooms
+    /// from the bottom-left origin — the launch bug the recording caught. Only
+    /// its entrance animates from there.
     private let auraLayer = CAGradientLayer()
     /// The ripple rings. Model opacity 0 — they exist only during the shot.
     private let ringLayers: [CAShapeLayer]
-    /// The rings' container, and the ONLY thing the feather mask applies to:
-    /// the resting frame (aura, icon, text — rings at opacity 0) is outside it
-    /// by construction, so the mask cannot alter the settled render. Static in
-    /// the view's own coordinate space; the rings move by transform inside it.
-    private let ringHost = CALayer()
-    /// The feather: a pre-drawn PURE-ALPHA image (opaque interior, fading to
-    /// clear over the last `ringFeatherWidth` points before each edge), so it
-    /// stamps no token colours and needs none of the re-stamp observers.
-    private let featherMask = CALayer()
 
     /// One-shot bookkeeping: `celebrationConsumed` is "the moment happened"
     /// (played, or skipped under Reduce Motion) and is what stops a repaint
@@ -1734,6 +1869,20 @@ final class DemoSettledMockView: NSView {
     /// once-only assertion.
     private(set) var celebrationConsumed = false
     private(set) var celebrationRunCount = 0
+
+    /// Set when `playCelebration()` fired before layout had resolved the icon's
+    /// frame: the shot is SPENT (consumed) at the call, but its launch waits for
+    /// the first real `layout()` so the ripple blooms from the icon centre, not
+    /// the collapsed bottom-left origin the first synchronous play would see.
+    private var pendingLaunch = false
+
+    /// The view whose edges the RINGS must be fully faded out before they cross
+    /// — the window-spanning host (the Setup window's whole content), wired by
+    /// the pane. It lets the wave sweep the entire window yet never visibly
+    /// terminate against a boundary; the rings pass faintly over the left spine
+    /// on the way out, already dissolving by then. `nil` (a mock built with no
+    /// host wired — a headless unit test) falls back to the stage-bound travel.
+    weak var rippleBoundsView: NSView?
 
     init() {
         ringLayers = Self.ringStarts.map { _ in CAShapeLayer() }
@@ -1751,10 +1900,9 @@ final class DemoSettledMockView: NSView {
     }
 
     private func build() {
-        layer?.masksToBounds = true
-        layer?.cornerRadius = Tokens.Layout.groupedSectionCornerRadius
-        layer?.cornerCurve = .continuous
-
+        // NOTHING here clips: no `masksToBounds`, no corner rounding, no mask.
+        // This card is ours and draws unframed, and the ripple has to cross
+        // the stage edge rather than end at it.
         icon.image = NSApp?.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.translatesAutoresizingMaskIntoConstraints = false
@@ -1778,16 +1926,14 @@ final class DemoSettledMockView: NSView {
         // Under the views: aura at the very back, rings between it and the
         // icon. Sublayers this view owns, never subviews — nothing else
         // manages their geometry, so the celebration can move them freely.
-        // The rings ride inside `ringHost` so the feather mask reaches them
-        // and nothing else.
         layer?.insertSublayer(auraLayer, at: 0)
-        ringHost.mask = featherMask
-        layer?.insertSublayer(ringHost, above: auraLayer)
-        for ring in ringLayers { ringHost.addSublayer(ring) }
+        for ring in ringLayers { layer?.insertSublayer(ring, above: auraLayer) }
 
         auraLayer.type = .radial
         auraLayer.startPoint = CGPoint(x: 0.5, y: 0.5)
         auraLayer.endPoint = CGPoint(x: 1, y: 1)
+        // Hidden until layout sits it on the icon centre — see the property doc.
+        auraLayer.opacity = 0
         for ring in ringLayers {
             ring.fillColor = nil
             ring.lineWidth = 2
@@ -1831,9 +1977,14 @@ final class DemoSettledMockView: NSView {
         // sidebar wash and the mock switch's off track already use.
         let glow = Tokens.Color.glow
         let isDark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        let peak: CGFloat = isDark ? 0.32 : 0.50
+        // The peak is scaled PER APPEARANCE: light glow is a paper-soft hue
+        // (floor-exempt by spec) with nothing but alpha to read as an aura at
+        // all, so it carries a much higher one — the same call-site alpha dial
+        // the sidebar wash and the mock switch's off track already use. The
+        // finale draws unframed, with no well fill under it to lift it.
+        let peak: CGFloat = isDark ? 0.40 : 0.70
         auraLayer.colors = [glow.withAlphaComponent(peak).cgColor,
-                            glow.withAlphaComponent(peak * 0.38).cgColor,
+                            glow.withAlphaComponent(peak * 0.46).cgColor,
                             glow.withAlphaComponent(0).cgColor]
         auraLayer.locations = [0, 0.55, 1]
         let gold = Tokens.Color.gold.cgColor
@@ -1846,20 +1997,15 @@ final class DemoSettledMockView: NSView {
         // knows. Actions disabled: repositioning decoration is never a slide.
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        let centre = icon.superview.map {
-            convert(NSPoint(x: icon.frame.midX, y: icon.frame.midY), from: $0)
-        } ?? .zero
+        let centre = iconCentre
         auraLayer.bounds = CGRect(x: 0, y: 0, width: Self.auraDiameter, height: Self.auraDiameter)
         auraLayer.position = centre
-        // The ring host and its feather mask track the view's bounds the same
-        // way (the host's origin is the view's, so ring positions below are
-        // still in view coordinates). The mask image is redrawn only when the
-        // size actually changes — in practice once, the stage is fixed.
-        ringHost.frame = bounds
-        if bounds.size != .zero, featherMask.frame.size != bounds.size {
-            featherMask.contents = Self.featherMaskImage(size: bounds.size)
-        }
-        featherMask.frame = CGRect(origin: .zero, size: bounds.size)
+        // Commit the aura's resting opacity ONLY now that it sits on a real
+        // centre — actions disabled, so no slide and no un-suppressed fade. Held
+        // at 0 (from `build()`) through every layout that hasn't resolved the
+        // icon yet, so it can never paint at the bottom-left origin; the bloom's
+        // own 0→1 keyframe still owns the animated entrance from here.
+        if hasResolvedIconCentre { auraLayer.opacity = 1 }
         let ringRect = CGRect(x: 0, y: 0, width: Self.ringBaseDiameter, height: Self.ringBaseDiameter)
         for ring in ringLayers {
             ring.bounds = ringRect
@@ -1867,47 +2013,33 @@ final class DemoSettledMockView: NSView {
             ring.path = CGPath(ellipseIn: ringRect.insetBy(dx: 1, dy: 1), transform: nil)
         }
         CATransaction.commit()
+
+        // A one-shot deferred because `playCelebration()` ran before this view
+        // had a resolved icon fires now — the first layout with a real centre,
+        // exactly once. Every later play (and Replay) is already laid out and
+        // launches straight from `playCelebration()`.
+        if pendingLaunch, hasResolvedIconCentre {
+            pendingLaunch = false
+            launchCelebration()
+        }
     }
 
-    /// The feather mask's image: alpha 1 in the interior, ramping to 0 over
-    /// the last `ringFeatherWidth` points before each edge — one horizontal
-    /// and one vertical ramp multiplied together (`.destinationIn`), which
-    /// rounds the falloff in the corners like a blur would. A rectangular
-    /// per-edge feather, NOT a radial one centred on the icon: the icon sits
-    /// above the vertical middle, so its edge distances differ by ~68 pt
-    /// (top ~146, bottom ~214) — a radial fade reaching clear at the nearest
-    /// edge would kill the wave stage-wide at the top's distance (the "one
-    /// little line" failure again), and one reaching the farthest would still
-    /// be half-opaque AT the top edge, i.e. the original hard cut. Distance-
-    /// to-nearest-edge is the only shape that is soft at every edge and
-    /// opaque everywhere mid-stage. Pure alpha, no colours to re-stamp.
-    private static func featherMaskImage(size: CGSize) -> CGImage? {
-        let scale: CGFloat = 2   // enough for a soft ramp on any backing store
-        guard let ctx = CGContext(
-            data: nil, width: Int(size.width * scale), height: Int(size.height * scale),
-            bitsPerComponent: 8, bytesPerRow: 0,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
-        ctx.scaleBy(x: scale, y: scale)
-        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
-        ctx.fill(CGRect(origin: .zero, size: size))
-        let colors = [CGColor(red: 1, green: 1, blue: 1, alpha: 0),
-                      CGColor(red: 1, green: 1, blue: 1, alpha: 1),
-                      CGColor(red: 1, green: 1, blue: 1, alpha: 1),
-                      CGColor(red: 1, green: 1, blue: 1, alpha: 0)]
-        ctx.setBlendMode(.destinationIn)
-        for vertical in [false, true] {
-            let length = vertical ? size.height : size.width
-            let inset = ringFeatherWidth / length
-            guard let gradient = CGGradient(
-                colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors as CFArray,
-                locations: [0, inset, 1 - inset, 1]) else { return nil }
-            ctx.drawLinearGradient(
-                gradient, start: .zero,
-                end: vertical ? CGPoint(x: 0, y: size.height) : CGPoint(x: size.width, y: 0),
-                options: [])
-        }
-        return ctx.makeImage()
+    /// The icon's centre in this view's coordinates — where the aura and rings
+    /// anchor. Collapses to ~`.zero` (bottom-left) until layout resolves the
+    /// icon's frame; ``hasResolvedIconCentre`` is the guard against reading it
+    /// too early.
+    private var iconCentre: CGPoint {
+        icon.superview.map {
+            convert(NSPoint(x: icon.frame.midX, y: icon.frame.midY), from: $0)
+        } ?? .zero
+    }
+
+    /// Whether layout has given the icon a real frame. `DemoSettledMockView`
+    /// does not override `isFlipped`, so an unresolved icon frame leaves the
+    /// centre at the bottom-left origin — launching the ripple from there is the
+    /// first-play bug this guards.
+    private var hasResolvedIconCentre: Bool {
+        bounds.width > 0 && icon.frame.width > 0 && icon.frame.height > 0
     }
 
     // MARK: The one-shot
@@ -1916,23 +2048,51 @@ final class DemoSettledMockView: NSView {
     /// is already the model state, so there is nothing else to apply.
     func skipCelebration() { celebrationConsumed = true }
 
-    /// The one-shot: rings ripple out staggered, the aura blooms, the icon
-    /// takes a small press of emphasis, and the text lands with the ripple.
+    /// Spend the one-shot. The shot is CONSUMED here (so a repaint can never
+    /// re-fire it), but it only LAUNCHES once the icon has a real frame: the
+    /// shot starts ON the step crossfade, before the enclosing pass has
+    /// positioned this view, so its centres are still collapsed at the
+    /// bottom-left origin. When that is the case the launch is DEFERRED to the
+    /// first real ``layout()``; every later play (and Replay) is already laid
+    /// out and launches immediately.
     func playCelebration() {
         guard !celebrationConsumed else { return }
         celebrationConsumed = true
+        guard hasResolvedIconCentre else {
+            pendingLaunch = true
+            needsLayout = true
+            return
+        }
+        launchCelebration()
+    }
+
+    /// The one-shot itself: rings ripple out staggered, the aura blooms, the
+    /// icon takes a small press of emphasis, and the text lands with the ripple.
+    /// Only ever reached with a resolved icon frame — from ``playCelebration()``
+    /// when the view is already laid out, or from ``layout()`` when a deferred
+    /// launch comes due — so the ripple always blooms from the icon centre.
+    private func launchCelebration() {
         celebrationRunCount += 1
-        layoutSubtreeIfNeeded()   // ring/aura geometry comes from layout
 
         let endScale = ringEndScale()
+        let fadeFraction = rippleFadeFraction(endScale: endScale)
         for (ring, start) in zip(ringLayers, Self.ringStarts) {
-            addRipple(to: ring, delay: start, endScale: endScale)
+            addRipple(to: ring, delay: start, endScale: endScale, fadeFraction: fadeFraction)
         }
 
-        let bloom = CABasicAnimation(keyPath: "opacity")
-        bloom.fromValue = 0
-        bloom.toValue = 1
-        addCelebrationAnimation(bloom, to: auraLayer, delay: 0.12, duration: 0.6, key: "bloom")
+        // The aura swells past its resting size as it fades up, then settles
+        // back onto it. The overshoot is in SCALE, never opacity: the settled
+        // alpha IS the model value, so the shot still ends exactly on the
+        // resting frame an interrupted or headless run renders.
+        let bloomFade = CAKeyframeAnimation(keyPath: "opacity")
+        bloomFade.values = [0, 1, 1]
+        bloomFade.keyTimes = [0, 0.45, 1]
+        let bloomSwell = CAKeyframeAnimation(keyPath: "transform.scale")
+        bloomSwell.values = [0.86, 1.16, 1.0]
+        bloomSwell.keyTimes = [0, 0.45, 1]
+        let bloom = CAAnimationGroup()
+        bloom.animations = [bloomFade, bloomSwell]
+        addCelebrationAnimation(bloom, to: auraLayer, delay: 0.12, duration: 0.7, key: "bloom")
 
         let pop = CAKeyframeAnimation(keyPath: "transform.scale")
         pop.values = [0.92, 1.04, 1.0]
@@ -1944,38 +2104,86 @@ final class DemoSettledMockView: NSView {
         addTextLanding(line, delay: 0.48)
     }
 
-    /// How far a ring scales before it dies: enough that its leading edge
-    /// reaches the icon centre's real distance to the FARTHEST surface edge —
-    /// a wave that washes the WHOLE stage and deliberately crosses the frame
-    /// on every side, with the feather mask (not a clearance) dissolving the
-    /// crossing. Derived per play rather than authored, so a resized surface
-    /// or re-balanced stack keeps full-stage travel without re-introducing a
-    /// hard clip. (Aiming at the NEAREST edge instead was the over-correction
-    /// the owner rejected as "one little line that goes out".) At scale 1 the
-    /// stroke's outer edge sits at `ringBaseDiameter / 2` (the path is inset
-    /// 1 pt and half the 2 pt stroke rides back outside it), and the whole
-    /// assembly scales together.
+    /// How far a ring scales before it dies. It fills the whole WINDOW now, not
+    /// the 418×278 stage or even the hero panel (which gained almost nothing over
+    /// the stage): the leading edge travels to the window's farthest
+    /// icon-centre-to-edge distance (``rippleBoundsView``), so the wave washes
+    /// the entire Setup window rather than halting at the invisible stage
+    /// boundary the owner saw partway across it. Nothing along the way clips —
+    /// the chromeless well, the unmasked hero panel and the canvas all pass the
+    /// ring through — and it is already fully faded before the NEAREST window
+    /// edge (``rippleFadeFraction(endScale:)``), so no side ever shows it hit a
+    /// wall. Derived per play rather than authored, so a resized window keeps
+    /// full travel. With no host wired (a headless unit test) it falls back to
+    /// the old stage-bound cap. At scale 1 the stroke's outer edge sits at
+    /// `ringBaseDiameter / 2` (the path is inset 1 pt and half the 2 pt stroke
+    /// rides back outside it), and the whole assembly scales together.
     private func ringEndScale() -> CGFloat {
+        let base = Self.ringBaseDiameter / 2
+        if let radii = boundsEdgeRadii() {
+            return max(radii.farthest / base, 1)
+        }
         let centre = ringLayers.first?.position ?? .zero
         let farthestEdge = max(centre.x, bounds.width - centre.x,
                                centre.y, bounds.height - centre.y)
-        return max(farthestEdge / (Self.ringBaseDiameter / 2), 1)
+        return max(farthestEdge / base, 1)
     }
 
-    /// One ring's flight: scale out to death while the stroke swells and fades
-    /// — a wave dissipating, not a shape resizing.
-    private func addRipple(to ring: CAShapeLayer, delay: TimeInterval, endScale: CGFloat) {
+    /// The travel FRACTION at which a ring's opacity must already be 0 — the
+    /// point where its radius equals the window's NEAREST icon-centre-to-edge
+    /// distance. The nearest edge governs, so no side ever shows a ring hitting
+    /// a wall; the ring keeps expanding (invisibly) past it, out to
+    /// ``ringEndScale()``. Because the window is so much bigger than the panel,
+    /// this fraction now spreads the fade over a far longer travel, which is what
+    /// keeps the pass over the left spine a soft glow rather than a hard line.
+    /// `1` (no compression — the old full-length fade) when no host is wired.
+    private func rippleFadeFraction(endScale: CGFloat) -> CGFloat {
+        let base = Self.ringBaseDiameter / 2
+        guard let radii = boundsEdgeRadii(), endScale > 1 else { return 1 }
+        let scaleAtNearest = radii.nearest / base
+        let fraction = (scaleAtNearest - 1) / (endScale - 1)
+        return min(max(fraction, 0.05), 1)
+    }
+
+    /// The icon centre's distances to the window-spanning host's four edges, in
+    /// this view's coordinates (`rippleBoundsView` converted into `self`). `nil`
+    /// when no host is wired. Distances are clamped at 0 so a centre that
+    /// momentarily resolves outside the host can't produce a negative radius.
+    private func boundsEdgeRadii() -> (nearest: CGFloat, farthest: CGFloat)? {
+        guard let host = rippleBoundsView else { return nil }
+        let centre = iconCentre
+        let rect = convert(host.bounds, from: host)
+        let edges = [centre.x - rect.minX, rect.maxX - centre.x,
+                     centre.y - rect.minY, rect.maxY - centre.y].map { max($0, 0) }
+        guard let nearest = edges.min(), let farthest = edges.max(), farthest > 0 else { return nil }
+        return (nearest, farthest)
+    }
+
+    /// One ring's flight: scale out to death while the stroke swells and fades.
+    /// The fade completes at `fadeFraction` of the travel — the moment the ring
+    /// reaches the window's nearest edge — then holds 0 while the ring keeps
+    /// expanding to fill the window, so a wave dissipates in open air and never
+    /// visibly terminates against a boundary. `fadeFraction == 1` restores the
+    /// old full-length fade (the no-host fallback), byte for byte.
+    private func addRipple(to ring: CAShapeLayer, delay: TimeInterval,
+                           endScale: CGFloat, fadeFraction: CGFloat) {
         let scale = CABasicAnimation(keyPath: "transform.scale")
         scale.fromValue = 1.0
         scale.toValue = endScale
-        // Rise fast, HOLD bright across the middle of the stage, then spend
-        // the whole back half of the flight fading — under the group's
-        // ease-out the ring is at the frame edges by then, so the fade
-        // finishes as the wave dies INTO the feather, never mid-stage (the
-        // old 0.55-peak ramp-down left it ghostly by the halfway mark).
         let fade = CAKeyframeAnimation(keyPath: "opacity")
-        fade.values = [0, 0.85, 0.85, 0]
-        fade.keyTimes = [0, 0.12, 0.5, 1]
+        if fadeFraction >= 1 {
+            // Rise fast, hold bright, then fade across the back half of the
+            // flight — the ring is past the stage edges by then.
+            fade.values = [0, 0.95, 0.95, 0]
+            fade.keyTimes = [0, 0.12, 0.5, 1]
+        } else {
+            // Same rise/hold/fade shape, compressed into [0, fadeFraction] so
+            // opacity is 0 by the nearest panel edge; 0 held to the end while
+            // the ring keeps growing invisibly to fill the panel.
+            let f = fadeFraction
+            fade.values = [0, 0.95, 0.95, 0, 0]
+            fade.keyTimes = [0, 0.12 * f, 0.5 * f, f, 1].map { NSNumber(value: Double($0)) }
+        }
         let flight = CAAnimationGroup()
         flight.animations = [scale, fade]
         addCelebrationAnimation(flight, to: ring, delay: delay,
@@ -2001,8 +2209,9 @@ final class DemoSettledMockView: NSView {
     /// completion so the layer lands back on its settled model value.
     private func addCelebrationAnimation(_ animation: CAAnimation, to layer: CALayer,
                                          delay: TimeInterval, duration: TimeInterval, key: String) {
-        animation.beginTime = layer.convertTime(CACurrentMediaTime(), from: nil) + delay
-        animation.duration = duration
+        animation.beginTime = layer.convertTime(CACurrentMediaTime(), from: nil)
+            + delay * Self.celebrationTimeScale
+        animation.duration = duration * Self.celebrationTimeScale
         animation.fillMode = .backwards
         animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
         layer.add(animation, forKey: key)
@@ -2012,6 +2221,69 @@ final class DemoSettledMockView: NSView {
 
     var test_headlineText: String { headline.stringValue }
     var test_lineText: String { line.stringValue }
+
+    /// The icon centre and the aura's launch anchor, for the first-play origin
+    /// regression: after a real layout the aura sits ON the icon centre, never
+    /// the bottom-left origin the first synchronous play used to bloom from.
+    var test_iconCentre: CGPoint { iconCentre }
+    var test_auraPosition: CGPoint { auraLayer.position }
+    /// The aura's MODEL opacity: 0 until layout has committed it onto the icon
+    /// centre, 1 afterwards. The transient corner-bloom the recording caught is
+    /// a pre-layout paint no headless frame can see, so this is what pins the
+    /// fix — the aura is never visible (opacity > 0) at the origin.
+    var test_auraOpacity: Float { auraLayer.opacity }
+
+    /// The nearest / farthest icon-centre-to-window-edge distances the ripple is
+    /// tuned against — `nil` with no host wired. Exposed so a test computes them
+    /// from the same real geometry the launch does.
+    var test_nearestEdgeRadius: CGFloat? { boundsEdgeRadii()?.nearest }
+    var test_farthestEdgeRadius: CGFloat? { boundsEdgeRadii()?.farthest }
+
+    /// The ripple's maximum radius (fill reach), to prove the rings now travel
+    /// PAST the 418×278 stage and the hero panel, out across the whole window.
+    var test_rippleEndRadius: CGFloat? {
+        ringEndScale(from: ringLayers.first).map { (Self.ringBaseDiameter / 2) * $0 }
+    }
+
+    /// The radius (icon-centre distance, this view's coordinates) at which each
+    /// launched ripple's opacity first reaches 0. Each must be ≤ the nearest
+    /// window edge so no ring is ever seen hitting a wall.
+    var test_rippleFadeOutRadii: [CGFloat] {
+        let base = Self.ringBaseDiameter / 2
+        return ringLayers.compactMap { ring -> CGFloat? in
+            guard let group = ring.animation(forKey: "ripple") as? CAAnimationGroup,
+                  let anims = group.animations else { return nil }
+            let scale = anims.compactMap { $0 as? CABasicAnimation }
+                .first { $0.keyPath == "transform.scale" }
+            let fade = anims.compactMap { $0 as? CAKeyframeAnimation }
+                .first { $0.keyPath == "opacity" }
+            let values = (fade?.values ?? []).compactMap { $0 as? NSNumber }.map { CGFloat(truncating: $0) }
+            let keyTimes = (fade?.keyTimes ?? []).map { CGFloat(truncating: $0) }
+            guard let endScale = (scale?.toValue as? NSNumber).map({ CGFloat(truncating: $0) }),
+                  values.count == keyTimes.count,
+                  let zeroIndex = Self.firstZeroAfterPeak(values)
+            else { return nil }
+            let scaleAtZero = 1 + keyTimes[zeroIndex] * (endScale - 1)
+            return base * scaleAtZero
+        }
+    }
+
+    /// The launched scale factor of one ring (`nil` if it has no ripple).
+    private func ringEndScale(from ring: CAShapeLayer?) -> CGFloat? {
+        guard let group = ring?.animation(forKey: "ripple") as? CAAnimationGroup,
+              let scale = group.animations?.compactMap({ $0 as? CABasicAnimation })
+                  .first(where: { $0.keyPath == "transform.scale" }),
+              let end = (scale.toValue as? NSNumber).map({ CGFloat(truncating: $0) })
+        else { return nil }
+        return end
+    }
+
+    /// Index of the first opacity keyframe that is 0 after the ring has risen to
+    /// its peak — the moment the ring goes invisible.
+    private static func firstZeroAfterPeak(_ values: [CGFloat]) -> Int? {
+        guard let peak = values.firstIndex(where: { $0 > 0 }) else { return nil }
+        return values[peak...].firstIndex(where: { $0 == 0 })
+    }
 }
 
 // MARK: - Drawn parts
@@ -2055,48 +2327,62 @@ final class DemoWindowSurfaceView: NSView {
     }
 }
 
-/// How a drawn dialog button is filled.
+/// How a drawn dialog button is marked.
+///
+/// The rehearsal's job is to say WHICH button to press, so the two cases are
+/// not "how macOS fills this button" any more — they are right answer and wrong
+/// answer. That is the one place the mock deliberately departs from the real
+/// surface: on the real Accessibility alert the refusal is the accent-filled
+/// DEFAULT, and drawing that faithfully emphasised exactly the button the user
+/// must not press.
 enum DemoButtonEmphasis {
-    /// The neutral grey both of the privacy dialog's buttons wear, and the one
-    /// the system alert's "Open System Settings" wears.
-    case neutral
-    /// Accent-filled with a white title — the alert's DEFAULT button, which on
-    /// the Accessibility panel is the refusal.
-    case accent
+    /// The button this step wants pressed: a slightly brighter fill and a thin
+    /// ring around it.
+    case correct
+    /// Every other button: a ghost — no fill, just a hairline, so it still
+    /// reads as a button without competing.
+    case ghost
 }
 
 /// A drawn dialog button.
 ///
-/// Two shapes, because the two surfaces this file mimics genuinely differ: the
-/// macOS 26 privacy dialog's are full CAPSULES and both the same grey (Liquid
-/// Glass has no accent-filled default there, and painting one would send the
-/// user looking for a blue button that won't be there), while the older system
-/// ALERT panel's are shorter rounded rects with an accent-filled default. The
-/// defaults here are the capsule, so the privacy dialog's call sites say
-/// nothing extra.
+/// Two SHAPES, because the two surfaces this file mimics genuinely differ: the
+/// macOS 26 privacy dialog's are full CAPSULES, while the older system ALERT
+/// panel's are shorter rounded rects. The defaults here are the capsule, so the
+/// privacy dialog's call sites say nothing extra. The MARKING is orthogonal to
+/// the shape — see ``DemoButtonEmphasis``.
 final class DemoPushButtonView: NSView {
 
     static let height: CGFloat = 28
     /// Air either side of the label.
     private static let labelInset: CGFloat = 10
 
+    /// The real label this button carries — the one string a mock never fakes.
+    let buttonTitle: String
     private let emphasis: DemoButtonEmphasis
     private let cornerRadius: CGFloat
 
+    /// Whether this is the button the step wants pressed.
+    var isMarked: Bool { emphasis == .correct }
+
     init(title: String,
-         emphasis: DemoButtonEmphasis = .neutral,
+         emphasis: DemoButtonEmphasis = .ghost,
          height: CGFloat = DemoPushButtonView.height,
          cornerRadius: CGFloat? = nil) {
+        self.buttonTitle = title
         self.emphasis = emphasis
         self.cornerRadius = cornerRadius ?? height / 2
         super.init(frame: .zero)
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
 
+        // The LABEL is the one thing in a mock that is never abstracted: the
+        // user has to recognise the words on the buttons when the real surface
+        // arrives, and a greeked "Don't Allow" would teach them nothing.
         let label = NSTextField(labelWithString: title)
         label.font = .systemFont(ofSize: 12)
         label.alignment = .center
-        label.textColor = emphasis == .accent ? .white : .labelColor
+        label.textColor = emphasis == .correct ? .labelColor : .secondaryLabelColor
         label.translatesAutoresizingMaskIntoConstraints = false
         addSubview(label)
         NSLayoutConstraint.activate([
@@ -2112,24 +2398,32 @@ final class DemoPushButtonView: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        layer?.backgroundColor = (emphasis == .accent ? DemoSystemColor.accent
-                                                      : DemoSystemColor.plainButton).cgColor
+        let isCorrect = emphasis == .correct
+        layer?.backgroundColor = isCorrect ? DemoSystemColor.markedButton.cgColor
+                                           : NSColor.clear.cgColor
+        // One hairline either way, so a ghost keeps a button's outline and the
+        // marked one gets its ring — the difference is the fill behind it.
+        layer?.borderWidth = 1
+        layer?.borderColor = (isCorrect ? DemoSystemColor.markedButtonRim
+                                        : DemoSystemColor.ghostButtonRim).cgColor
         layer?.cornerRadius = cornerRadius
         layer?.cornerCurve = .continuous
     }
 }
 
-/// The gold privacy PADLOCK the system alert leads with.
+/// The privacy PADLOCK the system alert leads with.
 ///
-/// `lock.fill` filled with a warm vertical gradient rather than a flat tint: the
-/// real icon is artwork with a little dimension in it, and a flat amber SF
-/// Symbol at this size reads as a toolbar glyph instead. The symbol IS the mask,
-/// so there is no second drawn shape to keep in step with it.
+/// `lock.fill` filled with a vertical gradient rather than a flat tint: the real
+/// icon is artwork with a little dimension in it, and a flat symbol at this size
+/// reads as a toolbar glyph instead. The symbol IS the mask, so there is no
+/// second drawn shape to keep in step with it. The gradient is warm GREY, not
+/// the real icon's gold — gold is spent on the CTA alone now (see
+/// ``DemoSystemColor/lockTop``).
 ///
 /// **TRAP: the mask has to be built in an image of its own.** Painting the
 /// gradient `.sourceAtop` straight into `draw(_:)` does not clip to the symbol —
 /// the view's backing store is not the empty destination that composite mode
-/// needs, and the whole icon rect comes out solid gold. Drawing the gradient
+/// needs, and the whole icon rect comes out a solid rectangle. Drawing the gradient
 /// into a fresh `NSImage` and knocking the symbol's alpha out of it with
 /// `.destinationIn` gives a surface nobody else has touched.
 final class DemoLockIconView: NSView {
@@ -2153,15 +2447,15 @@ final class DemoLockIconView: NSView {
                            width: size.width * scale,
                            height: size.height * scale)
 
-        let gold = NSImage(size: drawn.size, flipped: false) { rect in
-            // Negative angle so the LIGHTER gold is at the top, as it is on the
+        let shaded = NSImage(size: drawn.size, flipped: false) { rect in
+            // Negative angle so the LIGHTER end is at the top, as it is on the
             // real icon.
-            NSGradient(starting: DemoSystemColor.lockGoldTop,
-                       ending: DemoSystemColor.lockGoldBottom)?.draw(in: rect, angle: -90)
+            NSGradient(starting: DemoSystemColor.lockTop,
+                       ending: DemoSystemColor.lockBottom)?.draw(in: rect, angle: -90)
             symbol.draw(in: rect, from: .zero, operation: .destinationIn, fraction: 1)
             return true
         }
-        gold.draw(in: drawn)
+        shaded.draw(in: drawn)
     }
 }
 
@@ -2172,7 +2466,7 @@ final class DemoLockIconView: NSView {
 /// a vertical stem crossed by two diagonal "flags" that meet the stem at its
 /// top, middle and bottom. Verified against the real macOS Bluetooth
 /// permission dialog (owner screenshot, 2026-08-11), which is also what
-/// confirmed the tile itself is the plain system-blue `DemoSystemColor.accent`
+/// confirmed the tile itself is the plain system-blue `DemoSystemColor.systemBlue`
 /// this view is drawn on top of, not a separate measured hue.
 final class DemoBluetoothGlyphView: NSView {
 
@@ -2195,33 +2489,35 @@ final class DemoBluetoothGlyphView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         let w = bounds.width, h = bounds.height
-        let top = NSPoint(x: w * 0.5, y: h * 0.10)
-        let upperRight = NSPoint(x: w * 0.80, y: h * 0.30)
-        let center = NSPoint(x: w * 0.5, y: h * 0.5)
-        let lowerRight = NSPoint(x: w * 0.80, y: h * 0.70)
-        let bottom = NSPoint(x: w * 0.5, y: h * 0.90)
+        let top = NSPoint(x: w * 0.5, y: h * 0.06)
+        let bottom = NSPoint(x: w * 0.5, y: h * 0.94)
+        let upperRight = NSPoint(x: w * 0.78, y: h * 0.28)
+        let lowerRight = NSPoint(x: w * 0.78, y: h * 0.72)
+        let upperLeft = NSPoint(x: w * 0.22, y: h * 0.28)
+        let lowerLeft = NSPoint(x: w * 0.22, y: h * 0.72)
 
-        // The vertical stem and the diagonal flags share endpoints but are not
-        // the same path — the flags never travel straight down, so the stem
-        // needs its own stroke.
-        let stem = NSBezierPath()
-        stem.move(to: top)
-        stem.line(to: bottom)
-
-        let flags = NSBezierPath()
-        flags.move(to: top)
-        flags.line(to: upperRight)
-        flags.line(to: center)
-        flags.line(to: lowerRight)
-        flags.line(to: bottom)
+        // ONE unbroken stroke that crosses the stem twice, which is what makes
+        // this the bind rune and not a letter B: each diagonal runs from one
+        // side clean through to the other, so it OVERSHOOTS the stem and leaves
+        // a short tail on the left. Drawing it as a stem plus two right-hand
+        // flags — which is what this did — produces a tidy B and reads as the
+        // wrong mark at a glance (owner, 2026-08-13: "missing its tail").
+        //
+        // The stem is not a separate path any more: the middle leg of this one
+        // (top → bottom) IS the stem, so there is nothing to keep in sync.
+        let rune = NSBezierPath()
+        rune.move(to: lowerLeft)
+        rune.line(to: upperRight)
+        rune.line(to: top)
+        rune.line(to: bottom)
+        rune.line(to: lowerRight)
+        rune.line(to: upperLeft)
 
         color.setStroke()
-        for path in [stem, flags] {
-            path.lineWidth = w * 0.10
-            path.lineCapStyle = .round
-            path.lineJoinStyle = .round
-            path.stroke()
-        }
+        rune.lineWidth = w * 0.10
+        rune.lineCapStyle = .round
+        rune.lineJoinStyle = .round
+        rune.stroke()
     }
 }
 
@@ -2311,7 +2607,7 @@ final class DemoSidebarRowView: NSView {
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
 
-        let pill = DemoPillView(radius: 5, fill: isSelected ? DemoSystemColor.accent : .clear)
+        let pill = DemoPillView(radius: 5, fill: isSelected ? DemoSystemColor.settingsAccent : .clear)
         let tile = DemoPillView(radius: 3, fill: isSelected ? .white : tint)
         // A selected row's label goes white, like its text would.
         let label = DemoGreekBarView(width: labelWidth, fill: isSelected ? .white : .tertiaryLabelColor)
@@ -2405,7 +2701,7 @@ final class DemoSwitchView: NSView {
     /// A staged host (Remote Control's handoff) shifts this score through its
     /// ``DemoMockView/stageWindow``, so there is nothing per-stage in here.
     func addTimeline(on host: DemoMockView) {
-        let off = Self.offTrackColor.cgColor, on = DemoSystemColor.accent.cgColor
+        let off = Self.offTrackColor.cgColor, on = DemoSystemColor.settingsAccent.cgColor
         layer?.add(host.keyframes("backgroundColor", host.held([
             (0, off), (DemoBeat.pressEnd, off),
             (DemoBeat.changeEnd, on), (DemoBeat.holdEnd, on),
@@ -2440,7 +2736,7 @@ final class DemoSwitchView: NSView {
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
-        layer?.backgroundColor = (isOn ? DemoSystemColor.accent : Self.offTrackColor).cgColor
+        layer?.backgroundColor = (isOn ? DemoSystemColor.settingsAccent : Self.offTrackColor).cgColor
         // No hairline border: the real one is dropped below a ~13 pt track.
         layer?.cornerRadius = bounds.height / 2
         // The knob is white in BOTH appearances.
@@ -2545,28 +2841,28 @@ final class DemoSettingsRowView: NSView {
 /// mush and reads as a rendering bug rather than as words.
 final class DemoGreekBarView: NSView {
 
-    init(width: CGFloat, fill: NSColor = .tertiaryLabelColor) {
+    init(width: CGFloat, height: CGFloat = 3, fill: NSColor = .tertiaryLabelColor) {
+        self.fill = fill
+        self.barHeight = height
         super.init(frame: .zero)
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
-        layer?.backgroundColor = fill.cgColor
-        layer?.cornerRadius = 1.5
         NSLayoutConstraint.activate([
             widthAnchor.constraint(equalToConstant: width),
-            heightAnchor.constraint(equalToConstant: 3),
+            heightAnchor.constraint(equalToConstant: height),
         ])
-        self.fill = fill
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    private var fill: NSColor = .tertiaryLabelColor
+    private let fill: NSColor
+    private let barHeight: CGFloat
 
     override var wantsUpdateLayer: Bool { true }
 
     override func updateLayer() {
         layer?.backgroundColor = fill.cgColor
-        layer?.cornerRadius = 1.5
+        layer?.cornerRadius = barHeight / 2
     }
 }
 
@@ -2780,4 +3076,23 @@ final class DemoCursorView: NSView {
 extension NSView {
     /// Every descendant, for the "re-stamp resolved colours" sweep.
     var subviewsRecursively: [NSView] { subviews + subviews.flatMap(\.subviewsRecursively) }
+
+    // MARK: Test-support hooks
+
+    /// Every drawn dialog button in this surface, leading to trailing — one
+    /// walk that serves the prompt card, the alert panel and the two-stage host
+    /// alike, so no mock needs a hook of its own.
+    private var demoButtons: [DemoPushButtonView] {
+        subviewsRecursively.compactMap { $0 as? DemoPushButtonView }
+    }
+
+    /// The REAL labels this surface's buttons carry.
+    var test_demoButtonTitles: [String] { demoButtons.map(\.buttonTitle) }
+
+    /// The one button marked as the right answer — `nil` if none is, and a
+    /// crash-free way to catch two being marked (the array would have two).
+    var test_demoMarkedButtonTitle: String? {
+        let marked = demoButtons.filter(\.isMarked)
+        return marked.count == 1 ? marked[0].buttonTitle : nil
+    }
 }

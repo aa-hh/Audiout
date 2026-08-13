@@ -195,6 +195,47 @@ import Testing
                 "…and pulses normally once the reopened panel is the baseline")
     }
 
+    @Test func anOffScreenRebuildDrawNeverBecomesTheReopenBaseline() {
+        // THE OPEN-ANIMATION BUG. The reopen ritual runs entirely before the
+        // panel is ordered on screen: `rebuildForOpen()` tears down and rebuilds
+        // the row tree, then the exact-fit resize
+        // (`AppSurfaceController.applyWindowContentSize`) hands AppKit
+        // `setFrame(_:display: true)`, which draws the still-off-screen panel
+        // against rows Auto Layout has not placed yet. That invisible draw must
+        // not become the baseline the first ON-SCREEN draw is diffed against —
+        // otherwise the settled wire reads as a gain and the panel plays a
+        // connect pulse for the act of opening.
+        // First session on screen: this draw is the baseline.
+        let scene = makeScene(nodes: [.member, .member])
+        scene.hook.gold = true
+        scene.overlay.needsDisplay = true
+        scene.overlay.display()
+        drainMainQueue()
+        #expect(!scene.overlay.test_isConnectPulsing)
+
+        // Close: the panel orders out.
+        scene.overlay.test_windowVisibleOverride = false
+        NotificationCenter.default.post(
+            name: NSWindow.didChangeOcclusionStateNotification, object: scene.window)
+
+        // Reopen, step 1 — the rebuild + resize draw, still off screen, with the
+        // rail's rows not yet placed.
+        scene.overlay.deviceRows = []
+        scene.overlay.needsDisplay = true
+        scene.overlay.display()
+
+        // Reopen, step 2 — ordered front, laid out, drawing the settled wire.
+        scene.overlay.deviceRows = scene.rows
+        scene.overlay.test_windowVisibleOverride = true
+        scene.overlay.needsDisplay = true
+        scene.overlay.display()
+        drainMainQueue()
+        #expect(!scene.overlay.test_isConnectPulsing,
+                "opening the panel is not a gain in reach — the rail renders settled")
+        #expect(scene.hook.receivedPulses == 0,
+                "…and the Main Audio ring is handed nothing to bloom for")
+    }
+
     @Test func anOrderedOutWindowNeverPulses() {
         let scene = makeScene(nodes: [.member])
         scene.overlay.test_windowVisibleOverride = nil  // read the real window

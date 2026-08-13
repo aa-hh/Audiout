@@ -95,9 +95,10 @@ public final class BusRailOverlayView: NSView {
     /// if any (mounted by the bead's completion; dies with any cancel). An
     /// uncollapsed origin has a real ring, which blooms itself.
     private var arrivalLayer: CAShapeLayer?
-    /// The last drawn plan's energize signature. `nil` = no baseline yet, so the
-    /// next draw stamps one WITHOUT firing — the first render in a window is
-    /// always settled (no transient fires on open, spec §6).
+    /// The last VISIBLY drawn plan's energize signature. `nil` = no baseline
+    /// yet, so the next on-screen draw stamps one WITHOUT firing — the first
+    /// render the user can see is always settled (no transient fires on open,
+    /// spec §6).
     private var lastEnergy: EnergySignature?
     /// The last drawn plan's member-stop y positions — diffed against the next
     /// draw's to name WHICH room just joined, so the pulse departs from its
@@ -452,12 +453,22 @@ public final class BusRailOverlayView: NSView {
     /// Compare this draw's plan against the last one and fire the pulse on a
     /// qualifying gain. The layer mutation is deferred out of the draw pass.
     private func reconcileEnergize(with plan: RailPlan) {
+        // A draw nobody can see is never a baseline. An off-screen panel still
+        // lays out and DRAWS: the reopen ritual rebuilds the whole row tree and
+        // then resizes the window with `display:` while it is still ordered out
+        // (`AppSurfaceController.mount` → `applyWindowContentSize`), so this ran
+        // against a wire whose rows had not been laid out yet. Stamping THAT
+        // left the first on-screen draw diffing against a wire that was never on
+        // glass, and firing a pulse for the open itself. Settling instead makes
+        // the first VISIBLE draw the baseline, so no intra-open diff can fire
+        // (spec §6).
+        guard windowIsVisible else { settleBaseline(); return }
         let signature = Self.energizeSignature(of: plan)
         let fires = Self.connectPulseFires(previous: lastEnergy, current: signature)
         let previousMemberYs = lastMemberYs
         lastEnergy = signature
         lastMemberYs = plan.dormant ? [] : plan.stops.filter { $0.node == .member }.map(\.y)
-        guard fires, windowIsVisible, !reduceMotion else { return }
+        guard fires, !reduceMotion else { return }
         let joined = NSBezierPath()
         for run in wireRuns(for: plan) { joined.append(run.path) }
         guard !joined.isEmpty else { return }

@@ -522,12 +522,13 @@ import AudiouterCore
 
     // MARK: V1 — mute tint (accent while muted, secondary otherwise)
 
-    @Test func muteTintIsAccentWhenMutedViaApply() {
+    @Test func muteTintIsEngagedChromeWhenMutedViaApply() {
         let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod, isMuted: true)
         let row = DeviceRowView(device: device)
         row.apply(device, selected: true, controllable: true)
 
-        #expect(row.test_muteTintColor == .controlAccentColor, "apply() lands the accent tint while muted")
+        #expect(row.test_muteTintColor == Tokens.Color.engagedChrome,
+                "apply() lands the engaged-chrome tint while muted")
     }
 
     @Test func muteTintIsSecondaryWhenUnmutedViaApply() {
@@ -548,7 +549,8 @@ import AudiouterCore
         // (AppKit's own state flip, then `muteToggled(_:)`'s `updateMuteTint()`)
         // — the tint must update WITHOUT waiting for a host-driven `apply`.
         row.test_toggleMute(true)
-        #expect(row.test_muteTintColor == .controlAccentColor, "a live click updates the tint instantly")
+        #expect(row.test_muteTintColor == Tokens.Color.engagedChrome,
+                "a live click updates the tint instantly")
 
         row.test_toggleMute(false)
         #expect(row.test_muteTintColor == .secondaryLabelColor, "toggling back off reverts the tint instantly")

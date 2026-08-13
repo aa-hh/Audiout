@@ -372,7 +372,8 @@ public final class BTSyncDrawerView: NSView {
         self.isSet = isSet
         self.usableRangeMs = usableRangeMs
         alignButton.state = alignTickActive ? .on : .off
-        alignButton.contentTintColor = alignTickActive ? Tokens.Color.accent : Tokens.Color.secondaryLabel
+        alignButton.contentTintColor = alignTickActive
+            ? Tokens.Color.engagedChrome : Tokens.Color.secondaryLabel
         refreshDisplay()
     }
 
@@ -439,7 +440,7 @@ public final class BTSyncDrawerView: NSView {
         // so the toggle reads immediately, before the host's re-apply echoes
         // it — mirrors `DeviceRowView.alignTapped` exactly.
         alignButton.contentTintColor = sender.state == .on
-            ? Tokens.Color.accent : Tokens.Color.secondaryLabel
+            ? Tokens.Color.engagedChrome : Tokens.Color.secondaryLabel
         delegate?.syncDrawer(self, didToggleAlignTick: sender.state == .on)
     }
 

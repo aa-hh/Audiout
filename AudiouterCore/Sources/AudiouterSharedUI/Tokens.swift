@@ -87,9 +87,33 @@ public enum Tokens {
         /// De-emphasized label text (sublabels, dimmed inline detail). Alias
         /// of `NSColor.tertiaryLabelColor`.
         public static var tertiaryLabel: NSColor { .tertiaryLabelColor }
-        /// The system accent color, used for selection washes and active-state
-        /// fills. Alias of `NSColor.controlAccentColor`.
+        /// The system accent color. Alias of `NSColor.controlAccentColor`.
+        ///
+        /// NOT for the mixer's engaged-control chrome — use ``engagedChrome``.
+        /// `controlAccentColor` follows the user's macOS accent setting, so on a
+        /// default system it paints `#007AFF` onto a surface whose entire
+        /// vocabulary is warm; and the states it was carrying there (muted, sync
+        /// drawer open, row hovered, row selected) are meanings, which §Brand
+        /// says never theme.
         public static var accent: NSColor { .controlAccentColor }
+
+        /// **Engaged-control chrome**: the one tone every "this control is
+        /// engaged / this row is picked out" surface on the mixer draws in — the
+        /// mute pill and its glyph, the SYNC chip's engaged fill and border, and
+        /// the row hover and selection washes. Strength, not hue, separates
+        /// them: each site applies its own alpha
+        /// (`PopoverColumnGrid.rowHoverWashAlpha` < `rowSelectionWashAlpha` <
+        /// `mutePillFillAlpha` < full for a glyph or border).
+        ///
+        /// Deliberately NEUTRAL, and deliberately not the gold family. Gold
+        /// means signal — in the mix, carrying audio — so painting MUTE gold
+        /// states the opposite of what mute does, and a gold hover wash claims
+        /// membership the pointer has not granted (spec §4.8: hover is a neutral
+        /// wash, "never gold, never on the node"). `label` is what
+        /// `DeviceIconWellView` and `WarmNameFieldCell` already wash with; it is
+        /// dynamic, so it lifts the tone on the warm near-black ground and on
+        /// the flat Circuit light one without introducing a hue to either.
+        public static var engagedChrome: NSColor { label }
         /// Hairline/divider strokes. Alias of `NSColor.separatorColor`.
         public static var separator: NSColor { .separatorColor }
         /// Opaque window chrome background. Alias of

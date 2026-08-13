@@ -183,8 +183,8 @@ import AudiouterCore
     @Test func mutePillEngagesViaApply() {
         let row = DeviceRowView(device: makeDevice(isMuted: true))
         row.apply(makeDevice(isMuted: true), selected: true, controllable: true)
-        #expect(row.test_isMutePillEngaged, "muted: filled accent pill behind the (unchanged) glyph")
-        #expect(row.test_muteTintColor == .controlAccentColor)
+        #expect(row.test_isMutePillEngaged, "muted: filled pill behind the (unchanged) glyph")
+        #expect(row.test_muteTintColor == Tokens.Color.engagedChrome)
     }
 
     @Test func mutePillDisengagesOnUnmute() {

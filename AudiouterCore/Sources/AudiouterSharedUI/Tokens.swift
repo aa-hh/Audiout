@@ -87,9 +87,33 @@ public enum Tokens {
         /// De-emphasized label text (sublabels, dimmed inline detail). Alias
         /// of `NSColor.tertiaryLabelColor`.
         public static var tertiaryLabel: NSColor { .tertiaryLabelColor }
-        /// The system accent color, used for selection washes and active-state
-        /// fills. Alias of `NSColor.controlAccentColor`.
+        /// The system accent color. Alias of `NSColor.controlAccentColor`.
+        ///
+        /// NOT for the mixer's engaged-control chrome — use ``engagedChrome``.
+        /// `controlAccentColor` follows the user's macOS accent setting, so on a
+        /// default system it paints `#007AFF` onto a surface whose entire
+        /// vocabulary is warm; and the states it was carrying there (muted, sync
+        /// drawer open, row hovered, row selected) are meanings, which §Brand
+        /// says never theme.
         public static var accent: NSColor { .controlAccentColor }
+
+        /// **Engaged-control chrome**: the one tone every "this control is
+        /// engaged / this row is picked out" surface on the mixer draws in — the
+        /// mute pill and its glyph, the SYNC chip's engaged fill and border, and
+        /// the row hover and selection washes. Strength, not hue, separates
+        /// them: each site applies its own alpha
+        /// (`PopoverColumnGrid.rowHoverWashAlpha` < `rowSelectionWashAlpha` <
+        /// `mutePillFillAlpha` < full for a glyph or border).
+        ///
+        /// Deliberately NEUTRAL, and deliberately not the gold family. Gold
+        /// means signal — in the mix, carrying audio — so painting MUTE gold
+        /// states the opposite of what mute does, and a gold hover wash claims
+        /// membership the pointer has not granted (spec §4.8: hover is a neutral
+        /// wash, "never gold, never on the node"). `label` is what
+        /// `DeviceIconWellView` and `WarmNameFieldCell` already wash with; it is
+        /// dynamic, so it lifts the tone on the warm near-black ground and on
+        /// the flat Circuit light one without introducing a hue to either.
+        public static var engagedChrome: NSColor { label }
         /// Hairline/divider strokes. Alias of `NSColor.separatorColor`.
         public static var separator: NSColor { .separatorColor }
         /// Opaque window chrome background. Alias of
@@ -199,10 +223,16 @@ public enum Tokens {
             warmDynamic(name: "panel", dark: 0x1D1915, light: 0xFBFBF9)
         }
         /// Raised well fill (icon well, blocked-checkbox fill, §1). No
-        /// stated contrast floor. Light = Circuit `bg/normal`, flush with
-        /// the flat Circuit ground.
+        /// stated contrast floor. Light is `#F2F0EA` (Direction 04's authored
+        /// light active fill, rehearsal-led Setup rebuild) — this REPLACES the
+        /// earlier `#FBFBF9`, which was identical to `canvas`/`panel` and left
+        /// light mode with no one-rung surface ladder at all (critique P1);
+        /// `#F2F0EA` gives light a real raised step the way dark already has
+        /// one. `WarmNameFieldCell` and `DeviceIconWellView` also draw with
+        /// `raised`, so they pick up a faint warm well in light too —
+        /// intended, not a side effect to chase out.
         public static var raised: NSColor {
-            warmDynamic(name: "raised", dark: 0x241F1A, light: 0xFBFBF9)
+            warmDynamic(name: "raised", dark: 0x241F1A, light: 0xF2F0EA)
         }
         /// Inset well fill (slider track trough, dropdown fill, §1). First
         /// consumer: `WarmFaderCell`'s recessed trough. CONTRAST RATIONALE
@@ -213,18 +243,23 @@ public enum Tokens {
         /// than `canvas` (1.05:1, a true recess whose edge the `faderRim`
         /// carries) — which lifts every fill drawn on it (measured, WCAG
         /// relative luminance: `ringConnected` 4.82:1, `faderThumb` 4.44:1,
-        /// `ember` 3.86:1, `gold` 10.51:1). Light = Circuit `bg/highlight`
+        /// `ember` 3.86:1, `gold` 10.51:1). Light was Circuit `bg/highlight`
         /// `#E8E6DC` rather than `bg/subtle` (Alec's call on the Circuit
         /// pull): `bg/subtle` measured 1.06:1 vs the flat Circuit `panel`,
         /// under the membership checklist's locked 1.10:1 surface-separation
-        /// floor (`MembershipWellContrastTests`) — `bg/highlight` holds it at
-        /// 1.20:1 while staying a Circuit-family hex, and every dark fill
-        /// drawn in the well keeps its headroom (`faderThumb` 3.33:1).
-        /// Backgrounds carry no IC variant (same precedent as
+        /// floor (`MembershipWellContrastTests`). Re-tuned to `#E2DFD3` —
+        /// one step deeper, off the Circuit sheet — because Direction 04's
+        /// light `raised` `#F2F0EA` measured 1.098:1 against `#E8E6DC`,
+        /// under `MembershipWellContrastTests`' locked 1.15:1
+        /// control-on-section floor. Measured against the new value: well
+        /// vs panel 1.289:1 (floor 1.10), raised vs well 1.172:1 (floor
+        /// 1.15), light `faderThumb` 3.12:1 (IC 4.56:1). Awaits Alec's
+        /// palette sign-off alongside the other Direction-04 authored
+        /// values. Backgrounds carry no IC variant (same precedent as
         /// `canvas`/`panel`/`raised`); the fills and rim drawn on the well
         /// brighten under IC instead.
         public static var well: NSColor {
-            warmDynamic(name: "well", dark: 0x100D0A, light: 0xE8E6DC)
+            warmDynamic(name: "well", dark: 0x100D0A, light: 0xE2DFD3)
         }
         /// 1px section-divider hairline (§5.1 — the ONLY visual separation
         /// between de-nested cards now that they no longer draw their own
@@ -353,6 +388,43 @@ public enum Tokens {
                        light: 0xBB3A2F, lightHighContrast: 0xA62A20)
         }
 
+        /// Warm warning **text** — the onboarding header's permission-lost
+        /// message and the rehearsal-led Setup ribbon's status line (Direction
+        /// 04). Distinct from ``warning``, which stays the bare `.systemOrange`
+        /// alias other consumers keep using: that alias measures 2.24:1 vs
+        /// `panel` in light, under the 4.5:1 text floor, so a text consumer
+        /// needs an authored replacement rather than a re-tuned shared token.
+        /// CONTRAST RATIONALE (>=4.5:1 vs both `canvas` and `panel`, both
+        /// appearances; measured, WCAG relative luminance): dark `#D08A45` =
+        /// 6.3:1 vs `panel` (`#16130F`); light `#A55B22` = 4.9:1 vs `panel`
+        /// (`#FBFBF9`).
+        public static var warningText: NSColor {
+            warmDynamic(name: "warningText", dark: 0xD08A45, light: 0xA55B22)
+        }
+
+        /// Authored secondary text for onboarding surfaces that commit to the
+        /// 4.5:1 text floor — the rehearsal-led Setup spine/ribbon's secondary
+        /// copy (Direction 04). Distinct from ``secondaryLabel``, whose system
+        /// `NSColor.secondaryLabelColor` alias measures 3.95:1 vs `panel` in
+        /// light, under floor for body text. CONTRAST RATIONALE (>=4.5:1 vs
+        /// `canvas`/`panel`/`raised`, both appearances; measured): dark
+        /// `#B4ADA0` = 7.3:1 vs `panel`; light `#5C574C` = 7.1:1 vs `panel`
+        /// (`#FBFBF9`).
+        public static var inkSecondary: NSColor {
+            warmDynamic(name: "inkSecondary", dark: 0xB4ADA0, light: 0x5C574C)
+        }
+
+        /// The earned-checkmark green — the rehearsal-led Setup spine/ribbon's
+        /// granted-state glyph (Direction 04). No existing green token: the
+        /// checkmarks it replaces used the bare `.systemGreen` alias, which
+        /// measures 2.14:1 vs `panel` in light, under the 3:1 UI floor.
+        /// CONTRAST RATIONALE (>=3:1 vs `panel`/`raised`, both appearances;
+        /// measured): dark `#5FC27E` = clears floor vs `panel` (`#1D1915`);
+        /// light `#2C7A46` = 5.2:1 vs `panel` (`#FBFBF9`).
+        public static var success: NSColor {
+            warmDynamic(name: "success", dark: 0x5FC27E, light: 0x2C7A46)
+        }
+
         // MARK: Gold accent instruments (spec §1, S-BUS)
         //
         // THE accent (spec §1.1/§1.2): `gold` is the bus-node fill / route-armed
@@ -411,8 +483,12 @@ public enum Tokens {
         /// owns its contrast behavior).
         public static var gold: NSColor {
             accentDynamic(name: "gold",
+                          // Light re-tuned #A67C1E → #9E761D when Direction 04
+                          // deepened light `well` to #E2DFD3: measured 3.11:1 on
+                          // well / 4.00:1 on panel (≥3.0 non-text floor, pinned
+                          // in MembershipWellContrastTests).
                           full: WarmVariants(dark: 0xE8B84B, darkHighContrast: 0xF2C75E,
-                                             light: 0xA67C1E, lightHighContrast: 0x8A6614),
+                                             light: 0x9E761D, lightHighContrast: 0x8A6614),
                           subtle: WarmVariants(dark: 0xB99B53, darkHighContrast: 0xCBAF6A,
                                                light: 0x8F7B4A, lightHighContrast: 0x6F5E33),
                           systemAccentScale: 1.0)
@@ -432,8 +508,13 @@ public enum Tokens {
         /// luminance (spec's own formula; component-scaled sRGB).
         public static var ember: NSColor {
             accentDynamic(name: "ember",
+                          // Light re-tuned #9C7E3C → #947637 (IC #9A7A2E →
+                          // #8F702F, kept strictly darker than base) for the
+                          // same well deepening: measured 3.21:1 on well /
+                          // 4.13:1 on panel, still gold's dimmer, duller
+                          // companion (sat gap 0.19, same hue family).
                           full: WarmVariants(dark: 0x8A6A2F, darkHighContrast: 0xA5824A,
-                                             light: 0x9C7E3C, lightHighContrast: 0x9A7A2E),
+                                             light: 0x947637, lightHighContrast: 0x8F702F),
                           subtle: WarmVariants(dark: 0x6D5B34, darkHighContrast: 0x877146,
                                                light: 0xAE9668, lightHighContrast: 0x8A744C),
                           systemAccentScale: 0.55)
@@ -541,8 +622,8 @@ public enum Tokens {
         /// and `well`** in both themes. Measured (WCAG relative luminance):
         /// dark `#857762` = 4.44:1 vs `well` `#100D0A` / 4.24:1 vs `canvas`
         /// `#16130F`; light `#8A7A62` (a warm mid-brown knob on paper —
-        /// `raised`'s pure white measured 1.25:1, unusable) = 3.33:1 vs
-        /// `well` `#ECE5D8` / 3.64:1 vs `canvas` `#F4EFE7`. IC variants push
+        /// `raised`'s pure white measured 1.25:1, unusable) = 3.12:1 vs
+        /// `well` `#E2DFD3` / 3.64:1 vs `canvas` `#F4EFE7`. IC variants push
         /// further (dark `#9A8C74` = 5.88:1 / 5.62:1; light `#6E6050` =
         /// 4.86:1 / 5.31:1).
         public static var faderThumb: NSColor {
@@ -969,8 +1050,9 @@ public enum Tokens {
         /// How long ANY collapsible element in the app takes to unfold into —
         /// or fold out of — its host, on one curve (`.easeInEaseOut`): the
         /// popover's inserted rows, device-type subsections and card bodies
-        /// (`CardView.setBodyCollapsed`), and the Setup window's permission
-        /// cards (`SetupCardView`). ONE value, so an expand is the exact
+        /// (`CardView.setBodyCollapsed`). The Setup window's permission cards
+        /// were replaced by the non-collapsing spine (Direction 04), so it is no
+        /// longer one of them. ONE value, so an expand is the exact
         /// mirror of its collapse and every clip in the app reads as the same
         /// gesture — a second constant kept in step by hand silently drifts
         /// (live report 2026-08-10: the cards' own 0.2 s "don't follow the

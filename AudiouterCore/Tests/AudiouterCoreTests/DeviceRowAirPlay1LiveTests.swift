@@ -45,7 +45,8 @@ import AudiouterCore
         #expect(row.test_isSliderEnabled, "an AP1 row's volume slider is drivable")
         // Mute mirrors the slider's enabled state (same `controllable` gate).
         row.test_toggleMute(true)
-        #expect(row.test_muteTintColor == .controlAccentColor, "mute still works live on an AP1 row")
+        #expect(row.test_muteTintColor == Tokens.Color.engagedChrome,
+                "mute still works live on an AP1 row")
     }
 
     @Test func ap1RowCanBeToggledOnViaDelegate() {

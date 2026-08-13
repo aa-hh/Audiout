@@ -71,6 +71,32 @@ public enum PopoverColumnGrid {
         (indented ? indentedLeadingInset : leadingInset) + busGutterWidth
     }
 
+    /// Width of a card / subsection header's leading disclosure chevron.
+    public static let headerChevronWidth: CGFloat = 16
+    /// Gap between that chevron and the title following it.
+    public static let headerChevronToTitle: CGFloat = 4
+    /// Leading edge of a header's TITLE TEXT — the x a section title, a
+    /// subsection label, and anything annotating them all start at. A card note
+    /// is a subtitle to its section title, so it belongs on this column, not on
+    /// `firstElementLeading` (where only chevrons and device icons live) and not
+    /// on `nameColumnLeading` (where the rows themselves live).
+    public static var headerTitleLeading: CGFloat {
+        firstElementLeading(indented: false) + headerChevronWidth + headerChevronToTitle
+    }
+
+    /// Leading edge of the **name column** on a top-level row — the x every
+    /// device/app name starts at, and therefore the x an ICON-LESS secondary row
+    /// (a placeholder line, an empty-state link, a footer note) must start at to
+    /// sit in the same column as the names above it.
+    ///
+    /// Derived off `firstElementLeading`, never hand-rolled as `leadingInset +
+    /// iconWidth + iconToName`: that spelling omits the v4 rail gutter, so it
+    /// lands ~24 pt LEFT of the names it is meant to align with, and it silently
+    /// stops tracking the gutter the moment `busNodeClearance` moves.
+    public static var nameColumnLeading: CGFloat {
+        firstElementLeading(indented: false) + iconWidth + iconToName
+    }
+
     // MARK: Under-name level meter (Warm Signal v4 §Call-1 — meter relocation)
     //
     // The live-level bar moves out of the leading column into the identity
@@ -504,19 +530,21 @@ public enum PopoverColumnGrid {
     /// `NSColor.selectedContentBackgroundColor` at this opacity. Shared by
     /// DeviceRowView and AppRowView to establish consistent hover interaction.
     public static let rowHoverWashAlpha: CGFloat = 0.10
-    /// Alpha for the accent selection wash, drawn in `NSColor.controlAccentColor`.
+    /// Alpha for the selection wash, drawn in ``Tokens/Color/engagedChrome``.
     /// Shared by AppRowView's single-selection highlight and DeviceRowView's
     /// mixer-window selection pill.
     public static let rowSelectionWashAlpha: CGFloat = 0.18
 
     // MARK: Engaged mute pill (Warm Signal v3 §3.4/§3.5, S3)
     //
-    // A muted row's mute button gains a filled accent-tinted PILL behind its
-    // (never-slashed — locked decision) speaker glyph: drawing only, on the
-    // real `NSButton`'s backing layer; behavior/keyboard/VoiceOver untouched.
+    // A muted row's mute button gains a filled PILL behind its (never-slashed
+    // — locked decision) speaker glyph: drawing only, on the real `NSButton`'s
+    // backing layer; behavior/keyboard/VoiceOver untouched.
 
-    /// Alpha of the engaged pill's accent fill (subtle — config-adjacent, not
-    /// a signal; the gold budget governs gold, accent chrome is permitted).
+    /// Alpha of the engaged pill's ``Tokens/Color/engagedChrome`` fill —
+    /// subtle, because mute is config-adjacent, not a signal. The strongest
+    /// alpha in that token's ladder, since a pill is smaller than a row wash
+    /// and needs the extra weight to read at glyph scale.
     public static let mutePillFillAlpha: CGFloat = 0.22
     /// Corner radius of the engaged pill (capsule-ish over the `muteWidth`
     /// column's glyph box). Tuned live.

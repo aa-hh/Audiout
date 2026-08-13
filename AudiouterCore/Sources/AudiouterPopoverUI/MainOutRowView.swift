@@ -546,12 +546,12 @@ public final class MainOutRowView: NSView {
     /// (locked decision). Mirrors `DeviceRowView.updateMuteTint()`.
     private func updateMuteTint() {
         let engaged = muteButton.state == .on
-        muteButton.contentTintColor = engaged ? Tokens.Color.accent : Tokens.Color.secondaryLabel
+        muteButton.contentTintColor = engaged ? Tokens.Color.engagedChrome : Tokens.Color.secondaryLabel
         muteButton.wantsLayer = true
         muteButton.layer?.cornerRadius = PopoverColumnGrid.mutePillCornerRadius
         effectiveAppearance.performAsCurrentDrawingAppearance {
             muteButton.layer?.backgroundColor = engaged
-                ? Tokens.Color.accent.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha).cgColor
+                ? Tokens.Color.engagedChrome.withAlphaComponent(PopoverColumnGrid.mutePillFillAlpha).cgColor
                 : nil
         }
         configureAccessibility()

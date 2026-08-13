@@ -94,7 +94,8 @@ import AppKit
     /// is the whole reason the two header controls read as a pair — so the
     /// separation between the control fill and the section fill gets the same
     /// measured floor the other surface pairs carry. Measured: 1.186:1 dark /
-    /// 1.251:1 light.
+    /// 1.172:1 light (light re-measured 2026-08-12 when Direction 04
+    /// re-authored light `raised`/`well`).
     @Test func raisedVsWellClearsTheControlOnSectionFloorBothAppearances() {
         let floor: CGFloat = 1.15
 

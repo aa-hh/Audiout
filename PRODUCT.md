@@ -50,11 +50,13 @@ Design tension to protect, not resolve by accident: mixer-grade capability with 
 
 ## Business Model
 
-Confirmed 2026-08-12. Recorded here because it constrains product surfaces (a purchase flow, a license field, a telemetry consent prompt) that do not exist yet.
+Confirmed 2026-08-12. **The model is "free from source, paid binary" — the Ardour model** (Alec, chosen over an honour-system paid app). It constrains product surfaces (a purchase flow, a download gate, a telemetry consent prompt) that do not exist yet.
 
-- **Paid major versions.** A purchased version is free for its lifetime; the next major release is bought again (the Rogue Amoeba / Sketch model). No subscription.
-- **Enforcement is honor-system, deliberately.** Each licensed copy carries a license ID, and the app reports how many distinct devices that ID appears on — so Alec can *see* sharing. It never blocks, gates, or nags on the result. GPL-2.0-or-later forbids adding usage restrictions to the covered work and lets any buyer legally redistribute the binary and source, so a hard lock is not available while the vendored sender is in the build. Revenue rests on convenience and goodwill.
-- **A clean-room sender is on the cards, not scheduled.** Replacing the vendored GPL sender would free the license and make real enforcement possible. It is a large, separate project; nothing may be planned as if it is happening.
+- **Two paths to the same software.** The source is free: anyone willing to clone the public repo and build it themselves pays nothing — GPL-2.0-or-later requires that and it is not begrudged. The **product** is the paid thing: a signed, notarised, ready-to-run `.app` (Homebrew-free, dylibs bundled), plus updates and support. What is sold is not the software but the convenience of not compiling it.
+- **Why this and not an honour-system lock.** GPL-2.0-or-later forbids adding usage restrictions to the covered work and lets any recipient legally redistribute binary and source, so a "enter your key or it won't run" lock is neither enforceable nor permitted while the vendored sender is in the build. The Ardour model sidesteps that entirely: it charges for genuine work (packaging, signing, notarising, supporting) that a free rebuild does not get, so revenue rests on real value rather than on goodwill or a lock people can strip.
+- **Price: a one-time ~$25–35 band** (not yet fixed). One-time versus optional subscription, and whether to offer pay-what-you-want, are open. No subscription is assumed.
+- **The app itself never blocks, gates, or nags.** A licence check-in may record how many devices a licence appears on so Alec can *see* sharing, but it is telemetry, not a gate — the paid build runs the same for everyone.
+- **A clean-room sender is on the cards, not scheduled.** Replacing the vendored GPL sender would free the licence and open other models. It is a large, separate project; nothing may be planned as if it is happening.
 - **Promotion (all three, no priority set):** the marketing site plus organic/AI search visibility (separate repo, `~/Projects/Audiouter Website`); Mac community channels (Hacker News, r/macapps, r/sonos, MacRumors, Mac newsletters); and open-source discovery (the repo itself, Homebrew cask, awesome-lists, word of mouth).
 
 ## Data Collection

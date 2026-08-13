@@ -49,6 +49,10 @@
 //                      window stays config-only
 //
 // Run: `swift run window-snapshot [output-dir]`.
+//
+// HOST GATE: this refuses to render on macOS 27 (exit 3) — see
+// `hostCaptureFault()` for what comes out wrong there and why the checked-in
+// goldens must not be overwritten from such a host.
 
 import AppKit
 import AudiouterCore
@@ -485,6 +489,85 @@ func makeSnapshotDefaults() -> UserDefaults {
     return defaults
 }
 
+/// Escape hatch for `hostCaptureFault`'s refusal — set it when the captures are
+/// only wanted for the custom-drawn CONTENT pane (which is unaffected) and the
+/// stock chrome around it will be cropped away or ignored.
+let allowBrokenChromeEnv = "SNAPSHOT_ALLOW_BROKEN_CHROME"
+
+/// Can this host render this window's STOCK AppKit chrome into an offscreen
+/// bitmap at all? Nil when it can; otherwise the reason plus exactly what will
+/// come out wrong, for the refusal banner in `run()`.
+///
+/// On macOS 27 a system material has no window backdrop to sample during
+/// `displayIgnoringOpacity(_:in:)`, and instead of degrading to its flat tint
+/// the way macOS 26 did, it fills opaque. The sidebar's source-list selection
+/// pill (an `NSVisualEffectView`, material `.selection`) comes out BLACK where
+/// the goldens have `#D6D6D6` light / `#424242` dark, and the toolbar's
+/// selected segment comes out WHITE, erasing the three screen icons with it.
+/// BOTH passes are affected — black-on-near-black and white-on-white just make
+/// the dark ones look plausible, which is precisely why this has to be measured
+/// rather than eyeballed.
+///
+/// Measured, not assumed from the OS version: capture a lone `.selection`
+/// material through the very same `captureRep` path and ask whether it came
+/// back as the colour the system itself says that selection is. When Apple
+/// fixes it, this stops firing on its own.
+///
+/// razor: ONE material probe stands in for every material/glass surface in the
+/// window — they fail together, for the same missing-backdrop reason. If a
+/// later macOS fixes only one of them, probe each separately. It does NOT cover
+/// the second Mac's separate white-void sidebar over ssh (`../../AGENTS.md`) —
+/// that host PASSES this probe and nothing cheap distinguishes it.
+@MainActor
+func hostCaptureFault() -> [String]? {
+    let bounds = NSRect(x: 0, y: 0, width: 40, height: 20)
+    let appearance = NSAppearance(named: .aqua)
+    let window = NSWindow(contentRect: bounds, styleMask: [.borderless],
+                          backing: .buffered, defer: false)
+    window.appearance = appearance
+    window.alphaValue = 0
+    window.ignoresMouseEvents = true
+    guard let content = window.contentView else { return nil }
+    content.appearance = appearance
+
+    let material = NSVisualEffectView(frame: bounds)
+    material.appearance = appearance
+    material.material = .selection
+    material.blendingMode = .withinWindow
+    material.state = .active
+    content.addSubview(material)
+    window.orderFront(nil)
+    drain(0.1)
+
+    defer { window.orderOut(nil) }
+    guard let rep = captureRep(view: content, bounds: bounds),
+          let captured = rep.colorAt(x: rep.pixelsWide / 2, y: rep.pixelsHigh / 2)?
+              .usingColorSpace(.deviceRGB) else {
+        return nil   // can't tell — never block on a probe that didn't run
+    }
+    var expected = NSColor.unemphasizedSelectedContentBackgroundColor
+    appearance?.performAsCurrentDrawingAppearance {
+        expected = NSColor.unemphasizedSelectedContentBackgroundColor
+            .usingColorSpace(.deviceRGB) ?? expected
+    }
+    // Generous: this is asking "did the material draw ITSELF or an opaque
+    // black/white fallback?", not "is it pixel-exact".
+    let delta = max(abs(captured.redComponent - expected.redComponent),
+                    max(abs(captured.greenComponent - expected.greenComponent),
+                        abs(captured.blueComponent - expected.blueComponent)))
+    guard delta >= 0.2 else { return nil }
+    func hex(_ color: NSColor) -> String {
+        String(format: "#%02X%02X%02X", Int(color.redComponent * 255),
+               Int(color.greenComponent * 255), Int(color.blueComponent * 255))
+    }
+    return ["system materials do not composite offscreen here (macOS 27).",
+            "A light `.selection` material captured as \(hex(captured)); the",
+            "system says it is \(hex(expected)). Wrong in BOTH passes:",
+            "  * sidebar source-list selection pill -> opaque BLACK",
+            "  * toolbar selected segment + icons   -> opaque WHITE",
+            "Everything Audiouter draws itself is unaffected."]
+}
+
 @MainActor
 func run() -> Int32 {
     // Never show a real window on the developer's screen while this
@@ -493,6 +576,25 @@ func run() -> Int32 {
     setenv("AIRPLAY_HEADLESS", "1", 1)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+
+    if let fault = hostCaptureFault() {
+        let override = ProcessInfo.processInfo.environment[allowBrokenChromeEnv] != nil
+        let banner = [override ? "RENDERING ANYWAY — BAD HOST" : "REFUSING TO RENDER — BAD HOST"]
+            + fault
+            + ["Overwriting dev/notes/window-snapshots/ from here corrupts the",
+               "baseline every later design review is measured against, and NO",
+               "host we still have renders these correctly — the second Mac",
+               "draws the whole sidebar as a white void instead. Leave the",
+               "goldens alone. To render for the content pane only, set",
+               "\(allowBrokenChromeEnv)=1, crop to the content, and never",
+               "commit the result as a golden."]
+        print("")
+        print(String(repeating: "#", count: 70))
+        for line in banner { print("##  \(line)") }
+        print(String(repeating: "#", count: 70))
+        print("")
+        if !override { return 3 }
+    }
 
     let args = CommandLine.arguments
     let outDir: URL

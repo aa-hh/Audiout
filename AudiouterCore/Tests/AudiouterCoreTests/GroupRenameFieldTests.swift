@@ -51,7 +51,8 @@ import AppKit
                                          loadPersisted: false)
         let group = try controller.createGroup(name: name, memberIDs: ["d0"],
                                                memberVolumes: [:]).group
-        let window = MixerWindowController(groupController: controller)
+        let window = MixerWindowController(groupController: controller,
+                                           settings: AppSettings(defaults: isolatedDefaults))
         window.setHostVisible(true)
         window.update(devices: devices)
         window.test_select(.group(id: group.id))
@@ -337,7 +338,8 @@ import AppKit
         let controller = GroupController(backend: MockBackend(fleet: []),
                                          store: GroupStore(directory: tempDirectory()),
                                          loadPersisted: false)
-        let detail = DeviceDetailViewController(groupController: controller)
+        let detail = DeviceDetailViewController(groupController: controller,
+                                                settings: AppSettings(defaults: isolatedDefaults))
         detail.loadView()
         detail.show(device: Device(id: "office", name: "Office", kind: .generic, isAvailable: true))
         detail.view.layoutSubtreeIfNeeded()

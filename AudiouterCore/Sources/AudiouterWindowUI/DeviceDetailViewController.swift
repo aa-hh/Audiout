@@ -4,49 +4,49 @@ import AppKit
 import AudiouterCore
 import AudiouterSharedUI
 
-/// The device detail pane (design revamp, CONFIGURATION-ONLY —
-/// `../../AGENTS.md`): shown in the Groups window's detail area when the
-/// sidebar selects a device. It DESCRIBES the speaker and TUNES it — it
-/// renders a `Device` snapshot plus which saved groups it belongs to, and
-/// hosts that speaker's ``EQEditorView``. It never activates a group, changes
-/// routing, or moves audio; a tone change is reported straight out through
-/// ``onSetEQ`` for the app to apply.
+/// The device detail pane (CONFIGURATION-ONLY — `../../AGENTS.md`): shown in
+/// the Groups screen's detail area when the sidebar selects a device. It
+/// DESCRIBES the speaker and TUNES it — it renders a `Device` snapshot plus
+/// which saved groups it belongs to, and hosts that speaker's ``EQEditorView``.
+/// It never activates a group, changes routing, or moves audio; a tone change
+/// is reported straight out through ``onSetEQ`` for the app to apply.
 ///
-/// Layout, top to bottom, in an ELASTIC form column top-pinned to
-/// `safeAreaLayoutGuide` — structurally identical to
-/// `GroupEditorViewController`, off the same ``GroupsPaneLayout`` numbers:
-/// - a HEADER SECTION (``GroupedSectionView``) holding the large
-///   (``DeviceIconWellView/size``pt) device icon and the device name SIDE BY
-///   SIDE. The icon is resolved via an injected `DeviceIconController` +
-///   `Device.Kind.symbolName` fallback (the same resolution path `DeviceIcon`
-///   uses everywhere else — an override that's gone stale on this OS still
-///   falls back to the kind default rather than a blank glyph);
-/// - APPROVED CUSTOM ELEMENT (the only one this phase — `../../AGENTS.md`): the
-///   shared ``DeviceIconWellView``'s always-present corner pencil badge.
-///   Clicking the well presents `IconPickerViewController` as an anchored
-///   popover, and picking a symbol (or "use default") writes straight through
-///   `DeviceIconController.setSymbolName`/`resetIcon`, instant-apply like the
-///   group editor's icon well;
-/// - the device name as a PLAIN LABEL — same geometry as the group editor's
-///   title, deliberately different skin. Bordered + pencil means editable; bare
-///   means read-only, which is exactly the difference between a group's name
-///   (renameable here) and a device's (not);
-/// - the read-only metadata in two grouped sections (secondary-colour captions
-///   leading, values right-aligned into their own column): device STATE
-///   (Status, Available, Volume, Kind) in the first, MEMBERSHIP ("In groups" —
-///   the saved groups from the injected `GroupController` whose `memberIDs`
-///   contain this device) in the second. The sections' own inset hairlines
-///   separate the rows; the old stock `NSBox` divider is gone (it drew a 185 pt
-///   rule that stopped a third of the way across the pane);
-/// - the EQUALIZER section — one more ``GroupedSectionView``, wrapping the
-///   shared ``EQEditorView``. Hidden for This Mac (there is nothing to tune on
-///   the device the audio comes FROM), which is why the hint below it carries
-///   two alternative top constraints;
-/// - a minimal, single-line secondary-colour hint ("Playback is controlled
-///   from the Mixer — this page describes and tunes the speaker.") under the
-///   form. Deliberately terse: the fuller "configure here / play in the
-///   Mixer" teaching lives in a footer elsewhere in this window, not
-///   restated here.
+/// ONE HOUSING, four slots, top to bottom in an ELASTIC form column off the
+/// same ``GroupsPaneLayout`` numbers `GroupEditorViewController` reads:
+///
+/// - IDENTITY — the large (``DeviceIconWellView/size``pt) icon and the device
+///   name side by side in a BARE band: no fill, no border, because identity is
+///   not an instrument. The icon resolves through an injected
+///   `DeviceIconController` + `Device.Kind.symbolName` fallback (a stale
+///   override still lands on the kind default, never a blank glyph), and its
+///   always-present corner pencil badge is this phase's one APPROVED CUSTOM
+///   ELEMENT (`../../AGENTS.md`): clicking the well presents
+///   `IconPickerViewController` as an anchored popover, and picking writes
+///   straight through `DeviceIconController`, instant-apply. The name beside
+///   it is a PLAIN label — bordered + pencil means editable, bare means
+///   read-only, which is exactly the difference between a group's name
+///   (renameable) and a device's (not);
+/// - "Equalizer" — the page's ONE INSTRUMENT, and therefore its ONLY
+///   ``GroupedSectionView/Style/card``. Hidden whole for This Mac (the device
+///   the audio comes FROM has no send to tune), which is why the "Groups"
+///   title below it carries two alternative top constraints;
+/// - "Groups" — BARE rows, one per saved group whose `memberIDs` contain this
+///   device, in the order the sidebar lists them, each the group's icon + name
+///   + a trailing chevron. A row NAVIGATES: it reports out through
+///   ``onSelectGroup`` and the host selects that group in the sidebar, which
+///   opens its editor. Selecting is NOT activating — nothing here moves audio.
+///   A device in no saved group keeps the slot and shows one non-clickable
+///   "Not in any group" row;
+/// - "About" — BARE fact rows. Status folds `connectionState` and
+///   `isAvailable` into ONE value: as two rows they read as a contradiction
+///   ("Not connected" sitting over "On the network: Yes"). AirPlay reports
+///   `supportsAirPlay2`, and is dropped entirely for Bluetooth and This Mac,
+///   which are not AirPlay receivers at all.
+///
+/// Every title is a plain sibling label above the thing it names, at the group
+/// editor's "Speakers" geometry — a label is never a section. There is NO hint
+/// line: the window's own footer caption owns the division of labour, and this
+/// page restating it put the same sentence on screen twice.
 ///
 /// The whole column SCROLLS (`../AGENTS.md`): the Equalizer's Advanced fold
 /// exceeds the Groups screen's height budget, and the screen is user-resizable
@@ -54,7 +54,7 @@ import AudiouterSharedUI
 ///
 /// No volume slider, no mute, no Selected-Devices toggle, no group activation
 /// control of any kind lives here — that's the popover/mixer's job, not this
-/// pane's; the Equalizer section is configuration, not playback.
+/// pane's; the Equalizer is configuration, not playback.
 public final class DeviceDetailViewController: NSViewController {
 
     private let groupController: GroupController
@@ -68,45 +68,59 @@ public final class DeviceDetailViewController: NSViewController {
 
     private let iconWell = DeviceIconWellView()
     private let nameLabel = NSTextField(labelWithString: "")
-    /// The header's own bounded section (icon + name side by side) — the same
-    /// shape, at the same geometry, as the group editor's header section.
+    /// The identity BAND — `.bare`, so it draws nothing at all. Kept as a
+    /// section purely for its GEOMETRY, which `GroupsHeaderParityTests` pins
+    /// to the group editor's header band point for point.
     private let headerWell = GroupedSectionView()
-    /// The device-STATE section (Status / Available / Volume / Kind) and the
-    /// MEMBERSHIP section ("In groups"), each a `GroupedSectionView` whose own
-    /// inset hairlines separate its rows.
-    private let stateWell = GroupedSectionView()
+    /// The "Groups" and "About" lists — both `.bare`, so all either
+    /// contributes is the inset hairline between adjacent rows.
     private let groupsWell = GroupedSectionView()
-    /// The EQUALIZER section and the shared editor inside it. Hidden whole for
-    /// This Mac — the audio's SOURCE has no send to tune.
+    private let aboutWell = GroupedSectionView()
+    /// The page's ONE instrument, and therefore its one `.card`, wrapping the
+    /// shared editor. Hidden whole for This Mac — the audio's SOURCE has no
+    /// send to tune.
     private let eqWell = GroupedSectionView()
-    private let eqEditor = EQEditorView()
-    private let stateStack = NSStackView()
+    private let eqEditor: EQEditorView
+    /// The three slot titles. Each is a plain sibling label sitting on bare
+    /// pane above the list or card it names, exactly as the group editor's
+    /// "Speakers" label titles its checklist. `eqTitleLabel` hides in lockstep
+    /// with `eqWell` (see `applyEQSectionVisibility()`): This Mac has nothing
+    /// to tune, so neither the card nor its title has anything to say. The
+    /// title line also carries the card's Reset button (`eqResetButton`),
+    /// trailing-aligned on the content edge, hidden with the slot.
+    private let eqTitleLabel = NSTextField(labelWithString: "Equalizer")
+    /// The Equalizer card's Reset button — moved off the editor and onto this
+    /// title line so the loudness row inside the card is the checkbox alone.
+    private let eqResetButton = NSButton()
+    private let groupsTitleLabel = NSTextField(labelWithString: "Groups")
+    private let aboutTitleLabel = NSTextField(labelWithString: "About")
+    private let aboutStack = NSStackView()
     private let groupsStack = NSStackView()
-    // Text is set at declaration (not in `loadView`) so it's correct even
-    // before the view hierarchy is lazily loaded — `refreshUI()` mutates the
-    // other labels the same way, independent of `loadView` having run.
-    /// WRAPPING, not truncating: on one line this sentence is wider than the
-    /// form column, so a plain label ended it in an ellipsis — a hint nobody
-    /// can finish reading is not a hint. It still refuses to widen the pane
-    /// (low compression resistance + the wrap width below).
-    private let hintLabel = NSTextField(
-        wrappingLabelWithString: DeviceDetailViewController.mixerHint)
 
-    /// The hint sits one action-band gap below the LAST section, and which
-    /// section that is depends on the device — so both constraints are built
-    /// once and `refreshUI()` swaps which one is active. Rebuilding a
+    /// "Groups" sits one section-gap below whatever precedes it, and WHICH
+    /// slot that is depends on the device — the Equalizer card on a speaker,
+    /// the identity band on This Mac. So both constraints are built once and
+    /// `applyEQSectionVisibility()` swaps which one is active; rebuilding a
     /// constraint per refresh instead would leak one every time.
     /// Optional, not implicitly-unwrapped: `show(device:)` is legitimately
     /// called before the view is ever loaded (the pane is built long before
     /// it is mounted), and refreshing then must not trap.
-    private var hintBelowEQSection: NSLayoutConstraint?
-    private var hintBelowGroupsSection: NSLayoutConstraint?
+    private var groupsTitleBelowEQCard: NSLayoutConstraint?
+    private var groupsTitleBelowHeader: NSLayoutConstraint?
 
     private let statusValueLabel = NSTextField(labelWithString: "")
-    private let availableValueLabel = NSTextField(labelWithString: "")
-    private let volumeValueLabel = NSTextField(labelWithString: "")
     private let kindValueLabel = NSTextField(labelWithString: "")
-    private let groupsValueLabel = NSTextField(labelWithString: "")
+    private let airPlayValueLabel = NSTextField(labelWithString: "")
+    /// The AirPlay row itself — the one About row that can be ABSENT, so it is
+    /// held to be hidden. Lazy so it is the SAME view whichever of `loadView`
+    /// and `refreshUI()` reaches it first; the two arrive in either order.
+    private lazy var airPlayRow: NSView =
+        makeMetadataRow(caption: "AirPlay", valueLabel: airPlayValueLabel)
+
+    /// The saved groups the shown device belongs to, in the order the rows
+    /// currently in ``groupsStack`` render them — the row's `tag` indexes into
+    /// this, so a click knows which group it names without a bespoke row type.
+    private var shownGroupIDs: [String] = []
 
     /// The scroll view wrapping the whole form column, `nil` until `loadView`.
     private var scrollView: NSScrollView?
@@ -118,6 +132,11 @@ public final class DeviceDetailViewController: NSViewController {
     /// the gesture is finished (`false` = live scrub, apply only; `true` =
     /// apply AND persist). The pane reaches no backend itself.
     public var onSetEQ: ((DeviceEQ, String, Bool) -> Void)?
+
+    /// A membership row was activated: SELECT this saved group (open its
+    /// editor), never activate it. The pane reaches no sidebar and no
+    /// `GroupController` mutation itself — the host owns selection.
+    public var onSelectGroup: ((String) -> Void)?
 
     /// The EQ this pane has SENT for a device while a gesture is IN FLIGHT, and
     /// whether that send was the COMMIT (`awaitingEcho`). Without it a mid-scrub
@@ -138,8 +157,9 @@ public final class DeviceDetailViewController: NSViewController {
     /// `GroupEditorViewController.iconPickerPopover`).
     private var iconPickerPopover: NSPopover?
 
-    public init(groupController: GroupController) {
+    public init(groupController: GroupController, settings: AppSettings = AppSettings()) {
         self.groupController = groupController
+        self.eqEditor = EQEditorView(settings: settings)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -166,51 +186,52 @@ public final class DeviceDetailViewController: NSViewController {
         // its minimum thickness.
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        // Device STATE (status, availability, volume, kind) in one section,
-        // MEMBERSHIP ("In groups") in another — the two bounded sections are
-        // what read as sectioning now, replacing the stock `NSBox` rule that
-        // used to sit between them and stop a third of the way across the pane.
-        stateStack.translatesAutoresizingMaskIntoConstraints = false
-        stateStack.orientation = .vertical
-        stateStack.alignment = .leading
-        stateStack.spacing = 10
-        for (caption, valueLabel) in [
-            ("Status", statusValueLabel),
-            // "On the network", not "Available": next to "Status: Not
-            // connected" a bare "Available: Yes" read as a contradiction to a
-            // non-specialist ("it's available but not connected?").
-            ("On the network", availableValueLabel),
-            ("Volume", volumeValueLabel),
-            ("Kind", kindValueLabel),
+        // "About" — the speaker's facts, one per row, on bare pane. Status
+        // folds availability in rather than taking a row of its own: as two
+        // rows they contradicted each other to read ("Not connected" over
+        // "On the network: Yes").
+        aboutStack.translatesAutoresizingMaskIntoConstraints = false
+        aboutStack.orientation = .vertical
+        aboutStack.alignment = .leading
+        aboutStack.spacing = 10
+        for row in [
+            makeMetadataRow(caption: "Status", valueLabel: statusValueLabel),
+            makeMetadataRow(caption: "Kind", valueLabel: kindValueLabel),
+            airPlayRow,
         ] {
-            let row = makeMetadataRow(caption: caption, valueLabel: valueLabel)
-            stateStack.addArrangedSubview(row)
-            // Rows FILL the section, so a right-aligned value lands on the
-            // section's own inset edge rather than at the end of its own
+            aboutStack.addArrangedSubview(row)
+            // Rows FILL the list, so a right-aligned value lands on the
+            // content lane's own edge rather than at the end of its own
             // intrinsic width.
-            row.widthAnchor.constraint(equalTo: stateStack.widthAnchor).isActive = true
+            row.widthAnchor.constraint(equalTo: aboutStack.widthAnchor).isActive = true
         }
 
+        // A LIST, so it takes the group editor's checklist rhythm (6 pt)
+        // rather than the state section's form rhythm (10 pt). Its rows are
+        // per-device — see `rebuildGroupRows`.
         groupsStack.translatesAutoresizingMaskIntoConstraints = false
         groupsStack.orientation = .vertical
         groupsStack.alignment = .leading
-        groupsStack.spacing = 10
-        let membershipRow = makeMetadataRow(caption: "In groups", valueLabel: groupsValueLabel)
-        groupsStack.addArrangedSubview(membershipRow)
-        membershipRow.widthAnchor.constraint(equalTo: groupsStack.widthAnchor).isActive = true
+        groupsStack.spacing = 6
 
-        hintLabel.translatesAutoresizingMaskIntoConstraints = false
-        hintLabel.font = Tokens.Font.caption
-        hintLabel.textColor = Tokens.Color.secondaryLabel
-        hintLabel.isSelectable = false
-        hintLabel.preferredMaxLayoutWidth = GroupsPaneLayout.contentMaxWidth
-        // A pane-level footnote, not a form row: it spans the column's FULL
-        // width (see its constraints) and yields before the pane does. At its
-        // intrinsic ~310 pt it is wider than the content lane inside the
-        // sections, and a label that refuses to compress forces the whole split
-        // view wider than the window — it was squeezing the sidebar past its
-        // own minimum thickness.
-        hintLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // The three slot titles are configured identically, because they are
+        // the same thing three times: same font, same colour, same lane.
+        for title in [eqTitleLabel, groupsTitleLabel, aboutTitleLabel] {
+            title.translatesAutoresizingMaskIntoConstraints = false
+            title.font = Tokens.Font.body
+            title.textColor = Tokens.Color.secondaryLabel
+        }
+
+        // Enablement/visibility are set by `refreshUI()`/`applyEQSectionVisibility()`,
+        // which may already have run by the time `loadView` does — not here.
+        eqResetButton.translatesAutoresizingMaskIntoConstraints = false
+        eqResetButton.bezelStyle = .rounded
+        eqResetButton.controlSize = .small
+        eqResetButton.font = Tokens.Font.caption
+        eqResetButton.title = "Reset"
+        eqResetButton.target = self
+        eqResetButton.action = #selector(resetTapped(_:))
+        eqResetButton.setAccessibilityLabel("Reset tone to flat")
 
         let container = NSView()
         // The form column: symmetric margins off the pane, ELASTIC up to
@@ -223,21 +244,28 @@ public final class DeviceDetailViewController: NSViewController {
         // Sections go in FIRST so they sit behind the content they back
         // (non-interactive either way — `GroupedSectionView.hitTest` is nil).
         // The HEADER keeps the full spine-gutter inset so its icon + name stay
-        // pinned to the group editor's; the metadata sections below use the
-        // rail-free inset, because no rail runs past them and reserving the
-        // lane left them looking hollow (design review 2026-07-25).
+        // pinned to the group editor's; every list below it uses the rail-free
+        // inset, because no rail runs past them and reserving the lane left
+        // them looking hollow (design review 2026-07-25). That inset is also
+        // where a bare list's dividers start.
         headerWell.contentLeadingInset = GroupsPaneLayout.contentLeadingInset
-        stateWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
-        groupsWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
         eqWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
+        groupsWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
+        aboutWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
+        // ONE card per page, and it is the instrument: everything else is a
+        // bare list, separated by its own dividers rather than by a box.
+        headerWell.style = .bare
+        groupsWell.style = .bare
+        aboutWell.style = .bare
         eqEditor.translatesAutoresizingMaskIntoConstraints = false
         eqEditor.delegate = self
 
-        for well in [headerWell, stateWell, groupsWell, eqWell] {
+        for well in [headerWell, eqWell, groupsWell, aboutWell] {
             well.translatesAutoresizingMaskIntoConstraints = false
             column.addSubview(well)
         }
-        for v in [iconWell, nameLabel, stateStack, groupsStack, eqEditor, hintLabel] {
+        for v in [iconWell, nameLabel, eqTitleLabel, eqResetButton, eqEditor,
+                  groupsTitleLabel, groupsStack, aboutTitleLabel, aboutStack] {
             column.addSubview(v)
         }
 
@@ -261,19 +289,25 @@ public final class DeviceDetailViewController: NSViewController {
         container.addSubview(scrollView)
         self.scrollView = scrollView
 
-        // The rows' own hairlines come from the section, which reads their LIVE
-        // frames on every draw.
-        stateWell.rows = stateStack.arrangedSubviews
+        // The rows' own hairlines come from the list, which reads their LIVE
+        // frames on every draw. The Groups rows are per-device, so they are
+        // built here as well as on every refresh — the pane can be mounted
+        // before it is ever shown a device, and a list with no rows at all
+        // collapses to nothing.
+        aboutWell.rows = aboutStack.arrangedSubviews.filter { !$0.isHidden }
+        rebuildGroupRows()
 
         let columnFill = column.trailingAnchor.constraint(
             equalTo: document.trailingAnchor, constant: -GroupsPaneLayout.columnTrailingInset)
         columnFill.priority = .defaultHigh
 
-        // Both of the hint's possible top pins, built once (see the properties).
-        hintBelowEQSection = hintLabel.topAnchor.constraint(
-            equalTo: eqWell.bottomAnchor, constant: GroupsPaneLayout.actionBandGap)
-        hintBelowGroupsSection = hintLabel.topAnchor.constraint(
-            equalTo: groupsWell.bottomAnchor, constant: GroupsPaneLayout.actionBandGap)
+        // Both of the "Groups" title's possible top pins, built once (see the
+        // properties). Neither goes in the array below — exactly one is
+        // activated by `applyEQSectionVisibility()`.
+        groupsTitleBelowEQCard = groupsTitleLabel.topAnchor.constraint(
+            equalTo: eqWell.bottomAnchor, constant: GroupsPaneLayout.sectionGap)
+        groupsTitleBelowHeader = groupsTitleLabel.topAnchor.constraint(
+            equalTo: headerWell.bottomAnchor, constant: GroupsPaneLayout.sectionGap)
 
         NSLayoutConstraint.activate([
             scrollView.topAnchor.constraint(equalTo: container.topAnchor),
@@ -324,25 +358,55 @@ public final class DeviceDetailViewController: NSViewController {
             nameLabel.trailingAnchor.constraint(lessThanOrEqualTo: headerWell.trailingAnchor,
                                                 constant: -GroupsPaneLayout.contentTrailingInset),
 
-            stateStack.topAnchor.constraint(
-                equalTo: headerWell.bottomAnchor,
-                constant: GroupsPaneLayout.sectionGap + GroupedSectionView.verticalPadding),
-            stateStack.leadingAnchor.constraint(
+            // "Equalizer" sits on bare pane one section-gap under identity —
+            // the same break the group editor puts above its "Speakers" label,
+            // but at the CONTENT lane's leading inset rather than the
+            // header's, since this pane draws no rail past it.
+            eqTitleLabel.topAnchor.constraint(equalTo: headerWell.bottomAnchor,
+                                              constant: GroupsPaneLayout.sectionGap),
+            eqTitleLabel.leadingAnchor.constraint(
                 equalTo: column.leadingAnchor,
                 constant: GroupsPaneLayout.railFreeContentLeadingInset),
-            stateStack.trailingAnchor.constraint(
+
+            // Reset sits on the SAME title line, trailing-aligned to the
+            // card's content edge (the same edge `eqEditor` itself trails to).
+            eqResetButton.trailingAnchor.constraint(
+                equalTo: column.trailingAnchor, constant: -GroupsPaneLayout.contentTrailingInset),
+            eqResetButton.centerYAnchor.constraint(equalTo: eqTitleLabel.centerYAnchor),
+
+            // The card's content, one label-to-section gap below its title,
+            // plus the card's own top padding — mirrors the group editor's
+            // `speakersLabel` → `membershipStack` math, but with
+            // `cardContentInset` rather than `verticalPadding`: the editor is
+            // an INSTRUMENT (tone controls and, behind Advanced, a scope), not
+            // a list of text rows, so it earns the wider inset
+            // (`GroupsPaneLayout.cardContentInset`).
+            eqEditor.topAnchor.constraint(
+                equalTo: eqTitleLabel.bottomAnchor,
+                constant: GroupsPaneLayout.labelToSectionGap + GroupsPaneLayout.cardContentInset),
+            eqEditor.leadingAnchor.constraint(
+                equalTo: column.leadingAnchor,
+                constant: GroupsPaneLayout.railFreeContentLeadingInset),
+            eqEditor.trailingAnchor.constraint(
                 equalTo: column.trailingAnchor, constant: -GroupsPaneLayout.contentTrailingInset),
 
-            stateWell.leadingAnchor.constraint(equalTo: column.leadingAnchor),
-            stateWell.trailingAnchor.constraint(equalTo: column.trailingAnchor),
-            stateWell.topAnchor.constraint(equalTo: stateStack.topAnchor,
-                                           constant: -GroupedSectionView.verticalPadding),
-            stateWell.bottomAnchor.constraint(equalTo: stateStack.bottomAnchor,
-                                              constant: GroupedSectionView.verticalPadding),
+            eqWell.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            eqWell.trailingAnchor.constraint(equalTo: column.trailingAnchor),
+            eqWell.topAnchor.constraint(equalTo: eqEditor.topAnchor,
+                                        constant: -GroupsPaneLayout.cardContentInset),
+            eqWell.bottomAnchor.constraint(equalTo: eqEditor.bottomAnchor,
+                                           constant: GroupsPaneLayout.cardContentInset),
+
+            // "Groups". Its TOP is one of the two alternative pins built above
+            // — deliberately NOT in this array, since exactly one of them is
+            // activated by `applyEQSectionVisibility()`.
+            groupsTitleLabel.leadingAnchor.constraint(
+                equalTo: column.leadingAnchor,
+                constant: GroupsPaneLayout.railFreeContentLeadingInset),
 
             groupsStack.topAnchor.constraint(
-                equalTo: stateWell.bottomAnchor,
-                constant: GroupsPaneLayout.sectionGap + GroupedSectionView.verticalPadding),
+                equalTo: groupsTitleLabel.bottomAnchor,
+                constant: GroupsPaneLayout.labelToSectionGap + GroupedSectionView.verticalPadding),
             groupsStack.leadingAnchor.constraint(
                 equalTo: column.leadingAnchor,
                 constant: GroupsPaneLayout.railFreeContentLeadingInset),
@@ -356,57 +420,46 @@ public final class DeviceDetailViewController: NSViewController {
             groupsWell.bottomAnchor.constraint(equalTo: groupsStack.bottomAnchor,
                                                constant: GroupedSectionView.verticalPadding),
 
-            eqEditor.topAnchor.constraint(
-                equalTo: groupsWell.bottomAnchor,
-                constant: GroupsPaneLayout.sectionGap + GroupedSectionView.verticalPadding),
-            eqEditor.leadingAnchor.constraint(
+            // "About", the last slot on every device.
+            aboutTitleLabel.topAnchor.constraint(equalTo: groupsWell.bottomAnchor,
+                                                 constant: GroupsPaneLayout.sectionGap),
+            aboutTitleLabel.leadingAnchor.constraint(
                 equalTo: column.leadingAnchor,
                 constant: GroupsPaneLayout.railFreeContentLeadingInset),
-            eqEditor.trailingAnchor.constraint(
+
+            aboutStack.topAnchor.constraint(
+                equalTo: aboutTitleLabel.bottomAnchor,
+                constant: GroupsPaneLayout.labelToSectionGap + GroupedSectionView.verticalPadding),
+            aboutStack.leadingAnchor.constraint(
+                equalTo: column.leadingAnchor,
+                constant: GroupsPaneLayout.railFreeContentLeadingInset),
+            aboutStack.trailingAnchor.constraint(
                 equalTo: column.trailingAnchor, constant: -GroupsPaneLayout.contentTrailingInset),
 
-            eqWell.leadingAnchor.constraint(equalTo: column.leadingAnchor),
-            eqWell.trailingAnchor.constraint(equalTo: column.trailingAnchor),
-            eqWell.topAnchor.constraint(equalTo: eqEditor.topAnchor,
-                                        constant: -GroupedSectionView.verticalPadding),
-            eqWell.bottomAnchor.constraint(equalTo: eqEditor.bottomAnchor,
-                                           constant: GroupedSectionView.verticalPadding),
+            aboutWell.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            aboutWell.trailingAnchor.constraint(equalTo: column.trailingAnchor),
+            aboutWell.topAnchor.constraint(equalTo: aboutStack.topAnchor,
+                                           constant: -GroupedSectionView.verticalPadding),
+            aboutWell.bottomAnchor.constraint(equalTo: aboutStack.bottomAnchor,
+                                              constant: GroupedSectionView.verticalPadding),
 
-            // The pane's ACTION BAND (this pane's is a footnote, not a button),
-            // one shared gap below the last section — the same break the
-            // editor puts above "Delete Group…". WHICH section is last depends
-            // on the device, so the top pin is activated in `refreshUI()`.
-            // The full column, NOT the content lane inside the sections: this
-            // is a footnote about the pane, so it reads across it (the same way
-            // the window's own footer caption spans the whole pane) and gets
-            // the width it needs instead of truncating inside a lane that's
-            // 38.5 pt narrower.
-            hintLabel.leadingAnchor.constraint(equalTo: column.leadingAnchor),
-            hintLabel.trailingAnchor.constraint(lessThanOrEqualTo: column.trailingAnchor),
-            hintLabel.bottomAnchor.constraint(equalTo: column.bottomAnchor),
+            // About is ALWAYS last, so it is what ties the slots to the
+            // column's bottom — no alternates needed, unlike the hint it
+            // replaced. Without this the column's height is ambiguous and the
+            // scroll document collapses.
+            aboutWell.bottomAnchor.constraint(equalTo: column.bottomAnchor),
         ])
 
         view = container
 
-        // Pin the hint NOW, not at the next refresh. `show(device:)` is
-        // routinely called BEFORE the view is ever loaded (see
-        // `MixerWindowController.showDetail`: it shows the device and mounts
-        // the pane second), so the `refreshUI()` that ran then found both
-        // constraints still nil and left the hint with no top pin at all —
-        // which makes the column's height ambiguous and collapses the scroll
-        // document until something refreshes the pane again.
+        // Seed the "Groups" title's top pin NOW, not at the next refresh.
+        // `show(device:)` is routinely called BEFORE the view is ever loaded
+        // (see `MixerWindowController.showDetail`: it shows the device and
+        // mounts the pane second), so the `refreshUI()` that ran then found
+        // both constraints still nil and left the title — and everything
+        // hanging off it — with no top pin at all.
         applyEQSectionVisibility()
     }
-
-    /// Minimal one-line hint naming the division of labour. Deliberately
-    /// terse — the fuller "configure here / play in the Mixer" teaching lives
-    /// in a footer elsewhere in this window. It says what this page IS
-    /// ("describes and tunes"), not what it lacks: "view-only" was never true
-    /// of the icon well above it, and is doubly untrue now that the Equalizer
-    /// section edits the speaker's tone from here. Names the Mixer (not
-    /// "menu-bar popover" — the user reading this is already inside the one
-    /// surface, one toolbar click from it).
-    private static let mixerHint = "Playback is controlled from the Mixer — this page describes and tunes the speaker."
 
     /// Build one "Caption ······ Value" row: a secondary-colour caption on the
     /// leading edge and its value RIGHT-ALIGNED on the trailing edge, so the
@@ -467,11 +520,15 @@ public final class DeviceDetailViewController: NSViewController {
     private func refreshUI() {
         guard let device = shownDevice else { return }
         nameLabel.stringValue = device.name
-        statusValueLabel.stringValue = Self.statusText(for: device.connectionState)
-        availableValueLabel.stringValue = device.isAvailable ? "Yes" : "No"
-        volumeValueLabel.stringValue = "\(device.volume)%"
+        statusValueLabel.stringValue = Self.statusText(for: device)
         kindValueLabel.stringValue = Self.kindText(for: device.kind)
-        groupsValueLabel.stringValue = groupMembershipText(for: device)
+        let airPlay = Self.airPlayText(for: device)
+        airPlayValueLabel.stringValue = airPlay ?? ""
+        airPlayRow.isHidden = airPlay == nil
+        // Only the rows that are actually there, so no divider is drawn above
+        // a row that isn't.
+        aboutWell.rows = aboutStack.arrangedSubviews.filter { !$0.isHidden }
+        rebuildGroupRows()
         refreshIcon()
 
         applyEQSectionVisibility()
@@ -488,39 +545,64 @@ public final class DeviceDetailViewController: NSViewController {
         }
         eqEditor.apply(eq: eqEdits[device.id]?.eq ?? device.eq,
                        bypassReason: device.eqBypassReason)
+        refreshResetEnabled()
     }
 
-    /// Show or hide the Equalizer section for the shown device, and pin the
-    /// hint under whichever section is then LAST. This Mac is where the audio
-    /// comes FROM: there is no send to tune, so the whole section goes and the
-    /// hint closes the gap behind it.
+    /// Show or hide the Equalizer slot for the shown device, and pin the
+    /// "Groups" title under whichever slot then precedes it. This Mac is where
+    /// the audio comes FROM: there is no send to tune, so the whole slot goes
+    /// and Groups closes the gap behind it.
     ///
     /// Called from `loadView` as well as `refreshUI()` because the two arrive
-    /// in either order (the pane is shown before it is mounted), and the hint
-    /// must never be left without a top pin: it is the only thing tying the
-    /// sections to the column's bottom, so an unpinned hint makes the column's
-    /// height ambiguous and the scroll document collapses. With no device yet
-    /// the speaker branch is the default — the section it shows is the one a
-    /// following `refreshUI()` keeps for every device but This Mac.
+    /// in either order (the pane is shown before it is mounted), and the title
+    /// must never be left without a top pin: everything below it hangs off
+    /// that pin, down to the About list that ties the column's bottom, so an
+    /// unpinned title makes the column's height ambiguous and the scroll
+    /// document collapses. With no device yet the speaker branch is the
+    /// default — the slot it shows is the one a following `refreshUI()` keeps
+    /// for every device but This Mac.
     private func applyEQSectionVisibility() {
         let showsEQ = !(shownDevice?.isLocalDevice == true || shownDevice?.kind == .localMac)
         eqWell.isHidden = !showsEQ
         eqEditor.isHidden = !showsEQ
-        hintBelowEQSection?.isActive = false
-        hintBelowGroupsSection?.isActive = false
-        (showsEQ ? hintBelowEQSection : hintBelowGroupsSection)?.isActive = true
+        eqTitleLabel.isHidden = !showsEQ
+        eqResetButton.isHidden = !showsEQ
+        groupsTitleBelowEQCard?.isActive = false
+        groupsTitleBelowHeader?.isActive = false
+        (showsEQ ? groupsTitleBelowEQCard : groupsTitleBelowHeader)?.isActive = true
     }
 
-    /// Plain-word status copy for `state`, matching `DeviceRowView`'s existing
-    /// vocabulary (its "Couldn't connect" sublabel / accessibility suffixes)
-    /// rather than coining new copy for this pane.
-    private static func statusText(for state: ConnectionState) -> String {
-        switch state {
-        case .off:           return "Not connected"
-        case .connecting:    return "Connecting"
-        case .reconnecting:  return "Reconnecting"
+    /// ONE plain-word line for where this speaker stands, folding the two
+    /// facts the form used to split across two rows — "Status: Not connected"
+    /// sitting over "On the network: Yes" reads as a contradiction to anyone
+    /// not holding the model in their head. Availability only ever changes the
+    /// IDLE word: a speaker mid-connect is mid-connect whatever the network
+    /// says, and a failure is a failure. "Ready" (not "Not connected") because
+    /// a reachable idle speaker is a thing you can use, not a thing that's
+    /// broken. The busy words keep `DeviceRowView`'s existing vocabulary.
+    private static func statusText(for device: Device) -> String {
+        switch device.connectionState {
         case .connected:     return "Connected"
+        case .connecting:    return "Connecting…"
+        case .reconnecting:  return "Reconnecting…"
         case .failed:        return "Couldn't connect"
+        case .off:           return device.isAvailable ? "Ready" : "Not on the network"
+        }
+    }
+
+    /// Which AirPlay this speaker speaks, or `nil` when the question does not
+    /// apply and the row is dropped: `.bluetooth` is not an AirPlay receiver
+    /// at all (it carries `supportsAirPlay2 == false` for an unrelated
+    /// reason), and `.localMac` is where the audio comes FROM.
+    ///
+    /// Says what AirPlay 1 COSTS rather than only its version number — the
+    /// number alone tells the person reading it nothing.
+    private static func airPlayText(for device: Device) -> String? {
+        switch device.kind {
+        case .bluetooth, .localMac:
+            return nil
+        case .homePod, .appleTV, .airportExpress, .sonos, .generic:
+            return device.supportsAirPlay2 ? "AirPlay 2" : "AirPlay 1 — sync not exact"
         }
     }
 
@@ -539,13 +621,163 @@ public final class DeviceDetailViewController: NSViewController {
         }
     }
 
-    /// "Kitchen, Office" for every saved group whose `memberIDs` contains
-    /// `device.id`, in `groupController.groups` order, or "None" when empty.
-    private func groupMembershipText(for device: Device) -> String {
-        let names = groupController.groups
-            .filter { $0.memberIDs.contains(device.id) }
-            .map(\.name)
-        return names.isEmpty ? "None" : names.joined(separator: ", ")
+    // MARK: Membership section
+
+    /// Height of one membership row. 28 pt is the Groups screen's locked row
+    /// height (`dev/notes/warm-signal-screens-followup.md` — "row height 28pt",
+    /// frozen alongside the text colours); the editor's checklist rows are
+    /// taller only because the WHOLE row there is a checkbox target.
+    private static let groupRowHeight: CGFloat = 28
+
+    /// Shown when the device belongs to no saved group. The section STAYS —
+    /// hiding it would make "which groups is this speaker in?" unanswerable
+    /// from the page that exists to answer it.
+    private static let noGroupsRowText = "Not in any group"
+
+    /// Every saved group this device belongs to, in `groupController.groups`
+    /// order — the same order the sidebar's Groups section lists them in
+    /// (`SidebarViewController.reload` maps that array straight to rows), so
+    /// clicking the third row here lands on the third group there.
+    private func groups(containing device: Device) -> [Group] {
+        groupController.groups.filter { $0.memberIDs.contains(device.id) }
+    }
+
+    /// Rebuild the membership rows for the shown device. `NSStackView`'s
+    /// `removeArrangedSubview` alone leaves the view IN the hierarchy (it only
+    /// stops arranging it), so every old row is removed from its superview too
+    /// or the section quietly stacks up ghosts behind the live rows.
+    private func rebuildGroupRows() {
+        for row in groupsStack.arrangedSubviews {
+            groupsStack.removeArrangedSubview(row)
+            row.removeFromSuperview()
+        }
+
+        let memberGroups = shownDevice.map(groups(containing:)) ?? []
+        shownGroupIDs = memberGroups.map(\.id)
+
+        let rows: [NSView] = memberGroups.isEmpty
+            ? [makeNoGroupsRow()]
+            : memberGroups.enumerated().map { makeGroupRow($0.element, tag: $0.offset) }
+        for row in rows {
+            groupsStack.addArrangedSubview(row)
+            // Rows FILL the section, so the chevron lands on the section's own
+            // inset edge rather than at the end of the row's intrinsic width.
+            row.widthAnchor.constraint(equalTo: groupsStack.widthAnchor).isActive = true
+            row.heightAnchor.constraint(equalToConstant: Self.groupRowHeight).isActive = true
+        }
+        // Live views, so the section's inset hairlines draw between them.
+        groupsWell.rows = rows
+    }
+
+    /// Gap held clear between a membership row's title button and its chevron,
+    /// so a truncated name never crowds the glyph.
+    private static let groupRowChevronGap: CGFloat = 8
+
+    /// One membership row: the group's icon, its name, and a trailing chevron
+    /// saying the row OPENS something.
+    ///
+    /// A borderless `NSButton`, deliberately — not a stack view with a click
+    /// recognizer. Stock AppKit then gives the whole keyboard/accessibility
+    /// story for free: Tab focus with a focus ring, Space/Return activation,
+    /// `NSAccessibilityButton` role, and `accessibilityPerformPress()`. A
+    /// gesture recognizer on a plain view has none of that and would have to
+    /// hand-roll every one of them — the price `DeviceIconWellView` pays for
+    /// being the one approved custom element.
+    ///
+    /// The button IS the row, full width and full height, with the chevron a
+    /// click-through subview riding on it. That is not cosmetic: `NSButtonCell`
+    /// only fires when the mouse-UP lands inside the button's own frame, so a
+    /// button that stops short of the chevron leaves every click on the glyph
+    /// (and on the gap before it) dead, however the hit test is routed. The
+    /// title's clearance is therefore a CELL job, not a layout one —
+    /// `GroupRowButtonCell` shortens `titleRect(forBounds:)` by the chevron's
+    /// width plus the gap, so a long name ("Whole House Downstairs Speakers")
+    /// truncates against the glyph instead of drawing under it.
+    ///
+    /// No hover fill: this pane's text colours are frozen and there is no
+    /// approved hover chrome for it (`AGENTS.md`).
+    private func makeGroupRow(_ group: Group, tag: Int) -> NSView {
+        let button = NSButton()
+        // The cell is swapped BEFORE anything is configured on the button
+        // (`WarmFaderCell`'s precedent) — assigning a fresh cell afterwards
+        // would drop every setting made through the old one. The stock font
+        // rides across so the swap changes nothing but the title's width.
+        let stockFont = button.font
+        let cell = GroupRowButtonCell()
+        button.cell = cell
+        button.font = stockFont
+        button.setButtonType(.momentaryPushIn)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.isBordered = false
+        button.tag = tag
+        button.alignment = .left
+        button.imagePosition = .imageLeading
+        button.lineBreakMode = .byTruncatingTail
+        button.title = group.name
+        button.target = self
+        button.action = #selector(groupRowClicked(_:))
+        // The ONE group-icon resolution path (`AGENTS.md`): a stale override
+        // falls back to the group default rather than a blank glyph.
+        let symbol = DeviceIcon.resolve(group.iconSymbolName, default: Group.defaultIconSymbolName)
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        image?.isTemplate = true
+        button.image = image
+        button.setAccessibilityLabel(group.name)
+        // A long group name truncates; it never widens the pane (the same rule
+        // the device name above it follows).
+        button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        // Rides ON the button — the WHOLE row is the target, so the glyph must
+        // never swallow a click meant for it (`hitTest` nil, the module's
+        // documented non-interactive-chrome pattern).
+        let chevron = ClickThroughImageView()
+        chevron.translatesAutoresizingMaskIntoConstraints = false
+        let chevronImage = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)
+        chevronImage?.isTemplate = true
+        chevron.image = chevronImage
+        chevron.contentTintColor = Tokens.Color.secondaryLabel
+        cell.chevronReserve = (chevronImage?.size.width ?? 0) + Self.groupRowChevronGap
+        button.addSubview(chevron)
+        NSLayoutConstraint.activate([
+            chevron.trailingAnchor.constraint(equalTo: button.trailingAnchor),
+            chevron.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+        ])
+        return button
+    }
+
+    /// The empty state: a plain secondary-colour label, NOT a control — there
+    /// is nothing to open.
+    private func makeNoGroupsRow() -> NSView {
+        let label = NSTextField(labelWithString: Self.noGroupsRowText)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.textColor = Tokens.Color.secondaryLabel
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let row = NSView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: row.trailingAnchor),
+            label.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+        ])
+        return row
+    }
+
+    @objc private func groupRowClicked(_ sender: NSButton) {
+        guard shownGroupIDs.indices.contains(sender.tag) else { return }
+        onSelectGroup?(shownGroupIDs[sender.tag])
+    }
+
+    @objc private func resetTapped(_ sender: NSButton) {
+        eqEditor.resetToFlat()
+    }
+
+    /// The editor's own rendered model IS the source of truth here — it
+    /// already received `eqEdits[device.id]?.eq ?? device.eq`.
+    private func refreshResetEnabled() {
+        eqResetButton.isEnabled = !eqEditor.currentEQ.isFlat
     }
 
     /// Resolve and apply the icon for `shownDevice`: the controller's override
@@ -617,24 +849,95 @@ public final class DeviceDetailViewController: NSViewController {
     /// The id of the device currently shown, `nil` before the first `show`.
     public var test_shownDeviceID: String? { shownDevice?.id }
 
-    /// The metadata form's current visible text, keyed by field (not by its
+    /// The About list's current visible text, keyed by field (not by its
     /// on-screen caption, so a future copy change doesn't reshape this API).
+    /// "airplay" is ABSENT, not empty, when the row is dropped — Bluetooth and
+    /// This Mac are not AirPlay receivers, so the question has no answer
+    /// rather than a blank one.
     public var test_metadataStrings: [String: String] {
-        [
+        var strings = [
             "status": statusValueLabel.stringValue,
-            "available": availableValueLabel.stringValue,
-            "volume": volumeValueLabel.stringValue,
             "kind": kindValueLabel.stringValue,
         ]
+        if !airPlayRow.isHidden { strings["airplay"] = airPlayValueLabel.stringValue }
+        return strings
     }
 
-    /// The "In groups" value text ("None" when the device is in no saved group).
-    public var test_groupMembershipText: String { groupsValueLabel.stringValue }
+    /// The shown device's membership as ONE comma-joined string ("None" when it
+    /// belongs to no saved group) — the plain-string contract `window-harness`
+    /// check [9] and the suites assert against, off the same source and order
+    /// the section's rows render.
+    public var test_groupMembershipText: String {
+        guard let device = shownDevice else { return "" }
+        let names = groups(containing: device).map(\.name)
+        return names.isEmpty ? "None" : names.joined(separator: ", ")
+    }
 
-    /// The minimal Mixer hint's visible text — asserts it stays a single,
-    /// short line rather than restating the fuller footer copy owned
-    /// elsewhere in this window.
-    public var test_hintText: String { hintLabel.stringValue }
+    /// The membership section's title label.
+    public var test_groupsSectionTitleText: String { groupsTitleLabel.stringValue }
+
+    /// What the membership section's rows READ, top to bottom: one entry per
+    /// saved group the device belongs to, or the single non-clickable
+    /// "Not in any group" row when it belongs to none.
+    public var test_groupRowTitles: [String] {
+        groupsStack.arrangedSubviews.map { row in
+            if let button = Self.groupRowButton(in: row) { return button.title }
+            return (row.subviews.compactMap { $0 as? NSTextField }.first?.stringValue) ?? ""
+        }
+    }
+
+    /// The title button inside a membership row container, or `nil` for the
+    /// non-clickable empty-state row.
+    private static func groupRowButton(in row: NSView) -> NSButton? {
+        row as? NSButton
+    }
+
+    /// Where each row's TITLE is actually drawn, in the pane's own coordinates
+    /// — the cell's own answer, so the chevron clearance is measured rather
+    /// than assumed from the button's frame (the button spans the whole row).
+    public var test_groupRowTitleRects: [NSRect] {
+        view.layoutSubtreeIfNeeded()
+        return groupsStack.arrangedSubviews.compactMap { row in
+            guard let button = Self.groupRowButton(in: row), let cell = button.cell else { return nil }
+            return button.convert(cell.titleRect(forBounds: button.bounds), to: view)
+        }
+    }
+
+    /// The gap a membership row holds clear between its title button and its
+    /// chevron — read rather than hard-coded, so the geometry assertions can
+    /// never pin a number the row no longer uses.
+    public static var test_groupRowChevronGap: CGFloat { groupRowChevronGap }
+
+    /// Each membership row's title BUTTON frame, in the pane's own
+    /// coordinates, top to bottom.
+    public var test_groupRowButtonFrames: [NSRect] {
+        view.layoutSubtreeIfNeeded()
+        return groupsStack.arrangedSubviews.compactMap { row in
+            Self.groupRowButton(in: row).map { $0.convert($0.bounds, to: view) }
+        }
+    }
+
+    /// Each membership row's trailing CHEVRON frame, in the pane's own
+    /// coordinates, top to bottom — paired index-for-index with
+    /// `test_groupRowButtonFrames`, so a long name can be shown to truncate
+    /// rather than run under the glyph.
+    public var test_groupRowChevronFrames: [NSRect] {
+        view.layoutSubtreeIfNeeded()
+        return groupsStack.arrangedSubviews.compactMap { row in
+            row.subviews.compactMap { $0 as? NSImageView }.first
+                .map { $0.convert($0.bounds, to: view) }
+        }
+    }
+
+    /// Activate the membership row at `index` exactly as a click (or Space/
+    /// Return on the focused row) does — no synthesized clicks headless
+    /// (`../AGENTS.md`). No-op for an out-of-range index or the empty-state row.
+    public func test_selectGroupRow(at index: Int) {
+        let rows = groupsStack.arrangedSubviews
+        guard rows.indices.contains(index),
+              let button = Self.groupRowButton(in: rows[index]) else { return }
+        groupRowClicked(button)
+    }
 
     /// The symbol name currently rendered by the icon well.
     public var test_iconSymbolName: String? {
@@ -666,28 +969,43 @@ public final class DeviceDetailViewController: NSViewController {
         return headerWell.convert(headerWell.bounds, to: view)
     }
 
-    /// Leading inset of the metadata rows, measured from their section's own
-    /// edge. This pane draws NO rail, so its rows use the tighter
+    /// Leading inset of the About rows, measured from their list's own edge.
+    /// This pane draws NO rail, so its rows use the tighter
     /// `railFreeContentLeadingInset` rather than reserving the spine's lane —
     /// its HEADER still uses the full inset so the icon + name stay pinned to
     /// the group editor's (design review 2026-07-25).
     public var test_metadataRowInset: CGFloat {
         view.layoutSubtreeIfNeeded()
-        let row = stateStack.convert(stateStack.bounds, to: view)
-        let section = stateWell.convert(stateWell.bounds, to: view)
+        let row = aboutStack.convert(aboutStack.bounds, to: view)
+        let section = aboutWell.convert(aboutWell.bounds, to: view)
         return row.minX - section.minX
     }
 
-    /// The number of `GroupedSectionView` sections this pane draws (header +
-    /// state + "In groups" + Equalizer) — the detail pane adopts the SAME section shape the
-    /// group editor uses, rather than a bare form on the pane.
-    /// Counted RECURSIVELY: the column now sits inside a scroll view, so the
+    /// The VISIBLE slot titles, in page order — the page's shape as words
+    /// ("Equalizer", "Groups", "About"; This Mac drops the first).
+    public var test_slotTitles: [String] {
+        [eqTitleLabel, groupsTitleLabel, aboutTitleLabel]
+            .filter { !$0.isHidden }
+            .map(\.stringValue)
+    }
+
+    /// Every VISIBLE `.card` section's frame in the pane's own coordinates, in
+    /// subview order. There is exactly one on a speaker and none on This Mac:
+    /// a box is earned by holding a different instrument, never by length.
+    /// Walked RECURSIVELY — the column sits inside a scroll view, so the
     /// sections are several levels down rather than two.
-    public var test_sectionCount: Int {
-        func count(_ v: NSView) -> Int {
-            (v is GroupedSectionView ? 1 : 0) + v.subviews.reduce(0) { $0 + count($1) }
+    public var test_cardFrames: [NSRect] {
+        view.layoutSubtreeIfNeeded()
+        func cards(_ v: NSView) -> [GroupedSectionView] {
+            let here: [GroupedSectionView]
+            if let section = v as? GroupedSectionView, section.style == .card, !section.isHidden {
+                here = [section]
+            } else {
+                here = []
+            }
+            return here + v.subviews.flatMap(cards)
         }
-        return count(view)
+        return cards(view).map { $0.convert($0.bounds, to: view) }
     }
 
     /// The Equalizer section's editor — the host contract for every tone
@@ -719,16 +1037,32 @@ public final class DeviceDetailViewController: NSViewController {
         return statusValueLabel.convert(statusValueLabel.bounds, to: view).maxX
     }
 
-    /// The state section's laid-out frame in the pane's own coordinates.
-    public var test_stateSectionFrame: NSRect {
+    /// The About list's laid-out frame in the pane's own coordinates.
+    public var test_aboutSectionFrame: NSRect {
         view.layoutSubtreeIfNeeded()
-        return stateWell.convert(stateWell.bounds, to: view)
+        return aboutWell.convert(aboutWell.bounds, to: view)
     }
 
-    /// The "In groups" section's laid-out frame in the pane's own coordinates.
+    /// The "About" TITLE label's laid-out frame in the pane's own coordinates
+    /// — it must sit between the Groups list and the About list it titles,
+    /// never inside either.
+    public var test_aboutSectionTitleFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return aboutTitleLabel.convert(aboutTitleLabel.bounds, to: view)
+    }
+
+    /// The Groups list's laid-out frame in the pane's own coordinates.
     public var test_groupsSectionFrame: NSRect {
         view.layoutSubtreeIfNeeded()
         return groupsWell.convert(groupsWell.bounds, to: view)
+    }
+
+    /// The "Groups" TITLE label's laid-out frame in the pane's own coordinates
+    /// — it must sit between whatever precedes it (the Equalizer card, or the
+    /// identity band on This Mac) and the list it titles, never inside either.
+    public var test_groupsSectionTitleFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return groupsTitleLabel.convert(groupsTitleLabel.bounds, to: view)
     }
 
     /// The Equalizer section's laid-out frame in the pane's own coordinates.
@@ -737,19 +1071,50 @@ public final class DeviceDetailViewController: NSViewController {
         return eqWell.convert(eqWell.bounds, to: view)
     }
 
-    /// The hint's laid-out frame in the pane's own coordinates. The pane's own
-    /// `view` is NOT flipped, so "below the last section" reads as a SMALLER
-    /// y here even though the scroll document above it is flipped.
-    public var test_hintFrame: NSRect {
+    /// The Equalizer EDITOR's own laid-out frame (inside the card), in the
+    /// pane's own coordinates — lets a test measure the card's inner inset
+    /// against `test_eqSectionFrame` directly.
+    public var test_eqEditorFrame: NSRect {
         view.layoutSubtreeIfNeeded()
-        return hintLabel.convert(hintLabel.bounds, to: view)
+        return eqEditor.convert(eqEditor.bounds, to: view)
     }
 
-    /// How many of the hint's two alternative top pins are active — must be
-    /// exactly 1 from the moment the view loads. Zero leaves the column's
-    /// height ambiguous and collapses the scroll document; two conflict.
-    public var test_activeHintPinCount: Int {
-        [hintBelowEQSection, hintBelowGroupsSection].filter { $0?.isActive == true }.count
+    /// The Equalizer section title's visible text, `nil` when hidden (This
+    /// Mac) — mirrors `test_eqSectionShown` rather than a bare `Bool` so a
+    /// test can also assert the copy itself.
+    public var test_eqSectionTitleText: String? {
+        eqTitleLabel.isHidden ? nil : eqTitleLabel.stringValue
+    }
+
+    /// The Equalizer section title's laid-out frame in the pane's own
+    /// coordinates.
+    public var test_eqSectionTitleFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return eqTitleLabel.convert(eqTitleLabel.bounds, to: view)
+    }
+
+    /// The Equalizer title's ALIGNMENT rect (`MainOutDetailViewController
+    /// .test_headerTitleAlignmentFrame`'s idiom) — lets a test compare its
+    /// centre line with `eqResetButton`'s own frame directly.
+    public var test_eqSectionTitleAlignmentFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return eqTitleLabel.alignmentRect(forFrame: eqTitleLabel.convert(eqTitleLabel.bounds, to: view))
+    }
+
+    public func test_fireResetClick() { eqResetButton.performClick(nil) }
+    public var test_resetEnabled: Bool { eqResetButton.isEnabled }
+    public var test_resetShown: Bool { !eqResetButton.isHidden }
+    public var test_eqResetButtonFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return eqResetButton.convert(eqResetButton.bounds, to: view)
+    }
+
+    /// How many of the "Groups" title's two alternative top pins are active —
+    /// must be exactly 1 from the moment the view loads. Zero leaves the
+    /// column's height ambiguous and collapses the scroll document; two
+    /// conflict.
+    public var test_activeGroupsTitlePinCount: Int {
+        [groupsTitleBelowEQCard, groupsTitleBelowHeader].filter { $0?.isActive == true }.count
     }
 
     /// Drive the hover scrim's visibility headlessly (a real `mouseEntered`/
@@ -791,6 +1156,7 @@ extension DeviceDetailViewController: EQEditorViewDelegate {
         // and until it matches this exact value the snapshot must not win.
         eqEdits[id] = (eq, committed)
         onSetEQ?(eq, id, committed)
+        refreshResetEnabled()
     }
 
     public func eqEditorDidRequestReset(_ editor: EQEditorView) {
@@ -799,6 +1165,33 @@ extension DeviceDetailViewController: EQEditorViewDelegate {
         // controls back to flat.
         eqEdits[id] = (.flat, true)
         onSetEQ?(.flat, id, true)
+        refreshResetEnabled()
+    }
+}
+
+/// The membership row's trailing chevron: pure signal, never a click target.
+/// It sits ON the row button, so without this the trailing strip of every row
+/// would refuse the click the rest of the row accepts. Same `hitTest`-nil
+/// pattern as `HairlineView`/`GroupedSectionView`; no `draw(_:)` of its own.
+private final class ClickThroughImageView: NSImageView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
+/// The membership row button's cell, which does exactly one thing: hold the
+/// trailing chevron's width clear of the title. The button spans the WHOLE row
+/// (it has to — `NSButtonCell` fires only on a mouse-up inside its own frame),
+/// so without this the title would measure itself against the full width and a
+/// long group name would draw straight under the glyph.
+private final class GroupRowButtonCell: NSButtonCell {
+
+    /// Width kept clear at the trailing edge: the chevron plus the gap before
+    /// it. Set once, when the chevron's image is made.
+    var chevronReserve: CGFloat = 0
+
+    override func titleRect(forBounds rect: NSRect) -> NSRect {
+        var r = super.titleRect(forBounds: rect)
+        r.size.width = max(0, r.maxX - chevronReserve - r.minX)
+        return r
     }
 }
 

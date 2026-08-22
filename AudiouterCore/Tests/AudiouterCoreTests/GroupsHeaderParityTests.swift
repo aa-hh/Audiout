@@ -54,7 +54,8 @@ import AppKit
         let controller = makeController()
         let group = try controller.createGroup(name: "Downstairs", memberIDs: ["d0"],
                                                memberVolumes: [:]).group
-        let window = MixerWindowController(groupController: controller)
+        let window = MixerWindowController(groupController: controller,
+                                           settings: AppSettings(defaults: isolatedDefaults))
         window.setHostVisible(true)
         window.update(devices: devices)
         // `groupsDefaultContentSize` IS the content area below the window's
@@ -252,15 +253,17 @@ import AppKit
                 "container it drifts one margin to the left of the whole form"))
     }
 
-    // MARK: The detail pane adopts the same sections
+    // MARK: The detail pane is one housing: one card, three titled slots
 
-    @Test func detailPaneWearsGroupedSectionsAndNoOrphanedRule() throws {
+    @Test func detailPageHasOneCardThreeTitlesAndNoOrphanedRule() throws {
         let (window, _, _, _) = try makeWindow()
         window.test_select(.device(id: "d0"))
         settle(window)
 
-        #expect(window.test_detail.test_sectionCount == 4,
-                "header + device state + In groups + Equalizer, all the same section shape the editor uses")
+        #expect(window.test_detail.test_cardFrames.count == 1,
+                "the Equalizer is the page's one instrument, so the page's one card")
+        #expect(window.test_detail.test_slotTitles == ["Equalizer", "Groups", "About"],
+                "identity is bare and unlabelled; every other slot is a titled bare list")
         #expect(!window.test_detail.test_hasBoxDivider,
                 Comment(rawValue: "the stock NSBox rule is gone — it drew a 185pt line that stopped a third of " +
                 "the way across the pane; the sections' own inset hairlines separate rows now"))
@@ -311,7 +314,7 @@ import AppKit
         window.test_select(.device(id: "d0"))
         settle(window)
 
-        let section = window.test_detail.test_stateSectionFrame
+        let section = window.test_detail.test_aboutSectionFrame
         let valueTrailing = window.test_detail.test_valueTrailingX
         #expect(abs((section.maxX - valueTrailing) - GroupsPaneLayout.contentTrailingInset) <= 2.5,
                 Comment(rawValue: "values right-align on the section's own inset edge (± the text field's own " +

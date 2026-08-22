@@ -8,6 +8,16 @@ import AudiouterCore
 /// (``EQProcessor/responseDB(for:atHz:sampleRate:)``), so the picture and the
 /// sound can never drift apart.
 ///
+/// **It lives inside the editor's Advanced fold**, full width, directly above
+/// the ten band faders — and it shares their x-axis: every fader column is
+/// centred on the gridline this view draws for that band
+/// (``bandCentreX(index:width:)``). A curve bonded to the controls that shape
+/// it reads as an instrument; a curve floating over unrelated sliders reads as
+/// a black bar with a line through it. A dB ruler ("+12 / 0 / −12") sits in a
+/// gutter on the leading edge and a dotted line marks 0 dB; flat draws its
+/// hairline ON that dotted line and covers it. There are no Hz ticks inside
+/// the figure — the band labels under the faders ARE its Hz ruler.
+///
 /// **An approved custom-drawn instrument** (SharedUI AGENTS.md): a plotted
 /// curve has no stock AppKit equivalent. Everything it draws lives in
 /// `draw(_:)` with `NSBezierPath` — no `CALayer`, no animation, no state
@@ -28,9 +38,19 @@ public final class EQResponseCurveView: NSView {
 
     // MARK: Geometry + sampling constants
 
-    /// The scope's fixed height. The view installs this on itself, so a host
-    /// only has to pin its width.
-    public static let height: CGFloat = 64
+    /// The scope's fixed 80 pt height — room for the dB ruler's three labels
+    /// to sit clear of one another. The view installs this on itself, so a
+    /// host only has to pin its width.
+    public static let height: CGFloat = 80
+
+    /// The leading gutter the dB ruler is drawn in: the plot starts this far
+    /// in, so 20 Hz is at x = 28 rather than at the view's edge.
+    public static let plotLeadingInset: CGFloat = 28
+
+    /// The trailing margin. At least half a band-fader column wide, so the
+    /// 16 kHz fader — centred on the last gridline — never overhangs the
+    /// editor.
+    public static let plotTrailingInset: CGFloat = 14
 
     /// The rate the response is evaluated at. A fixed reference, not the live
     /// stream rate: the drawn shape is a description of the tone, and it must
@@ -54,11 +74,14 @@ public final class EQResponseCurveView: NSView {
 
     private static let cornerRadius: CGFloat = 6
     private static let plotInset: CGFloat = 1
-    private static let gridAlpha: CGFloat = 0.10
+    private static let gridAlpha: CGFloat = 0.14
     private static let shapedFillAlpha: CGFloat = 0.13
     private static let shapedLineWidth: CGFloat = 2
     private static let hairlineWidth: CGFloat = 1.5
     private static let bypassDashPattern: [CGFloat] = [4, 3]
+    private static let zeroDashPattern: [CGFloat] = [1, 3]
+    private static let rulerEdgeInset: CGFloat = 2
+    private static let rulerTextGap: CGFloat = 4
 
     // MARK: The plan — pure, testable without a single pixel
 
@@ -91,11 +114,22 @@ public final class EQResponseCurveView: NSView {
         CGFloat(log10(hz / lowestHz) / decades)
     }
 
+    /// The ten band centres on the plot's `0…1` horizontal scale — the
+    /// gridlines the scope draws and, through ``bandCentreX(index:width:)``,
+    /// the x-axis the editor's faders are laid out on.
+    public static let bandGridX: [CGFloat] = DeviceEQ.bandCentresHz.map { normalizedX(hz: $0) }
+
+    /// The x, in the view's own coordinates at `width`, of band `index`'s
+    /// grid line — the editor centres each fader column on it.
+    public static func bandCentreX(index: Int, width: CGFloat) -> CGFloat {
+        plotLeadingInset + bandGridX[index] * (width - plotLeadingInset - plotTrailingInset)
+    }
+
     /// Resolve what to draw. A FLAT eq is flat whatever the bypass state says:
     /// "not applied" is only worth saying about shaping that exists, and a
     /// dashed straight line would just look broken.
     public static func resolve(eq: DeviceEQ, bypassed: Bool) -> Plan {
-        let gridX = DeviceEQ.bandCentresHz.map { normalizedX(hz: $0) }
+        let gridX = bandGridX
         guard !eq.isFlat else {
             let flatPoints = (0..<sampleCount).map { index in
                 CGPoint(x: CGFloat(index) / CGFloat(sampleCount - 1), y: 0)
@@ -226,7 +260,14 @@ public final class EQResponseCurveView: NSView {
         Tokens.Color.scopeGround.setFill()
         ground.fill()
 
-        let plot = bounds.insetBy(dx: Self.plotInset, dy: Self.plotInset)
+        // The plot does not span the view: the leading gutter is the dB
+        // ruler's, and the trailing margin keeps the 16 kHz fader — centred on
+        // the last gridline — inside the editor. `drawGrid`/`drawTrace` map
+        // their `0…1` values across THIS rect, so a gridline lands exactly
+        // where `bandCentreX` says its fader goes.
+        var plot = bounds.insetBy(dx: 0, dy: Self.plotInset)
+        plot.origin.x += Self.plotLeadingInset
+        plot.size.width -= Self.plotLeadingInset + Self.plotTrailingInset
         guard plot.width > 0, plot.height > 0 else { return }
 
         // Clipped to the ground so a clamped trace can never paint over the
@@ -235,8 +276,42 @@ public final class EQResponseCurveView: NSView {
         ground.setClip()
         defer { NSGraphicsContext.restoreGraphicsState() }
 
+        drawRuler(beside: plot)
         drawGrid(in: plot)
         drawTrace(in: plot)
+    }
+
+    /// The dB ruler in the leading gutter: the vertical scale, stated once, so
+    /// the trace's height means something without a caption row under the
+    /// card. `secondaryLabel` rather than `tertiaryLabel` — over this ground
+    /// the tertiary tone falls to ~2.2:1, well under the 4.5:1 text floor.
+    private func drawRuler(beside plot: NSRect) {
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: Tokens.Font.caption,
+            .foregroundColor: Tokens.Color.secondaryLabel,
+        ]
+        // The typographic MINUS, matching `EQEditorView.gainText`, so "−12"
+        // keeps the digit width "+12" has.
+        let rows: [(String, CGFloat)] = [
+            ("+12", plot.maxY - Self.rulerEdgeInset),
+            ("0", plot.midY),
+            ("\u{2212}12", plot.minY + Self.rulerEdgeInset),
+        ]
+        for (index, (text, anchor)) in rows.enumerated() {
+            let string = NSAttributedString(string: text, attributes: attributes)
+            let size = string.size()
+            // Top-anchored, centred, bottom-anchored — the three labels pin
+            // the two ends of the scale and its middle.
+            let y: CGFloat
+            switch index {
+            case 0: y = anchor - size.height
+            case 1: y = anchor - size.height / 2
+            default: y = anchor
+            }
+            // Right-aligned against the gutter, so the digits line up whatever
+            // their widths.
+            string.draw(at: NSPoint(x: plot.minX - Self.rulerTextGap - size.width, y: y))
+        }
     }
 
     private func drawGrid(in plot: NSRect) {
@@ -252,9 +327,14 @@ public final class EQResponseCurveView: NSView {
         }
         grid.stroke()
 
-        Tokens.Color.scopeZeroLine.setStroke()
+        // 0 dB, DOTTED in the flat trace's own tone: `drawTrace` paints the
+        // solid 1.5 pt hairline over exactly this line when the tone is flat,
+        // so the dots read as "the reference" and the hairline reads as "you
+        // are on it" without ever being two competing lines at once.
+        Tokens.Color.scopeFlatLine.setStroke()
         let zero = NSBezierPath()
         zero.lineWidth = 1
+        zero.setLineDash(Self.zeroDashPattern, count: Self.zeroDashPattern.count, phase: 0)
         zero.move(to: NSPoint(x: plot.minX, y: plot.midY))
         zero.line(to: NSPoint(x: plot.maxX, y: plot.midY))
         zero.stroke()

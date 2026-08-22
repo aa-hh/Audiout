@@ -109,6 +109,11 @@ enum GroupsPaneLayout {
     /// Gap from the action band to the pane's own bottom edge.
     static let paneBottomInset: CGFloat = 20
 
+    /// Inset between a `.card` section's edge and the instrument inside it —
+    /// a scope against a 6 pt edge reads as jammed; 14 matches
+    /// `PopoverColumnGrid.leadingInset` / the column margins.
+    static let cardContentInset: CGFloat = 14
+
     /// The header band's height. SIDE-BY-SIDE (design review 2026-07-25): the
     /// icon and the name share one horizontal band rather than stacking, which
     /// reclaimed 30 pt of a pane that had been overflowing its own window.

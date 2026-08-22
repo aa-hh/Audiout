@@ -13,10 +13,11 @@ public protocol EQEditorViewDelegate: AnyObject {
     /// split the sync trim carries, for the same reason: a drag would
     /// otherwise rewrite the store dozens of times a second.
     func eqEditor(_ editor: EQEditorView, didChange eq: DeviceEQ, committed: Bool)
-    /// The Reset button: put every stage back to flat, in ONE committed
-    /// action. Separate from ``eqEditor(_:didChange:committed:)`` so the host
-    /// can treat "the user cleared this device" as its own event rather than
-    /// having to recognise a flat value.
+    /// The host's Reset button (via ``resetToFlat()``): put every stage back
+    /// to flat, in ONE committed action. Separate from
+    /// ``eqEditor(_:didChange:committed:)`` so the host can treat "the user
+    /// cleared this device" as its own event rather than having to recognise
+    /// a flat value.
     func eqEditorDidRequestReset(_ editor: EQEditorView)
 }
 
@@ -30,15 +31,32 @@ public protocol EQEditorViewDelegate: AnyObject {
 /// disclosure because most people never want it and a wall of vertical faders
 /// would be the loudest thing on the panel. They are not two views of one
 /// setting — ``DeviceEQ`` keeps both, so opening Advanced never discards a
-/// Bass adjustment and vice versa.
+/// Bass adjustment and vice versa. Reset lives on the host's "Equalizer" title
+/// line and calls ``resetToFlat()`` — the loudness row is the checkbox alone.
 ///
-/// **Stock AppKit only, and no surface of its own.** Every control here is an
-/// un-subclassed `NSSlider`, `NSButton` or `NSTextField`, and every colour is
-/// a semantic ``Tokens`` value. The editor draws NOTHING: the host's
-/// `GroupedSectionView` is the well it sits in, and the one custom-drawn
-/// element is the ``EQResponseCurveView`` scope at the top, which owns its own
-/// drawing. Its insets are zero for the same reason — the section supplies the
-/// padding.
+/// **The Advanced row is a section row, not a bare disclosure.** A 1 pt
+/// hairline sits above it; the word "Advanced" is clickable exactly like the
+/// triangle; a `tertiaryLabel` hint names the band count ("10 bands"); and a
+/// trailing readout counts the shaped bands ("N set", blank when flat). Every
+/// channel is composed into one spoken label. The expanded/collapsed state is
+/// one global switch — ``AppSettings/eqAdvancedExpanded`` — read at init and
+/// applied instantly (no animation on first layout) and written on every
+/// toggle, so every host's editor remembers the same state across launches.
+///
+/// **Stock AppKit only, and almost no surface of its own.** Every control here
+/// is an un-subclassed `NSSlider`, `NSButton` or `NSTextField`, and every
+/// colour is a semantic ``Tokens`` value. The editor draws nothing except that
+/// one hairline: the host's `GroupedSectionView` is the well it sits in, and
+/// the other custom-drawn element is the ``EQResponseCurveView`` scope, which
+/// owns its own drawing. Its insets are zero for the same reason — the section
+/// supplies the padding.
+///
+/// **The scope lives INSIDE the Advanced fold**, full width, directly above the
+/// ten faders, whose columns are each centred on the scope's gridline for that
+/// band (``EQResponseCurveView/bandCentreX(index:width:)``) — one x-axis shared
+/// by the picture and the controls that shape it. At rest the card is the
+/// simple tier alone: a curve drawn over Bass/Treble/Balance, whose axis means
+/// something else entirely, reads as decoration rather than a readout.
 public final class EQEditorView: NSView {
 
     // MARK: Copy — the exact strings the host contract names
@@ -73,6 +91,9 @@ public final class EQEditorView: NSView {
     private static let eqDrawerControlHeight: CGFloat = 20
     private static let eqDrawerBandSliderHeight: CGFloat = 76
     private static let eqDrawerBandColumnWidth: CGFloat = 26
+    /// The scope sits close to the faders on purpose: they are one instrument,
+    /// and a row gap's worth of air would read as two stacked things.
+    private static let eqDrawerScopeToFaderGap: CGFloat = 4
 
     // MARK: Subviews
 
@@ -93,16 +114,27 @@ public final class EQEditorView: NSView {
     private let bassCaption = NSTextField(labelWithString: "Bass")
     private let trebleCaption = NSTextField(labelWithString: "Treble")
     private let balanceCaption = NSTextField(labelWithString: "Balance")
-    private let resetButton = NSButton()
 
+    private let advancedHairline = HairlineView()
+    private let advancedHeader = NSStackView()
     private let advancedDisclosure = NSButton()
-    private let advancedTitle = NSTextField(labelWithString: "Advanced")
+    private let advancedTitle = NSButton()
+    private let advancedHint = NSTextField(labelWithString: "\(DeviceEQ.bandCount) bands")
+    private let advancedReadout = NSTextField(labelWithString: "")
     private let advancedClip = NSView()
-    private let advancedContent = NSStackView()
+    // A plain view, not a stack: the fader columns are positioned by the
+    // SCOPE's x-axis, not by an even distribution, so there is no stack
+    // arrangement that could produce them.
+    private let advancedContent = NSView()
+    private let hzLegend = NSTextField(labelWithString: "Hz")
     private var advancedClipCollapsed: NSLayoutConstraint!
     private var bandSliders: [NSSlider] = []
+    private var bandLabels: [NSTextField] = []
+    private var bandColumns: [NSView] = []
 
     public weak var delegate: EQEditorViewDelegate?
+
+    private let settings: AppSettings
 
     // MARK: State — pushed by `apply`, never read from a model
 
@@ -117,7 +149,8 @@ public final class EQEditorView: NSView {
     /// forward again after mouse-up.
     private weak var pointerTrackedSlider: NSSlider?
 
-    public init() {
+    public init(settings: AppSettings = AppSettings()) {
+        self.settings = settings
         super.init(frame: .zero)
         commonInit()
     }
@@ -155,9 +188,13 @@ public final class EQEditorView: NSView {
         ])
 
         configureNotes()
-        configureScope()
         configureSimpleTier()
         configureAdvancedTier()
+
+        if settings.eqAdvancedExpanded {
+            advancedDisclosure.state = .on
+            setAdvancedExpanded(true, animated: false)
+        }
 
         refreshDisplay()
     }
@@ -178,44 +215,6 @@ public final class EQEditorView: NSView {
         // dimmed label must be dimmed BY something.
         bypassLabel.textColor = Tokens.Color.secondaryLabel
         bypassLabel.lineBreakMode = .byTruncatingTail
-    }
-
-    /// The scope and the three-part caption that names its axes. The caption
-    /// is one row, not three stacked labels: leading = the low end, centre =
-    /// the vertical full-scale, trailing = the high end, which is how the
-    /// reader maps the picture without a single tick label inside it.
-    private func configureScope() {
-        addFullWidthRow(curve)
-        addFullWidthRow(captionRow())
-    }
-
-    private func captionRow() -> NSView {
-        let row = NSView()
-        row.translatesAutoresizingMaskIntoConstraints = false
-        var labels: [NSTextField] = []
-        for text in ["20 Hz", "+12 dB · −12 dB", "20 kHz"] {
-            let label = NSTextField(labelWithString: text)
-            label.translatesAutoresizingMaskIntoConstraints = false
-            label.font = Tokens.Font.caption
-            // `tertiaryLabel` here, unlike the bypass sentence: axis captions
-            // are a fixed legend, never state.
-            label.textColor = Tokens.Color.tertiaryLabel
-            row.addSubview(label)
-            labels.append(label)
-        }
-        let (leading, centre, trailing) = (labels[0], labels[1], labels[2])
-        NSLayoutConstraint.activate([
-            leading.leadingAnchor.constraint(equalTo: row.leadingAnchor),
-            centre.centerXAnchor.constraint(equalTo: row.centerXAnchor),
-            trailing.trailingAnchor.constraint(equalTo: row.trailingAnchor),
-            leading.topAnchor.constraint(equalTo: row.topAnchor),
-            centre.topAnchor.constraint(equalTo: row.topAnchor),
-            trailing.topAnchor.constraint(equalTo: row.topAnchor),
-            leading.bottomAnchor.constraint(equalTo: row.bottomAnchor),
-            centre.bottomAnchor.constraint(equalTo: row.bottomAnchor),
-            trailing.bottomAnchor.constraint(equalTo: row.bottomAnchor),
-        ])
-        return row
     }
 
     private func configureSimpleTier() {
@@ -255,14 +254,6 @@ public final class EQEditorView: NSView {
         loudnessCheckbox.target = self
         loudnessCheckbox.action = #selector(loudnessToggled(_:))
         loudnessCheckbox.setAccessibilityLabel("Loudness")
-
-        resetButton.bezelStyle = .rounded
-        resetButton.controlSize = .small
-        resetButton.font = Tokens.Font.caption
-        resetButton.title = "Reset"
-        resetButton.target = self
-        resetButton.action = #selector(resetTapped(_:))
-        resetButton.setAccessibilityLabel("Reset tone to flat")
 
         contentStack.addArrangedSubview(bypassLabel)
         addFullWidthRow(sliderRow(caption: bassCaption, middle: bassSlider, readout: bassReadout))
@@ -337,9 +328,7 @@ public final class EQEditorView: NSView {
     }
 
     private func loudnessRow() -> NSView {
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        let row = NSStackView(views: [loudnessCheckbox, spacer, resetButton])
+        let row = NSStackView(views: [loudnessCheckbox])
         row.translatesAutoresizingMaskIntoConstraints = false
         row.orientation = .horizontal
         row.alignment = .centerY
@@ -361,29 +350,52 @@ public final class EQEditorView: NSView {
         advancedDisclosure.state = .off
         advancedDisclosure.target = self
         advancedDisclosure.action = #selector(advancedToggled(_:))
-        advancedDisclosure.setAccessibilityLabel("Advanced")
-        advancedTitle.font = Tokens.Font.caption
-        advancedTitle.textColor = Tokens.Color.secondaryLabel
 
-        let header = NSStackView(views: [advancedDisclosure, advancedTitle])
+        // The title is a click target too, not just the triangle — same
+        // idiom as `AudioSettingsViewController.advancedTitleTapped`.
+        advancedTitle.isBordered = false
+        advancedTitle.setButtonType(.momentaryChange)
+        advancedTitle.attributedTitle = NSAttributedString(
+            string: "Advanced",
+            attributes: [.font: Tokens.Font.caption,
+                         .foregroundColor: Tokens.Color.secondaryLabel])
+        advancedTitle.target = self
+        advancedTitle.action = #selector(advancedTitleTapped(_:))
+
+        advancedHint.font = Tokens.Font.caption
+        advancedHint.textColor = Tokens.Color.tertiaryLabel
+
+        advancedReadout.font = Tokens.Font.caption
+        advancedReadout.textColor = Tokens.Color.secondaryLabel
+        advancedReadout.alignment = .right
+        advancedReadout.widthAnchor.constraint(
+            equalToConstant: EQEditorView.eqDrawerReadoutWidth).isActive = true
+
+        advancedHairline.translatesAutoresizingMaskIntoConstraints = false
+        advancedHairline.heightAnchor.constraint(equalToConstant: 1).isActive = true
+
+        let headerSpacer = NSView()
+        headerSpacer.translatesAutoresizingMaskIntoConstraints = false
+        let header = advancedHeader
         header.translatesAutoresizingMaskIntoConstraints = false
         header.orientation = .horizontal
         header.alignment = .centerY
         header.spacing = 4
+        for view in [advancedDisclosure, advancedTitle, advancedHint, headerSpacer, advancedReadout] {
+            header.addArrangedSubview(view)
+        }
+        header.setCustomSpacing(EQEditorView.eqDrawerRowSpacing, after: advancedTitle)
 
         advancedContent.translatesAutoresizingMaskIntoConstraints = false
-        advancedContent.orientation = .horizontal
-        advancedContent.alignment = .top
-        advancedContent.spacing = 2
-        advancedContent.distribution = .fill
-        for (index, title) in Self.bandTitles.enumerated() {
-            advancedContent.addArrangedSubview(bandColumn(index: index, title: title))
-        }
-        // ONE "Hz" legend for the row, not ten repeated units.
-        let legend = NSTextField(labelWithString: "Hz")
-        legend.font = Tokens.Font.caption
-        legend.textColor = Tokens.Color.tertiaryLabel
-        advancedContent.addArrangedSubview(legend)
+        // The scope tops the fold, spanning the whole editor, and the ten
+        // faders hang off ITS grid — see `layOutFaders(under:)`.
+        advancedContent.addSubview(curve)
+        NSLayoutConstraint.activate([
+            curve.leadingAnchor.constraint(equalTo: advancedContent.leadingAnchor),
+            curve.trailingAnchor.constraint(equalTo: advancedContent.trailingAnchor),
+            curve.topAnchor.constraint(equalTo: advancedContent.topAnchor),
+        ])
+        layOutFaders(under: curve)
 
         advancedClip.translatesAutoresizingMaskIntoConstraints = false
         advancedClip.wantsLayer = true
@@ -395,15 +407,63 @@ public final class EQEditorView: NSView {
         NSLayoutConstraint.activate([
             advancedContent.leadingAnchor.constraint(equalTo: advancedClip.leadingAnchor),
             advancedContent.topAnchor.constraint(equalTo: advancedClip.topAnchor),
-            advancedContent.trailingAnchor.constraint(lessThanOrEqualTo: advancedClip.trailingAnchor),
+            advancedContent.trailingAnchor.constraint(equalTo: advancedClip.trailingAnchor),
             bottomPin,
         ])
         advancedClipCollapsed.isActive = true
         advancedContent.isHidden = true
 
-        contentStack.addArrangedSubview(header)
+        addFullWidthRow(advancedHairline)
+        addFullWidthRow(header)
         contentStack.addArrangedSubview(advancedClip)
         advancedClip.widthAnchor.constraint(equalTo: contentStack.widthAnchor).isActive = true
+    }
+
+    /// Hang the ten faders off the scope's own x-axis. Each column's centre is
+    /// pinned to `EQResponseCurveView.bandCentreX(index:width:)` for its band —
+    /// expressed as a MULTIPLIER on `advancedContent`'s trailing edge, which is
+    /// the only way Auto Layout can state "a fraction of a width that is not
+    /// known until layout":
+    ///
+    ///     centre = g·W + L − g·(L + T) = L + g·(W − L − T)
+    ///
+    /// which is exactly what `bandCentreX` computes. The columns are therefore
+    /// not evenly spaced — they follow the log frequency scale the trace above
+    /// them is drawn on, so 31 Hz and 63 Hz crowd the left just as their
+    /// gridlines do.
+    private func layOutFaders(under scope: NSView) {
+        let leadingInset = EQResponseCurveView.plotLeadingInset
+        let trailingInset = EQResponseCurveView.plotTrailingInset
+        var constraints: [NSLayoutConstraint] = []
+        for (index, title) in Self.bandTitles.enumerated() {
+            let column = bandColumn(index: index, title: title)
+            advancedContent.addSubview(column)
+            bandColumns.append(column)
+            let g = EQResponseCurveView.bandGridX[index]
+            constraints.append(column.topAnchor.constraint(
+                equalTo: scope.bottomAnchor, constant: Self.eqDrawerScopeToFaderGap))
+            constraints.append(NSLayoutConstraint(
+                item: column, attribute: .centerX, relatedBy: .equal,
+                toItem: advancedContent, attribute: .trailing,
+                multiplier: g, constant: leadingInset - g * (leadingInset + trailingInset)))
+        }
+        // ONE column defines the content's bottom — every column is the same
+        // fixed height, so pinning all ten would just restate it.
+        constraints.append(
+            bandColumns[0].bottomAnchor.constraint(equalTo: advancedContent.bottomAnchor))
+
+        // ONE "Hz" legend for the row, not ten repeated units — parked in the
+        // scope's ruler gutter, on the band labels' baseline, so it reads as
+        // the unit for the row of numbers rather than an eleventh column.
+        hzLegend.translatesAutoresizingMaskIntoConstraints = false
+        hzLegend.font = Tokens.Font.caption
+        hzLegend.textColor = Tokens.Color.tertiaryLabel
+        advancedContent.addSubview(hzLegend)
+        constraints.append(hzLegend.centerXAnchor.constraint(
+            equalTo: advancedContent.leadingAnchor, constant: leadingInset / 2))
+        constraints.append(
+            hzLegend.firstBaselineAnchor.constraint(equalTo: bandLabels[0].firstBaselineAnchor))
+        NSLayoutConstraint.activate(constraints)
     }
 
     private func bandColumn(index: Int, title: String) -> NSView {
@@ -430,6 +490,7 @@ public final class EQEditorView: NSView {
         label.font = Tokens.Font.caption
         label.textColor = Tokens.Color.tertiaryLabel
         label.alignment = .center
+        bandLabels.append(label)
 
         let column = NSStackView(views: [slider, label])
         column.translatesAutoresizingMaskIntoConstraints = false
@@ -460,6 +521,15 @@ public final class EQEditorView: NSView {
     /// The tone the drawer is currently rendering — the model every spoken
     /// value and every readout below is derived from, so the two can't drift.
     public var currentEQ: DeviceEQ { eq }
+
+    /// Put every stage back to flat, in ONE committed action. The host's
+    /// Reset button (now on the "Equalizer" title line, not this view) calls
+    /// this directly.
+    public func resetToFlat() {
+        eq = .flat
+        refreshDisplay()
+        delegate?.eqEditorDidRequestReset(self)
+    }
 
     // MARK: Actions
 
@@ -550,14 +620,19 @@ public final class EQEditorView: NSView {
         delegate?.eqEditor(self, didChange: eq, committed: true)
     }
 
-    @objc private func resetTapped(_ sender: NSButton) {
-        eq = .flat
-        refreshDisplay()
-        delegate?.eqEditorDidRequestReset(self)
+    @objc private func advancedToggled(_ sender: NSButton) {
+        let expanded = sender.state == .on
+        settings.eqAdvancedExpanded = expanded
+        setAdvancedExpanded(expanded,
+                             animated: !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+                                 && !HeadlessRuntime.isActive)
     }
 
-    @objc private func advancedToggled(_ sender: NSButton) {
-        setAdvancedExpanded(sender.state == .on)
+    /// Clicking the word "Advanced" mirrors the triangle exactly — same idiom
+    /// as `AudioSettingsViewController.advancedTitleTapped`.
+    @objc private func advancedTitleTapped(_ sender: NSButton) {
+        advancedDisclosure.state = advancedDisclosure.state == .on ? .off : .on
+        advancedToggled(advancedDisclosure)
     }
 
     /// Report the freshest value out, splitting a live drag from the gesture
@@ -610,7 +685,6 @@ public final class EQEditorView: NSView {
         bassReadout.stringValue = Self.gainText(eq.bassDB)
         trebleReadout.stringValue = Self.gainText(eq.trebleDB)
         balanceReadout.stringValue = Self.balanceReadoutText(eq.balance)
-        resetButton.isEnabled = !eq.isFlat
 
         // Every spoken value derives from the SAME model the sliders render,
         // so VoiceOver and the pixels can never disagree.
@@ -621,6 +695,23 @@ public final class EQEditorView: NSView {
         for (index, slider) in bandSliders.enumerated() where index < eq.bandGainsDB.count {
             slider.setAccessibilityValue(Self.gainText(eq.bandGainsDB[index]))
         }
+
+        refreshAdvancedRow()
+    }
+
+    /// The Advanced row's readout ("N set") and its composed spoken label.
+    /// The readout counts non-zero bands — a shaped band is the one thing the
+    /// fold's collapsed row can say about content the user can't currently
+    /// see.
+    private func refreshAdvancedRow() {
+        let shaped = eq.bandGainsDB.filter { $0 != 0 }.count
+        advancedReadout.stringValue = shaped == 0 ? "" : "\(shaped) set"
+
+        var spoken = "Advanced, \(DeviceEQ.bandCount) bands"
+        if shaped > 0 { spoken += ", \(shaped) set" }
+        spoken += advancedExpanded ? ", expanded" : ", collapsed"
+        advancedDisclosure.setAccessibilityLabel(spoken)
+        advancedTitle.setAccessibilityLabel(spoken)
     }
 
     /// Bare number plus the unit — no locale-specific preset wording, and a
@@ -662,10 +753,9 @@ public final class EQEditorView: NSView {
     /// tick. Instant under Reduce Motion AND headless — the driver ticks off
     /// the main runloop, which `swift test` and the harness tools don't
     /// reliably spin, so a deferred terminal state would be stranded.
-    private func setAdvancedExpanded(_ expanded: Bool) {
+    private func setAdvancedExpanded(_ expanded: Bool, animated: Bool) {
         advancedExpanded = expanded
-        let animated = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-            && !HeadlessRuntime.isActive
+        refreshAdvancedRow()
         if expanded {
             advancedContent.isHidden = false
             guard animated else {
@@ -720,7 +810,6 @@ public final class EQEditorView: NSView {
     public var test_trebleReadout: String { trebleReadout.stringValue }
     public var test_balanceReadout: String { balanceReadout.stringValue }
     public var test_loudnessOn: Bool { loudnessCheckbox.state == .on }
-    public var test_resetEnabled: Bool { resetButton.isEnabled }
     public var test_advancedExpanded: Bool { advancedExpanded }
     public var test_bandTitles: [String] { Self.bandTitles }
     public var test_balanceHasCentreTick: Bool {
@@ -740,14 +829,48 @@ public final class EQEditorView: NSView {
     public var test_bassAXValue: String? { bassSlider.accessibilityValue() as? String }
     public var test_balanceAXValue: String? { balanceSlider.accessibilityValue() as? String }
 
-    // Frames for the Balance-layout assertions (relative comparisons only —
-    // never an absolute width, per the Groups-pane rounding-grid trap).
-    public var test_bassCaptionFrame: NSRect { bassCaption.frame }
-    public var test_balanceCaptionFrame: NSRect { balanceCaption.frame }
-    public var test_bassReadoutFrame: NSRect { bassReadout.frame }
-    public var test_balanceReadoutFrame: NSRect { balanceReadout.frame }
-    public var test_bassSliderFrame: NSRect { bassSlider.frame }
-    public var test_balanceSliderFrame: NSRect { balanceSlider.frame }
+    // Frames for the layout assertions (relative comparisons only — never an
+    // absolute width, per the Groups-pane rounding-grid trap). Every one is in
+    // the EDITOR's own coordinates, so a control in one row can be compared
+    // with a control in another without assuming where the rows start.
+    // The ALIGNMENT rect, not the raw frame: an `NSTextField` label's frame
+    // overhangs its text box by ~2 pt on every side, so raw frames make a label
+    // and a button that Auto Layout has aligned perfectly read as 2 pt apart.
+    private func frameInEditor(_ view: NSView) -> NSRect {
+        convert(view.alignmentRect(forFrame: view.bounds), from: view)
+    }
+    public var test_bassCaptionFrame: NSRect { frameInEditor(bassCaption) }
+    public var test_balanceCaptionFrame: NSRect { frameInEditor(balanceCaption) }
+    public var test_bassReadoutFrame: NSRect { frameInEditor(bassReadout) }
+    public var test_balanceReadoutFrame: NSRect { frameInEditor(balanceReadout) }
+    public var test_bassSliderFrame: NSRect { frameInEditor(bassSlider) }
+    public var test_balanceSliderFrame: NSRect { frameInEditor(balanceSlider) }
+    public var test_loudnessCheckboxFrame: NSRect { frameInEditor(loudnessCheckbox) }
+    public var test_advancedHairlineFrame: NSRect { frameInEditor(advancedHairline) }
+    public var test_advancedRowFrame: NSRect { frameInEditor(advancedHeader) }
+    public var test_advancedReadoutFrame: NSRect { frameInEditor(advancedReadout) }
+
+    // Everything inside the fold reads `nil` while it is closed — the resting
+    // card genuinely has no scope on it, and a frame from a hidden view would
+    // let a test claim otherwise.
+    public var test_curveFrame: NSRect? {
+        advancedContent.isHidden ? nil : frameInEditor(curve)
+    }
+    public var test_hzLegendFrame: NSRect? {
+        advancedContent.isHidden ? nil : frameInEditor(hzLegend)
+    }
+    public func test_bandColumnCenterX(_ index: Int) -> CGFloat? {
+        guard !advancedContent.isHidden, bandColumns.indices.contains(index) else { return nil }
+        return frameInEditor(bandColumns[index]).midX
+    }
+    public func test_bandSliderFrame(_ index: Int) -> NSRect? {
+        guard !advancedContent.isHidden, bandSliders.indices.contains(index) else { return nil }
+        return frameInEditor(bandSliders[index])
+    }
+
+    public var test_advancedReadoutText: String { advancedReadout.stringValue }
+    public var test_advancedHintText: String { advancedHint.stringValue }
+    public var test_advancedAXLabel: String? { advancedDisclosure.accessibilityLabel() }
 
     /// Drive one slider through its REAL target/action, exactly as a live drag
     /// does (a gesture cannot be synthesized headlessly).
@@ -760,12 +883,33 @@ public final class EQEditorView: NSView {
     }
 
     public func test_fireLoudnessClick() { loudnessCheckbox.performClick(nil) }
-    public func test_fireResetClick() { resetButton.performClick(nil) }
     public func test_fireAdvancedClick() { advancedDisclosure.performClick(nil) }
+    public func test_fireAdvancedTitleClick() { advancedTitle.performClick(nil) }
 
     private func fire(_ slider: NSSlider, value: Double) {
         slider.doubleValue = value
         guard let action = slider.action, let target = slider.target as? NSObject else { return }
         _ = target.perform(action, with: slider)
+    }
+}
+
+/// A one-token divider line above the Advanced section row. Copy of
+/// `AudiouterWindowUI`'s `HairlineView` (`MixerWindowController.swift`),
+/// which is internal to that module and not visible from here.
+/// `draw(_:)`-based rather than a frozen layer color so `Tokens.Color.hairline`
+/// re-resolves per appearance and Increase Contrast on every paint.
+/// Non-interactive — pure chrome, never an `NSBox` (`test_hasBoxDivider`).
+private final class HairlineView: NSView {
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        Tokens.Color.hairline.setFill()
+        bounds.fill()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
     }
 }

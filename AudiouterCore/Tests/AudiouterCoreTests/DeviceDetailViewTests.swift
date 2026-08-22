@@ -25,6 +25,8 @@ import AppKit
 @MainActor
 @Suite struct DeviceDetailViewTests {
 
+    private let isolation = TestIsolation(owner: "DeviceDetailViewTests")
+
     private func tempDirectory() -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("DeviceDetailViewTests-\(UUID().uuidString)", isDirectory: true)
@@ -42,90 +44,125 @@ import AppKit
 
     private func makeDevice(
         id: String = "d1", name: String = "Office", kind: Device.Kind = .generic,
-        isAvailable: Bool = true, volume: Int = 50, connectionState: ConnectionState = .off
+        isAvailable: Bool = true, supportsAirPlay2: Bool = true, volume: Int = 50,
+        connectionState: ConnectionState = .off
     ) -> Device {
-        Device(id: id, name: name, kind: kind, isAvailable: isAvailable, volume: volume,
+        Device(id: id, name: name, kind: kind, isAvailable: isAvailable,
+              supportsAirPlay2: supportsAirPlay2, volume: volume,
               connectionState: connectionState)
     }
 
     // MARK: show(device:) basics
 
     @Test func showSetsShownDeviceID() {
-        let detail = DeviceDetailViewController(groupController: makeController())
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.show(device: makeDevice(id: "sonos-move"))
         #expect(detail.test_shownDeviceID == "sonos-move")
     }
 
     @Test func shownDeviceIDIsNilBeforeFirstShow() {
-        let detail = DeviceDetailViewController(groupController: makeController())
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
         #expect(detail.test_shownDeviceID == nil)
     }
 
     @Test func refreshUpdatesFieldsForTheSameDevice() {
-        let detail = DeviceDetailViewController(groupController: makeController())
-        detail.show(device: makeDevice(volume: 20))
-        #expect(detail.test_metadataStrings["volume"] == "20%")
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        detail.show(device: makeDevice(isAvailable: true))
+        #expect(detail.test_metadataStrings["status"] == "Ready")
 
-        detail.refresh(device: makeDevice(volume: 75))
-        #expect(detail.test_metadataStrings["volume"] == "75%")
+        detail.refresh(device: makeDevice(isAvailable: false))
+        #expect(detail.test_metadataStrings["status"] == "Not on the network")
         #expect(detail.test_shownDeviceID == "d1")
     }
 
     // MARK: Metadata form — status wording
 
     @Test func statusTextOff() {
-        let detail = DeviceDetailViewController(groupController: makeController())
-        detail.show(device: makeDevice(connectionState: .off))
-        #expect(detail.test_metadataStrings["status"] == "Not connected")
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        detail.show(device: makeDevice(isAvailable: true, connectionState: .off))
+        #expect(detail.test_metadataStrings["status"] == "Ready",
+                "a reachable idle speaker is something you can use, not something broken")
+    }
+
+    @Test func statusTextOffAndUnreachable() {
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        detail.show(device: makeDevice(isAvailable: false, connectionState: .off))
+        #expect(detail.test_metadataStrings["status"] == "Not on the network",
+                "Status folds availability in — it is the only row that reports it")
     }
 
     @Test func statusTextConnecting() {
-        let detail = DeviceDetailViewController(groupController: makeController())
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.show(device: makeDevice(connectionState: .connecting))
-        #expect(detail.test_metadataStrings["status"] == "Connecting")
+        #expect(detail.test_metadataStrings["status"] == "Connecting…")
+    }
+
+    @Test func statusTextConnectingIgnoresAvailability() {
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        detail.show(device: makeDevice(isAvailable: false, connectionState: .connecting))
+        #expect(detail.test_metadataStrings["status"] == "Connecting…",
+                "availability is consulted only in the idle arm")
     }
 
     @Test func statusTextReconnecting() {
-        let detail = DeviceDetailViewController(groupController: makeController())
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.show(device: makeDevice(connectionState: .reconnecting))
-        #expect(detail.test_metadataStrings["status"] == "Reconnecting")
+        #expect(detail.test_metadataStrings["status"] == "Reconnecting…")
     }
 
     @Test func statusTextConnected() {
-        let detail = DeviceDetailViewController(groupController: makeController())
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.show(device: makeDevice(connectionState: .connected))
         #expect(detail.test_metadataStrings["status"] == "Connected")
     }
 
     @Test func statusTextFailed() {
-        let detail = DeviceDetailViewController(groupController: makeController())
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.show(device: makeDevice(connectionState: .failed(.init(cause: .notResponding))))
         #expect(detail.test_metadataStrings["status"] == "Couldn't connect",
                        "matches DeviceRowView's existing failed vocabulary")
     }
 
-    // MARK: Metadata form — available / volume / kind
+    // MARK: About list — the AirPlay row
 
-    @Test func availableYesAndNo() {
-        let detail = DeviceDetailViewController(groupController: makeController())
-        detail.show(device: makeDevice(isAvailable: true))
-        #expect(detail.test_metadataStrings["available"] == "Yes")
+    @Test func airPlayRowReadsAirPlay2OrAirPlay1() {
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        detail.show(device: makeDevice(kind: .generic, supportsAirPlay2: true))
+        #expect(detail.test_metadataStrings["airplay"] == "AirPlay 2")
 
-        detail.show(device: makeDevice(isAvailable: false))
-        #expect(detail.test_metadataStrings["available"] == "No")
+        detail.show(device: makeDevice(kind: .airportExpress, supportsAirPlay2: false))
+        #expect(detail.test_metadataStrings["airplay"] == "AirPlay 1 — sync not exact",
+                "says what AirPlay 1 costs, not just its version number")
     }
 
-    @Test func volumePercentFormatting() {
-        let detail = DeviceDetailViewController(groupController: makeController())
-        detail.show(device: makeDevice(volume: 0))
-        #expect(detail.test_metadataStrings["volume"] == "0%")
+    @Test func airPlayRowIsHiddenForBluetoothAndThisMac() {
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        detail.show(device: makeDevice(kind: .bluetooth, supportsAirPlay2: false))
+        #expect(detail.test_metadataStrings["airplay"] == nil,
+                "a Bluetooth speaker is not an AirPlay receiver at all")
 
-        detail.show(device: makeDevice(volume: 100))
-        #expect(detail.test_metadataStrings["volume"] == "100%")
+        detail.show(device: makeDevice(kind: .localMac))
+        #expect(detail.test_metadataStrings["airplay"] == nil,
+                "This Mac is where the audio comes FROM")
     }
+
+    // MARK: About list — kind
 
     @Test func kindTextForEveryKind() {
-        let detail = DeviceDetailViewController(groupController: makeController())
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
         let expectations: [(Device.Kind, String)] = [
             (.localMac, "This Mac"),
             (.homePod, "HomePod"),
@@ -133,6 +170,7 @@ import AppKit
             (.airportExpress, "AirPort Express"),
             (.sonos, "Sonos"),
             (.generic, "AirPlay Speaker"),
+            (.bluetooth, "Bluetooth Speaker"),
         ]
         for (kind, expected) in expectations {
             detail.show(device: makeDevice(kind: kind))
@@ -143,7 +181,8 @@ import AppKit
     // MARK: "In groups" membership text
 
     @Test func groupMembershipTextIsNoneWhenDeviceIsInNoGroup() {
-        let detail = DeviceDetailViewController(groupController: makeController())
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.show(device: makeDevice(id: "office"))
         #expect(detail.test_groupMembershipText == "None")
     }
@@ -157,7 +196,8 @@ import AppKit
         try controller.saveGroup(Group(id: "g3", name: "Bedroom", memberIDs: ["appletv-lr"],
                                        memberVolumes: ["appletv-lr": 60]))
 
-        let detail = DeviceDetailViewController(groupController: controller)
+        let detail = DeviceDetailViewController(groupController: controller,
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.show(device: makeDevice(id: "office"))
         #expect(detail.test_groupMembershipText == "Kitchen, Whole House",
                        "only groups this device is a member of, in groupController.groups order")
@@ -169,7 +209,8 @@ import AppKit
         // the group stays non-empty (an empty group is now rejected).
         try controller.saveGroup(Group(id: "g1", name: "Kitchen", memberIDs: ["living-room"],
                                        memberVolumes: ["living-room": 50]))
-        let detail = DeviceDetailViewController(groupController: controller)
+        let detail = DeviceDetailViewController(groupController: controller,
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.show(device: makeDevice(id: "office"))
         #expect(detail.test_groupMembershipText == "None")
 
@@ -182,10 +223,208 @@ import AppKit
         #expect(detail.test_groupMembershipText == "Kitchen")
     }
 
+    // MARK: The "Groups" membership section — rows, order, empty state
+
+    @Test func groupsSectionIsTitledGroups() {
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        _ = detail.view
+        detail.show(device: makeDevice(id: "office"))
+        #expect(detail.test_groupsSectionTitleText == "Groups")
+    }
+
+    @Test func groupRowsListEverySavedGroupContainingTheDeviceInSidebarOrder() throws {
+        let controller = makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Kitchen", memberIDs: ["office", "appletv-lr"],
+                                       memberVolumes: ["office": 50, "appletv-lr": 60]))
+        try controller.saveGroup(Group(id: "g2", name: "Whole House", memberIDs: ["office"],
+                                       memberVolumes: ["office": 50]))
+        try controller.saveGroup(Group(id: "g3", name: "Bedroom", memberIDs: ["appletv-lr"],
+                                       memberVolumes: ["appletv-lr": 60]))
+
+        let detail = DeviceDetailViewController(groupController: controller,
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        _ = detail.view
+        detail.show(device: makeDevice(id: "office"))
+
+        #expect(detail.test_groupRowTitles == ["Kitchen", "Whole House"],
+                Comment(rawValue: "one row per group this device is in, in groupController.groups order — " +
+                "the same order SidebarViewController.reload maps to its Groups section"))
+    }
+
+    @Test func groupRowsShowTheEmptyStateRowWhenTheDeviceIsInNoGroup() {
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        _ = detail.view
+        detail.show(device: makeDevice(id: "office"))
+        #expect(detail.test_groupRowTitles == ["Not in any group"],
+                "the section stays visible and says so, rather than disappearing")
+    }
+
+    @Test func groupRowsRebuildWhenMembershipChanges() throws {
+        let controller = makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Kitchen", memberIDs: ["living-room"],
+                                       memberVolumes: ["living-room": 50]))
+        let detail = DeviceDetailViewController(groupController: controller,
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        _ = detail.view
+        detail.show(device: makeDevice(id: "office"))
+        #expect(detail.test_groupRowTitles == ["Not in any group"])
+
+        var group = try #require(controller.groups.first { $0.id == "g1" })
+        group.memberIDs = ["office"]
+        group.memberVolumes["office"] = 50
+        try controller.saveGroup(group)
+
+        detail.refresh(device: makeDevice(id: "office"))
+        #expect(detail.test_groupRowTitles == ["Kitchen"],
+                "a rebuild replaces the rows — it never stacks a second set behind the first")
+    }
+
+    @Test func selectingAGroupRowReportsThatGroupsID() throws {
+        let controller = makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Kitchen", memberIDs: ["office"],
+                                       memberVolumes: ["office": 50]))
+        try controller.saveGroup(Group(id: "g2", name: "Whole House", memberIDs: ["office"],
+                                       memberVolumes: ["office": 50]))
+
+        let detail = DeviceDetailViewController(groupController: controller,
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        _ = detail.view
+        detail.show(device: makeDevice(id: "office"))
+
+        var reported: [String] = []
+        detail.onSelectGroup = { reported.append($0) }
+
+        detail.test_selectGroupRow(at: 1)
+        #expect(reported == ["g2"], "the row's id, not its position in groupController.groups")
+
+        detail.test_selectGroupRow(at: 0)
+        #expect(reported == ["g2", "g1"])
+    }
+
+    @Test func theEmptyStateRowIsNotClickable() {
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        _ = detail.view
+        detail.show(device: makeDevice(id: "office"))
+
+        var reported: [String] = []
+        detail.onSelectGroup = { reported.append($0) }
+        detail.test_selectGroupRow(at: 0)
+        detail.test_selectGroupRow(at: 7)
+
+        #expect(reported.isEmpty, "there is nothing to open")
+    }
+
+    @Test func theGroupsTitleSitsBetweenTheEqualizerCardAndTheGroupsList() throws {
+        let detail = try laidOutPaneWithOneGroup()
+
+        let card = detail.test_eqSectionFrame
+        let title = detail.test_groupsSectionTitleFrame
+        let section = detail.test_groupsSectionFrame
+
+        // The pane's own view is NOT flipped, so "below" reads as a SMALLER y.
+        // Half-point tolerance: auto layout snaps frames onto a rounding grid
+        // whose pitch varies BETWEEN RUNS of the same binary
+        // (`AudiouterWindowUI/AGENTS.md`), and this pane's insets are half
+        // points. Never assert absolute widths here for the same reason.
+        #expect(title.maxY <= card.minY + 0.5,
+                "the title sits below the Equalizer card's bottom edge")
+        #expect(section.maxY <= title.minY + 0.5,
+                "…and above the Groups list it titles")
+    }
+
+    @Test func theEqualizerCardInsetsTheEditorByCardContentInsetNotVerticalPadding() throws {
+        let detail = try laidOutPaneWithOneGroup()
+
+        let card = detail.test_eqSectionFrame
+        let editor = detail.test_eqEditorFrame
+
+        // The pane's own view is NOT flipped, so the card's top edge is a
+        // LARGER y than the editor's. Half-point tolerance: auto layout snaps
+        // frames onto a rounding grid whose pitch varies BETWEEN RUNS of the
+        // same binary (`AudiouterWindowUI/AGENTS.md`).
+        #expect(abs(card.maxY - editor.maxY - GroupsPaneLayout.cardContentInset) < 0.5,
+                "the card's top breathes cardContentInset above the editor's first row, not the tighter verticalPadding used by bare row lists")
+        #expect(abs(editor.minY - card.minY - GroupsPaneLayout.cardContentInset) < 0.5,
+                "…and the same inset below it")
+    }
+
+    @Test func theAboutTitleSitsBetweenTheGroupsListAndTheAboutList() throws {
+        let detail = try laidOutPaneWithOneGroup()
+
+        let groups = detail.test_groupsSectionFrame
+        let title = detail.test_aboutSectionTitleFrame
+        let about = detail.test_aboutSectionFrame
+
+        #expect(title.maxY <= groups.minY + 0.5,
+                "the title sits below the Groups list")
+        #expect(about.maxY <= title.minY + 0.5,
+                "…and above the About list it titles")
+    }
+
+    @Test func aGroupRowsNameStretchesToTheChevronAndTruncatesRatherThanRunningUnderIt() throws {
+        let controller = makeController()
+        // ~55 characters — far past any realistic column width, so the row has
+        // to give way somewhere — and a short one right after it.
+        try controller.saveGroup(Group(id: "g1",
+                                       name: "Whole House Downstairs Speakers and the Back Patio Pair",
+                                       memberIDs: ["office"], memberVolumes: ["office": 50]))
+        try controller.saveGroup(Group(id: "g2", name: "Den",
+                                       memberIDs: ["office"], memberVolumes: ["office": 50]))
+        let detail = DeviceDetailViewController(groupController: controller,
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        detail.show(device: makeDevice(id: "office"))
+        _ = detail.view
+        detail.view.setFrameSize(AppSurfaceController.groupsDefaultContentSize)
+        detail.view.layoutSubtreeIfNeeded()
+
+        let buttons = detail.test_groupRowButtonFrames
+        let chevrons = detail.test_groupRowChevronFrames
+        let titles = detail.test_groupRowTitleRects
+        #expect(buttons.count == 2)
+        #expect(chevrons.count == 2)
+        #expect(titles.count == 2)
+
+        let gap = DeviceDetailViewController.test_groupRowChevronGap
+        for (row, name) in [(0, "long"), (1, "short")] {
+            // `NSButtonCell` fires only when the mouse-UP lands inside the
+            // button's OWN frame, so the glyph has to sit INSIDE the button or
+            // every click on it is dead however the hit test is routed.
+            let glyphMiddle = NSPoint(x: chevrons[row].midX, y: chevrons[row].midY)
+            #expect(buttons[row].contains(glyphMiddle),
+                    Comment(rawValue: "the \(name) row's chevron sits inside its button, so a click " +
+                    "on the glyph opens the group"))
+            // Half-point tolerance for the per-run rounding grid, the same
+            // reason the slot-order assertions carry one. Never an absolute
+            // width.
+            #expect(titles[row].maxX <= chevrons[row].minX - gap + 0.5,
+                    Comment(rawValue: "the \(name) row's title stops a gap short of the chevron " +
+                    "rather than drawing under it"))
+        }
+    }
+
+    /// A speaker pane in one saved group, mounted and laid out at the screen's
+    /// real content size — the shared setup for the slot-order assertions.
+    private func laidOutPaneWithOneGroup() throws -> DeviceDetailViewController {
+        let controller = makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Kitchen", memberIDs: ["office"],
+                                       memberVolumes: ["office": 50]))
+        let detail = DeviceDetailViewController(groupController: controller,
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
+        detail.show(device: makeDevice(id: "office"))
+        _ = detail.view
+        detail.view.setFrameSize(AppSurfaceController.groupsDefaultContentSize)
+        detail.view.layoutSubtreeIfNeeded()
+        return detail
+    }
+
     // MARK: Icon resolution — no injected controller
 
     @Test func iconSymbolNameFallsBackToKindDefaultWithNoInjectedController() {
-        let detail = DeviceDetailViewController(groupController: makeController())
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.show(device: makeDevice(kind: .homePod))
         #expect(detail.test_iconSymbolName == Device.Kind.homePod.symbolName)
     }
@@ -194,7 +433,8 @@ import AppKit
 
     @Test func iconSymbolNameUsesKindDefaultWhenControllerHasNoOverride() {
         let iconController = DeviceIconController(store: DeviceIconStore(directory: tempDirectory()), loadPersisted: false)
-        let detail = DeviceDetailViewController(groupController: makeController())
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.deviceIconController = iconController
 
         detail.show(device: makeDevice(kind: .sonos))
@@ -206,7 +446,8 @@ import AppKit
         let device = makeDevice(kind: .sonos)
         iconController.setSymbolName("airpods", for: device.id)
 
-        let detail = DeviceDetailViewController(groupController: makeController())
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.deviceIconController = iconController
         detail.show(device: device)
 
@@ -223,7 +464,8 @@ import AppKit
         try? store.save(["d1": "definitely.not.a.symbol.zzz"])
         let iconController = DeviceIconController(store: store, loadPersisted: true)
 
-        let detail = DeviceDetailViewController(groupController: makeController())
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.deviceIconController = iconController
         detail.show(device: makeDevice(id: "d1", kind: .appleTV))
 
@@ -238,7 +480,8 @@ import AppKit
         let device = makeDevice(kind: .homePod)
         iconController.setSymbolName("airpods", for: device.id)
 
-        let detail = DeviceDetailViewController(groupController: makeController())
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.deviceIconController = iconController
         detail.show(device: device)
 
@@ -251,7 +494,8 @@ import AppKit
         let iconController = DeviceIconController(store: DeviceIconStore(directory: tempDirectory()), loadPersisted: false)
         let device = makeDevice(kind: .homePod)
 
-        let detail = DeviceDetailViewController(groupController: makeController())
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.deviceIconController = iconController
         detail.show(device: device)
         #expect(detail.test_iconSymbolName == Device.Kind.homePod.symbolName)
@@ -268,7 +512,8 @@ import AppKit
         let device = makeDevice(kind: .homePod)
         iconController.setSymbolName("airpods", for: device.id)
 
-        let detail = DeviceDetailViewController(groupController: makeController())
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.deviceIconController = iconController
         detail.show(device: device)
         #expect(detail.test_iconSymbolName == "airpods")
@@ -282,7 +527,8 @@ import AppKit
 
     @Test func pickingAnIconWithNoInjectedControllerIsANoOp() {
         let device = makeDevice(kind: .sonos)
-        let detail = DeviceDetailViewController(groupController: makeController())
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
         // No `deviceIconController` assigned — nil-tolerant per `../../AGENTS.md`.
         detail.show(device: device)
 
@@ -293,21 +539,13 @@ import AppKit
                        "nothing to write through — the glyph stays at the kind default")
     }
 
-    // MARK: The pane's hint
-
-    @Test func hintNamesDescribeAndTune() {
-        let detail = DeviceDetailViewController(groupController: makeController())
-        detail.show(device: makeDevice())
-        #expect(detail.test_hintText == "Playback is controlled from the Mixer — this page describes and tunes the speaker.")
-        #expect(!detail.test_hintText.contains("\n"), "stays a single line")
-    }
-
     // MARK: The Equalizer section
 
-    /// Loads the view (the Equalizer's delegate and the hint's two alternative
-    /// top constraints are wired in `loadView`) and shows `device`.
+    /// Loads the view (the Equalizer's delegate and the "Groups" title's two
+    /// alternative top constraints are wired in `loadView`) and shows `device`.
     private func makeLoadedPane(device: Device) -> DeviceDetailViewController {
-        let detail = DeviceDetailViewController(groupController: makeController())
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
         _ = detail.view
         detail.show(device: device)
         return detail
@@ -322,8 +560,62 @@ import AppKit
     @Test func equalizerSectionIsShownOnASpeaker() {
         let detail = makeLoadedPane(device: makeDevice())
         #expect(detail.test_eqSectionShown)
-        #expect(detail.test_sectionCount == 4,
-                "header + device state + In groups + Equalizer")
+        #expect(detail.test_slotTitles == ["Equalizer", "Groups", "About"])
+        #expect(detail.test_cardFrames.count == 1,
+                "the Equalizer is the page's one instrument, so its one card")
+    }
+
+    // MARK: The Equalizer section's title
+
+    @Test func eqSectionTitleShowsOnASpeaker() {
+        let detail = makeLoadedPane(device: makeDevice())
+        #expect(detail.test_eqSectionTitleText == "Equalizer")
+    }
+
+    @Test func eqSectionTitleIsNilOnThisMac() {
+        let detail = makeLoadedPane(device: makeDevice(id: "local", name: "This Mac", kind: .localMac))
+        #expect(detail.test_eqSectionTitleText == nil,
+                "hides together with the Equalizer section it titles")
+    }
+
+    @Test func eqSectionTitleSitsBetweenTheHeaderAndTheEqualizerCard() {
+        let detail = makeLoadedPane(device: makeDevice())
+        // The pane's own `view` is NOT flipped, so "below" reads as a SMALLER
+        // y here; the half point is the run's rounding grid, nothing else.
+        #expect(detail.test_eqSectionTitleFrame.maxY <= detail.test_headerSectionFrame.minY + 0.5,
+                "the title sits below the identity band")
+        #expect(detail.test_eqSectionFrame.maxY <= detail.test_eqSectionTitleFrame.minY + 0.5,
+                "the Equalizer card's own content sits below its title")
+    }
+
+    /// One card per page, and identity/Groups/About are bare: a box is earned
+    /// by holding a different instrument, never by length. The titles are bare
+    /// pane text, the same idiom as the group editor's "Speakers" label.
+    @Test func onlyTheEqualizerIsACard() {
+        let detail = makeLoadedPane(device: makeDevice())
+        #expect(detail.test_cardFrames.count == 1)
+
+        detail.show(device: makeDevice(id: "local", name: "This Mac", kind: .localMac))
+        #expect(detail.test_cardFrames.count == 0,
+                "This Mac has no instrument, so it has no card at all")
+        #expect(detail.test_slotTitles == ["Groups", "About"])
+    }
+
+    /// Proves `settings:` actually threads from the host's `init` down to the
+    /// editor it builds, rather than each falling back to its own default
+    /// `AppSettings()` (which would read `.standard`): a store that already
+    /// has the Advanced fold expanded produces a pane whose editor opens
+    /// expanded, and an untouched store produces one that opens collapsed.
+    @Test func eqAdvancedExpandedThreadsFromInjectedSettings() {
+        AppSettings(defaults: isolation.isolatedDefaults).eqAdvancedExpanded = true
+        let expandedPane = DeviceDetailViewController(groupController: makeController(),
+                                                       settings: AppSettings(defaults: isolation.isolatedDefaults))
+        #expect(expandedPane.test_eqEditor.test_advancedExpanded == true)
+
+        let freshStore = TestIsolation(owner: "DeviceDetailViewTests-fresh")
+        let freshPane = DeviceDetailViewController(groupController: makeController(),
+                                                    settings: AppSettings(defaults: freshStore.isolatedDefaults))
+        #expect(freshPane.test_eqEditor.test_advancedExpanded == false)
     }
 
     @Test func bypassSentencesComeFromTheSnapshot() {
@@ -362,11 +654,46 @@ import AppKit
 
         var reported: [(DeviceEQ, String, Bool)] = []
         detail.onSetEQ = { eq, id, committed in reported.append((eq, id, committed)) }
-        detail.test_eqEditor.test_fireResetClick()
+        detail.test_fireResetClick()
 
         #expect(reported.count == 1, "Reset is ONE action, not one per stage")
         #expect(reported.last?.0 == .flat)
         #expect(reported.last?.2 == true)
+    }
+
+    /// Reset now sits on the "Equalizer" title line, trailing-aligned to the
+    /// same content edge the editor itself trails to — not inside the editor.
+    @Test func resetSitsOnTheEqualizerTitleLine() {
+        let detail = makeShownThenLoadedPane(device: makeDevice())
+        let reset = detail.test_eqResetButtonFrame
+        let titleAlign = detail.test_eqSectionTitleAlignmentFrame
+        #expect(abs(reset.midY - titleAlign.midY) <= 0.5)
+        #expect(abs(reset.maxX - detail.test_eqEditorFrame.maxX) <= 0.5)
+    }
+
+    /// The editor's own rendered model IS the source of truth for enablement.
+    @Test func resetEnablementTracksTheTone() {
+        let detail = makeLoadedPane(device: makeDevice(id: "office"))
+        #expect(detail.test_resetEnabled == false, "a flat device has nothing to reset")
+
+        var shaped = makeDevice(id: "office")
+        shaped.eq = DeviceEQ(bassDB: 3)
+        detail.refresh(device: shaped)
+        #expect(detail.test_resetEnabled == true)
+
+        var reported: [(DeviceEQ, String, Bool)] = []
+        detail.onSetEQ = { eq, id, committed in reported.append((eq, id, committed)) }
+        detail.test_fireResetClick()
+        #expect(detail.test_resetEnabled == false)
+        #expect(reported.last?.0 == .flat)
+        #expect(reported.last?.1 == "office")
+        #expect(reported.last?.2 == true)
+    }
+
+    /// This Mac has no send to tune, so the Reset button hides with the slot.
+    @Test func resetIsHiddenOnThisMac() {
+        let detail = makeLoadedPane(device: makeDevice(id: "local", name: "This Mac", kind: .localMac))
+        #expect(detail.test_resetShown == false)
     }
 
     @Test func curveTracksTheEditor() {
@@ -388,7 +715,8 @@ import AppKit
     /// No window is involved — the pane is laid out at the Groups screen's
     /// content size directly, so nothing can appear on screen.
     private func makeShownThenLoadedPane(device: Device) -> DeviceDetailViewController {
-        let detail = DeviceDetailViewController(groupController: makeController())
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.show(device: device)
         _ = detail.view
         detail.view.setFrameSize(AppSurfaceController.groupsDefaultContentSize)
@@ -396,57 +724,59 @@ import AppKit
         return detail
     }
 
-    /// The scroll document's laid-out height — what collapses when the hint
-    /// has no top pin to tie the sections to the column's bottom.
+    /// The scroll document's laid-out height — what collapses when the
+    /// "Groups" title has no top pin, since everything below it (down to the
+    /// About list that ties the column's bottom) hangs off that pin.
     private func documentHeight(_ detail: DeviceDetailViewController) -> CGFloat {
         let scroll = detail.view.subviews.compactMap { $0 as? NSScrollView }.first
         return scroll?.documentView?.frame.height ?? 0
     }
 
-    @Test func aPaneShownBeforeItIsMountedStillPinsTheHintUnderTheLastSection() {
+    @Test func aPaneShownBeforeItIsMountedStillTiesTheColumnToTheAboutList() {
         let detail = makeShownThenLoadedPane(device: makeDevice())
 
-        #expect(detail.test_activeHintPinCount == 1,
-                Comment(rawValue: "the hint must have exactly one top pin from the moment the view loads — " +
-                "with none the column's height goes ambiguous"))
+        #expect(detail.test_activeGroupsTitlePinCount == 1,
+                Comment(rawValue: "the \"Groups\" title must have exactly one top pin from the moment " +
+                "the view loads — with none the column's height goes ambiguous"))
         // The pane's own view is NOT flipped, so "below" is a SMALLER y.
-        #expect(detail.test_hintFrame.maxY <= detail.test_eqSectionFrame.minY,
-                "the hint sits under the Equalizer section, the last one on a speaker")
+        #expect(detail.test_groupsSectionTitleFrame.maxY <= detail.test_eqSectionFrame.minY + 0.5,
+                "the title sits under the Equalizer card, what precedes it on a speaker")
 
-        let sections = detail.test_headerSectionFrame.height + detail.test_stateSectionFrame.height
-            + detail.test_groupsSectionFrame.height + detail.test_eqSectionFrame.height
-        #expect(documentHeight(detail) > sections,
-                "the document holds the whole stack — a collapsed one is shorter than its own sections")
+        let slots = detail.test_headerSectionFrame.height + detail.test_eqSectionFrame.height
+            + detail.test_groupsSectionFrame.height + detail.test_aboutSectionFrame.height
+        #expect(documentHeight(detail) > slots,
+                "the document holds the whole stack — a collapsed one is shorter than its own slots")
     }
 
-    @Test func aThisMacPaneShownBeforeItIsMountedPinsTheHintUnderInGroups() {
+    @Test func aThisMacPaneShownBeforeItIsMountedPutsGroupsDirectlyUnderTheHeader() {
         let detail = makeShownThenLoadedPane(
             device: makeDevice(id: "local", name: "This Mac", kind: .localMac))
 
-        #expect(detail.test_activeHintPinCount == 1)
+        #expect(detail.test_activeGroupsTitlePinCount == 1)
         #expect(!detail.test_eqSectionShown)
-        #expect(detail.test_hintFrame.maxY <= detail.test_groupsSectionFrame.minY,
-                "with the Equalizer gone, In groups is the last section and the hint closes up behind it")
+        #expect(detail.test_groupsSectionTitleFrame.maxY <= detail.test_headerSectionFrame.minY + 0.5,
+                "with the Equalizer gone, Groups closes up under the identity band")
 
-        let sections = detail.test_headerSectionFrame.height + detail.test_stateSectionFrame.height
-            + detail.test_groupsSectionFrame.height
-        #expect(documentHeight(detail) > sections)
+        let slots = detail.test_headerSectionFrame.height + detail.test_groupsSectionFrame.height
+            + detail.test_aboutSectionFrame.height
+        #expect(documentHeight(detail) > slots)
     }
 
-    @Test func theHintPinFollowsTheDeviceInBothDirections() {
+    @Test func theGroupsTitlePinFollowsTheDeviceInBothDirections() {
         let detail = makeShownThenLoadedPane(device: makeDevice())
-        #expect(detail.test_hintFrame.maxY <= detail.test_eqSectionFrame.minY)
+        #expect(detail.test_groupsSectionTitleFrame.maxY <= detail.test_eqSectionFrame.minY + 0.5)
 
         detail.show(device: makeDevice(id: "local", name: "This Mac", kind: .localMac))
         detail.view.layoutSubtreeIfNeeded()
-        #expect(detail.test_activeHintPinCount == 1)
-        #expect(detail.test_hintFrame.maxY <= detail.test_groupsSectionFrame.minY)
+        #expect(detail.test_activeGroupsTitlePinCount == 1)
+        #expect(detail.test_groupsSectionTitleFrame.maxY
+                <= detail.test_headerSectionFrame.minY + 0.5)
 
         detail.show(device: makeDevice())
         detail.view.layoutSubtreeIfNeeded()
-        #expect(detail.test_activeHintPinCount == 1)
-        #expect(detail.test_hintFrame.maxY <= detail.test_eqSectionFrame.minY,
-                "Mac → speaker puts the Equalizer section back under the hint")
+        #expect(detail.test_activeGroupsTitlePinCount == 1)
+        #expect(detail.test_groupsSectionTitleFrame.maxY <= detail.test_eqSectionFrame.minY + 0.5,
+                "Mac → speaker puts the Equalizer card back above the Groups title")
     }
 
     // MARK: The in-flight scrub cache
@@ -492,7 +822,7 @@ import AppKit
         let detail = makeLoadedPane(device: makeDevice(id: "office"))
         detail.test_eqEditor.test_committedGestureOverride = true
         detail.test_eqEditor.test_dragBass(to: 5)
-        detail.test_eqEditor.test_fireResetClick()
+        detail.test_fireResetClick()
 
         // Reset's own committed value is flat — a matching flat echo is what
         // releases the cache, same rule as any other committed gesture.
@@ -517,7 +847,8 @@ import AppKit
     // MARK: Hover scrim headless test hook
 
     @Test func setOverlayVisibleDoesNotCrashHeadless() {
-        let detail = DeviceDetailViewController(groupController: makeController())
+        let detail = DeviceDetailViewController(groupController: makeController(),
+                                            settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.show(device: makeDevice())
         detail.test_setOverlayVisible(true)
         detail.test_setOverlayVisible(false)

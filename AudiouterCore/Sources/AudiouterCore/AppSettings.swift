@@ -63,6 +63,7 @@ public struct AppSettings {
         static let mainOutVolume = "audio.mainOutVolume"
         static let syncOffsetMs = "audio.syncOffsetMs"
         static let surfacePinned = "surface.pinned"
+        static let eqAdvancedExpanded = "eq.advancedExpanded"
     }
 
     /// The user-selectable sender start-buffer options in ms (Settings › Audio
@@ -263,5 +264,15 @@ public struct AppSettings {
     public var surfacePinned: Bool {
         get { defaults.bool(forKey: Keys.surfacePinned) }
         nonmutating set { defaults.set(newValue, forKey: Keys.surfacePinned) }
+    }
+
+    /// Whether the Equalizer card's "Advanced" ten-band fold is expanded. One
+    /// global switch — every host's editor shares it, so opening it in one
+    /// place opens it everywhere — remembered across launches. Read by
+    /// ``EQEditorView`` at init and written on every toggle. Defaults to
+    /// `false` (unset): a fresh install shows the fold collapsed.
+    public var eqAdvancedExpanded: Bool {
+        get { defaults.bool(forKey: Keys.eqAdvancedExpanded) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.eqAdvancedExpanded) }
     }
 }

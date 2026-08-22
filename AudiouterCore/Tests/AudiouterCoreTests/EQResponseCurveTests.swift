@@ -186,6 +186,44 @@ import AppKit
         }
     }
 
+    /// Straight-alpha composite in sRGB. `contrastRatio` takes two OPAQUE
+    /// colours, and the ruler's tone is a semi-transparent label colour, so it
+    /// has to be laid over the ground before the ratio means anything.
+    private func composited(_ top: NSColor, over bottom: NSColor) -> NSColor {
+        let t = top.usingColorSpace(.sRGB)!, b = bottom.usingColorSpace(.sRGB)!
+        let a = t.alphaComponent
+        func mix(_ x: CGFloat, _ y: CGFloat) -> CGFloat { x * a + y * (1 - a) }
+        return NSColor(srgbRed: mix(t.redComponent, b.redComponent),
+                       green: mix(t.greenComponent, b.greenComponent),
+                       blue: mix(t.blueComponent, b.blueComponent),
+                       alpha: 1)
+    }
+
+    /// The dB ruler is TEXT on the scope's ground, so it answers to the 4.5:1
+    /// text floor, not the 3:1 instrument floor — which is exactly why it is
+    /// `secondaryLabel` and not the `tertiaryLabel` the band captions use
+    /// (tertiary lands near 2.2:1 here).
+    @Test func theRulerTextClearsTheTextFloorOnTheScopeGround() {
+        for appearance in [NSAppearance.Name.darkAqua, .accessibilityHighContrastDarkAqua] {
+            let ground = resolved(Tokens.Color.scopeGround, appearanceName: appearance)
+            let ink = resolved(Tokens.Color.secondaryLabel, appearanceName: appearance)
+            let ratio = contrastRatio(composited(ink, over: ground), ground)
+            #expect(ratio >= 4.5, "ruler text vs scopeGround in \(appearance.rawValue) = \(ratio):1")
+        }
+    }
+
+    /// The scope's x-axis IS the faders' x-axis: `bandCentreX` maps the `0…1`
+    /// gridline into the view's own coordinates, inside the ruler gutter and
+    /// the trailing margin, and the last band's 26 pt column has to still fit.
+    @Test func bandCentreXMapsTheGridIntoThePlot() {
+        let width: CGFloat = 357
+        let span = width - EQResponseCurveView.plotLeadingInset - EQResponseCurveView.plotTrailingInset
+        let expectedFirst = EQResponseCurveView.plotLeadingInset
+            + EQResponseCurveView.bandGridX[0] * span
+        #expect(abs(EQResponseCurveView.bandCentreX(index: 0, width: width) - expectedFirst) < 0.001)
+        #expect(EQResponseCurveView.bandCentreX(index: 9, width: width) + 13 <= width)
+    }
+
     /// The instrument never themes: the ground is the SAME authored value in
     /// light and dark, which is what lets the view pin its drawing appearance
     /// without the two modes disagreeing.

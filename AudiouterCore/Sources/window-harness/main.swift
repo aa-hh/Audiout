@@ -91,11 +91,12 @@ func run() -> Int32 {
     }
     window.update(devices: backend.devices)
 
-    // --- 1. Baseline sidebar: zero groups still shows BOTH sections (the
+    // --- 1. Baseline sidebar: zero groups still shows ALL THREE sections (the
     //        Groups section carries an empty-state row instead of vanishing).
     print("\n[1] Baseline sidebar (zero groups)")
-    checks.expectEqual(window.test_sidebar.test_sectionTitles, ["Groups", "Speakers"],
-                       "'Groups' and 'Speakers' sections both present even with zero groups")
+    checks.expectEqual(window.test_sidebar.test_sectionTitles,
+                       ["System Audio", "Groups", "Speakers"],
+                       "'System Audio', 'Groups' and 'Speakers' sections all present even with zero groups")
     checks.expect(window.test_sidebar.test_hasGroupsEmptyStateRow,
                   "the Groups section shows its empty-state row at zero groups")
     checks.expectEqual(window.test_sidebar.test_deviceRowCount, 7,

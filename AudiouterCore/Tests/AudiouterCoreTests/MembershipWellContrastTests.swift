@@ -7,16 +7,17 @@ import AppKit
 @testable import AudiouterSharedUI
 @testable import AudiouterWindowUI
 
-/// T5 — the membership checklist's recessed container + hairline dividers.
+/// The Groups screen's surface separation, measured.
 ///
-/// Before this task the checklist (`GroupEditorViewController`'s
-/// `membershipStack`) painted no surface of its own at all: no background, no
-/// divider, nothing — measured on the real post-T6 tones, `panel` vs `canvas`
-/// is ~1.06:1 dark / ~1.08:1 light, effectively invisible as a boundary.
+/// The screen is ONE housing: bare lists on `panel`, and exactly one lifted
+/// card per page (`GroupedSectionView` `.card` — `raised` + a `hairline`
+/// edge). Before any of it the checklist painted no surface at all — measured
+/// on the real tones, `panel` vs `canvas` is ~1.06:1 dark / ~1.08:1 light,
+/// effectively invisible as a boundary.
 ///
 /// Locked constraint (Alec): text colors stay frozen everywhere — separation
-/// must come entirely from surfaces (`Tokens.Color.well`/`.hairline`), never a
-/// text-color change. These tests assert the two measured floors against
+/// must come entirely from surfaces (`Tokens.Color.raised`/`.hairline`), never
+/// a text-color change. These tests assert the measured floors against
 /// `Tokens.Color.panel` the task specifies, in BOTH appearances, using the
 /// SAME real WCAG relative-luminance math `AppTetherColorTests` already
 /// established for a token contrast floor (its `relativeLuminance`/
@@ -88,36 +89,38 @@ import AppKit
                 "hairline vs panel (light): \(lightRatio):1 below the \(floor):1 separator floor")
     }
 
-    /// FOR THE RECORD (design review 2026-07-25): the inline rename field is
-    /// filled with `raised` and sits beside the icon well, which is filled with
-    /// the same token, inside a header section filled with `well`. That pairing
-    /// is the whole reason the two header controls read as a pair — so the
-    /// separation between the control fill and the section fill gets the same
-    /// measured floor the other surface pairs carry. Measured: 1.186:1 dark /
-    /// 1.172:1 light (light re-measured 2026-08-12 when Direction 04
-    /// re-authored light `raised`/`well`).
-    @Test func raisedVsWellClearsTheControlOnSectionFloorBothAppearances() {
-        let floor: CGFloat = 1.15
+    /// THE CARD'S EDGE, which is what actually separates it. The one card per
+    /// page is `raised` on `panel`, and on dark that pair measures 1.07:1 —
+    /// UNDER the 1.10:1 surface floor above. The fill is deliberately that
+    /// quiet: the card is a lift, not a slab. So the separation rides on the
+    /// 1 pt `hairline` edge instead, and THAT is what this floor pins
+    /// (measured 1.31:1 dark / 1.40:1 light).
+    ///
+    /// There is deliberately NO fill-floor assertion for raised-on-panel — it
+    /// would fail by design, and adding one would mean either loosening the
+    /// floor or brightening the card.
+    @Test func hairlineVsRaisedClearsTheCardEdgeFloorBothAppearances() {
+        let floor: CGFloat = 1.25
 
-        let darkRatio = contrastRatio(resolved(Tokens.Color.raised, appearanceName: .darkAqua),
-                                      resolved(Tokens.Color.well, appearanceName: .darkAqua))
+        let darkRatio = contrastRatio(resolved(Tokens.Color.hairline, appearanceName: .darkAqua),
+                                      resolved(Tokens.Color.raised, appearanceName: .darkAqua))
         #expect(darkRatio >= floor,
-                Comment(rawValue: "raised vs well (dark): \(darkRatio):1 below the \(floor):1 floor — " +
-                "the rename field/icon well would sink into the section they sit in"))
+                Comment(rawValue: "hairline vs raised (dark): \(darkRatio):1 below the \(floor):1 floor — " +
+                "the card's fill alone is 1.07:1 on panel, so a weak edge leaves no card at all"))
 
-        let lightRatio = contrastRatio(resolved(Tokens.Color.raised, appearanceName: .aqua),
-                                       resolved(Tokens.Color.well, appearanceName: .aqua))
+        let lightRatio = contrastRatio(resolved(Tokens.Color.hairline, appearanceName: .aqua),
+                                       resolved(Tokens.Color.raised, appearanceName: .aqua))
         #expect(lightRatio >= floor,
-                "raised vs well (light): \(lightRatio):1 below the \(floor):1 floor")
+                "hairline vs raised (light): \(lightRatio):1 below the \(floor):1 floor")
     }
 
     // MARK: The rail's idle ink, measured on the surface it actually runs over
 
     /// `ember` is a NON-TEXT instrument (the rail's idle wire and its member
     /// discs), so it carries the ≥3:1 floor — and in the group editor it is
-    /// drawn on the section's `well` fill, not on `panel`. Measured against
+    /// drawn on the card's `raised` fill, not on `panel`. Measured against
     /// `panel` alone it passed while failing on the ground under it: light
-    /// `#AC8C46` was 3.07:1 on `panel` but 2.55:1 on `well` (2026-08-12).
+    /// `#AC8C46` was 3.07:1 on `panel` but 2.55:1 on the card (2026-08-12).
     ///
     /// Increase Contrast can't be forced from a test (`Tokens` reads the LIVE
     /// `NSWorkspace` flag, there is no appearance name for it), so this pins the
@@ -126,10 +129,10 @@ import AppKit
         let floor: CGFloat = 3.0
         let ember = resolved(Tokens.Color.ember, appearanceName: .aqua)
 
-        let onWell = contrastRatio(ember, resolved(Tokens.Color.well, appearanceName: .aqua))
-        #expect(onWell >= floor,
-                Comment(rawValue: "light ember vs well: \(onWell):1 below the \(floor):1 non-text floor — " +
-                "the editor's rail runs over the section fill, not the pane"))
+        let onRaised = contrastRatio(ember, resolved(Tokens.Color.raised, appearanceName: .aqua))
+        #expect(onRaised >= floor,
+                Comment(rawValue: "light ember vs raised: \(onRaised):1 below the \(floor):1 non-text floor — " +
+                "the editor's rail runs over the card fill, not the pane"))
 
         let onPanel = contrastRatio(ember, resolved(Tokens.Color.panel, appearanceName: .aqua))
         #expect(onPanel >= floor,
@@ -137,7 +140,7 @@ import AppKit
     }
 
     /// `gold` carries the same ≥3:1 non-text floor on the same two surfaces —
-    /// the node discs sit on the section's `well` fill, where the pre-retune
+    /// the node discs sit on the card's `raised` fill, where the pre-retune
     /// `#A97F1E` measured only 2.92:1 (2026-08-12). Same base-value-only
     /// caveat as ember's: Increase Contrast can't be forced from a test, and
     /// the IC variant is authored strictly darker still.
@@ -145,10 +148,10 @@ import AppKit
         let floor: CGFloat = 3.0
         let gold = resolved(Tokens.Color.gold, appearanceName: .aqua)
 
-        let onWell = contrastRatio(gold, resolved(Tokens.Color.well, appearanceName: .aqua))
-        #expect(onWell >= floor,
-                Comment(rawValue: "light gold vs well: \(onWell):1 below the \(floor):1 non-text floor — " +
-                "the editor's nodes sit on the section fill, not the pane"))
+        let onRaised = contrastRatio(gold, resolved(Tokens.Color.raised, appearanceName: .aqua))
+        #expect(onRaised >= floor,
+                Comment(rawValue: "light gold vs raised: \(onRaised):1 below the \(floor):1 non-text floor — " +
+                "the editor's nodes sit on the card fill, not the pane"))
 
         let onPanel = contrastRatio(gold, resolved(Tokens.Color.panel, appearanceName: .aqua))
         #expect(onPanel >= floor,

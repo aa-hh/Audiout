@@ -63,11 +63,11 @@ import AppKit
 
     @Test func refreshUpdatesFieldsForTheSameDevice() {
         let detail = DeviceDetailViewController(groupController: makeController())
-        detail.show(device: makeDevice(volume: 20))
-        #expect(detail.test_metadataStrings["volume"] == "20%")
+        detail.show(device: makeDevice(isAvailable: true))
+        #expect(detail.test_metadataStrings["available"] == "Yes")
 
-        detail.refresh(device: makeDevice(volume: 75))
-        #expect(detail.test_metadataStrings["volume"] == "75%")
+        detail.refresh(device: makeDevice(isAvailable: false))
+        #expect(detail.test_metadataStrings["available"] == "No")
         #expect(detail.test_shownDeviceID == "d1")
     }
 
@@ -113,15 +113,6 @@ import AppKit
 
         detail.show(device: makeDevice(isAvailable: false))
         #expect(detail.test_metadataStrings["available"] == "No")
-    }
-
-    @Test func volumePercentFormatting() {
-        let detail = DeviceDetailViewController(groupController: makeController())
-        detail.show(device: makeDevice(volume: 0))
-        #expect(detail.test_metadataStrings["volume"] == "0%")
-
-        detail.show(device: makeDevice(volume: 100))
-        #expect(detail.test_metadataStrings["volume"] == "100%")
     }
 
     @Test func kindTextForEveryKind() {
@@ -324,6 +315,38 @@ import AppKit
         #expect(detail.test_eqSectionShown)
         #expect(detail.test_sectionCount == 4,
                 "header + device state + In groups + Equalizer")
+    }
+
+    // MARK: The Equalizer section's title
+
+    @Test func eqSectionTitleShowsOnASpeaker() {
+        let detail = makeLoadedPane(device: makeDevice())
+        #expect(detail.test_eqSectionTitleText == "Equalizer")
+    }
+
+    @Test func eqSectionTitleIsNilOnThisMac() {
+        let detail = makeLoadedPane(device: makeDevice(id: "local", name: "This Mac", kind: .localMac))
+        #expect(detail.test_eqSectionTitleText == nil,
+                "hides together with the Equalizer section it titles")
+    }
+
+    @Test func eqSectionTitleSitsBetweenGroupsSectionAndEQSection() {
+        let detail = makeLoadedPane(device: makeDevice())
+        // The pane's own `view` is NOT flipped, so "below" reads as a
+        // SMALLER y here (same idiom `test_hintFrame`'s doc comment uses).
+        #expect(detail.test_eqSectionTitleFrame.maxY <= detail.test_groupsSectionFrame.minY,
+                "the title sits below the groups section")
+        #expect(detail.test_eqSectionFrame.maxY <= detail.test_eqSectionTitleFrame.minY,
+                "the Equalizer section's own content sits below its title")
+    }
+
+    /// Not a `GroupedSectionView` — `test_sectionCount` (asserted at 4 in
+    /// `equalizerSectionIsShownOnASpeaker`) must not grow when this label is
+    /// added; it is bare pane text, the same idiom as the group editor's
+    /// "Speakers" label.
+    @Test func eqSectionTitleDoesNotCountAsASection() {
+        let detail = makeLoadedPane(device: makeDevice())
+        #expect(detail.test_sectionCount == 4)
     }
 
     @Test func bypassSentencesComeFromTheSnapshot() {

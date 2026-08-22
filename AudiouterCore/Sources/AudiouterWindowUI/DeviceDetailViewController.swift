@@ -33,7 +33,7 @@ import AudiouterSharedUI
 ///   (renameable here) and a device's (not);
 /// - the read-only metadata in two grouped sections (secondary-colour captions
 ///   leading, values right-aligned into their own column): device STATE
-///   (Status, Available, Volume, Kind) in the first, MEMBERSHIP ("In groups" —
+///   (Status, Available, Kind) in the first, MEMBERSHIP ("In groups" —
 ///   the saved groups from the injected `GroupController` whose `memberIDs`
 ///   contain this device) in the second. The sections' own inset hairlines
 ///   separate the rows; the old stock `NSBox` divider is gone (it drew a 185 pt
@@ -71,7 +71,7 @@ public final class DeviceDetailViewController: NSViewController {
     /// The header's own bounded section (icon + name side by side) — the same
     /// shape, at the same geometry, as the group editor's header section.
     private let headerWell = GroupedSectionView()
-    /// The device-STATE section (Status / Available / Volume / Kind) and the
+    /// The device-STATE section (Status / Available / Kind) and the
     /// MEMBERSHIP section ("In groups"), each a `GroupedSectionView` whose own
     /// inset hairlines separate its rows.
     private let stateWell = GroupedSectionView()
@@ -80,6 +80,12 @@ public final class DeviceDetailViewController: NSViewController {
     /// This Mac — the audio's SOURCE has no send to tune.
     private let eqWell = GroupedSectionView()
     private let eqEditor = EQEditorView()
+    /// The Equalizer section's own title, sitting on bare pane above the
+    /// section — the same idiom as the group editor's "Speakers" label above
+    /// its membership section. Hides/shows in lockstep with `eqWell` (see
+    /// `applyEQSectionVisibility()`): This Mac has nothing to tune, so neither
+    /// the section nor its title has anything to say.
+    private let eqTitleLabel = NSTextField(labelWithString: "Equalizer")
     private let stateStack = NSStackView()
     private let groupsStack = NSStackView()
     // Text is set at declaration (not in `loadView`) so it's correct even
@@ -104,7 +110,6 @@ public final class DeviceDetailViewController: NSViewController {
 
     private let statusValueLabel = NSTextField(labelWithString: "")
     private let availableValueLabel = NSTextField(labelWithString: "")
-    private let volumeValueLabel = NSTextField(labelWithString: "")
     private let kindValueLabel = NSTextField(labelWithString: "")
     private let groupsValueLabel = NSTextField(labelWithString: "")
 
@@ -166,7 +171,7 @@ public final class DeviceDetailViewController: NSViewController {
         // its minimum thickness.
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        // Device STATE (status, availability, volume, kind) in one section,
+        // Device STATE (status, availability, kind) in one section,
         // MEMBERSHIP ("In groups") in another — the two bounded sections are
         // what read as sectioning now, replacing the stock `NSBox` rule that
         // used to sit between them and stop a third of the way across the pane.
@@ -180,7 +185,6 @@ public final class DeviceDetailViewController: NSViewController {
             // connected" a bare "Available: Yes" read as a contradiction to a
             // non-specialist ("it's available but not connected?").
             ("On the network", availableValueLabel),
-            ("Volume", volumeValueLabel),
             ("Kind", kindValueLabel),
         ] {
             let row = makeMetadataRow(caption: caption, valueLabel: valueLabel)
@@ -233,11 +237,19 @@ public final class DeviceDetailViewController: NSViewController {
         eqEditor.translatesAutoresizingMaskIntoConstraints = false
         eqEditor.delegate = self
 
+        // "Equalizer" sits on bare pane above its section, same idiom as the
+        // group editor's "Speakers" label above its membership section —
+        // same font/colour, but the CONTENT-lane leading inset rather than the
+        // header's, because this pane draws no rail past it.
+        eqTitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        eqTitleLabel.font = Tokens.Font.body
+        eqTitleLabel.textColor = Tokens.Color.secondaryLabel
+
         for well in [headerWell, stateWell, groupsWell, eqWell] {
             well.translatesAutoresizingMaskIntoConstraints = false
             column.addSubview(well)
         }
-        for v in [iconWell, nameLabel, stateStack, groupsStack, eqEditor, hintLabel] {
+        for v in [iconWell, nameLabel, stateStack, groupsStack, eqTitleLabel, eqEditor, hintLabel] {
             column.addSubview(v)
         }
 
@@ -356,9 +368,22 @@ public final class DeviceDetailViewController: NSViewController {
             groupsWell.bottomAnchor.constraint(equalTo: groupsStack.bottomAnchor,
                                                constant: GroupedSectionView.verticalPadding),
 
+            // "Equalizer" sits on bare pane, one section-gap below "In groups"
+            // — the same break the group editor puts its "Speakers" label at
+            // above the header — but at the CONTENT lane's leading inset,
+            // not the header's, since this pane draws no rail past it.
+            eqTitleLabel.topAnchor.constraint(equalTo: groupsWell.bottomAnchor,
+                                              constant: GroupsPaneLayout.sectionGap),
+            eqTitleLabel.leadingAnchor.constraint(
+                equalTo: column.leadingAnchor,
+                constant: GroupsPaneLayout.railFreeContentLeadingInset),
+
+            // The Equalizer section's content, one label-to-section gap below
+            // the title, plus the section's own top padding — mirrors the
+            // group editor's `speakersLabel` → `membershipStack` math exactly.
             eqEditor.topAnchor.constraint(
-                equalTo: groupsWell.bottomAnchor,
-                constant: GroupsPaneLayout.sectionGap + GroupedSectionView.verticalPadding),
+                equalTo: eqTitleLabel.bottomAnchor,
+                constant: GroupsPaneLayout.labelToSectionGap + GroupedSectionView.verticalPadding),
             eqEditor.leadingAnchor.constraint(
                 equalTo: column.leadingAnchor,
                 constant: GroupsPaneLayout.railFreeContentLeadingInset),
@@ -469,7 +494,6 @@ public final class DeviceDetailViewController: NSViewController {
         nameLabel.stringValue = device.name
         statusValueLabel.stringValue = Self.statusText(for: device.connectionState)
         availableValueLabel.stringValue = device.isAvailable ? "Yes" : "No"
-        volumeValueLabel.stringValue = "\(device.volume)%"
         kindValueLabel.stringValue = Self.kindText(for: device.kind)
         groupsValueLabel.stringValue = groupMembershipText(for: device)
         refreshIcon()
@@ -506,6 +530,7 @@ public final class DeviceDetailViewController: NSViewController {
         let showsEQ = !(shownDevice?.isLocalDevice == true || shownDevice?.kind == .localMac)
         eqWell.isHidden = !showsEQ
         eqEditor.isHidden = !showsEQ
+        eqTitleLabel.isHidden = !showsEQ
         hintBelowEQSection?.isActive = false
         hintBelowGroupsSection?.isActive = false
         (showsEQ ? hintBelowEQSection : hintBelowGroupsSection)?.isActive = true
@@ -623,7 +648,6 @@ public final class DeviceDetailViewController: NSViewController {
         [
             "status": statusValueLabel.stringValue,
             "available": availableValueLabel.stringValue,
-            "volume": volumeValueLabel.stringValue,
             "kind": kindValueLabel.stringValue,
         ]
     }
@@ -735,6 +759,20 @@ public final class DeviceDetailViewController: NSViewController {
     public var test_eqSectionFrame: NSRect {
         view.layoutSubtreeIfNeeded()
         return eqWell.convert(eqWell.bounds, to: view)
+    }
+
+    /// The Equalizer section title's visible text, `nil` when hidden (This
+    /// Mac) — mirrors `test_eqSectionShown` rather than a bare `Bool` so a
+    /// test can also assert the copy itself.
+    public var test_eqSectionTitleText: String? {
+        eqTitleLabel.isHidden ? nil : eqTitleLabel.stringValue
+    }
+
+    /// The Equalizer section title's laid-out frame in the pane's own
+    /// coordinates.
+    public var test_eqSectionTitleFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return eqTitleLabel.convert(eqTitleLabel.bounds, to: view)
     }
 
     /// The hint's laid-out frame in the pane's own coordinates. The pane's own

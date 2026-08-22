@@ -493,7 +493,6 @@ import AppKit
         #expect(window.test_isShowingDetail)
         #expect(!(window.test_isShowingEditor))
         #expect(window.test_detail.test_shownDeviceID == "appletv-lr")
-        #expect(window.test_detail.test_metadataStrings["volume"] == "60%")
         #expect(window.test_detail.test_metadataStrings["available"] == "Yes")
         #expect(window.test_detail.test_metadataStrings["status"] == "Not connected")
         #expect(window.test_detail.test_groupMembershipText == "None", "appletv-lr isn't a member of any saved group")
@@ -557,17 +556,17 @@ import AppKit
         let (window, _, backend) = try await makeWindow()
         window.test_select(.device(id: "office"))
         await drain()
-        #expect(window.test_detail.test_metadataStrings["volume"] == "50%")
+        #expect(window.test_detail.test_metadataStrings["available"] == "Yes")
 
         let updated = backend.devices.map { device -> Device in
             var d = device
-            if d.id == "office" { d.volume = 77 }
+            if d.id == "office" { d.isAvailable = false }
             return d
         }
         window.update(devices: updated)
 
         #expect(window.test_isShowingDetail, "still showing the detail pane, just re-rendered")
-        #expect(window.test_detail.test_metadataStrings["volume"] == "77%", "refreshAll() re-renders the visible detail pane from the fresher snapshot")
+        #expect(window.test_detail.test_metadataStrings["available"] == "No", "refreshAll() re-renders the visible detail pane from the fresher snapshot")
     }
 
     @Test func refreshAllFallsBackWhenShownDeviceDisappears() async throws {

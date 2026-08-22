@@ -705,12 +705,11 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   layer tree (CA animation timing). Then: an origin that intersects no
   `NSScreen`, and `defer { window.orderOut(nil) }` right after ordering in.
   New UI-showing code paths must ship with one of the two escapes above — a
-  `HeadlessRuntime.isActive` gate or a `test_*` seam. Known gap, do not walk
-  into it: `PopoverController.presentAddApplicationPicker(relativeTo:)` calls
-  `NSMenu.popUp` with NO `HeadlessRuntime` guard, unlike its guarded sibling
-  `presentOutputDevicesPlusMenu` — until it gains a gate, tests reach that
-  feature through `test_availableAppsForPicker()`/`test_pickApp(bundleID:)`
-  instead. The `AudiouterApp` executable (status item, activation policy) is
+  `HeadlessRuntime.isActive` gate or a `test_*` seam. Both menu presenters
+  (`presentOutputDevicesPlusMenu`, `presentAddApplicationPicker`) are gated;
+  tests still reach the picker through
+  `test_availableAppsForPicker()`/`test_pickApp(bundleID:)` rather than the
+  presenter. The `AudiouterApp` executable (status item, activation policy) is
   not a test dependency and must stay that way.
 
 ## Map

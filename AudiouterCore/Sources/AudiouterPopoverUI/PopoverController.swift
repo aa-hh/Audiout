@@ -2960,6 +2960,7 @@ public final class PopoverController: NSObject {
     /// there's nothing to additionally disable. Choosing an item calls
     /// `pickApp`.
     func presentAddApplicationPicker(relativeTo view: NSView) {
+        guard !HeadlessRuntime.isActive else { return }
         makeAddApplicationMenu().popUp(positioning: nil,
                                        at: NSPoint(x: 0, y: view.bounds.height), in: view)
     }

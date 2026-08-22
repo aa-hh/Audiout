@@ -26,6 +26,9 @@ struct AlignmentProbeDebugView: View {
     @State private var micPermissionDenied = false
     @State private var errorText: String?
     @State private var result: ProbeAnalysis?
+    @State private var lastRecordingURL: URL?
+    @State private var recordedSeconds: Double = 0
+    @State private var applied = false
 
     private enum Phase: Equatable {
         case idle, capturing, analyzing, done
@@ -108,12 +111,22 @@ struct AlignmentProbeDebugView: View {
                 Text("Analyzing…")
             }
         case .done:
+            if recordedSeconds > 0, recordedSeconds < Self.patternDurationSeconds - 2 {
+                Label(String(format: "Recording truncated: %.1f s of %.0f s — keep the app open and the screen on for the whole run.",
+                             recordedSeconds, Self.patternDurationSeconds),
+                      systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(.orange)
+                    .font(.footnote)
+            }
             if let result {
                 resultView(result)
             } else if let errorText {
                 Label(errorText, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.red)
                     .font(.footnote)
+            }
+            if let lastRecordingURL {
+                ShareLink("Export recording", item: lastRecordingURL)
             }
             Button("Reset") { reset() }
         }
@@ -125,10 +138,16 @@ struct AlignmentProbeDebugView: View {
             LabeledContent("Spread", value: String(format: "%.1f ms", analysis.spreadMs))
             LabeledContent("Used pairs", value: "\(analysis.usedPairs)")
             LabeledContent("Confident", value: analysis.confident ? "Yes" : "No")
-            HStack {
-                Button("Discard") { reset() }
-                Spacer()
-                Button("Apply") { apply(analysis) }
+            if applied {
+                Label("Applied — the Mac has updated this speaker's trim.", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .font(.footnote)
+            } else {
+                HStack {
+                    Button("Discard") { reset() }
+                    Spacer()
+                    Button("Apply") { apply(analysis) }
+                }
             }
         }
     }
@@ -174,7 +193,12 @@ struct AlignmentProbeDebugView: View {
             }
             errorText = nil
             result = nil
+            applied = false
             phase = .capturing
+            // Locking the screen suspends the mic tap and silently truncates
+            // the take (live finding: 26 s of a 45 s pattern) — hold the
+            // screen awake for the run; cleared again on every finish path.
+            UIApplication.shared.isIdleTimerDisabled = true
             session.startAlignmentProbe(targetDeviceID: targetDeviceID, referenceDeviceID: referenceDeviceID)
             let deadline = Self.patternDurationSeconds
             DispatchQueue.main.asyncAfter(deadline: .now() + deadline) {
@@ -186,6 +210,7 @@ struct AlignmentProbeDebugView: View {
 
     private func cancel() {
         session.cancelAlignmentProbe()
+        UIApplication.shared.isIdleTimerDisabled = false
         _ = capture.stop()
         phase = .idle
     }
@@ -203,9 +228,14 @@ struct AlignmentProbeDebugView: View {
     private func finishCaptureAndAnalyze() {
         guard phase == .capturing else { return }
         phase = .analyzing
+        UIApplication.shared.isIdleTimerDisabled = false
         let samples = capture.stop()
         let sampleRate = capture.sampleRate
+        recordedSeconds = sampleRate > 0 ? Double(samples.count) / sampleRate : 0
         Task {
+            // Persist every take before analysis so a failed run can be
+            // exported and re-analyzed on a Mac (spike diagnostics).
+            lastRecordingURL = Self.writeWAV(samples, sampleRate: sampleRate)
             do {
                 let analysis = try ProbeAnalyzer(sampleRate: sampleRate, pattern: .spike).analyze(recording: samples)
                 result = analysis
@@ -218,6 +248,34 @@ struct AlignmentProbeDebugView: View {
         }
     }
 
+    /// Mono 16-bit PCM WAV of the take, in the temporary directory.
+    /// razor: spike diagnostics — delete with this debug surface.
+    private static func writeWAV(_ samples: [Float], sampleRate: Double) -> URL? {
+        let rate = UInt32(sampleRate.rounded())
+        var pcm = Data(capacity: samples.count * 2)
+        for s in samples {
+            let clamped = max(-1, min(1, s))
+            var v = Int16(clamped * Float(Int16.max)).littleEndian
+            withUnsafeBytes(of: &v) { pcm.append(contentsOf: $0) }
+        }
+        var data = Data()
+        func append(_ string: String) { data.append(contentsOf: Array(string.utf8)) }
+        func append32(_ value: UInt32) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
+        func append16(_ value: UInt16) { withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) } }
+        append("RIFF"); append32(UInt32(36 + pcm.count)); append("WAVE")
+        append("fmt "); append32(16); append16(1); append16(1)
+        append32(rate); append32(rate * 2); append16(2); append16(16)
+        append("data"); append32(UInt32(pcm.count)); data.append(pcm)
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("probe-take-\(Int(Date().timeIntervalSince1970)).wav")
+        do {
+            try data.write(to: url)
+            return url
+        } catch {
+            return nil
+        }
+    }
+
     private func apply(_ analysis: ProbeAnalysis) {
         guard let targetDeviceID else { return }
         session.submitProbeResult(
@@ -226,7 +284,9 @@ struct AlignmentProbeDebugView: View {
             spreadMs: analysis.spreadMs,
             confident: analysis.confident
         )
-        reset()
+        // Keep the numbers on screen as a receipt (live finding: a vanishing
+        // result reads as a glitch and loses the measurement).
+        applied = true
     }
 }
 

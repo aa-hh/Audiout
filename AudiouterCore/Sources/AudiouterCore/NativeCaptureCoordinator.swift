@@ -1,5 +1,6 @@
 import Foundation
 import AirPlayEngine
+import os
 
 #if canImport(CoreAudio)
 import CoreAudio
@@ -1070,6 +1071,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             }
             guard self.tickConfig != config else { return }
             self.tickConfig = config
+            // razor: spike diagnostics — delete with the probe's debug surface.
+            // Every transition is logged so a probe run stomped back to .off by
+            // another caller (e.g. the metronome's delayed auto-off) is visible.
+            Logger(subsystem: "com.audiouter.Audiouter", category: "probe")
+                .info("align tick mode -> \(String(describing: mode), privacy: .public)")
             self.tickInjector = config.map { AlignmentTickInjector(config: $0) }
             self.publishBufferSnapshot()
         }

@@ -1,6 +1,7 @@
 import Foundation
 import AudioToolbox
 import AirPlayEngine
+import os
 
 /// The native ``OutputBackend`` (T-NB-BACKEND-1): the app-visible seam that
 /// drives the extracted, in-process ``AirPlayEngine`` (an AirPlay-2 sender) plus
@@ -8332,6 +8333,9 @@ extension NativeBackend: BTOutputControlling {
     }
 
     public func setBTProbeTickActive(_ active: Bool) {
+        // razor: spike diagnostics — delete with the probe's debug surface.
+        Logger(subsystem: "com.audiouter.Audiouter", category: "probe")
+            .info("probe tick \(active ? "on" : "off", privacy: .public), coordinator \(self.captureCoordinator == nil ? "MISSING" : "present", privacy: .public)")
         captureCoordinator?.setAlignTickMode(active ? .probe : .off)
     }
 

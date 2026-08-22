@@ -10,6 +10,7 @@ import AudiouterWindowUI
 import AudiouterSettingsUI
 import AudiouterSharedUI
 import AudiouterOnboardingUI
+import os
 
 /// Writes `message` to `STDERR_FILENO` with a raw `write(2)`, retrying on
 /// `EINTR` and otherwise ignoring failures.
@@ -1627,6 +1628,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // AppKit-free, client-agnostic type has
                 // (CompanionCommandDispatcher.swift:219). Rate-limited like
                 // every other command by the guard above.
+                // razor: spike diagnostics — delete with the probe's debug surface.
+                if case .startAlignmentProbe = command {
+                    os.Logger(subsystem: "com.audiouter.Audiouter", category: "probe")
+                        .info("startAlignmentProbe arrived at the server")
+                }
                 if case .requestAppIcons(let requested) = command {
                     reply(CompanionServer.CommandResult(applied: true))
                     self.serveAppIconPages(requested, to: clientID)

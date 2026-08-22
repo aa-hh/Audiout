@@ -78,6 +78,13 @@ final class ProbeCaptureSession: @unchecked Sendable {
         } catch {
             throw CaptureError.sessionConfigurationFailed(error)
         }
+        // `.measurement` disables AGC, so the gain sits at the hardware
+        // default — observed too low to hear the ticks over the mic's own
+        // noise floor (live finding). Pin it to maximum where the hardware
+        // allows; failure is fine, it just stays at the default.
+        if session.isInputGainSettable {
+            try? session.setInputGain(1.0)
+        }
 
         queue.sync { samples.removeAll() }
         sampleRate = session.sampleRate

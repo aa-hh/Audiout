@@ -282,6 +282,14 @@ public final class CompanionCommandDispatcher {
     /// or with nothing audible to compare against, would record 45 s of
     /// silence and report a confident-looking nothing.
     private func startAlignmentProbe(targetDeviceID: String, referenceDeviceID: String?) -> Result {
+        // razor: spike diagnostics wrapper — delete with the probe's debug surface.
+        let result = startAlignmentProbeValidated(targetDeviceID: targetDeviceID,
+                                                  referenceDeviceID: referenceDeviceID)
+        log.info("alignment probe start: target=\(targetDeviceID, privacy: .public) ref=\(referenceDeviceID ?? "mainOut", privacy: .public) -> \(result.refusalReason ?? "STARTED", privacy: .public)")
+        return result
+    }
+
+    private func startAlignmentProbeValidated(targetDeviceID: String, referenceDeviceID: String?) -> Result {
         guard probeSession == nil else {
             return .refused("An alignment probe is already running.")
         }

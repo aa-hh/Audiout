@@ -714,6 +714,9 @@ private final class PreviewSession: MacSessionProtocol {
     func setAppVolume(bundleID: String, volume: Int, isFinal: Bool) {}
     func setConnectVolume(_ volume: Int, isFinal: Bool) {}
     func setStartBufferMs(_ ms: Int) {}
+    func startAlignmentProbe(targetDeviceID: String, referenceDeviceID: String?) {}
+    func cancelAlignmentProbe() {}
+    func submitProbeResult(targetDeviceID: String, offsetMs: Double, spreadMs: Double, confident: Bool) {}
 }
 
 #Preview("Healthy — Demo") {

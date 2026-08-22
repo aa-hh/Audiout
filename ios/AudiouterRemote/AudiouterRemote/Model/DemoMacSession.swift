@@ -75,6 +75,8 @@ final class DemoMacSession: MacSessionProtocol {
     private let connectVolumeMax: Int
     private var startBufferMs: Int
     private let startBufferOptionsMs: [Int]
+    /// BT auto-cal spike debug state — see the MARK below.
+    private var alignmentProbe: AlignmentProbeState?
 
     init() {
         devices = Self.seedFleet()
@@ -349,6 +351,27 @@ final class DemoMacSession: MacSessionProtocol {
         rebuildSnapshot()
     }
 
+    // MARK: BT auto-cal spike (debug-only; dev/notes/bt-autocal-spike-spec.md)
+    //
+    // No real probe session to run in Demo mode — just enough state so the
+    // debug probe screen has something to render while poking around
+    // offline. `referenceDeviceID` isn't tracked; nothing here reads it.
+
+    func startAlignmentProbe(targetDeviceID: String, referenceDeviceID: String?) {
+        alignmentProbe = AlignmentProbeState(targetDeviceID: targetDeviceID, state: "running")
+        rebuildSnapshot()
+    }
+
+    func cancelAlignmentProbe() {
+        alignmentProbe = nil
+        rebuildSnapshot()
+    }
+
+    func submitProbeResult(targetDeviceID: String, offsetMs: Double, spreadMs: Double, confident: Bool) {
+        alignmentProbe = nil
+        rebuildSnapshot()
+    }
+
     // MARK: Shared helpers (mirror GroupController's private math)
 
     private var localDeviceID: String? { devices.first(where: \.isLocalDevice)?.id }
@@ -476,7 +499,8 @@ final class DemoMacSession: MacSessionProtocol {
                 connectVolumeMax: connectVolumeMax,
                 startBufferMs: startBufferMs,
                 startBufferOptionsMs: startBufferOptionsMs
-            )
+            ),
+            alignmentProbe: alignmentProbe
         )
     }
 }

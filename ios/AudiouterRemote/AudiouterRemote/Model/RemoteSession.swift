@@ -295,4 +295,20 @@ final class RemoteSession: MacSessionProtocol {
     func setStartBufferMs(_ ms: Int) {
         track(sender.send(.setStartBufferMs(ms: ms)))
     }
+
+    // MARK: BT auto-cal spike (debug-only; dev/notes/bt-autocal-spike-spec.md)
+
+    func startAlignmentProbe(targetDeviceID: String, referenceDeviceID: String?) {
+        track(sender.send(.startAlignmentProbe(targetDeviceID: targetDeviceID, referenceDeviceID: referenceDeviceID)))
+    }
+
+    func cancelAlignmentProbe() {
+        track(sender.send(.cancelAlignmentProbe))
+    }
+
+    func submitProbeResult(targetDeviceID: String, offsetMs: Double, spreadMs: Double, confident: Bool) {
+        track(sender.send(.submitProbeResult(
+            targetDeviceID: targetDeviceID, offsetMs: offsetMs, spreadMs: spreadMs, confident: confident
+        )))
+    }
 }

@@ -182,6 +182,22 @@ public struct SettingsState: Codable, Equatable, Sendable {
     }
 }
 
+/// BT auto-cal spike (dev/notes/bt-autocal-spike-spec.md): the alignment
+/// probe's minimal run status, so the phone can show progress and detect a
+/// Mac-side abort. Optional on `Snapshot` so a peer built before this field
+/// decodes cleanly (additive change, no protocol break); absent means no
+/// probe is running.
+public struct AlignmentProbeState: Codable, Equatable, Sendable {
+    public var targetDeviceID: String
+    /// `"running"` or `"idle"`.
+    public var state: String
+
+    public init(targetDeviceID: String, state: String) {
+        self.targetDeviceID = targetDeviceID
+        self.state = state
+    }
+}
+
 /// Full app state, sent whole on connect (`welcome`) and again on every
 /// change (`state`), coalesced ~50 ms and suppressed when `Equatable`-identical
 /// to the last broadcast (`CompanionServer`, T5) — the server is the one
@@ -220,6 +236,10 @@ public struct Snapshot: Codable, Equatable, Sendable {
     /// `false`.
     public var systemDefaultIsAirPlayActive: Bool?
     public var settings: SettingsState
+    /// BT auto-cal spike: the running probe's status, or `nil` when none is
+    /// in flight (also `nil` from a peer built before this field — additive
+    /// change, no protocol break).
+    public var alignmentProbe: AlignmentProbeState?
 
     public init(
         serverName: String,
@@ -235,7 +255,8 @@ public struct Snapshot: Codable, Equatable, Sendable {
         localFallbackActive: Bool,
         takeoverStatus: String? = nil,
         systemDefaultIsAirPlayActive: Bool? = nil,
-        settings: SettingsState
+        settings: SettingsState,
+        alignmentProbe: AlignmentProbeState? = nil
     ) {
         self.serverName = serverName
         self.devices = devices
@@ -251,5 +272,6 @@ public struct Snapshot: Codable, Equatable, Sendable {
         self.takeoverStatus = takeoverStatus
         self.systemDefaultIsAirPlayActive = systemDefaultIsAirPlayActive
         self.settings = settings
+        self.alignmentProbe = alignmentProbe
     }
 }

@@ -13,7 +13,8 @@ import AudiouterProtocol
 ///
 /// Demo stays opt-in only, never a fallback (house rule): `demoSession` is
 /// nil until `enterDemo()` runs, and the ONLY call site for that is the
-/// Connect gate's labeled "Demo system" row (``ConnectGateView``).
+/// Connect gate's labeled "Demo system" row (``ConnectGateView``) — which is
+/// itself `#if DEBUG`, so demo is a development tool and never ships.
 @MainActor
 @Observable
 final class AppSessionModel {
@@ -127,6 +128,10 @@ final class AppSessionModel {
     /// session is ever active.
     func enterDemo() {
         controller.disconnect()
+        // Entering demo IS getting past the intro: without this, leaving the
+        // demo would drop the user back on a first-run screen they have
+        // already read and acted on.
+        markPrimerSeen()
         demoSession = DemoMacSession()
         showConnectGate = false
     }
@@ -138,9 +143,25 @@ final class AppSessionModel {
 
     /// Marks the primer read (once ever) and begins browsing.
     func completePrimer() {
+        markPrimerSeen()
+        start()
+    }
+
+    /// The once-ever flag, without starting anything: `enterDemo()` needs the
+    /// primer retired but must not begin browsing.
+    private func markPrimerSeen() {
+        guard needsPrimer else { return }
         UserDefaults.standard.set(true, forKey: Self.primerSeenKey)
         needsPrimer = false
-        start()
+    }
+
+    /// Debug-only affordance (the row is `#if DEBUG` in `SettingsTabView`):
+    /// clears the once-ever flag and puts the gate back on the primer, so the
+    /// intro can be reviewed on a device without a reinstall.
+    func replayPrimer() {
+        UserDefaults.standard.removeObject(forKey: Self.primerSeenKey)
+        needsPrimer = true
+        showConnectGate = true
     }
 
     /// The gate's half of the connection story, driven from `RootView` — the
@@ -274,7 +295,8 @@ struct RootView: View {
                 lastUsedMacID: model.lastUsedMacID,
                 onConnect: model.connect(to:),
                 onDisconnect: model.disconnect,
-                onExitDemo: model.exitDemo
+                onExitDemo: model.exitDemo,
+                onReplayPrimer: model.replayPrimer
             )
             .tabItem { Label("Settings", systemImage: "gear") }
             .tag(Tab.settings)

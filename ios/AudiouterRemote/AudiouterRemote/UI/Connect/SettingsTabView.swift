@@ -20,6 +20,7 @@ struct SettingsTabView: View {
     let onConnect: (DiscoveredMac) -> Void
     let onDisconnect: () -> Void
     let onExitDemo: () -> Void
+    let onReplayPrimer: () -> Void
 
     @State private var isSwitching = false
 
@@ -31,11 +32,18 @@ struct SettingsTabView: View {
 
                     Button("Switch Mac…") { isSwitching = true }
 
+                    // Leaving a demo is a debug-build concern only: the Demo
+                    // system does not ship, so the shipping build has exactly
+                    // one way out of here.
+                    #if DEBUG
                     Button(role: .destructive) {
                         if session.isDemo { onExitDemo() } else { onDisconnect() }
                     } label: {
                         Text(session.isDemo ? "Exit Demo" : "Disconnect")
                     }
+                    #else
+                    Button("Disconnect", role: .destructive, action: onDisconnect)
+                    #endif
                 }
 
                 Section {
@@ -50,6 +58,14 @@ struct SettingsTabView: View {
                         Label("About", systemImage: "info.circle")
                     }
                 }
+
+                #if DEBUG
+                Section {
+                    Button("Replay Intro", action: onReplayPrimer)
+                } footer: {
+                    Text("Debug builds only — reviews the first-run intro screen.")
+                }
+                #endif
             }
             .navigationTitle("Settings")
         }
@@ -88,6 +104,7 @@ struct SettingsTabView: View {
 
             Spacer()
 
+            #if DEBUG
             if session.isDemo {
                 Text("Demo")
                     .font(.caption2.weight(.semibold))
@@ -97,6 +114,7 @@ struct SettingsTabView: View {
                     .foregroundStyle(.orange)
                     .accessibilityLabel("Demo mode active")
             }
+            #endif
         }
         .padding(.vertical, 4)
         .accessibilityElement(children: .combine)
@@ -117,6 +135,6 @@ struct SettingsTabView: View {
     SettingsTabView(
         session: DemoMacSession(),
         macs: [], browserState: .idle, onWiFi: true, lastUsedMacID: nil,
-        onConnect: { _ in }, onDisconnect: {}, onExitDemo: {}
+        onConnect: { _ in }, onDisconnect: {}, onExitDemo: {}, onReplayPrimer: {}
     )
 }

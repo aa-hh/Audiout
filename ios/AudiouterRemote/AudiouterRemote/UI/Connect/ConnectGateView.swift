@@ -47,15 +47,18 @@ struct ConnectGateView: View {
     /// while that junction is actually on screen.
     @State private var searchIsTakingLong = false
 
-    /// The waves stand down at accessibility text sizes: the copy alone runs
-    /// most of the screen there, and the room they want is the room it needs.
-    private var typeSizeAllowsWaves: Bool { typeSize < .accessibility1 }
+    /// The field stands down at accessibility text sizes, on the primer and
+    /// the searching junction alike: the copy alone runs most of the screen
+    /// there, and the room the light wants is the room it needs.
+    private var typeSizeAllowsField: Bool { typeSize < .accessibility1 }
 
     /// Whether the waves are what is on screen right now — the one junction
     /// that wants the whole viewport to lay itself out in.
     private var isShowingSearchWaves: Bool {
-        currentJunction == .searching && !searchIsTakingLong && typeSizeAllowsWaves
+        currentJunction == .searching && typeSizeAllowsField
     }
+
+    private var isPrimer: Bool { currentJunction == .primer }
 
     /// How long "Looking for your Mac…" stands alone before the checklist
     /// unfolds under it. Long enough that a normal discovery never shows a
@@ -66,11 +69,18 @@ struct ConnectGateView: View {
         ZStack {
             WarmSignal.canvasGradient.ignoresSafeArea()
 
+            // The intro's field is the screen, not a panel on it: it runs edge
+            // to edge behind the name and the way in. At accessibility text
+            // sizes it stands down and the plain canvas is the ground.
+            if isPrimer, typeSizeAllowsField {
+                RoomField(tuning: .intro).ignoresSafeArea()
+            }
+
             VStack(spacing: 0) {
                 GeometryReader { viewport in
                     ScrollView {
                         junction
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .frame(maxWidth: .infinity, alignment: isPrimer ? .center : .leading)
                             .padding(.horizontal, 22)
                             .padding(.top, isFullScreen ? 44 : 28)
                             .padding(.bottom, 24)
@@ -78,17 +88,49 @@ struct ConnectGateView: View {
                             // their junction claims the viewport rather than
                             // sizing to content and stacking tight under the
                             // headline with the rest of the screen left bare.
-                            .frame(minHeight: isShowingSearchWaves ? viewport.size.height : nil,
-                                   alignment: .top)
+                            // The primer claims it to centre the mark and the
+                            // name in it — and because the caption and the
+                            // button sit BELOW this scroll area, centring here
+                            // already lands the block a little above the
+                            // screen's true middle, which is where it wants to
+                            // be under a bottom action.
+                            .frame(minHeight: isShowingSearchWaves || isPrimer ? viewport.size.height : nil,
+                                   alignment: isPrimer ? .center : .top)
                             .animation(motionCurve, value: searchIsTakingLong)
                     }
                 }
 
-                if isFullScreen {
+                if isPrimer {
+                    // Bottom-pinned, above the safe area: on the one screen
+                    // with a single thing to do, the thing to do is under the
+                    // thumb rather than under the sentence. The mechanism line
+                    // rides with it rather than with the name, because it is
+                    // priming the permission prompt this button raises — it
+                    // belongs where the tap happens, not where the app is
+                    // introduced.
+                    VStack(spacing: 14) {
+                        Text("It finds Audiouter running on your Mac, over your home Wi-Fi.")
+                            .font(.footnote)
+                            .foregroundStyle(WarmSignal.label2)
+                            .multilineTextAlignment(.center)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        GoldGlassAction(title: "Find My Mac", action: onCompletePrimer)
+                    }
+                    .padding(.horizontal, 22)
+                    .padding(.bottom, 18)
+                }
+
+                #if DEBUG
+                // Debug builds only: the Demo system is a development tool and
+                // does not ship. It never appears on the primer either — that
+                // screen is one thing to do, and this is not it.
+                if isFullScreen, !isPrimer {
                     demoFoot
                         .padding(.horizontal, 22)
                         .padding(.bottom, 18)
                 }
+                #endif
             }
         }
         .animation(motionCurve, value: currentJunction)
@@ -162,12 +204,18 @@ struct ConnectGateView: View {
     private var junction: some View {
         switch currentJunction {
         case .primer:
-            VStack(alignment: .leading, spacing: 24) {
+            // The app's first screen, so it introduces the app rather than
+            // asking anything: its own icon as the mark, the name at
+            // instruction size, the one line that says what it does, and no
+            // eyebrow — there is nowhere else to be. The mechanism line and the
+            // action are pinned to the bottom of the screen, not here.
+            VStack(spacing: 22) {
+                AppIconMark()
                 JunctionCopy(
-                    eyebrow: "Audiouter",
-                    instruction: "Audiouter finds your Mac over your home Wi-Fi"
+                    instruction: "Audiouter",
+                    supporting: "Control your Mac's speakers from this iPhone.",
+                    isCentered: true
                 )
-                GoldAction(title: "Find my Mac", action: onCompletePrimer)
             }
 
         case .noWiFi:
@@ -261,26 +309,24 @@ struct ConnectGateView: View {
         VStack(alignment: .leading, spacing: 24) {
             JunctionCopy(eyebrow: "Searching", instruction: "Looking for your Mac…")
 
-            if searchIsTakingLong {
-                // The App Store review requirement (T19): a reviewer with no
-                // Mac around must be able to read this and know what to
-                // check. It waits for the pause that means it's needed.
-                VStack(alignment: .leading, spacing: 14) {
-                    checklistStep(1, "Make sure this iPhone and your Mac are on the same Wi-Fi network.")
-                    checklistStep(2, "Open Audiouter on your Mac and keep it running.")
-                    checklistStep(3, "In Audiouter's Settings › General on your Mac, turn on \u{201C}Allow control from iPhone on this network.\u{201D}")
+            if typeSizeAllowsField {
+                // The checklist unfolds on glass OVER the waves, which keep
+                // running underneath: the browse is still going while the list
+                // is read, and the field is what says so.
+                ZStack {
+                    SearchWaves()
+
+                    if searchIsTakingLong {
+                        searchChecklist
+                            .padding(16)
+                            .transition(.opacity)
+                    }
                 }
-                .padding(18)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .glassPanel(cornerRadius: WarmSignal.Radius.panel)
-                .transition(.opacity)
-            } else if typeSizeAllowsWaves {
-                // The waves give way to the checklist rather than sitting
-                // above it: once there is something useful to say, saying it
-                // beats atmosphere.
-                SearchWaves()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .transition(.opacity)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if searchIsTakingLong {
+                // No waves at accessibility sizes, so the checklist takes the
+                // slot on its own.
+                searchChecklist
             }
         }
         .task {
@@ -292,6 +338,32 @@ struct ConnectGateView: View {
             searchIsTakingLong = true
         }
         .onDisappear { searchIsTakingLong = false }
+    }
+
+    /// The App Store review requirement (T19): a reviewer with no Mac around
+    /// must be able to read this and know what to check. It waits for the
+    /// pause that means it's needed.
+    ///
+    /// It sits on live, moving content, which is what the system's Liquid
+    /// Glass is for; below the OS that has it, the app's own glass panel is
+    /// the same idea with a flat material.
+    @ViewBuilder
+    private var searchChecklist: some View {
+        let rows = VStack(alignment: .leading, spacing: 14) {
+            checklistStep(1, "Make sure this iPhone and your Mac are on the same Wi-Fi network.")
+            checklistStep(2, "Open Audiouter on your Mac and keep it running.")
+            checklistStep(3, "In Audiouter's Settings › General on your Mac, turn on \u{201C}Allow control from iPhone on this network.\u{201D}")
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+
+        if #available(iOS 26.0, *) {
+            rows.glassEffect(
+                .regular,
+                in: RoundedRectangle(cornerRadius: WarmSignal.Radius.panel, style: .continuous))
+        } else {
+            rows.glassPanel(cornerRadius: WarmSignal.Radius.panel)
+        }
     }
 
     /// Numbered because the order is the information: a reader who does step
@@ -312,11 +384,13 @@ struct ConnectGateView: View {
 
     // MARK: - Demo foot
 
+    #if DEBUG
     /// The app's ONE `enterDemo` call site (house rule: opt-in only, never a
-    /// fallback). It sits under every junction at a whisper, and steps up to
-    /// a full band at the same moment the checklist unfolds — the point where
-    /// "try it without a Mac" stops being a curiosity and starts being the
-    /// useful offer.
+    /// fallback), and a DEBUG-ONLY one: the Demo system is a development tool
+    /// that never ships. It sits under every junction it is offered on at a
+    /// whisper, and steps up to a full band at the same moment the checklist
+    /// unfolds — the point where "try it without a Mac" stops being a
+    /// curiosity and starts being the useful offer.
     private var demoFoot: some View {
         Group {
             if demoIsPromoted {
@@ -353,11 +427,12 @@ struct ConnectGateView: View {
             .frame(maxWidth: .infinity, minHeight: WarmSignal.hitTarget, alignment: .leading)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PressFade())
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Demo system")
         .accessibilityHint("Double tap to try a simulated Mac with sample speakers")
     }
+    #endif
 
     // MARK: - Helpers
 
@@ -378,27 +453,94 @@ struct ConnectGateView: View {
     }
 }
 
+// MARK: - The mark
+
+/// The app's own icon on the primer, home-screen style: the squircle at the
+/// size iOS draws it, with a shadow so it stands ON the field rather than being
+/// printed into it.
+///
+/// It draws its own copy of the artwork (`AppIconMark.png`) rather than the
+/// app icon, because the app icon is not loadable as an image on device — see
+/// `iconImage` for why. If that copy ever fails to load there is nothing
+/// honest to draw, so nothing is drawn — a stand-in mark would be the app
+/// introducing itself as something it isn't.
+private struct AppIconMark: View {
+    @Environment(\.colorScheme) private var scheme
+    @ScaledMetric(relativeTo: .largeTitle) private var side: CGFloat = 100
+
+    var body: some View {
+        if let icon = Self.iconImage {
+            Image(uiImage: icon)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fill)
+                .frame(width: side, height: side)
+                // The iOS squircle at this size: ~22 pt on 100 pt, held as a
+                // ratio so it stays the same shape when the type scale grows it.
+                .clipShape(RoundedRectangle(cornerRadius: side * 0.22, style: .continuous))
+                .shadow(color: .black.opacity(scheme == .dark ? 0.22 : 0.12),
+                        radius: scheme == .dark ? 20 : 14,
+                        y: 8)
+                // The name below carries it; VoiceOver reading "image" here
+                // would only delay the sentence that says what the app is.
+                .accessibilityHidden(true)
+        }
+    }
+
+    /// Computed, not stored: `UIImage(named:)` keeps its own cache, and a
+    /// static stored image would be shared mutable state to reason about.
+    ///
+    /// This loads a plain PNG file resource, NOT the app icon. Asking for the
+    /// icon by its `CFBundleIconName` crashed the app on a real phone with
+    /// `NSInternalInconsistencyException: Need an imageRef`: on device that
+    /// name resolves to an app-icon rendition inside `Assets.car`, which is a
+    /// non-nil `UIImage` with no backing `CGImage`, so drawing it throws. The
+    /// simulator returns a real bitmap for the same call, which is why it only
+    /// ever crashed on hardware.
+    ///
+    /// So the `cgImage` check is the point: non-nil is not the same as
+    /// renderable, and an `if let` alone does not catch this. Do not simplify
+    /// it away — nil here just renders nothing, which beats a crash.
+    ///
+    /// `AppIconMark.png` is generated from `Audiouter.icon` (the Icon Composer
+    /// source in this same folder). To regenerate: build for a device, then
+    /// pull the appearance-neutral 1024x1024 `Audiouter` rendition out of the
+    /// built `Assets.car` (CoreUI's `CUICatalog.imagesWithName:`) and
+    /// downscale it to 512 px.
+    private static var iconImage: UIImage? {
+        guard let icon = UIImage(named: "AppIconMark"), icon.cgImage != nil else { return nil }
+        return icon
+    }
+}
+
 // MARK: - Junction copy
 
 /// Every junction's text, in one voice: the eyebrow says where you are, the
 /// instruction says what to do, and the supporting line is only ever the
 /// detail that instruction can't carry.
 private struct JunctionCopy: View {
-    let eyebrow: String
+    /// Absent on the primer alone: it is the app's first screen, and "where you
+    /// are" is not a question anyone has there yet.
+    var eyebrow: String?
     let instruction: String
     /// The arrival junction's acknowledgement — the one place the Mac's name
     /// itself is the gold, because there is no action to spend it on.
     var instructionInGold = false
     var supporting: String?
+    /// The primer alone: its block is a title card under the app's mark, not a
+    /// junction's left-aligned instruction.
+    var isCentered = false
 
     @ScaledMetric(relativeTo: .largeTitle) private var titleSize: CGFloat = 32
     @ScaledMetric(relativeTo: .body) private var bodySize: CGFloat = 16
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text(eyebrow)
-                .microLabel()
-                .foregroundStyle(WarmSignal.label2)
+        VStack(alignment: isCentered ? .center : .leading, spacing: 12) {
+            if let eyebrow {
+                Text(eyebrow)
+                    .microLabel()
+                    .foregroundStyle(WarmSignal.label2)
+            }
 
             Text(instruction)
                 .font(.system(size: titleSize, weight: .bold))
@@ -417,19 +559,30 @@ private struct JunctionCopy: View {
                     .padding(.top, 2)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .multilineTextAlignment(isCentered ? .center : .leading)
+        .frame(maxWidth: .infinity, alignment: isCentered ? .center : .leading)
     }
 }
 
 // MARK: - Actions
 
-/// Ink on a gold fill. Both golds are light enough that the app's own dark
-/// ground reads on them (5.0:1 light, 10.0:1 dark) where white does not
-/// (3.3:1 in light), so the label is dark in both appearances — this is a
+/// The shared on-accent ink: the label colour for every gold action in the
+/// app, the first-run one included. Both golds are light enough that the app's
+/// own dark ground reads on them (5.0:1 light, 10.0:1 dark) where white does
+/// not (3.3:1 in light), so the label is dark in both appearances — gold is a
 /// fill, not a surface, and it does not follow the ground.
 private let goldInk = Color(red: 0x16 / 255, green: 0x13 / 255, blue: 0x0F / 255)
 
+/// The primer CTA's fill: one value in BOTH appearances — dark `WarmSignal.gold`,
+/// which is light `WarmSignal.glow` (owner call: the brighter gold is more
+/// inviting on the intro's green field, and the dark ink measures ~10:1 on it
+/// either way). Every later GoldAction stays on the themed `WarmSignal.gold`.
+private let primerGold = Color(red: 0xE8 / 255, green: 0xB8 / 255, blue: 0x4B / 255)
+
 /// The one live action a junction gets, and the only gold on the screen.
+///
+/// A capsule, like the first-run action it follows: the shape of the button on
+/// screen one is the shape of every button after it.
 private struct GoldAction: View {
     let title: String
     let action: () -> Void
@@ -444,12 +597,62 @@ private struct GoldAction: View {
                 .padding(.horizontal, 20)
                 .padding(.vertical, 14)
                 .frame(maxWidth: .infinity, minHeight: WarmSignal.hitTarget)
-                .background(
-                    RoundedRectangle(cornerRadius: WarmSignal.Radius.control, style: .continuous)
-                        .fill(WarmSignal.gold)
-                )
+                .background(Capsule(style: .continuous).fill(WarmSignal.gold))
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// The intro's way in: the app's gold, as the system's Liquid Glass over the
+/// field's light — an object standing ON the room rather than a hole cut out
+/// of it, which is exactly what live moving content asks for. The system's own
+/// interactive glass carries the press. Below the OS that has it, the same
+/// capsule in flat gold with a hairline edge, and ``PressFade`` for the press.
+private struct GoldGlassAction: View {
+    let title: String
+    let action: () -> Void
+
+    @ScaledMetric(relativeTo: .headline) private var titleSize: CGFloat = 17
+
+    private var shape: Capsule { Capsule(style: .continuous) }
+
+    private var label: some View {
+        Text(title)
+            .font(.system(size: titleSize, weight: .semibold))
+            .foregroundStyle(goldInk)
+            .lineLimit(1)
+            // The capsule is pinned to the bottom, so at accessibility sizes
+            // the label gives way rather than pushing the screen off it.
+            .minimumScaleFactor(0.6)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
+            .frame(maxWidth: .infinity, minHeight: WarmSignal.hitTarget)
+    }
+
+    var body: some View {
+        if #available(iOS 26.0, *) {
+            Button(action: action) {
+                label.glassEffect(.regular.tint(primerGold).interactive(), in: shape)
+            }
+            .buttonStyle(.plain)
+        } else {
+            Button(action: action) {
+                label
+                    .background(shape.fill(primerGold))
+                    .overlay(shape.strokeBorder(WarmSignal.glassEdge, lineWidth: 0.5))
+            }
+            .buttonStyle(PressFade())
+        }
+    }
+}
+
+/// A press the finger can see on a fill that has no other state to show.
+private struct PressFade: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.78 : 1)
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .animation(.snappy(duration: 0.18), value: configuration.isPressed)
     }
 }
 
@@ -541,88 +744,23 @@ private struct MacBand: View {
 // MARK: - The search waves
 
 /// The screen below "Looking for your Mac…", given to the one thing the app
-/// is doing: calling across the house. A gold core with rings leaving it on a
-/// slow even beat — Warm Signal's own signal, going out and not yet answered.
+/// is doing: calling across the house. The intro's room, in gold and quieter:
+/// wavefronts leaving ONE source at the centre and fading as they cross —
+/// Warm Signal's own signal, going out and not yet answered.
 ///
 /// It claims NO progress. Nothing fills, counts, or estimates, because a
-/// Bonjour browse cannot say how much is left either; the rings say "still
-/// listening" and stop there. That is also why the far end of each ring is a
-/// fade rather than an arrival: nothing has arrived.
+/// Bonjour browse cannot say how much is left either; the fronts say "still
+/// listening" and stop there. That is also why each front ends in a fade
+/// rather than an arrival: nothing has arrived.
 ///
-/// Decorative and hidden from VoiceOver — the headline above already carries
-/// the whole state in words. It holds still under Reduce Motion rather than
-/// swapping in something else that moves.
+/// The height ceiling keeps it a field rather than a full screen of light on a
+/// tall phone; below it the square simply takes the width, which is what binds
+/// on a small one.
 private struct SearchWaves: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.colorScheme) private var scheme
-
-    /// One ring's whole journey, core to edge. Slow on purpose: the honest
-    /// mood here is patience — most of the time the Mac is simply not awake
-    /// yet, and a brisk sweep would tell the reader to expect an answer.
-    private static let period: Double = 2.8
-    /// Rings in flight at once, evenly spaced along the period.
-    private static let ringCount = 3
-    private static let coreDiameter: CGFloat = 10
-    private static let lineWidth: CGFloat = 2
-    /// The beat Reduce Motion rests on. Not 0: a ring's alpha starts there, so
-    /// phase 0 would rest one of the three invisible and pose the other two.
-    private static let stillPhase: Double = 0.22
-    /// Height ceiling, so the field stays a field and not a full screen of
-    /// circles on a tall phone. Below it the square simply takes the width,
-    /// which is what binds on a small one.
-    private static let maxHeight: CGFloat = 360
-
     var body: some View {
-        TimelineView(.animation(paused: reduceMotion)) { timeline in
-            Canvas { context, size in
-                draw(context, size: size, phase: phase(at: timeline.date))
-            }
-        }
-        .aspectRatio(1, contentMode: .fit)
-        .frame(maxWidth: .infinity, maxHeight: Self.maxHeight)
-        .accessibilityHidden(true)
-    }
-
-    private func phase(at date: Date) -> Double {
-        guard !reduceMotion else { return Self.stillPhase }
-        return (date.timeIntervalSinceReferenceDate / Self.period)
-            .truncatingRemainder(dividingBy: 1)
-    }
-
-    /// Peak ring alpha, per ground. Dark takes more: gold fading toward a
-    /// near-black canvas loses its edge much faster than the same fade toward
-    /// cream, so matched alphas leave the dark rings a stop quieter.
-    private var ringPeak: Double { scheme == .dark ? 0.72 : 0.62 }
-
-    private func draw(_ context: GraphicsContext, size: CGSize, phase: Double) {
-        let centre = CGPoint(x: size.width / 2, y: size.height / 2)
-        let coreRadius = Self.coreDiameter / 2
-        let maxRadius = min(size.width, size.height) / 2 - Self.lineWidth
-        guard maxRadius > coreRadius else { return }
-
-        for index in 0..<Self.ringCount {
-            let progress = (phase + Double(index) / Double(Self.ringCount))
-                .truncatingRemainder(dividingBy: 1)
-            // Ease-out travel: a wave spreads fastest as it leaves and slows as
-            // it widens, which is also what stops the rings bunching at the rim.
-            let radius = coreRadius + (maxRadius - coreRadius) * pow(progress, 0.72)
-            // In over the first sliver so no ring pops into being at the core;
-            // out across the whole journey so the rim is a fade, not a stop.
-            let alpha = ringPeak * min(1, progress / 0.14) * pow(1 - progress, 1.5)
-            context.stroke(
-                Path(ellipseIn: CGRect(x: centre.x - radius, y: centre.y - radius,
-                                       width: radius * 2, height: radius * 2)),
-                with: .color(WarmSignal.gold.opacity(alpha)),
-                lineWidth: Self.lineWidth)
-        }
-
-        // The core brightens as each ring leaves it, so the rings come FROM
-        // somewhere rather than simply existing.
-        let breath = 0.86 + 0.14 * cos(phase * Double(Self.ringCount) * 2 * .pi)
-        context.fill(
-            Path(ellipseIn: CGRect(x: centre.x - coreRadius, y: centre.y - coreRadius,
-                                   width: Self.coreDiameter, height: Self.coreDiameter)),
-            with: .color(WarmSignal.gold.opacity(breath)))
+        RoomField(tuning: .search)
+            .aspectRatio(1, contentMode: .fit)
+            .frame(maxWidth: .infinity, maxHeight: 360)
     }
 }
 

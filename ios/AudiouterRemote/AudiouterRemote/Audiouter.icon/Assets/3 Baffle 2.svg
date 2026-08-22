@@ -1,0 +1,31 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g id="Baffle">
+<g id="Baffle_2">
+<g id="Baffle face" filter="url(#filter0_ii_120_4)">
+<path d="M704.26 223.06H319.59C297.134 223.06 278.93 241.264 278.93 263.72V820.78C278.93 843.236 297.134 861.44 319.59 861.44H704.26C726.716 861.44 744.92 843.236 744.92 820.78V263.72C744.92 241.264 726.716 223.06 704.26 223.06Z" fill="url(#paint0_radial_120_4)"/>
+</g>
+</g>
+</g>
+<defs>
+<filter id="filter0_ii_120_4" x="277.93" y="222.06" width="473.99" height="648.38" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+<feFlood flood-opacity="0" result="BackgroundImageFix"/>
+<feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
+<feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+<feOffset dx="7" dy="9"/>
+<feGaussianBlur stdDeviation="8"/>
+<feComposite in2="hardAlpha" operator="arithmetic" k2="-1" k3="1"/>
+<feColorMatrix type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.75 0"/>
+<feBlend mode="normal" in2="shape" result="effect1_innerShadow_120_4"/>
+<feColorMatrix in="SourceAlpha" type="matrix" values="0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 127 0" result="hardAlpha"/>
+<feOffset dx="-1" dy="-1"/>
+<feGaussianBlur stdDeviation="1"/>
+<feComposite in2="hardAlpha" operator="arithmetic" k2="-1" k3="1"/>
+<feColorMatrix type="matrix" values="0 0 0 0 1 0 0 0 0 1 0 0 0 0 1 0 0 0 0.1 0"/>
+<feBlend mode="normal" in2="effect1_innerShadow_120_4" result="effect2_innerShadow_120_4"/>
+</filter>
+<radialGradient id="paint0_radial_120_4" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(442.026 382.655) scale(465.99 638.38)">
+<stop stop-color="#2C2F36"/>
+<stop offset="1" stop-color="#1C1E23"/>
+</radialGradient>
+</defs>
+</svg>

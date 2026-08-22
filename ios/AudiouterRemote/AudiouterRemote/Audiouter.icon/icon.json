@@ -1,36 +1,191 @@
 {
-  "fill" : {
-    "linear-gradient" : [
-      "display-p3:0.99349,1.00000,0.87949,1.00000",
-      "display-p3:0.13086,0.18408,0.23413,1.00000"
-    ],
-    "orientation" : {
-      "start" : {
-        "x" : 0.5,
-        "y" : 0
-      },
-      "stop" : {
-        "x" : 0.5,
-        "y" : 0.7
+  "features" : [
+    "refractivity",
+    "specular-location"
+  ],
+  "fill-specializations" : [
+    {
+      "value" : {
+        "linear-gradient" : [
+          "display-p3:0.99349,1.00000,0.87949,1.00000",
+          "extended-gray:1.00000,1.00000"
+        ],
+        "orientation" : {
+          "start" : {
+            "x" : 0.5,
+            "y" : 1
+          },
+          "stop" : {
+            "x" : 0.5,
+            "y" : 0
+          }
+        }
+      }
+    },
+    {
+      "appearance" : "dark",
+      "value" : {
+        "linear-gradient" : [
+          "extended-gray:0.00000,1.00000",
+          "extended-gray:0.25000,1.00000"
+        ]
       }
     }
-  },
+  ],
   "groups" : [
     {
+      "blur-material" : null,
       "layers" : [
         {
-          "image-name" : "Halo 3.svg",
-          "name" : "Halo 3",
+          "image-name" : "6 Halo 2.svg",
+          "name" : "6 Halo 2",
           "position" : {
             "scale" : 1,
             "translation-in-points" : [
-              0.07150000000001455,
-              -332.39156249999996
+              0,
+              19.525925925926003
+            ]
+          }
+        }
+      ],
+      "lighting" : "combined",
+      "name" : "Halo",
+      "shadow" : {
+        "kind" : "layer-color",
+        "opacity" : 0.8
+      },
+      "specular" : "outside",
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.05
+      }
+    },
+    {
+      "layers" : [
+        {
+          "image-name" : "Tweeter dust cap.svg",
+          "name" : "Tweeter dust cap",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              4.439999999999998,
+              -84.3001493570174
+            ]
+          }
+        },
+        {
+          "image-name" : "Tweeter cone.svg",
+          "name" : "Tweeter cone",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              0.4700000000000273,
+              -90.19014935701739
+            ]
+          }
+        },
+        {
+          "image-name" : "Tweeter surround.svg",
+          "name" : "Tweeter surround",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              0.11392188905927014,
+              -90.67014935701741
+            ]
+          }
+        },
+        {
+          "image-name" : "Tweeter ring.svg",
+          "name" : "Tweeter ring",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              6.350000000000023,
+              -81.3101493570174
             ]
           }
         }
       ],
       "lighting" : "individual",
+      "name" : "Tweeter",
+      "position" : {
+        "scale" : 1,
+        "translation-in-points" : [
+          0,
+          -18.81392471705658
+        ]
+      },
+      "refractivity" : {
+        "depth" : 0.8419921875,
+        "enabled" : false,
+        "strength" : -0.036015625
+      },
+      "shadow" : {
+        "kind" : "layer-color",
+        "opacity" : 0.5
+      },
+      "specular" : "inside",
+      "translucency" : {
+        "enabled" : true,
+        "value" : 0.3
+      }
+    },
+    {
+      "blend-mode" : "normal",
+      "layers" : [
+        {
+          "image-name" : "Woofer dust cap.svg",
+          "name" : "Woofer dust cap",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              3.2299999999999045,
+              177.06592592592597
+            ]
+          }
+        },
+        {
+          "image-name" : "Woofer cone.svg",
+          "name" : "Woofer cone",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              0.34392188905917465,
+              173.05592592592598
+            ]
+          }
+        },
+        {
+          "image-name" : "Woofer surround.svg",
+          "name" : "Woofer surround",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              0.2539218890592565,
+              172.96592592592606
+            ]
+          }
+        },
+        {
+          "image-name" : "Woofer ring.svg",
+          "name" : "Woofer ring",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              6.323921889059193,
+              182.035925925926
+            ]
+          }
+        }
+      ],
+      "lighting" : "combined",
+      "name" : "Woofer",
+      "refractivity" : {
+        "depth" : 0,
+        "enabled" : true,
+        "strength" : 0.5
+      },
       "shadow" : {
         "kind" : "layer-color",
         "opacity" : 0.7
@@ -38,225 +193,82 @@
       "specular" : true,
       "translucency" : {
         "enabled" : true,
-        "value" : 0.4
+        "value" : 0.3
       }
     },
     {
-      "blur-material" : 0.5,
+      "blend-mode-specializations" : [
+        {
+          "value" : "multiply"
+        },
+        {
+          "appearance" : "dark",
+          "value" : "normal"
+        }
+      ],
+      "blur-material" : null,
       "layers" : [
         {
-          "fill-specializations" : [
-            {
-              "appearance" : "dark",
-              "value" : {
-                "linear-gradient" : [
-                  "display-p3:0.16321,0.17322,0.19531,1.00000",
-                  "display-p3:0.35620,0.36719,0.39722,1.00000"
-                ],
-                "orientation" : {
-                  "start" : {
-                    "x" : 0.5,
-                    "y" : 0.5
-                  },
-                  "stop" : {
-                    "x" : 0,
-                    "y" : 0
-                  }
-                }
-              }
-            }
-          ],
-          "image-name" : "Tweeter 2 3.svg",
-          "name" : "Tweeter 2 3",
+          "image-name" : "3 Baffle 2.svg",
+          "name" : "3 Baffle 2",
           "position" : {
             "scale" : 1,
             "translation-in-points" : [
-              0.2777777777778283,
-              30.164930555555543
+              -0.0049999999999954525,
+              16.23592592592604
             ]
           }
         },
         {
-          "fill-specializations" : [
-            {
-              "appearance" : "dark",
-              "value" : "none"
-            }
-          ],
-          "image-name" : "Tweeter 3 3.svg",
-          "name" : "Tweeter 3 3",
+          "glass" : false,
+          "image-name" : "2 Halo glow 2.svg",
+          "name" : "2 Halo glow 2",
           "position" : {
             "scale" : 1,
             "translation-in-points" : [
-              0.2777777777778283,
-              30.164930555555543
+              0,
+              19.525925925926003
             ]
           }
         },
         {
-          "image-name" : "Tweeter 4 3.svg",
-          "name" : "Tweeter 4 3",
+          "image-name" : "1 Cabinet 2.svg",
+          "name" : "1 Cabinet 2",
           "position" : {
             "scale" : 1,
             "translation-in-points" : [
-              0.2777777777778283,
-              30.164930555555543
-            ]
-          }
-        },
-        {
-          "image-name" : "Tweeter 5 3.svg",
-          "name" : "Tweeter 5 3",
-          "position" : {
-            "scale" : 1.05,
-            "translation-in-points" : [
-              0.2777777777778283,
-              30.164930555555543
+              0,
+              19.525925925926003
             ]
           }
         }
       ],
-      "position" : {
-        "scale" : 0.9,
-        "translation-in-points" : [
-          0,
-          -155.890625
-        ]
+      "name" : "Box",
+      "refractivity" : {
+        "depth" : 0.54046875,
+        "enabled" : true,
+        "strength" : 0.3883203125
       },
       "shadow" : {
         "kind" : "layer-color",
         "opacity" : 0.5
       },
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.5
-      }
-    },
-    {
-      "layers" : [
+      "specular" : "inside",
+      "translucency-specializations" : [
         {
-          "fill-specializations" : [
-            {
-              "appearance" : "dark",
-              "value" : {
-                "linear-gradient" : [
-                  "display-p3:0.16321,0.17322,0.19531,1.00000",
-                  "display-p3:0.35620,0.36719,0.39722,1.00000"
-                ],
-                "orientation" : {
-                  "start" : {
-                    "x" : 0.5,
-                    "y" : 0.5
-                  },
-                  "stop" : {
-                    "x" : 0,
-                    "y" : 0
-                  }
-                }
-              }
-            }
-          ],
-          "image-name" : "Woofer 1 3.svg",
-          "name" : "Woofer 1 3",
-          "position" : {
-            "scale" : 1,
-            "translation-in-points" : [
-              0.2777777777778283,
-              30.164930555555543
-            ]
+          "value" : {
+            "enabled" : true,
+            "value" : 0.3
           }
         },
         {
-          "fill-specializations" : [
-            {
-              "appearance" : "dark",
-              "value" : "none"
-            }
-          ],
-          "image-name" : "Woofer 2 3.svg",
-          "name" : "Woofer 2 3",
-          "position" : {
-            "scale" : 1,
-            "translation-in-points" : [
-              0.2777777777778283,
-              30.164930555555543
-            ]
-          }
-        },
-        {
-          "image-name" : "Woofer 3 3.svg",
-          "name" : "Woofer 3 3",
-          "position" : {
-            "scale" : 1,
-            "translation-in-points" : [
-              0.2777777777778283,
-              30.164930555555543
-            ]
-          }
-        },
-        {
-          "image-name" : "Woofer 4 3.svg",
-          "name" : "Woofer 4 3",
-          "position" : {
-            "scale" : 1,
-            "translation-in-points" : [
-              0.2777777777778283,
-              30.164930555555543
-            ]
+          "appearance" : "dark",
+          "value" : {
+            "enabled" : false,
+            "value" : 0.3
           }
         }
-      ],
-      "position" : {
-        "scale" : 0.9,
-        "translation-in-points" : [
-          0,
-          126.40625
-        ]
-      },
-      "shadow" : {
-        "kind" : "layer-color",
-        "opacity" : 0.5
-      },
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.5
-      }
-    },
-    {
-      "blur-material" : 0.5,
-      "layers" : [
-        {
-          "image-name" : "Baffle.svg",
-          "name" : "Baffle",
-          "position" : {
-            "scale" : 1.04,
-            "translation-in-points" : [
-              0.25,
-              27.1484375
-            ]
-          }
-        },
-        {
-          "image-name" : "Cabinet Face-1.svg",
-          "name" : "Cabinet Face-1",
-          "position" : {
-            "scale" : 1,
-            "translation-in-points" : [
-              0.25,
-              27.1484375
-            ]
-          }
-        }
-      ],
-      "shadow" : {
-        "kind" : "layer-color",
-        "opacity" : 0.45
-      },
-      "specular" : true,
-      "translucency" : {
-        "enabled" : true,
-        "value" : 0.5
-      }
+      ]
     }
   ],
   "supported-platforms" : {

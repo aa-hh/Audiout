@@ -183,3 +183,136 @@ Things that need **new abstraction** (the hidden half of the estimate):
 5. **All findable Cast devices supported**, TVs included — same protocol, no
    filtering. TV wrinkles (visible on-screen player, wake-from-standby delay)
    are polish items, not scope.
+
+## Spike log
+
+**2026-08-22 — software receivers on the test Mac (SUMUP-M9Y197RFVG).**
+Phase-0 prep built (`CastSender` / `CastFakeReceiver` / `cast-spike`, see
+`AudiouterCore/Sources/CastSender/AGENTS.md`). Two Cast services were on the LAN:
+
+- **"Mac Cast Receiver"** (`~/Projects/googlecast-receiver`, Python) — discovery-only
+  stub by its own README; answers CONNECT/PING/GET_STATUS, never LAUNCH. Spike:
+  TLS + status OK, launch timed out. Not a target.
+- **"casty" = AirServer** (port 8010). `GET_APP_AVAILABILITY` over 18 known ids:
+  only `0F5096E8` (Chrome Mirroring) and `674A0243` (Android Screen Mirroring)
+  available; Default Media Receiver `CC1AD845` **unavailable** — matches AirServer's
+  docs ("no content casting from apps"). So AirServer cannot measure path A.
+  **New fact for path C:** a third-party sender CAN launch both mirroring apps;
+  they report namespaces `media`, `remoting`, `webrtc`, `debug` and
+  `senderConnected: true` after a virtual CONNECT. AirServer closed the virtual
+  connection within ~1 s when no OFFER followed. WebRTC/Cast-Streaming negotiation
+  itself untested (big clean-room spike; openscreen is the BSD reference).
+- Sender side proven over a real network: TLS to another host, local IPv4
+  detection, stream server bound on the LAN, volume status parsed
+  (`stepInterval` 0.05, `controlType` attenuation observed).
+
+**Path A numbers still need real Google hardware** (Nest Mini / Chromecast).
+
+**2026-08-22 — REAL HARDWARE: Google TV Streamer (4K, 2024), 192.168.4.54, Ethernet.**
+Bonjour note: its announcement reached the Mac only intermittently (wired device,
+Mac on Wi-Fi, same router) — `cast-spike --host <ip>` added to bypass discovery;
+also a 10 s connect timeout (an advertised-but-unreachable host hung forever).
+
+Path A (Default Media Receiver + chunked live WAV 44.1/16/2, `streamType` LIVE):
+
+| run | first audio after LOAD | stalls in first ~12 s | steady lead (sent − receiver currentTime) |
+|---|---|---|---|
+| prime 0 | 3.7 s | 3 | ~7.9 s |
+| prime 1 s | 0.8–0.9 s | 3 (one ~5.8 s long) | 7.9 s, flat for 60 s |
+| prime 2 / 3 / 4 s | ~0.7 s | 3 (long stall shrinks by the prime) | ~7.9 s |
+| prime 8 s | 0.7 s | 1 (0.5 s) | 8.4–8.5 s |
+| `streamType` BUFFERED / NONE, prime 1 s | 0.8–0.9 s | 3 | ~7.9 s (no change) |
+| `--wav-lite` 8-bit mono 22.05 kHz (1/8 bytes), prime 1 s | 10.0 s | 3 | **13.6 s** |
+
+Readings:
+- Launch DMR ≈ 2.6–2.8 s every time. Volume round trip **17 ms** when the player is
+  settled (the ~1 s readings coincide with a stall — control replies queue behind it).
+  Pause 34–150 ms, resume 45–175 ms. Receiver reports `stepInterval` 0.05,
+  `controlType` attenuation.
+- **The receiver's player insists on ~8 s of buffered audio before steady playback**
+  and builds that lead itself by stalling (~0.5 s at a time, one long one) while we
+  keep streaming. Priming only moves the stalls earlier; the lead target is unchanged.
+  Cast `streamType` is irrelevant. So naive path A = **~8 s latency**, matching the
+  "8–30 s" reports, NOT Airfoil's 2 s.
+- Lower byte rate made it worse (13.6 s) — so not a pure time target. First-play gate
+  ≈ 250 KB in both formats; afterwards a download-rate-vs-playback-rate heuristic
+  (Chromium progressive playback) decides when it dares to play through. For a live
+  source the two rates are equal by definition, which is the pathological case.
+- Lead drifts down slowly (7.88 → 7.53 over ~60 s in one run) — watch for sender timer
+  slip vs receiver clock in a long soak; not yet characterised.
+- Open: what AirConnect/Airfoil do differently (research in flight) — candidates:
+  finite/fake `Content-Length`, different container (FLAC/MP3/AAC), faster-than-real-time
+  delivery with a short declared duration, or a custom receiver.
+
+**2026-08-22 — AirConnect-recipe and codec matrix on the Google TV Streamer** (Sonnet ran
+the matrix; `cast-spike` gained `--no-autoplay`, `--app-id`, `--http10`, `--pipe <ffmpeg cmd>`,
+`--content-type`, wall-clock pacing, lead logging; pink-noise source via ffmpeg so byte
+rates are realistic — a sine compresses to nothing and skews byte-gated buffering).
+
+Single-variable results (WAV unless noted, prime 1 s): receiver app id `46C1A819`
+(AirConnect's) → 7.9 s, no change. HTTP/1.0 raw body → 7.9 s, no change. `streamType`
+BUFFERED/NONE → no change. **`autoplay:false` + explicit PLAY → 5.5 s** (the only lever).
+
+| codec (pink noise) | B/s | autoplay lead | no-autoplay lead |
+|---|---:|---:|---:|
+| WAV 44.1/16/2 | 176,400 | 7.45 s | **5.10 s** |
+| FLAC | 110,111 | 9.01 s | 5.79 s |
+| MP3 192k / 320k | 24,000 / 40,000 | 10.84 / 8.87 s | 5.43 / 5.70 s |
+| AAC-ADTS 192k / 320k | 24,000 / 40,000 | 10.92 / 10.51 s | 5.66 / 5.92 s |
+| Opus/Ogg 192k | 24,000 | 15.05 s | 8.88 s |
+
+Every run stalls once ~0.5 s after first audio, then once more; lead is flat afterwards
+(wall-clock pacing fixed the earlier sender slip). Receiver sends `Range: bytes=0-` for
+every content type. Volume round trip 17 ms when settled.
+
+**Conclusion for this device class:** no-autoplay lead is ~5–6 s for every codec = a
+TIME target, consistent with Android media-player defaults (play after 2.5 s, resume
+after a stall only with 5 s buffered). The Streamer is an Android TV box; Airfoil's 2 s
+figure (2016) was measured on Chromium-era Chromecast/Chromecast Audio. Codec buys
+nothing — WAV is the best and simplest. Stock Default Media Receiver floor here ≈ 5 s.
+Open: 206/Content-Range reply to the Range request (AirConnect does this); custom
+receiver with CAF `PlaybackConfig` buffer knobs (path B, needs Alec's Google account +
+$5); a Nest speaker for comparison (likely the 2 s class).
+
+**2026-08-22 — 206/Content-Range experiment: inconclusive, not pursued further.** Answering
+the Streamer's `Range: bytes=0-` with `206 Partial Content` + `Content-Range: bytes 0-/*`
+made it error within ~250ms every time (never buffered, never played) — control (plain 200)
+played normally at the established ~5.5s. Confound: `bytes 0-/*` omits the required
+last-byte-pos (RFC 7233); AirConnect sends a real end offset from its 2MB replay cache.
+Could be "TV hates 206 for a live stream" or "TV hates a malformed Content-Range" — not
+distinguished. Not chasing further: path B (custom receiver, Alec mid-registration
+2026-08-22) is the more promising next step for going below the ~5s stock-receiver floor.
+
+**2026-08-22 — Custom Web Receiver (path B), Google TV Streamer: NEGATIVE RESULT, closes
+path B for this device class.** Registered a Cast developer account, a throwaway CAF v3
+custom receiver (`playbackConfig.autoPauseDuration=0.5`, `autoResumeDuration=0.25`), and
+the Streamer as a test device — hosted at
+https://aa-hh.github.io/audiouter-cast-receiver-spike/ (public repo aa-hh/audiouter-cast-
+receiver-spike; app id `F10823C5`, unpublished; delete/unpublish once this spike closes).
+Setup traps hit along the way: registration needs BOTH the device's ~15min propagation +
+reboot AND (found empirically) the app's own ~15min propagation, else `LAUNCH_ERROR
+NOT_FOUND`; the device's *Cast* serial (get it by casting the Developer Console page to
+the TV) is a different number from the hardware serial in Settings, using the wrong one
+fails silently the same way. A real bug on our side masqueraded as a device problem: a
+guessed `cast.framework.events.EventType.PLAYER_STATE_CHANGED` constant doesn't exist,
+threw before `context.start()`, and produced `LAUNCH_ERROR CAST_INIT_TIMEOUT` — caught by
+loading the page in a normal browser and reading the console (Chrome DevTools-style),
+not obvious from the device-side error alone.
+
+Once genuinely working: **autoplay → 7.9s lead, no-autoplay → 5.5s lead — both
+statistically identical to the stock Default Media Receiver's numbers for the same
+modes** (§ above: 7.45s / 5.10s). `playbackConfig`'s buffer knobs bought nothing.
+Consistent with Google's own doc caveat that `autoPauseDuration` is "not supported by
+Shaka Player" — our plain progressive `audio/wav` URL evidently rides the native
+media-element path, not Shaka's segmented pipeline, so CAF's tuning surface doesn't
+reach it. **Path B is closed for a plain-WAV live stream on Android-TV-class Cast
+devices.** Untested and still open: whether MSE/a segmented container (fMP4, DASH) run
+through Shaka would respond to these knobs — meaningfully more engineering for
+uncertain payoff, not recommended before testing on a non-Android-TV device (Nest
+speaker) first.
+
+**Where this leaves the feature**: the ~5s floor via no-autoplay + explicit PLAY is
+the best number found on this hardware, using nothing but the stock, zero-registration
+Default Media Receiver. That's the v1 number for TV-class Cast devices unless a Nest
+speaker (older/different playback stack, likely closer to Airfoil's Chromium-era 2s)
+tests meaningfully better.

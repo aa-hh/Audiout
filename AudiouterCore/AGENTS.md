@@ -731,6 +731,9 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `NativeBackend` | Shipping backend; drives `AirPlayEngine`, owns capture gate, owns aggregate device lifecycle. |
 | `AggregateOutputDevice` | Lifecycle owner (adopt-or-create/off-switch/orphan sweep) for the PUBLIC, Sound-settings-visible "Audiouter" aggregate (UID `com.audiouter.Audiouter.aggregate`); thin CoreAudio shell wired by `NativeBackend`. Becomes Mac default when whole-system routing arms; restore-prior-default-then-destroy on quit; echo-guarded. New `BackendEvent` case `routingBlockedNeedsDefault(Bool)` signals when the app can't route because its aggregate isn't the Mac's default output. |
 | `NativeDiscovery` | Bonjour discovery (AP2 + AP1). |
+| `CastSender` | Hand-rolled Google Cast v2 protocol sender (proof of concept, Phase 0 spike). |
+| `CastFakeReceiver` | In-memory mock Cast receiver for testing (macOS 15+ only). |
+| `cast-spike` | Standalone CLI tool proving end-to-end Cast audio streaming. |
 | `BTDeviceEnumerator` | Bluetooth outputs: Core Audio BT transport merged with the TCC-gated IOBluetooth paired list; paired-but-disconnected speakers surface unavailable, with pairing recency kept for ghost-row filtering. |
 | `BTSyncedSink` | N-instance BT sink manager: per-device pinned engines, reference-timeline delay, pacing-clock drift correction. |
 | `BTSyncTrim` / `BTTrimStore` | The SYNC trim's shared clamp/step contract (±500 ms, 10 ms coarse) + versioned-JSON persistence per device UID; `NativeBackend` loads at init and re-pushes into the sink on every arm (`BTOutputControlling` is the UI seam). The same envelope carries the first-mix intercept's FINAL "Not now" dismissals — both saves are read-modify-write so neither record clobbers the other. |

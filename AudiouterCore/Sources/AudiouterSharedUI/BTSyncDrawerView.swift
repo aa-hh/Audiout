@@ -408,6 +408,20 @@ public final class BTSyncDrawerView: NSView {
         window.makeFirstResponder(valueField)
     }
 
+    /// Put a SUGGESTED value in the field, focused and selected, without
+    /// applying it (the alignment wizard's "Set it by hand"). The drawer emits
+    /// committed gestures only, and a number the user has merely been shown is
+    /// not one — Return commits it like any typed edit, Escape puts the stored
+    /// value back, and until then nothing has been written.
+    ///
+    /// Deliberately NOT `noteExternalTrimChange`: that is a gesture the user
+    /// already made, so it moves the model and the Revert baseline with it.
+    public func beginEditingSuggestedValue(_ ms: Double) {
+        focusValueField()
+        valueField.stringValue = "\(Int(BTSyncTrim.quantise(ms)))"
+        valueField.currentEditor()?.selectAll(nil)
+    }
+
     public func noteOpened(trimMs: Double) {
         openTimeMs = trimMs
         refreshDisplay()

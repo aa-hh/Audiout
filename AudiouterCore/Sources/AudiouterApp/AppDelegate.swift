@@ -577,9 +577,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             (self?.backend as? BTOutputControlling)?.btWizardLatencyRangeMs(forDevice: deviceID)
                 ?? (-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
         }
-        popoverController.onBTWizardLatencyPreview = { [weak self] ms, deviceID in
+        popoverController.onBTWizardLatencyPreview = { [weak self] ms, deviceID, halfWidthMs in
             (self?.backend as? BTOutputControlling)?
-                .setBTWizardLatencyPreview(ms, forDevice: deviceID)
+                .setBTWizardLatencyPreview(ms, forDevice: deviceID, halfWidthMs: halfWidthMs)
         }
         popoverController.onBTWizardEndLatencyPreview = { [weak self] deviceID, keepMs in
             (self?.backend as? BTOutputControlling)?

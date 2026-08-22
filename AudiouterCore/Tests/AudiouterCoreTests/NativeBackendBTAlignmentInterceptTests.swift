@@ -869,9 +869,10 @@ import CoreAudio
 
         Telemetry._installTestSink { capture.append($0) }
         backend.setBTWizardTickTempo(bpm: BTAlignmentWizardSession.searchTickBPM)
-        backend.setBTWizardLatencyPreview(0, forDevice: btMove.id)
-        backend.setBTWizardLatencyPreview(-96, forDevice: btMove.id)
+        backend.setBTWizardLatencyPreview(0, forDevice: btMove.id, halfWidthMs: 475)
+        backend.setBTWizardLatencyPreview(-96, forDevice: btMove.id, halfWidthMs: 210.4)
         backend.setBTWizardTickTempo(bpm: BTAlignmentWizardSession.blocksTickBPM)
+        // No half-width: the Mac's own run has no posterior behind it.
         backend.setBTWizardLatencyPreview(120, forDevice: btMove.id)
 
         waitFor { capture.lines(evt: "wizard_latency_preview").count == 3 }
@@ -885,6 +886,10 @@ import CoreAudio
         #expect(lines[2].contains("\"candidateMs\":\"120\""), "\(lines[2])")
         #expect(lines[2].contains("\"deltaMs\":\"216\""), "\(lines[2])")
         #expect(lines[2].contains("\"stage\":\"blocks\""), "the tempo names the stage")
+        #expect(lines[0].contains("\"halfWidthMs\":\"475.0\""), "\(lines[0])")
+        #expect(lines[1].contains("\"halfWidthMs\":\"210.4\""), "\(lines[1])")
+        #expect(!lines[2].contains("halfWidthMs"),
+                "the key is ABSENT rather than zero when the caller has none: \(lines[2])")
         #expect(lines.allSatisfy { $0.contains("\"uid\":\"\(btMove.id)\"") })
 
         // A candidate BELOW zero really does reach the sink — the floor lives at

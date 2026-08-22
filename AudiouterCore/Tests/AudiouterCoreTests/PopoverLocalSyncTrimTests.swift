@@ -163,9 +163,10 @@ import AppKit
         #expect(recorder.localPreviews.count == 1,
                 "the first candidate previews through the LOCAL seam")
         #expect(recorder.btSets.isEmpty, "…never the Bluetooth one")
-        // Candidates are the base trim plus one of the stimuli.
+        // The Mac's run is not inverted, so its candidates are plain trims
+        // inside the drawer's own range.
         if let first = recorder.localPreviews.first {
-            #expect(BTAlignmentConstantStimuli.stimuliMs.contains(first - 5))
+            #expect((-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs).contains(first))
         }
 
         wizard?.test_clickDismiss()

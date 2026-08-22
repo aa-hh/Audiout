@@ -404,9 +404,11 @@ public final class PopoverController: NSObject {
     /// The latency values a run may present for a device. Wired to
     /// `btWizardLatencyRangeMs`.
     public var btLatencyRangeProvider: ((_ deviceID: String) -> ClosedRange<Double>)?
-    /// The wizard's live latency candidate (never persisted). Wired to
-    /// `setBTWizardLatencyPreview`.
-    public var onBTWizardLatencyPreview: ((_ ms: Double, _ deviceID: String) -> Void)?
+    /// The wizard's live latency candidate (never persisted), with how sure
+    /// the run is about it — the half-width rides along purely so the trial's
+    /// telemetry line can carry it. Wired to `setBTWizardLatencyPreview`.
+    public var onBTWizardLatencyPreview:
+        ((_ ms: Double, _ deviceID: String, _ halfWidthMs: Double?) -> Void)?
     /// End of a latency preview: keep (persist as the measured latency) or
     /// restore. Wired to `endBTWizardLatencyPreview`.
     public var onBTWizardEndLatencyPreview: ((_ deviceID: String, _ keepMs: Double?) -> Void)?
@@ -3697,6 +3699,9 @@ extension PopoverController: DeviceRowView.Delegate {
                 if let stale = btWizardView { panel.removeRow(stale, animated: false) }
                 let view = BTAlignmentWizardView(session: session)
                 view.onFinished = { [weak self] in self?.finishBTWizard() }
+                view.onSetByHand = { [weak self] bestGuessMs in
+                    self?.btWizardSetByHand(deviceID: id, bestGuessValueMs: bestGuessMs)
+                }
                 view.onSelectReference = { [weak self] referenceID in
                     self?.setBTWizardReference(referenceID)
                 }
@@ -3793,6 +3798,13 @@ extension PopoverController: DeviceRowView.Delegate {
         btAlignmentPromptQueue.removeAll { $0 == deviceID }
         if btAlignmentPromptDeviceID == deviceID { btAlignmentPromptDeviceID = nil }
         onResolveBTAlignmentPrompt?(deviceID, false)
+        // Zero-click: a speaker that has been measured before opens straight on
+        // the PROPOSAL at its stored value — "still right?" is one click where
+        // a fresh run is a dozen. The prior behind it stays flat; this is a UI
+        // shortcut, not a statistical one. Never for the Mac's own row, whose
+        // trim is the user's setting rather than a measurement.
+        let openingProposal: Double? =
+            (!isLocalTarget && btMeasuredLatency(for: deviceID) != nil) ? base : nil
         let reference = btWizardDefaultReference(excluding: deviceID)
         if let reference { engageBTWizardReference(reference.id) }
         let session = BTAlignmentWizardSession(
@@ -3804,14 +3816,17 @@ extension PopoverController: DeviceRowView.Delegate {
             // A larger latency feeds the speaker EARLIER, so an early target
             // needs LESS of it — the mirror of a trim.
             invertsEstimate: !isLocalTarget,
+            openingProposalMs: openingProposal,
             // A LOCAL target previews through the Mac's own seam; everything
             // else through the Bluetooth one. Same contract either way: never
-            // persisted mid-run, restored or committed on the way out.
-            applyPreviewTrim: { [weak self] ms in
+            // persisted mid-run, restored or committed on the way out. The
+            // local seam takes no half-width — its telemetry is the Mac's, and
+            // this run is not what it is about.
+            applyPreviewTrim: { [weak self] ms, halfWidthMs in
                 if isLocalTarget {
                     self?.onLocalTrimPreview?(ms)
                 } else {
-                    self?.onBTWizardLatencyPreview?(ms, deviceID)
+                    self?.onBTWizardLatencyPreview?(ms, deviceID, halfWidthMs)
                 }
             },
             endPreview: { [weak self] keepMs in
@@ -3842,6 +3857,13 @@ extension PopoverController: DeviceRowView.Delegate {
                     // over what was just measured.
                     self?.noteWizardTrimIntoOpenDrawer(
                         deviceID: deviceID, trimMs: isLocalTarget ? keepMs : 0)
+                    // The panel STAYS UP on the kept screen, so the row's chip
+                    // has to flip while the user is still looking at it — the
+                    // live complaint was a run that "didn't update the value
+                    // anywhere" because the repaint waited for the dismissal.
+                    self?.refreshDeviceRows()
+                    self?.postAnnouncement(
+                        "\(device.name) aligned at \(Int(keepMs.rounded())) milliseconds")
                 }
             },
             setTick: { [weak self] active in
@@ -3861,6 +3883,30 @@ extension PopoverController: DeviceRowView.Delegate {
     private func noteWizardTrimIntoOpenDrawer(deviceID: String, trimMs: Double) {
         guard mountedSyncDrawerID == deviceID else { return }
         syncDrawer.noteExternalTrimChange(trimMs)
+    }
+
+    /// The unsettled screen's "Set it by hand": close the run and hand its best
+    /// guess to the row's SYNC drawer, focused but NOT committed — the drawer
+    /// emits committed gestures only, and a number nobody has agreed to is not
+    /// one.
+    ///
+    /// The run measured a LATENCY; the drawer edits a TRIM. Their sum is what
+    /// aligns the speaker, so the suggestion is the guess MINUS whatever
+    /// latency is already stored — offering the raw guess would double the
+    /// correction the moment the user pressed Return.
+    private func btWizardSetByHand(deviceID: String, bestGuessValueMs: Double) {
+        let measuresLatency = btWizardSession?.measuresLatency ?? false
+        finishBTWizard()
+        if expandedSyncDeviceID != deviceID {
+            toggleSyncDrawer(deviceID: deviceID, animated: true)
+        }
+        guard mountedSyncDrawerID == deviceID else { return }
+        let suggested = measuresLatency
+            ? bestGuessValueMs - (btMeasuredLatency(for: deviceID) ?? 0)
+            : bestGuessValueMs
+        let usable = btUsableTrimRange(for: deviceID)
+        syncDrawer.beginEditingSuggestedValue(
+            Swift.min(Swift.max(suggested, usable.lowerBound), usable.upperBound))
     }
 
     /// Every other speaker the target could be compared against, in the order

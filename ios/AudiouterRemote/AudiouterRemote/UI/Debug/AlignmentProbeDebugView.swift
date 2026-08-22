@@ -29,6 +29,8 @@ struct AlignmentProbeDebugView: View {
     @State private var lastRecordingURL: URL?
     @State private var recordedSeconds: Double = 0
     @State private var applied = false
+    @State private var history: [ProbeRunRecord] = []
+    @State private var currentRecordID: UUID?
 
     private enum Phase: Equatable {
         case idle, capturing, analyzing, done
@@ -85,8 +87,21 @@ struct AlignmentProbeDebugView: View {
                     Text("Pattern runs about \(Int(Self.patternDurationSeconds)) seconds; recording stops automatically when it ends.")
                 }
             }
+
+            if !history.isEmpty {
+                Section {
+                    ForEach(history) { record in historyRow(record) }
+                } header: {
+                    Text("History")
+                } footer: {
+                    if let logURL = ProbeRunLog.exportURL() {
+                        ShareLink("Export log (JSON)", item: logURL)
+                    }
+                }
+            }
         }
         .navigationTitle("Alignment Probe")
+        .onAppear { history = ProbeRunLog.load() }
         .onChange(of: session.snapshot?.alignmentProbe?.state) { _, newValue in
             guard phase == .capturing, newValue != "running" else { return }
             finishCaptureAndAnalyze()
@@ -240,11 +255,61 @@ struct AlignmentProbeDebugView: View {
                 let analysis = try ProbeAnalyzer(sampleRate: sampleRate, pattern: .spike).analyze(recording: samples)
                 result = analysis
                 errorText = nil
+                if let targetDeviceID {
+                    let record = ProbeRunRecord(
+                        id: UUID(), date: Date(),
+                        targetDeviceID: targetDeviceID,
+                        targetName: devices.first { $0.id == targetDeviceID }?.name ?? targetDeviceID,
+                        referenceName: referenceDeviceID.flatMap { id in devices.first { $0.id == id }?.name } ?? "Main Out",
+                        offsetMs: analysis.offsetMs, spreadMs: analysis.spreadMs,
+                        usedPairs: analysis.usedPairs, confident: analysis.confident,
+                        recordedSeconds: recordedSeconds, applied: false, earSaidInSync: nil)
+                    currentRecordID = record.id
+                    history = ProbeRunLog.append(record)
+                }
             } catch {
                 result = nil
                 errorText = "\(error)"
             }
             phase = .done
+        }
+    }
+
+    private func historyRow(_ record: ProbeRunRecord) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(record.date, format: .dateTime.month(.abbreviated).day().hour().minute())
+                Spacer()
+                Text(String(format: "%+.1f ms", record.offsetMs)).monospacedDigit().bold()
+            }
+            .font(.footnote)
+            HStack(spacing: 6) {
+                Text(String(format: "±%.1f · %d pairs", record.spreadMs, record.usedPairs))
+                if !record.confident { Text("· not confident").foregroundStyle(.orange) }
+                if record.applied { Text("· applied").foregroundStyle(.green) }
+                Spacer()
+                // The study's ear column: what did the room sound like
+                // BEFORE this run? Tap to cycle unknown → in sync → flam.
+                Button {
+                    var updated = record
+                    switch record.earSaidInSync {
+                    case nil: updated.earSaidInSync = true
+                    case true?: updated.earSaidInSync = false
+                    case false?: updated.earSaidInSync = nil
+                    }
+                    ProbeRunLog.update(updated)
+                    history = ProbeRunLog.load()
+                } label: {
+                    switch record.earSaidInSync {
+                    case nil: Text("ear?")
+                    case true?: Text("ear: sync").foregroundStyle(.green)
+                    case false?: Text("ear: flam").foregroundStyle(.red)
+                    }
+                }
+                .buttonStyle(.borderless)
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
         }
     }
 
@@ -287,6 +352,11 @@ struct AlignmentProbeDebugView: View {
         // Keep the numbers on screen as a receipt (live finding: a vanishing
         // result reads as a glitch and loses the measurement).
         applied = true
+        if let currentRecordID, var record = history.first(where: { $0.id == currentRecordID }) {
+            record.applied = true
+            ProbeRunLog.update(record)
+            history = ProbeRunLog.load()
+        }
     }
 }
 

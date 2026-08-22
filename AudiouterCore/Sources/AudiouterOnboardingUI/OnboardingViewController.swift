@@ -838,8 +838,21 @@ public final class OnboardingViewController: NSViewController {
     /// Bluetooth's wait is the model's to report: its prompt answers on a
     /// callback, so the Allow click returns long before the user has decided.
     /// Everything else is covered by ``allowInFlight`` for its whole ask.
+    ///
+    /// Local Network is the one step whose `allowInFlight` OUTLIVES its dialog:
+    /// once the answer lands, the prime spends up to a few more seconds settling
+    /// the speaker count (`localNetworkPhase == .verifying`). That tail has no
+    /// dialog on screen to go quiet for, so it must NOT count as in flight —
+    /// in-flight is what suppresses click activation, refuses the ✕, and (under
+    /// the since-removed level demote, where this was found live as "the setup
+    /// drops to the background right after I click Allow") buried the window
+    /// for the whole settle. The quiet ends the instant the user answers, not
+    /// seconds later when the count finishes.
     private var promptInFlightStep: SetupStep? {
-        if let allowInFlight { return allowInFlight }
+        if let allowInFlight {
+            if allowInFlight == .localNetwork, model.localNetworkPhase == .verifying { return nil }
+            return allowInFlight
+        }
         return model.isPrimingBluetooth ? .bluetooth : nil
     }
 
@@ -847,9 +860,10 @@ public final class OnboardingViewController: NSViewController {
     ///
     /// **Everything that pulls focus stays off while this is true.** Another
     /// process fighting a TCC dialog for input focus is what leaves it frozen
-    /// and unclickable — and this app was doing it three ways at once (the
-    /// floating level, the re-front on every grant, and the window's
-    /// force-activate on mouse-down).
+    /// and unclickable — and this app was doing it two ways at once (the
+    /// re-front on every grant, and the window's force-activate on mouse-down).
+    /// The window LEVEL is not one of them: it stays `.floating` for the whole
+    /// ask (see `OnboardingWindowController.setPromptInFlight`).
     private var isPromptInFlight: Bool { promptInFlightStep != nil }
 
     /// The last value pushed to the window controller, so the level yield and

@@ -369,14 +369,43 @@ gate/motion/demo/selection rules change.
     observable headless, so this pair of hooks is what tests can pin.
   - **AMENDMENT — the app goes QUIET while a prompt is unanswered.** A macOS
     permission dialog loses input focus to any process that grabs it, and comes
-    back frozen and unclickable; this window had three ways to grab it. So for
-    the length of an ask (`OnboardingViewController.isPromptInFlight` — the
-    Allow in flight, plus `SetupModel.isPrimingBluetooth`, whose prompt outlives
-    the click) the level drops BEFORE the prompt is triggered, the reactivate
-    hook re-floats and takes key for nobody, `OnboardingWindow`'s
+    back frozen and unclickable. So for the length of an ask
+    (`OnboardingViewController.isPromptInFlight` — the Allow in flight, plus
+    `SetupModel.isPrimingBluetooth`, whose prompt outlives the click) the
+    reactivate hook re-floats and takes key for nobody, `OnboardingWindow`'s
     force-activate-on-click is suppressed (the click is still DELIVERED — only
     the activation is skipped), and a re-front a grant would earn is OWED, then
     paid exactly ONCE on resolve. Resolve = granted, denied, or timed out.
+    - **AMENDMENT TO THE AMENDMENT (owner decision 2026-08-22) — quiet means
+      FOCUS, not level: the window stays `.floating` through a TCC ask.** The
+      original quiet also dropped the level to `.normal` for the length of the
+      dialog, and that demote was the mechanism behind the live "blip": the
+      setup vanished behind whatever else was open the moment the ask began and
+      popped back when the answer resolved — on EVERY accept, since this is an
+      accessory app nothing re-activates. The demote bought nothing: every
+      dialog `isPromptInFlight` covers is a TCC dialog a system process draws
+      ABOVE a floating window (the scoped observation above), and what freezes
+      a dialog is stolen input focus, which window level never touches. The two
+      normal-level surfaces (System Settings trips, Remote Control's
+      Accessibility alert) still yield — that is `yieldToSystemSettings()`'s
+      path, untouched. `aPromptInFlightSilencesEveryWayThisWindowTakesTheFront`
+      pins the level staying put.
+    - **TRAP: Local Network's `allowInFlight` OUTLIVES its dialog** (live find —
+      "the setup drops to the background right after I click Allow", and ONLY
+      Local Network, back when the quiet still demoted the level). Its Allow
+      stays in flight through the whole prime, but the prime keeps running a
+      few seconds PAST the answer to settle the speaker count
+      (`localNetworkPhase == .verifying`). That tail has no dialog on screen to
+      go quiet for, so `promptInFlightStep` returns nil for `.localNetwork`
+      once the phase is `.verifying` — in-flight still gates the ✕, the click
+      force-activate and the owed re-front, and none of those should wait on
+      the count. Every OTHER step resolves its `allowInFlight` the instant the
+      dialog is answered, so none of them hit this. The `.verifying` tail still
+      dims the stage and shows "Checking your network…" (that is driven by
+      `isPrompting`/`localNetworkPhase`, NOT by the window-level in-flight
+      state — the two are deliberately decoupled here).
+      `theQuietEndsWhenTheLocalNetworkAnswerLandsNotAfterTheCountSettles`
+      pins it.
   - **Escape hatch for a frozen dialog.** After
     `OnboardingViewController.stuckPromptDelay` unanswered, the card adds the
     existing hint line + demoted "Open Settings…" (`stuckPromptSteps` — the

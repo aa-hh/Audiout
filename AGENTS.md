@@ -89,16 +89,23 @@ symbol you cannot find in source, believe the source and fix the doc.
   and `scripts/make-app.sh` whenever a build starts) does two things: it
   removes any worktree whose root contains a `.prunable` marker — but only if
   it is clean, unreferenced by any running process, and its HEAD is merged
-  into `main` or pushed — and it sweeps machine-wide `.build` caches: any
-  cache untouched for `AUDIOUTER_CACHE_MAX_AGE_DAYS` (7) is deleted, and
-  below `AUDIOUTER_MIN_FREE_GB` (8) free disk, caches go least-recently-
-  built-first. **The floor is headroom the script guarantees with its own
-  caches, not a claim on the disk** — when reclaiming everything still would
-  not reach it, the shortfall came from elsewhere (Xcode device support,
-  simulators), so the caches stay warm and it says so instead of thrashing.
+  into `main` or pushed — and it sweeps build caches machine-wide. What counts
+  as a cache: every `.build` under any checkout (found by search, so the
+  spike packages under `dev/` are included, not just the three top-level
+  ones), plus Xcode's own `iOS DeviceSupport` and `DerivedData` directories,
+  which the iPhone work fills at ~1.5 GB per attach and which once hit 6.4 GB.
+  Any of them untouched for `AUDIOUTER_CACHE_MAX_AGE_DAYS` (7) is deleted, and
+  below `AUDIOUTER_MIN_FREE_GB` (8) free disk they go cheapest-to-lose first —
+  Xcode's ahead of any warm `.build`, since a re-attach costs nobody's time
+  and a cold rebuild costs ~95s per commit. **The floor is headroom the script
+  guarantees with the caches it owns, not a claim on the disk** — when
+  reclaiming everything still would not reach it, the shortfall came from
+  elsewhere, so the caches stay warm and it says so instead of thrashing.
   Below `AUDIOUTER_CRITICAL_FREE_GB` (2) it takes everything anyway. The
   building checkout and any checkout a live process references are never
-  touched.
+  touched, Xcode's caches are left alone entirely while Xcode is running, and
+  the simulator runtime image (~7.5 GB) and simulator devices are never
+  touched at all — those are downloads and test state, not build output.
   When a branch is merged AND live-verified (or abandoned with everything
   pushed), `touch .claude/worktrees/<slug>/.prunable` and let the system
   collect it. The flag is a request, not a command — a dirty or unpushed

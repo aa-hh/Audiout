@@ -53,6 +53,15 @@ public enum CompanionCommand: Equatable, Sendable {
     case setStartBufferMs(ms: Int)
     case requestAppIcons(bundleIDs: [String])
 
+    // MARK: BT auto-cal spike (dev/notes/bt-autocal-spike-spec.md)
+    //
+    // SPIKE — debug-surface only, no onboarding, no polish (see the spec's
+    // "Spike, not product" note). `referenceDeviceID == nil` means Main Out
+    // is the reference.
+    case startAlignmentProbe(targetDeviceID: String, referenceDeviceID: String?)
+    case cancelAlignmentProbe
+    case submitProbeResult(targetDeviceID: String, offsetMs: Double, spreadMs: Double, confident: Bool)
+
     /// An unrecognized `"command"` string — e.g. a newer phone talking to an
     /// older Mac. Decodes without throwing so the server can answer with a
     /// failed `commandResult` instead of dropping the connection.
@@ -69,6 +78,7 @@ extension CompanionCommand: Codable {
         case bundleID, displayName, kind, deviceID
         case ms
         case bundleIDs
+        case targetDeviceID, referenceDeviceID, offsetMs, spreadMs, confident
     }
 
     private enum Name: String {
@@ -77,6 +87,7 @@ extension CompanionCommand: Codable {
         case createGroup, updateGroup, deleteGroup, setGroupMuted
         case addAppRoute, removeAppRoute, setAppDestination, setAppVolume
         case setConnectVolume, setStartBufferMs, requestAppIcons
+        case startAlignmentProbe, cancelAlignmentProbe, submitProbeResult
     }
 
     public init(from decoder: Decoder) throws {
@@ -131,6 +142,20 @@ extension CompanionCommand: Codable {
             self = .setStartBufferMs(ms: try c.decode(Int.self, forKey: .ms))
         case .requestAppIcons:
             self = .requestAppIcons(bundleIDs: try c.decode([String].self, forKey: .bundleIDs))
+        case .startAlignmentProbe:
+            self = .startAlignmentProbe(
+                targetDeviceID: try c.decode(String.self, forKey: .targetDeviceID),
+                referenceDeviceID: try c.decodeIfPresent(String.self, forKey: .referenceDeviceID)
+            )
+        case .cancelAlignmentProbe:
+            self = .cancelAlignmentProbe
+        case .submitProbeResult:
+            self = .submitProbeResult(
+                targetDeviceID: try c.decode(String.self, forKey: .targetDeviceID),
+                offsetMs: try c.decode(Double.self, forKey: .offsetMs),
+                spreadMs: try c.decode(Double.self, forKey: .spreadMs),
+                confident: try c.decode(Bool.self, forKey: .confident)
+            )
         }
     }
 
@@ -201,6 +226,18 @@ extension CompanionCommand: Codable {
         case .requestAppIcons(let bundleIDs):
             try c.encode(Name.requestAppIcons.rawValue, forKey: .command)
             try c.encode(bundleIDs, forKey: .bundleIDs)
+        case .startAlignmentProbe(let targetDeviceID, let referenceDeviceID):
+            try c.encode(Name.startAlignmentProbe.rawValue, forKey: .command)
+            try c.encode(targetDeviceID, forKey: .targetDeviceID)
+            try c.encodeIfPresent(referenceDeviceID, forKey: .referenceDeviceID)
+        case .cancelAlignmentProbe:
+            try c.encode(Name.cancelAlignmentProbe.rawValue, forKey: .command)
+        case .submitProbeResult(let targetDeviceID, let offsetMs, let spreadMs, let confident):
+            try c.encode(Name.submitProbeResult.rawValue, forKey: .command)
+            try c.encode(targetDeviceID, forKey: .targetDeviceID)
+            try c.encode(offsetMs, forKey: .offsetMs)
+            try c.encode(spreadMs, forKey: .spreadMs)
+            try c.encode(confident, forKey: .confident)
         case .unknown(let name):
             // Round-trips as whatever it decoded from — re-encoding an
             // `.unknown` just forwards the original unrecognized name with

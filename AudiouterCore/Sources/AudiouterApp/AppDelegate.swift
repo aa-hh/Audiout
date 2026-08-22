@@ -1535,7 +1535,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 // snapped back. Mirrors the Mac pane's own ordering, where
                 // `onSettingChanged` fires after `await latency.apply`.
                 await self.scheduleCompanionBroadcast()
+            },
+            // The alignment probe's three backend touches, capability-gated
+            // like the popover's BT hooks above (nil cast on MockBackend /
+            // OwnToneBackend degrades each to a no-op).
+            setProbeTickActive: { [weak self] active in
+                (self?.backend as? BTOutputControlling)?.setBTProbeTickActive(active)
+            },
+            btSyncTrim: { [weak self] deviceID in
+                (self?.backend as? BTOutputControlling)?.btSyncTrim(forDevice: deviceID) ?? 0
+            },
+            persistBTSyncTrim: { [weak self] ms, deviceID in
+                (self?.backend as? BTOutputControlling)?
+                    .setBTSyncTrim(ms, forDevice: deviceID, persist: true)
             })
+
+        // A probe ends on its own clock (pattern done, timeout, target gone),
+        // with no command turn to ride — without this the phone would keep
+        // showing a run the Mac already finished.
+        companionDispatcher.onProbeStateDidChange = { [weak self] in
+            self?.scheduleCompanionBroadcast()
+        }
 
         // Group/Main-Out/mute state — the broadest snapshot input, and the only
         // signal behind a USER-driven Main Out master move: that emits no
@@ -1814,7 +1834,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             connectVolumeMin: AppSettings.minConnectVolume,
             connectVolumeMax: AppSettings.maxConnectVolume,
             startBufferMs: settings.startBufferMs,
-            startBufferOptionsMs: AppSettings.startBufferOptionsMs)
+            startBufferOptionsMs: AppSettings.startBufferOptionsMs,
+            alignmentProbe: companionDispatcher?.alignmentProbeState)
         companionServer.broadcast(snapshot)
     }
 

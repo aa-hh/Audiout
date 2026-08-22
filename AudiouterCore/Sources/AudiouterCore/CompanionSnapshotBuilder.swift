@@ -105,7 +105,8 @@ public enum CompanionSnapshotBuilder {
         connectVolumeMin: Int,
         connectVolumeMax: Int,
         startBufferMs: Int,
-        startBufferOptionsMs: [Int]
+        startBufferOptionsMs: [Int],
+        alignmentProbe: AlignmentProbeState? = nil
     ) -> Snapshot {
         let deviceStates = devices.map { device in
             deviceState(for: device, groupController: groupController, iconFor: iconFor)
@@ -182,7 +183,8 @@ public enum CompanionSnapshotBuilder {
                 connectVolumeMax: connectVolumeMax,
                 startBufferMs: startBufferMs,
                 startBufferOptionsMs: startBufferOptionsMs
-            )
+            ),
+            alignmentProbe: alignmentProbe
         )
     }
 

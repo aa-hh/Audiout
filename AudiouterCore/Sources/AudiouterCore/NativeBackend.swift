@@ -8240,6 +8240,10 @@ public protocol BTOutputControlling: AnyObject {
     /// ~3 s wake preamble (the Sonos amp-gate live finding, 2026-08-07) —
     /// distinct from the row button's ~30 s ``setBTAlignTickActive(_:)``.
     func setBTWizardTickActive(_ active: Bool)
+    /// The phone-measured probe's tick run (``AlignmentProbeSession``): the
+    /// wizard's run with a preamble long enough to cover the probe's both-
+    /// speakers-audible wake, so the first tick lands on the first REF block.
+    func setBTProbeTickActive(_ active: Bool)
 
     // MARK: First-mix intercept (W3)
 
@@ -8325,6 +8329,10 @@ extension NativeBackend: BTOutputControlling {
 
     public func setBTWizardTickActive(_ active: Bool) {
         captureCoordinator?.setAlignTickMode(active ? .wizard : .off)
+    }
+
+    public func setBTProbeTickActive(_ active: Bool) {
+        captureCoordinator?.setAlignTickMode(active ? .probe : .off)
     }
 
     public func resolveBTAlignmentPrompt(forDevice id: String, dismissed: Bool) {

@@ -379,11 +379,26 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         railOverlay.dormant = dormant
         railOverlay.originSection = cardsByHeader[originCardTitle]
         if let cutSubsectionTitle, let subsection = subsectionBodies[cutSubsectionTitle]?.rail {
+            // A collapsed device SUBSECTION whose rows the controller has DROPPED
+            // from the model — the hidden device is gone from `deviceRows`, so the
+            // overlay can't judge the cut from the stops and is told to cut here.
             railOverlay.deviceSection = subsection
+            railOverlay.deviceSectionRowsDropped = true
         } else {
+            // The device CARD: its rows stay in `deviceRows` (clipped by the fold),
+            // so the overlay judges the cut from the clipped rows themselves — that
+            // is what keeps a card collapse from running the rail past its lowest
+            // member down through the non-member rows it is still hiding.
             railOverlay.deviceSection = cardsByHeader[deviceCardTitle]
+            railOverlay.deviceSectionRowsDropped = false
         }
         railOverlay.needsDisplay = true
+    }
+
+    /// The controller's model-event → overlay bridge for the connect pulse;
+    /// geometry keeps flowing through `setRailRows`.
+    func playRailConnectPulse(joinedDeviceIDs: Set<String>, cameToLife: Bool) {
+        railOverlay.playConnectPulse(joinedDeviceIDs: joinedDeviceIDs, cameToLife: cameToLife)
     }
 
     // MARK: Exact-fit sizing (T-3)

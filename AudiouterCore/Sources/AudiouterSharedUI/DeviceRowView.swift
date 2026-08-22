@@ -2922,6 +2922,7 @@ public final class DeviceRowView: NSView {
 extension DeviceRowView: RailNodeProviding {
     /// The node this row renders, or `nil` when it hosts no bus.
     public var railNode: MembershipBusView.Node? { busActive ? busView.test_node : nil }
+    public var railDeviceID: String? { device.id }
     /// The node is centred on the row's own centre-y.
     public var railNodeView: NSView { self }
     public var railNodeBounds: NSRect { bounds }

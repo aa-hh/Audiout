@@ -43,8 +43,26 @@ struct RemoteSettingsView: View {
         _stagedBufferMs = State(initialValue: previewStagedBufferMs)
     }
 
+    #if DEBUG
+    // razor: spike-only entry point (dev/notes/bt-autocal-spike-spec.md).
+    // Delete this section and AlignmentProbeDebugView.swift once the BT
+    // auto-cal feature either graduates to a real surface or is dropped.
+    private var alignmentProbeSection: some View {
+        Section {
+            NavigationLink("BT Auto-Cal Probe") {
+                AlignmentProbeDebugView(session: session)
+            }
+        } footer: {
+            Text("Spike debug tool — records with the microphone to measure a Bluetooth speaker's timing offset.")
+        }
+    }
+    #endif
+
     var body: some View {
         Form {
+            #if DEBUG
+            alignmentProbeSection
+            #endif
             if let snapshot = session.snapshot {
                 connectVolumeSection(snapshot)
                 bufferSection(snapshot)

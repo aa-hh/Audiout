@@ -68,4 +68,10 @@ protocol MacSessionProtocol: AnyObject {
 
     func setConnectVolume(_ volume: Int, isFinal: Bool)
     func setStartBufferMs(_ ms: Int)
+
+    // MARK: BT auto-cal spike (debug-only; dev/notes/bt-autocal-spike-spec.md)
+
+    func startAlignmentProbe(targetDeviceID: String, referenceDeviceID: String?)
+    func cancelAlignmentProbe()
+    func submitProbeResult(targetDeviceID: String, offsetMs: Double, spreadMs: Double, confident: Bool)
 }

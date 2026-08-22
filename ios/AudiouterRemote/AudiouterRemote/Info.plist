@@ -8,5 +8,7 @@
 	<array>
 		<string>_audiouter._tcp</string>
 	</array>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>The microphone measures the timing of your speakers during sync auto-alignment.</string>
 </dict>
 </plist>

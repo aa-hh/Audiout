@@ -514,6 +514,13 @@ public final class PopoverController: NSObject {
     /// How long the live-removal offer stands before it retires itself.
     private static let removalUndoWindow: TimeInterval = 5
 
+    /// Cast fixed-volume (feed-gain) receivers whose fader is currently
+    /// holding the pending "not yet gold" tone, keyed by device id — HOST
+    /// state, mirroring the removal-undo idiom above. Each id's own timer
+    /// self-expires it after the measured stream lag.
+    private var castVolumePendingIDs: Set<String> = []
+    private var castVolumePendingTimers: [String: Timer] = [:]
+
     /// The mounted in-place refusal-note row per BLOCKED device id (spec §4.6):
     /// a body-click on a local-mix-blocked row toggles a one-line note carrying
     /// `GroupController.localMixRefusalReason` directly under it — the reachable
@@ -1776,6 +1783,33 @@ public final class PopoverController: NSObject {
         removalUndoDeviceID = nil
     }
 
+    /// Raise (or re-arm) the Cast feed-gain pending fill on `id`'s fader after
+    /// a volume/mute gesture, for the measured stream lag. A continuous drag
+    /// re-arms the timer on every tick, so `refreshDeviceRows()` only runs on
+    /// the id's FIRST insertion, not every re-arm.
+    private func raiseCastVolumePending(for id: String) {
+        guard let device = devicesByID[id], device.isCast,
+              let lag = device.castVolumeLagSeconds,
+              device.connectionState == .connected else { return }
+        castVolumePendingTimers[id]?.invalidate()
+        castVolumePendingTimers[id] = Timer.scheduledTimer(withTimeInterval: TimeInterval(max(1, lag)),
+                                                            repeats: false) { [weak self] _ in
+            self?.expireCastVolumePending(for: id)
+        }
+        if castVolumePendingIDs.insert(id).inserted {
+            refreshDeviceRows()
+        }
+    }
+
+    /// The timer's end of the pending fill: drop it, then repaint so the
+    /// fader returns to gold.
+    private func expireCastVolumePending(for id: String) {
+        castVolumePendingIDs.remove(id)
+        castVolumePendingTimers[id]?.invalidate()
+        castVolumePendingTimers[id] = nil
+        refreshDeviceRows()
+    }
+
     /// Live Reduce Motion value, overridable for headless determinism.
     private var reduceMotionActive: Bool {
         test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
@@ -2027,7 +2061,12 @@ public final class PopoverController: NSObject {
                   // The offer stands only while the device is genuinely OUT —
                   // re-joining the mix (undo, or a re-select from anywhere)
                   // withdraws it without needing its own edge to watch.
-                  removalUndoOffered: removalUndoDeviceID == device.id && !selected)
+                  removalUndoOffered: removalUndoDeviceID == device.id && !selected,
+                  // A stale id (device no longer Cast/lagged) renders nothing;
+                  // its own timer self-expires it — no pruning machinery needed.
+                  volumePendingApply: castVolumePendingIDs.contains(device.id)
+                      && device.castVolumeLagSeconds != nil
+                      && device.connectionState == .connected)
     }
 
     /// A Bluetooth row's current SYNC trim: the session cache first (the
@@ -3294,6 +3333,13 @@ public final class PopoverController: NSObject {
     /// Fire the offer's retirement timer now (headless runs don't wait 5 s).
     public func test_expireRemovalUndo() { expireRemovalUndo() }
 
+    /// The Cast fixed-volume receivers currently holding the pending fader fill.
+    public var test_castVolumePendingIDs: Set<String> { castVolumePendingIDs }
+
+    /// Fire a given id's pending-fill retirement timer now (headless runs
+    /// don't wait for the measured lag).
+    public func test_expireCastVolumePending(for id: String) { expireCastVolumePending(for: id) }
+
     /// Force a specific pending set + repaint — the snapshot harness stages a
     /// frozen mid-sequence frame with it (bypassing the async connection
     /// progression that a headless MockBackend never plays).
@@ -3431,6 +3477,7 @@ extension PopoverController: DeviceRowView.Delegate {
     public func deviceRow(_ row: DeviceRowView, didSetVolume volume: Int, for id: String) {
         groupController?.setMemberVolume(volume, for: id)
         refreshMainOutRow()
+        raiseCastVolumePending(for: id)
     }
 
     public func deviceRow(_ row: DeviceRowView, didToggleMute muted: Bool, for id: String) {
@@ -3439,6 +3486,7 @@ extension PopoverController: DeviceRowView.Delegate {
         // refresh those glyphs live.
         refreshDeviceRows()
         refreshMainOutRow()
+        raiseCastVolumePending(for: id)
     }
 
     public func deviceRow(_ row: DeviceRowView, didToggleEnabled on: Bool, for id: String) {
@@ -4005,6 +4053,10 @@ extension PopoverController: AppRowView.Delegate {
         selectedAppBundleID = nil
         // The live-removal offer never outlives the surface it was made on.
         clearRemovalUndo()
+        // Nor does the Cast feed-gain pending fill.
+        for timer in castVolumePendingTimers.values { timer.invalidate() }
+        castVolumePendingTimers.removeAll()
+        castVolumePendingIDs.removeAll()
         for row in deviceRowsByID.values { row.resetLevel() }
         mainOutRow.resetLevel()
         for row in appRowsByBundleID.values { row.resetLevel() }

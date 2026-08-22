@@ -32,12 +32,14 @@ import Foundation
 /// writes `requested`, the IOProc only ever writes `applied` — so neither needs
 /// a lock or an atomic.
 ///
-/// **Not wired to anything yet.** Phase (i) ships this built and tested; Phase
-/// (ii) is what puts it in the capture path.
+/// **Inert until a Cast device is selected.** Phase (ii) wires it into the
+/// capture fan-out as an OPTIONAL ``NativeCaptureCoordinator`` slot that stays
+/// `nil` — with no Cast device in the mix nothing constructs a line at all, so
+/// the AirPlay path costs one nil check and is byte-for-byte what it was.
 ///
 /// razor: stereo S16LE only, and no drop/underrun counters. Both are what the
-/// one future caller feeds it; widening to N channels or adding observability
-/// is a Phase (ii) job, when there is a caller to observe.
+/// one caller feeds it; widening to N channels or adding observability is a
+/// job for whoever first needs to observe it.
 final class PCMDelayLine {
 
     /// Interleaved stereo Int16: 2 samples, 4 bytes.
@@ -90,6 +92,23 @@ final class PCMDelayLine {
     func setDelayFrames(_ frames: Int) {
         requestedDelayFrames.pointee = max(0, frames)
         OSMemoryBarrier()                       // release: publish before the IOProc's acquire
+    }
+
+    /// Value-returning twin of ``exchange(_:)``, for the caller that must keep
+    /// its own undelayed block (the capture fan-out hands the SAME buffer to
+    /// three more consumers after the engine write, each with its own delay).
+    /// IOProc ONLY.
+    ///
+    /// razor: one `Data` copy per block while the line is live. That cost is
+    /// only ever paid with a Cast device selected — the bypass is a `nil` line,
+    /// not a zero delay, so the no-Cast path never reaches here. If a live Cast
+    /// mix ever shows it on the IOProc's budget, the upgrade is a preallocated
+    /// scratch handed back as `Data(bytesNoCopy:)`, which is safe because the
+    /// engine copies synchronously before enqueue.
+    func exchange(_ pcm: Data) -> Data {
+        var delayed = pcm
+        exchange(&delayed)
+        return delayed
     }
 
     /// Swap `pcm`'s live frames for the frames that entered the line `delay`

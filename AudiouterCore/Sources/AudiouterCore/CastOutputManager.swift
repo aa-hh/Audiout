@@ -26,6 +26,12 @@ enum CastSessionFailure: Equatable, Sendable {
 /// a socket.
 protocol CastOutputControlling: AnyObject, Sendable {
     var onStateChange: (@Sendable (_ deviceID: String, _ state: CastSessionState) -> Void)? { get set }
+    /// Measured Cast stream lag in whole seconds, non-nil ONLY while a
+    /// fixed-volume (feed-gain) receiver is playing — non-nil means
+    /// volume/mute are applied inside the audio feed and land ~this many
+    /// seconds later. Always `nil` for attenuation receivers and stopped
+    /// sessions.
+    var onVolumeLagChange: (@Sendable (_ deviceID: String, _ lagSeconds: Int?) -> Void)? { get set }
     /// The capture fan-out slot: every whole-system buffer written here is
     /// copied into each desired receiver's feed ring.
     var feed: PCMSink { get }
@@ -209,8 +215,10 @@ final class CastFanOut: PCMSink, @unchecked Sendable {
 /// longer matches its session belongs to a torn-down attempt and is dropped.
 final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
 
-    /// How long a receiver gets to reach PLAYING before the session fails.
-    private static let playDeadline: TimeInterval = 15
+    /// How long a receiver gets to reach PLAYING before the session fails —
+    /// and how long again from the moment its fetch starts. A Google TV
+    /// Streamer has been measured issuing the GET 12 s after PLAY.
+    static let defaultPlayDeadline: TimeInterval = 20
     /// Audio handed over up front, so the receiver's buffer target is met by
     /// bytes rather than by waiting. Silence, because the ring is reset by the
     /// GET that asks for it — the join gap is silent by design.
@@ -220,6 +228,7 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
     private let streamHostOverride: String?
     private let requestTimeout: TimeInterval
     private let reconnectDelay: TimeInterval
+    private let playDeadline: TimeInterval
     private let queue = DispatchQueue(label: "CastOutputManager")
     private let fanOut = CastFanOut()
 
@@ -227,6 +236,7 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
     /// own queue while a session completion may be reading it on ``queue``.
     private let stateLock = NSLock()
     private var _onStateChange: (@Sendable (String, CastSessionState) -> Void)?
+    private var _onVolumeLagChange: (@Sendable (String, Int?) -> Void)?
 
     /// Queue-confined.
     private var sessions: [String: Session] = [:]
@@ -242,17 +252,24 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         serverBindsLoopbackOnly: Bool = false,
         streamHostOverride: String? = nil,
         requestTimeout: TimeInterval = 10,
-        reconnectDelay: TimeInterval = 2
+        reconnectDelay: TimeInterval = 2,
+        playDeadline: TimeInterval = CastOutputManager.defaultPlayDeadline
     ) {
         self.serverBindsLoopbackOnly = serverBindsLoopbackOnly
         self.streamHostOverride = streamHostOverride
         self.requestTimeout = requestTimeout
         self.reconnectDelay = reconnectDelay
+        self.playDeadline = playDeadline
     }
 
     var onStateChange: (@Sendable (String, CastSessionState) -> Void)? {
         get { stateLock.withLock { _onStateChange } }
         set { stateLock.withLock { _onStateChange = newValue } }
+    }
+
+    var onVolumeLagChange: (@Sendable (String, Int?) -> Void)? {
+        get { stateLock.withLock { _onVolumeLagChange } }
+        set { stateLock.withLock { _onVolumeLagChange = newValue } }
     }
 
     var feed: PCMSink { fanOut }
@@ -281,6 +298,9 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         /// `fixed` receivers ignore `SET_VOLUME`; their level is carried by
         /// the feed's gain instead.
         var volumeControlIsFixed = false
+        /// Last lag value reported via `onVolumeLagChange`, so `handle(_:id:generation:)`
+        /// only fires on a genuine change.
+        var reportedLagSeconds: Int?
         /// Only the FIRST GET is logged — the interesting fact is whether the
         /// receiver ever reached the server at all.
         var loggedHTTPRequest = false
@@ -412,6 +432,9 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
                 guard let self, let session = self.live(id, generation), !session.loggedHTTPRequest else { return }
                 session.loggedHTTPRequest = true
                 Telemetry.log(.cast, "cast_http_request", ["device": id])
+                // A receiver that is fetching is demonstrably alive, so only
+                // the stretch from here to PLAYING is worth timing.
+                self.armPlayDeadline(session, id: id, generation: generation)
             }
         }
         session.server = server
@@ -460,12 +483,7 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
             self?.queue.async { self?.handle(status, id: id, generation: generation) }
         }
         if let level = session.requestedLevel { pushLevel(session, level) }
-        let deadline = DispatchWorkItem { [weak self] in
-            guard let self, let session = self.live(id, generation) else { return }
-            self.fail(session, CastError.timeout, stage: .media)
-        }
-        session.playDeadline = deadline
-        queue.asyncAfter(deadline: .now() + Self.playDeadline, execute: deadline)
+        armPlayDeadline(session, id: id, generation: generation)
         session.client?.load(url: url, contentType: "audio/wav", streamType: "LIVE", autoplay: false, app: app) { [weak self] result in
             self?.queue.async {
                 guard let self, let session = self.live(id, generation) else { return }
@@ -488,12 +506,31 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         }
     }
 
+    /// Fails the session unless PLAYING arrives within ``playDeadline``.
+    /// Replaces any pending one — the receiver's first GET restarts the clock.
+    private func armPlayDeadline(_ session: Session, id: String, generation: Int) {
+        session.playDeadline?.cancel()
+        let deadline = DispatchWorkItem { [weak self] in
+            guard let self, let session = self.live(id, generation) else { return }
+            self.fail(session, CastError.timeout, stage: .media)
+        }
+        session.playDeadline = deadline
+        queue.asyncAfter(deadline: .now() + playDeadline, execute: deadline)
+    }
+
     /// Every media status the receiver produces, solicited or not.
     private func handle(_ status: CastMediaStatus, id: String, generation: Int) {
         guard let session = live(id, generation) else { return }
         var lead = "nil"
         if status.playerState == "PLAYING", let time = status.currentTime, let sent = session.server?.secondsSent {
             lead = String(format: "%.2f", sent - time)
+            if session.volumeControlIsFixed {
+                let lagSeconds = Int(max(0, sent - time).rounded())
+                if lagSeconds != session.reportedLagSeconds {
+                    session.reportedLagSeconds = lagSeconds
+                    onVolumeLagChange?(id, lagSeconds)
+                }
+            }
         }
         Telemetry.log(.cast, "cast_media_status", ["device": id, "state": status.playerState, "lead_s": lead])
         if let media = status.mediaSessionID { session.mediaSessionID = media }
@@ -624,6 +661,10 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         session.controlReady = false
         session.wasPlaying = false
         session.generation += 1
+        if session.reportedLagSeconds != nil {
+            session.reportedLagSeconds = nil
+            onVolumeLagChange?(id, nil)
+        }
 
         let channel = session.channel
         let server = session.server

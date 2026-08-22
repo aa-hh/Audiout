@@ -56,6 +56,29 @@ import Testing
         #expect(line.delayFrames == 0)
     }
 
+    /// The value-returning twin the capture fan-out uses: the caller keeps its
+    /// own undelayed block (three more consumers read it after the engine
+    /// write) and gets the delayed one back, with identical semantics.
+    @Test func returningExchangeLeavesTheCallersBlockAlone() {
+        let inPlace = PCMDelayLine(capacityFrames: 8192)
+        let returning = PCMDelayLine(capacityFrames: 8192)
+        inPlace.setDelayFrames(1000)
+        returning.setDelayFrames(1000)
+
+        for block in 0..<30 {
+            let input = ramp(fromFrame: block * 512, frames: 512)
+            var mutated = input
+            inPlace.exchange(&mutated)
+            let returned = returning.exchange(input)
+            #expect(returned == mutated, "block \(block): both forms must emit the same audio")
+        }
+        // The caller's own copy is untouched — that is the whole reason this
+        // form exists.
+        let live = ramp(fromFrame: 30 * 512, frames: 512)
+        _ = returning.exchange(live)
+        #expect(live == ramp(fromFrame: 30 * 512, frames: 512))
+    }
+
     @Test func cadenceIsPreserved() {
         let line = PCMDelayLine(capacityFrames: 8192)
         line.setDelayFrames(1000)

@@ -32,6 +32,11 @@ public final class FakeCastReceiver: @unchecked Sendable {
     /// to the TV remote" — the sender is expected to attenuate the feed
     /// instead, and this fake exists to let that split be tested.
     private let controlType: String
+    /// How long the receiver sits on a LOAD before it issues the GET. Real
+    /// receivers have been measured taking 12 s over it; while a delayed fetch
+    /// is outstanding this fake answers PLAY still BUFFERING, the way hardware
+    /// does. `0` fetches immediately and answers PLAY with PLAYING.
+    private let fetchDelay: TimeInterval
     private let queue = DispatchQueue(label: "FakeCastReceiver")
 
     /// Lock-guarded rather than `queue.sync`-guarded: a test reads this from
@@ -71,9 +76,14 @@ public final class FakeCastReceiver: @unchecked Sendable {
         init(connection: NWConnection) { self.connection = connection }
     }
 
-    public init(fetchBytes: Int = 65_536, controlType: String = "attenuation") {
+    public init(
+        fetchBytes: Int = 65_536,
+        controlType: String = "attenuation",
+        fetchDelay: TimeInterval = 0
+    ) {
         self.fetchBytes = fetchBytes
         self.controlType = controlType
+        self.fetchDelay = fetchDelay
     }
 
     public var pongCount: Int { stateLock.withLock { _pongCount } }
@@ -315,12 +325,22 @@ public final class FakeCastReceiver: @unchecked Sendable {
             idleReason = nil
             reply(to: message, on: session, payload: mediaStatusPayload(), requestID: requestID)
             let contentID = (json["media"] as? [String: Any])?["contentId"] as? String
-            startFetch(contentID: contentID, message: message, session: session)
+            guard fetchDelay > 0 else {
+                startFetch(contentID: contentID, message: message, session: session)
+                return
+            }
+            queue.asyncAfter(deadline: .now() + fetchDelay) { [weak self] in
+                self?.startFetch(contentID: contentID, message: message, session: session)
+            }
             return
         case "PAUSE":
             playerState = "PAUSED"
         case "PLAY":
-            playerState = "PLAYING"
+            // A receiver whose GET has not landed yet is still BUFFERING when
+            // PLAY arrives; it reports PLAYING once the stream reaches it, which
+            // the fetch below already does. Once the fetch HAS completed,
+            // `playerState` is PLAYING and this leaves it there.
+            if fetchDelay == 0 { playerState = "PLAYING" }
         case "STOP":
             // Same reason the receiver-namespace STOP cancels: a fetch left
             // running would still reach `fetchBytes` and flip the stopped

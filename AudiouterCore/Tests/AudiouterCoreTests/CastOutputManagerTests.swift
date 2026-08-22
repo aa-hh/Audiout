@@ -43,6 +43,14 @@ import Testing
         func contains(_ state: CastSessionState) -> Bool { lock.withLock { states.contains(state) } }
     }
 
+    /// Every `onVolumeLagChange` report, in order.
+    private final class LagLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var values: [Int?] = []
+        func append(_ value: Int?) { lock.withLock { values.append(value) } }
+        var all: [Int?] { lock.withLock { values } }
+    }
+
     private func waitUntil(timeout: TimeInterval, _ condition: () -> Bool) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
@@ -57,9 +65,10 @@ import Testing
     @available(macOS 15, *)
     private func startFake(
         fetchBytes: Int = 16_384,
-        controlType: String = "attenuation"
+        controlType: String = "attenuation",
+        fetchDelay: TimeInterval = 0
     ) throws -> (fake: FakeCastReceiver, endpoint: NWEndpoint) {
-        let fake = FakeCastReceiver(fetchBytes: fetchBytes, controlType: controlType)
+        let fake = FakeCastReceiver(fetchBytes: fetchBytes, controlType: controlType, fetchDelay: fetchDelay)
         let box = Box<NWEndpoint>()
         fake.start { result in
             if case .success(let endpoint) = result { box.set(endpoint) }
@@ -68,12 +77,13 @@ import Testing
         return (fake, try #require(box.value))
     }
 
-    private func makeManager() -> CastOutputManager {
+    private func makeManager(playDeadline: TimeInterval = CastOutputManager.defaultPlayDeadline) -> CastOutputManager {
         CastOutputManager(
             serverBindsLoopbackOnly: true,
             streamHostOverride: "127.0.0.1",
             requestTimeout: 3,
-            reconnectDelay: 0.1
+            reconnectDelay: 0.1,
+            playDeadline: playDeadline
         )
     }
 
@@ -334,6 +344,111 @@ import Testing
                 "the receiver was never sent SET_VOLUME")
         let ring = try #require(manager.test_ring(forDevice: "dev1"))
         #expect(ring.gainTarget == 1, Comment(rawValue: "the feed was attenuated as well (gain \(ring.gainTarget))"))
+    }
+
+    @Test func aReceiverThatNeverFetchesTimesOut() throws {
+        guard #available(macOS 15, *) else { return }
+        // Three times the deadline: the GET never lands inside this test.
+        let (fake, endpoint) = try startFake(fetchDelay: 3)
+        defer { fake.stop() }
+        let manager = makeManager(playDeadline: 1)
+        defer { manager.stopAll() }
+        let log = watch(manager, deviceID: "dev1")
+        manager.setDevices([record(endpoint)])
+
+        #expect(waitUntil(timeout: 10) { log.last == .failed(.timedOut) },
+                Comment(rawValue: "expected a play-deadline timeout, saw \(log.all)"))
+    }
+
+    @Test func aSlowFetchRearmsThePlayDeadline() throws {
+        guard #available(macOS 15, *) else { return }
+        // The live regression (Google TV Streamer, 2026-08-22): the GET arrived
+        // 12.2 s after PLAY, the receiver went BUFFERING, and the 15 s deadline
+        // killed it ~2 s short of PLAYING. Scaled down here: the GET lands 4 s
+        // in, and "enough to play" — the header, the 1 s prime, then 2 s of
+        // real-time stream — only ~2 s after that. That is past the 5 s
+        // deadline armed at LAUNCH, and well inside the one the GET re-arms.
+        let (fake, endpoint) = try startFake(fetchBytes: 176_444 + 2 * 176_400, fetchDelay: 4)
+        defer { fake.stop() }
+        let manager = makeManager(playDeadline: 5)
+        defer { manager.stopAll() }
+        let log = watch(manager, deviceID: "dev1")
+        manager.setDevices([record(endpoint)])
+
+        #expect(waitUntil(timeout: 20) { log.contains(.playing) },
+                Comment(rawValue: "the slow fetch never reached PLAYING, saw \(log.all)"))
+        #expect(!log.contains(.failed(.timedOut)),
+                Comment(rawValue: "the deadline was not re-armed by the fetch, saw \(log.all)"))
+    }
+
+    @Test func fixedReceiverReportsVolumeLagThenNilOnDeselect() throws {
+        guard #available(macOS 15, *) else { return }
+        let (fake, endpoint) = try startFake(controlType: "fixed")
+        defer { fake.stop() }
+        let manager = makeManager()
+        defer { manager.stopAll() }
+        let log = watch(manager, deviceID: "dev1")
+        let lagLog = LagLog()
+        manager.onVolumeLagChange = { id, lag in
+            guard id == "dev1" else { return }
+            lagLog.append(lag)
+        }
+
+        // Keep the ring fed in real time so `secondsSent` keeps advancing past
+        // the fake's fixed `currentTime: 0` — the same real-time feed the
+        // streaming test above uses, so the measured lead has something to
+        // grow from instead of plateauing after the initial prime.
+        let feed = manager.feed
+        let writer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "CastOutputManagerTests.lagFeed"))
+        writer.schedule(deadline: .now(), repeating: 0.020)
+        let block = tone(frames: 882)
+        writer.setEventHandler { feed.write(pcm: block, pts: timespec(tv_sec: 0, tv_nsec: 0)) }
+        writer.resume()
+        defer { writer.cancel() }
+
+        manager.setDevices([record(endpoint)])
+        try #require(waitUntil(timeout: 10) { log.contains(.playing) },
+                     Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
+
+        // The poll is 1 Hz, so budget generously for the first non-nil report.
+        try #require(waitUntil(timeout: 15) { lagLog.all.contains { $0 != nil } },
+                     Comment(rawValue: "never reported a non-nil lag, saw \(lagLog.all)"))
+
+        manager.setDevices([])
+        #expect(waitUntil(timeout: 5) { lagLog.all.last == .some(nil) },
+                Comment(rawValue: "never reported nil on deselect, saw \(lagLog.all)"))
+    }
+
+    @Test func attenuationReceiverNeverReportsVolumeLag() throws {
+        guard #available(macOS 15, *) else { return }
+        let (fake, endpoint) = try startFake()
+        defer { fake.stop() }
+        let manager = makeManager()
+        defer { manager.stopAll() }
+        let log = watch(manager, deviceID: "dev1")
+        let lagLog = LagLog()
+        manager.onVolumeLagChange = { id, lag in
+            guard id == "dev1" else { return }
+            lagLog.append(lag)
+        }
+
+        let feed = manager.feed
+        let writer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "CastOutputManagerTests.lagFeedAttenuation"))
+        writer.schedule(deadline: .now(), repeating: 0.020)
+        let block = tone(frames: 882)
+        writer.setEventHandler { feed.write(pcm: block, pts: timespec(tv_sec: 0, tv_nsec: 0)) }
+        writer.resume()
+        defer { writer.cancel() }
+
+        manager.setDevices([record(endpoint)])
+        try #require(waitUntil(timeout: 10) { log.contains(.playing) },
+                     Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
+
+        // A further wait past PLAYING covers at least two status polls with
+        // no report ever firing.
+        Thread.sleep(forTimeInterval: 2.5)
+        #expect(lagLog.all.isEmpty,
+                Comment(rawValue: "an attenuation receiver reported a volume lag: \(lagLog.all)"))
     }
 
     @Test func fixedReceiverGainRampsWithoutZipper() {

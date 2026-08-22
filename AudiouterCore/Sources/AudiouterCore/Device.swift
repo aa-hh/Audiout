@@ -111,6 +111,13 @@ public struct Device: Identifiable, Equatable, Sendable {
     /// set).
     public var connectionState: ConnectionState
 
+    /// Measured Cast stream lag in whole seconds, non-nil ONLY while a
+    /// fixed-volume (feed-gain) Cast receiver is playing — non-nil means
+    /// volume/mute are applied inside the audio feed and land ~this many
+    /// seconds later. Always `nil` for attenuation receivers, non-Cast
+    /// devices, and stopped sessions.
+    public var castVolumeLagSeconds: Int?
+
     public init(
         id: String,
         name: String,
@@ -121,7 +128,8 @@ public struct Device: Identifiable, Equatable, Sendable {
         isMuted: Bool = false,
         isSelected: Bool = false,
         isLocalDevice: Bool = false,
-        connectionState: ConnectionState = .off
+        connectionState: ConnectionState = .off,
+        castVolumeLagSeconds: Int? = nil
     ) {
         self.id = id
         self.name = name
@@ -133,6 +141,7 @@ public struct Device: Identifiable, Equatable, Sendable {
         self.isSelected = isSelected
         self.isLocalDevice = isLocalDevice
         self.connectionState = connectionState
+        self.castVolumeLagSeconds = castVolumeLagSeconds
     }
 }
 

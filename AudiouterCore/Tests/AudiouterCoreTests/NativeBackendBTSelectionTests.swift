@@ -131,6 +131,10 @@ import CoreAudio
         func setAlignTick(_ active: Bool) {
             lock.withLock { _ops.append(active ? "tickOn" : "tickOff") }
         }
+        /// CAST-SYNC: every AirPlay pre-delay the backend asks for, in order.
+        private var _preDelayMs: [Int] = []
+        func setAirPlayPreDelay(ms: Int) { lock.withLock { _preDelayMs.append(ms) } }
+        var preDelayMs: [Int] { lock.withLock { _preDelayMs } }
         var ops: [String] { lock.withLock { _ops } }
     }
 
@@ -142,6 +146,18 @@ import CoreAudio
                    onTermination: @escaping @Sendable () -> Void) throws {}
         func stop() {}
         var isRunning: Bool { false }
+    }
+
+    /// The Mac's own membership, flipped mid-test: `setOutputSet` reads it
+    /// through `selectedDevicesQuery` (the local device has no engine handle,
+    /// so it is never in the output set itself), and that read happens on the
+    /// backend's own queue — hence the lock.
+    private final class LockedBool: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Bool
+        init(_ value: Bool) { self.value = value }
+        func get() -> Bool { lock.withLock { value } }
+        func set(_ v: Bool) { lock.withLock { value = v } }
     }
 
     /// A `BTSyncedSinkControlling` spy recording every call, in order.
@@ -797,6 +813,47 @@ import CoreAudio
         waitFor { sink.compositions.last?.airPlayPresent == true }
         #expect(backend.localSinkReferenceDelayMs() == backend.startBufferMs,
                 "AirPlay joining moves the local reference back to the start-buffer")
+    }
+
+    // MARK: - CAST-SYNC: the timeline stays inert without a Cast device
+
+    /// The Bluetooth half of the Phase (ii) invariant: across BT-only, BT+Mac
+    /// and AirPlay+BT, every composition the backend publishes carries
+    /// `castPresent == false` and no AirPlay pre-delay is ever installed — so
+    /// each sink's reference is the number it was before Cast existed.
+    @Test func noCastSelectionLeavesEveryCompositionCastFree() {
+        let (backend, engine, discovery, bt, sink, capture) = makeBackend()
+        defer { backend.stop() }
+        let macSelected = LockedBool(false)
+        backend.selectedDevicesQuery = { id in
+            id == NativeBackend.localDeviceID ? macSelected.get() : false
+        }
+        backend.start()
+        let ap = ap2Device()
+        discovery.fire(.appeared(ap))
+        bt.fire([btMove])
+        waitFor { self.device(backend, ap.id) != nil && self.device(backend, self.btMove.id) != nil }
+        waitFor { engine.fedIDs.contains(ap.outputID) }
+
+        backend.setOutputSet([btMove.id])
+        waitFor { sink.calls.contains("start") }
+        // The Mac's membership comes from `selectedDevicesQuery`, not from the
+        // output set — the local device has no engine handle, so `GroupController`
+        // strips it out before the set ever gets here.
+        macSelected.set(true)
+        backend.setOutputSet([btMove.id])
+        waitFor { sink.compositions.last?.macLocalPresent == true }
+        macSelected.set(false)
+        backend.setOutputSet([btMove.id, ap.id])
+        waitFor { sink.compositions.last?.airPlayPresent == true }
+
+        #expect(sink.compositions.count >= 3, "all three compositions must have been published")
+        #expect(sink.compositions.allSatisfy { $0.castPresent == false },
+                "no Cast id selected ⇒ no composition claims a Cast device")
+        #expect(sink.compositions.allSatisfy { $0.usesPresentationReference == $0.airPlayPresent },
+                "so the widened reference predicate reduces to today's airPlayPresent")
+        #expect(capture.preDelayMs.allSatisfy { $0 == 0 },
+                "and the AirPlay feed is never held back, got \(capture.preDelayMs)")
     }
 
     // MARK: - BT volume/mute (composed sink gain, `Main × Group × Device`)

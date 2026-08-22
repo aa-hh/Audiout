@@ -68,6 +68,17 @@ public final class WarmFaderCell: NSSliderCell {
         }
     }
 
+    /// Whether the owning row's volume/mute gesture is still pending its
+    /// feed-gain apply moment (Cast fixed-volume receivers only — the row
+    /// re-stamps this on every `apply`). While true, the engaged fill holds
+    /// flat at the gradient's ember-blended "dim end" tone instead of drawing
+    /// the gold gradient — the "not yet landed" signal.
+    public var isPendingApply: Bool = false {
+        didSet {
+            if isPendingApply != oldValue { controlView?.needsDisplay = true }
+        }
+    }
+
     // MARK: Drawing
 
     public override func drawBar(inside rect: NSRect, flipped: Bool) {
@@ -114,7 +125,13 @@ public final class WarmFaderCell: NSSliderCell {
                 let dimEnd = Tokens.Color.ember
                     .blended(withFraction: Self.armedDimEndGoldBlend,
                              of: Tokens.Color.gold) ?? Tokens.Color.ember
-                if let gradient = NSGradient(starting: dimEnd,
+                if isPendingApply {
+                    // Pending Cast feed-gain apply: hold the fill flat at the
+                    // gradient's ember-blended tone instead of the gold
+                    // gradient — the command hasn't landed yet.
+                    dimEnd.setFill()
+                    fillRect.fill()
+                } else if let gradient = NSGradient(starting: dimEnd,
                                              ending: Tokens.Color.gold) {
                     let leftToRight = fillRect.minX == track.minX
                     gradient.draw(in: fillRect, angle: leftToRight ? 0 : 180)
@@ -237,4 +254,5 @@ public final class WarmFaderCell: NSSliderCell {
     /// armed ∧ enabled, the exact gate `drawBar` uses, so tests can't drift
     /// from the pixels.
     public var test_isEngagedFill: Bool { isRouteArmed && isEnabled }
+    public var test_isPendingFill: Bool { isPendingApply && isRouteArmed && isEnabled }
 }

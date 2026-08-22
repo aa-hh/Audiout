@@ -1643,6 +1643,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             castOutputManager.onStateChange = { [weak self] id, state in
                 self?.stateQueue.async { self?.applyCastSessionState(id, state) }
             }
+            castOutputManager.onVolumeLagChange = { [weak self] id, lag in
+                self?.stateQueue.async { self?.applyCastVolumeLag(id, lag) }
+            }
         }
 
         // 1b. TWO-WAY SYNC for the local row. Its slider/mute ARE the Mac's default
@@ -1977,6 +1980,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         castEnumerator?.onSnapshot = nil
         castEnumerator?.stop()
         castOutputManager?.onStateChange = nil
+        castOutputManager?.onVolumeLagChange = nil
         // Drop the local row's two-way sync (the row itself is removed below).
         systemVolume.onExternalChange = nil
         systemVolume.stop()
@@ -2695,7 +2699,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 airPlayPresent: ids.contains {
                     self.known[$0].map { !$0.isBluetooth && !$0.isLocalDevice } == true
                 },
-                macLocalPresent: macSelected)
+                macLocalPresent: macSelected,
+                castPresent: ids.contains { self.known[$0]?.isCast == true })
 
             // W3 — the first-mix alignment intercept. The trigger is exactly
             // the locked spec's: a BT id in a MIX (any other member — another
@@ -2941,6 +2946,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Fold one `CastOutputManager` session state into the row (CAST-OUT). The
     /// manager knows nothing about rows; this is the only place a Cast session
     /// becomes a `ConnectionState`. On `stateQueue`.
+    private func applyCastVolumeLag(_ id: String, _ lagSeconds: Int?) {   // on stateQueue
+        guard var device = known[id], device.isCast, device.castVolumeLagSeconds != lagSeconds else { return }
+        device.castVolumeLagSeconds = lagSeconds
+        commitKnownDevice(id, device)
+    }
+
     private func applyCastSessionState(_ id: String, _ state: CastSessionState) {   // on stateQueue
         guard known[id]?.isCast == true else { return }
         let before = known[id]?.connectionState
@@ -5784,10 +5795,31 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// each BT speaker by `startBufferMs − btOnlyBufferMs` in that composition.
     func localSinkReferenceDelayMs() -> Int {
         stateQueue.sync {
-            (btSinkEnabled && !btComposition.airPlayPresent)
+            let today = (btSinkEnabled && !btComposition.airPlayPresent)
                 ? BTSyncedSink.defaultBTOnlyBufferMs : _startBufferMs
+            return _castTermMs.map { Swift.max(today, $0) } ?? today
         }
     }
+
+    /// The reference delay (ms) every Bluetooth sink renders on — the AirPlay
+    /// start buffer, raised to the Cast term when a Cast receiver is the
+    /// furthest-behind output in the room (sync architecture brief §3).
+    func btReferenceDelayMs() -> Int {
+        stateQueue.sync {
+            _castTermMs.map { Swift.max(_startBufferMs, $0) } ?? _startBufferMs
+        }
+    }
+
+    /// CAST-SYNC: how far behind live the furthest Cast receiver in the mix is
+    /// playing (ms), or `nil` when no Cast device is contributing a term — the
+    /// `max` reduction's absent operand, and the reason every delay above
+    /// reduces to today's number by construction rather than by a flag.
+    ///
+    /// razor: read-only for now. The room-delay controller that measures a
+    /// receiver's settled lead and writes this is the activation phase; until
+    /// it exists the term is `nil` on every path, which is exactly the state
+    /// the invariant needs.
+    private var _castTermMs: Int?
 
     /// Seed the initial value without triggering an apply (`makeBackend` only —
     /// the engine was just constructed with this same value in its config).
@@ -8542,6 +8574,13 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// ``NativeCaptureCoordinator`` provides the real one.
     func setCastSink(_ sink: PCMSink?, renderProcessPID: pid_t?)
 
+    /// CAST-SYNC: hold the AirPlay feed back by `ms` before the engine write,
+    /// so a Cast receiver playing seconds behind live can still be the room's
+    /// reference. `0` removes the line outright (the bypass is its absence, not
+    /// a zero delay). Default no-op; ``NativeCaptureCoordinator`` provides the
+    /// real one.
+    func setAirPlayPreDelay(ms: Int)
+
     /// Start/stop the align-by-ear tick mixed into the captured feed
     /// (BT-OFFSET-UI). Default no-op; ``NativeCaptureCoordinator`` provides
     /// the real one.
@@ -8570,6 +8609,8 @@ extension CaptureControlling {
     func setBTSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {}
     /// Default no-op (CAST-FANOUT), same posture.
     func setCastSink(_ sink: PCMSink?, renderProcessPID: pid_t?) {}
+    /// Default no-op (CAST-SYNC), same posture.
+    func setAirPlayPreDelay(ms: Int) {}
     /// Default no-op (BT-OFFSET-UI align tick), same posture.
     func setAlignTick(_ active: Bool) {}
     /// Default forwards to the flag-only seam so a fake recording plain

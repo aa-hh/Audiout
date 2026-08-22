@@ -47,6 +47,7 @@ import CoreAudio
     private final class FakeCastOutputManager: CastOutputControlling, @unchecked Sendable {
         private let lock = NSLock()
         private var _onStateChange: (@Sendable (String, CastSessionState) -> Void)?
+        private var _onVolumeLagChange: (@Sendable (String, Int?) -> Void)?
         private var _deviceSets: [[CastDeviceRecord]] = []
         private var _levels: [(level: Double, id: String)] = []
         private var _retries: [String] = []
@@ -57,6 +58,10 @@ import CoreAudio
         var onStateChange: (@Sendable (String, CastSessionState) -> Void)? {
             get { lock.withLock { _onStateChange } }
             set { lock.withLock { _onStateChange = newValue } }
+        }
+        var onVolumeLagChange: (@Sendable (String, Int?) -> Void)? {
+            get { lock.withLock { _onVolumeLagChange } }
+            set { lock.withLock { _onVolumeLagChange = newValue } }
         }
         var deviceSets: [[CastDeviceRecord]] { lock.withLock { _deviceSets } }
         var levels: [(level: Double, id: String)] { lock.withLock { _levels } }
@@ -71,6 +76,11 @@ import CoreAudio
         func fire(id: String, state: CastSessionState) {
             let handler = lock.withLock { _onStateChange }
             handler?(id, state)
+        }
+
+        func fireLag(id: String, lag: Int?) {
+            let handler = lock.withLock { _onVolumeLagChange }
+            handler?(id, lag)
         }
     }
 
@@ -367,6 +377,20 @@ import CoreAudio
         rig.manager.fire(id: Self.record.id, state: .failed(.dropped(nil)))
         waitFor { failureCause()?.cause == .droppedMidStream }
         #expect(failureCause()?.cause == .droppedMidStream)
+    }
+
+    @Test func volumeLagReachesTheDeviceAndClears() {
+        let rig = makeBackend()
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, Self.record.id) != nil }
+
+        rig.manager.fireLag(id: Self.record.id, lag: 6)
+        waitFor { Self.device(rig.backend, Self.record.id)?.castVolumeLagSeconds == 6 }
+        #expect(Self.device(rig.backend, Self.record.id)?.castVolumeLagSeconds == 6)
+
+        rig.manager.fireLag(id: Self.record.id, lag: nil)
+        waitFor { Self.device(rig.backend, Self.record.id)?.castVolumeLagSeconds == nil }
+        #expect(Self.device(rig.backend, Self.record.id)?.castVolumeLagSeconds == nil)
     }
 
     /// A receiver's first PLAYING can land after the user has already deselected

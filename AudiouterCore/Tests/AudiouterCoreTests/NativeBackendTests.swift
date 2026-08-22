@@ -997,6 +997,13 @@ private final class FakeCapture: CaptureControlling, @unchecked Sendable {
         let (handler, active) = lock.withLock { (_onLevel, _meteringActive) }
         if active { handler?(rms) }
     }
+    /// CAST-SYNC: every `setAirPlayPreDelay(ms:)` the backend issues, in order,
+    /// so a test can assert the AirPlay feed is never held back on a selection
+    /// with no Cast device in it.
+    private var _preDelayMs: [Int] = []
+    func setAirPlayPreDelay(ms: Int) { lock.withLock { _preDelayMs.append(ms) } }
+    var preDelayMs: [Int] { lock.withLock { _preDelayMs } }
+
     /// Fire `onStateChange` as the real coordinator would on a transition
     /// (T16, E10) — drives `NativeBackend.handleCaptureCoordinatorStateChange`
     /// with no real Core Audio tap in the loop.
@@ -3840,6 +3847,39 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         try? await Task.sleep(nanoseconds: 150_000_000)
         #expect(capture.ops == [], "passthrough (empty output set) must not run the tap")
         #expect(!(capture.isCapturing))
+    }
+
+    /// CAST-SYNC: with no Cast device anywhere in the selection the backend
+    /// must never install an AirPlay pre-delay — the timeline stays inert, so
+    /// the engine keeps receiving the capture feed the instant it is captured.
+    /// Driven across every AirPlay-side composition that ships today (the
+    /// Bluetooth ones are pinned in `NativeBackendBTSelectionTests`).
+    @Test func noCastSelectionNeverHoldsTheAirPlayFeedBack() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:5C", name: "Pre-delay Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        await pollUntil { backend.devices.contains { $0.isLocalDevice } }
+
+        // AirPlay only, then AirPlay + the Mac's own speakers, then Mac only,
+        // then nothing — the whole no-Cast half of the reduction table.
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+        backend.setOutputSet([device.id, NativeBackend.localDeviceID])
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        backend.setOutputSet([NativeBackend.localDeviceID])
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        backend.setOutputSet([])
+        await pollUntil { !capture.isCapturing }
+
+        #expect(capture.preDelayMs.allSatisfy { $0 == 0 },
+            "no Cast device selected ⇒ no AirPlay pre-delay is ever asked for, got \(capture.preDelayMs)")
     }
 
     /// Selecting a real AP2 output starts capture; deselecting stops it.

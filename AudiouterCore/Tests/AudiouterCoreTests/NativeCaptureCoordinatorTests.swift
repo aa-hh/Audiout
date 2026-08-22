@@ -1959,6 +1959,99 @@ extension SerializedSharedState {
         #expect(sink.forwarded.count == 8, "detaching must not disturb the engine's stream")
         #expect(castSpy.forwarded.count == 3, "and nothing more reaches a detached Cast slot")
     }
+
+    // MARK: - CAST-SYNC (the AirPlay pre-delay line)
+
+    /// THE Phase (ii) invariant: an AirPlay pre-delay of 0 is the ABSENCE of a
+    /// line, not a line set to zero, so the engine receives byte-for-byte and
+    /// pts-for-pts what it received before the seam existed. Two coordinators
+    /// are driven identically except that one has been told about both Cast
+    /// seams — `setAirPlayPreDelay(ms: 0)` and `setCastSink(nil, …)` — and
+    /// their forwarded sequences must be equal.
+    @Test func zeroAirPlayPreDelayLeavesTheForwardedSequenceIdentical() {
+        let tapA = FakeTap(), tapB = FakeTap()
+        let sinkA = SpySink(), sinkB = SpySink()
+        let coordinatorA = makeCoordinator(tap: tapA, sink: sinkA, converter: FakeConverter())
+        let coordinatorB = makeCoordinator(tap: tapB, sink: sinkB, converter: FakeConverter())
+
+        coordinatorB.setAirPlayPreDelay(ms: 0)
+        coordinatorB.setCastSink(nil, renderProcessPID: nil)
+        coordinatorA.start()
+        coordinatorB.start()
+
+        for i in 0..<200 {
+            let hostTime = UInt64(i + 1) * 10_000_000
+            tapA.pushBuffer(buffer(hostTime: hostTime))
+            tapB.pushBuffer(buffer(hostTime: hostTime))
+        }
+        waitFor { sinkA.forwarded.count == 200 }
+        waitFor { sinkB.forwarded.count == 200 }
+        #expect(sinkA.forwarded.count == 200)
+        #expect(sinkB.forwarded.count == 200)
+
+        #expect(sinkA.forwarded.map(\.pcm) == sinkB.forwarded.map(\.pcm),
+            "a zero pre-delay must not change one byte of what the engine sees")
+        // `timespec` is not `Equatable` — compare the two fields as Int pairs.
+        let ptsA = sinkA.forwarded.map { [Int($0.pts.tv_sec), Int($0.pts.tv_nsec)] }
+        let ptsB = sinkB.forwarded.map { [Int($0.pts.tv_sec), Int($0.pts.tv_nsec)] }
+        #expect(ptsA == ptsB, "nor one nanosecond of the pts it is handed")
+
+        #expect(tapA.creates == 1)
+        #expect(tapB.creates == 1, "and the pre-delay seam must never rebuild the tap")
+    }
+
+    /// The bypass is STRUCTURAL: the published snapshot carries no line at all
+    /// at 0 ms, one at a positive delay, and none again once the delay returns
+    /// to 0 — so the `if let` in `handleBuffer` has nothing to test against on
+    /// the path that ships today.
+    @Test func zeroAirPlayPreDelayPublishesNoLineAtAll() {
+        let tap = FakeTap()
+        let coordinator = makeCoordinator(tap: tap, sink: SpySink(), converter: FakeConverter())
+
+        #expect(coordinator.test_publishedAirPlayPreDelayInstalled == false,
+            "nothing installs a line until a Cast device asks for one")
+        coordinator.setAirPlayPreDelay(ms: 0)
+        #expect(coordinator.test_publishedAirPlayPreDelayInstalled == false,
+            "0 ms publishes nil, never an empty line")
+        coordinator.setAirPlayPreDelay(ms: 1)
+        #expect(coordinator.test_publishedAirPlayPreDelayInstalled == true)
+        coordinator.setAirPlayPreDelay(ms: 0)
+        #expect(coordinator.test_publishedAirPlayPreDelayInstalled == false,
+            "and dropping back to 0 restores the bypass at the very next buffer")
+    }
+
+    /// A live line moves AUDIO, never TIME: the engine keeps getting one block
+    /// per captured block, the same size, under the same live pts the fan-outs
+    /// see. (A rewound pts is the documented failure — the receiver would
+    /// schedule nothing.)
+    @Test func aLiveAirPlayPreDelayKeepsTheCadenceAndTheLivePts() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let castSpy = SpySink()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: FakeConverter())
+
+        coordinator.setCastSink(castSpy, renderProcessPID: getpid())
+        coordinator.setAirPlayPreDelay(ms: 1000)
+        coordinator.start()
+        for i in 0..<20 { tap.pushBuffer(buffer(hostTime: UInt64(i + 1) * 10_000_000)) }
+        waitFor { sink.forwarded.count == 20 }
+
+        #expect(sink.forwarded.count == 20, "one block out per block in")
+        #expect(castSpy.forwarded.count == 20)
+        #expect(sink.forwarded.map(\.pcm.count) == castSpy.forwarded.map(\.pcm.count),
+            "same frame count as the undelayed fan-out sees")
+        #expect(
+            sink.forwarded.map { [Int($0.pts.tv_sec), Int($0.pts.tv_nsec)] }
+                == castSpy.forwarded.map { [Int($0.pts.tv_sec), Int($0.pts.tv_nsec)] },
+            "the engine is handed the LIVE pts, only the samples are older")
+        // A 1 s delay at 44.1 kHz is far more than 20 four-frame blocks, so the
+        // engine is still being fed the line's start-up silence while the Cast
+        // fan-out gets the converter's real payload.
+        #expect(sink.forwarded.allSatisfy { $0.pcm.allSatisfy { $0 == 0 } },
+            "a freshly grown line emits silence, not replayed history")
+        #expect(castSpy.forwarded.allSatisfy { !$0.pcm.allSatisfy { $0 == 0 } },
+            "and the other consumers keep receiving the live audio")
+    }
     }
 }
 

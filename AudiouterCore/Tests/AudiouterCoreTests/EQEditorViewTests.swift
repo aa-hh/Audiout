@@ -13,11 +13,14 @@ import AppKit
 @MainActor
 @Suite struct EQEditorViewTests {
 
+    private let isolation = TestIsolation(owner: "EQEditorViewTests")
+
     /// A bare editor, no host pane — its own constraints are enough to lay
     /// it out once given a width, the same way `DeviceDetailViewTests`
     /// forces `AppSurfaceController.groupsDefaultContentSize` on the pane.
+    /// Backed by an isolated store so no test ever reads or writes `.standard`.
     private func makeHostedEditor(width: CGFloat = 300) -> EQEditorView {
-        let editor = EQEditorView()
+        let editor = EQEditorView(settings: AppSettings(defaults: isolation.isolatedDefaults))
         editor.widthAnchor.constraint(equalToConstant: width).isActive = true
         editor.layoutSubtreeIfNeeded()
         return editor
@@ -145,5 +148,163 @@ import AppKit
         #expect(editor.test_balanceCaptionFrame.width == editor.test_bassCaptionFrame.width)
         #expect(editor.test_balanceReadoutFrame.minX == editor.test_bassReadoutFrame.minX)
         #expect(editor.test_balanceReadoutFrame.width == editor.test_bassReadoutFrame.width)
+    }
+
+    /// The loudness row now holds the checkbox alone: Reset moved onto the
+    /// host's "Equalizer" title line. Half-point tolerance, no absolute
+    /// widths — the Groups-pane rounding grid varies per run.
+    @Test func loudnessRowIsTheCheckboxAlone() {
+        let editor = makeHostedEditor(width: 357)
+        #expect(abs(editor.test_loudnessCheckboxFrame.minX - editor.test_bassCaptionFrame.minX) <= 0.5)
+
+        func containsResetButton(_ view: NSView) -> Bool {
+            if let button = view as? NSButton, button.title == "Reset" { return true }
+            return view.subviews.contains(where: containsResetButton)
+        }
+        #expect(!containsResetButton(editor))
+    }
+
+    // MARK: The Advanced section row — hairline, hint, readout, persistence
+
+    @Test func advancedReadoutIsBlankWhenFlat() {
+        let editor = makeHostedEditor()
+        #expect(editor.test_advancedReadoutText == "")
+    }
+
+    @Test func advancedReadoutCountsOneShapedBand() {
+        let editor = makeHostedEditor()
+        editor.apply(eq: DeviceEQ(bandGainsDB: [3, 0, 0, 0, 0, 0, 0, 0, 0, 0]), bypassReason: nil)
+        #expect(editor.test_advancedReadoutText == "1 set")
+    }
+
+    @Test func advancedReadoutCountsThreeShapedBands() {
+        let editor = makeHostedEditor()
+        editor.apply(eq: DeviceEQ(bandGainsDB: [3, 0, -2, 0, 0, 1, 0, 0, 0, 0]), bypassReason: nil)
+        #expect(editor.test_advancedReadoutText == "3 set")
+    }
+
+    @Test func advancedHintNamesTheBandCount() {
+        let editor = makeHostedEditor()
+        #expect(editor.test_advancedHintText == "10 bands")
+    }
+
+    /// The hairline sits between the loudness row and the Advanced row, and
+    /// spans the same content lane the caption/readout columns anchor to.
+    /// Editor coordinates are NOT flipped, so "above" means a larger Y.
+    @Test func hairlineSitsBetweenLoudnessAndAdvanced() {
+        let editor = makeHostedEditor(width: 357)
+        let hairline = editor.test_advancedHairlineFrame
+        let checkbox = editor.test_loudnessCheckboxFrame
+        let row = editor.test_advancedRowFrame
+        #expect(hairline.minY >= row.maxY - 0.5)
+        #expect(hairline.maxY <= checkbox.minY + 0.5)
+        #expect(abs(hairline.minX - editor.test_bassCaptionFrame.minX) <= 0.5)
+        #expect(abs(hairline.maxX - editor.test_bassReadoutFrame.maxX) <= 0.5)
+    }
+
+    @Test func advancedReadoutColumnAlignsWithBass() {
+        let editor = makeHostedEditor(width: 357)
+        #expect(abs(editor.test_advancedReadoutFrame.maxX - editor.test_bassReadoutFrame.maxX) <= 0.5)
+    }
+
+    @Test func aFreshStoreShipsCollapsed() {
+        let editor = makeHostedEditor()
+        #expect(editor.test_advancedExpanded == false)
+    }
+
+    @Test func clickingTheTitleTogglesExpansionLikeTheTriangle() {
+        let editor = makeHostedEditor()
+        editor.test_fireAdvancedTitleClick()
+        #expect(editor.test_advancedExpanded == true)
+        editor.test_fireAdvancedTitleClick()
+        #expect(editor.test_advancedExpanded == false)
+    }
+
+    @Test func expandedStatePersistsAcrossASecondEditorOnTheSameStore() {
+        let editorA = makeHostedEditor()
+        editorA.test_fireAdvancedTitleClick()
+        #expect(editorA.test_advancedExpanded == true)
+        #expect(AppSettings(defaults: isolation.isolatedDefaults).eqAdvancedExpanded == true)
+
+        let editorB = EQEditorView(settings: AppSettings(defaults: isolation.isolatedDefaults))
+        editorB.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        editorB.layoutSubtreeIfNeeded()
+        #expect(editorB.test_advancedExpanded == true)
+    }
+
+    @Test func applyingAShapedEQToACollapsedEditorLeavesItCollapsed() {
+        let editor = makeHostedEditor()
+        editor.apply(eq: DeviceEQ(bandGainsDB: [3, 0, 0, 0, 0, 0, 0, 0, 0, 0]), bypassReason: nil)
+        #expect(editor.test_advancedExpanded == false)
+    }
+
+    @Test func spokenLabelComposesBandCountShapedCountAndState() {
+        let editor = makeHostedEditor()
+        #expect(editor.test_advancedAXLabel == "Advanced, 10 bands, collapsed")
+
+        editor.apply(eq: DeviceEQ(bandGainsDB: [3, 0, -2, 0, 0, 1, 0, 0, 0, 0]), bypassReason: nil)
+        #expect(editor.test_advancedAXLabel == "Advanced, 10 bands, 3 set, collapsed")
+
+        editor.test_fireAdvancedTitleClick()
+        #expect(editor.test_advancedAXLabel?.hasSuffix(", expanded") == true)
+    }
+
+    // MARK: The scope lives in the Advanced fold, on the faders' x-axis
+    //
+    // Frames only ever compared RELATIVELY (the Groups-pane rounding-grid
+    // trap), and the editor is not flipped, so "below" means a smaller y.
+
+    /// The resting card is the simple tier alone — no scope, and none of the
+    /// old centred axis caption that used to sit under it.
+    @Test func theRestingCardHasNoScope() {
+        let editor = makeHostedEditor(width: 357)
+        #expect(editor.test_curveFrame == nil)
+        #expect(!labels(in: editor).contains { $0.stringValue == "+12 dB · −12 dB" })
+    }
+
+    @Test func openingAdvancedRevealsTheScopeAboveTheFaders() throws {
+        let editor = makeHostedEditor(width: 357)
+        editor.test_fireAdvancedClick()
+        editor.layoutSubtreeIfNeeded()
+
+        let curve = try #require(editor.test_curveFrame)
+        #expect(abs(curve.width - editor.bounds.width) <= 0.5)
+        #expect(curve.maxY <= editor.test_advancedRowFrame.minY + 0.5)
+        let topFader = try #require(editor.test_bandSliderFrame(0))
+        #expect(topFader.maxY <= curve.minY + 0.5)
+    }
+
+    /// The whole point of the move: each fader stands under the gridline for
+    /// its own band, so the trace and the control that shapes it share one
+    /// x-axis.
+    @Test func faderColumnsCentreOnTheScopesGridLines() throws {
+        let editor = makeHostedEditor(width: 357)
+        editor.test_fireAdvancedClick()
+        editor.layoutSubtreeIfNeeded()
+
+        let curve = try #require(editor.test_curveFrame)
+        for index in 0..<DeviceEQ.bandCount {
+            let centre = try #require(editor.test_bandColumnCenterX(index))
+            let gridline = curve.minX
+                + EQResponseCurveView.bandCentreX(index: index, width: curve.width)
+            #expect(abs(centre - gridline) <= 0.5, "band \(index): \(centre) vs \(gridline)")
+        }
+    }
+
+    /// "Hz" is the unit for the row of band numbers, so it parks in the
+    /// scope's ruler gutter rather than becoming an eleventh column.
+    @Test func theHzLegendSitsInTheRulerGutter() throws {
+        let editor = makeHostedEditor(width: 357)
+        editor.test_fireAdvancedClick()
+        editor.layoutSubtreeIfNeeded()
+
+        let curve = try #require(editor.test_curveFrame)
+        let legend = try #require(editor.test_hzLegendFrame)
+        #expect(abs(legend.midX - (curve.minX + EQResponseCurveView.plotLeadingInset / 2)) <= 0.5)
+        #expect(legend.maxX <= curve.minX + EQResponseCurveView.plotLeadingInset + 0.5)
+    }
+
+    private func labels(in view: NSView) -> [NSTextField] {
+        (view as? NSTextField).map { [$0] } ?? view.subviews.flatMap { labels(in: $0) }
     }
 }

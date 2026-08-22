@@ -11,8 +11,11 @@ import AudiouterSharedUI
 /// It is the device detail pane's sibling, not a variant of it: the two share
 /// the geometry (``GroupsPaneLayout``, asserted by `GroupsHeaderParityTests`)
 /// and the editor, and nothing else. This page fronts no `Device` — there is
-/// no status, no volume, no membership to show — so it carries exactly a
-/// header, an Equalizer section, and one footnote saying where the tone lands.
+/// no status, no volume, no membership to show — so it is the shortest form of
+/// the one housing: a BARE identity band, an "Equalizer" title over the page's
+/// ONE card, and a caption under that card saying where the tone lands. The
+/// caption binds to the card with the same 6 pt (`labelToSectionGap`) that
+/// binds the title to it — it belongs to the card, not to the pane.
 ///
 /// Two deliberate differences from the device pane:
 /// - the icon well is NOT editable (`isEditable = false`, so no pencil badge,
@@ -39,7 +42,13 @@ public final class MainOutDetailViewController: NSViewController {
     private let nameLabel = NSTextField(labelWithString: MainOutDetailViewController.title)
     private let headerWell = GroupedSectionView()
     private let eqWell = GroupedSectionView()
-    private let eqEditor = EQEditorView()
+    /// Titles the page's one card, the same idiom (and geometry) as the device
+    /// pane's "Equalizer" label above its own.
+    private let eqTitleLabel = NSTextField(labelWithString: "Equalizer")
+    /// The Equalizer card's Reset button, on the title line beside
+    /// `eqTitleLabel` — same idiom as `DeviceDetailViewController`.
+    private let eqResetButton = NSButton()
+    private let eqEditor: EQEditorView
     private let noteLabel = NSTextField(
         wrappingLabelWithString: MainOutDetailViewController.noteText)
 
@@ -59,7 +68,8 @@ public final class MainOutDetailViewController: NSViewController {
     /// snapshot land right after and replay the drag on the knob.
     private var pendingEdit: (eq: DeviceEQ, awaitingEcho: Bool)?
 
-    public init() {
+    public init(settings: AppSettings = AppSettings()) {
+        self.eqEditor = EQEditorView(settings: settings)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -92,9 +102,13 @@ public final class MainOutDetailViewController: NSViewController {
         noteLabel.font = Tokens.Font.caption
         noteLabel.textColor = Tokens.Color.secondaryLabel
         noteLabel.isSelectable = false
+        // Wraps inside the CONTENT lane it now sits in, not across the whole
+        // column — the caption is the card's, so it starts where the card's
+        // content does.
         noteLabel.preferredMaxLayoutWidth = GroupsPaneLayout.contentMaxWidth
-        // A pane-level footnote: it spans the column and yields before the
-        // pane does, exactly like the device pane's hint.
+            - GroupsPaneLayout.railFreeContentLeadingInset
+            - GroupsPaneLayout.contentTrailingInset
+        // Yields before the pane does — a caption never widens the screen.
         noteLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let container = NSView()
@@ -106,11 +120,27 @@ public final class MainOutDetailViewController: NSViewController {
         // rail-free inset, like the device pane's sections.
         headerWell.contentLeadingInset = GroupsPaneLayout.contentLeadingInset
         eqWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
+        // Identity is bare; the Equalizer is this page's one card.
+        headerWell.style = .bare
+
+        eqTitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        eqTitleLabel.font = Tokens.Font.body
+        eqTitleLabel.textColor = Tokens.Color.secondaryLabel
+
+        eqResetButton.translatesAutoresizingMaskIntoConstraints = false
+        eqResetButton.bezelStyle = .rounded
+        eqResetButton.controlSize = .small
+        eqResetButton.font = Tokens.Font.caption
+        eqResetButton.title = "Reset"
+        eqResetButton.target = self
+        eqResetButton.action = #selector(resetTapped(_:))
+        eqResetButton.setAccessibilityLabel("Reset tone to flat")
+
         for well in [headerWell, eqWell] {
             well.translatesAutoresizingMaskIntoConstraints = false
             column.addSubview(well)
         }
-        for v in [iconWell, nameLabel, eqEditor, noteLabel] { column.addSubview(v) }
+        for v in [iconWell, nameLabel, eqTitleLabel, eqResetButton, eqEditor, noteLabel] { column.addSubview(v) }
 
         let document = FlippedView()
         document.translatesAutoresizingMaskIntoConstraints = false
@@ -169,9 +199,27 @@ public final class MainOutDetailViewController: NSViewController {
             nameLabel.trailingAnchor.constraint(lessThanOrEqualTo: headerWell.trailingAnchor,
                                                 constant: -GroupsPaneLayout.contentTrailingInset),
 
+            // "Equalizer" on bare pane above its card — a label is never a
+            // section (the device pane's identical break).
+            eqTitleLabel.topAnchor.constraint(equalTo: headerWell.bottomAnchor,
+                                              constant: GroupsPaneLayout.sectionGap),
+            eqTitleLabel.leadingAnchor.constraint(
+                equalTo: column.leadingAnchor,
+                constant: GroupsPaneLayout.railFreeContentLeadingInset),
+
+            // Reset sits on the SAME title line, trailing-aligned to the
+            // card's content edge (the same edge `eqEditor` itself trails to).
+            eqResetButton.trailingAnchor.constraint(
+                equalTo: column.trailingAnchor, constant: -GroupsPaneLayout.contentTrailingInset),
+            eqResetButton.centerYAnchor.constraint(equalTo: eqTitleLabel.centerYAnchor),
+
+            // The editor is an INSTRUMENT (tone controls and, behind Advanced,
+            // a scope), not a list of text rows, so it earns
+            // `cardContentInset` rather than the narrower `verticalPadding` a
+            // bare row list would use.
             eqEditor.topAnchor.constraint(
-                equalTo: headerWell.bottomAnchor,
-                constant: GroupsPaneLayout.sectionGap + GroupedSectionView.verticalPadding),
+                equalTo: eqTitleLabel.bottomAnchor,
+                constant: GroupsPaneLayout.labelToSectionGap + GroupsPaneLayout.cardContentInset),
             eqEditor.leadingAnchor.constraint(
                 equalTo: column.leadingAnchor,
                 constant: GroupsPaneLayout.railFreeContentLeadingInset),
@@ -181,16 +229,21 @@ public final class MainOutDetailViewController: NSViewController {
             eqWell.leadingAnchor.constraint(equalTo: column.leadingAnchor),
             eqWell.trailingAnchor.constraint(equalTo: column.trailingAnchor),
             eqWell.topAnchor.constraint(equalTo: eqEditor.topAnchor,
-                                        constant: -GroupedSectionView.verticalPadding),
+                                        constant: -GroupsPaneLayout.cardContentInset),
             eqWell.bottomAnchor.constraint(equalTo: eqEditor.bottomAnchor,
-                                           constant: GroupedSectionView.verticalPadding),
+                                           constant: GroupsPaneLayout.cardContentInset),
 
-            // The pane's action band — the same break the device pane puts
-            // above its hint.
+            // The caption belongs to the card above it, so it binds with the
+            // SAME 6 pt that binds the title to it, and starts on the card's
+            // own content lane rather than spanning the column.
             noteLabel.topAnchor.constraint(equalTo: eqWell.bottomAnchor,
-                                           constant: GroupsPaneLayout.actionBandGap),
-            noteLabel.leadingAnchor.constraint(equalTo: column.leadingAnchor),
-            noteLabel.trailingAnchor.constraint(lessThanOrEqualTo: column.trailingAnchor),
+                                           constant: GroupsPaneLayout.labelToSectionGap),
+            noteLabel.leadingAnchor.constraint(
+                equalTo: column.leadingAnchor,
+                constant: GroupsPaneLayout.railFreeContentLeadingInset),
+            noteLabel.trailingAnchor.constraint(
+                lessThanOrEqualTo: column.trailingAnchor,
+                constant: -GroupsPaneLayout.contentTrailingInset),
             noteLabel.bottomAnchor.constraint(equalTo: column.bottomAnchor),
         ])
 
@@ -210,6 +263,17 @@ public final class MainOutDetailViewController: NSViewController {
             pendingEdit = nil
         }
         eqEditor.apply(eq: pendingEdit?.eq ?? eq, bypassReason: nil)
+        refreshResetEnabled()
+    }
+
+    @objc private func resetTapped(_ sender: NSButton) {
+        eqEditor.resetToFlat()
+    }
+
+    /// The editor's own rendered model IS the source of truth here — it
+    /// already received `pendingEdit?.eq ?? eq`.
+    private func refreshResetEnabled() {
+        eqResetButton.isEnabled = !eqEditor.currentEQ.isFlat
     }
 
     // MARK: Test-support hooks
@@ -220,6 +284,9 @@ public final class MainOutDetailViewController: NSViewController {
 
     /// The footnote's visible text.
     public var test_noteText: String { noteLabel.stringValue }
+
+    /// The card's title text — the same word the device pane's card carries.
+    public var test_eqSectionTitleText: String { eqTitleLabel.stringValue }
 
     /// The page title's visible text.
     public var test_titleText: String { nameLabel.stringValue }
@@ -244,6 +311,27 @@ public final class MainOutDetailViewController: NSViewController {
         view.layoutSubtreeIfNeeded()
         return headerWell.convert(headerWell.bounds, to: view)
     }
+
+    /// The Equalizer EDITOR's own laid-out frame, in the page's own
+    /// coordinates — mirrors `DeviceDetailViewController.test_eqEditorFrame`.
+    public var test_eqEditorFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return eqEditor.convert(eqEditor.bounds, to: view)
+    }
+
+    /// The Equalizer title's ALIGNMENT rect — mirrors
+    /// `DeviceDetailViewController.test_eqSectionTitleAlignmentFrame`.
+    public var test_eqSectionTitleAlignmentFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return eqTitleLabel.alignmentRect(forFrame: eqTitleLabel.convert(eqTitleLabel.bounds, to: view))
+    }
+
+    public func test_fireResetClick() { eqResetButton.performClick(nil) }
+    public var test_resetEnabled: Bool { eqResetButton.isEnabled }
+    public var test_eqResetButtonFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return eqResetButton.convert(eqResetButton.bounds, to: view)
+    }
 }
 
 // MARK: - EQEditorViewDelegate
@@ -259,12 +347,14 @@ extension MainOutDetailViewController: EQEditorViewDelegate {
         // and until it matches this exact value the snapshot must not win.
         pendingEdit = (eq, committed)
         onSetEQ?(eq, committed)
+        refreshResetEnabled()
     }
 
     public func eqEditorDidRequestReset(_ editor: EQEditorView) {
         // One committed action; the editor has already flattened its controls.
         pendingEdit = (.flat, true)
         onSetEQ?(.flat, true)
+        refreshResetEnabled()
     }
 }
 

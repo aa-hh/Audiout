@@ -32,7 +32,8 @@ import AppKit
         try await waitForFleet(backend, count: 7)
         let store = GroupStore(directory: tempDirectory())
         let controller = GroupController(backend: backend, store: store, loadPersisted: false)
-        let window = MixerWindowController(groupController: controller)
+        let window = MixerWindowController(groupController: controller,
+                                           settings: AppSettings(defaults: isolatedDefaults))
         // Headless test seam: simulate the content being visible so update(devices:)
         // refreshes the UI tree (same pattern: PopoverController.test_isShownOverride / B8).
         window.test_isVisibleOverride = true
@@ -85,7 +86,8 @@ import AppKit
         let controller = GroupController(backend: backend, store: store, loadPersisted: false)
         let iconController = DeviceIconController(store: DeviceIconStore(directory: tempDirectory()),
                                                    loadPersisted: false)
-        let window = MixerWindowController(groupController: controller, deviceIconController: iconController)
+        let window = MixerWindowController(groupController: controller, deviceIconController: iconController,
+                                           settings: AppSettings(defaults: isolatedDefaults))
         // Headless test seam: simulate the content being visible so update(devices:)
         // refreshes the UI tree (same pattern: PopoverController.test_isShownOverride / B8).
         window.test_isVisibleOverride = true
@@ -117,7 +119,8 @@ import AppKit
         try await waitForFleet(backend, count: 7)
         let store = GroupStore(directory: tempDirectory())
         let controller = GroupController(backend: backend, store: store, loadPersisted: false)
-        let window = MixerWindowController(groupController: controller)
+        let window = MixerWindowController(groupController: controller,
+                                           settings: AppSettings(defaults: isolatedDefaults))
 
         window.update(devices: backend.devices)
         #expect(window.test_sidebar.test_deviceRowCount == 0,
@@ -493,9 +496,7 @@ import AppKit
         #expect(window.test_isShowingDetail)
         #expect(!(window.test_isShowingEditor))
         #expect(window.test_detail.test_shownDeviceID == "appletv-lr")
-        #expect(window.test_detail.test_metadataStrings["volume"] == "60%")
-        #expect(window.test_detail.test_metadataStrings["available"] == "Yes")
-        #expect(window.test_detail.test_metadataStrings["status"] == "Not connected")
+        #expect(window.test_detail.test_metadataStrings["status"] == "Ready")
         #expect(window.test_detail.test_groupMembershipText == "None", "appletv-lr isn't a member of any saved group")
 
         let saved = try makeGroup1(controller)   // members: sonos-move, office
@@ -507,6 +508,32 @@ import AppKit
         #expect(window.test_isShowingDetail)
         #expect(window.test_detail.test_shownDeviceID == "office")
         #expect(window.test_detail.test_groupMembershipText == saved.name, "office is a Group 1 member")
+    }
+
+    /// Membership on the detail pane is NAVIGATION: clicking a group row
+    /// selects that group in the sidebar and opens its editor. Still
+    /// configuration-only — selecting is not activating, so `activeGroupID`
+    /// stays nil and no audio moves.
+    @Test func clickingAGroupRowOnTheDetailPaneOpensThatGroupsEditor() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)   // members: sonos-move, office
+        window.update(devices: backend.devices)
+
+        window.test_select(.device(id: "office"))
+        await drain()
+        #expect(window.test_isShowingDetail)
+        #expect(window.test_detail.test_groupRowTitles == [saved.name])
+
+        window.test_detail.test_selectGroupRow(at: 0)
+        await drain()
+
+        #expect(window.test_isShowingEditor, "the row opened the group's editor")
+        #expect(!(window.test_isShowingDetail))
+        #expect(window.test_editor.editingGroupID == saved.id)
+        #expect(window.test_sidebar.currentSelection == .group(id: saved.id),
+                "the sidebar follows, so the screen has one selection, not two")
+        #expect(controller.activeGroupID == nil,
+                "selecting a group from the detail pane NEVER activates it")
     }
 
     @Test func deselectingDeviceAutoSelectsFirstGroupOrEmptyState() async throws {
@@ -557,17 +584,17 @@ import AppKit
         let (window, _, backend) = try await makeWindow()
         window.test_select(.device(id: "office"))
         await drain()
-        #expect(window.test_detail.test_metadataStrings["volume"] == "50%")
+        #expect(window.test_detail.test_metadataStrings["status"] == "Ready")
 
         let updated = backend.devices.map { device -> Device in
             var d = device
-            if d.id == "office" { d.volume = 77 }
+            if d.id == "office" { d.isAvailable = false }
             return d
         }
         window.update(devices: updated)
 
         #expect(window.test_isShowingDetail, "still showing the detail pane, just re-rendered")
-        #expect(window.test_detail.test_metadataStrings["volume"] == "77%", "refreshAll() re-renders the visible detail pane from the fresher snapshot")
+        #expect(window.test_detail.test_metadataStrings["status"] == "Not on the network", "refreshAll() re-renders the visible detail pane from the fresher snapshot")
     }
 
     @Test func refreshAllFallsBackWhenShownDeviceDisappears() async throws {
@@ -766,6 +793,8 @@ import AppKit
         #expect(window.test_mainOutDetail.test_eqEditor.currentEQ.bassDB == 2,
                 "the page pulls the whole mix's current tone when it opens")
         #expect(window.test_mainOutDetail.test_noteText == "Applies to audio sent to speakers.")
+        #expect(window.test_mainOutDetail.test_eqSectionTitleText == "Equalizer",
+                "the page's one card is titled, the same word the device page's card carries")
         #expect(window.test_mainOutDetail.test_titleText == "Main Audio")
     }
 
@@ -821,9 +850,36 @@ import AppKit
         editor.test_dragTreble(to: -4)
         #expect(reported.last?.1 == true, "the gesture that ends the drag persists")
 
-        editor.test_fireResetClick()
+        window.test_mainOutDetail.test_fireResetClick()
         #expect(reported.last?.0 == .flat)
         #expect(reported.last?.1 == true, "Reset is one committed action")
+    }
+
+    /// Reset lives on the Main Audio page's title line too, wired through the
+    /// same `MixerWindowController` seam a device page uses.
+    @Test func mainAudioResetSitsOnTheTitleLineAndTracksTheTone() async throws {
+        let (window, _, _) = try await makeWindow()
+        window.mainOutEQProvider = { .flat }
+        window.select(.mainOut)
+        window.contentController.view.layoutSubtreeIfNeeded()
+
+        let detail = window.test_mainOutDetail
+        #expect(detail.test_resetEnabled == false)
+
+        detail.show(eq: DeviceEQ(bassDB: 2))
+        #expect(detail.test_resetEnabled == true)
+
+        let reset = detail.test_eqResetButtonFrame
+        let titleAlign = detail.test_eqSectionTitleAlignmentFrame
+        #expect(abs(reset.midY - titleAlign.midY) <= 0.5)
+        #expect(abs(reset.maxX - detail.test_eqEditorFrame.maxX) <= 0.5)
+
+        var reported: [(DeviceEQ, Bool)] = []
+        window.onSetMainOutEQ = { eq, committed in reported.append((eq, committed)) }
+        detail.test_fireResetClick()
+        #expect(reported.last?.0 == .flat)
+        #expect(reported.last?.1 == true)
+        #expect(detail.test_resetEnabled == false)
     }
 
     @Test func deviceEditsReportWithTheDeviceID() async throws {

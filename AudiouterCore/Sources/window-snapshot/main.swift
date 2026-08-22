@@ -615,6 +615,18 @@ func run() -> Int32 {
             snapshotControlPanel(surface.shell, label: "4-device-detail", appearanceName: appearanceName,
                                 outDir: outDir, present: presentGroups)
 
+            // 4b. The same pane with Advanced open — the scope lives in the
+            // fold, so this is the only render that shows it. Put back
+            // afterwards: this tool's hosts read `.standard` defaults, and a
+            // left-open fold would leak into state 4 on the next run.
+            windowController.test_detail.test_eqEditor.test_fireAdvancedClick()
+            drain()
+            snapshotControlPanel(surface.shell, label: "4b-device-detail-eq-open",
+                                appearanceName: appearanceName,
+                                outDir: outDir, present: presentGroups)
+            windowController.test_detail.test_eqEditor.test_fireAdvancedClick()
+            drain()
+
             // 6. Icon picker (Warm Signal W3): the anchored popover content,
             // rendered standalone like the create sheet (`presentIconPicker`
             // never actually draws headless). Built off the detail pane's

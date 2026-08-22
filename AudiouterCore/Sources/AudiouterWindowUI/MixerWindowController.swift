@@ -70,7 +70,7 @@ public final class MixerWindowController {
     private let sidebarViewController: SidebarViewController
     private let editorViewController: GroupEditorViewController
     private let detailViewController: DeviceDetailViewController
-    private let mainOutDetailViewController = MainOutDetailViewController()
+    private let mainOutDetailViewController: MainOutDetailViewController
     private let emptyStateViewController = GroupsEmptyStateViewController()
 
     /// Tone seams, wired by the app to the backend. This controller never
@@ -114,12 +114,14 @@ public final class MixerWindowController {
     private let sidebarSplitItem: NSSplitViewItem
 
     public init(groupController: GroupController,
-               deviceIconController: DeviceIconController = DeviceIconController(loadPersisted: false)) {
+               deviceIconController: DeviceIconController = DeviceIconController(loadPersisted: false),
+               settings: AppSettings = AppSettings()) {
         self.groupController = groupController
         self.deviceIconController = deviceIconController
         self.sidebarViewController = SidebarViewController()
         self.editorViewController = GroupEditorViewController(groupController: groupController)
-        self.detailViewController = DeviceDetailViewController(groupController: groupController)
+        self.detailViewController = DeviceDetailViewController(groupController: groupController, settings: settings)
+        self.mainOutDetailViewController = MainOutDetailViewController(settings: settings)
 
         // Share the one icon controller across every pane so a per-device
         // override picked anywhere renders identically everywhere.
@@ -180,6 +182,14 @@ public final class MixerWindowController {
         }
         mainOutDetailViewController.onSetEQ = { [weak self] eq, committed in
             self?.onSetMainOutEQ?(eq, committed)
+        }
+
+        // A membership row on the detail pane NAVIGATES: it selects that group
+        // in the sidebar and opens its editor, through the same `select(_:)`
+        // path the popover's deep link uses. CONFIG-ONLY — selecting is not
+        // activating, so `activeGroupID` is untouched and no audio moves.
+        detailViewController.onSelectGroup = { [weak self] groupID in
+            self?.select(.group(id: groupID))
         }
 
         // Sidebar selection drives the content pane.

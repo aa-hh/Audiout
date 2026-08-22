@@ -567,7 +567,8 @@ import AppKit
         let groups = MixerWindowController(
             groupController: GroupController(backend: backend,
                                              store: GroupStore(directory: scratchDir),
-                                             loadPersisted: false))
+                                             loadPersisted: false),
+            settings: AppSettings(defaults: isolatedDefaults))
         let popover = PopoverController(
             appRouting: AppRoutingController(store: AppRouteStore(directory: scratchDir),
                                              loadPersisted: false),
@@ -610,7 +611,8 @@ import AppKit
         // live regression was reported in.
         _ = try groupController.createGroup(name: "Group 1",
                                             memberIDs: ["sonos-move", "office"])
-        let groups = MixerWindowController(groupController: groupController)
+        let groups = MixerWindowController(groupController: groupController,
+                                           settings: AppSettings(defaults: isolatedDefaults))
         groups.test_isVisibleOverride = true
         groups.update(devices: backend.devices)
         let popover = PopoverController(

@@ -675,8 +675,9 @@ public enum Tokens {
         // because the ground is what it is drawn on: dark `gold` ≈ 10.2:1,
         // subtle-dial `gold` ≈ 7.1:1, `scopeFlatLine` ≈ 6.0:1,
         // `scopeBypassLine` ≈ 4.7:1 — all clear the ≥3:1 non-text floor.
-        // The grid and `scopeZeroLine` are GRIDLINES (pure reference, never
-        // the state), so the floor does not apply to them.
+        // The grid is a GRIDLINE (pure reference, never the state), so the
+        // floor does not apply to it; the dotted zero line reuses
+        // `scopeFlatLine`.
 
         /// The scope's ground — the near-black screen the trace is drawn on.
         public static var scopeGround: NSColor {
@@ -698,11 +699,6 @@ public enum Tokens {
             warmDynamic(name: "scopeBypassLine", dark: 0x8A7E68, darkHighContrast: 0xA2957D,
                        light: 0x8A7E68, lightHighContrast: 0xA2957D)
         }
-
-        /// The 0 dB reference line across the scope's middle. A gridline, not
-        /// a state: a fixed white wash that reads the same over the ground in
-        /// either appearance.
-        public static var scopeZeroLine: NSColor { NSColor.white.withAlphaComponent(0.16) }
 
         // MARK: Icon-well badge instrument (V6, raw-color elimination pass)
         //

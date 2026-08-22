@@ -7,9 +7,19 @@
     {
       "value" : {
         "linear-gradient" : [
-          "extended-gray:1.00000,1.00000",
-          "display-p3:0.26196,0.47363,0.29346,1.00000"
-        ]
+          "display-p3:0.99349,1.00000,0.87949,1.00000",
+          "extended-gray:1.00000,1.00000"
+        ],
+        "orientation" : {
+          "start" : {
+            "x" : 0.5,
+            "y" : 1
+          },
+          "stop" : {
+            "x" : 0.5,
+            "y" : 0
+          }
+        }
       }
     },
     {
@@ -17,18 +27,8 @@
       "value" : {
         "linear-gradient" : [
           "extended-gray:0.00000,1.00000",
-          "display-p3:0.26196,0.47363,0.29346,1.00000"
-        ],
-        "orientation" : {
-          "start" : {
-            "x" : 0.5,
-            "y" : 0
-          },
-          "stop" : {
-            "x" : 0.5,
-            "y" : 0.7
-          }
-        }
+          "extended-gray:0.25000,1.00000"
+        ]
       }
     }
   ],
@@ -38,7 +38,14 @@
       "layers" : [
         {
           "image-name" : "6 Halo 2.svg",
-          "name" : "6 Halo 2"
+          "name" : "6 Halo 2",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              0,
+              19.525925925926003
+            ]
+          }
         }
       ],
       "lighting" : "combined",
@@ -62,7 +69,7 @@
             "scale" : 1,
             "translation-in-points" : [
               4.439999999999998,
-              -103.8260752829434
+              -84.3001493570174
             ]
           }
         },
@@ -73,7 +80,7 @@
             "scale" : 1,
             "translation-in-points" : [
               0.4700000000000273,
-              -109.7160752829434
+              -90.19014935701739
             ]
           }
         },
@@ -84,7 +91,7 @@
             "scale" : 1,
             "translation-in-points" : [
               0.11392188905927014,
-              -110.19607528294341
+              -90.67014935701741
             ]
           }
         },
@@ -95,7 +102,7 @@
             "scale" : 1,
             "translation-in-points" : [
               6.350000000000023,
-              -100.8360752829434
+              -81.3101493570174
             ]
           }
         }
@@ -134,7 +141,7 @@
             "scale" : 1,
             "translation-in-points" : [
               3.2299999999999045,
-              157.53999999999996
+              177.06592592592597
             ]
           }
         },
@@ -145,7 +152,7 @@
             "scale" : 1,
             "translation-in-points" : [
               0.34392188905917465,
-              153.52999999999997
+              173.05592592592598
             ]
           }
         },
@@ -156,7 +163,7 @@
             "scale" : 1,
             "translation-in-points" : [
               0.2539218890592565,
-              153.44000000000005
+              172.96592592592606
             ]
           }
         },
@@ -167,7 +174,7 @@
             "scale" : 1,
             "translation-in-points" : [
               6.323921889059193,
-              162.51
+              182.035925925926
             ]
           }
         }
@@ -208,18 +215,32 @@
             "scale" : 1,
             "translation-in-points" : [
               -0.0049999999999954525,
-              -3.2899999999999636
+              16.23592592592604
             ]
           }
         },
         {
           "glass" : false,
           "image-name" : "2 Halo glow 2.svg",
-          "name" : "2 Halo glow 2"
+          "name" : "2 Halo glow 2",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              0,
+              19.525925925926003
+            ]
+          }
         },
         {
           "image-name" : "1 Cabinet 2.svg",
-          "name" : "1 Cabinet 2"
+          "name" : "1 Cabinet 2",
+          "position" : {
+            "scale" : 1,
+            "translation-in-points" : [
+              0,
+              19.525925925926003
+            ]
+          }
         }
       ],
       "name" : "Box",

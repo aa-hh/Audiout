@@ -177,9 +177,15 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
             self.started = true
 
             for (index, device) in self.fleet.enumerated() {
-                let delay = self.staggerDiscovery ? 0.2 + Double(index) * 0.35 : 0
-                self.queue.asyncAfter(deadline: .now() + delay) {
-                    guard self.started, self.live[device.id] == nil else { return }
+                if self.staggerDiscovery {
+                    let delay = 0.2 + Double(index) * 0.35
+                    self.queue.asyncAfter(deadline: .now() + delay) {
+                        guard self.started, self.live[device.id] == nil else { return }
+                        self.live[device.id] = device
+                        self.emit(.deviceAdded(device))
+                    }
+                } else {
+                    guard self.live[device.id] == nil else { continue }
                     self.live[device.id] = device
                     self.emit(.deviceAdded(device))
                 }
@@ -310,6 +316,18 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
                 self.emit(.deviceUpdated(updated))
             }
         }
+    }
+
+    // MARK: Test barrier
+
+    /// Flush every mutation already enqueued on `queue` — a complete barrier
+    /// for the non-scripted fixture (all mutation and read paths are
+    /// `queue.async`/`queue.sync`, so a synchronous round-trip guarantees
+    /// everything prior has landed). Does NOT wait for `asyncAfter`-scheduled
+    /// choreography (stagger, scripted connect attempts, drop timers) — those
+    /// still need their own event-driven wait.
+    public func test_settle() {
+        queue.sync {}
     }
 
     // MARK: T9 offline fixture — live per-app routing indicator

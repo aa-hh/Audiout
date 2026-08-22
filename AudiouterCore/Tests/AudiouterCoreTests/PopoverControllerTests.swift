@@ -63,37 +63,14 @@ import AppKit
     }
 
     private func waitForFleet(_ backend: MockBackend, count: Int) async throws {
-        let stream = backend.makeEventStream()
-        let box = PopoverTestCountBox()
-        // 10s was widened (from an earlier 2s) because it was comfortable for a
-        // lone `swift test` run but not under `swift test --parallel` (every
-        // other suite is a concurrent sibling process competing for CPU) —
-        // this fixture runs up to 3x in one test
-        // (`applicationsCardExpandedOnOpenIffAnyRouteExists` builds three
-        // separate popovers), tripling the exposure to a single marginal
-        // timeout. The confirmation returns as soon as it fires, so a wider
-        // ceiling costs nothing in the fast path — it only buys headroom under
-        // load. (2026-07-24: "Asynchronous wait failed: Exceeded timeout of 2
-        // seconds, with unfulfilled expectations: 'fleet discovered'" observed
-        // intermittently under --parallel, never in isolation across 10 clean
-        // runs.)
-        try await confirmation("fleet discovered") { received in
-            let task = Task {
-                for await event in stream {
-                    if case .deviceAdded = event, await box.increment() >= count {
-                        received(); break
-                    }
-                }
-            }
-            defer { task.cancel() }
-            backend.start()
-            try await withThrowingTaskGroup(of: Void.self) { group in
-                group.addTask { _ = await task.value }
-                group.addTask { try await Task.sleep(for: .seconds(10)) }
-                try await group.next()
-                group.cancelAll()
-            }
-        }
+        // With `staggerDiscovery: false` every device is added synchronously
+        // inside `start()`'s `queue.async` block (MockBackend.swift), so a
+        // `test_settle()` barrier right after `start()` is a complete
+        // discovery wait for this fixture — no event-stream/confirmation
+        // machinery needed.
+        backend.start()
+        backend.test_settle()
+        try #require(backend.devices.count >= count)
     }
 
     private func tempDirectory() -> URL {
@@ -103,7 +80,7 @@ import AppKit
         return dir
     }
 
-    private func drain() async { try? await Task.sleep(nanoseconds: 200_000_000) }
+    private func drain(_ backend: MockBackend) async { backend.test_settle(); await Task.yield() }
 
     // MARK: Tests
 
@@ -116,13 +93,13 @@ import AppKit
     }
 
     @Test func mainOutSelectorHasSelectedDevicesAndGroups() async throws {
-        let (popover, controller, _) = try await makePopover()
+        let (popover, controller, backend) = try await makePopover()
         // Before any group: only Selected Devices is selectable.
         #expect(popover.test_mainOutRow.test_selectableTargets == [.selectedDevices])
 
         // After a group is saved, it appears as a second section.
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        popover.test_saveCurrentSetup(); await drain()
+        popover.test_saveCurrentSetup(); await drain(backend)
         let group = controller.groups[0]
         #expect(popover.test_mainOutRow.test_selectableTargets.contains(.group(id: group.id)), "the saved group is a Main Out option")
         #expect(popover.test_mainOutRow.test_optionTitles.contains("Output Groups"), "groups are under an Output Groups header")
@@ -159,13 +136,13 @@ import AppKit
         let (popover, controller, backend) = try await makePopover()
         // Build a group, point Main Out at it.
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        popover.test_saveCurrentSetup(); await drain()
+        popover.test_saveCurrentSetup(); await drain(backend)
         let group = controller.groups[0]
-        popover.test_selectMainOut(.group(id: group.id)); await drain()
+        popover.test_selectMainOut(.group(id: group.id)); await drain(backend)
         let before = Set(backend.devices.filter(\.isSelected).map(\.id))
 
         // Toggling composes the set but must not re-route (target is a group).
-        _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true); await drain()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true); await drain(backend)
         let after = Set(backend.devices.filter(\.isSelected).map(\.id))
         #expect(before == after, "composing the set didn't change the routed output")
         #expect(controller.isSpeakerSelected("homepod-bed"), "but the set was composed")
@@ -174,9 +151,9 @@ import AppKit
     @Test func selectingGroupRoutesToItsMembers() async throws {
         let (popover, controller, backend) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        popover.test_saveCurrentSetup(); await drain()
+        popover.test_saveCurrentSetup(); await drain(backend)
         let group = controller.groups[0]
-        popover.test_selectMainOut(.group(id: group.id)); await drain()
+        popover.test_selectMainOut(.group(id: group.id)); await drain(backend)
         #expect(controller.activeGroupID == group.id)
         #expect(Set(backend.devices.filter(\.isSelected).map(\.id)) == Set(group.memberIDs))
     }
@@ -186,15 +163,15 @@ import AppKit
     /// so its volume and mute must stay live even with its Selected checkbox
     /// cleared.
     @Test func aGroupMemberIsAdjustableWhileItsGroupIsMainOut() async throws {
-        let (popover, controller, _) = try await makePopover(appRouting: tempAppRoutingController())
+        let (popover, controller, backend) = try await makePopover(appRouting: tempAppRoutingController())
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        popover.test_saveCurrentSetup(); await drain()
+        popover.test_saveCurrentSetup(); await drain(backend)
         let group = controller.groups[0]
-        popover.test_selectMainOut(.group(id: group.id)); await drain()
+        popover.test_selectMainOut(.group(id: group.id)); await drain(backend)
         // Saving leaves "office" checked as well, which the OLD selected-set-only
         // predicate would have ridden; clear it so ONLY group membership can be
         // keeping the row live.
-        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false); await drain()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false); await drain(backend)
         #expect(!(controller.isSpeakerSelected("office")), "the dormant Selected set no longer holds it")
         #expect(controller.isMainOutMember("office"), "but the group Main Out targets still does")
         #expect(popover.test_deviceRow(for: "office")?.test_isSliderEnabled == true,
@@ -204,12 +181,12 @@ import AppKit
     /// The deliberate other direction of the same field: selected but outside the
     /// active group means Main Out sends it nothing, so it must NOT be adjustable.
     @Test func aDeviceStrandedInTheDormantSelectedSetIsNotAdjustable() async throws {
-        let (popover, controller, _) = try await makePopover(appRouting: tempAppRoutingController())
+        let (popover, controller, backend) = try await makePopover(appRouting: tempAppRoutingController())
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        popover.test_saveCurrentSetup(); await drain()
+        popover.test_saveCurrentSetup(); await drain(backend)
         let group = controller.groups[0]
         _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
-        popover.test_selectMainOut(.group(id: group.id)); await drain()
+        popover.test_selectMainOut(.group(id: group.id)); await drain(backend)
         #expect(controller.isSpeakerSelected("homepod-bed"), "in the dormant Selected set")
         #expect(!(controller.isMainOutMember("homepod-bed")), "but not in the group that's playing")
         #expect(popover.test_deviceRow(for: "homepod-bed")?.test_isSliderEnabled == false,
@@ -220,7 +197,7 @@ import AppKit
         let (popover, controller, backend) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
-        popover.test_selectMainOut(.selectedDevices); await drain()
+        popover.test_selectMainOut(.selectedDevices); await drain(backend)
         let routed = Set(backend.devices.filter(\.isSelected).map(\.id))
         #expect(routed == ["office", "homepod-bed"], "Selected Devices routes exactly its AirPlay members (local isn't a backend output)")
     }
@@ -295,10 +272,10 @@ import AppKit
     @Test func mainOutRowShowsMainsOwnValueNotTheMembersAverage() async throws {
         let (popover, controller, backend) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)   // set = {office}
-        popover.test_selectMainOut(.selectedDevices); await drain()
-        popover.test_dragMainOutMaster(to: 70); await drain()
+        popover.test_selectMainOut(.selectedDevices); await drain(backend)
+        popover.test_dragMainOutMaster(to: 70); await drain(backend)
 
-        backend.setVolume(50, for: "office"); await drain()
+        backend.setVolume(50, for: "office"); await drain(backend)
         popover.update(devices: backend.devices)
         #expect(controller.mainOutMasterVolume == 70,
                        "a member's own level does not move Main")
@@ -310,9 +287,9 @@ import AppKit
         let (popover, controller, backend) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
-        popover.test_selectMainOut(.selectedDevices); await drain()
-        backend.setVolume(40, for: "office"); backend.setVolume(80, for: "homepod-bed"); await drain()
-        popover.test_dragMainOutMaster(to: 30); await drain()
+        popover.test_selectMainOut(.selectedDevices); await drain(backend)
+        backend.setVolume(40, for: "office"); backend.setVolume(80, for: "homepod-bed"); await drain(backend)
+        popover.test_dragMainOutMaster(to: 30); await drain(backend)
         #expect(controller.mainOutMasterVolume == 30, "master volume is the dragged value")
         #expect(backend.devices.first { $0.id == "office" }?.volume == 40, "member volumes remain unchanged")
         #expect(backend.devices.first { $0.id == "homepod-bed" }?.volume == 80, "member volumes remain unchanged")
@@ -326,11 +303,11 @@ import AppKit
     /// shows one number while dragging it moves another, and the thumb jumps on the
     /// first repaint.
     @Test func inPassthroughTheMacRowDisplaysMain() async throws {
-        let (popover, controller, _) = try await makePopover()
-        popover.test_selectMainOut(.selectedDevices); await drain()
+        let (popover, controller, backend) = try await makePopover()
+        popover.test_selectMainOut(.selectedDevices); await drain(backend)
         #expect(controller.localRowDrivesMain, "precondition: nothing but the Mac is selected")
 
-        popover.test_dragMainOutMaster(to: 35); await drain()
+        popover.test_dragMainOutMaster(to: 35); await drain(backend)
         popover.rebuild()
         #expect(popover.test_deviceRow(for: "local-mac")?.test_sliderValue == 35,
                        "the Mac's row follows Main while it is the thing driving Main")
@@ -342,11 +319,11 @@ import AppKit
     /// permanent aliasing of the two values.
     @Test func armingRestoresTheMacRowToItsOwnRememberedFader() async throws {
         let (popover, controller, backend) = try await makePopover()
-        popover.test_selectMainOut(.selectedDevices); await drain()
-        backend.setVolume(62, for: "local-mac"); await drain()   // the Mac's own trim
+        popover.test_selectMainOut(.selectedDevices); await drain(backend)
+        backend.setVolume(62, for: "local-mac"); await drain(backend)   // the Mac's own trim
 
-        popover.test_dragMainOutMaster(to: 35); await drain()
-        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true); await drain()
+        popover.test_dragMainOutMaster(to: 35); await drain(backend)
+        _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true); await drain(backend)
         #expect(!controller.localRowDrivesMain, "a real output is live now")
 
         popover.update(devices: backend.devices)   // the row reads a device value, so refresh the snapshot
@@ -358,9 +335,9 @@ import AppKit
     }
 
     @Test func saveActionDisabledWhenSetEqualsGroup() async throws {
-        let (popover, controller, _) = try await makePopover()
+        let (popover, controller, backend) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        popover.test_saveCurrentSetup(); await drain()
+        popover.test_saveCurrentSetup(); await drain(backend)
         popover.rebuild()
         #expect(!(popover.test_saveCurrentSetupEnabled), "disabled: the Selected Devices set already IS a saved group")
     }
@@ -453,15 +430,15 @@ import AppKit
     /// updates when the target changes (the `test_selectedTitle` hook semantics
     /// are preserved).
     @Test func mainOutDropdownShowsCurrentTargetTitle() async throws {
-        let (popover, controller, _) = try await makePopover()
+        let (popover, controller, backend) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        popover.test_saveCurrentSetup(); await drain()
+        popover.test_saveCurrentSetup(); await drain(backend)
         let group = controller.groups[0]
 
-        popover.test_selectMainOut(.selectedDevices); await drain()
+        popover.test_selectMainOut(.selectedDevices); await drain(backend)
         // Warm Signal decision m: the title is CLEAN — no live "(n)" count.
         #expect(popover.test_mainOutRow.test_selectedTitle == "Selected Devices", "the named dropdown shows the current target, count-free")
-        popover.test_selectMainOut(.group(id: group.id)); await drain()
+        popover.test_selectMainOut(.group(id: group.id)); await drain(backend)
         #expect(popover.test_mainOutRow.test_selectedTitle == group.name, "selecting a group updates the named dropdown")
     }
 
@@ -550,7 +527,7 @@ import AppKit
         #expect(controller.isSpeakerSelected("office"), "R12: intent kept through .failed")
 
         // Re-render again; nothing should re-touch membership or drop the warning.
-        await drain()
+        await drain(backend)
         popover.update(devices: backend.devices)
         #expect(controller.isSpeakerSelected("office"))
         let device = try #require(backend.devices.first { $0.id == "office" })
@@ -865,10 +842,10 @@ import AppKit
     /// rejoin a mixed set at will (see `testAddingLocalIntoAMixedSetIsAllowed`);
     /// it just isn't re-added in THIS test.
     @Test func busNodesReflectMembershipAndShareOneColumn() async throws {
-        let (popover, _, _) = try await makePopover()
+        let (popover, _, backend) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
         _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true)
-        await drain()
+        await drain(backend)
         #expect(popover.test_deviceRow(for: "office")?.test_busNode == .member)
         #expect(popover.test_deviceRow(for: "homepod-bed")?.test_busNode == .member)
         #expect(popover.test_deviceRow(for: "airport-mixer")?.test_busNode == .nonMember, "an untapped device's node is hollow — the line detours it")
@@ -882,7 +859,7 @@ import AppKit
         #expect(abs((officeX ?? -1) - (mixerX ?? -2)) < 0.001,
                 "member and non-member nodes share one column x")
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false)
-        await drain()
+        await drain(backend)
         #expect(popover.test_deviceRow(for: "office")?.test_busNode == .nonMember)
         #expect(abs((popover.test_deviceRow(for: "office")?.test_busNodeCenterX() ?? -1)
                     - (officeX ?? -2)) < 0.001,
@@ -904,9 +881,9 @@ import AppKit
     @Test func failedGroupMemberKeepsFullEmphasisAndNeverEditsTheSavedGroup() async throws {
         let (popover, controller, backend) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        popover.test_saveCurrentSetup(); await drain()
+        popover.test_saveCurrentSetup(); await drain(backend)
         let group = controller.groups[0]
-        popover.test_selectMainOut(.group(id: group.id)); await drain()
+        popover.test_selectMainOut(.group(id: group.id)); await drain(backend)
 
         var devices = backend.devices
         let idx = try #require(devices.firstIndex { $0.id == "office" })
@@ -922,7 +899,7 @@ import AppKit
         // Interacting with the failed member (toggle-on = the retry path)
         // composes the CHECKED set only — the saved group is never edited.
         popover.test_deviceRow(for: "office")?.test_toggleEnabled(true)
-        await drain()
+        await drain(backend)
         #expect(controller.groups.first?.memberIDs == group.memberIDs, "the retry edited the Selected set, never the saved group")
         #expect(popover.test_cardNoteTexts(title: "Output Devices") == [], "…and the card is still undiverged afterwards")
     }
@@ -1151,15 +1128,15 @@ import AppKit
     @Test func muteDrivesVolumeToZeroAndRestores() async throws {
         let (popover, controller, backend) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        popover.test_saveCurrentSetup(); await drain()
+        popover.test_saveCurrentSetup(); await drain(backend)
         let target = controller.groups[0].memberIDs.first { id in
             backend.devices.first { $0.id == id }?.isLocalDevice == false
         }!
         let prior = try #require(backend.devices.first { $0.id == target }?.volume)
         #expect(prior > 0)
-        popover.test_toggleMute(deviceID: target, muted: true); await drain()
+        popover.test_toggleMute(deviceID: target, muted: true); await drain(backend)
         #expect(backend.devices.first { $0.id == target }?.volume == 0)
-        popover.test_toggleMute(deviceID: target, muted: false); await drain()
+        popover.test_toggleMute(deviceID: target, muted: false); await drain(backend)
         #expect(backend.devices.first { $0.id == target }?.volume == prior)
     }
 
@@ -2176,13 +2153,13 @@ import AppKit
     ///   active target de-emphasize — via the bus-node TINT (checkbox at full
     ///   alpha and interactive), never whole-row alpha.
     @Test func dormantDevicesCardNoteAndDimming() async throws {
-        let (popover, controller, _) = try await makePopover()
+        let (popover, controller, backend) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        popover.test_saveCurrentSetup(); await drain()
+        popover.test_saveCurrentSetup(); await drain(backend)
         let group = controller.groups[0]
 
         // Point Main Out at the group; checked == members ⇒ DERIVED case.
-        popover.test_selectMainOut(.group(id: group.id)); await drain()
+        popover.test_selectMainOut(.group(id: group.id)); await drain(backend)
         #expect(popover.test_cardNoteTexts(title: "Output Devices") == [], "derived-equal (checked set == group members) posts NO note (§4.7)")
         #expect(popover.test_deviceRow(for: "office")?.test_busNode == .member, "the derived member keeps its filled node")
         #expect(popover.test_deviceRow(for: "office")?.test_busNodeDimmed == false, "…at full gold emphasis — no dormant tint")
@@ -2190,7 +2167,7 @@ import AppKit
         #expect(!(popover.test_mainOutRow.test_busOriginDimmed), "the bus origin keeps full ink in the derived case")
 
         // Diverge: check a device the group doesn't hold ⇒ note + scoped tint.
-        _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true); await drain()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: true); await drain(backend)
         #expect(popover.test_cardNoteTexts(title: "Output Devices") == ["Inactive — Main Audio is using '\(group.name)'"], "genuine divergence posts the note with the group's name")
         #expect(popover.test_deviceRow(for: "office")?.test_busNodeDimmed == false, "a row INSIDE the active target keeps full emphasis")
         #expect(popover.test_deviceRow(for: "homepod-bed")?.test_busNodeDimmed == true, "a checked row OUTSIDE the target de-emphasizes via node tint")
@@ -2201,12 +2178,12 @@ import AppKit
 
         // Un-diverge (checked set returns to the group's members) ⇒ derived
         // again: the note unmounts LIVE off the membership toggle.
-        _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: false); await drain()
+        _ = popover.test_toggleDeviceEnabled(deviceID: "homepod-bed", on: false); await drain(backend)
         #expect(popover.test_cardNoteTexts(title: "Output Devices") == [], "returning to the derived set removes the note live")
         #expect(popover.test_deviceRow(for: "airport-mixer")?.test_busNodeDimmed == false, "…and releases every tint")
 
         // Back to Selected Devices ⇒ no dormancy machinery at all.
-        popover.test_selectMainOut(.selectedDevices); await drain()
+        popover.test_selectMainOut(.selectedDevices); await drain(backend)
         #expect(popover.test_cardNoteTexts(title: "Output Devices") == [], "no dormancy note under Selected Devices")
         #expect(popover.test_deviceRowSelectionDimmed(id: "office") == false, "no dim under Selected Devices")
     }
@@ -2239,12 +2216,12 @@ import AppKit
     /// `buttonTitle` short form for "Selected Devices" only; the GROUP branch
     /// still sets one.)
     @Test func collapsedButtonNamesGroupItselfNotMembers() async throws {
-        let (popover, controller, _) = try await makePopover()
+        let (popover, controller, backend) = try await makePopover()
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
-        popover.test_saveCurrentSetup(); await drain()
+        popover.test_saveCurrentSetup(); await drain(backend)
         let group = controller.groups[0]
 
-        popover.test_selectMainOut(.group(id: group.id)); await drain()
+        popover.test_selectMainOut(.group(id: group.id)); await drain(backend)
         #expect(popover.test_mainOutRow.test_selectedTitle == group.name,
                 "the open menu still shows the bare group name")
         #expect(popover.test_mainOutRow.test_buttonTitle == "→ \(group.name)",
@@ -2820,9 +2797,4 @@ import AppKit
         popover.setSystemAirPlayNoteActive(false)
         #expect(popover.test_systemAirPlayNoteText == nil, "both conditions ended — the slot is empty")
     }
-}
-
-private actor PopoverTestCountBox {
-    private var count = 0
-    func increment() -> Int { count += 1; return count }
 }

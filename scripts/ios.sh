@@ -1,9 +1,18 @@
 #!/bin/sh
 # Build or test the iOS companion app, on whichever Mac has the capacity.
 #
-#   scripts/ios.sh build [--root DIR] [extra xcodebuild args]
-#   scripts/ios.sh test  [--root DIR] [extra xcodebuild args]
-#   scripts/ios.sh shot  [--root DIR] [--out DIR] [--appearance dark|light|both]
+#   scripts/ios.sh build  [--root DIR] [extra xcodebuild args]
+#   scripts/ios.sh device [--root DIR] [--name LABEL] [extra xcodebuild args]
+#   scripts/ios.sh test   [--root DIR] [extra xcodebuild args]
+#   scripts/ios.sh shot   [--root DIR] [--out DIR] [--appearance dark|light|both]
+#
+# `device` is the one that puts the app on Alec's actual iPhone, which is the
+# only way the companion app is ever verified (ios/AGENTS.md). Prefer it over
+# `test`/`shot`: those drive a Simulator, and simulator DEVICES are disk the
+# machine does not have to spare -- the runtime image alone is ~7.5G and the
+# devices were deleted on purpose. `build` is safe either way; it targets
+# `generic/platform=iOS Simulator`, which needs the platform but creates no
+# device.
 #
 # WHY THIS EXISTS: run-tests.sh and build.sh route SwiftPM work to the other Mac
 # and know nothing about xcodebuild, so every iOS build and every iOS test ran
@@ -38,8 +47,8 @@ set -eu
 
 mode=${1:-}
 case "$mode" in
-    build|test|shot) shift ;;
-    *) echo "usage: scripts/ios.sh build|test|shot [--root DIR] [xcodebuild args...]" >&2; exit 64 ;;
+    build|device|test|shot) shift ;;
+    *) echo "usage: scripts/ios.sh build|device|test|shot [--root DIR] [xcodebuild args...]" >&2; exit 64 ;;
 esac
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
@@ -52,6 +61,16 @@ fi
 
 out_dir=$(pwd)
 appearances="dark light"
+device_label=
+if [ "$mode" = device ]; then
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --name) [ -n "${2:-}" ] || { echo "ios.sh: --name needs a label" >&2; exit 64; }
+                    device_label=$2; shift 2 ;;
+            *) break ;;
+        esac
+    done
+fi
 if [ "$mode" = shot ]; then
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -75,6 +94,107 @@ project="ios/AudiouterRemote/AudiouterRemote.xcodeproj"
     echo "        (the companion app lives on claude/companion-app-phase2-ios — pass --root <that worktree>)" >&2
     exit 66
 }
+
+# --- device ----------------------------------------------------------------
+# Builds for Alec's physical iPhone, signs it, and installs it. This is the only
+# mode that produces a verifiable build: the Simulator cannot discover a Mac over
+# Bonjour, raise the local-network prompt, or make a speaker play.
+#
+# IT NEVER ROUTES TO THE REMOTE, and that is not an oversight. A device build
+# needs an "Apple Development" certificate plus a provisioning profile for the
+# target device; the mule carries only "Developer ID Application" (Mac
+# distribution) and `devicectl list devices` there reports none paired. So the
+# work is pinned here, where the phone and the cert both are. AUDIOUTER_IOS_
+# REMOTE_ONLY is deliberately ignored for this mode rather than made to fail:
+# there is no remote that could ever do it.
+#
+# NOTHING IS NAMED. The device, the team and the Xcode-managed profile are all
+# resolved at run time -- a hard-coded udid goes stale the moment a device is
+# re-paired, and the team id is not in the project (DEVELOPMENT_TEAM is empty
+# there, so it MUST be supplied on the command line or signing silently fails).
+device_udid_and_name() {
+    json=$(mktemp)
+    xcrun devicectl list devices --json-output "$json" >/dev/null 2>&1 || {
+        rm -f "$json"; return 1; }
+    python3 - "$json" <<'PYEOF'
+import json, sys
+devs = json.load(open(sys.argv[1]))["result"]["devices"]
+for d in devs:
+    hw, dp, cp = (d.get(k, {}) for k in
+                  ("hardwareProperties", "deviceProperties", "connectionProperties"))
+    if hw.get("platform") == "iOS" and cp.get("pairingState") == "paired" and hw.get("udid"):
+        print("%s\t%s" % (hw["udid"], dp.get("name", "iPhone")))
+        break
+PYEOF
+    rm -f "$json"
+}
+
+# The team is the OU of the Apple Development certificate. Reading it beats
+# hard-coding: it follows the login keychain rather than this file.
+device_team() {
+    cn=$(security find-identity -v -p codesigning 2>/dev/null \
+         | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)
+    [ -n "$cn" ] || return 1
+    security find-certificate -c "$cn" -p 2>/dev/null \
+        | openssl x509 -noout -subject 2>/dev/null \
+        | sed -n 's/.*OU *= *\([^,]*\).*/\1/p' | head -1
+}
+
+run_device() {
+    dev=$(device_udid_and_name) || dev=
+    [ -n "$dev" ] || {
+        echo "ios.sh: no paired iPhone found. Plug it in or put it on this network," >&2
+        echo "        unlock it, and check it appears in: xcrun devicectl list devices" >&2
+        exit 70; }
+    udid=${dev%%	*}
+    name=${dev#*	}
+
+    team=$(device_team) || team=
+    [ -n "$team" ] || {
+        echo "ios.sh: no 'Apple Development' signing identity in the keychain." >&2
+        echo "        A device build cannot be signed without one (a Developer ID" >&2
+        echo "        certificate is for Mac distribution and will not do)." >&2
+        exit 70; }
+
+    # Every build handed over for testing gets its OWN bundle id and name, so a
+    # test install can never overwrite -- or inherit the TCC grants of -- one
+    # already on the phone. Defaults derive from the branch so two branches
+    # cannot collide by accident.
+    label=$device_label
+    if [ -z "$label" ]; then
+        label=$(cd "$root" && git rev-parse --abbrev-ref HEAD 2>/dev/null || echo dev)
+        label=${label##*/}
+    fi
+    slug=$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
+    [ -n "$slug" ] || slug=dev
+    bundle="com.audiouter.remote.$slug"
+
+    dd="${TMPDIR:-/tmp/}audiouter-ios-device/$(basename "$root")"
+    echo "  device:  $name ($udid)" >&2
+    echo "  team:    $team" >&2
+    echo "  bundle:  $bundle  (\"$label\")" >&2
+
+    cd "$root"
+    xcodebuild -project "$project" -scheme AudiouterRemote -configuration Debug \
+        -destination "id=$udid" -derivedDataPath "$dd" -allowProvisioningUpdates \
+        DEVELOPMENT_TEAM="$team" \
+        PRODUCT_BUNDLE_IDENTIFIER="$bundle" \
+        INFOPLIST_KEY_CFBundleDisplayName="$label" \
+        ${1+"$@"} build || exit 65
+
+    app=$(find "$dd/Build/Products" -maxdepth 2 -type d -name 'AudiouterRemote.app' | head -1)
+    [ -n "$app" ] || { echo "ios.sh: no AudiouterRemote.app was built" >&2; exit 70; }
+
+    xcrun devicectl device install app --device "$udid" "$app" >/dev/null || {
+        echo "ios.sh: built and signed, but the install failed. Is the phone unlocked?" >&2
+        exit 70; }
+    echo "  installed \"$label\" on $name." >&2
+}
+
+if [ "$mode" = device ]; then
+    run_device ${1+"$@"}
+    exit 0
+fi
 
 # Newest available iPhone simulator on whichever machine evaluates this. simctl
 # groups devices by runtime in ascending version order, so the devices under the

@@ -675,6 +675,42 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   `git grep _installTestSink`) nests into the shared `SerializedSharedState`
   parent suite (`Tests/AudiouterCoreTests/SerializedSharedStateSuite.swift`,
   `.serialized`) for true mutual exclusion instead.
+- **Tests must stay invisible — nothing a test does may reach the screen.**
+  Suites run on developer Macs and on the remote test Mac, both with a live
+  WindowServer: anything ordered in flashes on a real desktop, steals focus
+  mid-typing, and a modal run loop on an unattended machine wedges the run
+  until someone walks over to it. So no test may cause `orderFront`,
+  `orderFrontRegardless`, `makeKeyAndOrderFront`, `setIsVisible(true)`,
+  `NSPopover.show`, `NSMenu.popUp`, `runModal`/`beginSheetModal`,
+  `NSApp.activate`, or `NSStatusBar` status-item creation to actually execute.
+  The approved ways to get the same coverage:
+  - `NSWindow(contentRect:…, defer: false)` as a pure layout host that is never
+    ordered in — it lays out and draws without ever existing on screen.
+  - `view.display()`, `layer?.displayIfNeeded()` and
+    `window.setFrame(_:display: true)` on an ordered-OUT window: these draw into
+    the backing store only, so "display" here does not mean visible.
+  - Calling presenters (`show(anchorRect:)`, `present()`) directly, which is
+    safe ONLY because every `activate`/`makeKeyAndOrderFront`/`orderFront`
+    inside them sits behind `HeadlessRuntime.isActive` (see the gating rule
+    above; `HeadlessRuntimeTests` pins the detection itself).
+  - `test_*` seams that return the built object unpresented — e.g.
+    `PopoverController.test_outputDevicesPlusMenu()` hands back the `NSMenu`
+    with no `popUp`, `GroupEditorViewController.test_confirmDelete()` runs the
+    delete without the sheet.
+  - `performClick` on a control inside an ordered-out window (dispatches
+    target/action only), and `.titled` + `makeFirstResponder` for text editing —
+    first responder is not visibility.
+  Ordering a window in but parking it offscreen is a LAST resort, and the only
+  sanctioned reason is an assertion that needs a real render-server-attached
+  layer tree (CA animation timing). Then: an origin that intersects no
+  `NSScreen`, and `defer { window.orderOut(nil) }` right after ordering in.
+  New UI-showing code paths must ship with one of the two escapes above — a
+  `HeadlessRuntime.isActive` gate or a `test_*` seam. Both menu presenters
+  (`presentOutputDevicesPlusMenu`, `presentAddApplicationPicker`) are gated;
+  tests still reach the picker through
+  `test_availableAppsForPicker()`/`test_pickApp(bundleID:)` rather than the
+  presenter. The `AudiouterApp` executable (status item, activation policy) is
+  not a test dependency and must stay that way.
 
 ## Map
 

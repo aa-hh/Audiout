@@ -31,13 +31,20 @@ import AudiouterSharedUI
 ///   title, deliberately different skin. Bordered + pencil means editable; bare
 ///   means read-only, which is exactly the difference between a group's name
 ///   (renameable here) and a device's (not);
-/// - the read-only metadata in two grouped sections (secondary-colour captions
-///   leading, values right-aligned into their own column): device STATE
-///   (Status, Available, Volume, Kind) in the first, MEMBERSHIP ("In groups" —
-///   the saved groups from the injected `GroupController` whose `memberIDs`
-///   contain this device) in the second. The sections' own inset hairlines
-///   separate the rows; the old stock `NSBox` divider is gone (it drew a 185 pt
-///   rule that stopped a third of the way across the pane);
+/// - the read-only device STATE in a grouped section (secondary-colour captions
+///   leading, values right-aligned into their own column). The section's own
+///   inset hairlines separate the rows; the old stock `NSBox` divider is gone
+///   (it drew a 185 pt rule that stopped a third of the way across the pane);
+/// - a titled "Groups" SECTION — one row per saved group (from the injected
+///   `GroupController`) whose `memberIDs` contain this device, in the same
+///   order the sidebar lists them, each row the group's icon + its name + a
+///   trailing chevron. Membership here NAVIGATES: a row reports out through
+///   ``onSelectGroup`` and the host selects that group in the sidebar, which
+///   opens its editor. Selecting is NOT activating — nothing on this page moves
+///   audio. A device in no saved group keeps the section and
+///   shows one non-clickable "Not in any group" row. The section's title is a
+///   plain sibling label at the group editor's "Speakers" geometry
+///   (`GroupsPaneLayout.labelToSectionGap`), so a label is never a section;
 /// - the EQUALIZER section — one more ``GroupedSectionView``, wrapping the
 ///   shared ``EQEditorView``. Hidden for This Mac (there is nothing to tune on
 ///   the device the audio comes FROM), which is why the hint below it carries
@@ -72,10 +79,14 @@ public final class DeviceDetailViewController: NSViewController {
     /// shape, at the same geometry, as the group editor's header section.
     private let headerWell = GroupedSectionView()
     /// The device-STATE section (Status / Available / Volume / Kind) and the
-    /// MEMBERSHIP section ("In groups"), each a `GroupedSectionView` whose own
-    /// inset hairlines separate its rows.
+    /// MEMBERSHIP section (one row per saved group this device belongs to),
+    /// each a `GroupedSectionView` whose own inset hairlines separate its rows.
     private let stateWell = GroupedSectionView()
     private let groupsWell = GroupedSectionView()
+    /// Titles the membership section, exactly as the group editor's "Speakers"
+    /// label titles its checklist — a sibling of the section, NOT a section of
+    /// its own (`test_sectionCount` stays 4).
+    private let groupsTitleLabel = NSTextField(labelWithString: "Groups")
     /// The EQUALIZER section and the shared editor inside it. Hidden whole for
     /// This Mac — the audio's SOURCE has no send to tune.
     private let eqWell = GroupedSectionView()
@@ -106,7 +117,11 @@ public final class DeviceDetailViewController: NSViewController {
     private let availableValueLabel = NSTextField(labelWithString: "")
     private let volumeValueLabel = NSTextField(labelWithString: "")
     private let kindValueLabel = NSTextField(labelWithString: "")
-    private let groupsValueLabel = NSTextField(labelWithString: "")
+
+    /// The saved groups the shown device belongs to, in the order the rows
+    /// currently in ``groupsStack`` render them — the row's `tag` indexes into
+    /// this, so a click knows which group it names without a bespoke row type.
+    private var shownGroupIDs: [String] = []
 
     /// The scroll view wrapping the whole form column, `nil` until `loadView`.
     private var scrollView: NSScrollView?
@@ -118,6 +133,11 @@ public final class DeviceDetailViewController: NSViewController {
     /// the gesture is finished (`false` = live scrub, apply only; `true` =
     /// apply AND persist). The pane reaches no backend itself.
     public var onSetEQ: ((DeviceEQ, String, Bool) -> Void)?
+
+    /// A membership row was activated: SELECT this saved group (open its
+    /// editor), never activate it. The pane reaches no sidebar and no
+    /// `GroupController` mutation itself — the host owns selection.
+    public var onSelectGroup: ((String) -> Void)?
 
     /// The EQ this pane has SENT for a device while a gesture is IN FLIGHT, and
     /// whether that send was the COMMIT (`awaitingEcho`). Without it a mid-scrub
@@ -191,13 +211,16 @@ public final class DeviceDetailViewController: NSViewController {
             row.widthAnchor.constraint(equalTo: stateStack.widthAnchor).isActive = true
         }
 
+        // A LIST, so it takes the group editor's checklist rhythm (6 pt)
+        // rather than the state section's form rhythm (10 pt). Its rows are
+        // per-device — see `rebuildGroupRows`.
         groupsStack.translatesAutoresizingMaskIntoConstraints = false
         groupsStack.orientation = .vertical
         groupsStack.alignment = .leading
-        groupsStack.spacing = 10
-        let membershipRow = makeMetadataRow(caption: "In groups", valueLabel: groupsValueLabel)
-        groupsStack.addArrangedSubview(membershipRow)
-        membershipRow.widthAnchor.constraint(equalTo: groupsStack.widthAnchor).isActive = true
+        groupsStack.spacing = 6
+
+        groupsTitleLabel.translatesAutoresizingMaskIntoConstraints = false
+        groupsTitleLabel.textColor = Tokens.Color.secondaryLabel
 
         hintLabel.translatesAutoresizingMaskIntoConstraints = false
         hintLabel.font = Tokens.Font.caption
@@ -237,7 +260,7 @@ public final class DeviceDetailViewController: NSViewController {
             well.translatesAutoresizingMaskIntoConstraints = false
             column.addSubview(well)
         }
-        for v in [iconWell, nameLabel, stateStack, groupsStack, eqEditor, hintLabel] {
+        for v in [iconWell, nameLabel, stateStack, groupsTitleLabel, groupsStack, eqEditor, hintLabel] {
             column.addSubview(v)
         }
 
@@ -262,8 +285,12 @@ public final class DeviceDetailViewController: NSViewController {
         self.scrollView = scrollView
 
         // The rows' own hairlines come from the section, which reads their LIVE
-        // frames on every draw.
+        // frames on every draw. The membership section's rows are per-device,
+        // so they are built here as well as on every refresh — the pane can be
+        // mounted before it is ever shown a device, and a section with no rows
+        // at all collapses to nothing.
         stateWell.rows = stateStack.arrangedSubviews
+        rebuildGroupRows()
 
         let columnFill = column.trailingAnchor.constraint(
             equalTo: document.trailingAnchor, constant: -GroupsPaneLayout.columnTrailingInset)
@@ -340,9 +367,21 @@ public final class DeviceDetailViewController: NSViewController {
             stateWell.bottomAnchor.constraint(equalTo: stateStack.bottomAnchor,
                                               constant: GroupedSectionView.verticalPadding),
 
+            // The section's TITLE sits on bare pane between the two sections —
+            // the same break, at the same numbers, as the group editor's
+            // "Speakers" label. `sectionGap` below the state section's bottom
+            // border, and `labelToSectionGap` down to the membership section's
+            // top border (the constraint below pins the row STACK, so it
+            // carries the section's own `verticalPadding` on top of that).
+            groupsTitleLabel.topAnchor.constraint(equalTo: stateWell.bottomAnchor,
+                                                  constant: GroupsPaneLayout.sectionGap),
+            groupsTitleLabel.leadingAnchor.constraint(
+                equalTo: column.leadingAnchor,
+                constant: GroupsPaneLayout.railFreeContentLeadingInset),
+
             groupsStack.topAnchor.constraint(
-                equalTo: stateWell.bottomAnchor,
-                constant: GroupsPaneLayout.sectionGap + GroupedSectionView.verticalPadding),
+                equalTo: groupsTitleLabel.bottomAnchor,
+                constant: GroupsPaneLayout.labelToSectionGap + GroupedSectionView.verticalPadding),
             groupsStack.leadingAnchor.constraint(
                 equalTo: column.leadingAnchor,
                 constant: GroupsPaneLayout.railFreeContentLeadingInset),
@@ -471,7 +510,7 @@ public final class DeviceDetailViewController: NSViewController {
         availableValueLabel.stringValue = device.isAvailable ? "Yes" : "No"
         volumeValueLabel.stringValue = "\(device.volume)%"
         kindValueLabel.stringValue = Self.kindText(for: device.kind)
-        groupsValueLabel.stringValue = groupMembershipText(for: device)
+        rebuildGroupRows()
         refreshIcon()
 
         applyEQSectionVisibility()
@@ -539,13 +578,126 @@ public final class DeviceDetailViewController: NSViewController {
         }
     }
 
-    /// "Kitchen, Office" for every saved group whose `memberIDs` contains
-    /// `device.id`, in `groupController.groups` order, or "None" when empty.
-    private func groupMembershipText(for device: Device) -> String {
-        let names = groupController.groups
-            .filter { $0.memberIDs.contains(device.id) }
-            .map(\.name)
-        return names.isEmpty ? "None" : names.joined(separator: ", ")
+    // MARK: Membership section
+
+    /// Height of one membership row. 28 pt is the Groups screen's locked row
+    /// height (`dev/notes/warm-signal-screens-followup.md` — "row height 28pt",
+    /// frozen alongside the text colours); the editor's checklist rows are
+    /// taller only because the WHOLE row there is a checkbox target.
+    private static let groupRowHeight: CGFloat = 28
+
+    /// Shown when the device belongs to no saved group. The section STAYS —
+    /// hiding it would make "which groups is this speaker in?" unanswerable
+    /// from the page that exists to answer it.
+    private static let noGroupsRowText = "Not in any group"
+
+    /// Every saved group this device belongs to, in `groupController.groups`
+    /// order — the same order the sidebar's Groups section lists them in
+    /// (`SidebarViewController.reload` maps that array straight to rows), so
+    /// clicking the third row here lands on the third group there.
+    private func groups(containing device: Device) -> [Group] {
+        groupController.groups.filter { $0.memberIDs.contains(device.id) }
+    }
+
+    /// Rebuild the membership rows for the shown device. `NSStackView`'s
+    /// `removeArrangedSubview` alone leaves the view IN the hierarchy (it only
+    /// stops arranging it), so every old row is removed from its superview too
+    /// or the section quietly stacks up ghosts behind the live rows.
+    private func rebuildGroupRows() {
+        for row in groupsStack.arrangedSubviews {
+            groupsStack.removeArrangedSubview(row)
+            row.removeFromSuperview()
+        }
+
+        let memberGroups = shownDevice.map(groups(containing:)) ?? []
+        shownGroupIDs = memberGroups.map(\.id)
+
+        let rows: [NSView] = memberGroups.isEmpty
+            ? [makeNoGroupsRow()]
+            : memberGroups.enumerated().map { makeGroupRow($0.element, tag: $0.offset) }
+        for row in rows {
+            groupsStack.addArrangedSubview(row)
+            // Rows FILL the section, so the chevron lands on the section's own
+            // inset edge rather than at the end of the row's intrinsic width.
+            row.widthAnchor.constraint(equalTo: groupsStack.widthAnchor).isActive = true
+            row.heightAnchor.constraint(equalToConstant: Self.groupRowHeight).isActive = true
+        }
+        // Live views, so the section's inset hairlines draw between them.
+        groupsWell.rows = rows
+    }
+
+    /// One membership row: the group's icon, its name, and a trailing chevron
+    /// saying the row OPENS something.
+    ///
+    /// A borderless `NSButton`, deliberately — not a stack view with a click
+    /// recognizer. Stock AppKit then gives the whole keyboard/accessibility
+    /// story for free: Tab focus with a focus ring, Space/Return activation,
+    /// `NSAccessibilityButton` role, and `accessibilityPerformPress()`. A
+    /// gesture recognizer on a plain view has none of that and would have to
+    /// hand-roll every one of them — the price `DeviceIconWellView` pays for
+    /// being the one approved custom element.
+    ///
+    /// No hover fill: this pane's text colours are frozen and there is no
+    /// approved hover chrome for it (`AGENTS.md`).
+    private func makeGroupRow(_ group: Group, tag: Int) -> NSView {
+        let button = NSButton(title: group.name, target: self, action: #selector(groupRowClicked(_:)))
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.isBordered = false
+        button.tag = tag
+        button.alignment = .left
+        button.imagePosition = .imageLeading
+        button.lineBreakMode = .byTruncatingTail
+        // The ONE group-icon resolution path (`AGENTS.md`): a stale override
+        // falls back to the group default rather than a blank glyph.
+        let symbol = DeviceIcon.resolve(group.iconSymbolName, default: Group.defaultIconSymbolName)
+        let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        image?.isTemplate = true
+        button.image = image
+        button.setAccessibilityLabel(group.name)
+        // A long group name truncates; it never widens the pane (the same rule
+        // the device name above it follows).
+        button.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        // Rides ON the button — the WHOLE row is the target, so the glyph must
+        // never swallow a click meant for it (`hitTest` nil, the module's
+        // documented non-interactive-chrome pattern).
+        let chevron = ClickThroughImageView()
+        chevron.translatesAutoresizingMaskIntoConstraints = false
+        let chevronImage = NSImage(systemSymbolName: "chevron.right", accessibilityDescription: nil)
+        chevronImage?.isTemplate = true
+        chevron.image = chevronImage
+        chevron.contentTintColor = Tokens.Color.secondaryLabel
+        button.addSubview(chevron)
+        NSLayoutConstraint.activate([
+            chevron.trailingAnchor.constraint(equalTo: button.trailingAnchor),
+            chevron.centerYAnchor.constraint(equalTo: button.centerYAnchor),
+        ])
+        return button
+    }
+
+    /// The empty state: a plain secondary-colour label, NOT a control — there
+    /// is nothing to open.
+    private func makeNoGroupsRow() -> NSView {
+        let label = NSTextField(labelWithString: Self.noGroupsRowText)
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.textColor = Tokens.Color.secondaryLabel
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let row = NSView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: row.trailingAnchor),
+            label.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+        ])
+        return row
+    }
+
+    @objc private func groupRowClicked(_ sender: NSButton) {
+        guard shownGroupIDs.indices.contains(sender.tag) else { return }
+        onSelectGroup?(shownGroupIDs[sender.tag])
     }
 
     /// Resolve and apply the icon for `shownDevice`: the controller's override
@@ -628,8 +780,37 @@ public final class DeviceDetailViewController: NSViewController {
         ]
     }
 
-    /// The "In groups" value text ("None" when the device is in no saved group).
-    public var test_groupMembershipText: String { groupsValueLabel.stringValue }
+    /// The shown device's membership as ONE comma-joined string ("None" when it
+    /// belongs to no saved group) — the plain-string contract `window-harness`
+    /// check [9] and the suites assert against, off the same source and order
+    /// the section's rows render.
+    public var test_groupMembershipText: String {
+        guard let device = shownDevice else { return "" }
+        let names = groups(containing: device).map(\.name)
+        return names.isEmpty ? "None" : names.joined(separator: ", ")
+    }
+
+    /// The membership section's title label.
+    public var test_groupsSectionTitleText: String { groupsTitleLabel.stringValue }
+
+    /// What the membership section's rows READ, top to bottom: one entry per
+    /// saved group the device belongs to, or the single non-clickable
+    /// "Not in any group" row when it belongs to none.
+    public var test_groupRowTitles: [String] {
+        groupsStack.arrangedSubviews.map { row in
+            if let button = row as? NSButton { return button.title }
+            return (row.subviews.compactMap { $0 as? NSTextField }.first?.stringValue) ?? ""
+        }
+    }
+
+    /// Activate the membership row at `index` exactly as a click (or Space/
+    /// Return on the focused row) does — no synthesized clicks headless
+    /// (`../AGENTS.md`). No-op for an out-of-range index or the empty-state row.
+    public func test_selectGroupRow(at index: Int) {
+        let rows = groupsStack.arrangedSubviews
+        guard rows.indices.contains(index), let button = rows[index] as? NSButton else { return }
+        groupRowClicked(button)
+    }
 
     /// The minimal Mixer hint's visible text — asserts it stays a single,
     /// short line rather than restating the fuller footer copy owned
@@ -679,8 +860,9 @@ public final class DeviceDetailViewController: NSViewController {
     }
 
     /// The number of `GroupedSectionView` sections this pane draws (header +
-    /// state + "In groups" + Equalizer) — the detail pane adopts the SAME section shape the
-    /// group editor uses, rather than a bare form on the pane.
+    /// state + Groups + Equalizer) — the detail pane adopts the SAME section
+    /// shape the group editor uses, rather than a bare form on the pane. The
+    /// "Groups" label titles a section from OUTSIDE it and is not counted.
     /// Counted RECURSIVELY: the column now sits inside a scroll view, so the
     /// sections are several levels down rather than two.
     public var test_sectionCount: Int {
@@ -725,10 +907,18 @@ public final class DeviceDetailViewController: NSViewController {
         return stateWell.convert(stateWell.bounds, to: view)
     }
 
-    /// The "In groups" section's laid-out frame in the pane's own coordinates.
+    /// The membership section's laid-out frame in the pane's own coordinates.
     public var test_groupsSectionFrame: NSRect {
         view.layoutSubtreeIfNeeded()
         return groupsWell.convert(groupsWell.bounds, to: view)
+    }
+
+    /// The "Groups" TITLE label's laid-out frame in the pane's own coordinates
+    /// — it must sit between the state section and the membership section it
+    /// titles, never inside either.
+    public var test_groupsSectionTitleFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return groupsTitleLabel.convert(groupsTitleLabel.bounds, to: view)
     }
 
     /// The Equalizer section's laid-out frame in the pane's own coordinates.
@@ -807,4 +997,12 @@ extension DeviceDetailViewController: EQEditorViewDelegate {
 /// (`GroupCreationSheetController` keeps its own for the same reason).
 private final class FlippedView: NSView {
     override var isFlipped: Bool { true }
+}
+
+/// The membership row's trailing chevron: pure signal, never a click target.
+/// It sits ON the row button, so without this the trailing strip of every row
+/// would refuse the click the rest of the row accepts. Same `hitTest`-nil
+/// pattern as `HairlineView`/`GroupedSectionView`; no `draw(_:)` of its own.
+private final class ClickThroughImageView: NSImageView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }

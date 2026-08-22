@@ -509,6 +509,32 @@ import AppKit
         #expect(window.test_detail.test_groupMembershipText == saved.name, "office is a Group 1 member")
     }
 
+    /// Membership on the detail pane is NAVIGATION: clicking a group row
+    /// selects that group in the sidebar and opens its editor. Still
+    /// configuration-only — selecting is not activating, so `activeGroupID`
+    /// stays nil and no audio moves.
+    @Test func clickingAGroupRowOnTheDetailPaneOpensThatGroupsEditor() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)   // members: sonos-move, office
+        window.update(devices: backend.devices)
+
+        window.test_select(.device(id: "office"))
+        await drain()
+        #expect(window.test_isShowingDetail)
+        #expect(window.test_detail.test_groupRowTitles == [saved.name])
+
+        window.test_detail.test_selectGroupRow(at: 0)
+        await drain()
+
+        #expect(window.test_isShowingEditor, "the row opened the group's editor")
+        #expect(!(window.test_isShowingDetail))
+        #expect(window.test_editor.editingGroupID == saved.id)
+        #expect(window.test_sidebar.currentSelection == .group(id: saved.id),
+                "the sidebar follows, so the screen has one selection, not two")
+        #expect(controller.activeGroupID == nil,
+                "selecting a group from the detail pane NEVER activates it")
+    }
+
     @Test func deselectingDeviceAutoSelectsFirstGroupOrEmptyState() async throws {
         let (window, controller, backend) = try await makeWindow()
         window.test_select(.device(id: "office"))

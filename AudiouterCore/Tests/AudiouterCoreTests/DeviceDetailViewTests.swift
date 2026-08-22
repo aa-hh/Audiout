@@ -182,6 +182,119 @@ import AppKit
         #expect(detail.test_groupMembershipText == "Kitchen")
     }
 
+    // MARK: The "Groups" membership section — rows, order, empty state
+
+    @Test func groupsSectionIsTitledGroups() {
+        let detail = DeviceDetailViewController(groupController: makeController())
+        _ = detail.view
+        detail.show(device: makeDevice(id: "office"))
+        #expect(detail.test_groupsSectionTitleText == "Groups")
+    }
+
+    @Test func groupRowsListEverySavedGroupContainingTheDeviceInSidebarOrder() throws {
+        let controller = makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Kitchen", memberIDs: ["office", "appletv-lr"],
+                                       memberVolumes: ["office": 50, "appletv-lr": 60]))
+        try controller.saveGroup(Group(id: "g2", name: "Whole House", memberIDs: ["office"],
+                                       memberVolumes: ["office": 50]))
+        try controller.saveGroup(Group(id: "g3", name: "Bedroom", memberIDs: ["appletv-lr"],
+                                       memberVolumes: ["appletv-lr": 60]))
+
+        let detail = DeviceDetailViewController(groupController: controller)
+        _ = detail.view
+        detail.show(device: makeDevice(id: "office"))
+
+        #expect(detail.test_groupRowTitles == ["Kitchen", "Whole House"],
+                Comment(rawValue: "one row per group this device is in, in groupController.groups order — " +
+                "the same order SidebarViewController.reload maps to its Groups section"))
+    }
+
+    @Test func groupRowsShowTheEmptyStateRowWhenTheDeviceIsInNoGroup() {
+        let detail = DeviceDetailViewController(groupController: makeController())
+        _ = detail.view
+        detail.show(device: makeDevice(id: "office"))
+        #expect(detail.test_groupRowTitles == ["Not in any group"],
+                "the section stays visible and says so, rather than disappearing")
+    }
+
+    @Test func groupRowsRebuildWhenMembershipChanges() throws {
+        let controller = makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Kitchen", memberIDs: ["living-room"],
+                                       memberVolumes: ["living-room": 50]))
+        let detail = DeviceDetailViewController(groupController: controller)
+        _ = detail.view
+        detail.show(device: makeDevice(id: "office"))
+        #expect(detail.test_groupRowTitles == ["Not in any group"])
+
+        var group = try #require(controller.groups.first { $0.id == "g1" })
+        group.memberIDs = ["office"]
+        group.memberVolumes["office"] = 50
+        try controller.saveGroup(group)
+
+        detail.refresh(device: makeDevice(id: "office"))
+        #expect(detail.test_groupRowTitles == ["Kitchen"],
+                "a rebuild replaces the rows — it never stacks a second set behind the first")
+    }
+
+    @Test func selectingAGroupRowReportsThatGroupsID() throws {
+        let controller = makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Kitchen", memberIDs: ["office"],
+                                       memberVolumes: ["office": 50]))
+        try controller.saveGroup(Group(id: "g2", name: "Whole House", memberIDs: ["office"],
+                                       memberVolumes: ["office": 50]))
+
+        let detail = DeviceDetailViewController(groupController: controller)
+        _ = detail.view
+        detail.show(device: makeDevice(id: "office"))
+
+        var reported: [String] = []
+        detail.onSelectGroup = { reported.append($0) }
+
+        detail.test_selectGroupRow(at: 1)
+        #expect(reported == ["g2"], "the row's id, not its position in groupController.groups")
+
+        detail.test_selectGroupRow(at: 0)
+        #expect(reported == ["g2", "g1"])
+    }
+
+    @Test func theEmptyStateRowIsNotClickable() {
+        let detail = DeviceDetailViewController(groupController: makeController())
+        _ = detail.view
+        detail.show(device: makeDevice(id: "office"))
+
+        var reported: [String] = []
+        detail.onSelectGroup = { reported.append($0) }
+        detail.test_selectGroupRow(at: 0)
+        detail.test_selectGroupRow(at: 7)
+
+        #expect(reported.isEmpty, "there is nothing to open")
+    }
+
+    @Test func theGroupsTitleSitsBetweenTheStateSectionAndTheMembershipSection() throws {
+        let controller = makeController()
+        try controller.saveGroup(Group(id: "g1", name: "Kitchen", memberIDs: ["office"],
+                                       memberVolumes: ["office": 50]))
+        let detail = DeviceDetailViewController(groupController: controller)
+        detail.show(device: makeDevice(id: "office"))
+        _ = detail.view
+        detail.view.setFrameSize(AppSurfaceController.groupsDefaultContentSize)
+        detail.view.layoutSubtreeIfNeeded()
+
+        let state = detail.test_stateSectionFrame
+        let title = detail.test_groupsSectionTitleFrame
+        let section = detail.test_groupsSectionFrame
+
+        // The pane's own view is NOT flipped, so "below" reads as a SMALLER y.
+        // Half-point tolerance: auto layout snaps frames onto a rounding grid
+        // whose pitch varies BETWEEN RUNS of the same binary
+        // (`AudiouterWindowUI/AGENTS.md`), and this pane's insets are half
+        // points. Never assert absolute widths here for the same reason.
+        #expect(title.maxY <= state.minY + 0.5,
+                "the title sits below the state section's bottom border")
+        #expect(section.maxY <= title.minY + 0.5,
+                "…and above the membership section it titles")
+    }
+
     // MARK: Icon resolution — no injected controller
 
     @Test func iconSymbolNameFallsBackToKindDefaultWithNoInjectedController() {
@@ -323,7 +436,7 @@ import AppKit
         let detail = makeLoadedPane(device: makeDevice())
         #expect(detail.test_eqSectionShown)
         #expect(detail.test_sectionCount == 4,
-                "header + device state + In groups + Equalizer")
+                "header + device state + Groups + Equalizer")
     }
 
     @Test func bypassSentencesComeFromTheSnapshot() {

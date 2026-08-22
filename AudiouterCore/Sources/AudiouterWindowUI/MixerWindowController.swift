@@ -182,6 +182,14 @@ public final class MixerWindowController {
             self?.onSetMainOutEQ?(eq, committed)
         }
 
+        // A membership row on the detail pane NAVIGATES: it selects that group
+        // in the sidebar and opens its editor, through the same `select(_:)`
+        // path the popover's deep link uses. CONFIG-ONLY — selecting is not
+        // activating, so `activeGroupID` is untouched and no audio moves.
+        detailViewController.onSelectGroup = { [weak self] groupID in
+            self?.select(.group(id: groupID))
+        }
+
         // Sidebar selection drives the content pane.
         sidebarViewController.onSelect = { [weak self] selection in
             self?.handleSidebarSelection(selection)

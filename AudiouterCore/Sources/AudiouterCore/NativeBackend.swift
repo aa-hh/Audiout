@@ -8444,7 +8444,7 @@ public protocol BTOutputControlling: AnyObject {
     /// Push a CANDIDATE latency live to the device's sink — never persisted,
     /// the exact twin of ``setBTWizardTrimPreview(_:forDevice:)`` and equally
     /// rebuild-free.
-    func setBTWizardLatencyPreview(_ ms: Double, forDevice id: String)
+    func setBTWizardLatencyPreview(_ ms: Double, forDevice id: String, halfWidthMs: Double?)
     /// End a latency preview: `keepMs` non-nil persists it as the device's
     /// measured latency AND zeroes the device's trim (the run suspended it, and
     /// the nudge was a manual stand-in for the latency just measured); `nil`
@@ -8701,7 +8701,8 @@ extension NativeBackend: BTOutputControlling {
         return lower...Swift.max(lower, upper)
     }
 
-    public func setBTWizardLatencyPreview(_ ms: Double, forDevice id: String) {
+    public func setBTWizardLatencyPreview(_ ms: Double, forDevice id: String,
+                                          halfWidthMs: Double? = nil) {
         // NOT floored at 0: see `btWizardLatencyRangeMs` — the run needs to be
         // able to reverse below the base. Keep is where the floor belongs.
         let value = Int(ms.rounded())
@@ -8713,15 +8714,19 @@ extension NativeBackend: BTOutputControlling {
         // One line per trial — the run's only record of what the user was
         // actually asked to judge. `captureControlQueue`/`stateQueue` callers
         // only; nothing here runs on the render or tap thread.
-        Telemetry.log(.localPlayback, "wizard_latency_preview", [
+        var fields = [
             "uid": id,
             "candidateMs": String(value),
             "deltaMs": String(value - (previous ?? value)),
-            // The estimator's stage, read off the tempo it drives: the coarse
-            // search ticks far slower than the stimulus blocks.
+            // How wide the run is casting, read off the tempo it drives: an
+            // uncertain run ticks far slower than one closing in.
             "stage": (bpm ?? BTAlignmentWizardSession.searchTickBPM)
                 <= BTAlignmentWizardSession.searchTickBPM ? "search" : "blocks",
-        ])
+        ]
+        // How sure the estimator was when it chose this level. Absent rather
+        // than zero for a caller that has no posterior behind it.
+        if let halfWidthMs { fields["halfWidthMs"] = String(format: "%.1f", halfWidthMs) }
+        Telemetry.log(.localPlayback, "wizard_latency_preview", fields)
         captureControlQueue.async { [weak self] in
             self?.btSink?.setOffsetMs(value, forDeviceUID: id)
         }

@@ -2,110 +2,218 @@ import Foundation
 import Testing
 @testable import AudiouterCore
 
+private final class Recorder {
+    var previews: [Double] = []
+    var halfWidths: [Double?] = []
+    var ends: [Double?] = []
+    var ticks: [Bool] = []
+    var tempos: [Double] = []
+    var screens: [BTAlignmentWizardSession.Screen] = []
+
+    func makeSession(deviceID: String = "AA:BB:output",
+                     baseTrimMs: Double = 0,
+                     candidateRangeMs: ClosedRange<Double> =
+                        -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs,
+                     invertsEstimate: Bool = false,
+                     openingProposalMs: Double? = nil,
+                     reference: BTAlignmentWizardSession.Reference? =
+                        .init(id: "homepod", name: "Kitchen HomePod")) -> BTAlignmentWizardSession {
+        let session = BTAlignmentWizardSession(
+            deviceID: deviceID,
+            targetName: "Move 2",
+            reference: reference,
+            baseValueMs: baseTrimMs,
+            candidateRangeMs: candidateRangeMs,
+            invertsEstimate: invertsEstimate,
+            openingProposalMs: openingProposalMs,
+            applyPreviewTrim: { [weak self] ms, halfWidthMs in
+                self?.previews.append(ms)
+                self?.halfWidths.append(halfWidthMs)
+            },
+            endPreview: { [weak self] in self?.ends.append($0) },
+            setTick: { [weak self] in self?.ticks.append($0) },
+            setTempo: { [weak self] in self?.tempos.append($0) })
+        session.onScreenChange = { [weak self] in self?.screens.append($0) }
+        return session
+    }
+}
+
+/// Answer every question the way a listener with this true offset would.
+/// The candidate is read back off the preview the session just applied —
+/// the only place it is observable, which is also the point: the trim the
+/// device is playing at IS the level being judged.
+@discardableResult
+private func driveTruthfully(
+    _ session: BTAlignmentWizardSession, _ recorder: Recorder,
+    trueOffsetMs: Double, baseTrimMs: Double = 0, jndMs: Double = 4
+) -> Int {
+    var asked = 0
+    while case .question = session.screen, asked < 100 {
+        let levelMs = (recorder.previews.last ?? baseTrimMs) - baseTrimMs
+        if abs(levelMs - trueOffsetMs) < jndMs {
+            session.answer(.together)
+        } else {
+            session.answer(levelMs < trueOffsetMs ? .target : .reference)
+        }
+        asked += 1
+    }
+    return asked
+}
+
+/// Answer as a listener whose speaker really has `trueLatencyMs` of it. The
+/// mirror of ``driveTruthfully``: a LATENCY level below the truth leaves the
+/// target still late, so the REFERENCE is what is heard first.
+@discardableResult
+private func driveLatencyRun(
+    _ session: BTAlignmentWizardSession, _ recorder: Recorder,
+    trueLatencyMs: Double, jndMs: Double = 4
+) -> Int {
+    var asked = 0
+    while case .question = session.screen, asked < 100 {
+        let levelMs = recorder.previews.last ?? 0
+        if abs(levelMs - trueLatencyMs) < jndMs {
+            session.answer(.together)
+        } else {
+            session.answer(levelMs < trueLatencyMs ? .reference : .target)
+        }
+        asked += 1
+    }
+    return asked
+}
+
+/// Name the target at every level, rejecting whatever the run proposes: the
+/// listener whose offset this control cannot reach.
+@discardableResult
+private func driveAlwaysTarget(_ session: BTAlignmentWizardSession) -> Int {
+    var asked = 0
+    while asked < 100 {
+        switch session.screen {
+        case .question:
+            session.answer(.target)
+            asked += 1
+        case .proposal:
+            session.rejectProposal()
+        default:
+            return asked
+        }
+    }
+    return asked
+}
+
+/// Two answers one way and one the other, forever: consistent enough to keep
+/// the belief moving, contradictory enough that it never settles.
+@discardableResult
+private func driveContradictorily(_ session: BTAlignmentWizardSession) -> Int {
+    let pattern: [BTAlignmentWizardSession.Answer] = [.target, .target, .reference]
+    var asked = 0
+    while case .question = session.screen, asked < 120 {
+        session.answer(pattern[asked % 3])
+        asked += 1
+    }
+    return asked
+}
+
+private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
+    guard case .proposal(let valueMs) = session.screen else { return nil }
+    return valueMs
+}
+
+
 /// The wizard session (W2): drives the estimator end to end against recording
-/// closures — tick lifecycle, live candidate previews relative to the base trim,
-/// Back across the search/blocks boundary, Keep persisting, and Try again /
-/// cancel / graceful exit / unreachable restoring.
+/// closures — tick lifecycle, live candidate previews relative to the base
+/// value, Back, the proposal's accept/reject, and Try again / cancel / the
+/// bow-outs restoring.
 @Suite final class BTAlignmentWizardSessionTests {
 
-    /// SplitMix64 — a seed pins every block's stimulus order, so these tests
-    /// read the same run every time.
-    private struct SeededRNG: RandomNumberGenerator {
-        private var state: UInt64
-        init(seed: UInt64) { state = seed }
-        mutating func next() -> UInt64 {
-            state &+= 0x9E37_79B9_7F4A_7C15
-            var z = state
-            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-            return z ^ (z >> 31)
+    // MARK: The ordinary run
+
+    @Test func startTurnsTheTickOnAndAppliesTheFirstCandidate() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(baseTrimMs: 40)
+        #expect(session.screen == .intro)
+        session.start()
+        #expect(recorder.ticks == [true])
+        #expect(recorder.previews.count == 1)
+        guard case .question(let progress, let interval, let answers) = session.screen else {
+            Issue.record("expected a question, got \(session.screen)")
+            return
         }
+        #expect(progress == 0, "nothing learned yet")
+        #expect(answers == 0)
+        #expect(interval.lowerBound >= -BTSyncTrim.rangeMs,
+                "the confidence line never claims more spread than the run has")
+        #expect(interval.upperBound <= BTSyncTrim.rangeMs)
+        #expect(recorder.halfWidths.last ?? nil != nil,
+                "every preview carries how sure the run is")
+        session.cancel()
     }
 
-    private final class Recorder {
-        var previews: [Double] = []
-        var ends: [Double?] = []
-        var ticks: [Bool] = []
-        var tempos: [Double] = []
-        var screens: [BTAlignmentWizardSession.Screen] = []
-
-        func makeSession(baseTrimMs: Double = 0, seed: UInt64 = 42,
-                         candidateRangeMs: ClosedRange<Double> =
-                            -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs,
-                         invertsEstimate: Bool = false,
-                         reference: BTAlignmentWizardSession.Reference? =
-                            .init(id: "homepod", name: "Kitchen HomePod")) -> BTAlignmentWizardSession {
-            let session = BTAlignmentWizardSession(
-                deviceID: "AA:BB:output",
-                targetName: "Move 2",
-                reference: reference,
-                baseValueMs: baseTrimMs,
-                candidateRangeMs: candidateRangeMs,
-                invertsEstimate: invertsEstimate,
-                randomNumberGenerator: SeededRNG(seed: seed),
-                applyPreviewTrim: { [weak self] in self?.previews.append($0) },
-                endPreview: { [weak self] in self?.ends.append($0) },
-                setTick: { [weak self] in self?.ticks.append($0) },
-                setTempo: { [weak self] in self?.tempos.append($0) })
-            session.onScreenChange = { [weak self] in self?.screens.append($0) }
-            return session
-        }
+    @Test func candidatesStayInsideTheTrimRange() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(baseTrimMs: 490)
+        session.start()
+        driveTruthfully(session, recorder, trueOffsetMs: 0, baseTrimMs: 490)
+        #expect(recorder.previews.allSatisfy { abs($0) <= BTSyncTrim.rangeMs },
+                "got \(recorder.previews.filter { abs($0) > BTSyncTrim.rangeMs })")
+        session.cancel()
     }
 
-    /// Answer every question the way a listener with this true offset would.
-    /// The candidate is read back off the preview the session just applied —
-    /// the only place it is observable, which is also the point: the trim the
-    /// device is playing at IS the level being judged.
-    @discardableResult
-    private func driveTruthfully(
-        _ session: BTAlignmentWizardSession, _ recorder: Recorder,
-        trueOffsetMs: Double, baseTrimMs: Double = 0, jndMs: Double = 2
-    ) -> Int {
-        var asked = 0
-        while case .question = session.screen, asked < 200 {
-            let levelMs = (recorder.previews.last ?? baseTrimMs) - baseTrimMs
-            if abs(levelMs - trueOffsetMs) < jndMs {
-                session.answer(.cantTell)
-            } else {
-                session.answer(levelMs < trueOffsetMs ? .target : .reference)
-            }
-            asked += 1
+    /// The headline flow: questions narrow, a value is proposed, the tick is
+    /// STILL RUNNING while the user judges it, and accepting persists it.
+    @Test func answersNarrowToAProposalWhoseTickIsStillRunning() {
+        let recorder = Recorder()
+        let session = recorder.makeSession()
+        session.start()
+        driveTruthfully(session, recorder, trueOffsetMs: 60)
+        guard let valueMs = proposalValue(session) else {
+            Issue.record("expected a proposal, got \(session.screen)")
+            return
         }
-        return asked
+        #expect(abs(valueMs - 60) <= 6, "the proposal is what the listener heard, got \(valueMs)")
+        #expect(recorder.previews.last == valueMs, "the proposal is applied live to be judged")
+        #expect(recorder.ticks == [true], "the tick has NOT stopped — there is nothing to hear otherwise")
+        #expect(recorder.ends.isEmpty, "nothing persisted or restored until the user answers")
+
+        session.acceptProposal()
+        #expect(session.screen == .kept(valueMs: valueMs))
+        #expect(recorder.ends == [valueMs], "accepting IS keeping")
+        #expect(recorder.ticks == [true, false], "…and the tick stops exactly once")
+        session.done()
+        session.cancel()
+        #expect(recorder.ticks == [true, false], "terminal: no second tick-off edge")
+        #expect(recorder.ends == [valueMs], "…and no second write")
     }
 
-    /// Answer as a listener whose speaker really has `trueLatencyMs` of it. The
-    /// mirror of ``driveTruthfully``: a LATENCY level below the truth leaves the
-    /// target still late, so the REFERENCE is what is heard first.
-    @discardableResult
-    private func driveLatencyRun(
-        _ session: BTAlignmentWizardSession, _ recorder: Recorder,
-        trueLatencyMs: Double, jndMs: Double = 2
-    ) -> Int {
-        var asked = 0
-        while case .question = session.screen, asked < 200 {
-            let levelMs = recorder.previews.last ?? 0
-            if abs(levelMs - trueLatencyMs) < jndMs {
-                session.answer(.cantTell)
-            } else {
-                session.answer(levelMs < trueLatencyMs ? .reference : .target)
-            }
-            asked += 1
+    @Test func rejectingAProposalResumesTheQuestions() {
+        let recorder = Recorder()
+        let session = recorder.makeSession()
+        session.start()
+        driveTruthfully(session, recorder, trueOffsetMs: 60)
+        guard proposalValue(session) != nil else {
+            Issue.record("expected a proposal, got \(session.screen)")
+            return
         }
-        return asked
+        session.rejectProposal()
+        guard case .question = session.screen else {
+            Issue.record("expected the questions back, got \(session.screen)")
+            return
+        }
+        #expect(recorder.ticks == [true], "the tick never stopped, so it never restarts")
+        #expect(recorder.ends.isEmpty, "a rejection persists and restores nothing")
+        session.cancel()
     }
+
+    // MARK: The latency run's floor and sign
 
     /// A fresh speaker's latency base is 0, and its range used to bottom out
-    /// there too: "target first" means the latency must come DOWN, the candidate
-    /// clamped to the same 0, the identical question came back, and the second
-    /// identical answer bowed the run out. Two wrong-feeling clicks killed every
-    /// first run.
-    @Test func aFreshSpeakersFirstTargetAnswersMoveTheRunInsteadOfEndingIt() {
+    /// there too: "target first" meant the latency had to come DOWN, the
+    /// candidate clamped to the same 0, and the run dead-ended on its first
+    /// answer. The range gives it somewhere to go.
+    @Test func aFreshSpeakersRunCanReverseBelowItsBase() {
         let recorder = Recorder()
         let session = recorder.makeSession(candidateRangeMs: -500...1_500,
                                            invertsEstimate: true)
         session.start()
-        #expect(recorder.previews == [0], "the search opens at the fresh speaker's base")
         session.answer(.target)
         session.answer(.target)
         guard case .question = session.screen else {
@@ -113,16 +221,14 @@ import Testing
             return
         }
         #expect(recorder.previews.count == 3, "each answer asks a NEW question")
-        #expect(recorder.previews[1] < 0, "the candidate reverses below the base")
-        #expect(recorder.previews[2] < recorder.previews[1],
-                "…and keeps going: \(recorder.previews)")
+        #expect(recorder.previews.allSatisfy { (-500...1_500).contains($0) })
         session.cancel()
     }
 
-    /// The other end of that freedom: a run that converges somewhere the Mac
-    /// would have to be the LATE one says so instead of storing it. A negative
-    /// latency is not a thing a speaker does with the Mac as the zero.
-    @Test func aLatencyRunConvergingBelowZeroSaysSoAndPersistsNothing() {
+    /// A run that converges somewhere the Mac would have to be the LATE one
+    /// says so instead of storing it. A negative latency is not a thing a
+    /// speaker does with the Mac as the zero.
+    @Test func aLatencyRunProposingBelowZeroSaysSoAndPersistsNothing() {
         let recorder = Recorder()
         let session = recorder.makeSession(candidateRangeMs: -500...1_500,
                                            invertsEstimate: true)
@@ -133,124 +239,68 @@ import Testing
         #expect(recorder.ticks == [true, false], "and the tick stops with the questions")
     }
 
-    /// The ordinary outcome, unchanged by any of the above.
-    @Test func aLatencyRunConvergingAboveZeroPersistsTheMeasurement() {
+    @Test func aLatencyRunAboveZeroPersistsTheMeasurementOnAccept() {
         let recorder = Recorder()
         let session = recorder.makeSession(candidateRangeMs: -500...1_500,
                                            invertsEstimate: true)
         session.start()
         driveLatencyRun(session, recorder, trueLatencyMs: 640)
-        guard case .receipt(let latencyMs) = session.screen else {
-            Issue.record("expected a receipt, got \(session.screen)")
+        guard let latencyMs = proposalValue(session) else {
+            Issue.record("expected a proposal, got \(session.screen)")
             return
         }
-        #expect(abs(latencyMs - 640) <= 4, "got \(latencyMs)")
-        session.keep()
-        #expect(recorder.ends == [latencyMs], "Keep persists the measurement")
+        #expect(abs(latencyMs - 640) <= 6, "got \(latencyMs)")
+        session.acceptProposal()
+        #expect(recorder.ends == [latencyMs], "accepting persists the measurement")
+        #expect(session.measuresLatency, "…and the panel knows which copy to render")
     }
 
-    @Test func startTurnsTheTickOnAndAppliesTheFirstCandidate() {
-        let recorder = Recorder()
-        let session = recorder.makeSession(baseTrimMs: 40)
-        #expect(session.screen == .intro)
-        session.start()
-        #expect(recorder.ticks == [true])
-        #expect(recorder.previews.count == 1)
-        #expect(recorder.previews[0] == 40,
-                "the coarse search opens at the device's own trim, got \(recorder.previews[0])")
-        #expect(session.screen == .question(progress: 0, answersSoFar: 0, searching: true))
-        session.cancel()
+    /// THE sign, pinned. `.target` means the target was heard FIRST, so it is
+    /// early and needs MORE delay. A TRIM is added to the delay, so it goes UP.
+    /// A measured LATENCY is subtracted from it — a larger latency feeds the
+    /// speaker earlier — so it must go DOWN. Getting this backwards compiles
+    /// perfectly and converges a run onto the wrong side of the truth.
+    @Test func targetFirstRaisesATrimAndLowersAMeasuredLatency() {
+        let trimRecorder = Recorder()
+        let trim = trimRecorder.makeSession(baseTrimMs: 0)
+        trim.start()
+        trimRecorder.previews.removeAll()
+        trim.answer(.target)
+        trim.answer(.target)
+        trim.answer(.target)
+        #expect(trimRecorder.previews.last ?? 0 > 0,
+                "the target is early, so its trim grows — got \(trimRecorder.previews)")
+        trim.cancel()
+
+        let latencyRecorder = Recorder()
+        let latency = latencyRecorder.makeSession(
+            baseTrimMs: 300, candidateRangeMs: 0...1_500, invertsEstimate: true)
+        latency.start()
+        let opening = latencyRecorder.previews[0]
+        latency.answer(.target)
+        latency.answer(.target)
+        latency.answer(.target)
+        #expect(latencyRecorder.previews.last ?? 0 < opening,
+                "the target is early, so its latency SHRINKS: \(latencyRecorder.previews)")
+        latency.cancel()
     }
 
-    @Test func blockCandidatesAreTheStimuliOffsetFromTheBaseTrim() {
+    @Test func aLatencyRunStaysInsideItsUsableRange() {
         let recorder = Recorder()
-        let session = recorder.makeSession(baseTrimMs: 100)
+        let session = recorder.makeSession(
+            baseTrimMs: 40, candidateRangeMs: 0...600, invertsEstimate: true)
         session.start()
-        // One "can't tell" hands the coarse search over with the estimate still
-        // at the base trim, so the block's fan is base ± the stimuli.
-        session.answer(.cantTell)
-        let blockPreviews = recorder.previews.count - 1
-        session.answer(.target)
-        session.answer(.reference)
-        let candidates = Array(recorder.previews.dropFirst(blockPreviews))
-        #expect(candidates.count == 3)
-        #expect(candidates.allSatisfy {
-            BTAlignmentConstantStimuli.stimuliMs.contains($0 - 100)
-        }, "every candidate is base + δ: \(candidates)")
-        #expect(Set(candidates).count == 3, "no stimulus is repeated inside a block")
-        guard case .question(_, let answers, let searching) = session.screen else {
-            Issue.record("expected a question, got \(session.screen)")
-            return
+        var asked = 0
+        while case .question = session.screen, asked < 100 {
+            session.answer(.reference)
+            asked += 1
         }
-        #expect(answers == 3, "the count is every question asked, staircase included")
-        #expect(searching == false, "and the search is behind us")
+        #expect(recorder.previews.allSatisfy { (0...600).contains($0) },
+                "every candidate is inside the usable range")
         session.cancel()
     }
 
-    @Test func candidatesClampToTheTrimRange() {
-        let recorder = Recorder()
-        let session = recorder.makeSession(baseTrimMs: 490)
-        session.start()
-        // The first can't-tell ends the search at the base trim; the block that
-        // follows is the one whose upper stimuli have nowhere to go.
-        for _ in 0..<(BTAlignmentConstantStimuli.stimuliMs.count + 1) {
-            session.answer(.cantTell)
-        }
-        #expect(recorder.previews.allSatisfy { $0 <= BTSyncTrim.rangeMs })
-        #expect(recorder.previews.contains(BTSyncTrim.rangeMs),
-                "base 490 + the +16/+24 stimuli clamp onto the ceiling")
-        session.cancel()
-    }
-
-    @Test func convergenceShowsTheReceiptAndStopsTheTick() {
-        let recorder = Recorder()
-        let session = recorder.makeSession()
-        session.start()
-        driveTruthfully(session, recorder, trueOffsetMs: 10)
-        guard case .receipt(let trimMs) = session.screen else {
-            Issue.record("expected receipt, got \(session.screen)")
-            return
-        }
-        #expect(abs(trimMs - 10) <= 4, "the receipt is the true offset, got \(trimMs)")
-        #expect(recorder.previews.last == trimMs, "the result is applied live for the receipt audition")
-        #expect(recorder.ticks == [true, false], "the tick ends with the questions")
-        #expect(recorder.ends.isEmpty, "nothing persisted or restored until Keep/Try again")
-        session.cancel()
-    }
-
-    @Test func keepPersistsTheResultOnce() {
-        let recorder = Recorder()
-        let session = recorder.makeSession()
-        session.start()
-        driveTruthfully(session, recorder, trueOffsetMs: 10)
-        guard case .receipt(let trimMs) = session.screen else {
-            Issue.record("expected receipt, got \(session.screen)")
-            return
-        }
-        session.keep()
-        #expect(recorder.ends == [trimMs], "Keep commits the applied result")
-        session.keep()
-        session.cancel()
-        #expect(recorder.ends == [trimMs], "terminal: neither a second Keep nor cancel does anything")
-    }
-
-    @Test func tryAgainRestoresThePriorTrimAndRestarts() {
-        let recorder = Recorder()
-        let session = recorder.makeSession(baseTrimMs: 60)
-        session.start()
-        driveTruthfully(session, recorder, trueOffsetMs: 10, baseTrimMs: 60)
-        guard case .receipt = session.screen else {
-            Issue.record("expected receipt, got \(session.screen)")
-            return
-        }
-        session.tryAgain()
-        #expect(recorder.ends == [nil], "Try again restores the prior trim first")
-        #expect(recorder.ticks == [true, false, true], "and the tick comes back for the fresh run")
-        #expect(recorder.previews.last == recorder.previews[0],
-                "the restart re-runs from the base trim, at the top of the search")
-        #expect(session.screen == .question(progress: 0, answersSoFar: 0, searching: true))
-        session.cancel()
-    }
+    // MARK: The exit contracts (unchanged behaviour, new screen names)
 
     @Test func cancelRestoresThePriorTrimAndSilencesTheTick() {
         let recorder = Recorder()
@@ -260,44 +310,9 @@ import Testing
         session.cancel()
         #expect(recorder.ends == [nil])
         #expect(recorder.ticks == [true, false])
+        let previewCount = recorder.previews.count
         session.answer(.reference)
-        #expect(recorder.previews.count == 2, "a cancelled session ignores further answers")
-    }
-
-    @Test func twoAllCantTellBlocksExitGracefullyAndRestore() {
-        let recorder = Recorder()
-        let session = recorder.makeSession(baseTrimMs: 25)
-        session.start()
-        for _ in 0..<(2 * BTAlignmentConstantStimuli.stimuliMs.count + 1) {
-            session.answer(.cantTell)
-        }
-        #expect(session.screen == .gracefulExit)
-        #expect(recorder.ends == [nil], "graceful exit restores the prior trim")
-        #expect(recorder.ticks == [true, false])
-
-        // The panel's Done button calls `cancel()` on this screen, and the run
-        // is already over: a SECOND tick-off edge costs the backend a re-anchor
-        // of every sink, for nothing.
-        session.cancel()
-        #expect(recorder.ticks == [true, false], "exactly one tick-off edge")
-        #expect(recorder.ends == [nil], "…and no second restore")
-    }
-
-    /// The unreachable exit is terminal in exactly the same way.
-    @Test func doneAfterTheUnreachableExitIsInert() {
-        let recorder = Recorder()
-        let session = recorder.makeSession(baseTrimMs: 0)
-        session.start()
-        var asked = 0
-        while case .question = session.screen, asked < 200 {
-            session.answer(.target)
-            asked += 1
-        }
-        #expect(session.screen == .unreachable)
-        #expect(recorder.ticks == [true, false])
-        session.cancel()
-        #expect(recorder.ticks == [true, false], "exactly one tick-off edge")
-        #expect(recorder.ends == [nil])
+        #expect(recorder.previews.count == previewCount, "a cancelled session ignores further answers")
     }
 
     @Test func abandonedSessionCleansUpOnDeinit() {
@@ -311,24 +326,80 @@ import Testing
         #expect(recorder.ends == [nil])
     }
 
-    // MARK: The unreachable exit (the honest opposite of the graceful one)
-
-    /// A listener who names the target at every level, all the way to the end of
-    /// the usable range: the run says it could not find the alignment and puts
-    /// the prior trim back — never "already aligned".
+    /// A listener who names the target at every level runs off the end of the
+    /// usable range: the run says it could not find the alignment and puts the
+    /// prior trim back. It offers the range's own edge as a proposal on the
+    /// way — which the same listener rejects, because it is not what they are
+    /// hearing.
     @Test func aRunPinnedAgainstTheTrimRangeEndsUnreachable() {
         let recorder = Recorder()
         let session = recorder.makeSession(baseTrimMs: 0)
         session.start()
-        var asked = 0
-        while case .question = session.screen, asked < 200 {
-            session.answer(.target)
-            asked += 1
-        }
+        let asked = driveAlwaysTarget(session)
         #expect(session.screen == .unreachable, "got \(session.screen) after \(asked) answers")
-        #expect(recorder.previews.last == BTSyncTrim.rangeMs, "pinned at the range's ceiling")
         #expect(recorder.ends == [nil], "the prior trim is restored, nothing persisted")
         #expect(recorder.ticks == [true, false])
+
+        // The panel's Done button calls `cancel()` on this screen, and the run
+        // is already over: a SECOND tick-off edge costs the backend a re-anchor
+        // of every sink, for nothing.
+        session.cancel()
+        #expect(recorder.ticks == [true, false], "exactly one tick-off edge")
+        #expect(recorder.ends == [nil], "…and no second restore")
+    }
+
+    /// Contradictory answers never let the interval close: the run bows out
+    /// and offers its best guess for the manual control.
+    @Test func answersThatNeverSettleBowOutWithABestGuess() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(baseTrimMs: 0)
+        session.start()
+        let asked = driveContradictorily(session)
+        guard case .unsettled(let bestGuessMs) = session.screen else {
+            Issue.record("expected unsettled, got \(session.screen) after \(asked)")
+            return
+        }
+        #expect((-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs).contains(bestGuessMs))
+        #expect(recorder.ends == [nil], "the prior trim is restored")
+        #expect(recorder.ticks == [true, false])
+        session.cancel()
+        #expect(recorder.ticks == [true, false], "exactly one tick-off edge")
+    }
+
+    @Test func tryAgainFromABowOutRestartsWithoutASecondRestore() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(baseTrimMs: 0)
+        session.start()
+        driveAlwaysTarget(session)
+        #expect(session.screen == .unreachable)
+        session.tryAgain()
+        #expect(recorder.ends == [nil], "the bow-out already restored — no second push")
+        #expect(recorder.ticks == [true, false, true], "…and the tick comes back for the fresh run")
+        guard case .question(_, _, let answers) = session.screen, answers == 0 else {
+            Issue.record("expected a fresh question, got \(session.screen)")
+            return
+        }
+        session.cancel()
+    }
+
+    @Test func tryAgainFromAProposalRestoresFirst() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(baseTrimMs: 60)
+        session.start()
+        driveTruthfully(session, recorder, trueOffsetMs: 10, baseTrimMs: 60)
+        guard proposalValue(session) != nil else {
+            Issue.record("expected a proposal, got \(session.screen)")
+            return
+        }
+        session.tryAgain()
+        #expect(recorder.ends == [nil], "Try again restores the previewed value first")
+        #expect(recorder.ticks == [true],
+                "the proposal never stopped the tick, so the restart never re-fires it")
+        guard case .question(_, _, let answers) = session.screen, answers == 0 else {
+            Issue.record("expected a fresh question, got \(session.screen)")
+            return
+        }
+        session.cancel()
     }
 
     // MARK: Back
@@ -343,36 +414,13 @@ import Testing
 
         session.back()
         #expect(recorder.previews.last == first, "the undone question is asked again")
-        #expect(session.screen == .question(progress: 0, answersSoFar: 0, searching: true))
+        guard case .question(_, _, let answers) = session.screen, answers == 0 else {
+            Issue.record("expected the first question back, got \(session.screen)")
+            return
+        }
 
         session.answer(.target)
         #expect(recorder.previews.last == second, "and the run resumes where it was")
-        session.cancel()
-    }
-
-    /// Back works across the search/blocks boundary too — the estimator undoes
-    /// whole states, so the first block's first question steps back into the
-    /// staircase.
-    @Test func backCrossesTheSearchBoundary() {
-        let recorder = Recorder()
-        let session = recorder.makeSession(baseTrimMs: 12)
-        session.start()
-        session.answer(.target)
-        let lastSearchCandidate = recorder.previews[1]
-        session.answer(.cantTell)   // ends the search; the first block is up
-        guard case .question(_, _, let searching) = session.screen, searching == false else {
-            Issue.record("expected the blocks to have started, got \(session.screen)")
-            return
-        }
-
-        session.back()
-        #expect(recorder.previews.last == lastSearchCandidate)
-        guard case .question(_, let answers, let backSearching) = session.screen else {
-            Issue.record("expected a question, got \(session.screen)")
-            return
-        }
-        #expect(answers == 1)
-        #expect(backSearching, "back into the coarse search")
         session.cancel()
     }
 
@@ -413,17 +461,19 @@ import Testing
         let session = recorder.makeSession(baseTrimMs: 20)
         session.start()
         session.answer(.target)
-        guard case .question(_, let before, _) = session.screen, before == 1 else {
+        guard case .question(_, _, let before) = session.screen, before == 1 else {
             Issue.record("expected one answer folded in, got \(session.screen)")
             return
         }
 
         session.setReference(.init(id: "mac", name: "This Mac"))
         #expect(session.reference?.name == "This Mac")
-        #expect(session.screen == .question(progress: 0, answersSoFar: 0, searching: true),
-                "answers given against the old speaker are not evidence about this one")
+        guard case .question(_, _, let after) = session.screen, after == 0 else {
+            Issue.record("answers about the old speaker are dropped, got \(session.screen)")
+            return
+        }
         #expect(recorder.previews.last == recorder.previews[0],
-                "the run starts a fresh block from the base trim")
+                "the run starts fresh from the base trim")
         session.cancel()
     }
 
@@ -433,7 +483,7 @@ import Testing
         session.start()
         session.answer(.target)
         session.setReference(.init(id: "homepod", name: "Kitchen HomePod"))
-        guard case .question(_, let answers, _) = session.screen, answers == 1 else {
+        guard case .question(_, _, let answers) = session.screen, answers == 1 else {
             Issue.record("expected the run to continue, got \(session.screen)")
             return
         }
@@ -441,62 +491,70 @@ import Testing
         session.cancel()
     }
 
-    // MARK: The latency run's sign convention (roadmap 056 Part A)
+    // MARK: Zero-click
 
-    /// THE sign, pinned. `.target` means the target was heard FIRST, so it is
-    /// early and needs MORE delay. A TRIM is added to the delay, so it goes UP.
-    /// A measured LATENCY is subtracted from it — a larger latency feeds the
-    /// speaker earlier — so it must go DOWN. Getting this backwards compiles
-    /// perfectly and converges a run onto the wrong side of the truth.
-    @Test func targetFirstRaisesATrimAndLowersAMeasuredLatency() {
-        let trimRecorder = Recorder()
-        let trim = trimRecorder.makeSession(baseTrimMs: 0)
-        trim.start()
-        #expect(trimRecorder.previews == [0])
-        trim.answer(.target)
-        #expect(trimRecorder.previews[1] > 0,
-                "the target is early, so its trim grows — got \(trimRecorder.previews[1])")
-        trim.cancel()
+    /// A speaker measured before opens on the PROPOSAL at its stored value —
+    /// one click instead of a dozen answers.
+    @Test func anOpeningProposalStartsOnTheProposalScreen() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(baseTrimMs: 244,
+                                           candidateRangeMs: -500...1_500,
+                                           invertsEstimate: true,
+                                           openingProposalMs: 244)
+        session.start()
+        #expect(session.screen == .proposal(valueMs: 244), "got \(session.screen)")
+        #expect(recorder.ticks == [true], "the tick runs so the user can judge it")
+        #expect(recorder.previews == [244], "…at the stored value")
 
-        let latencyRecorder = Recorder()
-        let latency = latencyRecorder.makeSession(
-            baseTrimMs: 300, candidateRangeMs: 0...1_500, invertsEstimate: true)
-        latency.start()
-        #expect(latencyRecorder.previews == [300])
-        latency.answer(.target)
-        #expect(latencyRecorder.previews[1] < 300,
-                "the target is early, so its measured latency SHRINKS and it is fed later — got \(latencyRecorder.previews[1])")
-        latency.cancel()
+        session.acceptProposal()
+        #expect(session.screen == .kept(valueMs: 244))
+        #expect(recorder.ends == [244])
     }
 
-    /// A latency run never presents a value the sink's ≥ 0 delay clamp would
-    /// eat: candidates stay inside the range the backend derived.
-    @Test func aLatencyRunStaysInsideItsUsableRange() {
+    @Test func rejectingAnOpeningProposalFallsIntoTheOrdinaryQuestions() {
         let recorder = Recorder()
-        let session = recorder.makeSession(
-            baseTrimMs: 40, candidateRangeMs: 0...600, invertsEstimate: true)
+        let session = recorder.makeSession(baseTrimMs: 244,
+                                           candidateRangeMs: -500...1_500,
+                                           invertsEstimate: true,
+                                           openingProposalMs: 244)
         session.start()
-        // The reference always sounds first: the speaker is late everywhere, so
-        // the run drives the latency up as far as it can go.
-        var asked = 0
-        while case .question = session.screen, asked < 200 {
-            session.answer(.reference)
-            asked += 1
+        session.rejectProposal()
+        guard case .question(_, _, let answers) = session.screen, answers == 0 else {
+            Issue.record("expected the questions, got \(session.screen)")
+            return
         }
-        #expect(recorder.previews.allSatisfy { (0...600).contains($0) },
-                "every candidate is inside the usable range")
-        #expect(recorder.previews.max() ?? 0 > 40, "…and the run did push the latency up")
+        #expect(recorder.ends.isEmpty, "nothing restored — the run is still live")
         session.cancel()
     }
 
-    /// Two tempos, driven by the estimator's STAGE: the coarse search ticks
-    /// every 3 s (an unknown 650 ms latency must not alias into an apparent
-    /// lead at 833 ms), the blocks at 72 BPM.
-    @Test func theTempoFollowsTheEstimatorStage() {
+    /// Try again means "that value was wrong", so a restart must never
+    /// re-offer it.
+    @Test func tryAgainNeverReOffersTheOpeningProposal() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(baseTrimMs: 244,
+                                           candidateRangeMs: -500...1_500,
+                                           invertsEstimate: true,
+                                           openingProposalMs: 244)
+        session.start()
+        session.tryAgain()
+        guard case .question = session.screen else {
+            Issue.record("expected questions after a restart, got \(session.screen)")
+            return
+        }
+        session.cancel()
+    }
+
+    // MARK: Tempo
+
+    /// Two tempos, driven by how sure the run is: a wide-open run ticks every
+    /// 3 s (an unknown 650 ms latency must not alias into an apparent lead at
+    /// 833 ms), a closed-in one at 72 BPM.
+    @Test func theTempoFollowsTheCredibleIntervalAndOnlyMovesOnAPresentedLevel() {
         let recorder = Recorder()
         let session = recorder.makeSession()
         session.start()
-        #expect(recorder.tempos == [BTAlignmentWizardSession.searchTickBPM])
+        #expect(recorder.tempos == [BTAlignmentWizardSession.searchTickBPM],
+                "a flat prior over ±500 ms is wider than the threshold")
         #expect(BTAlignmentWizardSession.searchTickBPM == 20, "one tick every 3 s")
         // The two values are stated twice — this file is LICENSE-CLEAN and must
         // not reach into the GPL-headered injector for a constant — so pin them
@@ -504,19 +562,21 @@ import Testing
         #expect(BTAlignmentWizardSession.searchTickBPM == AlignmentTickInjector.wizardSearchBPM)
         #expect(BTAlignmentWizardSession.blocksTickBPM == AlignmentTickInjector.wizardBlocksBPM)
 
-        // Walk the staircase until it hands over to the blocks.
-        var asked = 0
-        while case .question(_, _, let searching) = session.screen, searching, asked < 30 {
-            session.answer(asked.isMultiple(of: 2) ? .target : .reference)
-            asked += 1
-        }
-        guard case .question(_, _, false) = session.screen else {
-            Issue.record("expected the blocks stage, got \(session.screen)")
-            return
-        }
+        driveTruthfully(session, recorder, trueOffsetMs: 10)
         #expect(recorder.tempos == [BTAlignmentWizardSession.searchTickBPM,
                                     BTAlignmentWizardSession.blocksTickBPM],
-                "one push per stage, never one per question")
+                "one push per change, never one per question: \(recorder.tempos)")
+        session.cancel()
+    }
+
+    /// A tight run opens straight on the fine tempo — the threshold is read
+    /// off the belief, not off a stage counter that no longer exists.
+    @Test func aNarrowRangeOpensOnTheFineTempo() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(candidateRangeMs: -30...30)
+        session.start()
+        #expect(recorder.tempos == [BTAlignmentWizardSession.blocksTickBPM],
+                "±30 ms is well inside \(BTAlignmentWizardSession.fineTempoHalfWidthMs) ms")
         session.cancel()
     }
 
@@ -524,10 +584,60 @@ import Testing
         let recorder = Recorder()
         let session = recorder.makeSession()
         session.start()
-        let trials = 2 * BTAlignmentConstantStimuli.stimuliMs.count + 1
-        for _ in 0..<trials { session.answer(.cantTell) }
-        #expect(recorder.screens.count == trials + 1, "start + every answer announced")
-        #expect(recorder.screens.last == .gracefulExit)
+        let asked = driveTruthfully(session, recorder, trueOffsetMs: 10)
+        #expect(recorder.screens.count == asked + 1, "start + every answer announced")
+        #expect(recorder.screens.last == session.screen)
         session.cancel()
+    }
+}
+
+/// The proposal telemetry, in the SERIALIZED parent because it installs the
+/// process-global capture sink (`SerializedSharedStateSuite.swift`).
+extension SerializedSharedState {
+    @Suite final class BTAlignmentWizardProposalTelemetryTests {
+
+        /// Collects the lines the sink emits.
+        private final class LineCapture: @unchecked Sendable {
+            private let lock = NSLock()
+            private var lines: [String] = []
+            func append(_ line: String) { lock.withLock { lines.append(line) } }
+            func lines(evt: String) -> [String] {
+                lock.withLock { lines.filter { $0.contains("\"evt\":\"\(evt)\"") } }
+            }
+        }
+
+        @Test func acceptAndRejectEachLogTheProposal() {
+            let capture = LineCapture()
+            Telemetry._installTestSink { capture.append($0) }
+            defer { Telemetry._installTestSink(nil) }
+
+            // The sink is process-global and other suites drive wizards of
+            // their own, so the lines are filtered by THIS run's device id.
+            let deviceID = "telemetry:output"
+            let recorder = Recorder()
+            let session = recorder.makeSession(deviceID: deviceID)
+            session.start()
+            driveTruthfully(session, recorder, trueOffsetMs: 60)
+            guard let valueMs = proposalValue(session) else {
+                Issue.record("expected a proposal, got \(session.screen)")
+                return
+            }
+            session.rejectProposal()
+            driveTruthfully(session, recorder, trueOffsetMs: 60)
+            guard proposalValue(session) != nil else {
+                Issue.record("expected a second proposal, got \(session.screen)")
+                return
+            }
+            session.acceptProposal()
+
+            let lines = capture.lines(evt: "wizard_proposal")
+                .filter { $0.contains("\"uid\":\"\(deviceID)\"") }
+            #expect(lines.count == 2, "one line per proposal answered, got \(lines)")
+            #expect(lines[0].contains("\"accepted\":\"false\""), "\(lines[0])")
+            #expect(lines[0].contains("\"valueMs\":\"\(Int(valueMs.rounded()))\""), "\(lines[0])")
+            #expect(lines[0].contains("\"halfWidthMs\""), "\(lines[0])")
+            #expect(lines[0].contains("\"answers\""), "\(lines[0])")
+            #expect(lines[1].contains("\"accepted\":\"true\""), "\(lines[1])")
+        }
     }
 }

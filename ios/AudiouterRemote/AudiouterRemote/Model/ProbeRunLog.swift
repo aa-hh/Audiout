@@ -19,6 +19,9 @@ struct ProbeRunRecord: Codable, Identifiable {
     let usedPairs: Int
     let confident: Bool
     let recordedSeconds: Double
+    /// The target's sync trim (ms) the run was measured under, from the
+    /// snapshot — nil when the Mac build predates the field.
+    let trimMsAtRun: Double?
     var applied: Bool
     /// Alec's by-ear verdict for the session, set from the history row:
     /// nil = not judged, true = sounded in sync BEFORE this run, false = flam.

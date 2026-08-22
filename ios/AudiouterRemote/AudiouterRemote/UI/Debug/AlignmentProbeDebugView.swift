@@ -263,7 +263,9 @@ struct AlignmentProbeDebugView: View {
                         referenceName: referenceDeviceID.flatMap { id in devices.first { $0.id == id }?.name } ?? "Main Out",
                         offsetMs: analysis.offsetMs, spreadMs: analysis.spreadMs,
                         usedPairs: analysis.usedPairs, confident: analysis.confident,
-                        recordedSeconds: recordedSeconds, applied: false, earSaidInSync: nil)
+                        recordedSeconds: recordedSeconds,
+                        trimMsAtRun: devices.first { $0.id == targetDeviceID }?.syncTrimMs,
+                        applied: false, earSaidInSync: nil)
                     currentRecordID = record.id
                     history = ProbeRunLog.append(record)
                 }
@@ -285,6 +287,9 @@ struct AlignmentProbeDebugView: View {
             .font(.footnote)
             HStack(spacing: 6) {
                 Text(String(format: "±%.1f · %d pairs", record.spreadMs, record.usedPairs))
+                if let trim = record.trimMsAtRun {
+                    Text(String(format: "· trim %+.0f", trim))
+                }
                 if !record.confident { Text("· not confident").foregroundStyle(.orange) }
                 if record.applied { Text("· applied").foregroundStyle(.green) }
                 Spacer()

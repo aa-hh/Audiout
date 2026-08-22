@@ -50,6 +50,10 @@ public struct DeviceState: Codable, Equatable, Sendable {
     public var isSelected: Bool
     public var isMainOutMember: Bool
     public var connection: ConnectionInfo
+    /// Bluetooth devices only: the current sync trim in ms (BT auto-cal
+    /// spike — lets the probe log record which trim a measurement ran under).
+    /// Optional so either side tolerates the other lacking it.
+    public var syncTrimMs: Double?
 
     public init(
         id: String,
@@ -63,8 +67,10 @@ public struct DeviceState: Codable, Equatable, Sendable {
         isMuted: Bool,
         isSelected: Bool,
         isMainOutMember: Bool,
-        connection: ConnectionInfo
+        connection: ConnectionInfo,
+        syncTrimMs: Double? = nil
     ) {
+        self.syncTrimMs = syncTrimMs
         self.id = id
         self.name = name
         self.kind = kind

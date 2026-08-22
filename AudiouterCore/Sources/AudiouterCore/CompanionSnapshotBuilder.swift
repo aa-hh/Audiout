@@ -106,10 +106,12 @@ public enum CompanionSnapshotBuilder {
         connectVolumeMax: Int,
         startBufferMs: Int,
         startBufferOptionsMs: [Int],
-        alignmentProbe: AlignmentProbeState? = nil
+        alignmentProbe: AlignmentProbeState? = nil,
+        syncTrimMsFor: (Device) -> Double? = { _ in nil }
     ) -> Snapshot {
         let deviceStates = devices.map { device in
-            deviceState(for: device, groupController: groupController, iconFor: iconFor)
+            deviceState(for: device, groupController: groupController, iconFor: iconFor,
+                        syncTrimMs: syncTrimMsFor(device))
         }
 
         // Live names win over the caller's last-known map — a rename arriving
@@ -191,7 +193,8 @@ public enum CompanionSnapshotBuilder {
     private static func deviceState(
         for device: Device,
         groupController: GroupController,
-        iconFor: (Device) -> String
+        iconFor: (Device) -> String,
+        syncTrimMs: Double? = nil
     ) -> DeviceState {
         DeviceState(
             id: device.id,
@@ -214,7 +217,8 @@ public enum CompanionSnapshotBuilder {
             isMuted: groupController.isMuted(device.id),
             isSelected: groupController.isSpeakerSelected(device.id),
             isMainOutMember: groupController.isMainOutMember(device.id),
-            connection: connectionInfo(device.connectionState)
+            connection: connectionInfo(device.connectionState),
+            syncTrimMs: syncTrimMs
         )
     }
 

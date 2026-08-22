@@ -1841,7 +1841,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             connectVolumeMax: AppSettings.maxConnectVolume,
             startBufferMs: settings.startBufferMs,
             startBufferOptionsMs: AppSettings.startBufferOptionsMs,
-            alignmentProbe: companionDispatcher?.alignmentProbeState)
+            alignmentProbe: companionDispatcher?.alignmentProbeState,
+            syncTrimMsFor: { [weak self] device in
+                guard device.isBluetooth else { return nil }
+                return (self?.backend as? BTOutputControlling)?.btSyncTrim(forDevice: device.id)
+            })
         companionServer.broadcast(snapshot)
     }
 

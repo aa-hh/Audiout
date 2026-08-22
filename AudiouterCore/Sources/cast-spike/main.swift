@@ -33,13 +33,8 @@ struct Options {
     var streamHost: String?
     var primeMilliseconds: Int = 0
     var streamType = "LIVE"
-    var liteWAV = false
-    var rawHTTP10 = false
-    var range206 = false
     var appID = CastClient.defaultMediaReceiverAppID
     var autoplay = true
-    var pipeCommand: String?
-    var contentType = "audio/wav"
 }
 
 struct UsageError: Error {
@@ -84,20 +79,10 @@ func parseArgs(_ args: [String]) throws -> Options {
             let raw = try next("LIVE, BUFFERED or NONE").uppercased()
             guard ["LIVE", "BUFFERED", "NONE"].contains(raw) else { throw UsageError(message: "--stream-type: '\(raw)' is not LIVE, BUFFERED or NONE") }
             options.streamType = raw
-        case "--http10":
-            options.rawHTTP10 = true
-        case "--range-206":
-            options.range206 = true
         case "--no-autoplay":
             options.autoplay = false
         case "--app-id":
             options.appID = try next("a Cast app id")
-        case "--pipe":
-            options.pipeCommand = try next("a shell command that writes audio to stdout")
-        case "--content-type":
-            options.contentType = try next("a MIME type")
-        case "--wav-lite":
-            options.liteWAV = true
         case "--prime-ms":
             let raw = try next("a number of milliseconds")
             guard let value = Int(raw), value >= 0 else { throw UsageError(message: "--prime-ms: '\(raw)' is not a number of milliseconds") }
@@ -135,13 +120,8 @@ OPTIONS:
   --stream-host <ip>     the address the receiver fetches audio from
   --prime-ms <n>         milliseconds of audio to send up front (default 0)
   --stream-type <t>      Cast streamType for LOAD: LIVE (default), BUFFERED, NONE
-  --wav-lite             serve 8-bit mono 22.05 kHz WAV (1/8 the bytes) — buffer-target experiment
-  --http10               AirConnect-style HTTP/1.0 raw body, no Content-Length, no chunks
-  --range-206            answer the receiver's Range request with 206 + Content-Range (AirConnect)
   --no-autoplay          LOAD with autoplay=false, then an explicit PLAY (AirConnect)
   --app-id <id>          receiver app to launch (default CC1AD845; AirConnect uses 46C1A819)
-  --pipe <cmd>           relay this command's stdout instead of the built-in WAV (e.g. ffmpeg)
-  --content-type <mime>  Content-Type + LOAD contentType for --pipe (default audio/wav)
 """
 
 // MARK: - Run
@@ -201,13 +181,8 @@ func spike(endpoint: NWEndpoint, options: Options, loopbackOnly: Bool, exit: Exi
             volumeLevel: options.volumeLevel,
             primeMilliseconds: options.primeMilliseconds,
             streamType: options.streamType,
-            liteWAV: options.liteWAV,
-            rawHTTP10: options.rawHTTP10,
-            range206: options.range206,
             appID: options.appID,
-            autoplay: options.autoplay,
-            pipeCommand: options.pipeCommand,
-            contentType: options.contentType
+            autoplay: options.autoplay
         ),
         log: { print($0) }
     )

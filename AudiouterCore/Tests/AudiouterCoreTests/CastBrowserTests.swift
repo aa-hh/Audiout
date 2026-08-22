@@ -45,4 +45,14 @@ import Testing
         #expect(record?.model == nil)
         #expect(record?.friendlyName == "Kitchen")
     }
+
+    /// The `.failed` recovery's one testable piece without a live NWBrowser —
+    /// same shape as `NetworkFrameworkBrowser`'s own backoff test.
+    @Test func backoffDoublesAndCaps() {
+        #expect(CastBrowser.nextDelay(afterAttempt: 0) == 1)
+        #expect(CastBrowser.nextDelay(afterAttempt: 1) == 2)
+        #expect(CastBrowser.nextDelay(afterAttempt: 2) == 4)
+        #expect(CastBrowser.nextDelay(afterAttempt: 5) == 30)
+        #expect(CastBrowser.nextDelay(afterAttempt: 20) == 30)
+    }
 }

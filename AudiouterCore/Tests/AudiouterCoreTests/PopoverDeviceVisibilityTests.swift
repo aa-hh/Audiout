@@ -56,8 +56,13 @@ import AppKit
                isAvailable: available, supportsAirPlay2: false, connectionState: state)
     }
 
+    private func cast(_ id: String, name: String) -> Device {
+        Device(id: id, name: name, kind: .cast, supportsAirPlay2: false)
+    }
+
     private let airPlayTitle = PopoverController.airPlaySubsectionTitle
     private let bluetoothTitle = PopoverController.bluetoothSubsectionTitle
+    private let castTitle = PopoverController.castSubsectionTitle
 
     // MARK: Feature A — collapsible device-type subsections
 
@@ -167,6 +172,50 @@ import AppKit
         popover.test_fireSubsectionHeaderClick(title: airPlayTitle)
         #expect(popover.test_diagnosisPanel(for: "office") != nil,
                 "the episode is still open, so the panel returns")
+    }
+
+    // MARK: Cast Devices — the third device-type subsection
+
+    /// Cast receivers are their own band, between AirPlay and Bluetooth: they
+    /// are non-local and non-Bluetooth, so without a section of their own they
+    /// would silently land among the AirPlay rows.
+    @Test func castDevicesRenderInTheirOwnSectionBetweenAirPlayAndBluetooth() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), airplay(), cast("c1", name: "Living Room TV"),
+                                 bt("bt-a:output", name: "Speaker A")])
+
+        #expect(popover.test_subsectionTitles()
+                == ["This Mac", airPlayTitle, castTitle, bluetoothTitle])
+        #expect(popover.test_renderedDeviceIDs() == ["mac", "office", "c1", "bt-a:output"])
+    }
+
+    /// Cast follows the hidden-when-empty rule the other non-Bluetooth
+    /// subsections obey — no empty grouping label for a feature the user may
+    /// own no hardware for.
+    @Test func noCastDevicesMeansNoCastHeader() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), airplay(), bt("bt-a:output", name: "Speaker A")])
+
+        #expect(popover.test_subsectionTitles() == ["This Mac", airPlayTitle, bluetoothTitle])
+    }
+
+    @Test func castSectionCollapsesLikeAirPlay() {
+        let (popover, _) = makePopover()
+        popover.update(devices: [local(), airplay(), cast("c1", name: "Living Room TV"),
+                                 bt("bt-a:output", name: "Speaker A")])
+        #expect(popover.test_cardChevronSymbolName(title: castTitle) == "chevron.down")
+
+        popover.test_fireSubsectionHeaderClick(title: castTitle)
+
+        #expect(popover.test_isSubsectionCollapsed(title: castTitle))
+        #expect(popover.test_renderedDeviceIDs() == ["mac", "office", "bt-a:output"])
+        #expect(popover.test_cardChevronSymbolName(title: castTitle) == "chevron.right")
+        #expect(popover.test_subsectionTitles()
+                == ["This Mac", airPlayTitle, castTitle, bluetoothTitle],
+                "a collapsed subsection keeps its header — only the rows go")
+
+        popover.test_fireSubsectionHeaderClick(title: castTitle)
+        #expect(popover.test_deviceRow(for: "c1") != nil)
     }
 
     // MARK: Feature B — Bluetooth connected-only listing (BT-LIST)

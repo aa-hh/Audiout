@@ -156,6 +156,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         let syncedLocalBaseResampler: SyncedLocalBaseResampler?
         let btSink: SyncedLocalPCMSink?
         let btBaseResampler: SyncedLocalBaseResampler?
+        /// CAST-FANOUT: the Cast fan-out, which takes the converted S16LE
+        /// straight (no widen/resample — the Cast server speaks 44.1/16/2).
+        let castSink: PCMSink?
         let tickInjector: AlignmentTickInjector?
 
         /// The published value before anything has been started, and the value
@@ -165,6 +168,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             converter: nil, meteringActive: false,
             syncedLocalSink: nil, syncedLocalBaseResampler: nil,
             btSink: nil, btBaseResampler: nil,
+            castSink: nil,
             tickInjector: nil)
 
         init(
@@ -174,6 +178,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             syncedLocalBaseResampler: SyncedLocalBaseResampler?,
             btSink: SyncedLocalPCMSink?,
             btBaseResampler: SyncedLocalBaseResampler?,
+            castSink: PCMSink?,
             tickInjector: AlignmentTickInjector?
         ) {
             self.converter = converter
@@ -182,6 +187,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             self.syncedLocalBaseResampler = syncedLocalBaseResampler
             self.btSink = btSink
             self.btBaseResampler = btBaseResampler
+            self.castSink = castSink
             self.tickInjector = tickInjector
         }
     }
@@ -275,6 +281,14 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     private var btSink: SyncedLocalPCMSink?
     private var btRenderPID: pid_t?
     private var btBaseResampler: SyncedLocalBaseResampler?
+
+    /// CAST-FANOUT: the Cast output manager's fan-out to ALSO feed (the fourth
+    /// consumer of the same converted PCM), and the pid of the process that
+    /// renders it. No resampler slot: a Cast receiver is fed the S16LE
+    /// 44.1 kHz stream verbatim over HTTP. Queue-confined, set together via
+    /// ``setCastSink(_:renderProcessPID:)``.
+    private var castSink: PCMSink?
+    private var castRenderPID: pid_t?
 
     /// The align-by-ear tick source (BT-OFFSET-UI), mixed into the converted
     /// PCM BEFORE the engine write and both fan-outs, so every consumer
@@ -781,6 +795,34 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         rebuildIfExclusionObjectsChanged()
     }
 
+    /// CAST-FANOUT: attach/detach the Cast output manager's fan-out — the
+    /// FOURTH consumer of the same converted PCM. Unlike the synced-local and
+    /// BT slots there is no resampler: the Cast HTTP server speaks S16LE
+    /// 44.1 kHz stereo, which is exactly what the converter already produces,
+    /// so the buffer goes straight in.
+    ///
+    /// `renderProcessPID` joins the tap's exclusion set exactly like the BT
+    /// pid, and for the same reason it never forces an unconditional recreate:
+    /// in production it is our own process, already self-excluded on every tap
+    /// creation, so ``rebuildIfExclusionObjectsChanged()``'s
+    /// compare-before-rebuild finds nothing changed and attaching mid-capture
+    /// costs no tap rebuild.
+    public func setCastSink(_ sink: PCMSink?, renderProcessPID: pid_t?) {
+        let checkExclusions: Bool = queue.sync {
+            self.castSink = sink
+            // Republish BEFORE the pid short-circuit below, same T8 discipline
+            // as `setBTSink`.
+            self.publishBufferSnapshot()
+            let newPID: pid_t? = (sink == nil) ? nil : renderProcessPID
+            guard newPID != castRenderPID else { return false }
+            castRenderPID = newPID
+            if case .capturing = _state { return true }
+            return false
+        }
+        guard checkExclusions else { return }
+        rebuildIfExclusionObjectsChanged()
+    }
+
     // MARK: Start sequence (on `queue`)
 
     /// Reject a tap format the converter/aggregate can't safely consume before it
@@ -823,6 +865,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // as the synced-local pid above (and equally redundant-but-harmless
         // whenever it is our own already-self-excluded pid).
         if let renderPID = btRenderPID {
+            result.formUnion(processResolver.resolve(pid: renderPID).map(\.objectID))
+        }
+        // CAST-FANOUT self-exclude: same contract again. In production this is
+        // our own already-self-excluded pid, so it is redundant-but-harmless.
+        if let renderPID = castRenderPID {
             result.formUnion(processResolver.resolve(pid: renderPID).map(\.objectID))
         }
         return result
@@ -1040,6 +1087,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             syncedLocalBaseResampler: syncedLocalBaseResampler,
             btSink: btSink,
             btBaseResampler: btBaseResampler,
+            castSink: castSink,
             tickInjector: tickInjector)
         snapshotLock.lock()
         _bufferSnapshot = snapshot
@@ -1155,6 +1203,16 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // can't loop back as an echo.
         if let btSink = snapshot.btSink, let btResampler = snapshot.btBaseResampler {
             Self.fanOutToSyncedLocal(pcm, pts: buffer.pts, into: btSink, resampler: btResampler)
+        }
+
+        // CAST-FANOUT: the fourth consumer of the identical converted PCM+pts.
+        // No widen/base-resample step — a Cast receiver is fed the S16LE
+        // 44.1 kHz stream verbatim. `castSink` is nil unless
+        // ``setCastSink(_:renderProcessPID:)`` ran with a non-nil sink, so with
+        // no Cast device selected this path costs one nil check and the engine
+        // write above is byte-for-byte what it always was.
+        if let castSink = snapshot.castSink {
+            castSink.write(pcm: pcm, pts: buffer.pts)
         }
 
         // Level pass-through: compute RMS on the CONVERTED S16LE buffer once, for

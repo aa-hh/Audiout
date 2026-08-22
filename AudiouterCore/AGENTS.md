@@ -341,6 +341,19 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   `BTSyncedSink.swift` are LICENSE-CLEAN
   like `SyncCore.swift` (no GPL header — see the header note in each file);
   never copy code into them from the GPL-headered `SyncedLocalSink.swift`.
+- **Cast ids are the THIRD R-partition arm**, held to the same discipline as
+  Bluetooth: no `outputIDs` entry plus an explicit `isCast` guard in the
+  converge loop, so a Cast id can never reach the AirPlay engine. Exclude Cast
+  from an engine-only path via `isCast`, never `supportsAirPlay2` — AP1
+  receivers share that flag yet ARE engine-driven. A `.cast` row's `.connected`
+  means the RECEIVER reported PLAYING, which is also the audible fact
+  `desiredDeviceAudibleLocked` reads (not `isAvailable` — a receiver merely on
+  the network is playing nothing, and the recipe's connect → launch → LOAD →
+  PLAY takes seconds). The fan-out slot is `setCastSink`, whose pid is our own
+  already-tap-excluded process, so attaching never rebuilds the tap. With no
+  Cast device selected the capture path is byte-identical to what it always was
+  — `NativeCaptureCoordinatorTests` pins that, so never move the engine write
+  or make the Cast hop unconditional.
 - **A Bluetooth sink held at gain 0 must always have a live release path.**
   The first-mix alignment intercept (W3) is the ONLY sanctioned writer of a
   0 gain (`BTDeviceSink.setGain` → `mainMixerNode.outputVolume` — the session,
@@ -731,7 +744,10 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `NativeBackend` | Shipping backend; drives `AirPlayEngine`, owns capture gate, owns aggregate device lifecycle. |
 | `AggregateOutputDevice` | Lifecycle owner (adopt-or-create/off-switch/orphan sweep) for the PUBLIC, Sound-settings-visible "Audiouter" aggregate (UID `com.audiouter.Audiouter.aggregate`); thin CoreAudio shell wired by `NativeBackend`. Becomes Mac default when whole-system routing arms; restore-prior-default-then-destroy on quit; echo-guarded. New `BackendEvent` case `routingBlockedNeedsDefault(Bool)` signals when the app can't route because its aggregate isn't the Mac's default output. |
 | `NativeDiscovery` | Bonjour discovery (AP2 + AP1). |
-| `CastSender` | Hand-rolled Google Cast v2 protocol sender (proof of concept, Phase 0 spike). |
+| `CastSender` | Hand-rolled Google Cast v2 sender: browse, control channel, live WAV server; driven by `CastOutputManager`. |
+| `CastOutputManager` | Per-Cast-device session recipe (connect → launch DMR → LOAD no-autoplay → PLAY), 1 s status poll, composed level, one automatic reconnect policy; feeds each receiver from `CastFeedRing` via the capture fan-out. |
+| `CastDeviceEnumerator` | `_googlecast._tcp` browse → `.cast` rows through the same `known`/`order`/`emit` flow as Bluetooth. |
+| `PCMDelayLine` | Cadence-preserving S16LE delay line for Phase (ii) sync; built and tested, wired nowhere yet. |
 | `CastFakeReceiver` | In-memory mock Cast receiver for testing (macOS 15+ only). |
 | `cast-spike` | Standalone CLI tool proving end-to-end Cast audio streaming. |
 | `BTDeviceEnumerator` | Bluetooth outputs: Core Audio BT transport merged with the TCC-gated IOBluetooth paired list; paired-but-disconnected speakers surface unavailable, with pairing recency kept for ghost-row filtering. |

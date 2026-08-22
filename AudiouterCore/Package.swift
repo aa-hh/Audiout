@@ -141,6 +141,7 @@ let package = Package(
             name: "AudiouterCore",
             dependencies: [
                 .product(name: "AirPlayEngine", package: "AirPlayEngine"),
+                "CastSender",
                 "ObjCExceptionShim",
             ],
             swiftSettings: [

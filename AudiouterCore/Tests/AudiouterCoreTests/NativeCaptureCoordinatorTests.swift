@@ -1887,6 +1887,78 @@ extension SerializedSharedState {
         tap.teardown()
         #expect(monitor.subscriberCount == 0, "a second teardown must stay a no-op")
     }
+
+    // MARK: - CAST-FANOUT
+
+    /// THE Phase (i) invariant: with no Cast device selected, what the engine
+    /// receives is byte-for-byte and pts-for-pts what it always received. Two
+    /// coordinators are driven identically except that one has been through
+    /// `setCastSink(nil, …)`, and their forwarded sequences must be equal — and
+    /// neither may have rebuilt its tap.
+    @Test func castSinkAbsentLeavesTheForwardedSequenceIdentical() {
+        let tapA = FakeTap(), tapB = FakeTap()
+        let sinkA = SpySink(), sinkB = SpySink()
+        let coordinatorA = makeCoordinator(tap: tapA, sink: sinkA, converter: FakeConverter())
+        let coordinatorB = makeCoordinator(tap: tapB, sink: sinkB, converter: FakeConverter())
+
+        coordinatorB.setCastSink(nil, renderProcessPID: nil)
+        coordinatorA.start()
+        coordinatorB.start()
+
+        for i in 0..<200 {
+            let hostTime = UInt64(i + 1) * 10_000_000
+            tapA.pushBuffer(buffer(hostTime: hostTime))
+            tapB.pushBuffer(buffer(hostTime: hostTime))
+        }
+        waitFor { sinkA.forwarded.count == 200 }
+        waitFor { sinkB.forwarded.count == 200 }
+        #expect(sinkA.forwarded.count == 200)
+        #expect(sinkB.forwarded.count == 200)
+
+        #expect(sinkA.forwarded.map(\.pcm) == sinkB.forwarded.map(\.pcm),
+            "a nil Cast slot must not change one byte of what the engine sees")
+        // `timespec` is not `Equatable` — compare the two fields as Int pairs.
+        let ptsA = sinkA.forwarded.map { [Int($0.pts.tv_sec), Int($0.pts.tv_nsec)] }
+        let ptsB = sinkB.forwarded.map { [Int($0.pts.tv_sec), Int($0.pts.tv_nsec)] }
+        #expect(ptsA == ptsB, "nor one nanosecond of the pts it is handed")
+
+        #expect(tapA.creates == 1)
+        #expect(tapB.creates == 1, "a nil Cast pid must never rebuild the tap")
+    }
+
+    /// Attaching the Cast slot mid-capture gives it the SAME (pcm, pts) the
+    /// engine gets — one capture, four consumers — and detaching it stops the
+    /// copies without touching the engine's stream.
+    @Test func castSinkReceivesTheSamePCMAndPTSAsTheEngine() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let castSpy = SpySink()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: FakeConverter())
+
+        coordinator.start()
+        for i in 0..<3 { tap.pushBuffer(buffer(hostTime: UInt64(i + 1) * 10_000_000)) }
+        waitFor { sink.forwarded.count == 3 }
+
+        coordinator.setCastSink(castSpy, renderProcessPID: getpid())
+        for i in 3..<6 { tap.pushBuffer(buffer(hostTime: UInt64(i + 1) * 10_000_000)) }
+        waitFor { sink.forwarded.count == 6 }
+        waitFor { castSpy.forwarded.count == 3 }
+        #expect(sink.forwarded.count == 6)
+        #expect(castSpy.forwarded.count == 3, "only buffers delivered AFTER the attach are copied")
+
+        let engineTail = Array(sink.forwarded.suffix(3))
+        #expect(castSpy.forwarded.map(\.pcm) == engineTail.map(\.pcm))
+        #expect(
+            castSpy.forwarded.map { [Int($0.pts.tv_sec), Int($0.pts.tv_nsec)] }
+                == engineTail.map { [Int($0.pts.tv_sec), Int($0.pts.tv_nsec)] },
+            "the Cast slot is handed the engine's own live pts, unmodified")
+
+        coordinator.setCastSink(nil, renderProcessPID: nil)
+        for i in 6..<8 { tap.pushBuffer(buffer(hostTime: UInt64(i + 1) * 10_000_000)) }
+        waitFor { sink.forwarded.count == 8 }
+        #expect(sink.forwarded.count == 8, "detaching must not disturb the engine's stream")
+        #expect(castSpy.forwarded.count == 3, "and nothing more reaches a detached Cast slot")
+    }
     }
 }
 

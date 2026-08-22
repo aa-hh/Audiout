@@ -35,8 +35,10 @@ public final class FakeCastReceiver: @unchecked Sendable {
     private let stateLock = NSLock()
     private var _pongCount = 0
 
-    /// The first 44 bytes fetched from the stream, and the total byte count —
-    /// the evidence that the audio server really served WAV.
+    /// Everything fetched from the stream (from the first content byte up to
+    /// wherever `fetchBytes` was reached, interior chunk framing included), and
+    /// the total byte count — the evidence of what the audio server really
+    /// served, header and audio alike.
     public var onFetchComplete: ((Data, Int) -> Void)?
 
     // Queue-confined below this line.
@@ -294,6 +296,11 @@ public final class FakeCastReceiver: @unchecked Sendable {
         case "PLAY":
             playerState = "PLAYING"
         case "STOP":
+            // Same reason the receiver-namespace STOP cancels: a fetch left
+            // running would still reach `fetchBytes` and flip the stopped
+            // session back to PLAYING.
+            fetch?.cancel()
+            fetch = nil
             playerState = "IDLE"
             idleReason = "CANCELLED"
             currentMediaSessionID = nil
@@ -322,11 +329,19 @@ public final class FakeCastReceiver: @unchecked Sendable {
     // MARK: - "Playback" — fetch the stream, then call it PLAYING
 
     private func startFetch(contentID: String?, message: CastMessage, session: Session) {
+        // A LOAD over a still-running fetch ends that one for real, rather than
+        // just dropping the reference and leaving it pulling the stream. This
+        // must run before the URL guard below so a bad-URL LOAD also clears
+        // any previous fetch — otherwise `failFetch(nil, …)`'s identity check
+        // would fail and the stale fetch would live on to report a later
+        // session as PLAYING.
+        fetch?.cancel()
+        fetch = nil
         guard let contentID,
               let url = URL(string: contentID),
               let host = url.host,
               let port = NWEndpoint.Port(rawValue: UInt16(url.port ?? 80)) else {
-            failFetch(message: message, session: session)
+            failFetch(nil, message: message, session: session)
             return
         }
         let connection = NWConnection(host: NWEndpoint.Host(host), port: port, using: .tcp)
@@ -342,7 +357,7 @@ public final class FakeCastReceiver: @unchecked Sendable {
                 )
                 self.readBody(connection, header: Data(), body: Data(), message: message, session: session)
             case .failed, .cancelled:
-                self.failFetch(message: message, session: session)
+                self.failFetch(connection, message: message, session: session)
             default:
                 break
             }
@@ -375,13 +390,22 @@ public final class FakeCastReceiver: @unchecked Sendable {
                 }
             }
             if error != nil || (isComplete && body.count < self.fetchBytes) {
-                self.failFetch(message: message, session: session)
+                self.failFetch(connection, message: message, session: session)
                 return
             }
             guard body.count < self.fetchBytes else {
+                // A receive completion queued before a STOP landed must not
+                // resurrect the stopped session: it would flip an app-less
+                // receiver to PLAYING, emit an unsolicited empty MEDIA_STATUS,
+                // and nil out a NEWER fetch a later LOAD had already started.
+                // Identity is the whole test — STOP cancels `fetch` and nils it,
+                // and a new LOAD cancels and replaces it. `playerState` is NOT
+                // tested: the no-autoplay recipe legitimately reaches PLAYING
+                // (LOAD → PLAY) while this fetch is still filling.
+                guard connection === self.fetch else { return }
                 connection.cancel()
                 self.fetch = nil
-                self.onFetchComplete?(Self.firstPayloadBytes(of: body), body.count)
+                self.onFetchComplete?(Self.payloadBytes(of: body), body.count)
                 self.playerState = "PLAYING"
                 self.idleReason = nil
                 self.sendUnsolicitedMediaStatus(message: message, session: session)
@@ -391,19 +415,29 @@ public final class FakeCastReceiver: @unchecked Sendable {
         }
     }
 
-    /// The first 44 bytes of actual content — the WAV header, if the stream is
-    /// one. A real receiver dechunks before it decodes; this does just enough
-    /// of that to step over the leading `Transfer-Encoding: chunked` size line,
-    /// so the sample is audio bytes rather than framing.
-    private static func firstPayloadBytes(of body: Data) -> Data {
+    /// Everything fetched, starting at the first content byte — the WAV header
+    /// first, if the stream is one. A real receiver dechunks before it decodes;
+    /// this does just enough of that to step over the LEADING
+    /// `Transfer-Encoding: chunked` size line, so the body starts on audio
+    /// rather than framing. Later chunk headers stay in, exactly as counted.
+    private static func payloadBytes(of body: Data) -> Data {
         guard let lineEnd = body.range(of: Data("\r\n".utf8)),
               Int(String(decoding: body[body.startIndex..<lineEnd.lowerBound], as: UTF8.self), radix: 16) != nil else {
-            return Data(body.prefix(44))
+            return body
         }
-        return Data(body[lineEnd.upperBound...].prefix(44))
+        return Data(body[lineEnd.upperBound...])
     }
 
-    private func failFetch(message: CastMessage, session: Session) {
+    /// `connection` is the fetch that failed. A `.cancelled`/`.failed` state or
+    /// an errored receive from the connection a newer LOAD already REPLACED
+    /// still arrives after the replacement started, and `playerState` is
+    /// BUFFERING for that new session — so without the identity check the dead
+    /// connection would cancel the live fetch and report the new session as
+    /// ERROR. A `nil` connection means the LOAD failed before a fetch existed;
+    /// `startFetch` clears any previous fetch first, so the identity check
+    /// holds.
+    private func failFetch(_ connection: NWConnection?, message: CastMessage, session: Session) {
+        guard connection === fetch else { return }
         guard playerState == "BUFFERING" else { return }
         fetch?.cancel()
         fetch = nil

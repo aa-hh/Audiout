@@ -1,0 +1,429 @@
+import Foundation
+import Testing
+import AirPlayEngine
+import CastSender
+import Network
+@testable import AudiouterCore
+
+#if canImport(CoreAudio)
+import CoreAudio
+#endif
+
+/// CAST-OUT / CAST-ENUM wiring: `NativeBackend` folds Cast browse records into
+/// the SAME `known`/`order`/`emit` flow AirPlay and Bluetooth rows use, and
+/// drives the Cast session manager as the THIRD routing partition — no
+/// `outputIDs` entry, never the engine. Hermetic: injected
+/// ``CastDeviceEnumerating`` and ``CastOutputControlling`` fakes stand in for
+/// the real browse and the real sockets, and every other collaborator is the
+/// same no-op double the sibling backend suites keep.
+@Suite final class NativeBackendCastTests: IsolatedSuite {
+
+    // MARK: Doubles
+
+    private final class FakeCastEnumerator: CastDeviceEnumerating, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _onSnapshot: (@Sendable ([CastDeviceRecord]) -> Void)?
+        private var _startCount = 0
+        private var _stopCount = 0
+
+        var onSnapshot: (@Sendable ([CastDeviceRecord]) -> Void)? {
+            get { lock.withLock { _onSnapshot } }
+            set { lock.withLock { _onSnapshot = newValue } }
+        }
+        var startCount: Int { lock.withLock { _startCount } }
+        var stopCount: Int { lock.withLock { _stopCount } }
+
+        func start() { lock.withLock { _startCount += 1 } }
+        func stop() { lock.withLock { _stopCount += 1 } }
+        func fire(_ records: [CastDeviceRecord]) { onSnapshot?(records) }
+    }
+
+    /// The fan-out slot's stand-in: the backend only ever hands this to the
+    /// capture coordinator, so it never has to do anything.
+    private final class NullSink: PCMSink, @unchecked Sendable {
+        func write(pcm: Data, pts: timespec) {}
+    }
+
+    private final class FakeCastOutputManager: CastOutputControlling, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _onStateChange: (@Sendable (String, CastSessionState) -> Void)?
+        private var _deviceSets: [[CastDeviceRecord]] = []
+        private var _levels: [(level: Double, id: String)] = []
+        private var _retries: [String] = []
+        private var _stopAllCount = 0
+
+        let feed: PCMSink = NullSink()
+
+        var onStateChange: (@Sendable (String, CastSessionState) -> Void)? {
+            get { lock.withLock { _onStateChange } }
+            set { lock.withLock { _onStateChange = newValue } }
+        }
+        var deviceSets: [[CastDeviceRecord]] { lock.withLock { _deviceSets } }
+        var levels: [(level: Double, id: String)] { lock.withLock { _levels } }
+        var retries: [String] { lock.withLock { _retries } }
+        var stopAllCount: Int { lock.withLock { _stopAllCount } }
+
+        func setDevices(_ records: [CastDeviceRecord]) { lock.withLock { _deviceSets.append(records) } }
+        func setLevel(_ level: Double, forDevice id: String) { lock.withLock { _levels.append((level, id)) } }
+        func retry(deviceID: String) { lock.withLock { _retries.append(deviceID) } }
+        func stopAll() { lock.withLock { _stopAllCount += 1 } }
+
+        func fire(id: String, state: CastSessionState) {
+            let handler = lock.withLock { _onStateChange }
+            handler?(id, state)
+        }
+    }
+
+    /// Records the Cast fan-out attaches/detaches; every other capture op is a
+    /// no-op, exactly like `NativeBackendTests`' own `FakeCapture`.
+    private final class FakeCapture: CaptureControlling, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _onLevel: (@Sendable (Float) -> Void)?
+        private var _onStateChange: (@Sendable (NativeCaptureCoordinator.State) -> Void)?
+        private var _castSinkCalls: [(isNil: Bool, pid: pid_t?)] = []
+
+        var onLevel: (@Sendable (_ rms: Float) -> Void)? {
+            get { lock.withLock { _onLevel } }
+            set { lock.withLock { _onLevel = newValue } }
+        }
+        var onStateChange: (@Sendable (NativeCaptureCoordinator.State) -> Void)? {
+            get { lock.withLock { _onStateChange } }
+            set { lock.withLock { _onStateChange = newValue } }
+        }
+        var castSinkCalls: [(isNil: Bool, pid: pid_t?)] { lock.withLock { _castSinkCalls } }
+
+        func start() {}
+        func stop() {}
+        func setCastSink(_ sink: PCMSink?, renderProcessPID: pid_t?) {
+            lock.withLock { _castSinkCalls.append((sink == nil, renderProcessPID)) }
+        }
+    }
+
+    private final class NoOpEngine: EngineControlling, @unchecked Sendable {
+        func start() async throws {}
+        func stop() async {}
+        func updateDiscovery(_ descriptor: DeviceDescriptor) async throws -> OutputID {
+            OutputID(rawValue: 0)
+        }
+        func removeDiscovery(_ descriptor: DeviceDescriptor) async {}
+        func addOutput(_ id: OutputID) async throws {}
+        func addOutput(_ id: OutputID, streamId: UInt32) async throws {}
+        func removeOutput(_ id: OutputID) async throws {}
+        func setVolume(_ id: OutputID, _ volume: Double) async throws {}
+        func setStartBufferMs(_ ms: Int) async {}
+        func write(pcm: Data, streamId: UInt32, pts: timespec) {}
+        func makeStateStream() -> AsyncStream<(OutputID, OutputState)> { AsyncStream { _ in } }
+        func makeRemoteEventStream() -> AsyncStream<RemoteEvent> { AsyncStream { _ in } }
+        var dacpID: UInt64 { 0 }
+        var ptpClockAvailable: Bool { get async { true } }
+    }
+
+    private final class NoOpDiscovery: DiscoverySource, @unchecked Sendable {
+        var onEvent: (@Sendable (DiscoveryEvent) -> Void)?
+        func start() {}
+        func stop() {}
+    }
+
+    /// No sockets: the real `DACPServer.start(dacpID:)` binds a live
+    /// `NWListener` (Local Network prompt).
+    private final class FakeDACPEndpoint: DACPEndpoint, @unchecked Sendable {
+        var onVolume: (@Sendable (_ activeRemote: UInt32, _ level: Double) -> Void)?
+        var onVolumeStep: (@Sendable (_ activeRemote: UInt32, _ direction: Int) -> Void)?
+        func start(dacpID: UInt64) {}
+        func stop() {}
+    }
+
+    private final class NoOpSystemVolume: SystemVolumeControlling, @unchecked Sendable {
+        var onExternalChange: (@Sendable (Int?, Bool?, Bool) -> Void)?
+        func currentVolume() -> Int? { nil }
+        func currentMuted() -> Bool? { nil }
+        func setVolume(_ volume: Int, didWrite: (@Sendable (Bool) -> Void)?) { didWrite?(true) }
+        func setMuted(_ muted: Bool) {}
+        func start() {}
+        func stop() {}
+    }
+
+    /// Never touches the real HAL — `stop()` sweeps aggregates unconditionally.
+    private struct NoOpAggregateControl: AggregateDeviceControlling {
+        func resolveDeviceID(forUID uid: String) -> AudioObjectID? { nil }
+        func createAggregate(uid: String, name: String, subDeviceUID: String) -> AudioObjectID? { nil }
+        func destroyAggregate(_ deviceID: AudioObjectID) -> Bool { false }
+        func aggregateDeviceUIDs() -> [String] { [] }
+        func deviceUID(_ deviceID: AudioObjectID) -> String? { nil }
+        func builtInOutputDeviceUID() -> String? { nil }
+        func setDefaultOutputDevice(_ deviceID: AudioObjectID) -> Bool { false }
+    }
+
+    private final class FakeBTEnumerator: BTDeviceEnumerating, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _onSnapshot: (@Sendable ([BTDeviceSnapshot]) -> Void)?
+        var onSnapshot: (@Sendable ([BTDeviceSnapshot]) -> Void)? {
+            get { lock.withLock { _onSnapshot } }
+            set { lock.withLock { _onSnapshot = newValue } }
+        }
+        func start() {}
+        func stop() {}
+        func refresh() {}
+        func requestAuthorizationForUserAction() {}
+        func fire(_ snapshots: [BTDeviceSnapshot]) { onSnapshot?(snapshots) }
+    }
+
+    // MARK: Helpers
+
+    private struct Rig {
+        let backend: NativeBackend
+        let cast: FakeCastEnumerator
+        let manager: FakeCastOutputManager
+        let capture: FakeCapture
+        let bt: FakeBTEnumerator
+    }
+
+    private func makeBackend(withBT: Bool = false) -> Rig {
+        let cast = FakeCastEnumerator()
+        let manager = FakeCastOutputManager()
+        let capture = FakeCapture()
+        let bt = FakeBTEnumerator()
+        let backend = NativeBackend(
+            engineControl: NoOpEngine(),
+            discoverySource: NoOpDiscovery(),
+            btEnumerator: withBT ? bt : nil,
+            castEnumerator: cast,
+            castOutputManager: manager,
+            dacpEndpoint: FakeDACPEndpoint(),
+            systemVolume: NoOpSystemVolume(),
+            aggregateControl: NoOpAggregateControl())
+        backend.captureCoordinator = capture
+        backend.start()
+        return Rig(backend: backend, cast: cast, manager: manager, capture: capture, bt: bt)
+    }
+
+    private func waitFor(timeout: TimeInterval = 2, _ cond: @escaping () -> Bool) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if cond() { return }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+        }
+    }
+
+    private static func device(_ backend: NativeBackend, _ id: String) -> Device? {
+        backend.devices.first { $0.id == id }
+    }
+
+    private static let record = CastDeviceRecord(
+        id: "abc123", friendlyName: "Living Room TV", model: "Google TV Streamer",
+        endpoint: .hostPort(host: "192.168.4.54", port: 8009))
+
+    // MARK: - CAST-ENUM
+
+    @Test func snapshotSurfacesCastRowsAndKeepsVanishedOnes() {
+        let rig = makeBackend()
+
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, Self.record.id) != nil }
+        let row = Self.device(rig.backend, Self.record.id)
+        #expect(row?.kind == .cast)
+        #expect(row?.isCast == true)
+        #expect(row?.name == "Living Room TV")
+        #expect(row?.isAvailable == true)
+        #expect(row?.supportsAirPlay2 == false)
+        #expect(row?.isLocalDevice == false)
+
+        // Dropping off the network greys the row; it never vanishes.
+        rig.cast.fire([])
+        waitFor { Self.device(rig.backend, Self.record.id)?.isAvailable == false }
+        #expect(Self.device(rig.backend, Self.record.id)?.isAvailable == false)
+        #expect(rig.backend.devices.filter { $0.isCast }.count == 1)
+    }
+
+    // MARK: - CAST-OUT selection
+
+    @Test func selectingACastDeviceDrivesTheManagerAndAttachesTheFeedOnce() {
+        let rig = makeBackend()
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, Self.record.id) != nil }
+
+        rig.backend.setOutputSet([Self.record.id])
+        waitFor { rig.manager.deviceSets.last == [Self.record] }
+        #expect(rig.manager.deviceSets.last == [Self.record])
+        #expect(rig.capture.castSinkCalls.count == 1)
+        #expect(rig.capture.castSinkCalls.first?.isNil == false)
+        #expect(rig.capture.castSinkCalls.first?.pid == getpid())
+        waitFor { Self.device(rig.backend, Self.record.id)?.connectionState == .connecting }
+        #expect(Self.device(rig.backend, Self.record.id)?.connectionState == .connecting)
+
+        // A membership-neutral re-push re-applies nothing.
+        let setsAfterSelect = rig.manager.deviceSets.count
+        rig.backend.setOutputSet([Self.record.id])
+        waitFor(timeout: 0.3) { false }
+        #expect(rig.capture.castSinkCalls.count == 1, "the feed attaches exactly once per armed stretch")
+        #expect(rig.manager.deviceSets.count == setsAfterSelect, "an unchanged id list enqueues nothing")
+
+        rig.backend.setOutputSet([])
+        waitFor { rig.manager.deviceSets.last == [] }
+        #expect(rig.manager.deviceSets.last == [])
+        #expect(rig.capture.castSinkCalls.count == 2)
+        #expect(rig.capture.castSinkCalls.last?.isNil == true)
+        waitFor { Self.device(rig.backend, Self.record.id)?.connectionState == .off }
+        #expect(Self.device(rig.backend, Self.record.id)?.connectionState == .off)
+    }
+
+    /// THE Phase (i) invariant at the backend seam: a selection with no Cast id
+    /// in it must never touch a Cast seam at all.
+    @Test func noCastSelectionNeverTouchesTheCastSeams() {
+        let rig = makeBackend(withBT: true)
+        let btID = "C4-38-75-0E-BF-4A:output"
+        rig.bt.fire([BTDeviceSnapshot(
+            id: btID, name: "Sonos Move 2", isConnected: true,
+            lastUsed: Date(timeIntervalSince1970: 1_780_000_000))])
+        waitFor { Self.device(rig.backend, btID) != nil }
+
+        rig.backend.setOutputSet([btID])
+        waitFor(timeout: 0.3) { false }
+        rig.backend.setOutputSet([])
+        waitFor(timeout: 0.3) { false }
+
+        #expect(rig.capture.castSinkCalls.isEmpty, "no Cast id selected ⇒ the fan-out slot is never touched")
+        #expect(rig.manager.deviceSets.isEmpty, "nor the session manager")
+    }
+
+    // MARK: - Session state → row
+
+    @Test func sessionStatesMapOntoTheRow() {
+        let rig = makeBackend()
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, Self.record.id) != nil }
+        rig.backend.setOutputSet([Self.record.id])
+        waitFor { Self.device(rig.backend, Self.record.id)?.connectionState == .connecting }
+
+        rig.manager.fire(id: Self.record.id, state: .playing)
+        waitFor { Self.device(rig.backend, Self.record.id)?.connectionState == .connected }
+        #expect(Self.device(rig.backend, Self.record.id)?.connectionState == .connected)
+
+        func failureCause() -> ConnectionFailure? {
+            if case .failed(let failure) = Self.device(rig.backend, Self.record.id)?.connectionState {
+                return failure
+            }
+            return nil
+        }
+
+        rig.manager.fire(id: Self.record.id, state: .failed(.appUnavailable(reason: "NOT_FOUND")))
+        waitFor { failureCause()?.cause == .castAppUnavailable }
+        #expect(failureCause()?.cause == .castAppUnavailable)
+        #expect(failureCause()?.detail == "NOT_FOUND")
+
+        rig.manager.fire(id: Self.record.id, state: .failed(.connectionFailed("refused")))
+        waitFor { failureCause()?.cause == .castConnectionFailed }
+        #expect(failureCause()?.cause == .castConnectionFailed)
+        #expect(failureCause()?.detail == "refused")
+
+        rig.manager.fire(id: Self.record.id, state: .failed(.timedOut))
+        waitFor { failureCause()?.cause == .timedOut }
+        #expect(failureCause()?.cause == .timedOut)
+
+        rig.manager.fire(id: Self.record.id, state: .failed(.dropped(nil)))
+        waitFor { failureCause()?.cause == .droppedMidStream }
+        #expect(failureCause()?.cause == .droppedMidStream)
+    }
+
+    /// A receiver's first PLAYING can land after the user has already deselected
+    /// the row mid-spinner (`setOutputSet` wrote `.off`, teardown still in
+    /// flight). That late state must leave the row alone — otherwise a
+    /// deselected device reads "connected", and it counts as audible for the
+    /// silence watchdog.
+    @Test func aLatePlayingAfterDeselectLeavesTheRowOff() {
+        let rig = makeBackend()
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, Self.record.id) != nil }
+        rig.backend.setOutputSet([Self.record.id])
+        waitFor { Self.device(rig.backend, Self.record.id)?.connectionState == .connecting }
+        rig.manager.fire(id: Self.record.id, state: .connecting)
+
+        rig.backend.setOutputSet([])
+        waitFor { Self.device(rig.backend, Self.record.id)?.connectionState == .off }
+
+        rig.manager.fire(id: Self.record.id, state: .playing)
+        waitFor(timeout: 0.3) { false }
+        #expect(Self.device(rig.backend, Self.record.id)?.connectionState == .off,
+                "a PLAYING that lands after deselect must not show the row as connected")
+
+        rig.manager.fire(id: Self.record.id, state: .idle)
+        waitFor(timeout: 0.3) { false }
+        #expect(Self.device(rig.backend, Self.record.id)?.connectionState == .off)
+
+        // Audibility is private state; the watchdog is its one observable. Re-select
+        // and the countdown must ARM — a leaked "playing" would have read as
+        // audible and cancelled it instead.
+        rig.backend.setOutputSet([Self.record.id])
+        waitFor { rig.backend.test_silenceWatchdogArmed }
+        #expect(rig.backend.test_silenceWatchdogArmed,
+                "the late PLAYING must not have marked the receiver audible")
+    }
+
+    // MARK: - Composed level
+
+    @Test func volumeAndMuteReachTheManagerComposed() {
+        let rig = makeBackend()
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, Self.record.id) != nil }
+        rig.backend.setOutputSet([Self.record.id])
+        waitFor { rig.manager.deviceSets.last == [Self.record] }
+
+        rig.backend.setVolume(50, for: Self.record.id)
+        waitFor { rig.manager.levels.last?.level == 0.5 }
+        #expect(rig.manager.levels.last?.level == 0.5)
+        #expect(rig.manager.levels.last?.id == Self.record.id)
+
+        rig.backend.setMasterGain(mainOut: 50, group: 100, mirrorToSystemVolume: false)
+        waitFor { rig.manager.levels.last?.level == 0.25 }
+        #expect(rig.manager.levels.last?.level == 0.25)
+
+        rig.backend.setMuted(true, for: Self.record.id)
+        waitFor { rig.manager.levels.last?.level == 0 }
+        #expect(rig.manager.levels.last?.level == 0, "a Cast mute IS level 0, never SET_VOLUME muted")
+
+        rig.backend.setMuted(false, for: Self.record.id)
+        waitFor { rig.manager.levels.last?.level == 0.25 }
+        #expect(rig.manager.levels.last?.level == 0.25, "unmute comes back at the user's composed level")
+    }
+
+    // MARK: - Retry
+
+    @Test func retryReachesTheManagerOnlyWhileSelected() {
+        let rig = makeBackend()
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, Self.record.id) != nil }
+        rig.backend.setOutputSet([Self.record.id])
+        waitFor { rig.manager.deviceSets.last == [Self.record] }
+        rig.manager.fire(id: Self.record.id, state: .failed(.timedOut))
+        waitFor { Self.device(rig.backend, Self.record.id)?.connectionState != .connecting }
+
+        rig.backend.retryOutput(Self.record.id)
+        waitFor { rig.manager.retries == [Self.record.id] }
+        #expect(rig.manager.retries == [Self.record.id])
+        #expect(Self.device(rig.backend, Self.record.id)?.connectionState == .connecting)
+
+        rig.backend.setOutputSet([])
+        waitFor { rig.manager.deviceSets.last == [] }
+        rig.backend.retryOutput(Self.record.id)
+        waitFor(timeout: 0.3) { false }
+        #expect(rig.manager.retries == [Self.record.id], "an unselected receiver has nothing to retry")
+    }
+
+    // MARK: - Lifecycle
+
+    @Test func stopStopsTheEnumeratorAndDetachesTheFeed() {
+        let rig = makeBackend()
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, Self.record.id) != nil }
+        rig.backend.setOutputSet([Self.record.id])
+        waitFor { rig.capture.castSinkCalls.count == 1 }
+
+        rig.backend.stop()
+        waitFor { rig.cast.stopCount == 1 }
+        #expect(rig.cast.stopCount == 1)
+        waitFor { rig.manager.deviceSets.last == [] }
+        #expect(rig.manager.deviceSets.last == [])
+        waitFor { rig.capture.castSinkCalls.last?.isNil == true }
+        #expect(rig.capture.castSinkCalls.last?.isNil == true)
+    }
+}

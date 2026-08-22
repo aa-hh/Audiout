@@ -204,6 +204,97 @@ import Testing
         #expect(try stopped.value?.get().applications.isEmpty == true)
     }
 
+    /// A media-namespace STOP must end the fetch too. `fetchBytes` here is
+    /// about 0.6 s of real-time stream — the STOP lands mid-fetch, and the wait
+    /// below outlasts what the fetch needs to finish, so an un-stopped fetch
+    /// WOULD reach its byte count inside the window and report completion with
+    /// no session behind it. `onFetchComplete` is the observable that catches
+    /// it: the client sees only IDLE either way, because the fake's unsolicited
+    /// status after the STOP carries an empty `status` array.
+    @Test func aMediaStopEndsTheFetchAndStaysIdle() throws {
+        guard #available(macOS 15, *) else { return }
+        let (fake, endpoint) = try startFake(fetchBytes: 100_000)
+        defer { fake.stop() }
+        let server = try startAudioServer()
+        defer { server.stop() }
+        let (channel, client) = try connect(to: endpoint)
+        defer { channel.close() }
+
+        let fetched = Box<(Data, Int)>()
+        fake.onFetchComplete = { head, total in fetched.set((head, total)) }
+        let playing = Signal()
+        client.onMediaStatus = { status in
+            if status.playerState == "PLAYING" { playing.fire() }
+        }
+
+        let app = try launchedApplication(client)
+        let loaded = Box<Result<CastMediaStatus, Error>>()
+        client.load(url: server.url(host: "127.0.0.1"), contentType: "audio/wav", app: app) { loaded.set($0) }
+        try #require(waitUntil(timeout: 5) { loaded.value != nil }, "LOAD never answered")
+        let session = try #require(try loaded.value?.get().mediaSessionID)
+
+        let stopped = Box<Result<CastMediaStatus, Error>>()
+        client.stopMedia(mediaSessionID: session, app: app) { stopped.set($0) }
+        try #require(waitUntil(timeout: 5) { stopped.value != nil }, "media STOP never answered")
+        #expect(try stopped.value?.get().playerState == "IDLE")
+
+        #expect(waitFor([playing], timeout: 1.5) == false, "a stopped session must never come back as PLAYING")
+        // This pins the `fetch = nil` half of the media-STOP fix (state
+        // resurrection), NOT the `cancel()` half (socket hygiene) — a STOP that
+        // only nils the reference passes here too.
+        #expect(fetched.value == nil, "the STOP left the fetch running — it ran to completion anyway")
+    }
+
+    /// A second LOAD lands on a still-filling fetch and must hand off cleanly.
+    /// Replacing the fetch cancels the old connection, which delivers
+    /// `.cancelled` to its state handler and an error to its pending receive —
+    /// both AFTER the new session is BUFFERING. Without a connection-identity
+    /// check in `failFetch` the dead connection tears down the live fetch and
+    /// reports the NEW session as ERROR. `fetchBytes` here is about 0.6 s of
+    /// real-time stream, so the second LOAD is comfortably mid-fetch.
+    @Test func aSecondLoadReplacesTheFetchWithoutFailingIt() throws {
+        guard #available(macOS 15, *) else { return }
+        let (fake, endpoint) = try startFake(fetchBytes: 100_000)
+        defer { fake.stop() }
+        let server = try startAudioServer()
+        defer { server.stop() }
+        let (channel, client) = try connect(to: endpoint)
+        defer { channel.close() }
+
+        // Counted, not signalled: the cancelled first fetch must never report
+        // completion. The count is written only from the fake's serial queue.
+        let fetches = Box<Int>()
+        fake.onFetchComplete = { _, _ in fetches.set((fetches.value ?? 0) + 1) }
+        let playingSession = Box<Int>()
+        let sawError = Signal()
+        client.onMediaStatus = { status in
+            if status.idleReason == "ERROR" { sawError.fire() }
+            if status.playerState == "PLAYING", let id = status.mediaSessionID { playingSession.set(id) }
+        }
+
+        let app = try launchedApplication(client)
+        let first = Box<Result<CastMediaStatus, Error>>()
+        client.load(url: server.url(host: "127.0.0.1"), contentType: "audio/wav", app: app) { first.set($0) }
+        try #require(waitUntil(timeout: 5) { first.value != nil }, "the first LOAD never answered")
+        let firstSession = try #require(try first.value?.get().mediaSessionID)
+
+        Thread.sleep(forTimeInterval: 0.02)
+
+        let second = Box<Result<CastMediaStatus, Error>>()
+        client.load(url: server.url(host: "127.0.0.1"), contentType: "audio/wav", app: app) { second.set($0) }
+        try #require(waitUntil(timeout: 5) { second.value != nil }, "the second LOAD never answered")
+        let reloaded = try #require(try second.value?.get())
+        #expect(reloaded.playerState == "BUFFERING")
+        let session = try #require(reloaded.mediaSessionID, "the second LOAD allocated no media session")
+        #expect(session != firstSession, "the second LOAD reused the first session id")
+
+        #expect(waitUntil(timeout: 2) { playingSession.value == session },
+                Comment(rawValue: "the second session never reached PLAYING, last PLAYING session was \(String(describing: playingSession.value))"))
+        #expect(sawError.fired == false, "the replaced fetch reported the live session as ERROR")
+        #expect(fetches.value == 1,
+                Comment(rawValue: "expected exactly one completed fetch, saw \(String(describing: fetches.value))"))
+    }
+
     @Test func spikeRunProducesEveryNumber() throws {
         guard #available(macOS 15, *) else { return }
         let (fake, endpoint) = try startFake(fetchBytes: 16_384)

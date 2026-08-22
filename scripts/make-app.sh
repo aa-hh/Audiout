@@ -586,7 +586,8 @@ plutil -extract NSAudioCaptureUsageDescription raw -o - "$PLIST" >/dev/null || {
 #   NSBonjourServices — the service types we're allowed to browse; without it the
 #     browse is blocked even with the usage string. These MUST match every type
 #     the app browses: _airplay._tcp for AirPlay 2 and _raop._tcp for AP1
-#     (NativeDiscovery), plus _audiouter-pf._tcp — the service setup
+#     (NativeDiscovery), _googlecast._tcp for Cast receivers
+#     (CastDeviceEnumerator), plus _audiouter-pf._tcp — the service setup
 #     publishes and then browses for on this same Mac to PROVE the permission
 #     was granted (LocalNetworkPrimer's self-discovery). Leave that last one out
 #     and the self-browse is silently blocked, so setup can never confirm a
@@ -600,9 +601,11 @@ plutil -insert NSBonjourServices -array "$PLIST"
 plutil -insert NSBonjourServices.0 -string "_airplay._tcp" "$PLIST"
 plutil -insert NSBonjourServices.1 -string "_raop._tcp" "$PLIST"
 plutil -insert NSBonjourServices.2 -string "_audiouter-pf._tcp" "$PLIST"
+plutil -insert NSBonjourServices.3 -string "_googlecast._tcp" "$PLIST"
 plutil -extract NSLocalNetworkUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSLocalNetworkUsageDescription missing from Info.plist" >&2; exit 1; }
 plutil -extract NSBonjourServices.0 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices missing from Info.plist" >&2; exit 1; }
 plutil -extract NSBonjourServices.2 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices is missing the setup self-discovery type — setup could not prove a Local Network grant" >&2; exit 1; }
+plutil -extract NSBonjourServices.3 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices is missing _googlecast._tcp — Cast discovery would be silently blocked" >&2; exit 1; }
 
 # Bluetooth (BT-CONNECT): reconnecting an already-paired speaker touches
 # IOBluetooth, which macOS gates behind the Bluetooth TCC prompt — and a

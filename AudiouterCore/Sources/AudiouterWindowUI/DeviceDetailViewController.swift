@@ -385,6 +385,7 @@ public final class DeviceDetailViewController: NSViewController {
         case .sonos:          return "Sonos"
         case .generic:        return "AirPlay Speaker"
         case .bluetooth:      return "Bluetooth Speaker"
+        case .cast:           return "Cast Device"
         }
     }
 

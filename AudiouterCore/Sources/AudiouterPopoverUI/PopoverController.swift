@@ -1316,6 +1316,7 @@ public final class PopoverController: NSObject {
     static let thisMacSubsectionTitle = "This Mac"
     static let airPlaySubsectionTitle = "AirPlay Devices"
     static let bluetoothSubsectionTitle = "Bluetooth Devices"
+    static let castSubsectionTitle = "Cast Devices"
 
     /// One device-type subsection and the rows it would render, the Bluetooth
     /// connected-only filter already applied.
@@ -1331,7 +1332,7 @@ public final class PopoverController: NSObject {
         !section.devices.isEmpty || section.title == Self.bluetoothSubsectionTitle
     }
 
-    /// The three subsections in RENDER order — the one place the order and the
+    /// The four subsections in RENDER order — the one place the order and the
     /// BT-LIST connected-only filter are expressed, so the rail's render order
     /// can never drift from the rows' (the terminus would land on the wrong
     /// row).
@@ -1341,7 +1342,9 @@ public final class PopoverController: NSObject {
             DeviceSection(title: Self.thisMacSubsectionTitle,
                           devices: visible.filter(\.isLocalDevice)),
             DeviceSection(title: Self.airPlaySubsectionTitle,
-                          devices: visible.filter { !$0.isLocalDevice && !$0.isBluetooth }),
+                          devices: visible.filter { !$0.isLocalDevice && !$0.isBluetooth && !$0.isCast }),
+            DeviceSection(title: Self.castSubsectionTitle,
+                          devices: visible.filter(\.isCast)),
             DeviceSection(title: Self.bluetoothSubsectionTitle,
                           devices: orderedBluetoothDevices(in: visible)),
         ]
@@ -3705,8 +3708,10 @@ extension PopoverController: DeviceRowView.Delegate {
 
     private func btWizardReferenceDevices(excluding deviceID: String) -> [Device] {
         let ordered = orderedDevices().filter { $0.id != deviceID && $0.isAvailable }
+        // Cast is never offered: a Cast receiver plays ~5.5 s behind live, which
+        // no ±500 ms bisection can resolve against.
         return ordered.filter(\.isLocalDevice)
-            + ordered.filter { !$0.isLocalDevice && !$0.isBluetooth }
+            + ordered.filter { !$0.isLocalDevice && !$0.isBluetooth && !$0.isCast }
             + orderedBluetoothDevices(in: ordered)
     }
 

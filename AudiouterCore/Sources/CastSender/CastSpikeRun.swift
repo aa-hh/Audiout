@@ -28,19 +28,10 @@ public final class CastSpikeRun: @unchecked Sendable {
         public var primeMilliseconds: Int
         /// Cast `streamType` sent with LOAD: LIVE, BUFFERED or NONE.
         public var streamType: String
-        /// Serve 8-bit mono 22.05 kHz WAV (one eighth of the bytes).
-        public var liteWAV: Bool
-        /// AirConnect-style HTTP/1.0 raw body (no Content-Length, no chunks).
-        public var rawHTTP10: Bool
-        /// Answer the receiver's `Range:` request with 206 + Content-Range.
-        public var range206: Bool
         /// Receiver app to launch; AirConnect uses its own `46C1A819`.
         public var appID: String
         /// LOAD with autoplay, or LOAD then an explicit PLAY (AirConnect).
         public var autoplay: Bool
-        /// Relay this command's stdout instead of the built-in WAV (ffmpeg A/B).
-        public var pipeCommand: String?
-        public var contentType: String
 
         public init(
             endpoint: NWEndpoint,
@@ -50,13 +41,8 @@ public final class CastSpikeRun: @unchecked Sendable {
             volumeLevel: Double = 0.3,
             primeMilliseconds: Int = 0,
             streamType: String = "LIVE",
-            liteWAV: Bool = false,
-            rawHTTP10: Bool = false,
-            range206: Bool = false,
             appID: String = CastClient.defaultMediaReceiverAppID,
-            autoplay: Bool = true,
-            pipeCommand: String? = nil,
-            contentType: String = "audio/wav"
+            autoplay: Bool = true
         ) {
             self.endpoint = endpoint
             self.streamHost = streamHost
@@ -65,13 +51,8 @@ public final class CastSpikeRun: @unchecked Sendable {
             self.volumeLevel = volumeLevel
             self.primeMilliseconds = primeMilliseconds
             self.streamType = streamType
-            self.liteWAV = liteWAV
-            self.rawHTTP10 = rawHTTP10
-            self.range206 = range206
             self.appID = appID
             self.autoplay = autoplay
-            self.pipeCommand = pipeCommand
-            self.contentType = contentType
         }
     }
 
@@ -156,13 +137,8 @@ public final class CastSpikeRun: @unchecked Sendable {
             let server = CastLiveAudioServer(
                 source: SineSource(),
                 loopbackOnly: options.loopbackOnly,
-                primeMilliseconds: options.primeMilliseconds,
-                liteWAV: options.liteWAV,
-                rawHTTP10: options.rawHTTP10,
-                pipeCommand: options.pipeCommand,
-                contentType: options.contentType
+                primeMilliseconds: options.primeMilliseconds
             )
-            server.range206 = options.range206
             server.onRequest = { [weak self] head in
                 self?.queue.async {
                     let lines = head.split(separator: "\r\n")
@@ -215,7 +191,7 @@ public final class CastSpikeRun: @unchecked Sendable {
                 self.afterPlaying()
             }
             loadSentAt = DispatchTime.now()
-            client?.load(url: url, contentType: options.contentType, streamType: options.streamType, autoplay: options.autoplay, app: app) { [weak self] result in
+            client?.load(url: url, contentType: "audio/wav", streamType: options.streamType, autoplay: options.autoplay, app: app) { [weak self] result in
                 if case .success(let status) = result, !(self?.options.autoplay ?? true), let session = status.mediaSessionID {
                     self?.queue.async {
                         self?.log("play_sent")

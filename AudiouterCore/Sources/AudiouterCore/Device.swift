@@ -24,6 +24,12 @@ public struct Device: Identifiable, Equatable, Sendable {
         /// the BT MAC address, so it survives disconnect/rejoin);
         /// `supportsAirPlay2` is always `false` (PLAN-UNIVERSAL-SYNC BT-DEVICE).
         case bluetooth
+        /// A Google Cast receiver (Chromecast, Nest speaker/display, Android TV)
+        /// driven by `CastOutputManager` over the Cast v2 protocol — not an
+        /// AirPlay receiver. `id` is the receiver's Bonjour TXT-record `id`;
+        /// `supportsAirPlay2` is always `false`, and a Cast id is never
+        /// engine-driven (it is the third routing partition, like `.bluetooth`).
+        case cast
 
         /// SF Symbol name for the row icon (all are documented AppKit-usable
         /// symbols — see SPEC.md §9 "Device row").
@@ -40,6 +46,10 @@ public struct Device: Identifiable, Equatable, Sendable {
             // NOT "speaker.wave.2.fill" — that's the rows' mute-accessory
             // glyph (DeviceRowView/MainOutRowView) and would collide.
             case .bluetooth:      return "hifispeaker.2.fill"
+            // SF Symbols has no Cast rune (trademark); the TV-plus-speaker
+            // glyph reads as "receiver attached to a screen", which is what a
+            // Chromecast/Nest/Android TV target is, and collides with nothing.
+            case .cast:           return "tv.and.hifispeaker.fill"
             }
         }
     }
@@ -74,6 +84,12 @@ public struct Device: Identifiable, Equatable, Sendable {
     /// owns them, so AirPlay-only paths must exclude them by this, never by
     /// `supportsAirPlay2` (AP1 receivers share that flag yet ARE engine-driven).
     public var isBluetooth: Bool { kind == .bluetooth }
+
+    /// A Google Cast receiver. Like Bluetooth, Cast devices are non-local but
+    /// never engine-driven — `CastOutputManager` owns them — so AirPlay-only
+    /// paths must exclude them by this, never by `supportsAirPlay2` (AP1
+    /// receivers share that flag yet ARE engine-driven).
+    public var isCast: Bool { kind == .cast }
 
     // MARK: Control state (0–100 volume model, matching the UI sliders)
 

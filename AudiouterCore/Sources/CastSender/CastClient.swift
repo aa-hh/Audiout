@@ -27,6 +27,11 @@ public struct CastApplication: Equatable {
 public struct CastReceiverStatus: Equatable {
     public let volumeLevel: Double
     public let muted: Bool
+    /// How the receiver's own volume can be driven: `attenuation`/`master`
+    /// take `SET_VOLUME`, `fixed` ignores it (an HDMI/CEC output whose level
+    /// belongs to the TV remote). Absent means attenuation, which is what
+    /// every speaker-style receiver reports.
+    public let volumeControlType: String
     public let applications: [CastApplication]
 
     /// An application without a `transportId` or `sessionId` cannot be
@@ -47,6 +52,7 @@ public struct CastReceiverStatus: Equatable {
         return CastReceiverStatus(
             volumeLevel: volume["level"] as? Double ?? 0,
             muted: volume["muted"] as? Bool ?? false,
+            volumeControlType: volume["controlType"] as? String ?? "attenuation",
             applications: applications
         )
     }

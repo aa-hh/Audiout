@@ -43,15 +43,28 @@ protocol CastOutputControlling: AnyObject, Sendable {
 /// missing one on a stream the receiver is already 5.5 s behind. The consumer
 /// zero-fills whatever is missing, so a starved ring plays silence rather than
 /// stalling the socket.
+///
+/// The consumer also carries this receiver's volume when the receiver's own
+/// volume is `fixed` (see ``CastOutputManager/pushLevel(_:_:)``): a scalar
+/// gain applied on the way out, ramped so a fader drag does not step.
+///
+/// `razor:` ceiling — one scalar gain with a linear ramp. Mute-click
+/// suppression or a dB mapping belongs here, in the ramp target, not at the
+/// call sites.
 final class CastFeedRing: CastPCMSource, @unchecked Sendable {
 
     /// 2 s at 44 100 Hz.
     private static let capacityFrames = 88_200
+    /// The gain never moves faster than full scale per 20 ms, so any change
+    /// inside [0, 1] lands within 882 frames and none of them zipper.
+    private static let gainRampFrames = 882
 
     private let storage: UnsafeMutablePointer<Int16>
     private let lock = NSLock()
     private var readFrame = 0
     private var availableFrames = 0
+    private var currentGain: Float = 1
+    private var targetGain: Float = 1
 
     init() {
         storage = UnsafeMutablePointer<Int16>.allocate(capacity: Self.capacityFrames * 2)
@@ -100,8 +113,52 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
             readFrame = (readFrame + taken) % Self.capacityFrames
             availableFrames -= taken
         }
+        // Unity on both ends is the whole attenuation-receiver path: the
+        // memcpy above is all it costs.
+        if currentGain != 1 || targetGain != 1 { applyGainLocked(&out, frames: frames) }
         lock.unlock()
         return out
+    }
+
+    /// The receiver's volume for a `fixed` receiver, in [0, 1]. Lock-guarded
+    /// rather than queue-confined: the manager sets it from its own queue
+    /// while the server's pacing timer is rendering.
+    func setTargetGain(_ level: Double) {
+        let clamped = Float(min(1, max(0, level)))
+        lock.lock()
+        targetGain = clamped
+        lock.unlock()
+    }
+
+    /// What ``setTargetGain(_:)`` last asked for.
+    var gainTarget: Double {
+        lock.lock()
+        defer { lock.unlock() }
+        return Double(targetGain)
+    }
+
+    /// Called with the lock held, on the server's consumer queue. Gain is in
+    /// [0, 1] so scaling down can never overflow; the clamp is defensive.
+    private func applyGainLocked(_ out: inout Data, frames: Int) {
+        let step = 1 / Float(Self.gainRampFrames)
+        var gain = currentGain
+        let target = targetGain
+        out.withUnsafeMutableBytes { raw in
+            let samples = raw.bindMemory(to: Int16.self)
+            for frame in 0..<frames {
+                if gain < target {
+                    gain = min(target, gain + step)
+                } else if gain > target {
+                    gain = max(target, gain - step)
+                }
+                for channel in 0..<2 {
+                    let index = frame * 2 + channel
+                    let scaled = (Float(samples[index]) * gain).rounded()
+                    samples[index] = Int16(max(-32_768, min(32_767, scaled)))
+                }
+            }
+        }
+        currentGain = gain
     }
 
     /// Drop the backlog. Called the moment the receiver's GET arrives, so what
@@ -110,6 +167,9 @@ final class CastFeedRing: CastPCMSource, @unchecked Sendable {
         lock.lock()
         readFrame = 0
         availableFrames = 0
+        // A fresh GET starts at the level the user asked for, not partway
+        // through the ramp the previous one was left in.
+        currentGain = targetGain
         lock.unlock()
     }
 }
@@ -171,6 +231,13 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
     /// Queue-confined.
     private var sessions: [String: Session] = [:]
 
+    /// How many teardowns are still finishing per device id. A receiver that
+    /// is handed LAUNCH while it is still processing the previous session's
+    /// STOP answers with the app it is tearing down, and the new LOAD lands on
+    /// a dead player — so a re-select waits for its predecessor's last hop.
+    /// Queue-confined.
+    private var teardownsInFlight: [String: Int] = [:]
+
     init(
         serverBindsLoopbackOnly: Bool = false,
         streamHostOverride: String? = nil,
@@ -211,6 +278,15 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         var playDeadline: DispatchWorkItem?
         var statusPoll: DispatchSourceTimer?
         var wasPlaying = false
+        /// `fixed` receivers ignore `SET_VOLUME`; their level is carried by
+        /// the feed's gain instead.
+        var volumeControlIsFixed = false
+        /// Only the FIRST GET is logged — the interesting fact is whether the
+        /// receiver ever reached the server at all.
+        var loggedHTTPRequest = false
+        /// Set while this id's PREVIOUS session is still tearing down: the
+        /// recipe starts from that teardown's completion, not here.
+        var awaitingTeardown = false
 
         init(record: CastDeviceRecord) { self.record = record }
     }
@@ -235,7 +311,14 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
             for record in records where self.sessions[record.id] == nil {
                 let session = Session(record: record)
                 self.sessions[record.id] = session
-                self.startRecipe(session)
+                if self.teardownsInFlight[record.id] != nil {
+                    // The row is connecting from the user's point of view the
+                    // instant it is selected, waiting included.
+                    session.awaitingTeardown = true
+                    self.setState(session, .connecting)
+                } else {
+                    self.startRecipe(session)
+                }
             }
             self.fanOut.setRings(self.sessions.values.map(\.ring))
         }
@@ -300,7 +383,15 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
 
     private func afterReceiverStatus(_ result: Result<CastReceiverStatus, Error>, id: String, generation: Int) {
         guard let session = live(id, generation) else { return }
-        if case .failure(let error) = result { fail(session, error, stage: .connect); return }
+        let status: CastReceiverStatus
+        switch result {
+        case .failure(let error):
+            fail(session, error, stage: .connect)
+            return
+        case .success(let received):
+            status = received
+        }
+        session.volumeControlIsFixed = status.volumeControlType == "fixed"
         session.controlReady = true
         guard let host = streamHostOverride ?? session.channel?.localIPv4Address else {
             fail(session, CastError.noLocalAddress, stage: .connect)
@@ -311,9 +402,18 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
             loopbackOnly: serverBindsLoopbackOnly,
             primeMilliseconds: Self.primeMilliseconds
         )
-        // Fires on the server's queue, synchronously ahead of the prime render,
-        // so the receiver's first bytes are the live edge of the feed.
-        server.onRequest = { [weak session] _ in session?.ring.reset() }
+        // The reset fires on the server's queue, synchronously ahead of the
+        // prime render, so the receiver's first bytes are the live edge of the
+        // feed. The log line hops onto ``queue`` — the session's flag is
+        // queue-confined, and Telemetry never belongs on an audio path.
+        server.onRequest = { [weak self, weak session] _ in
+            session?.ring.reset()
+            self?.queue.async {
+                guard let self, let session = self.live(id, generation), !session.loggedHTTPRequest else { return }
+                session.loggedHTTPRequest = true
+                Telemetry.log(.cast, "cast_http_request", ["device": id])
+            }
+        }
         session.server = server
         server.start { [weak self] result in
             self?.queue.async { self?.afterServerStart(result, id: id, generation: generation, host: host) }
@@ -327,6 +427,11 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
             fail(session, CastError.noLocalAddress, stage: .connect)
             return
         }
+        Telemetry.log(.cast, "cast_server_ready", [
+            "device": id,
+            "host": host,
+            "port": String(session.server?.port ?? 0),
+        ])
         session.client?.launch(appID: CastClient.defaultMediaReceiverAppID) { [weak self] result in
             self?.queue.async { self?.afterLaunch(result, id: id, generation: generation, url: url) }
         }
@@ -342,6 +447,14 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         case .success(let launched):
             app = launched
         }
+        // A re-select that is handed the JUST-torn-down session's transport id
+        // is the receiver answering with an app it is still stopping.
+        Telemetry.log(.cast, "cast_launch_ok", [
+            "device": id,
+            "transport": app.transportID,
+            "session": app.sessionID,
+            "app": app.appID,
+        ])
         session.application = app
         session.client?.onMediaStatus = { [weak self] status in
             self?.queue.async { self?.handle(status, id: id, generation: generation) }
@@ -358,10 +471,17 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
                 guard let self, let session = self.live(id, generation) else { return }
                 switch result {
                 case .failure(let error):
+                    Telemetry.log(.cast, "cast_load_reply", ["device": id, "error": String(describing: error)])
                     self.fail(session, error, stage: .media)
                 case .success(let status):
+                    Telemetry.log(.cast, "cast_load_reply", [
+                        "device": id,
+                        "state": status.playerState,
+                        "media": status.mediaSessionID.map(String.init) ?? "nil",
+                    ])
                     guard let media = status.mediaSessionID else { return }
                     session.mediaSessionID = media
+                    Telemetry.log(.cast, "cast_play_sent", ["device": id, "media": String(media)])
                     session.client?.play(mediaSessionID: media, app: app) { _ in }
                 }
             }
@@ -412,7 +532,16 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
     /// Latest-wins, one `SET_VOLUME` in flight per receiver — the
     /// `NativeBackend.pushVolume` idiom. Failures are swallowed: the next user
     /// action reconciles.
+    ///
+    /// A `fixed` receiver ignores `SET_VOLUME` outright (and tells the user to
+    /// reach for the TV remote), so its level is applied to the audio we serve
+    /// it instead. The composed `Main × Group × Device` level is the same
+    /// either way; only where it lands differs.
     private func pushLevel(_ session: Session, _ level: Double) {
+        guard !session.volumeControlIsFixed else {
+            session.ring.setTargetGain(level)
+            return
+        }
         guard !session.levelInFlight else { session.levelPending = level; return }
         session.levelInFlight = true
         issueLevel(session, level)
@@ -483,6 +612,9 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
     /// close the channel, stop the server. A step that fails still hands over
     /// to the next one — the session object survives, its transport does not.
     private func teardown(_ session: Session) {
+        let id = session.record.id
+        teardownsInFlight[id, default: 0] += 1
+
         session.playDeadline?.cancel()
         session.playDeadline = nil
         session.statusPoll?.cancel()
@@ -506,9 +638,10 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         channel?.onClose = nil
         client?.onMediaStatus = nil
 
-        let finish = {
+        let finish = { [weak self] in
             channel?.close()
             server?.stop()
+            self?.queue.async { self?.teardownFinished(id) }
         }
         guard let client, let application else { finish(); return }
         let stopApplication = {
@@ -519,6 +652,33 @@ final class CastOutputManager: CastOutputControlling, @unchecked Sendable {
         } else {
             stopApplication()
         }
+    }
+
+    /// The last hop of one teardown. When the id has no other teardown still
+    /// running, a session that was re-selected during it starts its recipe
+    /// here — the receiver has answered STOP by now, so its LAUNCH is a clean
+    /// one.
+    ///
+    /// `razor:` ceiling — the completion chain the teardown already had. A
+    /// fixed settle delay would also serialize, less reliably.
+    private func teardownFinished(_ id: String) {
+        guard let remaining = teardownsInFlight[id] else { return }
+        guard remaining <= 1 else {
+            teardownsInFlight[id] = remaining - 1
+            return
+        }
+        teardownsInFlight.removeValue(forKey: id)
+        guard let session = sessions[id], session.awaitingTeardown else { return }
+        session.awaitingTeardown = false
+        startRecipe(session)
+    }
+
+    // MARK: - Test seam
+
+    /// The feed ring one device's session renders from, so a test can read the
+    /// gain a `fixed` receiver's level landed in.
+    func test_ring(forDevice id: String) -> CastFeedRing? {
+        queue.sync { sessions[id]?.ring }
     }
 
     // MARK: - Helpers (on queue)

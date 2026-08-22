@@ -55,8 +55,11 @@ import Testing
     // MARK: - Fixtures
 
     @available(macOS 15, *)
-    private func startFake(fetchBytes: Int = 16_384) throws -> (fake: FakeCastReceiver, endpoint: NWEndpoint) {
-        let fake = FakeCastReceiver(fetchBytes: fetchBytes)
+    private func startFake(
+        fetchBytes: Int = 16_384,
+        controlType: String = "attenuation"
+    ) throws -> (fake: FakeCastReceiver, endpoint: NWEndpoint) {
+        let fake = FakeCastReceiver(fetchBytes: fetchBytes, controlType: controlType)
         let box = Box<NWEndpoint>()
         fake.start { result in
             if case .success(let endpoint) = result { box.set(endpoint) }
@@ -95,6 +98,12 @@ import Testing
             out.append(contentsOf: [0xE8, 0x03, 0xE8, 0x03])  // 1000, both channels
         }
         return out
+    }
+
+    /// The left channel of one rendered block, as amplitudes.
+    private func leftChannel(_ pcm: Data) -> [Int16] {
+        let samples: [Int16] = pcm.withUnsafeBytes { Array($0.bindMemory(to: Int16.self)) }
+        return stride(from: 0, to: samples.count, by: 2).map { samples[$0] }
     }
 
     /// The receiver's own view of its volume, over a second sender connection —
@@ -246,6 +255,102 @@ import Testing
             default: return false
             }
         }, Comment(rawValue: "expected a connect failure, saw \(log.all)"))
+    }
+
+    @Test func rapidReselectRelaunchesCleanly() throws {
+        guard #available(macOS 15, *) else { return }
+        let (fake, endpoint) = try startFake()
+        defer { fake.stop() }
+        let manager = makeManager()
+        defer { manager.stopAll() }
+        let log = watch(manager, deviceID: "dev1")
+        manager.setDevices([record(endpoint)])
+        try #require(waitUntil(timeout: 10) { log.contains(.playing) },
+                     Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
+
+        // Deselect and re-select in the same breath: the first session's STOP
+        // is still in flight when the second one is asked for.
+        manager.setDevices([])
+        manager.setDevices([record(endpoint)])
+
+        #expect(waitUntil(timeout: 20) { log.all.filter { $0 == .playing }.count >= 2 },
+                Comment(rawValue: "the re-selected session never reached PLAYING, saw \(log.all)"))
+        #expect(log.all.last == .playing)
+
+        // The ordering that makes the relaunch clean: the receiver answered
+        // STOP before the second LAUNCH arrived. (The first channel's close is
+        // initiated before the second connect, but the fake OBSERVES the close
+        // on its own connection handler, which can land after the new connect —
+        // so receiver-side close order is deliberately not asserted.)
+        let events = fake.events
+        let launches = events.indices.filter { events[$0] == "LAUNCH" }
+        try #require(launches.count >= 2, Comment(rawValue: "expected two LAUNCHes, saw \(events)"))
+        #expect(events[..<launches[1]].contains("STOP"),
+                Comment(rawValue: "the relaunch raced the previous STOP: \(events)"))
+    }
+
+    @Test func fixedReceiverAppliesGainInTheFeedNotSetVolume() throws {
+        guard #available(macOS 15, *) else { return }
+        let (fake, endpoint) = try startFake(controlType: "fixed")
+        defer { fake.stop() }
+        let manager = makeManager()
+        defer { manager.stopAll() }
+        let log = watch(manager, deviceID: "dev1")
+        manager.setDevices([record(endpoint)])
+        try #require(waitUntil(timeout: 10) { log.contains(.playing) },
+                     Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
+
+        manager.setLevel(0.5, forDevice: "dev1")
+        let ring = try #require(manager.test_ring(forDevice: "dev1"))
+        #expect(waitUntil(timeout: 3) { abs(ring.gainTarget - 0.5) < 0.001 },
+                Comment(rawValue: "the level never reached the feed (gain \(ring.gainTarget))"))
+        // A fixed receiver is told to reach for the TV remote instead, so the
+        // one thing that must NOT happen is a SET_VOLUME.
+        #expect(fake.setVolumeCount == 0,
+                Comment(rawValue: "a fixed receiver was sent \(fake.setVolumeCount) SET_VOLUME(s)"))
+
+        // What that gain does to the audio: half scale out of a full-scale in.
+        let scratch = CastFeedRing()
+        scratch.setTargetGain(0.5)
+        scratch.reset()
+        scratch.push(tone(frames: 441))
+        let peak = leftChannel(scratch.render(frames: 441)).map { abs(Int($0)) }.max() ?? 0
+        #expect(abs(peak - 500) <= 1, Comment(rawValue: "expected ~500, rendered \(peak)"))
+    }
+
+    @Test func attenuationReceiverStillUsesSetVolume() throws {
+        guard #available(macOS 15, *) else { return }
+        let (fake, endpoint) = try startFake()
+        defer { fake.stop() }
+        let manager = makeManager()
+        defer { manager.stopAll() }
+        let log = watch(manager, deviceID: "dev1")
+        manager.setDevices([record(endpoint)])
+        try #require(waitUntil(timeout: 10) { log.contains(.playing) },
+                     Comment(rawValue: "never reached PLAYING, saw \(log.all)"))
+
+        manager.setLevel(0.4, forDevice: "dev1")
+        #expect(waitUntil(timeout: 3) { fake.setVolumeCount >= 1 },
+                "the receiver was never sent SET_VOLUME")
+        let ring = try #require(manager.test_ring(forDevice: "dev1"))
+        #expect(ring.gainTarget == 1, Comment(rawValue: "the feed was attenuated as well (gain \(ring.gainTarget))"))
+    }
+
+    @Test func fixedReceiverGainRampsWithoutZipper() {
+        let ring = CastFeedRing()
+        ring.push(tone(frames: 882))
+        ring.setTargetGain(0)
+
+        // 20 ms is the cap: a full-scale-to-silence jump lands inside one
+        // 882-frame block, and every step on the way is smaller than the last.
+        let left = leftChannel(ring.render(frames: 882))
+        #expect(left.count == 882)
+        #expect(left.first ?? 0 < 1000, Comment(rawValue: "the first frame did not start ramping: \(left.prefix(4))"))
+        #expect(left.last == 0, Comment(rawValue: "the ramp had not finished after 882 frames: \(left.suffix(4))"))
+        #expect(zip(left, left.dropFirst()).allSatisfy { $0 >= $1 },
+                "the ramp was not monotonic")
+        // Halfway through is halfway down — a ramp, not a step.
+        #expect(abs(Int(left[440]) - 500) <= 2, Comment(rawValue: "midpoint was \(left[440])"))
     }
 
     @Test func ringZeroFillsWhenEmpty() {

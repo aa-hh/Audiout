@@ -178,7 +178,14 @@ import CoreAudio
         let bt: FakeBTEnumerator
     }
 
-    private func makeBackend(withBT: Bool = false) -> Rig {
+    /// `castAbsenceGrace` defaults SHORT so the browse-debounce never adds
+    /// seconds to a test that isn't about it; the tests that ARE about it pass
+    /// their own value.
+    private func makeBackend(
+        withBT: Bool = false,
+        silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
+        castAbsenceGrace: TimeInterval = 0.05
+    ) -> Rig {
         let cast = FakeCastEnumerator()
         let manager = FakeCastOutputManager()
         let capture = FakeCapture()
@@ -191,6 +198,8 @@ import CoreAudio
             castOutputManager: manager,
             dacpEndpoint: FakeDACPEndpoint(),
             systemVolume: NoOpSystemVolume(),
+            silenceFallbackDelay: silenceFallbackDelay,
+            castAbsenceGrace: castAbsenceGrace,
             aggregateControl: NoOpAggregateControl())
         backend.captureCoordinator = capture
         backend.start()
@@ -213,6 +222,12 @@ import CoreAudio
         id: "abc123", friendlyName: "Living Room TV", model: "Google TV Streamer",
         endpoint: .hostPort(host: "192.168.4.54", port: 8009))
 
+    /// The absence-debounce test's own receiver, so its timings never
+    /// interleave with a sibling test driving ``record``.
+    private static let graceRecord = CastDeviceRecord(
+        id: "grace456", friendlyName: "Kitchen TV", model: "Google TV Streamer",
+        endpoint: .hostPort(host: "192.168.4.55", port: 8009))
+
     // MARK: - CAST-ENUM
 
     @Test func snapshotSurfacesCastRowsAndKeepsVanishedOnes() {
@@ -233,6 +248,35 @@ import CoreAudio
         waitFor { Self.device(rig.backend, Self.record.id)?.isAvailable == false }
         #expect(Self.device(rig.backend, Self.record.id)?.isAvailable == false)
         #expect(rig.backend.devices.filter { $0.isCast }.count == 1)
+    }
+
+    /// A wired receiver's Bonjour advert reaches the Mac only intermittently, and
+    /// a greyed row reads as disabled in the popover. One browse that omits a
+    /// known receiver is a blip, not a departure — the flip waits out
+    /// ``NativeBackend/castAbsenceGrace``, and a reappearance inside it cancels.
+    @Test func oneMissedBrowseKeepsTheCastRowAvailable() {
+        let rig = makeBackend(castAbsenceGrace: 1)
+        let id = Self.graceRecord.id
+        rig.cast.fire([Self.graceRecord])
+        waitFor { Self.device(rig.backend, id)?.isAvailable == true }
+
+        rig.cast.fire([])
+        waitFor(timeout: 0.3) { false }
+        #expect(Self.device(rig.backend, id)?.isAvailable == true,
+                "one omitted browse must not grey the row")
+
+        // Back inside the grace: the pending flip is cancelled, so waiting the
+        // whole grace out from here changes nothing.
+        rig.cast.fire([Self.graceRecord])
+        waitFor(timeout: 1.3) { false }
+        #expect(Self.device(rig.backend, id)?.isAvailable == true,
+                "a receiver that comes back inside the grace stays available")
+
+        // Missing for the whole grace: now it really has left the network.
+        rig.cast.fire([])
+        waitFor(timeout: 3) { Self.device(rig.backend, id)?.isAvailable == false }
+        #expect(Self.device(rig.backend, id)?.isAvailable == false)
+        #expect(rig.backend.devices.filter { $0.id == id }.count == 1, "the row never vanishes")
     }
 
     // MARK: - CAST-OUT selection
@@ -350,13 +394,63 @@ import CoreAudio
         waitFor(timeout: 0.3) { false }
         #expect(Self.device(rig.backend, Self.record.id)?.connectionState == .off)
 
-        // Audibility is private state; the watchdog is its one observable. Re-select
-        // and the countdown must ARM — a leaked "playing" would have read as
-        // audible and cancelled it instead.
+        // Audibility is private state; the watchdog is its one observable — and
+        // under the Cast-connecting gate a re-select breathes (`.connecting`),
+        // which is deliberately NOT stranded, so the countdown stays disarmed
+        // (`connectingCastSessionDoesNotArmTheSilenceWatchdog`). R11 still lands
+        // the moment the session gives up, which is what the leak would have
+        // suppressed: a receiver left in `castPlaying` reads audible even at
+        // `.failed`, and the countdown would never arm.
         rig.backend.setOutputSet([Self.record.id])
+        waitFor { Self.device(rig.backend, Self.record.id)?.connectionState == .connecting }
+        #expect(!rig.backend.test_silenceWatchdogArmed, "a starting Cast session is not stranded")
+
+        rig.manager.fire(id: Self.record.id, state: .failed(.timedOut))
         waitFor { rig.backend.test_silenceWatchdogArmed }
         #expect(rig.backend.test_silenceWatchdogArmed,
                 "the late PLAYING must not have marked the receiver audible")
+    }
+
+    /// The live-run regression (2026-08-22). A Cast receiver needs ~10 s to reach
+    /// PLAYING — connect + launch + LOAD + receiver buffering — which is a dead
+    /// heat with the silence fallback's own 10 s. Reading a still-`.connecting`
+    /// session as stranded armed the countdown at select, and firing it stopped
+    /// the capture tap the Cast feed is fed from, starving the receiver into a
+    /// rebuffer stall it never recovered from.
+    @Test func connectingCastSessionDoesNotArmTheSilenceWatchdog() {
+        let rig = makeBackend(silenceFallbackDelay: 0.05)
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, Self.record.id) != nil }
+
+        rig.backend.setOutputSet([Self.record.id])
+        waitFor { Self.device(rig.backend, Self.record.id)?.connectionState == .connecting }
+        rig.manager.fire(id: Self.record.id, state: .connecting)
+
+        // Well past the (shrunk) fallback delay: nothing armed, nothing fired.
+        waitFor(timeout: 0.5) { false }
+        #expect(Self.device(rig.backend, Self.record.id)?.connectionState == .connecting)
+        #expect(!rig.backend.test_silenceWatchdogArmed, "a starting Cast session is not stranded")
+        #expect(!rig.backend.test_silenceFallbackActive,
+                "so the Mac never takes the audio back mid-startup")
+    }
+
+    /// R11 intact: the session's own play deadline is what ends a dead receiver,
+    /// and the `.failed` row it leaves behind arms the countdown as designed.
+    /// (Default fallback delay, so the armed countdown is still observable —
+    /// firing it would clear the token.)
+    @Test func failedCastSessionStillArmsTheWatchdog() {
+        let rig = makeBackend()
+        rig.cast.fire([Self.record])
+        waitFor { Self.device(rig.backend, Self.record.id) != nil }
+
+        rig.backend.setOutputSet([Self.record.id])
+        waitFor { Self.device(rig.backend, Self.record.id)?.connectionState == .connecting }
+        #expect(!rig.backend.test_silenceWatchdogArmed)
+
+        rig.manager.fire(id: Self.record.id, state: .failed(.timedOut))
+        waitFor { rig.backend.test_silenceWatchdogArmed }
+        #expect(rig.backend.test_silenceWatchdogArmed,
+                "a failed receiver IS stranded — the fallback must still arm")
     }
 
     // MARK: - Composed level

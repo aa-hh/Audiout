@@ -27,6 +27,11 @@ public final class FakeCastReceiver: @unchecked Sendable {
 
     /// How much of the audio stream counts as "enough to start playing".
     private let fetchBytes: Int
+    /// What RECEIVER_STATUS advertises as `volume.controlType`. `fixed` is a
+    /// real receiver saying "SET_VOLUME does nothing here, the level belongs
+    /// to the TV remote" — the sender is expected to attenuate the feed
+    /// instead, and this fake exists to let that split be tested.
+    private let controlType: String
     private let queue = DispatchQueue(label: "FakeCastReceiver")
 
     /// Lock-guarded rather than `queue.sync`-guarded: a test reads this from
@@ -34,6 +39,8 @@ public final class FakeCastReceiver: @unchecked Sendable {
     /// queue is servicing — a sync getter would deadlock there.
     private let stateLock = NSLock()
     private var _pongCount = 0
+    private var _setVolumeCount = 0
+    private var _events: [String] = []
 
     /// Everything fetched from the stream (from the first content byte up to
     /// wherever `fetchBytes` was reached, interior chunk framing included), and
@@ -64,11 +71,23 @@ public final class FakeCastReceiver: @unchecked Sendable {
         init(connection: NWConnection) { self.connection = connection }
     }
 
-    public init(fetchBytes: Int = 65_536) {
+    public init(fetchBytes: Int = 65_536, controlType: String = "attenuation") {
         self.fetchBytes = fetchBytes
+        self.controlType = controlType
     }
 
     public var pongCount: Int { stateLock.withLock { _pongCount } }
+
+    /// How many `SET_VOLUME` messages arrived. A `fixed` receiver must see
+    /// none: the sender attenuates the audio it serves instead.
+    public var setVolumeCount: Int { stateLock.withLock { _setVolumeCount } }
+
+    /// Sender-connection and app-lifecycle milestones in arrival order —
+    /// `connect`, `close`, `LAUNCH`, `STOP`. What a relaunch-ordering test
+    /// reads to prove the second LAUNCH followed the first channel's close.
+    public var events: [String] { stateLock.withLock { _events } }
+
+    private func record(_ event: String) { stateLock.withLock { _events.append(event) } }
 
     // MARK: - Lifecycle
 
@@ -125,10 +144,12 @@ public final class FakeCastReceiver: @unchecked Sendable {
     private func accept(_ connection: NWConnection) {
         let session = Session(connection: connection)
         sessions[ObjectIdentifier(connection)] = session
+        record("connect")
         connection.stateUpdateHandler = { [weak self] state in
             switch state {
             case .failed, .cancelled:
-                self?.sessions.removeValue(forKey: ObjectIdentifier(connection))
+                guard let self else { return }
+                if self.sessions.removeValue(forKey: ObjectIdentifier(connection)) != nil { self.record("close") }
             default:
                 break
             }
@@ -229,6 +250,7 @@ public final class FakeCastReceiver: @unchecked Sendable {
         case "GET_STATUS":
             break
         case "LAUNCH":
+            record("LAUNCH")
             transportCounter += 1
             applications.append([
                 "appId": json["appId"] as? String ?? "",
@@ -240,6 +262,7 @@ public final class FakeCastReceiver: @unchecked Sendable {
                 "namespaces": [["name": CastNamespace.media]],
             ])
         case "STOP":
+            record("STOP")
             let sessionID = json["sessionId"] as? String
             applications.removeAll { ($0["sessionId"] as? String) == sessionID }
             // A fetch left running would still reach `fetchBytes` and flip the
@@ -250,6 +273,7 @@ public final class FakeCastReceiver: @unchecked Sendable {
             idleReason = "CANCELLED"
             currentMediaSessionID = nil
         case "SET_VOLUME":
+            stateLock.withLock { _setVolumeCount += 1 }
             let volume = json["volume"] as? [String: Any] ?? [:]
             if let level = volume["level"] as? Double { volumeLevel = level }
             if let flag = volume["muted"] as? Bool { muted = flag }
@@ -263,7 +287,9 @@ public final class FakeCastReceiver: @unchecked Sendable {
     /// Real receivers omit `applications` entirely when nothing is running,
     /// rather than sending an empty array.
     private func receiverStatusPayload() -> [String: Any] {
-        var status: [String: Any] = ["volume": ["level": volumeLevel, "muted": muted]]
+        var status: [String: Any] = [
+            "volume": ["level": volumeLevel, "muted": muted, "controlType": controlType],
+        ]
         if !applications.isEmpty { status["applications"] = applications }
         return ["type": "RECEIVER_STATUS", "status": status]
     }

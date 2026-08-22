@@ -335,6 +335,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Cast ids whose receiver has reported PLAYING (`stateQueue`) — the audible
     /// fact `desiredDeviceAudibleLocked` reads.
     private var castPlaying: Set<String> = []
+    /// Cast ids with a grace timer running towards `isAvailable = false`
+    /// (`stateQueue`), each mapped to the generation that armed it. A browse
+    /// that lists the id again drops the entry, which makes the pending timer
+    /// inert; the generation additionally makes a stale timer from an EARLIER
+    /// absence inert after a reappear/vanish cycle.
+    private var castAbsenceFlips: [String: Int] = [:]
+    private var castAbsenceGeneration = 0
     /// Whether the capture fan-out's Cast slot is attached
     /// (`captureControlQueue`), so an already-armed selection change never
     /// re-attaches it.
@@ -721,6 +728,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// safety net, not a preference — the preference is the post-wake
     /// ``wakeAudioRestoreDelay``.
     public static let defaultSilenceFallbackDelay: TimeInterval = 10
+
+    /// How long a Cast row keeps `isAvailable` after a browse stops listing it
+    /// (CAST-ENUM). Injectable so tests shrink it; never mutated after init.
+    private let castAbsenceGrace: TimeInterval
+
+    /// The default Cast absence grace (seconds). A wired receiver's Bonjour
+    /// advert reaches the Mac only intermittently, so ONE browse that omits it
+    /// is a blip, not a departure — and a row that greys out reads as disabled
+    /// in the popover. A grace TIMER rather than a count of consecutive
+    /// omissions: the browse is event-driven (`NWBrowser.browseResultsChanged`),
+    /// so nothing guarantees a second browse ever arrives, and a count-based
+    /// debounce would leave a departed receiver listed as available forever.
+    public static let defaultCastAbsenceGrace: TimeInterval = 3
 
     /// The armed silence-watchdog countdown. Cancelled when a desired device
     /// reconnects, the intent clears, on a sleep/wake cycle, or on `stop()`.
@@ -1302,6 +1322,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         takeoverStripDelay: TimeInterval = 0.75,
         watchdogScheduler: SilenceWatchdogScheduling? = nil,
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
+        castAbsenceGrace: TimeInterval = NativeBackend.defaultCastAbsenceGrace,
         systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = NativeBackend.currentDefaultOutputIsAirPlayClass,
         defaultOutputSwitcher: DefaultOutputSwitcher? = nil,
         aggregateControl: AggregateDeviceControlling = CoreAudioAggregateDeviceControl(),
@@ -1323,6 +1344,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.watchdogScheduler = watchdogScheduler
             ?? DispatchSilenceWatchdogScheduler(queue: DispatchQueue(label: "NativeBackend.silenceWatchdog"))
         self.silenceFallbackDelay = silenceFallbackDelay
+        self.castAbsenceGrace = castAbsenceGrace
         self.engine = engineControl
         self.discovery = discoverySource
         self.btEnumerator = btEnumerator
@@ -2015,6 +2037,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // teardown below so the FIFO's last Cast op is the disable.
             self.castSelectedIDs = []
             self.castPlaying = []
+            // Drop the pending availability grace timers with them: a flip that
+            // lands after stop would grey a row nothing is watching any more.
+            self.castAbsenceFlips.removeAll()
             // BT-LIFECYCLE: drop every `.connecting` hold and its poll, so no
             // spinner can outlive the backend that would have resolved it.
             self.btRenderPollWork?.cancel()
@@ -2918,6 +2943,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// becomes a `ConnectionState`. On `stateQueue`.
     private func applyCastSessionState(_ id: String, _ state: CastSessionState) {   // on stateQueue
         guard known[id]?.isCast == true else { return }
+        let before = known[id]?.connectionState
+        defer {
+            // `cast_row_state` on a REAL row change only: a teardown `.idle`, or
+            // a late state a "still desired" guard dropped, moves nothing.
+            if let device = known[id], device.connectionState != before { logCastRowState(device) }
+        }
         switch state {
         case .connecting:
             // Only while still desired: a late `.connecting` from a session
@@ -6284,15 +6315,23 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// renders through; a selected-but-disconnected BT speaker therefore still
     /// (correctly) counts as silence and falls back to the Mac. On `stateQueue`.
     ///
-    /// A `.cast` id is audible only once its receiver has REPORTED PLAYING —
-    /// not on select and not on launch: the recipe runs connect → launch →
-    /// LOAD → PLAY, and audio starts flowing only at the end of it, so
-    /// `castPlaying` is the one honest read (`isAvailable` would count a
-    /// receiver that is merely on the network).
+    /// A `.cast` id is audible once its receiver has REPORTED PLAYING
+    /// (`castPlaying` — `isAvailable` would count a receiver that is merely on
+    /// the network), and a session that is still `.connecting` counts as NOT
+    /// STRANDED rather than audible. The Cast recipe runs connect → launch →
+    /// LOAD → PLAY and takes ~10 s on real hardware — a dead heat with
+    /// ``defaultSilenceFallbackDelay`` — so reading a starting session as
+    /// stranded armed the countdown at select and then stopped the capture tap
+    /// the Cast feed is fed from, starving the receiver into a rebuffer stall it
+    /// never recovers from (live run 2026-08-22). A genuinely dead receiver is
+    /// still caught: the session's own 15 s play deadline reports `.failed`, the
+    /// row leaves `.connecting`, and the countdown arms then (R11 intact).
     private func desiredDeviceAudibleLocked(_ id: String) -> Bool {   // on stateQueue
         guard let device = known[id] else { return false }
         if device.isBluetooth { return device.isAvailable }
-        if device.isCast { return castPlaying.contains(id) }
+        if device.isCast {
+            return castPlaying.contains(id) || device.connectionState == .connecting
+        }
         return device.connectionState == .connected
     }
 
@@ -7064,13 +7103,21 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// connection state is deliberately NOT touched here — the session's own
     /// channel is the truth about whether it is still playing, and a Bonjour
     /// blip is not evidence either way.
+    ///
+    /// The unavailable flip is DEBOUNCED behind ``castAbsenceGrace``: a wired
+    /// receiver advertises intermittently, and greying the row on the first
+    /// browse that omits it made the device read as disabled mid-session. A
+    /// browse that lists the id again inside the grace cancels the flip.
     private func applyCastSnapshots(_ records: [CastDeviceRecord]) {   // on stateQueue
         for record in records {
             castRecords[record.id] = record
+            castAbsenceFlips[record.id] = nil        // back inside the grace: no flip
             if var device = known[record.id] {
+                let returned = !device.isAvailable
                 device.name = record.friendlyName
                 device.isAvailable = true
                 if device != known[record.id] { commitKnownDevice(record.id, device) }
+                if returned { logCastRowState(device) }
             } else {
                 let device = Device(
                     id: record.id, name: record.friendlyName, kind: .cast,
@@ -7078,13 +7125,54 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 known[record.id] = device
                 order.append(record.id)
                 emit(.deviceAdded(device))
+                logCastRowState(device)
             }
         }
         let present = Set(records.map(\CastDeviceRecord.id))
         for id in order where known[id]?.kind == .cast && !present.contains(id) {
-            guard var device = known[id], device.isAvailable else { continue }
-            device.isAvailable = false
-            commitKnownDevice(id, device)
+            guard known[id]?.isAvailable == true, castAbsenceFlips[id] == nil else { continue }
+            castAbsenceGeneration += 1
+            let generation = castAbsenceGeneration
+            castAbsenceFlips[id] = generation
+            stateQueue.asyncAfter(deadline: .now() + castAbsenceGrace) { [weak self] in
+                self?.expireCastAbsence(id, generation)
+            }
+        }
+    }
+
+    /// The grace elapsed with the receiver still missing from the browse — it
+    /// really has left the network, so grey the row now. Inert if a later browse
+    /// listed the id again (the entry was dropped) or if a newer absence has
+    /// since armed its own timer (the generation moved on). On `stateQueue`.
+    private func expireCastAbsence(_ id: String, _ generation: Int) {   // on stateQueue
+        guard castAbsenceFlips[id] == generation else { return }
+        castAbsenceFlips[id] = nil
+        guard var device = known[id], device.isCast, device.isAvailable else { return }
+        device.isAvailable = false
+        commitKnownDevice(id, device)
+        logCastRowState(device)
+    }
+
+    /// One `cast_row_state` line per Cast availability / connection-state change:
+    /// the diagnostic that says whether a row the user saw as "disabled" really
+    /// was unavailable, or merely lacked a connection halo. Emitted only from
+    /// `stateQueue` (never the capture IOProc), and `Telemetry.log` formats and
+    /// hands off to its own queue, so it never blocks a decision.
+    private func logCastRowState(_ device: Device) {   // on stateQueue
+        Telemetry.log(.cast, "cast_row_state", [
+            "device": device.id,
+            "isAvailable": device.isAvailable ? "true" : "false",
+            "connectionState": Self.castRowConnectionName(device.connectionState),
+        ])
+    }
+
+    private static func castRowConnectionName(_ state: ConnectionState) -> String {
+        switch state {
+        case .off: return "off"
+        case .connecting: return "connecting"
+        case .connected: return "connected"
+        case .reconnecting: return "reconnecting"
+        case .failed(let failure): return "failed(\(failure.cause))"
         }
     }
 

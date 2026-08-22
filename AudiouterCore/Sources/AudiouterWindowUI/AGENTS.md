@@ -3,8 +3,8 @@
 ## Purpose
 
 The Groups SCREEN's content — a CONFIGURATION-ONLY tree for viewing and
-editing saved groups, hosted by the one surface (`AppSurfaceController` in
-`AudiouterPopoverUI`). `MixerWindowController` owns NO window (the standalone
+editing saved groups, and for describing and tuning speakers, hosted by the
+one surface (`AppSurfaceController` in `AudiouterPopoverUI`). `MixerWindowController` owns NO window (the standalone
 Groups window and the `AIRPLAY_CONTROL_PANEL` flag were retired in U6, plan
 032); it is a screen-content controller vending `contentController` (a split
 view: source-list sidebar + a swapped content pane) to whoever hosts it.
@@ -15,9 +15,11 @@ lives in the Mixer screen. All group logic goes through the shared
 ## Rules
 
 - **Configuration-only: sidebar selection ≠ activation.** Selecting a group
-  opens its editor; selecting a device opens its read-only detail pane; with
-  nothing selected the screen AUTO-SELECTS the first saved group (or shows the
-  empty pane). Nothing here ever calls `activateGroup`.
+  opens its editor; selecting a device opens its detail pane (which describes
+  the speaker and hosts its Equalizer — configuration, not playback);
+  selecting "Main Audio" opens the whole-mix page; with nothing selected the
+  screen AUTO-SELECTS the first saved group (or shows the empty pane). Nothing
+  here ever calls `activateGroup`.
 - **Hosts drive visibility through `setHostVisible(_:)`.** `update(devices:)`
   stores every snapshot but only rebuilds the UI while the host says the
   screen is visible (B8 — backend events fire for the whole app lifetime).
@@ -107,13 +109,22 @@ lives in the Mixer screen. All group logic goes through the shared
   "Delete Group…" — beside, not below: the editor pane's fitting height has
   ZERO headroom at a 7-device fleet, so new bands need surface-height budget
   first (`theActiveGroupsMarkersAddNoHeightToTheEditorPane`).
-- **Both sidebar sections are FLAT** — no expand/collapse, no nested rows;
-  the Speakers section lists EVERY device (membership is previewed in the
-  editor, not by expansion).
+- **The two detail panes (device, Main Audio) SCROLL; the editor does not.**
+  They host the Equalizer, whose Advanced fold exceeds the screen's budget,
+  and the Groups screen is user-resizable with drag memory, so growing the
+  window was rejected (roadmap 039 stays open for the editor). `FlippedView`
+  documents, overlay scrollers, transparent. The `mixer-4-device-detail`
+  goldens predate the Equalizer section and are unreproducible on macOS 27 —
+  never regenerate.
+- **All three sidebar sections are FLAT** (System Audio, Groups, Speakers) —
+  no expand/collapse, no nested rows; the Speakers section lists EVERY device
+  (membership is previewed in the editor, not by expansion).
 - **Edit-affordance vocabulary: bordered + pencil = editable, bare =
   read-only.** The group name wears `WarmNameFieldCell`; a device name is a
   plain label at identical geometry. Both edit cues share
-  `PopoverColumnGrid.editAffordanceRestAlpha`/`HoverAlpha`.
+  `PopoverColumnGrid.editAffordanceRestAlpha`/`HoverAlpha`. A well with
+  `isEditable == false` shows no badge (and refuses hover, click, Tab focus,
+  Space/Return and VoiceOver press) — the Main Audio page's icon.
 - **The rename field is a REAL `NSTextField`; only its drawing is ours.**
   Contract in `GroupRenameFieldTests`: Return/focus-loss commit, Escape
   reverts, emptying restores the name, first focus selects all, hover never
@@ -153,13 +164,14 @@ lives in the Mixer screen. All group logic goes through the shared
 | `MixerWindowController` | Screen-content controller: owns the split view, sheet flow, auto-select rule; vends `contentController`; visibility via `setHostVisible(_:)`. |
 | `ContentPaneHostViewController` | Swapped editor/detail/empty pane + the persistent footer caption. |
 | `GroupsEmptyStateViewController` | Empty pane: "Group your speakers" + §5.9 teaching subtitle + New Group… |
-| `SidebarViewController` | Source-list (Groups + Speakers), both FLAT; selection drives the content pane. |
+| `SidebarViewController` | Source-list (System Audio + Groups + Speakers), all three FLAT; selection drives the content pane. |
 | `GroupEditorViewController` | Edit-only pane: rename, membership toggles, delete. |
 | `GroupCreationSheetController` | Standard macOS sheet for new groups; never activates. |
-| `DeviceDetailViewController` | Read-only device detail pane; hosts the icon-edit badge. |
+| `DeviceDetailViewController` | Device detail pane: describes the speaker + Equalizer section; icon-edit badge. |
+| `MainOutDetailViewController` | Main Audio page: non-editable well + Equalizer + one note. |
 | `IconPickerViewController` | Curated SF Symbol grid + validated search; reports via `onPick`. |
 | `MembershipRowView` | Checkbox/node row shared by creation sheet and editor. |
 | `DeviceIconWellView` | Large icon + at-rest edit badge (the one approved custom element). |
 | `GroupsPaneLayout` | The panes' shared grid constants — the single parity source. |
 | `GroupedSectionView` | The one grouped-section container (well fill, hairline, inset dividers). |
-| `SidebarSelection` | Enum: `.group(id:)` or `.device(id:)`. |
+| `SidebarSelection` | Enum: `.mainOut`, `.group(id:)` or `.device(id:)`. |

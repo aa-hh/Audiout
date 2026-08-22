@@ -259,11 +259,51 @@ import AppKit
         window.test_select(.device(id: "d0"))
         settle(window)
 
-        #expect(window.test_detail.test_sectionCount == 3,
-                "header + device state + In groups, all the same section shape the editor uses")
+        #expect(window.test_detail.test_sectionCount == 4,
+                "header + device state + In groups + Equalizer, all the same section shape the editor uses")
         #expect(!window.test_detail.test_hasBoxDivider,
                 Comment(rawValue: "the stock NSBox rule is gone — it drew a 185pt line that stopped a third of " +
                 "the way across the pane; the sections' own inset hairlines separate rows now"))
+    }
+
+    // MARK: The Main Audio page is the third pane behind the same header
+
+    @Test func mainAudioPaneHeaderMatchesTheDevicePane() throws {
+        let (window, _, _, _) = try makeWindow()
+
+        window.test_select(.device(id: "d0"))
+        settle(window)
+        let detailIcon = window.test_detail.test_headerIconFrame
+        let detailTitle = window.test_detail.test_headerTitleAlignmentFrame
+        let detailHeader = window.test_detail.test_headerSectionFrame
+
+        window.test_select(.mainOut)
+        settle(window)
+        let mainIcon = window.test_mainOutDetail.test_headerIconFrame
+        let mainTitle = window.test_mainOutDetail.test_headerTitleAlignmentFrame
+        let mainHeader = window.test_mainOutDetail.test_headerSectionFrame
+
+        let slack = 0.01 + halfPointSlack()
+        #expect(abs(detailIcon.minX - mainIcon.minX) <= slack,
+                Comment(rawValue: "the Main Audio page is a third pane behind the same sidebar — its icon " +
+                "must land where the other two panes' do"))
+        #expect(abs(detailIcon.width - mainIcon.width) <= 0.01)
+        #expect(abs(detailIcon.height - mainIcon.height) <= 0.01)
+        #expect(abs(detailTitle.minX - mainTitle.minX) <= slack)
+        #expect(abs(detailHeader.height - mainHeader.height) <= 0.01,
+                "identical header BAND height, so the content below starts at the same y")
+        #expect(abs(detailHeader.minX - mainHeader.minX) <= 0.01)
+        #expect(abs(detailHeader.width - mainHeader.width) <= 0.01)
+    }
+
+    @Test func mainAudioIconWellIsNotEditable() throws {
+        let (window, _, _, _) = try makeWindow()
+        window.test_select(.mainOut)
+        settle(window)
+
+        #expect(!window.test_mainOutDetail.test_iconWellIsEditable,
+                Comment(rawValue: "nobody picks a glyph for the whole mix, and the module's vocabulary says a " +
+                "well that can't be edited wears no pencil badge"))
     }
 
     @Test func detailValuesRightAlignIntoTheSectionsWidth() throws {

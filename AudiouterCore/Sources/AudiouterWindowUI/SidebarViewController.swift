@@ -7,6 +7,9 @@ import AudiouterSharedUI
 /// What the user selected in the sidebar. Drives which detail pane the window
 /// shows (a group → its editor; a device → its detail pane; nothing → auto-select).
 public enum SidebarSelection: Equatable, Sendable {
+    /// The whole mix — everything the app sends to speakers. One row, no id:
+    /// it is a destination, not a device.
+    case mainOut
     case group(id: String)
     case device(id: String)
 }
@@ -37,7 +40,8 @@ public final class SidebarViewController: NSViewController {
     /// on object identity.
     final class Node {
         enum Payload {
-            case header(String)             // "Groups" / "Speakers" (isGroupItem)
+            case header(String)             // "System Audio" / "Groups" / "Speakers" (isGroupItem)
+            case mainOut                    // the one "Main Audio" row (flat leaf row)
             case group(Group)               // a saved group (flat leaf row)
             case device(Device)             // a device row (flat leaf row)
             case emptyState(String)         // non-selectable placeholder row (e.g. "No groups yet")
@@ -384,7 +388,12 @@ public final class SidebarViewController: NSViewController {
 
         var newRoots: [Node] = []
 
-        // 1. Groups section — always shown (this window is groups-configuration
+        // 1. System Audio section — the whole mix, always present and never
+        //    tied to a device: it is where the Main Audio page (and its
+        //    Equalizer) is reached.
+        newRoots.append(Node(.header("System Audio"), children: [Node(.mainOut)]))
+
+        // 2. Groups section — always shown (this window is groups-configuration
         //    only). Zero groups gets a non-selectable "No groups yet"
         //    placeholder row instead of vanishing. Each group is a flat leaf
         //    row (icon + name); members are previewed in the group editor's
@@ -397,7 +406,7 @@ public final class SidebarViewController: NSViewController {
         }
         newRoots.append(groupsHeader)
 
-        // 2. Speakers section — every device, grouped or not, so it stays
+        // 3. Speakers section — every device, grouped or not, so it stays
         //    reachable now that membership isn't previewed via expansion.
         if !devices.isEmpty {
             let devicesHeader = Node(.header("Speakers"))
@@ -427,6 +436,7 @@ public final class SidebarViewController: NSViewController {
     private func selection(for node: Node) -> SidebarSelection? {
         switch node.payload {
         case .header, .emptyState: return nil
+        case .mainOut: return .mainOut
         case .group(let g): return .group(id: g.id)
         case .device(let d): return .device(id: d.id)
         }
@@ -476,7 +486,8 @@ public final class SidebarViewController: NSViewController {
 
     // MARK: Test-support hooks
 
-    /// The section-header titles in order (e.g. ["Groups", "Speakers"]).
+    /// The section-header titles in order
+    /// (["System Audio", "Groups", "Speakers"]).
     public var test_sectionTitles: [String] {
         roots.compactMap { if case .header(let t) = $0.payload { return t } else { return nil } }
     }
@@ -815,7 +826,7 @@ extension SidebarViewController: NSMenuDelegate {
         menu.autoenablesItems = false
         guard let node = clickedNode else { return }
         switch node.payload {
-        case .header, .emptyState:
+        case .header, .emptyState, .mainOut:
             break   // no identity to act on — an empty menu shows nothing at all
         case .group(let group):
             menu.addItem(contextMenuItem("Rename…",
@@ -880,6 +891,9 @@ extension SidebarViewController: NSOutlineViewDelegate {
             return makeHeaderLabel(title)
         case .emptyState(let text):
             return makeLabel(text, identifier: "emptyState", secondary: true)
+        case .mainOut:
+            return makeIconLabel(symbol: DeviceIcon.mainAudioSymbolName,
+                                 text: "Main Audio", identifier: "mainOut")
         case .group(let group):
             let symbol = DeviceIcon.resolve(group.iconSymbolName, default: Group.defaultIconSymbolName)
             return makeIconLabel(symbol: symbol,

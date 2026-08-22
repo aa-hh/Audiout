@@ -567,6 +567,10 @@ private func ap1Device(id: String = "AA:BB:CC:DD:EE:99", name: String = "Old Exp
 /// `onExternalChange` construct their own `FakeSystemVolume` and pass it
 /// explicitly to get a handle on it.
 private func makeBackend(
+    /// `nil` (every pre-existing call site) = tone settings live for the session
+    /// only, exactly like `btTrimStore`. The EQ tests pass a store over an
+    /// isolated scratch directory so nothing touches real Application Support.
+    eqStore: DeviceEQStore? = nil,
     systemVolume: SystemVolumeControlling = FakeSystemVolume(),
     ptpHelperActivator: PTPHelperActivating = AlwaysReadyPTPHelperActivator(),
     connectVolume: @escaping @Sendable () -> Int = { AppSettings.defaultConnectVolume },
@@ -586,7 +590,8 @@ private func makeBackend(
     let engine = SpyEngine()
     let discovery = FakeDiscovery()
     let backend = NativeBackend(
-        engineControl: engine, discoverySource: discovery, dacpEndpoint: FakeDACPEndpoint(),
+        engineControl: engine, discoverySource: discovery, eqStore: eqStore,
+        dacpEndpoint: FakeDACPEndpoint(),
         systemVolume: systemVolume, ptpHelperActivator: ptpHelperActivator,
         connectVolume: connectVolume, processResolver: processResolver,
         injectedPerAppCapture: injectedPerAppCapture,
@@ -935,6 +940,14 @@ private final class FakeCapture: CaptureControlling, @unchecked Sendable {
     }
     func start() { lock.withLock { _ops.append("start"); _startCount += 1 } }
     func stop() { lock.withLock { _ops.append("stop") } }
+
+    /// Every ``WholeSystemEQPlan`` the backend published, in order. Recorded by
+    /// REFERENCE on purpose: an `EQProcessor` carries the stage's filter memory,
+    /// so "did this push reuse the same instance?" is a question only identity
+    /// can answer, and a rebuilt instance is an audible tick on that stream.
+    private var _eqPlans: [WholeSystemEQPlan] = []
+    func setEQPlan(_ plan: WholeSystemEQPlan) { lock.withLock { _eqPlans.append(plan) } }
+    var eqPlans: [WholeSystemEQPlan] { lock.withLock { _eqPlans } }
     func setMeteringActive(_ active: Bool) { lock.withLock { _meteringActive = active } }
 
     /// R14: records every `refreshExcludedProcessSet(forRelaunchedBundleID:)`
@@ -8068,6 +8081,449 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil(timeout: 5) { capture.refreshedBundleIDs.contains("com.notyet.audible") }
         #expect(capture.refreshedBundleIDs.contains("com.notyet.audible"),
                 Comment(rawValue: "the instant a routed app's per-app tap reaches .capturing, the whole-system tap's exclusion must re-resolve — its pid only became translatable now, so until this refresh the app is double-sent to its device AND the system mix"))
+    }
+
+    // MARK: Per-device + Main Out EQ (tone)
+
+    /// A live scrub (`commit: false`) is heard immediately and seen immediately:
+    /// the device snapshot carries the new value out on `deviceUpdated`, the same
+    /// optimistic echo a volume change gets.
+    @Test func setEQEchoesTheValueOnDeviceUpdated() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device()
+        await startSelectAndStream(backend, engine, discovery, FakeCapture(), device)
+        defer { backend.stop() }
+
+        let eq = DeviceEQ(bassDB: 4, trebleDB: -2)
+        let events = await collect(from: backend) { events in
+            events.contains {
+                if case .deviceUpdated(let d) = $0 { return d.id == device.id && d.eq == eq }
+                return false
+            }
+        } after: { backend.setEQ(eq, for: device.id, commit: false) }
+
+        #expect(events.contains {
+            if case .deviceUpdated(let d) = $0 { return d.id == device.id && d.eq == eq }
+            return false
+        }, "an EQ edit must echo back on the device snapshot, committed or not")
+    }
+
+    /// A committed edit reaches disk, and a NEW backend over the same directory
+    /// starts already knowing it: the device it re-connects goes straight onto an
+    /// EQ stream with no second edit from the user.
+    @Test func committedEQPersistsAndAFreshBackendReloadsIt() async throws {
+        let directory = isolation.scratchDir
+        let device = ap2Device()
+        let eq = DeviceEQ(bassDB: 6)
+
+        do {
+            let (backend, engine, discovery) = makeBackend(eqStore: DeviceEQStore(directory: directory))
+            await startSelectAndStream(backend, engine, discovery, FakeCapture(), device)
+            defer { backend.stop() }
+            backend.setEQ(eq, for: device.id, commit: true)
+            await pollUntil { (try? DeviceEQStore(directory: directory).load())??.devices[device.id] != nil }
+        }
+
+        let saved = try DeviceEQStore(directory: directory).load()
+        #expect(saved?.devices[device.id] == eq, "a committed edit must be on disk")
+
+        let (reloaded, engine, discovery) = makeBackend(eqStore: DeviceEQStore(directory: directory))
+        await startSelectAndStream(reloaded, engine, discovery, FakeCapture(), device)
+        defer { reloaded.stop() }
+        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= EQStreamAllocator.idBase }
+        #expect((engine.liveStream(of: device.outputID) ?? 0) >= EQStreamAllocator.idBase,
+                "a backend that loaded a stored EQ must put the device on its own stream at connect")
+    }
+
+    /// A stored EQ is on the row the moment it appears — at DISCOVERY, before
+    /// anything is selected or streaming. The snapshot is what the UI renders,
+    /// so a device whose audio is being shaped must never be drawn flat.
+    @Test func aStoredEQIsOnTheDeviceSnapshotFromDiscovery() async throws {
+        let directory = isolation.scratchDir
+        let device = ap2Device()
+        let eq = DeviceEQ(bassDB: 3, loudness: true)
+        try DeviceEQStore(directory: directory).save(mainOut: nil, devices: [device.id: eq])
+
+        let (backend, engine, discovery) = makeBackend(eqStore: DeviceEQStore(directory: directory))
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let events = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        let added = events.compactMap {
+            if case .deviceAdded(let d) = $0 { return d } else { return nil }
+        }.first { $0.id == device.id }
+        #expect(added?.eq == eq, "the first snapshot of a device must already carry its stored tone")
+        #expect(added?.eqBypassReason == nil,
+                "nothing is streaming yet, so nothing can have been bypassed")
+        #expect(backend.devices.first { $0.id == device.id }?.eq == eq)
+    }
+
+    /// Committing a non-flat EQ moves the device's live session onto an EQ stream
+    /// (top-half id, disjoint from the per-app namespace); going flat again moves
+    /// it back to stream 0, where it is byte-identical passthrough.
+    @Test func nonFlatCommitRebindsOntoAnEQStreamAndFlatReturnsToZero() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device()
+        await startSelectAndStream(backend, engine, discovery, FakeCapture(), device)
+        defer { backend.stop() }
+        #expect(engine.liveStream(of: device.outputID) == 0, "a fresh connect starts on stream 0")
+
+        backend.setEQ(DeviceEQ(trebleDB: 3), for: device.id, commit: true)
+        await pollUntil { (engine.liveStream(of: device.outputID) ?? 0) >= EQStreamAllocator.idBase }
+        let eqStream = engine.liveStream(of: device.outputID) ?? 0
+        #expect(eqStream >= EQStreamAllocator.idBase,
+                "a non-flat commit binds the device to an EQ stream, not a mixer one")
+        #expect(engine.rebindCalls.contains { $0.0 == device.outputID && $0.1 == eqStream },
+                "the move goes through the engine's rebind, never a bare re-add")
+
+        backend.setEQ(.flat, for: device.id, commit: true)
+        await pollUntil { engine.liveStream(of: device.outputID) == 0 }
+        #expect(engine.liveStream(of: device.outputID) == 0,
+                "flat means stream 0 again — EQ off has to be the untouched path")
+    }
+
+    /// The whole-mix tone is readable back off the backend, so the Main Audio
+    /// page can seed its editor from what is actually in force.
+    @Test func mainOutEQRoundTripsThroughTheGetter() async {
+        let (backend, engine, discovery) = makeBackend()
+        #expect(backend.mainOutEQ == .flat, "a fresh backend has no tone stored")
+
+        let device = ap2Device()
+        await startSelectAndStream(backend, engine, discovery, FakeCapture(), device)
+        defer { backend.stop() }
+
+        backend.setMainOutEQ(DeviceEQ(trebleDB: 3), commit: true)
+        await pollUntil { backend.mainOutEQ == DeviceEQ(trebleDB: 3) }
+        #expect(backend.mainOutEQ == DeviceEQ(trebleDB: 3))
+    }
+
+    /// More distinct settings than the engine has streams for: the admission
+    /// order is deterministic (equal-sized groups break the tie on the smallest
+    /// member id), the loser streams flat and SAYS so via `eqBypassReason`, and no
+    /// engine op is ever issued on its behalf. Its stored values are untouched.
+    @Test func budgetExhaustionBypassesTheDeterministicLoserWithoutBinding() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start()
+        defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        // Six devices, six distinct settings: one more group than the budget
+        // (engine capacity 6, less stream 0, less zero per-app streams = 5).
+        let devices = (1...6).map { index in
+            ap2Device(id: String(format: "AA:BB:CC:DD:EE:%02d", index), name: "Speaker \(index)")
+        }
+        for device in devices {
+            _ = await collect(from: backend) { events in
+                events.contains {
+                    if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false }
+                }
+            } after: { discovery.fire(.appeared(device)) }
+        }
+        backend.setOutputSet(Set(devices.map(\.id)))
+        await pollUntil(timeout: 5) {
+            devices.allSatisfy { engine.liveStream(of: $0.outputID) != nil }
+        }
+
+        for (index, device) in devices.enumerated() {
+            backend.setEQ(DeviceEQ(bassDB: Double(index + 1)), for: device.id, commit: true)
+        }
+        // The loser is the largest id: every group has one member, so admission
+        // runs in ascending member order and the sixth is left out.
+        let loser = devices.max { $0.id < $1.id }!
+        await pollUntil(timeout: 5) {
+            backend.devices.filter { $0.eqBypassReason != nil }.count == 1
+        }
+
+        let bypassed = backend.devices.filter { $0.eqBypassReason != nil }.map(\.id)
+        #expect(bypassed == [loser.id], "exactly the deterministic loser is bypassed")
+        #expect(backend.devices.first { $0.id == loser.id }?.eqBypassReason == .streamBudget,
+                "the budget is the reason, and the drawer's sentence depends on knowing that")
+        #expect(engine.liveStream(of: loser.outputID) == 0,
+                "an unadmitted device stays on stream 0 — it streams flat, it does not get an EQ stream")
+        #expect(!engine.rebindCalls.contains { $0.0 == loser.outputID },
+                "no engine op may be issued for a device that could not be admitted")
+        #expect(backend.devices.first { $0.id == loser.id }?.eq == DeviceEQ(bassDB: 6),
+                "the stored values survive the bypass — only the streaming is flat")
+    }
+
+    /// A DEPARTURE is an EQ edge too. Deselecting a device frees the stream its
+    /// group held, which is exactly what the budget's loser was waiting for — and
+    /// the departed device's own stream has to leave the plan, or the delivery
+    /// thread keeps copying and filtering a buffer no output is bound to.
+    /// `setOutputSet`'s reconcile cannot see either: it runs while the teardown is
+    /// still in flight, with the device still in the streaming set.
+    @Test func aDepartureUnbypassesTheBudgetLoserAndTakesItsOwnStreamOutOfThePlan() async throws {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start()
+        defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        // Same shape as the budget test above: six distinct settings, budget five.
+        let devices = (1...6).map { index in
+            ap2Device(id: String(format: "AA:BB:CC:DD:EE:%02d", index), name: "Speaker \(index)")
+        }
+        for device in devices {
+            _ = await collect(from: backend) { events in
+                events.contains {
+                    if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false }
+                }
+            } after: { discovery.fire(.appeared(device)) }
+        }
+        backend.setOutputSet(Set(devices.map(\.id)))
+        await pollUntil(timeout: 5) {
+            devices.allSatisfy { engine.liveStream(of: $0.outputID) != nil }
+        }
+        for (index, device) in devices.enumerated() {
+            backend.setEQ(DeviceEQ(bassDB: Double(index + 1)), for: device.id, commit: true)
+        }
+
+        let loser = devices.max { $0.id < $1.id }!
+        let departing = devices.first!
+        await pollUntil(timeout: 5) {
+            backend.devices.contains { $0.id == loser.id && $0.eqBypassReason == .streamBudget }
+        }
+        try #require(backend.devices.first { $0.id == loser.id }?.eqBypassReason == .streamBudget)
+        await pollUntil(timeout: 5) {
+            (engine.liveStream(of: departing.outputID) ?? 0) >= EQStreamAllocator.idBase
+        }
+        let departingStream = try #require(engine.liveStream(of: departing.outputID))
+
+        // Deselect the first speaker. Ids are never reused, so its stream can
+        // only leave the plan — the loser's admission gets a fresh one.
+        backend.setOutputSet(Set(devices.dropFirst().map(\.id)))
+
+        await pollUntil(timeout: 5) {
+            backend.devices.first { $0.id == loser.id }?.eqBypassReason == nil
+        }
+        #expect(backend.devices.first { $0.id == loser.id }?.eqBypassReason == nil,
+                "the freed stream must un-bypass the device the budget had refused")
+
+        await pollUntil(timeout: 5) {
+            capture.eqPlans.last?.streams.contains { $0.streamID == departingStream } == false
+        }
+        #expect(capture.eqPlans.last?.streams.contains { $0.streamID == departingStream } == false,
+                "a departed device's stream must not stay in the plan")
+    }
+
+    /// A slider drag on ONE device must be inaudible on every other stream. Each
+    /// frame republishes the plan, and a rebuilt `EQProcessor` starts with empty
+    /// IIR delay memory — a step discontinuity, i.e. a tick out of a speaker
+    /// nobody touched. Unchanged stages therefore keep the very same instance.
+    @Test func aScrubOnOneDeviceKeepsEveryOtherStreamsProcessorInstance() async throws {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start()
+        defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let scrubbed = ap2Device(id: "AA:BB:CC:DD:EE:01", name: "Scrubbed")
+        let untouched = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Untouched")
+        for device in [scrubbed, untouched] {
+            _ = await collect(from: backend) { events in
+                events.contains {
+                    if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false }
+                }
+            } after: { discovery.fire(.appeared(device)) }
+        }
+        backend.setOutputSet([scrubbed.id, untouched.id])
+        await pollUntil(timeout: 5) {
+            [scrubbed, untouched].allSatisfy { engine.liveStream(of: $0.outputID) != nil }
+        }
+
+        // Two distinct settings, so each owns its own stream — the scrub is then
+        // expressible in place and never recomputes topology.
+        backend.setEQ(DeviceEQ(bassDB: 3), for: scrubbed.id, commit: true)
+        backend.setEQ(DeviceEQ(trebleDB: -3), for: untouched.id, commit: true)
+        await pollUntil(timeout: 5) {
+            [scrubbed, untouched].allSatisfy {
+                (engine.liveStream(of: $0.outputID) ?? 0) >= EQStreamAllocator.idBase
+            }
+        }
+        let otherStream = try #require(engine.liveStream(of: untouched.outputID))
+        await pollUntil(timeout: 5) {
+            capture.eqPlans.last?.streams
+                .contains { $0.streamID == otherStream && $0.processor != nil } == true
+        }
+        let before = try #require(
+            capture.eqPlans.last?.streams.first { $0.streamID == otherStream }?.processor)
+        let publishedPlans = capture.eqPlans.count
+
+        backend.setEQ(DeviceEQ(bassDB: 4), for: scrubbed.id, commit: false)
+        await pollUntil(timeout: 5) { capture.eqPlans.count > publishedPlans }
+        #expect(capture.eqPlans.count > publishedPlans, "the scrub must still reach the audio")
+
+        let after = capture.eqPlans.last?.streams.first { $0.streamID == otherStream }?.processor
+        #expect(after === before,
+                "an untouched stream must keep its processor — a new one loses its filter memory")
+    }
+
+    /// And the SCRUBBED device keeps its own instance too. Its value genuinely
+    /// changed, so the old code handed it a NEW `EQProcessor` on every drag
+    /// frame — zeroing that stage's IIR delay memory dozens of times a second,
+    /// which the owner heard as a crackle running the length of the drag. The
+    /// stage is retargeted in place instead, so the instance is stable.
+    @Test func aScrubOnTheEditedDeviceKeepsItsOwnProcessorInstance() async throws {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start()
+        defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let scrubbed = ap2Device(id: "AA:BB:CC:DD:EE:01", name: "Scrubbed")
+        let untouched = ap2Device(id: "AA:BB:CC:DD:EE:02", name: "Untouched")
+        for device in [scrubbed, untouched] {
+            _ = await collect(from: backend) { events in
+                events.contains {
+                    if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false }
+                }
+            } after: { discovery.fire(.appeared(device)) }
+        }
+        backend.setOutputSet([scrubbed.id, untouched.id])
+        await pollUntil(timeout: 5) {
+            [scrubbed, untouched].allSatisfy { engine.liveStream(of: $0.outputID) != nil }
+        }
+
+        // Two distinct settings, so the scrubbed device owns a stream of its own
+        // and the drag is expressible in place.
+        backend.setEQ(DeviceEQ(bassDB: 3), for: scrubbed.id, commit: true)
+        backend.setEQ(DeviceEQ(trebleDB: -3), for: untouched.id, commit: true)
+        await pollUntil(timeout: 5) {
+            [scrubbed, untouched].allSatisfy {
+                (engine.liveStream(of: $0.outputID) ?? 0) >= EQStreamAllocator.idBase
+            }
+        }
+        let ownStream = try #require(engine.liveStream(of: scrubbed.outputID))
+        await pollUntil(timeout: 5) {
+            capture.eqPlans.last?.streams
+                .contains { $0.streamID == ownStream && $0.processor != nil } == true
+        }
+        let before = try #require(
+            capture.eqPlans.last?.streams.first { $0.streamID == ownStream }?.processor)
+        let publishedPlans = capture.eqPlans.count
+
+        backend.setEQ(DeviceEQ(bassDB: 4), for: scrubbed.id, commit: false)
+        await pollUntil(timeout: 5) { capture.eqPlans.count > publishedPlans }
+        #expect(capture.eqPlans.count > publishedPlans, "the scrub must still reach the audio")
+
+        let after = capture.eqPlans.last?.streams.first { $0.streamID == ownStream }?.processor
+        #expect(after === before,
+                "the edited stage must be retargeted, not rebuilt — a new instance crackles")
+    }
+
+    /// A scrub on a device that ISN'T in the EQ domain publishes nothing at all.
+    /// Nothing it could change is audible, so the value is simply remembered for
+    /// the commit — where the old code ran a FULL topology recompute per drag
+    /// frame, rebuilding every live stream's processor each time.
+    @Test func anUncommittedEditOnANonStreamingDevicePublishesNoPlan() async {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start()
+        defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        // Discovered but never selected: no session, so no EQ stream to change.
+        let device = ap2Device()
+        _ = await collect(from: backend) { events in
+            events.contains {
+                if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false }
+            }
+        } after: { discovery.fire(.appeared(device)) }
+
+        let publishedPlans = capture.eqPlans.count
+        for value in 1...5 {
+            backend.setEQ(DeviceEQ(bassDB: Double(value)), for: device.id, commit: false)
+        }
+        await pollUntil { backend.devices.first { $0.id == device.id }?.eq.bassDB == 5 }
+
+        #expect(backend.devices.first { $0.id == device.id }?.eq.bassDB == 5,
+                "the scrub is still remembered — the commit is what will apply it")
+        #expect(capture.eqPlans.count == publishedPlans,
+                "nothing about this device is audible, so no plan may be published")
+    }
+
+    /// Per-app routing takes a device's session out of the whole-system EQ domain
+    /// entirely, so its stored tone is not being applied — and the row must say so
+    /// with its OWN reason, not the budget's. Dropping the route gives it back.
+    @Test func perAppRoutingBypassesTheStoredEQAndUnroutingRestoresIt() async {
+        let (backend, engine, discovery) = makeBackend(
+            injectedPerAppCapture: workingPerAppCapture(bundleIDs: ["com.foo.player"]))
+        defer { backend.stop() }
+        let device = ap2Device()
+        await startAndDiscover(backend, engine, discovery, device)
+
+        let eq = DeviceEQ(bassDB: 5)
+        backend.setEQ(eq, for: device.id, commit: true)
+        backend.updateAppRoutes([route("com.foo.player", name: "Foo", toDevice: device.id)])
+        await pollUntil(timeout: 5) {
+            backend.devices.first { $0.id == device.id }?.eqBypassReason == .perAppRouting
+        }
+        #expect(backend.devices.first { $0.id == device.id }?.eqBypassReason == .perAppRouting,
+                "a per-app-claimed device's stored tone is not being applied, and must say why")
+
+        backend.updateAppRoutes([])
+        await pollUntil(timeout: 5) {
+            backend.devices.first { $0.id == device.id }?.eqBypassReason == nil
+        }
+        #expect(backend.devices.first { $0.id == device.id }?.eqBypassReason == nil,
+                "giving the device back to the whole-system domain clears the bypass")
+        #expect(backend.devices.first { $0.id == device.id }?.eq == eq,
+                "the stored values survive the whole round trip")
+    }
+
+    /// Close the lid, open it again: the speaker must come back SHAPED. Sleep
+    /// tears every engine session down while keeping the selection intent, so
+    /// the EQ topology it leaves behind describes sessions that no longer
+    /// exist. If that stale map survived, the wake re-add would land on stream 0
+    /// while the map still claimed the device was on its EQ stream — the
+    /// reconcile would see no difference, issue no rebind, and the speaker would
+    /// play flat forever with its chip still lit and no bypass sentence to
+    /// explain it.
+    @Test func aSleepWakeCycleRebindsTheEQdSpeakerBackOntoItsStream() async throws {
+        let (backend, engine, discovery) = makeBackend()
+        let capture = FakeCapture()
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:70", name: "Sleepy Tone")
+        await startSelectAndStream(backend, engine, discovery, capture, device)
+        defer { backend.stop() }
+
+        backend.setEQ(DeviceEQ(bassDB: 4), for: device.id, commit: true)
+        await pollUntil(timeout: 5) {
+            (engine.liveStream(of: device.outputID) ?? 0) >= EQStreamAllocator.idBase
+        }
+        try #require((engine.liveStream(of: device.outputID) ?? 0) >= EQStreamAllocator.idBase,
+                     "precondition: the committed tone put the device on an EQ stream")
+        let rebindsBeforeSleep = engine.rebindCalls.count
+
+        backend.handleSystemWillSleep()
+        await pollUntil(timeout: 5) { engine.liveStream(of: device.outputID) == nil }
+        try #require(engine.liveStream(of: device.outputID) == nil,
+                     "precondition: sleep really tore the session down")
+
+        backend.handleSystemDidWake()
+        await pollUntil(timeout: 5) {
+            (engine.liveStream(of: device.outputID) ?? 0) >= EQStreamAllocator.idBase
+        }
+        let woken = engine.liveStream(of: device.outputID) ?? 0
+        #expect(woken >= EQStreamAllocator.idBase,
+                "a woken speaker with a stored tone must end up back on an EQ stream, not flat")
+        #expect(engine.rebindCalls.count > rebindsBeforeSleep,
+                "the wake re-add lands on stream 0, so the move must be a FRESH engine rebind")
+
+        await pollUntil(timeout: 5) {
+            capture.eqPlans.last?.streams.contains { $0.streamID == woken } == true
+        }
+        #expect(capture.eqPlans.last?.streams
+            .contains { $0.streamID == woken && $0.processor != nil } == true,
+            "the plan the coordinator is running must carry the stream the output is now bound to")
     }
 
 }

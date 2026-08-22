@@ -4,12 +4,13 @@ import AppKit
 import AudiouterCore
 import AudiouterSharedUI
 
-/// The read-only device detail pane (design revamp, CONFIGURATION-ONLY —
+/// The device detail pane (design revamp, CONFIGURATION-ONLY —
 /// `../../AGENTS.md`): shown in the Groups window's detail area when the
-/// sidebar selects a device.
-/// This view controller never activates a group, changes routing, or moves
-/// audio — it only ever renders a `Device` snapshot plus which saved groups
-/// it belongs to.
+/// sidebar selects a device. It DESCRIBES the speaker and TUNES it — it
+/// renders a `Device` snapshot plus which saved groups it belongs to, and
+/// hosts that speaker's ``EQEditorView``. It never activates a group, changes
+/// routing, or moves audio; a tone change is reported straight out through
+/// ``onSetEQ`` for the app to apply.
 ///
 /// Layout, top to bottom, in an ELASTIC form column top-pinned to
 /// `safeAreaLayoutGuide` — structurally identical to
@@ -37,15 +38,23 @@ import AudiouterSharedUI
 ///   contain this device) in the second. The sections' own inset hairlines
 ///   separate the rows; the old stock `NSBox` divider is gone (it drew a 185 pt
 ///   rule that stopped a third of the way across the pane);
+/// - the EQUALIZER section — one more ``GroupedSectionView``, wrapping the
+///   shared ``EQEditorView``. Hidden for This Mac (there is nothing to tune on
+///   the device the audio comes FROM), which is why the hint below it carries
+///   two alternative top constraints;
 /// - a minimal, single-line secondary-colour hint ("Playback is controlled
-///   from the Mixer — this page only describes the speaker.") under the
+///   from the Mixer — this page describes and tunes the speaker.") under the
 ///   form. Deliberately terse: the fuller "configure here / play in the
 ///   Mixer" teaching lives in a footer elsewhere in this window, not
 ///   restated here.
 ///
-/// No volume slider, no mute, no Selected-Devices toggle, no group-activation
+/// The whole column SCROLLS (`../AGENTS.md`): the Equalizer's Advanced fold
+/// exceeds the Groups screen's height budget, and the screen is user-resizable
+/// with drag memory, so growing the window was rejected (roadmap 039).
+///
+/// No volume slider, no mute, no Selected-Devices toggle, no group activation
 /// control of any kind lives here — that's the popover/mixer's job, not this
-/// pane's.
+/// pane's; the Equalizer section is configuration, not playback.
 public final class DeviceDetailViewController: NSViewController {
 
     private let groupController: GroupController
@@ -67,6 +76,10 @@ public final class DeviceDetailViewController: NSViewController {
     /// inset hairlines separate its rows.
     private let stateWell = GroupedSectionView()
     private let groupsWell = GroupedSectionView()
+    /// The EQUALIZER section and the shared editor inside it. Hidden whole for
+    /// This Mac — the audio's SOURCE has no send to tune.
+    private let eqWell = GroupedSectionView()
+    private let eqEditor = EQEditorView()
     private let stateStack = NSStackView()
     private let groupsStack = NSStackView()
     // Text is set at declaration (not in `loadView`) so it's correct even
@@ -77,7 +90,17 @@ public final class DeviceDetailViewController: NSViewController {
     /// can finish reading is not a hint. It still refuses to widen the pane
     /// (low compression resistance + the wrap width below).
     private let hintLabel = NSTextField(
-        wrappingLabelWithString: DeviceDetailViewController.viewOnlyHint)
+        wrappingLabelWithString: DeviceDetailViewController.mixerHint)
+
+    /// The hint sits one action-band gap below the LAST section, and which
+    /// section that is depends on the device — so both constraints are built
+    /// once and `refreshUI()` swaps which one is active. Rebuilding a
+    /// constraint per refresh instead would leak one every time.
+    /// Optional, not implicitly-unwrapped: `show(device:)` is legitimately
+    /// called before the view is ever loaded (the pane is built long before
+    /// it is mounted), and refreshing then must not trap.
+    private var hintBelowEQSection: NSLayoutConstraint?
+    private var hintBelowGroupsSection: NSLayoutConstraint?
 
     private let statusValueLabel = NSTextField(labelWithString: "")
     private let availableValueLabel = NSTextField(labelWithString: "")
@@ -85,8 +108,30 @@ public final class DeviceDetailViewController: NSViewController {
     private let kindValueLabel = NSTextField(labelWithString: "")
     private let groupsValueLabel = NSTextField(labelWithString: "")
 
+    /// The scroll view wrapping the whole form column, `nil` until `loadView`.
+    private var scrollView: NSScrollView?
+
     /// The device currently shown, `nil` before the first `show(device:)`.
     private var shownDevice: Device?
+
+    /// Report a tone change: the new EQ, the device it belongs to, and whether
+    /// the gesture is finished (`false` = live scrub, apply only; `true` =
+    /// apply AND persist). The pane reaches no backend itself.
+    public var onSetEQ: ((DeviceEQ, String, Bool) -> Void)?
+
+    /// The EQ this pane has SENT for a device while a gesture is IN FLIGHT, and
+    /// whether that send was the COMMIT (`awaitingEcho`). Without it a mid-scrub
+    /// `update(devices:)` (the backend fans out constantly) would re-render the
+    /// slider from the older stored value and yank it out from under the
+    /// pointer. A committed entry is released only once a LATER snapshot
+    /// actually echoes it back (`refreshUI`) — dropping it synchronously at
+    /// commit let events already queued from mid-drag land afterward and
+    /// replay the drag on the knob. Kept past that echo it can still lie
+    /// forever — a set the backend drops (an id it no longer knows, because the
+    /// device vanished mid-drag) would leave this pane showing a shaped curve
+    /// for the rest of the session while the audio and every snapshot stayed
+    /// flat.
+    private var eqEdits: [String: (eq: DeviceEQ, awaitingEcho: Bool)] = [:]
 
     /// Kept alive across a picker session so it can be dismissed/replaced;
     /// `nil` when no picker is currently presented (mirrors
@@ -184,27 +229,72 @@ public final class DeviceDetailViewController: NSViewController {
         headerWell.contentLeadingInset = GroupsPaneLayout.contentLeadingInset
         stateWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
         groupsWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
-        for well in [headerWell, stateWell, groupsWell] {
+        eqWell.contentLeadingInset = GroupsPaneLayout.railFreeContentLeadingInset
+        eqEditor.translatesAutoresizingMaskIntoConstraints = false
+        eqEditor.delegate = self
+
+        for well in [headerWell, stateWell, groupsWell, eqWell] {
             well.translatesAutoresizingMaskIntoConstraints = false
             column.addSubview(well)
         }
-        for v in [iconWell, nameLabel, stateStack, groupsStack, hintLabel] { column.addSubview(v) }
-        container.addSubview(column)
+        for v in [iconWell, nameLabel, stateStack, groupsStack, eqEditor, hintLabel] {
+            column.addSubview(v)
+        }
+
+        // The pane SCROLLS (`../AGENTS.md`): with the Equalizer's Advanced fold
+        // open the column is taller than the Groups screen, and this screen is
+        // the one the user can resize (with remembered size), so growing the
+        // window to fit was rejected. Overlay scrollers + no background so the
+        // pane still reads as one warm surface, and a FLIPPED document so the
+        // form starts at the TOP rather than bottom-gravitating.
+        let document = FlippedView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(column)
+
+        let scrollView = NSScrollView()
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.documentView = document
+        scrollView.hasVerticalScroller = true
+        scrollView.scrollerStyle = .overlay
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        container.addSubview(scrollView)
+        self.scrollView = scrollView
 
         // The rows' own hairlines come from the section, which reads their LIVE
         // frames on every draw.
         stateWell.rows = stateStack.arrangedSubviews
 
         let columnFill = column.trailingAnchor.constraint(
-            equalTo: container.trailingAnchor, constant: -GroupsPaneLayout.columnTrailingInset)
+            equalTo: document.trailingAnchor, constant: -GroupsPaneLayout.columnTrailingInset)
         columnFill.priority = .defaultHigh
 
+        // Both of the hint's possible top pins, built once (see the properties).
+        hintBelowEQSection = hintLabel.topAnchor.constraint(
+            equalTo: eqWell.bottomAnchor, constant: GroupsPaneLayout.actionBandGap)
+        hintBelowGroupsSection = hintLabel.topAnchor.constraint(
+            equalTo: groupsWell.bottomAnchor, constant: GroupsPaneLayout.actionBandGap)
+
         NSLayoutConstraint.activate([
-            column.topAnchor.constraint(equalTo: container.safeAreaLayoutGuide.topAnchor,
+            scrollView.topAnchor.constraint(equalTo: container.topAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+
+            // The document is exactly as wide as the pane and as tall as the
+            // column needs — vertical scrolling only, never horizontal.
+            document.widthAnchor.constraint(equalTo: scrollView.widthAnchor),
+
+            // The column top-pins to the DOCUMENT, not the pane's safe-area
+            // guide — the clip view already sits below the title-bar chrome,
+            // so the document itself is the correct top reference here.
+            column.topAnchor.constraint(equalTo: document.topAnchor,
                                         constant: GroupsPaneLayout.columnTopInset),
-            column.leadingAnchor.constraint(equalTo: container.leadingAnchor,
+            column.bottomAnchor.constraint(equalTo: document.bottomAnchor,
+                                           constant: -GroupsPaneLayout.paneBottomInset),
+            column.leadingAnchor.constraint(equalTo: document.leadingAnchor,
                                             constant: GroupsPaneLayout.columnInset),
-            column.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor,
+            column.trailingAnchor.constraint(lessThanOrEqualTo: document.trailingAnchor,
                                              constant: -GroupsPaneLayout.columnTrailingInset),
             column.widthAnchor.constraint(lessThanOrEqualToConstant: GroupsPaneLayout.contentMaxWidth),
             columnFill,
@@ -266,11 +356,26 @@ public final class DeviceDetailViewController: NSViewController {
             groupsWell.bottomAnchor.constraint(equalTo: groupsStack.bottomAnchor,
                                                constant: GroupedSectionView.verticalPadding),
 
+            eqEditor.topAnchor.constraint(
+                equalTo: groupsWell.bottomAnchor,
+                constant: GroupsPaneLayout.sectionGap + GroupedSectionView.verticalPadding),
+            eqEditor.leadingAnchor.constraint(
+                equalTo: column.leadingAnchor,
+                constant: GroupsPaneLayout.railFreeContentLeadingInset),
+            eqEditor.trailingAnchor.constraint(
+                equalTo: column.trailingAnchor, constant: -GroupsPaneLayout.contentTrailingInset),
+
+            eqWell.leadingAnchor.constraint(equalTo: column.leadingAnchor),
+            eqWell.trailingAnchor.constraint(equalTo: column.trailingAnchor),
+            eqWell.topAnchor.constraint(equalTo: eqEditor.topAnchor,
+                                        constant: -GroupedSectionView.verticalPadding),
+            eqWell.bottomAnchor.constraint(equalTo: eqEditor.bottomAnchor,
+                                           constant: GroupedSectionView.verticalPadding),
+
             // The pane's ACTION BAND (this pane's is a footnote, not a button),
             // one shared gap below the last section — the same break the
-            // editor puts above "Delete Group…".
-            hintLabel.topAnchor.constraint(equalTo: groupsWell.bottomAnchor,
-                                           constant: GroupsPaneLayout.actionBandGap),
+            // editor puts above "Delete Group…". WHICH section is last depends
+            // on the device, so the top pin is activated in `refreshUI()`.
             // The full column, NOT the content lane inside the sections: this
             // is a footnote about the pane, so it reads across it (the same way
             // the window's own footer caption spans the whole pane) and gets
@@ -282,17 +387,26 @@ public final class DeviceDetailViewController: NSViewController {
         ])
 
         view = container
+
+        // Pin the hint NOW, not at the next refresh. `show(device:)` is
+        // routinely called BEFORE the view is ever loaded (see
+        // `MixerWindowController.showDetail`: it shows the device and mounts
+        // the pane second), so the `refreshUI()` that ran then found both
+        // constraints still nil and left the hint with no top pin at all —
+        // which makes the column's height ambiguous and collapses the scroll
+        // document until something refreshes the pane again.
+        applyEQSectionVisibility()
     }
 
-    /// Minimal one-line view-only hint. Deliberately terse — the fuller
-    /// "configure here / play in the Mixer" teaching lives in a footer
-    /// elsewhere in this window; this pane only needs to mark itself as
-    /// non-interactive. Names the Mixer (not "menu-bar popover" — the user
-    /// reading this is already inside the one surface, one toolbar click from
-    /// it) and avoids "View-only" as an opener: the icon well right above
-    /// this pane IS editable, so a blanket "view-only" read as a
-    /// contradiction next to its edit pencil.
-    private static let viewOnlyHint = "Playback is controlled from the Mixer — this page only describes the speaker."
+    /// Minimal one-line hint naming the division of labour. Deliberately
+    /// terse — the fuller "configure here / play in the Mixer" teaching lives
+    /// in a footer elsewhere in this window. It says what this page IS
+    /// ("describes and tunes"), not what it lacks: "view-only" was never true
+    /// of the icon well above it, and is doubly untrue now that the Equalizer
+    /// section edits the speaker's tone from here. Names the Mixer (not
+    /// "menu-bar popover" — the user reading this is already inside the one
+    /// surface, one toolbar click from it).
+    private static let mixerHint = "Playback is controlled from the Mixer — this page describes and tunes the speaker."
 
     /// Build one "Caption ······ Value" row: a secondary-colour caption on the
     /// leading edge and its value RIGHT-ALIGNED on the trailing edge, so the
@@ -336,6 +450,7 @@ public final class DeviceDetailViewController: NSViewController {
     /// Show the pane for `device`, replacing whatever was shown before.
     public func show(device: Device) {
         shownDevice = device
+        eqEdits.removeAll()
         refreshUI()
     }
 
@@ -358,6 +473,42 @@ public final class DeviceDetailViewController: NSViewController {
         kindValueLabel.stringValue = Self.kindText(for: device.kind)
         groupsValueLabel.stringValue = groupMembershipText(for: device)
         refreshIcon()
+
+        applyEQSectionVisibility()
+
+        // A scrub (or a just-committed value still awaiting its echo) wins
+        // over the snapshot: the backend fans out `update(devices:)`
+        // constantly, and re-rendering mid-drag from the older stored value
+        // yanks the slider out from under the pointer. A committed entry is
+        // released here, the instant a snapshot actually matches it — never
+        // synchronously at commit, or events already queued from mid-drag
+        // would land afterward and replay the drag on the knob.
+        if let entry = eqEdits[device.id], entry.awaitingEcho, device.eq == entry.eq {
+            eqEdits[device.id] = nil
+        }
+        eqEditor.apply(eq: eqEdits[device.id]?.eq ?? device.eq,
+                       bypassReason: device.eqBypassReason)
+    }
+
+    /// Show or hide the Equalizer section for the shown device, and pin the
+    /// hint under whichever section is then LAST. This Mac is where the audio
+    /// comes FROM: there is no send to tune, so the whole section goes and the
+    /// hint closes the gap behind it.
+    ///
+    /// Called from `loadView` as well as `refreshUI()` because the two arrive
+    /// in either order (the pane is shown before it is mounted), and the hint
+    /// must never be left without a top pin: it is the only thing tying the
+    /// sections to the column's bottom, so an unpinned hint makes the column's
+    /// height ambiguous and the scroll document collapses. With no device yet
+    /// the speaker branch is the default — the section it shows is the one a
+    /// following `refreshUI()` keeps for every device but This Mac.
+    private func applyEQSectionVisibility() {
+        let showsEQ = !(shownDevice?.isLocalDevice == true || shownDevice?.kind == .localMac)
+        eqWell.isHidden = !showsEQ
+        eqEditor.isHidden = !showsEQ
+        hintBelowEQSection?.isActive = false
+        hintBelowGroupsSection?.isActive = false
+        (showsEQ ? hintBelowEQSection : hintBelowGroupsSection)?.isActive = true
     }
 
     /// Plain-word status copy for `state`, matching `DeviceRowView`'s existing
@@ -480,7 +631,7 @@ public final class DeviceDetailViewController: NSViewController {
     /// The "In groups" value text ("None" when the device is in no saved group).
     public var test_groupMembershipText: String { groupsValueLabel.stringValue }
 
-    /// The minimal view-only hint's visible text — asserts it stays a single,
+    /// The minimal Mixer hint's visible text — asserts it stays a single,
     /// short line rather than restating the fuller footer copy owned
     /// elsewhere in this window.
     public var test_hintText: String { hintLabel.stringValue }
@@ -528,11 +679,27 @@ public final class DeviceDetailViewController: NSViewController {
     }
 
     /// The number of `GroupedSectionView` sections this pane draws (header +
-    /// state + "In groups") — the detail pane adopts the SAME section shape the
+    /// state + "In groups" + Equalizer) — the detail pane adopts the SAME section shape the
     /// group editor uses, rather than a bare form on the pane.
+    /// Counted RECURSIVELY: the column now sits inside a scroll view, so the
+    /// sections are several levels down rather than two.
     public var test_sectionCount: Int {
-        view.subviews.flatMap(\.subviews).filter { $0 is GroupedSectionView }.count
+        func count(_ v: NSView) -> Int {
+            (v is GroupedSectionView ? 1 : 0) + v.subviews.reduce(0) { $0 + count($1) }
+        }
+        return count(view)
     }
+
+    /// The Equalizer section's editor — the host contract for every tone
+    /// assertion (readouts, the bypass sentence, the curve).
+    public var test_eqEditor: EQEditorView { eqEditor }
+
+    /// False for This Mac, where the whole Equalizer section is hidden.
+    public var test_eqSectionShown: Bool { !eqWell.isHidden }
+
+    /// True while the form column is wrapped in the scroll view the Equalizer
+    /// made necessary (`../AGENTS.md`; roadmap 039).
+    public var test_hasScrollView: Bool { scrollView != nil }
 
     /// True when the pane still mounts a stock `NSBox` separator — it must
     /// not: the sections' own inset hairlines replaced the orphaned 185 pt rule
@@ -558,6 +725,33 @@ public final class DeviceDetailViewController: NSViewController {
         return stateWell.convert(stateWell.bounds, to: view)
     }
 
+    /// The "In groups" section's laid-out frame in the pane's own coordinates.
+    public var test_groupsSectionFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return groupsWell.convert(groupsWell.bounds, to: view)
+    }
+
+    /// The Equalizer section's laid-out frame in the pane's own coordinates.
+    public var test_eqSectionFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return eqWell.convert(eqWell.bounds, to: view)
+    }
+
+    /// The hint's laid-out frame in the pane's own coordinates. The pane's own
+    /// `view` is NOT flipped, so "below the last section" reads as a SMALLER
+    /// y here even though the scroll document above it is flipped.
+    public var test_hintFrame: NSRect {
+        view.layoutSubtreeIfNeeded()
+        return hintLabel.convert(hintLabel.bounds, to: view)
+    }
+
+    /// How many of the hint's two alternative top pins are active — must be
+    /// exactly 1 from the moment the view loads. Zero leaves the column's
+    /// height ambiguous and collapses the scroll document; two conflict.
+    public var test_activeHintPinCount: Int {
+        [hintBelowEQSection, hintBelowGroupsSection].filter { $0?.isActive == true }.count
+    }
+
     /// Drive the hover scrim's visibility headlessly (a real `mouseEntered`/
     /// `mouseExited` can't be synthesized in a headless run) so the snapshot
     /// tool can render the hovered state.
@@ -578,4 +772,39 @@ public final class DeviceDetailViewController: NSViewController {
     /// (`test_pickCurated`, `test_apply`, …) without needing the popover that
     /// hosts it live.
     public private(set) var test_picker: IconPickerViewController?
+}
+
+// MARK: - EQEditorViewDelegate
+
+/// Tone gestures leave the pane immediately: it keeps only the value it just
+/// sent (``eqEdits``, so a snapshot mid-scrub — or a stale one still in flight
+/// right after a commit — can't rewind the slider) and hands everything else
+/// to the app through ``onSetEQ``. No backend, no store — same discipline as
+/// the rest of this module. A committed entry is released by ``refreshUI``,
+/// never here: releasing it synchronously would let an already-queued stale
+/// snapshot land right after and replay the drag.
+extension DeviceDetailViewController: EQEditorViewDelegate {
+
+    public func eqEditor(_ editor: EQEditorView, didChange eq: DeviceEQ, committed: Bool) {
+        guard let id = shownDevice?.id else { return }
+        // Set BEFORE forwarding: `onSetEQ` can fan a snapshot straight back,
+        // and until it matches this exact value the snapshot must not win.
+        eqEdits[id] = (eq, committed)
+        onSetEQ?(eq, id, committed)
+    }
+
+    public func eqEditorDidRequestReset(_ editor: EQEditorView) {
+        guard let id = shownDevice?.id else { return }
+        // One committed action, not ten: the editor has already put its own
+        // controls back to flat.
+        eqEdits[id] = (.flat, true)
+        onSetEQ?(.flat, id, true)
+    }
+}
+
+/// A flipped document view so the form scrolls from the TOP rather than
+/// bottom-gravitating with dead space above the header. File-scoped on purpose
+/// (`GroupCreationSheetController` keeps its own for the same reason).
+private final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
 }

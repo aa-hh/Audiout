@@ -660,6 +660,50 @@ public enum Tokens {
                        light: 0xE0D8C6, lightHighContrast: 0xC4B89E)
         }
 
+        // MARK: Scope instrument (EQ response curve)
+        //
+        // The EQ response curve (`EQResponseCurveView`) is a SCOPE: a dark
+        // screen with a lit trace, the way a hardware analyser looks. Its
+        // three hexes are identical in both appearances on purpose —
+        // instruments never theme (dev/notes/eq-design-board). The view draws
+        // itself under `NSAppearance(named: .darkAqua)`, so these tokens still
+        // resolve live (Increase Contrast reaches them); it is only the
+        // light/dark axis that is deliberately fixed.
+        //
+        // CONTRAST RATIONALE for the whole block — everything that carries
+        // meaning is measured against `scopeGround`, not against `panel`,
+        // because the ground is what it is drawn on: dark `gold` ≈ 10.2:1,
+        // subtle-dial `gold` ≈ 7.1:1, `scopeFlatLine` ≈ 6.0:1,
+        // `scopeBypassLine` ≈ 4.7:1 — all clear the ≥3:1 non-text floor.
+        // The grid and `scopeZeroLine` are GRIDLINES (pure reference, never
+        // the state), so the floor does not apply to them.
+
+        /// The scope's ground — the near-black screen the trace is drawn on.
+        public static var scopeGround: NSColor {
+            warmDynamic(name: "scopeGround", dark: 0x14110C, darkHighContrast: 0x0E0C08,
+                       light: 0x14110C, lightHighContrast: 0x0E0C08)
+        }
+
+        /// The FLAT trace: a neutral hairline at the zero line. Deliberately
+        /// not gold — gold means signal, and flat is the absence of shaping.
+        public static var scopeFlatLine: NSColor {
+            warmDynamic(name: "scopeFlatLine", dark: 0x9C9077, darkHighContrast: 0xB3A78C,
+                       light: 0x9C9077, lightHighContrast: 0xB3A78C)
+        }
+
+        /// The BYPASSED trace: the shape is still drawn, dashed and dimmer
+        /// than flat, so the eye reads "these settings exist but are not
+        /// reaching the air".
+        public static var scopeBypassLine: NSColor {
+            warmDynamic(name: "scopeBypassLine", dark: 0x8A7E68, darkHighContrast: 0xA2957D,
+                       light: 0x8A7E68, lightHighContrast: 0xA2957D)
+        }
+
+        /// The 0 dB reference line across the scope's middle. A gridline, not
+        /// a state: a fixed white wash that reads the same over the ground in
+        /// either appearance.
+        public static var scopeZeroLine: NSColor { NSColor.white.withAlphaComponent(0.16) }
+
         // MARK: Icon-well badge instrument (V6, raw-color elimination pass)
         //
         // `DeviceIconWellView`'s corner edit badge: a dark disc + light rim

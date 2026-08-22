@@ -77,6 +77,45 @@ import Testing
         #expect(updated?.volume == 100, "volume should clamp to 100")
     }
 
+    @Test func setEQEchoesTheSettingsBack() async throws {
+        let backend = makeBackend([Device(id: "a", name: "A", kind: .generic)])
+        let stream = backend.makeEventStream()
+        backend.start()
+        let eq = DeviceEQ(bassDB: 5, balance: -0.25, loudness: true)
+
+        let box = DeviceBox()
+        try await confirmation("eq echoed") { echoed in
+            let task = Task {
+                for await event in stream {
+                    if case .deviceUpdated(let d) = event, d.id == "a" {
+                        await box.set(d); echoed(); break
+                    }
+                }
+            }
+            defer { task.cancel() }
+            try await Task.sleep(nanoseconds: 200_000_000)   // let discovery settle
+            backend.setEQ(eq, for: "a", commit: true)
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask { _ = await task.value }
+                group.addTask { try await Task.sleep(for: .seconds(2)) }
+                try await group.next()
+                group.cancelAll()
+            }
+        }
+        #expect(await box.value?.eq == eq)
+    }
+
+    @Test func setMainOutEQIsRecordedNotApplied() async throws {
+        let backend = makeBackend([Device(id: "a", name: "A", kind: .generic)])
+        _ = try await collect(1, from: backend)
+        #expect(backend.mainOutEQ == .flat)
+
+        backend.setMainOutEQ(DeviceEQ(trebleDB: -3), commit: false)
+        try await Task.sleep(nanoseconds: 200_000_000)
+        #expect(backend.mainOutEQ == DeviceEQ(trebleDB: -3))
+        #expect(backend.devices.allSatisfy { $0.eq.isFlat }, "Main Out EQ is not a per-device setting")
+    }
+
     @Test func setOutputSetSelectsExactlyTheGivenDevices() async throws {
         let backend = makeBackend()
         _ = try await collect(demoFleet.count, from: backend)

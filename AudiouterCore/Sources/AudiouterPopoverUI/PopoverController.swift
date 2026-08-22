@@ -348,6 +348,19 @@ public final class PopoverController: NSObject {
         return view
     }()
 
+    // MARK: The Equalizer door (owner decision 2026-08-22)
+
+    /// The id ``onOpenEqualizer`` passes for Main Audio. A sentinel, never a
+    /// real device id — the whole mix is not a device, but the Main Audio row
+    /// sits in the same stack and offers the same door, so one callback has to
+    /// be able to name either.
+    public static let mainOutEQID = "mainOut"
+
+    /// Open the Equalizer page for this device id or ``mainOutEQID``; wired by
+    /// the app to the Groups screen. The popover carries no tone state and no
+    /// tone controls — it hands the id over and forgets it.
+    public var onOpenEqualizer: ((String) -> Void)?
+
     // MARK: First-mix alignment intercept + wizard (W3/W4)
 
     /// Answers the card (all three actions release the backend's hold-silent;
@@ -3501,6 +3514,12 @@ extension PopoverController: DeviceRowView.Delegate {
         startBTAlignmentWizard(deviceID: row.device.id)
     }
 
+    /// The "Equalizer…" context-menu item (and the row icon, which pops the
+    /// same menu): a deep link, nothing more. The Mixer edits no tone.
+    public func deviceRowDidRequestEqualizer(_ row: DeviceRowView) {
+        onOpenEqualizer?(row.device.id)
+    }
+
     /// Move/stop the single align-by-ear tick (BT-OFFSET-UI): one device at a
     /// time, auto-stopped after ~30 s, and stopped by the popover closing
     /// (the click-away) or by its drawer collapsing. `refreshDeviceRows()`
@@ -3861,6 +3880,12 @@ extension PopoverController: MainOutRowView.Delegate {
         groupController?.setMainOutMuted(muted)
         refreshDeviceRows()
         refreshMainOutRow()
+    }
+
+    /// Main Audio's "Equalizer…" door, addressed by the ``mainOutEQID``
+    /// sentinel because the whole mix has no device id.
+    public func mainOutRowDidRequestEqualizer(_ row: MainOutRowView) {
+        onOpenEqualizer?(Self.mainOutEQID)
     }
 }
 

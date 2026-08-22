@@ -3,6 +3,7 @@
 import Testing
 import AppKit
 @testable import AudiouterCore
+@testable import AudiouterPopoverUI
 @testable import AudiouterSharedUI
 @testable import AudiouterWindowUI
 
@@ -292,13 +293,225 @@ import AppKit
                        "nothing to write through — the glyph stays at the kind default")
     }
 
-    // MARK: View-only hint
+    // MARK: The pane's hint
 
-    @Test func hintIsAMinimalSingleLineViewOnlyNotice() {
+    @Test func hintNamesDescribeAndTune() {
         let detail = DeviceDetailViewController(groupController: makeController())
         detail.show(device: makeDevice())
-        #expect(detail.test_hintText == "Playback is controlled from the Mixer — this page only describes the speaker.")
+        #expect(detail.test_hintText == "Playback is controlled from the Mixer — this page describes and tunes the speaker.")
         #expect(!detail.test_hintText.contains("\n"), "stays a single line")
+    }
+
+    // MARK: The Equalizer section
+
+    /// Loads the view (the Equalizer's delegate and the hint's two alternative
+    /// top constraints are wired in `loadView`) and shows `device`.
+    private func makeLoadedPane(device: Device) -> DeviceDetailViewController {
+        let detail = DeviceDetailViewController(groupController: makeController())
+        _ = detail.view
+        detail.show(device: device)
+        return detail
+    }
+
+    @Test func equalizerSectionIsHiddenOnThisMac() {
+        let detail = makeLoadedPane(device: makeDevice(id: "local", name: "This Mac", kind: .localMac))
+        #expect(!detail.test_eqSectionShown,
+                "the Mac is where the audio comes FROM — there is no send to tune")
+    }
+
+    @Test func equalizerSectionIsShownOnASpeaker() {
+        let detail = makeLoadedPane(device: makeDevice())
+        #expect(detail.test_eqSectionShown)
+        #expect(detail.test_sectionCount == 4,
+                "header + device state + In groups + Equalizer")
+    }
+
+    @Test func bypassSentencesComeFromTheSnapshot() {
+        var device = makeDevice()
+        device.eqBypassReason = .streamBudget
+        let detail = makeLoadedPane(device: device)
+        #expect(detail.test_eqEditor.test_bypassNoteText
+                == "Not applied — too many different EQ settings at once.")
+
+        device.eqBypassReason = .perAppRouting
+        detail.refresh(device: device)
+        #expect(detail.test_eqEditor.test_bypassNoteText
+                == "Not applied — apps are routed directly to this speaker.")
+    }
+
+    @Test func aScrubAppliesAndAMouseUpCommits() {
+        let detail = makeLoadedPane(device: makeDevice(id: "office"))
+        var reported: [(DeviceEQ, String, Bool)] = []
+        detail.onSetEQ = { eq, id, committed in reported.append((eq, id, committed)) }
+
+        detail.test_eqEditor.test_committedGestureOverride = false
+        detail.test_eqEditor.test_dragBass(to: 5)
+        #expect(reported.last?.0.bassDB == 5)
+        #expect(reported.last?.1 == "office")
+        #expect(reported.last?.2 == false)
+
+        detail.test_eqEditor.test_committedGestureOverride = true
+        detail.test_eqEditor.test_dragBass(to: 5)
+        #expect(reported.last?.2 == true)
+    }
+
+    @Test func resetCommitsFlatInOneAction() {
+        let detail = makeLoadedPane(device: makeDevice(id: "office"))
+        detail.test_eqEditor.test_committedGestureOverride = true
+        detail.test_eqEditor.test_dragBass(to: 5)
+
+        var reported: [(DeviceEQ, String, Bool)] = []
+        detail.onSetEQ = { eq, id, committed in reported.append((eq, id, committed)) }
+        detail.test_eqEditor.test_fireResetClick()
+
+        #expect(reported.count == 1, "Reset is ONE action, not one per stage")
+        #expect(reported.last?.0 == .flat)
+        #expect(reported.last?.2 == true)
+    }
+
+    @Test func curveTracksTheEditor() {
+        let detail = makeLoadedPane(device: makeDevice())
+        #expect(detail.test_eqEditor.test_curve.test_plan.state == .flat)
+
+        detail.test_eqEditor.test_committedGestureOverride = true
+        detail.test_eqEditor.test_dragBass(to: 6)
+        #expect(detail.test_eqEditor.test_curve.test_plan.state == .shaped,
+                "the picture and the controls read the same model")
+    }
+
+    // MARK: First load — shown BEFORE mounted (the live order)
+
+    /// Mirrors what `MixerWindowController.showDetail` really does: it calls
+    /// `show(device:)` and swaps the pane in AFTERWARDS, so the first
+    /// `refreshUI()` runs while the hint's two alternative top pins are still
+    /// nil. `makeLoadedPane` forces the view first and can never catch that.
+    /// No window is involved — the pane is laid out at the Groups screen's
+    /// content size directly, so nothing can appear on screen.
+    private func makeShownThenLoadedPane(device: Device) -> DeviceDetailViewController {
+        let detail = DeviceDetailViewController(groupController: makeController())
+        detail.show(device: device)
+        _ = detail.view
+        detail.view.setFrameSize(AppSurfaceController.groupsDefaultContentSize)
+        detail.view.layoutSubtreeIfNeeded()
+        return detail
+    }
+
+    /// The scroll document's laid-out height — what collapses when the hint
+    /// has no top pin to tie the sections to the column's bottom.
+    private func documentHeight(_ detail: DeviceDetailViewController) -> CGFloat {
+        let scroll = detail.view.subviews.compactMap { $0 as? NSScrollView }.first
+        return scroll?.documentView?.frame.height ?? 0
+    }
+
+    @Test func aPaneShownBeforeItIsMountedStillPinsTheHintUnderTheLastSection() {
+        let detail = makeShownThenLoadedPane(device: makeDevice())
+
+        #expect(detail.test_activeHintPinCount == 1,
+                Comment(rawValue: "the hint must have exactly one top pin from the moment the view loads — " +
+                "with none the column's height goes ambiguous"))
+        // The pane's own view is NOT flipped, so "below" is a SMALLER y.
+        #expect(detail.test_hintFrame.maxY <= detail.test_eqSectionFrame.minY,
+                "the hint sits under the Equalizer section, the last one on a speaker")
+
+        let sections = detail.test_headerSectionFrame.height + detail.test_stateSectionFrame.height
+            + detail.test_groupsSectionFrame.height + detail.test_eqSectionFrame.height
+        #expect(documentHeight(detail) > sections,
+                "the document holds the whole stack — a collapsed one is shorter than its own sections")
+    }
+
+    @Test func aThisMacPaneShownBeforeItIsMountedPinsTheHintUnderInGroups() {
+        let detail = makeShownThenLoadedPane(
+            device: makeDevice(id: "local", name: "This Mac", kind: .localMac))
+
+        #expect(detail.test_activeHintPinCount == 1)
+        #expect(!detail.test_eqSectionShown)
+        #expect(detail.test_hintFrame.maxY <= detail.test_groupsSectionFrame.minY,
+                "with the Equalizer gone, In groups is the last section and the hint closes up behind it")
+
+        let sections = detail.test_headerSectionFrame.height + detail.test_stateSectionFrame.height
+            + detail.test_groupsSectionFrame.height
+        #expect(documentHeight(detail) > sections)
+    }
+
+    @Test func theHintPinFollowsTheDeviceInBothDirections() {
+        let detail = makeShownThenLoadedPane(device: makeDevice())
+        #expect(detail.test_hintFrame.maxY <= detail.test_eqSectionFrame.minY)
+
+        detail.show(device: makeDevice(id: "local", name: "This Mac", kind: .localMac))
+        detail.view.layoutSubtreeIfNeeded()
+        #expect(detail.test_activeHintPinCount == 1)
+        #expect(detail.test_hintFrame.maxY <= detail.test_groupsSectionFrame.minY)
+
+        detail.show(device: makeDevice())
+        detail.view.layoutSubtreeIfNeeded()
+        #expect(detail.test_activeHintPinCount == 1)
+        #expect(detail.test_hintFrame.maxY <= detail.test_eqSectionFrame.minY,
+                "Mac → speaker puts the Equalizer section back under the hint")
+    }
+
+    // MARK: The in-flight scrub cache
+
+    @Test func aScrubSurvivesASnapshotAndTheCommitHandsTheTruthBack() {
+        let detail = makeLoadedPane(device: makeDevice(id: "office"))
+
+        // Mid-drag: a snapshot carrying the OLD value must not rewind the slider.
+        detail.test_eqEditor.test_committedGestureOverride = false
+        detail.test_eqEditor.test_dragBass(to: 5)
+        detail.refresh(device: makeDevice(id: "office"))
+        #expect(detail.test_eqEditor.currentEQ.bassDB == 5,
+                "a snapshot arriving mid-gesture can't yank the slider out from under the pointer")
+
+        // Committed: the entry is now AWAITING ITS OWN ECHO. A STALE snapshot
+        // already queued from before the commit — even flat — must not replay
+        // the drag backward; only a snapshot matching the committed value
+        // releases the cache.
+        detail.test_eqEditor.test_committedGestureOverride = true
+        detail.test_eqEditor.test_dragBass(to: 5)
+        var flat = makeDevice(id: "office")
+        flat.eq = .flat
+        detail.refresh(device: flat)
+        #expect(detail.test_eqEditor.currentEQ.bassDB == 5,
+                "a stale snapshot queued before the commit must not replay the drag on the knob")
+
+        // The committed value's OWN echo arrives: it renders (unsurprising —
+        // it already matched) AND releases the cache in the same beat.
+        var echoed = makeDevice(id: "office")
+        echoed.eq = DeviceEQ(bassDB: 5)
+        detail.refresh(device: echoed)
+        #expect(detail.test_eqEditor.currentEQ.bassDB == 5)
+
+        // Proof the cache is actually gone: a LATER flat snapshot now renders
+        // flat, where a still-cached entry would have kept showing 5 forever.
+        detail.refresh(device: flat)
+        #expect(detail.test_eqEditor.currentEQ.bassDB == 0,
+                Comment(rawValue: "kept past the echo the cache lies forever — the pane would show a shaped " +
+                "curve for the rest of the session while the audio stayed flat"))
+    }
+
+    @Test func resetAlsoHandsTheTruthBackToTheSnapshot() {
+        let detail = makeLoadedPane(device: makeDevice(id: "office"))
+        detail.test_eqEditor.test_committedGestureOverride = true
+        detail.test_eqEditor.test_dragBass(to: 5)
+        detail.test_eqEditor.test_fireResetClick()
+
+        // Reset's own committed value is flat — a matching flat echo is what
+        // releases the cache, same rule as any other committed gesture.
+        var flat = makeDevice(id: "office")
+        flat.eq = .flat
+        detail.refresh(device: flat)
+        #expect(detail.test_eqEditor.currentEQ.bassDB == 0)
+
+        var shaped = makeDevice(id: "office")
+        shaped.eq = DeviceEQ(bassDB: 3)
+        detail.refresh(device: shaped)
+        #expect(detail.test_eqEditor.currentEQ.bassDB == 3,
+                "Reset released its cache on the matching echo — a later snapshot is free to render again")
+    }
+
+    @Test func detailPaneScrolls() {
+        let detail = makeLoadedPane(device: makeDevice())
+        #expect(detail.test_hasScrollView,
+                "the Equalizer's Advanced fold exceeds the screen's budget, and the window can't grow (roadmap 039)")
     }
 
     // MARK: Hover scrim headless test hook

@@ -26,6 +26,8 @@ AudiouterProtocol/.build/
 AudiouterCore/.swiftpm/
 dev/audiocap/.build/
 dev/audiocap/.swiftpm/
+ios/AudiouterRemote/ProbeKit/.build/
+ios/AudiouterRemote/ProbeKit/.swiftpm/
 
 # Xcode / SwiftPM local state, in case anyone opens this via Xcode.
 xcuserdata/

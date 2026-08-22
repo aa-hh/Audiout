@@ -35,6 +35,41 @@ import Testing
         #expect(try store().load() == nil)
     }
 
+    // MARK: Measured latencies (roadmap 056 Part A — the wizard's own map)
+
+    @Test func roundTripSavesAndLoadsMeasuredLatencies() throws {
+        let store = store()
+        let latencies: [String: Double] = ["C4-38-75-0E-BF-4A:output": 320,
+                                           "70-99-1C-51-8F-A8:output": 640]
+        try store.saveLatencies(latencies)
+        #expect(try store.loadLatencies() == latencies)
+    }
+
+    /// The two maps are independent: the wizard writes the latency and must
+    /// never disturb the user's trim, or the dismissal record.
+    @Test func latenciesAndTrimsAndDismissalsSurviveEachOther() throws {
+        let store = store()
+        try store.save(["a": 40])
+        try store.saveDismissedUIDs(["b"])
+        try store.saveLatencies(["a": 320])
+        #expect(try store.load() == ["a": 40])
+        #expect(try store.loadDismissedUIDs() == ["b"])
+        #expect(try store.loadLatencies() == ["a": 320])
+
+        try store.save(["a": -10])
+        #expect(try store.loadLatencies() == ["a": 320], "a trim write keeps the measurement")
+    }
+
+    /// Backward compatible: a file written before latencies existed still
+    /// loads, and reads as "nothing measured".
+    @Test func aTrimsOnlyFileStillLoads() throws {
+        let url = scratchDir.appendingPathComponent("bt-sync-trims.json")
+        let payload = #"{"schemaVersion": 1, "trims": {"a": 22}}"#
+        try payload.data(using: .utf8)!.write(to: url)
+        #expect(try store().load() == ["a": 22])
+        #expect(try store().loadLatencies() == nil)
+    }
+
     @Test func newerSchemaReadsAsMissingNotACrash() throws {
         let url = scratchDir.appendingPathComponent("bt-sync-trims.json")
         let payload = #"{"schemaVersion": 99, "trims": {"x": 1}}"#

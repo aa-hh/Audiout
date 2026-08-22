@@ -5,7 +5,7 @@
 // (AVFoundation + Core Audio) written for this project against the shared
 // license-clean `SyncCore.swift` seams. The GPL-headered `SyncedLocalSink.swift`
 // was studied for its architectural SHAPE only — no code was copied from it; the
-// engine wiring, ring, and drift machinery here are re-derived from the plan
+// engine wiring and ring here are re-derived from the plan
 // (`docs/plans/PLAN-UNIVERSAL-SYNC.md` E/F/G) and the spike findings
 // (`dev/notes/bt-spike-findings-2026-08-07.md`). Do not add a GPL header to this
 // file, and do not move GPL-derived code into it.
@@ -68,167 +68,6 @@ enum BTReferenceTimeline {
     }
 }
 
-// MARK: - BT-DRIFT — pacing-clock corrector with the adaptive settle gate
-
-/// Per-device drift correction fed by the device's PACING clock (the host-side
-/// BT stack's `AudioDeviceGetCurrentTime` timeline — NOT the speaker's remote
-/// DAC, which nothing on this Mac can read). Live-verified 2026-08-07: the
-/// pacing clock is brand-dependent — a Sonos Move 2 showed ±5–100 ms jumps for
-/// ~40 s after connect while the stack re-buffered, a Sony XM3 was clean from
-/// second one — so a fixed distrust window is wrong in both directions. This is
-/// the ADAPTIVE settle gate the spike findings call for:
-///
-///  - **Settling (distrust):** the clock is not believed. The correction is
-///    held — at neutral 0 before the first trust, at the last-good value after
-///    it — and nothing is integrated, so a jumpy warm-up can never wind the
-///    loop up.
-///  - **Trust** is earned by being jump-free (per-sample step deviation below
-///    ``jumpThresholdNanos``) for ``settleNanos``. Sony-class devices lock in
-///    ~10 s; Sonos-class devices get the full protection automatically.
-///  - **Any later jump re-enters distrust and re-anchors**: the step is
-///    accepted as a measurement artifact of the stack re-buffering, never
-///    "corrected" by slewing the audio rate to chase it.
-///
-/// While trusted, the accumulated misalignment between the device's pacing
-/// clock and the host clock — minus the correction already applied — feeds the
-/// shared ``PhaseController`` PI loop; its `correctionPpm` output is the
-/// resampler rate the render path consumes (`ratio = 1 + ppm·1e-6`).
-///
-/// Pure and hardware-free: driven by ``ingest(deviceSampleTime:nominalRate:hostNanos:)``
-/// with real or synthetic clock samples. Single-threaded by contract (the
-/// device sink's clock queue); `reset()` only runs with the sampler stopped.
-final class BTDriftCorrector {
-
-    /// A per-sample step deviation at or above this is a jump (the spike saw
-    /// genuine jumps of 5–100 ms; genuine skew accumulates ~0.1 ms/s at 100 ppm,
-    /// far below).
-    static let defaultJumpThresholdNanos: Int64 = 2_000_000
-    /// Jump-free time required before the clock is trusted.
-    static let defaultSettleNanos: Int64 = 10_000_000_000
-
-    enum Trust: Equatable {
-        case settling
-        case trusted
-    }
-
-    private let jumpThresholdNanos: Int64
-    private let settleNanos: Int64
-    /// The shared PI loop, with gains tuned for THIS corrector's ~1 Hz ingest
-    /// cadence (``BTDeviceSink/clockSampleInterval``) rather than the per-render-
-    /// cycle cadence the defaults target. Plant per 1 s update at 44.1–48 kHz:
-    /// loop gain β = rate·1e-6 ≈ 0.044–0.048; Kp = 10 keeps β·Kp ≈ 0.5 (well
-    /// damped) and Ki = 0.6 sits under the real-pole bound β·Kp²/4 ≈ 1.1.
-    /// Deliberately NOT reset on re-anchor: its integrator carries the
-    /// last-good rate estimate across a distrust window, so re-trust resumes
-    /// smoothly instead of re-converging from zero.
-    private let controller: PhaseController
-
-    private(set) var trust: Trust = .settling
-    /// The residual the PI loop last acted on (diagnostic; 0 while settling).
-    private(set) var latestPhaseErrorNanos: Double = 0
-
-    private var lastDeviceNanos: Double?
-    private var lastHostNanos: Int64 = 0
-    private var jumpFreeSinceHostNanos: Int64 = 0
-    private var anchorDeviceNanos: Double = 0
-    private var anchorHostNanos: Int64 = 0
-    /// Content-time adjustment (ns) the applied corrections have already made
-    /// since the anchor — the loop's own actuation, modeled so the measured
-    /// pacing-clock skew is not double-corrected.
-    private var appliedCorrectionNanos: Double = 0
-    private var lastAppliedPpm: Double = 0
-
-    /// The rate correction (ppm) the render path should apply right now.
-    /// Changes only inside a trusted `ingest`; held steady during distrust.
-    var correctionPpm: Double { controller.correctionPpm }
-
-    init(
-        jumpThresholdNanos: Int64 = BTDriftCorrector.defaultJumpThresholdNanos,
-        settleNanos: Int64 = BTDriftCorrector.defaultSettleNanos,
-        controller: PhaseController = PhaseController(
-            kpPpmPerFrame: 10, kiPpmPerFrame: 0.6, maxPpm: 200, slewPpmPerCycle: 25)
-    ) {
-        self.jumpThresholdNanos = jumpThresholdNanos
-        self.settleNanos = settleNanos
-        self.controller = controller
-    }
-
-    /// Back to a fresh, neutral, distrusting state. Called on sink rebuild —
-    /// a device/rate/config change is a new clock context, so the old trust and
-    /// rate estimate are void.
-    func reset() {
-        trust = .settling
-        latestPhaseErrorNanos = 0
-        lastDeviceNanos = nil
-        lastHostNanos = 0
-        jumpFreeSinceHostNanos = 0
-        appliedCorrectionNanos = 0
-        lastAppliedPpm = 0
-        controller.reset()
-    }
-
-    /// Feed one pacing-clock sample; returns the correction (ppm) to apply.
-    /// `deviceSampleTime` is the device's `mSampleTime`, normalized here by
-    /// `nominalRate` onto a nanosecond timeline; `hostNanos` is the paired host
-    /// timestamp (mach ticks converted to ns — both clock paths deliver that).
-    @discardableResult
-    func ingest(deviceSampleTime: Double, nominalRate: Double, hostNanos: Int64) -> Double {
-        guard nominalRate > 0 else { return correctionPpm }
-        let deviceNanos = deviceSampleTime / nominalRate * 1_000_000_000.0
-
-        guard let previousDeviceNanos = lastDeviceNanos else {
-            // First sample: nothing to diff yet; the jump-free clock starts here.
-            lastDeviceNanos = deviceNanos
-            lastHostNanos = hostNanos
-            jumpFreeSinceHostNanos = hostNanos
-            return correctionPpm
-        }
-
-        let hostIntervalNanos = Double(hostNanos &- lastHostNanos)
-        let stepDeviationNanos = (deviceNanos - previousDeviceNanos) - hostIntervalNanos
-        lastDeviceNanos = deviceNanos
-        lastHostNanos = hostNanos
-
-        if abs(stepDeviationNanos) >= Double(jumpThresholdNanos) {
-            // Jump: re-enter distrust and re-anchor. The correction holds at
-            // last-good (or neutral 0 if the clock was never trusted).
-            trust = .settling
-            jumpFreeSinceHostNanos = hostNanos
-            latestPhaseErrorNanos = 0
-            return correctionPpm
-        }
-
-        switch trust {
-        case .settling:
-            if hostNanos &- jumpFreeSinceHostNanos >= settleNanos {
-                trust = .trusted
-                anchorDeviceNanos = deviceNanos
-                anchorHostNanos = hostNanos
-                appliedCorrectionNanos = 0
-                lastAppliedPpm = controller.correctionPpm
-            }
-            return correctionPpm
-
-        case .trusted:
-            // What the render actually applied over the interval just elapsed,
-            // at the correction that prevailed during it.
-            appliedCorrectionNanos += lastAppliedPpm * 1e-6 * hostIntervalNanos
-            let pacingSkewNanos =
-                (deviceNanos - anchorDeviceNanos) - Double(hostNanos &- anchorHostNanos)
-            // Positive misalignment = content running AHEAD of the reference
-            // (device clock fast); the controller convention is error > 0 ⇒
-            // BEHIND ⇒ speed up, so feed the negation.
-            let phaseErrorNanos = -(pacingSkewNanos + appliedCorrectionNanos)
-            latestPhaseErrorNanos = phaseErrorNanos
-            controller.update(
-                phaseErrorNanos: phaseErrorNanos,
-                nsPerFrame: 1_000_000_000.0 / nominalRate)
-            lastAppliedPpm = controller.correctionPpm
-            return controller.correctionPpm
-        }
-    }
-}
-
 // MARK: - Frame ring (delay line)
 
 /// Single-producer / single-consumer wait-free ring of whole interleaved
@@ -239,10 +78,9 @@ final class BTDriftCorrector {
 /// ordering; the counters are masked only for addressing, so full-vs-empty is a
 /// plain subtraction and the whole capacity is usable. The producer never
 /// blocks and never splits a chunk: a chunk that does not fit is dropped
-/// wholesale.
-///
-/// razor: no drop counters yet — BT-FANOUT (Wave 3), which owns the producer
-/// side for real, adds observability there if live use shows drops.
+/// wholesale — and every such drop is counted (``droppedChunks``), which is
+/// what makes "the ring ran dry / the ring overflowed" a fact in the log rather
+/// than a guess.
 final class BTFrameRing {
     private let channelCount: Int
     private let capacityFrames: Int
@@ -250,6 +88,10 @@ final class BTFrameRing {
     private let samples: UnsafeMutablePointer<Float>
     private let writeCounter: UnsafeMutablePointer<Int>   // producer-owned
     private let readCounter: UnsafeMutablePointer<Int>    // consumer-owned
+    /// Chunks the producer dropped for lack of space, monotonic since init. A
+    /// producer-owned word like `writeCounter` — one writer, so no atomics —
+    /// read by whoever is surfacing it (the gate opening).
+    private let dropCounter: UnsafeMutablePointer<Int>    // producer-owned
 
     init(minimumCapacityFrames: Int, channelCount: Int) {
         var capacity = 1
@@ -262,14 +104,32 @@ final class BTFrameRing {
         self.samples.initialize(repeating: 0, count: sampleCount)
         self.writeCounter = UnsafeMutablePointer<Int>.allocate(capacity: 1)
         self.readCounter = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        self.dropCounter = UnsafeMutablePointer<Int>.allocate(capacity: 1)
         writeCounter.initialize(to: 0)
         readCounter.initialize(to: 0)
+        dropCounter.initialize(to: 0)
     }
 
     deinit {
         samples.deallocate()
         writeCounter.deallocate()
         readCounter.deallocate()
+        dropCounter.deallocate()
+    }
+
+    /// Frames written but not yet read. Two aligned word loads, so it is safe
+    /// from any thread; a cycle stale at worst, which every caller allows for.
+    var usedFrames: Int {
+        OSMemoryBarrier()
+        return writeCounter.pointee &- readCounter.pointee
+    }
+
+    /// Chunks dropped since init. Monotonic on purpose: the consumer takes
+    /// differences against its own baseline rather than zeroing a word it does
+    /// not own.
+    var droppedChunks: Int {
+        OSMemoryBarrier()
+        return dropCounter.pointee
     }
 
     /// Producer side; real-time safe (no allocation, no locks). Returns false
@@ -280,7 +140,10 @@ final class BTFrameRing {
         let w = writeCounter.pointee
         OSMemoryBarrier()                       // acquire: see the consumer's counter
         let used = w &- readCounter.pointee
-        guard frameCount <= capacityFrames &- used else { return false }
+        guard frameCount <= capacityFrames &- used else {
+            dropCounter.pointee = dropCounter.pointee &+ 1
+            return false
+        }
         var copied = 0
         while copied < frameCount {
             let dstFrame = (w &+ copied) & frameMask
@@ -385,6 +248,10 @@ final class BTDelayLine {
     /// advances its own word to a value it has already read.
     private let requestedShiftFrames: UnsafeMutablePointer<Int>   // control-thread-owned
     private let appliedShiftFrames: UnsafeMutablePointer<Int>     // consumer-owned
+    /// The ring's drop total as of the last ``takeDroppedChunks()``. Only the
+    /// consumer side touches it, so differencing a producer-owned monotonic
+    /// word needs no atomics on either end.
+    private var dropBaseline = 0
 
     init(minimumCapacityFrames: Int, channelCount: Int, crossfadeFrames: Int) {
         let channels = max(1, channelCount)
@@ -442,11 +309,46 @@ final class BTDelayLine {
         return true
     }
 
+    /// Consumer side: drop up to `frames` of buffered content outright and
+    /// report how many were actually dropped (the ring clamps at the write
+    /// pointer). No crossfade — the one caller is the release gate, where
+    /// nothing has been emitted yet for a splice to be continuous WITH.
+    ///
+    /// Deliberately not routed through ``requestShift(frames:)``: that word has
+    /// exactly one writer, the control thread, and the render thread joining it
+    /// would make two. The ring's own seek is already consumer-owned, which the
+    /// render thread is. Real-time safe — counter arithmetic, no copying.
+    @discardableResult
+    func skipForward(frames: Int) -> Int {
+        frames > 0 ? ring.seek(byFrames: frames) : 0
+    }
+
+    /// How far the read pointer could still travel FORWARD before it reaches
+    /// the write pointer — the buffered frames, less any shift the control
+    /// thread has already asked for and the render thread has not consumed yet
+    /// (a fast scrub's shifts accumulate, so ignoring them would let two
+    /// requests each spend the same room). Control thread ONLY, and advisory:
+    /// the producer is adding frames concurrently, so this is a floor, never an
+    /// over-estimate.
+    func forwardShiftRoomFrames() -> Int {
+        OSMemoryBarrier()                       // acquire: see the consumer's word
+        let unconsumed = requestedShiftFrames.pointee &- appliedShiftFrames.pointee
+        return ring.usedFrames &- unconsumed
+    }
+
+    /// Chunks the producer dropped since the last call. Consumer/control side.
+    func takeDroppedChunks() -> Int {
+        let total = ring.droppedChunks
+        defer { dropBaseline = total }
+        return total &- dropBaseline
+    }
+
     /// Drop everything buffered and any un-consumed shift. Only while neither
     /// thread is active (engine stopped / offline tests) — the ring's contract.
     func reset() {
         ring.reset()
         appliedShiftFrames.pointee = requestedShiftFrames.pointee
+        dropBaseline = ring.droppedChunks
         fadeLength = 0
         fadeIndex = 0
     }
@@ -520,30 +422,29 @@ enum BTDeviceSinkError: Error, CustomStringConvertible {
     }
 }
 
-/// One Bluetooth device's delayed, drift-corrected render endpoint (BT-SINK):
-/// an `AVAudioEngine` pinned to that device via
-/// `outputNode.auAudioUnit.setDeviceID` (spike-proven; pinned BEFORE the first
-/// start), whose `AVAudioSourceNode` stays silent until the reference timeline
-/// reaches `capture_pts + delay`, then drains the ring through the shared
-/// `FractionalResampler` at the rate the ``BTDriftCorrector`` commands.
+/// One Bluetooth device's delayed render endpoint (BT-SINK): an `AVAudioEngine`
+/// pinned to that device via `outputNode.auAudioUnit.setDeviceID` (spike-proven;
+/// pinned BEFORE the first start), whose `AVAudioSourceNode` stays silent until
+/// the reference timeline reaches `capture_pts + delay`, then drains the ring
+/// through the shared `FractionalResampler` at unity rate.
+///
+/// There is no drift correction: A2DP sinks servo to the host delivery rate, and
+/// measured inter-speaker drift was −0.02 ppm (≈ 0 over 30 minutes) on
+/// 2026-08-12, so a fixed trim holds for a whole session.
 ///
 /// NEVER install a tap on `engine.outputNode` — that raises an uncatchable
 /// AVFAudio exception at install time (spike gotcha, live-verified); if a tap
 /// is ever needed here, it goes on `mainMixerNode`.
 ///
 /// `@unchecked Sendable`: producer (enqueue) and consumer (render) meet only
-/// through the wait-free ``BTFrameRing``; the scalar gate/drift state is behind
+/// through the wait-free ``BTFrameRing``; the scalar gate state is behind
 /// `stateLock`, taken non-blockingly on the render path. Graph mutation is
-/// serialized on `graphQueue`; pacing-clock sampling on `clockQueue`.
+/// serialized on `graphQueue`.
 ///
 /// Lock order: a device's `stateLock` may take the manager's table lock (the
 /// one-time anchor samples `delayNanosProvider`); the manager must NEVER call
 /// into a sink while holding its table lock.
 final class BTDeviceSink: @unchecked Sendable {
-
-    /// Pacing-clock sampling cadence. The ``BTDriftCorrector`` PI gains are
-    /// tuned for this; retune them if this ever changes.
-    static let clockSampleInterval: TimeInterval = 1.0
 
     let deviceID: AudioObjectID
     let deviceUID: String
@@ -567,9 +468,43 @@ final class BTDeviceSink: @unchecked Sendable {
     /// anchor used instead of nudging the old value by hand.
     private var anchorPtsNanos: Int64 = 0
     private var targetReleaseNanos: Int64 = 0
-    /// Published by the clock sampler; snapshotted by the render path each
-    /// cycle under the same non-blocking `stateLock.try()` as the gate.
-    private var driftPpm: Double = 0
+    /// The pts→playout mapping the session is actually running on:
+    /// `targetReleaseNanos − anchorPtsNanos`, kept as its own field so a rebuild
+    /// can carry it (below) instead of re-deriving it from a provider whose
+    /// inputs moved. Maintained at the anchor and by ``applyTrimDelta(ms:)``.
+    private var sessionDelayNanos: Int64 = 0
+    /// Set when a `config_change` rebuild tore down an anchored session: the
+    /// next anchor uses THIS delay instead of asking the provider, so adding or
+    /// removing a speaker cannot shift an alignment the user has already made
+    /// by ear (spec Part 3a). Every other rebuild cause clears it — those ARE
+    /// new timeline contexts and must re-derive.
+    private var pendingCarriedDelayNanos: Int64?
+    /// A consumed carry waiting to be logged. `enqueue` runs on the capture
+    /// tap's real-time thread, where `Telemetry.log`'s dictionary and
+    /// `String(format:)` allocations could overrun the tap deadline at exactly
+    /// the moment the carry exists to protect — so the anchor only records the
+    /// fact here and `graphQueue` emits it.
+    private var carryToLogNanos: Int64?
+    /// What the release gate did when it opened, waiting to be logged. Same
+    /// reason as `carryToLogNanos`, one thread stricter: this one is recorded on
+    /// the RENDER thread, which must not allocate, format or log — so the
+    /// numbers are stashed here and `graphQueue` emits them.
+    private struct ReleaseRecord {
+        let overshootNanos: Int64
+        let caughtUpFrames: Int
+        let partial: Bool
+        /// Producer chunks dropped since the previous gate opening — the ring's
+        /// overflow counter, surfaced on the same once-per-gate cadence.
+        let droppedChunks: Int
+    }
+    private var releaseToLog: ReleaseRecord?
+
+    /// How close a forward seek may bring the read pointer to the write
+    /// pointer. A forward seek IS how a larger measured latency lands, and one
+    /// that reaches the write pointer leaves the ring dry with no way back —
+    /// the wizard's permanent silence (roadmap 056). 100 ms is a few render
+    /// cycles' worth of headroom, well below the smallest reference.
+    static let seekSafetyMarginMs: Double = 100
 
     // Engine (all mutation on `graphQueue`).
     private let graphQueue: DispatchQueue
@@ -589,27 +524,13 @@ final class BTDeviceSink: @unchecked Sendable {
     private let scratch: UnsafeMutablePointer<Float>
     private let scratchCapacity: Int
 
-    // Pacing clock (BT-DRIFT). Sampling on `clockQueue`; the IOProc fallback
-    // follows the spike's lock discipline: `installLock` guards IOProc
-    // create/destroy, `clockLock` guards the three fields the HAL's real-time
-    // block writes. DISTINCT locks on purpose — the RT block takes only
-    // `clockLock`, so holding `installLock` across `AudioDeviceStart` (which
-    // may fire the block before returning) can never deadlock against it.
-    private let clockQueue: DispatchQueue
-    private var clockTimer: DispatchSourceTimer?
+    /// The device's live nominal sample rate, re-read on every (re)start. Only
+    /// the HFP-collapse detection below reads it — there is no drift loop.
     private var nominalRate: Double
     /// R-A2DP/HFP: `true` while the device's nominal rate reads narrowband
     /// (≤ 24 kHz — the mic-open HFP collapse). Set on every (re)start from the
     /// live rate; the rate listener's rebuild is what refreshes it both ways.
     private(set) var hfpDegraded = false
-    private let driftCorrector: BTDriftCorrector
-    private var lastLoggedTrust: BTDriftCorrector.Trust = .settling
-    private let installLock = NSLock()
-    private let clockLock = NSLock()
-    private var timingIOProcID: AudioDeviceIOProcID?
-    private var fallbackSampleTime: Double = 0
-    private var fallbackHostNanos: Int64 = 0
-    private var fallbackValid = false
 
     init(
         deviceID: AudioObjectID,
@@ -630,8 +551,6 @@ final class BTDeviceSink: @unchecked Sendable {
         self.nominalRate = renderSampleRate
         self.graphQueue = DispatchQueue(label: "com.audiouter.btsink.graph.\(deviceUID)")
         self.listenerQueue = DispatchQueue(label: "com.audiouter.btsink.listener.\(deviceUID)")
-        self.clockQueue = DispatchQueue(label: "com.audiouter.btsink.clock.\(deviceUID)")
-        self.driftCorrector = BTDriftCorrector()
 
         // The delay line must hold the full delay's worth of pre-roll (the
         // BT-only buffer or the ~2 s AirPlay presentation delay) AND, behind
@@ -679,10 +598,9 @@ final class BTDeviceSink: @unchecked Sendable {
     }
 
     /// Tear down and (if the sink was running) rebuild against the device's
-    /// current configuration, resetting THIS device's drift state — a config
-    /// change or nominal-rate renegotiation (the silent-tap bug family applied
-    /// to BT: a rebuilt route keeps "working" while the timeline it renders on
-    /// has moved) voids the session anchor AND the pacing-clock trust.
+    /// current configuration — a config change or nominal-rate renegotiation
+    /// (the silent-tap bug family applied to BT: a rebuilt route keeps "working"
+    /// while the timeline it renders on has moved) voids the session anchor.
     func requestRebuild(cause: String) {
         graphQueue.async { self.rebuildLocked(cause: cause) }
     }
@@ -690,7 +608,7 @@ final class BTDeviceSink: @unchecked Sendable {
     /// This device's render gain (W3 hold-silent + first-mix intercept):
     /// applied to `mainMixerNode.outputVolume`, the stock AVAudioEngine level
     /// stage between the source node and the pinned output — so 0 keeps the
-    /// whole session (anchor, delay gate, drift loop) running while the
+    /// whole session (anchor, delay gate) running while the
     /// speaker stays silent, and releasing the hold is a glitch-free property
     /// write, not a rebuild. Stored so a rebuild's fresh `startLocked` pass
     /// re-applies it.
@@ -741,24 +659,42 @@ final class BTDeviceSink: @unchecked Sendable {
         running = engine.isRunning
         guard running else { throw BTDeviceSinkError.engineNotRunning }
         installEventListenersLocked()
-        startClockSamplerLocked()
     }
 
-    private func stopLocked() {
-        stopClockSamplerLocked()
-        teardownTimingIOProc()
+    private func stopLocked(carryDelay: Bool = false) {
         removeEventListenersLocked()
         if running || engine.isRunning {
             sourceNode?.reset()
             engine.stop()
         }
         running = false
-        clearSessionStateLocked()
+        // Anchored, i.e. the session was actually handed audio — a sink that
+        // never produced has no ring history worth a line.
+        if stateLock.withLock({ anchored }) {
+            // The OTHER moment the ring's overflow count is worth knowing.
+            // Surfaced only at gate openings it never reached a wizard run's log
+            // at all (live report, 2026-08-22): a run has exactly one gate
+            // opening and it is at the start, so every drop after it went
+            // unreported. Every `stopLocked` caller — `stop()`, `rebuildLocked`,
+            // `deinit` — is already off the render and tap threads, which is the
+            // whole reason the gate's own line has to be stashed and posted
+            // later and this one does not.
+            Telemetry.log(.localPlayback, "bt_sink_ring_drops", [
+                "uid": deviceUID,
+                "chunks": String(delayLine.takeDroppedChunks()),
+                "at": "session_end",
+            ])
+        }
+        clearSessionStateLocked(carryDelay: carryDelay)
     }
 
     private func rebuildLocked(cause: String) {
         let wasRunning = running
-        stopLocked()
+        // Part 3a: a lineup change (`config_change`) is the SAME timeline with a
+        // different set of speakers on it, so the session's pts→playout mapping
+        // survives it. Every other cause is a genuinely new context and
+        // re-derives from the provider.
+        stopLocked(carryDelay: cause == "config_change")
         Telemetry.log(.localPlayback, "bt_sink_rebuild", ["uid": deviceUID, "cause": cause])
         guard wasRunning else { return }
         do {
@@ -783,22 +719,46 @@ final class BTDeviceSink: @unchecked Sendable {
     /// whole time the Mac is silent — see ``BTSyncedSink/anchoredDeviceUIDs()``.
     var hasAnchored: Bool { stateLock.withLock { anchored } }
 
-    /// Void the session (anchor, ring, resampler) AND the drift state. The
-    /// render thread is stopped by every caller (engine down), so resetting the
-    /// render-owned resampler is safe; the clock sampler is likewise stopped,
-    /// so resetting the corrector is exclusive.
-    private func clearSessionStateLocked() {
+    /// Test seam: the delay (ns) the CURRENT session actually anchored on, read
+    /// straight off the gate rather than off the bookkeeping field, so a carry
+    /// that failed to reach `targetReleaseNanos` cannot pass.
+    var test_anchoredDelayNanos: Int64 {
+        stateLock.withLock { targetReleaseNanos &- anchorPtsNanos }
+    }
+
+    /// Test seam: block until any `requestRebuild` queued so far has run.
+    func test_waitForPendingRebuild() { graphQueue.sync {} }
+
+    /// Void the session (anchor, ring, resampler). The render thread is stopped
+    /// by every caller (engine down), so resetting the render-owned resampler is
+    /// safe.
+    ///
+    /// `carryDelay` stashes the session's delay for the next anchor to reuse
+    /// (Part 3a). Stashing and clearing happen in ONE `stateLock` critical
+    /// section on purpose: `enqueue` runs concurrently on the tap thread and may
+    /// re-anchor the instant `anchored` clears, so a two-step read-then-clear
+    /// could hand that anchor the provider's value instead of the carried one.
+    private func clearSessionStateLocked(carryDelay: Bool = false) {
         stateLock.withLock {
+            // A carrying cause only OVERWRITES the stash when there is a live
+            // session to take the delay from; back-to-back `config_change`
+            // rebuilds with no enqueue in between (paused music, or the
+            // multi-fire `AVAudioEngineConfigurationChange` a single route
+            // change produces) find `anchored` already false and must keep the
+            // first rebuild's stash rather than drop the alignment.
+            if carryDelay {
+                if anchored { pendingCarriedDelayNanos = sessionDelayNanos }
+            } else {
+                pendingCarriedDelayNanos = nil
+            }
             anchored = false
             released = false
             anchorPtsNanos = 0
             targetReleaseNanos = 0
-            driftPpm = 0
+            sessionDelayNanos = 0
         }
         delayLine.reset()
         resampler.reset()
-        driftCorrector.reset()
-        lastLoggedTrust = .settling
     }
 
     // MARK: Producer (capture → delay line)
@@ -812,17 +772,84 @@ final class BTDeviceSink: @unchecked Sendable {
     /// sink's rate/channel layout is the caller's job (BT-FANOUT).
     func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {
         guard frameCount > 0 else { return }
+        var carriedDelayNanos: Int64?
+        var hasReleaseToLog = false
         if stateLock.try() {
             if !anchored {
                 anchored = true
                 anchorPtsNanos = SyncTiming.monotonicNanos(pts)
+                carriedDelayNanos = pendingCarriedDelayNanos
+                pendingCarriedDelayNanos = nil
+                // Only a real carry overwrites the pending line. A plain
+                // anchor must not clobber a stashed record whose emit block
+                // has not run yet — that would drop the line the live check
+                // reads.
+                if carriedDelayNanos != nil { carryToLogNanos = carriedDelayNanos }
+                let delayNanos = carriedDelayNanos ?? delayNanosProvider()
+                sessionDelayNanos = delayNanos
                 targetReleaseNanos = SyncTiming.targetReleaseMonotonicNanos(
                     anchorPtsNanos: anchorPtsNanos,
-                    totalDelayNanos: delayNanosProvider())
+                    totalDelayNanos: delayNanos)
             }
+            // The render thread cannot hand its own record to `graphQueue`
+            // (dispatch allocates), so the producer — which is here every
+            // buffer anyway, and already takes this lock — posts it instead.
+            hasReleaseToLog = releaseToLog != nil
             stateLock.unlock()
         }
         delayLine.write(interleavedFrames: interleavedFrames, frameCount: frameCount)
+        if carriedDelayNanos != nil || hasReleaseToLog {
+            // Once per lineup change / once per gate opening, never per buffer,
+            // and never ON this thread — see `carryToLogNanos`.
+            graphQueue.async { [weak self] in
+                self?.emitPendingCarryTelemetry()
+                self?.emitPendingReleaseTelemetry()
+            }
+        }
+    }
+
+    /// Emit the carry line for a carry the anchor consumed. `graphQueue` — off
+    /// the tap's real-time thread. Also drained by `test_waitForPendingRebuild`.
+    private func emitPendingCarryTelemetry() {
+        guard let carriedDelayNanos = stateLock.withLock({
+            defer { carryToLogNanos = nil }
+            return carryToLogNanos
+        }) else { return }
+        // This is the line the live check reads to confirm the alignment
+        // survived the rebuild.
+        Telemetry.log(.localPlayback, "bt_sink_anchor_carried", [
+            "uid": deviceUID,
+            "delayMs": String(format: "%.1f", Double(carriedDelayNanos) / 1_000_000),
+        ])
+    }
+
+    /// Emit the release-gate line for a gate that has opened. `graphQueue` —
+    /// off the render thread that recorded it, for the same reason
+    /// `carryToLogNanos` exists.
+    ///
+    /// Emitted for a CLEAN start too (`overshootMs` 0). A zero line is the
+    /// evidence that the session's engine start did not eat into the delay;
+    /// without it, "no line" would be indistinguishable from "never released".
+    private func emitPendingReleaseTelemetry() {
+        guard let record = stateLock.withLock({
+            defer { releaseToLog = nil }
+            return releaseToLog
+        }) else { return }
+        Telemetry.log(.localPlayback, "bt_sink_release_overshoot", [
+            "uid": deviceUID,
+            "overshootMs": String(format: "%.1f", Double(record.overshootNanos) / 1_000_000),
+            "caughtUpMs": String(
+                format: "%.1f", Double(record.caughtUpFrames) / renderSampleRate * 1_000),
+            "partial": record.partial ? "1" : "0",
+        ])
+        // Its own line, on the same once-per-gate cadence and for the same
+        // reason a zero overshoot is worth printing: "0" is the evidence the
+        // producer kept up, which "no line at all" could never be.
+        Telemetry.log(.localPlayback, "bt_sink_ring_drops", [
+            "uid": deviceUID,
+            "chunks": String(record.droppedChunks),
+            "at": "gate_open",
+        ])
     }
 
     /// Apply a live trim change of `deltaMs` (positive = this device plays
@@ -843,11 +870,28 @@ final class BTDeviceSink: @unchecked Sendable {
     ///    Hence the negation. (Plan trap 4.1: this is a 50/50 that compiles
     ///    either way — `positiveTrimSeeksTheReadPointerBackward` pins it.)
     ///
+    /// A SHORTER delay seeks the read pointer forward instead, and that
+    /// direction has a floor: run it into the write pointer and the ring is dry
+    /// with nothing left to play and no way back. The move is clamped
+    /// ``seekSafetyMarginMs`` short of the write pointer and the clamp is
+    /// logged (`bt_sink_seek_clamped`) — the caller asking for more than the
+    /// ring holds is the bug, and silently obeying it is what made a wizard
+    /// trial kill the speaker for the rest of the session.
+    ///
     /// Deliberately does NOT run `clearSessionStateLocked`: a seek is not a new
-    /// clock context, so the drift corrector keeps the rate it has learned
-    /// (plan trap 4.3).
+    /// session, so the anchor, the ring's contents and the resampler all stay
+    /// exactly as they are (plan trap 4.3).
     func applyTrimDelta(ms deltaMs: Double) {
-        let frames = Int((deltaMs / 1_000 * renderSampleRate).rounded())
+        let requestedFrames = Int((deltaMs / 1_000 * renderSampleRate).rounded())
+        // Negative delta = shorter delay = FORWARD seek, the direction that can
+        // empty the ring. Computed before the lock: both reads are lock-free
+        // counter loads, and the pre-release branch below ignores the result.
+        let marginFrames = Int((Self.seekSafetyMarginMs / 1_000 * renderSampleRate).rounded())
+        let frames = requestedFrames < 0
+            ? -Swift.min(-requestedFrames,
+                         Swift.max(0, delayLine.forwardShiftRoomFrames() - marginFrames))
+            : requestedFrames
+        let appliedMs = Double(frames) / renderSampleRate * 1_000
         stateLock.lock()
         let isAnchored = anchored, hasReleased = released
         if isAnchored, !hasReleased {
@@ -855,11 +899,33 @@ final class BTDeviceSink: @unchecked Sendable {
             // and the anchor can never drift apart. Taking `tableLock` (inside
             // the provider) under `stateLock` is the sanctioned nesting — the
             // manager drops its table lock before calling in here.
+            let delayNanos = delayNanosProvider()
+            sessionDelayNanos = delayNanos
             targetReleaseNanos = SyncTiming.targetReleaseMonotonicNanos(
-                anchorPtsNanos: anchorPtsNanos, totalDelayNanos: delayNanosProvider())
+                anchorPtsNanos: anchorPtsNanos, totalDelayNanos: delayNanos)
+        } else if isAnchored {
+            // Released: the seek below IS the delay change, so record it here
+            // too — a later `config_change` carry must reflect the trims the
+            // user has made since the anchor. The APPLIED move, not the asked
+            // one: a clamped seek that booked the full delta would leave the
+            // session's mapping describing audio the ring never moved.
+            sessionDelayNanos &+= Int64((appliedMs * 1_000_000).rounded())
         }
         stateLock.unlock()
-        guard isAnchored, hasReleased, frames != 0 else { return }
+        guard isAnchored, hasReleased else { return }
+        if frames != requestedFrames {
+            // Off the control queue — the queue that owns every sink operation
+            // is not the place to format and write a log line.
+            graphQueue.async { [weak self] in
+                guard let self else { return }
+                Telemetry.log(.localPlayback, "bt_sink_seek_clamped", [
+                    "uid": self.deviceUID,
+                    "requestedMs": String(format: "%.1f", deltaMs),
+                    "appliedMs": String(format: "%.1f", appliedMs),
+                ])
+            }
+        }
+        guard frames != 0 else { return }
         delayLine.requestShift(frames: -frames)
     }
 
@@ -912,7 +978,7 @@ final class BTDeviceSink: @unchecked Sendable {
     /// interleaved frames for a cycle starting at `cycleStartMonotonicNanos`
     /// and reports whether any real audio was emitted. Silent (and
     /// non-draining) until the gate opens at the anchored target; after that,
-    /// the ring drains through the resampler at the drift-commanded rate.
+    /// the ring drains through the resampler at unity rate.
     @discardableResult
     func renderInterleaved(
         into out: UnsafeMutableBufferPointer<Float>,
@@ -926,7 +992,10 @@ final class BTDeviceSink: @unchecked Sendable {
         base.update(repeating: 0, count: frameCount * channelCount)
 
         var plan = SyncTiming.RenderPlan(silentFrames: frameCount, releasesThisCycle: false)
-        var ratio = 1.0
+        // A2DP sinks servo to the host delivery rate — measured inter-speaker
+        // drift is ~0 over 30 minutes (2026-08-12), so there is no rate
+        // correction to apply and the resampler runs at unity.
+        let ratio = 1.0
         guard stateLock.try() else { return false }   // no snapshot → silent cycle
         if anchored {
             if released {
@@ -937,9 +1006,11 @@ final class BTDeviceSink: @unchecked Sendable {
                     frameCount: frameCount,
                     sampleRate: renderSampleRate,
                     targetReleaseMonotonicNanos: targetReleaseNanos)
-                if plan.releasesThisCycle { released = true }
+                if plan.releasesThisCycle {
+                    released = true
+                    catchUpToTargetLocked(cycleStartMonotonicNanos: cycleStartMonotonicNanos)
+                }
             }
-            ratio = 1.0 + driftPpm * 1e-6
         }
         stateLock.unlock()
         guard plan.releasesThisCycle else { return false }
@@ -953,6 +1024,36 @@ final class BTDeviceSink: @unchecked Sendable {
             self.delayLine.readFrame(into: frame)
         }
         return produced > 0
+    }
+
+    /// The gate has just opened; make the first frame released the frame that
+    /// is due NOW rather than the oldest one in the ring.
+    ///
+    /// The producer anchors on the first captured buffer and never waits for
+    /// the engine, so the two can be far apart: an A2DP `engine.start()` can
+    /// take well over half a second, and every rebuild (`config_change`,
+    /// `composition_change`, `wizard_feed`) pays it again. When that start runs
+    /// past `targetReleaseNanos`, the first cycle the render thread ever sees is
+    /// already `overshoot` LATE — and the ring is a plain FIFO with no catch-up,
+    /// so releasing its oldest frame here would make the effective delay
+    /// "however long the engine took to start", permanently, for the whole
+    /// session. Skipping the overshoot's worth of frames keeps playout pts-true.
+    ///
+    /// A ring holding less than the overshoot releases what it has (`partial`):
+    /// it is empty rather than stale, so it goes pts-true on its own as the
+    /// producer refills it.
+    ///
+    /// Called with `stateLock` HELD, on the render thread. The skip is counter
+    /// arithmetic only — no copying, no allocation, no second lock — and doing
+    /// it inside the same critical section is what lets a thread that may never
+    /// block on this lock stash a COMPLETE telemetry record in one take.
+    private func catchUpToTargetLocked(cycleStartMonotonicNanos: Int64) {
+        let overshootNanos = max(0, cycleStartMonotonicNanos &- targetReleaseNanos)
+        let wanted = Int((Double(overshootNanos) / 1_000_000_000 * renderSampleRate).rounded())
+        let skipped = delayLine.skipForward(frames: wanted)
+        releaseToLog = ReleaseRecord(
+            overshootNanos: overshootNanos, caughtUpFrames: skipped, partial: skipped < wanted,
+            droppedChunks: delayLine.takeDroppedChunks())
     }
 
     // MARK: Rebuild triggers (config change / nominal-rate renegotiation)
@@ -987,103 +1088,6 @@ final class BTDeviceSink: @unchecked Sendable {
         }
     }
 
-    // MARK: Pacing-clock sampling (BT-DRIFT)
-
-    private func startClockSamplerLocked() {
-        guard clockTimer == nil else { return }
-        let timer = DispatchSource.makeTimerSource(queue: clockQueue)
-        timer.schedule(
-            deadline: .now() + Self.clockSampleInterval,
-            repeating: Self.clockSampleInterval,
-            leeway: .milliseconds(100))
-        timer.setEventHandler { [weak self] in self?.sampleClockTick() }
-        timer.resume()
-        clockTimer = timer
-    }
-
-    private func stopClockSamplerLocked() {
-        guard let timer = clockTimer else { return }
-        timer.cancel()
-        clockTimer = nil
-        // Drain any in-flight tick so corrector/nominalRate mutation after this
-        // point is exclusive.
-        clockQueue.sync {}
-    }
-
-    private func sampleClockTick() {
-        guard let sample = readPacingClock() else { return }
-        let ppm = driftCorrector.ingest(
-            deviceSampleTime: sample.sampleTime,
-            nominalRate: nominalRate,
-            hostNanos: sample.hostNanos)
-        let trust = driftCorrector.trust
-        if trust != lastLoggedTrust {
-            lastLoggedTrust = trust
-            Telemetry.log(.localPlayback, "bt_drift_trust", [
-                "uid": deviceUID,
-                "state": trust == .trusted ? "trusted" : "settling",
-                "ppm": String(format: "%.1f", ppm),
-            ])
-        }
-        stateLock.withLock { driftPpm = ppm }
-    }
-
-    /// Query-first read of the device's pacing clock: `AudioDeviceGetCurrentTime`
-    /// worked passively on real hardware (Sonos, Sony — spike); if it refuses,
-    /// lazily attach a timing-only IOProc whose block records the HAL's own
-    /// timestamps, and read the latest recorded pair.
-    private func readPacingClock() -> (sampleTime: Double, hostNanos: Int64)? {
-        var ts = AudioTimeStamp()
-        if AudioDeviceGetCurrentTime(deviceID, &ts) == noErr,
-           ts.mFlags.contains(.sampleTimeValid), ts.mFlags.contains(.hostTimeValid) {
-            return (ts.mSampleTime, Self.machNanos(fromHostTime: ts.mHostTime))
-        }
-        ensureTimingIOProc()
-        clockLock.lock()
-        defer { clockLock.unlock() }
-        guard fallbackValid else { return nil }
-        return (fallbackSampleTime, fallbackHostNanos)
-    }
-
-    private func ensureTimingIOProc() {
-        installLock.lock()
-        defer { installLock.unlock() }
-        guard timingIOProcID == nil else { return }
-        var procID: AudioDeviceIOProcID?
-        let createStatus = AudioDeviceCreateIOProcIDWithBlock(&procID, deviceID, nil) {
-            [weak self] inNow, _, _, _, _ in
-            // HAL REAL-TIME THREAD: two number stores under clockLock — no
-            // allocation, no logging, no other lock.
-            guard let self else { return }
-            let now = inNow.pointee
-            guard now.mFlags.contains(.sampleTimeValid), now.mFlags.contains(.hostTimeValid) else { return }
-            let nanos = Self.machNanos(fromHostTime: now.mHostTime)
-            self.clockLock.lock()
-            self.fallbackSampleTime = now.mSampleTime
-            self.fallbackHostNanos = nanos
-            self.fallbackValid = true
-            self.clockLock.unlock()
-        }
-        guard createStatus == noErr, let procID else { return }
-        guard AudioDeviceStart(deviceID, procID) == noErr else {
-            _ = AudioDeviceDestroyIOProcID(deviceID, procID)
-            return
-        }
-        timingIOProcID = procID
-    }
-
-    private func teardownTimingIOProc() {
-        installLock.lock()
-        defer { installLock.unlock() }
-        guard let procID = timingIOProcID else { return }
-        _ = AudioDeviceStop(deviceID, procID)
-        _ = AudioDeviceDestroyIOProcID(deviceID, procID)
-        timingIOProcID = nil
-        clockLock.lock()
-        fallbackValid = false
-        clockLock.unlock()
-    }
-
     // MARK: Core Audio property helpers
 
     private static let nominalRateAddress = AudioObjectPropertyAddress(
@@ -1111,20 +1115,6 @@ final class BTDeviceSink: @unchecked Sendable {
         else { return nil }
         return transport
     }
-
-    /// mach host ticks → nanoseconds (mach-absolute timescale, signed so
-    /// interval math stays plain). Both pacing-clock paths deliver host times
-    /// through this one conversion, so the corrector diffs one time axis.
-    private static func machNanos(fromHostTime hostTime: UInt64) -> Int64 {
-        let timebase = cachedTimebase
-        return Int64(bitPattern: hostTime &* UInt64(timebase.numer) / UInt64(max(1, timebase.denom)))
-    }
-
-    private static let cachedTimebase: mach_timebase_info_data_t = {
-        var tb = mach_timebase_info_data_t()
-        mach_timebase_info(&tb)
-        return tb
-    }()
 }
 
 // MARK: - Manager (BT-SINK: the N-instance owner)
@@ -1132,7 +1122,7 @@ final class BTDeviceSink: @unchecked Sendable {
 /// The N-instance Bluetooth sink manager: one ``BTDeviceSink`` per selected BT
 /// device, all fed the SAME captured PCM+pts (`enqueue` fans out), each delayed
 /// to the current reference timeline (``BTReferenceTimeline``) with its own
-/// offset/trim and its own drift loop.
+/// offset/trim.
 ///
 /// Feeding it from the whole-system capture and driving it from selection
 /// transitions is BT-FANOUT/BT-BACKEND's partition
@@ -1151,11 +1141,17 @@ final class BTSyncedSink: @unchecked Sendable {
         let uid: String
     }
 
-    /// BT-only reference: the small fixed scheduling buffer ahead of the Mac
-    /// `hostTime` timeline. 500 ms clears the real-world BT output-latency
-    /// spread (~100–400 ms), so per-device offsets keep their full relative
+    /// BT-only reference: the scheduling buffer ahead of the Mac `hostTime`
+    /// timeline this manager STARTS on. 500 ms clears the typical real-world BT
+    /// output-latency spread, so per-device offsets keep their full relative
     /// effect without hitting the zero clamp; latency is a non-goal (music, not
     /// lip-sync — Decision 1).
+    ///
+    /// It is a FLOOR, not the whole answer: a speaker whose measured latency is
+    /// larger than the buffer cannot be fed early enough to reach the group, so
+    /// ``NativeBackend`` raises the reference past the slowest known device
+    /// (and again, higher still, for the duration of a wizard run) through
+    /// ``setBTOnlyBufferMs(_:)``.
     static let defaultBTOnlyBufferMs = 500
 
     /// Internal (not `private`) — ``SyncedLocalPCMSink``'s requirement: the
@@ -1163,7 +1159,8 @@ final class BTSyncedSink: @unchecked Sendable {
     /// `enqueue` (identity at the default airplay rate).
     let renderSampleRate: Double
     private let channelCount: Int
-    private let btOnlyBufferMs: Int
+    /// Guarded by `tableLock` — see ``setBTOnlyBufferMs(_:)``.
+    private var btOnlyBufferMs: Int
     /// The LIVE AirPlay presentation delay (`currentPresentationDelayMs()` in
     /// production — plan risk R4 forbids a hardcoded copy). Sampled per session
     /// anchor via each sink's delay provider.
@@ -1256,15 +1253,56 @@ final class BTSyncedSink: @unchecked Sendable {
         for sink in sinks { sink.requestRebuild(cause: "composition_change") }
     }
 
-    /// The settable per-device output-latency figure (ms) — the UI wave
-    /// persists it (keyed by device UID) later.
-    func setOffsetMs(_ ms: Int, forDeviceUID uid: String) {
-        let sink = tableLock.withLock { () -> BTDeviceSink? in
-            guard offsetMsByUID[uid] != ms else { return nil }
-            offsetMsByUID[uid] = ms
-            return sinksByUID[uid]
+    /// Move the BT-only reference timeline. Every sink's delay is measured from
+    /// it, so this re-anchors them all through the SAME path a composition
+    /// change uses — the reference moved, which is exactly what
+    /// `composition_change` means, and it is deliberately not a new rebuild
+    /// kind. No-op with AirPlay present (the presentation delay is the
+    /// reference then), and a same-value write costs nothing.
+    func setBTOnlyBufferMs(_ ms: Int) {
+        let sinks = tableLock.withLock { () -> [BTDeviceSink] in
+            guard btOnlyBufferMs != ms else { return [] }
+            btOnlyBufferMs = ms
+            return composition.airPlayPresent ? [] : Array(sinksByUID.values)
         }
-        sink?.requestRebuild(cause: "offset_change")
+        for sink in sinks { sink.requestRebuild(cause: "composition_change") }
+    }
+
+    /// Rebuild every live sink under `cause`, so the next captured buffer
+    /// re-anchors it against a fresh delay. The alignment wizard's feed handoff
+    /// is the caller (`cause: "wizard_feed"`), on both edges of its run.
+    func reanchorAll(cause: String) {
+        let sinks = tableLock.withLock { Array(sinksByUID.values) }
+        for sink in sinks { sink.requestRebuild(cause: cause) }
+    }
+
+    /// The per-device MEASURED output latency (ms) — how late this speaker
+    /// plays on its own, so a LARGER value feeds it EARLIER
+    /// (`SyncTiming.totalDelayNanos` subtracts it). The alignment wizard
+    /// measures it and ``BTTrimStore`` persists it per device UID.
+    ///
+    /// Applied LIVE, exactly like ``setTrimMs(_:forDeviceUID:)`` and for the
+    /// same reason: latency and trim are the same linear term in the delay
+    /// (`reference − latency + trim`), so a change is a move of the read
+    /// position, never a new session. The wizard pushes one of these per trial
+    /// — a rebuild each time would drop the speaker into silence for the whole
+    /// delay and there would be nothing left to judge. The delay delta is the
+    /// NEGATIVE of the latency delta, which is the whole sign convention in one
+    /// line.
+    func setOffsetMs(_ ms: Int, forDeviceUID uid: String) {
+        let change = tableLock.withLock { () -> (sink: BTDeviceSink, deltaMs: Double)? in
+            let previous = offsetMsByUID[uid] ?? 0
+            guard previous != ms else { return nil }
+            offsetMsByUID[uid] = ms
+            guard let sink = sinksByUID[uid] else { return nil }
+            return (sink, Double(ms - previous))
+        }
+        if let change { change.sink.applyTrimDelta(ms: -change.deltaMs) }
+    }
+
+    /// The measured latency currently in force for a device (0 when unknown).
+    func offsetMs(forDeviceUID uid: String) -> Int {
+        tableLock.withLock { offsetMsByUID[uid] ?? 0 }
     }
 
     /// The settable per-device signed manual trim (ms), applied LIVE — while

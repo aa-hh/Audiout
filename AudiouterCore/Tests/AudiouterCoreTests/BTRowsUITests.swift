@@ -45,6 +45,7 @@ import AppKit
     /// The popover's real BT row shape: bus + meter + SYNC chip.
     private func makeRow(_ device: Device, delegate: SpyDelegate,
                          syncTrimMs: Double = 0, syncTrimIsSet: Bool = false,
+                         syncMeasuredLatencyMs: Double? = nil,
                          syncDrawerExpanded: Bool = false,
                          selected: Bool = false) -> DeviceRowView {
         let row = DeviceRowView(device: device, showsToggle: true,
@@ -53,6 +54,7 @@ import AppKit
         row.delegate = delegate
         row.apply(device, selected: selected, controllable: selected,
                   syncTrimMs: syncTrimMs, syncTrimIsSet: syncTrimIsSet,
+                  syncMeasuredLatencyMs: syncMeasuredLatencyMs,
                   syncDrawerExpanded: syncDrawerExpanded)
         return row
     }
@@ -175,6 +177,23 @@ import AppKit
         #expect(row.test_syncChipTitle == "−24 ms", "typographic minus, not a hyphen")
         #expect(row.test_syncChipTooltip?.contains("24 milliseconds earlier") == true,
                 "the chip is too narrow for D7's phrasing, so the tooltip carries the direction")
+    }
+
+    /// Roadmap 056 Part A: the chip's number is still the user's TRIM, and the
+    /// speaker's own measured latency — what the wizard determined — rides the
+    /// tooltip alongside it. Nothing else about the row changes.
+    @Test func theTooltipCarriesTheMeasuredLatencyWhenThereIsOne() {
+        let measured = makeRow(btDevice(), delegate: SpyDelegate(),
+                               syncTrimMs: 24, syncTrimIsSet: true,
+                               syncMeasuredLatencyMs: 320)
+        #expect(measured.test_syncChipTitle == "24 ms", "the chip still shows the trim")
+        #expect(measured.test_syncChipTooltip?.contains("Measured latency: 320 ms") == true,
+                "got \(measured.test_syncChipTooltip ?? "none")")
+
+        let neverMeasured = makeRow(btDevice(), delegate: SpyDelegate(),
+                                    syncTrimMs: 24, syncTrimIsSet: true)
+        #expect(neverMeasured.test_syncChipTooltip?.contains("Measured latency") == false,
+                "a speaker the wizard has never run against says nothing about latency")
     }
 
     /// D10, the discoverability fix: an untuned speaker must not read "0.0 ms"
@@ -387,12 +406,12 @@ import AppKit
         popover.update(devices: [local(), airplay()])
         #expect(popover.test_bluetoothConnectRowShown(),
                 "precondition: the subsection is in its empty state")
-        #expect(!popover.test_syncColumnTitleShown(),
+        #expect(!popover.test_syncColumnTitleShown(in: "Bluetooth Devices"),
                 "no rows under it means no column to name")
 
         popover.update(devices: [local(), airplay(), bt("bt-a:output", name: "Attic Speaker")])
         #expect(popover.test_bluetoothRowOrder() == ["bt-a:output"])
-        #expect(popover.test_syncColumnTitleShown(),
+        #expect(popover.test_syncColumnTitleShown(in: "Bluetooth Devices"),
                 "one listed BT row brings its SYNC chip — and the title back")
     }
 

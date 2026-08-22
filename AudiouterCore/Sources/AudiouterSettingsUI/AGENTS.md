@@ -167,15 +167,14 @@ layout and where the settings model types (`AppSettings`,
   `SettingsForm.hintLabel`): the owning pane re-writes the hint on every value
   change so it always states the current value's consequence — don't replace
   one with a static subtitle. Kill static explanation paragraphs instead: the
-  sync-offset row (roadmap 050) moved its old five-line subtitle into a stock
-  `.helpButton`'s `NSPopover`, leaving only the live hint on the pane itself.
+  Audio-buffer row's hint states the currently-applied value's consequence up
+  front rather than carrying a separate subtitle.
 - **Section headers and value readouts share one look across panes**
   (roadmap 050, `SettingsForm`): `sectionHeader(_:)` is a semibold caption in
   the secondary color; `readoutWell(_:width:)` draws a monospaced-digit value
   label on `Tokens.Color.well`, in `draw(_:)` like `BorderedListView`, so it
-  re-resolves under the current appearance with no bookkeeping. Both connect
-  volume and sync offset use `readoutWell` at `width: 56` so their sliders'
-  value columns line up.
+  re-resolves under the current appearance with no bookkeeping. The connect
+  volume slider uses `readoutWell` at `width: 56`.
 
 ## Map
 
@@ -184,4 +183,4 @@ layout and where the settings model types (`AppSettings`,
 | `SettingsRootViewController` | Public `NSTabViewController` holding the panes; measures `fittedContentSize` (pane + in-content chrome) and publishes it via `onFittedContentSizeChange`. |
 | `GeneralSettingsViewController` | Launch at login / "Reconnect last speakers when Audiouter starts" (switch on `AppSettings.reconnectAtLaunch`, live hint) / a hairline + footer button strip (`Setup…`, `About Audiouter…`) in place of the old full-row Setup and About. |
 | `AppearanceSettingsViewController` | Theme tiles (warm product previews) + Accent dial. |
-| `AudioSettingsViewController` | Excluded-apps list (heading via `SettingsForm.sectionHeader`) + connect volume + wake restore + Advanced (Audio buffer, sync offset), Advanced a disclosure collapsed by default via the CardView-style clip (required height==0 vs a `.defaultHigh` bottom pin). |
+| `AudioSettingsViewController` | Excluded-apps list (heading via `SettingsForm.sectionHeader`) + connect volume + wake restore + Advanced (Audio buffer), Advanced a disclosure collapsed by default via the CardView-style clip (required height==0 vs a `.defaultHigh` bottom pin). |

@@ -38,9 +38,17 @@ import CoreAudio
         func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {
             lock.withLock { enqueueCount += 1 }
         }
+        // Also kept out of `_calls`, same reason as `setGain`.
+        func requestReanchor(cause: String) { lock.withLock { _reanchors.append(cause) } }
+        private var _reanchors: [String] = []
+        // The live trim seek (roadmap 056), same reason again.
+        func applyUserOffsetDelta(ms deltaMs: Double) { lock.withLock { _offsetDeltas.append(deltaMs) } }
+        private var _offsetDeltas: [Double] = []
 
         var calls: [String] { lock.withLock { _calls } }
         var gains: [Float] { lock.withLock { _gains } }
+        var reanchorCauses: [String] { lock.withLock { _reanchors } }
+        var offsetDeltas: [Double] { lock.withLock { _offsetDeltas } }
     }
 
     /// A minimal no-op `EngineControlling` — `setOutputSet` with ids that were
@@ -437,5 +445,99 @@ import CoreAudio
         backend.setOutputSet(["airplay-1"])   // Mac + AirPlay, but no syncedLocalSinkFactory
         waitFor(timeout: 0.2) { false }
         // No crash, nothing to observe — this test passes by not throwing.
+    }
+
+    // MARK: The Mac's own SYNC trim (roadmap 056 Part 1)
+
+    /// Each edit reaches the sink as the DELTA from the last one applied, landing
+    /// as a live seek. Nothing re-anchors: a re-anchor would silence the Mac for
+    /// a whole reference delay, which is exactly what the stepper must not do.
+    @Test func eachLocalTrimEditSeeksTheLiveSinkByItsOwnDelta() {
+        let (backend, sink, _) = makeBackend(macSelectedByDefault: true)
+        defer { backend.stop() }
+        backend.setOutputSet(["airplay-1"])
+        waitFor { !sink.calls.isEmpty }
+
+        // Relative to whatever is stored, so the assertion owns no assumption
+        // about this machine's saved offset.
+        let base = Double(backend.currentLocalSyncOffsetMs())
+        for step in 1...3 {
+            backend.setLocalTrimPreview(base + Double(step))
+            waitFor { sink.offsetDeltas.count == step }
+        }
+
+        #expect(sink.offsetDeltas == [1, 1, 1], "got: \(sink.offsetDeltas)")
+        #expect(sink.reanchorCauses.isEmpty, "a trim must never re-anchor: \(sink.reanchorCauses)")
+
+        // Dropping the preview walks the sink back to the stored value — one
+        // delta, the other way.
+        backend.endLocalTrimPreview(keepMs: nil)
+        waitFor { sink.offsetDeltas.count == 4 }
+        #expect(sink.offsetDeltas.last == -3)
+        #expect(sink.reanchorCauses.isEmpty)
+    }
+
+    /// The drawer's steppers hold-repeat every 60 ms. A burst is no longer
+    /// coalesced (a seek is cheap, and swallowing them made the control feel
+    /// dead) — but the deltas must still ADD UP to the move the user made, with
+    /// no re-anchor anywhere in the burst.
+    @Test func aBurstOfLocalTrimEditsSeeksTheWholeMoveAndNeverReanchors() {
+        let (backend, sink, _) = makeBackend(macSelectedByDefault: true)
+        defer { backend.stop() }
+        backend.setOutputSet(["airplay-1"])
+        waitFor { !sink.calls.isEmpty }
+
+        let base = Double(backend.currentLocalSyncOffsetMs())
+        for step in 1...8 { backend.setLocalTrimPreview(base + Double(step)) }
+
+        waitFor { sink.offsetDeltas.reduce(0, +) == 8 }
+        #expect(sink.offsetDeltas.reduce(0, +) == 8,
+                "eight stepper repeats must land the whole +8: \(sink.offsetDeltas)")
+        #expect(sink.reanchorCauses.isEmpty, "…and never re-anchor: \(sink.reanchorCauses)")
+
+        backend.endLocalTrimPreview(keepMs: nil)
+    }
+
+    /// An edit that doesn't move the value is not a seek. `noteLocalSyncOffsetChanged`
+    /// fires on every write to the setting, including a same-value one.
+    @Test func anUnchangedOffsetIsNotPushedToTheSink() {
+        let (backend, sink, _) = makeBackend(macSelectedByDefault: true)
+        defer { backend.stop() }
+        backend.setOutputSet(["airplay-1"])
+        waitFor { !sink.calls.isEmpty }
+
+        backend.noteLocalSyncOffsetChanged()
+        waitFor(timeout: 0.3) { false }
+        #expect(sink.offsetDeltas.isEmpty, "got: \(sink.offsetDeltas)")
+        #expect(sink.reanchorCauses.isEmpty)
+    }
+
+    /// A wizard preview is never stored — it overrides what the sink reads until
+    /// the run ends, and then the stored value is back.
+    @Test func aWizardPreviewOverridesTheStoredOffsetUntilItEnds() {
+        let (backend, sink, _) = makeBackend(macSelectedByDefault: true)
+        defer { backend.stop() }
+        backend.setOutputSet(["airplay-1"])
+        waitFor { !sink.calls.isEmpty }
+        let stored = backend.currentLocalSyncOffsetMs()
+
+        backend.setLocalTrimPreview(Double(stored) + 37)
+        #expect(backend.currentLocalSyncOffsetMs() == stored + 37, "the sink reads the candidate")
+        waitFor { !sink.offsetDeltas.isEmpty }
+        #expect(sink.offsetDeltas == [37], "…as a live seek: \(sink.offsetDeltas)")
+
+        backend.endLocalTrimPreview(keepMs: nil)
+        #expect(backend.currentLocalSyncOffsetMs() == stored,
+                "dropping the preview puts the stored value back")
+    }
+
+    @Test func aPreviewIsClampedToTheTrimRange() {
+        let (backend, _, _) = makeBackend(macSelectedByDefault: true)
+        defer { backend.stop() }
+        backend.setLocalTrimPreview(10_000)
+        #expect(Double(backend.currentLocalSyncOffsetMs()) == BTSyncTrim.rangeMs)
+        backend.setLocalTrimPreview(-10_000)
+        #expect(Double(backend.currentLocalSyncOffsetMs()) == -BTSyncTrim.rangeMs)
+        backend.endLocalTrimPreview(keepMs: nil)
     }
 }

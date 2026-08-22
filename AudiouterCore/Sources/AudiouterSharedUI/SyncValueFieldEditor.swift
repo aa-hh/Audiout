@@ -76,6 +76,22 @@ public final class SyncValueFieldEditor: NSObject, NSTextFieldDelegate {
         field.stringValue = displayText
     }
 
+    /// A change that came from OUTSIDE the field — a stepper click, its
+    /// auto-repeat, or Revert — while an editing session is live.
+    ///
+    /// `setCommittedValue` deliberately refuses to touch text that is being
+    /// edited, which is right for a background model push but wrong for a
+    /// gesture the user just made: the number would sit unchanged while the
+    /// audio moved (live bug — "the paddles do nothing"), and the next Return
+    /// would re-commit that stale text and snap the audio back. Here the
+    /// gesture wins, so the box always shows what was applied.
+    public func overrideEditedValue(_ ms: Double) {
+        committedMs = ms
+        guard let editor = field.currentEditor() else { return }
+        field.stringValue = Self.signedText(ms)
+        editor.selectAll(nil)
+    }
+
     // MARK: NSTextFieldDelegate
 
     /// Editing began (the user clicked in): switch from the host's resting

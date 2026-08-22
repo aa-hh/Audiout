@@ -328,6 +328,10 @@ public final class DeviceRowView: NSView {
     /// (D10) — an untuned device's chip reads "Not set", never "0.0 ms",
     /// because zero reads as finished where "Not set" reads as an invitation.
     private var syncTrimIsSet = false
+    /// This speaker's MEASURED output latency in ms (roadmap 056 Part A), or
+    /// `nil` when the alignment wizard has never run against it. Tooltip only —
+    /// the chip's own number stays the user's trim.
+    private var syncMeasuredLatencyMs: Double?
     /// Whether this row's drawer is currently open (host-owned, D2) — drives
     /// the chevron direction, the engaged fill, and `accessibilityExpanded`.
     private var syncDrawerExpanded = false
@@ -498,6 +502,7 @@ public final class DeviceRowView: NSView {
                       iconSymbolName: String? = nil,
                       syncTrimMs: Double = 0,
                       syncTrimIsSet: Bool = false,
+                      syncMeasuredLatencyMs: Double? = nil,
                       syncDrawerExpanded: Bool = false,
                       removalUndoOffered: Bool = false) {
         self.device = device
@@ -695,6 +700,7 @@ public final class DeviceRowView: NSView {
         if showsSyncControls {
             self.syncTrimMs = BTSyncTrim.clamp(syncTrimMs)
             self.syncTrimIsSet = syncTrimIsSet
+            self.syncMeasuredLatencyMs = syncMeasuredLatencyMs
             self.syncDrawerExpanded = syncDrawerExpanded
             syncChipButton.isEnabled = device.isAvailable
             updateSyncChip()
@@ -1688,6 +1694,13 @@ public final class DeviceRowView: NSView {
     private static let syncChipFont =
         NSFont.monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular)
 
+    /// Relocated from the deleted Settings › Audio › Advanced sync-offset row.
+    /// Its "takes effect next time" sentence is gone on purpose: the row applies
+    /// live.
+    public static let localSyncHelpCopy =
+        "Fine-tune the delay on this Mac's own speakers when playing in sync with "
+        + "other speakers. Raise it if the Mac plays ahead, lower it if it plays behind."
+
     private func configureSyncChip() {
         syncChipButton.translatesAutoresizingMaskIntoConstraints = false
         // Drawing-only cell swap FIRST, then configure the button — the same
@@ -1749,9 +1762,20 @@ public final class DeviceRowView: NSView {
         // D7's "later"/"earlier" phrasing, and a bare signed number is exactly
         // the ambiguity D7 warns about — so hover (and VoiceOver, below) spell
         // it out while the chip itself stays a compact summary.
-        syncChipButton.toolTip = syncTrimIsSet
+        let syncChipHelp = syncTrimIsSet
             ? "Sync offset — \(BTSyncTrim.spokenOffset(syncTrimMs)). Click to adjust."
             : "This speaker has never been tuned. Click to adjust its sync offset."
+        // The Mac's own row carries the explanation that used to live in
+        // Settings › Audio › Advanced — this chip is now that setting's only
+        // home, so the "why would I touch this" sentence comes with it.
+        // What the wizard MEASURED, when it has: the trim is a nudge on top of
+        // the speaker's own latency, and only the tooltip has room to say so.
+        let measured = syncMeasuredLatencyMs.map {
+            " Measured latency: \(Int($0.rounded())) ms."
+        } ?? ""
+        syncChipButton.toolTip = device.isLocalDevice
+            ? "\(syncChipHelp) \(Self.localSyncHelpCopy)"
+            : syncChipHelp + measured
         syncChipButton.setNeedsDisplay(syncChipButton.bounds)
     }
 

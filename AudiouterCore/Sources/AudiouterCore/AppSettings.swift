@@ -255,6 +255,14 @@ public struct AppSettings {
         }
     }
 
+    /// Whether this Mac's sync trim has an ENTRY at all — the honest answer to
+    /// "tuned or never tuned?", which the value alone cannot give: a Mac
+    /// deliberately trimmed to exactly 0 ms IS tuned and must not read "Not
+    /// set". The local twin of ``BTOutputControlling/btHasSyncTrim(forDevice:)``.
+    public var isSyncOffsetSet: Bool {
+        defaults.object(forKey: Keys.syncOffsetMs) != nil
+    }
+
     /// Whether the one-surface panel is PINNED (an ordinary movable window)
     /// rather than the transient menu-bar bubble. Written by the surface's Pin
     /// button, restored when the surface is constructed — the manner survives

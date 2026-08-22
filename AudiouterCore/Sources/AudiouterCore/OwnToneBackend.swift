@@ -947,7 +947,12 @@ public func makeBackend(
                 presentationDelayMs: { [weak nativeBackend] in
                     nativeBackend?.localSinkReferenceDelayMs() ?? startBufferMs
                 },
-                userOffsetMs: { AppSettings().syncOffsetMs })
+                // Roadmap 056: read through the backend so a wizard PREVIEW
+                // (never stored) beats the stored setting; with no backend and
+                // no preview it is the plain `AppSettings` read it always was.
+                userOffsetMs: { [weak nativeBackend] in
+                    nativeBackend?.currentLocalSyncOffsetMs() ?? AppSettings().syncOffsetMs
+                })
         }
         // BT-BACKEND: the N-instance Bluetooth sink manager, reading the SAME
         // live start-buffer value the synced-local sink reads (risk R4: one

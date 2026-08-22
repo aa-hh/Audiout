@@ -26,11 +26,37 @@ final class BTAlignmentWizardView: NSView {
 
     // The locked copy.
     static let introCopy =
-        "You'll hear ticks on both speakers — just say which one sounds first"
-    static let questionCopy = "Which one ticked first?"
+        "You'll hear a click from each speaker. Tap the one you hear first."
+    static let questionCopy = "Which speaker clicked first?"
     static let cantTellTitle = "Can't tell"
+    /// Undo the last answer — a mis-click nudges the fit rather than derailing
+    /// it, and this puts the trial straight back.
+    static let backTitle = "Back"
+    /// The way OUT, spelled out. The 9.5 pt ✕ was the only exit and the live
+    /// run never found it ("no way to exit").
+    static let stopTitle = "Stop"
     static let gracefulExitCopy =
         "These speakers are far apart — they're already as aligned as they need to be."
+    /// The opposite outcome, and the one the run used to report with the line
+    /// above — which read as the exact reverse of what had happened.
+    static let unreachableCopy =
+        "Couldn't find the alignment. Try moving closer to the speakers, "
+        + "or set the delay by hand from the SYNC control."
+    /// The third failure, and the one the run has to say out loud rather than
+    /// round away: the answers put the speaker AHEAD of the Mac, which the Mac
+    /// being the zero makes impossible. Nothing is stored.
+    static let macIsLateCopy =
+        "Couldn't get a clean reading — the Mac seems to be the late one here. "
+        + "Try again, or set the delay by hand."
+    /// The caption under the buttons. The two stages ask for different things:
+    /// the coarse search is still hunting a range that may be hundreds of
+    /// milliseconds wide, while the blocks are inside a few milliseconds and
+    /// deliberating there makes the answer worse, not better.
+    static func questionCountCopy(number: Int, searching: Bool) -> String {
+        searching
+            ? "Question \(number) — finding the range…"
+            : "Question \(number) — they're very close now, go with your first instinct."
+    }
     static let educationCopy = "You can fine-tune anytime from the popover."
     /// Shown in the reference line's place while no second speaker can be
     /// established — Start stays disabled until one is.
@@ -174,20 +200,36 @@ final class BTAlignmentWizardView: NSView {
             startButton = start
             addButtonRow([start])
             background.setAccessibilityLabel("Align \(session.targetName): \(Self.introCopy)")
-        case .question(let progress, _):
+        case .question(let progress, let answersSoFar, let searching):
             let referenceName = session.reference?.name ?? ""
             addBody(Self.questionCopy)
             addReferenceRow()
+            let back = makeButton(Self.backTitle, prominent: false, #selector(backClicked(_:)))
+            back.isEnabled = answersSoFar > 0
+            // TWO rows, deliberately: the which-side buttons carry real device
+            // names ("Sony WH-1000XM3 Wireless Headphones"), and four of these
+            // in one row inside a ~276 pt panel used to overrun a required
+            // constraint rather than merely look cramped.
             addButtonRow([
-                makeButton(session.targetName, prominent: true, #selector(targetClicked(_:))),
-                makeButton(referenceName, prominent: true, #selector(referenceClicked(_:))),
-                makeButton(Self.cantTellTitle, prominent: false, #selector(cantTellClicked(_:))),
+                makeButton(session.targetName, prominent: true,
+                           #selector(targetClicked(_:)), shrinkable: true),
+                makeButton(referenceName, prominent: true,
+                           #selector(referenceClicked(_:)), shrinkable: true),
             ])
+            addButtonRow([
+                makeButton(Self.cantTellTitle, prominent: false, #selector(cantTellClicked(_:))),
+                back,
+                makeButton(Self.stopTitle, prominent: false, #selector(stopClicked(_:))),
+            ])
+            addCaption(Self.questionCountCopy(number: answersSoFar + 1, searching: searching))
             addProgress(progress)
             background.setAccessibilityLabel(
                 "Which speaker ticked first: \(session.targetName) or \(referenceName)?")
         case .receipt(let trimMs):
-            let wholeMs = Int(BTSyncTrim.quantise(trimMs))
+            // Rounded, NOT `BTSyncTrim.quantise`: a Bluetooth run's result is
+            // the speaker's measured latency, which routinely runs past the
+            // trim's ±500 ms and would be clamped into a lie.
+            let wholeMs = Int(trimMs.rounded())
             addBody("Aligned — \(wholeMs) ms")
             addButtonRow([
                 makeButton("Keep", prominent: true, #selector(keepClicked(_:))),
@@ -200,6 +242,16 @@ final class BTAlignmentWizardView: NSView {
             addButtonRow([makeButton("Done", prominent: true, #selector(doneClicked(_:)))])
             addEducationLine()
             background.setAccessibilityLabel(Self.gracefulExitCopy)
+        case .unreachable:
+            addBody(Self.unreachableCopy)
+            addButtonRow([makeButton("Done", prominent: true, #selector(doneClicked(_:)))])
+            addEducationLine()
+            background.setAccessibilityLabel(Self.unreachableCopy)
+        case .macIsLate:
+            addBody(Self.macIsLateCopy)
+            addButtonRow([makeButton("Done", prominent: true, #selector(doneClicked(_:)))])
+            addEducationLine()
+            background.setAccessibilityLabel(Self.macIsLateCopy)
         }
         needsLayout = true
         // The stack changed height — the host panel re-measures via the same
@@ -223,6 +275,10 @@ final class BTAlignmentWizardView: NSView {
                                      : Self.comparingCopy(target: session.targetName))
         label.font = Tokens.Font.caption
         label.textColor = Tokens.Color.secondaryLabel
+        // Carries the target's name, so it gives way for the same reason the
+        // which-side buttons do.
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let popUp = NSPopUpButton(frame: .zero, pullsDown: false)
         popUp.translatesAutoresizingMaskIntoConstraints = false
@@ -251,6 +307,15 @@ final class BTAlignmentWizardView: NSView {
         row.alignment = .firstBaseline
         row.spacing = 6
         contentStack.addArrangedSubview(row)
+    }
+
+    /// The honest question counter — and, while the coarse staircase is still
+    /// walking, what it is doing.
+    private func addCaption(_ text: String) {
+        let label = NSTextField(labelWithString: text)
+        label.font = Tokens.Font.caption
+        label.textColor = Tokens.Color.secondaryLabel
+        contentStack.addArrangedSubview(label)
     }
 
     private func addEducationLine() {
@@ -282,7 +347,8 @@ final class BTAlignmentWizardView: NSView {
         contentStack.addArrangedSubview(bar)
     }
 
-    private func makeButton(_ title: String, prominent: Bool, _ action: Selector) -> NSButton {
+    private func makeButton(_ title: String, prominent: Bool, _ action: Selector,
+                            shrinkable: Bool = false) -> NSButton {
         let button = NSButton()
         button.translatesAutoresizingMaskIntoConstraints = false
         button.title = title
@@ -292,7 +358,17 @@ final class BTAlignmentWizardView: NSView {
         button.target = self
         button.action = action
         button.setContentHuggingPriority(.required, for: .horizontal)
-        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        // A button carrying a DEVICE NAME must give way rather than force the
+        // content wider than the panel: the panel pins its content inside the
+        // background with a REQUIRED `<=`, so an unshrinkable long name is a
+        // broken constraint, not a wide button. Everything else keeps its
+        // natural width — the titles are ours and they are short.
+        button.setContentCompressionResistancePriority(
+            shrinkable ? .defaultLow : .required, for: .horizontal)
+        if shrinkable {
+            button.cell?.lineBreakMode = .byTruncatingTail
+            button.cell?.usesSingleLineMode = true
+        }
         return button
     }
 
@@ -302,13 +378,22 @@ final class BTAlignmentWizardView: NSView {
     @objc private func targetClicked(_ sender: NSButton) { session.answer(.target) }
     @objc private func referenceClicked(_ sender: NSButton) { session.answer(.reference) }
     @objc private func cantTellClicked(_ sender: NSButton) { session.answer(.cantTell) }
+    @objc private func backClicked(_ sender: NSButton) { session.back() }
+    @objc private func stopClicked(_ sender: NSButton) {
+        session.cancel()
+        onFinished?()
+    }
     @objc private func keepClicked(_ sender: NSButton) {
         session.keep()
         onFinished?()
     }
     @objc private func tryAgainClicked(_ sender: NSButton) { session.tryAgain() }
     @objc private func doneClicked(_ sender: NSButton) {
-        // Graceful exit already restored; cancel is a harmless close here.
+        // Both screens behind this button are TERMINAL: the session already put
+        // the tick off and the prior value back, and marked itself ended — so
+        // `cancel()` is inert here, and deliberately so. It used to fire a
+        // second tick-off edge, which the backend pays for as a re-anchor of
+        // every sink. Kept as the one unconditional close call.
         session.cancel()
         onFinished?()
     }
@@ -334,6 +419,11 @@ final class BTAlignmentWizardView: NSView {
     var test_selectedReferenceTitle: String? { referencePopUp?.selectedItem?.title }
     var test_referencePickerIsEnabled: Bool { referencePopUp?.isEnabled ?? false }
     var test_startIsEnabled: Bool { startButton?.isEnabled ?? false }
+    var test_buttonIsEnabled: (String) -> Bool {
+        { [weak self] title in
+            self?.actionButtons.first { $0.title == title }?.isEnabled ?? false
+        }
+    }
     var test_referenceLineText: String? {
         contentStack.arrangedSubviews
             .compactMap { $0 as? NSStackView }
@@ -357,6 +447,20 @@ final class BTAlignmentWizardView: NSView {
         contentStack.arrangedSubviews
             .compactMap { ($0 as? NSTextField)?.stringValue }
             .contains(Self.educationCopy)
+    }
+    /// Does the mounted content fit the width it was given? A long device name
+    /// used to make `contentStack.trailing <= background.trailing` — required —
+    /// unsatisfiable; nothing here asserts an absolute width, only that the
+    /// content still fits whatever the host handed out.
+    var test_contentFitsItsWidth: Bool {
+        layoutSubtreeIfNeeded()
+        let available = background.bounds.width - 2 * Self.contentPadding
+        // The ROWS — the buttons and the reference line, the parts that carry
+        // device names. A wrapping body label sizes itself and is not what a
+        // long name breaks.
+        return contentStack.arrangedSubviews
+            .compactMap { $0 as? NSStackView }
+            .allSatisfy { $0.fittingSize.width <= available }
     }
     private func clickButton(titled title: String) {
         actionButtons.first { $0.title == title }?.performClick(nil)

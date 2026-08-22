@@ -40,9 +40,28 @@ import AppKit
         popover.onResolveBTAlignmentPrompt = { id, dismissed in
             recorder.resolves.append((id, dismissed))
         }
-        popover.onBTWizardTrimPreview = { ms, id in recorder.previews.append((ms, id)) }
-        popover.onBTWizardEndPreview = { id, keep in recorder.ends.append((id, keep)) }
-        popover.onBTWizardTickActive = { recorder.ticks.append($0) }
+        // Roadmap 056 Part A: a Bluetooth target's run MEASURES latency, and
+        // SUSPENDS the device's trim while it does — so the two seams carry
+        // different stories and are recorded apart. `previews`/`ends` are the
+        // run's own candidates (the shape every screen test asserts on);
+        // `trimPreviews`/`trimEnds` are the suspension and its restore.
+        popover.onBTWizardTrimPreview = { ms, id in recorder.trimPreviews.append((ms, id)) }
+        popover.onBTWizardEndPreview = { id, keep in recorder.trimEnds.append((id, keep)) }
+        popover.onBTWizardLatencyPreview = { ms, id in recorder.previews.append((ms, id)) }
+        popover.onBTWizardEndLatencyPreview = { id, keep in
+            recorder.ends.append((id, keep))
+            recorder.order.append("end")
+        }
+        popover.onBTWizardEndRun = {
+            recorder.endRuns += 1
+            recorder.order.append("endRun")
+        }
+        popover.onBTWizardTickActive = { active, target, reference in
+            recorder.ticks.append(active)
+            recorder.tickTargets.append(target)
+            recorder.tickReferences.append(reference)
+        }
+        popover.onBTWizardTempo = { recorder.tempos.append($0) }
         return (popover, recorder)
     }
 
@@ -62,7 +81,16 @@ import AppKit
         var resolves: [(id: String, dismissed: Bool)] = []
         var previews: [(ms: Double, id: String)] = []
         var ends: [(id: String, keep: Double?)] = []
+        var trimPreviews: [(ms: Double, id: String)] = []
+        var trimEnds: [(id: String, keep: Double?)] = []
+        var endRuns = 0
+        /// Keep's two backend calls in the order they landed: the measurement
+        /// has to be stored BEFORE the raised reference comes back down.
+        var order: [String] = []
         var ticks: [Bool] = []
+        var tickTargets: [String?] = []
+        var tickReferences: [String?] = []
+        var tempos: [Double] = []
     }
 
     private func local() -> Device {
@@ -206,38 +234,83 @@ import AppKit
         return popover.test_btWizardView()
     }
 
+    /// Answer every question the way a listener with `trueOffsetMs` would,
+    /// through REAL button dispatch. The level being judged is read off the
+    /// preview the session just pushed — the stimulus order is randomised, so
+    /// a fixed click script would be judging a different offset each run.
+    private func driveWizard(
+        _ wizard: BTAlignmentWizardView?, _ recorder: Recorder,
+        targetTitle: String, referenceTitle: String,
+        trueOffsetMs: Double, jndMs: Double = 2
+    ) {
+        var asked = 0
+        while case .question? = wizard?.test_screen, asked < 200 {
+            let levelMs = recorder.previews.last?.ms ?? 0
+            if abs(levelMs - trueOffsetMs) < jndMs {
+                wizard?.test_clickButton(titled: BTAlignmentWizardView.cantTellTitle)
+            } else {
+                // A LATENCY level, not a trim: a larger measured latency feeds
+                // the speaker EARLIER, so a level BELOW the truth leaves the
+                // target still late and the REFERENCE is what is heard first.
+                wizard?.test_clickButton(titled: levelMs < trueOffsetMs ? referenceTitle : targetTitle)
+            }
+            asked += 1
+        }
+    }
+
     @Test func startBeginsTheQuestionsWithDeviceNamedButtons() {
         let (popover, recorder) = makePopover()
         let wizard = openWizard(popover)
         wizard?.test_clickButton(titled: "Start")
         #expect(recorder.ticks == [true], "Start turns the wizard tick on")
-        #expect(recorder.previews.map(\.ms) == [0], "the centre candidate applies immediately")
-        guard case .question(_, _)? = wizard?.test_screen else {
+        #expect(recorder.previews.count == 1, "the first candidate applies immediately")
+        #expect(recorder.previews[0].ms == 0,
+                "…at the device's own trim, where the coarse search opens")
+        guard case .question? = wizard?.test_screen else {
             Issue.record("expected the question screen, got \(String(describing: wizard?.test_screen))")
             return
         }
         #expect(wizard?.test_bodyText == BTAlignmentWizardView.questionCopy)
-        #expect(wizard?.test_buttonTitles == ["Move 2", "This Mac", "Can't tell"],
-                "the which-side buttons carry the ACTUAL device names")
+        #expect(wizard?.test_buttonTitles
+                == ["Move 2", "This Mac", "Can't tell", "Back", BTAlignmentWizardView.stopTitle],
+                "the which-side buttons carry the ACTUAL device names, and there is a way out")
+        #expect(wizard?.test_buttonIsEnabled(BTAlignmentWizardView.backTitle) == false,
+                "there is nothing to go back to yet")
         #expect(wizard?.test_progressValue == 0)
+    }
+
+    @Test func backUndoesTheLastAnswerAndReAsksThatTrial() {
+        let (popover, recorder) = makePopover()
+        let wizard = openWizard(popover)
+        wizard?.test_clickButton(titled: "Start")
+        let first = recorder.previews[0].ms
+        wizard?.test_clickButton(titled: "Move 2")
+        #expect(wizard?.test_buttonIsEnabled(BTAlignmentWizardView.backTitle) == true)
+
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.backTitle)
+        #expect(recorder.previews.last?.ms == first, "the undone question is asked again")
+        #expect(wizard?.test_screen == .question(progress: 0, answersSoFar: 0, searching: true))
+        #expect(wizard?.test_buttonIsEnabled(BTAlignmentWizardView.backTitle) == false)
     }
 
     @Test func answersNarrowUntilTheReceiptThenKeepPersists() {
         let (popover, recorder) = makePopover()
         let wizard = openWizard(popover)
         wizard?.test_clickButton(titled: "Start")
-        wizard?.test_clickButton(titled: "Move 2")               // target first
-        #expect(recorder.previews.map(\.ms) == [0, 250])
-        #expect((wizard?.test_progressValue ?? 0) > 0, "the indicator narrows")
-        wizard?.test_clickButton(titled: "This Mac")             // reversal 1
-        wizard?.test_clickButton(titled: "Move 2")               // reversal 2 → converged
-        #expect(wizard?.test_screen == .receipt(trimMs: 156.25))
-        #expect(wizard?.test_bodyText == "Aligned — 156 ms", "the ms value is a receipt only")
+        driveWizard(wizard, recorder, targetTitle: "Move 2", referenceTitle: "This Mac",
+                    trueOffsetMs: 10)
+        guard case .receipt(let trimMs)? = wizard?.test_screen else {
+            Issue.record("expected receipt, got \(String(describing: wizard?.test_screen))")
+            return
+        }
+        #expect(abs(trimMs - 10) <= 4, "the receipt is the offset the listener heard, got \(trimMs)")
+        #expect(wizard?.test_bodyText == "Aligned — \(Int(trimMs.rounded())) ms",
+                "the ms value is a receipt only")
         #expect(wizard?.test_showsEducationLine == true)
         #expect(recorder.ticks == [true, false], "the tick ends with the questions")
 
         wizard?.test_clickButton(titled: "Keep")
-        #expect(recorder.ends.map(\.keep) == [156.25], "Keep persists the result")
+        #expect(recorder.ends.map(\.keep) == [trimMs], "Keep persists the result")
         #expect(popover.test_btWizardIsOpen() == false, "…and closes the wizard")
     }
 
@@ -245,9 +318,8 @@ import AppKit
         let (popover, recorder) = makePopover()
         let wizard = openWizard(popover)
         wizard?.test_clickButton(titled: "Start")
-        wizard?.test_clickButton(titled: "Move 2")
-        wizard?.test_clickButton(titled: "This Mac")
-        wizard?.test_clickButton(titled: "Move 2")
+        driveWizard(wizard, recorder, targetTitle: "Move 2", referenceTitle: "This Mac",
+                    trueOffsetMs: 10)
         guard case .receipt(_)? = wizard?.test_screen else {
             Issue.record("expected receipt, got \(String(describing: wizard?.test_screen))")
             return
@@ -255,18 +327,19 @@ import AppKit
         wizard?.test_clickButton(titled: "Try again")
         #expect(recorder.ends.map(\.keep) == [nil], "Try again restores the prior trim first")
         #expect(recorder.ticks == [true, false, true])
-        guard case .question(_, _)? = wizard?.test_screen else {
+        guard case .question? = wizard?.test_screen else {
             Issue.record("expected a fresh question, got \(String(describing: wizard?.test_screen))")
             return
         }
     }
 
-    @Test func twoCantTellsShowTheGracefulExitAndDoneCloses() {
+    @Test func allCantTellsShowTheGracefulExitAndDoneCloses() {
         let (popover, recorder) = makePopover()
         let wizard = openWizard(popover)
         wizard?.test_clickButton(titled: "Start")
-        wizard?.test_clickButton(titled: BTAlignmentWizardView.cantTellTitle)
-        wizard?.test_clickButton(titled: BTAlignmentWizardView.cantTellTitle)
+        for _ in 0..<(2 * BTAlignmentConstantStimuli.stimuliMs.count + 1) {
+            wizard?.test_clickButton(titled: BTAlignmentWizardView.cantTellTitle)
+        }
         #expect(wizard?.test_screen == .gracefulExit)
         #expect(wizard?.test_bodyText == BTAlignmentWizardView.gracefulExitCopy)
         #expect(wizard?.test_showsEducationLine == true)
@@ -312,6 +385,182 @@ import AppKit
         popover.test_btWizardView()?.test_clickButton(titled: "Start")
         #expect(manualGates == [true, false], "one tick source at a time")
         #expect(recorder.ticks == [true])
+    }
+
+    /// The way out, in words. The 9.5 pt ✕ was the only exit and the live run
+    /// never found it ("no way to exit").
+    @Test func stopEndsTheRunRestoresAndSilences() {
+        let (popover, recorder) = makePopover()
+        let wizard = openWizard(popover)
+        wizard?.test_clickButton(titled: "Start")
+        wizard?.test_clickButton(titled: "Move 2")
+
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.stopTitle)
+        #expect(recorder.ends.map(\.keep) == [nil], "Stop restores the prior trim")
+        #expect(recorder.ticks == [true, false])
+        #expect(popover.test_btWizardIsOpen() == false)
+    }
+
+    /// A listener who keeps naming the target right off the end of the usable
+    /// range gets told the truth — never the graceful exit's "already as
+    /// aligned as they need to be", which is what the live run was shown.
+    @Test func aRunThatCannotReachTheOffsetSaysSoAndRestores() {
+        let (popover, recorder) = makePopover()
+        let wizard = openWizard(popover)
+        wizard?.test_clickButton(titled: "Start")
+        var asked = 0
+        while case .question? = wizard?.test_screen, asked < 200 {
+            wizard?.test_clickButton(titled: "Move 2")
+            asked += 1
+        }
+        #expect(wizard?.test_screen == .unreachable,
+                "got \(String(describing: wizard?.test_screen))")
+        #expect(wizard?.test_bodyText == BTAlignmentWizardView.unreachableCopy)
+        #expect(wizard?.test_bodyText != BTAlignmentWizardView.gracefulExitCopy)
+        #expect(recorder.ends.map(\.keep) == [nil], "the prior trim is restored")
+        #expect(recorder.ticks == [true, false])
+
+        wizard?.test_clickButton(titled: "Done")
+        #expect(popover.test_btWizardIsOpen() == false)
+    }
+
+    // MARK: The run suspends the device's trim (roadmap 056 Part A)
+
+    /// A Bluetooth run measures the speaker's LATENCY, and latency and trim are
+    /// the same linear term in the delay — so a run made with the trim still
+    /// applied converges on `trueLatency + trim` and stores the workaround as
+    /// the measurement. The run suspends the nudge to 0 the moment it opens, and
+    /// puts the store's value back when the panel goes.
+    @Test func aBluetoothRunSuspendsTheDevicesTrimAndRestoresItOnExit() {
+        let (popover, recorder) = makePopover()
+        popover.btTrimProvider = { _ in -300 }
+        popover.btTrimIsSetProvider = { _ in true }
+        let wizard = openWizard(popover)
+        #expect(recorder.trimPreviews.map(\.ms) == [0],
+                "the trim steps aside for the whole run")
+        #expect(recorder.trimPreviews.map(\.id) == ["bt-a:output"])
+        #expect(recorder.trimEnds.isEmpty, "…and stays aside while the run is live")
+
+        wizard?.test_clickButton(titled: "Start")
+        wizard?.test_clickButton(titled: "Move 2")
+        #expect(recorder.trimEnds.isEmpty)
+
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.stopTitle)
+        #expect(recorder.trimEnds.map(\.id) == ["bt-a:output"])
+        #expect(recorder.trimEnds.map(\.keep) == [nil],
+                "a discarded run puts the user's own trim back, from the store")
+        #expect(recorder.endRuns == 1, "…and the raised reference comes down with it")
+    }
+
+    /// LIVE DEFECT (Sonos Move, 2026-08-22): Keep wrote the measurement and
+    /// zeroed the trim, and the SYNC DRAWER standing open under the row — the
+    /// very surface the run was launched from (⌥-click on its metronome) —
+    /// went on showing the pre-run nudge. Its next gesture (Revert, a stepper,
+    /// or the value field's own commit on the way out) then wrote that stale
+    /// number straight back over the zero, and the user saw a run that
+    /// "didn't update the value anywhere".
+    @Test func keepRefreshesTheOpenDrawerSoItCannotWriteThePreRunTrimBack() {
+        let (popover, recorder) = makePopover()
+        // The store, standing in for `NativeBackend`'s trim/latency maps: the
+        // pre-run nudge the user had tuned by ear, and Keep's two writes.
+        var trims: [String: Double] = ["bt-a:output": 244]
+        var latencies: [String: Double] = [:]
+        popover.btTrimProvider = { trims[$0] ?? 0 }
+        popover.btTrimIsSetProvider = { trims[$0] != nil }
+        popover.btLatencyProvider = { latencies[$0] }
+        popover.onSetBTTrim = { ms, id, persist in if persist { trims[id] = ms } }
+        popover.onBTWizardEndLatencyPreview = { id, keep in
+            recorder.ends.append((id, keep))
+            recorder.order.append("end")
+            guard let keep else { return }
+            latencies[id] = keep
+            trims[id] = 0            // `endBTWizardLatencyPreview` writes both
+        }
+        _ = selectMixedBT(popover)
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        #expect(popover.test_syncDrawer?.test_trimMs == 244)
+
+        popover.test_syncDrawer?.test_optionModifierOverride = true
+        popover.test_syncDrawer?.test_fireAlignClick()
+        let wizard = popover.test_btWizardView()
+        wizard?.test_clickButton(titled: "Start")
+        driveWizard(wizard, recorder, targetTitle: "Move 2", referenceTitle: "This Mac",
+                    trueOffsetMs: 200)
+        guard case .receipt(let latencyMs)? = wizard?.test_screen else {
+            Issue.record("expected receipt, got \(String(describing: wizard?.test_screen))")
+            return
+        }
+        wizard?.test_clickButton(titled: "Keep")
+
+        #expect(recorder.ends.map(\.keep) == [latencyMs], "Keep persists the measurement")
+        #expect(latencies["bt-a:output"] == latencyMs)
+        #expect(trims["bt-a:output"] == 0, "…and zeroes the nudge it suspended")
+        #expect(recorder.order == ["end", "endRun"],
+                "the reference comes down only once the measurement is stored")
+
+        let row = popover.test_deviceRow(for: "bt-a:output")
+        #expect(row?.test_syncChipTitle == "0 ms", "the row reads the zeroed trim")
+        #expect(row?.test_syncChipTooltip?
+            .contains("Measured latency: \(Int(latencyMs.rounded())) ms") == true,
+                "…and the measurement is what the tooltip carries")
+
+        let drawer = popover.test_syncDrawer
+        #expect(drawer?.test_trimMs == 0, "the open drawer agrees with the store")
+        #expect(drawer?.test_valueFieldText == "0 ms")
+        #expect(drawer?.test_revertEnabled == false,
+                "Revert's baseline moved with it — the suspended nudge is not a value to go back to")
+
+        // The live stomp: the field commits whatever it is SHOWING when it
+        // loses focus (the user clicking away, or the drawer closing), so a
+        // stale readout is one click away from the store.
+        drawer?.test_valueFieldEditor.test_endEditing()
+        #expect(trims["bt-a:output"] == 0,
+                "no drawer gesture can resurrect the pre-run trim over the measurement")
+    }
+
+    /// The whole point of the suspension: a device carrying a −300 ms nudge
+    /// still measures its TRUE 200 ms latency. With the trim applied the run
+    /// would have had to reach −100 ms of latency, which is not a physical
+    /// quantity — it pins at 0 and bows out `.unreachable`.
+    @Test func aTrimmedDeviceStillMeasuresItsTrueLatency() {
+        let (popover, recorder) = makePopover()
+        popover.btTrimProvider = { _ in -300 }
+        popover.btTrimIsSetProvider = { _ in true }
+        let wizard = openWizard(popover)
+        wizard?.test_clickButton(titled: "Start")
+        driveWizard(wizard, recorder, targetTitle: "Move 2", referenceTitle: "This Mac",
+                    trueOffsetMs: 200)
+        guard case .receipt(let latencyMs)? = wizard?.test_screen else {
+            Issue.record("expected receipt, got \(String(describing: wizard?.test_screen))")
+            return
+        }
+        #expect(abs(latencyMs - 200) <= 4, "the measurement is the hardware's, got \(latencyMs)")
+
+        wizard?.test_clickButton(titled: "Keep")
+        #expect(recorder.ends.map(\.keep) == [latencyMs], "Keep persists the measurement")
+        // The nudge was a manual stand-in for exactly that latency; keeping both
+        // would double the correction, so it starts fresh from the measurement.
+        popover.test_toggleSyncDrawer(deviceID: "bt-a:output")
+        #expect(popover.test_syncDrawer?.test_trimMs == 0,
+                "the row's trim reads 0 after the run, not the pre-run −300")
+    }
+
+    /// Real device names are long. The question screen's buttons have to give
+    /// way rather than overrun the panel's required content pin — no absolute
+    /// widths here, just "does the content still fit what it was given".
+    @Test func aLongDeviceNameStillLaysOutInsideThePanel() {
+        let longName = "Sony WH-1000XM3 Wireless Headphones"
+        let fleet = [local(), airplay(), bt(name: longName)]
+        let (popover, _) = makePopover(fleet: fleet)
+        popover.update(devices: fleet)
+        popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
+        let wizard = popover.test_btWizardView()
+        wizard?.test_clickButton(titled: "Start")
+        #expect(wizard?.test_buttonTitles.first == longName)
+        #expect(wizard?.test_contentFitsItsWidth == true,
+                "a long name must shrink its button, not break the panel's layout")
     }
 
     // MARK: Manual relaunch (the wizard outlives "Not now" — locked UX)
@@ -437,7 +686,7 @@ import AppKit
     /// a group of one and produced no comparison at all.
     @Test func aSilentReferenceIsSelectedForTheRunAndRestoredAfterKeep() {
         let fleet = [airplay("office"), bt()]
-        let (popover, _) = makePopover(fleet: fleet)
+        let (popover, recorder) = makePopover(fleet: fleet)
         popover.update(devices: fleet)
         popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
         #expect(popover.test_isSpeakerSelected("office") == false)
@@ -450,9 +699,8 @@ import AppKit
 
         let wizard = popover.test_btWizardView()
         wizard?.test_clickButton(titled: "Start")
-        wizard?.test_clickButton(titled: "Move 2")
-        wizard?.test_clickButton(titled: "Office")
-        wizard?.test_clickButton(titled: "Move 2")
+        driveWizard(wizard, recorder, targetTitle: "Move 2", referenceTitle: "Office",
+                    trueOffsetMs: 10)
         wizard?.test_clickButton(titled: "Keep")
         #expect(popover.test_btWizardIsOpen() == false)
         #expect(popover.test_isSpeakerSelected("office") == false,
@@ -490,8 +738,9 @@ import AppKit
 
     @Test func aGracefulExitRestoresTheEngagedReference() {
         exitPathRestoresTheReference { _, wizard in
-            wizard?.test_clickButton(titled: BTAlignmentWizardView.cantTellTitle)
-            wizard?.test_clickButton(titled: BTAlignmentWizardView.cantTellTitle)
+            for _ in 0..<(2 * BTAlignmentConstantStimuli.stimuliMs.count + 1) {
+                wizard?.test_clickButton(titled: BTAlignmentWizardView.cantTellTitle)
+            }
             wizard?.test_clickButton(titled: "Done")
         }
     }
@@ -514,17 +763,59 @@ import AppKit
         let wizard = popover.test_btWizardView()
         wizard?.test_clickButton(titled: "Start")
         wizard?.test_clickButton(titled: "Move 2")
-        #expect(recorder.previews.map(\.ms) == [0, 250])
+        #expect(recorder.previews.count == 2)
 
         wizard?.test_selectReference(titled: "Office")
         #expect(popover.test_btWizardReferenceID() == "office")
         #expect(popover.test_isSpeakerSelected("office"), "the new reference is engaged")
         #expect(popover.test_isSpeakerSelected("mac") == false, "…and the old one released")
         #expect(popover.test_btWizardEngagedReferenceID() == "office")
-        #expect(wizard?.test_screen == .question(progress: 0, answersSoFar: 0),
-                "the bisection restarts — the earlier answers are not evidence about Office")
-        #expect(recorder.previews.map(\.ms) == [0, 250, 0])
-        #expect(wizard?.test_buttonTitles == ["Move 2", "Office", "Can't tell"])
+        #expect(wizard?.test_screen == .question(progress: 0, answersSoFar: 0, searching: true),
+                "the run restarts — the earlier answers are not evidence about Office")
+        #expect(recorder.previews.count == 3, "a fresh run's first candidate is applied")
+        #expect(wizard?.test_buttonTitles
+                == ["Move 2", "Office", "Can't tell", "Back", BTAlignmentWizardView.stopTitle])
+    }
+
+    /// The tick gate carries BOTH participants, so the backend can hold every
+    /// other Bluetooth speaker silent — and a reference swapped mid-run re-pushes
+    /// it, or the new reference would be the one left silent.
+    @Test func theTickCarriesBothParticipantsAndARefSwapRePushesThem() {
+        let fleet = [local(), airplay("office"), bt()]
+        let (popover, recorder) = makePopover(fleet: fleet)
+        popover.update(devices: fleet)
+        popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
+        let wizard = popover.test_btWizardView()
+        wizard?.test_clickButton(titled: "Start")
+        #expect(recorder.tickTargets == ["bt-a:output"])
+        #expect(recorder.tickReferences == ["mac"], "the Mac is the default reference")
+
+        wizard?.test_selectReference(titled: "Office")
+        #expect(recorder.ticks == [true, true], "a live run re-pushes rather than re-arming")
+        #expect(recorder.tickReferences == ["mac", "office"],
+                "the backend hears about the swap, got \(recorder.tickReferences)")
+
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.stopTitle)
+        #expect(recorder.ticks.last == false)
+    }
+
+    /// A run whose answers put the speaker AHEAD of the Mac has not measured a
+    /// latency — with the Mac as the zero that is not a thing a speaker does. It
+    /// says so and stores nothing, rather than rounding a bad reading to 0.
+    @Test func aRunThatMakesTheMacTheLateOneSaysSoAndPersistsNothing() {
+        let (popover, recorder) = makePopover()
+        let wizard = openWizard(popover)
+        wizard?.test_clickButton(titled: "Start")
+        driveWizard(wizard, recorder, targetTitle: "Move 2", referenceTitle: "This Mac",
+                    trueOffsetMs: -60)
+        #expect(wizard?.test_screen == .macIsLate,
+                "got \(String(describing: wizard?.test_screen))")
+        #expect(wizard?.test_bodyText == BTAlignmentWizardView.macIsLateCopy)
+        #expect(recorder.ends.map(\.keep) == [nil], "nothing is persisted")
+
+        wizard?.test_clickButton(titled: "Done")
+        #expect(popover.test_btWizardIsOpen() == false)
     }
 
     /// Nothing else to compare against: the wizard opens, says why, and Start

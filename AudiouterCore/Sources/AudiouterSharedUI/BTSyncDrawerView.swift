@@ -413,6 +413,24 @@ public final class BTSyncDrawerView: NSView {
         refreshDisplay()
     }
 
+    /// A trim written by something OUTSIDE the drawer while it stands open —
+    /// the alignment wizard's Keep, which zeroes the nudge its run suspended.
+    ///
+    /// Not `configure`: that is a background model push, and it deliberately
+    /// refuses to yank text out from under an in-progress edit — so the field
+    /// would go on SHOWING the pre-run value and commit it straight back over
+    /// the measurement on its way out (live defect, 2026-08-22). This is a
+    /// gesture in its own right, so it wins over a live edit exactly as the
+    /// steppers do, and it moves the Revert baseline with it: a nudge the run
+    /// just measured away is not a value to go back to.
+    public func noteExternalTrimChange(_ ms: Double) {
+        trimMs = ms
+        isSet = true
+        openTimeMs = ms
+        refreshDisplay()
+        valueFieldEditor.overrideEditedValue(ms)
+    }
+
     // MARK: Actions
 
     @objc private func minusTapped() { stepTrim(by: -stepAmountMs) }
@@ -464,10 +482,16 @@ public final class BTSyncDrawerView: NSView {
 
     /// A discrete, complete gesture (stepper click, typed commit, Revert):
     /// apply AND persist.
-    private func applyCommit(_ ms: Double) {
+    ///
+    /// `fromField` marks the typed-Return / focus-loss path, which arrives via
+    /// the field editor's own commit and has already written the field. Every
+    /// OTHER gesture has to say so, because `refreshDisplay` cannot write text
+    /// the user is editing — see `SyncValueFieldEditor.overrideEditedValue`.
+    private func applyCommit(_ ms: Double, fromField: Bool = false) {
         trimMs = ms
         isSet = true
         refreshDisplay()
+        if !fromField { valueFieldEditor.overrideEditedValue(ms) }
         delegate?.syncDrawer(self, didChangeTrimMs: ms, committed: true)
     }
 
@@ -556,6 +580,6 @@ public final class BTSyncDrawerView: NSView {
 
 extension BTSyncDrawerView: SyncValueFieldEditorDelegate {
     public func syncValueFieldEditor(_ editor: SyncValueFieldEditor, didCommit ms: Double) {
-        applyCommit(ms)
+        applyCommit(ms, fromField: true)
     }
 }

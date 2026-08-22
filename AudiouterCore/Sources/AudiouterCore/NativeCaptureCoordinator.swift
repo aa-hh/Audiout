@@ -157,6 +157,12 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         let btSink: SyncedLocalPCMSink?
         let btBaseResampler: SyncedLocalBaseResampler?
         let tickInjector: AlignmentTickInjector?
+        /// The wizard is driving the feed itself (``startWizardPacerLocked()``).
+        /// While this is set, captured buffers are dropped at the top of
+        /// ``handleBuffer(_:)`` and the ONLY producer is the pacer — that
+        /// single-producer-by-construction shape is the whole point (roadmap
+        /// 040 failed as two producers contending for a lock on a cadence).
+        let wizardActive: Bool
 
         /// The published value before anything has been started, and the value
         /// every teardown path returns to: no converter, so ``handleBuffer(_:)``
@@ -165,7 +171,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             converter: nil, meteringActive: false,
             syncedLocalSink: nil, syncedLocalBaseResampler: nil,
             btSink: nil, btBaseResampler: nil,
-            tickInjector: nil)
+            tickInjector: nil, wizardActive: false)
 
         init(
             converter: PCMConverting?,
@@ -174,7 +180,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             syncedLocalBaseResampler: SyncedLocalBaseResampler?,
             btSink: SyncedLocalPCMSink?,
             btBaseResampler: SyncedLocalBaseResampler?,
-            tickInjector: AlignmentTickInjector?
+            tickInjector: AlignmentTickInjector?,
+            wizardActive: Bool
         ) {
             self.converter = converter
             self.meteringActive = meteringActive
@@ -183,6 +190,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             self.btSink = btSink
             self.btBaseResampler = btBaseResampler
             self.tickInjector = tickInjector
+            self.wizardActive = wizardActive
         }
     }
 
@@ -287,6 +295,46 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// idempotence key for ``setAlignTick(_:config:)``, so a wizard activation
     /// can replace a manual one and vice versa. Confined to `queue`.
     private var tickConfig: AlignmentTickInjector.Config?
+
+    // MARK: The wizard's own paced feed (absorbs roadmap 040)
+
+    /// The alignment wizard works with the music PAUSED, and a paused Mac
+    /// delivers no captured buffers at all — so the wizard drives its own feed
+    /// instead of riding one. One timer on this one serial queue is the whole
+    /// producer while `.wizard` is engaged; captured buffers are dropped for
+    /// the duration (``BufferSnapshot/wizardActive``). Roadmap 040's first
+    /// attempt failed because the RT tap thread and a tone thread BOTH produced
+    /// and contended for a lock on a cadence; a wholesale mode gate is a
+    /// decision, not a missed lock.
+    /// `.userInteractive`: this queue IS the audio producer for the run's
+    /// duration, so it must not be scheduled behind ordinary work — a late fire
+    /// is a late (or catch-up-capped) block of audio.
+    private let pacerQueue = DispatchQueue(label: "NativeCaptureCoordinator.wizardPacer",
+                                           qos: .userInteractive)
+    /// Created/cancelled under `queue`; fires on `pacerQueue`.
+    private var pacerTimer: DispatchSourceTimer?
+    /// Tests only (``test_setWizardModeWithoutPacerTimer()``): skip creating the
+    /// timer so manual pumps are the whole feed. `queue`.
+    private var suppressWizardPacerTimer = false
+    /// Whether the wizard feed is engaged. Confined to `queue`; mirrored into
+    /// the published snapshot for the RT path.
+    private var wizardActive = false
+    /// Pacer-queue-confined. `0` means "not started yet" — the first fire seeds
+    /// it, so the engage delay never leaves a block of frames owed.
+    private var pacerStartNanos: Int64 = 0
+    private var pacerEmittedFrames = 0
+
+    /// The engine's fixed feed format, which the pacer synthesizes directly.
+    private static let wizardFeedRate = 44_100.0
+    private static let wizardFeedChannels = 2
+    /// First fire sits this far after the snapshot publish, bounding the engage
+    /// handoff: the only overlap left is one RT callback already in flight, and
+    /// the wizard's re-anchor (`NativeBackend.setBTWizardTickActive`) voids its
+    /// effect anyway.
+    private static let wizardPacerEngageDelay: DispatchTimeInterval = .milliseconds(200)
+    private static let wizardPacerInterval: DispatchTimeInterval = .milliseconds(20)
+    /// ~93 ms at 44.1 kHz — a ceiling on one fire's catch-up after a stall.
+    private static let wizardPacerMaxFramesPerFire = 4_096
 
     /// W1-T7 (Gap 1 + Fix 1): the excluded process-OBJECT set the CURRENT live tap
     /// was last built/recreated against — the compare-before-rebuild key for the
@@ -614,6 +662,15 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // Tear down OUTSIDE the state lock (teardown may block on Core Audio).
         toTearDown?.teardown()
         queue.sync {
+            // Disengage the wizard feed the same way a mode change does: cancel,
+            // drain, THEN publish. Its mode is dropped along with the pacer —
+            // leaving `wizardActive` set with no producer would silently gate
+            // every captured buffer after the next `start()`.
+            if self.wizardActive {
+                self.stopWizardPacerLocked()
+                self.tickConfig = nil
+                self.tickInjector = nil
+            }
             self.tap = nil
             self.converter = nil
             self.publishBufferSnapshot()
@@ -1040,7 +1097,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             syncedLocalBaseResampler: syncedLocalBaseResampler,
             btSink: btSink,
             btBaseResampler: btBaseResampler,
-            tickInjector: tickInjector)
+            tickInjector: tickInjector,
+            wizardActive: wizardActive)
         snapshotLock.lock()
         _bufferSnapshot = snapshot
         snapshotLock.unlock()
@@ -1057,9 +1115,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     }
 
     /// Mode-aware twin (W2): the wizard activates with `.wizard` — long tick
-    /// budget plus the keep-alive bed's wake preamble. Switching mode while
-    /// active swaps in a fresh injector (new beat clock + budget); a same-mode
-    /// call stays a no-op.
+    /// budget plus the keep-alive bed's wake preamble, and its OWN paced feed,
+    /// so the guided run works with the music paused. Switching mode while
+    /// active swaps in a fresh injector (new beat clock + budget), which is also
+    /// what keeps the injector's un-locked `cursor` single-consumer across a
+    /// producer change; a same-mode call stays a no-op.
     public func setAlignTickMode(_ mode: AlignTickMode) {
         queue.sync {
             let config: AlignmentTickInjector.Config? = switch mode {
@@ -1070,7 +1130,134 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             guard self.tickConfig != config else { return }
             self.tickConfig = config
             self.tickInjector = config.map { AlignmentTickInjector(config: $0) }
+            // Leaving `.wizard`: cancel and DRAIN the pacer before the new
+            // snapshot goes out, so no in-flight pacer block can be delivered
+            // against it — zero producer overlap at the resume boundary.
+            if self.wizardActive { self.stopWizardPacerLocked() }
+            self.wizardActive = (mode == .wizard)
             self.publishBufferSnapshot()
+            if self.wizardActive { self.startWizardPacerLocked() }
+        }
+    }
+
+    /// Arm the wizard's beat grid: from here on the run is audible. Hops onto
+    /// `pacerQueue` because the injector's cursor and epoch are that queue's
+    /// alone — the pacer is the single producer for a wizard run, and an arm
+    /// from any other thread would be a second toucher of lock-free state.
+    /// Inert when no wizard injector is live.
+    public func armWizardTicks() {
+        pacerQueue.async { [weak self] in self?.currentWizardInjector()?.armTicks() }
+    }
+
+    /// Swap the wizard's beat interval mid-run (the estimator's search stage
+    /// ticks every 3 s, its blocks stage at 72 BPM). Same pacer-queue
+    /// confinement, same reason, as ``armWizardTicks()``.
+    public func setWizardTempo(bpm: Double) {
+        pacerQueue.async { [weak self] in self?.currentWizardInjector()?.setTempo(bpm: bpm) }
+    }
+
+    /// The live wizard injector, or `nil` if the run has ended. `pacerQueue`
+    /// only — a plain blocking `lock()` is right here (this is not the RT path,
+    /// and dropping the arm would leave the run silent forever).
+    private func currentWizardInjector() -> AlignmentTickInjector? {
+        snapshotLock.lock()
+        let snapshot = _bufferSnapshot
+        snapshotLock.unlock()
+        guard snapshot.wizardActive else { return nil }
+        return snapshot.tickInjector
+    }
+
+    /// Start the wizard's paced producer. Must hold `queue`, and must be called
+    /// only AFTER the wizard snapshot is published — the timer reads that
+    /// snapshot to find its injector.
+    private func startWizardPacerLocked() {
+        pacerQueue.async { [weak self] in
+            self?.pacerStartNanos = 0
+            self?.pacerEmittedFrames = 0
+        }
+        guard !suppressWizardPacerTimer else { return }
+        let timer = DispatchSource.makeTimerSource(queue: pacerQueue)
+        timer.schedule(
+            deadline: .now() + Self.wizardPacerEngageDelay,
+            repeating: Self.wizardPacerInterval,
+            leeway: .milliseconds(2))
+        timer.setEventHandler { [weak self] in self?.pumpWizardTickIfDue() }
+        timer.resume()
+        pacerTimer = timer
+    }
+
+    /// Cancel the pacer and drain its queue, so the producer is provably idle
+    /// by the time this returns. Must hold `queue`.
+    private func stopWizardPacerLocked() {
+        pacerTimer?.cancel()
+        pacerTimer = nil
+        pacerQueue.sync {}
+        wizardActive = false
+    }
+
+    /// One pacer fire: emit however many frames real time now owes, capped.
+    /// `pacerQueue` only.
+    private func pumpWizardTickIfDue() {
+        let now = Self.monotonicNanos()
+        if pacerStartNanos == 0 { pacerStartNanos = now; pacerEmittedFrames = 0 }
+        let owed = Int(
+            (Double(now &- pacerStartNanos) * Self.wizardFeedRate / 1_000_000_000).rounded())
+            - pacerEmittedFrames
+        let frames = min(max(owed, 0), Self.wizardPacerMaxFramesPerFire)
+        guard frames > 0 else { return }
+        emitWizardBlock(frames: frames)
+    }
+
+    /// Synthesize one silent block, run the wizard injector over it, and hand it
+    /// to the same delivery tail captured buffers use. `pacerQueue` only — that
+    /// exclusivity is what lets the injector keep its lock-free cursor.
+    private func emitWizardBlock(frames: Int) {
+        let snapshot: BufferSnapshot
+        snapshotLock.lock()
+        snapshot = _bufferSnapshot
+        snapshotLock.unlock()
+        guard snapshot.wizardActive, let injector = snapshot.tickInjector else { return }
+
+        // TWO variants off ONE cursor advance (live report, 2026-08-22 — "heavy
+        // static on the Mac"): the keep-alive bed is there to stop a Bluetooth
+        // speaker's amp power-gating between ticks, and on the Mac's own
+        // speakers it is nothing but hiss. Same tick, same beat, both ways.
+        var pcm = Data(count: frames * Self.wizardFeedChannels * MemoryLayout<Int16>.size)
+        var bedded = Data()
+        injector.mixWizardVariants(into: &pcm, bedded: &bedded)
+        // Host clock only, never a device clock (the standing rule), on the same
+        // CLOCK_MONOTONIC timeline `CapturedBuffer.pts` rides.
+        let ptsNanos = pacerStartNanos
+            &+ Int64((Double(pacerEmittedFrames) / Self.wizardFeedRate * 1_000_000_000).rounded())
+        pacerEmittedFrames += frames
+        deliver(pcm, pts: timespec(tv_sec: Int(ptsNanos / 1_000_000_000),
+                                   tv_nsec: Int(ptsNanos % 1_000_000_000)),
+                snapshot: snapshot, btPCM: bedded)
+    }
+
+    private static func monotonicNanos() -> Int64 {
+        var ts = Darwin.timespec()
+        clock_gettime(CLOCK_MONOTONIC, &ts)
+        return Int64(ts.tv_sec) &* 1_000_000_000 &+ Int64(ts.tv_nsec)
+    }
+
+    /// Test seam: engage `.wizard` with the pacer timer suppressed, leaving
+    /// ``test_pumpWizardTick(frames:)`` the ONLY producer — otherwise the live
+    /// timer starts emitting as soon as wall time overtakes the pumped frames,
+    /// and a stalled machine slips an extra block into a pumped-block count.
+    /// Stays suppressed for this coordinator's lifetime; production engages
+    /// through ``setAlignTickMode(_:)`` and always runs the timer.
+    func test_setWizardModeWithoutPacerTimer() {
+        queue.sync { self.suppressWizardPacerTimer = true }
+        setAlignTickMode(.wizard)
+    }
+
+    /// Deterministic seam: generate and deliver exactly one pacer block, on the
+    /// pacer queue, without waiting for the timer.
+    func test_pumpWizardTick(frames: Int) {
+        pacerQueue.sync {
+            if pacerStartNanos == 0 { pacerStartNanos = Self.monotonicNanos() }
+            emitWizardBlock(frames: frames)
         }
     }
 
@@ -1108,9 +1295,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         } else {
             return
         }
-        let metering = snapshot.meteringActive
-        let syncedSink = snapshot.syncedLocalSink
-        let baseResampler = snapshot.syncedLocalBaseResampler
+        // The wizard drives the feed itself for the duration of a run, so the
+        // captured content is deliberately delivered to NOBODY — `.wizard`
+        // already replaces the program, and a wholesale gate here is what makes
+        // the pacer the single producer.
+        guard !snapshot.wizardActive else { return }
         guard let converter = snapshot.converter else { return }
 
         let converted = converter.convertToAirPlayPCM(buffer)
@@ -1129,8 +1318,23 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             tickInjector.mix(into: &pcm)
         }
 
-        // pts straight off the buffer's capture clock (mHostTime → timespec).
-        sink.write(pcm: pcm, pts: buffer.pts)
+        deliver(pcm, pts: buffer.pts, snapshot: snapshot)
+    }
+
+    /// The delivery tail every producer shares — the engine write, both
+    /// fan-outs, and the metering emission. Captured buffers reach it through
+    /// ``handleBuffer(_:)``; the wizard's paced blocks reach it through
+    /// ``emitWizardBlock(frames:)``, so both land on exactly the same consumers.
+    ///
+    /// `btPCM` is the ONE deliberate divergence between consumers, and it exists
+    /// for one caller: the wizard pacer hands the Bluetooth fan-out the same
+    /// block with the keep-alive bed added, while the engine and the Mac's own
+    /// fan-out get it tick-only. `nil` — every other caller — means one feed for
+    /// everybody, which is the rule the align tick depends on.
+    private func deliver(_ pcm: Data, pts: timespec, snapshot: BufferSnapshot,
+                         btPCM: Data? = nil) {
+        // pts straight off the producer's capture clock (mHostTime → timespec).
+        sink.write(pcm: pcm, pts: pts)
 
         // T-FANOUT: fan the SAME converted PCM (and its pts) to the delayed local
         // sink — ONE capture, two consumers. Widened to interleaved Float32 and
@@ -1141,8 +1345,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // phase-aligned with AirPlay; its render process is self-excluded from this
         // tap (``resolveExcludedProcessObjectIDs()``) so this fanned-out audio
         // can't loop back as an echo.
-        if let syncedSink, let baseResampler {
-            Self.fanOutToSyncedLocal(pcm, pts: buffer.pts, into: syncedSink, resampler: baseResampler)
+        if let syncedSink = snapshot.syncedLocalSink,
+           let baseResampler = snapshot.syncedLocalBaseResampler {
+            Self.fanOutToSyncedLocal(pcm, pts: pts, into: syncedSink, resampler: baseResampler)
         }
 
         // BT-FANOUT: the third consumer of the identical converted PCM+pts —
@@ -1154,14 +1359,14 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // (``resolveExcludedProcessObjectIDs()``) so their delayed output
         // can't loop back as an echo.
         if let btSink = snapshot.btSink, let btResampler = snapshot.btBaseResampler {
-            Self.fanOutToSyncedLocal(pcm, pts: buffer.pts, into: btSink, resampler: btResampler)
+            Self.fanOutToSyncedLocal(btPCM ?? pcm, pts: pts, into: btSink, resampler: btResampler)
         }
 
         // Level pass-through: compute RMS on the CONVERTED S16LE buffer once, for
         // the meter feature (identical for every fanned-out device) — but only
         // while metering is active (T-GATE): the popover is closed, so skip the
         // RMS pass entirely rather than compute a sample nobody reads.
-        if metering, let onLevel {
+        if snapshot.meteringActive, let onLevel {
             onLevel(Self.rmsOfS16LE(pcm))
         }
     }

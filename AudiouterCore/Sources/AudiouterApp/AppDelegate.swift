@@ -1179,10 +1179,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return controller.contentController
     }
 
-    /// The Settings screen's content, built on the first visit to the Settings
-    /// tab. In-content tabs (`.segmentedControlOnTop`) so the panes' own tab
-    /// strip renders BENEATH the surface's screen switcher rather than in a
-    /// title bar the surface doesn't have.
+    /// The Settings screen's content, built on the first visit: a Groups-style
+    /// sidebar of sections and one pane.
     @MainActor
     private func makeSettingsRoot() -> SettingsRootViewController {
         let general = GeneralSettingsViewController(loginItem: SMAppServiceLoginItem(),
@@ -1206,11 +1204,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                 wakeRestore: makeWakeRestoreSettingModel())
         audio.onChange = { [weak self] in self?.handleExcludedAppsChanged() }
 
-        return SettingsRootViewController(tabs: [
+        return SettingsRootViewController(sections: [
             .init(title: "General", symbolName: "gearshape", viewController: general),
             .init(title: "Appearance", symbolName: "paintpalette", viewController: appearance),
             .init(title: "Audio", symbolName: "speaker.wave.2", viewController: audio),
-        ], tabStyle: .segmentedControlOnTop)
+        ])
     }
 
     /// The menu-bar item's frame in screen coordinates, for anchoring the

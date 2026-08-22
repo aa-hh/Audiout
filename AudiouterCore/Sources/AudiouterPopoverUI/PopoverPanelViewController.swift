@@ -164,7 +164,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// left chrome + slider/readout/trailing columns). Longer device names may
     /// truncate more — accepted. (Footer removed; actions moved to the header +
     /// Groups "+".)
-    private let panelWidth: CGFloat = 623
+    private let panelWidth: CGFloat = SurfaceLayout.width
     /// Trailing inset of a header's accessory button ("+", Groups) from the
     /// header row's OWN trailing edge — unrelated to card-tile geometry
     /// (there's no card margin to reuse after V2's de-nest; this keeps the
@@ -411,15 +411,13 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// runs the resize animation). One channel, used consistently: PLAN §E risk 1
     /// "prefer the preferredContentSize channel".
     ///
-    /// `animated` selects the animation via `PopoverController.applySurfaceResize`
-    /// (the controller, not the panel, knows the current host): under the popover
-    /// host that toggles `popover.animates` around the `preferredContentSize`
-    /// assignment. The non-animated path is used for the
-    /// initial show and when `NSWorkspace.shared.accessibilityDisplayShouldReduceMotion`
-    /// is true (the jank escape hatch); it applies the size with `animates` forced
-    /// off so no frame animation runs. **A fold never asks for `animated: true`**
-    /// — `FoldAnimator` calls in with `animated: false` on every tick, so the
-    /// surface has no clock of its own to drift against the content's.
+    /// `animated` is carried through `PopoverController.applySurfaceResize` for
+    /// the host to interpret (the controller, not the panel, knows the current
+    /// host). Under the one-surface host it never animates a window: the frame
+    /// is FIXED, and the host follows the published size only to notice
+    /// content taller than that frame. **A fold never asks for
+    /// `animated: true`** either — `FoldAnimator` calls in with
+    /// `animated: false` on every tick.
     func panelContentDidChangeHeight(animated: Bool) {
         publishContentSize(fittingSizeSettled(), animated: animated)
     }

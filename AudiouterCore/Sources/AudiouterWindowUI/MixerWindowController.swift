@@ -130,23 +130,19 @@ public final class MixerWindowController {
         // Sidebar item — the documented `.sidebar(withViewController:)`
         // constructor applies source-list material/vibrancy + collapse behavior.
         let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarViewController)
-        // PINNED at 210 — minimum AND maximum, deliberately (2026-08-12).
-        // The sidebar's own fitting width is ≥260, and the split view hands
-        // an item its fitting width clamped to `maximumThickness`, so the old
-        // 260 ceiling WAS the sidebar's width; worse, the whole screen's
-        // width is the split's fitting width (sidebar + form column + margins)
-        // and AppKit widens the Groups window up to it, overriding the size
-        // the surface asks for. Those 60 pt of source-list padding were
-        // therefore charged to the window, not to the sidebar: Groups mounted
-        // 707 pt wide against the Mixer's 623, so switching screens jumped.
-        // Pinning it spends them on the form instead and lets
-        // `AppSurfaceController.groupsDefaultContentSize`'s 623 hold. 210, not
-        // the old 200 floor: 200 truncated "MacBook Pro Speakers", the longest
-        // name every Mac has. The cost is a divider the user can no longer
-        // drag; a longer name still truncates, which is what a source list
-        // does anyway.
-        sidebarItem.minimumThickness = 210
-        sidebarItem.maximumThickness = 210
+        // PINNED at `SurfaceLayout.sidebarWidth` — minimum AND maximum,
+        // deliberately (2026-08-12). The sidebar's own fitting width is
+        // ≥260, and the split view hands an item its fitting width clamped
+        // to `maximumThickness`; pinning min == max makes the split's whole
+        // fitting width exactly `SurfaceLayout.width` (sidebar +
+        // `GroupsPaneLayout.contentMaxWidth` + both column margins), which is
+        // what lets it sit inside the one fixed surface frame without
+        // widening it. 210, not the old 200 floor: 200 truncated "MacBook
+        // Pro Speakers", the longest name every Mac has. The cost is a
+        // divider the user can no longer drag; a longer name still
+        // truncates, which is what a source list does anyway.
+        sidebarItem.minimumThickness = SurfaceLayout.sidebarWidth
+        sidebarItem.maximumThickness = SurfaceLayout.sidebarWidth
         // NOT collapsible: a collapse here is a ONE-WAY DOOR. The sidebar is
         // the only way to change selection, and nothing can bring it back —
         // the surface has no toolbar sidebar toggle and no View menu, and this

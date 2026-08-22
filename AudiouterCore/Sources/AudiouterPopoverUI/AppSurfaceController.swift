@@ -51,27 +51,26 @@ public enum SurfaceScreen: Int, CaseIterable, Sendable {
 /// - **Mixer** — the real `PopoverController` panel, claimed through
 ///   `claimPanelForSurfaceHosting()` and driven through the U2
 ///   host-agnostic seams: `surfaceDidShow()`/`surfaceDidHide()` on window
-///   show/hide/switch, and a `surfaceResizer` that animates the SHELL to the
-///   panel's exact-fit `preferredContentSize` (the existing
-///   `panelContentDidChangeHeight` channel — Mixer is always exact-fit).
+///   show/hide/switch, and a `surfaceResizer` that listens to the panel's
+///   published size only to notice content the fixed frame cannot show.
 /// - **Groups** — the caller-provided content controller
 ///   (`MixerWindowController.contentController` in the app), seated below the
-///   toolbar strip in a `SurfaceScreenViewController`. Fixed default content
-///   size 623×528 below the strip — the Mixer's width, and a height derived
-///   so the 7-device group editor fits
-///   (see `groupsDefaultContentSize`) — and the one screen whose user-dragged
-///   size is remembered for the session (the shell's drag-holds philosophy).
-/// - **Settings** — a caller-provided `SettingsRootViewController` (in-content
-///   tabs, so they render beneath the toolbar), same container. Per-tab
-///   height rides `onFittedContentSizeChange`, which THIS controller takes
-///   over (R5: the standalone Settings window's four sizing traps transfer to
-///   whoever hosts these panes — the re-measure triggers live in the root
-///   controller and keep firing here).
+///   toolbar strip in a `SurfaceScreenViewController`.
+/// - **Settings** — a caller-provided `SettingsRootViewController` (a section
+///   sidebar plus one scrolling pane), same container.
 ///
 /// Every swap routes through the shell's `setContent` (R3 — assigning
 /// `contentViewController` directly snaps the window to a 500×500 fallback).
-/// Sizes are applied top-anchored (the surface grows downward from the menu
-/// bar) and, unpinned, re-centered on the status-item anchor.
+///
+/// **ONE FRAME.** The surface is `SurfaceLayout.width` wide and, for a whole
+/// open session, exactly one height: measured on each fresh show from the
+/// Mixer's exact fit, floored at `minimumContentSize` and capped to the
+/// screen. Every screen wears it, folds and drawers move rows INSIDE it, and
+/// nothing resizes the window again until the surface closes — a width change
+/// on a screen switch slid the toolbar out from under the cursor and "reads
+/// as the surface twitching" (owner, 2026-08-12). The frame is applied
+/// top-anchored (the surface hangs from the menu bar and grows downward);
+/// the shell's `show` does the positioning, and nothing re-centres it after.
 ///
 /// **Pin** drives U1's `setPinned(_:)` manner flip and persists in
 /// `AppSettings.surfacePinned` (restored at construction). The toolbar strip
@@ -102,9 +101,8 @@ public final class AppSurfaceController {
     /// surface must not construct window controllers itself).
     private let makeGroupsContent: () -> NSViewController
     /// Lazily builds the Settings root the FIRST time the Settings tab is
-    /// selected. The surface takes over the returned controller's
-    /// `onFittedContentSizeChange` — don't hand it one whose callback
-    /// something else still needs.
+    /// selected. The surface subscribes to nothing on it: the frame is fixed,
+    /// so no pane size is ever published to a host.
     private let makeSettingsContent: () -> SettingsRootViewController
 
     /// The Mixer panel, once claimed from its controller (lazy — claiming
@@ -117,20 +115,18 @@ public final class AppSurfaceController {
 
     public private(set) var selectedScreen: SurfaceScreen = .mixer
 
+    /// The one frame's content size for THIS open session — measured on every
+    /// fresh show, never touched between shows.
+    private var sessionContentSize = AppSurfaceController.minimumContentSize
+
+    /// Whether this open session already logged Mixer content taller than the
+    /// frame. Once per open: the panel republishes its size on every fold tick.
+    private var overflowReported = false
+
     /// Whether the surface window is currently presented (show → close). The
     /// Mixer's `surfaceDidShow`/`surfaceDidHide` lifecycle keys off this so
     /// metering/monitors only run while a user can see the panel.
     public private(set) var isShown = false
-
-    /// The status-item anchor `show(anchorRect:)` last received — unpinned
-    /// resizes re-center on it so the beak keeps pointing at the status item
-    /// across per-screen width changes.
-    private var lastAnchorRect: NSRect?
-
-    /// The Groups screen's session size memory: captured when switching away,
-    /// so a user-dragged Groups size survives Mixer/Settings round-trips.
-    /// Never persisted (matches the shell's process-lifetime drag memory).
-    private var rememberedGroupsFrameSize: NSSize?
 
     /// Fired after the shell window really closes (✕ / Esc / `performClose`).
     public var onClose: (() -> Void)?
@@ -147,31 +143,16 @@ public final class AppSurfaceController {
     /// surface) never re-announces.
     private var publishedVisibleScreen: SurfaceScreen?
 
-    /// Groups' default content size, BELOW the toolbar strip.
+    /// The one frame's width, and the FLOOR of its session height.
     ///
-    /// WIDTH: the Mixer's, to the point — read from `mixerSeedContentSize` so
-    /// the two can't drift, because a screen switch that changes the window's
-    /// width reads as the surface twitching (owner, 2026-08-12). It only holds
-    /// if the Groups split view doesn't ask for more: AppKit widens the window
-    /// to the split's fitting width, which is
-    /// `MixerWindowController`'s pinned 200pt sidebar plus
-    /// `GroupsPaneLayout.contentMaxWidth` plus both column margins. Those three
-    /// add up to this width on purpose — change one and this stops holding.
-    ///
-    /// HEIGHT: DERIVED, not picked. The group editor pane has no scroll view,
-    /// so a 7-device fleet's editor plus the screen's footer strip (28) must
-    /// fit (`MembershipRailTests`). 468 → 528 (2026-08-12) buys the pane's
-    /// vertical cadence — taller rows and real gaps between sections — plus a
-    /// few points of headroom, where the old value was an exact fit with none.
-    /// The window's real content size adds the MEASURED toolbar-strip inset on
-    /// top (`groupsTargetContentSize()`) — the strip is window chrome now, not
-    /// a 52pt in-content header row.
-    public static let groupsDefaultContentSize = NSSize(width: mixerSeedContentSize.width,
-                                                        height: 528)
-
-    /// The Mixer panel's width is fixed (623); height is always exact-fit, so
-    /// this seed only positions the very first mount before the fit lands.
-    static let mixerSeedContentSize = NSSize(width: 623, height: 623)
+    /// Both are WINDOW CONTENT sizes — the toolbar strip is included, because
+    /// the Mixer's fit (`fittingSizeSettled()`) already carries the measured
+    /// chrome inset. The Mixer's fit at open raises the height above this
+    /// floor; the screen's visible frame caps it. The floor exists for the
+    /// screens that cannot scroll: the Groups editor pane has no scroll view,
+    /// so a 7-device fleet's editor plus the screen's footer strip must fit
+    /// here (`AppSurfaceControllerTests.theSevenDeviceEditorFitsTheMinimumFrame`).
+    public static let minimumContentSize = NSSize(width: SurfaceLayout.width, height: 600)
 
     public init(popoverController: PopoverController,
                 settings: AppSettings = AppSettings(),
@@ -188,12 +169,9 @@ public final class AppSurfaceController {
         // only re-anchors a visible panel, so this is a pure profile stamp.
         shell.setPinned(settings.surfacePinned)
         shell.onClose = { [weak self] in self?.handleShellClosed() }
-        // The window's frame animation reads `animationResizeTime(_:)`, never
-        // the `NSAnimationContext` around `animator().setFrame` — without this
-        // the shell resize runs on AppKit's own clock while every collapsible
-        // clip travels on `collapseRevealDuration`, and the two can never meet
-        // (the root of the content-vs-window judder, live 2026-08-11).
-        shell.resizeAnimationDuration = PopoverPanelViewController.collapseRevealDuration
+        // One fixed frame: nothing in the surface resizes, so no screen offers
+        // a drag affordance.
+        shell.setUserResizable(false)
 
         // The one header (D1): a real unified NSToolbar on the shell window,
         // both profiles. Attaching here — before anything shows — means the
@@ -233,10 +211,11 @@ public final class AppSurfaceController {
     /// — re-running the Mixer's open ritual there would discard the user's
     /// mid-open collapse toggles for no reason (it is the same open session).
     public func show(anchorRect: NSRect?) {
-        lastAnchorRect = anchorRect
         let wasShown = isShown
         if !wasShown {
-            mount(selectedScreen, animated: false)
+            overflowReported = false
+            sessionContentSize = measureSessionContentSize()
+            mount(selectedScreen)
         }
         shell.show(anchorRect: anchorRect)
         isShown = true
@@ -276,17 +255,41 @@ public final class AppSurfaceController {
         onVisibleScreenChange?(current)
     }
 
+    /// The one frame's content size for the session about to start.
+    ///
+    /// Measured from the MIXER even when Groups or Settings is the screen that
+    /// opens: the Mixer is the one screen that cannot scroll and cannot be
+    /// shortened, so it decides the height and the other two fill it. Hidden
+    /// means idle, so the panel is stale between shows — `rebuildForOpen()`
+    /// re-ingests everything that arrived meanwhile BEFORE the measure, which
+    /// is also why `mount` no longer runs the open ritual itself.
+    /// `fittingSizeSettled()` already includes the measured chrome inset, so
+    /// this is a window CONTENT size, toolbar strip and all.
+    private func measureSessionContentSize() -> NSSize {
+        let panel = claimedMixerPanel()
+        applyChromeTopInset()
+        popoverController.rebuildForOpen()
+        var size = panel.fittingSizeSettled()
+        size.width = Self.minimumContentSize.width
+        size.height = max(size.height, Self.minimumContentSize.height)
+        if let window = shell.window, let screen = window.screen ?? NSScreen.main {
+            let maxFrame = NSRect(x: 0, y: 0,
+                                  width: size.width,
+                                  height: screen.visibleFrame.height - 16)
+            size.height = min(size.height,
+                              window.contentRect(forFrameRect: maxFrame).height)
+        }
+        return size
+    }
+
     // MARK: Screen switching
 
     /// Switch to `screen`: lazy-builds it on first visit, swaps it in through
-    /// the shell's `setContent` (R3), animates the window to the screen's size
-    /// (top edge anchored), and confirms the toolbar's tab selection.
-    /// Selecting the current screen is a no-op.
+    /// the shell's `setContent` (R3), and confirms the toolbar's tab
+    /// selection. The frame never changes — every screen wears the session
+    /// size. Selecting the current screen is a no-op.
     public func select(_ screen: SurfaceScreen) {
         guard screen != selectedScreen else { return }
-        if selectedScreen == .groups {
-            rememberedGroupsFrameSize = shell.window?.frame.size
-        }
         if selectedScreen == .mixer, isShown {
             // The panel is leaving the window: drop what must not outlive a
             // session (transient selection, stale meter bars) and stop paying
@@ -295,7 +298,12 @@ public final class AppSurfaceController {
         }
         selectedScreen = screen
         syncToolbar()
-        mount(screen, animated: isShown)
+        if screen == .mixer {
+            // The Mixer's open ritual — `show` already ran it while measuring,
+            // so returning to the screen re-ingests what arrived meanwhile.
+            popoverController.rebuildForOpen()
+        }
+        mount(screen)
         if screen == .mixer, isShown {
             popoverController.surfaceDidShow()
         }
@@ -356,72 +364,57 @@ public final class AppSurfaceController {
         }
     }
 
-    /// Mount `screen` into the shell and drive it to its target size.
+    /// Mount `screen` into the shell. Every screen gets the SAME session size:
+    /// there is one frame, and a swap is content changing behind fixed glass.
     ///
-    /// `setContent` is deliberately bracketed by a frame save/restore: on a
-    /// controller's FIRST mount it applies `defaultSize` by snapping the
-    /// window, and on a re-host it restores the pre-swap size — either way the
-    /// window should visibly END UP at the target via ONE animated resize, not
-    /// jump-then-glide. So: capture the frame, swap content, put the frame
-    /// back, then animate to the target (the prototype's proven dance).
-    private func mount(_ screen: SurfaceScreen, animated: Bool) {
-        let previousFrame = shell.window?.frame
-        // F3: only Groups is user-resizable — it's the one screen with
-        // session drag-memory (U3). Mixer and Settings re-size the window
-        // themselves on every content change (exact-fit), so a manual drag
-        // there would fight the next automatic resize; removing the
-        // affordance is the same rule pinned and unpinned.
-        shell.setUserResizable(screen == .groups)
+    /// `setContent` can still move the window — on a controller's FIRST mount
+    /// it applies `defaultSize` by snapping (R3), and a freshly mounted split
+    /// view can ask AppKit for more — so the session frame is re-asserted
+    /// after every swap, instantly, never animated.
+    private func mount(_ screen: SurfaceScreen) {
         switch screen {
         case .mixer:
             let panel = claimedMixerPanel()
             // Seat the content below the toolbar strip AFTER the lazy build
             // (a screen that doesn't exist yet can't be seated), BEFORE the
-            // rebuild/size so the exact fit includes the inset.
+            // size so the fit includes the inset.
             applyChromeTopInset()
-            // Re-ingest everything that arrived while the panel was hidden or
-            // unmounted (hidden-means-idle, audit B8) and recompute collapse
-            // defaults — the Mixer open ritual every host must perform.
-            popoverController.rebuildForOpen()
-            shell.setContent(panel, defaultSize: Self.mixerSeedContentSize)
-            restoreFrameAfterSwap(previousFrame)
-            // Exact fit through the panel's own documented size channel; the
-            // surfaceResizer assigned at claim time turns it into the shell
-            // resize (animated or snap).
-            panel.panelContentDidChangeHeight(animated: animated)
+            shell.setContent(panel, defaultSize: sessionContentSize)
+            panel.panelContentDidChangeHeight(animated: false)
         case .groups:
             let screenVC = builtGroupsScreen()
             applyChromeTopInset()
-            shell.setContent(screenVC, defaultSize: groupsTargetContentSize())
-            restoreFrameAfterSwap(previousFrame)
-            applyWindowContentSize(groupsTargetContentSize(), animated: animated)
+            shell.setContent(screenVC, defaultSize: sessionContentSize)
         case .settings:
             let screenVC = builtSettingsScreen()
             applyChromeTopInset()
-            shell.setContent(screenVC, defaultSize: settingsTargetContentSize())
-            restoreFrameAfterSwap(previousFrame)
-            applyWindowContentSize(settingsTargetContentSize(), animated: animated)
+            shell.setContent(screenVC, defaultSize: sessionContentSize)
         }
-    }
-
-    private func restoreFrameAfterSwap(_ frame: NSRect?) {
-        guard let frame else { return }
-        shell.window?.setFrame(frame, display: false)
+        applySessionFrame()
     }
 
     // MARK: Lazy screens
 
     /// The Mixer panel, claimed from its controller on first use. Claiming
-    /// also installs the surface's resize behavior (the panel is pure content
-    /// now — the switcher lives on the window's toolbar).
+    /// also installs the surface's size LISTENER: the surface never resizes to
+    /// the panel — the frame is fixed — it only notices content the frame
+    /// cannot show and says so once per open. What to do about it (scroll the
+    /// Mixer) is roadmap 039's call; clipping silently is not.
     private func claimedMixerPanel() -> PopoverPanelViewController {
         if let mixerPanel { return mixerPanel }
         let panel = popoverController.claimPanelForSurfaceHosting()
         mixerPanel = panel
-        popoverController.surfaceResizer = { [weak self, weak panel] animated, apply in
+        popoverController.surfaceResizer = { [weak self, weak panel] _, apply in
             apply()
-            guard let self, let panel else { return }
-            self.applyWindowContentSize(panel.preferredContentSize, animated: animated)
+            guard let self, let panel, self.isShown else { return }
+            let content = panel.preferredContentSize.height
+            guard content > self.sessionContentSize.height + 0.5,
+                  !self.overflowReported else { return }
+            self.overflowReported = true
+            Telemetry.log(.surface, "mixer_content_taller_than_frame", [
+                "content": String(Int(content.rounded())),
+                "frame": String(Int(self.sessionContentSize.height.rounded())),
+            ])
         }
         return panel
     }
@@ -437,18 +430,6 @@ public final class AppSurfaceController {
         if let settingsScreen { return settingsScreen }
         let root = makeSettingsContent()
         settingsRoot = root
-        // Re-measure trigger for a pane that grows at runtime and for tab
-        // switches (R5 trigger 2+3 live inside SettingsRootViewController;
-        // this is the surface-side subscriber the window controller used to be).
-        root.onFittedContentSizeChange = { [weak self] _ in
-            guard let self, self.selectedScreen == .settings else { return }
-            // During a fold (the Audio pane's Advanced disclosure) the sizes
-            // arrive per tick of the ONE fold clock — apply them instantly,
-            // exactly like the Mixer panel's `foldAnimatorDidTick` path. An
-            // animated window resize here would be the second clock.
-            self.applyWindowContentSize(self.settingsTargetContentSize(),
-                                        animated: self.isShown && !FoldAnimator.shared.isFolding)
-        }
         let screen = SurfaceScreenViewController(content: root)
         settingsScreen = screen
         return screen
@@ -467,15 +448,19 @@ public final class AppSurfaceController {
 
     /// Flip the shell's manner profile (U1) and persist the choice. Also
     /// re-seats every screen's content below the toolbar strip (measured —
-    /// the strip's height can differ per profile) and re-applies the current
-    /// screen's size, whose target height includes that chrome.
+    /// the strip's height can differ per profile) and re-asserts the session
+    /// frame, which the profile flip can disturb. The SIZE never changes: a
+    /// pin is a manner change, not a resize.
     public func setPinned(_ pinned: Bool) {
         guard pinned != shell.isPinned else { return }
         settings.surfacePinned = pinned
         shell.setPinned(pinned)
         syncToolbar()
         applyChromeTopInset()
-        reapplyCurrentScreenSize()
+        if selectedScreen == .mixer {
+            mixerPanel?.panelContentDidChangeHeight(animated: false)
+        }
+        applySessionFrame()
     }
 
     /// Points of window chrome overlapping the content's TOP: the unified
@@ -503,75 +488,27 @@ public final class AppSurfaceController {
         settingsScreen?.setContentTopInset(inset)
     }
 
-    private func reapplyCurrentScreenSize() {
-        switch selectedScreen {
-        case .mixer:
-            // The inset changed the panel's fitting height; republish it.
-            mixerPanel?.panelContentDidChangeHeight(animated: isShown)
-        case .groups:
-            applyWindowContentSize(groupsTargetContentSize(), animated: isShown)
-        case .settings:
-            applyWindowContentSize(settingsTargetContentSize(), animated: isShown)
-        }
-    }
-
     // MARK: Sizing
 
-    private func groupsTargetContentSize() -> NSSize {
-        if let remembered = rememberedGroupsFrameSize { return remembered }
-        var size = Self.groupsDefaultContentSize
-        size.height += chromeTopInset
-        return size
-    }
-
-    private func settingsTargetContentSize() -> NSSize {
-        guard let settingsRoot else { return Self.groupsDefaultContentSize }
-        let fitted = settingsRoot.fittedContentSize
-        return NSSize(width: fitted.width, height: fitted.height + chromeTopInset)
-    }
-
-    /// Resize the shell to `contentSize`, TOP edge anchored (the surface hangs
-    /// from the menu bar and grows downward) and, unpinned, re-centered on the
-    /// status-item anchor so the beak keeps pointing at it across per-screen
-    /// width changes; pinned keeps the user's left edge. Clamped on screen
-    /// with the shell's own 8pt margins. Snaps (no animation) under Reduce
-    /// Motion and headless (`HeadlessRuntime` — `swift test` and the harness
-    /// tools must never animate real window frames).
-    private func applyWindowContentSize(_ contentSize: NSSize, animated: Bool) {
+    /// Put the window back on the session frame: `sessionContentSize` as
+    /// content, TOP edge anchored (the surface hangs from the menu bar and
+    /// grows downward), left edge where it already is, clamped on screen with
+    /// the shell's own 8pt margins. Never animated — nothing about the frame
+    /// ever changes once a session starts, so there is nothing to animate and
+    /// no Reduce Motion or headless branch to take. Never re-centred either:
+    /// the shell's `show(anchorRect:)` positions the window once, at open.
+    private func applySessionFrame() {
         guard let window = shell.window else { return }
         let frameSize = window.frameRect(
-            forContentRect: NSRect(origin: .zero, size: contentSize)).size
+            forContentRect: NSRect(origin: .zero, size: sessionContentSize)).size
         var origin = NSPoint(x: window.frame.minX,
                              y: window.frame.maxY - frameSize.height)
-        if !shell.isPinned, let anchor = lastAnchorRect {
-            origin.x = (anchor.midX - frameSize.width / 2).rounded()
-        }
         if let screen = window.screen ?? NSScreen.main {
             let vf = screen.visibleFrame
             origin.x = min(max(vf.minX + 8, origin.x), vf.maxX - frameSize.width - 8)
             origin.y = max(vf.minY + 8, origin.y)
         }
-        let frame = NSRect(origin: origin, size: frameSize)
-
-        let reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
-        if !animated || reduceMotion || HeadlessRuntime.isActive {
-            window.setFrame(frame, display: true)
-        } else {
-            // `setFrame(_:display:animate:)`, NEVER `animator().setFrame`: the
-            // animator proxy animates the frame as a pure surface transform —
-            // no layout runs mid-flight, and the content's backing store rides
-            // the window ORIGIN (bottom-left in AppKit), so this top-anchored
-            // surface shrinking from the bottom slides its whole content up
-            // under the toolbar until the end-of-animation layout snaps it
-            // back (live slow-motion captures, 2026-08-11). The old API steps
-            // the frame on the runloop and lays the content out at EVERY tick,
-            // so the panel's required top pin holds throughout and any
-            // content-vs-window drift resolves at the bottom edge (the panel's
-            // 999 shield), reading as the fold itself. Duration comes from
-            // `animationResizeTime(_:)` — `ControlPanelPanel` overrides it to
-            // the one shared `collapseRevealDuration`.
-            window.setFrame(frame, display: true, animate: true)
-        }
+        window.setFrame(NSRect(origin: origin, size: frameSize), display: true)
     }
 
     // MARK: Test-support hooks
@@ -623,7 +560,7 @@ final class SurfaceScreenViewController: NSViewController {
 
     override func loadView() {
         let root = NSView(frame: NSRect(origin: .zero,
-                                        size: AppSurfaceController.groupsDefaultContentSize))
+                                        size: AppSurfaceController.minimumContentSize))
         let contentView = content.view
         contentView.translatesAutoresizingMaskIntoConstraints = false
         root.addSubview(contentView)

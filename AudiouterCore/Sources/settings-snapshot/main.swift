@@ -10,13 +10,12 @@
 // writing a PNG to `dev/notes/settings-snapshots/` in both light and dark
 // appearances.
 //
-// Settings is TABBED content (General / Appearance / Audio) hosted on the
-// one-surface shell with `tabStyle = .segmentedControlOnTop`. Each render
-// below is the PANE only — the in-content tab strip and the surface's own
-// chrome are deliberately absent. These goldens verify each pane's own
-// layout and dark-mode appearance; the tab strip itself (labels, symbols,
-// selection) is covered by the `SettingsRootViewController` tests, not a
-// pixel snapshot.
+// Settings is SIDEBAR content (General / Appearance / Audio sections, one
+// pane) hosted on the one-surface shell. Each render below is the PANE only —
+// the sidebar and the surface's chrome are deliberately absent. These goldens
+// verify each pane's own layout and dark-mode appearance; the sidebar itself
+// (labels, symbols, selection) is covered by the `SettingsRootViewController`
+// tests, not a pixel snapshot.
 //
 // One PNG per (tab × appearance) — six total:
 //   settings-{general,appearance,audio}-{light,dark}.png
@@ -116,9 +115,9 @@ func makeSnapshotDefaults() -> UserDefaults {
 /// Audio buffer section renders).
 ///
 /// A NEW controller per call is required, not an optimization:
-/// `tabRootView(at:)` must run before the controller has ever been shown or
-/// selected a tab (see `snapshotTab` below), so no controller here is ever
-/// reused across two snapshots.
+/// `paneView(at:)` must run before the controller has ever been shown or
+/// selected another section (see `snapshotTab` below), so no controller here
+/// is ever reused across two snapshots.
 @MainActor
 func makeRoot() -> SettingsRootViewController {
     let settings = AppSettings(defaults: makeSnapshotDefaults())
@@ -137,10 +136,9 @@ func makeRoot() -> SettingsRootViewController {
         isStreaming: { false },
         apply: { _ in })
 
-    // Tab order/labels/symbols mirror the app's own assembly
-    // (`AppDelegate.makeSettingsRoot`) exactly, including the shipping
-    // `.segmentedControlOnTop` style.
-    return SettingsRootViewController(tabs: [
+    // Section order/labels/symbols mirror the app's own assembly
+    // (`AppDelegate.makeSettingsRoot`) exactly.
+    return SettingsRootViewController(sections: [
         .init(title: "General", symbolName: "gearshape",
               viewController: GeneralSettingsViewController(loginItem: SnapshotLoginItem(),
                                                             settings: settings)),
@@ -150,7 +148,7 @@ func makeRoot() -> SettingsRootViewController {
               viewController: AudioSettingsViewController(excluded: excludedApps,
                                                           runningAppsProvider: { [] },
                                                           latency: latency)),
-    ], tabStyle: .segmentedControlOnTop)
+    ])
 }
 
 /// Resolve every wrapping label's `preferredMaxLayoutWidth` from the width it
@@ -193,18 +191,20 @@ func resolveWrapWidths(_ view: NSView) {
 /// independent of tab order and of any size a previous tab left behind.
 @MainActor
 func snapshotTab(index: Int, tabLabel: String, appearanceName: NSAppearance.Name, appearanceLabel: String, outDir: URL) {
-    // Mirrors `SettingsForm.contentWidth`, which is internal to
-    // AudiouterSettingsUI. Any drift shows up at once as a changed golden width.
-    let contentWidth: CGFloat = 460
+    // Mirrors `SettingsForm.contentWidth` (= `SurfaceLayout.contentPaneWidth`),
+    // which is internal to AudiouterSettingsUI. Any drift shows up at once as
+    // a changed golden width.
+    let contentWidth: CGFloat = 413
     let root = makeRoot()
     let appearance = snapshotAppearance(appearanceName)
-    let paneView = root.tabRootView(at: index)
+    let paneView = root.paneView(at: index)
     paneView.removeFromSuperview()
 
     // Mirror `SettingsRootViewController`'s opaque, appearance-adaptive
-    // backing. That background lives on the tab controller's own root view, so
-    // a pane grabbed directly bypasses it — without it the controls draw
-    // light-adapted text over a transparent window in dark mode.
+    // backing. That `WarmPanelView` is the pane host's root view inside the
+    // root controller (an `NSSplitViewController`), so a pane grabbed directly
+    // bypasses it — without it the controls draw light-adapted text over a
+    // transparent window in dark mode.
     let background = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: contentWidth, height: 100))
     background.material = .windowBackground
     background.blendingMode = .behindWindow

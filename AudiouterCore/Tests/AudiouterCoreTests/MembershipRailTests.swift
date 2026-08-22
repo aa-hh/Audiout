@@ -4,7 +4,6 @@ import Testing
 import Foundation
 import AppKit
 @testable import AudiouterCore
-@testable import AudiouterPopoverUI
 @testable import AudiouterSharedUI
 @testable import AudiouterWindowUI
 
@@ -508,81 +507,6 @@ import AppKit
 
         #expect(!sheet.test_checklistScrolls,
                 "a 7-device fleet must not scroll in the create sheet")
-    }
-
-    /// The editor pane has NO scroll view, so its fitting height is a hard
-    /// budget — and the budget is NOT the whole Groups screen's height.
-    ///
-    /// This guard used to compare the pane against the whole content height
-    /// and passed while the pane was ~22 pt too tall to actually fit: the
-    /// chrome above the pane and the persistent footer strip both come out of
-    /// that number first. At a 7-device fleet the bottom of the list and the
-    /// "Delete group…" button fell below the screen's edge with nothing to
-    /// scroll them back. Under the one surface (U6) the budget is the Groups
-    /// screen's content area — `AppSurfaceController.groupsDefaultContentSize`
-    /// (already below the window's toolbar strip) minus the footer strip.
-    ///
-    /// Every term is DERIVED, not typed in: the surface's shipping constants
-    /// and the footer strip measured off the real host.
-    @Test func editorFitsTheHeightTheWindowActuallyGivesIt() throws {
-        let devices = (0..<7).map { makeDevice(id: "d\($0)", name: "Device \($0)") }
-        let controller = GroupController(backend: MockBackend(fleet: []),
-                                         store: GroupStore(directory: tempDirectory()),
-                                         loadPersisted: false)
-        let group = try controller.createGroup(name: "Downstairs", memberIDs: ["d0"],
-                                               memberVolumes: [:]).group
-
-        let window = MixerWindowController(groupController: controller)
-        window.setHostVisible(true)
-        window.update(devices: devices)
-        window.test_select(.group(id: group.id))
-
-        // `groupsDefaultContentSize` is the content area BELOW the window's
-        // toolbar strip (live-review D1), so only the footer subtracts.
-        let footerStrip = window.test_contentPaneChromeHeight
-        #expect(footerStrip > 0, "the footer strip must cost real height")
-        let available = AppSurfaceController.groupsDefaultContentSize.height - footerStrip
-
-        let editor = GroupEditorViewController(groupController: controller)
-        editor.loadView()
-        editor.show(groupID: group.id, devices: devices)
-        editor.view.layoutSubtreeIfNeeded()
-
-        #expect(
-            editor.view.fittingSize.height <= available,
-            Comment(rawValue: "a 7-device editor needs \(editor.view.fittingSize.height)pt but the Groups screen's default " +
-            "gives the pane only \(available)pt (\(AppSurfaceController.groupsDefaultContentSize.height) " +
-            "− \(footerStrip) footer). The pane has no scroll view, so this " +
-            "is an overflow, not a preference."))
-    }
-
-    /// The same budget, from the other end: with the content laid out at the
-    /// Groups screen's shipping content area and a full fleet selected, the
-    /// pane the split view actually hands the editor must still hold the
-    /// editor's laid-out content, and nothing may need more width than the
-    /// screen provides.
-    @Test func defaultWindowSizeIsWideEnoughThatNothingForcesItWider() throws {
-        let devices = (0..<7).map { makeDevice(id: "d\($0)", name: "Device \($0)") }
-        let controller = GroupController(backend: MockBackend(fleet: []),
-                                         store: GroupStore(directory: tempDirectory()),
-                                         loadPersisted: false)
-        let group = try controller.createGroup(name: "Downstairs", memberIDs: ["d0"],
-                                               memberVolumes: [:]).group
-        let window = MixerWindowController(groupController: controller)
-        window.setHostVisible(true)
-        window.update(devices: devices)
-        window.test_select(.group(id: group.id))
-        let size = AppSurfaceController.groupsDefaultContentSize
-        let content = window.contentController.view
-        content.setFrameSize(size)
-        content.layoutSubtreeIfNeeded()
-
-        #expect(content.fittingSize.width <= size.width,
-                "no required content constraint may need more than the screen's default width")
-        let pane = window.test_editor.view.frame
-        #expect(pane.width > 0)
-        #expect(window.test_editor.view.fittingSize.height <= pane.height,
-                "the editor's content fits the pane the split view gives it")
     }
 }
 

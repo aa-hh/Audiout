@@ -218,8 +218,13 @@ public final class AudioSettingsViewController: NSViewController {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(column)
+        // `.defaultHigh`, same reason as `SettingsForm.paneView(rows:width:)`:
+        // the pane host's edge pins own the real width once mounted, and a 1pt
+        // split divider must be able to shave this without a conflict.
+        let widthConstraint = container.widthAnchor.constraint(equalToConstant: SettingsForm.contentWidth)
+        widthConstraint.priority = .defaultHigh
         NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: SettingsForm.contentWidth),
+            widthConstraint,
             column.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: SettingsForm.horizontalPadding),
             column.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -SettingsForm.horizontalPadding),
             column.topAnchor.constraint(equalTo: container.topAnchor, constant: SettingsForm.verticalPadding),
@@ -810,15 +815,12 @@ public final class AudioSettingsViewController: NSViewController {
 
     // MARK: List
 
-    /// Repopulate the list from the controller and resize the pane to fit.
+    /// Repopulate the list from the controller and re-measure the pane.
     ///
-    /// Writing `preferredContentSize` is what makes the HOST grow too, but not
-    /// by itself: AppKit's tab controller never resizes its host (probed —
-    /// see the sizing-trap note on `SettingsRootViewController`). The write
-    /// below reaches the host only because `SettingsRootViewController`
-    /// observes each pane's `preferredContentSize` by KVO and republishes
-    /// `fittedContentSize` from there. Without that the pane would silently
-    /// clip when a user adds an excluded app.
+    /// Nothing outside this pane is resized by the write below: the surface
+    /// frame is fixed, so the pane's new height simply grows the scroll
+    /// document the Settings pane host wraps it in, and the extra rows become
+    /// scrollable content rather than a taller window.
     private func rebuildList() {
         for row in listStack.arrangedSubviews {
             listStack.removeArrangedSubview(row)

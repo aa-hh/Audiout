@@ -55,9 +55,8 @@ import AppKit
         window.setHostVisible(true)
         window.update(devices: devices)
         window.test_select(.group(id: group.id))
-        // `groupsDefaultContentSize` IS the content area below the window's
-        // toolbar strip (live-review D1), so no header subtraction remains.
-        window.contentController.view.setFrameSize(AppSurfaceController.groupsDefaultContentSize)
+        // The fixed frame's floor; only the width matters here.
+        window.contentController.view.setFrameSize(AppSurfaceController.minimumContentSize)
         settle(window)
         return (window, controller, group)
     }

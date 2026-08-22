@@ -44,21 +44,17 @@ lives in the Mixer screen. All group logic goes through the shared
   (`splitViewController.view.window?.isVisible`), never a window of this
   controller's (there is none). Headless runs keep the sheet reference and
   drive it via `test_createSheet`/`test_commit()`/`test_cancel()`.
-- **The editor pane has NO scroll view, so its fitting height is a hard
-  budget** — the Groups screen's content area
-  (`AppSurfaceController.groupsDefaultContentSize` minus the surface header
-  strip) minus the footer strip (`test_contentPaneChromeHeight`). The
-  surface's default height is DERIVED from this budget; grow it there, never
-  by letting the editor overflow (`MembershipRailTests`).
-- **The screen's WIDTH is not the surface's to choose either — this pane's
-  numbers set it.** AppKit widens the Groups window to the split view's
-  fitting width, which is the sidebar's thickness + `GroupsPaneLayout
-  .contentMaxWidth` + both column margins; the size
-  `AppSurfaceController.groupsDefaultContentSize` asks for only holds while it
-  matches. That is why the sidebar is PINNED at 210 (min == max: its own
-  fitting width is ≥260, and every point past 210 was being charged to the
-  window, which mounted 707 pt wide against the Mixer's 623) and why the
-  column cap is 385. Raising either widens the whole screen.
+- **The editor pane has NO scroll view, so it must fit the content area the
+  FIXED surface frame gives it at the 600 floor minus the footer strip**
+  (`test_contentPaneChromeHeight`) — guarded by
+  `AppSurfaceControllerTests.theSevenDeviceEditorFitsTheMinimumFrame`. Grow
+  the floor in `AppSurfaceController.minimumContentSize`, never by letting
+  the editor overflow.
+- **The split's fitting width is `SurfaceLayout.sidebarWidth` +
+  `GroupsPaneLayout.contentMaxWidth` + both margins = `SurfaceLayout.width`**,
+  all derived from `SurfaceLayout` — guarded by
+  `AppSurfaceControllerTests.noGroupsPaneAsksForMoreThanTheFrameWidth`.
+  Raising any of them asks AppKit to widen a window that must not widen.
 - **Header parity is GEOMETRIC and lives in `GroupsPaneLayout`.** Editor and
   detail pane swap behind one sidebar; every shared number is read from that
   one enum — hand-copied literals once drifted ~22.5pt and made the header
@@ -111,8 +107,8 @@ lives in the Mixer screen. All group logic goes through the shared
   first (`theActiveGroupsMarkersAddNoHeightToTheEditorPane`).
 - **The two detail panes (device, Main Audio) SCROLL; the editor does not.**
   They host the Equalizer, whose Advanced fold exceeds the screen's budget,
-  and the Groups screen is user-resizable with drag memory, so growing the
-  window was rejected (roadmap 039 stays open for the editor). `FlippedView`
+  and the surface frame is fixed for every screen, so growing the window is
+  not available (roadmap 039 stays open for the editor). `FlippedView`
   documents, overlay scrollers, transparent. The `mixer-4-device-detail`
   goldens predate the Equalizer section and are unreproducible on macOS 27 —
   never regenerate.

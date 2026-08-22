@@ -24,12 +24,11 @@ public protocol FoldFollowing: AnyObject {
 ///
 /// So a fold now has exactly ONE animated value, the clip height, and
 /// everything else is laid out FROM it, synchronously, every tick: the panel
-/// re-fits and publishes that size, and the window takes it with a plain
-/// instant `setFrame` (`AppSurfaceController.applyWindowContentSize` with
-/// `animated: false`). The window runs no animation of its own during a fold,
-/// so it cannot drift from the content — it IS the content's laid-out size,
-/// frame by frame. A web accordion, not two animations agreeing to travel at
-/// the same pace.
+/// re-fits and publishes that size. The window is not the second clock any
+/// more because it is not a clock at all — the surface frame is FIXED for the
+/// whole open session, so the rows travel inside it and the panel's surplus
+/// shield absorbs whatever gap the fold opens at the bottom. A web accordion,
+/// not two animations agreeing to travel at the same pace.
 ///
 /// Constants are set DIRECTLY: never through `animator()`, never inside an
 /// `NSAnimationContext`, never with `allowsImplicitAnimation`. Any of those

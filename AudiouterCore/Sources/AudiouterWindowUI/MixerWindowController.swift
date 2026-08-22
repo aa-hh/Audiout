@@ -127,9 +127,23 @@ public final class MixerWindowController {
         editorViewController.deviceIconController = deviceIconController
         detailViewController.deviceIconController = deviceIconController
 
-        // Sidebar item — the documented `.sidebar(withViewController:)`
-        // constructor applies source-list material/vibrancy + collapse behavior.
-        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebarViewController)
+        // A PLAIN split item, NOT `.sidebar(withViewController:)` — the one
+        // thing that keeps the surface's tab strip still. A split item with
+        // `.sidebar` behavior anywhere in the window makes AppKit reserve the
+        // toolbar's whole leading region for it, so every toolbar item starts
+        // at the CONTENT pane's edge instead of the window's for as long as
+        // this screen is mounted; the strip jumped ~210pt on every visit here
+        // and jumped back on the Mixer (live build, 2026-08-22). Probed on a
+        // real on-screen window, this is the ONLY cure: not
+        // `allowsFullHeightLayout`, not a tracking separator item, not any
+        // `toolbarStyle`, and not un-parenting the split controller — all of
+        // those still reserve. The source-list LOOK is unaffected because it
+        // never came from here: `SidebarViewController` sets
+        // `outlineView.style = .sourceList` itself. What the constructor did
+        // supply is the system sidebar material, and the sidebar's own
+        // `SidebarWarmSurfaceView` draws its opaque backing instead (the
+        // branch that already shipped to everyone below macOS 26).
+        let sidebarItem = NSSplitViewItem(viewController: sidebarViewController)
         // PINNED at `SurfaceLayout.sidebarWidth` — minimum AND maximum,
         // deliberately (2026-08-12). The sidebar's own fitting width is
         // ≥260, and the split view hands an item its fitting width clamped
@@ -152,14 +166,6 @@ public final class MixerWindowController {
         // only refuses the USER's divider drag, and AppKit still auto-collapses
         // a sidebar item laid out narrower than its items' minimums.
         sidebarItem.canCollapse = false
-        // NOT full-height: a full-height sidebar makes AppKit reserve the
-        // toolbar's leading region for it, which slides the surface's tab
-        // strip right by the sidebar width for as long as this screen is
-        // mounted (probed: 256 → 386). The one frame's header must never
-        // move. Nothing is lost — the surface seats every screen BELOW the
-        // toolbar strip anyway, so this sidebar never had a title bar to
-        // extend under.
-        sidebarItem.allowsFullHeightLayout = false
         sidebarSplitItem = sidebarItem
 
         // Content item — wraps the footer-bearing host, which starts on the

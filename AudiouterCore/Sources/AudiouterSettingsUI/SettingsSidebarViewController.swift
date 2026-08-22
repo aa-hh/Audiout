@@ -38,8 +38,11 @@ final class SettingsSidebarViewController: NSViewController {
 
     private let outlineView = NSOutlineView()
     private let scrollView = NSScrollView()
-    private let warmSurfaceView = SidebarWarmSurfaceView(
-        rendersOnGlass: SidebarWarmSurfaceView.osSupportsLiquidGlass)
+    /// `rendersOnGlass: false` on every OS: the surface's split items are
+    /// plain ones (see `SettingsRootViewController`), so no system sidebar
+    /// material sits behind this wash for it to tint — it draws the opaque
+    /// warm backing itself.
+    private let warmSurfaceView = SidebarWarmSurfaceView(rendersOnGlass: false)
     private let root: Node
 
     init(sections: [(title: String, symbolName: String)]) {

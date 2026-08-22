@@ -54,23 +54,20 @@ public final class SettingsRootViewController: NSSplitViewController {
             sections: sections.map { (title: $0.title, symbolName: $0.symbolName) })
         super.init(nibName: nil, bundle: nil)
 
-        // The documented `.sidebar(withViewController:)` constructor applies
-        // the source-list material/vibrancy, and the thickness is PINNED
-        // min == max at `SurfaceLayout.sidebarWidth` so this screen's split
-        // asks for exactly the same width the Groups screen's does.
-        let sidebarItem = NSSplitViewItem(sidebarWithViewController: sidebar)
+        // A PLAIN split item, NOT `.sidebar(withViewController:)`, for the
+        // reason the Groups screen's is one (see `MixerWindowController`): a
+        // `.sidebar`-behavior item makes AppKit reserve the toolbar's leading
+        // region, which slides the surface's tab strip off the window edge
+        // while this screen is mounted. The thickness is PINNED min == max at
+        // `SurfaceLayout.sidebarWidth` so this screen's split asks for exactly
+        // the same width the Groups screen's does.
+        let sidebarItem = NSSplitViewItem(viewController: sidebar)
         sidebarItem.minimumThickness = SurfaceLayout.sidebarWidth
         sidebarItem.maximumThickness = SurfaceLayout.sidebarWidth
         // NOT collapsible: a collapse here is a ONE-WAY DOOR — the sidebar is
         // the only way to change section, and the surface has no sidebar
         // toggle and no View menu to bring it back.
         sidebarItem.canCollapse = false
-        // NOT full-height, for the same reason the Groups screen's sidebar
-        // isn't: AppKit reserves the toolbar's leading region for a
-        // full-height sidebar, which slides the surface's tab strip right
-        // while this screen is mounted. The screen sits below the toolbar
-        // strip regardless.
-        sidebarItem.allowsFullHeightLayout = false
         addSplitViewItem(sidebarItem)
         addSplitViewItem(NSSplitViewItem(viewController: paneHost))
 

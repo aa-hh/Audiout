@@ -637,16 +637,19 @@ import AppKit
                 "the hosted split view has real height (it is laid out, not collapsed)")
     }
 
-    /// The one header must be a FIXED landmark: the tab strip sits where it
-    /// sits, on every screen. The regression this pins (live build, 2026-08-22)
-    /// was AppKit's, not ours — a split view item built with
-    /// `sidebarWithViewController:` defaults to full-height layout, which makes
-    /// the window reserve the toolbar's leading region for the sidebar and
-    /// slides every toolbar item right by the sidebar's width for as long as
-    /// that screen is mounted. Both sidebar-bearing screens (Groups, Settings)
-    /// therefore opt out. Measured on the REAL content, since a stub screen has
-    /// no sidebar to trigger it. The picker view is private AppKit, matched by
-    /// class NAME like `SurfaceToolbarTests` does.
+    /// The one header must be a FIXED landmark: the tab strip sits at the
+    /// window's leading edge on every screen. The regression this pins (live
+    /// build, 2026-08-22) was AppKit's, not ours — a split view item with
+    /// `.sidebar` BEHAVIOR anywhere in the window makes the toolbar reserve its
+    /// whole leading region for that sidebar, so every toolbar item starts at
+    /// the content pane's edge instead of the window's while that screen is
+    /// mounted. Hence the behavior assertions: they are what the live bug
+    /// actually turned on, and no headless measurement can stand in for them —
+    /// a window that never orders on screen skips the reservation pass, so the
+    /// geometry below stayed green through a build that shifted ~210pt in front
+    /// of the owner. Both must hold. Measured on the REAL content; a stub
+    /// screen has no sidebar to trigger any of it. The picker view is private
+    /// AppKit, matched by class NAME like `SurfaceToolbarTests` does.
     @Test func theTabStripNeverMovesAcrossScreens() throws {
         let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
                                   emitsLevels: false, simulatesDropouts: false)
@@ -692,6 +695,13 @@ import AppKit
                 "nor may the Settings sidebar")
         surface.select(.mixer)
         #expect(try tabStripLeadingX() == onMixer, "and it comes back unchanged")
+
+        let groupsSplit = try #require(surface.test_groupsScreen?.content as? NSSplitViewController)
+        #expect(groupsSplit.splitViewItems[0].behavior != .sidebar,
+                "the Groups sidebar is a PLAIN split item — `.sidebar` behavior reserves the toolbar's leading region")
+        let settingsRoot = try #require(surface.test_settingsRoot)
+        #expect(settingsRoot.test_sidebarSplitItem.behavior != .sidebar,
+                "and so is the Settings one")
     }
 
     private func firstView(in root: NSView, namedLike name: String) -> NSView? {

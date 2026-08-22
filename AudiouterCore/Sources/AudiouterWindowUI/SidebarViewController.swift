@@ -103,23 +103,16 @@ public final class SidebarViewController: NSViewController {
     /// place the sidebar may use it. Pure model state, never audio-driven.
     private var activeGroupID: String?
 
-    /// Whether THIS OS renders the sidebar's automatic Liquid Glass (macOS
-    /// 26+) — the injected seam T7 needs (spec Q4-b: warm tint on 26+, opaque
-    /// warm fallback below). Never read via a bare `#available` on the
-    /// drawing path itself; both branches must be exercisable from a test
-    /// regardless of the machine the suite runs on (this box is macOS 27, so
-    /// without this seam the `< 26` fallback would be untestable here). Same
-    /// injection shape as `SetupModel.osGatesLocalNetwork`/`localNetworkGated`
-    /// — a static real-OS-value property, injected through a defaulted init
-    /// parameter so existing `SidebarViewController()` call sites (e.g.
-    /// `MixerWindowController`) are unaffected, and a test can construct
-    /// either branch directly.
-    public static var osSupportsLiquidGlassSidebar: Bool {
-        SidebarWarmSurfaceView.osSupportsLiquidGlass
-    }
-
-    public init(osSupportsLiquidGlassSidebar: Bool = SidebarViewController.osSupportsLiquidGlassSidebar) {
-        self.warmSurfaceView = SidebarWarmSurfaceView(rendersOnGlass: osSupportsLiquidGlassSidebar)
+    /// Whether a system sidebar material sits behind the warm wash for it to
+    /// tint (T7, spec Q4-b). FALSE on every OS since the surface's split
+    /// items became plain ones (`MixerWindowController` explains why): with
+    /// no `.sidebar` behavior there is no automatic material — not even
+    /// macOS 26+'s Liquid Glass — so the wash draws the opaque warm backing
+    /// itself, the branch that always shipped below macOS 26. The parameter
+    /// stays injectable because both drawing modes are still real and a test
+    /// must be able to exercise either one directly.
+    public init(rendersOnSystemSidebarMaterial: Bool = false) {
+        self.warmSurfaceView = SidebarWarmSurfaceView(rendersOnGlass: rendersOnSystemSidebarMaterial)
         super.init(nibName: nil, bundle: nil)
     }
 

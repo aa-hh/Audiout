@@ -152,6 +152,14 @@ public final class MixerWindowController {
         // only refuses the USER's divider drag, and AppKit still auto-collapses
         // a sidebar item laid out narrower than its items' minimums.
         sidebarItem.canCollapse = false
+        // NOT full-height: a full-height sidebar makes AppKit reserve the
+        // toolbar's leading region for it, which slides the surface's tab
+        // strip right by the sidebar width for as long as this screen is
+        // mounted (probed: 256 → 386). The one frame's header must never
+        // move. Nothing is lost — the surface seats every screen BELOW the
+        // toolbar strip anyway, so this sidebar never had a title bar to
+        // extend under.
+        sidebarItem.allowsFullHeightLayout = false
         sidebarSplitItem = sidebarItem
 
         // Content item — wraps the footer-bearing host, which starts on the

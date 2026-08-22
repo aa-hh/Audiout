@@ -65,6 +65,12 @@ public final class SettingsRootViewController: NSSplitViewController {
         // the only way to change section, and the surface has no sidebar
         // toggle and no View menu to bring it back.
         sidebarItem.canCollapse = false
+        // NOT full-height, for the same reason the Groups screen's sidebar
+        // isn't: AppKit reserves the toolbar's leading region for a
+        // full-height sidebar, which slides the surface's tab strip right
+        // while this screen is mounted. The screen sits below the toolbar
+        // strip regardless.
+        sidebarItem.allowsFullHeightLayout = false
         addSplitViewItem(sidebarItem)
         addSplitViewItem(NSSplitViewItem(viewController: paneHost))
 

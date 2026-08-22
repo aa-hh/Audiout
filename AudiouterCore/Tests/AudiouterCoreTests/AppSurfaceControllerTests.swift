@@ -637,6 +637,71 @@ import AppKit
                 "the hosted split view has real height (it is laid out, not collapsed)")
     }
 
+    /// The one header must be a FIXED landmark: the tab strip sits where it
+    /// sits, on every screen. The regression this pins (live build, 2026-08-22)
+    /// was AppKit's, not ours — a split view item built with
+    /// `sidebarWithViewController:` defaults to full-height layout, which makes
+    /// the window reserve the toolbar's leading region for the sidebar and
+    /// slides every toolbar item right by the sidebar's width for as long as
+    /// that screen is mounted. Both sidebar-bearing screens (Groups, Settings)
+    /// therefore opt out. Measured on the REAL content, since a stub screen has
+    /// no sidebar to trigger it. The picker view is private AppKit, matched by
+    /// class NAME like `SurfaceToolbarTests` does.
+    @Test func theTabStripNeverMovesAcrossScreens() throws {
+        let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        let groups = MixerWindowController(
+            groupController: GroupController(backend: backend,
+                                             store: GroupStore(directory: scratchDir),
+                                             loadPersisted: false))
+        let popover = PopoverController(
+            appRouting: AppRoutingController(store: AppRouteStore(directory: scratchDir),
+                                             loadPersisted: false),
+            runningAppsProvider: { [] })
+        let surface = AppSurfaceController(
+            popoverController: popover,
+            settings: AppSettings(defaults: isolatedDefaults),
+            groupsContent: { groups.contentController },
+            settingsContent: { [self] in makeSettingsRoot() },
+            frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurfaceTests")))
+
+        surface.show(anchorRect: nil)
+        let window = try #require(surface.shell.window)
+
+        func tabStripLeadingX() throws -> CGFloat {
+            window.layoutIfNeeded()
+            let themeFrame = try #require(window.contentView?.superview)
+            let picker = try #require(firstView(in: themeFrame,
+                                                namedLike: "NSToolbarItemGroupPicker"),
+                                      "the tab group's picker view is in the window's chrome")
+            return picker.convert(picker.bounds, to: themeFrame).minX
+        }
+
+        // Mixer twice: the first layout pass of a freshly attached toolbar
+        // settles the group's width, so the SECOND visit is the reference.
+        _ = try tabStripLeadingX()
+        surface.select(.groups)
+        surface.select(.mixer)
+        let onMixer = try tabStripLeadingX()
+
+        surface.select(.groups)
+        #expect(try tabStripLeadingX() == onMixer,
+                "the Groups sidebar must not push the tab strip right")
+        surface.select(.settings)
+        #expect(try tabStripLeadingX() == onMixer,
+                "nor may the Settings sidebar")
+        surface.select(.mixer)
+        #expect(try tabStripLeadingX() == onMixer, "and it comes back unchanged")
+    }
+
+    private func firstView(in root: NSView, namedLike name: String) -> NSView? {
+        if String(describing: type(of: root)).contains(name) { return root }
+        for subview in root.subviews {
+            if let hit = firstView(in: subview, namedLike: name) { return hit }
+        }
+        return nil
+    }
+
     /// The Groups screen is a SPLIT: speakers/groups sidebar on the left,
     /// editor pane on the right. Both halves must be mounted, laid out and
     /// side by side at the surface's real Groups size — a screen showing only

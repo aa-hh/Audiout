@@ -24,12 +24,11 @@ Three cost centers, in order:
    breaks things technically (not legally); OSS ecosystem patches within
    weeks-to-months.
 
-## Direction check (needs Alec)
+## Direction check — SETTLED (Alec, 2026-08-22)
 
-Roadmap 006's text covers two different features: **casting TO Cast devices**
-(output — what this brief scopes) and **Audiouter acting as a Cast receiver**
-(other apps casting into our speakers). This brief is output-only; the receiver
-direction is a separate, unscoped feature.
+Roadmap 006's text mentioned two directions; Alec confirmed **output only**
+(casting TO Cast devices). The receiver direction (other apps casting into
+Audiouter) is out of scope and not planned.
 
 ## The protocol (all confirmed, no blockers)
 
@@ -171,7 +170,7 @@ Things that need **new abstraction** (the hidden half of the estimate):
 
 ## Open questions for Alec
 
-1. **Output only, or also the receiver direction** roadmap 006 mentions?
+1. ~~Output only, or also the receiver direction?~~ **Answered: output only.**
 2. **Do you own Cast hardware to test on?** (Chromecast Audio is discontinued;
    current targets are Nest Audio/Mini, Cast-enabled TVs/soundbars.) Phase 0 is
    blocked without at least one real device — ideally one speaker + one group.

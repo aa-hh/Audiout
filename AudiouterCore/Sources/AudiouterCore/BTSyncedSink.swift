@@ -531,6 +531,10 @@ final class BTDeviceSink: @unchecked Sendable {
     /// (≤ 24 kHz — the mic-open HFP collapse). Set on every (re)start from the
     /// live rate; the rate listener's rebuild is what refreshes it both ways.
     private(set) var hfpDegraded = false
+    /// Diagnostics only — gates ``bt_device_reported_latency`` to once per
+    /// connect: a rebuild restarts the same physical connection, not a new
+    /// one, so this must not reset in ``clearSessionStateLocked(carryDelay:)``.
+    private var hasLoggedReportedLatency = false
 
     init(
         deviceID: AudioObjectID,
@@ -633,6 +637,15 @@ final class BTDeviceSink: @unchecked Sendable {
         // real speaker must not be refused); the pin below still targets the
         // exact device either way.
         try engine.outputNode.auAudioUnit.setDeviceID(deviceID)
+        if !hasLoggedReportedLatency {
+            hasLoggedReportedLatency = true
+            if let measurement = try? LocalOutputLatency.measure(deviceID: deviceID) {
+                Telemetry.log(.localPlayback, "bt_device_reported_latency", [
+                    "uid": deviceUID,
+                    "ms": String(Int(measurement.totalMilliseconds.rounded())),
+                ])
+            }
+        }
         if let liveRate = Self.nominalSampleRate(deviceID) { nominalRate = liveRate }
         // R-A2DP/HFP (Wave 4, detection only): a narrowband nominal rate means
         // some app opened this device's MIC and macOS collapsed the link to

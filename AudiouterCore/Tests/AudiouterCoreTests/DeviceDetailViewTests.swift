@@ -377,7 +377,7 @@ import AppKit
                                             settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.show(device: makeDevice(id: "office"))
         _ = detail.view
-        detail.view.setFrameSize(AppSurfaceController.groupsDefaultContentSize)
+        detail.view.setFrameSize(AppSurfaceController.minimumContentSize)
         detail.view.layoutSubtreeIfNeeded()
 
         let buttons = detail.test_groupRowButtonFrames
@@ -415,7 +415,7 @@ import AppKit
                                             settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.show(device: makeDevice(id: "office"))
         _ = detail.view
-        detail.view.setFrameSize(AppSurfaceController.groupsDefaultContentSize)
+        detail.view.setFrameSize(AppSurfaceController.minimumContentSize)
         detail.view.layoutSubtreeIfNeeded()
         return detail
     }
@@ -719,7 +719,8 @@ import AppKit
                                             settings: AppSettings(defaults: isolation.isolatedDefaults))
         detail.show(device: device)
         _ = detail.view
-        detail.view.setFrameSize(AppSurfaceController.groupsDefaultContentSize)
+        // The fixed frame's floor; only the width matters here.
+        detail.view.setFrameSize(AppSurfaceController.minimumContentSize)
         detail.view.layoutSubtreeIfNeeded()
         return detail
     }

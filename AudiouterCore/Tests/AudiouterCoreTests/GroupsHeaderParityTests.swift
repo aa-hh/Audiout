@@ -48,7 +48,7 @@ import AppKit
     /// since a pane's width comes from the split view, not from a frame a test
     /// picked. The controller owns no window (U6): the split view is laid out
     /// directly at the area the surface's Groups screen gives it
-    /// (`AppSurfaceController.groupsDefaultContentSize` minus the header strip).
+    /// (`AppSurfaceController.minimumContentSize` minus the header strip).
     private func makeWindow() throws -> (MixerWindowController, GroupController, [Device], Group) {
         let devices = (0..<7).map { makeDevice(id: "d\($0)", name: "Device \($0)") }
         let controller = makeController()
@@ -58,9 +58,8 @@ import AppKit
                                            settings: AppSettings(defaults: isolatedDefaults))
         window.setHostVisible(true)
         window.update(devices: devices)
-        // `groupsDefaultContentSize` IS the content area below the window's
-        // toolbar strip (live-review D1), so no header subtraction remains.
-        window.contentController.view.setFrameSize(AppSurfaceController.groupsDefaultContentSize)
+        // The fixed frame's floor; only the width matters here.
+        window.contentController.view.setFrameSize(AppSurfaceController.minimumContentSize)
         return (window, controller, devices, group)
     }
 

@@ -46,15 +46,14 @@ enum GroupsPaneLayout {
     /// **THIS NUMBER SETS THE WHOLE SCREEN'S WIDTH — it is not cosmetic.**
     /// (Probed 2026-08-12 by re-rendering `window-snapshot` at several caps.)
     /// The split view's fitting width is `sidebar + cap + 2 × columnInset`,
-    /// and AppKit widens the Groups window to it, overriding whatever
-    /// `AppSurfaceController.groupsDefaultContentSize` asks for: at the old
-    /// 420 the screen mounted 707 pt wide — 84 pt WIDER than the Mixer, so
-    /// switching screens jumped. 385 = 623 (the Mixer's fixed width) − 210
-    /// (`MixerWindowController`'s pinned sidebar) − 28 (both column margins),
-    /// which is what makes 623 actually stick. Raise it and the whole screen
-    /// grows with it; the sections already fill the pane exactly here, so
-    /// there is nothing to gain by doing so.
-    static let contentMaxWidth: CGFloat = 385
+    /// so this is DERIVED — never a hand-picked literal — to guarantee that
+    /// sum can never exceed the one fixed surface frame:
+    /// `SurfaceLayout.contentPaneWidth` (`SurfaceLayout.width` minus
+    /// `MixerWindowController`'s pinned sidebar) minus both column margins,
+    /// which evaluates to 385. Raise it and the whole screen would ask to
+    /// grow past the fixed frame; the sections already fill the pane exactly
+    /// here, so there is nothing to gain by doing so.
+    static let contentMaxWidth: CGFloat = SurfaceLayout.contentPaneWidth - columnInset - columnTrailingInset
 
     /// Where content STARTS inside the column: the group editor's left spine
     /// gutter (Warm Signal v4 §Call-1), which the membership rail owns

@@ -1086,13 +1086,13 @@ public final class PopoverController: NSObject {
     /// rebuild per backend event (audit B8).
     public private(set) var test_rebuildCount = 0
 
-    /// The host's resize behavior. A host assigns this to run `apply` (the
-    /// `preferredContentSize` assignment) inside whatever animation IT uses to
-    /// follow the panel's new size — the surface assigns it at claim time to
-    /// resize its shell window. `nil` means NO host is following the panel
-    /// (pre-claim, or headless tests/tools): the size change applies
-    /// immediately with no animation, which is exactly right for a panel
-    /// nothing is showing.
+    /// The host's size hook. A host assigns this to hear every size publish
+    /// and run `apply` (the `preferredContentSize` assignment) — the
+    /// one-surface host assigns it at claim time, and uses it ONLY to notice
+    /// content taller than its fixed frame (logged once per open), never to
+    /// resize. `nil` means NO host is listening (pre-claim, or headless
+    /// tests/tools): the size change applies immediately, which is exactly
+    /// right for a panel nothing is showing.
     var surfaceResizer: ((_ animated: Bool, _ apply: () -> Void) -> Void)?
 
     /// Hand the panel to the one-surface host (U3, `AppSurfaceController`) —
@@ -1104,11 +1104,13 @@ public final class PopoverController: NSObject {
         panel
     }
 
-    /// Apply the panel's next `preferredContentSize` change with the current
-    /// host's resize animation. The panel's resize primitive
+    /// Apply the panel's next `preferredContentSize` change in front of the
+    /// current host. The panel's resize primitive
     /// (`panelContentDidChangeHeight`) calls this so the DOCUMENTED
-    /// `preferredContentSize` size channel animates (or not) exactly as the caller
-    /// asked; the panel itself holds no reference to any host.
+    /// `preferredContentSize` size channel stays the one channel; `animated`
+    /// is carried for the caller and never animates a window under the
+    /// one-surface host, whose frame is fixed. The panel itself holds no
+    /// reference to any host.
     func applySurfaceResize(animated: Bool, whileApplying apply: () -> Void) {
         if let surfaceResizer {
             surfaceResizer(animated, apply)

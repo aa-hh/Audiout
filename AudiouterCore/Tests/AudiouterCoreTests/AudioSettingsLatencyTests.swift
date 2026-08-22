@@ -113,8 +113,8 @@ import AppKit
     }
 
     /// A latency-bearing Audio pane mounted on the root (the surface's
-    /// Settings screen, post-U5): the section renders and the measured Audio
-    /// tab size is real — i.e. the model survives the assembly the app does in
+    /// Settings screen): the section renders and the mounted pane has a real
+    /// size — i.e. the model survives the assembly the app does in
     /// `AppDelegate.makeSettingsRoot`.
     @Test func rootMeasuresTheLatencyBearingAudioPane() {
         let model = LatencySettingModel(
@@ -122,11 +122,11 @@ import AppKit
             envOverrideMs: nil, isStreaming: { false }, apply: { _ in })
         let audio = AudioSettingsViewController(
             excluded: makeExcluded(), runningAppsProvider: { [] }, latency: model)
-        let root = SettingsRootViewController(tabs: [
+        let root = SettingsRootViewController(sections: [
             .init(title: "Audio", symbolName: "speaker.wave.2", viewController: audio),
-        ], tabStyle: .segmentedControlOnTop)
+        ])
         #expect(audio.test_hasLatencySection)
-        root.selectTab(at: 0)
-        #expect(root.fittedContentSize.height > 100)
+        root.selectSection(at: 0)
+        #expect(audio.view.fittingSize.height > 100)
     }
 }

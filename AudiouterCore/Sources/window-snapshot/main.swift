@@ -9,8 +9,9 @@
 // backing bubble + native toolbar header + content) into an explicit @2x
 // bitmap via `displayIgnoringOpacity(_:in:)` (see `captureOnce` for why not
 // `cacheDisplay(in:to:)`). Every Groups-content state renders at the size the
-// surface really presents (`AppSurfaceController.groupsDefaultContentSize`,
-// 560×468 below the toolbar strip), never a synthetic plain-titled host: a
+// surface really presents (the one fixed surface frame —
+// `AppSurfaceController.minimumContentSize` is its floor; the Mixer's fit
+// decides the height), never a synthetic plain-titled host: a
 // fixture built from a fake window carries none of the toolbar strip or beak
 // chrome the app actually wraps the screen in, so it can't show what a
 // sidebar layout regression would really look like on screen. `create-sheet`
@@ -561,7 +562,7 @@ func run() -> Int32 {
             settingsContent: {
                 // Lazily built on first .settings selection — never reached
                 // in this render (only Groups is ever selected).
-                SettingsRootViewController(tabs: [], tabStyle: .segmentedControlOnTop)
+                SettingsRootViewController(sections: [])
             },
             frameAutosaveName: "WindowSnapshotSurface")
         // `show` mounts + fronts (a no-op re-front once already shown);

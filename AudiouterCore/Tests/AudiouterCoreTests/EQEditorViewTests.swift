@@ -17,7 +17,7 @@ import AppKit
 
     /// A bare editor, no host pane — its own constraints are enough to lay
     /// it out once given a width, the same way `DeviceDetailViewTests`
-    /// forces `AppSurfaceController.groupsDefaultContentSize` on the pane.
+    /// forces `AppSurfaceController.minimumContentSize` on the pane.
     /// Backed by an isolated store so no test ever reads or writes `.standard`.
     private func makeHostedEditor(width: CGFloat = 300) -> EQEditorView {
         let editor = EQEditorView(settings: AppSettings(defaults: isolation.isolatedDefaults))

@@ -482,6 +482,7 @@ public final class MembershipRowView: NSView {
 /// overlay's `deviceRows` and contribute nothing.
 extension MembershipRowView: RailNodeProviding {
     public var railNode: MembershipBusView.Node? { test_busNode }
+    public var railDeviceID: String? { device.id }
     public var railNodeView: NSView { self }
     public var railNodeBounds: NSRect { bounds }
 }

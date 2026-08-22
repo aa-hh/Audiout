@@ -162,6 +162,37 @@ import Testing
                        "the cut dot follows the floor exactly as it rises")
     }
 
+    // MARK: The cut represents hidden SIGNAL, not any hidden row
+
+    @Test func clippingOnlyANonMemberEndsAtTheMemberWithNoTail() throws {
+        // THE SECTION-TOGGLE BUG (live repro 2026-08-22). As a section collapses,
+        // the clip floor rises through the NON-member rows sitting below the lowest
+        // member FIRST. Hiding a non-member hides no signal, so the rail must still
+        // end at the lowest member — not grow a tail down to the cut floor through
+        // the non-member area ("the rail expanding into areas where it wasn't
+        // before" on a rapid toggle). Only a hidden MEMBER cuts the rail.
+        var input = expandedInput()
+        input.deviceFloorY = 320          // between the non-member (300) and lowest member (340)
+        let plan = RailPlan.resolve(input)
+        #expect(plan.stops.map(\.y) == [420, 380, 340],
+                "the non-member below the floor is clipped; every member stays drawn")
+        #expect(plan.signalTerminusIndex == 2, "the wire still ends at the lowest member")
+        #expect(plan.terminusDotY == nil,
+                "no member is hidden ⇒ no cut: the rail ends at the member, no tail down to the floor")
+    }
+
+    @Test func clippingTheLowestMemberDoesCutTheRail() throws {
+        // The mirror of the above: once the floor rises past the lowest MEMBER, a
+        // real signal IS hidden below the fold, so the cut returns.
+        var input = expandedInput()
+        input.deviceFloorY = 350          // now above the lowest member (340)
+        let plan = RailPlan.resolve(input)
+        #expect(plan.stops.map(\.y) == [420, 380], "the lowest member is now clipped")
+        let terminusDotY = try #require(plan.terminusDotY,
+                "a hidden member is hidden signal — the rail cuts to the floor")
+        #expect(abs(terminusDotY - 350) <= 0.001)
+    }
+
     // MARK: Behavior 4 — re-expand restores the exact prior geometry
 
     @Test func resolveIsPureSoReexpandRestoresIdenticalGeometry() {

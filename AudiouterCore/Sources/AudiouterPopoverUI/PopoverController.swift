@@ -595,6 +595,15 @@ public final class PopoverController: NSObject {
     /// still offering a speaker that is now carrying the mix.
     private var lastMainOutMemberIDs: Set<String>?
 
+    /// The device ids that were BOTH members of the active Main Out target AND
+    /// `.connected` at the last `update(devices:)` — the rail connect pulse's
+    /// firing baseline. `nil` until the first snapshot. Deliberately persists
+    /// across `rebuild()`/`rebuildForOpen()`/open/close (it is model state), and
+    /// keeps advancing while the surface is hidden — which is exactly what makes
+    /// a reopen non-firing: a device that connected while closed is already
+    /// settled state by the next open.
+    private var lastConnectedMemberIDs: Set<String>?
+
     /// The sentinel destination id the Applications card's "Current Device" entry
     /// carries (T-8). `AppRouteDestination.currentDevice` names no specific device,
     /// but `AppRowView` works in plain string ids; this sentinel bridges the two
@@ -745,6 +754,29 @@ public final class PopoverController: NSObject {
         })
         let mainOutMembersChanged = lastMainOutMemberIDs != nil && lastMainOutMemberIDs != nowMainOutMembers
         lastMainOutMemberIDs = nowMainOutMembers
+
+        // The rail's connect pulse fires from THIS diff — the model fact "a
+        // device became a connected member of the active Main Out target" —
+        // never from the overlay's own draws, so a layout-only change (open,
+        // rebuild, collapse/expand) cannot fire it by construction. Not the
+        // row's `.member`-node predicate: that one includes `.off` (it would
+        // double-fire across the `.off → .connecting → .connected` dip) and
+        // keys off `isSpeakerSelected`, which would let a per-app-redirect
+        // connect pulse the Main-Audio wire. The stored set always advances,
+        // hidden updates included, so a connect that lands while the surface is
+        // closed is settled state by the next open.
+        let nowConnectedMembers = Set(devices.compactMap {
+            groupController?.isMainOutMember($0.id) == true && $0.connectionState == .connected
+                ? $0.id : nil
+        })
+        if let previousConnected = lastConnectedMemberIDs {
+            let newlyJoined = nowConnectedMembers.subtracting(previousConnected)
+            if !newlyJoined.isEmpty, isEffectivelyShown {
+                panel.playRailConnectPulse(joinedDeviceIDs: newlyJoined,
+                                           cameToLife: previousConnected.isEmpty)
+            }
+        }
+        lastConnectedMemberIDs = nowConnectedMembers
 
         // A route reset (routesChanged) restructures the Applications card, so it
         // needs a full rebuild — but a rebuild here must NOT reset this open's
@@ -3262,6 +3294,10 @@ public final class PopoverController: NSObject {
     /// laid-out frames (origin at ring vs collapsed header, the terminus dot, the
     /// visible device stops). Lets the rail-collapse tests assert the drawn shape.
     public func test_railPlan() -> RailPlan? { panel.test_railPlan() }
+
+    /// The panel's rail overlay — lets tests pin its visibility/Reduce Motion
+    /// seams and read its pulse counters through the controller boundary.
+    public func test_railOverlay() -> BusRailOverlayView { panel.railOverlay }
 
     /// Select the Main Out destination directly (drives the routing).
     public func test_selectMainOut(_ target: MainOutTarget) {

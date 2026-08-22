@@ -83,6 +83,33 @@ public final class CompanionCommandDispatcher {
     /// `applied` immediately — the ~3-5s reconnect gap happens after the reply, same
     /// as the Mac's own "Apply & Reconnect" semantics (protocol sketch, D10).
     private let applyStartBuffer: (Int) async -> Void
+    /// The three Bluetooth capabilities the alignment probe needs, injected as
+    /// closures for the same reason as the two above: they live on
+    /// `NativeBackend` behind a `backend as? BTOutputControlling` cast this
+    /// backend-agnostic type doesn't hold. Default to inert, so a host on a
+    /// backend with no Bluetooth at all (mock, OwnTone) still builds and runs
+    /// the mute choreography — with no tick and no trim write behind it.
+    private let setProbeTickActive: (Bool) -> Void
+    private let btSyncTrim: (String) -> Double
+    private let persistBTSyncTrim: (Double, String) -> Void
+
+    /// The probe run in flight (spike: one at a time, Mac-wide). Held here so
+    /// `cancelAlignmentProbe` and the snapshot can both reach it.
+    private var probeSession: AlignmentProbeSession?
+
+    /// Fired when a probe run starts or ends — including the ends no command
+    /// caused (pattern finished, timeout, target vanished), which is the only
+    /// way the phone learns the run is over. The host wires this to a snapshot
+    /// broadcast.
+    public var onProbeStateDidChange: (() -> Void)?
+
+    /// The snapshot's `alignmentProbe` slice. Absent while idle rather than a
+    /// `state: "idle"` object: there is no target to name when nothing is
+    /// running, and a field that disappears is exactly the abort signal the
+    /// phone needs.
+    public var alignmentProbeState: AlignmentProbeState? {
+        probeSession.map { AlignmentProbeState(targetDeviceID: $0.targetDeviceID, state: "running") }
+    }
 
     /// True while a `setStartBufferMs` apply Task is running. The apply tears
     /// every AirPlay stream down and back (~3-5s); overlapping runs would keep
@@ -104,7 +131,10 @@ public final class CompanionCommandDispatcher {
         settings: AppSettings,
         isExcluded: @escaping (String) -> Bool,
         setLocalPlaybackVolume: @escaping (Int, String) -> Void,
-        applyStartBuffer: @escaping (Int) async -> Void
+        applyStartBuffer: @escaping (Int) async -> Void,
+        setProbeTickActive: @escaping (Bool) -> Void = { _ in },
+        btSyncTrim: @escaping (String) -> Double = { _ in 0 },
+        persistBTSyncTrim: @escaping (Double, String) -> Void = { _, _ in }
     ) {
         self.groupController = groupController
         self.appRouting = appRouting
@@ -112,6 +142,9 @@ public final class CompanionCommandDispatcher {
         self.isExcluded = isExcluded
         self.setLocalPlaybackVolume = setLocalPlaybackVolume
         self.applyStartBuffer = applyStartBuffer
+        self.setProbeTickActive = setProbeTickActive
+        self.btSyncTrim = btSyncTrim
+        self.persistBTSyncTrim = persistBTSyncTrim
     }
 
     /// Execute one command, mapping it to the exact controller method the
@@ -224,9 +257,131 @@ public final class CompanionCommandDispatcher {
             // applied so the phone doesn't surface a spurious refusal toast.
             return .ok
 
+        case .startAlignmentProbe(let targetDeviceID, let referenceDeviceID):
+            return startAlignmentProbe(targetDeviceID: targetDeviceID,
+                                       referenceDeviceID: referenceDeviceID)
+
+        case .cancelAlignmentProbe:
+            // Idempotent: nothing running is the state the phone asked for.
+            probeSession?.cancel()
+            return .ok
+
+        case .submitProbeResult(let targetDeviceID, let offsetMs, let spreadMs, let confident):
+            return applyProbeResult(targetDeviceID: targetDeviceID, offsetMs: offsetMs,
+                                    spreadMs: spreadMs, confident: confident)
+
         case .unknown(let name):
             return .refused("Unknown command: \(name).")
         }
+    }
+
+    // MARK: - Alignment probe (BT auto-cal spike)
+
+    /// Validate and start one probe run. Everything here is a refusal the
+    /// phone can act on: a probe against a speaker that can't receive the tick,
+    /// or with nothing audible to compare against, would record 45 s of
+    /// silence and report a confident-looking nothing.
+    private func startAlignmentProbe(targetDeviceID: String, referenceDeviceID: String?) -> Result {
+        guard probeSession == nil else {
+            return .refused("An alignment probe is already running.")
+        }
+        guard let target = groupController.devices.first(where: { $0.id == targetDeviceID }) else {
+            return .refused("Unknown device.")
+        }
+        guard target.isBluetooth else {
+            return .refused("\(target.name) isn't a Bluetooth speaker.")
+        }
+        if let refused = deviceWriteRefusal(id: targetDeviceID) { return refused }
+        // The tick rides INSIDE the captured feed, which only reaches Main Out
+        // members — a target outside it hears nothing to measure.
+        guard groupController.isMainOutMember(targetDeviceID) else {
+            return .refused("\(target.name) isn't playing the Main Out, so it can't be measured.")
+        }
+
+        let referenceIDs: [String]
+        if let referenceDeviceID {
+            guard referenceDeviceID != targetDeviceID else {
+                return .refused("The reference has to be a different speaker.")
+            }
+            guard let reference = groupController.devices.first(where: { $0.id == referenceDeviceID }) else {
+                return .refused("Unknown device.")
+            }
+            guard isAudibleReference(referenceDeviceID) else {
+                return .refused("\(reference.name) isn't playing right now, so it can't be the reference.")
+            }
+            referenceIDs = [referenceDeviceID]
+        } else {
+            // No reference named: Main Out IS the reference — every other
+            // audible member of it, since the target is normally one too.
+            referenceIDs = groupController.devices
+                .map(\.id)
+                .filter { $0 != targetDeviceID && isAudibleReference($0) }
+            guard !referenceIDs.isEmpty else {
+                return .refused("Nothing else is playing to compare \(target.name) against.")
+            }
+        }
+
+        let session = AlignmentProbeSession(
+            targetDeviceID: targetDeviceID,
+            referenceDeviceIDs: referenceIDs,
+            setMuted: { [groupController] id, muted in groupController.setMuted(muted, for: id) },
+            isMuted: { [groupController] id in groupController.isMuted(id) },
+            isTargetLive: { [weak self] in
+                guard let self else { return false }
+                return self.deviceWriteRefusal(id: targetDeviceID) == nil
+            },
+            setTick: setProbeTickActive)
+        session.onEnd = { [weak self] outcome in
+            guard let self, self.probeSession === session else { return }
+            self.probeSession = nil
+            self.log.info("alignment probe ended: \(String(describing: outcome), privacy: .public)")
+            self.onProbeStateDidChange?()
+        }
+        probeSession = session
+        session.start()
+        onProbeStateDidChange?()
+        return .ok
+    }
+
+    /// A speaker can stand in for "the reference" only if it is carrying the
+    /// Main Out (so the tick reaches it), can take writes, and isn't already
+    /// muted by the user.
+    private func isAudibleReference(_ id: String) -> Bool {
+        groupController.isMainOutMember(id)
+            && !groupController.isMuted(id)
+            && deviceWriteRefusal(id: id) == nil
+    }
+
+    /// Fold the phone's measurement into the target's stored trim.
+    ///
+    /// **Sign, derived from the sink — not assumed.** `BTSyncTrim` is the
+    /// `userOffsetMs` term of `SyncTiming.totalDelayNanos`, which ADDS it to
+    /// the device's scheduled delay (`SyncCore.swift`: "positive delays the
+    /// speaker further"), and `BTSyncedSink.applyTrimDelta` says the same from
+    /// the other end ("positive = this device plays LATER"). The wizard agrees:
+    /// an answer of `.target` means the target was heard FIRST — it plays early
+    /// — and folds the bracket UPWARD, toward a larger trim.
+    ///
+    /// The phone reports `offsetMs` positive = the target sounds LATE. Making a
+    /// late device play earlier means a SMALLER trim, so the correction
+    /// SUBTRACTS the measurement. This is the one place that math exists.
+    private func applyProbeResult(targetDeviceID: String, offsetMs: Double,
+                                  spreadMs: Double, confident: Bool) -> Result {
+        guard offsetMs.isFinite, spreadMs.isFinite else {
+            return .refused("That measurement isn't a usable number.")
+        }
+        guard groupController.devices.contains(where: { $0.id == targetDeviceID }) else {
+            return .refused("Unknown device.")
+        }
+        guard confident else {
+            // The phone's own UI already told the user it couldn't measure;
+            // a refusal here would be a second, redundant failure toast.
+            log.info("alignment probe result discarded — not confident (spread \(spreadMs, privacy: .public) ms)")
+            return .ok
+        }
+        let newTrim = BTSyncTrim.quantise(btSyncTrim(targetDeviceID) - offsetMs)
+        persistBTSyncTrim(newTrim, targetDeviceID)
+        return .ok
     }
 
     // MARK: - Group CRUD (validated + all-or-nothing)

@@ -1066,6 +1066,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             case .off: nil
             case .manual: .manual
             case .wizard: .wizard
+            case .probe: .probe
             }
             guard self.tickConfig != config else { return }
             self.tickConfig = config

@@ -5,11 +5,14 @@ import Foundation
 /// What shape of align-tick run a caller wants (W2) — the public vocabulary
 /// the ``CaptureControlling`` seam speaks so the injector's numeric ``AlignmentTickInjector/Config``
 /// stays internal. `.manual` is the row's metronome button; `.wizard` is the
-/// alignment wizard's continuous run (long budget + keep-alive bed preamble).
+/// alignment wizard's continuous run (long budget + keep-alive bed preamble);
+/// `.probe` is the phone-measured probe's run, which is `.wizard` with a
+/// preamble stretched to ``AlignmentProbeSession/preambleSeconds``.
 public enum AlignTickMode: Equatable, Sendable {
     case off
     case manual
     case wizard
+    case probe
 }
 
 /// The align-by-ear aid's tick source (BT-OFFSET-UI): a synthesized
@@ -78,6 +81,16 @@ final class AlignmentTickInjector: @unchecked Sendable {
 
         static let manual = Config()
         static let wizard = Config(maxTicks: 360, preambleSeconds: 3, replacesProgram: true)
+        /// The probe's run: the wizard's shape with the preamble stretched to
+        /// cover ``AlignmentProbeSession/preambleSeconds``. The length is load-
+        /// bearing, not comfort: during the preamble BOTH speakers are audible,
+        /// so a tick landing inside it would be heard twice at once and merge
+        /// into the phone analyzer's first block. The first tick must fall on
+        /// the first REF block, where only the reference is up.
+        static let probe = Config(
+            maxTicks: 360,
+            preambleSeconds: AlignmentProbeSession.preambleSeconds,
+            replacesProgram: true)
     }
 
     private let beatFrames: Int

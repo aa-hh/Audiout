@@ -101,7 +101,10 @@ import Testing
     }
 
     private func makeScene(nodes: [MembershipBusView.Node]) -> Scene {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 400),
+        // Parked far outside every screen: the two tests below need a real
+        // render-server-backed layer tree (an ordered-in window), and a test
+        // must never put anything on the developer's actual screen.
+        let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: 300, height: 400),
                               styleMask: .borderless, backing: .buffered, defer: false)
         let content = window.contentView!
         var rows: [StubRow] = []
@@ -151,7 +154,8 @@ import Testing
         // presentation tree never commits there — skip rather than lie.
         try #require(NSScreen.main != nil, "needs a window server")
         let scene = makeScene(nodes: [.member])
-        scene.window.orderFrontRegardless()
+        scene.window.orderFrontRegardless()          // off-screen; see `makeScene`
+        defer { scene.window.orderOut(nil) }
         scene.overlay.needsDisplay = true
         scene.overlay.display()                       // baseline: idle
         scene.hook.gold = true
@@ -275,11 +279,12 @@ import Testing
     }
 
     @Test func aCompletedPulseHandsOffToTheRing() {
-        // On-glass window: an undisplayed window's layer tree never starts its
+        // Ordered-in window: an undisplayed window's layer tree never starts its
         // CA timeline, so the bead's completion (the bloom's trigger) would
         // never fire — same requirement as the presentation probe above.
         let scene = makeScene(nodes: [.member])
-        scene.window.orderFrontRegardless()
+        scene.window.orderFrontRegardless()          // off-screen; see `makeScene`
+        defer { scene.window.orderOut(nil) }
         scene.overlay.test_reconcileEnergize()          // baseline: idle
         scene.hook.gold = true
         scene.overlay.test_reconcileEnergize()

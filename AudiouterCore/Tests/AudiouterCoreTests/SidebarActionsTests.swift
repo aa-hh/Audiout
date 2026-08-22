@@ -52,6 +52,11 @@ import AppKit
                 == ["New Group from Selection…"])
     }
 
+    @Test func mainAudioRowHasNoMenu() {
+        let sidebar = makeSidebar()
+        #expect(sidebar.test_contextMenuItems(for: .mainOut).isEmpty)
+    }
+
     @Test func headerAndPlaceholderRowsHaveNoMenu() {
         let sidebar = makeSidebar(groups: [])
         // Section headers carry no identity to act on…

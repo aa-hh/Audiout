@@ -132,7 +132,7 @@ import AppKit
 
     @Test func sidebarAlwaysShowsGroupsAndSpeakersSections() async throws {
         let (window, _, _) = try await makeWindow()
-        #expect(window.test_sidebar.test_sectionTitles == ["Groups", "Speakers"])
+        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Groups", "Speakers"])
         #expect(window.test_sidebar.test_hasGroupsEmptyStateRow, "zero saved groups shows the empty-state placeholder row")
         #expect(window.test_sidebar.test_deviceRowCount == 7)
         #expect(!(window.test_isShowingEditor))
@@ -155,7 +155,7 @@ import AppKit
         _ = try makeGroup1(controller)
         window.update(devices: backend.devices)
         #expect(!sidebarItem.isCollapsed, "a refresh restores a collapsed sidebar")
-        #expect(window.test_sidebar.test_sectionTitles == ["Groups", "Speakers"],
+        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Groups", "Speakers"],
                 "and it still lists both sections")
     }
 
@@ -189,7 +189,7 @@ import AppKit
         _ = try makeGroup1(controller)
         window.update(devices: backend.devices)
 
-        #expect(window.test_sidebar.test_sectionTitles == ["Groups", "Speakers"])
+        #expect(window.test_sidebar.test_sectionTitles == ["System Audio", "Groups", "Speakers"])
         #expect(!(window.test_sidebar.test_hasGroupsEmptyStateRow))
         #expect(window.test_sidebar.test_groupRowCount == 1)
         #expect(window.test_sidebar.test_groupRowsAreFlat, "a group row is a flat leaf — no expandable member children (design review 2026-07-18)")
@@ -199,6 +199,38 @@ import AppKit
     @Test func sidebarSupportsMultipleSelection() async throws {
         let (window, _, _) = try await makeWindow()
         #expect(window.test_sidebar.test_allowsMultipleSelection)
+    }
+
+    /// `update(devices:)` fires on every backend event for the app's whole
+    /// lifetime — an EQ-only change touches nothing any sidebar cell renders,
+    /// so it must not rebuild the sidebar's node tree. A change the sidebar
+    /// DOES render (a rename) must still reload.
+    @Test func sidebarReloadSkipsAnEQOnlyChangeButNotARename() async throws {
+        let (window, _, backend) = try await makeWindow()
+        let baseline = window.test_sidebarReloadCount
+        #expect(baseline > 0, "the initial makeWindow() snapshot already reloaded once")
+
+        var eqOnly = backend.devices
+        eqOnly[0].eq = DeviceEQ(bassDB: 4)
+        window.update(devices: eqOnly)
+        #expect(window.test_sidebarReloadCount == baseline,
+                "no sidebar cell shows a tone value, so this must be a no-op reload")
+
+        var renamed = eqOnly
+        renamed[0].name += " (renamed)"
+        window.update(devices: renamed)
+        #expect(window.test_sidebarReloadCount == baseline + 1,
+                "a name change IS on a sidebar cell, so it must reload")
+    }
+
+    @Test func sidebarReloadDetectsAnIconOverrideOnlyChange() async throws {
+        let (window, _, _, icons) = try await makeWindowWithIconController()
+        let baseline = window.test_sidebarReloadCount
+        #expect(baseline > 0, "the initial makeWindow() snapshot already reloaded once")
+
+        icons.setSymbolName("sofa.fill", for: "office")
+        #expect(window.test_sidebarReloadCount == baseline + 1,
+                "an icon override IS the rendered sidebar icon, so a same-id/name/kind/isAvailable change must still reload")
     }
 
     // MARK: New Group — sheet (SPEC.md §9, design revamp)
@@ -693,6 +725,131 @@ import AppKit
         let candidates = sheet.test_candidateDeviceIDs   // sanity: both offered
         #expect(candidates.contains("office") && candidates.contains("sonos-move"))
         #expect(sheet.test_nameFieldText == "Office + Sonos Move")
+    }
+
+    // MARK: Deep link from the popover ("Equalizer…")
+
+    @Test func selectDeviceShowsItsDetailAndHighlightsTheSidebarRow() async throws {
+        let (window, _, _) = try await makeWindow()
+
+        window.select(.device(id: "office"))
+
+        #expect(window.test_isShowingDetail)
+        #expect(window.test_detail.test_shownDeviceID == "office")
+        #expect(window.test_sidebar.currentSelection == .device(id: "office"),
+                "the deep link highlights the row too — arriving on a pane whose sidebar shows nothing selected reads as a bug")
+    }
+
+    @Test func selectingAnUnknownDevicePendsUntilTheSnapshotCarriesIt() async throws {
+        let (window, _, backend) = try await makeWindow()
+
+        window.select(.device(id: "ghost"))
+        #expect(!window.test_isShowingDetail,
+                "a device this screen has never been told about doesn't fall back to the default pane")
+        #expect(window.test_pendingSelection == .device(id: "ghost"))
+
+        let ghost = Device(id: "ghost", name: "Ghost", kind: .generic, isAvailable: true)
+        window.update(devices: backend.devices + [ghost])
+
+        #expect(window.test_isShowingDetail)
+        #expect(window.test_detail.test_shownDeviceID == "ghost")
+        #expect(window.test_pendingSelection == nil, "the deep link is spent, not repeated")
+    }
+
+    @Test func selectMainAudioShowsTheWholeMixPage() async throws {
+        let (window, _, _) = try await makeWindow()
+        window.mainOutEQProvider = { DeviceEQ(bassDB: 2) }
+
+        window.select(.mainOut)
+
+        #expect(window.test_isShowingMainOut)
+        #expect(window.test_mainOutDetail.test_eqEditor.currentEQ.bassDB == 2,
+                "the page pulls the whole mix's current tone when it opens")
+        #expect(window.test_mainOutDetail.test_noteText == "Applies to audio sent to speakers.")
+        #expect(window.test_mainOutDetail.test_titleText == "Main Audio")
+    }
+
+    @Test func mainOutScrubSurvivesASnapshotAndTheEchoReleasesTheCache() async throws {
+        let (window, _, _) = try await makeWindow()
+        window.mainOutEQProvider = { .flat }
+        window.select(.mainOut)
+
+        let detail = window.test_mainOutDetail
+        let editor = detail.test_eqEditor
+
+        // Mid-drag: a snapshot carrying the OLD value must not rewind the slider.
+        editor.test_committedGestureOverride = false
+        editor.test_dragBass(to: 5)
+        detail.show(eq: .flat)
+        #expect(editor.currentEQ.bassDB == 5,
+                "a snapshot arriving mid-gesture can't yank the slider out from under the pointer")
+
+        // Committed: the entry awaits its own echo — a stale flat snapshot
+        // already queued from before the commit must not replay the drag
+        // backward.
+        editor.test_committedGestureOverride = true
+        editor.test_dragBass(to: 5)
+        detail.show(eq: .flat)
+        #expect(editor.currentEQ.bassDB == 5,
+                "a stale snapshot queued before the commit must not replay the drag on the knob")
+
+        // The committed value's own echo releases the cache.
+        detail.show(eq: DeviceEQ(bassDB: 5))
+        #expect(editor.currentEQ.bassDB == 5)
+
+        // Proof the cache is gone: a LATER flat snapshot now renders flat.
+        detail.show(eq: .flat)
+        #expect(editor.currentEQ.bassDB == 0,
+                "kept past the echo the cache lies forever — the page would show a shaped curve while the audio stayed flat")
+    }
+
+    // MARK: The two tone seams
+
+    @Test func mainAudioEditsReportOnTheWholeMixSeam() async throws {
+        let (window, _, _) = try await makeWindow()
+        var reported: [(DeviceEQ, Bool)] = []
+        window.onSetMainOutEQ = { eq, committed in reported.append((eq, committed)) }
+        window.select(.mainOut)
+
+        let editor = window.test_mainOutDetail.test_eqEditor
+        editor.test_committedGestureOverride = false
+        editor.test_dragTreble(to: -4)
+        #expect(reported.last?.0.trebleDB == -4)
+        #expect(reported.last?.1 == false, "a live scrub applies but must not persist")
+
+        editor.test_committedGestureOverride = true
+        editor.test_dragTreble(to: -4)
+        #expect(reported.last?.1 == true, "the gesture that ends the drag persists")
+
+        editor.test_fireResetClick()
+        #expect(reported.last?.0 == .flat)
+        #expect(reported.last?.1 == true, "Reset is one committed action")
+    }
+
+    @Test func deviceEditsReportWithTheDeviceID() async throws {
+        let (window, _, _) = try await makeWindow()
+        var reported: [(DeviceEQ, String, Bool)] = []
+        window.onSetDeviceEQ = { eq, id, committed in reported.append((eq, id, committed)) }
+        window.select(.device(id: "office"))
+
+        let editor = window.test_detail.test_eqEditor
+        editor.test_committedGestureOverride = true
+        editor.test_dragBass(to: 3)
+
+        #expect(reported.last?.0.bassDB == 3)
+        #expect(reported.last?.1 == "office", "the whole point of the per-device seam is the id")
+        #expect(reported.last?.2 == true)
+    }
+
+    @Test func autoSelectStillPicksTheFirstGroupWhenNothingIsSelected() async throws {
+        let (window, controller, _) = try await makeWindow()
+        let group = try makeGroup1(controller)
+
+        window.test_select(nil)
+
+        #expect(window.test_isShowingEditor)
+        #expect(window.test_editor.editingGroupID == group.id,
+                "the new System Audio row must not steal the empty selection's auto-select")
     }
 }
 

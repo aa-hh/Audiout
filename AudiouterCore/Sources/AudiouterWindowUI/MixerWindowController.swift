@@ -11,10 +11,11 @@ import AudiouterSharedUI
 ///
 /// It owns an `NSSplitViewController` whose sidebar item is a source-list
 /// `NSOutlineView` (`SidebarViewController`) and whose content item is swapped
-/// between three panes: the group editor (`GroupEditorViewController`, when a
-/// group is selected), the read-only device detail pane
-/// (`DeviceDetailViewController`, when a device is selected), and an empty
-/// "No groups yet" pane (nothing to select). It owns NO window: the app's
+/// between four panes: the group editor (`GroupEditorViewController`, when a
+/// group is selected), the device detail pane (`DeviceDetailViewController`,
+/// when a device is selected), the whole-mix `MainOutDetailViewController`
+/// (the sidebar's "Main Audio" row), and an empty "No groups yet" pane
+/// (nothing to select). It owns NO window: the app's
 /// `AppSurfaceController` hosts `contentController` as the surface's Groups
 /// screen and tells this controller when that screen is visible via
 /// `setHostVisible(_:)` (the standalone Groups window was retired in U6).
@@ -69,7 +70,29 @@ public final class MixerWindowController {
     private let sidebarViewController: SidebarViewController
     private let editorViewController: GroupEditorViewController
     private let detailViewController: DeviceDetailViewController
+    private let mainOutDetailViewController = MainOutDetailViewController()
     private let emptyStateViewController = GroupsEmptyStateViewController()
+
+    /// Tone seams, wired by the app to the backend. This controller never
+    /// calls a backend itself (`AGENTS.md`) — it only forwards what the two
+    /// detail panes report.
+    ///
+    /// `onSetDeviceEQ` carries (eq, device id, committed); `onSetMainOutEQ`
+    /// carries (eq, committed) — no id, it is the whole mix.
+    public var onSetDeviceEQ: ((DeviceEQ, String, Bool) -> Void)?
+    public var onSetMainOutEQ: ((DeviceEQ, Bool) -> Void)?
+    /// Reads the whole mix's current tone when the Main Audio page opens.
+    /// Pulled rather than pushed: the value lives on the backend, and this
+    /// screen has no event to receive it on.
+    public var mainOutEQProvider: (() -> DeviceEQ)?
+
+    /// A selection that arrived before the snapshot carrying its device did —
+    /// the popover's "Equalizer…" deep link can name a speaker this screen has
+    /// never been told about (it is built lazily, on first open). Held here and
+    /// applied at the end of the first `refreshAll()` in which the id exists.
+    /// Only `.device` ever pends: `.group` and `.mainOut` resolve immediately
+    /// or not at all.
+    private var pendingSelection: SidebarSelection?
 
     /// Hosts the swapped content pane (editor / detail / empty) PLUS the
     /// persistent footer caption pinned beneath it. SCOPED TO THE CONTENT
@@ -149,6 +172,15 @@ public final class MixerWindowController {
         // `refreshAll()`/auto-select runs, and those run on `update(devices:)`
         // before any host has mounted the content.
         splitViewController.loadViewIfNeeded()
+
+        // The panes report tone gestures; this controller forwards them
+        // untouched to whoever owns the backend.
+        detailViewController.onSetEQ = { [weak self] eq, id, committed in
+            self?.onSetDeviceEQ?(eq, id, committed)
+        }
+        mainOutDetailViewController.onSetEQ = { [weak self] eq, committed in
+            self?.onSetMainOutEQ?(eq, committed)
+        }
 
         // Sidebar selection drives the content pane.
         sidebarViewController.onSelect = { [weak self] selection in
@@ -269,9 +301,11 @@ public final class MixerWindowController {
             showEditor(for: id)
             refreshSidebar()
         case .device(let id):
-            // Selecting a device shows its read-only detail pane. CONFIG-ONLY:
-            // this never activates a group, changes routing, or moves audio.
+            // Selecting a device shows its detail pane. CONFIG-ONLY: this never
+            // activates a group, changes routing, or moves audio.
             showDetail(for: id)
+        case .mainOut:
+            showMainOut()
         case .none:
             showDefaultContent()
         }
@@ -290,7 +324,8 @@ public final class MixerWindowController {
         }
     }
 
-    /// Show the read-only detail pane for `deviceID`. Falls back to the default
+    /// Show the detail pane for `deviceID` — the page that DESCRIBES and TUNES
+    /// that speaker. Falls back to the default
     /// content when the id isn't in the current snapshot (a stale selection) so
     /// the content area is never left on a device that no longer exists.
     private func showDetail(for deviceID: String) {
@@ -304,10 +339,48 @@ public final class MixerWindowController {
         swapContent(to: detailViewController)
     }
 
+    /// Show the whole-mix page. Nothing to look up — the one thing it renders
+    /// is pulled from the app through `mainOutEQProvider` at open time.
+    private func showMainOut() {
+        shownDetailDeviceID = nil
+        mainOutDetailViewController.show(eq: mainOutEQProvider?() ?? .flat)
+        swapContent(to: mainOutDetailViewController)
+    }
+
     private func showEditor(for groupID: String) {
         shownDetailDeviceID = nil
         editorViewController.show(groupID: groupID, devices: orderedDevices())
         swapContent(to: editorViewController)
+    }
+
+    /// Select `selection` from OUTSIDE the sidebar — the popover's
+    /// "Equalizer…" deep link. Highlights the sidebar row (without re-firing
+    /// `onSelect`, which would just call back into here) and shows the pane.
+    ///
+    /// A device this screen has not been told about yet PENDS rather than
+    /// falling back to the default content: the Groups screen is built lazily,
+    /// so the very first deep link can easily arrive before its first
+    /// `update(devices:)`. The pending selection is applied at the end of the
+    /// first `refreshAll()` whose snapshot carries the id.
+    public func select(_ selection: SidebarSelection) {
+        if case .device(let id) = selection, devicesByID[id] == nil {
+            pendingSelection = selection
+            return
+        }
+        pendingSelection = nil
+        sidebarViewController.select(selection, notify: false)
+        handleSidebarSelection(selection)
+    }
+
+    /// Apply a deep link that was waiting for its device to show up. Runs at
+    /// the END of `refreshAll()` so it wins over the auto-select rule that ran
+    /// earlier in the same pass.
+    private func applyPendingSelection() {
+        guard case .device(let id)? = pendingSelection, devicesByID[id] != nil else { return }
+        let selection = pendingSelection!
+        pendingSelection = nil
+        sidebarViewController.select(selection, notify: false)
+        handleSidebarSelection(selection)
     }
 
     /// The live group-creation sheet while it's up, so `refreshAll()` can leave
@@ -389,9 +462,9 @@ public final class MixerWindowController {
         if sidebarSplitItem.isCollapsed { sidebarSplitItem.isCollapsed = false }
 
         let devices = orderedDevices()
-        sidebarViewController.reload(groups: groupController.groups,
-                                     activeGroupID: groupController.activeGroupID,
-                                     devices: devices)
+        reloadSidebarIfNeeded(groups: groupController.groups,
+                             activeGroupID: groupController.activeGroupID,
+                             devices: devices)
         // Refresh whichever content pane is showing. The create sheet is a
         // separate presentation (not the content pane) — it is never disturbed
         // here.
@@ -411,6 +484,13 @@ public final class MixerWindowController {
             } else {
                 showDefaultContent()
             }
+        } else if currentContent === mainOutDetailViewController {
+            // Nothing in a snapshot can invalidate the whole mix, and the page
+            // owns its own in-flight tone state now (`MainOutDetailViewController
+            // .pendingEdit`) — a per-event re-pull here bought nothing but a
+            // `stateQueue.sync` on the main thread for every backend event
+            // during a drag. The one legitimate pull is at `showMainOut()`,
+            // on open.
         } else {
             // Empty pane showing: AUTO-SELECT kicks in as soon as a group
             // exists (first launch with persisted groups, or one created from
@@ -419,12 +499,75 @@ public final class MixerWindowController {
                 showDefaultContent()
             }
         }
+
+        applyPendingSelection()
     }
 
+    /// Unconditional — callers of this one reach it after a user ACTION
+    /// (renaming, deleting, group selection), so the sidebar must always
+    /// reflect it immediately. Still records the projection reload gates on,
+    /// so the NEXT `update(devices:)` compares against the truth rather than
+    /// whatever the last snapshot-driven reload happened to see.
     private func refreshSidebar() {
-        sidebarViewController.reload(groups: groupController.groups,
-                                     activeGroupID: groupController.activeGroupID,
-                                     devices: orderedDevices())
+        let groups = groupController.groups
+        let activeGroupID = groupController.activeGroupID
+        let devices = orderedDevices()
+        lastSidebarProjection = sidebarProjection(groups: groups, activeGroupID: activeGroupID, devices: devices)
+        sidebarViewController.reload(groups: groups, activeGroupID: activeGroupID, devices: devices)
+        test_sidebarReloadCount += 1
+    }
+
+    /// Reload the sidebar only when what its cells actually RENDER changed.
+    /// `update(devices:)` fires on every backend event for the app's whole
+    /// lifetime, including an EQ-only change that no sidebar cell shows
+    /// (SharedUI's device/group cells draw icon, name, membership/active
+    /// marker, availability — never a tone value) — comparing this plain
+    /// projection instead of rebuilding the node tree unconditionally is what
+    /// turns that flood back into a no-op. Not a general diffing framework:
+    /// one struct, one equality check.
+    private func reloadSidebarIfNeeded(groups: [Group], activeGroupID: String?, devices: [Device]) {
+        let projection = sidebarProjection(groups: groups, activeGroupID: activeGroupID, devices: devices)
+        guard projection != lastSidebarProjection else { return }
+        lastSidebarProjection = projection
+        sidebarViewController.reload(groups: groups, activeGroupID: activeGroupID, devices: devices)
+        test_sidebarReloadCount += 1
+    }
+
+    /// Exactly what the sidebar's cells render (`SidebarViewController`'s
+    /// device/group row cell), named as one Equatable value so a reload can be
+    /// gated on it changing rather than on the raw model arrays changing.
+    private struct SidebarProjection: Equatable {
+        struct GroupCell: Equatable {
+            let id: String
+            let name: String
+            let iconSymbolName: String?
+        }
+        struct DeviceCell: Equatable {
+            let id: String
+            let name: String
+            let kind: Device.Kind
+            let isAvailable: Bool
+            let iconSymbolName: String
+        }
+        let groups: [GroupCell]
+        let activeGroupID: String?
+        let devices: [DeviceCell]
+    }
+
+    private var lastSidebarProjection: SidebarProjection?
+
+    private func sidebarProjection(
+        groups: [Group], activeGroupID: String?, devices: [Device]
+    ) -> SidebarProjection {
+        SidebarProjection(
+            groups: groups.map {
+                .init(id: $0.id, name: $0.name, iconSymbolName: $0.iconSymbolName)
+            },
+            activeGroupID: activeGroupID,
+            devices: devices.map {
+                .init(id: $0.id, name: $0.name, kind: $0.kind, isAvailable: $0.isAvailable,
+                      iconSymbolName: deviceIconController.symbolName(for: $0))
+            })
     }
 
     private func orderedDevices() -> [Device] {
@@ -442,7 +585,14 @@ public final class MixerWindowController {
     public var test_sidebar: SidebarViewController { sidebarViewController }
     public var test_editor: GroupEditorViewController { editorViewController }
     public var test_detail: DeviceDetailViewController { detailViewController }
+    public var test_mainOutDetail: MainOutDetailViewController { mainOutDetailViewController }
     public var test_emptyState: GroupsEmptyStateViewController { emptyStateViewController }
+
+    /// How many times the sidebar has actually been reloaded — proves the
+    /// change-gate in ``reloadSidebarIfNeeded`` : an EQ-only `update(devices:)`
+    /// must leave this unchanged, and a real sidebar-visible change must bump
+    /// it exactly once.
+    public private(set) var test_sidebarReloadCount = 0
 
     /// True when the editor pane is the visible content (vs detail/empty pane).
     public var test_isShowingEditor: Bool {
@@ -453,6 +603,14 @@ public final class MixerWindowController {
     public var test_isShowingDetail: Bool {
         currentContent === detailViewController
     }
+
+    /// True when the whole-mix Main Audio page is the visible content.
+    public var test_isShowingMainOut: Bool {
+        currentContent === mainOutDetailViewController
+    }
+
+    /// The deep link still waiting for the device it names, or nil.
+    public var test_pendingSelection: SidebarSelection? { pendingSelection }
 
     /// True when the "No groups yet" empty pane is the visible content.
     public var test_isShowingEmptyState: Bool {

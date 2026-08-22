@@ -579,6 +579,12 @@ final class BTDeviceSink: @unchecked Sendable {
     private var running = false
     /// Current render gain (graphQueue). 1 unless the hold-silent path set it.
     private var gain: Float = 1
+    /// This device's tone (graphQueue). Stored so a rebuild re-derives its
+    /// processor at whatever rate the device comes back on.
+    private var eq: DeviceEQ = .flat
+    /// The baked processor the render path applies, published under `stateLock`
+    /// like `driftPpm`. `nil` = flat, and flat stays untouched audio.
+    private var eqProcessor: EQProcessor?   // stateLock
     private var configChangeObserver: NSObjectProtocol?
     private var rateListenerBlock: AudioObjectPropertyListenerBlock?
     private let listenerQueue: DispatchQueue
@@ -701,6 +707,31 @@ final class BTDeviceSink: @unchecked Sendable {
         }
     }
 
+    /// This device's tone. Like the gain above, a live session absorbs it as a
+    /// property swap — the coefficients are baked into a NEW ``EQProcessor``
+    /// built here on `graphQueue` (never on the render thread, and never by
+    /// re-parameterizing a live one, whose biquad state belongs to the render
+    /// thread alone) and published under the same `stateLock` snapshot the drift
+    /// figure uses. Stored so a rebuild's fresh `startLocked` pass re-derives it
+    /// at whatever rate the device came back on.
+    func setEQ(_ eq: DeviceEQ) {
+        graphQueue.async {
+            self.eq = eq
+            self.rebuildEQProcessorLocked()
+        }
+    }
+
+    /// Bake `eq` for the CURRENT render rate and publish it to the render path.
+    /// A flat setting publishes `nil` — a flat device must never be filtered.
+    /// Stereo only: ``EQProcessor`` is interleaved-stereo by construction, so a
+    /// mono/multichannel sink simply runs untouched. On `graphQueue`.
+    private func rebuildEQProcessorLocked() {   // on graphQueue
+        let processor: EQProcessor? = (eq.isFlat || channelCount != 2)
+            ? nil
+            : EQProcessor(eq: eq, sampleRate: renderSampleRate)
+        stateLock.withLock { eqProcessor = processor }
+    }
+
     private func startLocked() throws {
         guard !running else { return }
         if let transport = Self.transportType(deviceID),
@@ -736,6 +767,11 @@ final class BTDeviceSink: @unchecked Sendable {
             engine.connect(node, to: engine.mainMixerNode, format: connectionFormat)
         }
         engine.mainMixerNode.outputVolume = gain
+        // Re-derive the tone from the remembered value, exactly as the gain
+        // above is re-applied: a rebuild throws away the old processor along
+        // with the session, and the device may have come back on a different
+        // configuration.
+        rebuildEQProcessorLocked()
         engine.prepare()
         try engine.start()
         running = engine.isRunning
@@ -782,6 +818,10 @@ final class BTDeviceSink: @unchecked Sendable {
     /// Whether this sink has been handed any captured audio at all. False the
     /// whole time the Mac is silent — see ``BTSyncedSink/anchoredDeviceUIDs()``.
     var hasAnchored: Bool { stateLock.withLock { anchored } }
+
+    /// Test seam: the tone this sink is holding — proof that a value remembered
+    /// by the manager before this sink existed actually reached it.
+    var eqForTesting: DeviceEQ { graphQueue.sync { eq } }
 
     /// Void the session (anchor, ring, resampler) AND the drift state. The
     /// render thread is stopped by every caller (engine down), so resetting the
@@ -927,7 +967,9 @@ final class BTDeviceSink: @unchecked Sendable {
 
         var plan = SyncTiming.RenderPlan(silentFrames: frameCount, releasesThisCycle: false)
         var ratio = 1.0
+        var processor: EQProcessor?
         guard stateLock.try() else { return false }   // no snapshot → silent cycle
+        processor = eqProcessor
         if anchored {
             if released {
                 plan = SyncTiming.RenderPlan(silentFrames: 0, releasesThisCycle: true)
@@ -951,6 +993,15 @@ final class BTDeviceSink: @unchecked Sendable {
             ratio: ratio
         ) { frame in
             self.delayLine.readFrame(into: frame)
+        }
+        // Tone, applied to the frames this cycle actually produced — the same
+        // `DeviceEQ` and the same `EQProcessor` the AirPlay path runs, so one
+        // speaker sounds the same however it is fed. Flat publishes no processor
+        // at all, which is what keeps "EQ off" untouched audio.
+        if let processor, produced > 0 {
+            processor.process(
+                floatInterleaved: base + plan.silentFrames * channelCount,
+                frameCount: produced)
         }
         return produced > 0
     }
@@ -1175,6 +1226,7 @@ final class BTSyncedSink: @unchecked Sendable {
     private var offsetMsByUID: [String: Int] = [:]
     private var trimMsByUID: [String: Double] = [:]
     private var gainByUID: [String: Float] = [:]
+    private var eqByUID: [String: DeviceEQ] = [:]
     private var desiredRunning = false
 
     init(
@@ -1216,7 +1268,7 @@ final class BTSyncedSink: @unchecked Sendable {
     /// while the manager is armed), vanished devices' sinks stop and drop.
     /// Unchanged devices are untouched — their sessions keep playing.
     func setDevices(_ specs: [DeviceSpec]) {
-        var added: [(sink: BTDeviceSink, gain: Float)] = []
+        var added: [(sink: BTDeviceSink, gain: Float, eq: DeviceEQ)] = []
         var removed: [BTDeviceSink] = []
         var shouldStart = false
         tableLock.lock()
@@ -1228,19 +1280,24 @@ final class BTSyncedSink: @unchecked Sendable {
         for (uid, spec) in wantedByUID where sinksByUID[uid] == nil {
             let sink = makeSink(spec)
             sinksByUID[uid] = sink
-            added.append((sink, gainByUID[uid] ?? 1))
+            added.append((sink, gainByUID[uid] ?? 1, eqByUID[uid] ?? .flat))
         }
         shouldStart = desiredRunning
         tableLock.unlock()
 
         for sink in removed { sink.stop() }
-        for (sink, gain) in added where gain != 1 {
+        for (sink, gain, _) in added where gain != 1 {
             // A remembered hold (W3) applies BEFORE the engine starts, so a
             // held device never gets an audible blip ahead of the mute.
             sink.setGain(gain)
         }
+        // Same ordering rule for tone: applied before the engine starts, so the
+        // device never plays a few unshaped buffers first.
+        for (sink, _, eq) in added where !eq.isFlat {
+            sink.setEQ(eq)
+        }
         if shouldStart {
-            for (sink, _) in added { startSink(sink) }
+            for (sink, _, _) in added { startSink(sink) }
         }
     }
 
@@ -1343,6 +1400,21 @@ final class BTSyncedSink: @unchecked Sendable {
             return sinksByUID[uid]
         }
         sink?.setGain(gain)
+    }
+
+    /// Per-device tone — remembered in the table exactly like the gain above, so
+    /// a sink created LATER starts already shaped instead of playing its first
+    /// buffers flat. Never a rebuild: the sink swaps its filter coefficients on
+    /// the running session (a rebuild would re-arm the delay gate and drop the
+    /// device into silence for the whole reference delay, which is what makes
+    /// live scrubbing unusable).
+    func setEQ(_ eq: DeviceEQ, forDeviceUID uid: String) {
+        let sink = tableLock.withLock { () -> BTDeviceSink? in
+            guard eqByUID[uid] != eq else { return nil }
+            eqByUID[uid] = eq
+            return sinksByUID[uid]
+        }
+        sink?.setEQ(eq)
     }
 
     /// The UIDs whose delay gate has opened — the devices actually hearing

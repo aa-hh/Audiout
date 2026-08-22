@@ -232,9 +232,10 @@ func run() -> Int32 {
     drain()
     checks.expect(!window.test_isPresentingCreateSheet, "cancelling clears the sheet")
 
-    // --- 9. Select a device: read-only detail pane, membership text correct,
-    //        `activeGroupID` untouched; deselecting returns the mixer pane.
-    print("\n[9] Select a device shows the read-only detail pane")
+    // --- 9. Select a device: the detail pane that describes and tunes it,
+    //        membership text correct, `activeGroupID` untouched; deselecting
+    //        returns the mixer pane.
+    print("\n[9] Select a device shows the detail pane that describes and tunes it")
     checks.expectEqual(controller.activeGroupID, nil,
                        "sanity: no group active before selecting a device")
     window.test_select(.device(id: candidateA))

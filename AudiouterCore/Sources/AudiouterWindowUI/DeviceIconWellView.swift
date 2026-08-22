@@ -92,6 +92,20 @@ final class DeviceIconWellView: NSView {
     /// Fired on a real click (mouse-down) anywhere in the well.
     var onClick: (() -> Void)?
 
+    /// False turns the well into a pure picture: the corner pencil badge is
+    /// hidden and every interaction path (hover, click, Tab focus, Space/
+    /// Return, VoiceOver press) refuses, so the well can front something whose
+    /// glyph nobody chooses — the Main Audio page's whole-mix icon. Matches the
+    /// module's edit-affordance vocabulary (`AGENTS.md`: bordered + pencil =
+    /// editable, bare = read-only): with no badge there is no promise to break.
+    var isEditable: Bool = true {
+        didSet {
+            guard isEditable != oldValue else { return }
+            badgeView.isHidden = !isEditable
+            setAccessibilityRole(isEditable ? .button : .image)
+        }
+    }
+
     /// Warm Signal §5.3: true when the group this well fronts is the ACTIVE
     /// Main Out target — the well's edge draws as the thin gold ring instead
     /// of the resting hairline. Pure model-state input (the host sets it from
@@ -281,10 +295,18 @@ final class DeviceIconWellView: NSView {
         trackingArea = area
     }
 
-    override func mouseEntered(with event: NSEvent) { setOverlayVisible(true) }
-    override func mouseExited(with event: NSEvent) { setOverlayVisible(false) }
+    override func mouseEntered(with event: NSEvent) {
+        guard isEditable else { return }
+        setOverlayVisible(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        guard isEditable else { return }
+        setOverlayVisible(false)
+    }
 
     override func mouseDown(with event: NSEvent) {
+        guard isEditable else { return }
         // A real click also claims first responder, exactly like a genuine
         // `NSButton` would — otherwise a mouse click leaves whatever was
         // focused before still focused, and the very next Tab jumps from
@@ -299,7 +321,7 @@ final class DeviceIconWellView: NSView {
     // so none of the following is inherited for free — each override mirrors
     // exactly what `NSButton` would already give it.
 
-    override var acceptsFirstResponder: Bool { true }
+    override var acceptsFirstResponder: Bool { isEditable }
 
     override func becomeFirstResponder() -> Bool {
         let became = super.becomeFirstResponder()
@@ -320,6 +342,10 @@ final class DeviceIconWellView: NSView {
     /// it, but falling through keeps this view from becoming an unintended
     /// sink for keys it has no opinion on).
     override func keyDown(with event: NSEvent) {
+        guard isEditable else {
+            super.keyDown(with: event)
+            return
+        }
         switch event.charactersIgnoringModifiers {
         case " ", "\r", "\u{3}":   // space, Return, keypad Enter
             onClick?()
@@ -332,6 +358,7 @@ final class DeviceIconWellView: NSView {
     /// instead of a real click when the user activates this element via
     /// assistive technology rather than a pointer.
     override func accessibilityPerformPress() -> Bool {
+        guard isEditable else { return false }
         onClick?()
         return true
     }

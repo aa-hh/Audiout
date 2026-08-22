@@ -290,25 +290,30 @@ import AppKit
                 "the tooltip teaches the invisible modifier")
     }
 
-    @Test func contextMenuCarriesAlignSpeakerOnBTRowsThroughRealMenuDispatch() {
+    @Test func contextMenuCarriesAlignSpeakerOnBTRowsThroughRealMenuDispatch() throws {
         let spy = SpyDelegate()
         let row = makeRow(btDevice(), delegate: spy)
         let menu = row.test_contextMenu()
-        #expect(menu?.items.map(\.title) == ["Align speaker…"])
-        #expect(menu?.items.first?.isEnabled == true)
-        menu?.performActionForItem(at: 0)   // real AppKit menu dispatch
+        // "Equalizer…" leads on every non-local row (owner decision
+        // 2026-08-22); alignment is the Bluetooth-only item under it.
+        #expect(menu?.items.map(\.title) == ["Equalizer…", "Align speaker…"])
+        let alignIndex = try #require(menu?.items.firstIndex { $0.title == "Align speaker…" })
+        #expect(menu?.items[alignIndex].isEnabled == true)
+        menu?.performActionForItem(at: alignIndex)   // real AppKit menu dispatch
         #expect(spy.wizardRequests == [btDevice().id])
 
         let plain = DeviceRowView(device: btDevice(), showsToggle: true,
                                   paintsSelectionBackground: false, showsMeter: true,
                                   showsBus: true, showsSyncControls: false)
-        #expect(plain.test_contextMenu() == nil, "non-sync rows carry no alignment menu")
+        #expect(plain.test_contextMenu()?.items.map(\.title) == ["Equalizer…"],
+                "non-sync rows keep the Equalizer door but carry no alignment item")
     }
 
-    @Test func contextMenuAlignItemDisablesOnAGreyedRow() {
+    @Test func contextMenuAlignItemDisablesOnAGreyedRow() throws {
         let row = makeRow(btDevice(available: false), delegate: SpyDelegate())
-        #expect(row.test_contextMenu()?.items.first?.isEnabled == false,
-                "no wizard offer over a silent target")
+        let menu = try #require(row.test_contextMenu())
+        let align = try #require(menu.items.first { $0.title == "Align speaker…" })
+        #expect(align.isEnabled == false, "no wizard offer over a silent target")
     }
 }
 

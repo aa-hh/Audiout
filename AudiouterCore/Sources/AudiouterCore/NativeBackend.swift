@@ -296,6 +296,59 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private let btTrimLock = NSLock()
     private var btTrimsByUID: [String: Double] = [:]   // btTrimLock
 
+    // MARK: Tone (per-device + Main Out EQ)
+
+    /// Persistence for the tone settings. `nil` (most tests) = session-only.
+    private let eqStore: DeviceEQStore?
+    /// Every device's tone, whether or not it is currently streaming. On
+    /// `stateQueue`. Stored values are NEVER discarded for budget reasons — a
+    /// device that can't get its own stream streams flat and says so
+    /// (`Device.eqBypassReason`) while keeping what the user dialled in.
+    private var eqByDeviceID: [String: DeviceEQ] = [:]   // on stateQueue
+    /// The whole mix's own tone stage, applied before every fan-out. On `stateQueue`.
+    private var storedMainOutEQ: DeviceEQ = .flat   // on stateQueue
+    /// Which stream id each EQ group owns, remembered across recomputes so
+    /// editing a lone device's values swaps coefficients instead of rebinding.
+    private var eqAllocator = EQStreamAllocator()   // on stateQueue
+    /// The assignment the LAST ``reconcileEQPlan()`` settled on — deviceID → the
+    /// whole-system stream it should be bound to (0 = flat/main-only). Diffed to
+    /// issue the minimal set of EQ rebinds, and read by ``pushEQPlanLocked()`` so
+    /// an uncommitted edit can swap coefficients without recomputing topology.
+    private var eqStreamIDByDevice: [String: UInt32] = [:]   // on stateQueue
+    /// Devices whose EQ move was refused because a `convergeDevice` loop held
+    /// their `converging` slot — the commonest case by far, since the connect
+    /// edge that owes the move happens INSIDE that loop. Drained by the slot
+    /// release, the same bow-out-and-be-re-driven shape the scope arbiter's
+    /// `pendingScopeSettles` uses. On `stateQueue`.
+    private var eqRebindDeferred: Set<String> = []   // on stateQueue
+
+    /// One published tone stage: the processor the delivery thread is running,
+    /// plus the value it was built for.
+    ///
+    /// Kept so an UNCHANGED stage keeps the very same `EQProcessor` instance
+    /// across pushes. A processor carries IIR delay memory, and a fresh one
+    /// starts empty — rebuilding every stage on every push put a step
+    /// discontinuity (an audible tick) through every other live stream on each
+    /// frame of one device's slider drag.
+    private struct EQProcessorSlot {
+        let eq: DeviceEQ
+        let processor: EQProcessor
+    }
+    /// The live per-stream stages, keyed by stream id. On `stateQueue`.
+    private var eqSlotByStream: [UInt32: EQProcessorSlot] = [:]   // on stateQueue
+    /// The live Main Out stage. On `stateQueue`.
+    private var mainOutEQSlot: EQProcessorSlot?   // on stateQueue
+
+    /// The rate every whole-system `EQProcessor` is built for: the engine's
+    /// hardwired PCM format (S16LE / 44100 / 2ch), which the capture
+    /// coordinator's converter has already produced by the time the plan runs.
+    private static let eqSampleRate: Double = 44_100
+
+    /// How many streams the engine can carry at once. Mirrors
+    /// `AirPlayEngine.maxSimultaneousStreams`, which is internal to that package
+    /// (a licensing boundary this file may not widen).
+    private static let engineStreamCapacity = 6
+
     /// Test seam: a BT `Device.id` (its Core Audio UID) → the live
     /// `AudioObjectID` a per-device sink pins its engine to. `nil` (production)
     /// falls back to `aggregateControl.resolveDeviceID(forUID:)` — the HAL's
@@ -1216,6 +1269,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             btEnumerator: BTDeviceEnumerator.production(),
             btConnectionManager: BTConnectionManager(),
             btTrimStore: BTTrimStore(),
+            eqStore: DeviceEQStore(),
             processResolver: processResolver,
             defaultOutputSwitcher: DefaultOutputSwitcher())
     }
@@ -1255,6 +1309,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         btEnumerator: BTDeviceEnumerating? = nil,
         btConnectionManager: BTConnectionManaging? = nil,
         btTrimStore: BTTrimStore? = nil,
+        eqStore: DeviceEQStore? = nil,
         dacpEndpoint: DACPEndpoint = DACPServer(),
         systemVolume: SystemVolumeControlling = SystemOutputVolume(),
         ptpHelperActivator: PTPHelperActivating = PTPHelperActivator(),
@@ -1302,6 +1357,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
         if let dismissed = try? btTrimStore?.loadDismissedUIDs() {
             self.btAlignmentDismissedUIDs = dismissed
+        }
+        self.eqStore = eqStore
+        if let loaded = (try? eqStore?.load()) ?? nil {
+            self.storedMainOutEQ = loaded.mainOut ?? .flat
+            self.eqByDeviceID = loaded.devices
         }
         self.dacpServer = dacpEndpoint
         self.systemVolume = systemVolume
@@ -1419,6 +1479,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     // STABILITY(C8): main thread blocks on the state queue for slow work — see dev/notes/stability-audit-2026-07-18.md
     public var devices: [Device] {
         stateQueue.sync { order.compactMap { known[$0] } }
+    }
+
+    // STABILITY(C8): main thread blocks on the state queue for slow work — see dev/notes/stability-audit-2026-07-18.md
+    public var mainOutEQ: DeviceEQ {
+        stateQueue.sync { storedMainOutEQ }
     }
 
     /// Whether the last connect attempt found the PTP helper's clock ready
@@ -2024,6 +2089,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.routeDisplayNames.removeAll()
             self.streamBindings.removeAll()
             self.routedAppNames.removeAll()
+            // The EQ topology describes engine sessions that are being torn down;
+            // the VALUES (`eqByDeviceID`/`storedMainOutEQ`) are the user's settings and
+            // stay. The allocator stays too — a released stream id is retired for
+            // the session, never reused (decision 8). The coordinator goes back to
+            // byte-identical passthrough.
+            self.eqStreamIDByDevice.removeAll()
+            self.eqRebindDeferred.removeAll()
+            self.eqSlotByStream.removeAll()
+            self.mainOutEQSlot = nil
+            if let coordinator = self.captureCoordinator {
+                self.captureControlQueue.async { coordinator.setEQPlan(.passthrough) }
+            }
             // T8 edge-case tracking resets alongside the rest of the per-app state —
             // a later start() begins with no bundle ID considered dead or mid-retry.
             self.lastRoutes.removeAll()
@@ -2339,6 +2416,326 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         Dictionary(uniqueKeysWithValues: uids.map { ($0, btSinkGain(forUID: $0)) })
     }
 
+    // MARK: Tone (per-device + Main Out EQ)
+
+    /// One speaker's tone. `commit == false` is live scrub — the sound changes
+    /// immediately but nothing is persisted and, wherever the device's current
+    /// stream can already express the edit, no rebind is issued. `commit == true`
+    /// is the end of a gesture: persist, then recompute the dedup topology.
+    ///
+    /// The local Mac row is REJECTED (locked scoping decision: per-device EQ
+    /// covers AirPlay and Bluetooth rows only). A Bluetooth id branches to its
+    /// sink — its audio never goes through an AirPlay stream, so stream topology
+    /// has nothing to say about it.
+    public func setEQ(_ eq: DeviceEQ, for id: String, commit: Bool) {
+        guard id != Self.localDeviceID else { return }
+        stateQueue.async {
+            guard self.known[id] != nil else { return }
+            self.eqByDeviceID[id] = eq
+            self.applyLocal(id) { $0.eq = eq }
+            if commit { self.saveEQLocked() }
+            if self.known[id]?.isBluetooth == true {
+                self.pushBTSinkEQLocked(id)
+                return
+            }
+            // A device outside the EQ domain (not streaming whole-system, or
+            // claimed by per-app routing) has nothing in the plan to change, so
+            // a scrub touches neither topology nor processors — the value is
+            // remembered and the commit applies it. Without this, every frame of
+            // a drag on such a row ran a full `reconcileEQPlan`.
+            guard commit || self.eqStreamIDByDevice[id] != nil else { return }
+            // Decision 9: a sole owner of its own stream just gets fresh
+            // coefficients. Anything else — flat↔non-flat, a group merge or
+            // split, a device still on stream 0 — needs the topology recomputed,
+            // and inherits the rebind's accepted ~1 s gap.
+            if commit || !self.eqEditIsExpressibleLocked(id) {
+                self.reconcileEQPlan()
+            } else {
+                self.pushEQPlanLocked()
+            }
+        }
+    }
+
+    /// Main Out's tone: one stage over the whole mix, applied before every
+    /// fan-out, so AirPlay, the Mac's own delayed sink and every Bluetooth sink
+    /// hear the same shaped program. Never affects stream topology — there is
+    /// exactly one main stage no matter how many streams exist.
+    public func setMainOutEQ(_ eq: DeviceEQ, commit: Bool) {
+        stateQueue.async {
+            self.storedMainOutEQ = eq
+            if commit { self.saveEQLocked() }
+            self.pushEQPlanLocked()
+        }
+    }
+
+    /// Whether `id`'s current stream can carry a changed value with no rebind:
+    /// it owns a real EQ stream, alone. A device on stream 0, or sharing a
+    /// stream with others, cannot — changing its values there would change
+    /// everyone else's too (decision 9). On `stateQueue`.
+    private func eqEditIsExpressibleLocked(_ id: String) -> Bool {   // on stateQueue
+        guard let stream = eqStreamIDByDevice[id], stream != 0 else { return false }
+        return !eqStreamIDByDevice.contains { $0.key != id && $0.value == stream }
+    }
+
+    /// Persist the current tone settings. Committed edits only — a live scrub
+    /// must not write a file per slider frame. Flat entries are dropped by the
+    /// store itself, so the whole table can be handed over as-is. On `stateQueue`.
+    private func saveEQLocked() {   // on stateQueue
+        do {
+            try eqStore?.save(mainOut: storedMainOutEQ, devices: eqByDeviceID)
+        } catch {
+            Telemetry.log(.airplay, "eq_save_failed", ["error": "\(error)"])
+        }
+    }
+
+    /// Recompute which stream every streaming AirPlay device belongs on, publish
+    /// the resulting plan, and move any device whose stream changed.
+    ///
+    /// Triggers (decision 16): a committed `setEQ`, an uncommitted edit its
+    /// current stream cannot express, a device reaching OR leaving `added` (a
+    /// reconnect always lands on stream 0 first, so its EQ has to be re-applied;
+    /// a departure frees a stream for whoever the budget refused, and takes the
+    /// departed device's own stream out of the plan), `setOutputSet`, a per-app
+    /// destination-set change (which moves the budget), and `stop()`.
+    /// On `stateQueue`.
+    private func reconcileEQPlan() {   // on stateQueue
+        // Only devices with a LIVE stream-0 session can be moved onto an EQ
+        // stream. A device claimed by the per-app domain is not ours to rebind
+        // (its stream is `streamBindings`'), and it is already counted against
+        // the budget below.
+        let active = added.filter { streamBindings[$0] == nil }
+        let previous = eqStreamIDByDevice
+        let result = EQStreamTopology.resolve(
+            activeDeviceIDs: active,
+            eqByDevice: eqByDeviceID,
+            budget: eqBudgetLocked(),
+            allocator: eqAllocator)
+        eqAllocator = result.allocator
+
+        // Say out loud, per device, whether its stored values are reaching the
+        // audio — and when they aren't, WHY, because the two reasons need
+        // different sentences. One sweep over everything known, so a device that
+        // just left the EQ domain is cleared by the same pass that sets the
+        // others. `applyLocal` emits only on a real change.
+        for id in Array(known.keys) {   // snapshot: `applyLocal` writes `known`
+            let reason: Device.EQBypassReason?
+            if result.bypassed.contains(id) {
+                // Kept its values, streams flat: more distinct settings than the
+                // budget could admit.
+                reason = .streamBudget
+            } else if streamBindings[id] != nil, !(eqByDeviceID[id] ?? .flat).isFlat {
+                // Excluded from the EQ domain above because per-app routing owns
+                // this device's session — its audio never passes the whole-system
+                // EQ stage, so a stored tone is stored only.
+                reason = .perAppRouting
+            } else {
+                reason = nil
+            }
+            applyLocal(id) { $0.eqBypassReason = reason }
+        }
+
+        // The assignment is only true once the move is actually issued. A move
+        // that had to be deferred rolls back to where the device still IS, so the
+        // drain's reconcile sees a real change and re-issues it — recording the
+        // target eagerly would make the re-drive a no-op and strand the device on
+        // the wrong stream.
+        var settled = result.streamIDByDevice
+        for (id, stream) in result.streamIDByDevice {
+            // A device with no previous assignment is on stream 0 in engine
+            // truth — a fresh connect, or one this reconcile just discovered.
+            let current = previous[id] ?? 0
+            guard current != stream else { continue }
+            guard let outputID = outputIDs[id],
+                  enqueueEQRebindLocked(deviceID: id, outputID: outputID, stream: stream)
+            else {
+                settled[id] = current
+                continue
+            }
+        }
+        eqStreamIDByDevice = settled
+        pushEQPlanLocked()
+    }
+
+    /// Drop `id` from the whole-system streaming set, reconciling the EQ plan on
+    /// a REAL true→false edge — the departure mirror of the `added` false→true
+    /// edge, and the only site that owns it.
+    ///
+    /// A departure changes two things nothing else notices: it frees an EQ
+    /// stream, so a device the budget had refused can be admitted and stop
+    /// streaming flat; and it takes the departed device's own stream out of the
+    /// plan, which otherwise keeps costing a per-buffer copy and filter pass for
+    /// audio no output is bound to. `setOutputSet`'s reconcile can't do either —
+    /// it runs while the teardown is still in flight, with the device still in
+    /// `added`.
+    ///
+    /// `reconcileEQPlan` moves other devices through `enqueueEQRebindLocked`,
+    /// which defers rather than waits when a `converging` slot is held, so this
+    /// is safe to call from inside a converge loop. On `stateQueue`.
+    /// - Returns: whether `id` was actually in the streaming set.
+    @discardableResult
+    private func removeFromAddedLocked(_ id: String) -> Bool {   // on stateQueue
+        guard added.remove(id) != nil else { return false }
+        reconcileEQPlan()
+        return true
+    }
+
+    /// How many EQ streams may exist beyond stream 0 (decision 10): the engine's
+    /// capacity, less stream 0 itself, less every distinct per-app stream
+    /// currently bound. Per-app ids are allocated upward from 1 and EQ ids live
+    /// in the top half of the space, so the range test tells them apart. On
+    /// `stateQueue`.
+    private func eqBudgetLocked() -> Int {   // on stateQueue
+        let perAppStreams = Set(streamBindings.values.filter { $0 >= 1 && $0 < EQStreamAllocator.idBase })
+        return max(0, Self.engineStreamCapacity - 1 - perAppStreams.count)
+    }
+
+    /// Publish the CURRENT assignment as a plan for the capture coordinator.
+    /// Called for a topology change and for a bare coefficient swap alike — the
+    /// assignment map is the same input either way.
+    ///
+    /// No live stage is ever rebuilt: an unchanged one is carried over
+    /// instance-and-all (see ``EQProcessorSlot``) and a changed one is
+    /// retargeted in place, because a fresh `EQProcessor` starts with empty IIR
+    /// delay memory — a tick on a neighbour, a crackle for the whole drag on the
+    /// speaker being edited. Coefficients are built HERE, on `stateQueue`, and
+    /// reach the processor through its own mailbox; its filter state stays the
+    /// delivery thread's alone and is never read from here. Enqueued on
+    /// `captureControlQueue` like every other coordinator call, so a coordinator
+    /// callback that hops to `stateQueue` can never deadlock against this.
+    /// On `stateQueue`.
+    private func pushEQPlanLocked() {   // on stateQueue
+        var eqByStream: [UInt32: DeviceEQ] = [:]
+        for (id, stream) in eqStreamIDByDevice where stream != 0 {
+            eqByStream[stream] = eqByDeviceID[id] ?? .flat
+        }
+        // A stream that left the plan takes its cached processor with it —
+        // nothing will feed it again, and a reused id is a different group.
+        eqSlotByStream = eqSlotByStream.filter { eqByStream[$0.key] != nil }
+
+        var streams: [WholeSystemEQPlan.Stream] = [.init(streamID: 0, processor: nil)]
+        for (stream, eq) in eqByStream.sorted(by: { $0.key < $1.key }) {
+            streams.append(.init(
+                streamID: stream,
+                processor: Self.processor(reusing: &eqSlotByStream[stream], for: eq)))
+        }
+        let plan = WholeSystemEQPlan(
+            main: Self.processor(reusing: &mainOutEQSlot, for: storedMainOutEQ),
+            streams: streams)
+        guard let coordinator = captureCoordinator else { return }
+        captureControlQueue.async { coordinator.setEQPlan(plan) }
+    }
+
+    /// The processor for one tone stage, KEEPING the live instance in every case
+    /// where one already exists — unchanged (return it as it stands) or changed
+    /// (``EQProcessor/retarget(to:)``, which hands the new coefficients to the
+    /// delivery thread and carries the delay memory across). Building a new one
+    /// would zero that memory mid-signal: an audible tick on an untouched
+    /// speaker, and a crackle for the whole drag on the one being edited.
+    ///
+    /// A flat value drops the slot and returns `nil`: flat must stay
+    /// byte-identical passthrough, never a processor pass. The mirror edge —
+    /// flat to shaped — has no live instance to preserve, and zero state is the
+    /// right start for a stage that was not running. On `stateQueue`.
+    private static func processor(reusing slot: inout EQProcessorSlot?, for eq: DeviceEQ) -> EQProcessor? {
+        guard !eq.isFlat else {
+            slot = nil
+            return nil
+        }
+        if let existing = slot {
+            if existing.eq != eq {
+                existing.processor.retarget(to: eq)
+                slot = EQProcessorSlot(eq: eq, processor: existing.processor)
+            }
+            return existing.processor
+        }
+        let processor = EQProcessor(eq: eq, sampleRate: eqSampleRate)
+        slot = EQProcessorSlot(eq: eq, processor: processor)
+        return processor
+    }
+
+    /// Move one device's live session onto the stream its EQ group owns.
+    ///
+    /// Claims the per-device `converging` slot exactly as
+    /// `resetAirPlaySessionForWholeSystem` does — an EQ rebind is a whole-system
+    /// engine op and must never interleave with a concurrent `convergeDevice`
+    /// loop for the same device — and records the hold in `rebindConverging` so
+    /// the sleep path can release it if the machine goes down mid-move. The op
+    /// itself goes through `bindOutput`, the single call site that arbitrates on
+    /// the engine's own answer, never a naked `rebindOutput`. On `stateQueue`.
+    /// - Returns: whether the move was actually issued. `false` means the slot
+    ///   was busy and the device is noted for the release to re-drive.
+    private func enqueueEQRebindLocked(   // on stateQueue
+        deviceID: String, outputID: OutputID, stream: UInt32
+    ) -> Bool {
+        guard !converging.contains(deviceID) else {
+            // A converge already owns this device's engine ops — including the
+            // one whose own `added` edge asked for this move. Never WAIT on the
+            // slot (that is the documented FIFO deadlock); note the device and
+            // re-drive when the slot is released.
+            eqRebindDeferred.insert(deviceID)
+            Telemetry.log(.airplay, "eq_rebind_deferred", [
+                "device": deviceID, "stream": "\(stream)", "reason": "already_converging",
+            ])
+            return false
+        }
+        eqRebindDeferred.remove(deviceID)
+        converging.insert(deviceID)
+        rebindConverging.insert(deviceID)
+        Telemetry.log(.airplay, "eq_rebind", ["device": deviceID, "stream": "\(stream)"])
+        let prev = bindTail
+        bindTail = Task { [weak self] in
+            await prev.value
+            guard let self else { return }
+            // Re-check under the lock immediately before the engine call: the
+            // world may have moved while this op waited its turn in the FIFO
+            // (deselected, superseded by a newer assignment, or the sleep path
+            // took our slot back).
+            let shouldFire: Bool = self.stateQueue.sync {
+                self.rebindConverging.contains(deviceID)
+                    && !self.suspended
+                    && self.added.contains(deviceID)
+                    && self.eqStreamIDByDevice[deviceID] == stream
+            }
+            if shouldFire {
+                do {
+                    try await self.bindOutput(outputID, toStream: stream)
+                } catch {
+                    Telemetry.log(.airplay, "eq_rebind_failed", [
+                        "device": deviceID, "stream": "\(stream)", "error": "\(error)",
+                    ])
+                }
+            }
+            let action: ConvergeReleaseAction = self.stateQueue.sync {
+                // Only release a hold we still own — sleep releases every
+                // `rebindConverging` slot itself, and a `convergeDevice` loop may
+                // have claimed the freed slot since.
+                guard self.rebindConverging.contains(deviceID) else { return .none }
+                return self.releaseRebindConverging(id: deviceID)
+            }
+            if action.redrivePerApp { self.replayPendingPerAppBindings(trigger: "ws_release") }
+            if let requeue = action.requeue {
+                Task { [weak self] in await self?.convergeDevice(id: deviceID, outputID: requeue) }
+            }
+        }
+        return true
+    }
+
+    /// Push one Bluetooth device's tone into its sink — a property swap on the
+    /// running session, never a rebuild. On `stateQueue`.
+    private func pushBTSinkEQLocked(_ uid: String) {   // on stateQueue
+        let eq = eqByDeviceID[uid] ?? .flat
+        captureControlQueue.async { [weak self] in
+            self?.btSink?.setEQ(eq, forDeviceUID: uid)
+        }
+    }
+
+    /// The tone per selected BT uid, snapshotted under `stateQueue` for a sink
+    /// transition to apply on `captureControlQueue` — the same re-push-on-every-arm
+    /// discipline the persisted trims get. On `stateQueue`.
+    private func btSinkEQs(forUIDs uids: [String]) -> [String: DeviceEQ] {   // on stateQueue
+        Dictionary(uniqueKeysWithValues: uids.map { ($0, eqByDeviceID[$0] ?? .flat) })
+    }
+
     /// Renders a set of device ids as `"[Name1,Name2]"` for a Telemetry field —
     /// prefers the human-readable ``Device/name`` when the id is currently known
     /// (falls back to the raw id for a vanished/unknown one), sorted for
@@ -2598,10 +2995,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.btSelectedUIDs = btUIDs
                 self.btComposition = composition
                 let gains = self.btSinkGains(forUIDs: btUIDs)
+                let eqs = self.btSinkEQs(forUIDs: btUIDs)
                 self.captureControlQueue.async { [weak self] in
                     self?.applyBTSinkTransition(
                         enable: wantBT, uids: btUIDs, composition: composition,
-                        gains: gains)
+                        gains: gains, eqs: eqs)
                 }
                 if localReferenceMoved, self.syncedLocalSinkApplied {
                     // Re-anchor the already-running local sink onto the new
@@ -2614,6 +3012,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     }
                 }
             }
+
+            // The selection just moved, so the set of devices an EQ stream can
+            // serve moved with it (decision 16). This pass sees INTENT only:
+            // devices connecting as a result of this call reconcile again on
+            // their own `added` edge, and a DESELECTED device is still in
+            // `added` here (its teardown is only being scheduled) — the
+            // departure edge is `removeFromAddedLocked`'s to report, not this
+            // one's.
+            self.reconcileEQPlan()
 
             // T4: log the selection diff + the resulting per-device convergence
             // target. Read-only over state already captured above, then a single
@@ -2791,9 +3198,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let uids = btSelectedUIDs
         let composition = btComposition
         let gains = btSinkGains(forUIDs: uids)
+        let eqs = btSinkEQs(forUIDs: uids)
         captureControlQueue.async { [weak self] in
             self?.applyBTSinkTransition(
-                enable: true, uids: uids, composition: composition, gains: gains)
+                enable: true, uids: uids, composition: composition, gains: gains, eqs: eqs)
         }
     }
 
@@ -2926,7 +3334,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// that debounce exists for cannot start here.
     private func applyBTSinkTransition(
         enable: Bool, uids: [String], composition: BTGroupComposition,
-        gains: [String: Float] = [:]
+        gains: [String: Float] = [:], eqs: [String: DeviceEQ] = [:]
     ) {
         if enable {
             let sink: BTSyncedSinkControlling
@@ -2953,6 +3361,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // this ordering), never at a hardcoded 1 or 0.
             for uid in uids {
                 sink.setGain(gains[uid] ?? 1, forDeviceUID: uid)
+            }
+            // Tone, on the same re-push-on-every-arm footing as the trims above:
+            // the manager remembers it per uid, so a sink created by `setDevices`
+            // below starts already shaped instead of playing a few flat buffers.
+            for uid in uids {
+                sink.setEQ(eqs[uid] ?? .flat, forDeviceUID: uid)
             }
             // UID → live AudioObjectID, resolved fresh per apply. A uid that no
             // longer resolves (the speaker dropped between selection and apply)
@@ -4559,6 +4973,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             }
             self.streamBindings = newBindings
             self.enqueueBindOps(ops)
+            // The per-app domain just took (or gave back) stream ids, which is
+            // exactly what the EQ budget is computed from (decision 16) — a
+            // shrunk budget bypasses the deterministic loser, a grown one
+            // re-admits it.
+            self.reconcileEQPlan()
             // T3: a device that just lost its per-app stream gets a final combined
             // `.level` (now with a zero stream contribution, so its meter drops to
             // its system contribution — 0 if unselected) so a torn-down stream can't
@@ -5045,6 +5464,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 }
             }
         }
+        // 1b. Consume a deferred EQ move the same way: the connect edge that owed
+        //     it happened INSIDE the converge that just released, so this is the
+        //     first moment the device's engine ops are ours to issue.
+        //     `reconcileEQPlan` re-derives the target from scratch, so a stale
+        //     note can only ever produce a no-op.
+        if self.eqRebindDeferred.remove(id) != nil {
+            self.reconcileEQPlan()
+        }
         // 2. Per-app re-drive: the per-app table still wants this device, its
         //    binding was cleared (a fire-time bow-out), and whole-system no
         //    longer desires it — tell the caller to replay the cached topology
@@ -5112,7 +5539,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // now beats a "connected" row that never makes a sound.
                     guard await ensurePTPTakeover(telemetryDeviceID: id) else {
                         stateQueue.sync {
-                            self.added.remove(id)
+                            self.removeFromAddedLocked(id)
                             self.failedGate.insert(id)
                             self.applyLocal(id) { $0.isSelected = false; $0.isAvailable = false }
                             self.enterFailure(id, cause: .timingUnavailable)
@@ -5183,6 +5610,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         let wasAdded = self.added.contains(id)
                         self.added.insert(id)
                         let seededVolume = wasAdded ? nil : self.connectVolumeSeed(id, outputID: outputID)
+                        // Same edge, same reason as the volume seed: a fresh
+                        // session always lands on stream 0, so a device with a
+                        // stored EQ has to be moved onto its group's stream again
+                        // (decision 16).
+                        if !wasAdded { self.reconcileEQPlan() }
                         self.applyLocal(id) {
                             $0.isSelected = true; $0.isAvailable = true
                             if let seededVolume { $0.volume = seededVolume }
@@ -5209,7 +5641,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     var cause: ConnectionFailure.Cause = .unknown
                     if case AirPlayEngineError.passwordRequired = error { cause = .authRequired }
                     stateQueue.sync {
-                        self.added.remove(id)
+                        self.removeFromAddedLocked(id)
                         self.failedGate.insert(id)
                         self.applyLocal(id) { $0.isSelected = false; $0.isAvailable = false }
                         self.enterFailure(id, cause: cause)
@@ -5220,7 +5652,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 do {
                     try await engine.removeOutput(outputID)
                     stateQueue.sync {
-                        self.added.remove(id)
+                        self.removeFromAddedLocked(id)
                         self.applyLocal(id) { $0.isSelected = false }
                         // Confirmed torn down — off is a no-op if `setOutputSet`
                         // already set it eagerly, but covers the case where an
@@ -5246,7 +5678,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // non-terminal issue) — the device is still desired off, so the
                     // dot should already read `.off` from `setOutputSet`'s eager set.
                     stateQueue.sync {
-                        self.added.remove(id)
+                        self.removeFromAddedLocked(id)
                         self.markUnavailable(id)
                     }
                     return
@@ -5776,6 +6208,24 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             return (id, outputID)
         }
         self.added.removeAll()
+        // Same discipline as `stop()`: the EQ topology describes engine sessions
+        // that just died, so it must die with them. Keeping it would make the
+        // wake path's `added` false→true reconcile a NO-OP — the fresh session
+        // lands on stream 0, the reconcile recomputes the same stream S, and
+        // `current != stream` is false, so no rebind is ever issued and the
+        // speaker plays flat forever (a same-value commit can't recover it
+        // either) while the coordinator keeps filtering into a stream with no
+        // output bound. Clearing it means the reconcile sees `previous[id] ==
+        // nil`, reads engine truth (stream 0), and issues the move. The VALUES
+        // (`eqByDeviceID`/`storedMainOutEQ`) are the user's settings and stay, as does
+        // the allocator (a released id is retired for the session, decision 8).
+        self.eqStreamIDByDevice.removeAll()
+        self.eqRebindDeferred.removeAll()
+        self.eqSlotByStream.removeAll()
+        self.mainOutEQSlot = nil
+        if let coordinator = self.captureCoordinator {
+            self.captureControlQueue.async { coordinator.setEQPlan(.passthrough) }
+        }
         return items
     }
 
@@ -6434,8 +6884,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // A future re-add must re-feed the engine's discovery (the descriptor is
             // being deregistered), so forget the fed memo regardless of add state.
             self.fedDescriptors[id] = nil
-            guard self.added.contains(id) else { return nil }
-            self.added.remove(id)
+            guard self.removeFromAddedLocked(id) else { return nil }
             return self.outputIDs[id]
         }
         guard let outputID else { return }
@@ -6653,7 +7102,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// saved group keeps its membership); it is removed from the streaming set.
     /// On `stateQueue`.
     private func markDisappeared(_ id: String) {
-        self.added.remove(id)
+        // Before the `device` copy below is taken, so the reconcile's own
+        // `eqBypassReason` writes can't be clobbered by this method's commit.
+        self.removeFromAddedLocked(id)
         // The engine descriptor is deregistered on disappear; a future re-add must
         // re-feed it. Clear the fed memo so `descriptorToFeed` doesn't skip it.
         self.fedDescriptors[id] = nil
@@ -6766,7 +7217,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     name: snapshot.name,
                     kind: .bluetooth,
                     isAvailable: snapshot.isConnected,
-                    supportsAirPlay2: false)
+                    supportsAirPlay2: false,
+                    // Same as the AirPlay row (`mapDiscovered`): the stored tone
+                    // shows from the moment the row appears. A BT device's sink
+                    // gets the value re-pushed on every arm, so the snapshot and
+                    // what is audible agree.
+                    eq: eqByDeviceID[id] ?? .flat)
                 known[id] = device
                 order.append(id)
                 emit(.deviceAdded(device))
@@ -6838,6 +7294,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                   var device = self.known[id] else { return nil }
 
             let before = device
+            // Set on EITHER `added` edge below and acted on after the commit —
+            // `reconcileEQPlan` reads `added`/`known` and may write
+            // `eqBypassReason` through `applyLocal`, which the in-flight `device`
+            // copy would otherwise clobber. That deferral is why these two arms
+            // can't go through `removeFromAddedLocked` like every other
+            // departure site.
+            var eqNeedsReconcile = false
             switch state {
             case .streaming, .connected:
                 // Reconcile against the user's latest intent. If the device is
@@ -6881,6 +7344,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 if !wasAdded, let seededVolume = self.connectVolumeSeed(id, outputID: outputID) {
                     device.volume = seededVolume
                 }
+                // The other `added` false→true site (decision 16): an
+                // out-of-band reconnect re-establishes the session on stream 0,
+                // so this device's EQ stream has to be re-claimed.
+                eqNeedsReconcile = !wasAdded
             case .failed, .passwordRequired:
                 // A live session died / needs a PIN we don't have: surface it as
                 // unavailable + deselected and drop it from the streaming set. PARK
@@ -6891,7 +7358,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // edge, or `retryOutput` — a same-descriptor re-announce keeps it.
                 device.isAvailable = false
                 device.isSelected = false
-                self.added.remove(id)
+                eqNeedsReconcile = self.added.remove(id) != nil
                 if self.desiredOn[id] == true {
                     self.failedGate.insert(id)
                     // `.passwordRequired` is the one engine failure with a KNOWN,
@@ -6905,7 +7372,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 }
             case .stopped:
                 device.isSelected = false
-                self.added.remove(id)
+                eqNeedsReconcile = self.added.remove(id) != nil
                 // A stopped session for a device the user hasn't re-desired-off is
                 // NOT a failure — it's a clean stop. Only clear a `.connecting` /
                 // `.connected` / `.reconnecting` dot to `.off`; leave a sticky
@@ -6918,12 +7385,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             case .startup:
                 return nil // non-terminal progress; nothing to render yet
             }
-            guard device != before else { return nil }   // de-dupe the completion echo
+            guard device != before else {
+                // The snapshot is unchanged but `added` may still have flipped
+                // (every visible field was already at its connected value), and
+                // either edge is what owes an EQ reconcile.
+                if eqNeedsReconcile { self.reconcileEQPlan() }
+                return nil   // de-dupe the completion echo
+            }
             // R5: `.failed`/`.passwordRequired` above just made this device
             // unreachable, and `.connected`/`.streaming` just made it reachable —
             // both are per-app redirect edges the discovery path never sees, so this
             // commit (not a bare `known[id] =`) is what replays the route table.
             self.commitKnownDevice(id, device)
+            if eqNeedsReconcile { self.reconcileEQPlan() }
             // This out-of-band transition set `connectionState` DIRECTLY on the device
             // (bypassing `setConnectionState`), so drive the silence-watchdog reconcile
             // here too — a `→ .connected` re-engages the gate, a `→ .failed`/`.off`
@@ -7115,7 +7589,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // doesn't jump to 0 under the user.
             volume: isMuted ? (stashedVolume[id] ?? baseVolume) : baseVolume,
             isMuted: isMuted,
-            isSelected: added.contains(id)
+            isSelected: added.contains(id),
+            // The stored tone, from the moment the row appears — a speaker the
+            // user shaped last week must not show flat until they touch it
+            // again. `eqBypassReason` is deliberately left `nil`: both its cases
+            // describe a LIVE session, which nothing that isn't streaming yet
+            // can have. `reconcileEQPlan` sets it on the `added` edge and clears
+            // it when the device stops streaming.
+            eq: eqByDeviceID[id] ?? .flat
         )
     }
 
@@ -8159,6 +8640,13 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// (BT-OFFSET-UI). Default no-op; ``NativeCaptureCoordinator`` provides
     /// the real one.
     func setAlignTick(_ active: Bool)
+
+    /// Hand the delivery path a new set of tone stages: the Main Out EQ (applied
+    /// before every fan-out) plus one AirPlay write per EQ stream. Default no-op
+    /// so a fake that doesn't exercise EQ compiles unchanged;
+    /// ``NativeCaptureCoordinator`` provides the real one. See
+    /// ``NativeCaptureCoordinator/setEQPlan(_:)``.
+    func setEQPlan(_ plan: WholeSystemEQPlan)
 }
 
 extension CaptureControlling {
@@ -8183,6 +8671,8 @@ extension CaptureControlling {
     func setBTSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {}
     /// Default no-op (BT-OFFSET-UI align tick), same posture.
     func setAlignTick(_ active: Bool) {}
+    /// Default no-op (per-device + Main Out EQ), same posture.
+    func setEQPlan(_ plan: WholeSystemEQPlan) {}
     /// Default forwards to the flag-only seam so a fake recording plain
     /// `setAlignTick` calls also observes wizard activations (W2).
     func setAlignTickMode(_ mode: AlignTickMode) {
@@ -8422,6 +8912,9 @@ protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
     /// `Main × Group × Device` product, 0 while muted or first-mix-held (W3).
     /// Same default-no-op posture as `setTrimMs`.
     func setGain(_ gain: Float, forDeviceUID uid: String)
+    /// Per-device tone. A property swap on the running session — never a
+    /// rebuild. Same default-no-op posture as `setTrimMs`.
+    func setEQ(_ eq: DeviceEQ, forDeviceUID uid: String)
 }
 
 extension BTSyncedSinkControlling {
@@ -8431,6 +8924,7 @@ extension BTSyncedSinkControlling {
         -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs
     }
     func setGain(_ gain: Float, forDeviceUID uid: String) {}
+    func setEQ(_ eq: DeviceEQ, forDeviceUID uid: String) {}
 }
 
 extension BTSyncedSink: BTSyncedSinkControlling {}

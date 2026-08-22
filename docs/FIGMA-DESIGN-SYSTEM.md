@@ -137,6 +137,7 @@ Variable names (each resolvable by name; IDs ledgered in the build state):
 | ApplicationsFooter | `67:38` | `AudiouterPopoverUI/PopoverController.swift` |
 | RefusalNoteRow | `67:43` | `AudiouterSharedUI/DeviceRowView.swift` |
 | PlaceholderRow | `67:47` | `AudiouterPopoverUI/PopoverController.swift` (empty states) |
+| EQResponseCurve | *owed — Atom · Scope* | `AudiouterSharedUI/EQResponseCurveView.swift` |
 
 ### Assembled screens
 
@@ -295,6 +296,8 @@ Do not "fix" the code to match any of these; they are Figma stand-ins:
   fill) — code computes them at runtime.
 - The **System accent dial** (accent-color multipliers) is documented text, not
   a variable mode.
+- **Atom · Scope** (the EQ response curve) is owed in Figma; convention: an
+  instrument page whose ground is the authored dark value in every mode.
 
 ## Light mode = Circuit theme (decision, Alec 2026-08-07)
 

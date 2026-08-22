@@ -153,30 +153,33 @@ Things that need **new abstraction** (the hidden half of the estimate):
    (the exclusion pattern exists; a Cast device would need its own HTTP stream
    per app-mix otherwise).
 
-## Suggested phasing
+## Phasing (v1 = Phases 0–2, per decision 3)
 
 - **Phase 0 — hardware spike (gates everything):** clean-room CASTV2 connect on
   real hardware: discover, TLS+auth-skip, launch Default Media Receiver, serve
   WAV and AAC live streams, measure BUFFERING→PLAYING latency + its variance
   + volume round-trip. Exit criterion: reproducible ≤2.5 s latency with a known
-  recipe. (Requires owning a Cast device — see open questions.)
-- **Phase 1 — unmixed output:** Cast devices listed + selectable, stream +
-  volume/mute, no sync promise with other transports (Cast-only selections, or
-  visibly-late in mixed). Groups appear as single devices.
-- **Phase 2 — sync integration:** reference-timeline generalization, delay
-  everything to the Cast leg, per-device trim + wizard reuse.
-- **Phase 3 — polish:** multizone member volumes, metering, per-app routing
-  decision, latency-upgrade research (paths B/C).
+  recipe. (Blocked until Alec's Cast device arrives.)
+- **Phase 1 — output plumbing:** Cast devices listed + selectable, stream +
+  volume/mute; groups appear as single devices.
+- **Phase 2 — sync integration (completes v1):** reference-timeline
+  generalization, delay everything to the Cast leg, per-device trim + wizard
+  reuse.
+- **Phase 3 — post-v1 polish:** multizone member volumes, metering, per-app
+  routing decision, TV wake/standby handling, latency-upgrade research
+  (paths B/C).
 
-## Open questions for Alec
+## Decisions (Alec, 2026-08-22)
 
-1. ~~Output only, or also the receiver direction?~~ **Answered: output only.**
-2. **Do you own Cast hardware to test on?** (Chromecast Audio is discontinued;
-   current targets are Nest Audio/Mini, Cast-enabled TVs/soundbars.) Phase 0 is
-   blocked without at least one real device — ideally one speaker + one group.
-3. **Sync promise for v1**: Airfoil-style "everything delayed ~2 s when a Cast
-   device is in the mix", or Phase-1-style "Cast works, mixed sync comes later"?
-4. **Dependency policy**: is SwiftProtobuf (Apache-2.0, Apple-maintained)
-   acceptable as the packages' first external dependency, or hand-roll framing?
-5. **TVs in scope?** Audio-only devices are the clean case; Cast TVs add
-   wake/CEC/standby weirdness and a visible on-screen player for marginal value.
+1. **Output only.** The Cast-receiver direction is out of scope, not planned.
+2. **Hardware**: Alec doesn't own a Cast device yet, **will get one**. Phase 0
+   stays blocked until it arrives; ideally one speaker + a second for a group.
+3. **Sync ships in v1.** v1 = Phases 0–2 (spike, output, sync integration) —
+   the Airfoil model: everything delayed ~2 s when a Cast device is in the mix,
+   per-device trim on top.
+4. **Protobuf framing: hand-rolled** (Claude's call — one 7-field message type;
+   keeps the packages' zero-external-dependency policy; SwiftProtobuf remains
+   the swap-in if the surface grows).
+5. **All findable Cast devices supported**, TVs included — same protocol, no
+   filtering. TV wrinkles (visible on-screen player, wake-from-standby delay)
+   are polish items, not scope.

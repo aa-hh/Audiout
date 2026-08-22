@@ -74,13 +74,13 @@ import Testing
     /// came before.
     ///
     /// Two thresholds rather than one, because the two failure modes are
-    /// different animals. A WRONG proposal is an estimator defect. A run that
-    /// bows out instead of proposing is the bow-out RULES being strict: a
-    /// measured 9 of 10 bow-outs here would have proposed accurately within a
-    /// couple more answers, the stagnation rule catching the endgame's slow
-    /// crawl from ~13 ms of half-width down to 6. Both thresholds sit below
-    /// what this build measures (98% accurate, 95% proposing) with room for
-    /// the seeds to move, and tight enough that a real regression trips them.
+    /// different animals: a WRONG proposal is an estimator defect, a bow-out
+    /// is the bow-out rules' strictness. ``stagnationFloorMs`` exists because
+    /// this test once measured 9 of its 10 bow-outs as the stagnation rule
+    /// catching the endgame's slow crawl from ~13 ms of half-width down to 6
+    /// — runs whose next few answers would have proposed accurately. Both
+    /// thresholds sit below what this build measures with room for the seeds
+    /// to move, and tight enough that a real regression trips them.
     @Test func simulatedListenersReachAnAccurateProposalQuickly() {
         let offsets: [Double] = [0, 3, -3, 180, -180, 450, -450]
         var proposals = 0
@@ -103,7 +103,7 @@ import Testing
             }
         }
         #expect(total == 210)
-        #expect(Double(proposals) / Double(total) >= 0.90,
+        #expect(Double(proposals) / Double(total) >= 0.95,
                 "\(proposals)/\(total) reached a proposal — \(misses.prefix(8))")
         #expect(Double(accurate) / Double(proposals) >= 0.95,
                 "\(accurate)/\(proposals) proposals landed within 4 ms — \(misses.prefix(8))")

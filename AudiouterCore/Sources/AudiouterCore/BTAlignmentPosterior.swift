@@ -97,8 +97,20 @@ struct BTAlignmentPosterior {
     /// ``Phase/unsettled``: the interval has to shrink by this much across
     /// this many answers, nobody is asked more than ``maxAnswers``, and a
     /// second rejected proposal ends the run wherever it stands.
+    ///
+    /// The shrink check gets two guards, one per false-positive mode it was
+    /// measured producing (210 simulated runs, ~10% lapse listener). It never
+    /// fires before ``minAnswersForStagnation``: a couple of early lapses can
+    /// stall a still-wide interval for a window, and almost every such run
+    /// recovers given a few more answers. And it never fires once the
+    /// interval is inside ``stagnationFloorMs``: near the finish line
+    /// relative shrink slows for every listener (the crawl from ~13 ms of
+    /// half-width down to the 6 ms stop), which is convergence, not noise.
+    /// ``maxAnswers`` and the two-rejection rule stay the hard backstops.
     static let stagnationWindow = 8
     static let stagnationShrinkFraction: Double = 0.2
+    static let stagnationFloorMs: Double = 20
+    static let minAnswersForStagnation = 16
     static let maxAnswers = 40
     static let maxRejections = 2
 
@@ -401,9 +413,12 @@ struct BTAlignmentPosterior {
     }
 
     private var hasStagnated: Bool {
+        guard answerCount >= Self.minAnswersForStagnation else { return false }
         guard halfWidths.count > Self.stagnationWindow else { return false }
         let earlier = halfWidths[halfWidths.count - 1 - Self.stagnationWindow]
         let now = halfWidths[halfWidths.count - 1]
+        // The endgame crawl is not stagnation — see ``stagnationFloorMs``.
+        guard now > Self.stagnationFloorMs else { return false }
         return now > earlier * (1 - Self.stagnationShrinkFraction)
     }
 

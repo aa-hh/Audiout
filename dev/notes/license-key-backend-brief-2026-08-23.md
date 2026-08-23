@@ -83,7 +83,11 @@ and keys survive any future backend migration without reissue.
    server-side via `GET /transactions/{id}`, polls briefly if the webhook
    hasn't landed).
 2. **Download gate.** `/download?key=…` → validate + increment counter → 302
-   to a ~15-min presigned R2 URL. R2 egress is free.
+   to a ~15-min presigned R2 URL. R2 egress is free. The keyed link is the
+   durable one (emailed + on the thank-you page; works as long as the key is
+   active, dies on revoke) — only the final presigned hop is short-lived, so
+   no long-expiry file URLs ever exist (Alec's 2026-08-23 requirement that
+   the emailed link keep working for months is met by construction).
 3. **Update gate.** Sparkle: set `SPUUpdater.httpHeaders` with a bearer token
    derived from the key — applies to both appcast fetch and update download,
    keeps the secret out of URLs (query-param feeds leak via logs/proxies).
@@ -116,6 +120,11 @@ lose to a hand-rolled Worker at this volume (ops weight, immaturity, or no
 Paddle support).
 
 ## 4. Decision points for Alec
+
+**Decided 2026-08-23:** runtime behavior = **(b) soft check** (PRODUCT.md
+amended on this branch); trademark = name not settled yet, roadmap entry 063
+tracks name + registration; key generation scheme = follow-up discovery ran
+same day (see companion notes). Original options kept below for the record.
 
 1. **Runtime behavior** — pick one; PRODUCT.md must be amended if not (a):
    (a) app never checks anything (current PRODUCT.md stance) — key gates

@@ -435,12 +435,14 @@ public final class PopoverController: NSObject {
     /// resolves — the per-device hold is only released by
     /// `onResolveBTAlignmentPrompt` (or the backend's own watchdog/deselect).
     private var btAlignmentPromptQueue: [String] = []
-    /// The device whose wizard panel is open, its live session, and the panel.
-    /// Session lifetime == panel lifetime; `popoverDidClose` cancels both so
-    /// the wizard tick never outlives the surface.
+    /// The device whose wizard is open, its live session, the view, and the
+    /// floating window hosting it. Session lifetime == WINDOW lifetime: the
+    /// wizard is no longer a row in the card stack, so it survives a popover
+    /// close and ends only with its own window or its target.
     private var btWizardDeviceID: String?
     private var btWizardSession: BTAlignmentWizardSession?
     private var btWizardView: BTAlignmentWizardView?
+    private var btWizardSheet: AlignmentWizardViewController?
     /// The reference device this run SELECTED for itself, so every exit path
     /// can put the user's Selected Devices set back. `nil` when the reference
     /// was already audible and nothing had to change.
@@ -846,6 +848,12 @@ public final class PopoverController: NSObject {
         // live view tree, and nothing reads it while closed (`statusMasterVolume`
         // reads `groupController` directly). Rebuilding here made every backend
         // event a hidden full rebuild storm under volume-key repeat (audit B8).
+        //
+        // The ONE exception to hidden-means-idle: the wizard's own window is a
+        // surface of its own and stays up through a popover close, so its
+        // target check and its reference picker run unconditionally. The CARD's
+        // reconcile stays inside the gate above — it IS a row in the panel.
+        reconcileBTWizardLiveness()
     }
 
     /// Store the latest CONFIRMED per-device streaming map (T9,
@@ -1154,11 +1162,11 @@ public final class PopoverController: NSObject {
         // (`openDiagnosisIDs`) survives and is re-applied below (brief §7.3 —
         // "rebuild() restores open panels").
         diagnosisPanelsByID.removeAll()
-        // Same lifetime rule for the W3 card / W4 wizard panel: the views die
-        // with the row tree here; the intent (`btAlignmentPromptDeviceID`,
-        // `btWizardSession`) survives and remounts below.
+        // Same lifetime rule for the W3 card: the view dies with the row tree
+        // here; the intent (`btAlignmentPromptDeviceID`) survives and remounts
+        // below. The W4 wizard is NOT in this tree — it lives in its own
+        // window and a rebuild does not touch it.
         btAlignmentPromptView = nil
-        btWizardView = nil
         // The ONE reused drawer view (D2) can't just be forgotten the way the
         // per-id panels above are: `clearRows()` drops the cards, but the
         // drawer stays parented to the orphaned body stack it was inserted
@@ -1531,15 +1539,15 @@ public final class PopoverController: NSObject {
     /// Drop the MODEL for a subsection collapsing away: its rows, the panels
     /// mounted under them, and the ONE reused sync drawer (D2), which — exactly
     /// as in `rebuild()` — cannot be left parented to a tree that is about to be
-    /// torn down. The INTENTS (`openDiagnosisIDs`, `btAlignmentPromptDeviceID`,
-    /// `btWizardSession`) are deliberately untouched: collapse is display only,
-    /// and the expand's reconcile remounts from them.
+    /// torn down. The INTENTS (`openDiagnosisIDs`, `btAlignmentPromptDeviceID`)
+    /// are deliberately untouched: collapse is display only, and the expand's
+    /// reconcile remounts from them. The wizard's window is not in this tree at
+    /// all, so a collapse never reaches it.
     private func dropSubsectionRowModel(_ section: DeviceSection) {
         for device in section.devices {
             deviceRowsByID.removeValue(forKey: device.id)
             diagnosisPanelsByID.removeValue(forKey: device.id)
             if btAlignmentPromptDeviceID == device.id { btAlignmentPromptView = nil }
-            if btWizardDeviceID == device.id { btWizardView = nil }
             if mountedSyncDrawerID == device.id {
                 mountedSyncDrawerID = nil
                 syncDrawer.removeFromSuperview()
@@ -3665,11 +3673,9 @@ extension PopoverController: DeviceRowView.Delegate {
     /// until the row returns; a missing DEVICE drops the whole offer (the
     /// backend released its hold on the deselect edge already).
     private func reconcileBTAlignmentPanels(animated: Bool) {
-        // Wizard teardown first (target gone, powered off, or deselected):
-        // a torn-down wizard frees the alignment slot for this same pass.
-        if let id = btWizardDeviceID, !btAlignmentTargetIsLive(id) {
-            tearDownBTWizard()
-        }
+        // Wizard first: a torn-down wizard frees the alignment slot for this
+        // same pass.
+        reconcileBTWizardLiveness()
         // Prompt card.
         if let id = btAlignmentPromptDeviceID, devicesByID[id] == nil {
             btAlignmentPromptDeviceID = nil
@@ -3692,27 +3698,49 @@ extension PopoverController: DeviceRowView.Delegate {
             btAlignmentPromptView = view
             panel.insertRow(view, after: row, animated: animated)
         }
-        // Wizard panel (teardown ran first, above).
+        // Wizard sheet (its liveness ran first, above). It needs no row: the
+        // wizard rides the surface as a SHEET, so a filtered or collapsed-away
+        // row can no longer strand a live run — and the host can't close
+        // under it either (AppKit refuses `performClose` while a sheet is
+        // attached; the shell's R7 and the menu-bar click policy both already
+        // honour `hasAttachedSheet`).
         if let id = btWizardDeviceID, let session = btWizardSession,
-           let row = deviceRowsByID[id] {
-            if btWizardView?.superview == nil {
-                if let stale = btWizardView { panel.removeRow(stale, animated: false) }
-                let view = BTAlignmentWizardView(session: session)
-                view.onFinished = { [weak self] in self?.finishBTWizard() }
-                view.onSetByHand = { [weak self] bestGuessMs in
-                    self?.btWizardSetByHand(deviceID: id, bestGuessValueMs: bestGuessMs)
-                }
-                view.onSelectReference = { [weak self] referenceID in
-                    self?.setBTWizardReference(referenceID)
-                }
-                btWizardView = view
-                // Before the insert, so the panel measures the finished layout.
-                view.referenceOptions = btWizardReferenceOptions(excluding: id)
-                panel.insertRow(view, after: row, animated: animated)
-            } else {
-                // Devices come and go mid-run; the picker follows.
-                btWizardView?.referenceOptions = btWizardReferenceOptions(excluding: id)
+           btWizardSheet == nil, devicesByID[id] != nil {
+            let view = BTAlignmentWizardView(session: session)
+            view.onFinished = { [weak self] in self?.finishBTWizard() }
+            view.onSetByHand = { [weak self] bestGuessMs in
+                self?.btWizardSetByHand(deviceID: id, bestGuessValueMs: bestGuessMs)
             }
+            view.onSelectReference = { [weak self] referenceID in
+                self?.setBTWizardReference(referenceID)
+            }
+            // Before the mount, so the sheet measures the finished layout.
+            view.referenceOptions = btWizardReferenceOptions(excluding: id)
+            let sheet = AlignmentWizardViewController(wizardView: view)
+            view.onContentSizeChange = { [weak sheet] in sheet?.fitToContent() }
+            btWizardView = view
+            btWizardSheet = sheet
+            sheet.fitToContent()
+            // The Mixer create-sheet gate: an on-screen host means a real
+            // sheet parent; headless runs (host never shown) keep the
+            // reference and drive the view through the test hooks instead.
+            if let host = panel.viewIfLoaded?.window, host.isVisible {
+                panel.presentAsSheet(sheet)
+            }
+        }
+    }
+
+    /// The wizard's target check and its picker refresh — the two things that
+    /// must run whether or not the popover is on screen. An app-switch
+    /// tuck-away hides the surface (sheet and all) without closing it, so a
+    /// dead target has to reach the hidden run anyway, and the reference
+    /// picker has to keep up with devices coming and going.
+    private func reconcileBTWizardLiveness() {
+        if let id = btWizardDeviceID, !btAlignmentTargetIsLive(id) {
+            tearDownBTWizard(targetLost: true)
+        }
+        if let id = btWizardDeviceID, btWizardSession != nil, let view = btWizardView {
+            view.referenceOptions = btWizardReferenceOptions(excluding: id)
         }
     }
 
@@ -3862,8 +3890,14 @@ extension PopoverController: DeviceRowView.Delegate {
                     // live complaint was a run that "didn't update the value
                     // anywhere" because the repaint waited for the dismissal.
                     self?.refreshDeviceRows()
+                    // The kept screen's own peak-end order, spoken: the ready
+                    // line first, the measurement after it. VoiceOver used to
+                    // hear only the number — the housekeeping — while the
+                    // screen printed the win. Reuses the PRINTED string so the
+                    // two can never drift.
                     self?.postAnnouncement(
-                        "\(device.name) aligned at \(Int(keepMs.rounded())) milliseconds")
+                        BTAlignmentWizardView.keptReadyCopy(target: device.name)
+                        + " Aligned at \(Int(keepMs.rounded())) milliseconds.")
                 }
             },
             setTick: { [weak self] active in
@@ -3993,9 +4027,9 @@ extension PopoverController: DeviceRowView.Delegate {
         refreshDeviceRows()
     }
 
-    /// The wizard's own close (Keep / Done / ✕): the session already committed
-    /// or restored; drop panel + session, repaint the row's trim display, and
-    /// let a queued first-mix card take the freed slot.
+    /// The wizard's own close (Keep / Done / Stop / Esc): the session already
+    /// committed or restored; drop sheet + session, repaint the row's trim
+    /// display, and let a queued first-mix card take the freed slot.
     private func finishBTWizard() {
         tearDownBTWizard()
         refreshDeviceRows()
@@ -4005,7 +4039,13 @@ extension PopoverController: DeviceRowView.Delegate {
     /// Cancel-and-unmount. The session's `cancel()` restores the prior trim
     /// and silences the wizard tick unless Keep already ended it — safe on
     /// every path (deinit would cancel too; explicit is clearer).
-    private func tearDownBTWizard() {
+    ///
+    /// `targetLost` is the one exit that may KEEP the sheet: a target that
+    /// vanishes under a LIVE modal bows out in place (one line and a Done)
+    /// instead of vanishing the sheet silently. The run still ends here and
+    /// now — only the chrome lingers; Done re-enters this funnel through
+    /// `onFinished` with the session already gone and dismisses then.
+    private func tearDownBTWizard(targetLost: Bool = false) {
         let hadRun = btWizardSession != nil
         btWizardSession?.cancel()
         btWizardSession = nil
@@ -4022,9 +4062,16 @@ extension PopoverController: DeviceRowView.Delegate {
         // run that actually existed — this funnel also runs on the way IN, to
         // clear a previous wizard.
         if hadRun { onBTWizardEndRun?() }
-        if let view = btWizardView {
+        if targetLost, hadRun, let sheet = btWizardSheet, sheet.isHosted,
+           let view = btWizardView {
+            // The bow-out keeps sheet + view standing; every reference stays
+            // so a relaunch (which tears down first) or Done can clear them.
+            view.showTargetLost()
+        } else {
+            let sheet = btWizardSheet
+            btWizardSheet = nil
             btWizardView = nil
-            panel.removeRow(view, animated: true)
+            sheet?.dismissSilently()
         }
         releaseBTWizardReference()
     }
@@ -4035,6 +4082,7 @@ extension PopoverController: DeviceRowView.Delegate {
     public func test_btAlignmentPromptQueue() -> [String] { btAlignmentPromptQueue }
     func test_btAlignmentPromptView() -> BTAlignmentPromptView? { btAlignmentPromptView }
     func test_btWizardView() -> BTAlignmentWizardView? { btWizardView }
+    func test_btWizardSheet() -> AlignmentWizardViewController? { btWizardSheet }
     public func test_btWizardIsOpen() -> Bool { btWizardSession != nil }
     public func test_btWizardReferenceID() -> String? { btWizardSession?.reference?.id }
     /// The reference the RUN selected for itself (`nil` when it was already
@@ -4255,11 +4303,10 @@ extension PopoverController: AppRowView.Delegate {
         closeSyncDrawerIntent()
         unmountSyncDrawer(animated: false)
         setAlignTick(nil)
-        // Same rule for the wizard's tick (W4): a click-away cancels the run
-        // (prior trim restored). The first-mix CARD's intent deliberately
-        // survives the close — the backend's hold does too, so the offer
-        // remounts on the next open.
-        tearDownBTWizard()
+        // NOT the wizard (W4): its own window is the surface its tick must not
+        // outlive, and that window is still on screen. A popover close leaves
+        // the run alone. The first-mix CARD's intent survives the close too —
+        // the backend's hold does, so the offer remounts on the next open.
         // "+"-menu connect attempts are session-scoped (BT-LIST): `.failed` is
         // sticky and never clears for a paired device, so keeping these would
         // leave a permanent dead row on the next open.

@@ -224,7 +224,10 @@ import AppKit
                 "the wizard replaces the card; the queued offer never mounts beside it")
         #expect(popover.test_btAlignmentPromptQueue() == ["bt-b:output"])
 
-        popover.test_btWizardView()?.test_clickDismiss()
+        // The key, not the button — `theIntrosStopIsTheSameExitAsEscape`
+        // covers the button and proves the two land in the same place.
+        #expect(popover.test_btWizardView()?
+            .test_sendKey(keyCode: 53, characters: "\u{1b}") == true)
         #expect(popover.test_btWizardIsOpen() == false)
         #expect(popover.test_btAlignmentPromptDeviceID() == "bt-b:output",
                 "the wizard's close hands the slot to the queued device")
@@ -238,6 +241,43 @@ import AppKit
         showPrompt(popover)
         popover.test_btAlignmentPromptView()?.test_clickAlignWithTicks()
         return popover.test_btWizardView()
+    }
+
+    /// Mounts the live sheet's content in a real `NSWindow` — the ONLY seam
+    /// that proves the wizard's keyboard actually works.
+    ///
+    /// TRAP the keyboard tests below exist for (live bug, build wizardv6 —
+    /// ←/→ did nothing on the question screen while this suite was green):
+    /// AppKit offers a key to `performKeyEquivalent(with:)` only when it
+    /// carries a MODIFIER. A plain ←/→/Space/Esc/Return skips that pass
+    /// entirely and is delivered to the window's FIRST RESPONDER as an
+    /// ordinary `keyDown`. A test that calls `performKeyEquivalent` directly
+    /// therefore says nothing about what a real key press does — so the
+    /// unmodified keys are driven through this window's `sendEvent`, and only
+    /// ⌘Z keeps the key-equivalent seam.
+    private func hostSheetInWindow(_ popover: PopoverController) -> NSWindow? {
+        guard let sheet = popover.test_btWizardSheet() else {
+            Issue.record("expected a wizard sheet to host in a window")
+            return nil
+        }
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 560, height: 420),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.contentView = sheet.view
+        return window
+    }
+
+    /// A real, unmodified key press: `NSWindow.sendEvent` is what routes it to
+    /// the first responder, exactly as it does on screen.
+    private func sendKey(_ window: NSWindow, keyCode: UInt16, characters: String) {
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, characters: characters,
+            charactersIgnoringModifiers: characters, isARepeat: false, keyCode: keyCode)
+        else {
+            Issue.record("could not synthesise key \(keyCode)")
+            return
+        }
+        window.sendEvent(event)
     }
 
     /// Answer every question the way a listener with `trueOffsetMs` would,
@@ -311,21 +351,31 @@ import AppKit
             Issue.record("expected the question screen, got \(String(describing: wizard?.test_screen))")
             return
         }
-        #expect(wizard?.test_bodyText == BTAlignmentWizardView.questionCopy)
+        // The QUESTION is the headline under the stage (owner ruling
+        // 2026-08-23, reversing v2 §1's cut); the interval is the stage's
+        // tooltip and the composed AX label keeps the long form.
+        #expect(wizard?.test_readoutText?.hasPrefix(BTAlignmentWizardView.questionPrompt) == true,
+                "got \(String(describing: wizard?.test_readoutText))")
+        #expect(wizard?.test_stage.toolTip?.hasPrefix("Somewhere between") == true,
+                "the interval is on the stage's tooltip, got \(String(describing: wizard?.test_stage.toolTip))")
         #expect(wizard?.test_buttonTitles
-                == ["Move 2", "This Mac", BTAlignmentWizardView.togetherTitle, "Back",
-                    BTAlignmentWizardView.stopTitle],
+                == ["Move 2", "This Mac", BTAlignmentWizardView.togetherTitle,
+                    BTAlignmentWizardView.backTitle, BTAlignmentWizardView.stopTitle],
                 "the which-side buttons carry the ACTUAL device names, and there is a way out")
         #expect(wizard?.test_buttonIsEnabled(BTAlignmentWizardView.backTitle) == false,
                 "there is nothing to go back to yet")
-        #expect(wizard?.test_progressValue == 0)
-        // The question number is gone: a variable-length run has none to give.
-        // A confidence line and an elapsed clock stand in its place.
-        #expect(wizard?.test_captionTexts.count == 2,
-                "got \(String(describing: wizard?.test_captionTexts))")
-        #expect(wizard?.test_captionTexts.first?.hasPrefix("Somewhere between") == true)
-        #expect(wizard?.test_captionTexts.last == BTAlignmentWizardView.elapsedCopy(0))
-        #expect(wizard?.test_elapsedClockIsRunning == true)
+        // The progress bar is gone: the stage above the question IS the
+        // readout, showing the live belief as a lit interval rather than a
+        // fraction of a run that has no fixed length.
+        if case .question? = wizard?.test_stage.test_state {} else {
+            Issue.record("""
+                expected a lit interval on the stage, got \
+                \(String(describing: wizard?.test_stage.test_state))
+                """)
+        }
+        // The click count rides the nameplate row's right slot — "about 15",
+        // because a variable-length run has no exact total to give.
+        #expect(wizard?.test_nameplateRightText == BTAlignmentWizardView.clickCountCopy(1))
     }
 
     @Test func backUndoesTheLastAnswerAndReAsksThatTrial() {
@@ -352,10 +402,15 @@ import AppKit
             return
         }
         #expect(abs(valueMs - 200) <= 6, "the proposal is what the listener heard, got \(valueMs)")
-        #expect(wizard?.test_bodyText
-                == BTAlignmentWizardView.proposalCopy(valueMs: Int(valueMs.rounded())))
+        // The NUMBER moved to the readout, freeing the sentence to be about
+        // listening (v2 spec §4).
+        #expect(wizard?.test_bodyText == "Listen — the clicks should land as one.")
+        #expect(wizard?.test_readoutText == "\(Int(valueMs.rounded())) ms")
         #expect(wizard?.test_buttonTitles == [BTAlignmentWizardView.soundsRightTitle,
-                                              BTAlignmentWizardView.stillOffTitle])
+                                              BTAlignmentWizardView.stillOffTitle,
+                                              BTAlignmentWizardView.setByHandTitle,
+                                              BTAlignmentWizardView.stopTitle],
+                "accept, reject, the manual path, and a way out")
         #expect(recorder.ticks == [true],
                 "the tick keeps running — the proposal is judged by listening to it")
 
@@ -397,8 +452,12 @@ import AppKit
         #expect(row?.test_syncChipTooltip?
             .contains("Measured latency: \(Int(valueMs.rounded())) ms") == true,
                 "…and the measurement is what the tooltip carries")
-        #expect(popover.test_lastEnergizeAnnouncement?.contains("aligned at") == true,
-                "VoiceOver hears it on the same beat: \(popover.test_lastEnergizeAnnouncement ?? "-")")
+        // Peak first, housekeeping last — the same order the screen prints.
+        #expect(popover.test_lastEnergizeAnnouncement?
+            .hasPrefix(BTAlignmentWizardView.keptReadyCopy(target: "Move 2")) == true,
+                "VoiceOver hears the win first: \(popover.test_lastEnergizeAnnouncement ?? "-")")
+        #expect(popover.test_lastEnergizeAnnouncement?.contains("Aligned at") == true,
+                "…and the measurement after it: \(popover.test_lastEnergizeAnnouncement ?? "-")")
     }
 
     /// "Still off" sends the run back to the questions with the tick never
@@ -441,9 +500,9 @@ import AppKit
             return
         }
         #expect(wizard?.test_bodyText == BTAlignmentWizardView.unsettledCopy)
-        #expect(wizard?.test_buttonTitles == [BTAlignmentWizardView.setByHandTitle,
-                                              BTAlignmentWizardView.tryAgainTitle, "Done"])
-        #expect(wizard?.test_showsEducationLine == true)
+        #expect(wizard?.test_buttonTitles == [BTAlignmentWizardView.tryAgainTitle,
+                                              BTAlignmentWizardView.setByHandTitle, "Done"],
+                "Try again is the default; the manual path is the quiet alternative")
         #expect(recorder.ends.map(\.keep) == [nil], "the bow-out restored the prior trim")
 
         wizard?.test_clickButton(titled: BTAlignmentWizardView.setByHandTitle)
@@ -456,25 +515,57 @@ import AppKit
                 "…SHOWN, never written — the drawer emits committed gestures only")
     }
 
-    @Test func dismissMidQuestionsCancelsRestoresAndSilences() {
-        let (popover, recorder) = makePopover()
-        let wizard = openWizard(popover)
-        wizard?.test_clickButton(titled: "Start")
-        wizard?.test_clickButton(titled: "Move 2")
-        wizard?.test_clickDismiss()
-        #expect(recorder.ends.map(\.keep) == [nil], "✕ restores the prior trim")
-        #expect(recorder.ticks == [true, false])
-        #expect(popover.test_btWizardIsOpen() == false)
-    }
-
-    @Test func popoverCloseCancelsTheWizardButKeepsNoStaleTick() {
+    /// The wizard is a SHEET now, so the host cannot close under a live run at
+    /// all (AppKit refuses `performClose` while a sheet is attached — the
+    /// shell's R7). What surviving-a-hide means is therefore the app-switch
+    /// tuck-away: host and sheet go together and come back together, and the
+    /// run underneath never notices.
+    @Test func appSwitchTuckAwayLeavesTheRunAlive() {
         let (popover, recorder) = makePopover()
         let wizard = openWizard(popover)
         wizard?.test_clickButton(titled: "Start")
         popover.surfaceDidHide()
-        #expect(recorder.ticks == [true, false], "the wizard tick never outlives the surface")
-        #expect(recorder.ends.map(\.keep) == [nil], "…and the prior trim is restored")
-        #expect(popover.test_btWizardIsOpen() == false)
+        #expect(popover.test_btWizardIsOpen(), "the run outlives the tuck-away")
+        #expect(popover.test_btWizardSheet() != nil)
+        #expect(recorder.ticks == [true], "…tick and all")
+        #expect(recorder.ends.isEmpty, "nothing restored — the run has not ended")
+    }
+
+    /// Why the wizard's target check can no longer sit behind the shown gate: a
+    /// tucked-away popover still has to reach a run whose speaker went away.
+    @Test func aHiddenPopoverStillTearsDownAWizardWhoseTargetIsGone() {
+        let (popover, recorder) = makePopover()
+        let wizard = openWizard(popover)
+        wizard?.test_clickButton(titled: "Start")
+
+        popover.test_isShownOverride = false
+        popover.surfaceDidHide()
+        #expect(popover.test_btWizardIsOpen(), "the close alone leaves it running")
+
+        popover.update(devices: [local(), airplay(), bt(available: false)])
+        #expect(popover.test_btWizardIsOpen() == false,
+                "no wizard over a silent target, shown or not")
+        #expect(popover.test_btWizardSheet() == nil)
+        #expect(recorder.ends.map(\.keep) == [nil], "the prior trim is restored")
+        #expect(recorder.ticks == [true, false], "…and the wizard tick ends")
+    }
+
+    /// Esc still reaches the wizard now that the sheet's own content stands
+    /// between the keystroke and the view — down the seam it genuinely uses.
+    /// Esc carries no modifier, so AppKit never offers it as a key equivalent;
+    /// it lands on the window's first responder, which mounting the sheet's
+    /// content makes the wizard view (see `hostSheetInWindow`).
+    @Test func escapeReachesTheWizardThroughTheSheetContent() {
+        let (popover, recorder) = makePopover()
+        let wizard = openWizard(popover)
+        wizard?.test_clickButton(titled: "Start")
+        guard let window = hostSheetInWindow(popover) else { return }
+        #expect(window.firstResponder === wizard,
+                "the sheet's content holds the keys")
+        sendKey(window, keyCode: 53, characters: "\u{1b}")
+        #expect(popover.test_btWizardIsOpen() == false, "…and it stopped the run")
+        #expect(recorder.ends.map(\.keep) == [nil])
+        #expect(recorder.ticks == [true, false])
     }
 
     @Test func openingTheWizardStopsARunningManualMetronome() {
@@ -668,6 +759,25 @@ import AppKit
                 "a long name must shrink its button, not break the panel's layout")
     }
 
+    /// The nameplate is the other place a name can run past its slot, and the
+    /// failure there is invisible in code: both micro-labels are pinned to
+    /// opposite edges of a plain container, so an over-long `ALIGN · <NAME>`
+    /// draws straight THROUGH `CLICK n OF ABOUT 15` rather than being clipped.
+    @Test func aVeryLongDeviceNameTruncatesInsteadOfOverprintingTheClickCount() {
+        let longName = "Downstairs Living Room Sonos Play:5 Right Channel Speaker"
+        let fleet = [local(), airplay(), bt(name: longName)]
+        let (popover, _) = makePopover(fleet: fleet)
+        popover.update(devices: fleet)
+        popover.test_toggleDeviceEnabled(deviceID: "office", on: true)
+        popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
+        let wizard = popover.test_btWizardView()
+        wizard?.test_clickButton(titled: "Start")
+        #expect(wizard?.test_nameplateRightText == "CLICK 1 OF ABOUT 15")
+        #expect(wizard?.test_nameplateSlotsAreClear == true,
+                "the name gives way to the click count, never overprints it")
+    }
+
     // MARK: Manual relaunch (the wizard outlives "Not now" — locked UX)
 
     /// The mix-selected row without any card: ⌥-click on the DRAWER's
@@ -834,12 +944,28 @@ import AppKit
         #expect(popover.test_btWizardEngagedReferenceID() == nil)
     }
 
-    @Test func dismissRestoresTheEngagedReference() {
-        exitPathRestoresTheReference { _, wizard in wizard?.test_clickDismiss() }
+    @Test func stopRestoresTheEngagedReference() {
+        exitPathRestoresTheReference { _, wizard in
+            wizard?.test_clickButton(titled: BTAlignmentWizardView.stopTitle)
+        }
     }
 
-    @Test func popoverCloseRestoresTheEngagedReference() {
-        exitPathRestoresTheReference { popover, _ in popover.surfaceDidHide() }
+    /// The same rule one level down: a popover close is not an exit, so the
+    /// reference the run engaged for itself stays engaged with it.
+    @Test func popoverCloseKeepsTheEngagedReferenceSelected() {
+        let fleet = [airplay("office"), bt()]
+        let (popover, _) = makePopover(fleet: fleet)
+        popover.update(devices: fleet)
+        popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
+        popover.test_btWizardView()?.test_clickButton(titled: "Start")
+        #expect(popover.test_isSpeakerSelected("office"))
+
+        popover.surfaceDidHide()
+        #expect(popover.test_btWizardIsOpen())
+        #expect(popover.test_isSpeakerSelected("office"),
+                "only a real exit puts the user's Selected Devices set back")
+        #expect(popover.test_btWizardEngagedReferenceID() == "office")
     }
 
     @Test func aBowOutRestoresTheEngagedReference() {
@@ -880,8 +1006,8 @@ import AppKit
         }
         #expect(recorder.previews.count == 3, "a fresh run's first candidate is applied")
         #expect(wizard?.test_buttonTitles
-                == ["Move 2", "Office", BTAlignmentWizardView.togetherTitle, "Back",
-                    BTAlignmentWizardView.stopTitle])
+                == ["Move 2", "Office", BTAlignmentWizardView.togetherTitle,
+                    BTAlignmentWizardView.backTitle, BTAlignmentWizardView.stopTitle])
     }
 
     /// The tick gate carries BOTH participants, so the backend can hold every
@@ -919,6 +1045,9 @@ import AppKit
         #expect(wizard?.test_screen == .macIsLate,
                 "got \(String(describing: wizard?.test_screen))")
         #expect(wizard?.test_bodyText == BTAlignmentWizardView.macIsLateCopy)
+        // The copy no longer offers "try again" in prose — the screen carries
+        // a real button for it (v2 spec §1).
+        #expect(wizard?.test_buttonTitles == [BTAlignmentWizardView.tryAgainTitle, "Done"])
         #expect(recorder.ends.map(\.keep) == [nil], "nothing is persisted")
 
         wizard?.test_clickButton(titled: "Done")
@@ -942,6 +1071,55 @@ import AppKit
         wizard?.test_clickButton(titled: "Start")   // performClick on a disabled button
         #expect(wizard?.test_screen == .intro, "the run never begins")
         #expect(recorder.ticks.isEmpty, "…and nothing ticks into a group of one")
+        // …but the screen is never a dead end: Start is off, so Stop is the
+        // one enabled control, and it is on screen rather than only on Esc.
+        #expect(wizard?.test_buttonIsEnabled(BTAlignmentWizardView.stopTitle) == true)
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.stopTitle)
+        #expect(popover.test_btWizardIsOpen() == false)
+    }
+
+    /// The intro's own way out. A sheet carries no ✕, so before Start the
+    /// only exit was Esc — undiscoverable on a mouse, and with no reference
+    /// to compare against Start is disabled and the screen held no enabled
+    /// control at all. Stop is now in the same trailing corner every other
+    /// screen puts it in, and it is the SAME exit: driven through the
+    /// button's real dispatch it leaves exactly the state the key leaves.
+    @Test func theIntrosStopIsTheSameExitAsEscape() {
+        func endTheIntro(byStop: Bool)
+            -> (open: Bool, ticks: [Bool], endRuns: Int, resolved: [String]) {
+            let (popover, recorder) = makePopover()
+            let wizard = openWizard(popover)
+            #expect(wizard?.test_screen == .intro)
+            #expect(wizard?.test_buttonTitles == ["Start", BTAlignmentWizardView.stopTitle],
+                    "the intro offers exactly one action and one exit")
+            if byStop {
+                wizard?.test_clickButton(titled: BTAlignmentWizardView.stopTitle)
+            } else {
+                #expect(wizard?.test_sendKey(keyCode: 53, characters: "\u{1b}") == true)
+            }
+            return (popover.test_btWizardIsOpen(), recorder.ticks, recorder.endRuns,
+                    recorder.resolves.map(\.id))
+        }
+        let stopped = endTheIntro(byStop: true)
+        #expect(stopped.open == false, "Stop closes the sheet from the intro")
+        #expect(stopped == endTheIntro(byStop: false),
+                "…and leaves exactly what Esc leaves")
+    }
+
+    /// Exactly one speaker to compare against is not a CHOICE: the intro
+    /// states the fact in plain text rather than mounting a pop-up with a
+    /// single item in it, and Start is live all the same (v2 spec §1).
+    @Test func aSingleReferenceCandidateReadsAsTextWithNoPicker() {
+        let fleet = [local(), bt()]
+        let (popover, _) = makePopover(fleet: fleet)
+        popover.update(devices: fleet)
+        popover.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
+        popover.startBTAlignmentWizard(deviceID: "bt-a:output")
+        let wizard = popover.test_btWizardView()
+        #expect(popover.test_btWizardReferenceID() == "mac")
+        #expect(wizard?.test_referenceLineText == "Compare against This Mac")
+        #expect(wizard?.test_referencePickerIsEnabled == false)
+        #expect(wizard?.test_startIsEnabled == true)
     }
 
     // MARK: Zero-click (a speaker measured before)
@@ -987,18 +1165,20 @@ import AppKit
 
     // MARK: Keyboard
 
-    /// The locked key map, through the real key-equivalent seam.
+    /// The locked key map, each key through the seam AppKit really uses for
+    /// it — the unmodified three as a first-responder `keyDown` delivered by a
+    /// real window, ⌘Z as a genuine key equivalent. See `hostSheetInWindow`
+    /// for why the old `performKeyEquivalent`-only version of this test could
+    /// pass over a keyboard that did nothing on screen.
     @Test func theQuestionScreenAnswersFromTheKeyboard() {
         let (popover, recorder) = makePopover()
         let wizard = openWizard(popover)
         wizard?.test_clickButton(titled: "Start")
+        guard let window = hostSheetInWindow(popover) else { return }
 
-        #expect(wizard?.test_sendKey(keyCode: 123, characters: "\u{F702}") == true,
-                "← is the target")
-        #expect(wizard?.test_sendKey(keyCode: 124, characters: "\u{F703}") == true,
-                "→ is the reference")
-        #expect(wizard?.test_sendKey(keyCode: 49, characters: " ") == true,
-                "Space is \"They sound together\"")
+        sendKey(window, keyCode: 123, characters: "\u{F702}")  // ← is the target
+        sendKey(window, keyCode: 124, characters: "\u{F703}")  // → is the reference
+        sendKey(window, keyCode: 49, characters: " ")          // Space is "Both at once"
         guard case .question(_, _, let answers)? = wizard?.test_screen else {
             Issue.record("expected a question, got \(String(describing: wizard?.test_screen))")
             return
@@ -1006,7 +1186,7 @@ import AppKit
         #expect(answers == 3, "three keys, three answers")
 
         #expect(wizard?.test_sendKey(keyCode: 6, characters: "z", modifiers: .command) == true,
-                "⌘Z is Back")
+                "⌘Z is Undo — carrying a modifier, it really is a key equivalent")
         guard case .question(_, _, let afterBack)? = wizard?.test_screen else {
             Issue.record("expected a question, got \(String(describing: wizard?.test_screen))")
             return
@@ -1015,9 +1195,11 @@ import AppKit
         #expect(recorder.previews.count == 5, "each key applied a fresh candidate")
     }
 
-    /// Escape belongs to the WIZARD while its panel is mounted — a key
-    /// equivalent runs before the shell panel's own "close the whole surface"
-    /// handling ever sees the keystroke.
+    /// Escape belongs to the WIZARD while its sheet is up — the view's own
+    /// `keyDown` consumes it, so it never travels on to the shell panel's
+    /// "close the whole surface" handling. (`test_sendKey` routes an
+    /// unmodified key to `keyDown` for the reason `hostSheetInWindow`
+    /// records.)
     @Test func escapeStopsTheWizardRatherThanClosingTheSurface() {
         let (popover, recorder) = makePopover()
         let wizard = openWizard(popover)
@@ -1043,6 +1225,79 @@ import AppKit
                 "no wizard over a silent target — the row surviving is not enough")
         #expect(recorder.ends.map(\.keep) == [nil], "the prior trim is restored")
         #expect(recorder.ticks == [true, false], "…and the wizard tick ends")
+    }
+
+    /// Under a LIVE sheet the same loss bows out IN PLACE: the RUN ends on the
+    /// spot exactly as above, but a modal that vanishes mid-sentence is more
+    /// jarring than one line and a Done, so the sheet stands until it is
+    /// answered.
+    @Test func targetLostUnderALiveSheetBowsOutInPlace() {
+        let (popover, recorder) = makePopover()
+        let wizard = openWizard(popover)
+        wizard?.test_clickButton(titled: "Start")
+        popover.test_btWizardSheet()?.test_isHostedOverride = true
+
+        popover.update(devices: [local(), airplay(), bt(available: false)])
+        #expect(popover.test_btWizardIsOpen() == false, "the run is over the moment the sink goes")
+        #expect(recorder.ends.map(\.keep) == [nil], "the prior trim is restored")
+        #expect(recorder.ticks == [true, false], "…and the wizard tick ends")
+        #expect(popover.test_btWizardSheet() != nil, "…but the sheet stays up to say so")
+        #expect(popover.test_btWizardView()?.test_bodyText
+                == BTAlignmentWizardView.targetLostCopy(target: "Move 2"))
+
+        wizard?.test_clickButton(titled: "Done")
+        #expect(popover.test_btWizardSheet() == nil, "Done dismisses and frees the slot")
+    }
+
+    /// Return has to reach the ONE control the fourth bow-out has. On the
+    /// other three ⏎ lands on Try again; here there is nothing to try again,
+    /// so the chip drawn on Done has to be real.
+    ///
+    /// Return is NOT in the wizard's own key map: it is unmodified, so it goes
+    /// to the first responder, whose `keyDown` deliberately falls through to
+    /// `super` — up the responder chain to the WINDOW's default-button
+    /// dispatch, which fires the plate carrying `keyEquivalent = "\r"`. That
+    /// dispatch only exists inside a real window, so this drives one.
+    @Test func returnFiresTheTargetLostBowOutsDone() {
+        let (popover, _) = makePopover()
+        let wizard = openWizard(popover)
+        wizard?.test_clickButton(titled: "Start")
+        // A real window makes the sheet genuinely hosted — no override needed.
+        guard let window = hostSheetInWindow(popover) else { return }
+        popover.update(devices: [local(), airplay(), bt(available: false)])
+        #expect(popover.test_btWizardSheet() != nil, "the bow-out is up")
+
+        sendKey(window, keyCode: 36, characters: "\r")
+        #expect(popover.test_btWizardSheet() == nil,
+                "the default plate claims Return, and firing it dismisses the sheet")
+    }
+
+    /// The sheet's presentation has to hand the wizard the KEYS: the
+    /// unmodified map is delivered to the first responder, so a sheet that
+    /// left focus on the window would open with ←/→/Space dead — one of the
+    /// two halves of the live bug.
+    @Test func theSheetsPresentationMakesTheWizardTheFirstResponder() {
+        let (popover, _) = makePopover()
+        let wizard = openWizard(popover)
+        guard let window = hostSheetInWindow(popover) else { return }
+        #expect(window.firstResponder === wizard,
+                "mounting the sheet's content claims first responder")
+        #expect(window.initialFirstResponder === wizard,
+                "…and a later key-window pass lands on the wizard, never a plate")
+        // The assignment above is not enough on its own: AppKit's become-key
+        // pass SKIPS an `initialFirstResponder` that declines the job (probed
+        // on a real sheet — the window kept it), which is how the live sheet
+        // opened with focus nowhere useful.
+        #expect(wizard?.acceptsFirstResponder == true,
+                "…and it only survives that pass because the view accepts")
+
+        // A render tears the plates out. Under Full Keyboard Access a clicked
+        // plate holds focus, and losing it drops the window back to itself —
+        // where an arrow keyDown dies. Every screen re-claims the keys.
+        wizard?.test_clickButton(titled: "Start")
+        window.makeFirstResponder(window)
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.togetherTitle)
+        #expect(window.firstResponder === wizard, "every render re-claims the keys")
     }
 
     @Test func wizardTearsDownWhenItsTargetIsDeselected() {

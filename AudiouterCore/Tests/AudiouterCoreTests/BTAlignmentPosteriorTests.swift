@@ -111,7 +111,7 @@ import Testing
         #expect(median <= 20, "median run length was \(median) answers")
     }
 
-    /// "They sound together" is EVIDENCE, not a shrug: the old constant-stimuli
+    /// "Both at once" is EVIDENCE, not a shrug: the old constant-stimuli
     /// design needed whole blocks because a staircase cannot use a
     /// non-monotonic answer. Repeated at one level it should pull the belief
     /// onto that level.

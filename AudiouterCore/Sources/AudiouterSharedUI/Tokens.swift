@@ -905,6 +905,120 @@ public enum Tokens {
                 return isDark ? .secondaryLabelColor : .labelColor
             }
         }
+
+        // MARK: Alignment-wizard stage instruments (wizard-stage v2 spec §2.1)
+        //
+        // Eight tokens for the BT-alignment wizard's stage plate — a FIXED
+        // dark instrument ground that never themes with the window (owner
+        // ruling 2026-08-23 #1). The six "instrument" tokens below
+        // (`stagePlate` through `fuseWhite`) pass the SAME hex for dark and
+        // light on purpose: the plate is a physical gauge face, not themed
+        // chrome, so it reads identically in both appearances (spec's "dark
+        // screen set into a light chassis" framing). `syncSignalDeep`/
+        // `partySignalDeep` are the opposite case — themed chrome companions
+        // that DO vary by appearance, used only where the identity hue must
+        // sit on the THEMED window ground (plate rim/keycap tint in light
+        // mode) rather than the fixed plate itself. None of these eight are
+        // accent-dial remapped (spec §2.2): the stage no longer borrows
+        // `gold`/`glow`, so the dial's remap cannot collide with "which
+        // speaker" identity.
+
+        /// The stage's instrument ground — the plate itself (spec §2.1).
+        /// Background token, no contrast floor (canvas precedent: an
+        /// instrument face is a surface, not a foreground object). Fixed
+        /// both appearances; in light mode this is deliberately a dark
+        /// screen set into a light chassis, per the spec's framing.
+        public static var stagePlate: NSColor {
+            warmDynamic(name: "stagePlate", dark: 0x100B07, darkHighContrast: 0x080604,
+                       light: 0x100B07, lightHighContrast: 0x080604)
+        }
+
+        /// Wire + ticks + dormant-state color on the plate (spec §2.1).
+        /// CONTRAST RATIONALE: measured 3.14:1 vs `stagePlate` (WCAG
+        /// relative luminance), clearing the spec's 3:1 non-text floor.
+        /// Fixed both appearances.
+        public static var stageRule: NSColor {
+            warmDynamic(name: "stageRule", dark: 0x6A5F50, darkHighContrast: 0x7A6E5C,
+                       light: 0x6A5F50, lightHighContrast: 0x7A6E5C)
+        }
+
+        /// The value stamp on the plate (spec §2.1). CONTRAST RATIONALE:
+        /// measured 16.19:1 vs `stagePlate`, clearing the spec's ≥16:1
+        /// floor. Fixed both appearances.
+        public static var stageInk: NSColor {
+            warmDynamic(name: "stageInk", dark: 0xEFE9DD, darkHighContrast: 0xFFFFFF,
+                       light: 0xEFE9DD, lightHighContrast: 0xFFFFFF)
+        }
+
+        /// Target light — the speaker being aligned (spec §2.1/§0 ruling 1:
+        /// the website's Sync Green, one owner-decided value in both
+        /// themes, 2026-08-12). Instrument (fixed): names WHICH speaker,
+        /// never state — "is it live" stays gold everywhere else in the
+        /// app. CONTRAST RATIONALE: measured 14.73:1 vs `stagePlate` (spec's
+        /// "~14:1"). Fixed both appearances.
+        public static var syncSignal: NSColor {
+            warmDynamic(name: "syncSignal", dark: 0x2BFF8F, darkHighContrast: 0x2BFF8F,
+                       light: 0x2BFF8F, lightHighContrast: 0x2BFF8F)
+        }
+
+        /// `syncSignal`'s THEMED CHROME companion — the target's plate
+        /// rim/keycap tint on the themed window ground in light mode, where
+        /// electric green measures only ≈1.3:1 on near-white (invisible).
+        /// Dark reuses the electric value at FULL strength (owner ruling
+        /// 2026-08-23, superseding spec §2.2's "dark = electric value at
+        /// 0.45 alpha over `raised`" — at 0.45 the rims measured olive and
+        /// mauve, 45% of the lights' chroma). CONTRAST
+        /// RATIONALE: light `#0B7A45` measured 4.74:1 vs `raised` / 5.22:1
+        /// vs `canvas`, clearing the spec's required ≥3:1 floor on both
+        /// light grounds; IC `#086237` deepens further.
+        public static var syncSignalDeep: NSColor {
+            warmDynamic(name: "syncSignalDeep", dark: 0x2BFF8F, darkHighContrast: 0x2BFF8F,
+                       light: 0x0B7A45, lightHighContrast: 0x086237)
+        }
+
+        /// Reference light — the speaker being compared against (spec
+        /// §2.1/§0 ruling 1: the website's Party Magenta). Instrument
+        /// (fixed): names WHICH speaker, never state. CONTRAST RATIONALE:
+        /// measured 9.71:1 vs `stagePlate` (spec's "~9:1"). Fixed both
+        /// appearances.
+        public static var partySignal: NSColor {
+            warmDynamic(name: "partySignal", dark: 0xFF90E9, darkHighContrast: 0xFF90E9,
+                       light: 0xFF90E9, lightHighContrast: 0xFF90E9)
+        }
+
+        /// `partySignal`'s themed chrome companion — "the magenta ramp's own
+        /// dark end" (spec §2.1), used the same way as `syncSignalDeep`.
+        /// CONTRAST RATIONALE: light `#752C68` measured 7.95:1 vs `raised` /
+        /// 8.75:1 vs `canvas`, clearing the spec's required ≥3:1 floor; IC
+        /// `#5E2354` deepens further.
+        public static var partySignalDeep: NSColor {
+            warmDynamic(name: "partySignalDeep", dark: 0xFF90E9, darkHighContrast: 0xFF90E9,
+                       light: 0x752C68, lightHighContrast: 0x5E2354)
+        }
+
+        /// The fused/locked hue — additive-fusion climax color, transient +
+        /// locked ring (spec §2.1/§2.2). CONTRAST RATIONALE: measured
+        /// 17.98:1 vs `stagePlate` (spec's "~18:1"). Fixed both appearances.
+        public static var fuseWhite: NSColor {
+            warmDynamic(name: "fuseWhite", dark: 0xFFF4E2, darkHighContrast: 0xFFF4E2,
+                       light: 0xFFF4E2, lightHighContrast: 0xFFF4E2)
+        }
+
+        /// Neutral plate / together-bar rim (spec §2.1) — fixes layout
+        /// finding F1 (`faderRim` measured 2.62:1 vs `raised`, under floor).
+        /// REQUIRED ≥3:1 vs BOTH `raised` and `canvas`, both appearances.
+        /// CONTRAST RATIONALE (measured, WCAG relative luminance): dark
+        /// `#7E7160` = 3.44:1 vs `raised` / 3.90:1 vs `canvas`; light
+        /// `#857868` = 3.77:1 vs `raised` / 4.15:1 vs `canvas` — the spec's
+        /// approximate hexes already clear the floor on both sides, so kept
+        /// verbatim (decision: tune the hex only on a miss, never lower a
+        /// floor). IC deepens further: dark `#8F8271` = 4.35:1 / 4.94:1;
+        /// light `#685C4C` = 5.72:1 / 6.29:1. Arbiter:
+        /// `AlignmentTokenContrastTests`.
+        public static var plateRim: NSColor {
+            warmDynamic(name: "plateRim", dark: 0x7E7160, darkHighContrast: 0x8F8271,
+                       light: 0x857868, lightHighContrast: 0x685C4C)
+        }
     }
 
     // MARK: - Type
@@ -988,6 +1102,11 @@ public enum Tokens {
         /// enough for the editable number to read as the focal control.
         public static var syncReadout: NSFont {
             .monospacedDigitSystemFont(ofSize: NSFont.smallSystemFontSize + 1, weight: .medium)
+        }
+        /// The alignment-wizard plate keycap glyph voice (wizard-stage v2
+        /// spec §3: "←"/"→"/"SPACE"/"⏎" chips on `AlignmentPlateButton`).
+        public static var keycap: NSFont {
+            .monospacedSystemFont(ofSize: 11, weight: .medium)
         }
     }
 

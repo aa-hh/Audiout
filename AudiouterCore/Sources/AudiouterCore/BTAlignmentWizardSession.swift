@@ -92,6 +92,12 @@ public final class BTAlignmentWizardSession {
     /// The credible half-width at which the tempo closes up.
     public static let fineTempoHalfWidthMs: Double = 250
 
+    /// The credible half-width at which the posterior proposes a result
+    /// (wizard-stage v2 spec §5 — the `threshold` rung's own boundary lives
+    /// here so the view never retypes it). Forwards `BTAlignmentPosterior`'s
+    /// internal `proposeHalfWidthMs`, single-owned there.
+    public static var proposeHalfWidthMs: Double { BTAlignmentPosterior.proposeHalfWidthMs }
+
     /// The floor a LATENCY result has to clear to be believable. Below it the
     /// run reports ``Screen/macIsLate`` and persists nothing; between it and 0
     /// the reading stands and accepting floors the stored value at 0. −4 ms is
@@ -103,6 +109,11 @@ public final class BTAlignmentWizardSession {
     /// than the Mac's own sync offset. The panel picks its kept-screen copy
     /// off it: the two runs write different things in different places.
     public var measuresLatency: Bool { invertsEstimate }
+
+    /// The values a result may take, in VALUE space — the stage's wire is a
+    /// window onto this range, so the view never has to guess how far the
+    /// interval could travel.
+    public var candidateRange: ClosedRange<Double> { candidateRangeMs }
 
     /// The value this run is measuring, at the moment it opened. For a
     /// Bluetooth target that is the device's MEASURED LATENCY; for the Mac's

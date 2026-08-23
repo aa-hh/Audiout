@@ -38,14 +38,9 @@ struct DeviceRowView: View {
     let device: DeviceState
     let session: any MacSessionProtocol
 
-    /// Which way the finger committed. SwiftUI has no equivalent of the
-    /// design's CSS `touch-action: pan-y` (doc:79), and a plain drag gesture
-    /// on a row inside a `ScrollView` wins arbitration outright and kills
-    /// vertical scrolling. Latching to one axis after 5 pt of slop, and
-    /// leaving vertical inert, gives the scroll view its pan back.
-    private enum DragAxis { case horizontal, vertical }
-
-    @State private var axis: DragAxis?        // nil until the gesture commits
+    /// doc:1826 — the row only reads as "dragging" once the finger has
+    /// committed horizontally (``HorizontalDragGesture``).
+    @State private var dragging = false
     @State private var dragStartVolume: Int?  // captured at commit — doc:1755-1765
     @State private var localVolume: Double?   // in-drag echo
     @State private var detents = WarmSignal.FaderDetents()  // the dial's clicks
@@ -258,15 +253,11 @@ struct DeviceRowView: View {
         selected && device.isAvailable && !isFailed && !isPending
     }
 
-    /// doc:1826 — the row only reads as "dragging" once the finger has
-    /// committed horizontally.
-    private var dragging: Bool { axis == .horizontal }
-
     /// Touch-down, before the gesture has decided what it is. It ends the
     /// moment the finger commits — a horizontal drag has its own tint, and a
     /// vertical one belongs to the ScrollView, not to this row. Never on a
     /// row a tap can't act on: a flash is a promise.
-    private var pressed: Bool { fingerDown && axis == nil && device.isAvailable }
+    private var pressed: Bool { fingerDown && !dragging && device.isAvailable }
 
     /// The unavailable row's dim, and the one thing it may touch: the halo.
     ///
@@ -402,7 +393,7 @@ struct DeviceRowView: View {
         .clipShape(RoundedRectangle(cornerRadius: WarmSignal.Radius.row, style: .continuous))
         .contentShape(Rectangle())
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { rowWidth = $0 }
-        .simultaneousGesture(dragGesture)
+        .gesture(HorizontalDragGesture { handle($0) })
         // The tap's tick, fired off the local echo so it lands with the finger
         // rather than a round trip later — and only on the echo being SET,
         // never on the snapshot clearing it. Then the rails, so the end of the
@@ -419,10 +410,10 @@ struct DeviceRowView: View {
         // so the tick rides the Mac's answer.
         .sensoryFeedback(.impact(weight: .light), trigger: device.isMuted)
         // An OVERLAY, and applied after the gesture on purpose: a `Button`
-        // inside `faderRow` would sit under `.simultaneousGesture`, which
-        // means both fire — every mute tap would also stop the speaker. Out
-        // here the button is not in the gesture's subtree, so it takes its own
-        // taps and nothing else sees them. It is also outside ``combined``,
+        // inside `faderRow` would sit in the drag recognizer's own view
+        // subtree, which means both fire — every mute tap would also stop the
+        // speaker. Out here the button is not in that subtree, so it takes its
+        // own taps and nothing else sees them. It is also outside ``combined``,
         // which is what keeps it reachable as its own VoiceOver element.
         .overlay(alignment: .trailing) { muteControl }
     }
@@ -666,8 +657,8 @@ struct DeviceRowView: View {
     /// A row the rule won't let you adjust must say why — so the reason rides
     /// on the hint. The volume gesture does NOT: VoiceOver announces an
     /// adjustable element's own swipe, and the touch path this row offers a
-    /// sighted user is horizontal (``dragGesture``), so any wording here is
-    /// either a duplicate or a lie to one of the two audiences.
+    /// sighted user is horizontal (``HorizontalDragGesture``), so any wording
+    /// here is either a duplicate or a lie to one of the two audiences.
     private var hint: String {
         // A hint that promises an action the tap will refuse is worse than no
         // hint, so under a group target it carries the reason instead.
@@ -683,60 +674,65 @@ struct DeviceRowView: View {
 
     // MARK: - Gesture
 
-    /// doc:1730-1794. `.simultaneousGesture` plus the axis latch, so the
-    /// enclosing `ScrollView` keeps its own pan and this row only takes over
-    /// once the finger has committed horizontally.
-    private var dragGesture: some Gesture {
-        DragGesture(minimumDistance: 0)
-            .onChanged { value in
-                // Touch-down. `minimumDistance: 0` means this first tick
-                // arrives with no translation at all, which is exactly the
-                // moment the pressed state is for — and taking it from the
-                // gesture that is already here leaves the arbitration with
-                // the ScrollView untouched. Assigned once rather than on
-                // every tick: `@State` invalidates on assignment, not on
-                // change, and the ticks keep coming for the whole scroll.
-                if !fingerDown { fingerDown = true }
-                let w = value.translation.width, h = value.translation.height
-                if axis == nil {
-                    // 5 pt slop (doc:1739, doc:1773), then commit to one axis for
-                    // the rest of the gesture. Vertical commits are inert so the
-                    // enclosing ScrollView keeps the pan.
-                    guard max(abs(w), abs(h)) >= 5 else { return }
-                    axis = abs(w) > abs(h) ? .horizontal : .vertical
-                    if axis == .horizontal {
-                        dragStartVolume = device.volume
-                        detents.begin(at: device.volume)
-                        // The coach promised this gesture, so a row that can't
-                        // answer it has to say why rather than swallow it. At
-                        // the latch, which is the moment the drag became a
-                        // volume drag — once per gesture, and before the finger
-                        // has travelled far enough to expect a number to move.
-                        if !controlsEnabled { refuseAdjustment() }
-                    }
-                }
-                guard axis == .horizontal, controlsEnabled, let start = dragStartVolume else { return }
-                let v = WarmSignal.faderValue(start: start, translationWidth: w, trackWidth: rowWidth)
-                localVolume = Double(v)
-                detents.advance(to: v)
-                session.setDeviceVolume(id: device.id, volume: v, isFinal: false)
-            }
-            .onEnded { _ in
-                defer { axis = nil; dragStartVolume = nil; fingerDown = false }
-                switch axis {
-                case .horizontal:
-                    guard controlsEnabled else { return }
-                    session.setDeviceVolume(id: device.id,
-                                            volume: Int((localVolume ?? Double(device.volume)).rounded()),
-                                            isFinal: true)
-                    localVolume = nil                    // clear on release, unlike MainOutRow
-                    SpeakerCoach.learned(.drag)          // a drag that actually set a level
-                case .vertical:
-                    return                               // the ScrollView handled it
-                case nil:
-                    tapped()                             // doc:1792
-                }
-            }
+    /// One phase of ``HorizontalDragGesture``: the row's whole touch path.
+    /// The gesture has already decided that a vertical pan belongs to the
+    /// enclosing `ScrollView` — anything arriving here is either the fader,
+    /// the tap, or the finger going away again.
+    private func handle(_ phase: HorizontalDragGesture.Phase) {
+        switch phase {
+        case .down:
+            // The pressed flash, before anything else can answer: the arm
+            // write round-trips to the Mac and the drag needs 5 pt before it
+            // means anything, so without this the row's first response to
+            // being touched is nothing at all.
+            fingerDown = true
+
+        case .began(let width):
+            dragging = true
+            dragStartVolume = device.volume
+            detents.begin(at: device.volume)
+            // The coach promised this gesture, so a row that can't answer it
+            // has to say why rather than swallow it. At the latch, which is
+            // the moment the drag became a volume drag — once per gesture,
+            // and before the finger has travelled far enough to expect a
+            // number to move.
+            if !controlsEnabled { refuseAdjustment() }
+            track(width)
+
+        case .changed(let width):
+            track(width)
+
+        case .ended:
+            defer { reset() }
+            guard controlsEnabled else { return }
+            session.setDeviceVolume(id: device.id,
+                                    volume: Int((localVolume ?? Double(device.volume)).rounded()),
+                                    isFinal: true)
+            localVolume = nil                    // clear on release, unlike MainOutRow
+            SpeakerCoach.learned(.drag)          // a drag that actually set a level
+
+        case .tapped:
+            reset()
+            tapped()                             // doc:1792
+
+        case .cancelled:
+            reset()                              // the ScrollView has it now
+        }
+    }
+
+    /// One tick of the fader — doc:1755-1765.
+    private func track(_ width: CGFloat) {
+        guard controlsEnabled, let start = dragStartVolume else { return }
+        let v = WarmSignal.faderValue(start: start, translationWidth: width, trackWidth: rowWidth)
+        localVolume = Double(v)
+        detents.advance(to: v)
+        session.setDeviceVolume(id: device.id, volume: v, isFinal: false)
+    }
+
+    private func reset() {
+        dragging = false
+        dragStartVolume = nil
+        fingerDown = false
     }
 
     /// What the row says when the level gesture lands somewhere it can't act.

@@ -263,6 +263,14 @@ public struct AppSettings {
         defaults.object(forKey: Keys.syncOffsetMs) != nil
     }
 
+    /// Delete the stored sync offset, returning this Mac to never-tuned
+    /// (roadmap 056: the drawer's "Reset alignment"). Removing the key rather
+    /// than writing 0 is what ``isSyncOffsetSet`` reads, so a stored 0 would
+    /// leave the row reading "0 ms" instead of "Not set".
+    public func clearSyncOffset() {
+        defaults.removeObject(forKey: Keys.syncOffsetMs)
+    }
+
     /// Whether the one-surface panel is PINNED (an ordinary movable window)
     /// rather than the transient menu-bar bubble. Written by the surface's Pin
     /// button, restored when the surface is constructed — the manner survives

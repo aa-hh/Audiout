@@ -8370,6 +8370,12 @@ public protocol BTOutputControlling: AnyObject {
     /// device deliberately tuned to exactly 0.0 ms is tuned, and must not
     /// read "Not set".
     func btHasSyncTrim(forDevice id: String) -> Bool
+    /// Delete this device's stored alignment — its measured latency AND its
+    /// trim — and put the live sink back on unaligned scheduling (roadmap 056:
+    /// the drawer's "Reset alignment"). The entries are REMOVED, never written
+    /// as 0: ``btHasSyncTrim(forDevice:)`` answers by existence, so a stored 0
+    /// would leave the row reading "0 ms" rather than "Not set".
+    func resetBTAlignment(forDevice id: String)
     /// Start/stop the align-by-ear tick in the captured feed (auto-limits to
     /// ~30 s of ticks on its own).
     func setBTAlignTickActive(_ active: Bool)
@@ -8510,6 +8516,28 @@ extension NativeBackend: BTOutputControlling {
 
     public func btHasSyncTrim(forDevice id: String) -> Bool {
         btTrimLock.withLock { btTrimsByUID[id] != nil }
+    }
+
+    public func resetBTAlignment(forDevice id: String) {
+        btTrimLock.withLock {
+            btLatencyMsByUID.removeValue(forKey: id)
+            btTrimsByUID.removeValue(forKey: id)
+        }
+        // ONE read-modify-write of the file for both maps — and a genuine
+        // delete, which `save`/`saveLatencies` (whole-map overwrites) could
+        // only express by round-tripping the maps back out again.
+        try? btTrimStore?.clearAlignment(deviceUID: id)
+        // The reference floor is a function of the slowest KNOWN latency, so
+        // dropping one can move it — same ordering as the wizard's Keep: the
+        // reference first, then the sink's own two terms, both hops enqueued
+        // from `stateQueue` so `captureControlQueue` replays them in order.
+        stateQueue.async {
+            self.updateBTReferenceBufferLocked()
+            self.captureControlQueue.async { [weak self] in
+                self?.btSink?.setOffsetMs(0, forDeviceUID: id)
+                self?.btSink?.setTrimMs(0, forDeviceUID: id)
+            }
+        }
     }
 
     public func setBTAlignTickActive(_ active: Bool) {

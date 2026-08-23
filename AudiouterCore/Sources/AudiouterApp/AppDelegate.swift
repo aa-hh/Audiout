@@ -538,6 +538,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             (self?.backend as? BTOutputControlling)?.btUsableTrimRangeMs(forDevice: deviceID)
                 ?? (-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
         }
+        // Roadmap 056: the drawer's "Reset alignment" — delete the stored
+        // measurement AND nudge, and re-push the live sink.
+        popoverController.onResetBTAlignment = { [weak self] deviceID in
+            (self?.backend as? BTOutputControlling)?.resetBTAlignment(forDevice: deviceID)
+        }
         popoverController.onAlignTickActiveChange = { [weak self] active in
             (self?.backend as? BTOutputControlling)?.setBTAlignTickActive(active)
         }
@@ -598,6 +603,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.onSetLocalTrim = { [weak self] ms in
             guard let self else { return }
             self.settings.syncOffsetMs = Int(ms)
+            (self.backend as? LocalSyncOffsetControlling)?.noteLocalSyncOffsetChanged()
+        }
+        popoverController.onResetLocalTrim = { [weak self] in
+            guard let self else { return }
+            // Cleared, not zeroed — `isSyncOffsetSet` reads the key's existence.
+            self.settings.clearSyncOffset()
             (self.backend as? LocalSyncOffsetControlling)?.noteLocalSyncOffsetChanged()
         }
         popoverController.onLocalTrimPreview = { [weak self] ms in

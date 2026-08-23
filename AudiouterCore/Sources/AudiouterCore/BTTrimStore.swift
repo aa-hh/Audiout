@@ -128,6 +128,18 @@ public struct BTTrimStore: Sendable {
         try write(envelope)
     }
 
+    /// Delete BOTH of a device's alignment entries — its measured latency and
+    /// its trim — in one read-modify-write (roadmap 056: the drawer's "Reset
+    /// alignment"). Deleting rather than saving 0 is the whole point: "tuned"
+    /// is decided by whether an entry EXISTS, so a stored 0 would leave the row
+    /// reading "0 ms" forever instead of returning it to "Not set".
+    public func clearAlignment(deviceUID: String) throws {
+        var envelope = existingEnvelope()
+        envelope.trims.removeValue(forKey: deviceUID)
+        envelope.latencyMs?.removeValue(forKey: deviceUID)
+        try write(envelope)
+    }
+
     /// Device UIDs whose first-mix intercept was dismissed ("Not now" — final).
     public func loadDismissedUIDs() throws -> Set<String> {
         Set((try loadEnvelope())?.alignmentPromptDismissed ?? [])

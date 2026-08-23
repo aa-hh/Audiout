@@ -19,6 +19,7 @@ import AppKit
         var localPreviews: [Double] = []
         var localEnds: [Double?] = []
         var btSets: [(ms: Double, id: String)] = []
+        var localResets = 0
     }
 
     private func local() -> Device {
@@ -62,6 +63,10 @@ import AppKit
         popover.onSetLocalTrim = { ms in
             settings.syncOffsetMs = Int(ms)
             recorder.localSets.append(ms)
+        }
+        popover.onResetLocalTrim = {
+            settings.clearSyncOffset()
+            recorder.localResets += 1
         }
         popover.onLocalTrimPreview = { recorder.localPreviews.append($0) }
         popover.onLocalTrimEndPreview = { recorder.localEnds.append($0) }
@@ -139,6 +144,34 @@ import AppKit
         popover.test_deviceRow(for: "mac")?.test_fireSyncChipClick()
         #expect(popover.test_syncDrawer?.test_usableRangeMs
                 == -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
+    }
+
+    // MARK: Reset alignment on the Mac's own row (roadmap 056)
+
+    @Test func resetClearsTheStoredOffsetAndPutsTheRowBackOnNotSet() {
+        let isolation = TestIsolation(owner: "PopoverLocalSyncTrimTests")
+        let (popover, recorder, settings) = makePopover(isolation, syncOffsetMs: -12)
+
+        popover.test_deviceRow(for: "mac")?.test_fireSyncChipClick()
+        let drawer = popover.test_syncDrawer
+        #expect(drawer?.test_resetVisible == true, "a tuned Mac has something to clear")
+
+        drawer?.test_fireResetClick()
+        #expect(recorder.localResets == 1)
+        #expect(!settings.isSyncOffsetSet, "the entry is DELETED, not written as 0")
+        #expect(settings.syncOffsetMs == 0, "…and an unset offset resolves to 0")
+        #expect(recorder.localSets.isEmpty, "a reset is never a committed trim")
+        // Visible immediately, without waiting for a backend push.
+        let row = popover.test_deviceRow(for: "mac")
+        #expect(row?.test_syncChipTitle == "Not set")
+        #expect(row?.test_syncChipIsDashed == true)
+    }
+
+    @Test func resetIsNotOfferedOnAMacThatWasNeverTuned() {
+        let isolation = TestIsolation(owner: "PopoverLocalSyncTrimTests")
+        let (popover, _, _) = makePopover(isolation)
+        popover.test_deviceRow(for: "mac")?.test_fireSyncChipClick()
+        #expect(popover.test_syncDrawer?.test_resetVisible == false)
     }
 
     // MARK: The wizard on a local target

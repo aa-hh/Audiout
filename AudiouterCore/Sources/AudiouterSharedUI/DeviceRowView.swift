@@ -1739,11 +1739,18 @@ public final class DeviceRowView: NSView {
     ///   secondary, transient affordance.
     private func updateSyncChip() {
         let engaged = syncDrawerExpanded
-        let title = syncTrimIsSet ? Self.syncChipTrimText(syncTrimMs) : "Not set"
+        let measuredMs = shownMeasuredLatencyMs
+        let title: String
+        if let measuredMs {
+            title = Self.syncChipMeasuredText(measuredMs)
+        } else {
+            title = syncTrimIsSet ? Self.syncChipTrimText(syncTrimMs) : "Not set"
+        }
+        let showsValue = measuredMs != nil || syncTrimIsSet
         let color: NSColor
         if engaged {
             color = Tokens.Color.engagedChrome
-        } else if syncTrimIsSet {
+        } else if showsValue {
             color = Tokens.Color.label
         } else {
             color = Tokens.Color.tertiaryLabel
@@ -1757,7 +1764,7 @@ public final class DeviceRowView: NSView {
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 8, weight: .semibold))
         syncChipButton.contentTintColor = color
         syncChipCell.isEngaged = engaged
-        syncChipCell.isUntuned = !syncTrimIsSet
+        syncChipCell.isUntuned = !showsValue
         // The tooltip is where the DIRECTION lives: the chip is too narrow for
         // D7's "later"/"earlier" phrasing, and a bare signed number is exactly
         // the ambiguity D7 warns about — so hover (and VoiceOver, below) spell
@@ -1773,10 +1780,38 @@ public final class DeviceRowView: NSView {
         let measured = syncMeasuredLatencyMs.map {
             " Measured latency: \(Int($0.rounded())) ms."
         } ?? ""
-        syncChipButton.toolTip = device.isLocalDevice
-            ? "\(syncChipHelp) \(Self.localSyncHelpCopy)"
-            : syncChipHelp + measured
+        if let measuredMs {
+            // The chip is SHOWING the measurement, so the tooltip leads with
+            // what that number is — the correction the alignment run found —
+            // then says the nudge rides on top of it and where to undo it.
+            syncChipButton.toolTip =
+                "Measured latency: \(Int(measuredMs.rounded())) ms — the alignment measured for this speaker. "
+                + "The sync nudge sits on top of it. Click to adjust it, or to reset the alignment."
+        } else {
+            syncChipButton.toolTip = device.isLocalDevice
+                ? "\(syncChipHelp) \(Self.localSyncHelpCopy)"
+                : syncChipHelp + measured
+        }
         syncChipButton.setNeedsDisplay(syncChipButton.bounds)
+    }
+
+    /// The MEASURED alignment this chip is standing in for, or `nil` when it
+    /// shows the trim (or "Not set") instead. The measurement takes the chip
+    /// only while the user's nudge is ZERO: a nudge of 0 used to render a false
+    /// "0 ms" over a correction of hundreds of milliseconds, which reads as
+    /// "nothing is set" (live finding). A non-zero nudge is the value the user
+    /// last chose, so it keeps the chip exactly as before.
+    private var shownMeasuredLatencyMs: Double? {
+        guard let measured = syncMeasuredLatencyMs,
+              Int(BTSyncTrim.quantise(syncTrimMs)) == 0
+        else { return nil }
+        return measured
+    }
+
+    /// The chip's compact MEASURED text: whole milliseconds, bare numeric —
+    /// the same shape as the trim's, minus the sign a latency never carries.
+    private static func syncChipMeasuredText(_ ms: Double) -> String {
+        "\(Int(ms.rounded())) ms"
     }
 
     /// The chip's compact value text: whole milliseconds (decimals were cut —
@@ -2807,10 +2842,18 @@ public final class DeviceRowView: NSView {
         // performs instead of leaving it a silent visual change.
         if showsSyncControls {
             syncChipButton.setAccessibilityLabel("Sync offset for \(device.name)")
-            syncChipButton.setAccessibilityValue(
-                syncTrimIsSet
-                    ? BTSyncTrim.spokenOffset(syncTrimMs)
-                    : "not set")
+            // A chip showing the MEASURED alignment must speak that, not the
+            // zero nudge underneath it — "in sync" over a 429 ms correction is
+            // the same lie the visible "0 ms" was.
+            if let measuredMs = shownMeasuredLatencyMs {
+                syncChipButton.setAccessibilityValue(
+                    "measured alignment, \(Int(measuredMs.rounded())) milliseconds")
+            } else {
+                syncChipButton.setAccessibilityValue(
+                    syncTrimIsSet
+                        ? BTSyncTrim.spokenOffset(syncTrimMs)
+                        : "not set")
+            }
             syncChipButton.setAccessibilityExpanded(syncDrawerExpanded)
         }
         slider.setAccessibilityRole(.slider)

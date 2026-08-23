@@ -80,7 +80,9 @@ run_remote() {
     esac
 
     rrc=0
-    remote_run "$repo_root" "cd AudiouterCore && swift test $rargs $*" || rrc=$?
+    # remote_quote, not a bare `$*`: the remote shell re-parses this string, and
+    # an unquoted `--filter A|B` would become a pipeline there.
+    remote_run "$repo_root" "cd AudiouterCore && swift test $rargs$(remote_quote "$@")" || rrc=$?
     if [ "$rrc" -eq 2 ]; then
         # "Ran, but failed" — re-run locally rather than trusting the verdict. A
         # machine on a different Swift/SDK must never be what REFUSES a commit:

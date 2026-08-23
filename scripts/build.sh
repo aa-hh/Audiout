@@ -42,7 +42,9 @@ build_flags="--build-system native"
 if [ "${AUDIOUTER_BUILD_LOCAL:-0}" != "1" ] && remote_wins; then
     echo "  build: sending to remote $remote_host ..." >&2
     rrc=0
-    remote_run "$repo_root" "cd \"$package\" && swift build $build_flags $*" || rrc=$?
+    # remote_quote, not a bare `$*`: the remote shell re-parses this string, so
+    # caller flags must arrive quoted (see remote.sh).
+    remote_run "$repo_root" "cd \"$package\" && swift build $build_flags$(remote_quote "$@")" || rrc=$?
     if [ "$rrc" -eq 0 ]; then
         echo "  build: compiled clean on remote $remote_host." >&2
         exit 0

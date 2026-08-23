@@ -125,6 +125,22 @@ remote_sweep_orphans() {
         2>/dev/null || true
 }
 
+# Print each argument single-quoted for the remote shell, space-separated with
+# a LEADING space, so a caller can append the result straight onto a command
+# string: "swift test $rargs$(remote_quote "$@")".
+#
+# The command string remote_run sends is parsed by the remote shell exactly
+# once, so one layer of quoting is what survives. Without it a
+# `--filter "AboutSectionTests|TelemetryTests"` reached the remote as a
+# PIPELINE — `swift test ... --filter AboutSectionTests | TelemetryTests` — and
+# the missing command's exit status reported as "ran remotely and FAILED", which
+# then cost a full local re-run on code that was never broken.
+remote_quote() {
+    for _a; do
+        printf " '%s'" "$(printf '%s' "$_a" | sed "s/'/'\\\\''/g")"
+    done
+}
+
 # Run a command in the synced tree on the remote.
 #   remote_run <repo_root> <shell command string>
 # Sets $remote_status to the command's own exit code when it ACTUALLY RAN.

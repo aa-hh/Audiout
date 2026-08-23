@@ -177,6 +177,7 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
         // System Settings (or anything else) took the front: the yield did its
         // job, and the NEXT activation is a real return.
         isYieldingToSettings = false
+        contentVC.appDidResignActive()
     }
 
     @objc private func appDidBecomeActive() {
@@ -209,7 +210,7 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
         // Returning to the app (e.g. back from System Settings) is exactly when a
         // permission the user just changed should be re-read — so the rows reflect
         // reality instead of a stale "Requested".
-        contentVC.refreshStatuses()
+        contentVC.appDidBecomeActive()
     }
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }

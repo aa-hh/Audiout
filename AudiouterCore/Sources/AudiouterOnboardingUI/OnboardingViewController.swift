@@ -107,6 +107,19 @@ public final class OnboardingViewController: NSViewController {
     /// the real click started (`test_pressRow`) instead of re-implementing it.
     private var allowTask: Task<Void, Never>?
 
+    /// The step whose Allow sent the user to System Settings or Login Items —
+    /// armed on the trip out, cleared once the step completes or a genuine
+    /// return re-reads status and finds nothing changed. Drives the waiting
+    /// spinner through a round-trip `allowInFlight` doesn't cover.
+    private var settingsTripStep: SetupStep?
+    /// Set once the app has actually lost the front while a Settings trip is
+    /// armed — the signal that the trip really left, as opposed to the app's
+    /// own catching-up activation (see `appDidBecomeActive`).
+    private var settingsTripDeparted = false
+    /// The re-read this waiting Settings trip is awaiting, so a headless walk
+    /// can wait for exactly what a real return starts (`test_awaitSettingsReturn`).
+    private var settingsReturnTask: Task<Void, Never>?
+
     /// Set by a failed Done verification: the step to snap back to. It overrides
     /// the flow model's own active step, which is anchored to where this
     /// presentation STARTED and so can't reach back to a step that was fine
@@ -434,6 +447,31 @@ public final class OnboardingViewController: NSViewController {
         Task { @MainActor in await model.refreshStatuses() }
     }
 
+    /// The window controller's half of a Settings-trip wait: the app losing
+    /// the front is the only honest signal the trip really left (mirrors
+    /// `OnboardingWindowController.isYieldingToSettings`).
+    public func appDidResignActive() {
+        if settingsTripStep != nil { settingsTripDeparted = true }
+    }
+
+    /// Called on every app reactivation. A genuine return from an armed
+    /// Settings trip awaits one status re-read and clears the wait whatever
+    /// it finds — "we looked; nothing changed" stops the spinner honestly.
+    /// Otherwise this is just the ordinary catching-up activation, so it does
+    /// the plain silent re-read as before.
+    public func appDidBecomeActive() {
+        if settingsTripDeparted {
+            settingsReturnTask = Task { @MainActor in
+                await model.refreshStatuses()
+                settingsTripStep = nil
+                settingsTripDeparted = false
+                refresh(animated: false)
+            }
+        } else {
+            refreshStatuses()
+        }
+    }
+
     /// Poll the silent Accessibility read every ~1.5 s until it's granted, so a
     /// toggle flipped in System Settings lands on the row even without a re-focus.
     private func startRemoteControlPoll() {
@@ -612,6 +650,13 @@ public final class OnboardingViewController: NSViewController {
         if !newlyCompleted.isEmpty { browseStep = nil }
         if let browsed = browseStep, !flow.isComplete(browsed) { browseStep = nil }
 
+        // A Settings/Login Items trip's wait ends the instant its step
+        // completes — the grant landed, so there is nothing left to wait for.
+        if let settingsTripStep, flow.isComplete(settingsTripStep) {
+            self.settingsTripStep = nil
+            settingsTripDeparted = false
+        }
+
         let active = displayedActiveStep
         for step in SetupFlowModel.steps {
             rows[step]?.apply(state(for: step, active: active),
@@ -623,6 +668,7 @@ public final class OnboardingViewController: NSViewController {
                               isLive: step == active,
                               isBrowseSelected: step == browseStep,
                               isBroken: isBroken(step),
+                              isWaiting: step == active && isAwaitingOutcome(step),
                               animated: shouldAnimate)
         }
         runFinalCheckIfReady()
@@ -766,6 +812,16 @@ public final class OnboardingViewController: NSViewController {
     private func isPrompting(_ step: SetupStep) -> Bool {
         if allowInFlight == step { return true }
         return step == .bluetooth && model.isPrimingBluetooth
+    }
+
+    /// Whether this row's ask is unresolved and the spine should show the
+    /// waiting spinner: a prompt in flight, Local Network's verifying tail
+    /// (which `promptInFlightStep` deliberately excludes, but the row still
+    /// hasn't heard back), or an armed Settings/Login Items trip.
+    private func isAwaitingOutcome(_ step: SetupStep) -> Bool {
+        if isPrompting(step) { return true }
+        if step == .localNetwork, model.localNetworkPhase != .idle { return true }
+        return settingsTripStep == step
     }
 
     /// Whether this step's own permission is PROVABLY refused. Only three steps
@@ -1497,7 +1553,14 @@ public final class OnboardingViewController: NSViewController {
             // dialog, so take the front again — unless the surface that ask
             // raised may still be up (``shouldReturnToFront(after:)``).
             if shouldReturnToFront(after: step) { returnToFront() }
+            // Remote Control's first ask fires its alert here rather than
+            // opening a destination — the alert is up and unresolved until a
+            // poll or a return re-read finds Accessibility trusted.
+            if step == .remoteControl, model.remoteControlStatus != .granted {
+                settingsTripStep = step
+            }
         case .settingsPane, .loginItems:
+            settingsTripStep = step
             openDestination(result.destination)
         }
     }
@@ -1522,6 +1585,7 @@ public final class OnboardingViewController: NSViewController {
     /// there is no prompt left to fire, and nothing here re-asks.
     private func settingsLinkTapped(_ step: SetupStep) {
         guard step == .localNetwork || isStuck(step) else { return }
+        settingsTripStep = step
         openDestination(SetupFlowModel.settingsDestination(for: step))
     }
 
@@ -1578,6 +1642,14 @@ public final class OnboardingViewController: NSViewController {
 
     /// Whether a row is drawing the broken-permission treatment.
     public func test_rowIsBroken(_ step: SetupStep) -> Bool { _ = view; return rows[step]?.test_isBroken ?? false }
+
+    /// Whether a row is drawing the waiting spinner.
+    public func test_rowIsWaiting(_ step: SetupStep) -> Bool { _ = view; return rows[step]?.test_isWaiting ?? false }
+
+    /// Await whatever a genuine return from an armed Settings trip started —
+    /// the seam a headless walk needs since that re-read runs off the app's
+    /// own reactivation notification, not off a click.
+    public func test_awaitSettingsReturn() async { await settingsReturnTask?.value }
 
     /// A row's leading edge bar fill, or nil when it draws none — the live
     /// row's is EMBER, gold being reserved for the one button to press.

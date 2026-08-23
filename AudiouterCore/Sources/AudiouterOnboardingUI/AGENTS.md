@@ -174,6 +174,20 @@ gate/motion/demo/selection rules change.
   `dynamicBlend(_:fraction:of:)`: blending a dynamic token in place flattens it
   to whichever appearance happened to be current, which is exactly the 1.13:1
   dark rim the critique measured on the old active card.
+  - The same trailing slot ALSO shows a small `NSProgressIndicator` (the
+    `SetupCheckRowView` spinner's own config) while the active row's ask is
+    unresolved: a prompt still in flight, Local Network's phase not idle, or a
+    Settings/Login Items trip this window sent the user on and hasn't yet
+    resolved by a grant landing or a genuine return's status re-read. It
+    outranks every other marker for the slot ONLY — the stored broken flag,
+    surface tint, and red edge bar are untouched, since the user just acted on
+    that broken state. VoiceOver's label carries ", waiting" (checked before
+    the broken suffix). The clear is gated on losing the front first
+    (`appDidResignActive` → `appDidBecomeActive`), because the window
+    controller's reactivation refresh also fires on the app's own
+    catching-up activation right after the deep link — without that gate the
+    spinner would blink out the instant the trip fired, not when the user
+    actually comes back.
 - **THE WHOLE ROW IS THE PRESS TARGET, and the row has no sub-controls at all**
   (this SUPERSEDES the "whole ACTIVE card is the click target" rule, which had to
   keep Allow/Skip hit-testing above the card by construction — the spine has no

@@ -120,8 +120,11 @@ is installing Homebrew and running a build script, which they will never do.
 
 - One-time vs one-time-plus-optional-subscription?
 - Exact price point in the $25–35 band?
-- Do we ship an in-app soft trial at all, or lean entirely on "free from source,
-  paid binary"?
+- ~~Do we ship an in-app soft trial at all, or lean entirely on "free from
+  source, paid binary"?~~ **Decided 2026-08-23: no trial at launch — not even
+  a soft one.** Buying is the only route to the built app; the public source
+  is the only free route. Revisit only if sales disappoint. The website copy
+  was swept the same day (no trial promise anywhere).
 - Setapp as a second channel, yes/no?
 
 ## Sources

@@ -48,9 +48,9 @@ type**, matching the Mac's Speakers-by-type overview:
 
 | Section header | Contents |
 |---|---|
-| `AIRPLAY` | every device whose `kind` is an AirPlay kind (not bluetooth/cast), incl. `isLocalDevice` "This Mac" |
-| `BLUETOOTH` | `kind == "bluetooth"` |
-| `CAST` | `kind == "cast"` |
+| `AirPlay` | every device whose `kind` is an AirPlay kind (not bluetooth/cast), incl. `isLocalDevice` "This Mac" |
+| `Bluetooth` | `kind == "bluetooth"` |
+| `Cast` | `kind == "cast"` |
 
 - A section is drawn only if it has ≥1 device (a pure-AirPlay home sees one
   section, no headers competing for space). Within a section: available
@@ -59,8 +59,8 @@ type**, matching the Mac's Speakers-by-type overview:
   Speakers tab, which stays cut by state.
 - **Row:** the device's `iconSymbolName` glyph in a small halo (reuse the
   Speakers halo vocabulary at rest — no level arc here), `name`, a
-  right-side availability word in the micro-label voice (`READY` /
-  `UNAVAILABLE`), a `SHAPED` micro-label when EQ is non-flat, and a
+  right-side availability word in the micro-label voice (`Ready` /
+  `Unavailable`), a `Shaped` micro-label when EQ is non-flat, and a
   disclosure chevron. A pinned device shows a small filled star before the
   name. Tap → push `DeviceDetailView`.
 - No faders here. Volume/mute stay on the Speakers tab (Live audio is
@@ -128,19 +128,19 @@ Out tone…", presenting the same Tone card for the whole mix
 ```
 ┌──────────────────────────────────────────────┐
 │           [ Devices | Groups ]            +  │  ← segmented; + hidden here
-│ AIRPLAY ──────────────────────────────────── │
-│ ★ (◦) Kitchen HomePod          READY      ›  │
-│   (◦) Living Room Sonos   SHAPED READY    ›  │
-│   (◦) Bedroom HomePod          READY      ›  │
-│   (◦) Apple TV                 READY      ›  │
-│   (◦) This Mac                 READY      ›  │
-│   (◦) Hallway AirPlay          UNAVAILABLE ›  │
-│ BLUETOOTH ─────────────────────────────────  │
-│   (◦) Office Speaker           READY      ›  │
-│ CAST ────────────────────────────────────── │
-│   (◦) Downstairs        GROUP  READY      ›  │
-│   (◦) Study Nest Mini          READY      ›  │
-│   (◦) Kitchen Nest Hub         UNAVAILABLE ›  │
+│ AirPlay ──────────────────────────────────── │
+│ ★ (◦) Kitchen HomePod          Ready      ›  │
+│   (◦) Living Room Sonos   Shaped Ready    ›  │
+│   (◦) Bedroom HomePod          Ready      ›  │
+│   (◦) Apple TV                 Ready      ›  │
+│   (◦) This Mac                 Ready      ›  │
+│   (◦) Hallway AirPlay          Unavailable ›  │
+│ Bluetooth ─────────────────────────────────  │
+│   (◦) Office Speaker           Ready      ›  │
+│ Cast ────────────────────────────────────── │
+│   (◦) Downstairs        Group  Ready      ›  │
+│   (◦) Study Nest Mini          Ready      ›  │
+│   (◦) Kitchen Nest Hub         Unavailable ›  │
 └──────────────────────────────────────────────┘
 ```
 
@@ -168,7 +168,7 @@ Out tone…", presenting the same Tone card for the whole mix
 │ ───────────────────────────────────────────  │
 │  Pin to Favourites                     ( ●)  │
 │ ───────────────────────────────────────────  │
-│ ╭─ TONE ───────────────────────── Reset ──╮  │
+│ ╭─ Tone ───────────────────────── Reset ──╮  │
 │ │ Bass      ───────●────────        +4 dB  │  │
 │ │ Treble    ────●───────────        −2 dB  │  │
 │ │ Balance  L──────●─────────R          0   │  │
@@ -176,10 +176,10 @@ Out tone…", presenting the same Tone card for the whole mix
 │ ╰──────────────────────────────────────────╯  │
 │  Also shaped with 10 bands on the Mac.       │
 │ ───────────────────────────────────────────  │
-│  IN GROUPS                                   │
+│  In groups                                   │
 │  Living Room, Whole Floor                    │
 │ ───────────────────────────────────────────  │
-│  ABOUT                                       │
+│  About                                       │
 │  Shaped, so it won't sound identical to the  │
 │  other speakers in a group.                  │
 └──────────────────────────────────────────────┘
@@ -193,11 +193,11 @@ Out tone…", presenting the same Tone card for the whole mix
 │ ───────────────────────────────────────────  │
 │  Pin to Favourites                     ( )   │
 │ ───────────────────────────────────────────  │
-│ ╭─ TONE ───────────────────────── Reset ──╮  │
+│ ╭─ Tone ───────────────────────── Reset ──╮  │
 │ │ … same four controls …                   │  │
 │ ╰──────────────────────────────────────────╯  │
-│  IN GROUPS   In no groups                     │
-│  ABOUT  A Google Cast group. Its members are  │
+│  In groups   In no groups                     │
+│  About  A Google Cast group. Its members are  │
 │         set up in the Google Home app.        │
 ```
 
@@ -206,7 +206,7 @@ Out tone…", presenting the same Tone card for the whole mix
 | Need | Field / command | Already there? |
 |---|---|---|
 | Tone card | `DeviceState.eq {bassDB,trebleDB,balance,loudness,bandsAreFlat}`, `Snapshot.mainOutEQ`, `setDeviceEQ(id:eq:committed:)`, `setMainOutEQ(eq:committed:)` | **New** (simple tier only; phone never writes a band) |
-| `SHAPED` mark, Tone | `bandsAreFlat` (part of `eq`) | via `eq` |
+| `Shaped` mark, Tone | `bandsAreFlat` (part of `eq`) | via `eq` |
 | Cast "Group of n" | `DeviceState.memberCount: Int?` | **New** |
 | Cast delay line | `DeviceState.outputDelayMs: Int?` | **New** |
 | "In groups" | `GroupState.memberIDs` | **Present — free** |
@@ -238,9 +238,13 @@ and Main Out. Mac work is snapshot-builder mapping + two dispatcher cases.
   the star is folded into the row value ("Favourite"), not a lone element;
   the segmented control announces the selected segment; Tone sliders are
   adjustable with dB values from the same source the label draws.
-- **Voice:** section headers and `READY`/`UNAVAILABLE`/`SHAPED`/`GROUP` are
-  the UPPERCASE micro-label; every sentence a user reads (type sub-label,
-  status, About) is sentence case — the app's own words.
+- **Voice: One Case (sentence case), the live iOS rule** (DESIGN.md, PR #36 /
+  roadmap 059 — the all-caps monospaced micro-voice was retired). Every
+  string is authored sentence case and never transformed: section headers
+  read "AirPlay", state words read "Ready"/"Unavailable"/"Shaped"/"Group",
+  slot headers read "Tone"/"In groups"/"About". Set `.textCase(nil)` on List
+  sections so iOS does not auto-uppercase them. Numeric readouts use tabular
+  digits (`.monospacedDigit()`), never a monospaced face.
 - **Reduce Motion:** the push and segment switch honour it (no custom
   transitions beyond the system's).
 
@@ -251,7 +255,7 @@ and Main Out. Mac work is snapshot-builder mapping + two dispatcher cases.
 | Tab shell swap + segmented control + re-host GroupsView | none | 1 |
 | Devices segment (sections by type, rows, empty state) | none | 1.5 |
 | `DeviceDetailView` identity + pin + "In groups" + About | none | 1.5 |
-| Tone card + EQ protocol both sides + `SHAPED` mark + Main Out tone menu item | yes | 2.5 |
+| Tone card + EQ protocol both sides + `Shaped` mark + Main Out tone menu item | yes | 2.5 |
 | Cast identity (memberCount, outputDelayMs) | yes (gated on 006) | 0.5 |
 | VoiceOver + Dynamic Type + phone live pass | — | 1 |
 

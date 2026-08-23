@@ -16,6 +16,14 @@ anti-goals where it says so. This is what gets scoped and built on
 
 ## Decided
 
+> **Voice note (corrected 2026-08-23):** iOS uses the **One Case** rule —
+> sentence case, never all-caps, no monospaced face (DESIGN.md, PR #36 /
+> roadmap 059). The ALL-CAPS chip and state names written below (`ALL`,
+> `FAVOURITES`, `STARTING…`, etc.) are **notation only**; the real glyphs are
+> sentence case: `All · Favourites · AirPlay · Bluetooth · Cast`, `Starting…`,
+> `Playing`/`Ready`/`Unavailable`. Slice 1 shipped this way.
+
+
 ### Speakers tab
 - Sections stay by state: **PLAYING · READY · UNAVAILABLE** (collapsed with count). Playing speakers and their mute stay at the top, always.
 - **Chip row directly under PLAYING**, scrolls with the list:

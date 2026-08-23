@@ -4,13 +4,13 @@
      AirPlayEngine/docs/ptp-helper-design.md §2.2/§2.4). scripts/make-app.sh
      substitutes the placeholder token below (BUNDLE underscore ID, doubled
      underscores each side) with the app's actual BUNDLE_ID (default
-     com.audiouter.Audiouter) before copying into
+     com.audiout.Audiout) before copying into
      Contents/Library/LaunchDaemons/ — the filename there MUST equal Label +
      ".plist" (SMAppService.daemon(plistName:) resolves the plist by that
      exact name). Label/AssociatedBundleIdentifiers are BUNDLE_ID-derived (not
      hardcoded) so a side-by-side dev build under a distinct BUNDLE_ID gets its
      own independently-registerable daemon identity rather than colliding with
-     another Audiouter copy's already-claimed "com.audiouter.Audiouter.ptphelper"
+     another Audiout copy's already-claimed "com.audiout.Audiout.ptphelper"
      label (2026-07-24 live-testing bug — two copies silently fought over one
      daemon identity, and the loser's register() silently no-op'd instead of
      throwing). The MachServices/EnvironmentVariables tokens below are
@@ -26,7 +26,7 @@
      starts on demand, the first time the app actually connects to it — no
      always-on root process for a feature the user may never invoke this
      session. EnvironmentVariables hands the helper that same service name
-     (AUDIOUTER_PTP_MACH_SERVICE) so it knows which name to check in on; unset
+     (AUDIOUT_PTP_MACH_SERVICE) so it knows which name to check in on; unset
      (dev path, run outside launchd) means no check-in at all. -->
 <plist version="1.0">
 <dict>
@@ -50,7 +50,7 @@
 
     <key>EnvironmentVariables</key>
     <dict>
-        <key>AUDIOUTER_PTP_MACH_SERVICE</key>
+        <key>AUDIOUT_PTP_MACH_SERVICE</key>
         <string>__BUNDLE_ID__.ptphelper</string>
     </dict>
 

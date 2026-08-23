@@ -12,7 +12,7 @@ Work is on branch `claude/rail-animation-bugs-89dd1a` in THIS worktree, on top o
 current UNCOMMITTED changes. Read the current state of the files, not `main`.
 
 ## The problem (why we're refactoring)
-`BusRailOverlayView` (AudiouterCore/Sources/AudiouterSharedUI/BusRailOverlayView.swift)
+`BusRailOverlayView` (AudioutCore/Sources/AudioutSharedUI/BusRailOverlayView.swift)
 INFERS when to fire the connect pulse by diffing an "energize signature" between
 consecutive `draw(_:)` passes: `reconcileEnergize`, `connectPulseFires`,
 `energizeSignature`, `EnergySignature`, `lastEnergy`, `lastMemberYs`. The signature

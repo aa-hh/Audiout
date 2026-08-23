@@ -1,4 +1,4 @@
-// PLAN-AIRPLAY-COEXISTENCE.md T7 — yield-back verification: when an Audiouter
+// PLAN-AIRPLAY-COEXISTENCE.md T7 — yield-back verification: when an Audiout
 // session ends, do our PTP peers really go away, so the on-demand helper's
 // idle-exit fires and UDP 319/320 come back to macOS?
 //
@@ -90,7 +90,7 @@ final class PTPYieldBackTests {
     /// daemon forgets it anyway, and the running helper still idle-exits.
     @Test func forgottenPeerAgesOutAndHelperStillIdleExitsWithoutExplicitRemoval() throws {
         guard let binary = ptpHelperBinaryURL else {
-            Issue.record("ptp-helper binary not found next to the test bundle; set AUDIOUTER_PTP_HELPER_BINARY to point at it")
+            Issue.record("ptp-helper binary not found next to the test bundle; set AUDIOUT_PTP_HELPER_BINARY to point at it")
             return
         }
 

@@ -1,4 +1,4 @@
-# Audiouter — Product Spec & Feasibility Plan
+# Audiout — Product Spec & Feasibility Plan
 
 *Draft v0.1 — 2026-07-09. Based on our interview. Everything here is up for revision.*
 
@@ -500,8 +500,8 @@ trailing control, a device-selector dropdown as THE routing control.
 
    Owning types: `AppRoutingController` (model/persistence logic, sibling of
    `GroupController`) and `AppRouteStore` (versioned-JSON persistence,
-   `app-routes.json`) — see `AudiouterCore/AGENTS.md` Key Types.
-   `AppRowView` / `AddApplicationRowView` (`AudiouterSharedUI`) render
+   `app-routes.json`) — see `AudioutCore/AGENTS.md` Key Types.
+   `AppRowView` / `AddApplicationRowView` (`AudioutSharedUI`) render
    the rows; `PopoverController` wires the card and the running-app picker.
 
 **Rules:**

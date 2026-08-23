@@ -5,7 +5,7 @@
 > panel is the default chrome in every bundled build. For the current state see
 > [`docs/plans/PLAN-UI-CONSISTENCY-PUNCHLIST.md`](../PLAN-UI-CONSISTENCY-PUNCHLIST.md).
 
-Audiouter is a menu-bar-only (`.accessory`) app: no Dock icon, no main menu,
+Audiout is a menu-bar-only (`.accessory`) app: no Dock icon, no main menu,
 no `Cmd+Tab` safety net. Every window it owns has to be recoverable through
 the status item alone, or it strands the user. This audit traces every
 surface (popover, Groups window, Settings window, onboarding window, and the
@@ -15,9 +15,9 @@ Space/fullscreen and multi-display behavior, and quit/relaunch state.
 ## Method
 
 Read (not run, except where noted):
-- `AGENTS.md` (repo root), `AudiouterCore/AGENTS.md`, and the AGENTS.md in
-  `AudiouterApp`, `AudiouterPopoverUI`, `AudiouterSettingsUI`,
-  `AudiouterSharedUI`, `AudiouterWindowUI`.
+- `AGENTS.md` (repo root), `AudioutCore/AGENTS.md`, and the AGENTS.md in
+  `AudioutApp`, `AudioutPopoverUI`, `AudioutSettingsUI`,
+  `AudioutSharedUI`, `AudioutWindowUI`.
 - Full source of `AppDelegate.swift`, `StatusItemController.swift`,
   `ControlPanelWindowController.swift`, `ControlPanelBackingView.swift`,
   `OnboardingWindowController.swift`, `OnboardingViewController.swift`
@@ -66,7 +66,7 @@ menu-bar icon does **not** bring it back — it only opens the little dropdown.
 Since this app has no Dock icon and no menu bar of its own, there is no other
 obvious way to find that window again.
 
-**Evidence:** `AudiouterCore/Sources/AudiouterApp/AppDelegate.swift:195-211`
+**Evidence:** `AudioutCore/Sources/AudioutApp/AppDelegate.swift:195-211`
 — the status item's click handler:
 ```swift
 statusItemController.onButtonClicked = { [weak self] button in
@@ -87,8 +87,8 @@ It only special-cases the onboarding window and the (flag-gated,
 off-by-default — see C2) control-panel shell. `mixerWindowController` and
 `settingsWindowController` are never consulted here, so in the shipping
 default the click always just toggles the popover. Neither
-`MixerWindowController` (`AudiouterCore/Sources/AudiouterWindowUI/MixerWindowController.swift`)
-nor `SettingsWindowController` (`AudiouterCore/Sources/AudiouterSettingsUI/SettingsWindowController.swift`)
+`MixerWindowController` (`AudioutCore/Sources/AudioutWindowUI/MixerWindowController.swift`)
+nor `SettingsWindowController` (`AudioutCore/Sources/AudioutSettingsUI/SettingsWindowController.swift`)
 implements any re-front-on-reactivate logic the way `OnboardingWindowController`
 does (`OnboardingWindowController.swift:76-83`, `appDidBecomeActive`).
 
@@ -117,7 +117,7 @@ built (and merged to `main`) that was specifically designed to solve the
 the packaging script turns it on. So the paid release ships with the old,
 broken behavior even though the fix already exists in the codebase.
 
-**Evidence:** `AudiouterCore/Sources/AudiouterApp/AppDelegate.swift:139-143`:
+**Evidence:** `AudioutCore/Sources/AudioutApp/AppDelegate.swift:139-143`:
 ```swift
 /// Control-panel prototype (design review 2026-07-18): route Groups through a
 /// sticky floating `NSPanel` anchored under the menu-bar item instead of a
@@ -148,7 +148,7 @@ it at all. The only way to truly dismiss it — as opposed to it just hiding
 behind another app and popping back later — is to press the Escape key,
 which nobody discovers by looking at the screen.
 
-**Evidence:** `AudiouterCore/Sources/AudiouterSharedUI/ControlPanelWindowController.swift:100-102`:
+**Evidence:** `AudioutCore/Sources/AudioutSharedUI/ControlPanelWindowController.swift:100-102`:
 ```swift
 panel.titlebarAppearsTransparent = true
 panel.titleVisibility = .hidden
@@ -196,7 +196,7 @@ reopen it will make macOS switch the whole screen away from what they were
 doing, back to wherever that window last lived. That's a jarring, unexpected
 interruption for what should be a quick glance at a menu-bar utility.
 
-**Evidence:** `grep -rn "collectionBehavior\|canJoinAllSpaces\|moveToActiveSpace" AudiouterCore/Sources`
+**Evidence:** `grep -rn "collectionBehavior\|canJoinAllSpaces\|moveToActiveSpace" AudioutCore/Sources`
 returns zero hits across the entire app. Every window/panel — the reused
 singleton `MixerWindowController`/`SettingsWindowController` windows
 (`MixerWindowController.swift:178-187`, `SettingsWindowController.swift:95-98`),
@@ -237,7 +237,7 @@ practice it always opens centered at the same fixed size on every relaunch.
 The code that looks like it saves your window placement doesn't actually do
 anything.
 
-**Evidence:** `AudiouterCore/Sources/AudiouterWindowUI/MixerWindowController.swift:177-187`
+**Evidence:** `AudioutCore/Sources/AudioutWindowUI/MixerWindowController.swift:177-187`
 (`makeContainer()`) calls `window.setFrameAutosaveName("MixerWindow")` —
 which, per `NSWindow` semantics, immediately applies any previously-saved
 frame for that name if one exists. But the caller, `init()` at
@@ -279,10 +279,10 @@ the foreground while that permission hasn't been confirmed granted yet — so
 a user who leaves the setup window open and switches around could hear that
 "known beep" replay unexpectedly, with no button-click to explain it.
 
-**Evidence:** `AudiouterCore/Sources/AudiouterCore/AudioCapturePermissionProbe.swift:100-119` —
+**Evidence:** `AudioutCore/Sources/AudioutCore/AudioCapturePermissionProbe.swift:100-119` —
 `CoreAudioTonePermissionProbe.probe()` unconditionally starts an audible
 `TonePlayer` every time it's called; there is no "silent" or "verify-only"
-mode. `AudiouterCore/Sources/AudiouterCore/SetupModel.swift:286-300`
+mode. `AudioutCore/Sources/AudioutCore/SetupModel.swift:286-300`
 (`refreshStatuses()`) calls this exact same `audioProbe.probe()` — the
 method's own doc comment says "do it SILENTLY (no `isProbingAudio` spinner)"
 (line 295-296), but that only suppresses the UI spinner; the underlying
@@ -297,7 +297,7 @@ state that would keep re-triggering this.
 (`OnboardingWindowController.swift:76-83`), which fires on **every**
 `NSApplication.didBecomeActiveNotification` while the setup window is open
 — not just returning from a permission prompt, but any ordinary app-switch
-back to Audiouter.
+back to Audiout.
 
 [confirm-in-G1] — needs a live check of how often this genuinely re-fires
 in practice (in particular whether audio TCC gets stuck the way Accessibility
@@ -351,7 +351,7 @@ all. Harmless today, but it's an unfinished corner.
 `window.isRestorable = false`. `MixerWindowController` and
 `SettingsWindowController` never touch `isRestorable`, and
 `grep -rn "applicationSupportsSecureRestorableState"` across
-`AudiouterCore/Sources` returns nothing — `AppDelegate` never overrides it,
+`AudioutCore/Sources` returns nothing — `AppDelegate` never overrides it,
 so it defaults to `false` (state restoration effectively inert) on modern
 macOS. The net behavioral risk is low, but the inconsistency (one window
 opting out explicitly, others not deciding) reads as unfinished rather than
@@ -379,7 +379,7 @@ old note could reintroduce the reverted behavior.
 // `.floating` to keep it recoverable after a permission prompt stole focus,
 // but floating means always-on-top over EVERY other app...
 ```
-and `AudiouterCore/Sources/AudiouterApp/AGENTS.md:103-110` documents the
+and `AudioutCore/Sources/AudioutApp/AGENTS.md:103-110` documents the
 reversion explicitly. The AGENTS.md is authoritative and correct; the
 `dev/notes/` brief was never updated after the reversion.
 

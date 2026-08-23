@@ -6,10 +6,10 @@ tip `0c8f77d`, identical to `main`).
 
 ## A. End-state overview
 
-Audiouter gains an **always-on, structured, bounded, agent-readable decision log**: a
-Foundation-only `Telemetry` facility in `AudiouterCore` that appends one JSON object per
+Audiout gains an **always-on, structured, bounded, agent-readable decision log**: a
+Foundation-only `Telemetry` facility in `AudioutCore` that appends one JSON object per
 line to a stable file under the user's `~/Library/` (no Full Disk Access needed to read
-it — the app is not sandboxed, confirmed: `scripts/Audiouter.entitlements` has no
+it — the app is not sandboxed, confirmed: `scripts/Audiout.entitlements` has no
 `com.apple.security.app-sandbox` key). The four subsystems that have actually produced
 "only-reproduces-live, no evidence to read afterward" bugs are instrumented at their real
 decision points: **permission/TCC gate checks and reported-vs-actual divergence**
@@ -44,11 +44,11 @@ downside stated too. None should be decided silently.
   beforehand, which is exactly what you can't do. This is the whole reason for the ask.
 
 **Q2 — Where does the file live?**
-- **`~/Library/Logs/Audiouter/telemetry.jsonl` (recommended).** Upside: the standard macOS
+- **`~/Library/Logs/Audiout/telemetry.jsonl` (recommended).** Upside: the standard macOS
   place for app logs, easy to find in Finder (Go ▸ Library ▸ Logs), and an agent reads it
   directly with no special permission. Downside: it's a different folder from the app's
-  other data (`~/Library/Application Support/Audiouter/`), so there are two app folders.
-- Alongside existing data at `~/Library/Application Support/Audiouter/` (reuses the proven
+  other data (`~/Library/Application Support/Audiout/`), so there are two app folders.
+- Alongside existing data at `~/Library/Application Support/Audiout/` (reuses the proven
   `GroupStore` base-dir pattern, `GroupStore.swift:73`). Upside: everything in one folder.
   Downside: less discoverable as "logs"; mixes debug logs with real user data.
   Either is equally agent-readable (neither needs Full Disk Access).
@@ -107,7 +107,7 @@ downside stated too. None should be decided silently.
 ## C. Task list
 
 Proposed shared API contract (executor may refine names; fixing it here de-risks the
-parallel fan-out). Foundation-only, in `AudiouterCore`:
+parallel fan-out). Foundation-only, in `AudioutCore`:
 
 ```
 public enum Telemetry {
@@ -143,7 +143,7 @@ Concrete examples the executor should be able to produce:
 ---
 
 ### T1 — Telemetry core (the logger)
-- **files:** NEW `AudiouterCore/Sources/AudiouterCore/Telemetry.swift`
+- **files:** NEW `AudioutCore/Sources/AudioutCore/Telemetry.swift`
 - **what:** Implement the always-on structured JSON-lines writer per the API above.
   Generalize the proven `AudioDiag` shape (`AudioDiag.swift`: static facade, off-thread
   serial `DispatchQueue`, `isEnabled` fast-path) but always-on, structured, size-bounded
@@ -165,7 +165,7 @@ Concrete examples the executor should be able to produce:
   no file at the production path.
 
 ### T2 — Whole-system capture instrumentation
-- **files:** `AudiouterCore/Sources/AudiouterCore/NativeCaptureCoordinator.swift` (single
+- **files:** `AudioutCore/Sources/AudioutCore/NativeCaptureCoordinator.swift` (single
   choke point `transition(to:)` at line **563**; also `handleDeviceChange()`,
   `updateRouting(...)` exclusion changes, `pendingDeviceChange` coalescing ~line **118**,
   and its own gate check at line **841**); tests in `NativeCaptureCoordinatorTests.swift`.
@@ -185,7 +185,7 @@ Concrete examples the executor should be able to produce:
   `captureWS transition` lines.
 
 ### T3 — Per-app capture instrumentation
-- **files:** `AudiouterCore/Sources/AudiouterCore/PerAppCaptureCoordinator.swift` (State
+- **files:** `AudioutCore/Sources/AudioutCore/PerAppCaptureCoordinator.swift` (State
   transitions ~line **79**; nominal-sample-rate listener → rebuild at line **955-972**,
   upgrading the existing `AudioDiag.log` at line **959**; pending-coalesce ~line **371**;
   gate check at line **745**); tests in `PerAppCaptureCoordinatorTests.swift`.
@@ -203,7 +203,7 @@ Concrete examples the executor should be able to produce:
   a simulated rate change emits a `capturePA rate_rebuild` line with old/new rate.
 
 ### T4 — AirPlay bind/rebind/session-reset + device-selection instrumentation
-- **files:** `AudiouterCore/Sources/AudiouterCore/NativeBackend.swift` (`setOutputSet` at
+- **files:** `AudioutCore/Sources/AudioutCore/NativeBackend.swift` (`setOutputSet` at
   line **1096** — added/removed/`desiredOn` diff; converge outcomes; recapture→session reset
   `resetAirPlaySessionForRoutedApp` ~line **1464**; `rebindRecoveryGen` generation bump +
   attempt number + backoff + success/give-up, lines **450-456, 1475-1533**;
@@ -226,11 +226,11 @@ Concrete examples the executor should be able to produce:
   session reset emits `airplay rebind` lines with monotonic `gen` and incrementing `attempt`.
 
 ### T5 — Permission/TCC divergence instrumentation (the motivating bug)
-- **files:** `AudiouterCore/Sources/AudiouterCore/SetupModel.swift` (reported-vs-actual
+- **files:** `AudioutCore/Sources/AudioutCore/SetupModel.swift` (reported-vs-actual
   reconciliation at lines **380** and **546**, where `audioProbe.currentStatusSilently()`
-  is compared to stored `audioStatus`); `AudiouterCore/Sources/AudiouterCore/AudioCapturePermissionProbe.swift`
+  is compared to stored `audioStatus`); `AudioutCore/Sources/AudioutCore/AudioCapturePermissionProbe.swift`
   (probe outcome in `probe()` ~line **122** and `currentStatusSilently()` ~line **215**);
-  `AudiouterCore/Sources/AudiouterApp/AppDelegate.swift` (onboarding gate at line **399**);
+  `AudioutCore/Sources/AudioutApp/AppDelegate.swift` (onboarding gate at line **399**);
   tests in `SetupModelTests.swift`.
 - **what:** Emit `permission` events capturing the exact "UI says granted while the
   authoritative gate says not" discrepancy: log both the reported status and the silent
@@ -251,7 +251,7 @@ Concrete examples the executor should be able to produce:
   Developer-ID build): reproduce the setup flow and confirm the divergence line appears.
 
 ### T6 — Telemetry core tests
-- **files:** NEW `AudiouterCore/Tests/AudiouterCoreTests/TelemetryTests.swift` (subclass
+- **files:** NEW `AudioutCore/Tests/AudioutCoreTests/TelemetryTests.swift` (subclass
   `IsolatedTestCase`, use `scratchDir`).
 - **what:** Assert: valid JSON per line + required fields (ts/sid/cat/evt); size-bound +
   rotation keeps newest and never exceeds the cap; `HeadlessRuntime`-neutralization writes
@@ -268,7 +268,7 @@ Concrete examples the executor should be able to produce:
   to confirm no cross-suite file race.
 
 ### T7 — Docs: AGENTS.md registry + reader note
-- **files:** `AudiouterCore/AGENTS.md` (add one Map row for `Telemetry`; add one Rule
+- **files:** `AudioutCore/AGENTS.md` (add one Map row for `Telemetry`; add one Rule
   invariant); OPTIONAL NEW `dev/notes/telemetry-how-to-read.md` (one short page: file path,
   line schema, example greps for a future debugging agent).
 - **what:** Register the new `Telemetry` type in the Map and state the load-bearing
@@ -298,7 +298,7 @@ new file; T7 is `AGENTS.md`. The only shared dependency is the T1 API surface.
 - **Wave 2 (fully concurrent — no shared files):** **T2, T3, T4, T5, T6, T7** in parallel.
   - T2 ↔ NativeCaptureCoordinator.swift, T3 ↔ PerAppCaptureCoordinator.swift,
     T4 ↔ NativeBackend.swift, T5 ↔ SetupModel/AudioCapturePermissionProbe/AppDelegate,
-    T6 ↔ TelemetryTests.swift (new), T7 ↔ AudiouterCore/AGENTS.md. Disjoint sets → safe to
+    T6 ↔ TelemetryTests.swift (new), T7 ↔ AudioutCore/AGENTS.md. Disjoint sets → safe to
     run at once.
 - **Wave 3 (barrier):** combined build + full `swift test --parallel` on the merged tree
   (Guard 4 gate). Not a coding task — the integration check after the parallel batch
@@ -343,12 +343,12 @@ out **T2–T7** as concurrent agents; finish with the Wave-3 combined `swift tes
   (T1) or the existing suite would start writing/rotating real files and racing under
   `swift test --parallel`. This is the single most important test-hygiene requirement and is
   explicitly verified by T6. Guard 4 runs the full `--parallel` suite at commit.
-- **Docs/registry:** `AudiouterCore/AGENTS.md` Map gains one `Telemetry` row + one Rule (T7);
+- **Docs/registry:** `AudioutCore/AGENTS.md` Map gains one `Telemetry` row + one Rule (T7);
   Guard 2 verifies the symbol, so docs and code ride the same merge. Optional
   `dev/notes/telemetry-how-to-read.md` for future debugging agents. This plan lives at
   `docs/plans/PLAN-TELEMETRY-SYSTEM.md`.
 - **Not touched:** `AirPlayEngine` (separate licensing-boundary package — do NOT add
-  `AudiouterCore.Telemetry` there; its own `os_log` stays); `ConnectionDiagnostics`
+  `AudioutCore.Telemetry` there; its own `os_log` stays); `ConnectionDiagnostics`
   (OwnTone-only post-hoc classifier, superseded backend); `AudioDiag` (left as-is per Q7);
   `os.Logger` in `DACPServer` (coexists).
 

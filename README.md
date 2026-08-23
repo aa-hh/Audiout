@@ -1,4 +1,4 @@
-# Audiouter
+# Audiout
 
 A native AppKit macOS app for sending system audio to several AirPlay 2
 speakers at once — per-device volume, mute, saved groups, per-app routing,
@@ -58,7 +58,7 @@ Every line should print `OK`. If one prints `MISSING`, run `brew install
 ## Getting started
 
 ```bash
-cd AudiouterCore
+cd AudioutCore
 swift test --build-system native   # run the core test suite against the mock backend
 ```
 

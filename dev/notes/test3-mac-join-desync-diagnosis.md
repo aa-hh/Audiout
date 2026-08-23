@@ -1,6 +1,6 @@
 # Test 3 — "Mac joins last into an AirPlay group" desync: defect diagnosis
 
-Build: worktree `foreman-roadmap-c1a0f5` @ `202dc4e4` ("Audiouter Bayes v1").
+Build: worktree `foreman-roadmap-c1a0f5` @ `202dc4e4` ("Audiout Bayes v1").
 Evidence: `test3-session-telemetry.jsonl`, 1223 lines, 2026-08-22T23:55Z → 2026-08-23T00:19Z.
 All file:line refs are that worktree.
 
@@ -202,7 +202,7 @@ on that receiver. This is why repeated fiddling makes it worse, not better.
 
 **Primary — confirmed-by-evidence.**
 
-> `AudiouterCore/Sources/AudiouterCore/NativeCaptureCoordinator.swift:792` —
+> `AudioutCore/Sources/AudioutCore/NativeCaptureCoordinator.swift:792` —
 > `setSyncedLocalSink(_:renderProcessPID:)` forces
 > `recreateTap(cause: .exclusionChange)` on every Mac join/leave. The resulting
 > ~200 ms capture hole starves the vendored sender, whose presentation timeline is

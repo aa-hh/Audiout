@@ -22,9 +22,9 @@ regression there could otherwise be misattributed to this branch's new changes.
 ## Prerequisites (once per session)
 
 1. **Check for a stale build in another worktree first** — PTP native audio uses
-   exclusive ports 319/320; only ONE `Audiouter.app` can live-test at a time.
+   exclusive ports 319/320; only ONE `Audiout.app` can live-test at a time.
    ```
-   find .claude/worktrees -name Audiouter.app
+   find .claude/worktrees -name Audiout.app
    ```
    If another one is running (menu-bar icon near the clock), quit it before continuing.
    Also check `/Applications` for an installed copy and quit it too.
@@ -33,7 +33,7 @@ regression there could otherwise be misattributed to this branch's new changes.
    that's `/Applications/Xcode-beta.app/Contents/Developer` — that's correct, not a bug.
 3. **Build + launch this worktree's app:**
    ```
-   cd "/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/audio-routing-consolidation-92be71" && scripts/make-app.sh ./build && open ./build/Audiouter.app
+   cd "/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/audio-routing-consolidation-92be71" && scripts/make-app.sh ./build && open ./build/Audiout.app
    ```
    Always launch via `open`, **never** a raw shell/Terminal command — a shell-launched
    binary inherits the *terminal's* TCC grants instead of getting its own, which makes
@@ -44,12 +44,12 @@ regression there could otherwise be misattributed to this branch's new changes.
    Privacy). If a toggle looks "on" but doesn't work, that's cdhash-pinning (see Test 4
    below, which specifically exercises this) — remove (−) and re-grant, don't just toggle.
 5. **Telemetry file** (used throughout this checklist):
-   `~/Library/Logs/Audiouter/telemetry.jsonl` (rotates to `.1` at 5 MB). Always-on, JSONL,
+   `~/Library/Logs/Audiout/telemetry.jsonl` (rotates to `.1` at 5 MB). Always-on, JSONL,
    one object per line with `ts`/`sid`/`cat`/`evt` plus event-specific fields. Shared
-   across every Audiouter build on this Mac, not per-worktree — filter by time or `sid`
+   across every Audiout build on this Mac, not per-worktree — filter by time or `sid`
    if another build ran recently. A fresh line to confirm it's writing:
    ```
-   tail -5 ~/Library/Logs/Audiouter/telemetry.jsonl
+   tail -5 ~/Library/Logs/Audiout/telemetry.jsonl
    ```
 
 ## Test 0 — Re-verify prior, still-unverified work (do this FIRST)
@@ -60,11 +60,11 @@ it regressed before testing anything new:
 1. **Per-app pitch/judder + storm-guard** (`196e5b7`, `d415381` — memory-leak-live-testing
    session): redirect Music (or another native app) to an AirPlay speaker, let it play
    30+ seconds. **PASS:** correct pitch/speed, no cutoff, no judder.
-2. **Silent-redirect-at-launch recovery** (`22a25f7`): quit Audiouter with an app already
+2. **Silent-redirect-at-launch recovery** (`22a25f7`): quit Audiout with an app already
    redirected to an AirPlay device, relaunch. **PASS:** the redirect re-establishes itself
    within ~1s of the device being discovered, without you having to re-pick it. Confirm via:
    ```
-   grep '"evt":"app_route_rebind_on_discovery"' ~/Library/Logs/Audiouter/telemetry.jsonl | tail -5
+   grep '"evt":"app_route_rebind_on_discovery"' ~/Library/Logs/Audiout/telemetry.jsonl | tail -5
    ```
 3. **Per-app state-machine attribution** (T-DIAG, `7cc0f18`, this branch): this is the fix
    for the 25-minute "phantom idle" mystery in `PLAN-LIVE-TEST-HANDOFF-2026-07-25.md` — it
@@ -73,10 +73,10 @@ it regressed before testing anything new:
    popover (arms the metering coordinator) while an app is redirected (arms the routing
    coordinator) and confirm the two are now distinguishable:
    ```
-   grep '"cat":"capturePA"' ~/Library/Logs/Audiouter/telemetry.jsonl | tail -20
+   grep '"cat":"capturePA"' ~/Library/Logs/Audiout/telemetry.jsonl | tail -20
    ```
    **PASS:** every line has a `"coordinator"` field, either `AirPlayController` (routing)
-   or `AudiouterMeter` (metering) — confirms the fix that resolved the mystery is live and
+   or `AudioutMeter` (metering) — confirms the fix that resolved the mystery is live and
    working, not just unit-tested.
 4. **Firefox/Chrome per-app routing leak** (Wave 3 of the memory-leak audit, still Wave-4
    "combined verify" pending): redirect Firefox or Chrome (NOT Safari — known XPC scope
@@ -100,7 +100,7 @@ multiple listeners firing on the same real-world event.
    **PASS:** all audio survives the renegotiation (no dropout beyond a brief expected
    blip), and exactly ONE rebuild fires per tap, not a storm:
    ```
-   grep -E '"cat":"(captureWS|capturePA)".*"evt":"(rate_changed_rebuild_triggered|rate_rebuild)"' ~/Library/Logs/Audiouter/telemetry.jsonl | tail -20
+   grep -E '"cat":"(captureWS|capturePA)".*"evt":"(rate_changed_rebuild_triggered|rate_rebuild)"' ~/Library/Logs/Audiout/telemetry.jsonl | tail -20
    ```
    A single real change should produce one `rate_changed_rebuild_triggered` (whole-system)
    and/or one `rate_rebuild` (per-app) per tap that was actually running — not a repeated
@@ -109,14 +109,14 @@ multiple listeners firing on the same real-world event.
    routed to "Play on this Mac" and playing, plug/unplug a Bluetooth or USB output device.
    **PASS:** audio follows the new default output, and exactly one repoint is logged:
    ```
-   grep '"cat":"localPlayback".*"evt":"output_device_pinned"' ~/Library/Logs/Audiouter/telemetry.jsonl | tail -10
+   grep '"cat":"localPlayback".*"evt":"output_device_pinned"' ~/Library/Logs/Audiout/telemetry.jsonl | tail -10
    ```
 3. **No-op check** (confirms the compare-before-rebuild guard, not just the rebuild path):
    trigger a duplicate/no-change notification if you can (e.g. toggle the same device
    selection off then immediately back on) and confirm a `rate_notification_no_op` or
    `rate_notification_skipped` line appears instead of a real rebuild:
    ```
-   grep -E '"evt":"(rate_notification_no_op|rate_notification_skipped)"' ~/Library/Logs/Audiouter/telemetry.jsonl | tail -10
+   grep -E '"evt":"(rate_notification_no_op|rate_notification_skipped)"' ~/Library/Logs/Audiout/telemetry.jsonl | tail -10
    ```
 
 ## Test 2 — Per-app clock/format correctness (T3: cached clock-offset + format guard)
@@ -146,7 +146,7 @@ the device never joined (architecture review defect B).
 4. Repeat steps 2–3 once more (twice total each direction, per the task's requirement).
 5. Confirm each transition actually rebound the stream rather than silently no-op'ing:
    ```
-   grep '"evt":"engine_scope_rebind"' ~/Library/Logs/Audiouter/telemetry.jsonl | tail -10
+   grep '"evt":"engine_scope_rebind"' ~/Library/Logs/Audiout/telemetry.jsonl | tail -10
    ```
    **PASS:** one `engine_scope_rebind` line (with `"from"` != `"to"`) per real scope
    change above — a same-stream request (no scope change) should NOT produce one.
@@ -154,7 +154,7 @@ the device never joined (architecture review defect B).
    connect/disconnect of an unrelated AirPlay device with no scope games involved.
    **PASS:** normal connect time and audio, no regression:
    ```
-   grep -E '"evt":"(engine_bind|engine_rebind)"' ~/Library/Logs/Audiouter/telemetry.jsonl | tail -10
+   grep -E '"evt":"(engine_bind|engine_rebind)"' ~/Library/Logs/Audiout/telemetry.jsonl | tail -10
    ```
 
 **Known, accepted residual risks (not fixed by T7, nothing to fail here on)** — flag if
@@ -179,12 +179,12 @@ one recorded at the last PROVEN grant.
    scripts/make-app.sh ./build
    ```
    (ad-hoc signing produces a new cdhash on every build, even with no source changes).
-3. Quit the old instance, `open ./build/Audiouter.app` the freshly rebuilt one.
+3. Quit the old instance, `open ./build/Audiout.app` the freshly rebuilt one.
 4. **PASS:** the probe actually RE-RUNS (you should hear/see the functional tone-probe
    check happen again, not a silent fast `.granted` pass-through) and correctly reports
    the true state:
    ```
-   grep '"evt":"probe_verdict"' ~/Library/Logs/Audiouter/telemetry.jsonl | tail -10
+   grep '"evt":"probe_verdict"' ~/Library/Logs/Audiout/telemetry.jsonl | tail -10
    ```
    Confirm the `"method"` field is `self_tap_tone` (the real functional probe), not
    `tcc_preflight` (the fast/skipped path), for this rebuild's first probe.
@@ -211,7 +211,7 @@ choreography itself deliberately stays two separate bodies, cross-linked by name
    **PASS:** no dropout on either output when the combined selection is made.
 4. **Confirm no rebuild storm** for all three sub-tests above:
    ```
-   grep -E '"cat":"(captureWS|capturePA)".*"evt":"(rebuild_reanchored|device_change_coalesced|device_change_fired)"' ~/Library/Logs/Audiouter/telemetry.jsonl | tail -40
+   grep -E '"cat":"(captureWS|capturePA)".*"evt":"(rebuild_reanchored|device_change_coalesced|device_change_fired)"' ~/Library/Logs/Audiout/telemetry.jsonl | tail -40
    ```
    **PASS:** the coalescer is visibly doing its job — `device_change_fired` events during
    a rapid-toggle burst should mostly resolve to a much smaller number of

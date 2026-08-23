@@ -63,7 +63,7 @@ func printDefaultOutput() {
     }
     let uid = cfStringProperty(id, kAudioDevicePropertyDeviceUID) ?? "<?>"
     let name = cfStringProperty(id, kAudioObjectPropertyName) ?? "<?>"
-    let ours = uid == "com.audiouter.Audiouter.aggregate"
+    let ours = uid == "com.audiout.Audiout.aggregate"
     print("• default output: \"\(name)\"")
     print("    UID:  \(uid)   \(ours ? "← this IS our aggregate" : "← NOT our aggregate")")
     print("    volume scalar settable by CoreAudio: \(hasSettableVolume(id))")

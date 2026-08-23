@@ -2,7 +2,7 @@
 
 ## Method
 
-Ran all four offscreen snapshot generators from `AudiouterCore/` (`swift build` cold
+Ran all four offscreen snapshot generators from `AudioutCore/` (`swift build` cold
 build first, ~17s; each `swift run` thereafter incremental):
 
 - `swift run popover-snapshot` — default mode: 4 PNGs (`popover-{light,dark}.png`,
@@ -53,7 +53,7 @@ row shows the dimmed name and amber "Couldn't connect" subtitle — and then the
 next row starts immediately. No panel, no Retry button, nothing.
 
 Root cause, confirmed by reading the call chain: `PopoverPanelViewController
-.insertRow(_:after:animated:)` (`AudiouterCore/Sources/AudiouterPopoverUI/
+.insertRow(_:after:animated:)` (`AudioutCore/Sources/AudioutPopoverUI/
 PopoverPanelViewController.swift:546-562`) locates the failed device's row by
 searching `card.contentStack.arrangedSubviews.contains(sibling)`. But device rows are
 never direct arranged subviews of `contentStack` — they're added via `addBodyRow`
@@ -145,7 +145,7 @@ Two distinct, both-measured issues:
   populated state — renders crisp white-on-dark text throughout. So this isn't a
   blanket "dark mode is broken" issue; it's specific to the empty-state code path.
 - `mixer-5-panel-chrome-dark.png` (the newer `ControlPanelWindowController` shell
-  hosting the Groups content, `AudiouterCore/Sources/window-snapshot/main.swift:
+  hosting the Groups content, `AudioutCore/Sources/window-snapshot/main.swift:
   134-240`): the sidebar correctly turns dark (`(30,30,30)`), but the content pane on
   the right stays at `(231,231,231)` — the *light*-mode background color — even
   though `panelContent.appearance = appearance` is set explicitly
@@ -211,7 +211,7 @@ in the codebase.**
 
 `git grep -n "ReduceTransparency\|shouldIncreaseContrast\|
 accessibilityDisplayShouldIncreaseContrast"` returns zero hits in
-`AudiouterCore`. Reduce Motion is handled carefully and consistently (7 call sites:
+`AudioutCore`. Reduce Motion is handled carefully and consistently (7 call sites:
 `PopoverPanelViewController.swift:203-220,489-513`, `ControlPanelWindowController
 .swift:269`, `DeviceRowView.swift:1059`, `LevelMeterView.swift:156`, `StatusDotView
 .swift:159`, `DeviceIconWellView.swift:127`) — but nothing in the app reacts to the
@@ -250,8 +250,8 @@ non-breaking hyphen) so it doesn't become the line-wrap point.
 **T1. Card corner radius differs by 1pt between the popover's cards and the new
 control-panel shell's backing, which are meant to read as one continuous shape.**
 
-`AudiouterPopoverUI/CardView.swift:82` — `cornerRadius: CGFloat = 13` — vs.
-`AudiouterSharedUI/ControlPanelBackingView.swift:31` — `cornerRadius: CGFloat = 12`.
+`AudioutPopoverUI/CardView.swift:82` — `cornerRadius: CGFloat = 13` — vs.
+`AudioutSharedUI/ControlPanelBackingView.swift:31` — `cornerRadius: CGFloat = 12`.
 The control-panel controller's own comment
 (`ControlPanelWindowController.swift:152`) says the backing's corner radius is
 chosen "so the two windows read as one continuous shape," which makes the 1pt gap

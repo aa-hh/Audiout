@@ -8,7 +8,7 @@
 
 ## Executive Summary
 
-This inventory covers the actual license headers found in the OwnTone source extraction cluster (`dev/owntone-src/`). The project adopts **GPL-2.0-or-later** as the overall license for the Audiouter engine and application. Within this:
+This inventory covers the actual license headers found in the OwnTone source extraction cluster (`dev/owntone-src/`). The project adopts **GPL-2.0-or-later** as the overall license for the Audiout engine and application. Within this:
 
 - **GPL-2.0+ cluster** (airplay.c, airplay_events.c, raop.c, rtp_common.c) forms the core sender engine.
 - **MIT components** (pair_ap, libairptp) retain their original headers and are compatible with GPL-2.0+.
@@ -109,7 +109,7 @@ This inventory covers the actual license headers found in the OwnTone source ext
 
 ## GPL-2.0-or-later Distribution Obligations
 
-When the AirPlayEngine (and the full Audiouter app) is distributed under GPL-2.0-or-later, the following apply:
+When the AirPlayEngine (and the full Audiout app) is distributed under GPL-2.0-or-later, the following apply:
 
 ### 1. Header Preservation
 - Every .c and .h file from the GPL cluster (airplay.c, airplay_events.c, raop.c, rtp_common.c) **must retain its GPL-2.0+ header** in the distributed source.
@@ -123,9 +123,9 @@ When the AirPlayEngine (and the full Audiouter app) is distributed under GPL-2.0
 
 ### 3. NOTICE / THIRD-PARTY File
 A `NOTICE` file (or `THIRD-PARTY-LICENSES`, `ATTRIBUTION`) **must list:**
-- **GPL-2.0-or-later** — AirPlayEngine + Audiouter Core
-  - Copyright: The Audiouter authors (or the named project holder)
-  - Source: Audiouter repository
+- **GPL-2.0-or-later** — AirPlayEngine + Audiout Core
+  - Copyright: The Audiout authors (or the named project holder)
+  - Source: Audiout repository
   - Includes OwnTone-derived code (airplay.c, raop.c, rtp_common.c) — see individual files for original copyright.
 - **OwnTone GPL-2.0-or-later Components** (for historical record)
   - airplay.c — OwnTone Project
@@ -148,7 +148,7 @@ A `NOTICE` file (or `THIRD-PARTY-LICENSES`, `ATTRIBUTION`) **must list:**
   - MIT License (separable; PTP helper daemon can be shipped as standalone MIT binary)
 
 ### 4. Combined Work
-The **entire linked application** (Audiouter + AirPlayEngine + system libraries) falls under GPL-2.0-or-later due to the GPL sender cluster. This is a **deliberate design choice per RESOLVED DECISION Q4**; no accident.
+The **entire linked application** (Audiout + AirPlayEngine + system libraries) falls under GPL-2.0-or-later due to the GPL sender cluster. This is a **deliberate design choice per RESOLVED DECISION Q4**; no accident.
 
 The MIT and BSD components are compatible and do not "contaminate" the license — their original headers must be preserved, and their authors credited, but the GPL-2.0+ obligation covers the whole work.
 
@@ -168,10 +168,10 @@ It is **severable** under GPL-2.0 Section 3. The daemon can be redistributed und
 
 **File: `LICENSE`** (or `COPYING`)
 ```
-This file describes the licensing terms for the Audiouter project
+This file describes the licensing terms for the Audiout project
 and its components.
 
-Audiouter AirPlayEngine is licensed under the GNU General Public
+Audiout AirPlayEngine is licensed under the GNU General Public
 License, version 2 or later (GPL-2.0-or-later).
 
 See the LICENSE-COMPONENT.md or NOTICE file for detailed attribution and
@@ -182,9 +182,9 @@ component-specific licensing, including third-party code under MIT and BSD.
 ```markdown
 # Third-Party Licenses and Attribution
 
-## Audiouter / AirPlayEngine
+## Audiout / AirPlayEngine
 
-The Audiouter project is licensed under **GPL-2.0-or-later**.
+The Audiout project is licensed under **GPL-2.0-or-later**.
 See the top-level LICENSE or COPYING file for the full GPL v2 text.
 
 ### Component Licensing
@@ -245,7 +245,7 @@ For the full GPL-2.0 text, see the repository's top-level LICENSE or COPYING fil
 **Recommended directory structure for a distribution:**
 
 ```
-Audiouter/
+Audiout/
   LICENSE                    (GNU General Public License v2)
   COPYING                    (Full GPL-2.0 text)
   NOTICE                     (Third-party attribution, as above)
@@ -332,7 +332,7 @@ components (libgcrypt, libgpg-error, libplist; ffmpeg conditionally)
 did not apply, since nothing was actually being redistributed.
 
 That model has changed. `scripts/make-app.sh` now supports an
-`AUDIOUTER_BUNDLE_DYLIBS=1` release/distribution mode that copies these
+`AUDIOUT_BUNDLE_DYLIBS=1` release/distribution mode that copies these
 libraries into `Contents/Frameworks/` inside the shipped `.app`, so end
 users can run it without installing Homebrew themselves. (A plain dev
 build without the flag still links from Homebrew and bundles nothing.)

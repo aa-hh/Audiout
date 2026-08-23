@@ -70,11 +70,11 @@ fi
 # GUARD 3 (WARN-ONLY): new test code must not reach cross-process shared state.
 #
 # `swift test --parallel --num-workers 4` (the default full-run command — see
-# AudiouterCore/AGENTS.md) runs each test CLASS in its own process. Processes
+# AudioutCore/AGENTS.md) runs each test CLASS in its own process. Processes
 # share nothing in memory, but they DO share `UserDefaults.standard` (one
 # on-disk plist) and a fixed `FileManager.default.temporaryDirectory` path. Two
 # suites writing the same defaults key or temp filename race and flake. The
-# blessed fix is to subclass `IsolatedTestCase` (Tests/AudiouterCoreTests/
+# blessed fix is to subclass `IsolatedTestCase` (Tests/AudioutCoreTests/
 # IsolatedTestCase.swift) and use `scratchDir` / `isolatedDefaults` /
 # `makeDefaults()` / `uniqueName(_:)` instead of the shared globals.
 #
@@ -134,11 +134,11 @@ fi
 #
 # Agents may run `swift test --filter <Suite>` while iterating (fast); a
 # too-narrow filter can miss a suite the change broke, but that risk is absorbed
-# HERE — no commit touching AudiouterCore Swift sources/tests lands until the
+# HERE — no commit touching AudioutCore Swift sources/tests lands until the
 # WHOLE suite (parallelised) passes. So filtering can only ever cost one extra
 # fix cycle at commit time.
 #
-# Scope: only runs when staged files include AudiouterCore Swift source/test
+# Scope: only runs when staged files include AudioutCore Swift source/test
 # files. Docs/config/other commits skip it (no code changed → nothing to gate).
 #
 # Pathspec note: a bare directory pathspec + `grep '\.swift$'` — NOT
@@ -149,11 +149,11 @@ fi
 # the other guards. Missing `swift` toolchain => skip (don't wedge a machine
 # that can't build).
 staged_swift=$(git diff --cached --name-only --diff-filter=ACM -- \
-    'AudiouterCore/Sources/' 'AudiouterCore/Tests/' 2>/dev/null | grep '\.swift$')
+    'AudioutCore/Sources/' 'AudioutCore/Tests/' 2>/dev/null | grep '\.swift$')
 if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
     repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
     echo "" >&2
-    echo "  Guard 4: AudiouterCore Swift changed — running full suite" >&2
+    echo "  Guard 4: AudioutCore Swift changed — running full suite" >&2
     echo "  (scripts/run-tests.sh) before commit. ~70s warm; --no-verify to skip." >&2
     # Via the shared runner, NOT a bare `swift test`: the runner takes a
     # machine-wide lock so concurrent agents queue instead of thrashing 8 cores
@@ -188,7 +188,7 @@ if [ -n "$staged_swift" ] && command -v swift >/dev/null 2>&1; then
     # separate cache trees, so a guard that disagreed with the runner would make
     # every commit pay a cold rebuild.
     if ! { if [ -n "$run_suite" ]; then "$run_suite"; \
-           else ( cd "$repo_root/AudiouterCore" && swift test --build-system native --parallel --num-workers 4 >&2 ); fi; }; then
+           else ( cd "$repo_root/AudioutCore" && swift test --build-system native --parallel --num-workers 4 >&2 ); fi; }; then
         echo "" >&2
         echo "  REFUSED: full test suite failed. Fix the failures" >&2
         echo "  (or 'git commit --no-verify' for a real emergency)." >&2
@@ -203,7 +203,7 @@ fi
 #
 # The XCTest -> swift-testing migration
 # (docs/notes/swift-testing-conversion-cookbook.md) is done for the large
-# majority of both AudiouterCore's and AirPlayEngine's test suites. New tests
+# majority of both AudioutCore's and AirPlayEngine's test suites. New tests
 # should be written `import Testing` / `@Suite` / `@Test`, not `import XCTest`.
 #
 # This only fires on a newly ADDED `import XCTest` line (diffs the STAGED
@@ -215,7 +215,7 @@ fi
 # blocking gate, so backsliding away from it shouldn't be either. It just needs
 # to be visible so it doesn't happen quietly.
 staged_swift_pkgs=$(git diff --cached --name-only --diff-filter=AM -- \
-    'AudiouterCore/' 'AirPlayEngine/' 2>/dev/null | grep '\.swift$')
+    'AudioutCore/' 'AirPlayEngine/' 2>/dev/null | grep '\.swift$')
 xctest_hits=""
 for f in $staged_swift_pkgs; do
     added=$(git diff --cached -U0 -- "$f" 2>/dev/null | grep -E '^\+[^+]')
@@ -240,10 +240,10 @@ fi
 # Swift code is committed.
 #
 # AirPlayEngine is a standalone SwiftPM package (sibling of, not nested in,
-# AudiouterCore — see AirPlayEngine/AGENTS.md), so Guard 4's AudiouterCore run
+# AudioutCore — see AirPlayEngine/AGENTS.md), so Guard 4's AudioutCore run
 # never touches it: a commit that only changes AirPlayEngine currently gets no
 # automatic test run at all. This closes that gap with an independent guard —
-# deliberately NOT folded into Guard 4, so an AudiouterCore-only commit never
+# deliberately NOT folded into Guard 4, so an AudioutCore-only commit never
 # pays for an AirPlayEngine run it didn't need, and vice versa. A commit
 # touching both packages runs both suites.
 #

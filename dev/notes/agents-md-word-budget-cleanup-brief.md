@@ -20,21 +20,21 @@ found:
 
 | File | Word count | vs. 300-word budget |
 |---|---|---|
-| `AudiouterSharedUI/AGENTS.md` | ~3132 | ~10x |
-| `AudiouterCore/AGENTS.md` | ~2496 | ~8x |
+| `AudioutSharedUI/AGENTS.md` | ~3132 | ~10x |
+| `AudioutCore/AGENTS.md` | ~2496 | ~8x |
 | root `AGENTS.md` | ~1410 | ~5x (over its OWN rule) |
 | `dev/AGENTS.md` | ~467 | ~1.5x |
-| `AudiouterOnboardingUI/AGENTS.md` | ~296 | within budget |
-| *(other `Sources/Audiouter*UI/AGENTS.md` files — not yet individually audited)* | — | — |
+| `AudioutOnboardingUI/AGENTS.md` | ~296 | within budget |
+| *(other `Sources/Audiout*UI/AGENTS.md` files — not yet individually audited)* | — | — |
 
-**This has grown incrementally, not all at once.** `AudiouterCore/AGENTS.md`
+**This has grown incrementally, not all at once.** `AudioutCore/AGENTS.md`
 was deliberately trimmed once (commit `9bf9e06`, 2026-07-17: "10.6k → 3.6k
 words" per its own log), then crept back up through roughly 14 subsequent
 commits, each adding 5–30 lines to document one fix or new subsystem (T3
 telemetry, T5 TCC divergence, T6 PTP helper daemon, T7 per-app routing, a
 volume-reseed regression, and most recently `d1dc310` on 2026-07-25 alone
 added 27 lines for the TCC permission-detection rewrite). Nobody has done a
-second trim pass since the first one. `AudiouterSharedUI/AGENTS.md` shows the
+second trim pass since the first one. `AudioutSharedUI/AGENTS.md` shows the
 same pattern and is worse — it has drifted into a changelog with **dated
 entries** ("2026-07-22"), which the root rule explicitly bans.
 
@@ -50,15 +50,15 @@ inside padding, making them easier to miss than if the file were short.
 ## What the research pass found, concretely
 
 ### Every AGENTS.md needs re-auditing, but two are the worst offenders
-Start with `AudiouterCore/AGENTS.md` and `AudiouterSharedUI/AGENTS.md`. Also
-check every other `Sources/Audiouter*UI/AGENTS.md` (SettingsUI, PopoverUI,
+Start with `AudioutCore/AGENTS.md` and `AudioutSharedUI/AGENTS.md`. Also
+check every other `Sources/Audiout*UI/AGENTS.md` (SettingsUI, PopoverUI,
 WindowUI, App) — the initial pass did not individually audit all of them, only
 spot-checked word counts.
 
 ### Classification framework (apply to every paragraph/bullet)
 - **(a) Genuine constraint/trap — keep, but likely condense.** The
   "obvious reading is wrong" test from the root rule. Examples already
-  identified in `AudiouterCore/AGENTS.md`: `Device.isSelected` meaning,
+  identified in `AudioutCore/AGENTS.md`: `Device.isSelected` meaning,
   `AudioProcessResolver` multi-process requirement, `AppRouteDestination
   .isDeviceRoute`, the `.currentDevice` anti-feedback guard, `TCCAccessPreflight`
   being cached for the calling process's lifetime, `IsolatedTestCase`'s
@@ -74,7 +74,7 @@ spot-checked word counts.
   b8123f` does NOT hold this work") — pure incident history, banned by the
   root rule, and reads oddly to a future reader.
 - **(d) Real trap, but buried in excess mechanism — MOVE, don't delete.** Two
-  worst examples in `AudiouterCore/AGENTS.md`: the volume-reseed bullet
+  worst examples in `AudioutCore/AGENTS.md`: the volume-reseed bullet
   (~340 words) and the metering bullet (~230 words). Each contains a
   load-bearing one-sentence trap (a zero-initialized engine volume produces
   −30dB silent connect; meters read pre-volume so a low fader slider never
@@ -87,21 +87,21 @@ spot-checked word counts.
   each ("name → what it is"). Most current entries run 30–100+ words
   (`SetupModel`, `SystemAudioCaptureTCC`, `PermissionStateObserver` were
   named as examples). This alone is an estimated 400–500 words of low-risk,
-  high-value trimming in `AudiouterCore/AGENTS.md` — likely proportionally
+  high-value trimming in `AudioutCore/AGENTS.md` — likely proportionally
   similar in others.
 
-### Estimated result for `AudiouterCore/AGENTS.md` after cuts
+### Estimated result for `AudioutCore/AGENTS.md` after cuts
 Purpose (~60w, unchanged) + condensed Rules (~800–900w) + trimmed Map
 (~350–400w) ≈ **1200–1300 words** — roughly half the current size, but still
 ~4x the nominal 300-word target.
 
 ### On the 300-word target itself — likely needs to be revised, not enforced
 The research pass's view: 300 words is not a realistic target for
-`AudiouterCore/AGENTS.md` specifically, because the root `AGENTS.md` itself
+`AudioutCore/AGENTS.md` specifically, because the root `AGENTS.md` itself
 describes that package as spanning the `Device` model, the `OutputBackend`
 seam and its implementations, per-app routing, AND the AppKit UI targets —
 materially more surface than a single-subsystem child file like
-`AudiouterOnboardingUI`. The recommendation is to **explicitly raise and
+`AudioutOnboardingUI`. The recommendation is to **explicitly raise and
 document** an acknowledged budget for this file (~800–1000 words) rather than
 mechanically forcing it to 300, while still cutting the genuine bloat.
 Whoever picks this up should form their own view rather than take this as
@@ -143,7 +143,7 @@ trap against current Swift source. Two specific open risks it flagged:
    finalizing — this is what pre-commit Guard 2 checks anyway, so failing to
    do it manually just means discovering it at commit time instead.
 5. For any file whose genuine, irreducible scope exceeds 300 words even after
-   honest trimming (candidate: `AudiouterCore/AGENTS.md`), document the raised
+   honest trimming (candidate: `AudioutCore/AGENTS.md`), document the raised
    budget and the reasoning for it — plausibly in the root `AGENTS.md`'s own
    rule section, so future readers know it's a deliberate exception and not
    drift.

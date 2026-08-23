@@ -95,8 +95,8 @@ a from-scratch embedded-LaunchDaemon walkthrough; cross-checked against
   Not a concern now (SMAppService is the only planned path) but worth a code
   comment so nobody "fixes" the plist later without realizing this.
 - `Label` in the plist **must match the plist's filename** (e.g.
-  `com.<team>.audiouter.ptphelper.plist` ↔
-  `Label: com.<team>.audiouter.ptphelper`) — standard launchd
+  `com.<team>.audiout.ptphelper.plist` ↔
+  `Label: com.<team>.audiout.ptphelper`) — standard launchd
   convention, and `SMAppService.daemon(plistName:)` takes the filename, not
   the Label, as its lookup key.
 - Since this project is a **SwiftPM package** (`AirPlayEngine/`) consumed by an
@@ -259,7 +259,7 @@ This is the most important new finding for tonight's observed symptom.
   app's deletion** — macOS persists the user's approval intent even after the
   app bundle is gone
   ([forums.apple.com/thread/736272](https://developer.apple.com/forums/thread/736272)).
-  For a personal tool this is a minor UX wart (a phantom "Audiouter"
+  For a personal tool this is a minor UX wart (a phantom "Audiout"
   entry in Login Items after a full uninstall), not a functional problem — the
   daemon itself is gone/unregistered, just the list entry lingers. Document
   this in a user-facing "how to fully remove" note rather than trying to

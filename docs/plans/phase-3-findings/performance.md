@@ -17,17 +17,17 @@ Speakers", "Sonos Move", "Move 2", "Mixer", "Living Room TV", "airport-mixer",
   --build-tests` briefly ran during setup and was clear before real
   measurements started).
 - **Build**: release throughout. `scripts/make-app.sh build` (wraps `swift
-  build -c release --product AudiouterApp`, ad-hoc codesigned, hardened
+  build -c release --product AudioutApp`, ad-hoc codesigned, hardened
   runtime) for the app-launch and bundle-size numbers. `swift build -c
   release --product popover-harness` (same package, same optimization level)
-  for the popover-rebuild numbers, since `AudiouterPopoverUI` isn't an
+  for the popover-rebuild numbers, since `AudioutPopoverUI` isn't an
   exported library product and can't be reached from an out-of-package
   script (see below).
 - **Launch time**: a Python wrapper (`scratchpad/perf/launch_time.py`) forks
-  `build/Audiouter.app/Contents/MacOS/AudiouterApp` directly (env
+  `build/Audiout.app/Contents/MacOS/AudioutApp` directly (env
   `AIRPLAY_BACKEND` explicitly unset so `makeBackend()` resolves
   `MockBackend`), records `time.monotonic()` at fork, and stamps every stderr
-  line as it arrives. The app's own `AppDelegate.log("Audiouter launched
+  line as it arrives. The app's own `AppDelegate.log("Audiout launched
   (backend: \(type(of: backend)))")` (`AppDelegate.swift:329`) fires at the
   END of `applicationDidFinishLaunching`, but `StatusItemController()`
   (`AppDelegate.swift:194`) — the menu-bar icon — is the FIRST thing that
@@ -55,14 +55,14 @@ Speakers", "Sonos Move", "Move 2", "Mixer", "Living Room TV", "airport-mixer",
 - **Idle/active CPU**: `top -pid <pid> -l N -s 1 -stats pid,cpu,mem,threads`
   sampling once per second.
   - State (a) popover-closed idle: sampled the real, fully-launched
-    `AudiouterApp` process (mock backend) for 60 consecutive samples.
+    `AudioutApp` process (mock backend) for 60 consecutive samples.
   - State (b) "metering active": could NOT click the real popover open —
     `osascript`/System Events has no Automation permission in this shell
     (`-1743 Not authorised to send Apple events to System Events`), and
     granting that is a system-settings change this audit does not have
     standing to make unilaterally. Instead, a second scratch SwiftPM package
     (`scratchpad/perf/core-timing`, depending on the repo's real, exported
-    `AudiouterCore` library product via a read-only `.package(path:)` —
+    `AudioutCore` library product via a read-only `.package(path:)` —
     no repo file modified) drives `MockBackend.setMeteringActive(true)`
     directly — the exact `MeteringControlling` call
     `PopoverController`/`AppDelegate` fire on `popoverDidShow`
@@ -84,7 +84,7 @@ Speakers", "Sonos Move", "Move 2", "Mixer", "Living Room TV", "airport-mixer",
   (see findings).
 - **Bundle size**: `du -sh` + `otool -L` + `find -iname '*.dylib'` on two
   builds: `scripts/make-app.sh build` (default — dylibs NOT bundled) and
-  `AUDIOUTER_BUNDLE_DYLIBS=1 scripts/make-app.sh build-dylibs` (bundles every
+  `AUDIOUT_BUNDLE_DYLIBS=1 scripts/make-app.sh build-dylibs` (bundles every
   Homebrew dylib the binary transitively needs, for a Homebrew-less target
   Mac). The `build-dylibs/` output was deleted after measuring (not a repo
   file; not needed after the numbers were recorded).
@@ -108,7 +108,7 @@ Speakers", "Sonos Move", "Move 2", "Mixer", "Living Room TV", "airport-mixer",
 | RSS at launch (includes shared pages) | ~40–42 MB | `ps -o rss` |
 | Memory after repeated popover/Groups/Settings open-close | not measured | `[confirm-in-G1]` — same permission gap; static code review below |
 | App bundle, default build (dylibs NOT bundled — dev-only, will not launch on a clean Mac) | 6.8 MB (binary 4.06 MB + icon 2.91 MB), 0 bundled dylibs | `du -sh`, `scripts/make-app.sh build` |
-| App bundle, dylibs bundled (the actual customer-facing artifact per `AGENTS.md`'s "Homebrew-less target Mac") | ~38–40 MB, 19 bundled dylibs | `du -sh`, `AUDIOUTER_BUNDLE_DYLIBS=1 scripts/make-app.sh` |
+| App bundle, dylibs bundled (the actual customer-facing artifact per `AGENTS.md`'s "Homebrew-less target Mac") | ~38–40 MB, 19 bundled dylibs | `du -sh`, `AUDIOUT_BUNDLE_DYLIBS=1 scripts/make-app.sh` |
 | …of which pure video-codec dylibs (never invoked — audio-only app) | ~23.7 MB (≈60% of the bundled artifact) | `libavcodec` (9.8 MB), `libx265` (7.2 MB), `libSvtAv1Enc` (2.8 MB), `libvpx` (1.7 MB), `libx264` (1.3 MB), `libdav1d` (0.8 MB) |
 
 ## Findings
@@ -120,7 +120,7 @@ Speakers", "Sonos Move", "Move 2", "Mixer", "Living Room TV", "airport-mixer",
   bundled for a Mac without Homebrew — see `commercial-wrapper.md` §7 for
   whether that step is even wired into the release process) is about
   38–40 MB. Roughly 24 MB of that — three-fifths of the download — is H.264,
-  H.265, AV1, and VP9 video encoder/decoder code that Audiouter never uses.
+  H.265, AV1, and VP9 video encoder/decoder code that Audiout never uses.
   It streams audio only, and specifically only one audio codec (Apple
   Lossless).
 - Evidence: `AirPlayEngine/Sources/CAirPlayEngine/shims/transcode.c:130`
@@ -130,7 +130,7 @@ Speakers", "Sonos Move", "Move 2", "Mixer", "Living Room TV", "airport-mixer",
   every codec enabled, so `libavcodec.62.28.102.dylib` itself dynamically
   depends on `libx264`, `libx265`, `libvpx`, `libdav1d`, and
   `libSvtAv1Enc` (`otool -L` on the bundled dylib), and
-  `scripts/make-app.sh`'s dylib-bundling step (`AUDIOUTER_BUNDLE_DYLIBS=1`)
+  `scripts/make-app.sh`'s dylib-bundling step (`AUDIOUT_BUNDLE_DYLIBS=1`)
   walks that whole dependency graph and ships all of it.
 - Suggested fix direction: either link a minimal, audio-codecs-only ffmpeg
   build (`--disable-everything --enable-encoder=alac` and friends) as the
@@ -170,7 +170,7 @@ Speakers", "Sonos Move", "Move 2", "Mixer", "Living Room TV", "airport-mixer",
   fully stops itself when its bar goes idle — zero cost at rest — and each
   frame update avoids triggering an animation/layout pass), so this is a
   minor efficiency note, not a real slowdown at typical fleet sizes.
-- Evidence: `AudiouterSharedUI/LevelMeterView.swift:58` (`private var
+- Evidence: `AudioutSharedUI/LevelMeterView.swift:58` (`private var
   displayLink: CVDisplayLink?`, one per instance), `:172-188`
   (`startDisplayLinkIfNeeded`) — the file's own doc comment already names
   the tradeoff: "every popover row gets one of these, so an always-running
@@ -247,8 +247,8 @@ Speakers", "Sonos Move", "Move 2", "Mixer", "Living Room TV", "airport-mixer",
   `PopoverPanelViewController.clearRows()` (`:230-243`) does a real
   `removeArrangedSubview` + `removeFromSuperview` on every card (not just an
   array clear), and both `DeviceRowView.delegate`
-  (`AudiouterSharedUI/DeviceRowView.swift:96`) and `AppRowView.delegate`
-  (`AudiouterSharedUI/AppRowView.swift:136`) are `weak`.
+  (`AudioutSharedUI/DeviceRowView.swift:96`) and `AppRowView.delegate`
+  (`AudioutSharedUI/AppRowView.swift:136`) are `weak`.
 
 ## Top 5 by user impact
 

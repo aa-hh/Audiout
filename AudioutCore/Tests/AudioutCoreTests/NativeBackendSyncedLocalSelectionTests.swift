@@ -1,0 +1,543 @@
+import Foundation
+import Testing
+import AirPlayEngine
+@testable import AudioutCore
+
+#if canImport(CoreAudio)
+import CoreAudio
+#endif
+
+/// T-BACKEND: hermetic tests for `NativeBackend`'s "play everywhere" enable/
+/// disable decision — Mac + ≥1 AirPlay device selected turns the delayed local
+/// sink on; anything else turns it off. No `AVAudioEngine`, no Core Audio tap,
+/// no engine/network — a spy `SyncedLocalSinkControlling` stands in for the
+/// real `SyncedLocalSink` (constructed via `syncedLocalSinkFactory`), and a
+/// plain closure stands in for `GroupController.isSpeakerSelected(_:)` (wired
+/// in production via `selectedDevicesQuery`, since `setOutputSet`'s `ids` never
+/// carries the local device — `GroupController.applyRouting` always filters it
+/// out before calling the backend).
+@Suite final class NativeBackendSyncedLocalSelectionTests: IsolatedSuite {
+
+    // MARK: Doubles
+
+    /// A `SyncedLocalSinkControlling` spy: records every call, in order, with no
+    /// `AVAudioEngine` or real audio graph in the loop.
+    private final class SpySyncedLocalSink: SyncedLocalSinkControlling, @unchecked Sendable {
+        private let lock = NSLock()
+        private var _calls: [String] = []
+        private var _gains: [Float] = []
+        private(set) var enqueueCount = 0
+
+        func start() throws { lock.withLock { _calls.append("start") } }
+        func stop() { lock.withLock { _calls.append("stop") } }
+        func startObservingLifecycleEvents() { lock.withLock { _calls.append("startObserving") } }
+        func stopObservingLifecycleEvents() { lock.withLock { _calls.append("stopObserving") } }
+        // Recorded in `_gains` only, deliberately NOT in `_calls`: the lifecycle
+        // call-order assertions (start/observe/stop) must not see gain pushes.
+        func setGain(_ gain: Float) { lock.withLock { _gains.append(gain) } }
+        func enqueue(interleavedFrames: UnsafePointer<Float>, frameCount: Int, pts: timespec) {
+            lock.withLock { enqueueCount += 1 }
+        }
+        // Also kept out of `_calls`, same reason as `setGain`.
+        func requestReanchor(cause: String) { lock.withLock { _reanchors.append(cause) } }
+        private var _reanchors: [String] = []
+        // The live trim seek (roadmap 056), same reason again.
+        func applyUserOffsetDelta(ms deltaMs: Double) { lock.withLock { _offsetDeltas.append(deltaMs) } }
+        private var _offsetDeltas: [Double] = []
+
+        var calls: [String] { lock.withLock { _calls } }
+        var gains: [Float] { lock.withLock { _gains } }
+        var reanchorCauses: [String] { lock.withLock { _reanchors } }
+        var offsetDeltas: [Double] { lock.withLock { _offsetDeltas } }
+    }
+
+    /// A minimal no-op `EngineControlling` — `setOutputSet` with ids that were
+    /// never fed through discovery produces no engine calls at all (the loop
+    /// only iterates `known`/`order`), so this fake never needs to do anything.
+    private final class NoOpEngine: EngineControlling, @unchecked Sendable {
+        func start() async throws {}
+        func stop() async {}
+        func updateDiscovery(_ descriptor: DeviceDescriptor) async throws -> OutputID {
+            OutputID(rawValue: 0)
+        }
+        func removeDiscovery(_ descriptor: DeviceDescriptor) async {}
+        func addOutput(_ id: OutputID) async throws {}
+        func addOutput(_ id: OutputID, streamId: UInt32) async throws {}
+        func removeOutput(_ id: OutputID) async throws {}
+        func setVolume(_ id: OutputID, _ volume: Double) async throws {}
+        func setStartBufferMs(_ ms: Int) async {}
+        func write(pcm: Data, streamId: UInt32, pts: timespec) {}
+        func makeStateStream() -> AsyncStream<(OutputID, OutputState)> {
+            AsyncStream { _ in }
+        }
+        func makeRemoteEventStream() -> AsyncStream<RemoteEvent> {
+            AsyncStream { _ in }
+        }
+        var dacpID: UInt64 { 0 }
+        var ptpClockAvailable: Bool { get async { true } }
+    }
+
+    /// Feeds no discovery events — every test here only cares about
+    /// `setOutputSet`'s intent-level bookkeeping, never a real device.
+    private final class NoOpDiscovery: DiscoverySource, @unchecked Sendable {
+        var onEvent: (@Sendable (DiscoveryEvent) -> Void)?
+        func start() {}
+        func stop() {}
+    }
+
+    /// Fakes `SystemVolumeControlling` with no Core Audio HAL reads (same
+    /// hermeticity concern `NativeBackendTests.FakeSystemVolume` documents).
+    private final class NoOpSystemVolume: SystemVolumeControlling, @unchecked Sendable {
+        var onExternalChange: (@Sendable (Int?, Bool?, Bool) -> Void)?
+        /// Deliberately NOT `nil`: an unreadable system volume is itself a
+        /// "we own the volume" signal, which would fold Main into the sink gain
+        /// and change every gain this file asserts. A readable level keeps these
+        /// tests about the ordinary settable output they mean to describe.
+        func currentVolume() -> Int? { 50 }
+        func currentMuted() -> Bool? { nil }
+        func setVolume(_ volume: Int, didWrite: (@Sendable (Bool) -> Void)?) { didWrite?(true) }
+        func setMuted(_ muted: Bool) {}
+        func start() {}
+        func stop() {}
+    }
+
+    /// No-op ``AggregateDeviceControlling`` double: every read returns nil/empty
+    /// and create/destroy never run. `NativeBackend`'s default `aggregateControl`
+    /// param (`CoreAudioAggregateDeviceControl()`) would otherwise create/destroy
+    /// a REAL public "Audiout" aggregate device in macOS Sound settings —
+    /// `.stop()` (every test here `defer`s it) calls `sweepOrphans()`
+    /// unconditionally, even on a backend that never called `.start()`. Never
+    /// touches the real HAL — mirrors `NativeBackendTests.NoOpAggregateControl`,
+    /// kept as its own copy here since this suite keeps its own private doubles.
+    private struct NoOpAggregateControl: AggregateDeviceControlling {
+        func resolveDeviceID(forUID uid: String) -> AudioObjectID? { nil }
+        func createAggregate(uid: String, name: String, subDeviceUID: String) -> AudioObjectID? { nil }
+        func destroyAggregate(_ deviceID: AudioObjectID) -> Bool { false }
+        func aggregateDeviceUIDs() -> [String] { [] }
+        func deviceUID(_ deviceID: AudioObjectID) -> String? { nil }
+        func builtInOutputDeviceUID() -> String? { nil }
+        func setDefaultOutputDevice(_ deviceID: AudioObjectID) -> Bool { false }
+    }
+
+    // MARK: Helpers
+
+    /// `weOwnVolume` picks which default output the backend believes it has: our
+    /// own aggregate (so the app owns the volume and Main folds into the Mac's sink
+    /// gain) or an ordinary settable device. Pinned explicitly rather than left to
+    /// the production HAL read — on a machine where Audiout really IS the default
+    /// output, that read would silently flip these tests.
+    private func makeBackend(macSelectedByDefault: Bool = false, weOwnVolume: Bool = false)
+        -> (NativeBackend, SpySyncedLocalSink, LockedBool) {
+        let backend = NativeBackend(
+            engineControl: NoOpEngine(),
+            discoverySource: NoOpDiscovery(),
+            systemVolume: NoOpSystemVolume(),
+            aggregateControl: NoOpAggregateControl(),
+            currentDefaultOutputUID: {
+                weOwnVolume ? AggregateOutputDevice.productUID : "BuiltInSpeakerDevice"
+            })
+        let sink = SpySyncedLocalSink()
+        backend.syncedLocalSinkFactory = { sink }
+        let macSelected = LockedBool(macSelectedByDefault)
+        backend.selectedDevicesQuery = { id in
+            id == NativeBackend.localDeviceID ? macSelected.get() : false
+        }
+        return (backend, sink, macSelected)
+    }
+
+    /// A tiny thread-safe `Bool` box so a test can flip "is the Mac in Selected
+    /// Devices" between `setOutputSet` calls, standing in for
+    /// `GroupController.selectedDeviceIDs` changing.
+    private final class LockedBool: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Bool
+        init(_ v: Bool) { value = v }
+        func get() -> Bool { lock.withLock { value } }
+        func set(_ v: Bool) { lock.withLock { value = v } }
+    }
+
+    private func waitFor(timeout: TimeInterval = 2, _ cond: @escaping () -> Bool) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if cond() { return }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.005))
+        }
+    }
+
+    // MARK: Tests
+
+    /// Mac-only → Mac + AirPlay: the sink turns ON — constructed, attached,
+    /// started, and its lifecycle observers installed, in that order.
+    @Test func macOnlyToMacPlusAirPlayEnablesSyncedLocalSink() {
+        let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: true)
+        defer { backend.stop() }
+
+        backend.setOutputSet([])   // Mac-only (passthrough): no AirPlay device selected
+        waitFor { true }           // let any (there shouldn't be any) async work settle
+        #expect(sink.calls.isEmpty, "Mac alone must never enable the synced-local sink")
+
+        backend.setOutputSet(["airplay-1"])   // now Mac + 1 AirPlay device
+        waitFor { !sink.calls.isEmpty }
+
+        #expect(sink.calls == ["start", "startObserving"],
+                "enabling must start the sink and begin lifecycle observation, in order")
+        _ = macSelected   // silence unused-var warning if the compiler flags it
+    }
+
+    /// The Mac's sink gain carries the GROUP stage but NOT Main — Main already
+    /// reaches the Mac through its system volume, so folding it in here would
+    /// square the master. The review found this caller path (`syncedLocalGain` →
+    /// `sink.setGain`) had no test at all; only the sink's `setGain` was tested in
+    /// isolation. With the Mac's own fader at its default 100, the sink gain is just
+    /// `group/100`.
+    @Test func syncedLocalSinkGainCarriesGroupButExcludesMain() {
+        let (backend, sink, _) = makeBackend(macSelectedByDefault: true)
+        defer { backend.stop() }
+
+        // `start()` is what evaluates volume ownership. Without it the exclusion
+        // below would hold for the wrong reason — never evaluated, rather than
+        // evaluated and found false.
+        backend.start()
+        backend.setOutputSet(["airplay-1"])   // Mac + AirPlay ⇒ sink armed
+        waitFor { !sink.gains.isEmpty }
+
+        // A GROUP change moves the sink gain: group 50 × Mac 100% = 0.50.
+        backend.setMasterGain(mainOut: 100, group: 50, mirrorToSystemVolume: false)
+        waitFor { sink.gains.last.map { abs($0 - 0.50) < 0.0001 } ?? false }
+        #expect(sink.gains.last.map { abs($0 - 0.50) < 0.0001 } ?? false,
+                "the group stage multiplies into the Mac's sink gain (group 50 → 0.50)")
+
+        // A MAIN-only change doesn't re-push the sink gain (only `groupChanged` does).
+        // NOTE: count-unchanged alone would hold even if Main WERE in the formula —
+        // it only proves the short-circuit. The real exclusion proof is the next step,
+        // where the gain lands at group-only (0.80) with Main pinned at 20.
+        let gainCountBeforeMainChange = sink.gains.count
+        backend.setMasterGain(mainOut: 20, group: 50, mirrorToSystemVolume: false)
+        waitFor { true }
+        #expect(sink.gains.count == gainCountBeforeMainChange,
+                "a Main-only change does not re-push the Mac's sink gain")
+        #expect(sink.gains.last.map { abs($0 - 0.50) < 0.0001 } ?? false,
+                "the sink gain is still 0.50, unchanged by the Main move")
+
+        // THE EXCLUSION PROOF: group 80 with Main STILL at 20. If Main were in the
+        // formula the gain would be 0.20×0.80 = 0.16; group-only it is 0.80.
+        backend.setMasterGain(mainOut: 20, group: 80, mirrorToSystemVolume: false)
+        waitFor { sink.gains.last.map { abs($0 - 0.80) < 0.0001 } ?? false }
+        #expect(sink.gains.last.map { abs($0 - 0.80) < 0.0001 } ?? false,
+                "group 80 with Main pinned at 20 → 0.80, not 0.16 — Main is not in the sink gain")
+    }
+
+    /// The mirror of the test above, for the state that makes the volume-key
+    /// interceptor necessary at all: with OUR aggregate as the default output the
+    /// system volume can't be written, so nothing else is applying Main to the Mac
+    /// and it has to fold into the sink gain. Without this, pulling Main down
+    /// quietens the AirPlay speakers while the Mac's own output stays at full —
+    /// the master control visibly failing on the commonest setup.
+    @Test func syncedLocalSinkGainCarriesMainWhenWeOwnTheVolume() {
+        let (backend, sink, _) = makeBackend(macSelectedByDefault: true, weOwnVolume: true)
+        defer { backend.stop() }
+
+        backend.start()
+        backend.setOutputSet(["airplay-1"])
+        waitFor { !sink.gains.isEmpty }
+
+        // Main 20 × group 80 × Mac 100% = 0.16 — the very value the settable case
+        // above proves must NOT appear there.
+        backend.setMasterGain(mainOut: 20, group: 80, mirrorToSystemVolume: false)
+        waitFor { sink.gains.last.map { abs($0 - 0.16) < 0.0001 } ?? false }
+        #expect(sink.gains.last.map { abs($0 - 0.16) < 0.0001 } ?? false,
+                "Main 20 × group 80 → 0.16 when the app owns the volume")
+
+        // And a MAIN-ONLY move must re-push, since Main is the only thing
+        // attenuating the Mac here — the settable case deliberately does not.
+        backend.setMasterGain(mainOut: 50, group: 80, mirrorToSystemVolume: false)
+        waitFor { sink.gains.last.map { abs($0 - 0.40) < 0.0001 } ?? false }
+        #expect(sink.gains.last.map { abs($0 - 0.40) < 0.0001 } ?? false,
+                "a Main-only move re-pushes the Mac's sink gain (0.50 × 0.80 = 0.40)")
+    }
+
+    /// Mac + AirPlay → AirPlay-only (Mac deselected): the sink turns OFF — in
+    /// the mirrored order (stop, then stop observing).
+    @Test func macPlusAirPlayToAirPlayOnlyDisablesSyncedLocalSink() {
+        let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: true)
+        defer { backend.stop() }
+
+        backend.setOutputSet(["airplay-1"])   // Mac + AirPlay: enabled
+        waitFor { !sink.calls.isEmpty }
+        #expect(sink.calls == ["start", "startObserving"])
+
+        macSelected.set(false)                // user deselects the Mac row
+        backend.setOutputSet(["airplay-1"])   // same AirPlay membership, Mac dropped
+        waitFor { sink.calls.count >= 4 }
+
+        #expect(sink.calls == ["start", "startObserving", "stop", "stopObserving"],
+                "disabling must stop the sink and stop lifecycle observation, in order")
+    }
+
+    /// Mac + AirPlay → Mac + 2×AirPlay: stays enabled, and — critically — does
+    /// NOT re-attach/re-start the sink. A second AirPlay device joining a
+    /// selection that's already "Mac + AirPlay" is a no-op for this feature.
+    @Test func macPlusAirPlayToMacPlusTwoAirPlayStaysEnabledNoRedundantReattach() {
+        let (backend, sink, _) = makeBackend(macSelectedByDefault: true)
+        defer { backend.stop() }
+
+        backend.setOutputSet(["airplay-1"])
+        waitFor { !sink.calls.isEmpty }
+        #expect(sink.calls == ["start", "startObserving"])
+
+        backend.setOutputSet(["airplay-1", "airplay-2"])   // a second AirPlay device joins
+        // Give any (incorrect) redundant work a moment to show up.
+        waitFor(timeout: 0.3) { false }
+
+        #expect(sink.calls == ["start", "startObserving"],
+                "adding a second AirPlay device to an already-enabled selection must not re-attach/re-start the sink")
+    }
+
+    /// AirPlay-only (Mac never selected) never enables the sink, regardless of
+    /// how many AirPlay devices are selected.
+    @Test func airPlayOnlyNeverEnablesSyncedLocalSink() {
+        let (backend, sink, _) = makeBackend(macSelectedByDefault: false)
+        defer { backend.stop() }
+
+        backend.setOutputSet(["airplay-1"])
+        backend.setOutputSet(["airplay-1", "airplay-2"])
+        waitFor(timeout: 0.3) { false }
+
+        #expect(sink.calls.isEmpty, "AirPlay selected with the Mac NOT selected must never enable the sink")
+    }
+
+    /// Mac + AirPlay → empty selection (both dropped): disables, same as
+    /// dropping just the AirPlay side.
+    @Test func macPlusAirPlayToEmptySelectionDisablesSyncedLocalSink() {
+        let (backend, sink, macSelected) = makeBackend(macSelectedByDefault: true)
+        defer { backend.stop() }
+
+        backend.setOutputSet(["airplay-1"])
+        waitFor { !sink.calls.isEmpty }
+
+        macSelected.set(false)
+        backend.setOutputSet([])
+        waitFor { sink.calls.count >= 4 }
+
+        #expect(sink.calls == ["start", "startObserving", "stop", "stopObserving"])
+    }
+
+    // MARK: End-to-end over the GroupController → NativeBackend seam
+    //
+    // The unit tests above stand a closure in for the query. These two wire the
+    // REAL `GroupController` to it exactly as `AppDelegate` does
+    // (`selectedDevicesQuery = isMainOutMember(_:)`) and drive it from a saved
+    // GROUP — the path that was silently dropping the Mac. Still fully hermetic:
+    // the routing brain talks to a recording fake, whose output set is forwarded
+    // into the backend, and the sink is the same spy. No engine, no audio.
+
+    /// A minimal `OutputBackend` for `GroupController` to route against: it
+    /// serves a fixed fleet and forwards each `setOutputSet` onward, which is
+    /// exactly the pair of facts the seam under test is made of.
+    private final class RecordingBackend: OutputBackend, @unchecked Sendable {
+        let devices: [Device]
+        var onSetOutputSet: ((Set<String>) -> Void)?
+        private(set) var lastOutputSet: Set<String> = []
+        private(set) var volumeWrites: [(id: String, volume: Int)] = []
+
+        init(devices: [Device]) { self.devices = devices }
+
+        func start() {}
+        func stop() {}
+        func makeEventStream() -> AsyncStream<BackendEvent> { AsyncStream { _ in } }
+        func setVolume(_ volume: Int, for id: String) { volumeWrites.append((id, volume)) }
+        func setMuted(_ muted: Bool, for id: String) {}
+        func setOutputSet(_ ids: Set<String>) {
+            lastOutputSet = ids
+            onSetOutputSet?(ids)
+        }
+        func retryOutput(_ id: String) {}
+    }
+
+    private func makeRoutingBrain() -> (GroupController, RecordingBackend) {
+        let fleet: [Device] = [
+            Device(id: NativeBackend.localDeviceID, name: "This Mac", kind: .localMac,
+                   supportsAirPlay2: false, volume: 50, isLocalDevice: true),
+            Device(id: "airplay-1", name: "Kitchen Speaker", kind: .sonos, volume: 40),
+        ]
+        let router = RecordingBackend(devices: fleet)
+        let controller = GroupController(backend: router,
+                                         store: GroupStore(directory: scratchDir),
+                                         routingStore: RoutingStore(directory: scratchDir),
+                                         // Isolated too: ensureDefaultSelection reads
+                                         // settings.mainOutVolume, so the default
+                                         // AppSettings() (.standard) would make the seed
+                                         // depend on the dev's real defaults domain.
+                                         settings: AppSettings(defaults: makeDefaults()),
+                                         loadPersisted: false)
+        return (controller, router)
+    }
+
+    /// THE BUG: a saved group that mixes the Mac with an AirPlay speaker must
+    /// play out of BOTH. The Mac never rides in `setOutputSet`'s ids, so its
+    /// membership reaches the backend only through the query — which must read
+    /// the ACTIVE GROUP, not the Selected Devices set.
+    @Test func groupMixingMacWithAirPlayArmsTheSyncedLocalSink() throws {
+        let (controller, router) = makeRoutingBrain()
+        let backend = NativeBackend(engineControl: NoOpEngine(),
+                                    discoverySource: NoOpDiscovery(),
+                                    systemVolume: NoOpSystemVolume(),
+                                    aggregateControl: NoOpAggregateControl())
+        defer { backend.stop() }
+        let sink = SpySyncedLocalSink()
+        backend.syncedLocalSinkFactory = { sink }
+        // Exactly `AppDelegate`'s wiring.
+        backend.selectedDevicesQuery = { [weak controller] in controller?.isMainOutMember($0) ?? false }
+        router.onSetOutputSet = { backend.setOutputSet($0) }
+
+        try controller.saveGroup(Group(id: "g1", name: "Kitchen",
+                                       memberIDs: [NativeBackend.localDeviceID, "airplay-1"],
+                                       memberVolumes: [:]))
+        controller.setMainOut(.group(id: "g1"))
+        waitFor { !sink.calls.isEmpty }
+
+        #expect(router.lastOutputSet == ["airplay-1"],
+                "the Mac is filtered out of the engine output set …")
+        #expect(sink.calls == ["start", "startObserving"],
+                "… and reaches the backend through the query instead, arming the local sink")
+    }
+
+    /// The mirror failure: an AirPlay-ONLY group must NOT arm the sink just
+    /// because the Mac is still sitting in the (untargeted) Selected Devices set
+    /// — that would play the Mac after the user routed the audio away from it.
+    @Test func airPlayOnlyGroupDoesNotArmTheSinkWhileTheMacSitsInSelectedDevices() throws {
+        let (controller, router) = makeRoutingBrain()
+        let backend = NativeBackend(engineControl: NoOpEngine(),
+                                    discoverySource: NoOpDiscovery(),
+                                    systemVolume: NoOpSystemVolume(),
+                                    aggregateControl: NoOpAggregateControl())
+        defer { backend.stop() }
+        let sink = SpySyncedLocalSink()
+        backend.syncedLocalSinkFactory = { sink }
+        backend.selectedDevicesQuery = { [weak controller] in controller?.isMainOutMember($0) ?? false }
+        router.onSetOutputSet = { backend.setOutputSet($0) }
+
+        controller.ensureDefaultSelection()                       // Selected Devices = {the Mac}
+        #expect(controller.isSpeakerSelected(NativeBackend.localDeviceID))
+
+        try controller.saveGroup(Group(id: "g1", name: "Patio",
+                                       memberIDs: ["airplay-1"], memberVolumes: [:]))
+        controller.setMainOut(.group(id: "g1"))
+        waitFor(timeout: 0.3) { false }
+
+        #expect(router.lastOutputSet == ["airplay-1"])
+        #expect(sink.calls.isEmpty,
+                "an AirPlay-only group must not arm the sink off a stale Selected-Devices Mac")
+    }
+
+    /// With no factory wired (mirrors the UI-only smoke path / a test that
+    /// doesn't care about this feature), a Mac + AirPlay selection is inert —
+    /// no crash, nothing to assert against because there's no sink at all.
+    @Test func noFactoryWiredIsInert() {
+        let backend = NativeBackend(
+            engineControl: NoOpEngine(),
+            discoverySource: NoOpDiscovery(),
+            systemVolume: NoOpSystemVolume(),
+            aggregateControl: NoOpAggregateControl())
+        backend.selectedDevicesQuery = { $0 == NativeBackend.localDeviceID }
+        defer { backend.stop() }
+
+        backend.setOutputSet(["airplay-1"])   // Mac + AirPlay, but no syncedLocalSinkFactory
+        waitFor(timeout: 0.2) { false }
+        // No crash, nothing to observe — this test passes by not throwing.
+    }
+
+    // MARK: The Mac's own SYNC trim (roadmap 056 Part 1)
+
+    /// Each edit reaches the sink as the DELTA from the last one applied, landing
+    /// as a live seek. Nothing re-anchors: a re-anchor would silence the Mac for
+    /// a whole reference delay, which is exactly what the stepper must not do.
+    @Test func eachLocalTrimEditSeeksTheLiveSinkByItsOwnDelta() {
+        let (backend, sink, _) = makeBackend(macSelectedByDefault: true)
+        defer { backend.stop() }
+        backend.setOutputSet(["airplay-1"])
+        waitFor { !sink.calls.isEmpty }
+
+        // Relative to whatever is stored, so the assertion owns no assumption
+        // about this machine's saved offset.
+        let base = Double(backend.currentLocalSyncOffsetMs())
+        for step in 1...3 {
+            backend.setLocalTrimPreview(base + Double(step))
+            waitFor { sink.offsetDeltas.count == step }
+        }
+
+        #expect(sink.offsetDeltas == [1, 1, 1], "got: \(sink.offsetDeltas)")
+        #expect(sink.reanchorCauses.isEmpty, "a trim must never re-anchor: \(sink.reanchorCauses)")
+
+        // Dropping the preview walks the sink back to the stored value — one
+        // delta, the other way.
+        backend.endLocalTrimPreview(keepMs: nil)
+        waitFor { sink.offsetDeltas.count == 4 }
+        #expect(sink.offsetDeltas.last == -3)
+        #expect(sink.reanchorCauses.isEmpty)
+    }
+
+    /// The drawer's steppers hold-repeat every 60 ms. A burst is no longer
+    /// coalesced (a seek is cheap, and swallowing them made the control feel
+    /// dead) — but the deltas must still ADD UP to the move the user made, with
+    /// no re-anchor anywhere in the burst.
+    @Test func aBurstOfLocalTrimEditsSeeksTheWholeMoveAndNeverReanchors() {
+        let (backend, sink, _) = makeBackend(macSelectedByDefault: true)
+        defer { backend.stop() }
+        backend.setOutputSet(["airplay-1"])
+        waitFor { !sink.calls.isEmpty }
+
+        let base = Double(backend.currentLocalSyncOffsetMs())
+        for step in 1...8 { backend.setLocalTrimPreview(base + Double(step)) }
+
+        waitFor { sink.offsetDeltas.reduce(0, +) == 8 }
+        #expect(sink.offsetDeltas.reduce(0, +) == 8,
+                "eight stepper repeats must land the whole +8: \(sink.offsetDeltas)")
+        #expect(sink.reanchorCauses.isEmpty, "…and never re-anchor: \(sink.reanchorCauses)")
+
+        backend.endLocalTrimPreview(keepMs: nil)
+    }
+
+    /// An edit that doesn't move the value is not a seek. `noteLocalSyncOffsetChanged`
+    /// fires on every write to the setting, including a same-value one.
+    @Test func anUnchangedOffsetIsNotPushedToTheSink() {
+        let (backend, sink, _) = makeBackend(macSelectedByDefault: true)
+        defer { backend.stop() }
+        backend.setOutputSet(["airplay-1"])
+        waitFor { !sink.calls.isEmpty }
+
+        backend.noteLocalSyncOffsetChanged()
+        waitFor(timeout: 0.3) { false }
+        #expect(sink.offsetDeltas.isEmpty, "got: \(sink.offsetDeltas)")
+        #expect(sink.reanchorCauses.isEmpty)
+    }
+
+    /// A wizard preview is never stored — it overrides what the sink reads until
+    /// the run ends, and then the stored value is back.
+    @Test func aWizardPreviewOverridesTheStoredOffsetUntilItEnds() {
+        let (backend, sink, _) = makeBackend(macSelectedByDefault: true)
+        defer { backend.stop() }
+        backend.setOutputSet(["airplay-1"])
+        waitFor { !sink.calls.isEmpty }
+        let stored = backend.currentLocalSyncOffsetMs()
+
+        backend.setLocalTrimPreview(Double(stored) + 37)
+        #expect(backend.currentLocalSyncOffsetMs() == stored + 37, "the sink reads the candidate")
+        waitFor { !sink.offsetDeltas.isEmpty }
+        #expect(sink.offsetDeltas == [37], "…as a live seek: \(sink.offsetDeltas)")
+
+        backend.endLocalTrimPreview(keepMs: nil)
+        #expect(backend.currentLocalSyncOffsetMs() == stored,
+                "dropping the preview puts the stored value back")
+    }
+
+    @Test func aPreviewIsClampedToTheTrimRange() {
+        let (backend, _, _) = makeBackend(macSelectedByDefault: true)
+        defer { backend.stop() }
+        backend.setLocalTrimPreview(10_000)
+        #expect(Double(backend.currentLocalSyncOffsetMs()) == BTSyncTrim.rangeMs)
+        backend.setLocalTrimPreview(-10_000)
+        #expect(Double(backend.currentLocalSyncOffsetMs()) == -BTSyncTrim.rangeMs)
+        backend.endLocalTrimPreview(keepMs: nil)
+    }
+}

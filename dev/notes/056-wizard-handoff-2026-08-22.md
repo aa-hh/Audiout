@@ -19,7 +19,7 @@ leftover compile error (below): `bash scripts/run-tests.sh` →
 **2477 tests / 142 suites passed**. `bash scripts/build.sh` → clean.
 
 The one thing fixed in this documentation pass: a failed agent left
-`AudiouterCore/Tests/AudiouterCoreTests/AlignmentTickInjectorTests.swift`
+`AudioutCore/Tests/AudioutCoreTests/AlignmentTickInjectorTests.swift`
 with a `#expect(..., "a" + "b")` — Swift Testing's macro can't parse a
 string built with `+` as its `Comment` argument. Changed to one string
 literal. That was the ONLY thing broken; once fixed, everything the two
@@ -47,7 +47,7 @@ after each):
    reviewer; several real defects found and fixed (anchor-carry lost on
    back-to-back rebuilds, telemetry on the RT thread, a flaky pacer test).
 2. **First live test** (v1–v3 builds): found the Settings-app aggregate
-   "stale twin" trap (unrelated — a leftover `Audiouter EQ v2` public
+   "stale twin" trap (unrelated — a leftover `Audiout EQ v2` public
    aggregate blocked routing; documented, not a code bug), the drawer
    stepper not applying live except via typed+Enter (fixed —
    `SyncValueFieldEditor.overrideEditedValue`), the wizard not working with

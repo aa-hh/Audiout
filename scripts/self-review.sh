@@ -46,7 +46,7 @@ echo ""
 echo "  Read the full diff:  git diff --cached -- '*.swift'"
 echo ""
 
-printf '%s\n' "$hash" > "$git_dir/audiouter-review-receipt"
+printf '%s\n' "$hash" > "$git_dir/audiout-review-receipt"
 echo "  Receipt written for this exact staged state ($(printf '%s' "$hash" | cut -c1-12)…)."
 echo "  Restaging any Swift change invalidates it — review and run again."
 exit 0

@@ -39,13 +39,13 @@
 #              this script is invoked from) — always protected from both jobs
 #   --dry-run  report what would happen, touch nothing
 #
-# Env: AUDIOUTER_CACHE_MAX_AGE_DAYS  staleness cutoff (default 7)
-#      AUDIOUTER_MIN_FREE_GB         headroom target, our caches only (default 8)
-#      AUDIOUTER_CRITICAL_FREE_GB    take everything below this (default 2)
-#      AUDIOUTER_NO_HOUSEKEEPING=1   do nothing (escape hatch for odd states)
+# Env: AUDIOUT_CACHE_MAX_AGE_DAYS  staleness cutoff (default 7)
+#      AUDIOUT_MIN_FREE_GB         headroom target, our caches only (default 8)
+#      AUDIOUT_CRITICAL_FREE_GB    take everything below this (default 2)
+#      AUDIOUT_NO_HOUSEKEEPING=1   do nothing (escape hatch for odd states)
 set -u
 
-[ "${AUDIOUTER_NO_HOUSEKEEPING:-0}" = "1" ] && exit 0
+[ "${AUDIOUT_NO_HOUSEKEEPING:-0}" = "1" ] && exit 0
 
 dry_run=0
 current=""
@@ -70,7 +70,7 @@ worktrees_dir="$primary/.claude/worktrees"
 # prune the same worktree or delete each other's kept cache. shlock (macOS
 # base system) reclaims the lock if the recorded PID is dead. Busy => the
 # other run is already doing this exact work — skip silently, don't queue.
-lock=/tmp/audiouter-housekeeping.lock
+lock=/tmp/audiout-housekeeping.lock
 if [ "$dry_run" -eq 0 ]; then
     /usr/bin/shlock -f "$lock" -p $$ || exit 0
     trap 'rm -f "$lock"' EXIT HUP INT TERM
@@ -161,25 +161,25 @@ done
 # forces cold rebuilds (minutes of heavy compile per Guard-4 commit) exactly
 # on the busy multi-agent days run-tests.sh exists to keep survivable. The
 # harm was only ever disk exhaustion, so target that directly:
-#   1. STALENESS: a cache untouched for AUDIOUTER_CACHE_MAX_AGE_DAYS (7) is
+#   1. STALENESS: a cache untouched for AUDIOUT_CACHE_MAX_AGE_DAYS (7) is
 #      deleted unconditionally — after that much source drift SwiftPM largely
 #      rebuilds from scratch anyway, so it saves ~nothing and holds ~1 GB.
-#   2. PRESSURE: below AUDIOUTER_MIN_FREE_GB (8) free, delete caches least-
+#   2. PRESSURE: below AUDIOUT_MIN_FREE_GB (8) free, delete caches least-
 #      recently-built first — but ONLY when doing so actually reaches the
 #      floor, so builds never eat the last of the disk while a shortfall
 #      caused elsewhere is left for a human to deal with. See rule 2 below.
 # The current checkout and anything a live process references are never
 # touched by either rule.
-max_age_days=${AUDIOUTER_CACHE_MAX_AGE_DAYS:-7}
+max_age_days=${AUDIOUT_CACHE_MAX_AGE_DAYS:-7}
 # The headroom a build should be able to count on: ~2 builds' worth (~1 GB
 # each) plus room for the OS to breathe. Deliberately below this machine's
 # ~13 GB everyday baseline — a floor above the baseline would ask for reclaim
 # on every single build (observed live at 15).
-min_free_gb=${AUDIOUTER_MIN_FREE_GB:-8}
+min_free_gb=${AUDIOUT_MIN_FREE_GB:-8}
 # Emergency line. Above it, a shortfall we cannot fix is reported and left
 # alone; below it, every reclaimable cache goes regardless, because a build
 # dying on a full disk is the incident this whole script exists to prevent.
-critical_gb=${AUDIOUTER_CRITICAL_FREE_GB:-2}
+critical_gb=${AUDIOUT_CRITICAL_FREE_GB:-2}
 now=$(date +%s)
 
 # A "build" is a checkout owning any SwiftPM cache dir; its recency is the
@@ -360,7 +360,7 @@ fi
 # They are the cheap ones: giving one up costs a re-attach nobody is waiting
 # on, where a warm `.build` costs ~95s of compile on the next commit.
 #
-# The exception is genuine emergency: below AUDIOUTER_CRITICAL_FREE_GB, take
+# The exception is genuine emergency: below AUDIOUT_CRITICAL_FREE_GB, take
 # everything reclaimable even though it falls short. Preventing a build that
 # dies on a full disk beats keeping caches warm, and a zero-byte disk is the
 # incident that started all of this.

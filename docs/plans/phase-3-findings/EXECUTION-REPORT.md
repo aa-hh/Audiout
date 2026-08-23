@@ -4,7 +4,7 @@
 **Status at writing:** all functional work done; 868 tests / 0 failures; Developer-ID-signed build produced.
 
 This is the consolidated record of the Phase 3 polish effort: the pre-release
-pass to take Audiouter from "works for me" to "a stranger would pay for it."
+pass to take Audiout from "works for me" to "a stranger would pay for it."
 It has two halves — a discovery/audit phase and a fix-execution phase.
 
 ---
@@ -115,7 +115,7 @@ Every item below is committed and headless-verified unless marked otherwise.
 **Headless-verified:** everything above that isn't marked otherwise — 868 unit
 tests, window-harness 48/48, snapshot generators, targeted feature tests.
 
-**Needs the Developer-ID signed build (`build/Audiouter.app`, now available):**
+**Needs the Developer-ID signed build (`build/Audiout.app`, now available):**
 - crash guard (toggle output device during playback)
 - onboarding permission flows + real TCC grant behavior
 - right-click Quit menu + ⌘Q interactive behavior
@@ -164,9 +164,9 @@ merges it doesn't yet have). So landing the remaining 6 is a small, deliberate
 step (merge main in here then land, or cherry-pick the 6 onto main) — Alec's
 call, and worth coordinating given how many sessions have been cross-merging.
 
-- Build/test: `cd AudiouterCore && swift build && swift test` (868 tests).
+- Build/test: `cd AudioutCore && swift build && swift test` (868 tests).
 - Signed build: `bash scripts/make-app.sh` (auto Dev-ID signs; add
-  `AUDIOUTER_BUNDLE_DYLIBS=1` for the self-contained, codec-trimmed bundle — first
+  `AUDIOUT_BUNDLE_DYLIBS=1` for the self-contained, codec-trimmed bundle — first
   such build compiles the minimal ffmpeg once, then caches it).
 - Notarization is deliberately deferred (signing only).
 

@@ -191,7 +191,7 @@ BT `requestShift` + crossfade (:424, :457-486) — note a **negative shift repla
 (:419-421), so a seconds-long grow must use a new zero-fill variant, not a 5 s rewind; local
 `requestReanchor` (`SyncedLocalSink.swift:394`, already fired on composition flips :2613);
 `BTSyncedSink.setComposition` rebuilds (:1250-1257) = silence for the whole delay.
-**A trim change never rebuilds a sink** (`Sources/AudiouterCore/AGENTS.md:38-47`) — R
+**A trim change never rebuilds a sink** (`Sources/AudioutCore/AGENTS.md:38-47`) — R
 changes follow the same rule: shift, don't rebuild, except Cast join/leave where a rebuild
 costs about what the shift would.
 
@@ -238,7 +238,7 @@ impact" holds by three orders of magnitude; and at delay 0 the cost is one nil c
 
 | Seam | Change | Touches AirPlay path? |
 |---|---|---|
-| `Device.Kind` (`Device.swift:14-42`) | `case cast` (+ `isCast` next to `isBluetooth` :76; `supportsAirPlay2 = false`). **Trap:** exclude via `isCast`, never `supportsAirPlay2` — AP1 receivers share that flag and ARE engine-driven (`AudiouterCore/AGENTS.md:320-323`). | No |
+| `Device.Kind` (`Device.swift:14-42`) | `case cast` (+ `isCast` next to `isBluetooth` :76; `supportsAirPlay2 = false`). **Trap:** exclude via `isCast`, never `supportsAirPlay2` — AP1 receivers share that flag and ARE engine-driven (`AudioutCore/AGENTS.md:320-323`). | No |
 | Discovery | `_googlecast._tcp` browse (`CastBrowser`), ingest shaped like `applyBTSnapshots` :6714 via `commitKnownDevice` :6645; groups = one virtual device. | No |
 | `setOutputSet` (:2353) | Engine loop guard :2413-2415 gains `!device.isCast` (explicit, like `isBluetooth` — R-partition trap: no `outputIDs` entry already drops it silently). Third arm after the BT arm (:2523-2616): `castIDs`, `.connecting` on select, manager reconcile, `castPresent` in composition. | Guard only; evaluates `false` for every non-Cast device |
 | Fan-out slot | `setCastSink(_:renderProcessPID:)` in `CaptureControlling` (:8156 pattern, default no-op), `BufferSnapshot` field, fourth consumer after :1156 — S16LE straight in (Cast server already speaks 44.1/16/2), no widen/resample. pid = own pid ⇒ `rebuildIfExclusionObjectsChanged` finds no change ⇒ **no tap rebuild** (:747-756). | One more `if let` after the engine write |
@@ -266,7 +266,7 @@ impact" holds by three orders of magnitude; and at delay 0 the cost is one nil c
 | `localSinkReferenceDelayMs` :5502 / BT closure `OwnToneBackend.swift:961` | `max` with optional | `castTermMs == nil` ⇒ old expression returned unchanged. |
 | `BTReferenceTimeline.delayNanos` :56 / `usableTrimRangeMs` :1318 | predicate OR | `castPresent == false`. |
 | `reconcileCaptureGate` :7537 | **none** | — |
-| `TapRebuildDecision` (`NativeCaptureCoordinator.swift:2200`) / `recreateTap` / R10 reset (`AudiouterCore/AGENTS.md:222-257`) | **none** | Cast attach changes no exclusion object (own pid); a future out-of-process encoder would — keep it in-process. |
+| `TapRebuildDecision` (`NativeCaptureCoordinator.swift:2200`) / `recreateTap` / R10 reset (`AudioutCore/AGENTS.md:222-257`) | **none** | Cast attach changes no exclusion object (own pid); a future out-of-process encoder would — keep it in-process. |
 | `resetAirPlaySessionForWholeSystem` :3700, `handleSystemDidWake` :5913, `armSilenceWatchdog` :6065 | **none** | Iterate `added`/`desiredOn` with `outputIDs` — Cast never has one. Wake re-connect for Cast is the manager's (like BT's enumerator refresh). |
 | `retryOutput` :2656 | early-return arm | `isCast == false` ⇒ falls through to today's body. |
 | `desiredDeviceAudibleLocked` :6034 | one inserted line | — |

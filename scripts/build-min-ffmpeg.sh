@@ -15,7 +15,7 @@
 # formula, however, is a FULL build: its libavcodec.dylib hard-links libx264,
 # libx265, libvpx, libdav1d, libSvtAv1Enc, libmp3lame and libopus. When
 # scripts/bundle-dylibs.sh walks the load-command graph for a self-contained
-# release (AUDIOUTER_BUNDLE_DYLIBS=1), it drags all of those in — ~24 MB of
+# release (AUDIOUT_BUNDLE_DYLIBS=1), it drags all of those in — ~24 MB of
 # H.264/H.265/AV1/VP9 encoder code an audio-only app never calls (roughly 60% of
 # the shipped download). See docs/plans/phase-3-findings/performance.md (M1) and
 # AirPlayEngine/docs/ffmpeg-minimal-build.md.

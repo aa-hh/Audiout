@@ -4,13 +4,13 @@
 
 Static code audit only — no live app launches, no VoiceOver session (this
 worktree is read-only, no audio sessions). Read the repo-root `AGENTS.md`,
-then `AudiouterCore/AGENTS.md` and the `AGENTS.md` nearest every package
-touched (`AudiouterSharedUI`, `AudiouterPopoverUI`, `AudiouterWindowUI`,
-`AudiouterSettingsUI`). Then, for every custom-drawn or composite view named
+then `AudioutCore/AGENTS.md` and the `AGENTS.md` nearest every package
+touched (`AudioutSharedUI`, `AudioutPopoverUI`, `AudioutWindowUI`,
+`AudioutSettingsUI`). Then, for every custom-drawn or composite view named
 in the brief plus everything each package's `AGENTS.md` "Map" section lists:
 read the full source, `git grep`'d for `setAccessibility*` / `isAccessibility*`
 / `mouseEntered` / `mouseDown` / `acceptsFirstResponder` / `keyDown` across
-`AudiouterCore/Sources`, and cross-checked every hover-only visual cue against
+`AudioutCore/Sources`, and cross-checked every hover-only visual cue against
 whether the same action is also reachable through an always-present control.
 
 Two names in the brief don't exist verbatim in source — `ControlCenterSlider`
@@ -29,26 +29,26 @@ per-segment label win over the control-level label) are tagged
 
 | View | Role + label exposed? | State conveyed (non-visually)? | Keyboard path? | file:line |
 |---|---|---|---|---|
-| `DeviceRowView` | Yes — `.group`/`.menuItem`, composed label (name, membership, volume, connection state, AP1) | Yes — connection state is a spoken clause | Yes — checkbox/slider/mute are real controls; name-click and unsupported-row click are mouse-only *conveniences* layered on an already-accessible primary control | `AudiouterSharedUI/DeviceRowView.swift:1114` |
-| `AppRowView` | Yes — `.group`, label = "name, volume X percent" | Partial — destination and "not running" omitted from the row's own label (reachable by tabbing into the destination popup; offline badge has no label anywhere) | Yes — richest in the codebase: `acceptsFirstResponder`, body-click select, Up/Down move, Delete/Backspace remove, all via `NSStandardKeyBindingResponding` overrides | `AudiouterSharedUI/AppRowView.swift:826`, offline badge: `:434` |
-| `GroupRowView` | Yes — `.button` on the row, but press is unwired (no `accessibilityPerformPress`/`acceptsFirstResponder`) | Yes — "active/inactive, expanded/collapsed, master volume" in the label | Yes, but only via the real `activateButton`/`chevronButton`/`muteButton`/`masterSlider` children — the row's own advertised `.button` role has no confirmed activation path | `AudiouterPopoverUI/GroupRowView.swift:374` |
-| `MainOutRowView` | Yes — `.group`, label + slider label + popup label/value | Yes | Yes — every control is stock (`NSSlider`/`NSButton`/`NSPopUpButton`) | `AudiouterPopoverUI/MainOutRowView.swift:380` |
-| `StatusDotView` | No (by design — relies on the host row's composed label) | Color/motion-only for its *own* value (see Major-1); the state is separately spoken via the host row's label | N/A (non-interactive) | `AudiouterSharedUI/StatusDotView.swift:32` |
-| `LevelMeterView` | No (decorative, `hitTest` → nil) | No live-playback-activity signal exists anywhere else either (see Minor-2) | N/A (non-interactive) | `AudiouterSharedUI/LevelMeterView.swift:32` |
-| Card collapse header (`PopoverPanelViewController.beginCard`) | Yes — real `NSButton` chevron, dynamic "Expand/Collapse `<title>`" label | Yes | Yes — chevron is a real control; whole-header click is a bonus on top of it | `AudiouterPopoverUI/PopoverPanelViewController.swift:322`, `:499` |
-| `ConnectionDiagnosisView` | Yes — group label + 3 labeled buttons | Yes | Yes — real buttons | `AudiouterPopoverUI/ConnectionDiagnosisView.swift:247` |
-| `PopoverHeaderView` | Yes — group label + 3 labeled/tooltipped icon buttons | N/A | Yes | `AudiouterPopoverUI/PopoverHeaderView.swift:175` |
-| `ApplicationsFooterView` (± control) | Yes — control-level label + per-segment image descriptions | Yes (enabled/disabled) | Yes — `NSSegmentedControl` | `AudiouterPopoverUI/PopoverController.swift:36-68` |
-| `IconPickerViewController` (grid/search/Apply) | Yes, but grid cells speak the raw SF Symbol identifier (see Minor-3) | Yes | Yes — every element is a real control | `AudiouterWindowUI/IconPickerViewController.swift:176-193` |
-| `DeviceIconWellView` (icon-edit affordance) | Yes — `.button`, "Edit icon" label | N/A | **No** — plain `NSView`, `mouseDown`-only, no `acceptsFirstResponder`/keyDown/press override, and it is the *only* entry point into the icon picker | `AudiouterWindowUI/DeviceIconWellView.swift:95-97`, `:117` |
-| `PermissionRowView` (onboarding) | Yes — entirely stock controls, each status (Allow/Allowed/Requested/Denied/Unsupported) gets its own labeled icon+text | Yes | Yes — real `NSButton`s throughout | `AudiouterOnboardingUI/PermissionRowView.swift` (whole file) |
-| `ThemeTileButton` (Appearance theme picker) | Partial — real `NSButton` + `theme.displayName` label, but selection state isn't announced (see Minor-1) | No — "currently selected" isn't in the accessibility tree | Yes — real `NSButton`, target/action | `AudiouterSettingsUI/AppearanceSettingsViewController.swift:78-99` |
-| Excluded-apps rows (`AudioSettingsViewController`) | Yes — add/remove buttons individually labeled, always visible | N/A | Yes | `AudiouterSettingsUI/AudioSettingsViewController.swift:449-500` |
-| `GeneralSettingsViewController` (launch-at-login) | Yes | Yes (native switch) | Yes | `AudiouterSettingsUI/GeneralSettingsViewController.swift:35` |
-| `SidebarViewController` (Groups/Devices list) | Yes — stock `NSOutlineView` | Yes | Yes — native arrow-key/VO rotor navigation | `AudiouterWindowUI/SidebarViewController.swift:76` |
-| `MembershipRowView` | Yes — dynamic "Add/Remove `<device>` … group" label | Yes | Yes — real checkbox | `AudiouterWindowUI/MembershipRowView.swift:158-161` |
-| `ControlPanelWindowController` (shared panel shell, flag-gated) | N/A (window chrome, not a control) | N/A | Unclear — native close button is force-hidden and no `cancelOperation`/Escape wiring found (see Major-2) | `AudiouterSharedUI/ControlPanelWindowController.swift:102` |
-| Status item → popover open/close | Yes — stock `NSStatusItem`/`NSStatusBarButton`; popover uses `.behavior = .transient` (Escape/outside-click close is an AppKit default) | Yes | Yes — standard macOS menu-bar-extra keyboard/VO navigation, not app code | `AudiouterApp/AppDelegate.swift:194-195`, `AudiouterPopoverUI/PopoverController.swift:362` |
+| `DeviceRowView` | Yes — `.group`/`.menuItem`, composed label (name, membership, volume, connection state, AP1) | Yes — connection state is a spoken clause | Yes — checkbox/slider/mute are real controls; name-click and unsupported-row click are mouse-only *conveniences* layered on an already-accessible primary control | `AudioutSharedUI/DeviceRowView.swift:1114` |
+| `AppRowView` | Yes — `.group`, label = "name, volume X percent" | Partial — destination and "not running" omitted from the row's own label (reachable by tabbing into the destination popup; offline badge has no label anywhere) | Yes — richest in the codebase: `acceptsFirstResponder`, body-click select, Up/Down move, Delete/Backspace remove, all via `NSStandardKeyBindingResponding` overrides | `AudioutSharedUI/AppRowView.swift:826`, offline badge: `:434` |
+| `GroupRowView` | Yes — `.button` on the row, but press is unwired (no `accessibilityPerformPress`/`acceptsFirstResponder`) | Yes — "active/inactive, expanded/collapsed, master volume" in the label | Yes, but only via the real `activateButton`/`chevronButton`/`muteButton`/`masterSlider` children — the row's own advertised `.button` role has no confirmed activation path | `AudioutPopoverUI/GroupRowView.swift:374` |
+| `MainOutRowView` | Yes — `.group`, label + slider label + popup label/value | Yes | Yes — every control is stock (`NSSlider`/`NSButton`/`NSPopUpButton`) | `AudioutPopoverUI/MainOutRowView.swift:380` |
+| `StatusDotView` | No (by design — relies on the host row's composed label) | Color/motion-only for its *own* value (see Major-1); the state is separately spoken via the host row's label | N/A (non-interactive) | `AudioutSharedUI/StatusDotView.swift:32` |
+| `LevelMeterView` | No (decorative, `hitTest` → nil) | No live-playback-activity signal exists anywhere else either (see Minor-2) | N/A (non-interactive) | `AudioutSharedUI/LevelMeterView.swift:32` |
+| Card collapse header (`PopoverPanelViewController.beginCard`) | Yes — real `NSButton` chevron, dynamic "Expand/Collapse `<title>`" label | Yes | Yes — chevron is a real control; whole-header click is a bonus on top of it | `AudioutPopoverUI/PopoverPanelViewController.swift:322`, `:499` |
+| `ConnectionDiagnosisView` | Yes — group label + 3 labeled buttons | Yes | Yes — real buttons | `AudioutPopoverUI/ConnectionDiagnosisView.swift:247` |
+| `PopoverHeaderView` | Yes — group label + 3 labeled/tooltipped icon buttons | N/A | Yes | `AudioutPopoverUI/PopoverHeaderView.swift:175` |
+| `ApplicationsFooterView` (± control) | Yes — control-level label + per-segment image descriptions | Yes (enabled/disabled) | Yes — `NSSegmentedControl` | `AudioutPopoverUI/PopoverController.swift:36-68` |
+| `IconPickerViewController` (grid/search/Apply) | Yes, but grid cells speak the raw SF Symbol identifier (see Minor-3) | Yes | Yes — every element is a real control | `AudioutWindowUI/IconPickerViewController.swift:176-193` |
+| `DeviceIconWellView` (icon-edit affordance) | Yes — `.button`, "Edit icon" label | N/A | **No** — plain `NSView`, `mouseDown`-only, no `acceptsFirstResponder`/keyDown/press override, and it is the *only* entry point into the icon picker | `AudioutWindowUI/DeviceIconWellView.swift:95-97`, `:117` |
+| `PermissionRowView` (onboarding) | Yes — entirely stock controls, each status (Allow/Allowed/Requested/Denied/Unsupported) gets its own labeled icon+text | Yes | Yes — real `NSButton`s throughout | `AudioutOnboardingUI/PermissionRowView.swift` (whole file) |
+| `ThemeTileButton` (Appearance theme picker) | Partial — real `NSButton` + `theme.displayName` label, but selection state isn't announced (see Minor-1) | No — "currently selected" isn't in the accessibility tree | Yes — real `NSButton`, target/action | `AudioutSettingsUI/AppearanceSettingsViewController.swift:78-99` |
+| Excluded-apps rows (`AudioSettingsViewController`) | Yes — add/remove buttons individually labeled, always visible | N/A | Yes | `AudioutSettingsUI/AudioSettingsViewController.swift:449-500` |
+| `GeneralSettingsViewController` (launch-at-login) | Yes | Yes (native switch) | Yes | `AudioutSettingsUI/GeneralSettingsViewController.swift:35` |
+| `SidebarViewController` (Groups/Devices list) | Yes — stock `NSOutlineView` | Yes | Yes — native arrow-key/VO rotor navigation | `AudioutWindowUI/SidebarViewController.swift:76` |
+| `MembershipRowView` | Yes — dynamic "Add/Remove `<device>` … group" label | Yes | Yes — real checkbox | `AudioutWindowUI/MembershipRowView.swift:158-161` |
+| `ControlPanelWindowController` (shared panel shell, flag-gated) | N/A (window chrome, not a control) | N/A | Unclear — native close button is force-hidden and no `cancelOperation`/Escape wiring found (see Major-2) | `AudioutSharedUI/ControlPanelWindowController.swift:102` |
+| Status item → popover open/close | Yes — stock `NSStatusItem`/`NSStatusBarButton`; popover uses `.behavior = .transient` (Escape/outside-click close is an AppKit default) | Yes | Yes — standard macOS menu-bar-extra keyboard/VO navigation, not app code | `AudioutApp/AppDelegate.swift:194-195`, `AudioutPopoverUI/PopoverController.swift:362` |
 
 **Coverage summary:** 12 views/surfaces fully covered, 5 partial (`AppRowView`,
 `GroupRowView`, `StatusDotView`, `ThemeTileButton`, `IconPickerViewController`'s
@@ -69,13 +69,13 @@ That click handler lives on a plain, non-button view with no keyboard
 equivalent at all — a keyboard-only user or a VoiceOver user has no way to
 reach the icon picker, full stop. Every other click affordance in the app has
 a fallback (a real button, a menu item, arrow keys); this one doesn't.
-Evidence: `AudiouterCore/Sources/AudiouterWindowUI/DeviceIconWellView.swift:44`
+Evidence: `AudioutCore/Sources/AudioutWindowUI/DeviceIconWellView.swift:44`
 (`final class DeviceIconWellView: NSView`, not `NSButton`), `:117`
 (`override func mouseDown(with event: NSEvent) { onClick?() }` — the sole
 trigger), `:95-97` (accessibility is *labeled* `.button` but nothing wires a
 press action), and the two callers that only ever set `.onClick`:
-`AudiouterWindowUI/GroupEditorViewController.swift:104-106`,
-`AudiouterWindowUI/DeviceDetailViewController.swift:95-96`.
+`AudioutWindowUI/GroupEditorViewController.swift:104-106`,
+`AudioutWindowUI/DeviceDetailViewController.swift:95-96`.
 Fix direction: back the well with a real `NSButton` (image-button covering
 the whole well, exactly like `ThemeTileButton` already does elsewhere in this
 codebase), or at minimum add `override var acceptsFirstResponder: Bool { true }`
@@ -96,9 +96,9 @@ device that's "System"-selected and mid-connect reads exactly like one that's
 already connected and playing, distinguishable only by the dot's gray-vs-green
 hue and a subtle pulse. This is the classic WCAG "use of color" trap, worse
 for colorblind or low-vision users glancing at an 8pt dot.
-Evidence: `AudiouterCore/Sources/AudiouterSharedUI/StatusDotView.swift:107-130`
+Evidence: `AudioutCore/Sources/AudioutSharedUI/StatusDotView.swift:107-130`
 (the fill-color switch is the only differentiator), and
-`AudiouterSharedUI/DeviceRowView.swift:416-426` (`resolveSublabel`'s
+`AudioutSharedUI/DeviceRowView.swift:416-426` (`resolveSublabel`'s
 precedence ladder has no "Connecting…" branch — a connecting, selected device
 falls straight into the routing-line branch and just shows "System").
 Fix direction: add a shape/glyph cue (e.g., an outlined vs. filled dot) or a
@@ -116,10 +116,10 @@ was hidden. This flag is OFF by default today (`AppDelegate.useControlPanel`),
 so it does not affect the shipping paid build, but it's live code that could
 ship later without a verified way to dismiss the panel for anyone who isn't
 clicking outside it with a mouse.
-Evidence: `AudiouterCore/Sources/AudiouterSharedUI/ControlPanelWindowController.swift:102`
+Evidence: `AudioutCore/Sources/AudioutSharedUI/ControlPanelWindowController.swift:102`
 (`panel.standardWindowButton(.closeButton)?.isHidden = true`), no
 `keyEquivalent`/`cancelOperation` hits anywhere in that file;
-`AudiouterApp/AppDelegate.swift:143` (flag gate, off by default).
+`AudioutApp/AppDelegate.swift:143` (flag gate, off by default).
 `[confirm-in-G1]` — this needs a live keyboard/VO check before the flag is
 ever turned on for a release; the code alone doesn't prove Escape works or
 fails.
@@ -135,7 +135,7 @@ user has to tab one control further (into the destination popup) to learn
 where audio is going, and has no way at all to learn "this app isn't running"
 — the offline badge's `NSImage` carries an `accessibilityDescription` but
 nothing surfaces it as a label on the badge view or folds it into the row.
-Evidence: `AudiouterCore/Sources/AudiouterSharedUI/AppRowView.swift:826-832`
+Evidence: `AudioutCore/Sources/AudioutSharedUI/AppRowView.swift:826-832`
 (`configureAccessibility` — no destination, no running-state), `:434-439`
 (`offlineBadge` — image has a description, view has none).
 Fix direction: mirror `DeviceRowView`'s `stateClause` pattern — append the
@@ -151,7 +151,7 @@ selected.** `ThemeTileButton` is a real, keyboard/VoiceOver-reachable
 `NSButton.state` or an explicit `accessibilityValue`. A VoiceOver user
 tabbing through the three tiles hears three identically-phrased buttons with
 no indication of which one is active.
-Evidence: `AudiouterCore/Sources/AudiouterSettingsUI/AppearanceSettingsViewController.swift:86`
+Evidence: `AudioutCore/Sources/AudioutSettingsUI/AppearanceSettingsViewController.swift:86`
 (label set once, at creation, to just `theme.displayName`) and
 `:136-138`/`:95-99` (`isSelectedTile` never touches `button.state` or
 accessibility).
@@ -165,7 +165,7 @@ users don't typically want a live-updating numeric readout. But there's
 currently no substitute anywhere: connection state and volume % tell you
 "selected and at 40%," not "sound is actually flowing." Low severity —
 flagging for awareness, not urging a fix for v1.
-Evidence: `AudiouterCore/Sources/AudiouterSharedUI/LevelMeterView.swift`
+Evidence: `AudioutCore/Sources/AudioutSharedUI/LevelMeterView.swift`
 (no `setAccessibility*`/`isAccessibilityElement` calls anywhere in the file).
 
 **N3 — Icon-picker grid buttons speak raw SF Symbol identifiers.** Each
@@ -173,7 +173,7 @@ curated icon in `IconPickerViewController`'s grid is a real, reachable
 `NSButton`, but its accessibility label is the literal symbol name (e.g.
 `"hifispeaker.2.fill"`) rather than a plain-language description — functional,
 but reads as engineering jargon to a VoiceOver user browsing icons by ear.
-Evidence: `AudiouterCore/Sources/AudiouterWindowUI/IconPickerViewController.swift:185`
+Evidence: `AudioutCore/Sources/AudioutWindowUI/IconPickerViewController.swift:185`
 (`accessibilityDescription: name` where `name` is the raw curated symbol
 string).
 Fix direction: maintain a small `[String: String]` display-name lookup for
@@ -189,7 +189,7 @@ likely gets no response. Every actual action the row offers (expand/collapse,
 activate, mute, master volume) is separately reachable through its own real
 `NSButton`/`NSSlider` child, so this doesn't block anything — it's a labeling
 promise the view doesn't keep.
-Evidence: `AudiouterCore/Sources/AudiouterPopoverUI/GroupRowView.swift:374-385`
+Evidence: `AudioutCore/Sources/AudioutPopoverUI/GroupRowView.swift:374-385`
 (`configureAccessibility` sets `.button` with no press wiring anywhere in the
 file).
 `[confirm-in-G1]` — live VoiceOver check of "press" on the row body.
@@ -204,7 +204,7 @@ routed to a given speaker — renders at an explicit `10pt` in
 `.secondaryLabelColor`, smaller than the app's own smallest named system size
 (`NSFont.smallSystemFontSize`, ~11pt) used everywhere else for genuinely
 secondary text (the `%` readouts).
-Evidence: `AudiouterCore/Sources/AudiouterSharedUI/DeviceRowView.swift:542-543`
+Evidence: `AudioutCore/Sources/AudioutSharedUI/DeviceRowView.swift:542-543`
 (`statusLabel.font = .systemFont(ofSize: 10)`).
 `[confirm-in-G1]` — a rendered-contrast check against the popover's `.menu`
 material in both light and dark is a visual-audit question, not a code-read
@@ -215,7 +215,7 @@ secondary line in the row.
 ### Nit
 
 **T1 — No support for "Differentiate Without Color" or "Increase Contrast."**
-Zero occurrences anywhere in `AudiouterCore/Sources` of
+Zero occurrences anywhere in `AudioutCore/Sources` of
 `accessibilityDisplayShouldDifferentiateWithoutColor` or
 `accessibilityDisplayShouldIncreaseContrast` (confirmed by repo-wide grep,
 alongside the Reduce-Motion checks which ARE present throughout). Wiring
@@ -228,7 +228,7 @@ bezel outline is invisible at rest — the glyph itself is always visible and
 the buttons are always clickable/keyboard-focusable, so nothing is actually
 blocked, but a low-vision user scanning for "where are the buttons" gets a
 weaker cue than Settings/Quit deserve.
-Evidence: `AudiouterCore/Sources/AudiouterPopoverUI/PopoverHeaderView.swift:140`.
+Evidence: `AudioutCore/Sources/AudioutPopoverUI/PopoverHeaderView.swift:140`.
 
 **T3 — Fixed point-size fonts throughout, no Dynamic-Type-style scaling.**
 Standard and expected for a Control-Center-style menu-bar utility — Apple's
@@ -242,7 +242,7 @@ segment's own image `accessibilityDescription` ("Add application" /
 "Remove application"). `[confirm-in-G1]`: whether VoiceOver announces the
 per-segment description or the control-level label when focus lands on an
 individual segment — stock `NSSegmentedControl` behavior, low risk either way.
-Evidence: `AudiouterCore/Sources/AudiouterPopoverUI/PopoverController.swift:60-68`.
+Evidence: `AudioutCore/Sources/AudioutPopoverUI/PopoverController.swift:60-68`.
 
 ---
 

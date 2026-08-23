@@ -8,15 +8,15 @@
 # separately. With no remote configured it is a passthrough to `swift build`.
 #
 # Usage:
-#   scripts/build.sh                       # AudiouterCore, debug
+#   scripts/build.sh                       # AudioutCore, debug
 #   scripts/build.sh -c release            # any swift-build flags pass through
 #   scripts/build.sh --product ptp-helper  #
-#   AUDIOUTER_BUILD_PACKAGE=AirPlayEngine scripts/build.sh
+#   AUDIOUT_BUILD_PACKAGE=AirPlayEngine scripts/build.sh
 #
 # Env:
-#   AUDIOUTER_BUILD_PACKAGE  package dir, relative to the repo root
-#                            (default AudiouterCore)
-#   AUDIOUTER_BUILD_LOCAL=1  skip the remote entirely
+#   AUDIOUT_BUILD_PACKAGE  package dir, relative to the repo root
+#                            (default AudioutCore)
+#   AUDIOUT_BUILD_LOCAL=1  skip the remote entirely
 #
 # SCOPE — this is a CHECK, not a producer. It answers "does this compile?" and
 # deliberately does NOT copy artifacts back: a remote compile does not warm the
@@ -26,7 +26,7 @@
 set -eu
 
 repo_root=$(git rev-parse --show-toplevel)
-package=${AUDIOUTER_BUILD_PACKAGE:-AudiouterCore}
+package=${AUDIOUT_BUILD_PACKAGE:-AudioutCore}
 
 # --build-system native: Xcode 26+/27 made the new "swiftbuild" engine the
 # default, but it doesn't forward a C target's cSettings unsafeFlags
@@ -39,7 +39,7 @@ build_flags="--build-system native"
 
 . "$(cd "$(dirname "$0")" && pwd)/lib/remote.sh"
 
-if [ "${AUDIOUTER_BUILD_LOCAL:-0}" != "1" ] && remote_wins; then
+if [ "${AUDIOUT_BUILD_LOCAL:-0}" != "1" ] && remote_wins; then
     echo "  build: sending to remote $remote_host ..." >&2
     rrc=0
     remote_run "$repo_root" "cd \"$package\" && swift build $build_flags $*" || rrc=$?

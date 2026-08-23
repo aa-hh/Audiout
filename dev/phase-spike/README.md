@@ -6,7 +6,7 @@ Throwaway feasibility harness for **T-SPIKE-PHASE** (see the plan
 precision of the kind of `AVAudioEngine` graph `SyncedLocalSink` builds, and the
 behaviour of candidate rate-correction mechanisms for T-CORRECTION.
 
-Deliberately **separate from AudiouterCore** (does not link it): disposable
+Deliberately **separate from AudioutCore** (does not link it): disposable
 measurement code, and it re-derives the release-plan math independently so it is an
 *independent* cross-check of `SyncTiming.plan`.
 

@@ -1,7 +1,7 @@
 # P2b — NativeBackend gap analysis: everything `OutputBackend` promises that `AirPlayEngine` doesn't yet provide
 
 Research brief for **T-BACKEND-1** (PLAN-PHASE-2.md Wave 4). Read-only pass over
-`AudiouterCore/` and `AirPlayEngine/` — no code or other docs touched.
+`AudioutCore/` and `AirPlayEngine/` — no code or other docs touched.
 Companion investigations are running against `AirPlayEngine/` internals
 concurrently; this brief only reads it.
 
@@ -90,7 +90,7 @@ explicitly told (`updateDiscovery`) and what state a session op resolved to.
      emit `.deviceRemoved`/mark-unavailable exactly like `OwnToneBackend`'s
      `markUnreachable` does for the whole-backend-down case (OwnToneBackend.swift:317-330)
      — except here it's per-device, driven by mDNS TTL/departure, not a health-check.
-- **This NWBrowser does not exist yet anywhere in `AudiouterCore`** —
+- **This NWBrowser does not exist yet anywhere in `AudioutCore`** —
   confirmed by grep; the only discovery-shaped code today is `OwnToneBackend`
   reading OwnTone's own list. **This is new code, not a rewire**, and it's on
   the critical path before anything else in `NativeBackend` can work (nothing

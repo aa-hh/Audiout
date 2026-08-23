@@ -42,12 +42,12 @@ This is the production per-app routing safety net; the system-wide tap has only 
 ### C8 — main thread blocks on the state queue for slow work
 
 **Sites:**
-- `AudiouterCore/Sources/AudiouterCore/NativeBackend.swift:482` —
+- `AudioutCore/Sources/AudioutCore/NativeBackend.swift:482` —
   `setOutputSet`'s `stateQueue.sync { ... }`, called from the main thread on
   every routing change.
-- `AudiouterCore/Sources/AudiouterCore/NativeBackend.swift:220` — the
+- `AudioutCore/Sources/AudioutCore/NativeBackend.swift:220` — the
   `devices` getter, also a `stateQueue.sync`.
-- `AudiouterCore/Sources/AudiouterCore/GroupController.swift:167` —
+- `AudioutCore/Sources/AudioutCore/GroupController.swift:167` —
   `device(_ id:)` calls `backend.devices` (so re-enters the sync above) and
   is called in loops during repaints.
 
@@ -75,14 +75,14 @@ entry to Resolved.
 ### D4 — UI-thread stalls and stuck-drag state (several sub-items)
 
 **Sync persistence on main per gesture:**
-- `AudiouterCore/Sources/AudiouterCore/AppRoutingController.swift:31` —
+- `AudioutCore/Sources/AudioutCore/AppRoutingController.swift:31` —
   `persist()` calls `try? store.save(appRoutes)` synchronously, invoked from
   a UI gesture handler.
-- `AudiouterCore/Sources/AudiouterCore/GroupController.swift:155` —
+- `AudioutCore/Sources/AudioutCore/GroupController.swift:155` —
   `persistRouting()`, same shape.
 
 **Blocking XPC on main:**
-- `AudiouterCore/Sources/AudiouterSettingsUI/GeneralSettingsViewController.swift:52`
+- `AudioutCore/Sources/AudioutSettingsUI/GeneralSettingsViewController.swift:52`
   — `launchToggled()` calls `try loginItem.setEnabled(desired)` directly on
   the button's action handler, which round-trips `SMAppService` XPC
   synchronously.
@@ -92,26 +92,26 @@ cleared when the row happens to see an event whose type is `.leftMouseUp`
 at the same moment as the last continuous slider callback. `Esc` or any
 other way of ending a drag without that exact coincidence leaves the flag
 set, so the row keeps ignoring model updates indefinitely.
-- `AudiouterCore/Sources/AudiouterSharedUI/AppRowView.swift:360` (flag set
+- `AudioutCore/Sources/AudioutSharedUI/AppRowView.swift:360` (flag set
   at 360, cleared conditionally at 362)
-- `AudiouterCore/Sources/AudiouterSharedUI/DeviceRowView.swift:583`
+- `AudioutCore/Sources/AudioutSharedUI/DeviceRowView.swift:583`
   (set), `:585` (conditional clear)
-- `AudiouterCore/Sources/AudiouterPopoverUI/MainOutRowView.swift:289`
+- `AudioutCore/Sources/AudioutPopoverUI/MainOutRowView.swift:289`
   (set), `:296` (conditional clear) — note this row uses a differently-named
   drag flag than the two above, same shape
-- `AudiouterCore/Sources/AudiouterPopoverUI/GroupRowView.swift:251` (set),
+- `AudioutCore/Sources/AudioutPopoverUI/GroupRowView.swift:251` (set),
   `:258` (conditional clear) — this one additionally leaves
   `GroupController`'s per-group drag-ratio cache stale, since nothing else
   invalidates it
 
 **Per-row global mouse monitors churned on rebuild:**
-- `AudiouterCore/Sources/AudiouterSharedUI/DeviceRowView.swift:778`
-- `AudiouterCore/Sources/AudiouterSharedUI/AppRowView.swift:468`
-- `AudiouterCore/Sources/AudiouterPopoverUI/GroupRowView.swift:318`
+- `AudioutCore/Sources/AudioutSharedUI/DeviceRowView.swift:778`
+- `AudioutCore/Sources/AudioutSharedUI/AppRowView.swift:468`
+- `AudioutCore/Sources/AudioutPopoverUI/GroupRowView.swift:318`
 
 IMPORTANT nuance: the app-wide `.mouseMoved` local-monitor pattern itself is
 deliberate and documented in
-`AudiouterCore/Sources/AudiouterSharedUI/AGENTS.md` (~line 11) as the
+`AudioutCore/Sources/AudioutSharedUI/AGENTS.md` (~line 11) as the
 intentional replacement for `NSTrackingArea`. The finding here is about
 per-row multiplicity and churn on every popover rebuild — each row adds its
 own app-wide monitor and removes it on teardown, so a rebuild briefly
@@ -120,7 +120,7 @@ Word any fix so it reduces churn (e.g. one shared monitor dispatching to
 rows) without reverting to `NSTrackingArea`.
 
 **Structural rebuild mid-drag detaches the tracked slider:**
-- `AudiouterCore/Sources/AudiouterPopoverUI/PopoverController.swift:343`
+- `AudioutCore/Sources/AudioutPopoverUI/PopoverController.swift:343`
   — when `deviceSetChanged` is true, the full `rebuild()` path runs even if
   a slider drag is in progress, replacing the row (and its slider) the user
   has the mouse down on.
@@ -142,7 +142,7 @@ and move this entry to Resolved.
 ### D5 — legacy OwnTone backend (fix only if that path stays shipped)
 
 **Sites:**
-- `AudiouterCore/Sources/AudiouterCore/ConnectionDiagnostics.swift:276-291`
+- `AudioutCore/Sources/AudioutCore/ConnectionDiagnostics.swift:276-291`
   — the Bonjour browse continuation inside the async diagnose flow resumes
   on `.failed` (line 288) but never on `.cancelled`; if the browser is torn
   down by cancellation instead of failing outright, the continuation is
@@ -151,7 +151,7 @@ and move this entry to Resolved.
   continuation a few lines below (318–333) is a different call and is
   already bounded by a sibling timeout task in the same `withTaskGroup`, so
   it does not hang.
-- `AudiouterCore/Sources/AudiouterCore/OwnToneBackend.swift:568`
+- `AudioutCore/Sources/AudioutCore/OwnToneBackend.swift:568`
   (`recoverZombies(_:expected:)`) — recovery re-`setOutputSet`s the
   `expected` set captured at call time without re-checking current intent,
   so it can re-select a device the user deselected while recovery was in
@@ -175,17 +175,17 @@ this entry to Resolved.
 ### D6 — narrow verified races
 
 **Sites:**
-- `AudiouterCore/Sources/AudiouterCore/DefaultOutputObserver.swift:12`
+- `AudioutCore/Sources/AudioutCore/DefaultOutputObserver.swift:12`
   (`onChange` closure) and `:16` (`currentDeviceName`) — both documented as
   queue-confined, but `onChange` is a plain `var` settable from any thread
   and `currentDeviceName`'s doc comment claims readable-from-any-thread
   safety that depends on every write going through `queue`, which isn't
   enforced by the type.
-- `AudiouterCore/Sources/AudiouterCore/CaptureCoordinator.swift:311` — a
+- `AudioutCore/Sources/AudioutCore/CaptureCoordinator.swift:311` — a
   `Task { [weak self] in self?.captureProcess?.stop() }` reads
   `captureProcess` off the coordinator's own queue, from inside a detached
   `Task`, racing any queue-confined mutation of the same property.
-- `AudiouterCore/Sources/AudiouterCore/CaptureProcess.swift:120-129` — the
+- `AudioutCore/Sources/AudioutCore/CaptureProcess.swift:120-129` — the
   shared `LineBuffer` is appended to from the `readabilityHandler` callback
   and flushed from the `terminationHandler` callback; both can fire on
   different GCD threads around process exit with no shared lock between

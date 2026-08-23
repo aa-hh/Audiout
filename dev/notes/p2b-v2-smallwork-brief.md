@@ -20,7 +20,7 @@ live so it doesn't fight the user's own manual choices?
 ### Findings (with evidence)
 
 **Availability is already a first-class, event-driven concept.**
-`Device.isAvailable` (`AudiouterCore/Sources/AudiouterCore/Device.swift:46`)
+`Device.isAvailable` (`AudioutCore/Sources/AudioutCore/Device.swift:46`)
 is documented explicitly for this: *"A dropped device stays in the model
 (greyed out) rather than vanishing, so groups keep their membership."* The
 model was built with auto-reconnect in mind — it just isn't wired up yet.
@@ -438,14 +438,14 @@ Reasoning:
 
 ## Source references
 
-- `AudiouterCore/Sources/AudiouterCore/Device.swift`
-- `AudiouterCore/Sources/AudiouterCore/OutputBackend.swift`
-- `AudiouterCore/Sources/AudiouterCore/OwnToneBackend.swift`
-- `AudiouterCore/Sources/AudiouterCore/GroupController.swift`
-- `AudiouterCore/Sources/AudiouterCore/GroupStore.swift`
-- `AudiouterCore/Sources/AudiouterWindowUI/MixerViewController.swift`
-- `AudiouterCore/Sources/AudiouterWindowUI/MixerWindowController.swift`
-- `AudiouterCore/Tests/AudiouterCoreTests/GroupControllerTests.swift`
+- `AudioutCore/Sources/AudioutCore/Device.swift`
+- `AudioutCore/Sources/AudioutCore/OutputBackend.swift`
+- `AudioutCore/Sources/AudioutCore/OwnToneBackend.swift`
+- `AudioutCore/Sources/AudioutCore/GroupController.swift`
+- `AudioutCore/Sources/AudioutCore/GroupStore.swift`
+- `AudioutCore/Sources/AudioutWindowUI/MixerViewController.swift`
+- `AudioutCore/Sources/AudioutWindowUI/MixerWindowController.swift`
+- `AudioutCore/Tests/AudioutCoreTests/GroupControllerTests.swift`
 - `SPEC.md` §3 (v2 feature list, lines 48-54), §4 (architecture + security
   principles, lines 63-145), §9 (device row / full window, lines 537-558)
 - `PLAN-PHASE-2.md` (engine seam status, lines 351, 396-399, 607)

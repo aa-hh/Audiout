@@ -13,7 +13,7 @@ This document is prose only — it changes no code. Section numbers are stable s
 the resolution log (§8) and the scenario appendix (§9) can cite them.
 
 Reference geometry lives in
-`AudiouterCore/Sources/AudiouterSharedUI/PopoverColumnGrid.swift`; every measured
+`AudioutCore/Sources/AudioutSharedUI/PopoverColumnGrid.swift`; every measured
 constant below is that file's, cited by name, never re-hardcoded.
 
 ---
@@ -566,7 +566,7 @@ stay exactly as built.
   to pick an app."* Teaches the feature at the moment of emptiness, not a modal.
 - **Groups empty (contextual hint):** *"Save a set of speakers as a group, then
   switch to it in two clicks from the menu bar."*
-- **"How Audiouter works" reference page:** a plain, calm explainer (its own
+- **"How Audiout works" reference page:** a plain, calm explainer (its own
   view or Settings pane) covering the three planes — main output, groups, app
   exceptions — and the bus idiom. **Spec the copy voice, not the layout**: warm,
   concrete, second person, one idea per line, no marketing. This spec does not

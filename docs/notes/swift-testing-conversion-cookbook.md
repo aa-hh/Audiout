@@ -10,14 +10,14 @@ before being written down — nothing here is recalled from memory.
 | --- | --- |
 | Compiler | Apple Swift 6.4 (`swiftlang-6.4.0.27.1`), Xcode 27 beta |
 | Target | `arm64-apple-macos14.0`, SDK MacOSX27.0 |
-| `swift-tools-version` | **5.10, unchanged**, in both `AudiouterCore/Package.swift` and `AirPlayEngine/Package.swift` |
+| `swift-tools-version` | **5.10, unchanged**, in both `AudioutCore/Package.swift` and `AirPlayEngine/Package.swift` |
 | Language mode | `-swift-version 5` (NOT Swift 6 strict concurrency) |
 | Testing library | `Testing` framework version **2074**, bundled with the toolchain |
 
 **No `swift-tools-version` bump is needed.** `import Testing` resolves in both
 packages under `swift-tools-version:5.10`, needs no `Package.swift` dependency
 entry, and swift-testing suites coexist in the same target as untouched
-`XCTestCase` classes — verified by building the whole `AudiouterCoreTests`
+`XCTestCase` classes — verified by building the whole `AudioutCoreTests`
 target with a mix of both, and by running a swift-testing suite in
 `AirPlayEngineTests`. **If you hit something that seems to require a tools-version
 bump, STOP and escalate — do not bump it yourself.** It would flip both packages
@@ -40,7 +40,7 @@ Practical notes that fall out of the above:
 ```swift
 // BEFORE
 import XCTest
-@testable import AudiouterCore
+@testable import AudioutCore
 
 final class FooTests: XCTestCase {
     func testBarDoesTheThing() { ... }
@@ -51,7 +51,7 @@ final class FooTests: XCTestCase {
 // AFTER
 import Foundation      // add if the file used Foundation types via XCTest's re-export
 import Testing
-@testable import AudiouterCore
+@testable import AudioutCore
 
 @Suite struct FooTests {
     @Test func barDoesTheThing() { ... }
@@ -706,7 +706,7 @@ to "convert" them:
 Also note `XCTest` / `XCTestCase` in the raw counts include occurrences inside
 doc comments and string literals. Update prose that now describes the wrong
 framework, but don't mangle comments that are genuinely *about* XCTest-process
-detection (see the `Telemetry` row above, and `AudiouterCore/AGENTS.md`'s
+detection (see the `Telemetry` row above, and `AudioutCore/AGENTS.md`'s
 `HeadlessRuntime` rule).
 
 ## Full sweep coverage checklist
@@ -753,7 +753,7 @@ Plus the non-`XCT*` XCTest surface: `expectation(description:)`,
 5. Add `throws` to any test that gained a `#require`; add `async` to any that
    gained a `confirmation`.
 6. `grep -n 'XCT' <file>` — must return nothing except intentional prose.
-7. `cd AudiouterCore && swift test --filter <SuiteName>` — must show the **same
+7. `cd AudioutCore && swift test --filter <SuiteName>` — must show the **same
    number of tests** as before, all passing. A dropped test is the failure mode
    to watch for: a `@Test` attribute forgotten on one function makes it vanish
    silently with no error.
@@ -778,7 +778,7 @@ safe. **Read §16–§18 before converting any file that subclasses
 
 ## 16. `IsolatedTestCase` → `IsolatedSuite`
 
-`Tests/AudiouterCoreTests/IsolatedTestCase.swift` now holds **three** types:
+`Tests/AudioutCoreTests/IsolatedTestCase.swift` now holds **three** types:
 
 | Type | Use |
 | --- | --- |
@@ -924,7 +924,7 @@ safety disappears the moment these suites are converted: two tests that both
 call `Telemetry._installTestSink(_:)` overwrite each other's sink and read back
 a mixture of both tests' lines.
 
-`Tests/AudiouterCoreTests/SerializedSharedStateSuite.swift` declares:
+`Tests/AudioutCoreTests/SerializedSharedStateSuite.swift` declares:
 
 ```swift
 @Suite(.serialized)
@@ -952,7 +952,7 @@ is global to the process. **Verified**: two child suites nested under one
 overlap of 1; nothing from one child ever overlapped the other.
 
 The five files (confirmed by `git grep _installTestSink` over
-`Tests/AudiouterCoreTests`, not from an estimate):
+`Tests/AudioutCoreTests`, not from an estimate):
 
 | File | Seam |
 | --- | --- |
@@ -967,7 +967,7 @@ Rules:
 - Do **not** repeat `.serialized` on the child suite — it inherits.
 - The suite's full name becomes `SerializedSharedState.TelemetryTests`, but
   `swift test --filter TelemetryTests` still matches (substring/regex on the
-  full name), so the inner-loop convention in `AudiouterCore/AGENTS.md` is
+  full name), so the inner-loop convention in `AudioutCore/AGENTS.md` is
   unchanged. Your per-file verification step is unaffected.
 - Nesting changes nothing about member lookup: the suite can still inherit
   `IsolatedSuite`, be `@MainActor`, and use the file's private helpers.
@@ -981,7 +981,7 @@ Rules:
 
 ## 19. `HeadlessRuntime.isActive` now detects swift-testing too
 
-`Sources/AudiouterCore/HeadlessRuntime.swift` gates every window/panel
+`Sources/AudioutCore/HeadlessRuntime.swift` gates every window/panel
 `show*()` entry point in ~10 shipping source files. It used to detect a test run
 solely by `NSClassFromString("XCTestCase") != nil`. That still works today —
 `swift test` loads XCTest into the process even for a pure swift-testing target
@@ -1036,9 +1036,9 @@ one still covers any legacy or Xcode-hosted run.
 
 # Part III — AirPlayEngine (T3, 2026-07-26)
 
-`AirPlayEngine` is the **lower** package — `AudiouterCore` depends on it, not
+`AirPlayEngine` is the **lower** package — `AudioutCore` depends on it, not
 the reverse — so its test target cannot `import` anything from
-`AudiouterCoreTests` (`TestIsolation`, `IsolatedSuite`,
+`AudioutCoreTests` (`TestIsolation`, `IsolatedSuite`,
 `SerializedSharedState`). Everything in Part II had to be re-declared as its
 own thing inside `AirPlayEngine/Tests/AirPlayEngineTests/`, following the same
 *pattern*, not the same code.
@@ -1051,7 +1051,7 @@ over: `AirPlayEngine/Package.swift` is also `swift-tools-version:5.10`, no
 throwaway probe suite (built, run via `swift test --filter`, then deleted —
 see §22) compiled and ran cleanly mixed into the same `AirPlayEngineTests`
 target as its 144 untouched `XCTestCase` tests, with no drop in the XCTest
-count. Same result as Part I's AudiouterCore-side proof, confirmed
+count. Same result as Part I's AudioutCore-side proof, confirmed
 separately rather than inferred.
 
 ## 22. `SerializedEngineState` — AirPlayEngine's `SerializedSharedState`
@@ -1074,7 +1074,7 @@ extension SerializedEngineState {
 }
 ```
 
-**The reason this suite exists is narrower than AudiouterCore's — a different
+**The reason this suite exists is narrower than AudioutCore's — a different
 C registry, not `Telemetry`.** `shims/outputs.c` keeps the AirPlay
 device/callback registry (`outputs_list`, the completion table —
 `docs/outputs-dispatcher-contract.md`) as process-global C state, safe only

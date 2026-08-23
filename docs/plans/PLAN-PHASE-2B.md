@@ -111,7 +111,7 @@ posture). Known open items are tracked as separate tasks, not here:
   with animated resize — NEVER a scrollbar.
 - All non-gated verification is headless: build + hermetic unit tests (no
   TCC, no hardware; live LAN discovery scans are the sole D7 exception).
-- Both test suites must stay green: `AudiouterCoreTests` (note:
+- Both test suites must stay green: `AudioutCoreTests` (note:
   `CaptureCoordinatorTests.testCaptureCrashOverBudgetSurfacesError` is a
   KNOWN pre-existing load-flaky test — if it is the only failure under
   parallel-agent CPU load, re-run it in isolation before investigating) and
@@ -191,21 +191,21 @@ posture). Known open items are tracked as separate tasks, not here:
 - model: sonnet · effort: med
 - verify: no-flag run prints an N-device plan, exits 0; build green.
 
-### Native path (AudiouterCore package)
+### Native path (AudioutCore package)
 
 **T-NB-PKGDEP-1 — Engine package dependency wiring**
-- files: `AudiouterCore/Package.swift` (sole editor).
+- files: `AudioutCore/Package.swift` (sole editor).
 - what: Local path dependency on `AirPlayEngine` + product dep on the core
   library target. Platform floor: engine is .v14 (tap API is 14.4+; ahh runs
   14.4.1) — raise the core floor to .v14 if that is the minimal working
   configuration rather than fighting availability annotations; record the
   choice. Mock/OwnTone paths unaffected.
 - model: sonnet · effort: low
-- verify: `swift build` + existing tests build in AudiouterCore.
+- verify: `swift build` + existing tests build in AudioutCore.
 
 **T-NB-CAPTURE-1 — In-process process-tap capture → `engine.write(pcm:pts:)`** ⭐
-- files: NEW `AudiouterCore/Sources/AudiouterCore/NativeCaptureCoordinator.swift`
-  + NEW `.../Tests/AudiouterCoreTests/NativeCaptureCoordinatorTests.swift`.
+- files: NEW `AudioutCore/Sources/AudioutCore/NativeCaptureCoordinator.swift`
+  + NEW `.../Tests/AudioutCoreTests/NativeCaptureCoordinatorTests.swift`.
   Reference (read-only, do NOT edit): `dev/audiocap/Sources/audiocap/TapEngine.swift`.
 - what: Core Audio process tap (`CATapDescription` /
   `AudioHardwareCreateProcessTap` + aggregate device, macOS 14.4+) inside the
@@ -223,7 +223,7 @@ posture). Known open items are tracked as separate tasks, not here:
   converted→forwarded→device-change→stop→error surfaced).
 
 **T-NB-DISCOVERY-1 — `NativeDiscovery` (NWBrowser, both service types)** ⭐
-- files: NEW `.../AudiouterCore/NativeDiscovery.swift` + NEW
+- files: NEW `.../AudioutCore/NativeDiscovery.swift` + NEW
   `NativeDiscoveryTests.swift` + NEW env-gated `NativeDiscoveryLiveTests.swift`.
 - what: Browse `_airplay._tcp` AND `_raop._tcp`. Per resolved service:
   `DeviceDescriptor` (name/host/address/family/port + TXT `deviceid`/
@@ -245,7 +245,7 @@ posture). Known open items are tracked as separate tasks, not here:
   classification, id round-trip) + the live scan above.
 
 **T-NB-BACKEND-1 — `NativeBackend : OutputBackend`** ⭐
-- files: NEW `.../AudiouterCore/NativeBackend.swift` + NEW
+- files: NEW `.../AudioutCore/NativeBackend.swift` + NEW
   `NativeBackendTests.swift`.
 - what: Fresh implementation of the `OwnToneBackend` shape (NOT a refactor):
   own `known`/`order` + `stateQueue`; `start()` wires NativeDiscovery →
@@ -265,7 +265,7 @@ posture). Known open items are tracked as separate tasks, not here:
   best-effort convergence, mute stash/restore. Existing suites green.
 
 **T-NB-RESOLVER-1 — `BackendKind.native` + `AIRPLAY_BACKEND=native`**
-- files: `.../AudiouterCore/OwnToneBackend.swift` (resolver:
+- files: `.../AudioutCore/OwnToneBackend.swift` (resolver:
   `BackendKind` ~:481-513, `makeBackend` ~:521-534). HOT FILE, sole editor.
 - what: Add `.native`, map `"native"` in `resolved()`, `makeBackend` case
   constructing NativeBackend + NativeCaptureCoordinator. Do NOT touch the
@@ -274,7 +274,7 @@ posture). Known open items are tracked as separate tasks, not here:
 - verify: `AIRPLAY_BACKEND=native` resolves; build green.
 
 **T-NB-RESOLVER-1b — Resolution tests for `native`**
-- files: `.../Tests/AudiouterCoreTests/BackendKindResolutionTests.swift`
+- files: `.../Tests/AudioutCoreTests/BackendKindResolutionTests.swift`
   (sole editor; strictly AFTER T-NB-RESOLVER-1).
 - what: `native` + case-insensitive variants; keep existing assertions.
 - model: haiku · effort: low
@@ -283,8 +283,8 @@ posture). Known open items are tracked as separate tasks, not here:
 ### UI
 
 **T-UI-AP1-1 — AP1-only devices: dimmed row + "coming soon" explanation**
-- files: `.../AudiouterPopoverUI/PopoverController.swift`,
-  `.../AudiouterSharedUI/DeviceRowView.swift`, `MockBackend.swift`
+- files: `.../AudioutPopoverUI/PopoverController.swift`,
+  `.../AudioutSharedUI/DeviceRowView.swift`, `MockBackend.swift`
   (add one AP1-only fixture device), + NEW test (e.g.
   `DeviceRowUnsupportedTests.swift`). Sole editor of all four.
 - what: Grounded: `Device.supportsAirPlay2` exists (Device.swift:51);

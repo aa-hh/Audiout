@@ -40,11 +40,11 @@ in-memory only — see §2.
 ### 2.1 The seed function
 
 `NativeBackend.connectVolumeSeed(_:outputID:)` —
-`AudiouterCore/Sources/AudiouterCore/NativeBackend.swift:5428-5462`. Called from
+`AudioutCore/Sources/AudioutCore/NativeBackend.swift:5428-5462`. Called from
 both add-success sites (a plain user connect races an out-of-band engine-state
 mirror of the same completion; whichever flips `added` false→true first wins,
 capped at one push per connect — see the doc comment at `:5392-5410` and
-`AudiouterCore/AGENTS.md`'s "Every real (re)connect must reseed the engine volume"
+`AudioutCore/AGENTS.md`'s "Every real (re)connect must reseed the engine volume"
 rule):
 
 - `convergeDevice`'s post-`addOutput` write — `NativeBackend.swift:3746`
@@ -158,7 +158,7 @@ initial-state announcement:
   `NativeBackend.applyRemoteVolume` (`NativeBackend.swift:4937-4942`) →
   `setSpeakerVolume`. **Swift-side doc comment confirms this path is "rarely
   exercised"** in practice (`NativeBackend.swift:4934-4936`).
-- **DACP callback** — `AudiouterCore/Sources/AudiouterCore/DACPServer.swift`.
+- **DACP callback** — `AudioutCore/Sources/AudioutCore/DACPServer.swift`.
   The receiver makes an HTTP `GET /ctrl-int/1/setproperty?dmcp.device-volume=<dB>`
   request **to us** (`:17-28`), matched by `Active-Remote` token →
   `NativeBackend.applyDacpVolume` (`:4949-4956`) → `setSpeakerVolume`. Doc-tagged
@@ -215,7 +215,7 @@ uniformly to AP1/RAOP receivers too — no separate feasibility question there.
 **Current state: `known[id].volume` and `stashedVolume[id]` are IN-MEMORY ONLY.**
 Neither is written to disk anywhere. `grep -rn "known\[id\]" NativeBackend.swift`
 and a repo-wide search for a per-device volume store both come up empty — the
-only Codable/JSON stores in `AudiouterCore/Sources/AudiouterCore/` are
+only Codable/JSON stores in `AudioutCore/Sources/AudioutCore/` are
 `AppRouteStore.swift`, `GroupStore.swift`, `RoutingStore.swift`,
 `ExcludedAppsStore.swift`, and `DeviceIconStore.swift` — none holds a volume.
 `known` is rebuilt fresh from Bonjour discovery every launch
@@ -233,9 +233,9 @@ existing behavior.
 
 ### 4.1 Where it should live — an existing, direct analog
 
-`DeviceIconStore.swift` (`AudiouterCore/Sources/AudiouterCore/DeviceIconStore.swift`)
+`DeviceIconStore.swift` (`AudioutCore/Sources/AudioutCore/DeviceIconStore.swift`)
 is the closest sibling: `Codable`, versioned-JSON, `[deviceID: value]` payload,
-same `Application Support/Audiouter/` directory
+same `Application Support/Audiout/` directory
 (`GroupStore.defaultDirectory`), injectable directory for tests. Device ids are
 the stable colon-hex `deviceid` (`Device.swift:39`, `NativeDiscovery.swift:48-49`)
 — the same durable key `DeviceIconStore` already keys on, and stable across
@@ -372,7 +372,7 @@ specifically waits on T-I1.
 | **T-F3** | **Write-through wiring**: persist a UI-domain volume via `DeviceVolumeStore.save` from the write points identified in §4.2 (`setSpeakerVolume`, `setVolume`, and `connectVolumeSeed`'s own seed write per §4.3's sub-decision), debounced/coalesced so a slider drag doesn't hit disk per tick. Resolve §4.3 (persist tier-3 fallback on first use?) explicitly rather than silently picking one. | `NativeBackend.swift`, `AppDelegate` or wherever the backend is composed (`makeBackend`) for store injection. | T-F2 | Sonnet, **medium** |
 | **T-F4** | **Rewire `connectVolumeSeed`'s user-connect branch** to the 3-tier order from §6, applying whatever T-I2 decided for §5's clamp/ramp question on tier 1. Update the doc comment block (`:5358-5427`) to describe the new priority order — it currently documents ONLY the fixed-default behavior and will actively mislead the next reader once this lands. | `NativeBackend.swift` (`connectVolumeSeed`). | T-F1 (if built) or a tier-1-absent variant, T-F2/T-F3 | Opus, **medium** (the existing de-dup/F-REBIND/mute-carve-out invariants around this function are dense and easy to regress) |
 | **T-F5** | **Tests.** Hermetic coverage: tier 1 present → used (with the §5 clamp/ramp behavior verified); tier 1 absent, tier 2 (persisted store) present → used verbatim, unclamped; neither present → falls to tier 3 exactly as today (regression coverage for the existing `connectSeedsEngineVolumeFromConfiguredDefault` / `autoRecoveryReconnectPreservesInSessionVolume` / `secondReconnectReseedsFromCurrentConnectVolume` tests at `NativeBackendTests.swift:1900,1996,2145` continuing to pass unchanged, since F-REBIND is untouched); a fresh `DeviceVolumeStore` round-trips UI-domain values correctly across a simulated restart (new backend instance, same injected directory). | `NativeBackendTests.swift`, new `DeviceVolumeStoreTests.swift`. | T-F1..T-F4 | Sonnet, **medium** |
-| **T-F6** | **Docs.** Update `AudiouterCore/AGENTS.md`'s "Every real (re)connect must reseed the engine volume" rule (currently describes only the fixed-default + F-REBIND-preserve shape) to name the new 3-tier order and the persisted store, and update the Settings UI copy/hint (`AudiouterSettingsUI/AudioSettingsViewController.swift:266,279`, "Volume when connecting a speaker") if the connect-default's role changes user-visibly (it becomes "used only for a device we've never seen," which may be worth saying in the settings hint). | `AudiouterCore/AGENTS.md`, `AudiouterSettingsUI/AudioSettingsViewController.swift`. | T-F4 | Sonnet, **low** |
+| **T-F6** | **Docs.** Update `AudioutCore/AGENTS.md`'s "Every real (re)connect must reseed the engine volume" rule (currently describes only the fixed-default + F-REBIND-preserve shape) to name the new 3-tier order and the persisted store, and update the Settings UI copy/hint (`AudioutSettingsUI/AudioSettingsViewController.swift:266,279`, "Volume when connecting a speaker") if the connect-default's role changes user-visibly (it becomes "used only for a device we've never seen," which may be worth saying in the settings hint). | `AudioutCore/AGENTS.md`, `AudioutSettingsUI/AudioSettingsViewController.swift`. | T-F4 | Sonnet, **low** |
 
 **Execution note.** T-F2 (the persistence store) is fully independent of the tier-1
 protocol question and can be built and tested in parallel with T-I1 today — it is
@@ -391,7 +391,7 @@ the only task genuinely gated on live hardware findings.
   any exception) — nothing in this plan requires touching the C sender/receiver
   code; all new work is Swift-side.
 - **Inner loop is `swift test --filter <Suite>`**; the full run is
-  `scripts/run-tests.sh`, never a bare `swift test`. See `AudiouterCore/AGENTS.md`.
+  `scripts/run-tests.sh`, never a bare `swift test`. See `AudioutCore/AGENTS.md`.
 - **`Telemetry.log` is never called from the IOProc/render path** — irrelevant
   here (nothing in this plan touches the render path), but keep any new logging
   off it regardless.
@@ -408,15 +408,15 @@ the only task genuinely gated on live hardware findings.
 | The two add-success call sites | `NativeBackend.swift:3746` (`convergeDevice`), `:4844` (`applyEngineState`) |
 | `stashedVolume` / `known` declarations | `NativeBackend.swift:551`, `:278` |
 | `AppSettings.connectVolume` + min/max/default | `AppSettings.swift:169,177,180,198-209` |
-| Settings UI row | `AudiouterSettingsUI/AudioSettingsViewController.swift:96-103,242-274` |
+| Settings UI row | `AudioutSettingsUI/AudioSettingsViewController.swift:96-103,242-274` |
 | Wire→UI inversion pattern to reuse | `NativeBackend.swift:4991-5007` (`setSpeakerVolume`) |
 | UI→engine domain conversion, Main×Group×Device | `NativeBackend.swift:5179-5199` (`engineVolume(forID:uiVolume:)`) |
 | RTSP connect sequence table (SET_PARAMETER only, no GET) | `AirPlayEngine/Sources/CAirPlayEngine/sender/airplay.c:3735-3790` |
 | Push-only volume math (sender is the authority) | `airplay.c:1674`, `:1888-1953`, `:1958-1968` |
 | Reverse `/event` channel volume parse (receiver-initiated push) | `AirPlayEngine/Sources/CAirPlayEngine/sender/airplay_events.c:336-391`, `:477-557` |
-| DACP receiver→sender volume callback (the real path for Sonos) | `AudiouterCore/Sources/AudiouterCore/DACPServer.swift:17-28,292-314` |
+| DACP receiver→sender volume callback (the real path for Sonos) | `AudioutCore/Sources/AudioutCore/DACPServer.swift:17-28,292-314` |
 | `RemoteEvent`/`RemoteEventHub` plumbing | `AirPlayEngine/Sources/AirPlayEngine/AirPlayEngine.swift:1780-1830`, `AirPlayTypes.swift:150-153` |
 | Swift-side receiver-volume handlers | `NativeBackend.swift:4901-4956` (`subscribeRemoteEventStream`, `applyRemoteEvent`, `applyRemoteVolume`, `applyDacpVolume`) |
 | Device id stability (colon-hex MAC) | `Device.swift:39`, `NativeDiscovery.swift:48-49` |
-| Closest persistence analog to copy | `AudiouterCore/Sources/AudiouterCore/DeviceIconStore.swift` (whole file) |
+| Closest persistence analog to copy | `AudioutCore/Sources/AudioutCore/DeviceIconStore.swift` (whole file) |
 | Existing test coverage to preserve (regression floor) | `NativeBackendTests.swift:1900,1996,2145` |

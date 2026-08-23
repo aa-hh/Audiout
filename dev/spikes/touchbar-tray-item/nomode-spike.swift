@@ -32,8 +32,8 @@ func logLine(_ s: String) {
 
 final class NoModeDelegate: NSObject, NSApplicationDelegate, NSTouchBarDelegate {
 
-    private let minusID = NSTouchBarItem.Identifier("com.audiouter.nomode.minus")
-    private let plusID = NSTouchBarItem.Identifier("com.audiouter.nomode.plus")
+    private let minusID = NSTouchBarItem.Identifier("com.audiout.nomode.minus")
+    private let plusID = NSTouchBarItem.Identifier("com.audiout.nomode.plus")
     private var taps = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {

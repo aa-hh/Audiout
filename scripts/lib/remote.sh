@@ -13,32 +13,32 @@
 #
 # ONE setting governs tests and builds alike. That is deliberate: "prefer the
 # other Mac" is a fact about the machines, not about the kind of work, so a
-# second AUDIOUTER_BUILD_* family of variables would just be a way for the two
-# to disagree. The names keep their AUDIOUTER_TEST_ prefix for compatibility
+# second AUDIOUT_BUILD_* family of variables would just be a way for the two
+# to disagree. The names keep their AUDIOUT_TEST_ prefix for compatibility
 # with what is already configured and documented.
 #
 # Config (git config, NOT a committed file or a shell export — see the
-# audiouter.remoteHost note in AudiouterCore/AGENTS.md for why):
-#   git config --local audiouter.remoteHost 'user@host.local'
-#   git config --local audiouter.testPrefer cpu     # local (default) | remote | cpu
-#   git config --local audiouter.testRemoteBias 40  # cpu mode only
+# audiout.remoteHost note in AudioutCore/AGENTS.md for why):
+#   git config --local audiout.remoteHost 'user@host.local'
+#   git config --local audiout.testPrefer cpu     # local (default) | remote | cpu
+#   git config --local audiout.testRemoteBias 40  # cpu mode only
 
-remote_host=${AUDIOUTER_TEST_REMOTE_HOST:-$(git config --get audiouter.remoteHost 2>/dev/null || true)}
-remote_pref=${AUDIOUTER_TEST_PREFER:-$(git config --get audiouter.testPrefer 2>/dev/null || echo local)}
+remote_host=${AUDIOUT_TEST_REMOTE_HOST:-$(git config --get audiout.remoteHost 2>/dev/null || true)}
+remote_pref=${AUDIOUT_TEST_PREFER:-$(git config --get audiout.testPrefer 2>/dev/null || echo local)}
 # How many load-per-core percentage points busier the remote may be and still
 # win the "cpu" comparison. The two machines are NOT interchangeable: this one
 # also carries the agents, the editor and any app under live test, so its spare
 # capacity is worth more. 0 = strict lower-load-wins.
-remote_bias=${AUDIOUTER_TEST_REMOTE_BIAS:-$(git config --get audiouter.testRemoteBias 2>/dev/null || echo 40)}
+remote_bias=${AUDIOUT_TEST_REMOTE_BIAS:-$(git config --get audiout.testRemoteBias 2>/dev/null || echo 40)}
 # Deliberately RELATIVE to the remote home directory — no leading `~`. A tilde
 # survives neither quoting on the remote `cd` (it is not expanded inside quotes,
 # so `cd '~/foo'` fails) nor safe quoting of paths containing spaces. ssh starts
 # in $HOME, so a relative path is both simpler and correct.
-remote_root=${AUDIOUTER_TEST_REMOTE_ROOT:-audiouter-remote-tests}
+remote_root=${AUDIOUT_TEST_REMOTE_ROOT:-audiout-remote-tests}
 # Short ON PURPOSE. The known failure mode of this particular machine is
 # sleeping: it answers ping (sleep proxy) but refuses TCP, so a generous timeout
 # would stall every run behind a host that is never going to answer.
-remote_probe_timeout=${AUDIOUTER_TEST_REMOTE_TIMEOUT:-5}
+remote_probe_timeout=${AUDIOUT_TEST_REMOTE_TIMEOUT:-5}
 
 remote_configured() { [ -n "$remote_host" ]; }
 

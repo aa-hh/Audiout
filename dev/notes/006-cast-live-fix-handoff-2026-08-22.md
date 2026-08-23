@@ -19,8 +19,8 @@ hardware found three bugs, and two fix tracks were built in response.
 
 ## The live test that found the bugs
 
-Alec built a signed test app (`APP_NAME="Audiouter Cast v1"
-BUNDLE_ID="com.audiouter.Audiouter.castv1"`) from `76bbc2e4` and tested
+Alec built a signed test app (`APP_NAME="Audiout Cast v1"
+BUNDLE_ID="com.audiout.Audiout.castv1"`) from `76bbc2e4` and tested
 against his Google TV Streamer (192.168.4.54, wired Ethernet, same subnet as
 the Mac's Wi-Fi). Results:
 
@@ -39,7 +39,7 @@ the Mac's Wi-Fi). Results:
 ## Diagnosis (Fable agent, full text preserved)
 
 A background research agent read the app's own JSON telemetry log
-(`~/Library/Logs/Audiouter/telemetry.jsonl`, filtered `"cat":"cast"`) with
+(`~/Library/Logs/Audiout/telemetry.jsonl`, filtered `"cat":"cast"`) with
 real timestamps, correlated it against the code, and produced root causes +
 exact fix specs. **Full diagnosis text**:
 `/private/tmp/claude-501/-Users-alechenderson-Projects-AirPlay-Controller--claude-worktrees-cast-devices-support-scope-d72349/46a6fb14-da61-42a7-b2ef-04a790fb967b/scratchpad/castv1-diagnosis.md`
@@ -150,13 +150,13 @@ Two Opus executors were launched in **separate git worktrees**, both forked
 from `76bbc2e4` (the committed Phase (i) HEAD), so their diffs merge
 independently:
 
-- **Track T1** — worktree `/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/cast-p1-fix-t1`, branch `claude/cast-p1-fix-t1` (pushed to origin). Files: `AudiouterCore/Sources/AudiouterCore/NativeBackend.swift`,
-  `AudiouterCore/Tests/AudiouterCoreTests/NativeBackendCastTests.swift`.
+- **Track T1** — worktree `/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/cast-p1-fix-t1`, branch `claude/cast-p1-fix-t1` (pushed to origin). Files: `AudioutCore/Sources/AudioutCore/NativeBackend.swift`,
+  `AudioutCore/Tests/AudioutCoreTests/NativeBackendCastTests.swift`.
   Covers Bug 1 (primary fix) and Bug 3 (availability debounce + `cast_row_state` telemetry).
-- **Track T2** — worktree `/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/cast-p1-fix-t2`, branch `claude/cast-p1-fix-t2` (pushed to origin). Files: `AudiouterCore/Sources/AudiouterCore/CastOutputManager.swift`,
-  `AudiouterCore/Sources/CastSender/CastClient.swift`,
-  `AudiouterCore/Sources/CastFakeReceiver/FakeCastReceiver.swift`,
-  `AudiouterCore/Tests/AudiouterCoreTests/CastOutputManagerTests.swift`.
+- **Track T2** — worktree `/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/cast-p1-fix-t2`, branch `claude/cast-p1-fix-t2` (pushed to origin). Files: `AudioutCore/Sources/AudioutCore/CastOutputManager.swift`,
+  `AudioutCore/Sources/CastSender/CastClient.swift`,
+  `AudioutCore/Sources/CastFakeReceiver/FakeCastReceiver.swift`,
+  `AudioutCore/Tests/AudioutCoreTests/CastOutputManagerTests.swift`.
   Covers Bug 2 (relaunch serialization + five new `cast_*` telemetry events)
   and Bug 4 (fixed-receiver PCM gain).
 
@@ -195,7 +195,7 @@ re-run properly.
   The diagnosis asked for `connectingCastSessionDoesNotArmTheSilenceWatchdog`
   and `failedCastSessionStillArmsTheWatchdog`, plus a debounce test
   extending `snapshotSurfacesCastRowsAndKeepsVanishedOnes`.
-- **Not yet done**: `AUDIOUTER_TEST_NO_CACHE=1 bash scripts/run-tests.sh
+- **Not yet done**: `AUDIOUT_TEST_NO_CACHE=1 bash scripts/run-tests.sh
   --filter 'NativeBackendCastTests|NativeBackendTests|
   NativeCaptureCoordinatorTests|PopoverDeviceVisibilityTests'`,
   `bash scripts/build.sh`, and reading `aLatePlayingAfterDeselectLeavesTheRowOff`
@@ -245,11 +245,11 @@ re-run properly.
   `fixedReceiverGainRampsWithoutZipper` — **read the file to confirm names
   and that assertions match**, this handoff did not independently verify
   them.
-- **Not yet done**: `AUDIOUTER_TEST_NO_CACHE=1 bash scripts/run-tests.sh
+- **Not yet done**: `AUDIOUT_TEST_NO_CACHE=1 bash scripts/run-tests.sh
   --filter 'CastOutputManagerTests|CastFakeReceiverLoopTests|
   CastLiveAudioServerTests|CastMessageCodecTests|CastBrowserTests'`,
   `bash scripts/build.sh`, `bash scripts/build.sh --product cast-spike` +
-  `swift run --package-path AudiouterCore cast-spike --fake --hold 1`.
+  `swift run --package-path AudioutCore cast-spike --fake --hold 1`.
 
 ## What remains — the plan
 
@@ -288,10 +288,10 @@ re-run properly.
 5. **Commit** on `claude/cast-devices-support-scope-d72349` (still not
    merged to main — that's Alec's call, later). Push.
 6. **Build a fresh signed test app** with a NEW bundle id/name (never reuse
-   `com.audiouter.Audiouter.castv1` — TCC grants pin to bundle id + code
+   `com.audiout.Audiout.castv1` — TCC grants pin to bundle id + code
    signature, so re-signing the same id with changed code produces
    confusing stale-permission failures). Example:
-   `APP_NAME="Audiouter Cast v2" BUNDLE_ID="com.audiouter.Audiouter.castv2"
+   `APP_NAME="Audiout Cast v2" BUNDLE_ID="com.audiout.Audiout.castv2"
    bash scripts/make-app.sh`.
 7. **Guide Alec through the live-test checklist again**, this time
    specifically re-testing the reselect flow (select → deselect → reselect,
@@ -300,7 +300,7 @@ re-run properly.
    the first round: pulling the Ethernet cable mid-play (expect: Cast row
    fails cleanly, AirPlay unaffected) and quitting the app while Cast is
    selected (expect: clean teardown, no stuck player on the TV). Pull
-   `~/Library/Logs/Audiouter/telemetry.jsonl` again afterward — the five new
+   `~/Library/Logs/Audiout/telemetry.jsonl` again afterward — the five new
    `cast_*` events from Track T2 exist specifically to make the next run's
    diagnosis fast even if something is still wrong.
 8. **If Bug 2's root cause turns out to still be present** (i.e. the
@@ -329,7 +329,7 @@ re-run properly.
   memory `agent-worktree-isolation-forks-from-main.md` if available, or
   just always create track worktrees manually with `git worktree add
   <path> -b <branch> <sha>` from the actual branch HEAD you want).
-- **`AUDIOUTER_TEST_NO_CACHE=1` is required** when re-running a filter that
+- **`AUDIOUT_TEST_NO_CACHE=1` is required** when re-running a filter that
   was already green before these edits, or the test runner may report a
   stale cached pass instead of actually re-running.
 - **THE INVARIANT is the one thing that must never move**: with no Cast

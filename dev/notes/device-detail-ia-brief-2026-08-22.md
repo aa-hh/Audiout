@@ -1,7 +1,7 @@
 # Device detail pane — information-architecture brief (2026-08-22)
 
 Discovery for the Groups screen's device detail pane
-(`AudiouterWindowUI/DeviceDetailViewController.swift`). Proposals only; nothing
+(`AudioutWindowUI/DeviceDetailViewController.swift`). Proposals only; nothing
 built. Current render (with the Equalizer section, which the checked-in golden
 predates): hero box → Status/On the network/Volume/Kind box → In groups box →
 Equalizer box → hint line. Four identical unlabeled `GroupedSectionView`s; at

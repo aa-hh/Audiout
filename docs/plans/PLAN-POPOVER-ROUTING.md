@@ -51,7 +51,7 @@ shrinks with expansion state.
 ## C. Task list
 
 **T-1 — `AppRoute` + `AppRouteStore`** *(sonnet / low)*
-New `Sources/AudiouterCore/AppRouteStore.swift` mirroring
+New `Sources/AudioutCore/AppRouteStore.swift` mirroring
 `RoutingStore.swift`: `AppRoute` (bundleID identity, displayName, destination
 `.currentDevice | .device(id:)` flattened for Codable, volume 0–100 default
 100), injectable directory, `app-routes.json`, schemaVersion 1, newer-schema →
@@ -59,7 +59,7 @@ treated missing. New `AppRouteStoreTests` (round-trip, missing file, future
 schema, clamp).
 
 **T-2 — `AppRoutingController`** *(sonnet / medium)*
-New `Sources/AudiouterCore/AppRoutingController.swift`: holds
+New `Sources/AudioutCore/AppRoutingController.swift`: holds
 `private(set) appRoutes`, `setAppRoute`/`setAppVolume`/`removeAppRoute`,
 `routedAppCount` (destination != currentDevice), persists every mutation,
 `handleDeviceUnavailable(id:)` → resets affected routes to `.currentDevice`
@@ -91,7 +91,7 @@ Selected Devices expanded; Applications expanded iff
 state discarded on next open.
 
 **T-6 — `AppRowView` + Add row** *(sonnet / medium)*
-New `Sources/AudiouterSharedUI/AppRowView.swift` on `PopoverColumnGrid`:
+New `Sources/AudioutSharedUI/AppRowView.swift` on `PopoverColumnGrid`:
 icon · truncating name · `ControlCenterSlider` (dimmed when local, decision 3) ·
 % · sectioned popup (disabled-header style per `MainOutRowView`). Delegate:
 didSetVolume / didSelectDestination / didRemove (hover-revealed ✕,
@@ -128,7 +128,7 @@ changes expected (new files land in existing targets).
 
 **T-12 — Docs** *(sonnet / low)*
 SPEC.md §9 (Applications section shipped; collapsible sections; exact-fit
-no-scroll sizing; decisions 1–8) + `AudiouterCore/AGENTS.md`
+no-scroll sizing; decisions 1–8) + `AudioutCore/AGENTS.md`
 (`AppRoutingController`, `AppRouteStore`).
 
 ## D. Parallelization — waves, hot files, critical path
@@ -162,7 +162,7 @@ Hot file: `PopoverController.swift` (T-3, T-5, T-7, T-8, T-10) — serialize.
 
 ## F. Verification
 
-From `AudiouterCore/`: `swift build`, `swift test`,
+From `AudioutCore/`: `swift build`, `swift test`,
 `swift run popover-harness`, `swift run popover-snapshot` (PNGs must show no
 scrollbar sliver). Live look: `AIRPLAY_DEBUG_POPOVER_PNG` hook.
 

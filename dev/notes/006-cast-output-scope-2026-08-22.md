@@ -28,7 +28,7 @@ Three cost centers, in order:
 
 Roadmap 006's text mentioned two directions; Alec confirmed **output only**
 (casting TO Cast devices). The receiver direction (other apps casting into
-Audiouter) is out of scope and not planned.
+Audiout) is out of scope and not planned.
 
 ## The protocol (all confirmed, no blockers)
 
@@ -188,7 +188,7 @@ Things that need **new abstraction** (the hidden half of the estimate):
 
 **2026-08-22 — software receivers on the test Mac (SUMUP-M9Y197RFVG).**
 Phase-0 prep built (`CastSender` / `CastFakeReceiver` / `cast-spike`, see
-`AudiouterCore/Sources/CastSender/AGENTS.md`). Two Cast services were on the LAN:
+`AudioutCore/Sources/CastSender/AGENTS.md`). Two Cast services were on the LAN:
 
 - **"Mac Cast Receiver"** (`~/Projects/googlecast-receiver`, Python) — discovery-only
   stub by its own README; answers CONNECT/PING/GET_STATUS, never LAUNCH. Spike:
@@ -287,7 +287,7 @@ distinguished. Not chasing further: path B (custom receiver, Alec mid-registrati
 path B for this device class.** Registered a Cast developer account, a throwaway CAF v3
 custom receiver (`playbackConfig.autoPauseDuration=0.5`, `autoResumeDuration=0.25`), and
 the Streamer as a test device — hosted at
-https://aa-hh.github.io/audiouter-cast-receiver-spike/ (public repo aa-hh/audiouter-cast-
+https://aa-hh.github.io/audiout-cast-receiver-spike/ (public repo aa-hh/audiout-cast-
 receiver-spike; app id `F10823C5`, unpublished; delete/unpublish once this spike closes).
 Setup traps hit along the way: registration needs BOTH the device's ~15min propagation +
 reboot AND (found empirically) the app's own ~15min propagation, else `LAUNCH_ERROR

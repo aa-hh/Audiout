@@ -35,7 +35,7 @@
 # # the middle of the rename loop leaves Homebrew intact.                     #
 # ############################################################################
 #
-# Usage: scripts/verify-standalone-app.sh [path-to-.app]   (default: build/Audiouter.app)
+# Usage: scripts/verify-standalone-app.sh [path-to-.app]   (default: build/Audiout.app)
 # Every command below is a paste-proof one-liner — no backslash continuations.
 #
 # BASH VERSION: like bundle-dylibs.sh, this must run under macOS's stock bash
@@ -47,10 +47,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # Default matches make-app.sh's default output location (its OUTPUT_DIR is
-# $REPO_ROOT/build and APP_NAME is Audiouter) so `verify-standalone-app.sh` with
+# $REPO_ROOT/build and APP_NAME is Audiout) so `verify-standalone-app.sh` with
 # no argument checks the app a plain `make-app.sh` just produced.
-APP_BUNDLE="${1:-$REPO_ROOT/build/Audiouter.app}"
-EXECUTABLE_NAME="AudiouterApp"
+APP_BUNDLE="${1:-$REPO_ROOT/build/Audiout.app}"
+EXECUTABLE_NAME="AudioutApp"
 EXECUTABLE="$APP_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
 FRAMEWORKS_DIR="$APP_BUNDLE/Contents/Frameworks"
 
@@ -91,7 +91,7 @@ APP_PID=""
 # --- THE RESTORE TRAP (the load-bearing safety mechanism) ------------------
 # Fires on EVERY exit path: normal return, `set -e` abort, Ctrl-C (INT),
 # SIGTERM, SIGHUP. It (a) kills the test-launched app so we never strand a
-# stray Audiouter, then (b) moves every renamed Homebrew directory back to its
+# stray Audiout, then (b) moves every renamed Homebrew directory back to its
 # original name. Restore reads MOVES_FILE bottom-up (reverse order) purely for
 # tidiness; each entry is independent. We DELIBERATELY do not `set -e` inside
 # the trap — if one restore fails we still attempt the rest and shout loudly,

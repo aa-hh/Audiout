@@ -2,7 +2,7 @@
 > *method*) drove the cost analysis that motivated migrating this repo's
 > suites off XCTest onto Apple's `swift-testing`, which runs tests
 > concurrently in-process instead of forking. That migration is now done for
-> the large majority of both `AudiouterCore` and `AirPlayEngine`'s test
+> the large majority of both `AudioutCore` and `AirPlayEngine`'s test
 > targets, so the process-spawn cost measured here no longer applies to most
 > of the suite — see
 > [swift-testing-conversion-cookbook.md](swift-testing-conversion-cookbook.md)
@@ -13,7 +13,7 @@
 # What determines the xctest process count under `swift test --parallel`
 
 Measured 2026-07-25 in this repo (worktree `.claude/worktrees/test-class-consolidation`),
-against the real `AudiouterCoreTests` binary (AppKit / CoreAudio / AirPlayEngine linked),
+against the real `AudioutCoreTests` binary (AppKit / CoreAudio / AirPlayEngine linked),
 Apple Swift 6.4, `xctest` from `/Applications/Xcode-beta.app`.
 
 ## Verdict
@@ -22,15 +22,15 @@ Apple Swift 6.4, `xctest` from `/Applications/Xcode-beta.app`.
 reduce process-spawn count.**
 
 This contradicts the "one process per test CLASS" claim currently written in
-`AudiouterCore/AGENTS.md` (~lines 165 and 251). That claim is wrong.
+`AudioutCore/AGENTS.md` (~lines 165 and 251). That claim is wrong.
 
 ## Method
 
-Subject class: `AudiouterCore/Tests/AudiouterCoreTests/AppSettingsTests.swift`,
+Subject class: `AudioutCore/Tests/AudioutCoreTests/AppSettingsTests.swift`,
 `final class AppSettingsTests: XCTestCase`, **21** `func test…` methods.
 
 ```
-cd AudiouterCore && swift build --build-tests          # warm, 44.7s
+cd AudioutCore && swift build --build-tests          # warm, 44.7s
 # then, for W in 4, 2, 6 — test run backgrounded, sampled concurrently:
 swift test --parallel --num-workers $W --filter AppSettingsTests &
 while kill -0 $! ; do ps -Ao pid,ppid,command | grep '[x]ctest' ; sleep 0.1 ; done
@@ -44,12 +44,12 @@ confirms all of them share a single parent PID, i.e. they are our run's children
 
 ```
 ts                 pid   ppid  command
-1785015558.558545  93974 93486 …/usr/bin/xctest -XCTest AudiouterCoreTests.AppSettingsTests/testDensityRoundTrips …
-1785015558.558545  93975 93486 …/usr/bin/xctest -XCTest AudiouterCoreTests.AppSettingsTests/testDefaultsWhenUnset …
-1785015558.558545  93976 93486 …/usr/bin/xctest -XCTest AudiouterCoreTests.AppSettingsTests/testHasCompletedSetupRoundTrips …
-1785015558.558545  93977 93486 …/usr/bin/xctest -XCTest AudiouterCoreTests.AppSettingsTests/testHasCompletedSetupDefaultsFalse …
-1785015558.558545  93978 93486 …/usr/bin/xctest -XCTest AudiouterCoreTests.AppSettingsTests/testStartBufferDefaultsWhenUnset …
-1785015558.558545  93979 93486 …/usr/bin/xctest -XCTest AudiouterCoreTests.AppSettingsTests/testStartBufferOptionListInvariants …
+1785015558.558545  93974 93486 …/usr/bin/xctest -XCTest AudioutCoreTests.AppSettingsTests/testDensityRoundTrips …
+1785015558.558545  93975 93486 …/usr/bin/xctest -XCTest AudioutCoreTests.AppSettingsTests/testDefaultsWhenUnset …
+1785015558.558545  93976 93486 …/usr/bin/xctest -XCTest AudioutCoreTests.AppSettingsTests/testHasCompletedSetupRoundTrips …
+1785015558.558545  93977 93486 …/usr/bin/xctest -XCTest AudioutCoreTests.AppSettingsTests/testHasCompletedSetupDefaultsFalse …
+1785015558.558545  93978 93486 …/usr/bin/xctest -XCTest AudioutCoreTests.AppSettingsTests/testStartBufferDefaultsWhenUnset …
+1785015558.558545  93979 93486 …/usr/bin/xctest -XCTest AudioutCoreTests.AppSettingsTests/testStartBufferOptionListInvariants …
 ```
 
 Six *different methods of the same class*, six different PIDs, alive at the same instant,
@@ -71,7 +71,7 @@ Two independent confirmations:
    have spawned exactly **1**.
 
 `swift test`'s own progress output agrees: it prints
-`[17/21] Testing AudiouterCoreTests.AppSettingsTests/testWakeRestoreRoundTripsEveryOfferedOption`
+`[17/21] Testing AudioutCoreTests.AppSettingsTests/testWakeRestoreRoundTripsEveryOfferedOption`
 — a 21-unit work queue for a single class.
 
 ## Arithmetic cross-check against the AGENTS.md measurements

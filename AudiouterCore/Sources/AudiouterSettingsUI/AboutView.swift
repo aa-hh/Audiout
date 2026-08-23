@@ -90,6 +90,10 @@ enum AboutCredits {
     (LGPL-2.1-or-later), and ffmpeg (LGPL-2.1-or-later or GPL-2.0-or-later \
     depending on build configuration).
 
+    MIT — Sparkle, the in-app update framework \
+    (github.com/sparkle-project/Sparkle). Copyright (c) Sparkle Project \
+    contributors.
+
     All third-party files retain their original copyright notices and \
     license headers in source. The repository's NOTICE file is the \
     authoritative, complete per-file breakdown.

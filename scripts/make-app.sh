@@ -359,6 +359,53 @@ else
   echo "==> Skipping dylib bundling (set AUDIOUTER_BUNDLE_DYLIBS=1 to bundle for a Homebrew-less target Mac)"
 fi
 
+# --- Sparkle.framework (unconditional) --------------------------------------
+# The executable links Sparkle in EVERY build (Package.swift scopes it to the
+# AudiouterApp target), so the framework has to ship even when
+# AUDIOUTER_BUNDLE_DYLIBS is unset — an unbundled build would otherwise not
+# launch at all. That is also why the @rpath is added here rather than left to
+# bundle-dylibs.sh, which only runs on the bundling path.
+#
+# SwiftPM copies the macOS slice out of the downloaded xcframework, so the
+# framework exists once the package has been built or resolved on this machine
+# — which a remote-compiled build has not necessarily done. When it's absent we
+# fetch it here with a local `swift package resolve`: that downloads and
+# extracts the binary artifact (seconds, no compile) without disturbing the
+# remote/local split above. NOT `scripts/build.sh` — that check may satisfy
+# itself entirely on the remote and leave this machine's .build as cold as it
+# found it, so telling the operator to run it would loop forever.
+echo "==> Embedding Sparkle.framework"
+find_sparkle() {
+  if [ -n "${BIN_DIR:-}" ] && [ -d "$BIN_DIR/Sparkle.framework" ]; then
+    printf '%s' "$BIN_DIR/Sparkle.framework"
+  else
+    find "$PACKAGE_DIR/.build/artifacts" -type d -name 'Sparkle.framework' -print -quit 2>/dev/null || true
+  fi
+}
+SPARKLE_FRAMEWORK="$(find_sparkle)"
+if [ -z "$SPARKLE_FRAMEWORK" ]; then
+  echo "    not in this machine's .build — resolving the binary artifact locally"
+  swift package resolve --package-path "$PACKAGE_DIR"
+  SPARKLE_FRAMEWORK="$(find_sparkle)"
+fi
+[ -n "$SPARKLE_FRAMEWORK" ] && [ -d "$SPARKLE_FRAMEWORK" ] || {
+  echo "ERROR: Sparkle.framework still not found under $PACKAGE_DIR/.build after 'swift package resolve' — run 'AUDIOUTER_BUILD_LOCAL=1 bash scripts/build.sh' to force a local build that populates the artifacts" >&2
+  exit 1
+}
+FRAMEWORKS_DIR="$CONTENTS/Frameworks"
+mkdir -p "$FRAMEWORKS_DIR"
+# -R (not -RL): a framework is a web of relative symlinks (Versions/Current,
+# the top-level Sparkle/Autoupdate/Resources aliases) and resolving them would
+# both double the size and break codesign's bundle-format check.
+rm -rf "$FRAMEWORKS_DIR/Sparkle.framework"
+cp -R "$SPARKLE_FRAMEWORK" "$FRAMEWORKS_DIR/Sparkle.framework"
+test -x "$FRAMEWORKS_DIR/Sparkle.framework/Versions/B/Sparkle" || { echo "ERROR: Sparkle.framework copied but its binary is missing" >&2; exit 1; }
+# Same idempotent otool guard bundle-dylibs.sh uses: install_name_tool errors
+# out on a duplicate LC_RPATH, and that script may already have added this one.
+if ! otool -l "$MACOS_DIR/$EXECUTABLE" | grep -A2 LC_RPATH | grep -q '@executable_path/../Frameworks'; then
+  install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS_DIR/$EXECUTABLE"
+fi
+
 # --- App icon --------------------------------------------------------------
 # The official icon is authored in Icon Composer (scripts/Audiouter.icon) as a
 # Liquid Glass icon. Compiling that bundle into the real Liquid Glass asset
@@ -613,6 +660,28 @@ plutil -extract NSBonjourServices.2 raw -o - "$PLIST" >/dev/null || { echo "ERRO
 plutil -insert NSBluetoothAlwaysUsageDescription -string "$BLUETOOTH_USAGE" "$PLIST"
 plutil -extract NSBluetoothAlwaysUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBluetoothAlwaysUsageDescription missing from Info.plist" >&2; exit 1; }
 
+# --- Sparkle in-app updates (release builds only) ---------------------------
+# Set BOTH SPARKLE_FEED_URL and SPARKLE_ED_PUBLIC_KEY to build an updating
+# release; set neither for a dev/handover build, which then gets no updater at
+# all (AppDelegate creates SPUStandardUpdaterController only when SUFeedURL is
+# present, and Settings hides "Check for Updates…" when it didn't).
+#
+# One without the other is refused rather than defaulted: a feed with no key
+# means Sparkle downloads updates it cannot verify, and a key with no feed
+# means an updater that can never find anything. Both are silent at build time
+# and only surface in a shipped app.
+if [ -n "${SPARKLE_FEED_URL:-}" ] || [ -n "${SPARKLE_ED_PUBLIC_KEY:-}" ]; then
+  [ -n "${SPARKLE_FEED_URL:-}" ] || { echo "ERROR: SPARKLE_ED_PUBLIC_KEY is set but SPARKLE_FEED_URL is not — an EdDSA key with no appcast is an updater that can never check" >&2; exit 1; }
+  [ -n "${SPARKLE_ED_PUBLIC_KEY:-}" ] || { echo "ERROR: SPARKLE_FEED_URL is set but SPARKLE_ED_PUBLIC_KEY is not — an appcast with no EdDSA key means updates are installed unverified" >&2; exit 1; }
+  echo "==> Writing Sparkle appcast keys (SUFeedURL, SUPublicEDKey)"
+  plutil -insert SUFeedURL -string "$SPARKLE_FEED_URL" "$PLIST"
+  plutil -insert SUPublicEDKey -string "$SPARKLE_ED_PUBLIC_KEY" "$PLIST"
+  plutil -extract SUFeedURL raw -o - "$PLIST" >/dev/null || { echo "ERROR: SUFeedURL missing from Info.plist" >&2; exit 1; }
+  plutil -extract SUPublicEDKey raw -o - "$PLIST" >/dev/null || { echo "ERROR: SUPublicEDKey missing from Info.plist" >&2; exit 1; }
+else
+  echo "==> Skipping Sparkle appcast keys (set SPARKLE_FEED_URL + SPARKLE_ED_PUBLIC_KEY for an updating release build)"
+fi
+
 # --- LSEnvironment: release runtime defaults --------------------------------
 # Environment variables LaunchServices injects when the app is launched by
 # double-click / `open` (a bundled build), so the release default lives HERE
@@ -731,6 +800,36 @@ if [ -d "$CONTENTS/Frameworks" ] && [ -n "$(ls -A "$CONTENTS/Frameworks" 2>/dev/
     echo "    signing $(basename "$dylib")"
     codesign --force $TIMESTAMP_FLAG --options runtime --sign "$CODESIGN_IDENTITY" "$dylib"
   done
+fi
+
+# Sparkle.framework carries its OWN nested code — two XPC service bundles, the
+# Updater.app progress UI and the Autoupdate installer helper — each of which
+# is a separate signable unit that the outer app's `--verify --deep --strict`
+# will inspect. Sparkle ships it pre-signed by the Sparkle project, but that
+# signature is not ours: notarization requires every Mach-O in the bundle to
+# carry this build's identity, so re-sign the lot with --force, innermost
+# first (XPC services and helpers before the framework version that contains
+# them) for the same reason the dylibs above are signed before the app.
+#
+# The framework's VERSION directory is what gets signed, not the top-level
+# Sparkle.framework path: this is a versioned (Versions/B + Versions/Current)
+# framework, where the signature belongs inside the version being signed.
+#
+# No --entitlements, same rule as the dylibs and helpers: only the main
+# executable is entitled.
+SPARKLE_VERSION_DIR="$CONTENTS/Frameworks/Sparkle.framework/Versions/B"
+if [ -d "$SPARKLE_VERSION_DIR" ]; then
+  echo "==> Codesigning Sparkle.framework (identity: $CODESIGN_IDENTITY, inside-out, before the app)"
+  for nested in "$SPARKLE_VERSION_DIR/XPCServices/Downloader.xpc" \
+                "$SPARKLE_VERSION_DIR/XPCServices/Installer.xpc" \
+                "$SPARKLE_VERSION_DIR/Updater.app" \
+                "$SPARKLE_VERSION_DIR/Autoupdate"; do
+    test -e "$nested" || { echo "ERROR: expected Sparkle component missing: $nested" >&2; exit 1; }
+    echo "    signing $(basename "$nested")"
+    codesign --force $TIMESTAMP_FLAG --options runtime --sign "$CODESIGN_IDENTITY" "$nested"
+  done
+  echo "    signing Sparkle.framework/Versions/B"
+  codesign --force $TIMESTAMP_FLAG --options runtime --sign "$CODESIGN_IDENTITY" "$SPARKLE_VERSION_DIR"
 fi
 # ptp-helper is a second Mach-O living directly in Contents/MacOS (not nested
 # inside a Frameworks/Plugins bundle), so `codesign --deep` on the outer app

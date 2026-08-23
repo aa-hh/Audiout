@@ -7,6 +7,7 @@ import AudiouterWindowUI
 import AudiouterSettingsUI
 import AudiouterSharedUI
 import AudiouterOnboardingUI
+import Sparkle
 
 /// Writes `message` to `STDERR_FILENO` with a raw `write(2)`, retrying on
 /// `EINTR` and otherwise ignoring failures.
@@ -100,6 +101,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The app reads `theme` at launch to apply the appearance override, and the
     /// Settings screen writes it back.
     private let settings = AppSettings()
+
+    /// Sparkle's updater, created at launch ONLY in a bundle that carries a
+    /// `SUFeedURL` — the notarised paid build. A build run from source has no
+    /// feed and no signing key, so it gets no updater at all and Settings hides
+    /// the "Check for Updates…" button (`GeneralSettingsViewController
+    /// .onCheckForUpdates`). Nil here is the whole gate.
+    private var updaterController: SPUStandardUpdaterController?
 
     /// The resolved backend kind (same resolution `makeBackend()` used). The
     /// first-run setup flow only presents on `.native` — the sole path that taps
@@ -350,6 +358,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // status item and popover pick it up on first paint (Settings ›
         // Appearance). `.system` is a no-op (`NSApp.appearance = nil`).
         applyAppearance(settings.theme)
+
+        // In-app updates, paid builds only (roadmap 054). `SUFeedURL` is
+        // inserted by `scripts/make-app.sh` when a release is built with a feed
+        // URL and a signing key; without it Sparkle has nothing to check, so
+        // the updater is never even started.
+        if Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil {
+            updaterController = SPUStandardUpdaterController(startingUpdater: true,
+                                                             updaterDelegate: nil,
+                                                             userDriverDelegate: nil)
+        }
+
+        // Licence check-in (roadmap 054): telemetry recording device spread,
+        // never a gate — see `LicenseCheckIn`'s doc comment. A no-op today
+        // since `AppSettings.checkInURL` is unset everywhere in this app.
+        LicenseCheckIn(settings: settings).checkInIfNeeded()
+
         // Seed the accent dial's live token remap (W1, spec §1.3) before any
         // UI paints — the token module defaults to `.fullGold`, so this only
         // matters when the user has dialed it elsewhere. Changes made later in
@@ -1246,6 +1270,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // "Open Setup…" (General pane) re-opens the first-run priming window;
         // the backend is already running, so its onFinished is a guarded no-op.
         general.onRunSetupAgain = { [weak self] in self?.presentSetup() }
+        // Left nil in a build with no updater, which hides the button.
+        if let updaterController {
+            general.onCheckForUpdates = { updaterController.checkForUpdates(nil) }
+        }
 
         let appearance = AppearanceSettingsViewController(settings: settings)
         appearance.onThemeChanged = { [weak self] theme in self?.applyAppearance(theme) }

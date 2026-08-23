@@ -103,6 +103,27 @@ import AudiouterSharedUI
         #expect(fired == 1, "Open Setup… routes from the General pane out to the app")
     }
 
+    /// Roadmap 054: only a release build carries a Sparkle updater, so an
+    /// unwired `onCheckForUpdates` must leave the button off screen rather than
+    /// inert — an update affordance that cannot work is worse than none.
+    /// The panes are built directly here, NOT through `makeRoot`: mounting a
+    /// pane on `SettingsRootViewController` loads its view during that init (the
+    /// root measures its fitted size there), and the button's visibility is
+    /// decided in `loadView`. The app wires this callback before it builds the
+    /// root — `AppDelegate.makeSettingsRoot` — so this is the app's own order.
+    @Test func checkForUpdatesIsHiddenWithoutAnUpdaterAndForwardsWithOne() {
+        let withoutUpdater = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false))
+        #expect(!withoutUpdater.test_checkForUpdatesIsVisible,
+                "no updater wired ⇒ no Check for Updates… button")
+
+        let withUpdater = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false))
+        var fired = 0
+        withUpdater.onCheckForUpdates = { fired += 1 }
+        #expect(withUpdater.test_checkForUpdatesIsVisible)
+        withUpdater.test_tapCheckForUpdates()
+        #expect(fired == 1, "Check for Updates… routes from the General pane out to the app")
+    }
+
     /// Owner decision (AGENTS.md): Settings always opens on General. A fresh
     /// root starts there by construction; the surface builds/keeps the root
     /// and owns any reset-on-show policy of its own.

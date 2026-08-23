@@ -123,6 +123,10 @@ let package = Package(
         // (T-NB-BACKEND-1) and NativeCaptureCoordinator (T-NB-CAPTURE-1) are
         // the consumers; the Mock/OwnTone backends do not import it.
         .package(path: "../AirPlayEngine"),
+        // Sparkle 2 (MIT) — in-app updates for the paid, notarised build only.
+        // Scoped to the `AudiouterApp` executable target so no library, test or
+        // harness target ever links it.
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.0"),
     ],
     targets: [
         // Block-based Objective-C exception catcher. Swift's `catch` cannot
@@ -231,6 +235,7 @@ let package = Package(
                 "AudiouterWindowUI",
                 "AudiouterSettingsUI",
                 "AudiouterOnboardingUI",
+                .product(name: "Sparkle", package: "Sparkle"),
             ],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),

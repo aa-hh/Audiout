@@ -27,14 +27,25 @@ public final class GeneralSettingsViewController: NSViewController {
     private let launchSwitch = NSSwitch()
     private let reconnectSwitch = NSSwitch()
     private let reconnectHint = SettingsForm.hintLabel()
+    private let licenseKeyField = NSTextField()
+    private let licenseCheckInSwitch = NSSwitch()
+    private let licenseHint = SettingsForm.hintLabel()
     private let setupButton = NSButton()
     private let aboutButton = NSButton()
+    private let updatesButton = NSButton()
     private let aboutWindowController: AboutWindowController
 
     /// Fired when "Open Setup…" is clicked, so the app can re-present the
     /// first-run onboarding/permission-priming flow. Nil (unset) leaves the
     /// button inert — the app layer wires it in `openSettings`.
     public var onRunSetupAgain: (() -> Void)?
+
+    /// Fired when "Check for Updates…" is clicked. Nil (unset) means this build
+    /// has no updater at all — a build run from source or without a Sparkle feed
+    /// — and the button is then hidden rather than inert, so nothing offers an
+    /// update path that cannot work. The app layer wires it before the view
+    /// loads, exactly as it does `onRunSetupAgain`.
+    public var onCheckForUpdates: (() -> Void)?
 
     /// - Parameters:
     ///   - aboutInfo: the About window's bundle-sourced identity; defaults to
@@ -80,6 +91,36 @@ public final class GeneralSettingsViewController: NSViewController {
         // Live hint (spec §5.2) — re-written on every toggle.
         reconnectHint.stringValue = Self.reconnectHintLine(settings.reconnectAtLaunch)
 
+        // License (roadmap 054, Ardour model): entirely optional — the app is
+        // fully functional with no key at all. The key persists on edit end
+        // (focus loss), the same commit point `GroupEditorViewController`'s
+        // rename field uses, via `NSTextFieldDelegate` below.
+        licenseKeyField.stringValue = settings.licenseKey ?? ""
+        licenseKeyField.placeholderString = "Optional"
+        licenseKeyField.isEditable = true
+        licenseKeyField.isSelectable = true
+        licenseKeyField.delegate = self
+        licenseKeyField.setAccessibilityLabel("License key")
+        licenseKeyField.widthAnchor.constraint(equalToConstant: 180).isActive = true
+        let licenseKeyRow = SettingsForm.row(
+            title: "License key",
+            subtitle: "From your purchase receipt. Optional — Audiouter is fully functional without it.",
+            control: licenseKeyField)
+
+        // Check-in consent (``LicenseCheckIn``) — the identified stream
+        // (PRODUCT.md Data Collection stream 2), so it defaults off and is
+        // never assumed on.
+        licenseCheckInSwitch.target = self
+        licenseCheckInSwitch.action = #selector(licenseCheckInConsentToggled)
+        licenseCheckInSwitch.state = settings.licenseCheckInConsent ? .on : .off
+        licenseCheckInSwitch.setAccessibilityLabel("Send license check-ins")
+        let licenseConsentRow = SettingsForm.row(
+            title: "Send license check-ins",
+            control: licenseCheckInSwitch)
+        licenseHint.stringValue = "Sends your license key and an install ID so we can count how many "
+            + "Macs each license is used on. This is tied to your purchase — it is not anonymous. "
+            + "Audiouter runs the same whether this is on or off."
+
         // Footer strip (roadmap 050): Setup and About are rare-use, so they
         // share one quiet button strip instead of two full title+subtitle rows.
         // "Open Setup…" re-opens the first-run permission-priming window — the
@@ -101,17 +142,27 @@ public final class GeneralSettingsViewController: NSViewController {
         aboutButton.target = self
         aboutButton.action = #selector(aboutTapped)
 
+        updatesButton.title = "Check for Updates…"
+        updatesButton.bezelStyle = .rounded
+        updatesButton.controlSize = .small
+        updatesButton.target = self
+        updatesButton.action = #selector(checkForUpdatesTapped)
+        updatesButton.setAccessibilityLabel("Check for Updates")
+        updatesButton.isHidden = onCheckForUpdates == nil
+
         let hairline = NSBox()
         hairline.boxType = .separator
         hairline.translatesAutoresizingMaskIntoConstraints = false
 
-        let strip = NSStackView(views: [setupButton, aboutButton])
+        let strip = NSStackView(views: [setupButton, aboutButton, updatesButton])
         strip.orientation = .horizontal
         strip.alignment = .centerY
         strip.spacing = 8
         strip.translatesAutoresizingMaskIntoConstraints = false
 
-        view = SettingsForm.paneView(rows: [launchRow, reconnectRow, reconnectHint, hairline, strip])
+        view = SettingsForm.paneView(rows: [launchRow, reconnectRow, reconnectHint,
+                                             licenseKeyRow, licenseConsentRow, licenseHint,
+                                             hairline, strip])
     }
 
     /// The reconnect-at-launch live hint: what the NEXT launch will do.
@@ -125,6 +176,19 @@ public final class GeneralSettingsViewController: NSViewController {
         let enabled = reconnectSwitch.state == .on
         settings.reconnectAtLaunch = enabled
         reconnectHint.stringValue = Self.reconnectHintLine(enabled)
+    }
+
+    @objc private func licenseCheckInConsentToggled() {
+        settings.licenseCheckInConsent = licenseCheckInSwitch.state == .on
+    }
+
+    /// Persists the license key. Empty text clears it (`AppSettings.licenseKey`
+    /// treats an empty string the same as any other value it stores — the
+    /// field's placeholder, not a stored empty string, is what communicates
+    /// "unset").
+    private func commitLicenseKey() {
+        let text = licenseKeyField.stringValue
+        settings.licenseKey = text.isEmpty ? nil : text
     }
 
     public override func viewDidLoad() {
@@ -145,6 +209,8 @@ public final class GeneralSettingsViewController: NSViewController {
     @objc private func runSetupAgainTapped() { onRunSetupAgain?() }
 
     @objc private func aboutTapped() { aboutWindowController.show() }
+
+    @objc private func checkForUpdatesTapped() { onCheckForUpdates?() }
 
     // STABILITY(D4): SMAppService register/status round-trips launchd XPC synchronously on the main thread; see dev/notes/stability-audit-2026-07-18.md
     @objc private func launchToggled() {
@@ -200,10 +266,58 @@ public final class GeneralSettingsViewController: NSViewController {
         return reconnectHint.stringValue
     }
 
+    // MARK: Test-support hooks (License, roadmap 054)
+
+    /// The license key field's current text.
+    public var test_licenseKeyText: String {
+        _ = view
+        return licenseKeyField.stringValue
+    }
+
+    /// Type `text` into the license key field and commit it, the way focus
+    /// loss (`controlTextDidEndEditing`) would.
+    public func test_setLicenseKey(_ text: String) {
+        _ = view
+        licenseKeyField.stringValue = text
+        commitLicenseKey()
+    }
+
+    /// Whether the "Send license check-ins" switch currently reads "on".
+    public var test_licenseCheckInConsentIsOn: Bool {
+        _ = view
+        return licenseCheckInSwitch.state == .on
+    }
+
+    /// Drive the "Send license check-ins" switch and run the toggle action.
+    public func test_toggleLicenseCheckInConsent(_ on: Bool) {
+        _ = view
+        licenseCheckInSwitch.state = on ? .on : .off
+        licenseCheckInConsentToggled()
+    }
+
+    /// The license check-in hint line's fixed disclosure copy.
+    public var test_licenseHint: String {
+        _ = view
+        return licenseHint.stringValue
+    }
+
     /// Invoke "Open Setup…" as a click would.
     public func test_tapRunSetupAgain() {
         _ = view
         runSetupAgainTapped()
+    }
+
+    /// Whether "Check for Updates…" is on screen (it is hidden in builds with
+    /// no updater — see `onCheckForUpdates`).
+    public var test_checkForUpdatesIsVisible: Bool {
+        _ = view
+        return !updatesButton.isHidden
+    }
+
+    /// Invoke "Check for Updates…" as a click would.
+    public func test_tapCheckForUpdates() {
+        _ = view
+        checkForUpdatesTapped()
     }
 
     // MARK: Test-support hooks (About)
@@ -217,5 +331,16 @@ public final class GeneralSettingsViewController: NSViewController {
     public func test_tapAbout() {
         _ = view
         aboutTapped()
+    }
+}
+
+// MARK: - NSTextFieldDelegate
+
+extension GeneralSettingsViewController: NSTextFieldDelegate {
+    /// Commit the license key when the field loses focus, not just on
+    /// Return — the same edit-end commit point `GroupEditorViewController`'s
+    /// rename field uses.
+    public func controlTextDidEndEditing(_ obj: Notification) {
+        commitLicenseKey()
     }
 }

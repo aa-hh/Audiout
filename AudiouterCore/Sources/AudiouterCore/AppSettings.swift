@@ -64,6 +64,10 @@ public struct AppSettings {
         static let syncOffsetMs = "audio.syncOffsetMs"
         static let surfacePinned = "surface.pinned"
         static let eqAdvancedExpanded = "eq.advancedExpanded"
+        static let licenseKey = "license.key"
+        static let licenseCheckInConsent = "license.checkInConsent"
+        static let licenseInstallID = "license.installID"
+        static let licenseCheckInURL = "license.checkInURL"
     }
 
     /// The user-selectable sender start-buffer options in ms (Settings › Audio
@@ -290,5 +294,46 @@ public struct AppSettings {
     public var eqAdvancedExpanded: Bool {
         get { defaults.bool(forKey: Keys.eqAdvancedExpanded) }
         nonmutating set { defaults.set(newValue, forKey: Keys.eqAdvancedExpanded) }
+    }
+
+    /// The purchase licence key, entered once from the receipt (Settings ›
+    /// General, roadmap 054). `nil` when unset — Audiouter is fully functional
+    /// without one (the Ardour model: the binary is what's sold, never a
+    /// software lock — GPL forbids one). Setting `nil` removes the stored value.
+    public var licenseKey: String? {
+        get { defaults.string(forKey: Keys.licenseKey) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.licenseKey) }
+    }
+
+    /// Consent to send licence check-ins (``LicenseCheckIn``) — telemetry that
+    /// records device spread for a licence, never a gate. Defaults to **off**:
+    /// this is the identified stream (PRODUCT.md Data Collection stream 2), so
+    /// it is opt-in like the anonymous stream, never assumed on.
+    public var licenseCheckInConsent: Bool {
+        get { defaults.bool(forKey: Keys.licenseCheckInConsent) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.licenseCheckInConsent) }
+    }
+
+    /// A stable per-install identifier for licence check-ins — lazily created
+    /// on first read and persisted immediately, so every later read (including
+    /// from a fresh `AppSettings` instance over the same store) returns the
+    /// same value for the life of this install.
+    public var installID: String {
+        if let existing = defaults.string(forKey: Keys.licenseInstallID) {
+            return existing
+        }
+        let generated = UUID().uuidString
+        defaults.set(generated, forKey: Keys.licenseInstallID)
+        return generated
+    }
+
+    /// The licence check-in endpoint. **Absent by default, and no code path in
+    /// this app sets it** — that absence is what keeps ``LicenseCheckIn``
+    /// inert until a real backend exists (roadmap 054: "check-in client built
+    /// now with no server"). `nil` when unset or when the stored string isn't a
+    /// valid URL.
+    public var checkInURL: URL? {
+        get { defaults.string(forKey: Keys.licenseCheckInURL).flatMap(URL.init(string:)) }
+        nonmutating set { defaults.set(newValue?.absoluteString, forKey: Keys.licenseCheckInURL) }
     }
 }

@@ -148,11 +148,12 @@ import AudiouterSharedUI
     @Test func generalPaneStaysCompactAboutIsNotInlined() {
         let controller = GeneralSettingsViewController(loginItem: FakeLoginItem())
         controller.view.layoutSubtreeIfNeeded()
-        // Three short button rows (Launch at login / Setup / About), not the
-        // full About content — comfortably under half of what full inlining
-        // measured (~1039pt, the change that broke
+        // Launch at login / Reconnect at launch / License key / Send license
+        // check-ins / two hint lines / a button row (roadmap 054 added the
+        // License rows) — still comfortably under half of what full About
+        // inlining measured (~1039pt, the change that broke
         // `testContentSizeIsFittedNotDegenerate`'s 750pt regression bound).
-        #expect(controller.view.fittingSize.height < 250)
+        #expect(controller.view.fittingSize.height < 450)
     }
 
     // MARK: Renders offscreen without crashing, in both appearances

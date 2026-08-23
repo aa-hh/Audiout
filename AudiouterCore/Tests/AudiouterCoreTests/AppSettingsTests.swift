@@ -247,4 +247,44 @@ import Testing
         settings.surfacePinned = false
         #expect(!AppSettings(defaults: defaults).surfacePinned)
     }
+
+    // MARK: License check-in (roadmap 054)
+
+    @Test func licenseKeyDefaultsNilAndRoundTrips() {
+        let settings = AppSettings(defaults: defaults)
+        #expect(settings.licenseKey == nil)
+        settings.licenseKey = "ABCD-1234"
+        #expect(settings.licenseKey == "ABCD-1234")
+        #expect(AppSettings(defaults: defaults).licenseKey == "ABCD-1234")
+        settings.licenseKey = nil
+        #expect(AppSettings(defaults: defaults).licenseKey == nil)
+    }
+
+    @Test func licenseCheckInConsentDefaultsOffAndRoundTrips() {
+        let settings = AppSettings(defaults: defaults)
+        #expect(!settings.licenseCheckInConsent, "identified stream: opt-in, never assumed on")
+        settings.licenseCheckInConsent = true
+        #expect(settings.licenseCheckInConsent)
+        #expect(AppSettings(defaults: defaults).licenseCheckInConsent)
+    }
+
+    @Test func installIDIsStableAcrossReads() {
+        let first = AppSettings(defaults: defaults).installID
+        #expect(!first.isEmpty)
+        // A fresh value over the same store reads the same persisted id,
+        // never regenerating one.
+        #expect(AppSettings(defaults: defaults).installID == first)
+        #expect(AppSettings(defaults: defaults).installID == first)
+    }
+
+    @Test func checkInURLDefaultsNilAndRoundTrips() {
+        let settings = AppSettings(defaults: defaults)
+        // Absent by default — this is what keeps the check-in client inert.
+        #expect(settings.checkInURL == nil)
+        settings.checkInURL = URL(string: "https://example.com/checkin")
+        #expect(settings.checkInURL == URL(string: "https://example.com/checkin"))
+        #expect(AppSettings(defaults: defaults).checkInURL == URL(string: "https://example.com/checkin"))
+        settings.checkInURL = nil
+        #expect(AppSettings(defaults: defaults).checkInURL == nil)
+    }
 }

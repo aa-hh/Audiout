@@ -233,12 +233,17 @@ import AVFoundation
         waitFor { engineSink.forwarded.count == 1 }
         #expect(btSink.enqueued.isEmpty, "no BT fan-out while detached")
 
-        // Attach → subsequent buffers fan out with the capture pts unchanged.
+        // Attach → subsequent buffers fan out with the capture pts unchanged. This
+        // pid is genuinely new, so the attach rebuilds the tap, and the tail also
+        // carries that rebuild's silence fill (fix 2) — the program blocks are the
+        // non-silent ones.
         coordinator.setBTSink(btSink, renderProcessPID: btRenderPID)
         tap.deliverMix(frames: 4, phaseStart: 4, pts: timespec(tv_sec: 2, tv_nsec: 0))
-        waitFor { btSink.enqueued.count == 1 }
+        waitFor { btSink.enqueued.contains { $0.frames.contains { $0 != 0 } } }
 
-        let call = btSink.enqueued[0]
+        let program = btSink.enqueued.filter { $0.frames.contains { $0 != 0 } }
+        #expect(program.count == 1)
+        let call = program[0]
         #expect(call.frameCount == 4, "16-byte S16LE stereo payload = 4 frames")
         #expect(call.pts.tv_sec == 2, "BT fan-out carries the capture pts unchanged")
         // The fixed payload widens 1…8 (Int16) → Float32 / 32768, identity rate.
@@ -251,8 +256,9 @@ import AVFoundation
         // Detach → fan-out stops again.
         coordinator.setBTSink(nil, renderProcessPID: nil)
         tap.deliverMix(frames: 4, phaseStart: 8, pts: timespec(tv_sec: 3, tv_nsec: 0))
-        waitFor { engineSink.forwarded.count == 3 }
-        #expect(btSink.enqueued.count == 1, "no BT fan-out after detach")
+        waitFor { engineSink.forwarded.filter { $0.pcm == FixedConverter.payload }.count == 3 }
+        #expect(btSink.enqueued.filter { $0.frames.contains { $0 != 0 } }.count == 1,
+                "no BT fan-out after detach")
     }
 
     /// BOTH consumers attached: one delivered buffer reaches the engine, the

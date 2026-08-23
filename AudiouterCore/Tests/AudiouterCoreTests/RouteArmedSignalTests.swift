@@ -260,14 +260,14 @@ import AudiouterCore
     @Test func mutedRowWithFeedsGainsLeadingMutedToken() {
         let row = DeviceRowView(device: makeDevice(isMuted: true))
         row.apply(makeDevice(isMuted: true), selected: true, controllable: true)
-        #expect(row.test_statusText == "MUTED · System", "the MUTED token leads an EXISTING feed sublabel")
+        #expect(row.test_statusText == "Muted · System", "the MUTED token leads an EXISTING feed sublabel")
     }
 
     @Test func mutedRedirectTargetPrependsTokenToFeedList() {
         let row = DeviceRowView(device: makeDevice(isMuted: true))
         row.apply(makeDevice(isMuted: true), selected: false, controllable: true,
                   routedAppNames: ["Spotify"])
-        #expect(row.test_statusText == "MUTED · Spotify")
+        #expect(row.test_statusText == "Muted · Spotify")
     }
 
     @Test func mutedRowWithoutFeedsStaysSingleLine() {
@@ -276,19 +276,21 @@ import AudiouterCore
         #expect(row.test_statusText == nil, "no standalone MUTED line — a single-line row never grows (R7 no-reflow)")
     }
 
-    @Test func masterMuteAddsNoMutedToken() {
-        // Master mute is realized by muting every member, so the view uses
-        // `masterMuted` to suppress the per-row token (matrix §3.6: the Main
-        // Out pill carries master mute; member sublabels stay clean).
+    @Test func mutedRowKeepsItsTokenUnderMasterMute() {
+        // A muted row always says so (Alec, 2026-08-23) — master mute is
+        // realized by muting every member, and each member now labels its own
+        // mute instead of deferring to the Main Out pill (the old matrix §3.6
+        // suppression made the label vanish when the muted row was the only
+        // member).
         let row = DeviceRowView(device: makeDevice(isMuted: true))
         row.apply(makeDevice(isMuted: true), selected: true, controllable: true, masterMuted: true)
-        #expect(row.test_statusText == "System", "no MUTED token under MASTER mute")
+        #expect(row.test_statusText == "Muted · System", "a muted row says Muted even under MASTER mute")
     }
 
     @Test func unmutingRestoresThePlainSublabel() {
         let row = DeviceRowView(device: makeDevice(isMuted: true))
         row.apply(makeDevice(isMuted: true), selected: true, controllable: true)
-        #expect(row.test_statusText == "MUTED · System")
+        #expect(row.test_statusText == "Muted · System")
 
         row.apply(makeDevice(isMuted: false), selected: true, controllable: true)
         #expect(row.test_statusText == "System", "unmute restores the plain feed line")

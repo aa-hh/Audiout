@@ -51,13 +51,13 @@ import AppKit
                                          loadPersisted: false)
         let group = try controller.createGroup(name: name, memberIDs: ["d0"],
                                                memberVolumes: [:]).group
-        let window = MixerWindowController(groupController: controller)
+        let window = MixerWindowController(groupController: controller,
+                                           settings: AppSettings(defaults: isolatedDefaults))
         window.setHostVisible(true)
         window.update(devices: devices)
         window.test_select(.group(id: group.id))
-        // `groupsDefaultContentSize` IS the content area below the window's
-        // toolbar strip (live-review D1), so no header subtraction remains.
-        window.contentController.view.setFrameSize(AppSurfaceController.groupsDefaultContentSize)
+        // The fixed frame's floor; only the width matters here.
+        window.contentController.view.setFrameSize(AppSurfaceController.minimumContentSize)
         settle(window)
         return (window, controller, group)
     }
@@ -337,7 +337,8 @@ import AppKit
         let controller = GroupController(backend: MockBackend(fleet: []),
                                          store: GroupStore(directory: tempDirectory()),
                                          loadPersisted: false)
-        let detail = DeviceDetailViewController(groupController: controller)
+        let detail = DeviceDetailViewController(groupController: controller,
+                                                settings: AppSettings(defaults: isolatedDefaults))
         detail.loadView()
         detail.show(device: Device(id: "office", name: "Office", kind: .generic, isAvailable: true))
         detail.view.layoutSubtreeIfNeeded()

@@ -133,12 +133,19 @@ extension SerializedSharedState {
         var excludedProcessObjectIDs: Set<AudioObjectID> { lock.withLock { lastExcludedProcessObjectIDs } }
     }
 
-    /// Records every forwarded (pcm, pts) pair.
+    /// Records every forwarded (pcm, pts) pair, and — separately — every BATCHED
+    /// per-stream write, so an EQ test can tell "one call carrying two streams"
+    /// apart from "two single writes" (the protocol's looping default).
     private final class SpySink: PCMSink, @unchecked Sendable {
         let lock = NSLock()
         private(set) var writes: [(pcm: Data, pts: timespec)] = []
+        private(set) var batches: [(streams: [(pcm: Data, streamId: UInt32)], pts: timespec)] = []
         func write(pcm: Data, pts: timespec) { lock.withLock { writes.append((pcm, pts)) } }
+        func write(streams: [(pcm: Data, streamId: UInt32)], pts: timespec) {
+            lock.withLock { batches.append((streams, pts)) }
+        }
         var forwarded: [(pcm: Data, pts: timespec)] { lock.withLock { writes } }
+        var batched: [(streams: [(pcm: Data, streamId: UInt32)], pts: timespec)] { lock.withLock { batches } }
     }
 
     /// Deterministic converter: emits a fixed non-empty S16LE payload per buffer so
@@ -2051,6 +2058,105 @@ extension SerializedSharedState {
             "a freshly grown line emits silence, not replayed history")
         #expect(castSpy.forwarded.allSatisfy { !$0.pcm.allSatisfy { $0 == 0 } },
             "and the other consumers keep receiving the live audio")
+    }
+
+    // MARK: - Per-device / Main Out EQ plan (whole-system delivery path)
+
+    /// Exactly what ``FakeConverter`` emits, so a test can assert the delivered
+    /// bytes are the converted PCM untouched.
+    private var convertedPCM: Data {
+        Data([0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00,
+              0x05, 0x00, 0x06, 0x00, 0x07, 0x00, 0x08, 0x00])
+    }
+
+    /// Audibly non-flat and deterministic on a 4-frame buffer: hard-left balance
+    /// zeroes the right channel, so "the bytes changed" can't hinge on rounding.
+    private func nonFlatProcessor() -> EQProcessor {
+        EQProcessor(eq: DeviceEQ(bassDB: 12, balance: -1), sampleRate: 44_100)
+    }
+
+    /// The default plan is the legacy path, byte for byte: one plain
+    /// `write(pcm:pts:)` carrying exactly what the converter produced. This is
+    /// the "EQ off is passthrough" guarantee at the delivery seam.
+    @Test func defaultEQPlanKeepsTheLegacySingleStreamZeroWrite() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: FakeConverter())
+
+        coordinator.start()
+        tap.pushBuffer(buffer(hostTime: 1_000_000_000))
+        waitFor { sink.forwarded.count == 1 }
+
+        #expect(sink.forwarded.count == 1, "the flat plan must take the single stream-0 write")
+        #expect(sink.batched.isEmpty, "no batched write may be issued while EQ is off")
+        #expect(sink.forwarded[0].pcm == convertedPCM, "EQ off must be byte-identical passthrough")
+
+        coordinator.stop()
+    }
+
+    /// A two-entry plan collapses into ONE batched call — both stream ids, one
+    /// shared pts — with only the entry carrying a processor differing from the
+    /// converted program.
+    @Test func twoStreamEQPlanIssuesOneBatchedWritePerBuffer() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: FakeConverter())
+
+        let eqStreamID = EQStreamAllocator.idBase
+        coordinator.setEQPlan(WholeSystemEQPlan(
+            main: nil,
+            streams: [
+                WholeSystemEQPlan.Stream(streamID: 0, processor: nil),
+                WholeSystemEQPlan.Stream(streamID: eqStreamID, processor: nonFlatProcessor()),
+            ]))
+
+        coordinator.start()
+        tap.pushBuffer(buffer(hostTime: 3_000_000_000))
+        waitFor { sink.batched.count == 1 }
+
+        #expect(sink.batched.count == 1, "both streams must go out in ONE call, phase-aligned")
+        #expect(sink.forwarded.isEmpty, "a non-flat plan must not fall back to the single write")
+        let batch = sink.batched[0]
+        #expect(batch.streams.map(\.streamId) == [0, eqStreamID])
+        #expect(batch.pts.tv_sec == 3, "the batch carries the buffer's own capture-clock pts")
+        #expect(batch.streams[0].pcm == convertedPCM, "the processor-less entry stays passthrough")
+        #expect(batch.streams[1].pcm != convertedPCM, "the EQ'd entry must differ from the program")
+        #expect(batch.streams[1].pcm.count == convertedPCM.count, "EQ never changes the frame count")
+
+        coordinator.stop()
+    }
+
+    /// The plan is picked up through the published snapshot, so a swap lands on
+    /// the very next delivered buffer — no restart, no tap rebuild.
+    @Test func eqPlanSwapAppliesToTheNextBuffer() {
+        let tap = FakeTap()
+        let sink = SpySink()
+        let coordinator = makeCoordinator(tap: tap, sink: sink, converter: FakeConverter())
+
+        coordinator.start()
+        tap.pushBuffer(buffer(hostTime: 1_000_000_000))
+        waitFor { sink.forwarded.count == 1 }
+        #expect(sink.batched.isEmpty)
+
+        coordinator.setEQPlan(WholeSystemEQPlan(
+            main: nonFlatProcessor(),
+            streams: [WholeSystemEQPlan.Stream(streamID: 0, processor: nil)]))
+        tap.pushBuffer(buffer(hostTime: 2_000_000_000))
+        waitFor { sink.batched.count == 1 }
+
+        #expect(sink.forwarded.count == 1, "no further legacy writes once a plan is installed")
+        #expect(sink.batched.count == 1, "the swapped-in plan drives the very next buffer")
+        #expect(sink.batched[0].streams[0].pcm != convertedPCM,
+            "the Main Out stage shapes the program before it reaches stream 0")
+
+        // ...and swapping back restores the byte-identical legacy write.
+        coordinator.setEQPlan(.passthrough)
+        tap.pushBuffer(buffer(hostTime: 4_000_000_000))
+        waitFor { sink.forwarded.count == 2 }
+        #expect(sink.forwarded.count == 2)
+        #expect(sink.forwarded[1].pcm == convertedPCM)
+
+        coordinator.stop()
     }
     }
 }

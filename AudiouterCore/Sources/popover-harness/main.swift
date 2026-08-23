@@ -326,11 +326,11 @@ func run() -> Int32 {
     // --- 17. Destination menu has exactly the two sections.
     print("\n[17] Destination menu sections")
     if let titles = popover.test_appRowDestinationTitles(for: musicBundleID) {
-        checks.expect(titles.contains("CURRENT DEVICE"), "menu has a Current Device section")
-        checks.expect(titles.contains("AIRPLAY DEVICES"), "menu has an AirPlay Devices section")
-        let unexpectedSections = titles.filter { $0 == $0.uppercased() && $0.count > 1 }
-            .filter { $0 != "CURRENT DEVICE" && $0 != "AIRPLAY DEVICES" }
-        checks.expect(unexpectedSections.isEmpty,
+        checks.expect(titles.contains("Current Device"), "menu has a Current Device section")
+        checks.expect(titles.contains("AirPlay Devices"), "menu has an AirPlay Devices section")
+        // Headers are sentence-case now (One Case rule), so an all-caps scan
+        // can't spot a leaked section — name the one that must not appear.
+        checks.expect(!titles.contains { $0.localizedCaseInsensitiveContains("group") },
                       "no extra section headers (e.g. a Groups section) leaked in")
     } else {
         checks.expect(false, "the seeded app row's destination menu exists")

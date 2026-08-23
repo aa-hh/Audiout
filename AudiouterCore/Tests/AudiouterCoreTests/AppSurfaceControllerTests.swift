@@ -44,11 +44,11 @@ import AppKit
     }
 
     private func makeSettingsRoot() -> SettingsRootViewController {
-        SettingsRootViewController(tabs: [
+        SettingsRootViewController(sections: [
             .init(title: "General", symbolName: "gearshape", viewController: makePane(height: 200)),
             .init(title: "Appearance", symbolName: "paintpalette", viewController: makePane(height: 300)),
             .init(title: "Audio", symbolName: "speaker.wave.2", viewController: makePane(height: 420)),
-        ], tabStyle: .segmentedControlOnTop)
+        ])
     }
 
     /// The surface under test plus spy state. The popover controller is real
@@ -123,31 +123,28 @@ import AppKit
         #expect(surface.test_hostedContentViewController === surface.test_mixerPanel)
     }
 
-    /// F3: Mixer and Settings re-size the window themselves on every content
-    /// change (exact-fit), so a manual drag-resize there would fight the next
-    /// automatic resize — it stuck until the next content change, then
-    /// snapped back. Groups keeps its session drag-memory (U3) and stays
-    /// resizable. The rule is the same pinned and unpinned.
-    @Test func onlyGroupsStaysUserResizable() throws {
+    /// One frame for the whole session, so a drag affordance would only ever
+    /// fight it: the resize bit is flipped OFF once at construction and no
+    /// screen and no manner profile flips it back.
+    @Test func noScreenIsEverUserResizable() throws {
         let (surface, _, _, _) = makeSurface()
         surface.show(anchorRect: nil)
-        #expect(!surface.shell.isUserResizable, "Mixer opens exact-fit, not user-resizable")
+        #expect(!surface.shell.isUserResizable, "the Mixer wears the fixed frame")
 
         surface.select(.groups)
-        #expect(surface.shell.isUserResizable, "Groups keeps its manual drag-resize")
+        #expect(!surface.shell.isUserResizable, "Groups has no drag memory any more")
 
         surface.select(.settings)
-        #expect(!surface.shell.isUserResizable, "Settings is exact-fit, not user-resizable")
+        #expect(!surface.shell.isUserResizable)
 
         surface.select(.mixer)
         #expect(!surface.shell.isUserResizable)
 
-        // Pinned and unpinned share the rule — it tracks the screen, not the
-        // manner profile.
+        // Pinning is a manner change, not a resize.
         surface.setPinned(true)
-        #expect(!surface.shell.isUserResizable, "still Mixer: pinning alone must not flip it")
+        #expect(!surface.shell.isUserResizable)
         surface.select(.groups)
-        #expect(surface.shell.isUserResizable, "Groups is resizable pinned too")
+        #expect(!surface.shell.isUserResizable, "Groups is not resizable pinned either")
     }
 
     @Test func selectingTheCurrentScreenIsANoOp() {
@@ -178,47 +175,95 @@ import AppKit
 
     // MARK: Per-screen sizes
 
-    @Test func groupsGetsItsDesignedSizeAndMixerItsExactFit() throws {
+    /// The whole contract in one test: one frame, measured once at open from
+    /// the Mixer, worn unchanged by every screen — same SIZE and same ORIGIN,
+    /// because a window that moves under the cursor on a tab click reads as
+    /// the surface twitching.
+    @Test func oneFrameForEveryScreen() throws {
         let (surface, _, _, _) = makeSurface()
-        surface.show(anchorRect: nil)
+        surface.show(anchorRect: NSRect(x: 900, y: 1000, width: 30, height: 24))
         let window = try #require(surface.shell.window)
         let panel = try #require(surface.test_mixerPanel)
+        let frame = window.frame
 
-        // Mixer: the window wears the panel's exact-fit preferred size.
-        let mixerFit = panel.preferredContentSize
-        #expect(mixerFit.width == 623, "the Mixer panel's fixed width")
-        #expect(window.frame.size.width == mixerFit.width)
-        #expect(abs(window.frame.size.height - mixerFit.height) < 0.5,
-                "the shell resized to the Mixer's exact fit")
+        let contentHeight = window.contentRect(forFrameRect: frame).height
+        #expect(abs(contentHeight - max(600, panel.preferredContentSize.height)) < 0.5,
+                "the frame is the Mixer's fit, floored at 600 (got \(contentHeight))")
+        #expect(frame.width == 623, "the one fixed width")
 
         surface.select(.groups)
-        var expected = AppSurfaceController.groupsDefaultContentSize
-        expected.height += surface.test_chromeTopInset
-        #expect(window.frame.size == expected,
-                "Groups opens at its designed content size plus the measured toolbar strip")
-        #expect(expected.width == mixerFit.width,
-                "…and at the Mixer's own width, so switching screens never changes it")
+        #expect(window.frame == frame, "Groups wears the same frame, and does not move it")
+        surface.select(.settings)
+        #expect(window.frame == frame, "so does Settings")
+        surface.select(.mixer)
+        #expect(window.frame == frame, "and coming back changes nothing")
+
+        surface.togglePin()
+        #expect(window.frame.size == frame.size, "a pin flip is a manner change, not a resize")
     }
 
-    @Test func settingsSizesPerTabThroughTheFittedChannel() throws {
+    /// Settings sections swap content behind fixed glass — the pane host
+    /// scrolls, the window does not move.
+    @Test func settingsSectionSwitchLeavesTheFrameAlone() throws {
         let (surface, _, _, _) = makeSurface()
         surface.show(anchorRect: nil)
         surface.select(.settings)
         let window = try #require(surface.shell.window)
         let root = try #require(surface.test_settingsRoot)
 
-        let chrome = surface.test_chromeTopInset
-        let fittedFirst = root.fittedContentSize
-        #expect(fittedFirst.height > 200, "fitted height includes the in-content tab chrome")
-        #expect(window.frame.size.height == fittedFirst.height + chrome,
-                "settings screen = toolbar strip + fitted tabs")
+        let frame = window.frame
+        root.selectSection(at: 2)
+        #expect(window.frame == frame,
+                "the tallest section must not resize the surface")
+    }
 
-        // A tab switch re-measures and the surface follows (trigger 2).
-        root.selectTab(at: 2)
-        let fittedThird = root.fittedContentSize
-        #expect(fittedThird.height > fittedFirst.height, "the third pane is taller")
-        #expect(window.frame.size.height == fittedThird.height + chrome,
-                "the surface resized for the newly selected tab")
+    /// A fold moves rows INSIDE the frame. The content's published size
+    /// changes (that is what a collapse is); the window's frame must not.
+    @Test func foldsNeverMoveTheFrame() throws {
+        let (surface, popover, _, _) = makeSurface()
+        surface.show(anchorRect: nil)
+        let window = try #require(surface.shell.window)
+        let panel = try #require(surface.test_mixerPanel)
+
+        let frame = window.frame
+        let fit = panel.preferredContentSize.height
+        _ = popover.test_toggleCard(title: PopoverController.outputDevicesCardTitle)
+        #expect(panel.preferredContentSize.height != fit, "the content really moved")
+        #expect(window.frame == frame, "…inside the frame, which did not")
+
+        _ = popover.test_toggleCard(title: PopoverController.outputDevicesCardTitle)
+        #expect(window.frame == frame, "and un-folding does not move it back")
+    }
+
+    /// The floor is a floor, not the size: a Mixer with a real fleet fits
+    /// taller than 600, and the frame follows it — up to the screen.
+    @Test func theMixerFitRaisesTheHeightAboveTheFloor() throws {
+        let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        backend.start()
+        let popover = PopoverController(
+            appRouting: AppRoutingController(store: AppRouteStore(directory: scratchDir),
+                                             loadPersisted: false),
+            runningAppsProvider: { [] })
+        popover.test_isShownOverride = true
+        popover.update(devices: backend.devices)
+        let surface = AppSurfaceController(
+            popoverController: popover,
+            settings: AppSettings(defaults: isolatedDefaults),
+            groupsContent: { NSViewController() },
+            settingsContent: { [self] in makeSettingsRoot() },
+            frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurfaceTests")))
+
+        surface.show(anchorRect: nil)
+        let window = try #require(surface.shell.window)
+        let panel = try #require(surface.test_mixerPanel)
+
+        let contentHeight = window.contentRect(forFrameRect: window.frame).height
+        #expect(abs(contentHeight - max(600, panel.preferredContentSize.height)) < 0.5,
+                "the fit decides the height once it clears the floor (got \(contentHeight))")
+        let visible = try #require(NSScreen.main).visibleFrame.height
+        #expect(window.frame.height <= visible - 16,
+                "…and the screen caps it (got \(window.frame.height), cap \(visible - 16))")
     }
 
     // MARK: Mixer show/hide lifecycle (U2 seams)
@@ -567,6 +612,51 @@ import AppKit
         let groups = MixerWindowController(
             groupController: GroupController(backend: backend,
                                              store: GroupStore(directory: scratchDir),
+                                             loadPersisted: false),
+            settings: AppSettings(defaults: isolatedDefaults))
+        let popover = PopoverController(
+            appRouting: AppRoutingController(store: AppRouteStore(directory: scratchDir),
+                                             loadPersisted: false),
+            runningAppsProvider: { [] })
+        let surface = AppSurfaceController(
+            popoverController: popover,
+            settings: AppSettings(defaults: isolatedDefaults),
+            groupsContent: { groups.contentController },
+            settingsContent: { [self] in makeSettingsRoot() },
+            frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurfaceTests")))
+
+        surface.show(anchorRect: nil)
+        let window = try #require(surface.shell.window)
+        let frameBefore = window.frame
+        surface.select(.groups)
+
+        #expect(window.frame == frameBefore,
+                "the real split view mounts INTO the session frame: it neither snaps the window to a 500×500 fallback nor widens it to its own minimum")
+        let screen = try #require(surface.test_groupsScreen)
+        screen.view.layoutSubtreeIfNeeded()
+        #expect(screen.content.view.frame.height > 0,
+                "the hosted split view has real height (it is laid out, not collapsed)")
+    }
+
+    /// The one header must be a FIXED landmark: the tab strip sits at the
+    /// window's leading edge on every screen. The regression this pins (live
+    /// build, 2026-08-22) was AppKit's, not ours — a split view item with
+    /// `.sidebar` BEHAVIOR anywhere in the window makes the toolbar reserve its
+    /// whole leading region for that sidebar, so every toolbar item starts at
+    /// the content pane's edge instead of the window's while that screen is
+    /// mounted. Hence the behavior assertions: they are what the live bug
+    /// actually turned on, and no headless measurement can stand in for them —
+    /// a window that never orders on screen skips the reservation pass, so the
+    /// geometry below stayed green through a build that shifted ~210pt in front
+    /// of the owner. Both must hold. Measured on the REAL content; a stub
+    /// screen has no sidebar to trigger any of it. The picker view is private
+    /// AppKit, matched by class NAME like `SurfaceToolbarTests` does.
+    @Test func theTabStripNeverMovesAcrossScreens() throws {
+        let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        let groups = MixerWindowController(
+            groupController: GroupController(backend: backend,
+                                             store: GroupStore(directory: scratchDir),
                                              loadPersisted: false))
         let popover = PopoverController(
             appRouting: AppRoutingController(store: AppRouteStore(directory: scratchDir),
@@ -580,17 +670,47 @@ import AppKit
             frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurfaceTests")))
 
         surface.show(anchorRect: nil)
-        surface.select(.groups)
-
         let window = try #require(surface.shell.window)
-        var designed = AppSurfaceController.groupsDefaultContentSize
-        designed.height += surface.test_chromeTopInset
-        #expect(window.frame.size == designed,
-                "the real split view mounts at the designed size, not a 500×500 fallback")
-        let screen = try #require(surface.test_groupsScreen)
-        screen.view.layoutSubtreeIfNeeded()
-        #expect(screen.content.view.frame.height > 0,
-                "the hosted split view has real height (it is laid out, not collapsed)")
+
+        func tabStripLeadingX() throws -> CGFloat {
+            window.layoutIfNeeded()
+            let themeFrame = try #require(window.contentView?.superview)
+            let picker = try #require(firstView(in: themeFrame,
+                                                namedLike: "NSToolbarItemGroupPicker"),
+                                      "the tab group's picker view is in the window's chrome")
+            return picker.convert(picker.bounds, to: themeFrame).minX
+        }
+
+        // Mixer twice: the first layout pass of a freshly attached toolbar
+        // settles the group's width, so the SECOND visit is the reference.
+        _ = try tabStripLeadingX()
+        surface.select(.groups)
+        surface.select(.mixer)
+        let onMixer = try tabStripLeadingX()
+
+        surface.select(.groups)
+        #expect(try tabStripLeadingX() == onMixer,
+                "the Groups sidebar must not push the tab strip right")
+        surface.select(.settings)
+        #expect(try tabStripLeadingX() == onMixer,
+                "nor may the Settings sidebar")
+        surface.select(.mixer)
+        #expect(try tabStripLeadingX() == onMixer, "and it comes back unchanged")
+
+        let groupsSplit = try #require(surface.test_groupsScreen?.content as? NSSplitViewController)
+        #expect(groupsSplit.splitViewItems[0].behavior != .sidebar,
+                "the Groups sidebar is a PLAIN split item — `.sidebar` behavior reserves the toolbar's leading region")
+        let settingsRoot = try #require(surface.test_settingsRoot)
+        #expect(settingsRoot.test_sidebarSplitItem.behavior != .sidebar,
+                "and so is the Settings one")
+    }
+
+    private func firstView(in root: NSView, namedLike name: String) -> NSView? {
+        if String(describing: type(of: root)).contains(name) { return root }
+        for subview in root.subviews {
+            if let hit = firstView(in: subview, namedLike: name) { return hit }
+        }
+        return nil
     }
 
     /// The Groups screen is a SPLIT: speakers/groups sidebar on the left,
@@ -610,7 +730,8 @@ import AppKit
         // live regression was reported in.
         _ = try groupController.createGroup(name: "Group 1",
                                             memberIDs: ["sonos-move", "office"])
-        let groups = MixerWindowController(groupController: groupController)
+        let groups = MixerWindowController(groupController: groupController,
+                                           settings: AppSettings(defaults: isolatedDefaults))
         groups.test_isVisibleOverride = true
         groups.update(devices: backend.devices)
         let popover = PopoverController(
@@ -625,9 +746,8 @@ import AppKit
             frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurfaceTests")))
 
         surface.show(anchorRect: nil)
-        // Reach Groups the way a user does — via the NARROWER Settings screen.
-        // `mount` restores the outgoing screen's frame before animating to the
-        // incoming one, so the split view is laid out at Settings' 460 first.
+        // Reach Groups via the Settings screen, so the split is laid out after
+        // a swap.
         surface.select(.settings)
         surface.shell.window?.contentView?.layoutSubtreeIfNeeded()
         surface.select(.groups)
@@ -687,5 +807,82 @@ import AppKit
 
         #expect(published.isEmpty, "nothing is visible, so nothing became visible")
         #expect(surface.visibleScreen == nil)
+    }
+
+    // MARK: The fixed frame's two hard budgets
+
+    /// The Groups editor pane has NO scroll view, so whatever the frame gives
+    /// it at the FLOOR is a hard budget — the popover here has no devices, so
+    /// the Mixer's fit cannot raise the height and the floor is what the
+    /// screen gets. If this fails, raise
+    /// `AppSurfaceController.minimumContentSize`; never let the editor
+    /// overflow.
+    @Test func theSevenDeviceEditorFitsTheMinimumFrame() throws {
+        let (surface, groups, groupID) = try makeRealGroupsSurface()
+        surface.show(anchorRect: nil)
+        surface.select(.groups)
+        groups.test_select(.group(id: groupID))
+        let screen = try #require(surface.test_groupsScreen)
+        screen.view.layoutSubtreeIfNeeded()
+
+        let editor = groups.test_editor.view
+        #expect(editor.fittingSize.height <= editor.frame.height,
+                Comment(rawValue: "the editor needs \(editor.fittingSize.height)pt but the "
+                        + "fixed frame gives the pane \(editor.frame.height)pt. The pane has "
+                        + "no scroll view, so this is an overflow, not a preference — raise "
+                        + "AppSurfaceController.minimumContentSize."))
+    }
+
+    /// AppKit widens a window to its content's fitting width, and this window
+    /// must never widen. Every Groups pane — a group, a device, Main Out —
+    /// has to stay inside the frame.
+    @Test func noGroupsPaneAsksForMoreThanTheFrameWidth() throws {
+        let (surface, groups, groupID) = try makeRealGroupsSurface()
+        surface.show(anchorRect: nil)
+        surface.select(.groups)
+        let screen = try #require(surface.test_groupsScreen)
+        let window = try #require(surface.shell.window)
+
+        for selection in [SidebarSelection.group(id: groupID),
+                          .device(id: "office"),
+                          .mainOut] {
+            groups.test_select(selection)
+            screen.view.layoutSubtreeIfNeeded()
+            #expect(screen.content.view.fittingSize.width <= 623,
+                    Comment(rawValue: "\(selection) asks for "
+                            + "\(screen.content.view.fittingSize.width)pt of width"))
+            #expect(window.frame.width == 623,
+                    Comment(rawValue: "\(selection) widened the window"))
+        }
+    }
+
+    /// The real Groups content over a discovered fleet with one saved group,
+    /// hosted on a surface whose popover has NO devices — so the Mixer's fit
+    /// cannot raise the frame above the floor and both budget tests measure
+    /// the worst case.
+    private func makeRealGroupsSurface() throws
+        -> (AppSurfaceController, MixerWindowController, String) {
+        let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        backend.start()
+        let groupController = GroupController(backend: backend,
+                                              store: GroupStore(directory: scratchDir),
+                                              loadPersisted: false)
+        let group = try groupController.createGroup(name: "Group 1",
+                                                    memberIDs: ["sonos-move", "office"])
+        let groups = MixerWindowController(groupController: groupController)
+        groups.test_isVisibleOverride = true
+        groups.update(devices: backend.devices)
+        let popover = PopoverController(
+            appRouting: AppRoutingController(store: AppRouteStore(directory: scratchDir),
+                                             loadPersisted: false),
+            runningAppsProvider: { [] })
+        let surface = AppSurfaceController(
+            popoverController: popover,
+            settings: AppSettings(defaults: isolatedDefaults),
+            groupsContent: { groups.contentController },
+            settingsContent: { [self] in makeSettingsRoot() },
+            frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurfaceTests")))
+        return (surface, groups, group.group.id)
     }
 }

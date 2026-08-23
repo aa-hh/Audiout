@@ -726,6 +726,11 @@ public enum PopoverColumnGrid {
     public static let syncDrawerAlignButtonWidth: CGFloat = 104
     /// Width of the Revert push button.
     public static let syncDrawerRevertButtonWidth: CGFloat = 58
+    /// Width of the "Reset alignment" push button — wider than Revert because
+    /// it spells out what it clears: Revert restores the value this drawer
+    /// opened on, Reset deletes the stored alignment entirely, and a two-button
+    /// pair reading "Revert"/"Reset" would be one glance from a wrong click.
+    public static let syncDrawerResetButtonWidth: CGFloat = 108
     /// Gap between the align toggle and the Revert button beside it — they are
     /// one pair, so this is tight.
     public static let syncDrawerButtonGap: CGFloat = 6

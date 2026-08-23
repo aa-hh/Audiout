@@ -132,37 +132,252 @@ import AudioToolbox
 
     // MARK: Keep-alive bed + wake preamble (W2 — the Sonos amp-gate fix)
 
-    /// The bed rides under every active frame at ~−47 dBFS RMS — present, but
-    /// far below the tick.
-    @Test func bedIsPresentAtTheTargetLevel() {
-        let injector = AlignmentTickInjector(
-            sampleRate: 1_000, config: .init(bpm: 600, maxTicks: 4))
-        var pcm = zeroBuffer(frames: 100)
-        injector.mix(into: &pcm)
-        let samples = channel0(pcm)
-        // Between ticks (frames 30..<100) only the bed plays.
-        let bedOnly = samples[30..<100].map { Double($0) / 32_768.0 }
-        #expect(bedOnly.contains { $0 != 0 }, "the bed keeps signal flowing between ticks")
-        let rms = (bedOnly.map { $0 * $0 }.reduce(0, +) / Double(bedOnly.count)).squareRoot()
-        let dBFS = 20 * log10(max(rms, 1e-12))
-        #expect(dBFS > -53 && dBFS < -41, "bed ≈ −47 dBFS RMS, measured \(dBFS)")
+    /// dBFS RMS of one S16LE channel.
+    private func dBFS(_ samples: some Collection<Int16>) -> Double {
+        let normalized = samples.map { Double($0) / 32_768.0 }
+        let rms = (normalized.map { $0 * $0 }.reduce(0, +) / Double(normalized.count)).squareRoot()
+        return 20 * log10(max(rms, 1e-12))
     }
 
-    /// The wizard's wake preamble: bed only — no tick — for the configured
-    /// stretch, then the first tick lands on already-awake amps.
-    @Test func preambleIsBedOnlyBeforeTheFirstTick() {
+    /// The keep-alive tone's expected sample at absolute frame `position` —
+    /// the injector's own loop table, re-derived so a test can both predict it
+    /// and subtract it back out.
+    private func toneSample(at position: Int, sampleRate: Double = 44_100) -> Int16 {
+        let period = Int((sampleRate / AlignmentTickInjector.Config.toneHz).rounded())
+        let peak = pow(10, AlignmentTickInjector.Config.toneRMSdBFS / 20) * 2.0.squareRoot()
+        return Int16(clamping: Int32(
+            (peak * sin(2 * .pi * Double(position % period) / Double(period)) * 32_767.0).rounded()))
+    }
+
+    /// One whole run's worth of the wizard's Bluetooth variant, channel 0.
+    /// Unarmed, so it is keep-alive and nothing else.
+    private func keepAliveRun(blocks: Int, framesPerBlock: Int,
+                              sampleRate: Double = 44_100) -> (all: [Int16], boundaries: [Int]) {
+        let injector = AlignmentTickInjector(sampleRate: sampleRate, config: .wizard)
+        var all: [Int16] = []
+        var boundaries: [Int] = []
+        for _ in 0..<blocks {
+            var pcm = zeroBuffer(frames: framesPerBlock)
+            var bedded = Data()
+            injector.mixWizardVariants(into: &pcm, bedded: &bedded)
+            if !all.isEmpty { boundaries.append(all.count) }
+            all += channel0(bedded)
+        }
+        return (all, boundaries)
+    }
+
+    /// The keep-alive the Bluetooth variant carries is a ~20 Hz sine at
+    /// −40 dBFS RMS and NOTHING else — the fix for the live run's "the static
+    /// gets louder as the test goes on" (2026-08-22). Exact, because the loop
+    /// table is one whole cycle indexed by the absolute frame position.
+    @Test func theKeepAliveIsALowToneAndNothingElse() {
+        let run = keepAliveRun(blocks: 40, framesPerBlock: 512)
+        #expect(abs(dBFS(run.all) - AlignmentTickInjector.Config.toneRMSdBFS) < 0.5,
+                "keep-alive ≈ −40 dBFS RMS, measured \(dBFS(run.all))")
+
+        #expect(run.all == (0..<run.all.count).map { toneSample(at: $0) },
+                "the Bluetooth variant carries the tone and nothing else")
+
+        // DC-free — measured over WHOLE cycles, which is the only window in
+        // which "a sine has no DC" is a statement about the signal rather than
+        // about where the window happened to stop.
+        let period = Int((44_100 / AlignmentTickInjector.Config.toneHz).rounded())
+        let wholeCycles = run.all.prefix((run.all.count / period) * period)
+        #expect(wholeCycles.count >= period)
+        #expect(wholeCycles.reduce(0) { $0 + Int($1) } == 0,
+                "no DC offset over \(wholeCycles.count / period) cycles")
+    }
+
+    /// Phase-continuous across block boundaries: the pacer renders 512 frames at
+    /// a time and the tone must not restart at each one. A 20 Hz sine at this
+    /// level moves at most ~1.4 LSB per sample, ANYWHERE — including the step
+    /// from the last sample of one block to the first of the next.
+    @Test func theKeepAliveHasNoDiscontinuityAtBlockBoundaries() {
+        let run = keepAliveRun(blocks: 40, framesPerBlock: 512)
+        let maxStep = (1..<run.all.count)
+            .map { abs(Int(run.all[$0]) - Int(run.all[$0 - 1])) }.max() ?? 0
+        #expect(maxStep <= 2, "largest sample step \(maxStep) — the tone is continuous")
+        for boundary in run.boundaries {
+            #expect(abs(Int(run.all[boundary]) - Int(run.all[boundary - 1])) <= 2,
+                    "step across the block boundary at \(boundary)")
+        }
+    }
+
+    /// H1, the live run's "the static gets louder": the keep-alive is rendered
+    /// from a loop table into a FRESH block every pacer fire, so it is the SAME
+    /// signal on the last block of a run as on the first — nothing accumulates
+    /// and nothing climbs toward clipping. 2 000 blocks ≈ 23 s of run, across
+    /// the search → blocks tempo change.
+    ///
+    /// Subtracting the expected tone is what makes this exact rather than
+    /// statistical: a block that carries no tick must come back ALL ZEROES, at
+    /// block 2 000 exactly as at block 1. A keep-alive that grew by even one LSB
+    /// would leave a residual in every block and take this count to nothing.
+    @Test func theKeepAliveLevelNeverGrowsAcrossALongRun() {
+        let injector = AlignmentTickInjector(sampleRate: 44_100, config: .wizard)
+        injector.armTicks()
+        var position = 0
+        var tickFreeBlocks = 0, tickBlocks = 0, loudest = 0
+        for block in 0..<2_000 {
+            var pcm = zeroBuffer(frames: 512)
+            var bedded = Data()
+            injector.mixWizardVariants(into: &pcm, bedded: &bedded)
+            let samples = channel0(bedded)
+            loudest = max(loudest, samples.map { abs(Int($0)) }.max() ?? 0)
+            let residual = samples.enumerated().map {
+                Int32($0.element) - Int32(toneSample(at: position + $0.offset))
+            }
+            if residual.allSatisfy({ $0 == 0 }) { tickFreeBlocks += 1 } else { tickBlocks += 1 }
+            position += samples.count
+            if block == 900 { injector.setTempo(bpm: AlignmentTickInjector.wizardBlocksBPM) }
+        }
+        #expect(tickFreeBlocks > 1_500,
+                "every tick-free block is the keep-alive and nothing else, start to finish — \(tickFreeBlocks) of 2 000")
+        #expect(tickBlocks > 0, "…and the run really did tick, so this is not vacuous")
+        #expect(loudest < 16_000, "nothing in the run approaches clipping, peak \(loudest)")
+    }
+
+    /// `.manual` — the row's metronome — gets the same keep-alive as the
+    /// wizard: the Move's amp gate is the same amp gate either way.
+    @Test func theManualMetronomeCarriesTheSameKeepAlive() {
+        let injector = AlignmentTickInjector(sampleRate: 44_100, config: .manual)
+        var pcm = zeroBuffer(frames: 20_000)
+        injector.mix(into: &pcm)
+        // Past the 30 ms tick body (1 323 frames), only the keep-alive plays.
+        let betweenTicks = channel0(pcm)[2_000...]
+        #expect(abs(dBFS(betweenTicks) - AlignmentTickInjector.Config.toneRMSdBFS) < 0.5,
+                "measured \(dBFS(betweenTicks))")
+    }
+
+    /// Both wizard variants render the SAME tick from the same block, and the
+    /// keep-alive rides only the Bluetooth one — so subtracting the tone leaves
+    /// two blocks whose tick onsets are sample-identical in position.
+    @Test func theKeepAliveNeverMovesTheTickOnset() {
+        let injector = AlignmentTickInjector(
+            sampleRate: 44_100,
+            config: .init(bpm: 600, maxTicks: AlignmentTickInjector.unlimitedTicks,
+                          armedAtStart: false, replacesProgram: true))
+        injector.armTicks()
+        var pcm = zeroBuffer(frames: 20_000)
+        var bedded = Data()
+        injector.mixWizardVariants(into: &pcm, bedded: &bedded)
+        let knock = channel0(pcm)
+        // Subtract the keep-alive back out (exact — nothing clamps at these
+        // levels) and what is left is the bright click alone, so the two onsets
+        // can be compared the same first-nonzero way the bed-less pair is.
+        let click = channel0(bedded).enumerated().map { (position, sample) in
+            Int16(clamping: Int32(sample) - Int32(toneSample(at: position)))
+        }
+        let onset = { (samples: [Int16]) -> Int? in samples.firstIndex { $0 != 0 } }
+        #expect(onset(knock) != nil)
+        #expect(onset(knock) == onset(click),
+                "the keep-alive must not shift or mask the Bluetooth onset")
+    }
+
+    /// The ARM gate replaced the fixed wake preamble (roadmap 056 Part B): a
+    /// wizard injector is bed-only until the backend says every participating
+    /// sink is playing. The beat grid then opens one WHOLE interval after the
+    /// arm — the arm point is wherever the last sink happened to release, and a
+    /// tick placed on it can land a few ms behind the previous run's last one,
+    /// overlapping two 30 ms tick bodies into one ambiguous smear.
+    @Test func aWizardInjectorIsBedOnlyUntilArmed() {
         let injector = AlignmentTickInjector(
             sampleRate: 1_000,
-            config: .init(bpm: 600, maxTicks: 2, preambleSeconds: 0.2))
-        #expect(injector.test_preambleFrames == 200)
-        var pcm = zeroBuffer(frames: 300)
-        injector.mix(into: &pcm)
-        let samples = channel0(pcm)
+            config: .init(bpm: 600, maxTicks: AlignmentTickInjector.unlimitedTicks,
+                          armedAtStart: false))
+        #expect(!injector.test_isArmed)
         let tickPeak = Double(0.35 * 0.7 * 32_767)   // the tick's first partial scale
-        #expect(samples[0..<200].allSatisfy { abs(Double($0)) < tickPeak / 8 },
-                "the preamble carries only the quiet bed, never a tick")
-        #expect(samples[200...229].contains { abs(Double($0)) > tickPeak / 8 },
-                "the first tick starts right after the preamble")
+        let isTick = { (s: Int16) in abs(Double(s)) > tickPeak / 8 }
+        var pcm = zeroBuffer(frames: 200)
+        var bedded = Data()
+        injector.mixWizardVariants(into: &pcm, bedded: &bedded)
+        #expect(!channel0(bedded).contains(where: isTick),
+                "before the arm the run carries only the quiet bed, never a tick")
+
+        injector.armTicks()
+        #expect(injector.test_isArmed)
+        // 600 BPM at 1 kHz — one beat every 100 frames, so the arm's own
+        // interval covers frames 0..<100 of this block and the first tick is at
+        // 100.
+        var armedPCM = zeroBuffer(frames: 200)
+        injector.mixWizardVariants(into: &armedPCM, bedded: &bedded)
+        let armed = channel0(bedded)
+        #expect(!armed[0..<100].contains(where: isTick),
+                "no tick inside the first interval — the arm instant is silent")
+        #expect(armed[100..<130].contains(where: isTick),
+                "…and the opening tick lands one whole interval later")
+    }
+
+    /// Two tempos, one grid: the estimator's coarse search ticks every 3 s and
+    /// its blocks at 72 BPM, and the change re-derives the grid rather than
+    /// leaving a stale phase behind.
+    @Test func theTempoCanChangeMidRun() {
+        let injector = AlignmentTickInjector(
+            sampleRate: 1_000,
+            config: .init(bpm: 60, maxTicks: AlignmentTickInjector.unlimitedTicks,
+                          armedAtStart: false))
+        #expect(injector.test_beatFrames == 1_000)
+        injector.setTempo(bpm: 120)
+        #expect(injector.test_beatFrames == 500)
+
+        // The wizard's own two values, as the session drives them.
+        let wizard = AlignmentTickInjector(sampleRate: 1_000, config: .wizard)
+        #expect(wizard.test_beatFrames == 3_000, "the search ticks every 3 s")
+        wizard.setTempo(bpm: AlignmentTickInjector.wizardBlocksBPM)
+        #expect(wizard.test_beatFrames == 833, "72 BPM ≈ 833 ms — 833 frames at 1 kHz")
+    }
+
+    /// A tempo change lands the next tick a full NEW interval after the LAST
+    /// one already heard — never sooner. At the search → blocks handover the
+    /// two intervals differ by seconds, and re-deriving the grid from the bare
+    /// cursor put the next tick ~20 ms behind the one the listener had just
+    /// heard: two overlapping 30 ms tick bodies, an unanswerable first pair.
+    @Test func aTempoChangeNeverCrowdsTheTickJustHeard() {
+        // 60 BPM at 1 kHz — a beat every 1000 frames — dropping to 120 BPM.
+        let injector = AlignmentTickInjector(
+            sampleRate: 1_000,
+            config: .init(bpm: 60, maxTicks: AlignmentTickInjector.unlimitedTicks,
+                          armedAtStart: false, bedEnabled: false, replacesProgram: true))
+        injector.armTicks()          // first tick at frame 1000
+        var pcm = zeroBuffer(frames: 1_050)
+        injector.mix(into: &pcm)
+        #expect(channel0(pcm)[1_000..<1_030].contains { $0 != 0 }, "the opening tick")
+
+        // 50 frames past that tick — the crowding case.
+        injector.setTempo(bpm: 120)
+        #expect(injector.test_beatFrames == 500)
+        var after = zeroBuffer(frames: 1_000)
+        injector.mix(into: &after)
+        let samples = channel0(after)
+        // Absolute frames 1050..2049; the last tick was at 1000, so the next
+        // may not land before 1500 (local index 450).
+        #expect(!samples[0..<450].contains { $0 != 0 },
+                "nothing inside one new interval of the tick just heard")
+        #expect(samples[450..<480].contains { $0 != 0 },
+                "…and the next tick lands exactly one new interval after it")
+    }
+
+    /// Two TIMBRES off one beat clock: the Bluetooth fan-out keeps the bright
+    /// click, the engine/Mac side gets a low knock, and the onset instant is
+    /// sample-identical in both — the question is which side first, never which
+    /// side louder.
+    @Test func theWizardVariantsCarryDifferentTicksAtTheSameOnset() {
+        let injector = AlignmentTickInjector(
+            sampleRate: 44_100,
+            config: .init(bpm: 60, maxTicks: AlignmentTickInjector.unlimitedTicks,
+                          armedAtStart: false, bedEnabled: false, replacesProgram: true))
+        injector.armTicks()
+        // The first tick is one whole interval after the arm, so the block has
+        // to be long enough to contain it.
+        var pcm = zeroBuffer(frames: injector.test_beatFrames + 2_000)
+        var bedded = Data()
+        injector.mixWizardVariants(into: &pcm, bedded: &bedded)
+        let low = channel0(pcm)
+        let bright = channel0(bedded)
+        let onset = { (samples: [Int16]) -> Int? in samples.firstIndex { $0 != 0 } }
+        #expect(onset(low) != nil)
+        #expect(onset(low) == onset(bright), "sample-exact onset equality")
+        #expect(low != bright, "different partials — a low knock against the bright click")
     }
 
     /// The bed stops WITH the tick budget — an expired injector adds nothing,
@@ -178,17 +393,77 @@ import AudioToolbox
                 "past the budget, neither tick nor bed is emitted")
     }
 
-    /// The wizard config: long budget, ~3 s preamble, bed on.
+    /// The wizard config: NO budget, NOT armed at birth (the backend's arm gate
+    /// owns that now), opening on the search tempo, bed on.
     @Test func wizardConfigShape() {
         let config = AlignmentTickInjector.Config.wizard
-        #expect(config.maxTicks == 360)
-        #expect(config.preambleSeconds == 3)
+        #expect(config.maxTicks == AlignmentTickInjector.unlimitedTicks)
+        #expect(config.armedAtStart == false)
+        #expect(config.bpm == AlignmentTickInjector.wizardSearchBPM)
         #expect(config.bedEnabled)
         #expect(config.replacesProgram, "the guided run is ticks only")
-        #expect(AlignmentTickInjector.Config.manual.preambleSeconds == 0)
+        #expect(AlignmentTickInjector.Config.manual.armedAtStart,
+                "the row's metronome ticks the moment it is switched on")
         #expect(AlignmentTickInjector.Config.manual.replacesProgram == false,
                 "the row's metronome is the nudge-while-listening case")
     }
+
+    /// The wizard's tick has no wall-clock ceiling (live report, 2026-08-22):
+    /// the old 360-beat budget ≈ 303 s expired mid-questionnaire and the whole
+    /// system went silent with the panel still asking. The session's exit paths
+    /// are the one switch-off.
+    @Test func aWizardInjectorStillTicksLongPastTheOldBudget() {
+        let injector = AlignmentTickInjector(
+            sampleRate: 1_000,
+            config: .init(bpm: 600, maxTicks: AlignmentTickInjector.unlimitedTicks,
+                          bedEnabled: false))
+        // 400 beats — well past the 360 the wizard used to stop at.
+        var pcm = zeroBuffer(frames: 100)
+        for _ in 0..<399 {
+            pcm = zeroBuffer(frames: 100)
+            injector.mix(into: &pcm)
+        }
+        var last = zeroBuffer(frames: 100)
+        injector.mix(into: &last)
+        #expect(channel0(last).contains { $0 != 0 }, "beat 400 still rings")
+    }
+
+    /// The bed is a Bluetooth amp's keep-alive, and nothing else's: on the Mac's
+    /// own speakers it is audible hiss (live report, 2026-08-22 — "heavy static
+    /// during the wizard"). One render, two variants.
+    @Test func theWizardsBedGoesToBluetoothOnlyAndTheTickToBoth() {
+        let injector = AlignmentTickInjector(
+            sampleRate: 1_000, config: .init(bpm: 600, maxTicks: 4))
+        var tickOnly = zeroBuffer(frames: 100)
+        var bedded = Data()
+        injector.mixWizardVariants(into: &tickOnly, bedded: &bedded)
+
+        let plain = channel0(tickOnly)
+        let withBed = channel0(bedded)
+        #expect(plain[30..<100].allSatisfy { $0 == 0 }, "no bed between the ticks")
+        #expect(withBed[30..<100].contains { $0 != 0 }, "the bed rides under the Bluetooth copy")
+        #expect(plain[1...29].contains { $0 != 0 }, "the tick is in both…")
+        #expect(withBed[1...29].contains { $0 != 0 })
+
+        // …at the SAME instant, in two different timbres (roadmap 056 Part B),
+        // and the bed stays far under either of them.
+        let bedPeak = withBed[30..<100].map { abs(Int($0)) }.max() ?? 0
+        let tickPeak = plain.map { abs(Int($0)) }.max() ?? 0
+        #expect(bedPeak > 0)
+        // A ratio, not THE ratio: this injector runs at a synthetic 1 kHz where
+        // both tick partials are above Nyquist and alias down to a fraction of
+        // their real amplitude. `theKeepAliveIsALowToneAndNothingElse` pins the
+        // keep-alive's real level at 44.1 kHz.
+        #expect(tickPeak > bedPeak * 4, "tick \(tickPeak) vs keep-alive \(bedPeak)")
+
+        // One cursor advance for both variants: the next block starts where a
+        // single `mix` would have left off.
+        var next = zeroBuffer(frames: 100)
+        injector.mix(into: &next)
+        #expect(channel0(next)[0...29].contains { $0 != 0 },
+                "the following beat lands on time, so the cursor moved exactly once")
+    }
+
 
     // MARK: Coordinator seam — one mixed feed, every consumer
 
@@ -237,6 +512,15 @@ import AudioToolbox
         private var writes: [Data] = []
         func write(pcm: Data, pts: timespec) { lock.withLock { writes.append(pcm) } }
         var forwarded: [Data] { lock.withLock { writes } }
+    }
+
+    /// Like ``SpyPCMSink`` but keeps each write's `pts` — the pacer's own clock
+    /// is the thing under test.
+    private final class SpyPtsSink: PCMSink, @unchecked Sendable {
+        private let lock = NSLock()
+        private var recorded: [(pcm: Data, pts: timespec)] = []
+        func write(pcm: Data, pts: timespec) { lock.withLock { recorded.append((pcm, pts)) } }
+        var writes: [(pcm: Data, pts: timespec)] { lock.withLock { recorded } }
     }
 
     private final class SpyFanoutSink: SyncedLocalPCMSink, @unchecked Sendable {
@@ -308,12 +592,14 @@ import AudioToolbox
                 "disabling the tick restores the untouched feed")
     }
 
-    /// The mode difference at the seam every consumer shares: the manual
-    /// metronome rides OVER the music, the wizard's run replaces it, and
-    /// switching off brings the music straight back.
-    @Test func wizardModeSilencesTheMusicInTheSharedFeedAndManualDoesNot() {
+    /// The mode difference at the seam every consumer shares. `.manual` rides
+    /// OVER the captured music, which keeps flowing. `.wizard` takes the feed
+    /// over completely: captured buffers reach NOBODY (the pacer is the single
+    /// producer for the run's duration), and switching off restores the
+    /// captured feed untouched.
+    @Test func wizardModeTakesOverTheSharedFeedAndManualDoesNot() {
         let tap = FakeTap()
-        let engineSink = SpyPCMSink()
+        let engineSink = SpyPtsSink()
         let coordinator = NativeCaptureCoordinator(
             makeTap: { tap },
             sink: engineSink,
@@ -325,11 +611,14 @@ import AudioToolbox
             if case .capturing = coordinator.state { return true }
             return false
         }
+        // Each tap buffer is stamped with its own whole second, which is what
+        // identifies a delivered CAPTURED buffer downstream — the pacer's pts is
+        // a live CLOCK_MONOTONIC reading and can never collide with one.
         func meanOfNextBuffer(second: Int) -> Double {
-            let expected = engineSink.forwarded.count + 1
+            let expected = engineSink.writes.count + 1
             tap.deliverSilence(frames: 512, pts: timespec(tv_sec: second, tv_nsec: 0))
-            waitFor { engineSink.forwarded.count == expected }
-            let samples = channel0(engineSink.forwarded[expected - 1])
+            waitFor { engineSink.writes.count == expected }
+            let samples = channel0(engineSink.writes[expected - 1].pcm)
             return samples.reduce(0.0) { $0 + Double($1) } / Double(samples.count)
         }
         let program = Double(ConstantConverter.level)
@@ -341,11 +630,146 @@ import AudioToolbox
                 "the manual metronome ticks OVER the music, which keeps playing")
 
         coordinator.setAlignTickMode(.wizard)
-        #expect(abs(meanOfNextBuffer(second: 3)) < 500,
-                "the guided run is ticks only — the music is gone from the shared feed")
+        tap.deliverSilence(frames: 512, pts: timespec(tv_sec: 3, tv_nsec: 0))
+        waitFor(timeout: 0.3) { engineSink.writes.contains { $0.pts.tv_sec == 3 } }
+        #expect(!engineSink.writes.contains { $0.pts.tv_sec == 3 },
+                "during a wizard run captured buffers reach no consumer at all")
 
         coordinator.setAlignTickMode(.off)
         #expect(abs(meanOfNextBuffer(second: 4) - program) < 1,
-                "…and comes back the instant the run ends")
+                "…and the captured feed comes back the instant the run ends")
+    }
+
+    /// The wizard's own paced blocks go to the SAME consumers a captured buffer
+    /// would, carrying ticks and no program.
+    @Test func wizardPacerBlocksReachEveryConsumerWithTicksAndNoProgram() {
+        let tap = FakeTap()
+        let engineSink = SpyPCMSink()
+        let btSink = SpyFanoutSink()
+        let coordinator = NativeCaptureCoordinator(
+            makeTap: { tap },
+            sink: engineSink,
+            makeConverter: { _ in ConstantConverter() },
+            processResolver: AudioProcessResolver(enumerator: EmptyEnumerator()),
+            muteBehavior: .mutedWhenTapped)
+        coordinator.setBTSink(btSink, renderProcessPID: 313_131)
+        coordinator.start()
+        waitFor {
+            if case .capturing = coordinator.state { return true }
+            return false
+        }
+
+        coordinator.test_setWizardModeWithoutPacerTimer()
+        // The run opens bed-only; the backend's arm gate is what makes it
+        // audible (roadmap 056 Part B), and it is the pacer queue that arms.
+        coordinator.armWizardTicks()
+        for _ in 0..<60 { coordinator.test_pumpWizardTick(frames: 4_096) }
+        waitFor { !engineSink.forwarded.isEmpty && !btSink.enqueued.isEmpty }
+
+        let engineSamples = engineSink.forwarded.flatMap { channel0($0) }
+        #expect(engineSamples.contains { $0 != 0 }, "the pacer's blocks carry the tick")
+        #expect(!engineSamples.contains { $0 == Int16(ConstantConverter.level) },
+                "and carry no captured program — the wizard replaces it")
+        #expect(engineSink.forwarded.count == btSink.enqueued.count,
+                "every pacer block reaches the BT fan-out too, one for one")
+        // One render pass, two variants: the Bluetooth copy carries the bright
+        // click over the keep-alive bed while the engine gets the low knock.
+        // Their sample-exact onset equality is pinned by
+        // `theWizardVariantsCarryDifferentTicksAtTheSameOnset` above; what
+        // matters here is that BOTH consumers got a tick, block for block.
+        let btChannel0 = btSink.enqueued.flatMap { block in
+            stride(from: 0, to: block.count, by: 2).map { block[$0] }
+        }
+        #expect(btChannel0.contains { abs($0) > 0.2 }, "the Bluetooth copy ticks too")
+        #expect(engineSamples.map { abs(Float($0) / 32_768.0) }.max() ?? 0 > 0.2)
+
+        coordinator.setAlignTickMode(.off)
+    }
+
+    /// The Mac hears TICKS; Bluetooth hears ticks over the keep-alive bed. Same
+    /// pacer block, one injector cursor, two variants — the fix for the "heavy
+    /// static on the Mac" the live run reported.
+    @Test func theWizardPacerFeedsTheMacTicksOnlyAndBluetoothTheBed() {
+        let tap = FakeTap()
+        let engineSink = SpyPCMSink()
+        let localSink = SpyFanoutSink()
+        let btSink = SpyFanoutSink()
+        let coordinator = NativeCaptureCoordinator(
+            makeTap: { tap },
+            sink: engineSink,
+            makeConverter: { _ in ConstantConverter() },
+            processResolver: AudioProcessResolver(enumerator: EmptyEnumerator()),
+            muteBehavior: .mutedWhenTapped)
+        coordinator.setSyncedLocalSink(localSink, renderProcessPID: 212_121)
+        coordinator.setBTSink(btSink, renderProcessPID: 313_131)
+        coordinator.start()
+        waitFor {
+            if case .capturing = coordinator.state { return true }
+            return false
+        }
+
+        coordinator.test_setWizardModeWithoutPacerTimer()
+        // Before the arm: bed only, no tick anywhere yet.
+        for _ in 0..<8 { coordinator.test_pumpWizardTick(frames: 4_096) }
+        waitFor { localSink.enqueued.count == 8 && btSink.enqueued.count == 8 }
+        let quietLocal = localSink.enqueued.flatMap { $0 }
+        let quietBT = btSink.enqueued.flatMap { $0 }
+        #expect(quietLocal.allSatisfy { $0 == 0 },
+                "the Mac's own fan-out carries silence between ticks, never the bed")
+        #expect(quietBT.contains { $0 != 0 },
+                "the Bluetooth fan-out carries the amp's keep-alive bed")
+        #expect(engineSink.forwarded.flatMap { channel0($0) }.allSatisfy { $0 == 0 },
+                "so does the engine feed — the bed is a Bluetooth-only concern")
+
+        // Armed: the tick reaches both — the Mac's low knock, Bluetooth's
+        // bright click over the bed.
+        coordinator.armWizardTicks()
+        for _ in 0..<60 { coordinator.test_pumpWizardTick(frames: 4_096) }
+        waitFor { localSink.enqueued.count == 68 && btSink.enqueued.count == 68 }
+        let local = localSink.enqueued.flatMap { $0 }
+        let bt = btSink.enqueued.flatMap { $0 }
+        #expect(local.count == bt.count)
+        let tickPeak = local.map { abs($0) }.max() ?? 0
+        #expect(tickPeak > 0.2, "the Mac hears the tick, peak \(tickPeak)")
+        #expect(bt.map { abs($0) }.max() ?? 0 > 0.2, "and so does Bluetooth")
+        #expect(local != bt, "two timbres — the Mac's knock is not Bluetooth's click")
+
+        coordinator.setAlignTickMode(.off)
+    }
+
+    /// The whole point of the pacer (roadmap 040): with the Mac paused the tap
+    /// delivers nothing at all, and the wizard still gets a feed — with a pts
+    /// that advances.
+    @Test func wizardFeedsTicksWithNoTapDeliveryAtAll() {
+        let tap = FakeTap()
+        let engineSink = SpyPtsSink()
+        let coordinator = NativeCaptureCoordinator(
+            makeTap: { tap },
+            sink: engineSink,
+            makeConverter: { _ in ConstantConverter() },
+            processResolver: AudioProcessResolver(enumerator: EmptyEnumerator()),
+            muteBehavior: .mutedWhenTapped)
+        coordinator.start()
+        waitFor {
+            if case .capturing = coordinator.state { return true }
+            return false
+        }
+
+        // No live pacer timer: the four pumps below are provably the only
+        // writes, which is exactly what this test claims.
+        coordinator.test_setWizardModeWithoutPacerTimer()
+        for _ in 0..<4 { coordinator.test_pumpWizardTick(frames: 4_096) }
+        waitFor { engineSink.writes.count == 4 }
+
+        // Not one buffer was ever delivered by the tap.
+        #expect(engineSink.writes.count == 4, "the pacer alone fed the graph")
+        let stamps = engineSink.writes.map { SyncTiming.monotonicNanos($0.pts) }
+        #expect(zip(stamps, stamps.dropFirst()).allSatisfy { $0 < $1 },
+                "pts must advance monotonically: \(stamps)")
+        // 4096 frames at 44.1 kHz ≈ 92.9 ms per block.
+        let step = stamps[1] - stamps[0]
+        #expect(abs(step - 92_879_818) < 1_000_000, "one block's worth of pts, got \(step) ns")
+
+        coordinator.setAlignTickMode(.off)
     }
 }

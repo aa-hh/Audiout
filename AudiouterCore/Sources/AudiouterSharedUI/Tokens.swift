@@ -660,6 +660,46 @@ public enum Tokens {
                        light: 0xE0D8C6, lightHighContrast: 0xC4B89E)
         }
 
+        // MARK: Scope instrument (EQ response curve)
+        //
+        // The EQ response curve (`EQResponseCurveView`) is a SCOPE: a dark
+        // screen with a lit trace, the way a hardware analyser looks. Its
+        // three hexes are identical in both appearances on purpose —
+        // instruments never theme (dev/notes/eq-design-board). The view draws
+        // itself under `NSAppearance(named: .darkAqua)`, so these tokens still
+        // resolve live (Increase Contrast reaches them); it is only the
+        // light/dark axis that is deliberately fixed.
+        //
+        // CONTRAST RATIONALE for the whole block — everything that carries
+        // meaning is measured against `scopeGround`, not against `panel`,
+        // because the ground is what it is drawn on: dark `gold` ≈ 10.2:1,
+        // subtle-dial `gold` ≈ 7.1:1, `scopeFlatLine` ≈ 6.0:1,
+        // `scopeBypassLine` ≈ 4.7:1 — all clear the ≥3:1 non-text floor.
+        // The grid is a GRIDLINE (pure reference, never the state), so the
+        // floor does not apply to it; the dotted zero line reuses
+        // `scopeFlatLine`.
+
+        /// The scope's ground — the near-black screen the trace is drawn on.
+        public static var scopeGround: NSColor {
+            warmDynamic(name: "scopeGround", dark: 0x14110C, darkHighContrast: 0x0E0C08,
+                       light: 0x14110C, lightHighContrast: 0x0E0C08)
+        }
+
+        /// The FLAT trace: a neutral hairline at the zero line. Deliberately
+        /// not gold — gold means signal, and flat is the absence of shaping.
+        public static var scopeFlatLine: NSColor {
+            warmDynamic(name: "scopeFlatLine", dark: 0x9C9077, darkHighContrast: 0xB3A78C,
+                       light: 0x9C9077, lightHighContrast: 0xB3A78C)
+        }
+
+        /// The BYPASSED trace: the shape is still drawn, dashed and dimmer
+        /// than flat, so the eye reads "these settings exist but are not
+        /// reaching the air".
+        public static var scopeBypassLine: NSColor {
+            warmDynamic(name: "scopeBypassLine", dark: 0x8A7E68, darkHighContrast: 0xA2957D,
+                       light: 0x8A7E68, lightHighContrast: 0xA2957D)
+        }
+
         // MARK: Icon-well badge instrument (V6, raw-color elimination pass)
         //
         // `DeviceIconWellView`'s corner edit badge: a dark disc + light rim
@@ -964,21 +1004,16 @@ public enum Tokens {
         /// match a real `NSMenuItem`'s rendering (`AppRowView`). Alias of
         /// `NSFont.menuFont(ofSize: 0)`.
         public static var menuItem: NSFont { .menuFont(ofSize: 0) }
-        /// The **micro-label voice** (Warm Signal v3 §2): SF Mono, ~8.5–11 pt,
-        /// weight 700, UPPERCASE, tracked +0.09–0.11 em — the small-caps state
-        /// vocabulary (`LIVE`/`MUTED`/`IDLE`) and section captions. 8.5 pt is
-        /// the bottom of the spec's band, sized to ride as a leading token
-        /// INSIDE the existing 10 pt sublabel line without changing its height
-        /// (§3.5 no-reflow rule). The +0.09 em tracking rides alongside as
-        /// ``microLabelKern`` (an `NSAttributedString.Key.kern` value, since
-        /// tracking isn't a font attribute in AppKit). The first spec-named
-        /// custom `Tokens.Font` case (system monospaced ≈ SF Mono).
+        /// The **micro-label voice** (One Case rule, 2026-08-23): the plain
+        /// system face, semibold, sentence case as authored — the state
+        /// vocabulary ("Muted") and inline tags ("AP1"). Replaces the old
+        /// SF Mono bold UPPERCASE + kern treatment; a token now stands out
+        /// from the body text sharing its line by weight alone. 10 pt matches
+        /// the sublabel line it rides in, so the line's height cannot change
+        /// (§3.5 no-reflow rule).
         public static var microLabel: NSFont {
-            .monospacedSystemFont(ofSize: 8.5, weight: .bold)
+            .systemFont(ofSize: 10, weight: .semibold)
         }
-        /// The `.kern` value (in points) realizing the micro-label voice's
-        /// +0.09 em tracking at ``microLabel``'s 8.5 pt size (0.09 × 8.5).
-        public static var microLabelKern: CGFloat { 0.765 }
         /// The BT sync drawer's click-to-edit value field. Monospaced digits
         /// so the number keeps its width as it steps. Sized to sit with the
         /// row's own controls, not to shout — two live findings cut it down in

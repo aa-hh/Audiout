@@ -45,6 +45,7 @@ import AppKit
     /// The popover's real BT row shape: bus + meter + SYNC chip.
     private func makeRow(_ device: Device, delegate: SpyDelegate,
                          syncTrimMs: Double = 0, syncTrimIsSet: Bool = false,
+                         syncMeasuredLatencyMs: Double? = nil,
                          syncDrawerExpanded: Bool = false,
                          selected: Bool = false) -> DeviceRowView {
         let row = DeviceRowView(device: device, showsToggle: true,
@@ -53,6 +54,7 @@ import AppKit
         row.delegate = delegate
         row.apply(device, selected: selected, controllable: selected,
                   syncTrimMs: syncTrimMs, syncTrimIsSet: syncTrimIsSet,
+                  syncMeasuredLatencyMs: syncMeasuredLatencyMs,
                   syncDrawerExpanded: syncDrawerExpanded)
         return row
     }
@@ -177,6 +179,66 @@ import AppKit
                 "the chip is too narrow for D7's phrasing, so the tooltip carries the direction")
     }
 
+    /// Roadmap 056 Part A: the chip's number is still the user's TRIM, and the
+    /// speaker's own measured latency — what the wizard determined — rides the
+    /// tooltip alongside it. Nothing else about the row changes.
+    @Test func theTooltipCarriesTheMeasuredLatencyWhenThereIsOne() {
+        let measured = makeRow(btDevice(), delegate: SpyDelegate(),
+                               syncTrimMs: 24, syncTrimIsSet: true,
+                               syncMeasuredLatencyMs: 320)
+        #expect(measured.test_syncChipTitle == "24 ms", "the chip still shows the trim")
+        #expect(measured.test_syncChipTooltip?.contains("Measured latency: 320 ms") == true,
+                "got \(measured.test_syncChipTooltip ?? "none")")
+
+        let neverMeasured = makeRow(btDevice(), delegate: SpyDelegate(),
+                                    syncTrimMs: 24, syncTrimIsSet: true)
+        #expect(neverMeasured.test_syncChipTooltip?.contains("Measured latency") == false,
+                "a speaker the wizard has never run against says nothing about latency")
+    }
+
+    /// Roadmap 056 live finding: after the wizard's Keep the trim is 0 and the
+    /// whole correction lives in the MEASURED latency — so a chip showing the
+    /// trim read "0 ms", i.e. "nothing is set", over a 429 ms alignment. With
+    /// the nudge at zero the chip shows the measurement instead, in the tuned
+    /// (solid, full-strength) style.
+    @Test func aZeroNudgeOverAMeasurementShowsTheMeasurementNotZero() {
+        let row = makeRow(btDevice(), delegate: SpyDelegate(),
+                          syncTrimMs: 0, syncTrimIsSet: true,
+                          syncMeasuredLatencyMs: 429)
+        #expect(row.test_syncChipTitle == "429 ms", "the measurement, not the zero nudge")
+        #expect(!row.test_syncChipIsDashed, "a measured row is tuned — solid outline")
+        #expect(row.test_syncChipTitleColor == Tokens.Color.label)
+        #expect(row.test_syncChipBorderColor == Tokens.Color.hairline)
+        #expect(row.test_syncChipTooltip?.hasPrefix("Measured latency: 429 ms") == true,
+                "the tooltip leads with what the number is — got \(row.test_syncChipTooltip ?? "none")")
+        #expect(row.test_syncChipTooltip?.contains("reset the alignment") == true,
+                "…and says where the alignment can be cleared")
+        #expect(row.test_syncChipAXValue == "measured alignment, 429 milliseconds",
+                "VoiceOver must not say \"in sync\" over a 429 ms correction")
+    }
+
+    /// The measurement only borrows the chip while the nudge is zero: a device
+    /// the user has actually nudged keeps showing that nudge, exactly as before.
+    @Test func aNonZeroNudgeKeepsTheChipEvenWithAMeasurement() {
+        let row = makeRow(btDevice(), delegate: SpyDelegate(),
+                          syncTrimMs: -12, syncTrimIsSet: true,
+                          syncMeasuredLatencyMs: 429)
+        #expect(row.test_syncChipTitle == "−12 ms", "the user's own value wins the chip")
+        #expect(row.test_syncChipTooltip?.contains("Measured latency: 429 ms") == true,
+                "the measurement rides the tooltip, as it did before")
+        #expect(row.test_syncChipAXValue == "12 milliseconds earlier")
+    }
+
+    /// A measurement with no trim ENTRY at all is still a measurement — the
+    /// chip shows it rather than falling back to "Not set".
+    @Test func aMeasurementWithNoTrimEntryStillTakesTheChip() {
+        let row = makeRow(btDevice(), delegate: SpyDelegate(),
+                          syncTrimMs: 0, syncTrimIsSet: false,
+                          syncMeasuredLatencyMs: 250)
+        #expect(row.test_syncChipTitle == "250 ms")
+        #expect(!row.test_syncChipIsDashed)
+    }
+
     /// D10, the discoverability fix: an untuned speaker must not read "0.0 ms"
     /// (which looks finished) — it reads "Not set" inside a DASHED outline,
     /// which reads as an invitation.
@@ -290,25 +352,30 @@ import AppKit
                 "the tooltip teaches the invisible modifier")
     }
 
-    @Test func contextMenuCarriesAlignSpeakerOnBTRowsThroughRealMenuDispatch() {
+    @Test func contextMenuCarriesAlignSpeakerOnBTRowsThroughRealMenuDispatch() throws {
         let spy = SpyDelegate()
         let row = makeRow(btDevice(), delegate: spy)
         let menu = row.test_contextMenu()
-        #expect(menu?.items.map(\.title) == ["Align speaker…"])
-        #expect(menu?.items.first?.isEnabled == true)
-        menu?.performActionForItem(at: 0)   // real AppKit menu dispatch
+        // "Equalizer…" leads on every non-local row (owner decision
+        // 2026-08-22); alignment is the Bluetooth-only item under it.
+        #expect(menu?.items.map(\.title) == ["Equalizer…", "Align speaker…"])
+        let alignIndex = try #require(menu?.items.firstIndex { $0.title == "Align speaker…" })
+        #expect(menu?.items[alignIndex].isEnabled == true)
+        menu?.performActionForItem(at: alignIndex)   // real AppKit menu dispatch
         #expect(spy.wizardRequests == [btDevice().id])
 
         let plain = DeviceRowView(device: btDevice(), showsToggle: true,
                                   paintsSelectionBackground: false, showsMeter: true,
                                   showsBus: true, showsSyncControls: false)
-        #expect(plain.test_contextMenu() == nil, "non-sync rows carry no alignment menu")
+        #expect(plain.test_contextMenu()?.items.map(\.title) == ["Equalizer…"],
+                "non-sync rows keep the Equalizer door but carry no alignment item")
     }
 
-    @Test func contextMenuAlignItemDisablesOnAGreyedRow() {
+    @Test func contextMenuAlignItemDisablesOnAGreyedRow() throws {
         let row = makeRow(btDevice(available: false), delegate: SpyDelegate())
-        #expect(row.test_contextMenu()?.items.first?.isEnabled == false,
-                "no wizard offer over a silent target")
+        let menu = try #require(row.test_contextMenu())
+        let align = try #require(menu.items.first { $0.title == "Align speaker…" })
+        #expect(align.isEnabled == false, "no wizard offer over a silent target")
     }
 }
 
@@ -387,12 +454,12 @@ import AppKit
         popover.update(devices: [local(), airplay()])
         #expect(popover.test_bluetoothConnectRowShown(),
                 "precondition: the subsection is in its empty state")
-        #expect(!popover.test_syncColumnTitleShown(),
+        #expect(!popover.test_syncColumnTitleShown(in: "Bluetooth Devices"),
                 "no rows under it means no column to name")
 
         popover.update(devices: [local(), airplay(), bt("bt-a:output", name: "Attic Speaker")])
         #expect(popover.test_bluetoothRowOrder() == ["bt-a:output"])
-        #expect(popover.test_syncColumnTitleShown(),
+        #expect(popover.test_syncColumnTitleShown(in: "Bluetooth Devices"),
                 "one listed BT row brings its SYNC chip — and the title back")
     }
 

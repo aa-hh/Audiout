@@ -86,17 +86,17 @@ public final class GroupEditorViewController: NSViewController {
     private let iconWell = DeviceIconWellView()
     private let nameField = NSTextField(string: "")
     private let membershipStack = RailRepaintingStackView()
-    /// The checklist's recessed background + inter-row hairlines (T5) — see
-    /// ``GroupedSectionView``. Sits BEHIND `membershipStack` in z-order.
+    /// THIS PAGE'S ONE INSTRUMENT, so it is the one `.card` here — a `raised`
+    /// fill with a `hairline` edge behind the Speakers checklist, plus the
+    /// inter-row hairlines. Sits BEHIND `membershipStack` in z-order.
     /// NAME IS LOAD-BEARING: `GroupsWindowTextColorLockTests` reaches this
     /// stored property by reflection (the type is internal, the property is
     /// private) to sample the real drawn fill/divider colours.
     private let membershipWell = GroupedSectionView()
-    /// The header's own bounded section (icon + title side by side), the
-    /// sibling of ``membershipWell``. Holds no rows, so it draws fill + border
-    /// only — the rail climbs out of the list section and lands on the icon
-    /// well inside this one, which is what visually ties the members to the
-    /// group they belong to.
+    /// The header BAND — `.bare`, so it draws nothing at all (identity is not
+    /// an instrument). Kept as a section purely for its GEOMETRY: the rail
+    /// climbs out of the list and lands on the icon well inside this band, and
+    /// `test_headerSectionFrame` / the badge anchors measure its frame.
     private let headerWell = GroupedSectionView()
     private let deleteButton = NSButton()
 
@@ -315,6 +315,8 @@ public final class GroupEditorViewController: NSViewController {
             well.contentLeadingInset = GroupsPaneLayout.contentLeadingInset
             column.addSubview(well)
         }
+        // Identity is bare; the checklist is the page's one card.
+        headerWell.style = .bare
         for v in [iconWell, nameField, playingBadge, speakersLabel, membershipStack] {
             column.addSubview(v)
         }

@@ -208,6 +208,30 @@ import AppKit
         #expect(mounted.popover.test_expandedSyncDeviceID == btDevice.id)
     }
 
+    /// LIVE BUG (owner report): with the field focused, the −/+ paddles
+    /// "appear not to apply". They did apply — the audio moved — but the box
+    /// still showed the old number, because the display writer refuses to
+    /// touch text that is being edited; the next Return then re-committed that
+    /// stale text and snapped the value back. Both halves are asserted here,
+    /// and only a MOUNTED field has a live field editor to reproduce it.
+    @Test func aStepperClickWhileTypingMovesTheBoxAndSurvivesTheNextReturn() throws {
+        let mounted = try mountedDrawer()
+        try clickIn(mounted.field, window: mounted.window)
+        let before = mounted.drawer.test_trimMs
+
+        mounted.drawer.test_firePlusClick()
+
+        #expect(mounted.field.stringValue != "\(Int(before))",
+                "the paddle moved the value but the box still reads the old number")
+        #expect(mounted.host.commits.last?.ms == before + BTSyncTrim.fineStepMs,
+                "a paddle click must commit; got \(mounted.host.commits.map(\.ms))")
+
+        try press(.newline, into: mounted.window)
+
+        #expect(mounted.host.commits.last?.ms == before + BTSyncTrim.fineStepMs,
+                "Return re-committed the stale pre-paddle text; got \(mounted.host.commits.map(\.ms))")
+    }
+
     @Test func escapeRevertsTheEditAndLeavesTheDrawerOpen() throws {
         let mounted = try mountedDrawer()
         try clickIn(mounted.field, window: mounted.window)

@@ -184,7 +184,13 @@ now=$(date +%s)
 
 # A "build" is a checkout owning any SwiftPM cache dir; its recency is the
 # newest mtime among them (a build touches its .build root).
-caches_of() { for d in "$1/.build" "$1/AudiouterCore/.build" "$1/AirPlayEngine/.build"; do [ -d "$d" ] && printf '%s\n' "$d"; done; }
+# Found by search, not by a hardcoded list of three: the spike packages under
+# dev/ (dev/audiocap, dev/bt-multi-spike) own their own caches — 68 MB and
+# 240 MB when this was written — and a fixed list simply never saw them.
+# -maxdepth 3 keeps the scan cheap and stops short of
+# .claude/worktrees/<slug>/*/.build, whose caches are enumerated as their own
+# units; -prune stops the walk at each cache instead of descending it.
+caches_of() { find "$1" -maxdepth 3 -type d -name .build -prune 2>/dev/null; }
 # Newline-piped, never `for d in $(...)`: this repo's own path contains a
 # space, which word-splitting silently breaks (see the AGENTS.md warning).
 newest_mtime() {
@@ -192,8 +198,13 @@ newest_mtime() {
     echo "${m:-0}"
 }
 free_kb() { df -k "$primary" | awk 'NR==2 {print $4}'; }
+human_mb() { awk -v kb="$1" 'BEGIN { if (kb >= 1048576) printf "%.1f GB", kb/1048576; else printf "%d MB", kb/1024 }'; }
+size_of() {  # $1 = unit — total KB across every cache it owns
+    caches_of "$1" | while IFS= read -r d; do du -sk "$d" 2>/dev/null | cut -f1; done |
+        awk '{s+=$1} END {print s+0}'
+}
 delete_caches() {  # $1 = unit, $2 = reason
-    sz=$(du -sh "$1/AudiouterCore/.build" 2>/dev/null | cut -f1)
+    sz=$(human_mb "$(size_of "$1")")
     if [ "$dry_run" -eq 1 ]; then
         say "would delete build cache in $(basename "$1")${sz:+ (~$sz)} — $2."
     else
@@ -281,23 +292,73 @@ printf '%s\n' "$units" | while IFS='	' read -r mt u; do
     delete_caches "$u" "untouched for >${max_age_days}d"
 done
 
-# Rule 2: pressure floor — scoped to OUR OWN footprint.
+# Rule 1b: Xcode's own build caches, outside the repo.
+#
+# Not this repo's directories, but the same substance — regenerable output
+# that this project's own work creates, and much bigger than anything in the
+# tree. Two kinds:
+#   iOS DeviceSupport  symbols copied off the iPhone on each attach, ~1.5 GB
+#                      per iOS build, one directory per build. Reached 6.4 GB
+#                      during the companion-app work and put the machine under
+#                      the floor by itself, which the repo's own caches then
+#                      could not fix — the case rule 2 below used to give up on.
+#   DerivedData        Xcode's per-project build output.
+# Losing either costs one slow re-attach or one cold Xcode build. Never work.
+#
+# Deliberately NOT touched: the simulator RUNTIME image (~7.5 GB, in
+# ~/Library/Developer/CoreSimulator) and DVTDownloads. Those are downloads,
+# not caches — re-fetching them is a long job, and Alec has said keep them.
+# Simulator DEVICES are left alone too: erasing one is a decision about
+# someone's test state, not disk hygiene.
+#
+# Skipped wholesale while Xcode is running: it may be mid-attach or mid-build.
+xcode_dir="$HOME/Library/Developer/Xcode"
+xcode_caches() {
+    for d in "$xcode_dir/iOS DeviceSupport"/*/ "$xcode_dir/DerivedData"/*/; do
+        [ -d "$d" ] && printf '%s\n' "${d%/}"
+    done
+}
+delete_xcode_cache() {  # $1 = dir, $2 = reason
+    sz=$(human_mb "$(du -sk "$1" 2>/dev/null | cut -f1)")
+    if [ "$dry_run" -eq 1 ]; then
+        say "would delete Xcode cache $(basename "$1") (~$sz) — $2."
+    else
+        rm -rf "$1"
+        say "deleted Xcode cache $(basename "$1") (~$sz) — $2 (regenerable)."
+    fi
+}
+xcode_busy=0
+pgrep -x Xcode >/dev/null 2>&1 && xcode_busy=1
+if [ "$xcode_busy" -eq 1 ]; then
+    say "keeping Xcode's caches — Xcode is running."
+else
+    xcode_caches | while IFS= read -r d; do
+        mt=$(stat -f %m "$d" 2>/dev/null || echo "$now")
+        [ $((now - mt)) -gt "$max_age_s" ] || continue
+        delete_xcode_cache "$d" "untouched for >${max_age_days}d"
+    done
+fi
+
+# Rule 2: pressure floor — scoped to what this project's work created.
 #
 # The floor is headroom this script tries to guarantee using the caches it
-# owns. It is NOT a promise about the disk as a whole, because build caches
-# are only one input to free space and the others are not ours to manage: the
-# day this was written, 6.4 GB of Xcode iOS DeviceSupport (downloaded for the
-# companion-app work) put the machine under the floor all by itself.
+# owns: the repo's `.build` trees and, since rule 1b, Xcode's device-support
+# and DerivedData trees. It is still NOT a promise about the disk as a whole —
+# a 62 GB music library or a simulator runtime image is not ours to reclaim.
 #
-# That case is why "delete oldest until free >= floor" is the wrong loop. It
-# cannot reach a floor the caches did not cause, so it deletes every warm
-# cache, makes the next build in each worktree cold, and STILL reports
-# failure — pure loss. Observed live, and the reason this rule was rewritten.
+# That is why this is not a plain "delete oldest until free >= floor" loop. It
+# cannot reach a floor our caches did not cause, so it would delete every warm
+# cache, make the next build in each worktree cold, and STILL report failure —
+# pure loss. Observed live, and the reason this rule was rewritten.
 #
 # So: measure what is actually reclaimable first, and only reclaim when doing
 # so reaches the floor. When it cannot, keep the caches and say plainly that
 # the shortfall came from somewhere else — that is a message for a human, not
 # a problem this script should thrash trying to fix.
+#
+# Xcode's caches go FIRST in the order, ahead of even the oldest `.build`.
+# They are the cheap ones: giving one up costs a re-attach nobody is waiting
+# on, where a warm `.build` costs ~95s of compile on the next commit.
 #
 # The exception is genuine emergency: below AUDIOUTER_CRITICAL_FREE_GB, take
 # everything reclaimable even though it falls short. Preventing a build that
@@ -307,34 +368,41 @@ min_free_kb=$((min_free_gb * 1024 * 1024))
 critical_kb=$((critical_gb * 1024 * 1024))
 free_now=$(free_kb)
 if [ "$free_now" -lt "$min_free_kb" ]; then
-    # Candidates, oldest first, each with its total size. Skip reasons print
-    # to stderr from skippable(), so they never pollute this capture.
-    candidates=$(printf '%s\n' "$units" | while IFS='	' read -r mt u; do
-        [ -n "$u" ] || continue
-        [ -n "$(caches_of "$u")" ] || continue   # rule 1 may have emptied it
-        skippable "$u" || continue
-        sz=$(caches_of "$u" | while IFS= read -r d; do du -sk "$d" 2>/dev/null | cut -f1; done |
-             awk '{s+=$1} END {print s+0}')
-        printf '%s\t%s\n' "$sz" "$u"
-    done)
+    # Candidates as `size<TAB>kind<TAB>path`, cheapest-to-lose first: Xcode's
+    # caches, then `.build` trees oldest first. Skip reasons print to stderr
+    # from skippable(), so they never pollute this capture.
+    candidates=$(
+        [ "$xcode_busy" -eq 0 ] && xcode_caches | while IFS= read -r d; do
+            printf '%s\txcode\t%s\n' "$(du -sk "$d" 2>/dev/null | cut -f1)" "$d"
+        done
+        printf '%s\n' "$units" | while IFS='	' read -r mt u; do
+            [ -n "$u" ] || continue
+            [ -n "$(caches_of "$u")" ] || continue   # rule 1 may have emptied it
+            skippable "$u" || continue
+            printf '%s\tswift\t%s\n' "$(size_of "$u")" "$u"
+        done
+    )
     reclaimable=$(printf '%s\n' "$candidates" | awk -F'\t' '{s+=$1} END {print s+0}')
 
     if [ -z "$candidates" ]; then
         say "under ${min_free_gb} GB free, but every build cache is in use or protected — nothing to reclaim."
     elif [ $((free_now + reclaimable)) -ge "$min_free_kb" ] || [ "$free_now" -lt "$critical_kb" ]; then
-        say "under ${min_free_gb} GB free — reclaiming build caches, oldest first."
-        printf '%s\n' "$candidates" | while IFS='	' read -r sz u; do
-            [ -n "$u" ] || continue
+        say "under ${min_free_gb} GB free — reclaiming build caches, cheapest first."
+        printf '%s\n' "$candidates" | while IFS='	' read -r sz kind p; do
+            [ -n "$p" ] || continue
             # Re-read df per delete so this stops at the minimum needed. In a
             # dry run nothing is freed, so this would never stop — hence the
             # dry_run guard, which lists the full order instead.
             [ "$dry_run" -eq 0 ] && [ "$(free_kb)" -ge "$min_free_kb" ] && break
-            delete_caches "$u" "disk below ${min_free_gb} GB free"
+            case "$kind" in
+                xcode) delete_xcode_cache "$p" "disk below ${min_free_gb} GB free" ;;
+                *)     delete_caches "$p" "disk below ${min_free_gb} GB free" ;;
+            esac
         done
     else
-        say "under ${min_free_gb} GB free ($((free_now / 1024 / 1024)) GB), but this repo's reclaimable"
-        say "caches total only $((reclaimable / 1024)) MB — the shortfall is not ours, so they stay warm."
-        say "Look outside the repo: ~/Library/Developer (Xcode DeviceSupport, simulators, DerivedData)."
+        say "under ${min_free_gb} GB free ($((free_now / 1024 / 1024)) GB), but every cache this"
+        say "project owns totals only $(human_mb "$reclaimable") — the shortfall is not ours, so they stay warm."
+        say "Look elsewhere: the simulator runtime image, DVTDownloads, ~/Music, ~/Library/Caches."
     fi
 fi
 

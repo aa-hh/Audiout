@@ -100,8 +100,8 @@ import AppKit
     @Test func menuHasExactlyTwoSections() {
         let (row, _) = makeRow()
         let titles = row.test_menuTitles
-        #expect(titles.contains("CURRENT DEVICE"), "expected a 'Current Device' header, got \(titles)")
-        #expect(titles.contains("AIRPLAY DEVICES"), "expected an 'AirPlay Devices' header, got \(titles)")
+        #expect(titles.contains("Current Device"), "expected a 'Current Device' header, got \(titles)")
+        #expect(titles.contains("AirPlay Devices"), "expected an 'AirPlay Devices' header, got \(titles)")
         // Exactly the two headers + three destination entries, no Groups section.
         #expect(titles.count == 5, "unexpected menu items: \(titles)")
         #expect(!titles.contains { $0.uppercased().contains("GROUP") },
@@ -111,8 +111,8 @@ import AppKit
     @Test func menuSectionOrderIsCurrentDeviceThenAirPlayDevices() {
         let (row, _) = makeRow()
         let titles = row.test_menuTitles
-        let currentIndex = titles.firstIndex(of: "CURRENT DEVICE")
-        let airplayIndex = titles.firstIndex(of: "AIRPLAY DEVICES")
+        let currentIndex = titles.firstIndex(of: "Current Device")
+        let airplayIndex = titles.firstIndex(of: "AirPlay Devices")
         #expect(currentIndex != nil)
         #expect(airplayIndex != nil)
         #expect(currentIndex! < airplayIndex!, "Current Device section must come first")
@@ -136,8 +136,8 @@ import AppKit
         #expect(titles.first == "Follows main output",
                 "the standalone entry must be first, displayed as the bridge phrase")
         let standaloneIndex = titles.firstIndex(of: "Follows main output")
-        let currentDeviceHeaderIndex = titles.firstIndex(of: "CURRENT DEVICE")
-        let airplayHeaderIndex = titles.firstIndex(of: "AIRPLAY DEVICES")
+        let currentDeviceHeaderIndex = titles.firstIndex(of: "Current Device")
+        let airplayHeaderIndex = titles.firstIndex(of: "AirPlay Devices")
         #expect(currentDeviceHeaderIndex != nil)
         #expect(airplayHeaderIndex != nil)
         #expect(standaloneIndex! < currentDeviceHeaderIndex!)

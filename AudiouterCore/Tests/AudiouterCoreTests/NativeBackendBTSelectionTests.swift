@@ -392,6 +392,37 @@ import CoreAudio
         #expect(sink.compositions.last?.airPlayPresent == false)
     }
 
+    /// Fix 3 (Mac-join desync): a Mac toggle alone — `selectedDevicesQuery`
+    /// flips but `setOutputSet` re-runs with the SAME AirPlay+BT ids (the
+    /// `add=[] rm=[]` shape) — must not push a composition. `macLocalPresent`
+    /// never changes a BT delay, so a spurious push would rebuild every BT
+    /// sink into ~570 ms of silence for no reason.
+    @Test func macToggleAloneDoesNotPushComposition() {
+        let (backend, _, discovery, bt, sink, _) = makeBackend()
+        defer { backend.stop() }
+        let macSelected = LockedBool(false)
+        backend.selectedDevicesQuery = { id in
+            id == NativeBackend.localDeviceID ? macSelected.get() : false
+        }
+        backend.start()
+
+        let ap = ap2Device()
+        discovery.fire(.appeared(ap))
+        bt.fire([btMove])
+        waitFor { self.device(backend, ap.id) != nil && self.device(backend, self.btMove.id) != nil }
+
+        backend.setOutputSet([btMove.id, ap.id])
+        waitFor { sink.calls.contains("start") }
+        let compositionPushes = sink.calls.filter { $0 == "setComposition" }.count
+
+        macSelected.set(true)
+        backend.setOutputSet([btMove.id, ap.id])   // same ids — the Mac-toggle shape
+        waitFor(timeout: 0.3) { false }
+
+        #expect(sink.calls.filter { $0 == "setComposition" }.count == compositionPushes,
+                "a Mac toggle alone must not push a composition")
+    }
+
     /// BT+BT: both selected BT devices land in ONE device set (one manager, N
     /// sinks), and reconciling to one keeps the sink armed with the remainder.
     @Test func multiBTSelectionReconcilesDeviceSet() {
@@ -817,10 +848,13 @@ import CoreAudio
 
     // MARK: - CAST-SYNC: the timeline stays inert without a Cast device
 
-    /// The Bluetooth half of the Phase (ii) invariant: across BT-only, BT+Mac
-    /// and AirPlay+BT, every composition the backend publishes carries
+    /// The Bluetooth half of the Phase (ii) invariant: across BT-only and
+    /// AirPlay+BT, every composition the backend publishes carries
     /// `castPresent == false` and no AirPlay pre-delay is ever installed — so
     /// each sink's reference is the number it was before Cast existed.
+    /// (No BT+Mac stage: a macLocalPresent-only flip deliberately publishes
+    /// no composition — "Mac joining changes nothing for BT", the narrowed
+    /// trigger in `setOutputSet` — so there is nothing to observe there.)
     @Test func noCastSelectionLeavesEveryCompositionCastFree() {
         let (backend, engine, discovery, bt, sink, capture) = makeBackend()
         defer { backend.stop() }
@@ -837,17 +871,10 @@ import CoreAudio
 
         backend.setOutputSet([btMove.id])
         waitFor { sink.calls.contains("start") }
-        // The Mac's membership comes from `selectedDevicesQuery`, not from the
-        // output set — the local device has no engine handle, so `GroupController`
-        // strips it out before the set ever gets here.
-        macSelected.set(true)
-        backend.setOutputSet([btMove.id])
-        waitFor { sink.compositions.last?.macLocalPresent == true }
-        macSelected.set(false)
         backend.setOutputSet([btMove.id, ap.id])
         waitFor { sink.compositions.last?.airPlayPresent == true }
 
-        #expect(sink.compositions.count >= 3, "all three compositions must have been published")
+        #expect(sink.compositions.count >= 2, "BT-only and AirPlay+BT must both have been published")
         #expect(sink.compositions.allSatisfy { $0.castPresent == false },
                 "no Cast id selected ⇒ no composition claims a Cast device")
         #expect(sink.compositions.allSatisfy { $0.usesPresentationReference == $0.airPlayPresent },

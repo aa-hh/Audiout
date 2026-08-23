@@ -307,6 +307,66 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// dedicated lock keeps those reads off `stateQueue` entirely.
     private let btTrimLock = NSLock()
     private var btTrimsByUID: [String: Double] = [:]   // btTrimLock
+    /// Each Bluetooth device's MEASURED output latency in ms (roadmap 056 Part
+    /// A) — how late the speaker plays on its own, which is what the alignment
+    /// wizard now determines. Distinct from the trim: the latency is a
+    /// measurement of the hardware, the trim is the user's nudge on top, and
+    /// the wizard never rewrites the latter. Same lock, same read/write
+    /// pattern, and persisted in the same file's second map.
+    private var btLatencyMsByUID: [String: Double] = [:]   // btTrimLock
+
+    // MARK: Tone (per-device + Main Out EQ)
+
+    /// Persistence for the tone settings. `nil` (most tests) = session-only.
+    private let eqStore: DeviceEQStore?
+    /// Every device's tone, whether or not it is currently streaming. On
+    /// `stateQueue`. Stored values are NEVER discarded for budget reasons — a
+    /// device that can't get its own stream streams flat and says so
+    /// (`Device.eqBypassReason`) while keeping what the user dialled in.
+    private var eqByDeviceID: [String: DeviceEQ] = [:]   // on stateQueue
+    /// The whole mix's own tone stage, applied before every fan-out. On `stateQueue`.
+    private var storedMainOutEQ: DeviceEQ = .flat   // on stateQueue
+    /// Which stream id each EQ group owns, remembered across recomputes so
+    /// editing a lone device's values swaps coefficients instead of rebinding.
+    private var eqAllocator = EQStreamAllocator()   // on stateQueue
+    /// The assignment the LAST ``reconcileEQPlan()`` settled on — deviceID → the
+    /// whole-system stream it should be bound to (0 = flat/main-only). Diffed to
+    /// issue the minimal set of EQ rebinds, and read by ``pushEQPlanLocked()`` so
+    /// an uncommitted edit can swap coefficients without recomputing topology.
+    private var eqStreamIDByDevice: [String: UInt32] = [:]   // on stateQueue
+    /// Devices whose EQ move was refused because a `convergeDevice` loop held
+    /// their `converging` slot — the commonest case by far, since the connect
+    /// edge that owes the move happens INSIDE that loop. Drained by the slot
+    /// release, the same bow-out-and-be-re-driven shape the scope arbiter's
+    /// `pendingScopeSettles` uses. On `stateQueue`.
+    private var eqRebindDeferred: Set<String> = []   // on stateQueue
+
+    /// One published tone stage: the processor the delivery thread is running,
+    /// plus the value it was built for.
+    ///
+    /// Kept so an UNCHANGED stage keeps the very same `EQProcessor` instance
+    /// across pushes. A processor carries IIR delay memory, and a fresh one
+    /// starts empty — rebuilding every stage on every push put a step
+    /// discontinuity (an audible tick) through every other live stream on each
+    /// frame of one device's slider drag.
+    private struct EQProcessorSlot {
+        let eq: DeviceEQ
+        let processor: EQProcessor
+    }
+    /// The live per-stream stages, keyed by stream id. On `stateQueue`.
+    private var eqSlotByStream: [UInt32: EQProcessorSlot] = [:]   // on stateQueue
+    /// The live Main Out stage. On `stateQueue`.
+    private var mainOutEQSlot: EQProcessorSlot?   // on stateQueue
+
+    /// The rate every whole-system `EQProcessor` is built for: the engine's
+    /// hardwired PCM format (S16LE / 44100 / 2ch), which the capture
+    /// coordinator's converter has already produced by the time the plan runs.
+    private static let eqSampleRate: Double = 44_100
+
+    /// How many streams the engine can carry at once. Mirrors
+    /// `AirPlayEngine.maxSimultaneousStreams`, which is internal to that package
+    /// (a licensing boundary this file may not widen).
+    private static let engineStreamCapacity = 6
 
     /// Test seam: a BT `Device.id` (its Core Audio UID) → the live
     /// `AudioObjectID` a per-device sink pins its engine to. `nil` (production)
@@ -324,6 +384,40 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     private var btSinkEnabled = false
     private var btSelectedUIDs: [String] = []
     private var btComposition = BTGroupComposition(airPlayPresent: false, macLocalPresent: false)
+    /// The BT-only reference timeline currently in force (ms) — the buffer
+    /// every BT sink AND the Mac's own sink schedule against when no AirPlay
+    /// receiver is in the group. Derived by ``btOnlyReferenceMs(latencies:uids:)``;
+    /// on `stateQueue`, which is also where ``localSinkReferenceDelayMs()``
+    /// reads it, so the two sides can never disagree about where the timeline is.
+    private var btReferenceBufferMs = BTSyncedSink.defaultBTOnlyBufferMs
+    /// A Bluetooth-target wizard run is under way, so the reference is pinned
+    /// wide open (``btWizardReferenceBufferMs``) for the duration. On `stateQueue`.
+    private var btWizardReferenceRaised = false
+    /// Whether the wizard tick is currently on, so a redundant edge costs
+    /// nothing — both edges re-anchor every sink, and the panel fires a second
+    /// `false` on the terminal screens. Under ``btTrimLock``.
+    private var btWizardTickActive = false
+    /// The last candidate latency pushed per device this run, so a trial's
+    /// telemetry can carry the STEP the estimator just took and not only where
+    /// it landed. Cleared when the run ends. Under ``btTrimLock``.
+    private var btWizardLastPreviewMsByUID: [String: Int] = [:]
+    /// The wizard's last pushed tempo — the estimator's stage in disguise (the
+    /// coarse search ticks far slower than the stimulus blocks), and the only
+    /// signal of it that reaches this layer. Under ``btTrimLock``.
+    private var btWizardTickBPM: Double?
+    /// The alignment wizard's first-tick ARM gate (roadmap 056 Part B): the
+    /// in-flight poll, on `captureControlQueue` (which owns both sinks).
+    var wizardArmPollWork: DispatchWorkItem?   // captureControlQueue
+    /// The three arm-gate timings, `var` for the same reason
+    /// ``btAlignmentHoldTimeout`` is: a suite shrinks them rather than sleeping
+    /// through the production values.
+    var wizardArmPollInterval: TimeInterval = 0.1
+    /// A floor of bed-only time before the first tick, however fast the sinks
+    /// release — the Sonos Move's amplifier needs it (live finding 2026-08-07).
+    var wizardArmMinimumBedSeconds: TimeInterval = 1.5
+    /// The ceiling: a speaker that never reports rendering must not stall the
+    /// run, so past this the ticks arm regardless.
+    var wizardArmCeilingSeconds: TimeInterval = 8
 
     /// The latest browse record per Cast id (`stateQueue`) — kept even when the
     /// receiver drops off the network, because a row that comes back must be
@@ -356,6 +450,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// UIDs currently HELD SILENT awaiting the card's answer. On `stateQueue`;
     /// applied as a per-device sink gain of 0 on `captureControlQueue`.
     private var btAlignmentHeldUIDs: Set<String> = []   // stateQueue
+    /// UIDs held silent for the DURATION of a Bluetooth wizard run — every
+    /// selected Bluetooth speaker except the target and (when it is itself a
+    /// Bluetooth device) the reference. A run is a two-speaker comparison, and
+    /// a third speaker ticking at its own trim is the loudest thing in the room
+    /// (live run 2026-08-22: the decoy was judged for the whole run). On
+    /// `stateQueue`; folded into `btSinkGain` like the intercept's hold, so it
+    /// costs no rebuild and cannot fight the user's volume.
+    private var btWizardHeldUIDs: Set<String> = []   // stateQueue
     /// UIDs whose intercept already fired since launch — the once-ever guard's
     /// in-memory half (the persistent half is a trim or dismissal record; an
     /// abandoned, unanswered card leaves no record on purpose). On `stateQueue`.
@@ -603,6 +705,20 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// section gives both: `stateQueue` orders the decisions, this queue replays
     /// them in that same order, off the hot path.
     private let captureControlQueue = DispatchQueue(label: "NativeBackend.captureControl")
+
+    // MARK: The Mac's own SYNC trim (roadmap 056 Part 1 — `LocalSyncOffsetControlling`)
+
+    /// A wizard preview offset (ms) overriding the stored setting, or `nil`.
+    /// Plain lock rather than a queue: the sink reads it on its own anchor path.
+    private let localTrimPreviewLock = NSLock()
+    private var localTrimPreviewMs: Double?
+    /// The effective offset (ms) the running sink's session was last put onto —
+    /// the baseline every live change is a delta from. Confined to
+    /// `captureControlQueue`. Seeded from the stored setting because that is what
+    /// the sink's own anchor samples through `currentLocalSyncOffsetMs()`; every
+    /// later write comes through `LocalSyncOffsetControlling` below, and a
+    /// re-anchor re-reads the same live value, so the two stay in step.
+    private var lastAppliedLocalOffsetMs = Double(AppSettings().syncOffsetMs)
 
     // MARK: Sleep/wake + generalized silence watchdog (B6b + Wave 2 W2-T2 / R11 —
     // all confined to `stateQueue`)
@@ -1265,6 +1381,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             castEnumerator: CastDeviceEnumerator(),
             castOutputManager: CastOutputManager(),
             btTrimStore: BTTrimStore(),
+            eqStore: DeviceEQStore(),
             processResolver: processResolver,
             defaultOutputSwitcher: DefaultOutputSwitcher())
     }
@@ -1306,6 +1423,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         castEnumerator: CastDeviceEnumerating? = nil,
         castOutputManager: CastOutputControlling? = nil,
         btTrimStore: BTTrimStore? = nil,
+        eqStore: DeviceEQStore? = nil,
         dacpEndpoint: DACPEndpoint = DACPServer(),
         systemVolume: SystemVolumeControlling = SystemOutputVolume(),
         ptpHelperActivator: PTPHelperActivating = PTPHelperActivator(),
@@ -1355,8 +1473,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         if let loaded = (try? btTrimStore?.load()) ?? nil {
             self.btTrimsByUID = loaded.mapValues(BTSyncTrim.clamp)
         }
+        if let latencies = (try? btTrimStore?.loadLatencies()) ?? nil {
+            self.btLatencyMsByUID = latencies.mapValues { Swift.max(0, $0) }
+        }
         if let dismissed = try? btTrimStore?.loadDismissedUIDs() {
             self.btAlignmentDismissedUIDs = dismissed
+        }
+        self.eqStore = eqStore
+        if let loaded = (try? eqStore?.load()) ?? nil {
+            self.storedMainOutEQ = loaded.mainOut ?? .flat
+            self.eqByDeviceID = loaded.devices
         }
         self.dacpServer = dacpEndpoint
         self.systemVolume = systemVolume
@@ -1474,6 +1600,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     // STABILITY(C8): main thread blocks on the state queue for slow work — see dev/notes/stability-audit-2026-07-18.md
     public var devices: [Device] {
         stateQueue.sync { order.compactMap { known[$0] } }
+    }
+
+    // STABILITY(C8): main thread blocks on the state queue for slow work — see dev/notes/stability-audit-2026-07-18.md
+    public var mainOutEQ: DeviceEQ {
+        stateQueue.sync { storedMainOutEQ }
     }
 
     /// Whether the last connect attempt found the PTP helper's clock ready
@@ -2053,6 +2184,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             for work in self.btAlignmentHoldWatchdogs.values { work.cancel() }
             self.btAlignmentHoldWatchdogs.removeAll()
             self.btAlignmentHeldUIDs.removeAll()
+            self.btWizardHeldUIDs.removeAll()
             self.suspended = false
             // Seamless handoff T3.8-3: reset the release flag and stop/nil the
             // watcher so no orphan `log` child survives quit (AppDelegate's quit
@@ -2113,6 +2245,18 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.routeDisplayNames.removeAll()
             self.streamBindings.removeAll()
             self.routedAppNames.removeAll()
+            // The EQ topology describes engine sessions that are being torn down;
+            // the VALUES (`eqByDeviceID`/`storedMainOutEQ`) are the user's settings and
+            // stay. The allocator stays too — a released stream id is retired for
+            // the session, never reused (decision 8). The coordinator goes back to
+            // byte-identical passthrough.
+            self.eqStreamIDByDevice.removeAll()
+            self.eqRebindDeferred.removeAll()
+            self.eqSlotByStream.removeAll()
+            self.mainOutEQSlot = nil
+            if let coordinator = self.captureCoordinator {
+                self.captureControlQueue.async { coordinator.setEQPlan(.passthrough) }
+            }
             // T8 edge-case tracking resets alongside the rest of the per-app state —
             // a later start() begins with no bundle ID considered dead or mid-retry.
             self.lastRoutes.removeAll()
@@ -2439,7 +2583,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `syncedLocalGain`, Main IS included — a BT sink renders through its own
     /// device, which the Mac's system volume never touches. On `stateQueue`.
     private func btSinkGain(forUID uid: String) -> Float {   // on stateQueue
-        if btAlignmentHeldUIDs.contains(uid) || muted.contains(uid) { return 0 }
+        if btAlignmentHeldUIDs.contains(uid) || btWizardHeldUIDs.contains(uid)
+            || muted.contains(uid) { return 0 }
         let level = known[uid]?.volume ?? 100
         return Float(masterGainFraction * Double(level.clampedToVolume) / 100.0)
     }
@@ -2479,6 +2624,326 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         captureControlQueue.async { [weak self] in
             self?.castOutputManager?.setLevel(level, forDevice: id)
         }
+    }
+
+    // MARK: Tone (per-device + Main Out EQ)
+
+    /// One speaker's tone. `commit == false` is live scrub — the sound changes
+    /// immediately but nothing is persisted and, wherever the device's current
+    /// stream can already express the edit, no rebind is issued. `commit == true`
+    /// is the end of a gesture: persist, then recompute the dedup topology.
+    ///
+    /// The local Mac row is REJECTED (locked scoping decision: per-device EQ
+    /// covers AirPlay and Bluetooth rows only). A Bluetooth id branches to its
+    /// sink — its audio never goes through an AirPlay stream, so stream topology
+    /// has nothing to say about it.
+    public func setEQ(_ eq: DeviceEQ, for id: String, commit: Bool) {
+        guard id != Self.localDeviceID else { return }
+        stateQueue.async {
+            guard self.known[id] != nil else { return }
+            self.eqByDeviceID[id] = eq
+            self.applyLocal(id) { $0.eq = eq }
+            if commit { self.saveEQLocked() }
+            if self.known[id]?.isBluetooth == true {
+                self.pushBTSinkEQLocked(id)
+                return
+            }
+            // A device outside the EQ domain (not streaming whole-system, or
+            // claimed by per-app routing) has nothing in the plan to change, so
+            // a scrub touches neither topology nor processors — the value is
+            // remembered and the commit applies it. Without this, every frame of
+            // a drag on such a row ran a full `reconcileEQPlan`.
+            guard commit || self.eqStreamIDByDevice[id] != nil else { return }
+            // Decision 9: a sole owner of its own stream just gets fresh
+            // coefficients. Anything else — flat↔non-flat, a group merge or
+            // split, a device still on stream 0 — needs the topology recomputed,
+            // and inherits the rebind's accepted ~1 s gap.
+            if commit || !self.eqEditIsExpressibleLocked(id) {
+                self.reconcileEQPlan()
+            } else {
+                self.pushEQPlanLocked()
+            }
+        }
+    }
+
+    /// Main Out's tone: one stage over the whole mix, applied before every
+    /// fan-out, so AirPlay, the Mac's own delayed sink and every Bluetooth sink
+    /// hear the same shaped program. Never affects stream topology — there is
+    /// exactly one main stage no matter how many streams exist.
+    public func setMainOutEQ(_ eq: DeviceEQ, commit: Bool) {
+        stateQueue.async {
+            self.storedMainOutEQ = eq
+            if commit { self.saveEQLocked() }
+            self.pushEQPlanLocked()
+        }
+    }
+
+    /// Whether `id`'s current stream can carry a changed value with no rebind:
+    /// it owns a real EQ stream, alone. A device on stream 0, or sharing a
+    /// stream with others, cannot — changing its values there would change
+    /// everyone else's too (decision 9). On `stateQueue`.
+    private func eqEditIsExpressibleLocked(_ id: String) -> Bool {   // on stateQueue
+        guard let stream = eqStreamIDByDevice[id], stream != 0 else { return false }
+        return !eqStreamIDByDevice.contains { $0.key != id && $0.value == stream }
+    }
+
+    /// Persist the current tone settings. Committed edits only — a live scrub
+    /// must not write a file per slider frame. Flat entries are dropped by the
+    /// store itself, so the whole table can be handed over as-is. On `stateQueue`.
+    private func saveEQLocked() {   // on stateQueue
+        do {
+            try eqStore?.save(mainOut: storedMainOutEQ, devices: eqByDeviceID)
+        } catch {
+            Telemetry.log(.airplay, "eq_save_failed", ["error": "\(error)"])
+        }
+    }
+
+    /// Recompute which stream every streaming AirPlay device belongs on, publish
+    /// the resulting plan, and move any device whose stream changed.
+    ///
+    /// Triggers (decision 16): a committed `setEQ`, an uncommitted edit its
+    /// current stream cannot express, a device reaching OR leaving `added` (a
+    /// reconnect always lands on stream 0 first, so its EQ has to be re-applied;
+    /// a departure frees a stream for whoever the budget refused, and takes the
+    /// departed device's own stream out of the plan), `setOutputSet`, a per-app
+    /// destination-set change (which moves the budget), and `stop()`.
+    /// On `stateQueue`.
+    private func reconcileEQPlan() {   // on stateQueue
+        // Only devices with a LIVE stream-0 session can be moved onto an EQ
+        // stream. A device claimed by the per-app domain is not ours to rebind
+        // (its stream is `streamBindings`'), and it is already counted against
+        // the budget below.
+        let active = added.filter { streamBindings[$0] == nil }
+        let previous = eqStreamIDByDevice
+        let result = EQStreamTopology.resolve(
+            activeDeviceIDs: active,
+            eqByDevice: eqByDeviceID,
+            budget: eqBudgetLocked(),
+            allocator: eqAllocator)
+        eqAllocator = result.allocator
+
+        // Say out loud, per device, whether its stored values are reaching the
+        // audio — and when they aren't, WHY, because the two reasons need
+        // different sentences. One sweep over everything known, so a device that
+        // just left the EQ domain is cleared by the same pass that sets the
+        // others. `applyLocal` emits only on a real change.
+        for id in Array(known.keys) {   // snapshot: `applyLocal` writes `known`
+            let reason: Device.EQBypassReason?
+            if result.bypassed.contains(id) {
+                // Kept its values, streams flat: more distinct settings than the
+                // budget could admit.
+                reason = .streamBudget
+            } else if streamBindings[id] != nil, !(eqByDeviceID[id] ?? .flat).isFlat {
+                // Excluded from the EQ domain above because per-app routing owns
+                // this device's session — its audio never passes the whole-system
+                // EQ stage, so a stored tone is stored only.
+                reason = .perAppRouting
+            } else {
+                reason = nil
+            }
+            applyLocal(id) { $0.eqBypassReason = reason }
+        }
+
+        // The assignment is only true once the move is actually issued. A move
+        // that had to be deferred rolls back to where the device still IS, so the
+        // drain's reconcile sees a real change and re-issues it — recording the
+        // target eagerly would make the re-drive a no-op and strand the device on
+        // the wrong stream.
+        var settled = result.streamIDByDevice
+        for (id, stream) in result.streamIDByDevice {
+            // A device with no previous assignment is on stream 0 in engine
+            // truth — a fresh connect, or one this reconcile just discovered.
+            let current = previous[id] ?? 0
+            guard current != stream else { continue }
+            guard let outputID = outputIDs[id],
+                  enqueueEQRebindLocked(deviceID: id, outputID: outputID, stream: stream)
+            else {
+                settled[id] = current
+                continue
+            }
+        }
+        eqStreamIDByDevice = settled
+        pushEQPlanLocked()
+    }
+
+    /// Drop `id` from the whole-system streaming set, reconciling the EQ plan on
+    /// a REAL true→false edge — the departure mirror of the `added` false→true
+    /// edge, and the only site that owns it.
+    ///
+    /// A departure changes two things nothing else notices: it frees an EQ
+    /// stream, so a device the budget had refused can be admitted and stop
+    /// streaming flat; and it takes the departed device's own stream out of the
+    /// plan, which otherwise keeps costing a per-buffer copy and filter pass for
+    /// audio no output is bound to. `setOutputSet`'s reconcile can't do either —
+    /// it runs while the teardown is still in flight, with the device still in
+    /// `added`.
+    ///
+    /// `reconcileEQPlan` moves other devices through `enqueueEQRebindLocked`,
+    /// which defers rather than waits when a `converging` slot is held, so this
+    /// is safe to call from inside a converge loop. On `stateQueue`.
+    /// - Returns: whether `id` was actually in the streaming set.
+    @discardableResult
+    private func removeFromAddedLocked(_ id: String) -> Bool {   // on stateQueue
+        guard added.remove(id) != nil else { return false }
+        reconcileEQPlan()
+        return true
+    }
+
+    /// How many EQ streams may exist beyond stream 0 (decision 10): the engine's
+    /// capacity, less stream 0 itself, less every distinct per-app stream
+    /// currently bound. Per-app ids are allocated upward from 1 and EQ ids live
+    /// in the top half of the space, so the range test tells them apart. On
+    /// `stateQueue`.
+    private func eqBudgetLocked() -> Int {   // on stateQueue
+        let perAppStreams = Set(streamBindings.values.filter { $0 >= 1 && $0 < EQStreamAllocator.idBase })
+        return max(0, Self.engineStreamCapacity - 1 - perAppStreams.count)
+    }
+
+    /// Publish the CURRENT assignment as a plan for the capture coordinator.
+    /// Called for a topology change and for a bare coefficient swap alike — the
+    /// assignment map is the same input either way.
+    ///
+    /// No live stage is ever rebuilt: an unchanged one is carried over
+    /// instance-and-all (see ``EQProcessorSlot``) and a changed one is
+    /// retargeted in place, because a fresh `EQProcessor` starts with empty IIR
+    /// delay memory — a tick on a neighbour, a crackle for the whole drag on the
+    /// speaker being edited. Coefficients are built HERE, on `stateQueue`, and
+    /// reach the processor through its own mailbox; its filter state stays the
+    /// delivery thread's alone and is never read from here. Enqueued on
+    /// `captureControlQueue` like every other coordinator call, so a coordinator
+    /// callback that hops to `stateQueue` can never deadlock against this.
+    /// On `stateQueue`.
+    private func pushEQPlanLocked() {   // on stateQueue
+        var eqByStream: [UInt32: DeviceEQ] = [:]
+        for (id, stream) in eqStreamIDByDevice where stream != 0 {
+            eqByStream[stream] = eqByDeviceID[id] ?? .flat
+        }
+        // A stream that left the plan takes its cached processor with it —
+        // nothing will feed it again, and a reused id is a different group.
+        eqSlotByStream = eqSlotByStream.filter { eqByStream[$0.key] != nil }
+
+        var streams: [WholeSystemEQPlan.Stream] = [.init(streamID: 0, processor: nil)]
+        for (stream, eq) in eqByStream.sorted(by: { $0.key < $1.key }) {
+            streams.append(.init(
+                streamID: stream,
+                processor: Self.processor(reusing: &eqSlotByStream[stream], for: eq)))
+        }
+        let plan = WholeSystemEQPlan(
+            main: Self.processor(reusing: &mainOutEQSlot, for: storedMainOutEQ),
+            streams: streams)
+        guard let coordinator = captureCoordinator else { return }
+        captureControlQueue.async { coordinator.setEQPlan(plan) }
+    }
+
+    /// The processor for one tone stage, KEEPING the live instance in every case
+    /// where one already exists — unchanged (return it as it stands) or changed
+    /// (``EQProcessor/retarget(to:)``, which hands the new coefficients to the
+    /// delivery thread and carries the delay memory across). Building a new one
+    /// would zero that memory mid-signal: an audible tick on an untouched
+    /// speaker, and a crackle for the whole drag on the one being edited.
+    ///
+    /// A flat value drops the slot and returns `nil`: flat must stay
+    /// byte-identical passthrough, never a processor pass. The mirror edge —
+    /// flat to shaped — has no live instance to preserve, and zero state is the
+    /// right start for a stage that was not running. On `stateQueue`.
+    private static func processor(reusing slot: inout EQProcessorSlot?, for eq: DeviceEQ) -> EQProcessor? {
+        guard !eq.isFlat else {
+            slot = nil
+            return nil
+        }
+        if let existing = slot {
+            if existing.eq != eq {
+                existing.processor.retarget(to: eq)
+                slot = EQProcessorSlot(eq: eq, processor: existing.processor)
+            }
+            return existing.processor
+        }
+        let processor = EQProcessor(eq: eq, sampleRate: eqSampleRate)
+        slot = EQProcessorSlot(eq: eq, processor: processor)
+        return processor
+    }
+
+    /// Move one device's live session onto the stream its EQ group owns.
+    ///
+    /// Claims the per-device `converging` slot exactly as
+    /// `resetAirPlaySessionForWholeSystem` does — an EQ rebind is a whole-system
+    /// engine op and must never interleave with a concurrent `convergeDevice`
+    /// loop for the same device — and records the hold in `rebindConverging` so
+    /// the sleep path can release it if the machine goes down mid-move. The op
+    /// itself goes through `bindOutput`, the single call site that arbitrates on
+    /// the engine's own answer, never a naked `rebindOutput`. On `stateQueue`.
+    /// - Returns: whether the move was actually issued. `false` means the slot
+    ///   was busy and the device is noted for the release to re-drive.
+    private func enqueueEQRebindLocked(   // on stateQueue
+        deviceID: String, outputID: OutputID, stream: UInt32
+    ) -> Bool {
+        guard !converging.contains(deviceID) else {
+            // A converge already owns this device's engine ops — including the
+            // one whose own `added` edge asked for this move. Never WAIT on the
+            // slot (that is the documented FIFO deadlock); note the device and
+            // re-drive when the slot is released.
+            eqRebindDeferred.insert(deviceID)
+            Telemetry.log(.airplay, "eq_rebind_deferred", [
+                "device": deviceID, "stream": "\(stream)", "reason": "already_converging",
+            ])
+            return false
+        }
+        eqRebindDeferred.remove(deviceID)
+        converging.insert(deviceID)
+        rebindConverging.insert(deviceID)
+        Telemetry.log(.airplay, "eq_rebind", ["device": deviceID, "stream": "\(stream)"])
+        let prev = bindTail
+        bindTail = Task { [weak self] in
+            await prev.value
+            guard let self else { return }
+            // Re-check under the lock immediately before the engine call: the
+            // world may have moved while this op waited its turn in the FIFO
+            // (deselected, superseded by a newer assignment, or the sleep path
+            // took our slot back).
+            let shouldFire: Bool = self.stateQueue.sync {
+                self.rebindConverging.contains(deviceID)
+                    && !self.suspended
+                    && self.added.contains(deviceID)
+                    && self.eqStreamIDByDevice[deviceID] == stream
+            }
+            if shouldFire {
+                do {
+                    try await self.bindOutput(outputID, toStream: stream)
+                } catch {
+                    Telemetry.log(.airplay, "eq_rebind_failed", [
+                        "device": deviceID, "stream": "\(stream)", "error": "\(error)",
+                    ])
+                }
+            }
+            let action: ConvergeReleaseAction = self.stateQueue.sync {
+                // Only release a hold we still own — sleep releases every
+                // `rebindConverging` slot itself, and a `convergeDevice` loop may
+                // have claimed the freed slot since.
+                guard self.rebindConverging.contains(deviceID) else { return .none }
+                return self.releaseRebindConverging(id: deviceID)
+            }
+            if action.redrivePerApp { self.replayPendingPerAppBindings(trigger: "ws_release") }
+            if let requeue = action.requeue {
+                Task { [weak self] in await self?.convergeDevice(id: deviceID, outputID: requeue) }
+            }
+        }
+        return true
+    }
+
+    /// Push one Bluetooth device's tone into its sink — a property swap on the
+    /// running session, never a rebuild. On `stateQueue`.
+    private func pushBTSinkEQLocked(_ uid: String) {   // on stateQueue
+        let eq = eqByDeviceID[uid] ?? .flat
+        captureControlQueue.async { [weak self] in
+            self?.btSink?.setEQ(eq, forDeviceUID: uid)
+        }
+    }
+
+    /// The tone per selected BT uid, snapshotted under `stateQueue` for a sink
+    /// transition to apply on `captureControlQueue` — the same re-push-on-every-arm
+    /// discipline the persisted trims get. On `stateQueue`.
+    private func btSinkEQs(forUIDs uids: [String]) -> [String: DeviceEQ] {   // on stateQueue
+        Dictionary(uniqueKeysWithValues: uids.map { ($0, eqByDeviceID[$0] ?? .flat) })
     }
 
     /// Renders a set of device ids as `"[Name1,Name2]"` for a Telemetry field —
@@ -2734,19 +3199,26 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // Wave-4 delay agreement: a BT presence/AirPlay-presence flip moves
             // the LOCAL sink's reference too (`localSinkReferenceDelayMs`), so
             // capture whether the reference input changed before overwriting.
-            let localReferenceMoved =
-                (wantBT != self.btSinkEnabled)
-                || (wantBT && composition.airPlayPresent != self.btComposition.airPlayPresent)
+            // macLocalPresent never changes a BT delay (BTReferenceTimeline
+            // .delayNanos doc, BTSyncedSink.swift:52-55), so only an
+            // airPlayPresent flip counts as the reference moving.
+            let referenceMoved =
+                wantBT && composition.airPlayPresent != self.btComposition.airPlayPresent
+            let localReferenceMoved = (wantBT != self.btSinkEnabled) || referenceMoved
             if wantBT != self.btSinkEnabled || btUIDs != self.btSelectedUIDs
-                || (wantBT && composition != self.btComposition) {
+                || referenceMoved {
                 self.btSinkEnabled = wantBT
                 self.btSelectedUIDs = btUIDs
                 self.btComposition = composition
                 let gains = self.btSinkGains(forUIDs: btUIDs)
+                // Derived AFTER the new selection is committed — the reference
+                // is a function of the selected devices' measured latencies.
+                let referenceMs = self.updateBTReferenceBufferLocked()
+                let eqs = self.btSinkEQs(forUIDs: btUIDs)
                 self.captureControlQueue.async { [weak self] in
                     self?.applyBTSinkTransition(
                         enable: wantBT, uids: btUIDs, composition: composition,
-                        gains: gains)
+                        gains: gains, eqs: eqs, referenceBufferMs: referenceMs)
                 }
                 if localReferenceMoved, self.syncedLocalSinkApplied {
                     // Re-anchor the already-running local sink onto the new
@@ -2793,6 +3265,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         enable: !castIDs.isEmpty, records: records, levels: levels)
                 }
             }
+
+            // The selection just moved, so the set of devices an EQ stream can
+            // serve moved with it (decision 16). This pass sees INTENT only:
+            // devices connecting as a result of this call reconcile again on
+            // their own `added` edge, and a DESELECTED device is still in
+            // `added` here (its teardown is only being scheduled) — the
+            // departure edge is `removeFromAddedLocked`'s to report, not this
+            // one's.
+            self.reconcileEQPlan()
 
             // T4: log the selection diff + the resulting per-device convergence
             // target. Read-only over state already captured above, then a single
@@ -3044,6 +3525,61 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         }
     }
 
+    // MARK: BT-only reference timeline (roadmap 056 Part A)
+
+    /// How far past the slowest known speaker the BT-only reference sits. A
+    /// speaker can only be fed EARLY by shortening its delay, so the reference
+    /// has to be at least its latency; the margin leaves room for the user's
+    /// trim on top of a freshly measured device.
+    static let btReferenceHeadroomMs = 100
+    /// The reference a Bluetooth-target wizard run pins the timeline to. The
+    /// latency it is about to measure is unknown by definition, so the search
+    /// needs room to reach any plausible A2DP/DSP latency instead of pinning
+    /// against a 500 ms floor and bowing out "unreachable".
+    ///
+    /// 2 s, not the 1.5 s it was: ``btWizardLatencyRangeMs`` now stops one
+    /// default BT-only buffer SHORT of the reference (a candidate at the
+    /// reference itself is a delay of 0 — the ring seeked dry, silent for the
+    /// rest of the session), so the reference has to carry that buffer on top
+    /// for the reachable latency span to stay the ~1.5 s the search needs.
+    static let btWizardReferenceBufferMs = 2_000
+
+    /// The BT-only reference for a selection: never below the
+    /// ``BTSyncedSink/defaultBTOnlyBufferMs`` floor, and always far enough
+    /// ahead of the slowest MEASURED latency among the selected devices that
+    /// its delay does not hit `SyncTiming.totalDelayNanos`'s ≥ 0 clamp. Devices
+    /// with no measurement contribute nothing — an unknown latency is treated
+    /// as within the floor until the wizard says otherwise.
+    static func btOnlyReferenceMs(latencies: [String: Double], uids: [String]) -> Int {
+        let slowest = uids.compactMap { latencies[$0] }.max() ?? 0
+        return Swift.max(BTSyncedSink.defaultBTOnlyBufferMs,
+                         Int(slowest.rounded()) + btReferenceHeadroomMs)
+    }
+
+    /// Recompute the BT-only reference and, if it moved, push it to the sink
+    /// manager and re-anchor the Mac's own sink (which rides the same reference
+    /// in this composition). Returns the value now in force, so the caller can
+    /// hand it straight to ``applyBTSinkTransition(...)``. On `stateQueue`.
+    @discardableResult
+    private func updateBTReferenceBufferLocked() -> Int {   // on stateQueue
+        let latencies = btTrimLock.withLock { btLatencyMsByUID }
+        let desired = btWizardReferenceRaised
+            ? Self.btWizardReferenceBufferMs
+            : Self.btOnlyReferenceMs(latencies: latencies, uids: btSelectedUIDs)
+        guard desired != btReferenceBufferMs else { return desired }
+        btReferenceBufferMs = desired
+        let localRides = btSinkEnabled && !btComposition.airPlayPresent && syncedLocalSinkApplied
+        captureControlQueue.async { [weak self] in
+            guard let self else { return }
+            self.btSink?.setBTOnlyBufferMs(desired)
+            // Wave-4 delay agreement: with no AirPlay in the group the Mac's
+            // own sink schedules against this same buffer, so a move of the
+            // reference is a move for it too.
+            if localRides { self.syncedLocalSink?.requestReanchor(cause: "bt_composition_change") }
+        }
+        return desired
+    }
+
     /// Wave-4 reconnect-reapply: re-run the CURRENT BT sink decision so a
     /// selected device that just (re)appeared resolves a live `AudioObjectID`
     /// and re-enters the per-device set (and one that vanished drops out). The
@@ -3055,9 +3591,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let uids = btSelectedUIDs
         let composition = btComposition
         let gains = btSinkGains(forUIDs: uids)
+        let referenceMs = updateBTReferenceBufferLocked()
+        let eqs = btSinkEQs(forUIDs: uids)
         captureControlQueue.async { [weak self] in
             self?.applyBTSinkTransition(
-                enable: true, uids: uids, composition: composition, gains: gains)
+                enable: true, uids: uids, composition: composition, gains: gains,
+                eqs: eqs, referenceBufferMs: referenceMs)
         }
     }
 
@@ -3190,7 +3729,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// that debounce exists for cannot start here.
     private func applyBTSinkTransition(
         enable: Bool, uids: [String], composition: BTGroupComposition,
-        gains: [String: Float] = [:]
+        gains: [String: Float] = [:], eqs: [String: DeviceEQ] = [:],
+        referenceBufferMs: Int? = nil
     ) {
         if enable {
             let sink: BTSyncedSinkControlling
@@ -3203,12 +3743,23 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 return   // no factory wired (tests / UI-only smoke) — inert
             }
             sink.setComposition(composition)
+            // The BT-only reference this selection needs (roadmap 056 Part A):
+            // pushed with the composition, BEFORE `setDevices` builds any sink,
+            // so a fresh sink anchors against the right timeline first time.
+            if let referenceBufferMs { sink.setBTOnlyBufferMs(referenceBufferMs) }
             // Persisted SYNC trims (BT-OFFSET-UI), re-pushed on every enable so
             // a sink built after launch — or rebuilt after a reconnect — starts
             // from the saved values. Idempotent: the sink ignores a same-value
             // write, so this never forces a rebuild on its own.
-            for (uid, ms) in btTrimLock.withLock({ btTrimsByUID }) {
+            let (trims, latencies) = btTrimLock.withLock { (btTrimsByUID, btLatencyMsByUID) }
+            for (uid, ms) in trims {
                 sink.setTrimMs(ms, forDeviceUID: uid)
+            }
+            // Measured latencies (roadmap 056 Part A), re-pushed for the same
+            // reason as the trims: a sink built after launch must start from
+            // what the wizard already learned about this speaker, not from 0.
+            for (uid, ms) in latencies {
+                sink.setOffsetMs(Int(ms.rounded()), forDeviceUID: uid)
             }
             // Composed gains (`btSinkGain`: user volume × masters, 0 while
             // held/muted) land BEFORE the device set, so a sink created by
@@ -3217,6 +3768,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // this ordering), never at a hardcoded 1 or 0.
             for uid in uids {
                 sink.setGain(gains[uid] ?? 1, forDeviceUID: uid)
+            }
+            // Tone, on the same re-push-on-every-arm footing as the trims above:
+            // the manager remembers it per uid, so a sink created by `setDevices`
+            // below starts already shaped instead of playing a few flat buffers.
+            for uid in uids {
+                sink.setEQ(eqs[uid] ?? .flat, forDeviceUID: uid)
             }
             // UID → live AudioObjectID, resolved fresh per apply. A uid that no
             // longer resolves (the speaker dropped between selection and apply)
@@ -4856,6 +5413,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             }
             self.streamBindings = newBindings
             self.enqueueBindOps(ops)
+            // The per-app domain just took (or gave back) stream ids, which is
+            // exactly what the EQ budget is computed from (decision 16) — a
+            // shrunk budget bypasses the deterministic loser, a grown one
+            // re-admits it.
+            self.reconcileEQPlan()
             // T3: a device that just lost its per-app stream gets a final combined
             // `.level` (now with a zero stream contribution, so its meter drops to
             // its system contribution — 0 if unselected) so a torn-down stream can't
@@ -5342,6 +5904,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 }
             }
         }
+        // 1b. Consume a deferred EQ move the same way: the connect edge that owed
+        //     it happened INSIDE the converge that just released, so this is the
+        //     first moment the device's engine ops are ours to issue.
+        //     `reconcileEQPlan` re-derives the target from scratch, so a stale
+        //     note can only ever produce a no-op.
+        if self.eqRebindDeferred.remove(id) != nil {
+            self.reconcileEQPlan()
+        }
         // 2. Per-app re-drive: the per-app table still wants this device, its
         //    binding was cleared (a fire-time bow-out), and whole-system no
         //    longer desires it — tell the caller to replay the cached topology
@@ -5409,7 +5979,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // now beats a "connected" row that never makes a sound.
                     guard await ensurePTPTakeover(telemetryDeviceID: id) else {
                         stateQueue.sync {
-                            self.added.remove(id)
+                            self.removeFromAddedLocked(id)
                             self.failedGate.insert(id)
                             self.applyLocal(id) { $0.isSelected = false; $0.isAvailable = false }
                             self.enterFailure(id, cause: .timingUnavailable)
@@ -5480,6 +6050,11 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                         let wasAdded = self.added.contains(id)
                         self.added.insert(id)
                         let seededVolume = wasAdded ? nil : self.connectVolumeSeed(id, outputID: outputID)
+                        // Same edge, same reason as the volume seed: a fresh
+                        // session always lands on stream 0, so a device with a
+                        // stored EQ has to be moved onto its group's stream again
+                        // (decision 16).
+                        if !wasAdded { self.reconcileEQPlan() }
                         self.applyLocal(id) {
                             $0.isSelected = true; $0.isAvailable = true
                             if let seededVolume { $0.volume = seededVolume }
@@ -5506,7 +6081,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     var cause: ConnectionFailure.Cause = .unknown
                     if case AirPlayEngineError.passwordRequired = error { cause = .authRequired }
                     stateQueue.sync {
-                        self.added.remove(id)
+                        self.removeFromAddedLocked(id)
                         self.failedGate.insert(id)
                         self.applyLocal(id) { $0.isSelected = false; $0.isAvailable = false }
                         self.enterFailure(id, cause: cause)
@@ -5517,7 +6092,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 do {
                     try await engine.removeOutput(outputID)
                     stateQueue.sync {
-                        self.added.remove(id)
+                        self.removeFromAddedLocked(id)
                         self.applyLocal(id) { $0.isSelected = false }
                         // Confirmed torn down — off is a no-op if `setOutputSet`
                         // already set it eagerly, but covers the case where an
@@ -5543,7 +6118,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // non-terminal issue) — the device is still desired off, so the
                     // dot should already read `.off` from `setOutputSet`'s eager set.
                     stateQueue.sync {
-                        self.added.remove(id)
+                        self.removeFromAddedLocked(id)
                         self.markUnavailable(id)
                     }
                     return
@@ -5799,7 +6374,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     func localSinkReferenceDelayMs() -> Int {
         stateQueue.sync {
             let today = (btSinkEnabled && !btComposition.airPlayPresent)
-                ? BTSyncedSink.defaultBTOnlyBufferMs : _startBufferMs
+                ? btReferenceBufferMs : _startBufferMs
             return _castTermMs.map { Swift.max(today, $0) } ?? today
         }
     }
@@ -6094,6 +6669,24 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             return (id, outputID)
         }
         self.added.removeAll()
+        // Same discipline as `stop()`: the EQ topology describes engine sessions
+        // that just died, so it must die with them. Keeping it would make the
+        // wake path's `added` false→true reconcile a NO-OP — the fresh session
+        // lands on stream 0, the reconcile recomputes the same stream S, and
+        // `current != stream` is false, so no rebind is ever issued and the
+        // speaker plays flat forever (a same-value commit can't recover it
+        // either) while the coordinator keeps filtering into a stream with no
+        // output bound. Clearing it means the reconcile sees `previous[id] ==
+        // nil`, reads engine truth (stream 0), and issues the move. The VALUES
+        // (`eqByDeviceID`/`storedMainOutEQ`) are the user's settings and stay, as does
+        // the allocator (a released id is retired for the session, decision 8).
+        self.eqStreamIDByDevice.removeAll()
+        self.eqRebindDeferred.removeAll()
+        self.eqSlotByStream.removeAll()
+        self.mainOutEQSlot = nil
+        if let coordinator = self.captureCoordinator {
+            self.captureControlQueue.async { coordinator.setEQPlan(.passthrough) }
+        }
         return items
     }
 
@@ -6767,8 +7360,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // A future re-add must re-feed the engine's discovery (the descriptor is
             // being deregistered), so forget the fed memo regardless of add state.
             self.fedDescriptors[id] = nil
-            guard self.added.contains(id) else { return nil }
-            self.added.remove(id)
+            guard self.removeFromAddedLocked(id) else { return nil }
             return self.outputIDs[id]
         }
         guard let outputID else { return }
@@ -6986,7 +7578,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// saved group keeps its membership); it is removed from the streaming set.
     /// On `stateQueue`.
     private func markDisappeared(_ id: String) {
-        self.added.remove(id)
+        // Before the `device` copy below is taken, so the reconcile's own
+        // `eqBypassReason` writes can't be clobbered by this method's commit.
+        self.removeFromAddedLocked(id)
         // The engine descriptor is deregistered on disappear; a future re-add must
         // re-feed it. Clear the fed memo so `descriptorToFeed` doesn't skip it.
         self.fedDescriptors[id] = nil
@@ -7099,7 +7693,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     name: snapshot.name,
                     kind: .bluetooth,
                     isAvailable: snapshot.isConnected,
-                    supportsAirPlay2: false)
+                    supportsAirPlay2: false,
+                    // Same as the AirPlay row (`mapDiscovered`): the stored tone
+                    // shows from the moment the row appears. A BT device's sink
+                    // gets the value re-pushed on every arm, so the snapshot and
+                    // what is audible agree.
+                    eq: eqByDeviceID[id] ?? .flat)
                 known[id] = device
                 order.append(id)
                 emit(.deviceAdded(device))
@@ -7255,6 +7854,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                   var device = self.known[id] else { return nil }
 
             let before = device
+            // Set on EITHER `added` edge below and acted on after the commit —
+            // `reconcileEQPlan` reads `added`/`known` and may write
+            // `eqBypassReason` through `applyLocal`, which the in-flight `device`
+            // copy would otherwise clobber. That deferral is why these two arms
+            // can't go through `removeFromAddedLocked` like every other
+            // departure site.
+            var eqNeedsReconcile = false
             switch state {
             case .streaming, .connected:
                 // Reconcile against the user's latest intent. If the device is
@@ -7298,6 +7904,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 if !wasAdded, let seededVolume = self.connectVolumeSeed(id, outputID: outputID) {
                     device.volume = seededVolume
                 }
+                // The other `added` false→true site (decision 16): an
+                // out-of-band reconnect re-establishes the session on stream 0,
+                // so this device's EQ stream has to be re-claimed.
+                eqNeedsReconcile = !wasAdded
             case .failed, .passwordRequired:
                 // A live session died / needs a PIN we don't have: surface it as
                 // unavailable + deselected and drop it from the streaming set. PARK
@@ -7308,7 +7918,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // edge, or `retryOutput` — a same-descriptor re-announce keeps it.
                 device.isAvailable = false
                 device.isSelected = false
-                self.added.remove(id)
+                eqNeedsReconcile = self.added.remove(id) != nil
                 if self.desiredOn[id] == true {
                     self.failedGate.insert(id)
                     // `.passwordRequired` is the one engine failure with a KNOWN,
@@ -7322,7 +7932,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 }
             case .stopped:
                 device.isSelected = false
-                self.added.remove(id)
+                eqNeedsReconcile = self.added.remove(id) != nil
                 // A stopped session for a device the user hasn't re-desired-off is
                 // NOT a failure — it's a clean stop. Only clear a `.connecting` /
                 // `.connected` / `.reconnecting` dot to `.off`; leave a sticky
@@ -7335,12 +7945,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             case .startup:
                 return nil // non-terminal progress; nothing to render yet
             }
-            guard device != before else { return nil }   // de-dupe the completion echo
+            guard device != before else {
+                // The snapshot is unchanged but `added` may still have flipped
+                // (every visible field was already at its connected value), and
+                // either edge is what owes an EQ reconcile.
+                if eqNeedsReconcile { self.reconcileEQPlan() }
+                return nil   // de-dupe the completion echo
+            }
             // R5: `.failed`/`.passwordRequired` above just made this device
             // unreachable, and `.connected`/`.streaming` just made it reachable —
             // both are per-app redirect edges the discovery path never sees, so this
             // commit (not a bare `known[id] =`) is what replays the route table.
             self.commitKnownDevice(id, device)
+            if eqNeedsReconcile { self.reconcileEQPlan() }
             // This out-of-band transition set `connectionState` DIRECTLY on the device
             // (bypassing `setConnectionState`), so drive the silence-watchdog reconcile
             // here too — a `→ .connected` re-engages the gate, a `→ .failed`/`.off`
@@ -7532,7 +8149,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // doesn't jump to 0 under the user.
             volume: isMuted ? (stashedVolume[id] ?? baseVolume) : baseVolume,
             isMuted: isMuted,
-            isSelected: added.contains(id)
+            isSelected: added.contains(id),
+            // The stored tone, from the moment the row appears — a speaker the
+            // user shaped last week must not show flat until they touch it
+            // again. `eqBypassReason` is deliberately left `nil`: both its cases
+            // describe a LIVE session, which nothing that isn't streaming yet
+            // can have. `reconcileEQPlan` sets it on the `added` edge and clears
+            // it when the device stops streaming.
+            eq: eqByDeviceID[id] ?? .flat
         )
     }
 
@@ -8545,6 +9169,15 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// provides the real mode → injector-config mapping.
     func setAlignTickMode(_ mode: AlignTickMode)
 
+    /// Make the wizard's ticks audible (roadmap 056 Part B): the run opens on
+    /// bed/silence so every sink can anchor and every amp can wake, and the
+    /// backend arms the beat grid once they have. Default no-op;
+    /// ``NativeCaptureCoordinator`` provides the real one.
+    func armWizardTicks()
+    /// Swap the wizard's beat interval mid-run (search stage → blocks stage).
+    /// Same default-no-op posture as ``armWizardTicks()``.
+    func setWizardTempo(bpm: Double)
+
     /// Keep the whole-system tap's exclusion set in sync with the routing table
     /// (T4/T6): individually-routed apps (`.device(id:)` routes) and user-excluded
     /// apps must not double up into the system-wide mix. Default no-op so a fake
@@ -8588,6 +9221,13 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// (BT-OFFSET-UI). Default no-op; ``NativeCaptureCoordinator`` provides
     /// the real one.
     func setAlignTick(_ active: Bool)
+
+    /// Hand the delivery path a new set of tone stages: the Main Out EQ (applied
+    /// before every fan-out) plus one AirPlay write per EQ stream. Default no-op
+    /// so a fake that doesn't exercise EQ compiles unchanged;
+    /// ``NativeCaptureCoordinator`` provides the real one. See
+    /// ``NativeCaptureCoordinator/setEQPlan(_:)``.
+    func setEQPlan(_ plan: WholeSystemEQPlan)
 }
 
 extension CaptureControlling {
@@ -8616,6 +9256,11 @@ extension CaptureControlling {
     func setAirPlayPreDelay(ms: Int) {}
     /// Default no-op (BT-OFFSET-UI align tick), same posture.
     func setAlignTick(_ active: Bool) {}
+    /// Default no-ops (roadmap 056 Part B wizard stimulus), same posture.
+    func armWizardTicks() {}
+    func setWizardTempo(bpm: Double) {}
+    /// Default no-op (per-device + Main Out EQ), same posture.
+    func setEQPlan(_ plan: WholeSystemEQPlan) {}
     /// Default forwards to the flag-only seam so a fake recording plain
     /// `setAlignTick` calls also observes wizard activations (W2).
     func setAlignTickMode(_ mode: AlignTickMode) {
@@ -8652,6 +9297,12 @@ public protocol BTOutputControlling: AnyObject {
     /// device deliberately tuned to exactly 0.0 ms is tuned, and must not
     /// read "Not set".
     func btHasSyncTrim(forDevice id: String) -> Bool
+    /// Delete this device's stored alignment — its measured latency AND its
+    /// trim — and put the live sink back on unaligned scheduling (roadmap 056:
+    /// the drawer's "Reset alignment"). The entries are REMOVED, never written
+    /// as 0: ``btHasSyncTrim(forDevice:)`` answers by existence, so a stored 0
+    /// would leave the row reading "0 ms" rather than "Not set".
+    func resetBTAlignment(forDevice id: String)
     /// Start/stop the align-by-ear tick in the captured feed (auto-limits to
     /// ~30 s of ticks on its own).
     func setBTAlignTickActive(_ active: Bool)
@@ -8669,10 +9320,70 @@ public protocol BTOutputControlling: AnyObject {
     /// ordinary ``setBTSyncTrim(_:forDevice:persist:)`` path); `nil` restores
     /// the stored trim to the live sink (cancel / Try again / graceful exit).
     func endBTWizardTrimPreview(forDevice id: String, keepMs: Double?)
-    /// The wizard's continuous tick run: long budget plus the keep-alive bed's
-    /// ~3 s wake preamble (the Sonos amp-gate live finding, 2026-08-07) —
-    /// distinct from the row button's ~30 s ``setBTAlignTickActive(_:)``.
-    func setBTWizardTickActive(_ active: Bool)
+    /// The wizard's continuous tick run — distinct from the row button's ~30 s
+    /// ``setBTAlignTickActive(_:)``. The run OPENS on the keep-alive bed alone
+    /// and the backend arms the ticks once every participating sink has
+    /// actually released (roadmap 056 Part B) — that is what stops the Mac
+    /// ticking on its own while a Bluetooth engine is still coming up.
+    ///
+    /// `btTargetDeviceID` names the Bluetooth device being measured, or `nil`
+    /// for a Mac-target run. A Bluetooth target additionally pins the BT-only
+    /// reference wide open (its latency is the unknown the run exists to find);
+    /// the `false` edge does NOT lower it again — ``endBTWizardRun()`` does, so
+    /// the receipt the user is judging plays on the same timeline the trials
+    /// did.
+    ///
+    /// `btReferenceDeviceID` names the speaker the target is being compared
+    /// AGAINST. A run is a two-speaker comparison, so every OTHER selected
+    /// Bluetooth speaker is held silent for its duration — one at its own trim
+    /// is simply the loudest thing in the room and gets judged instead of the
+    /// target (live run 2026-08-22). Pass it whether or not it is a Bluetooth
+    /// device; a Mac reference is not in the held set anyway.
+    ///
+    /// IDEMPOTENT for the tick itself: a redundant edge does nothing at all.
+    /// Both edges re-anchor every sink, and the panel's Done button issues a
+    /// second `false` after a terminal screen already stopped the tick. The
+    /// participant hold is the exception — it is recomputed on every call, so a
+    /// reference swapped mid-run comes back off the hold without a tick edge.
+    func setBTWizardTickActive(_ active: Bool, btTargetDeviceID: String?,
+                               btReferenceDeviceID: String?)
+    /// The wizard panel is going away for good — Keep, Discard, Done, ✕,
+    /// popover close, target lost. Lowers a Bluetooth run's raised reference
+    /// back onto `max(floor, slowest measured latency + headroom)`, by which
+    /// point a Keep's own measurement is already in the table, so the move is
+    /// ONE composition re-anchor with nothing left to clamp. Idempotent.
+    func endBTWizardRun()
+    /// The wizard's beat interval, in BPM — the estimator's coarse search ticks
+    /// far slower than its stimulus blocks so an unknown latency cannot alias
+    /// into an apparent lead.
+    func setBTWizardTickTempo(bpm: Double)
+
+    // MARK: Measured latency (roadmap 056 Part A)
+
+    /// A device's measured output latency in ms, or `nil` when the wizard has
+    /// never run against it. The Mac is the zero this is measured from.
+    func btMeasuredLatencyMs(forDevice id: String) -> Double?
+    /// The latency values a wizard run may actually present for this device.
+    /// The ceiling stops one default BT-only buffer SHORT of the reference — at
+    /// the reference itself the delay is 0, which seeks the ring dry and takes
+    /// the speaker silent for the rest of the session. The floor is NEGATIVE
+    /// (`−BTSyncTrim.rangeMs`) even though a latency below 0 is not a physical
+    /// quantity: without it a fresh speaker (base 0) dead-ends on its first
+    /// "target first" answer. Nothing below 0 is ever persisted. Derived
+    /// against the reference IN FORCE DURING A RUN (the raised wizard buffer,
+    /// or the live AirPlay presentation delay), so it can be asked before the
+    /// run starts.
+    func btWizardLatencyRangeMs(forDevice id: String) -> ClosedRange<Double>
+    /// Push a CANDIDATE latency live to the device's sink — never persisted,
+    /// the exact twin of ``setBTWizardTrimPreview(_:forDevice:)`` and equally
+    /// rebuild-free.
+    func setBTWizardLatencyPreview(_ ms: Double, forDevice id: String, halfWidthMs: Double?)
+    /// End a latency preview: `keepMs` non-nil persists it as the device's
+    /// measured latency AND zeroes the device's trim (the run suspended it, and
+    /// the nudge was a manual stand-in for the latency just measured); `nil`
+    /// restores the stored latency and leaves the trim to
+    /// ``endBTWizardTrimPreview(forDevice:keepMs:)``.
+    func endBTWizardLatencyPreview(forDevice id: String, keepMs: Double?)
 
     // MARK: First-mix intercept (W3)
 
@@ -8734,6 +9445,28 @@ extension NativeBackend: BTOutputControlling {
         btTrimLock.withLock { btTrimsByUID[id] != nil }
     }
 
+    public func resetBTAlignment(forDevice id: String) {
+        btTrimLock.withLock {
+            btLatencyMsByUID.removeValue(forKey: id)
+            btTrimsByUID.removeValue(forKey: id)
+        }
+        // ONE read-modify-write of the file for both maps — and a genuine
+        // delete, which `save`/`saveLatencies` (whole-map overwrites) could
+        // only express by round-tripping the maps back out again.
+        try? btTrimStore?.clearAlignment(deviceUID: id)
+        // The reference floor is a function of the slowest KNOWN latency, so
+        // dropping one can move it — same ordering as the wizard's Keep: the
+        // reference first, then the sink's own two terms, both hops enqueued
+        // from `stateQueue` so `captureControlQueue` replays them in order.
+        stateQueue.async {
+            self.updateBTReferenceBufferLocked()
+            self.captureControlQueue.async { [weak self] in
+                self?.btSink?.setOffsetMs(0, forDeviceUID: id)
+                self?.btSink?.setTrimMs(0, forDeviceUID: id)
+            }
+        }
+    }
+
     public func setBTAlignTickActive(_ active: Bool) {
         captureCoordinator?.setAlignTick(active)
     }
@@ -8756,8 +9489,101 @@ extension NativeBackend: BTOutputControlling {
         }
     }
 
-    public func setBTWizardTickActive(_ active: Bool) {
+    public func setBTWizardTickActive(_ active: Bool, btTargetDeviceID: String?,
+                                      btReferenceDeviceID: String?) {
+        // NOT edge-guarded, unlike everything below: the host re-pushes a `true`
+        // when the user swaps the reference mid-run, and the new reference has
+        // to come back off the hold that the old one was exempt from.
+        updateBTWizardParticipantHold(
+            active: active, targetUID: btTargetDeviceID, referenceUID: btReferenceDeviceID)
+        // Idempotent (see the protocol): everything below is an EDGE cost — a
+        // tick-mode swap, an arm gate, and a re-anchor of every FIFO sink — so
+        // a `false` against an already-stopped tick must be nothing at all.
+        let isEdge = btTrimLock.withLock { () -> Bool in
+            guard btWizardTickActive != active else { return false }
+            btWizardTickActive = active
+            return true
+        }
+        guard isEdge else { return }
         captureCoordinator?.setAlignTickMode(active ? .wizard : .off)
+        // The run opens on the search stage's slow beat; the session moves it
+        // on when the estimator reaches its blocks.
+        if active { captureCoordinator?.setWizardTempo(bpm: AlignmentTickInjector.wizardSearchBPM) }
+        // A Bluetooth target's latency is the unknown the run measures, so the
+        // reference goes wide open. Only RAISED here: the tick stops at the
+        // receipt, and lowering it there would drop the result the user is
+        // judging onto a timeline that clamps it. `endBTWizardRun()` owns the
+        // way back down.
+        if active, btTargetDeviceID != nil {
+            stateQueue.async {
+                guard !self.btWizardReferenceRaised else { return }
+                self.btWizardReferenceRaised = true
+                self.updateBTReferenceBufferLocked()
+            }
+        }
+        // The arm gate: bed only until every participating sink is playing.
+        let expected = stateQueue.sync { self.btSinkEnabled ? Set(self.btSelectedUIDs) : [] }
+        captureControlQueue.async { [weak self] in
+            guard let self else { return }
+            if active {
+                self.beginWizardArmGate(expecting: expected)
+            } else {
+                self.cancelWizardArmGate()
+            }
+        }
+        // BOTH edges re-anchor every FIFO sink. The wizard swaps the producer of
+        // the shared feed, which breaks frame continuity for sinks that anchor
+        // once and then run as FIFOs — and after any paused stretch (the case the
+        // wizard exists for) their rings have drained anyway, so their idea of
+        // where a pts lands is already untrustworthy. Re-anchoring is what makes
+        // the measurement, and the playback that follows it, pts-true.
+        // `wizard_feed` is deliberately NOT `config_change`: this IS a new
+        // timeline context, so Part 3a's anchor carry must not engage.
+        captureControlQueue.async { [weak self] in
+            self?.syncedLocalSink?.requestReanchor(cause: "wizard_feed")
+            self?.btSink?.reanchorAll(cause: "wizard_feed")
+        }
+    }
+
+    /// Hold every selected Bluetooth speaker that is NOT part of the comparison
+    /// silent for the run, and let them all back in when it ends.
+    ///
+    /// The reference is exempt only when it is itself a Bluetooth device — a
+    /// Mac reference renders through a different sink entirely and is not in
+    /// this set to begin with, so passing its id costs nothing. Applied through
+    /// the ordinary composed-gain seam: no rebuild, no gap, and the wizard's
+    /// arm gate (which keys off `hasStartedRendering`) is unaffected because a
+    /// gain of 0 is still a released, rendering sink.
+    private func updateBTWizardParticipantHold(
+        active: Bool, targetUID: String?, referenceUID: String?
+    ) {
+        stateQueue.async {
+            var want: Set<String> = []
+            if active, let targetUID {
+                want = Set(self.btSelectedUIDs)
+                    .subtracting([targetUID, referenceUID].compactMap { $0 })
+            }
+            let changed = want.symmetricDifference(self.btWizardHeldUIDs)
+            guard !changed.isEmpty else { return }
+            self.btWizardHeldUIDs = want
+            for uid in changed { self.pushBTSinkGainLocked(uid) }
+        }
+    }
+
+    public func endBTWizardRun() {
+        // Belt and braces for the hold: the tick's `false` edge already dropped
+        // it, but a run that ends is a run whose participants must all be
+        // audible again, whatever route it took to get here.
+        updateBTWizardParticipantHold(active: false, targetUID: nil, referenceUID: nil)
+        btTrimLock.withLock {
+            btWizardLastPreviewMsByUID.removeAll()
+            btWizardTickBPM = nil
+        }
+        stateQueue.async {
+            guard self.btWizardReferenceRaised else { return }
+            self.btWizardReferenceRaised = false
+            self.updateBTReferenceBufferLocked()
+        }
     }
 
     public func resolveBTAlignmentPrompt(forDevice id: String, dismissed: Bool) {
@@ -8784,6 +9610,257 @@ extension NativeBackend: BTOutputControlling {
             btSink?.usableTrimRangeMs(forDeviceUID: id) ?? (-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
         }
     }
+
+    public func setBTWizardTickTempo(bpm: Double) {
+        // Stashed as well as pushed: it is the one signal down here that says
+        // which estimator stage a trial belongs to (`setBTWizardLatencyPreview`).
+        btTrimLock.withLock { btWizardTickBPM = bpm }
+        captureCoordinator?.setWizardTempo(bpm: bpm)
+    }
+
+    // MARK: Measured latency (roadmap 056 Part A)
+
+    public func btMeasuredLatencyMs(forDevice id: String) -> Double? {
+        btTrimLock.withLock { btLatencyMsByUID[id] }
+    }
+
+    public func btWizardLatencyRangeMs(forDevice id: String) -> ClosedRange<Double> {
+        // Solve the sink's own delay formula (`reference − latency + trim`) for
+        // the latencies a trial can actually be judged at. The run SUSPENDS the
+        // trim to 0 for its whole duration, so the trim term is gone here too —
+        // leaving it in both polluted the measurement (a candidate would be
+        // judged at `L + trim`) and, for a trim more negative than the hardware
+        // latency, collapsed the range onto 0 and bowed the run out as
+        // `.unreachable`.
+        //
+        // The CEILING is the reference less one default BT-only buffer, not the
+        // reference itself: at `latency == reference` the delay is 0, the ring
+        // is seeked completely dry, and the speaker is silent for the rest of
+        // the session with no way back. Leaving a buffer's worth of content
+        // ahead of the read pointer is what keeps every reachable candidate
+        // playable.
+        //
+        // The FLOOR is negative on purpose. A latency below 0 is not a physical
+        // quantity and never gets persisted (`endBTWizardLatencyPreview` floors
+        // it, as does the session's Keep) — but a run that cannot go below 0
+        // dead-ends on the very first answer of a fresh speaker, whose base is
+        // 0: "target first" means the latency must come DOWN, the candidate
+        // clamps to the same 0, the identical question repeats, and two clicks
+        // in the run bows out. The staircase has to be able to REVERSE out of a
+        // wrong early answer, so the range gives it somewhere to go.
+        let reference = stateQueue.sync { () -> Int in
+            btComposition.airPlayPresent ? _startBufferMs : Self.btWizardReferenceBufferMs
+        }
+        let lower = -BTSyncTrim.rangeMs
+        let upper = Double(reference) - Double(BTSyncedSink.defaultBTOnlyBufferMs)
+        return lower...Swift.max(lower, upper)
+    }
+
+    public func setBTWizardLatencyPreview(_ ms: Double, forDevice id: String,
+                                          halfWidthMs: Double? = nil) {
+        // NOT floored at 0: see `btWizardLatencyRangeMs` — the run needs to be
+        // able to reverse below the base. Keep is where the floor belongs.
+        let value = Int(ms.rounded())
+        let (previous, bpm) = btTrimLock.withLock { () -> (Int?, Double?) in
+            let previous = btWizardLastPreviewMsByUID[id]
+            btWizardLastPreviewMsByUID[id] = value
+            return (previous, btWizardTickBPM)
+        }
+        // One line per trial — the run's only record of what the user was
+        // actually asked to judge. `captureControlQueue`/`stateQueue` callers
+        // only; nothing here runs on the render or tap thread.
+        var fields = [
+            "uid": id,
+            "candidateMs": String(value),
+            "deltaMs": String(value - (previous ?? value)),
+            // How wide the run is casting, read off the tempo it drives: an
+            // uncertain run ticks far slower than one closing in.
+            "stage": (bpm ?? BTAlignmentWizardSession.searchTickBPM)
+                <= BTAlignmentWizardSession.searchTickBPM ? "search" : "blocks",
+        ]
+        // How sure the estimator was when it chose this level. Absent rather
+        // than zero for a caller that has no posterior behind it.
+        if let halfWidthMs { fields["halfWidthMs"] = String(format: "%.1f", halfWidthMs) }
+        Telemetry.log(.localPlayback, "wizard_latency_preview", fields)
+        captureControlQueue.async { [weak self] in
+            self?.btSink?.setOffsetMs(value, forDeviceUID: id)
+        }
+    }
+
+    public func endBTWizardLatencyPreview(forDevice id: String, keepMs: Double?) {
+        if let keepMs {
+            let value = Swift.max(0, keepMs.rounded())
+            // Keep writes BOTH halves of the delay term. The trim goes to 0
+            // because it was a manual stand-in for exactly the latency this run
+            // has now measured — carrying it over would double the correction,
+            // and the run was judged with it suspended anyway. The nudge starts
+            // fresh from the measurement.
+            let (latencies, trims): ([String: Double], [String: Double]) = btTrimLock.withLock {
+                btLatencyMsByUID[id] = value
+                btTrimsByUID[id] = 0
+                return (btLatencyMsByUID, btTrimsByUID)
+            }
+            try? btTrimStore?.saveLatencies(latencies)
+            try? btTrimStore?.save(trims)
+            // The run's receipt, in one line: what was measured and what the
+            // nudge was left at — the two halves of the delay term Keep writes,
+            // so a live report never has to infer one from the other. UI-thread
+            // call site (the popover's Keep), never the render or tap thread.
+            Telemetry.log(.localPlayback, "wizard_keep", [
+                "uid": id,
+                "latencyMs": String(Int(value)),
+                "trimMs": "0",
+            ])
+            // The reference floor is a function of the slowest known latency, so
+            // a new measurement can move it — and it must move FIRST: pushing a
+            // 640 ms latency against a 500 ms reference drives the delay onto
+            // its ≥ 0 clamp for as long as the two disagree. Both hops are
+            // enqueued from `stateQueue`, so `captureControlQueue` runs them in
+            // that order rather than whichever thread got there first. The
+            // reference itself comes back down only at ``endBTWizardRun()``,
+            // one hop later, with this measurement already in the table.
+            stateQueue.async {
+                self.updateBTReferenceBufferLocked()
+                self.captureControlQueue.async { [weak self] in
+                    self?.btSink?.setOffsetMs(Int(value), forDeviceUID: id)
+                    self?.btSink?.setTrimMs(0, forDeviceUID: id)
+                }
+            }
+        } else {
+            let stored = Int((btMeasuredLatencyMs(forDevice: id) ?? 0).rounded())
+            captureControlQueue.async { [weak self] in
+                self?.btSink?.setOffsetMs(stored, forDeviceUID: id)
+            }
+        }
+    }
+
+    // MARK: The wizard's first-tick ARM gate (roadmap 056 Part B)
+
+    /// Start polling for "everyone is playing". Ticks stay off until every
+    /// participating sink has opened its delay gate — or the ceiling expires —
+    /// so the FIRST audible tick is a true pair on every speaker instead of the
+    /// Mac ticking alone while a Bluetooth engine is still coming up (the
+    /// engine needs longer than the old fixed 3 s preamble allowed for).
+    /// `captureControlQueue`.
+    private func beginWizardArmGate(expecting uids: Set<String>) {   // captureControlQueue
+        cancelWizardArmGate()
+        scheduleWizardArmPoll(started: Date(), expecting: uids)
+    }
+
+    /// `captureControlQueue`. Idempotent.
+    private func cancelWizardArmGate() {   // captureControlQueue
+        wizardArmPollWork?.cancel()
+        wizardArmPollWork = nil
+    }
+
+    private func scheduleWizardArmPoll(started: Date, expecting uids: Set<String>) {
+        let work = DispatchWorkItem { [weak self] in
+            self?.pollWizardArmGate(started: started, expecting: uids)
+        }
+        wizardArmPollWork = work
+        captureControlQueue.asyncAfter(
+            deadline: .now() + wizardArmPollInterval, execute: work)
+    }
+
+    /// One arm-gate poll. `captureControlQueue`, which owns both sinks — and is
+    /// not a render or tap thread, so the one telemetry line at the end is
+    /// emitted where it belongs.
+    private func pollWizardArmGate(started: Date, expecting uids: Set<String>) {
+        wizardArmPollWork = nil
+        let waited = Date().timeIntervalSince(started)
+        let rendering = btSink?.renderingDeviceUIDs() ?? []
+        // `true` when there is no local sink at all: nothing to wait for.
+        let localReleased = syncedLocalSink?.hasStartedRendering ?? true
+        let everyoneReleased = uids.isSubset(of: rendering) && localReleased
+        // A minimum stretch of bed regardless (the Sonos Move power-gates its
+        // amplifier and swallows the first transients after silence), and a
+        // ceiling so a speaker that never releases cannot stall the run.
+        let ready = everyoneReleased && waited >= wizardArmMinimumBedSeconds
+        guard ready || waited >= wizardArmCeilingSeconds else {
+            scheduleWizardArmPoll(started: started, expecting: uids)
+            return
+        }
+        captureCoordinator?.armWizardTicks()
+        Telemetry.log(.localPlayback, "wizard_ticks_armed", [
+            "waitedMs": String(Int((waited * 1_000).rounded())),
+            "released": rendering.sorted().joined(separator: " "),
+            "localReleased": localReleased ? "1" : "0",
+            "timedOut": ready ? "0" : "1",
+        ])
+    }
+}
+
+/// Optional backend capability for the Mac's OWN device row (roadmap 056 Part
+/// 1) — same `backend as? Capability` posture as ``BTOutputControlling``, and
+/// `NativeBackend` is again the only conformer. The stored value stays in
+/// ``AppSettings/syncOffsetMs`` (one local device — a migration into
+/// `BTTrimStore` would buy nothing); this seam is only the LIVE APPLY.
+public protocol LocalSyncOffsetControlling: AnyObject {
+    /// ``AppSettings/syncOffsetMs`` was just written — bring the running local
+    /// sink onto the new value.
+    func noteLocalSyncOffsetChanged()
+    /// Push a CANDIDATE offset to the live sink without storing it — the
+    /// wizard's per-trial preview, the local twin of
+    /// ``BTOutputControlling/setBTWizardTrimPreview(_:forDevice:)``.
+    func setLocalTrimPreview(_ ms: Double)
+    /// End a preview: `keepMs` non-nil writes it to ``AppSettings``; `nil`
+    /// drops the override and puts the stored value back on the sink.
+    func endLocalTrimPreview(keepMs: Double?)
+}
+
+extension NativeBackend: LocalSyncOffsetControlling {
+
+    /// The offset the local sink should be running at right now: a live wizard
+    /// preview if one is in flight, else the stored setting. Read on the sink's
+    /// own anchor/rebuild path, so it takes a plain lock rather than a queue hop.
+    public func currentLocalSyncOffsetMs() -> Int {
+        if let preview = localTrimPreviewLock.withLock({ localTrimPreviewMs }) {
+            return Int(BTSyncTrim.clamp(preview).rounded())
+        }
+        return AppSettings().syncOffsetMs
+    }
+
+    public func noteLocalSyncOffsetChanged() {
+        applyLocalSyncOffsetLive()
+    }
+
+    public func setLocalTrimPreview(_ ms: Double) {
+        localTrimPreviewLock.withLock { localTrimPreviewMs = BTSyncTrim.clamp(ms) }
+        applyLocalSyncOffsetLive()
+    }
+
+    public func endLocalTrimPreview(keepMs: Double?) {
+        if let keepMs {
+            AppSettings().syncOffsetMs = Int(BTSyncTrim.quantise(keepMs))
+        }
+        localTrimPreviewLock.withLock { localTrimPreviewMs = nil }
+        applyLocalSyncOffsetLive()
+    }
+
+    /// Move the running local sink onto the current effective offset by handing
+    /// it the DELTA since the last one applied — a read-pointer seek in the
+    /// sink's delay line, which lands while the music plays. No debounce: a seek
+    /// is cheap, so the drawer's 60 ms stepper hold-repeat can have one each and
+    /// the control feels live under the finger.
+    ///
+    /// razor: the Mac's trim now costs a seek, not a session — the one remaining
+    /// rebuild is the sink's own fallback when the move is bigger than the ring
+    /// can replay (``SyncedLocalSink/applyUserOffsetDelta(ms:)``), which ±500 ms
+    /// against a multi-second ring never reaches in practice. Upgrade path if it
+    /// ever does: a bigger ring, not a re-anchor.
+    private func applyLocalSyncOffsetLive() {
+        captureControlQueue.async { [weak self] in
+            guard let self else { return }
+            // Read ON the queue, so the delta and the apply are one serialized
+            // step: a burst of stepper repeats can never land out of order or
+            // double-count a value.
+            let effective = Double(self.currentLocalSyncOffsetMs())
+            let delta = effective - self.lastAppliedLocalOffsetMs
+            self.lastAppliedLocalOffsetMs = effective
+            guard delta != 0 else { return }
+            self.syncedLocalSink?.applyUserOffsetDelta(ms: delta)
+        }
+    }
 }
 
 /// The full lifecycle surface T-BACKEND drives on the delayed local sink: the
@@ -8806,11 +9883,27 @@ public protocol SyncedLocalSinkControlling: SyncedLocalPCMSink {
     /// left a BT-containing selection) — rebuild so the fresh session anchor
     /// re-samples the delay provider. Default no-op (spies).
     func requestReanchor(cause: String)
+
+    /// Roadmap 056 Part 1: the user's sync offset moved by `deltaMs` (positive =
+    /// the Mac plays later) — land it on the LIVE session, no rebuild. Same
+    /// default-no-op posture as `requestReanchor`.
+    func applyUserOffsetDelta(ms deltaMs: Double)
+
+    /// Whether this sink's delay gate has opened — the Mac's half of the
+    /// wizard's arm gate, the twin of ``BTSyncedSink/renderingDeviceUIDs()``.
+    var hasStartedRendering: Bool { get }
 }
 
 extension SyncedLocalSinkControlling {
     /// Default no-op — only the real ``SyncedLocalSink`` re-anchors.
     public func requestReanchor(cause: String) {}
+
+    /// Default no-op — only the real ``SyncedLocalSink`` has a delay line to seek.
+    public func applyUserOffsetDelta(ms deltaMs: Double) {}
+
+    /// Default "can't tell", read as nothing-to-wait-for — a lifecycle-only spy
+    /// must never hold the wizard's arm gate open to its ceiling.
+    public var hasStartedRendering: Bool { true }
 
     /// Default no-op so a spy that only exercises the enable/disable lifecycle
     /// compiles unchanged; ``SyncedLocalSink`` provides the real one. (Same posture
@@ -8855,15 +9948,33 @@ protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
     /// `Main × Group × Device` product, 0 while muted or first-mix-held (W3).
     /// Same default-no-op posture as `setTrimMs`.
     func setGain(_ gain: Float, forDeviceUID uid: String)
+    /// Rebuild every live sink under `cause`, so the next captured buffer
+    /// re-anchors it. The wizard's feed handoff is the only caller. Same
+    /// default-no-op posture as `setTrimMs`.
+    func reanchorAll(cause: String)
+    /// Per-device MEASURED output latency (roadmap 056 Part A) — see
+    /// ``BTSyncedSink/setOffsetMs(_:forDeviceUID:)``. Same default-no-op
+    /// posture as `setTrimMs`.
+    func setOffsetMs(_ ms: Int, forDeviceUID uid: String)
+    /// Move the BT-only reference timeline — see
+    /// ``BTSyncedSink/setBTOnlyBufferMs(_:)``. Same posture again.
+    func setBTOnlyBufferMs(_ ms: Int)
+    /// Per-device tone. A property swap on the running session — never a
+    /// rebuild. Same default-no-op posture as `setTrimMs`.
+    func setEQ(_ eq: DeviceEQ, forDeviceUID uid: String)
 }
 
 extension BTSyncedSinkControlling {
     func anchoredDeviceUIDs() -> Set<String>? { nil }
     func setTrimMs(_ ms: Double, forDeviceUID uid: String) {}
+    func reanchorAll(cause: String) {}
+    func setOffsetMs(_ ms: Int, forDeviceUID uid: String) {}
+    func setBTOnlyBufferMs(_ ms: Int) {}
     func usableTrimRangeMs(forDeviceUID uid: String) -> ClosedRange<Double> {
         -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs
     }
     func setGain(_ gain: Float, forDeviceUID uid: String) {}
+    func setEQ(_ eq: DeviceEQ, forDeviceUID uid: String) {}
 }
 
 extension BTSyncedSink: BTSyncedSinkControlling {}

@@ -360,6 +360,25 @@ public protocol OutputBackend: AnyObject {
     func setVolume(_ volume: Int, for id: String)
     func setMuted(_ muted: Bool, for id: String)
 
+    /// Set one device's tone settings. `commit` splits a live slider scrub from
+    /// the gesture that ends it, exactly as the Bluetooth sync trim does: `false`
+    /// only swaps filter coefficients (cheap, no persistence, no stream
+    /// re-topology unless the device's current stream cannot express the value);
+    /// `true` persists and recomputes which devices share which stream.
+    ///
+    /// Default no-op: only ``NativeBackend`` owns a PCM pipeline to filter.
+    func setEQ(_ eq: DeviceEQ, for id: String, commit: Bool)
+
+    /// Set the tone settings applied to the WHOLE mix, before the fan-out — so it
+    /// reaches AirPlay speakers, the Mac's own output and Bluetooth alike. Same
+    /// `commit` split as ``setEQ(_:for:commit:)``.
+    ///
+    /// Default no-op: only ``NativeBackend`` owns a PCM pipeline to filter.
+    func setMainOutEQ(_ eq: DeviceEQ, commit: Bool)
+
+    /// The whole-mix tone last set, or `.flat`.
+    var mainOutEQ: DeviceEQ { get }
+
     /// Replace the output set with exactly these devices. Activating a saved
     /// group calls this with the group's members — "one active group at a time,"
     /// groups behave like output presets (SPEC.md §9 interaction model).
@@ -445,6 +464,14 @@ public extension OutputBackend {
     /// is unknown. Only ``NativeBackend`` overrides them.
     func setMasterGain(mainOut: Int, group: Int, mirrorToSystemVolume: Bool) {}
     var systemOutputVolume: Int? { nil }
+
+    /// Backends with no PCM pipeline of their own have nothing to filter, so the
+    /// setting is simply not applied anywhere. ``NativeBackend`` runs the real
+    /// DSP; ``MockBackend`` stores and echoes so the UI can be developed offline.
+    func setEQ(_ eq: DeviceEQ, for id: String, commit: Bool) {}
+    func setMainOutEQ(_ eq: DeviceEQ, commit: Bool) {}
+
+    var mainOutEQ: DeviceEQ { .flat }
 }
 
 /// The optional latency-tuning capability (PLAN-LATENCY-SETTING.md). A backend

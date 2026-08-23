@@ -32,6 +32,12 @@ public final class MainOutRowView: NSView {
         func mainOutRow(_ row: MainOutRowView, didSelect target: MainOutTarget)
         func mainOutRow(_ row: MainOutRowView, didSetMaster volume: Int)
         func mainOutRow(_ row: MainOutRowView, didSetMuted muted: Bool)
+        /// The user asked for the WHOLE MIX's Equalizer — the "Equalizer…"
+        /// context-menu item, or a click on this row's icon, which pops the
+        /// same menu. The host deep-links to the Groups screen's Main Audio
+        /// page; this row edits no tone (owner decision 2026-08-22: EQ never
+        /// lives on the Mixer). Default no-op.
+        func mainOutRowDidRequestEqualizer(_ row: MainOutRowView)
     }
 
     /// One option in the selector, kept alongside its menu item so a selection
@@ -71,7 +77,7 @@ public final class MainOutRowView: NSView {
     private let meterView = LevelMeterView(thickness: PopoverColumnGrid.masterMeterThickness)
     /// Leading speaker icon (restored — ahh reverted the slider to the original
     /// slim-track design, which does not draw an in-track glyph).
-    private let iconView = NSImageView()
+    private let iconView = MenuTriggerImageView()
     /// The connection **halo ring** around the Main Out icon (Warm Signal v3
     /// §3.2 Main Out note): reflects the AGGREGATE connection lifecycle of the
     /// active Audio Out target's members — **pending** (dashed breathing) during
@@ -254,7 +260,7 @@ public final class MainOutRowView: NSView {
             if option.isHeader {
                 item.isEnabled = false
                 item.attributedTitle = NSAttributedString(
-                    string: option.title.uppercased(),
+                    string: option.title,
                     attributes: [
                         .font: Tokens.Font.captionEmphasized,
                         .foregroundColor: Tokens.Color.tertiaryLabel,
@@ -319,11 +325,10 @@ public final class MainOutRowView: NSView {
         meterView.translatesAutoresizingMaskIntoConstraints = false
 
         iconView.translatesAutoresizingMaskIntoConstraints = false
-        // ahh's requested icon `hifispeaker.arrow.forward.fill` was introduced in
-        // macOS 15 (Sequoia); it returns nil below macOS 15 (the deployment target is macOS 14),
-        // so it's listed FIRST — it auto-upgrades to the exact symbol once the OS is
-        // new enough. Below macOS 15 `hifispeaker.fill` (always available) is the
-        // visible fallback (ahh's choice).
+        // One definition of the Main Audio glyph, shared with the Groups
+        // screen's Main Audio page: `DeviceIcon.mainAudioSymbolName` owns the
+        // owner's `hifispeaker.arrow.forward.fill` and its below-macOS-15
+        // fallback, so the two surfaces can never draw different speakers.
         // Match the device rows' glyph sizing (2026-07-17): size the symbol to
         // fill the shared 26pt icon box so the Main Out icon reads at the same
         // scale as the device icons below it (without a config it renders at the
@@ -331,13 +336,14 @@ public final class MainOutRowView: NSView {
         let iconConfig = NSImage.SymbolConfiguration(pointSize: PopoverColumnGrid.iconGlyphPointSize,
                                                      weight: .regular)
         iconView.imageScaling = .scaleProportionallyDown
-        for name in ["hifispeaker.arrow.forward.fill", "hifispeaker.fill"] {
-            if let image = NSImage(systemSymbolName: name, accessibilityDescription: "Main Out")?
-                .withSymbolConfiguration(iconConfig) {
-                iconView.image = image
-                break
-            }
-        }
+        iconView.image = NSImage(systemSymbolName: DeviceIcon.mainAudioSymbolName,
+                                 accessibilityDescription: "Main Out")?
+            .withSymbolConfiguration(iconConfig)
+        // The icon is the visible door to this row's menu. Main Audio always
+        // has an Equalizer, so unlike a device row it is armed once, here, and
+        // never disarmed.
+        iconView.onPress = { [weak self] in self?.presentIconMenu() }
+        iconView.setAccessibilityLabel("Main Audio options")
         // Match device row icon styling (2026-07-17): neutral gray, not accent.
         // Consistency across System and Devices sections — all icons are identity
         // only, connection status lives on the icon as a corner badge.
@@ -735,6 +741,70 @@ public final class MainOutRowView: NSView {
     public func test_dragMaster(to value: Int) {
         delegate?.mainOutRow(self, didSetMaster: value)
     }
+
+    /// The row's context menu exactly as `menu(for:)` builds it. Tests
+    /// dispatch items via `performActionForItem(at:)` (real AppKit menu
+    /// dispatch), never the delegate shortcut.
+    public func test_contextMenu() -> NSMenu { buildContextMenu() }
+
+    /// A click on the row ICON, through the same builder the live click uses.
+    public func test_clickIcon() -> NSMenu? { presentIconMenu() }
+
+    /// The icon's spoken identity as a menu button.
+    public var test_iconAXLabel: String? { iconView.accessibilityLabel() }
+
+    // MARK: Context menu — the Equalizer door
+    //
+    // The device rows' idiom, one item shorter: Main Audio has tone but no
+    // Bluetooth alignment. Two ways in, one builder — a right-click anywhere
+    // the subviews don't claim (AppKit's `menu(for:)`, so VoiceOver's "show
+    // menu" shares the path), and a click on the icon.
+
+    public override func menu(for event: NSEvent) -> NSMenu? {
+        buildContextMenu()
+    }
+
+    private func buildContextMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let eq = NSMenuItem(title: "Equalizer…",
+                            action: #selector(equalizerMenuItemSelected(_:)),
+                            keyEquivalent: "")
+        eq.target = self
+        menu.addItem(eq)
+        return menu
+    }
+
+    /// The on-screen `popUp` BLOCKS, so it is `HeadlessRuntime`-gated exactly
+    /// like the popover's "+" menu; the built menu is returned either way so
+    /// tests dispatch against the very menu a user would see.
+    @discardableResult
+    private func presentIconMenu() -> NSMenu? {
+        let menu = buildContextMenu()
+        if !HeadlessRuntime.isActive {
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: 0), in: iconView)
+        }
+        return menu
+    }
+
+    @objc private func equalizerMenuItemSelected(_ sender: NSMenuItem) {
+        delegate?.mainOutRowDidRequestEqualizer(self)
+    }
+
+    /// A pointing hand over the icon, matching the device rows: the icon is a
+    /// door, so it has to look like one.
+    public override func resetCursorRects() {
+        super.resetCursorRects()
+        addCursorRect(convert(iconView.bounds, from: iconView), cursor: .pointingHand)
+    }
+}
+
+// MARK: - Delegate defaults
+
+public extension MainOutRowView.Delegate {
+    /// Default no-op — only the popover can deep-link to the Groups screen's
+    /// Main Audio page.
+    func mainOutRowDidRequestEqualizer(_ row: MainOutRowView) {}
 }
 
 // MARK: - Continuous rail origin hook (Warm Signal v4 §Call-1)

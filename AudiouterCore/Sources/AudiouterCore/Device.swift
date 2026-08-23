@@ -54,6 +54,17 @@ public struct Device: Identifiable, Equatable, Sendable {
         }
     }
 
+    /// Why a stored EQ is not reaching the audio right now. Both cases keep the
+    /// user's values intact; they differ only in what the UI must say.
+    public enum EQBypassReason: Equatable, Sendable {
+        /// More distinct EQ settings are in play than the engine has streams
+        /// for, so this device streams flat (`EQStreamTopology`'s loser).
+        case streamBudget
+        /// Apps are routed straight to this speaker, so its audio comes from the
+        /// per-app mixer and never passes the whole-system EQ stage at all.
+        case perAppRouting
+    }
+
     /// Stable identity — the Bonjour service name / device id for AirPlay
     /// receivers; the Core Audio `kAudioDevicePropertyDeviceUID` for
     /// `.bluetooth` devices. Survives a device dropping off (the network or
@@ -96,6 +107,17 @@ public struct Device: Identifiable, Equatable, Sendable {
     public var volume: Int
     public var isMuted: Bool
 
+    /// This speaker's own tone settings — one EQ per device, wherever it appears.
+    /// Set through `OutputBackend.setEQ(_:for:commit:)` and echoed back like
+    /// `volume`; the UI never writes it directly.
+    public var eq: DeviceEQ
+
+    /// Why this device's stored EQ is NOT currently audible, or `nil` when it is
+    /// applied. The values are untouched either way — this is the only thing
+    /// standing between the UI and claiming an inaudible EQ is applied, and the
+    /// REASON is carried because the two cases need different sentences.
+    public var eqBypassReason: EQBypassReason?
+
     /// In the backend's current OUTPUT set — i.e. this device is currently being
     /// streamed to. Under the SPEC §9b Main Out model this is decided by the Main
     /// Out target (a group's members, or the AirPlay members of Selected Devices),
@@ -129,6 +151,8 @@ public struct Device: Identifiable, Equatable, Sendable {
         isSelected: Bool = false,
         isLocalDevice: Bool = false,
         connectionState: ConnectionState = .off,
+        eq: DeviceEQ = .flat,
+        eqBypassReason: EQBypassReason? = nil,
         castVolumeLagSeconds: Int? = nil
     ) {
         self.id = id
@@ -141,6 +165,8 @@ public struct Device: Identifiable, Equatable, Sendable {
         self.isSelected = isSelected
         self.isLocalDevice = isLocalDevice
         self.connectionState = connectionState
+        self.eq = eq
+        self.eqBypassReason = eqBypassReason
         self.castVolumeLagSeconds = castVolumeLagSeconds
     }
 }

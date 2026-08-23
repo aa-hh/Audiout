@@ -201,6 +201,10 @@ public final class SyncedLocalSink: @unchecked Sendable {
         deinterleaveScratch.deallocate()
     }
 
+    /// Whether the delay gate has opened — the Mac's half of the alignment
+    /// wizard's arm gate, the twin of ``BTDeviceSink/hasStartedRendering``.
+    public var hasStartedRendering: Bool { stateLock.withLock { released } }
+
     /// Signed residual phase error (ns) captured at release — the seam
     /// T-SPIKE-PHASE reads and T-CORRECTION drives to zero.
     public var latestPhaseErrorNanos: Int64 {
@@ -399,6 +403,109 @@ public final class SyncedLocalSink: @unchecked Sendable {
         performLifecycleRebuild()
     }
 
+    // MARK: T-OFFSET-UI — live trim seek (roadmap 056 Part 1)
+
+    /// Apply a live change of `deltaMs` to the user sync offset (positive = the
+    /// Mac plays LATER) WITHOUT rebuilding the sink, so a stepper click no longer
+    /// silences the Mac for a whole reference delay. The Bluetooth twin is
+    /// ``BTDeviceSink/applyTrimDelta(ms:)`` and the three cases match it:
+    ///
+    ///  - **Not anchored** — nothing captured yet, and the anchor samples
+    ///    `userOffsetMs` itself, so there is nothing to do here.
+    ///  - **Anchored, gate still closed** — only silence so far, so there is
+    ///    nothing to stay continuous with: move the gate instead of the audio,
+    ///    re-measuring the delay (which re-reads the live offset) and re-deriving
+    ///    the target from the same anchor pts.
+    ///  - **Released** — the delay IS the audio piled up behind the read pointer,
+    ///    so the read position is the only lever. A LARGER offset plays LATER ⇒ a
+    ///    LONGER delay ⇒ MORE audio must sit between read and write ⇒ the read
+    ///    pointer moves BACKWARD, replaying history. Hence the negation — a 50/50
+    ///    that compiles either way, so both directions are pinned by test
+    ///    (`postReleaseOffsetDelta_shiftsPlayoutByExactlyTheDelta` and its mirror).
+    ///
+    /// Deliberately never runs `clearSessionState()`: a seek is not a new session,
+    /// so the anchor, the ring's contents and the resampler all stay as they are.
+    /// The T-CORRECTION loop cannot read the seek as drift to correct back out
+    /// either — its error term is `audioStart − target − consumedContentFrames`,
+    /// and moving the ring's read pointer touches none of the three.
+    ///
+    /// Callable from any thread off the render path; `NativeBackend` calls it on
+    /// `captureControlQueue`, the single control thread `requestShift` requires.
+    ///
+    /// razor: the splice is NOT crossfaded — a step lands as a raw discontinuity
+    /// (one 1 ms stepper tick = 48 frames at 48 kHz), where ``BTDelayLine`` hides
+    /// its seek under a 5 ms equal-power crossfade. Upgrade path if it ticks
+    /// audibly: lift that crossfade out of `BTDelayLine` into one type both rings
+    /// drain through, rather than growing a second copy of it here.
+    public func applyUserOffsetDelta(ms deltaMs: Double) {
+        stateLock.lock()
+        let isAnchored = anchored, hasReleased = released
+        stateLock.unlock()
+        guard isAnchored else { return }
+
+        if !hasReleased {
+            switch movePreReleaseGate() {
+            case .moved, .sessionGone: return
+            case .released: break
+            }
+        }
+
+        // A whole-frame move, so the ring's frame alignment survives it.
+        let deltaSamples = Int((deltaMs / 1_000 * renderSampleRate).rounded()) * channelCount
+        guard deltaSamples != 0 else { return }
+        let shift = -deltaSamples
+        let room = ring.seekRoomSamples
+        guard shift < 0 ? -shift <= room.backward : shift <= room.forward else {
+            // Beyond what the ring can replay (or skip): the only way to land a
+            // move this big is a fresh session. THE one remaining rebuild.
+            requestReanchor(cause: "offset_change")
+            return
+        }
+        ring.requestShift(samples: shift)
+    }
+
+    /// What ``movePreReleaseGate()`` found once it re-took the lock. The two
+    /// ways it can fail to move the gate are OPPOSITES and a plain `false`
+    /// conflated them: a gate that OPENED wants the seek, a session that went
+    /// AWAY wants nothing at all.
+    private enum PreReleaseGateMove {
+        /// The release target was re-derived; the delta is fully applied.
+        case moved
+        /// The gate opened while the delay was being measured — there is now
+        /// audio to stay continuous with, so the caller seeks instead.
+        case released
+        /// A rebuild cleared the session under the measurement. The ring has
+        /// been reset and the NEXT anchor samples the live offset itself, so a
+        /// shift parked now would land the same delta a second time.
+        case sessionGone
+    }
+
+    /// The pre-release half of ``applyUserOffsetDelta(ms:)``: re-derive the
+    /// release target from a freshly-measured delay. The whole decision is made
+    /// from the state observed under ONE lock take, so the caller never acts on
+    /// a session that has already gone.
+    private func movePreReleaseGate() -> PreReleaseGateMove {
+        // Measured OFF the lock: `measureTotalDelayNanos` probes Core Audio for
+        // the device latency, far too long to hold a lock the render path
+        // `try()`s every cycle (a missed `try()` is a silent render cycle).
+        let delay = measureTotalDelayNanos()
+        return stateLock.withLock {
+            guard anchored else { return .sessionGone }
+            guard !released else { return .released }
+            // The anchor pts, recovered from the two values it produced rather
+            // than stored a third time: `target == anchorPts + cachedDelay`.
+            let anchorPtsNanos = targetReleaseNanos &- (cachedTotalDelayNanos ?? 0)
+            cachedTotalDelayNanos = delay
+            targetReleaseNanos = SyncTiming.targetReleaseMonotonicNanos(
+                anchorPtsNanos: anchorPtsNanos, totalDelayNanos: delay)
+            return .moved
+        }
+    }
+
+    /// Test seam: the phase-lock loop's current correction (ppm) — the readout a
+    /// seek must leave untouched.
+    var phaseCorrectionPpmForTesting: Double { phaseController.correctionPpm }
+
     /// Wired externally to `NSWorkspace.willSleepNotification`. `AudiouterCore`
     /// must never import AppKit (package rule, `AudiouterCore/AGENTS.md`), so —
     /// same idiom as ``OutputBackend/handleSystemWillSleep()`` — this is a plain
@@ -499,6 +606,7 @@ public final class SyncedLocalSink: @unchecked Sendable {
                 Telemetry.log(.localPlayback, "sync_session_anchored", [
                     "delayNanos": "\(delay)",
                     "delayMs": String(format: "%.1f", Double(delay) / 1_000_000),
+                    "anchorPtsNanos": "\(ptsNanos)",
                 ])
             }
             stateLock.unlock()
@@ -605,6 +713,35 @@ public final class SyncedLocalSink: @unchecked Sendable {
                     if plan.releasesThisCycle {
                         released = true
                         shouldDrain = true
+                        // Fix 4: the same gate-open catch-up
+                        // `BTDeviceSink.catchUpToTargetLocked` applies
+                        // (`BTSyncedSink.swift`) — a slow `engine.start()` can
+                        // push this cycle past `targetReleaseNanos`, and the
+                        // ring is a plain FIFO with no catch-up of its own, so
+                        // releasing its oldest frame here would make the
+                        // effective delay "however late the engine took to
+                        // start," permanently, for the whole session. Counter
+                        // arithmetic only, still inside `stateLock`.
+                        let overshootNanos = max(0, cycleStartMonotonicNanos &- targetReleaseNanos)
+                        if overshootNanos > 0 {
+                            let wanted = Int(
+                                (Double(overshootNanos) / 1_000_000_000 * renderSampleRate).rounded())
+                            let skippedFrames = ring.skipForward(samples: wanted * channelCount) / channelCount
+                            // Unlike the BT twin, this sink re-reads
+                            // `targetReleaseNanos` every cycle to drive its PI
+                            // phase loop below; leaving the target unmoved
+                            // would make that loop read the overshoot as phase
+                            // error and drain the frames just skipped a SECOND
+                            // time (double correction → underrun). Advancing it
+                            // by exactly what was skipped — partial if the ring
+                            // held less than the overshoot, matching the BT
+                            // twin's `partial` semantics — keeps playout
+                            // pts-true and the release-cycle phase error ~0.
+                            let nsPerFrameAtRelease = 1_000_000_000.0 / renderSampleRate
+                            targetReleaseNanos &+= Int64(
+                                (Double(skippedFrames) * nsPerFrameAtRelease).rounded())
+                            target = targetReleaseNanos
+                        }
                     }
                 }
             }
@@ -698,6 +835,13 @@ private final class InterleavedFloatRing {
     // no barrier is paid on this path.
     private let droppedWritesPtr: UnsafeMutablePointer<Int>
     private let droppedSamplesPtr: UnsafeMutablePointer<Int>
+    // T-OFFSET-UI live trim seek. Two monotonic words with exactly ONE writer
+    // each — the same discipline as head/tail, and why neither needs an atomic.
+    // A single "pending" word both threads wrote could silently swallow a shift
+    // mid-scrub; here the consumer only ever advances its own word to a value it
+    // has already read. Same design as `BTDelayLine`'s pair.
+    private let requestedShiftPtr: UnsafeMutablePointer<Int>   // control-thread-owned
+    private let appliedShiftPtr: UnsafeMutablePointer<Int>     // consumer-owned
 
     init(minimumCapacitySamples: Int) {
         var cap = 1
@@ -714,6 +858,10 @@ private final class InterleavedFloatRing {
         self.droppedSamplesPtr = UnsafeMutablePointer<Int>.allocate(capacity: 1)
         droppedWritesPtr.initialize(to: 0)
         droppedSamplesPtr.initialize(to: 0)
+        self.requestedShiftPtr = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        self.appliedShiftPtr = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        requestedShiftPtr.initialize(to: 0)
+        appliedShiftPtr.initialize(to: 0)
     }
 
     deinit {
@@ -722,6 +870,8 @@ private final class InterleavedFloatRing {
         tailPtr.deallocate()
         droppedWritesPtr.deallocate()
         droppedSamplesPtr.deallocate()
+        requestedShiftPtr.deallocate()
+        appliedShiftPtr.deallocate()
     }
 
     /// Cumulative producer chunks dropped on overflow (never reset — the
@@ -752,9 +902,59 @@ private final class InterleavedFloatRing {
         return true
     }
 
+    /// How far the read position can move, in samples: `forward` is the audio
+    /// waiting to be played, `backward` the intact history behind it — intact
+    /// precisely because a producer out of room drops its chunk rather than
+    /// overwrite, and fills from the head end first.
+    ///
+    /// razor: an ADVISORY bound for ``SyncedLocalSink/applyUserOffsetDelta(ms:)``'s
+    /// "does this fit, or must I re-anchor?" decision, read from the control
+    /// thread while both other threads run — `seek` below clamps for real. The
+    /// window it can be wrong by is one render cycle's worth of samples against
+    /// seconds of room, so a genuine near-miss re-anchors, which is the safe side.
+    var seekRoomSamples: (forward: Int, backward: Int) {
+        let h = headPtr.pointee
+        let t = tailPtr.pointee
+        OSMemoryBarrier()
+        let used = (h &- t) & mask
+        return (forward: used, backward: capacity - 1 - used)
+    }
+
+    /// Ask the consumer to move the read position by `samples` (negative =
+    /// replay history = a LONGER delay). Non-blocking and lossless: the word
+    /// only ever grows by the requested amount, so shifts from a held-down
+    /// stepper accumulate instead of a newer one overwriting an unconsumed
+    /// older one. CONTROL THREAD ONLY (its single writer).
+    func requestShift(samples: Int) {
+        guard samples != 0 else { return }
+        requestedShiftPtr.pointee = requestedShiftPtr.pointee &+ samples
+        OSMemoryBarrier()                 // release: publish before the consumer's acquire
+    }
+
+    /// Take whatever shift the control thread has asked for since the last call
+    /// and move the read position by it, clamped to what the ring actually
+    /// holds. Consumer side, so `tailPtr` keeps its single writer.
+    private func applyPendingShift() {
+        OSMemoryBarrier()                 // acquire: see the control thread's word
+        let requested = requestedShiftPtr.pointee
+        let delta = requested &- appliedShiftPtr.pointee
+        guard delta != 0 else { return }
+        appliedShiftPtr.pointee = requested
+
+        let t = tailPtr.pointee
+        let used = (headPtr.pointee &- t) & mask
+        let applied = delta < 0
+            ? -min(-delta, capacity - 1 - used)
+            : min(delta, used)
+        guard applied != 0 else { return }
+        OSMemoryBarrier()                 // release: reads land before the producer can reclaim
+        tailPtr.pointee = (t &+ applied) & mask
+    }
+
     /// Consumer side. Copies up to `maxCount` available samples into `dst`,
     /// returning the count copied.
     func read(into dst: UnsafeMutablePointer<Float>, maxCount: Int) -> Int {
+        applyPendingShift()
         let t = tailPtr.pointee
         let h = headPtr.pointee
         OSMemoryBarrier()                 // acquire: see the producer's data
@@ -769,11 +969,34 @@ private final class InterleavedFloatRing {
         return count
     }
 
-    /// Drop all buffered samples. Only safe while neither thread is active (call
-    /// from `stop()`).
+    /// Consumer-thread-only: drop up to `samples` of buffered content outright
+    /// (no copy) and return how many were actually skipped, clamped to what is
+    /// available. The twin of `BTDelayLine`'s consumer-owned seek
+    /// (`ring.seek(byFrames:)` in `BTSyncedSink.swift`) — deliberately NOT
+    /// routed through ``requestShift(samples:)``: that word has exactly one
+    /// writer, the control thread, and the caller here is the render thread's
+    /// release-gate catch-up, where nothing has played yet for a crossfade to
+    /// be continuous with. Frame alignment holds because both the ring's writes
+    /// and the caller's argument are whole-frame multiples.
+    func skipForward(samples: Int) -> Int {
+        guard samples > 0 else { return 0 }
+        let t = tailPtr.pointee
+        let h = headPtr.pointee
+        OSMemoryBarrier()                 // acquire: see the producer's data
+        let available = (h &- t) & mask
+        let applied = min(available, samples)
+        guard applied != 0 else { return 0 }
+        OSMemoryBarrier()                 // release: finish "reading" before advancing tail
+        tailPtr.pointee = (t &+ applied) & mask
+        return applied
+    }
+
+    /// Drop all buffered samples and any un-consumed shift. Only safe while
+    /// neither thread is active (call from `stop()`).
     func reset() {
         OSMemoryBarrier()
         tailPtr.pointee = headPtr.pointee
+        appliedShiftPtr.pointee = requestedShiftPtr.pointee
         OSMemoryBarrier()
     }
 }

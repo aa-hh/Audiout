@@ -6,14 +6,17 @@ import AudiouterSharedUI
 /// Tiny layout kit shared by the Settings panes so every pane reads as one
 /// consistent macOS form: a fixed-width column of `title · optional subtitle`
 /// rows with the control right-aligned, standard insets, and a fitting height
-/// that `SettingsRootViewController` measures and publishes to its host
-/// (AppKit's tab controller does NOT do that for you — see the sizing-trap note
-/// there). Deliberately minimal — panes stay small, so this is a few helpers,
-/// not a framework.
+/// the pane publishes as its own. Deliberately minimal — panes stay small, so
+/// this is a few helpers, not a framework.
 enum SettingsForm {
 
-    /// Fixed content width for every pane (settings windows don't reflow).
-    static let contentWidth: CGFloat = 460
+    /// The pane column inside the one fixed surface frame:
+    /// `SurfaceLayout.width` minus the section sidebar. The pane host pins the
+    /// pane's edges at REQUIRED priority and the pane holds this width at
+    /// `.defaultHigh`, so a 1pt split divider can shave it without a conflict
+    /// while headless callers (tests, `settings-snapshot`), which have no host
+    /// to pin them, still get a definite width.
+    static let contentWidth: CGFloat = SurfaceLayout.contentPaneWidth
 
     /// Standard left/right pane margin — shared by `paneView(rows:)` and
     /// `AudioSettingsViewController.loadView()`'s equivalent hand-rolled
@@ -157,10 +160,12 @@ enum SettingsForm {
         return container
     }
 
-    /// Stack `rows` into a pane view: fixed `contentWidth`, standard 20/18pt
-    /// insets, full-width rows. The caller assigns this to `NSViewController.view`;
-    /// the fixed width lets `view.fittingSize.height` drive `preferredContentSize`.
-    static func paneView(rows: [NSView]) -> NSView {
+    /// Stack `rows` into a pane view: `width` wide (the shared `contentWidth`
+    /// column unless a caller outside the surface frame says otherwise — About
+    /// keeps its own window's width), standard 20/18pt insets, full-width rows.
+    /// The caller assigns this to `NSViewController.view`; the width lets
+    /// `view.fittingSize.height` drive `preferredContentSize`.
+    static func paneView(rows: [NSView], width: CGFloat = contentWidth) -> NSView {
         let stack = NSStackView(views: rows)
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -171,8 +176,14 @@ enum SettingsForm {
         container.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(stack)
 
+        // `.defaultHigh`, not required: the pane host's edge pins own the real
+        // width once mounted, and a 1pt split divider must be able to shave
+        // this without a constraint conflict.
+        let widthConstraint = container.widthAnchor.constraint(equalToConstant: width)
+        widthConstraint.priority = .defaultHigh
+
         NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: contentWidth),
+            widthConstraint,
             stack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: horizontalPadding),
             stack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -horizontalPadding),
             stack.topAnchor.constraint(equalTo: container.topAnchor, constant: verticalPadding),

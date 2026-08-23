@@ -22,8 +22,12 @@ import AppKit
         var changes: [(ms: Double, committed: Bool)] = []
         var alignToggles: [Bool] = []
         var closeRequests = 0
+        var resetRequests = 0
         func syncDrawer(_ d: BTSyncDrawerView, didChangeTrimMs ms: Double, committed: Bool) {
             changes.append((ms, committed))
+        }
+        func syncDrawerDidRequestResetAlignment(_ d: BTSyncDrawerView) {
+            resetRequests += 1
         }
         func syncDrawer(_ d: BTSyncDrawerView, didToggleAlignTick active: Bool) {
             alignToggles.append(active)
@@ -35,10 +39,12 @@ import AppKit
 
     private func makeDrawer(trimMs: Double = 24, isSet: Bool = true,
                             usableRangeMs: ClosedRange<Double> = -500...500,
-                            alignTickActive: Bool = false) -> (BTSyncDrawerView, Spy) {
+                            alignTickActive: Bool = false,
+                            canReset: Bool = false) -> (BTSyncDrawerView, Spy) {
         let drawer = BTSyncDrawerView()
         drawer.configure(deviceName: "Kitchen Speaker", trimMs: trimMs, isSet: isSet,
-                         usableRangeMs: usableRangeMs, alignTickActive: alignTickActive)
+                         usableRangeMs: usableRangeMs, alignTickActive: alignTickActive,
+                         canReset: canReset)
         drawer.noteOpened(trimMs: trimMs)
         let spy = Spy()
         drawer.delegate = spy
@@ -101,6 +107,44 @@ import AppKit
         #expect(!drawer.test_revertEnabled)
         #expect(spy.changes.last?.ms == 24)
         #expect(spy.changes.last?.committed == true, "Revert applies AND persists")
+    }
+
+    // MARK: Reset alignment (roadmap 056) — the neighbour Revert is NOT
+
+    /// Only offered when there is something stored to clear; hidden, not
+    /// disabled, so an empty state carries no dead control to explain.
+    @Test func resetIsHiddenUntilThereIsSomethingStoredToClear() {
+        let (nothing, _) = makeDrawer(trimMs: 0, isSet: false, canReset: false)
+        #expect(!nothing.test_resetVisible)
+
+        let (stored, _) = makeDrawer(trimMs: 0, isSet: true, canReset: true)
+        #expect(stored.test_resetVisible)
+        #expect(stored.test_resetTitle == "Reset alignment",
+                "spelled out — a \"Revert\"/\"Reset\" pair is one glance from a wrong click")
+    }
+
+    /// Reset lands the drawer on NOT SET — a distinct destination from
+    /// Revert's, which restores the value the drawer opened on. It reports
+    /// through its own delegate call, never as a trim change of 0 (which the
+    /// host would store as a deliberate zero).
+    @Test func resetClearsTheValueAndReportsItsOwnGestureNotATrimOfZero() {
+        let (drawer, spy) = makeDrawer(trimMs: 24, isSet: true, canReset: true)
+        drawer.test_fireResetClick()
+        #expect(spy.resetRequests == 1)
+        #expect(spy.changes.isEmpty, "a reset is not a committed trim of 0")
+        #expect(drawer.test_trimMs == 0)
+        #expect(!drawer.test_isSet)
+        #expect(drawer.test_valueFieldText == "0 ms")
+        #expect(drawer.test_valueFieldAXValue == "Not set")
+        #expect(!drawer.test_resetVisible, "nothing left to reset")
+    }
+
+    /// The Revert baseline moves with the reset: a nudge that has just been
+    /// deleted is not a value to go back to.
+    @Test func resetMovesTheRevertBaselineWithIt() {
+        let (drawer, _) = makeDrawer(trimMs: 24, isSet: true, canReset: true)
+        drawer.test_fireResetClick()
+        #expect(!drawer.test_revertEnabled, "Revert must not offer the value just cleared")
     }
 
     // MARK: One stepper pair — 1 ms a click, 10 while ⇧ is held

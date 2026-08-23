@@ -502,6 +502,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             (self?.backend as? AppRouteConfiguring)?.setLocalPlaybackVolume(
                 volume: volume, bundleID: bundleID)
         }
+        // EQ lives on the GROUPS screen, never on the Mixer (owner decision
+        // 2026-08-22): a row's "Equalizer…" is a DOOR, and this is the hinge —
+        // it opens the surface on the speaker's own page (or the whole mix's).
+        popoverController.onOpenEqualizer = { [weak self] id in
+            self?.showSurface(.groups,
+                              selecting: id == PopoverController.mainOutEQID
+                                  ? .mainOut : .device(id: id))
+        }
         // BT-UI: the OUTPUT DEVICES "+" menu's "Pair a Bluetooth speaker…" —
         // pairing is Apple-owned, so the one-tap Settings trip is the whole
         // affordance; the fresh row auto-appears on return (connect
@@ -538,6 +546,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             (self?.backend as? BTOutputControlling)?.btUsableTrimRangeMs(forDevice: deviceID)
                 ?? (-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
         }
+        // Roadmap 056: the drawer's "Reset alignment" — delete the stored
+        // measurement AND nudge, and re-push the live sink.
+        popoverController.onResetBTAlignment = { [weak self] deviceID in
+            (self?.backend as? BTOutputControlling)?.resetBTAlignment(forDevice: deviceID)
+        }
         popoverController.onAlignTickActiveChange = { [weak self] active in
             (self?.backend as? BTOutputControlling)?.setBTAlignTickActive(active)
         }
@@ -556,8 +569,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             (self?.backend as? BTOutputControlling)?
                 .endBTWizardTrimPreview(forDevice: deviceID, keepMs: keepMs)
         }
-        popoverController.onBTWizardTickActive = { [weak self] active in
-            (self?.backend as? BTOutputControlling)?.setBTWizardTickActive(active)
+        popoverController.onBTWizardTickActive = { [weak self] active, target, reference in
+            (self?.backend as? BTOutputControlling)?
+                .setBTWizardTickActive(active, btTargetDeviceID: target,
+                                       btReferenceDeviceID: reference)
+        }
+        popoverController.onBTWizardEndRun = { [weak self] in
+            (self?.backend as? BTOutputControlling)?.endBTWizardRun()
+        }
+        popoverController.onBTWizardTempo = { [weak self] bpm in
+            (self?.backend as? BTOutputControlling)?.setBTWizardTickTempo(bpm: bpm)
+        }
+        // Roadmap 056 Part A: a Bluetooth run measures the speaker's own
+        // LATENCY (the Mac is the zero), stored beside the trim rather than
+        // overwriting it.
+        popoverController.btLatencyProvider = { [weak self] deviceID in
+            (self?.backend as? BTOutputControlling)?.btMeasuredLatencyMs(forDevice: deviceID)
+        }
+        popoverController.btLatencyRangeProvider = { [weak self] deviceID in
+            (self?.backend as? BTOutputControlling)?.btWizardLatencyRangeMs(forDevice: deviceID)
+                ?? (-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
+        }
+        popoverController.onBTWizardLatencyPreview = { [weak self] ms, deviceID, halfWidthMs in
+            (self?.backend as? BTOutputControlling)?
+                .setBTWizardLatencyPreview(ms, forDevice: deviceID, halfWidthMs: halfWidthMs)
+        }
+        popoverController.onBTWizardEndLatencyPreview = { [weak self] deviceID, keepMs in
+            (self?.backend as? BTOutputControlling)?
+                .endBTWizardLatencyPreview(forDevice: deviceID, keepMs: keepMs)
+        }
+        // Roadmap 056 Part 1: the Mac's own row gets the identical SYNC
+        // surface. The value lives in `AppSettings`, so reading and writing it
+        // work under ANY backend — only the live apply is native-gated, exactly
+        // like the Bluetooth hooks above.
+        popoverController.localTrimProvider = { [weak self] in
+            Double(self?.settings.syncOffsetMs ?? 0)
+        }
+        popoverController.localTrimIsSetProvider = { [weak self] in
+            self?.settings.isSyncOffsetSet ?? false
+        }
+        popoverController.onSetLocalTrim = { [weak self] ms in
+            guard let self else { return }
+            self.settings.syncOffsetMs = Int(ms)
+            (self.backend as? LocalSyncOffsetControlling)?.noteLocalSyncOffsetChanged()
+        }
+        popoverController.onResetLocalTrim = { [weak self] in
+            guard let self else { return }
+            // Cleared, not zeroed — `isSyncOffsetSet` reads the key's existence.
+            self.settings.clearSyncOffset()
+            (self.backend as? LocalSyncOffsetControlling)?.noteLocalSyncOffsetChanged()
+        }
+        popoverController.onLocalTrimPreview = { [weak self] ms in
+            (self?.backend as? LocalSyncOffsetControlling)?.setLocalTrimPreview(ms)
+        }
+        popoverController.onLocalTrimEndPreview = { [weak self] keepMs in
+            (self?.backend as? LocalSyncOffsetControlling)?.endLocalTrimPreview(keepMs: keepMs)
         }
         // Excluded apps (Settings › Audio) are un-routable: the popover reads this
         // to drop them from the Applications picker + rows.
@@ -1138,10 +1204,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Bring the surface up on `screen` — the one destination every "open X"
     /// affordance now shares (right-click menu, ⌘,, the header tabs' pre-claim
     /// fallbacks, and the post-Setup landing).
+    ///
+    /// `selecting` deep-links INTO the Groups screen (the popover's
+    /// "Equalizer…"), applied after the screen is up so the pane it names is
+    /// built and mounted. A device the Groups screen has not seen yet pends
+    /// there rather than being dropped.
     @MainActor
-    private func showSurface(_ screen: SurfaceScreen) {
+    private func showSurface(_ screen: SurfaceScreen, selecting: SidebarSelection? = nil) {
         surface.select(screen)
         surface.show(anchorRect: statusAnchorRect())
+        if let selecting { mixerWindowController?.select(selecting) }
     }
 
     /// The Groups screen's content: `MixerWindowController`'s split view. The
@@ -1154,14 +1226,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             groupController: groupController,
             deviceIconController: deviceIconController)
         mixerWindowController = controller
+        // The two Equalizer seams. This screen owns no backend (its own
+        // AGENTS.md); the tone it reports is applied here, at the one place
+        // that holds one. A live scrub applies without persisting; the
+        // gesture that ends it does both — the backends make that split.
+        controller.onSetDeviceEQ = { [weak self] eq, deviceID, committed in
+            self?.backend.setEQ(eq, for: deviceID, commit: committed)
+        }
+        controller.onSetMainOutEQ = { [weak self] eq, committed in
+            self?.backend.setMainOutEQ(eq, commit: committed)
+        }
+        controller.mainOutEQProvider = { [weak self] in self?.backend.mainOutEQ ?? .flat }
         controller.update(devices: Array(devicesByID.values))
         return controller.contentController
     }
 
-    /// The Settings screen's content, built on the first visit to the Settings
-    /// tab. In-content tabs (`.segmentedControlOnTop`) so the panes' own tab
-    /// strip renders BENEATH the surface's screen switcher rather than in a
-    /// title bar the surface doesn't have.
+    /// The Settings screen's content, built on the first visit: a Groups-style
+    /// sidebar of sections and one pane.
     @MainActor
     private func makeSettingsRoot() -> SettingsRootViewController {
         let general = GeneralSettingsViewController(loginItem: SMAppServiceLoginItem(),
@@ -1185,11 +1266,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                 wakeRestore: makeWakeRestoreSettingModel())
         audio.onChange = { [weak self] in self?.handleExcludedAppsChanged() }
 
-        return SettingsRootViewController(tabs: [
+        return SettingsRootViewController(sections: [
             .init(title: "General", symbolName: "gearshape", viewController: general),
             .init(title: "Appearance", symbolName: "paintpalette", viewController: appearance),
             .init(title: "Audio", symbolName: "speaker.wave.2", viewController: audio),
-        ], tabStyle: .segmentedControlOnTop)
+        ])
     }
 
     /// The menu-bar item's frame in screen coordinates, for anchoring the

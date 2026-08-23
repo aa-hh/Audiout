@@ -191,6 +191,27 @@ import Testing
         #expect(AppSettings(defaults: defaults).syncOffsetMs == 0)
     }
 
+    /// "Tuned or never tuned?" — the question the value alone cannot answer,
+    /// and what the SYNC chip's "Not set" readout keys off.
+    @Test func isSyncOffsetSetDistinguishesAnExplicitZeroFromUnset() {
+        #expect(AppSettings(defaults: defaults).isSyncOffsetSet == false)
+        let settings = AppSettings(defaults: defaults)
+        settings.syncOffsetMs = 0
+        #expect(AppSettings(defaults: defaults).isSyncOffsetSet,
+                "a Mac deliberately trimmed to 0 ms is tuned")
+    }
+
+    /// The drawer's "Reset alignment" on the Mac's row (roadmap 056): the
+    /// entry is DELETED, so the row goes back to "Not set". Writing 0 would
+    /// leave it tuned, reading "0 ms" forever.
+    @Test func clearSyncOffsetDeletesTheEntryRatherThanWritingZero() {
+        let settings = AppSettings(defaults: defaults)
+        settings.syncOffsetMs = -75
+        settings.clearSyncOffset()
+        #expect(AppSettings(defaults: defaults).isSyncOffsetSet == false)
+        #expect(AppSettings(defaults: defaults).syncOffsetMs == AppSettings.defaultSyncOffsetMs)
+    }
+
     @Test func syncOffsetClampsToBounds() {
         let settings = AppSettings(defaults: defaults)
         settings.syncOffsetMs = 10_000

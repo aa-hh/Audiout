@@ -121,15 +121,8 @@ public final class AudioSettingsViewController: NSViewController {
     // Advanced › Audio buffer state (all nil/untouched when `latency` is nil).
     private let bufferPopup = NSPopUpButton()
     private let bufferHint = SettingsForm.hintLabel()
-    // Advanced › Sync offset state (T-OFFSET-UI; mounts alongside the buffer
-    // control — same `latency != nil` native-backend gate, since the offset only
-    // feeds `SyncedLocalSink`, a native-only feature).
-    private let syncOffsetSlider = NSSlider()
-    private let syncOffsetValueLabel = NSTextField(labelWithString: "")
-    private let syncOffsetHint = SettingsForm.hintLabel()
-    private let syncOffsetHelpButton = NSButton()
-    // Advanced is a disclosure, collapsed by default (roadmap 050): buffer and
-    // sync offset are expert controls and don't deserve standing rows.
+    // Advanced is a disclosure, collapsed by default (roadmap 050): the buffer
+    // is an expert control and doesn't deserve a standing row.
     private let advancedDisclosure = NSButton()
     private let advancedContent = NSStackView()
     private let advancedClip = NSView()
@@ -218,8 +211,13 @@ public final class AudioSettingsViewController: NSViewController {
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(column)
+        // `.defaultHigh`, same reason as `SettingsForm.paneView(rows:width:)`:
+        // the pane host's edge pins own the real width once mounted, and a 1pt
+        // split divider must be able to shave this without a conflict.
+        let widthConstraint = container.widthAnchor.constraint(equalToConstant: SettingsForm.contentWidth)
+        widthConstraint.priority = .defaultHigh
         NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: SettingsForm.contentWidth),
+            widthConstraint,
             column.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: SettingsForm.horizontalPadding),
             column.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -SettingsForm.horizontalPadding),
             column.topAnchor.constraint(equalTo: container.topAnchor, constant: SettingsForm.verticalPadding),
@@ -385,19 +383,9 @@ public final class AudioSettingsViewController: NSViewController {
         "\(msFormatter.string(from: NSNumber(value: ms)) ?? String(ms)) ms"
     }
 
-    /// Format a signed offset as a bare, locale-aware "+N ms" / "−N ms" / "0 ms"
-    /// (numeric by design, same house rule as ``msLabel(_:)`` — no named preset
-    /// text). Unlike ``msLabel(_:)`` this can be negative, so the sign is made
-    /// explicit rather than relying on the formatter's default minus glyph.
-    private static func syncOffsetLabel(_ ms: Int) -> String {
-        let magnitude = msFormatter.string(from: NSNumber(value: abs(ms))) ?? String(abs(ms))
-        let sign = ms > 0 ? "+" : (ms < 0 ? "\u{2212}" : "")
-        return "\(sign)\(magnitude) ms"
-    }
-
     /// The Advanced sub-section: hairline + a **disclosure header** (collapsed
     /// by default, roadmap 050) whose content stack holds the Audio buffer row
-    /// (+ env-override note, or the apply-feedback row) and the sync-offset row.
+    /// (+ env-override note, or the apply-feedback row).
     /// Expanding/collapsing republishes `preferredContentSize`, which reaches
     /// the host via the same KVO path `rebuildList()` uses — no second path.
     private func makeAdvancedSectionViews() -> [NSView] {
@@ -596,7 +584,6 @@ public final class AudioSettingsViewController: NSViewController {
         // there's no CTA to carry that warning instead).
         bufferHint.stringValue = Self.bufferHintLine(latency.envOverrideMs ?? latency.initialMs)
         views.append(bufferHint)
-        views.append(contentsOf: makeSyncOffsetSectionViews())
 
         if let envMs = latency.envOverrideMs {
             let note = SettingsForm.label(
@@ -716,109 +703,14 @@ public final class AudioSettingsViewController: NSViewController {
         }
     }
 
-    // MARK: Advanced › Sync offset (T-OFFSET-UI)
-
-    /// The sync-offset sub-row: a slider (matching ``AppSettings/minSyncOffsetMs``…
-    /// ``AppSettings/maxSyncOffsetMs``) + a bare "±N ms" value label, same layout
-    /// idiom as the connect-volume row above. Applies immediately on change,
-    /// persist-only — unlike the Audio buffer control just above, this never
-    /// reconnects anything: it's a static bias `SyncedLocalSink` re-reads live
-    /// at its next connect/rebuild, not a value that requires tearing down a
-    /// live session to take effect.
-    private func makeSyncOffsetSectionViews() -> [NSView] {
-        syncOffsetSlider.translatesAutoresizingMaskIntoConstraints = false
-        syncOffsetSlider.minValue = Double(AppSettings.minSyncOffsetMs)
-        syncOffsetSlider.maxValue = Double(AppSettings.maxSyncOffsetMs)
-        syncOffsetSlider.integerValue = settings.syncOffsetMs
-        syncOffsetSlider.isContinuous = true
-        syncOffsetSlider.target = self
-        syncOffsetSlider.action = #selector(syncOffsetChanged)
-        syncOffsetSlider.setAccessibilityLabel("Local speaker sync offset")
-        syncOffsetSlider.widthAnchor.constraint(equalToConstant: 160).isActive = true
-
-        // Monospaced digits on the panel's well (roadmap 050); same width as
-        // the connect-volume readout so the sliders share a column.
-        let syncOffsetWell = SettingsForm.readoutWell(syncOffsetValueLabel, width: 56)
-        syncOffsetValueLabel.stringValue = Self.syncOffsetLabel(settings.syncOffsetMs)
-
-        // The long what-is-this explanation moved OFF the pane (roadmap 050 —
-        // no static paragraphs) into a stock help button's popover; the line
-        // beneath the row is a live hint instead.
-        syncOffsetHelpButton.translatesAutoresizingMaskIntoConstraints = false
-        syncOffsetHelpButton.bezelStyle = .helpButton
-        syncOffsetHelpButton.title = ""
-        syncOffsetHelpButton.target = self
-        syncOffsetHelpButton.action = #selector(syncOffsetHelpTapped)
-        syncOffsetHelpButton.setAccessibilityLabel("About local speaker sync offset")
-
-        let control = NSStackView(views: [syncOffsetSlider, syncOffsetWell, syncOffsetHelpButton])
-        control.orientation = .horizontal
-        control.alignment = .centerY
-        control.spacing = 8
-        control.translatesAutoresizingMaskIntoConstraints = false
-
-        // Live hint (spec §5.2) — re-written on every drag.
-        syncOffsetHint.stringValue = Self.syncOffsetHintLine(settings.syncOffsetMs)
-
-        return [SettingsForm.row(title: "Local speaker sync offset", control: control),
-                syncOffsetHint]
-    }
-
-    /// The sync-offset live hint: where this Mac's own speakers sit relative to
-    /// the AirPlay devices at the current value.
-    private static func syncOffsetHintLine(_ ms: Int) -> String {
-        switch ms {
-        case 0:      return "Your Mac plays in step with your speakers."
-        case ..<0:   return "Your Mac plays \(syncOffsetLabel(ms)) ahead of your speakers."
-        default:     return "Your Mac plays \(syncOffsetLabel(ms)) behind your speakers."
-        }
-    }
-
-    @objc private func syncOffsetHelpTapped() {
-        let text = SettingsForm.hintLabel(
-            "Fine-tune the delay on this Mac's own speakers when playing "
-            + "in sync with AirPlay devices. Raise it if the Mac plays ahead of "
-            + "your speakers, lower it if it plays behind. Takes effect the next "
-            + "time the Mac's speakers join the stream.")
-        text.preferredMaxLayoutWidth = 260
-
-        let content = NSViewController()
-        let container = NSView()
-        container.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(text)
-        NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: 280),
-            text.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
-            text.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
-            text.topAnchor.constraint(equalTo: container.topAnchor, constant: 10),
-            text.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -10),
-        ])
-        content.view = container
-
-        let popover = NSPopover()
-        popover.behavior = .transient
-        popover.contentViewController = content
-        popover.show(relativeTo: syncOffsetHelpButton.bounds, of: syncOffsetHelpButton, preferredEdge: .maxY)
-    }
-
-    @objc private func syncOffsetChanged() {
-        let ms = syncOffsetSlider.integerValue
-        syncOffsetValueLabel.stringValue = Self.syncOffsetLabel(ms)
-        syncOffsetHint.stringValue = Self.syncOffsetHintLine(ms)
-        settings.syncOffsetMs = ms
-    }
-
     // MARK: List
 
-    /// Repopulate the list from the controller and resize the pane to fit.
+    /// Repopulate the list from the controller and re-measure the pane.
     ///
-    /// Writing `preferredContentSize` is what makes the HOST grow too, but not
-    /// by itself: AppKit's tab controller never resizes its host (probed —
-    /// see the sizing-trap note on `SettingsRootViewController`). The write
-    /// below reaches the host only because `SettingsRootViewController`
-    /// observes each pane's `preferredContentSize` by KVO and republishes
-    /// `fittedContentSize` from there. Without that the pane would silently
-    /// clip when a user adds an excluded app.
+    /// Nothing outside this pane is resized by the write below: the surface
+    /// frame is fixed, so the pane's new height simply grows the scroll
+    /// document the Settings pane host wraps it in, and the extra rows become
+    /// scrollable content rather than a taller window.
     private func rebuildList() {
         for row in listStack.arrangedSubviews {
             listStack.removeArrangedSubview(row)
@@ -1103,47 +995,6 @@ public final class AudioSettingsViewController: NSViewController {
     public var test_applyStatusText: String? {
         _ = view
         return applyStatusLabel.isHidden ? nil : applyStatusLabel.stringValue
-    }
-
-    // MARK: Test-support hooks (Advanced › Sync offset — T-OFFSET-UI)
-
-    /// Whether the sync-offset section mounted (mirrors ``test_hasLatencySection``
-    /// — same native-backend gate).
-    public var test_hasSyncOffsetSection: Bool {
-        _ = view
-        return latency != nil
-    }
-
-    /// The slider's current ms value (mirrors the persisted setting).
-    public var test_syncOffsetMs: Int {
-        _ = view
-        return syncOffsetSlider.integerValue
-    }
-
-    /// The trailing "±N ms" label text.
-    public var test_syncOffsetValueLabel: String {
-        _ = view
-        return syncOffsetValueLabel.stringValue
-    }
-
-    /// The slider's `[min, max]` bounds — the UI can never select outside these.
-    public var test_syncOffsetBounds: (min: Int, max: Int) {
-        _ = view
-        return (Int(syncOffsetSlider.minValue), Int(syncOffsetSlider.maxValue))
-    }
-
-    /// Simulate the user dragging the sync-offset slider to `ms` (persists
-    /// immediately, same as a real drag).
-    public func test_setSyncOffset(ms: Int) {
-        _ = view
-        syncOffsetSlider.integerValue = ms
-        syncOffsetChanged()
-    }
-
-    /// The sync-offset live hint line (spec §5.2, roadmap 050).
-    public var test_syncOffsetHint: String {
-        _ = view
-        return syncOffsetHint.stringValue
     }
 
     // MARK: Test-support hooks (Advanced disclosure — roadmap 050)

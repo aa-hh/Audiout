@@ -63,6 +63,7 @@ public struct AppSettings {
         static let mainOutVolume = "audio.mainOutVolume"
         static let syncOffsetMs = "audio.syncOffsetMs"
         static let surfacePinned = "surface.pinned"
+        static let eqAdvancedExpanded = "eq.advancedExpanded"
     }
 
     /// The user-selectable sender start-buffer options in ms (Settings › Audio
@@ -255,6 +256,22 @@ public struct AppSettings {
         }
     }
 
+    /// Whether this Mac's sync trim has an ENTRY at all — the honest answer to
+    /// "tuned or never tuned?", which the value alone cannot give: a Mac
+    /// deliberately trimmed to exactly 0 ms IS tuned and must not read "Not
+    /// set". The local twin of ``BTOutputControlling/btHasSyncTrim(forDevice:)``.
+    public var isSyncOffsetSet: Bool {
+        defaults.object(forKey: Keys.syncOffsetMs) != nil
+    }
+
+    /// Delete the stored sync offset, returning this Mac to never-tuned
+    /// (roadmap 056: the drawer's "Reset alignment"). Removing the key rather
+    /// than writing 0 is what ``isSyncOffsetSet`` reads, so a stored 0 would
+    /// leave the row reading "0 ms" instead of "Not set".
+    public func clearSyncOffset() {
+        defaults.removeObject(forKey: Keys.syncOffsetMs)
+    }
+
     /// Whether the one-surface panel is PINNED (an ordinary movable window)
     /// rather than the transient menu-bar bubble. Written by the surface's Pin
     /// button, restored when the surface is constructed — the manner survives
@@ -263,5 +280,15 @@ public struct AppSettings {
     public var surfacePinned: Bool {
         get { defaults.bool(forKey: Keys.surfacePinned) }
         nonmutating set { defaults.set(newValue, forKey: Keys.surfacePinned) }
+    }
+
+    /// Whether the Equalizer card's "Advanced" ten-band fold is expanded. One
+    /// global switch — every host's editor shares it, so opening it in one
+    /// place opens it everywhere — remembered across launches. Read by
+    /// ``EQEditorView`` at init and written on every toggle. Defaults to
+    /// `false` (unset): a fresh install shows the fold collapsed.
+    public var eqAdvancedExpanded: Bool {
+        get { defaults.bool(forKey: Keys.eqAdvancedExpanded) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.eqAdvancedExpanded) }
     }
 }

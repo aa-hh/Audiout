@@ -32,11 +32,14 @@ anti-goals where it says so. This is what gets scoped and built on
   toggle. Chip selection resets to ALL on each launch (a filter left on is a
   lie about the system — research anti-pattern).
 
-### Devices tab (new bottom-bar item)
-- Tabs become **Speakers · Apps · Groups · Devices · Connection** (five, the
-  HIG ceiling). Overrides the brief's "no second Devices tab" anti-goal: this
-  is where per-device settings that write back to the Mac live, and the
-  Speakers tab stays a control surface.
+### Devices tab (replaces the Groups tab)
+- The Groups tab becomes **Devices**, with a segmented control at the top:
+  **Devices | Groups**. Mirrors the Mac, whose Groups window holds both the
+  groups list and the device detail pane. Tab bar stays at four:
+  **Speakers · Apps · Devices · Connection**. The existing Groups list and
+  editor move under the Groups segment unchanged. (Alec, 2026-08-23 —
+  supersedes the five-tab version above.) Tab name open: "Devices" is the
+  working label; the segment names are the real labels.
 - Devices list: every device the Mac knows, grouped by type (AirPlay,
   Bluetooth, Cast), name + type + availability. Tap → **device detail**.
 - Device detail: identity (name, type, what the Mac knows — AirPlay 2 or
@@ -68,8 +71,7 @@ anti-goals where it says so. This is what gets scoped and built on
 ## Open (decide at scoping)
 - Does the FAVOURITES chip remember itself across launches as the one
   exception to "reset to ALL"? Default here: no.
-- Does the Devices tab absorb the Connection tab's Mac list later (six tabs
-  is over the ceiling)? Not now.
+- Tab label for the merged Devices | Groups tab.
 
 ## Order of work
 1. Chips + pins (phone-local) + UNAVAILABLE collapsed — no protocol change.

@@ -1363,8 +1363,8 @@ import AppKit
         // host-supplies-copy doctrine; the view renders titles verbatim).
         #expect(titles.first == "Follows main output", "the menu leads with the standalone entry, displayed as the bridge phrase")
         let noRedirectIndex = titles.firstIndex(of: "Follows main output")
-        let currentDeviceHeaderIndex = titles.firstIndex(of: "CURRENT DEVICE")
-        let airplayHeaderIndex = titles.firstIndex(of: "AIRPLAY DEVICES")
+        let currentDeviceHeaderIndex = titles.firstIndex(of: "Current Device")
+        let airplayHeaderIndex = titles.firstIndex(of: "AirPlay Devices")
         #expect(currentDeviceHeaderIndex != nil, "the menu has a Current Device section")
         #expect(airplayHeaderIndex != nil, "the menu has an AirPlay Devices section (decision 4 — no Groups)")
         #expect(noRedirectIndex! < currentDeviceHeaderIndex!, "No Redirect must come before the Current Device section")

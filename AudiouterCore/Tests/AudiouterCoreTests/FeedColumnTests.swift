@@ -128,7 +128,7 @@ import AudiouterCore
         let row = makeBusRow()
         row.apply(muted, selected: true, controllable: true, routedAppNames: ["Music"])
         #expect(row.test_feedText == "System · Music", "muted is not represented in the FEED column at all")
-        #expect(row.test_statusText == "MUTED", "…it lives on the sublabel/mute-pill instead")
+        #expect(row.test_statusText == "Muted", "…it lives on the sublabel/mute-pill instead")
     }
 
     // MARK: AP1 micro-tag — the one true exception, AP2 never badged

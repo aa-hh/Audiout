@@ -299,7 +299,7 @@ import Testing
         #expect(vc.test_heroHeadline == "Hear your Mac's sound")
         #expect(vc.test_heroWhy == "Audiouter needs this to send your music to your speakers.")
         #expect(vc.test_ribbonBodyText == nil, "a first ask has no paragraph under it")
-        #expect(vc.test_previewFrameLabel?.contains("MACOS") ?? false,
+        #expect(vc.test_previewFrameLabel?.contains("macOS") ?? false,
                 "the frame says whose surface this is, so no line of copy has to")
         #expect(vc.test_ribbonButtonTitles == ["Enable System Audio"])
         #expect(vc.test_browseStep == nil)
@@ -2280,7 +2280,7 @@ import Testing
     /// It comes off for the ONE surface that isn't macOS's — our own finale.
     @Test func thePreviewFrameIsCaptionedExceptOnTheFinale() async {
         let vc = makeVC(model: makeGrantableModel())
-        #expect(vc.test_previewFrameLabel == "YOU'LL SEE THIS FROM MACOS")
+        #expect(vc.test_previewFrameLabel == "You'll see this from macOS")
 
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)

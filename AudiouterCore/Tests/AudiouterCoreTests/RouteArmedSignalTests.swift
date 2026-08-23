@@ -260,14 +260,14 @@ import AudiouterCore
     @Test func mutedRowWithFeedsGainsLeadingMutedToken() {
         let row = DeviceRowView(device: makeDevice(isMuted: true))
         row.apply(makeDevice(isMuted: true), selected: true, controllable: true)
-        #expect(row.test_statusText == "MUTED · System", "the MUTED token leads an EXISTING feed sublabel")
+        #expect(row.test_statusText == "Muted · System", "the MUTED token leads an EXISTING feed sublabel")
     }
 
     @Test func mutedRedirectTargetPrependsTokenToFeedList() {
         let row = DeviceRowView(device: makeDevice(isMuted: true))
         row.apply(makeDevice(isMuted: true), selected: false, controllable: true,
                   routedAppNames: ["Spotify"])
-        #expect(row.test_statusText == "MUTED · Spotify")
+        #expect(row.test_statusText == "Muted · Spotify")
     }
 
     @Test func mutedRowWithoutFeedsStaysSingleLine() {
@@ -288,7 +288,7 @@ import AudiouterCore
     @Test func unmutingRestoresThePlainSublabel() {
         let row = DeviceRowView(device: makeDevice(isMuted: true))
         row.apply(makeDevice(isMuted: true), selected: true, controllable: true)
-        #expect(row.test_statusText == "MUTED · System")
+        #expect(row.test_statusText == "Muted · System")
 
         row.apply(makeDevice(isMuted: false), selected: true, controllable: true)
         #expect(row.test_statusText == "System", "unmute restores the plain feed line")

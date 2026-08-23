@@ -83,9 +83,9 @@ import AppKit
 
     @Test func outputGroupsHeaderIsDisabledAndInert() {
         let (row, _) = makeRow()
-        // The header renders via an uppercased `attributedTitle`, which is what
-        // `NSMenuItem.title` reports back.
-        let header = row.test_menuItem(titled: "OUTPUT GROUPS")
+        // The header renders via a title-case `attributedTitle` (One Case
+        // rule), which is what `NSMenuItem.title` reports back.
+        let header = row.test_menuItem(titled: "Output Groups")
         #expect(header != nil, "the 'Output Groups' section header must exist")
         #expect(!(header?.isEnabled ?? true),
                 "the header must be disabled so it can't be clicked like a real choice")

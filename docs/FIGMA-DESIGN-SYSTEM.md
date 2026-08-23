@@ -168,8 +168,15 @@ Variable names (each resolvable by name; IDs ledgered in the build state):
 `captionEmphasized S:994995ce46163b66f2458d284bf1e4f0a90b56d1` ·
 `menuItem S:bc95f1e439be17551730b8ff6e01124f36b82ccc` ·
 `microLabel S:43af1e806b5dc49b03cea864de6847f411c923a9` ·
-`sectionHeader S:950ba5fbf2d73e45804b467852ead0c8459429a6` (the one non-token
-literal: 14 pt medium uppercase, `PopoverPanelViewController.swift:398`).
+`sectionHeader S:950ba5fbf2d73e45804b467852ead0c8459429a6`.
+
+**One Case rule (2026-08-23, supersedes the Figma styles above where they
+disagree):** no UI text is uppercased or set in a monospaced face. `microLabel`
+is now the plain system face, 10 pt semibold, sentence case as authored (was
+SF Mono 8.5 pt bold UPPERCASE + kern); the popover's legend/section headers and
+menu headers render their title-case strings untransformed. Numeric readouts
+keep `monospacedDigit` only. The Figma styles still show the old caps voice —
+resync owed under roadmap 034.
 
 ### Effect style
 
@@ -284,8 +291,9 @@ g. **Light mode — every new element must resolve in BOTH appearances.** Light 
 
 Do not "fix" the code to match any of these; they are Figma stand-ins:
 
-- **JetBrains Mono** stands in for SF Mono (`microLabel`; SF Mono is unavailable
-  in Figma — noted on the style).
+- **JetBrains Mono** stood in for SF Mono on the old `microLabel` style; the
+  voice is no longer monospaced at all (One Case rule above), so the stand-in
+  goes away on resync.
 - **SF Symbols are placeholder vectors**, not the real glyphs the app renders.
 - **Canvas grain is not rendered** (dark-mode 48×48 procedural tile exists only
   in `WarmCanvasView.swift`).

@@ -962,31 +962,28 @@ public final class DeviceRowView: NSView {
         return tokens.joined(separator: Self.routingTokenSeparator)
     }
 
-    /// Show the sublabel as the standalone small-caps `MUTED` token (spec §2
-    /// micro-label voice — SF Mono bold, tracked, uppercase) — the bus-row
-    /// case, where the feed list lives in its own column so MUTED needs no
-    /// existing line to piggyback on.
+    /// Show the sublabel as the standalone `Muted` token (micro-label voice —
+    /// semibold, sentence case) — the bus-row case, where the feed list lives
+    /// in its own column so the token needs no existing line to piggyback on.
     private func showMutedSublabel() {
         statusLabel.isHidden = false
         statusLabel.attributedStringValue = NSAttributedString(
-            string: "MUTED",
+            string: "Muted",
             attributes: [.font: Tokens.Font.microLabel,
-                         .kern: Tokens.Font.microLabelKern,
                          .foregroundColor: Tokens.Color.secondaryLabel])
         statusLabel.textColor = Tokens.Color.secondaryLabel
         applyNameStackLayout(twoLine: true)
     }
 
-    /// Show the sublabel as `MUTED · <feeds>` — the non-bus host's own rung,
-    /// unchanged from pre-v4.1: the leading MUTED token in the micro-label
+    /// Show the sublabel as `Muted · <feeds>` — the non-bus host's own rung,
+    /// unchanged from pre-v4.1: the leading Muted token in the micro-label
     /// voice with the feed list continuing in the sublabel's own 10 pt voice.
     private func showLegacyMutedSublabel(feeds: String) {
         statusLabel.isHidden = false
         let bodyFont = statusLabel.font ?? .systemFont(ofSize: 10)
         let composed = NSMutableAttributedString(
-            string: "MUTED",
+            string: "Muted",
             attributes: [.font: Tokens.Font.microLabel,
-                         .kern: Tokens.Font.microLabelKern,
                          .foregroundColor: Tokens.Color.secondaryLabel])
         composed.append(NSAttributedString(
             string: Self.routingTokenSeparator + feeds,
@@ -1163,7 +1160,7 @@ public final class DeviceRowView: NSView {
             let result = NSMutableAttributedString()
             if prefixTag, let tag {
                 result.append(NSAttributedString(string: tag + " ", attributes: [
-                    .font: Tokens.Font.microLabel, .kern: Tokens.Font.microLabelKern,
+                    .font: Tokens.Font.microLabel,
                     .foregroundColor: chromeColor,
                 ]))
             }
@@ -1191,7 +1188,7 @@ public final class DeviceRowView: NSView {
             let result = NSMutableAttributedString()
             if prefixTag, let tag {
                 result.append(NSAttributedString(string: tag + " ", attributes: [
-                    .font: Tokens.Font.microLabel, .kern: Tokens.Font.microLabelKern,
+                    .font: Tokens.Font.microLabel,
                     .foregroundColor: chromeColor,
                 ]))
             }

@@ -116,6 +116,9 @@ let package = Package(
         // browser's actual audio producer is a child process our single-PID
         // resolver can never find. Run: `swift run process-audio-dump`.
         .executable(name: "process-audio-dump", targets: ["process-audio-dump"]),
+        // Roadmap 006 Phase 0: the hardware-free Google Cast sender spike —
+        // browse, launch, stream, time it. Not linked by the app.
+        .executable(name: "cast-spike", targets: ["cast-spike"]),
     ],
     dependencies: [
         // The native AirPlay 2 sender engine (PLAN-PHASE-2b T-NB-PKGDEP-1).
@@ -138,6 +141,7 @@ let package = Package(
             name: "AudiouterCore",
             dependencies: [
                 .product(name: "AirPlayEngine", package: "AirPlayEngine"),
+                "CastSender",
                 "ObjCExceptionShim",
             ],
             swiftSettings: [
@@ -301,6 +305,26 @@ let package = Package(
         .executableTarget(
             name: "process-audio-dump"
         ),
+        // Roadmap 006 Phase 0: the clean-room Google Cast (CASTV2) sender —
+        // wire protocol, discovery, and the live-audio HTTP server. Not linked
+        // by the app: Phase 1 wires it into NativeBackend behind a Device.Kind.
+        // No dependency on AudiouterCore or AirPlayEngine by design (hence no
+        // Homebrew importer flags) — it is Foundation + Network + Security only.
+        .target(
+            name: "CastSender"
+        ),
+        // Roadmap 006 Phase 0: an in-process fake Cast receiver, so the whole
+        // launch/load/play loop is exercised offline. Not linked by the app.
+        .target(
+            name: "CastFakeReceiver",
+            dependencies: ["CastSender"]
+        ),
+        // Roadmap 006 Phase 0: the measurement CLI — see Sources/cast-spike.
+        // Not linked by the app.
+        .executableTarget(
+            name: "cast-spike",
+            dependencies: ["CastSender", "CastFakeReceiver"]
+        ),
         .testTarget(
             name: "AudiouterCoreTests",
             dependencies: [
@@ -310,6 +334,8 @@ let package = Package(
                 "AudiouterWindowUI",
                 "AudiouterSettingsUI",
                 "AudiouterOnboardingUI",
+                "CastSender",
+                "CastFakeReceiver",
             ],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),

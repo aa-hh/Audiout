@@ -150,7 +150,10 @@ public final class SyncedLocalSink: @unchecked Sendable {
     public init(
         renderSampleRate: Double = 48_000,
         channelCount: Int = 2,
-        maxBufferedSeconds: Double = 8,
+        // CAST-SYNC capacity (sync architecture brief §6): the ring must hold
+        // the deepest room delay a Cast receiver can set (9.5 s). At 48 kHz
+        // stereo that stays inside the 2^20-sample ring already allocated.
+        maxBufferedSeconds: Double = 10,
         maxRenderFrames: Int = 8192,
         safetyMarginMs: Double = SyncedLocalSink.defaultSafetyMarginMs,
         presentationDelayMs: @escaping @Sendable () -> Int,
@@ -168,7 +171,7 @@ public final class SyncedLocalSink: @unchecked Sendable {
 
         // The ring is the delay line: during the ~presentationDelay pre-roll the
         // producer fills while the consumer drains nothing, so capacity must exceed
-        // the delay's worth of audio (default 8 s > the 5 s max start-buffer).
+        // the delay's worth of audio (default 10 s > the 9.5 s room-delay cap).
         let minSamples = Int((maxBufferedSeconds * renderSampleRate).rounded()) * channels
         self.ring = InterleavedFloatRing(minimumCapacitySamples: minSamples)
 
@@ -1008,7 +1011,7 @@ public final class SyncedLocalSink: @unchecked Sendable {
     public init(
         renderSampleRate: Double = 48_000,
         channelCount: Int = 2,
-        maxBufferedSeconds: Double = 8,
+        maxBufferedSeconds: Double = 10,
         maxRenderFrames: Int = 8192,
         safetyMarginMs: Double = SyncedLocalSink.defaultSafetyMarginMs,
         presentationDelayMs: @escaping @Sendable () -> Int,

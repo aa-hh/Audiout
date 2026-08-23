@@ -343,6 +343,19 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   `BTSyncedSink.swift` are LICENSE-CLEAN
   like `SyncCore.swift` (no GPL header — see the header note in each file);
   never copy code into them from the GPL-headered `SyncedLocalSink.swift`.
+- **Cast ids are the THIRD R-partition arm**, held to the same discipline as
+  Bluetooth: no `outputIDs` entry plus an explicit `isCast` guard in the
+  converge loop, so a Cast id can never reach the AirPlay engine. Exclude Cast
+  from an engine-only path via `isCast`, never `supportsAirPlay2` — AP1
+  receivers share that flag yet ARE engine-driven. A `.cast` row's `.connected`
+  means the RECEIVER reported PLAYING, which is also the audible fact
+  `desiredDeviceAudibleLocked` reads (not `isAvailable` — a receiver merely on
+  the network is playing nothing, and the recipe's connect → launch → LOAD →
+  PLAY takes seconds). The fan-out slot is `setCastSink`, whose pid is our own
+  already-tap-excluded process, so attaching never rebuilds the tap. With no
+  Cast device selected the capture path is byte-identical to what it always was
+  — `NativeCaptureCoordinatorTests` pins that, so never move the engine write
+  or make the Cast hop unconditional.
 - **A Bluetooth sink held at gain 0 must always have a live release path.**
   The first-mix alignment intercept (W3) is the ONLY sanctioned writer of a
   0 gain (`BTDeviceSink.setGain` → `mainMixerNode.outputVolume` — the session,
@@ -740,6 +753,12 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
 | `NativeBackend` | Shipping backend; drives `AirPlayEngine`, owns capture gate, owns aggregate device lifecycle. |
 | `AggregateOutputDevice` | Lifecycle owner (adopt-or-create/off-switch/orphan sweep) for the PUBLIC, Sound-settings-visible "Audiouter" aggregate (UID `com.audiouter.Audiouter.aggregate`); thin CoreAudio shell wired by `NativeBackend`. Becomes Mac default when whole-system routing arms; restore-prior-default-then-destroy on quit; echo-guarded. New `BackendEvent` case `routingBlockedNeedsDefault(Bool)` signals when the app can't route because its aggregate isn't the Mac's default output. |
 | `NativeDiscovery` | Bonjour discovery (AP2 + AP1). |
+| `CastSender` | Hand-rolled Google Cast v2 sender: browse, control channel, live WAV server; driven by `CastOutputManager`. |
+| `CastOutputManager` | Per-Cast-device session recipe (connect → launch DMR → LOAD no-autoplay → PLAY), 1 s status poll, composed level, one automatic reconnect policy; feeds each receiver from `CastFeedRing` via the capture fan-out. |
+| `CastDeviceEnumerator` | `_googlecast._tcp` browse → `.cast` rows through the same `known`/`order`/`emit` flow as Bluetooth. |
+| `PCMDelayLine` | Cadence-preserving S16LE delay line for Phase (ii) sync; built and tested, wired nowhere yet. |
+| `CastFakeReceiver` | In-memory mock Cast receiver for testing (macOS 15+ only). |
+| `cast-spike` | Standalone CLI tool proving end-to-end Cast audio streaming. |
 | `BTDeviceEnumerator` | Bluetooth outputs: Core Audio BT transport merged with the TCC-gated IOBluetooth paired list; paired-but-disconnected speakers surface unavailable, with pairing recency kept for ghost-row filtering. |
 | `BTSyncedSink` | N-instance BT sink manager: per-device pinned engines, reference-timeline delay. No drift correction — A2DP sinks servo to the host delivery rate and measured inter-speaker drift was ≈ 0 over 30 minutes (2026-08-12), so the resampler runs at unity. **The release gate CATCHES UP.** The producer anchors on the first captured buffer without waiting for the engine, so a slow `engine.start()` (well over 500 ms on A2DP, and every rebuild — `config_change`, `composition_change`, `wizard_feed` — pays it again) can leave the first render cycle PAST `targetReleaseNanos`. The ring is a plain FIFO, so releasing its oldest frame there would make the real delay "however long the engine took to start", permanently, for the whole session — hundreds of ms of extra lag on that speaker, and an alignment that goes stale on every lineup change. The gate therefore skips the overshoot's worth of frames (`BTDelayLine.skipForward` → the ring's consumer-owned seek, NOT `requestShift`, whose word has exactly one writer and it is not the render thread) so the first frame played is the one that was due. A ring shorter than the overshoot releases what it has and is flagged `partial` — empty, not stale. Every gate opening logs `bt_sink_release_overshoot` (a ZERO line too: it is the evidence start-up was clean) and `bt_sink_ring_drops` (the producer's wholesale-drop counter, differenced against a consumer-owned baseline that a new session resets), stashed on the render thread and emitted from `graphQueue` — the `carryToLogNanos` discipline. `bt_sink_ring_drops` ALSO fires at session end (`stopLocked`, so every `stop()` and every rebuild cause), tagged `"at":"gate_open"` vs `"at":"session_end"`: a wizard run has exactly one gate opening and it is at the start, so gate-only reporting left every drop after it invisible — which is what a 2026-08-22 live run's "the speaker just stopped" had to be diagnosed without. **A FORWARD seek is floored.** `applyTrimDelta` clamps any forward move (a larger measured latency) to `BTDeviceSink.seekSafetyMarginMs` short of the write pointer and logs `bt_sink_seek_clamped`: a seek that reaches the write pointer leaves the ring dry with nothing to play and no way back, which is exactly how a wizard trial at the old range ceiling took a speaker silent for the rest of the session. The delay the session books is the APPLIED move, never the asked one. |
 | `BTSyncTrim` / `BTTrimStore` | The SYNC trim's shared clamp/step contract (±500 ms, 10 ms coarse) + versioned-JSON persistence per device UID; `NativeBackend` loads at init and re-pushes into the sink on every arm (`BTOutputControlling` is the UI seam). The same envelope carries the first-mix intercept's FINAL "Not now" dismissals — both saves are read-modify-write so neither record clobbers the other. |

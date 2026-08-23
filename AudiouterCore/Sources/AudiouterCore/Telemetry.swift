@@ -43,10 +43,10 @@ public enum Telemetry {
     /// change recovery, per-app player attach, and the synced-local session
     /// anchor — `LocalPlaybackEngine`/`SyncedLocalSink`), `lifecycle`
     /// (process/session boundaries — currently just the launch banner
-    /// emitted below), and `surface` (the one-surface window's frame
-    /// decisions).
+    /// emitted below), `surface` (the one-surface window's frame decisions),
+    /// and `cast` (Cast session lifecycle + 1 s media-status samples).
     public enum Category: String, Sendable {
-        case permission, captureWS, capturePA, airplay, localPlayback, lifecycle, surface
+        case permission, captureWS, capturePA, airplay, localPlayback, lifecycle, surface, cast
     }
 
     /// Non-blocking. Formats `{"ts":...,"sid":...,"cat":...,"evt":...,

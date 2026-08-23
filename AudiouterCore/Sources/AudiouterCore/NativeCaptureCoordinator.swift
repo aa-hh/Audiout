@@ -156,6 +156,14 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         let syncedLocalBaseResampler: SyncedLocalBaseResampler?
         let btSink: SyncedLocalPCMSink?
         let btBaseResampler: SyncedLocalBaseResampler?
+        /// CAST-FANOUT: the Cast fan-out, which takes the converted S16LE
+        /// straight (no widen/resample — the Cast server speaks 44.1/16/2).
+        let castSink: PCMSink?
+        /// CAST-SYNC: the AirPlay pre-delay line (sync architecture brief §2).
+        /// `nil` — the value in every snapshot unless
+        /// ``setAirPlayPreDelay(ms:)`` ran with a positive delay — IS the
+        /// bypass: the engine write below stays the statement it always was.
+        let airPlayPreDelay: PCMDelayLine?
         let tickInjector: AlignmentTickInjector?
         /// The wizard is driving the feed itself (``startWizardPacerLocked()``).
         /// While this is set, captured buffers are dropped at the top of
@@ -178,6 +186,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             converter: nil, meteringActive: false,
             syncedLocalSink: nil, syncedLocalBaseResampler: nil,
             btSink: nil, btBaseResampler: nil,
+            castSink: nil, airPlayPreDelay: nil,
             tickInjector: nil, wizardActive: false, tapEpoch: 0, eqPlan: .passthrough)
 
         init(
@@ -187,6 +196,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             syncedLocalBaseResampler: SyncedLocalBaseResampler?,
             btSink: SyncedLocalPCMSink?,
             btBaseResampler: SyncedLocalBaseResampler?,
+            castSink: PCMSink?,
+            airPlayPreDelay: PCMDelayLine?,
             tickInjector: AlignmentTickInjector?,
             wizardActive: Bool,
             tapEpoch: Int,
@@ -198,6 +209,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             self.syncedLocalBaseResampler = syncedLocalBaseResampler
             self.btSink = btSink
             self.btBaseResampler = btBaseResampler
+            self.castSink = castSink
+            self.airPlayPreDelay = airPlayPreDelay
             self.tickInjector = tickInjector
             self.wizardActive = wizardActive
             self.tapEpoch = tapEpoch
@@ -299,6 +312,21 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     private var btSink: SyncedLocalPCMSink?
     private var btRenderPID: pid_t?
     private var btBaseResampler: SyncedLocalBaseResampler?
+
+    /// CAST-FANOUT: the Cast output manager's fan-out to ALSO feed (the fourth
+    /// consumer of the same converted PCM), and the pid of the process that
+    /// renders it. No resampler slot: a Cast receiver is fed the S16LE
+    /// 44.1 kHz stream verbatim over HTTP. Queue-confined, set together via
+    /// ``setCastSink(_:renderProcessPID:)``.
+    private var castSink: PCMSink?
+    private var castRenderPID: pid_t?
+
+    /// CAST-SYNC: the AirPlay pre-delay line, held here so a delay CHANGE keeps
+    /// the ring (and its buffered history) instead of restarting the fill.
+    /// Queue-confined, set only via ``setAirPlayPreDelay(ms:)``; `nil` whenever
+    /// the delay is 0, which is what makes the no-Cast bypass structural rather
+    /// than a flag.
+    private var airPlayPreDelay: PCMDelayLine?
 
     /// The align-by-ear tick source (BT-OFFSET-UI), mixed into the converted
     /// PCM BEFORE the engine write and both fan-outs, so every consumer
@@ -877,6 +905,87 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         rebuildIfExclusionObjectsChanged()
     }
 
+    /// CAST-FANOUT: attach/detach the Cast output manager's fan-out — the
+    /// FOURTH consumer of the same converted PCM. Unlike the synced-local and
+    /// BT slots there is no resampler: the Cast HTTP server speaks S16LE
+    /// 44.1 kHz stereo, which is exactly what the converter already produces,
+    /// so the buffer goes straight in.
+    ///
+    /// `renderProcessPID` joins the tap's exclusion set exactly like the BT
+    /// pid, and for the same reason it never forces an unconditional recreate:
+    /// in production it is our own process, already self-excluded on every tap
+    /// creation, so ``rebuildIfExclusionObjectsChanged()``'s
+    /// compare-before-rebuild finds nothing changed and attaching mid-capture
+    /// costs no tap rebuild.
+    public func setCastSink(_ sink: PCMSink?, renderProcessPID: pid_t?) {
+        let checkExclusions: Bool = queue.sync {
+            self.castSink = sink
+            // Republish BEFORE the pid short-circuit below, same T8 discipline
+            // as `setBTSink`.
+            self.publishBufferSnapshot()
+            let newPID: pid_t? = (sink == nil) ? nil : renderProcessPID
+            guard newPID != castRenderPID else { return false }
+            castRenderPID = newPID
+            if case .capturing = _state { return true }
+            return false
+        }
+        guard checkExclusions else { return }
+        rebuildIfExclusionObjectsChanged()
+    }
+
+    /// CAST-SYNC: hold the AirPlay feed back by `ms` before the engine write
+    /// (sync architecture brief §2). With a Cast device in the mix the room
+    /// delay is seconds, far past the sender's clamped start buffer, so the
+    /// only place the extra seconds can come from is a line in FRONT of the
+    /// engine — and it must be a line, not a later pts, because the sender uses
+    /// the pts to anchor its RTP timeline to the wall clock and an old pts
+    /// tells the receiver to schedule nothing.
+    ///
+    /// **`ms == 0` publishes `nil`, never an empty line.** That is the whole
+    /// bypass: with no Cast device selected the snapshot field is absent and
+    /// ``deliver(_:pts:snapshot:btPCM:)`` runs the identical `sink.write`
+    /// statement it always ran. Allocation happens HERE, on the control queue,
+    /// never on the IOProc.
+    ///
+    /// A change from one positive delay to another keeps the existing line, so
+    /// the ring's history survives: growing emits silence for the stretch it
+    /// grew by and shrinking skips, which is what
+    /// ``PCMDelayLine/setDelayFrames(_:)`` is for.
+    public func setAirPlayPreDelay(ms: Int) {
+        queue.sync {
+            guard ms > 0 else {
+                guard self.airPlayPreDelay != nil else { return }
+                self.airPlayPreDelay = nil
+                self.publishBufferSnapshot()
+                return
+            }
+            let frames = ms &* PCMFormat.airplay.sampleRate / 1000
+            if let line = self.airPlayPreDelay {
+                line.setDelayFrames(frames)
+                return
+            }
+            let line = PCMDelayLine(capacityFrames: Self.airPlayPreDelayCapacityFrames)
+            line.setDelayFrames(frames)
+            self.airPlayPreDelay = line
+            self.publishBufferSnapshot()
+        }
+    }
+
+    /// Whether the PUBLISHED snapshot currently carries an AirPlay pre-delay
+    /// line — the structural bypass read from the RT side's own slot, not from
+    /// the queue-confined field the setter writes.
+    var test_publishedAirPlayPreDelayInstalled: Bool {
+        snapshotLock.lock()
+        defer { snapshotLock.unlock() }
+        return _bufferSnapshot.airPlayPreDelay != nil
+    }
+
+    /// Sized for the brief's `R_max` (9500 ms) minus the smallest start buffer
+    /// (300 ms), rounded up to a whole 10 s — the line is allocated once and
+    /// resized in place, so it has to hold the deepest delay the room policy
+    /// can ever ask for.
+    private static let airPlayPreDelayCapacityFrames = 10 * PCMFormat.airplay.sampleRate
+
     // MARK: Start sequence (on `queue`)
 
     /// Reject a tap format the converter/aggregate can't safely consume before it
@@ -919,6 +1028,11 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // as the synced-local pid above (and equally redundant-but-harmless
         // whenever it is our own already-self-excluded pid).
         if let renderPID = btRenderPID {
+            result.formUnion(processResolver.resolve(pid: renderPID).map(\.objectID))
+        }
+        // CAST-FANOUT self-exclude: same contract again. In production this is
+        // our own already-self-excluded pid, so it is redundant-but-harmless.
+        if let renderPID = castRenderPID {
             result.formUnion(processResolver.resolve(pid: renderPID).map(\.objectID))
         }
         return result
@@ -1139,6 +1253,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             syncedLocalBaseResampler: syncedLocalBaseResampler,
             btSink: btSink,
             btBaseResampler: btBaseResampler,
+            castSink: castSink,
+            airPlayPreDelay: airPlayPreDelay,
             tickInjector: tickInjector,
             wizardActive: wizardActive,
             tapEpoch: tapEpoch,
@@ -1428,12 +1544,22 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// everybody, which is the rule the align tick depends on.
     private func deliver(_ pcm: Data, pts: timespec, snapshot: BufferSnapshot,
                          btPCM: Data? = nil) {
+        // CAST-SYNC: with a Cast device in the mix the engine is fed audio from
+        // `D` seconds ago under the LIVE pts — one block out per block in, same
+        // frame count, so the sender sees the identical (byteCount, pts)
+        // sequence and only the samples are older. `airPlayPreDelay` is nil
+        // unless ``setAirPlayPreDelay(ms:)`` ran with a positive delay, so with
+        // no Cast device selected `enginePCM` IS `pcm` and the writes below are
+        // the statements they always were. The line wraps ONLY the engine
+        // write — the local, BT and Cast fan-outs below stay on the live `pcm`.
+        let enginePCM = snapshot.airPlayPreDelay?.exchange(pcm) ?? pcm
+
         // pts straight off the producer's capture clock (mHostTime → timespec).
         // EQ off is the LITERAL legacy line: one flag test on an already-loaded
         // struct, then the exact single stream-0 write this path always did.
         let plan = snapshot.eqPlan
         if plan.isPassthrough {
-            sink.write(pcm: pcm, pts: pts)
+            sink.write(pcm: enginePCM, pts: pts)
         } else {
             // Per-device EQ diverges only here, per AirPlay stream: each entry
             // filters its OWN copy of the shared program, and all of them go out
@@ -1442,10 +1568,10 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             entries.reserveCapacity(plan.streams.count)
             for stream in plan.streams {
                 guard let processor = stream.processor else {
-                    entries.append((pcm: pcm, streamId: stream.streamID))
+                    entries.append((pcm: enginePCM, streamId: stream.streamID))
                     continue
                 }
-                var shaped = pcm
+                var shaped = enginePCM
                 processor.process(&shaped)
                 entries.append((pcm: shaped, streamId: stream.streamID))
             }
@@ -1476,6 +1602,16 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         // can't loop back as an echo.
         if let btSink = snapshot.btSink, let btResampler = snapshot.btBaseResampler {
             Self.fanOutToSyncedLocal(btPCM ?? pcm, pts: pts, into: btSink, resampler: btResampler)
+        }
+
+        // CAST-FANOUT: the fourth consumer of the identical converted PCM+pts.
+        // No widen/base-resample step — a Cast receiver is fed the S16LE
+        // 44.1 kHz stream verbatim. `castSink` is nil unless
+        // ``setCastSink(_:renderProcessPID:)`` ran with a non-nil sink, so with
+        // no Cast device selected this path costs one nil check and the engine
+        // write above is byte-for-byte what it always was.
+        if let castSink = snapshot.castSink {
+            castSink.write(pcm: pcm, pts: pts)
         }
 
         // Level pass-through: compute RMS on the CONVERTED S16LE buffer once, for

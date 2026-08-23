@@ -29,6 +29,17 @@ struct BTGroupComposition: Equatable, Sendable {
     /// the "Mac joining changes nothing for BT" rule is explicit and testable
     /// instead of implicit in a missing parameter.
     var macLocalPresent: Bool
+    /// CAST-SYNC: at least one Cast receiver is in the mix. Like AirPlay it
+    /// authors a presentation timeline everything else delays to, so it selects
+    /// the same reference branch — the room delay handed in, not the BT-only
+    /// scheduling buffer. Defaulted so the many call sites that predate Cast
+    /// read as what they are: compositions with no Cast device in them.
+    var castPresent: Bool = false
+
+    /// Whether the reference handed to ``BTReferenceTimeline`` is the room's
+    /// presentation timeline (AirPlay and/or Cast author one) rather than the
+    /// Mac's own host clock with a small scheduling buffer.
+    var usesPresentationReference: Bool { airPlayPresent || castPresent }
 }
 
 /// The BT-REFSEL rule (plan §E): AirPlay present → the AirPlay presentation
@@ -58,13 +69,40 @@ enum BTReferenceTimeline {
         presentationDelayMs: Int,
         btOnlyBufferMs: Int,
         deviceOffsetMs: Int,
-        trimMs: Double
+        trimMs: Double,
+        castTermMs: Int? = nil
     ) -> Int64 {
         SyncTiming.totalDelayNanos(
-            presentationDelayMs: composition.airPlayPresent ? presentationDelayMs : btOnlyBufferMs,
+            presentationDelayMs: roomDelayMs(
+                composition: composition,
+                presentationDelayMs: presentationDelayMs,
+                btOnlyBufferMs: btOnlyBufferMs,
+                castTermMs: castTermMs),
             localOutputLatencySeconds: Double(deviceOffsetMs) / 1_000,
             safetyMarginMs: 0,
             userOffsetMs: trimMs)
+    }
+
+    /// CAST-SYNC — the N-way generalisation of the rule above (sync
+    /// architecture brief §3): the room delay `R` is the LONGEST intrinsic
+    /// delay any active output has, and every output then delays itself by
+    /// `R − its own intrinsic delay`. Delay-to-worst is the only workable
+    /// direction, because no output's own latency can be shortened.
+    ///
+    /// `castTermMs` is how far behind live the furthest Cast receiver plays,
+    /// or `nil` when no Cast device contributes a term. That `nil` is the
+    /// invariant: an absent operand makes the `max` the identity, so every
+    /// composition that ships today returns precisely the number it returns
+    /// today — proven case by case rather than gated behind a flag.
+    static func roomDelayMs(
+        composition: BTGroupComposition,
+        presentationDelayMs: Int,
+        btOnlyBufferMs: Int,
+        castTermMs: Int?
+    ) -> Int {
+        let reference = composition.usesPresentationReference
+            ? presentationDelayMs : btOnlyBufferMs
+        return castTermMs.map { Swift.max(reference, $0) } ?? reference
     }
 }
 
@@ -558,7 +596,11 @@ final class BTDeviceSink: @unchecked Sendable {
         deviceUID: String,
         renderSampleRate: Double,
         channelCount: Int,
-        maxBufferedSeconds: Double = 8,
+        // CAST-SYNC capacity (sync architecture brief §6): the ring IS the
+        // delay line, so it must hold the deepest room delay the Cast policy
+        // can ask for (9.5 s) plus the BT-only buffer. 11 s and 8 s both round
+        // up to the same 2^19 frames, so this costs nothing.
+        maxBufferedSeconds: Double = 11,
         maxRenderFrames: Int = 8192,
         delayNanosProvider: @escaping @Sendable () -> Int64
     ) {
@@ -1465,7 +1507,8 @@ final class BTSyncedSink: @unchecked Sendable {
         let offsetMs = offsetMsByUID[uid] ?? 0
         let bufferMs = btOnlyBufferMs
         tableLock.unlock()
-        let reference = currentComposition.airPlayPresent ? presentationDelayMs() : bufferMs
+        let reference = currentComposition.usesPresentationReference
+            ? presentationDelayMs() : bufferMs
         let lowerBound = Swift.min(
             BTSyncTrim.rangeMs,
             Swift.max(-BTSyncTrim.rangeMs, -(Double(reference) - Double(offsetMs))))

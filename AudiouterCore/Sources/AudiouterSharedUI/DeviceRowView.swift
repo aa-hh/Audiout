@@ -199,6 +199,11 @@ public final class DeviceRowView: NSView {
     private var hasLiveFeeds = false
     /// The armed predicate's last computed value (what the dot renders).
     private var isRouteArmed = false
+    /// Whether the row's volume/mute gesture is pending its Cast feed-gain
+    /// apply moment — mirrors `faderCell.isPendingApply`; stored so
+    /// `configureAccessibility()` (called outside `apply`'s own scope) can
+    /// speak its equivalent.
+    private var volumePendingApply = false
     private let nameLabel = NSTextField(labelWithString: "")
     /// The single sublabel line under the name (Warm Signal v4.1 item 3 —
     /// re-scoped from the retired routing ladder): carries ONLY state words now.
@@ -511,7 +516,8 @@ public final class DeviceRowView: NSView {
                       syncTrimIsSet: Bool = false,
                       syncMeasuredLatencyMs: Double? = nil,
                       syncDrawerExpanded: Bool = false,
-                      removalUndoOffered: Bool = false) {
+                      removalUndoOffered: Bool = false,
+                      volumePendingApply: Bool = false) {
         self.device = device
         self.isSelectedInSet = selected
         self.isToggleBlocked = blocked
@@ -626,6 +632,25 @@ public final class DeviceRowView: NSView {
         case .connected, .off:                    controlsMuted = !device.isAvailable
         }
         faderCell.isMutedControl = controlsMuted
+        // Cast feed-gain pending state (host-owned, id-keyed timer — the
+        // "not yet gold" hold while the gesture is still in flight to the
+        // receiver's audio feed).
+        self.volumePendingApply = volumePendingApply
+        if faderCell.isPendingApply != volumePendingApply {
+            // Live diagnosis (2026-08-23): log BOTH transitions — an unlogged
+            // true->false stamp between draws would explain a fill that never
+            // visibly changes — and invalidate the slider explicitly rather
+            // than trusting the cell's controlView back-pointer.
+            Telemetry.log(.cast, "cast_pending_cell", [
+                "device": device.id,
+                "to": volumePendingApply ? "true" : "false",
+                "armed": faderCell.isRouteArmed ? "true" : "false",
+                "enabled": slider.isEnabled ? "true" : "false",
+                "inWindow": slider.window != nil ? "true" : "false",
+            ])
+            faderCell.isPendingApply = volumePendingApply
+            slider.needsDisplay = true
+        }
 
         // Item 8's brighten EDGE — "on successful connect it brightens to
         // full gold/normal": fires ONLY on a connecting/reconnecting →
@@ -2050,6 +2075,9 @@ public final class DeviceRowView: NSView {
     /// catches a row whose displayed level has drifted from what was painted.
     public var test_sliderValue: Int { slider.integerValue }
 
+    /// The volume slider itself, for pixel-truth rendering in tests.
+    public var test_slider: NSSlider { slider }
+
     /// Simulate the user toggling this row's mute button — flips
     /// `muteButton.state` and lands the V1 tint via `updateMuteTint()` exactly
     /// as a real click does (AppKit flips the `pushOnPushOff` state before
@@ -2350,6 +2378,7 @@ public final class DeviceRowView: NSView {
     /// can't drift from the pixels. Must track `test_routeArmed` whenever the
     /// slider is enabled (one armed truth, two instruments).
     public var test_isFaderEngaged: Bool { faderCell.test_isEngagedFill }
+    public var test_isFaderPending: Bool { faderCell.test_isPendingFill }
 
     /// Whether the slider is wearing the Warm fader skin (the drawing-only
     /// `WarmFaderCell` swap) — structural assertion that the skin is installed.
@@ -2885,6 +2914,7 @@ public final class DeviceRowView: NSView {
         var valueParts: [String] = []
         if device.isMuted || isMasterMuted { valueParts.append("muted") }
         if isRouteArmed { valueParts.append(hasLiveFeeds ? "playing here" : "armed") }
+        if volumePendingApply { valueParts.append("applying volume") }
         setAccessibilityValue(valueParts.joined(separator: ", "))
 
         // Blocked local-mix row (spec §4.6, S4): the refusal reason rides the

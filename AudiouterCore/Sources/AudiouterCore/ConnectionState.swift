@@ -64,6 +64,12 @@ public struct ConnectionFailure: Equatable, Sendable {
         // spec). Never auto-purged: re-pairing resurrects the same MAC-derived
         // id, and with it the trim + membership.
         case notPaired
+        // A Cast receiver refused to LAUNCH the Default Media Receiver app —
+        // the AirServer-style case, where the device speaks the Cast protocol
+        // but hosts no app that can play a stream.
+        case castAppUnavailable
+        // TLS/TCP to the Cast receiver's control port (8009) never came up.
+        case castConnectionFailed
         case unknown
     }
 
@@ -96,6 +102,8 @@ extension ConnectionFailure {
         case .timingUnavailable: return "Sync unavailable"
         case .connectedElsewhere: return "Connected elsewhere"
         case .notPaired:        return "Not paired"
+        case .castAppUnavailable: return "Cast app unavailable"
+        case .castConnectionFailed: return "Couldn't reach receiver"
         case .unknown:          return "Couldn't connect"
         }
     }
@@ -125,6 +133,10 @@ extension ConnectionFailure {
             return "The speaker is connected to another device. Disconnect it there — or from this Mac's Bluetooth Settings — then try again."
         case .notPaired:
             return "This speaker's pairing was removed. Pair it again in Bluetooth Settings, then try again."
+        case .castAppUnavailable:
+            return "This receiver can't run the Default Media Receiver — some software receivers don't support it. Try a different Cast device."
+        case .castConnectionFailed:
+            return "The Cast receiver didn't accept the connection. Check that it's powered on and on the same network, then try again."
         case .unknown:
             return "The connection failed for an unknown reason. Try again, or check the speaker."
         }

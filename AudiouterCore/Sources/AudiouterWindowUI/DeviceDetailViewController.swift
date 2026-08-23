@@ -599,7 +599,7 @@ public final class DeviceDetailViewController: NSViewController {
     /// number alone tells the person reading it nothing.
     private static func airPlayText(for device: Device) -> String? {
         switch device.kind {
-        case .bluetooth, .localMac:
+        case .bluetooth, .localMac, .cast:
             return nil
         case .homePod, .appleTV, .airportExpress, .sonos, .generic:
             return device.supportsAirPlay2 ? "AirPlay 2" : "AirPlay 1 — sync not exact"
@@ -618,6 +618,7 @@ public final class DeviceDetailViewController: NSViewController {
         case .sonos:          return "Sonos"
         case .generic:        return "AirPlay Speaker"
         case .bluetooth:      return "Bluetooth Speaker"
+        case .cast:           return "Cast Device"
         }
     }
 

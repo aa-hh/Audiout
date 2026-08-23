@@ -130,6 +130,62 @@ import Testing
         }
     }
 
+    // MARK: - CAST-SYNC: the N-way room-delay reduction
+
+    /// THE Phase (ii) invariant on the timing side (sync architecture brief
+    /// §3): every composition that ships today returns today's reference when
+    /// `castTermMs` is `nil`, because an absent operand makes the `max` the
+    /// identity. Table-driven over all six shipped compositions, including the
+    /// one that carries an explicit `castPresent: false`.
+    @Test func roomDelay_withNoCastTerm_reducesToTodaysReference() {
+        let S = 1_000, btOnly = 500
+        let cases: [(name: String, composition: BTGroupComposition, expected: Int)] = [
+            ("AirPlay only", BTGroupComposition(airPlayPresent: true, macLocalPresent: false), S),
+            ("AirPlay + Mac", BTGroupComposition(airPlayPresent: true, macLocalPresent: true), S),
+            ("AirPlay + BT", BTGroupComposition(airPlayPresent: true, macLocalPresent: false), S),
+            ("BT only", BTGroupComposition(airPlayPresent: false, macLocalPresent: false), btOnly),
+            ("BT + Mac", BTGroupComposition(airPlayPresent: false, macLocalPresent: true), btOnly),
+            ("BT, castPresent false",
+             BTGroupComposition(airPlayPresent: false, macLocalPresent: false, castPresent: false),
+             btOnly),
+        ]
+        for c in cases {
+            #expect(BTReferenceTimeline.roomDelayMs(
+                composition: c.composition, presentationDelayMs: S,
+                btOnlyBufferMs: btOnly, castTermMs: nil) == c.expected, "\(c.name)")
+            // And the delay every BT device actually renders on is the same
+            // number it is today — the reduction is not just in the helper.
+            #expect(BTReferenceTimeline.delayNanos(
+                composition: c.composition, presentationDelayMs: S, btOnlyBufferMs: btOnly,
+                deviceOffsetMs: 120, trimMs: 10, castTermMs: nil)
+                == BTReferenceTimeline.delayNanos(
+                    composition: c.composition, presentationDelayMs: S, btOnlyBufferMs: btOnly,
+                    deviceOffsetMs: 120, trimMs: 10), "\(c.name): delayNanos")
+        }
+    }
+
+    /// The other half of the same rule: a Cast term only ever RAISES the room
+    /// delay (delay-to-worst — no output's own latency can be shortened), and a
+    /// Cast device selects the presentation reference exactly as AirPlay does.
+    @Test func roomDelay_takesTheLongestActiveTerm() {
+        let btOnly = BTGroupComposition(airPlayPresent: false, macLocalPresent: false)
+        let withCast = BTGroupComposition(
+            airPlayPresent: false, macLocalPresent: false, castPresent: true)
+
+        #expect(BTReferenceTimeline.roomDelayMs(
+            composition: btOnly, presentationDelayMs: 1_000,
+            btOnlyBufferMs: 500, castTermMs: 5_500) == 5_500,
+            "a Cast receiver 5.5 s behind live sets the room delay")
+        #expect(BTReferenceTimeline.roomDelayMs(
+            composition: withCast, presentationDelayMs: 5_500,
+            btOnlyBufferMs: 500, castTermMs: nil) == 5_500,
+            "a Cast device authors a presentation timeline, like AirPlay")
+        #expect(BTReferenceTimeline.roomDelayMs(
+            composition: withCast, presentationDelayMs: 6_000,
+            btOnlyBufferMs: 500, castTermMs: 5_500) == 6_000,
+            "and the room never shortens to the faster of the two")
+    }
+
     @Test func compositionChange_reanchorsWithTheNewReference() throws {
         let manager = BTSyncedSink(
             renderSampleRate: Self.sampleRate, channelCount: 1,
@@ -646,8 +702,9 @@ extension SerializedSharedState {
             manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
             let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
 
-            // The ring holds 8 s (524_288 frames once rounded up), so blocks 3
-            // and 4 of these have nowhere to go and are dropped wholesale.
+            // The ring holds 11 s (1_048_576 frames once rounded up — the
+            // Cast room-delay capacity), so five of these fit and the last
+            // two have nowhere to go and are dropped wholesale.
             var block = [Float](repeating: 1, count: 200_000)
             func feed(atSec sec: Int) {
                 block.withUnsafeBufferPointer { buf in
@@ -656,7 +713,7 @@ extension SerializedSharedState {
                                     pts: timespec(tv_sec: sec, tv_nsec: 0))
                 }
             }
-            for i in 0..<4 { feed(atSec: BTSyncedSinkTests.anchorSec + i) }
+            for i in 0..<7 { feed(atSec: BTSyncedSinkTests.anchorSec + i) }
 
             // Open the gate; the NEXT enqueue posts the stashed record.
             _ = BTSyncedSinkTests.renderCycle(
@@ -705,10 +762,11 @@ extension SerializedSharedState {
                 BTGroupComposition(airPlayPresent: true, macLocalPresent: false))
             manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
 
-            // Overflow the ring WITHOUT ever opening the gate, so the only line
-            // that can carry these drops is the one session end emits.
+            // Overflow the ring (11 s ≈ 1_048_576 frames: five blocks fit,
+            // two drop) WITHOUT ever opening the gate, so the only line that
+            // can carry these drops is the one session end emits.
             var block = [Float](repeating: 1, count: 200_000)
-            for i in 0..<4 {
+            for i in 0..<7 {
                 block.withUnsafeBufferPointer { buf in
                     manager.enqueue(interleavedFrames: buf.baseAddress!,
                                     frameCount: block.count,

@@ -1,6 +1,7 @@
 import Foundation
 import AudioToolbox
 import AirPlayEngine
+import CastSender
 
 /// The native ``OutputBackend`` (T-NB-BACKEND-1): the app-visible seam that
 /// drives the extracted, in-process ``AirPlayEngine`` (an AirPlay-2 sender) plus
@@ -80,6 +81,17 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// `nil` under most tests (like `btEnumerator`), which keeps every BT
     /// reconnect path inert unless a fake is injected.
     private let btConnectionManager: BTConnectionManaging?
+
+    /// Cast discovery (CAST-ENUM): `_googlecast._tcp` browse surfacing `.cast`
+    /// rows through the same `known`/`order`/`emit` flow BT rows use. `nil` (the
+    /// designated init's default, so every existing test stays Cast-free) means
+    /// no Cast enumeration; the production convenience init wires the real one.
+    private let castEnumerator: CastDeviceEnumerating?
+    /// CAST-OUT: the per-receiver session manager the selection arm drives.
+    /// `nil` under most tests, which keeps every Cast path inert unless a fake
+    /// is injected. Cast ids are the THIRD routing partition — never an
+    /// `outputIDs` entry, never fed to the engine.
+    private let castOutputManager: CastOutputControlling?
 
     /// The Mac's own default-output volume/mute. This is the ONLY control path the
     /// local device row (``localDeviceID``) has: the Mac is the thing *sending*
@@ -406,6 +418,28 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// The ceiling: a speaker that never reports rendering must not stall the
     /// run, so past this the ticks arm regardless.
     var wizardArmCeilingSeconds: TimeInterval = 8
+
+    /// The latest browse record per Cast id (`stateQueue`) — kept even when the
+    /// receiver drops off the network, because a row that comes back must be
+    /// addressable again without waiting for a fresh browse.
+    private var castRecords: [String: CastDeviceRecord] = [:]
+    /// The Cast ids `setOutputSet` last committed (`stateQueue`), sorted, so a
+    /// routing call that changes none of them re-applies nothing.
+    private var castSelectedIDs: [String] = []
+    /// Cast ids whose receiver has reported PLAYING (`stateQueue`) — the audible
+    /// fact `desiredDeviceAudibleLocked` reads.
+    private var castPlaying: Set<String> = []
+    /// Cast ids with a grace timer running towards `isAvailable = false`
+    /// (`stateQueue`), each mapped to the generation that armed it. A browse
+    /// that lists the id again drops the entry, which makes the pending timer
+    /// inert; the generation additionally makes a stale timer from an EARLIER
+    /// absence inert after a reappear/vanish cycle.
+    private var castAbsenceFlips: [String: Int] = [:]
+    private var castAbsenceGeneration = 0
+    /// Whether the capture fan-out's Cast slot is attached
+    /// (`captureControlQueue`), so an already-armed selection change never
+    /// re-attaches it.
+    private var castFeedAttached = false
 
     // MARK: First-mix alignment intercept (W3)
 
@@ -810,6 +844,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// safety net, not a preference — the preference is the post-wake
     /// ``wakeAudioRestoreDelay``.
     public static let defaultSilenceFallbackDelay: TimeInterval = 10
+
+    /// How long a Cast row keeps `isAvailable` after a browse stops listing it
+    /// (CAST-ENUM). Injectable so tests shrink it; never mutated after init.
+    private let castAbsenceGrace: TimeInterval
+
+    /// The default Cast absence grace (seconds). A wired receiver's Bonjour
+    /// advert reaches the Mac only intermittently, so ONE browse that omits it
+    /// is a blip, not a departure — and a row that greys out reads as disabled
+    /// in the popover. A grace TIMER rather than a count of consecutive
+    /// omissions: the browse is event-driven (`NWBrowser.browseResultsChanged`),
+    /// so nothing guarantees a second browse ever arrives, and a count-based
+    /// debounce would leave a departed receiver listed as available forever.
+    public static let defaultCastAbsenceGrace: TimeInterval = 3
 
     /// The armed silence-watchdog countdown. Cancelled when a desired device
     /// reconnects, the intent clears, on a sleep/wake cycle, or on `stop()`.
@@ -1331,6 +1378,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             discoverySource: discovery,
             btEnumerator: BTDeviceEnumerator.production(),
             btConnectionManager: BTConnectionManager(),
+            castEnumerator: CastDeviceEnumerator(),
+            castOutputManager: CastOutputManager(),
             btTrimStore: BTTrimStore(),
             eqStore: DeviceEQStore(),
             processResolver: processResolver,
@@ -1371,6 +1420,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         discoverySource: DiscoverySource,
         btEnumerator: BTDeviceEnumerating? = nil,
         btConnectionManager: BTConnectionManaging? = nil,
+        castEnumerator: CastDeviceEnumerating? = nil,
+        castOutputManager: CastOutputControlling? = nil,
         btTrimStore: BTTrimStore? = nil,
         eqStore: DeviceEQStore? = nil,
         dacpEndpoint: DACPEndpoint = DACPServer(),
@@ -1389,6 +1440,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         takeoverStripDelay: TimeInterval = 0.75,
         watchdogScheduler: SilenceWatchdogScheduling? = nil,
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
+        castAbsenceGrace: TimeInterval = NativeBackend.defaultCastAbsenceGrace,
         systemDefaultOutputIsAirPlayClass: @escaping @Sendable () -> Bool = NativeBackend.currentDefaultOutputIsAirPlayClass,
         defaultOutputSwitcher: DefaultOutputSwitcher? = nil,
         aggregateControl: AggregateDeviceControlling = CoreAudioAggregateDeviceControl(),
@@ -1410,10 +1462,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         self.watchdogScheduler = watchdogScheduler
             ?? DispatchSilenceWatchdogScheduler(queue: DispatchQueue(label: "NativeBackend.silenceWatchdog"))
         self.silenceFallbackDelay = silenceFallbackDelay
+        self.castAbsenceGrace = castAbsenceGrace
         self.engine = engineControl
         self.discovery = discoverySource
         self.btEnumerator = btEnumerator
         self.btConnectionManager = btConnectionManager
+        self.castEnumerator = castEnumerator
+        self.castOutputManager = castOutputManager
         self.btTrimStore = btTrimStore
         if let loaded = (try? btTrimStore?.load()) ?? nil {
             self.btTrimsByUID = loaded.mapValues(BTSyncTrim.clamp)
@@ -1702,6 +1757,26 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 Telemetry.log(.localPlayback, "bt_connect_fallback_suggested", ["address": address])
             }
             btConnectionManager.startObservingConnections()
+        }
+
+        // 1a-CAST: Cast receivers (CAST-ENUM) take the same route as BT rows —
+        //     their own browse feeding `applyCastSnapshots` on `stateQueue`, and
+        //     the session manager's state changes feeding `applyCastSessionState`
+        //     on the same queue, so a row's `.connecting`/`.connected`/`.failed`
+        //     is decided in exactly one place.
+        if let castEnumerator {
+            castEnumerator.onSnapshot = { [weak self] records in
+                self?.stateQueue.async { self?.applyCastSnapshots(records) }
+            }
+            castEnumerator.start()
+        }
+        if let castOutputManager {
+            castOutputManager.onStateChange = { [weak self] id, state in
+                self?.stateQueue.async { self?.applyCastSessionState(id, state) }
+            }
+            castOutputManager.onVolumeLagChange = { [weak self] id, lag in
+                self?.stateQueue.async { self?.applyCastVolumeLag(id, lag) }
+            }
         }
 
         // 1b. TWO-WAY SYNC for the local row. Its slider/mute ARE the Mac's default
@@ -2033,6 +2108,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         btEnumerator?.stop()
         btConnectionManager?.onConnectionsChanged = nil
         btConnectionManager?.stopObservingConnections()
+        castEnumerator?.onSnapshot = nil
+        castEnumerator?.stop()
+        castOutputManager?.onStateChange = nil
+        castOutputManager?.onVolumeLagChange = nil
         // Drop the local row's two-way sync (the row itself is removed below).
         systemVolume.onExternalChange = nil
         systemVolume.stop()
@@ -2089,6 +2168,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self.btSinkEnabled = false
             self.btSelectedUIDs = []
             self.btComposition = BTGroupComposition(airPlayPresent: false, macLocalPresent: false)
+            // CAST-OUT: same shape — reset the decisions here, enqueue the
+            // teardown below so the FIFO's last Cast op is the disable.
+            self.castSelectedIDs = []
+            self.castPlaying = []
+            // Drop the pending availability grace timers with them: a flip that
+            // lands after stop would grey a row nothing is watching any more.
+            self.castAbsenceFlips.removeAll()
             // BT-LIFECYCLE: drop every `.connecting` hold and its poll, so no
             // spinner can outlive the backend that would have resolved it.
             self.btRenderPollWork?.cancel()
@@ -2129,6 +2215,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self?.applyBTSinkTransition(
                     enable: false, uids: [],
                     composition: BTGroupComposition(airPlayPresent: false, macLocalPresent: false))
+            }
+            self.captureControlQueue.async { [weak self] in
+                self?.applyCastTransition(enable: false, records: [], levels: [:])
             }
             let ids = self.order
             self.known.removeAll()
@@ -2302,6 +2391,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 }
                 return
             }
+            // `.cast` ids are the third partition — no `outputIDs` entry either,
+            // same stash-under-mute semantics, and the push is the composed
+            // receiver level instead of an engine volume.
+            if self.known[id]?.isCast == true {
+                if self.muted.contains(id) {
+                    self.stashedVolume[id] = clamped
+                    self.applyLocal(id) { $0.volume = clamped }
+                } else {
+                    self.applyLocal(id) { $0.volume = clamped }
+                    self.pushCastLevelLocked(id)
+                }
+                return
+            }
             guard let outputID = self.outputIDs[id] else { return }
             // If the device is muted, remember the desired level; unmute restores
             // it. Otherwise push it now. Optimistically echo so the UI is snappy.
@@ -2345,6 +2447,22 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     self.applyLocal(id) { $0.isMuted = false; $0.volume = intended }
                 }
                 self.pushBTSinkGainLocked(id)
+                return
+            }
+            // Cast arm: the same stash/restore shim again — a Cast mute is the
+            // composed level 0, never the protocol's own muted flag.
+            if self.known[id]?.isCast == true {
+                if muted {
+                    self.muted.insert(id)
+                    if self.stashedVolume[id] == nil { self.stashedVolume[id] = self.known[id]?.volume ?? 0 }
+                    self.applyLocal(id) { $0.isMuted = true; $0.volume = 0 }
+                } else {
+                    self.muted.remove(id)
+                    let intended = self.stashedVolume[id] ?? self.known[id]?.volume ?? 0
+                    self.stashedVolume[id] = nil
+                    self.applyLocal(id) { $0.isMuted = false; $0.volume = intended }
+                }
+                self.pushCastLevelLocked(id)
                 return
             }
             guard let outputID = self.outputIDs[id] else { return }
@@ -2396,6 +2514,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // gain. `pushBTSinkGainLocked` folds mute/hold in as 0, so this
             // can't unmute or blow through a first-mix hold.
             for uid in self.btSelectedUIDs { self.pushBTSinkGainLocked(uid) }
+            // Same for every selected Cast id — `castLevel(forID:)` folds mute
+            // in as 0, so this can't unmute a receiver either.
+            for id in self.castSelectedIDs { self.pushCastLevelLocked(id) }
             // The Mac's own path carries `group × device`, and Main too whenever we
             // own the volume — there it is the ONLY thing applying Main to the Mac,
             // so a Main-only move has to re-push as well. When macOS owns the
@@ -2482,6 +2603,27 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// a sink transition to apply on `captureControlQueue`. On `stateQueue`.
     private func btSinkGains(forUIDs uids: [String]) -> [String: Float] {   // on stateQueue
         Dictionary(uniqueKeysWithValues: uids.map { ($0, btSinkGain(forUID: $0)) })
+    }
+
+    /// One Cast receiver's composed level: `Main × Group × Device` as 0.0…1.0,
+    /// the same product `btSinkGain(forUID:)` forms, forced to 0 while muted.
+    /// ONE product, one writer — a Cast receiver's mute IS level 0, never the
+    /// protocol's `SET_VOLUME muted` flag, so nothing else can fight over the
+    /// knob and no receiver-side mute can outlive the session. On `stateQueue`.
+    private func castLevel(forID id: String) -> Double {   // on stateQueue
+        if muted.contains(id) { return 0 }
+        return masterGainFraction * Double((known[id]?.volume ?? 100).clampedToVolume) / 100.0
+    }
+
+    /// Push one Cast id's composed level to the session manager (a no-op before
+    /// the channel is live — the manager stores it and sends it on connect).
+    /// Reads on `stateQueue`, then hops to `captureControlQueue`, which owns the
+    /// manager's transitions. On `stateQueue`.
+    private func pushCastLevelLocked(_ id: String) {   // on stateQueue
+        let level = castLevel(forID: id)
+        captureControlQueue.async { [weak self] in
+            self?.castOutputManager?.setLevel(level, forDevice: id)
+        }
     }
 
     // MARK: Tone (per-device + Main Out EQ)
@@ -2872,11 +3014,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // no `outputIDs` entry either, and the explicit `isBluetooth` guard
             // keeps that structural (a BT id must never reach the AirPlay
             // engine even if it ever acquired a handle) — they drive the BT
-            // sink manager below instead.
+            // sink manager below instead. `.cast` ids are the THIRD partition,
+            // held to the same guard discipline for the same reason.
             var kicks: [(String, OutputID)] = []
             for id in self.order {
                 guard let device = self.known[id], !device.isLocalDevice,
                       !device.isBluetooth,
+                      !device.isCast,
                       let outputID = self.outputIDs[id] else { continue }
                 let wantOn = ids.contains(id)
 
@@ -3020,7 +3164,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 airPlayPresent: ids.contains {
                     self.known[$0].map { !$0.isBluetooth && !$0.isLocalDevice } == true
                 },
-                macLocalPresent: macSelected)
+                macLocalPresent: macSelected,
+                castPresent: ids.contains { self.known[$0]?.isCast == true })
 
             // W3 — the first-mix alignment intercept. The trigger is exactly
             // the locked spec's: a BT id in a MIX (any other member — another
@@ -3087,6 +3232,40 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 }
             }
 
+            // CAST-OUT (R-partition, third arm): selected `.cast` ids drive the
+            // Cast session manager — same decide-here/apply-on-`captureControlQueue`
+            // split as BT, and an unchanged id list enqueues nothing. An empty
+            // `castIDs` on an already-empty selection is a no-op.
+            let castIDs = ids.filter { self.known[$0]?.isCast == true }.sorted()
+            // The row's connect story, twin of the BT arm's: a newly-selected
+            // AVAILABLE Cast id breathes until its receiver reports PLAYING; a
+            // newly-selected UNAVAILABLE one stays `.off`. A deselect ends the
+            // hold but leaves a `.failed` story standing, so "Try again" keeps
+            // explaining what went wrong.
+            for id in previouslySelected.symmetricDifference(ids)
+            where self.known[id]?.isCast == true {
+                if ids.contains(id) {
+                    if self.known[id]?.isAvailable == true {
+                        self.setConnectionState(.connecting, for: id)
+                    }
+                } else {
+                    self.castPlaying.remove(id)
+                    if case .failed = self.known[id]?.connectionState {} else {
+                        self.setConnectionState(.off, for: id)
+                    }
+                }
+            }
+            if castIDs != self.castSelectedIDs {
+                self.castSelectedIDs = castIDs
+                let records = castIDs.compactMap { self.castRecords[$0] }
+                let levels = Dictionary(
+                    uniqueKeysWithValues: castIDs.map { ($0, self.castLevel(forID: $0)) })
+                self.captureControlQueue.async { [weak self] in
+                    self?.applyCastTransition(
+                        enable: !castIDs.isEmpty, records: records, levels: levels)
+                }
+            }
+
             // The selection just moved, so the set of devices an EQ stream can
             // serve moved with it (decision 16). This pass sees INTENT only:
             // devices connecting as a result of this call reconcile again on
@@ -3142,6 +3321,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // separate path — BT ids have no engine OutputID, and their "converge"
         // is a baseband reconnect (`BTConnectionManager`), not an RTSP session.
         if retryBTOutput(id) { return }
+        // CAST-OUT: a Cast row's "Try again" re-runs the whole session recipe in
+        // the manager — no engine OutputID exists for it either.
+        if retryCastOutput(id) { return }
         let kick: OutputID? = stateQueue.sync {
             // Only a still-DESIRED id can be retried — intent lives in
             // `expectedSelected` (what the routing brain last asked for), and a
@@ -3219,6 +3401,88 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             self?.finishBTReconnect(id: id, outcome: outcome)
         }
         return true
+    }
+
+    /// CAST-OUT: handle `retryOutput` for a `.cast` id. Returns `false` for
+    /// non-Cast ids (the AirPlay path runs instead). Unlike the BT arm,
+    /// membership IS required — nothing streams to an unselected receiver, so a
+    /// retry there could only open a session with no audio behind it.
+    private func retryCastOutput(_ id: String) -> Bool {
+        stateQueue.sync {
+            guard self.known[id]?.isCast == true else { return false }
+            if self.expectedSelected.contains(id) {
+                // Eager `.connecting`, mirroring both arms above: immediate
+                // spinner, and the `.failed → .connecting` edge marks a fresh
+                // user-initiated attempt for the row's failure-episode semantics.
+                self.setConnectionState(.connecting, for: id)
+                Telemetry.log(.cast, "cast_connect_requested", ["device": id, "trigger": "retry"])
+                self.captureControlQueue.async { [weak self] in
+                    self?.castOutputManager?.retry(deviceID: id)
+                }
+            }
+            return true
+        }
+    }
+
+    /// Fold one `CastOutputManager` session state into the row (CAST-OUT). The
+    /// manager knows nothing about rows; this is the only place a Cast session
+    /// becomes a `ConnectionState`. On `stateQueue`.
+    private func applyCastVolumeLag(_ id: String, _ lagSeconds: Int?) {   // on stateQueue
+        guard var device = known[id], device.isCast, device.castVolumeLagSeconds != lagSeconds else { return }
+        device.castVolumeLagSeconds = lagSeconds
+        commitKnownDevice(id, device)
+        Telemetry.log(.cast, "cast_volume_lag", [
+            "device": id, "lag": lagSeconds.map(String.init) ?? "nil",
+        ])
+    }
+
+    private func applyCastSessionState(_ id: String, _ state: CastSessionState) {   // on stateQueue
+        guard known[id]?.isCast == true else { return }
+        let before = known[id]?.connectionState
+        defer {
+            // `cast_row_state` on a REAL row change only: a teardown `.idle`, or
+            // a late state a "still desired" guard dropped, moves nothing.
+            if let device = known[id], device.connectionState != before { logCastRowState(device) }
+        }
+        switch state {
+        case .connecting:
+            // Only while still desired: a late `.connecting` from a session
+            // being torn down must not resurrect a spinner on a deselected row.
+            if expectedSelected.contains(id) { setConnectionState(.connecting, for: id) }
+        case .playing:
+            // Same "only while still desired" test as `.connecting`: a receiver's
+            // first PLAYING can land after a deselect has already written `.off`,
+            // and an unguarded write would show a deselected row as connected.
+            guard expectedSelected.contains(id) else { break }
+            castPlaying.insert(id)
+            setConnectionState(.connected, for: id)
+        case .failed(let failure):
+            castPlaying.remove(id)
+            let cause: ConnectionFailure.Cause
+            let detail: String?
+            switch failure {
+            case .timedOut:
+                cause = .timedOut
+                detail = nil
+            case .appUnavailable(let reason):
+                cause = .castAppUnavailable
+                detail = reason
+            case .connectionFailed(let message):
+                cause = .castConnectionFailed
+                detail = message
+            case .dropped(let message):
+                cause = .droppedMidStream
+                detail = message
+            case .noLocalAddress:
+                cause = .castConnectionFailed
+                detail = "no local IPv4 address"
+            }
+            setConnectionState(.failed(ConnectionFailure(cause: cause, detail: detail)), for: id)
+        case .idle:
+            // Teardown acknowledgement only — the row's `.off` was already set
+            // by whichever gesture caused the teardown.
+            castPlaying.remove(id)
+        }
     }
 
     /// Fold one `BTConnectionManager.connect` outcome into the row's
@@ -3526,6 +3790,39 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             sink.stop()
             sink.setDevices([])
             attachBTSink(nil)
+        }
+    }
+
+    /// Apply one Cast selection decision (CAST-OUT). On `captureControlQueue`,
+    /// like ``applyBTSinkTransition(enable:uids:composition:gains:)``, so a Cast
+    /// transition can never race a tap start/stop or a BT transition.
+    ///
+    /// The fan-out slot is attached exactly once per armed stretch — the pid is
+    /// our own already-tap-excluded process, so attaching costs no tap rebuild,
+    /// but re-attaching on every selection change would still churn the
+    /// snapshot for nothing.
+    private func applyCastTransition(
+        enable: Bool, records: [CastDeviceRecord], levels: [String: Double]
+    ) {   // on captureControlQueue
+        guard let manager = castOutputManager else { return }
+        if enable {
+            if !castFeedAttached {
+                captureCoordinator?.setCastSink(manager.feed, renderProcessPID: getpid())
+                castFeedAttached = true
+            }
+            manager.setDevices(records)
+            // Composed levels land after the device set: a session that has not
+            // reached its receiver yet stores the level and pushes it as soon
+            // as the channel is live.
+            for (id, level) in levels {
+                manager.setLevel(level, forDevice: id)
+            }
+        } else {
+            manager.setDevices([])
+            if castFeedAttached {
+                captureCoordinator?.setCastSink(nil, renderProcessPID: nil)
+                castFeedAttached = false
+            }
         }
     }
 
@@ -6076,10 +6373,31 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// each BT speaker by `startBufferMs − btOnlyBufferMs` in that composition.
     func localSinkReferenceDelayMs() -> Int {
         stateQueue.sync {
-            (btSinkEnabled && !btComposition.airPlayPresent)
+            let today = (btSinkEnabled && !btComposition.airPlayPresent)
                 ? btReferenceBufferMs : _startBufferMs
+            return _castTermMs.map { Swift.max(today, $0) } ?? today
         }
     }
+
+    /// The reference delay (ms) every Bluetooth sink renders on — the AirPlay
+    /// start buffer, raised to the Cast term when a Cast receiver is the
+    /// furthest-behind output in the room (sync architecture brief §3).
+    func btReferenceDelayMs() -> Int {
+        stateQueue.sync {
+            _castTermMs.map { Swift.max(_startBufferMs, $0) } ?? _startBufferMs
+        }
+    }
+
+    /// CAST-SYNC: how far behind live the furthest Cast receiver in the mix is
+    /// playing (ms), or `nil` when no Cast device is contributing a term — the
+    /// `max` reduction's absent operand, and the reason every delay above
+    /// reduces to today's number by construction rather than by a flag.
+    ///
+    /// razor: read-only for now. The room-delay controller that measures a
+    /// receiver's settled lead and writes this is the activation phase; until
+    /// it exists the term is `nil` on every path, which is exactly the state
+    /// the invariant needs.
+    private var _castTermMs: Int?
 
     /// Seed the initial value without triggering an apply (`makeBackend` only —
     /// the engine was just constructed with this same value in its config).
@@ -6624,9 +6942,24 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// Core Audio endpoint existing (`isAvailable`) — exactly what its sink
     /// renders through; a selected-but-disconnected BT speaker therefore still
     /// (correctly) counts as silence and falls back to the Mac. On `stateQueue`.
+    ///
+    /// A `.cast` id is audible once its receiver has REPORTED PLAYING
+    /// (`castPlaying` — `isAvailable` would count a receiver that is merely on
+    /// the network), and a session that is still `.connecting` counts as NOT
+    /// STRANDED rather than audible. The Cast recipe runs connect → launch →
+    /// LOAD → PLAY and takes ~10 s on real hardware — a dead heat with
+    /// ``defaultSilenceFallbackDelay`` — so reading a starting session as
+    /// stranded armed the countdown at select and then stopped the capture tap
+    /// the Cast feed is fed from, starving the receiver into a rebuffer stall it
+    /// never recovers from (live run 2026-08-22). A genuinely dead receiver is
+    /// still caught: the session's own 15 s play deadline reports `.failed`, the
+    /// row leaves `.connecting`, and the countdown arms then (R11 intact).
     private func desiredDeviceAudibleLocked(_ id: String) -> Bool {   // on stateQueue
         guard let device = known[id] else { return false }
         if device.isBluetooth { return device.isAvailable }
+        if device.isCast {
+            return castPlaying.contains(id) || device.connectionState == .connecting
+        }
         return device.connectionState == .connected
     }
 
@@ -7390,6 +7723,90 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         if desiredAvailabilityMoved {
             reconcileSilenceWatchdog()
             reapplyBTSinkLocked()
+        }
+    }
+
+    // MARK: Cast receivers → deviceAdded/deviceUpdated (CAST-ENUM)
+
+    /// Fold one Cast browse snapshot into `known`/`order` (CAST-ENUM), the same
+    /// shape `applyBTSnapshots` uses for the BT merged list. On `stateQueue`.
+    ///
+    /// An id absent from this list has dropped off the network, not been
+    /// deleted: the row is kept (unavailable) and its browse record is kept too,
+    /// so a receiver that comes back is addressable without a fresh browse. The
+    /// connection state is deliberately NOT touched here — the session's own
+    /// channel is the truth about whether it is still playing, and a Bonjour
+    /// blip is not evidence either way.
+    ///
+    /// The unavailable flip is DEBOUNCED behind ``castAbsenceGrace``: a wired
+    /// receiver advertises intermittently, and greying the row on the first
+    /// browse that omits it made the device read as disabled mid-session. A
+    /// browse that lists the id again inside the grace cancels the flip.
+    private func applyCastSnapshots(_ records: [CastDeviceRecord]) {   // on stateQueue
+        for record in records {
+            castRecords[record.id] = record
+            castAbsenceFlips[record.id] = nil        // back inside the grace: no flip
+            if var device = known[record.id] {
+                let returned = !device.isAvailable
+                device.name = record.friendlyName
+                device.isAvailable = true
+                if device != known[record.id] { commitKnownDevice(record.id, device) }
+                if returned { logCastRowState(device) }
+            } else {
+                let device = Device(
+                    id: record.id, name: record.friendlyName, kind: .cast,
+                    isAvailable: true, supportsAirPlay2: false)
+                known[record.id] = device
+                order.append(record.id)
+                emit(.deviceAdded(device))
+                logCastRowState(device)
+            }
+        }
+        let present = Set(records.map(\CastDeviceRecord.id))
+        for id in order where known[id]?.kind == .cast && !present.contains(id) {
+            guard known[id]?.isAvailable == true, castAbsenceFlips[id] == nil else { continue }
+            castAbsenceGeneration += 1
+            let generation = castAbsenceGeneration
+            castAbsenceFlips[id] = generation
+            stateQueue.asyncAfter(deadline: .now() + castAbsenceGrace) { [weak self] in
+                self?.expireCastAbsence(id, generation)
+            }
+        }
+    }
+
+    /// The grace elapsed with the receiver still missing from the browse — it
+    /// really has left the network, so grey the row now. Inert if a later browse
+    /// listed the id again (the entry was dropped) or if a newer absence has
+    /// since armed its own timer (the generation moved on). On `stateQueue`.
+    private func expireCastAbsence(_ id: String, _ generation: Int) {   // on stateQueue
+        guard castAbsenceFlips[id] == generation else { return }
+        castAbsenceFlips[id] = nil
+        guard var device = known[id], device.isCast, device.isAvailable else { return }
+        device.isAvailable = false
+        commitKnownDevice(id, device)
+        logCastRowState(device)
+    }
+
+    /// One `cast_row_state` line per Cast availability / connection-state change:
+    /// the diagnostic that says whether a row the user saw as "disabled" really
+    /// was unavailable, or merely lacked a connection halo. Emitted only from
+    /// `stateQueue` (never the capture IOProc), and `Telemetry.log` formats and
+    /// hands off to its own queue, so it never blocks a decision.
+    private func logCastRowState(_ device: Device) {   // on stateQueue
+        Telemetry.log(.cast, "cast_row_state", [
+            "device": device.id,
+            "isAvailable": device.isAvailable ? "true" : "false",
+            "connectionState": Self.castRowConnectionName(device.connectionState),
+        ])
+    }
+
+    private static func castRowConnectionName(_ state: ConnectionState) -> String {
+        switch state {
+        case .off: return "off"
+        case .connecting: return "connecting"
+        case .connected: return "connected"
+        case .reconnecting: return "reconnecting"
+        case .failed(let failure): return "failed(\(failure.cause))"
         }
     }
 
@@ -8788,6 +9205,18 @@ public protocol CaptureControlling: AnyObject, Sendable {
     /// ``NativeCaptureCoordinator`` provides the real one.
     func setBTSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?)
 
+    /// Attach/detach the Cast fan-out (CAST-FANOUT) — same contract again, and
+    /// the converted S16LE goes straight in (no widen/resample). Default no-op;
+    /// ``NativeCaptureCoordinator`` provides the real one.
+    func setCastSink(_ sink: PCMSink?, renderProcessPID: pid_t?)
+
+    /// CAST-SYNC: hold the AirPlay feed back by `ms` before the engine write,
+    /// so a Cast receiver playing seconds behind live can still be the room's
+    /// reference. `0` removes the line outright (the bypass is its absence, not
+    /// a zero delay). Default no-op; ``NativeCaptureCoordinator`` provides the
+    /// real one.
+    func setAirPlayPreDelay(ms: Int)
+
     /// Start/stop the align-by-ear tick mixed into the captured feed
     /// (BT-OFFSET-UI). Default no-op; ``NativeCaptureCoordinator`` provides
     /// the real one.
@@ -8821,6 +9250,10 @@ extension CaptureControlling {
     func setSyncedLocalSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {}
     /// Default no-op (BT-FANOUT), same posture.
     func setBTSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {}
+    /// Default no-op (CAST-FANOUT), same posture.
+    func setCastSink(_ sink: PCMSink?, renderProcessPID: pid_t?) {}
+    /// Default no-op (CAST-SYNC), same posture.
+    func setAirPlayPreDelay(ms: Int) {}
     /// Default no-op (BT-OFFSET-UI align tick), same posture.
     func setAlignTick(_ active: Bool) {}
     /// Default no-ops (roadmap 056 Part B wizard stimulus), same posture.

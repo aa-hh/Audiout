@@ -795,6 +795,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.permissionObserver.kick(source: "wake")
             }
         }
+
+        // Live diagnosis (2026-08-23): offline reproduction of the Cast
+        // pending-fill "pixels never move" report. Inert without its env var.
+        startCastPendingProbeIfEnabled()
     }
 
     /// Register the PTP helper daemon once at launch, outside onboarding
@@ -1656,5 +1660,122 @@ final class QuittingIndicatorPanel: NSPanel {
         ])
 
         contentView = effectView
+    }
+}
+
+// MARK: - Cast pending-fill live probe (TEMPORARY diagnostic, 2026-08-23)
+
+extension AppDelegate {
+
+    /// `AUDIOUTER_DEBUG_CAST_PROBE=<dir>` (mock backend + `AUDIOUTER_MOCK_CAST_LAG`):
+    /// scripted offline reproduction of the live "pending fader fill never
+    /// shows" report. Opens the ⌘1 surface, selects the mock Cast device,
+    /// fires the REAL slider action (the same dispatch a drag performs), and
+    /// captures the Cast row's slider three times (gold / pending / after)
+    /// through BOTH render paths:
+    ///   - `*-draw.png`   — `cacheDisplay`, the draw-path truth (what the
+    ///     passing pixel test measures), and
+    ///   - `*-layer.png`  — `CALayer.render(in:)`, the layer BACKING STORE
+    ///     the compositor actually puts on screen. A stale backing store
+    ///     (needsDisplay never reaching the layer) shows up ONLY here.
+    /// Remove with the rest of the 2026-08-23 diagnostics once the root cause
+    /// is pinned.
+    func startCastPendingProbeIfEnabled() {
+        guard let dir = ProcessInfo.processInfo.environment["AUDIOUTER_DEBUG_CAST_PROBE"],
+              !dir.isEmpty else { return }
+        let out = URL(fileURLWithPath: dir, isDirectory: true)
+        try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+        let castID = "cast-tv"
+        let logURL = out.appendingPathComponent("probe.log")
+
+        func note(_ s: String) {
+            let line = "[cast-probe] \(s)\n"
+            FileHandle.standardError.write(Data(line.utf8))
+            if let h = try? FileHandle(forWritingTo: logURL) {
+                defer { try? h.close() }
+                h.seekToEndOfFile()
+                h.write(Data(line.utf8))
+            } else {
+                try? Data(line.utf8).write(to: logURL)
+            }
+        }
+
+        func drawPNG(_ view: NSView) -> Data? {
+            guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return nil }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            return rep.representation(using: .png, properties: [:])
+        }
+
+        func layerPNG(_ view: NSView) -> Data? {
+            guard let layer = view.layer else { return nil }
+            let scale = view.window?.backingScaleFactor ?? 2
+            let w = Int(view.bounds.width * scale), h = Int(view.bounds.height * scale)
+            guard w > 0, h > 0,
+                  let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
+                                             bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                             isPlanar: false, colorSpaceName: .deviceRGB,
+                                             bytesPerRow: 0, bitsPerPixel: 0),
+                  let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = ctx
+            ctx.cgContext.scaleBy(x: scale, y: scale)
+            layer.render(in: ctx.cgContext)
+            NSGraphicsContext.restoreGraphicsState()
+            return rep.representation(using: .png, properties: [:])
+        }
+
+        func capture(_ tag: String) {
+            guard let row = popoverController.test_deviceRow(for: castID) else {
+                note("\(tag): NO ROW for \(castID)")
+                return
+            }
+            let slider = row.test_slider
+            note("\(tag): pending=\(row.test_isFaderPending)"
+                 + " inWindow=\(slider.window != nil)"
+                 + " windowVisible=\(slider.window?.isVisible == true)"
+                 + " sliderLayer=\(slider.layer != nil)"
+                 + " needsDisplay=\(slider.needsDisplay)")
+            try? drawPNG(slider)?.write(to: out.appendingPathComponent("\(tag)-slider-draw.png"))
+            try? layerPNG(slider)?.write(to: out.appendingPathComponent("\(tag)-slider-layer.png"))
+            if let content = slider.window?.contentView {
+                try? layerPNG(content)?.write(to: out.appendingPathComponent("\(tag)-window-layer.png"))
+            }
+        }
+
+        func after(_ s: Double, _ block: @escaping @MainActor () -> Void) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + s) {
+                MainActor.assumeIsolated(block)
+            }
+        }
+
+        note("probe armed; out=\(out.path)")
+        after(2.0) { [self] in
+            showSurface(.mixer)
+            note("surface shown")
+        }
+        after(3.5) { [self] in
+            let result = popoverController.test_toggleDeviceEnabled(deviceID: castID, on: true)
+            note("selected \(castID): \(String(describing: result))")
+        }
+        after(6.5) { [self] in
+            capture("1-gold")
+            popoverController.test_deviceRow(for: castID)?.test_fireSliderAction(settingValueTo: 30)
+            note("slider action fired (30)")
+        }
+        after(8.0) { capture("2-pending") }
+        after(13.5) { capture("3-after") }
+        after(14.5) {
+            note("probe done")
+            NSApp.terminate(nil)
+        }
+        // `applicationShouldTerminate` can defer/park termination (measured:
+        // three probe instances outlived their own terminate call), and a
+        // leftover instance fights the live app over the default output.
+        // Mock mode holds no aggregate device, so a hard exit backstop is
+        // safe here — and only here.
+        after(17.0) {
+            note("probe exit backstop")
+            exit(0)
+        }
     }
 }

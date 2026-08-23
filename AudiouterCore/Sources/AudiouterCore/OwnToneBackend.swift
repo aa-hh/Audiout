@@ -859,7 +859,18 @@ public func makeBackend(
         // demoable offline; any other/missing value resolves to no scripts
         // (exact pre-existing behaviour). The observer gives the mock's local
         // row the real default-output name instead of a hardcoded one.
-        return MockBackend(connectScripts: MockBackend.resolveScenarioScripts(),
+        // Live diagnosis (2026-08-23, cast pending-fill probe): a lagged Cast
+        // fixture in the offline fleet, so the fixed-volume pending fader can
+        // be reproduced with zero hardware. Opt-in via env; absent = the
+        // exact pre-existing demo fleet.
+        var fleet: [Device] = .demoFleet
+        if let lag = ProcessInfo.processInfo.environment["AUDIOUTER_MOCK_CAST_LAG"].flatMap(Int.init) {
+            fleet.append(Device(id: "cast-tv", name: "Google TV", kind: .cast,
+                                supportsAirPlay2: false, volume: 45,
+                                castVolumeLagSeconds: lag))
+        }
+        return MockBackend(fleet: fleet,
+                           connectScripts: MockBackend.resolveScenarioScripts(),
                            outputObserver: DefaultOutputObserver())
     case .ownTone:
         let backend = OwnToneBackend(outputObserver: DefaultOutputObserver())

@@ -53,6 +53,109 @@ import Testing
         #expect(row.test_accessibilityValue?.contains("applying volume") != true)
     }
 
+    /// PIXEL truth for the pending fill — the flag flipping must actually
+    /// change what the slider draws. Renders the row's slider to a bitmap in
+    /// both states and requires the images to differ; a live run (2026-08-23)
+    /// showed the flag raised while the pixels never moved.
+    @Test func pendingFillActuallyChangesTheSliderPixels() {
+        let device = makeCastDevice()
+        let row = makeBusRow(device)
+        row.frame = NSRect(x: 0, y: 0, width: 640, height: 64)
+        row.layoutSubtreeIfNeeded()
+
+        func sliderBitmap() -> Data? {
+            let slider = row.test_slider
+            let bounds = slider.bounds
+            guard bounds.width > 10,
+                  let rep = slider.bitmapImageRepForCachingDisplay(in: bounds) else { return nil }
+            slider.cacheDisplay(in: bounds, to: rep)
+            return rep.tiffRepresentation
+        }
+
+        row.apply(device, selected: true, controllable: true, inActiveTarget: true)
+        row.layoutSubtreeIfNeeded()
+        let gold = sliderBitmap()
+        #expect(gold != nil, "the slider must render at all")
+
+        row.apply(device, selected: true, controllable: true, inActiveTarget: true,
+                  volumePendingApply: true)
+        let pending = sliderBitmap()
+        #expect(pending != nil)
+        #expect(row.test_isFaderPending)
+        #expect(gold != pending,
+                "the pending fill must be VISIBLE — same bytes means the flag never reaches the pixels")
+    }
+
+    /// PERCEPTUAL truth for the pending fill — the level the 2026-08-23 live
+    /// bug actually lived at. The raise → stamp → draw → composite chain was
+    /// proven working on hardware (telemetry) and offline (a mock-window
+    /// layer-capture probe) while the user still reported ZERO visible change,
+    /// because the pending tone was the EXACT fill every unarmed fader
+    /// already draws — a same-luminance warm tint swap on a 5 pt track. So
+    /// byte inequality against the gold render (the test above) is not
+    /// enough: the pending fill must be STRUCTURALLY distinct from the
+    /// unarmed fill it was previously indistinguishable from. Sweeps the
+    /// track midline and requires a material color break (>30/255 in some
+    /// channel) on a meaningful share of pixels — a tint swap of warm
+    /// same-luminance fills stays under it; the dashed gold/trough
+    /// alternation clears it.
+    @Test func pendingFillIsNotTheUnarmedFillInDisguise() {
+        let device = makeCastDevice()
+        let row = makeBusRow(device)
+        row.appearance = NSAppearance(named: .darkAqua)
+        row.frame = NSRect(x: 0, y: 0, width: 640, height: 64)
+        row.layoutSubtreeIfNeeded()
+
+        func sliderRep() -> NSBitmapImageRep? {
+            let slider = row.test_slider
+            guard slider.bounds.width > 10,
+                  let rep = slider.bitmapImageRepForCachingDisplay(in: slider.bounds)
+            else { return nil }
+            slider.cacheDisplay(in: slider.bounds, to: rep)
+            return rep
+        }
+
+        // The UNARMED-but-enabled render: the fill whose tone the original
+        // pending implementation literally reused. Same device, same volume,
+        // same enabled state — only armed-ness and the pending flag move.
+        row.apply(device, selected: true, controllable: true, inActiveTarget: false)
+        row.layoutSubtreeIfNeeded()
+        guard let unarmed = sliderRep() else {
+            Issue.record("the unarmed slider must render at all")
+            return
+        }
+
+        row.apply(device, selected: true, controllable: true, inActiveTarget: true,
+                  volumePendingApply: true)
+        guard let pending = sliderRep() else {
+            Issue.record("the pending slider must render at all")
+            return
+        }
+        #expect(row.test_isFaderPending)
+        #expect(unarmed.pixelsWide == pending.pixelsWide)
+
+        let y = unarmed.pixelsHigh / 2
+        var material = 0
+        var sampled = 0
+        for x in 0..<min(unarmed.pixelsWide, pending.pixelsWide) {
+            guard let a = unarmed.colorAt(x: x, y: y),
+                  let b = pending.colorAt(x: x, y: y) else { continue }
+            sampled += 1
+            let delta = max(abs(a.redComponent - b.redComponent),
+                            abs(a.greenComponent - b.greenComponent),
+                            abs(a.blueComponent - b.blueComponent))
+            if delta > 30.0 / 255.0 { material += 1 }
+        }
+        #expect(sampled > 0)
+        #expect(Double(material) >= 0.05 * Double(sampled),
+                """
+                the pending fill must be UNMISSABLE — only \(material) of \
+                \(sampled) midline pixels differ materially from the ordinary \
+                unarmed fill, which is exactly the live-invisible tint swap \
+                the 2026-08-23 runs shipped
+                """)
+    }
+
     // MARK: Controller level
 
     private func waitFleet(_ backend: MockBackend, count: Int) {

@@ -2950,6 +2950,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         guard var device = known[id], device.isCast, device.castVolumeLagSeconds != lagSeconds else { return }
         device.castVolumeLagSeconds = lagSeconds
         commitKnownDevice(id, device)
+        Telemetry.log(.cast, "cast_volume_lag", [
+            "device": id, "lag": lagSeconds.map(String.init) ?? "nil",
+        ])
     }
 
     private func applyCastSessionState(_ id: String, _ state: CastSessionState) {   // on stateQueue

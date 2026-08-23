@@ -70,9 +70,9 @@ public final class WarmFaderCell: NSSliderCell {
 
     /// Whether the owning row's volume/mute gesture is still pending its
     /// feed-gain apply moment (Cast fixed-volume receivers only — the row
-    /// re-stamps this on every `apply`). While true, the engaged fill holds
-    /// flat at the gradient's ember-blended "dim end" tone instead of drawing
-    /// the gold gradient — the "not yet landed" signal.
+    /// re-stamps this on every `apply`). While true, the engaged fill draws
+    /// as DASHED gold segments — the app's connecting/"in flight" vocabulary
+    /// — instead of the solid gradient: the "not yet landed" signal.
     public var isPendingApply: Bool = false {
         didSet {
             if isPendingApply != oldValue { controlView?.needsDisplay = true }
@@ -126,11 +126,36 @@ public final class WarmFaderCell: NSSliderCell {
                     .blended(withFraction: Self.armedDimEndGoldBlend,
                              of: Tokens.Color.gold) ?? Tokens.Color.ember
                 if isPendingApply {
-                    // Pending Cast feed-gain apply: hold the fill flat at the
-                    // gradient's ember-blended tone instead of the gold
-                    // gradient — the command hasn't landed yet.
-                    dimEnd.setFill()
-                    fillRect.fill()
+                    // Pending Cast feed-gain apply: the level is real but not
+                    // audible yet, so the gold renders in the app's "in
+                    // flight" vocabulary — DASHED, the same form the
+                    // connecting halo ring and bus node already use — until
+                    // the lag elapses and the solid bar returns. Two flat
+                    // tones were tried first and were LIVE-INVISIBLE at this
+                    // 5 pt track size (2026-08-23, mock-window pixel probe):
+                    // the ember-blend is indistinguishable from the gradient,
+                    // and the unarmed neutral is a same-luminance warm fill —
+                    // byte-identical to every unarmed row's fader, so a tint
+                    // swap reads as "no change". A broken bar cannot be
+                    // mistaken for a solid one. Dash phase anchors to the
+                    // TRACK, not the fill, so segments hold still while the
+                    // thumb drags. Static drawing — no animation, so Reduce
+                    // Motion and snapshot determinism are untouched.
+                    let dashes = NSBezierPath()
+                    var x = track.minX
+                    while x < fillRect.maxX {
+                        dashes.appendRect(NSRect(x: x, y: track.minY,
+                                                 width: Self.pendingDashLength,
+                                                 height: track.height))
+                        x += Self.pendingDashLength + Self.pendingDashGap
+                    }
+                    NSBezierPath(rect: fillRect).addClip()
+                    dashes.addClip()
+                    if let gradient = NSGradient(starting: dimEnd,
+                                                 ending: Tokens.Color.gold) {
+                        let leftToRight = fillRect.minX == track.minX
+                        gradient.draw(in: fillRect, angle: leftToRight ? 0 : 180)
+                    }
                 } else if let gradient = NSGradient(starting: dimEnd,
                                              ending: Tokens.Color.gold) {
                     let leftToRight = fillRect.minX == track.minX
@@ -247,6 +272,11 @@ public final class WarmFaderCell: NSSliderCell {
     /// (light) vs `well` — raw ember measured 3.86:1 / 1.98:1, muddy at the
     /// track's low-value end in light.
     private static let armedDimEndGoldBlend: CGFloat = 0.5
+    /// The pending-apply fill's dash geometry: painted / gap run lengths in
+    /// points. 6-on/4-off gives a ~90 pt fill about nine clearly separated
+    /// gold segments — coarse enough to read at the 5 pt track height.
+    private static let pendingDashLength: CGFloat = 6
+    private static let pendingDashGap: CGFloat = 4
 
     // MARK: Test-support hooks
 

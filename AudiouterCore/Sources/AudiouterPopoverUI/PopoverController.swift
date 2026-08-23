@@ -1790,7 +1790,18 @@ public final class PopoverController: NSObject {
     private func raiseCastVolumePending(for id: String) {
         guard let device = devicesByID[id], device.isCast,
               let lag = device.castVolumeLagSeconds,
-              device.connectionState == .connected else { return }
+              device.connectionState == .connected else {
+            // Which guard refused — the fact the next live diagnosis needs.
+            if let d = devicesByID[id], d.isCast {
+                Telemetry.log(.cast, "cast_pending_refused", [
+                    "device": id,
+                    "lag": d.castVolumeLagSeconds.map(String.init) ?? "nil",
+                    "state": String(describing: d.connectionState),
+                ])
+            }
+            return
+        }
+        Telemetry.log(.cast, "cast_pending_raised", ["device": id, "lag": String(lag)])
         castVolumePendingTimers[id]?.invalidate()
         castVolumePendingTimers[id] = Timer.scheduledTimer(withTimeInterval: TimeInterval(max(1, lag)),
                                                             repeats: false) { [weak self] _ in
@@ -2043,6 +2054,16 @@ public final class PopoverController: NSObject {
         // Out sends nothing to — does not. Master mute is folded in so it drains
         // every device dot.
         let inActiveTarget = controller.isMainOutMember(device.id)
+        // Live diagnosis (2026-08-23): the raise fires but the pixels never
+        // move — log what the render actually hands the row.
+        if device.isCast, castVolumePendingIDs.contains(device.id) {
+            Telemetry.log(.cast, "cast_pending_render", [
+                "device": device.id,
+                "lag": device.castVolumeLagSeconds.map(String.init) ?? "nil",
+                "state": String(describing: device.connectionState),
+                "armedInputs": "\(inActiveTarget)/\(controller.isMainOutMember(device.id))",
+            ])
+        }
         row.apply(device,
                   selected: selected,
                   controllable: controller.isMainOutMember(device.id) || isRedirectTarget(device.id),

@@ -618,7 +618,21 @@ public final class DeviceRowView: NSView {
         // "not yet gold" hold while the gesture is still in flight to the
         // receiver's audio feed).
         self.volumePendingApply = volumePendingApply
-        faderCell.isPendingApply = volumePendingApply
+        if faderCell.isPendingApply != volumePendingApply {
+            // Live diagnosis (2026-08-23): log BOTH transitions — an unlogged
+            // true->false stamp between draws would explain a fill that never
+            // visibly changes — and invalidate the slider explicitly rather
+            // than trusting the cell's controlView back-pointer.
+            Telemetry.log(.cast, "cast_pending_cell", [
+                "device": device.id,
+                "to": volumePendingApply ? "true" : "false",
+                "armed": faderCell.isRouteArmed ? "true" : "false",
+                "enabled": slider.isEnabled ? "true" : "false",
+                "inWindow": slider.window != nil ? "true" : "false",
+            ])
+            faderCell.isPendingApply = volumePendingApply
+            slider.needsDisplay = true
+        }
 
         // Item 8's brighten EDGE — "on successful connect it brightens to
         // full gold/normal": fires ONLY on a connecting/reconnecting →
@@ -1946,6 +1960,9 @@ public final class DeviceRowView: NSView {
     /// the model that was handed to `apply`. That distinction is the point: it
     /// catches a row whose displayed level has drifted from what was painted.
     public var test_sliderValue: Int { slider.integerValue }
+
+    /// The volume slider itself, for pixel-truth rendering in tests.
+    public var test_slider: NSSlider { slider }
 
     /// Simulate the user toggling this row's mute button — flips
     /// `muteButton.state` and lands the V1 tint via `updateMuteTint()` exactly

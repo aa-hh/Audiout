@@ -27,10 +27,13 @@ public final class GeneralSettingsViewController: NSViewController {
     private let launchSwitch = NSSwitch()
     private let reconnectSwitch = NSSwitch()
     private let reconnectHint = SettingsForm.hintLabel()
-    private let licenseKeyField = NSTextField()
     private let licenseStatusHint = SettingsForm.hintLabel()
-    private let licenseCheckInSwitch = NSSwitch()
-    private let licenseHint = SettingsForm.hintLabel()
+    private let enterLicenseButton = NSButton()
+    private var licenseRow: NSView?
+    /// The presented (or headlessly held) Enter License… sheet — strong, the
+    /// `MixerWindowController.presentCreateSheet` idiom: headless tests never
+    /// present, they hold this and drive its `test_` hooks.
+    private var licenseSheet: LicenseSheetViewController?
     private let setupButton = NSButton()
     private let aboutButton = NSButton()
     private let updatesButton = NSButton()
@@ -109,34 +112,30 @@ public final class GeneralSettingsViewController: NSViewController {
         reconnectHint.stringValue = Self.reconnectHintLine(settings.reconnectAtLaunch)
 
         // License (roadmap 054, Ardour model): entirely optional — the app is
-        // fully functional with no key at all. The key persists on edit end
-        // (focus loss), the same commit point `GroupEditorViewController`'s
-        // rename field uses, via `NSTextFieldDelegate` below.
-        licenseKeyField.stringValue = settings.licenseKey ?? ""
-        licenseKeyField.placeholderString = "Optional"
-        licenseKeyField.isEditable = true
-        licenseKeyField.isSelectable = true
-        licenseKeyField.delegate = self
-        licenseKeyField.setAccessibilityLabel("License key")
-        licenseKeyField.widthAnchor.constraint(equalToConstant: 180).isActive = true
-        let licenseKeyRow = SettingsForm.row(
-            title: "License key",
-            subtitle: "From your purchase receipt. Optional — Audiout is fully functional without it.",
-            control: licenseKeyField)
+        // fully functional with no key at all. NO inline key field: entry is a
+        // deliberate act behind "Enter License…" (a sheet), the convention
+        // every respected optional-license app follows (Sublime, Little
+        // Snitch, Panic — surveyed 2026-08-24). The row is a title + two
+        // buttons, and the live status line beneath it carries both the state
+        // and the honest pitch.
+        enterLicenseButton.bezelStyle = .rounded
+        enterLicenseButton.target = self
+        enterLicenseButton.action = #selector(enterLicenseTapped)
+        enterLicenseButton.setAccessibilityLabel("Enter License Key")
 
-        // Check-in consent (``LicenseCheckIn``) — the identified stream
-        // (PRODUCT.md Data Collection stream 2), so it defaults off and is
-        // never assumed on.
-        licenseCheckInSwitch.target = self
-        licenseCheckInSwitch.action = #selector(licenseCheckInConsentToggled)
-        licenseCheckInSwitch.state = settings.licenseCheckInConsent ? .on : .off
-        licenseCheckInSwitch.setAccessibilityLabel("Send license check-ins")
-        let licenseConsentRow = SettingsForm.row(
-            title: "Send license check-ins",
-            control: licenseCheckInSwitch)
-        licenseHint.stringValue = "Sends your license key and an install ID so we can count how many "
-            + "Macs each license is used on. This is tied to your purchase — it is not anonymous. "
-            + "Audiout runs the same whether this is on or off."
+        buyButton.title = "Buy Audiout…"
+        buyButton.bezelStyle = .rounded
+        buyButton.target = self
+        buyButton.action = #selector(buyTapped)
+        buyButton.setAccessibilityLabel("Buy an Audiout license")
+
+        let licenseButtons = NSStackView(views: [enterLicenseButton, buyButton])
+        licenseButtons.orientation = .horizontal
+        licenseButtons.alignment = .centerY
+        licenseButtons.spacing = 8
+        licenseButtons.translatesAutoresizingMaskIntoConstraints = false
+        let licenseKeyRow = SettingsForm.row(title: "License", control: licenseButtons)
+        licenseRow = licenseKeyRow
 
         // Footer strip (roadmap 050): Setup and About are rare-use, so they
         // share one quiet button strip instead of two full title+subtitle rows.
@@ -167,18 +166,11 @@ public final class GeneralSettingsViewController: NSViewController {
         updatesButton.setAccessibilityLabel("Check for Updates")
         updatesButton.isHidden = onCheckForUpdates == nil
 
-        buyButton.title = "Buy Audiout…"
-        buyButton.bezelStyle = .rounded
-        buyButton.controlSize = .small
-        buyButton.target = self
-        buyButton.action = #selector(buyTapped)
-        buyButton.setAccessibilityLabel("Buy an Audiout license")
-
         let hairline = NSBox()
         hairline.boxType = .separator
         hairline.translatesAutoresizingMaskIntoConstraints = false
 
-        let strip = NSStackView(views: [setupButton, aboutButton, updatesButton, buyButton])
+        let strip = NSStackView(views: [setupButton, aboutButton, updatesButton])
         strip.orientation = .horizontal
         strip.alignment = .centerY
         strip.spacing = 8
@@ -186,43 +178,49 @@ public final class GeneralSettingsViewController: NSViewController {
 
         view = SettingsForm.paneView(rows: [launchRow, reconnectRow, reconnectHint,
                                              licenseKeyRow, licenseStatusHint,
-                                             licenseConsentRow, licenseHint,
                                              hairline, strip])
 
         refreshLicenseStatus()
     }
 
-    /// What the status line under the key field says, per state — plain words,
-    /// no jargon, and never a claim the app is about to stop working. `nil`
-    /// means the line is hidden: with no license server this build has nothing
-    /// to verify against, so it says nothing at all.
-    private static func licenseStatusLine(serverConfigured: Bool,
-                                          keyIsEmpty: Bool,
-                                          status: LicenseStatus?) -> String? {
-        guard serverConfigured else { return nil }
-        if keyIsEmpty { return "Unregistered. Buy a license to support Audiout and get updates." }
-        switch status {
-        case .active: return "Registered. Thank you."
-        case .revoked: return "This key was refunded or revoked. It no longer gets updates."
-        case .unknown: return "This key isn’t recognised. Check it against your receipt."
-        case .invalid: return "That doesn’t look like an Audiout key (AUDR-XXXXX-XXXXX-XXXXX-XXXXX)."
-        case nil: return "Couldn’t reach the license server — will try again next launch."
+    /// What the status line under the License row says, per state — plain
+    /// words, no jargon, and never a claim the app is about to stop working.
+    /// The four server-verdict strings come from
+    /// ``LicenseSheetViewController/statusLine(for:)`` so the pane and the
+    /// sheet can never drift apart; the two key-side states are the pane's own.
+    private static func licenseStatusLine(keyIsEmpty: Bool,
+                                          status: LicenseStatus?) -> String {
+        if keyIsEmpty {
+            return "Unregistered. Audiout is fully functional without a license — "
+                + "buying one funds development and unlocks official downloads and updates."
         }
+        guard let status else {
+            return "Couldn’t reach the license server — will try again next launch."
+        }
+        return LicenseSheetViewController.statusLine(for: status)
     }
 
-    /// Re-read the stored license state into the status line and the Buy
-    /// button, then tell the app layer. Every path that can change the state —
-    /// the launch build, a committed key, a validator answer — ends here, so
-    /// there is one place that decides what the pane shows.
+    /// Re-read the stored license state into the row, then tell the app
+    /// layer. Every path that can change the state — the launch build, the
+    /// sheet closing, a validator answer — ends here, so there is one place
+    /// that decides what the pane shows. A build with no license server hides
+    /// the whole License surface: it has nothing to verify and nothing to
+    /// sell, so it says nothing at all.
     private func refreshLicenseStatus() {
         let serverConfigured = settings.licenseServerURL != nil
+        licenseRow?.isHidden = !serverConfigured
+        licenseStatusHint.isHidden = !serverConfigured
+
         let key = settings.licenseKey ?? ""
         let status = settings.licenseStatus
-        let line = Self.licenseStatusLine(serverConfigured: serverConfigured,
-                                          keyIsEmpty: key.isEmpty,
-                                          status: status)
-        licenseStatusHint.stringValue = line ?? ""
-        licenseStatusHint.isHidden = line == nil
+        if serverConfigured {
+            licenseStatusHint.stringValue = Self.licenseStatusLine(keyIsEmpty: key.isEmpty,
+                                                                   status: status)
+        }
+
+        // "Enter License…" before a key exists; "Change…" once one is stored
+        // (the sheet then prefills it and offers Remove License…).
+        enterLicenseButton.title = key.isEmpty ? "Enter License…" : "Change…"
 
         // Buying is offered only where it can work (a server) and only where it
         // would help (no key, or a key the server won’t honour).
@@ -230,6 +228,25 @@ public final class GeneralSettingsViewController: NSViewController {
         buyButton.isHidden = !(serverConfigured && unregistered && settings.buyURL != nil)
 
         onLicenseChanged?()
+    }
+
+    /// Present the Enter License… sheet (`MixerWindowController
+    /// .presentCreateSheet`'s idiom: strong reference always, `presentAsSheet`
+    /// only when a visible window can host it — headless tests drive the held
+    /// controller's hooks directly).
+    @objc private func enterLicenseTapped() {
+        let sheet = LicenseSheetViewController(settings: settings,
+                                               transport: licenseTransport,
+                                               openURL: openURL)
+        sheet.onComplete = { [weak self] in
+            self?.licenseSheet = nil
+            self?.refreshLicenseStatus()
+        }
+        sheet.onStateChange = { [weak self] in self?.refreshLicenseStatus() }
+        licenseSheet = sheet
+        if let host = view.window, host.isVisible {
+            presentAsSheet(sheet)
+        }
     }
 
     /// The reconnect-at-launch live hint: what the NEXT launch will do.
@@ -243,35 +260,6 @@ public final class GeneralSettingsViewController: NSViewController {
         let enabled = reconnectSwitch.state == .on
         settings.reconnectAtLaunch = enabled
         reconnectHint.stringValue = Self.reconnectHintLine(enabled)
-    }
-
-    @objc private func licenseCheckInConsentToggled() {
-        settings.licenseCheckInConsent = licenseCheckInSwitch.state == .on
-    }
-
-    /// Persists the license key and asks the server about it. Empty text
-    /// clears it (`AppSettings.licenseKey` treats an empty string the same as
-    /// any other value it stores — the field's placeholder, not a stored empty
-    /// string, is what communicates "unset") and refreshes straight away, since
-    /// there is nothing to ask about. A real key refreshes twice: once now
-    /// from what is already known, and again when the answer lands.
-    private func commitLicenseKey() {
-        let text = licenseKeyField.stringValue
-        // A different key is an unanswered question: the previous key's
-        // verdict must not stand in for it while the server is asked.
-        if text != settings.licenseKey { settings.licenseStatus = nil }
-        settings.licenseKey = text.isEmpty ? nil : text
-        refreshLicenseStatus()
-        guard !text.isEmpty else { return }
-
-        let validator = licenseTransport.map { LicenseValidator(settings: settings, transport: $0) }
-            ?? LicenseValidator(settings: settings)
-        validator.validate { [weak self] _ in
-            guard let self else { return }
-            // The server may have written back a canonical spelling.
-            self.licenseKeyField.stringValue = self.settings.licenseKey ?? ""
-            self.refreshLicenseStatus()
-        }
     }
 
     public override func viewDidLoad() {
@@ -356,31 +344,45 @@ public final class GeneralSettingsViewController: NSViewController {
 
     // MARK: Test-support hooks (License, roadmap 054)
 
-    /// The license key field's current text.
-    public var test_licenseKeyText: String {
-        _ = view
-        return licenseKeyField.stringValue
-    }
-
-    /// Type `text` into the license key field and commit it, the way focus
-    /// loss (`controlTextDidEndEditing`) would.
+    /// Register `text` through the REAL sheet path — open the sheet the way
+    /// "Enter License…" does (held headlessly), type into its field, click
+    /// Register — so what tests prove is the one commit path users have.
     public func test_setLicenseKey(_ text: String) {
         _ = view
-        licenseKeyField.stringValue = text
-        commitLicenseKey()
+        enterLicenseTapped()
+        licenseSheet?.test_setKeyText(text)
+        licenseSheet?.test_tapRegister()
     }
 
-    /// Whether the "Send license check-ins" switch currently reads "on".
-    public var test_licenseCheckInConsentIsOn: Bool {
+    /// Remove the stored key through the sheet's Remove License… path.
+    public func test_removeLicense() {
         _ = view
-        return licenseCheckInSwitch.state == .on
+        enterLicenseTapped()
+        licenseSheet?.test_tapRemove()
     }
 
-    /// Drive the "Send license check-ins" switch and run the toggle action.
-    public func test_toggleLicenseCheckInConsent(_ on: Bool) {
+    /// Open the Enter License…/Change… sheet as a click would (held
+    /// headlessly; drive it via ``test_licenseSheet``).
+    public func test_tapEnterLicense() {
         _ = view
-        licenseCheckInSwitch.state = on ? .on : .off
-        licenseCheckInConsentToggled()
+        enterLicenseTapped()
+    }
+
+    /// The held Enter License… sheet, while one is open (headless runs hold
+    /// it without presenting).
+    public var test_licenseSheet: LicenseSheetViewController? { licenseSheet }
+
+    /// Whether the License row is on screen (hidden entirely in builds with
+    /// no license server).
+    public var test_licenseRowIsVisible: Bool {
+        _ = view
+        return !(licenseRow?.isHidden ?? true)
+    }
+
+    /// The row's secondary button title — "Enter License…" ↔ "Change…".
+    public var test_enterLicenseButtonTitle: String {
+        _ = view
+        return enterLicenseButton.title
     }
 
     /// The license status line under the key field, or `nil` when it is hidden
@@ -394,12 +396,6 @@ public final class GeneralSettingsViewController: NSViewController {
     public var test_buyButtonIsVisible: Bool {
         _ = view
         return !buyButton.isHidden
-    }
-
-    /// The license check-in hint line's fixed disclosure copy.
-    public var test_licenseHint: String {
-        _ = view
-        return licenseHint.stringValue
     }
 
     /// Invoke "Open Setup…" as a click would.
@@ -432,16 +428,5 @@ public final class GeneralSettingsViewController: NSViewController {
     public func test_tapAbout() {
         _ = view
         aboutTapped()
-    }
-}
-
-// MARK: - NSTextFieldDelegate
-
-extension GeneralSettingsViewController: NSTextFieldDelegate {
-    /// Commit the license key when the field loses focus, not just on
-    /// Return — the same edit-end commit point `GroupEditorViewController`'s
-    /// rename field uses.
-    public func controlTextDidEndEditing(_ obj: Notification) {
-        commitLicenseKey()
     }
 }

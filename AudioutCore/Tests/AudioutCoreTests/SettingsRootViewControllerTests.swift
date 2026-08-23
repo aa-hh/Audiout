@@ -170,6 +170,7 @@ import AudioutSharedUI
         let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false),
                                                     settings: makeSettings())
         #expect(general.test_licenseStatusText == nil)
+        #expect(!general.test_licenseRowIsVisible, "the whole License surface stays hidden")
         #expect(!general.test_buyButtonIsVisible)
     }
 
@@ -182,12 +183,14 @@ import AudioutSharedUI
                                                     settings: settings)
         general.licenseTransport = transport.closure
 
-        #expect(general.test_licenseStatusText == "Unregistered. Buy a license to support Audiout and get updates.")
+        #expect(general.test_licenseStatusText == "Unregistered. Audiout is fully functional without a license — buying one funds development and unlocks official downloads and updates.")
+        #expect(general.test_enterLicenseButtonTitle == "Enter License…")
 
         transport.replies(#"{"status":"active"}"#)
         general.test_setLicenseKey("AUDR-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
-        #expect(general.test_licenseStatusText == "Registered. Thank you.")
+        #expect(general.test_licenseStatusText == "Registered. Thank you for supporting Audiout.")
+        #expect(general.test_enterLicenseButtonTitle == "Change…")
 
         transport.replies(#"{"status":"revoked"}"#)
         general.test_setLicenseKey("AUDR-AAAAA-BBBBB-CCCCC-DDDDD")
@@ -202,11 +205,12 @@ import AudioutSharedUI
         transport.replies(#"{"status":"invalid"}"#)
         general.test_setLicenseKey("nonsense")
         await drainMainQueue()
-        #expect(general.test_licenseStatusText == "That doesn’t look like an Audiout key (AUDR-XXXXX-XXXXX-XXXXX-XXXXX).")
+        #expect(general.test_licenseStatusText == "That doesn’t look like an Audiout key (AUDT-XXXXX-XXXXX-XXXXX-XXXXX).")
 
-        // Clearing the key clears the verdict with it, so the next commit —
-        // against a server that never answers — lands on "never verified".
-        general.test_setLicenseKey("")
+        // Removing the key (the sheet's explicit button) clears the verdict
+        // with it, so the next commit — against a server that never answers —
+        // lands on "never verified".
+        general.test_removeLicense()
         transport.answer = (nil, nil, URLError(.notConnectedToInternet))
         general.test_setLicenseKey("AUDR-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
@@ -224,7 +228,7 @@ import AudioutSharedUI
         transport.replies(#"{"status":"active"}"#)
         general.test_setLicenseKey("AUDR-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
-        #expect(general.test_licenseStatusText == "Registered. Thank you.")
+        #expect(general.test_licenseStatusText == "Registered. Thank you for supporting Audiout.")
 
         transport.answer = (nil, nil, URLError(.notConnectedToInternet))
         general.test_setLicenseKey("AUDR-ZZZZZ-ZZZZZ-ZZZZZ-ZZZZZ")
@@ -251,6 +255,40 @@ import AudioutSharedUI
         general.test_setLicenseKey("AUDR-AAAAA-BBBBB-CCCCC-DDDDD")
         await drainMainQueue()
         #expect(general.test_buyButtonIsVisible, "a key the server won’t honour is worth re-buying")
+    }
+
+    /// The sheet is the ONE commit path, and its edges hold: Cancel discards
+    /// typed text (no more silent commit-on-focus-loss), Remove License… is
+    /// offered only once a key is stored and clears key + verdict together.
+    @Test func licenseSheetCancelDiscardsAndRemoveClears() async {
+        let settings = makePaidBuildSettings()
+        let transport = StubTransport()
+        let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false),
+                                                    settings: settings)
+        general.licenseTransport = transport.closure
+        _ = general.view
+
+        // Cancel: typed text never lands in settings.
+        general.test_tapEnterLicense()
+        let sheet = general.test_licenseSheet
+        #expect(sheet?.test_removeIsVisible == false, "nothing stored yet — nothing to remove")
+        sheet?.test_setKeyText("AUDR-AAAAA-BBBBB-CCCCC-DDDDD")
+        sheet?.test_tapCancel()
+        #expect(settings.licenseKey == nil, "Cancel writes nothing")
+        #expect(general.test_licenseSheet == nil, "the pane lets the sheet go")
+
+        // Register, then Remove through a fresh sheet.
+        transport.replies(#"{"status":"active"}"#)
+        general.test_setLicenseKey("AUDR-AAAAA-BBBBB-CCCCC-DDDDD")
+        await drainMainQueue()
+        #expect(settings.licenseKey != nil)
+
+        general.test_tapEnterLicense()
+        #expect(general.test_licenseSheet?.test_removeIsVisible == true)
+        general.test_licenseSheet?.test_tapRemove()
+        #expect(settings.licenseKey == nil)
+        #expect(settings.licenseStatus == nil, "the verdict goes with the key")
+        #expect(general.test_enterLicenseButtonTitle == "Enter License…")
     }
 
     /// Owner decision (AGENTS.md): Settings always opens on General. A fresh

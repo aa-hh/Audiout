@@ -64,7 +64,7 @@ Confirmed 2026-08-12. **The model is "free from source, paid binary" — the Ard
 Confirmed 2026-08-12. **Two separate streams, and users are told about each one plainly.** Neither is built yet.
 
 1. **Anonymous feature telemetry — opt-in, off by default.** Asked once, never re-nagged. Feature counts only: no audio content, no speaker names, no network identifiers, and **no license ID attached**. Answers feature usage, feature discoverability, uninstall rate, and month-over-month users.
-2. **License activation check-ins — identified by purchase.** Ties a license ID to a device count. This is not anonymous and must never be described as such.
+2. **License activation check-ins — identified by purchase.** Ties a license ID to a device count. This is not anonymous and must never be described as such. **Not opt-in** (Alec, 2026-08-24): unlike stream 1, this is abuse detection — a license appearing on far more devices than one buyer plausibly owns — so it cannot be a toggle an abuser simply switches off. It runs unconditionally whenever a key and a check-in endpoint exist, the same way any paid app's license check does; users are told about it (this document, the source), not asked to consent to it.
 
 The "no cloud" advantage over Sonos survives but must be stated precisely: **no cloud in the audio or control path.** Discovery, routing, volume, and playback stay entirely local and keep working with the machine offline. Telemetry and activation are the only network calls that leave the LAN, and the first is optional.
 

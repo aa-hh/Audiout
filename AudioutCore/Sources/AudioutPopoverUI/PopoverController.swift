@@ -1041,7 +1041,7 @@ public final class PopoverController: NSObject {
 
     /// The unregistered-build note's copy: a standing fact stated once, not a
     /// nag — the app is doing everything it always does either way.
-    static let unregisteredNoteText = "Audiout is unregistered. Buying a license keeps it updated."
+    static let unregisteredNoteText = "Audiout is unregistered. Buying a license keeps it updated and funds the work of improving it."
 
     /// Whether this build has a license server but no key the server honours.
     /// Drives the LOWEST-precedence note (see PRECEDENCE above); re-applied on

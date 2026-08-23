@@ -305,14 +305,6 @@ import Testing
         #expect(AppSettings(defaults: defaults).licenseMaxMajor == nil)
     }
 
-    @Test func licenseCheckInConsentDefaultsOffAndRoundTrips() {
-        let settings = AppSettings(defaults: defaults)
-        #expect(!settings.licenseCheckInConsent, "identified stream: opt-in, never assumed on")
-        settings.licenseCheckInConsent = true
-        #expect(settings.licenseCheckInConsent)
-        #expect(AppSettings(defaults: defaults).licenseCheckInConsent)
-    }
-
     @Test func installIDIsStableAcrossReads() {
         let first = AppSettings(defaults: defaults).installID
         #expect(!first.isEmpty)

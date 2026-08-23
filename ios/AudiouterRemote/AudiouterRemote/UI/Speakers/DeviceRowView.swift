@@ -716,7 +716,10 @@ struct DeviceRowView: View {
             tapped()                             // doc:1792
 
         case .cancelled:
-            reset()                              // the ScrollView has it now
+            // The ScrollView has it now — or the system took the touch
+            // mid-drag, in which case the echo is a level nobody confirmed.
+            localVolume = nil
+            reset()
         }
     }
 

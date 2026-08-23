@@ -332,7 +332,10 @@ struct AppRouteRowView: View {
                                  isFinal: true)
             localVolume = nil   // clear on release — DeviceRowView's policy, not MainOutRow's hold
         case .cancelled:
-            reset()             // the ScrollView has it now
+            // The ScrollView has it now — or the system took the touch
+            // mid-drag, in which case the echo is a level nobody confirmed.
+            localVolume = nil
+            reset()
         }
     }
 

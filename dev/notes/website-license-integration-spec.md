@@ -20,9 +20,11 @@ truth if the two ever disagree.
 
 - Paddle.js inline checkout. Config comes from data attributes on the page:
   - `data-paddle-env` — `sandbox` now, `production` at go-live.
-  - `data-paddle-token` — Paddle **client-side** token (sandbox tokens start
-    `test_`). Public-safe, fine to commit. Alec creates it: Paddle dashboard →
-    Developer tools → Authentication → client-side tokens.
+  - `data-paddle-token` — Paddle **client-side** token. Public-safe by
+    design (it ships in page source), fine to commit. Sandbox value:
+    `test_92006632f7790eba19aa4c6a1b7` (the "Purchase Page" token). The
+    other active sandbox token ("Hosted Checkout") is Paddle-managed for a
+    hosted checkout page — don't use it for the site's inline checkout.
   - `data-paddle-price` — the price id above.
 - On success Paddle redirects to `/thanks?_ptxn=<transaction id>`.
 - Before live checkout works, Paddle must approve the domain: dashboard →
@@ -77,7 +79,7 @@ truth if the two ever disagree.
 |---|---|---|
 | `data-license-server` | `https://license.audiout.app` | done |
 | `data-paddle-env` | `sandbox` (→ `production` at go-live) | website |
-| `data-paddle-token` | `test_…` client-side token | **Alec** (dashboard) |
+| `data-paddle-token` | `test_92006632f7790eba19aa4c6a1b7` ("Purchase Page") | done (→ live token at go-live) |
 | `data-paddle-price` | `pri_01m0pkeeq1hw4wg7055aekgev6` (→ live id at go-live) | done / Alec |
 | `DOWNLOAD` | `https://license.audiout.app/download` (+ `?key=` via JS) | done |
 | `SUPPORT` | `support@audiout.app` | value done; **Alec** sets up receiving (Cloudflare Email Routing) |

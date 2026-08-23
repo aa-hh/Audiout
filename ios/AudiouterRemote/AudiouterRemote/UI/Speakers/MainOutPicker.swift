@@ -12,7 +12,7 @@ import AudiouterProtocol
 /// (`AppRouteRowView.destinationMenu`). A menu picker's label is drawn by UIKit
 /// and ignores `.lineLimit`: its only defence against wrapping to four lines is
 /// `.fixedSize()`, which makes it incompressible, and an incompressible picker
-/// takes its width out of whatever label shares the row ("MAIN OUT" → "MAIN
+/// takes its width out of whatever label shares the row ("Main Out" → "Main
 /// O…"). Drawn here, the group name is a plain `Text` that truncates itself —
 /// which on the deck header is the only thing that may.
 struct MainOutPicker: View {

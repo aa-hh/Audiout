@@ -139,12 +139,12 @@ private struct SpeakerSectionSpec: Identifiable {
 /// speaker is doing right now — so a device's state IS its address, and there
 /// is exactly one row per speaker anywhere on the screen.
 ///
-/// A `"failed"` speaker sits in READY rather than PLAYING even while the Mac
+/// A `"failed"` speaker sits in Ready rather than Playing even while the Mac
 /// still has it selected: it is making no sound, and its row is a failure card
 /// asking to be retried, which is a thing to do rather than a thing playing.
 ///
-/// PLAYING is ``DeviceRowView/isSounding(_:)``, NOT `isSelected` — which is why
-/// activating a group puts its members here rather than leaving them in READY
+/// Playing is ``DeviceRowView/isSounding(_:)``, NOT `isSelected` — which is why
+/// activating a group puts its members here rather than leaving them in Ready
 /// while the room they're in plays.
 enum SpeakerSection {
     case playing, ready, unavailable
@@ -188,7 +188,7 @@ private struct SpeakerConsole: View {
     /// same state change, no slide, no spring overshoot.
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    /// One namespace for the row that moves between READY and PLAYING: the
+    /// One namespace for the row that moves between Ready and Playing: the
     /// two `ForEach`es render the same device id, so the row can travel
     /// between them instead of vanishing from one and appearing in the other.
     @Namespace private var rowMove
@@ -218,7 +218,7 @@ private struct SpeakerConsole: View {
         snapshot.devices.filter { SpeakerSection.of($0) == section }
     }
 
-    /// READY, with anything that failed at the top of it. A failure card is
+    /// Ready, with anything that failed at the top of it. A failure card is
     /// the one row in the section that is asking for something, and it is also
     /// the tallest, so burying it under three idle speakers hides both the ask
     /// and the reason. Two passes rather than a `sorted` predicate, because
@@ -239,7 +239,7 @@ private struct SpeakerConsole: View {
         reduceMotion ? .easeInOut(duration: 0.2) : .spring(duration: 0.25)
     }
 
-    /// What the row move animates against. The membership of PLAYING is the
+    /// What the row move animates against. The membership of Playing is the
     /// state change the move explains, and it changes only when the Mac says
     /// so — never under a finger, so the drag latch is never animated.
     private var playingIDs: [String] { playingDevices.map(\.id) }
@@ -265,11 +265,11 @@ private struct SpeakerConsole: View {
     /// reader is scanning by state.
     private var sections: [SpeakerSectionSpec] {
         [
-            SpeakerSectionSpec(id: "live", title: "PLAYING", tint: WarmSignal.goldText,
+            SpeakerSectionSpec(id: "live", title: "Playing", tint: WarmSignal.goldText,
                                devices: playingDevices),
-            SpeakerSectionSpec(id: "ready", title: "READY", tint: WarmSignal.label2,
+            SpeakerSectionSpec(id: "ready", title: "Ready", tint: WarmSignal.label2,
                                devices: readyDevices),
-            SpeakerSectionSpec(id: "unavailable", title: "UNAVAILABLE", tint: WarmSignal.label2,
+            SpeakerSectionSpec(id: "unavailable", title: "Unavailable", tint: WarmSignal.label2,
                                devices: devices(in: .unavailable)),
         ]
     }
@@ -290,8 +290,8 @@ private struct SpeakerConsole: View {
             }
             .padding(.horizontal, 14)
             .padding(.bottom, deckHeight + 16)
-            // Starting a speaker re-sorts the row out of READY and into
-            // PLAYING. Without this the row teleports and the user has to find
+            // Starting a speaker re-sorts the row out of Ready and into
+            // Playing. Without this the row teleports and the user has to find
             // it again; with it the row is the same object in a new place,
             // which is the truth.
             .animation(motion, value: playingIDs)
@@ -373,21 +373,20 @@ private struct SpeakerConsole: View {
     /// needs protecting from the user, and a first tap that starts music in
     /// another room is a thing to warn about, not to interrupt for.
     ///
-    /// It leaves for good once both gestures have been used (or on GOT IT) —
+    /// It leaves for good once both gestures have been used (or on Got it) —
     /// see ``SpeakerCoach``.
     private var gestureCoach: some View {
         HStack(spacing: 0) {
-            Text("TAP TO PLAY · DRAG TO SET LEVEL")
+            Text("Tap to play · Drag to set level")
                 .microLabel()
                 .foregroundStyle(WarmSignal.label2)
-                // On screen it is the screen's micro voice; spoken, capitals
-                // and a middle dot are noise, so VoiceOver gets the sentence
-                // instead.
+                // Spoken, the middle dot is noise, so VoiceOver gets the
+                // sentence instead.
                 .accessibilityLabel("Tap a speaker to play it. Drag across a speaker to set its level.")
 
             Spacer(minLength: 8)
 
-            Text("GOT IT")
+            Text("Got it")
                 .microLabel()
                 .foregroundStyle(WarmSignal.goldText)
                 .padding(.horizontal, 10)
@@ -434,15 +433,15 @@ private struct SpeakerConsole: View {
 
     /// The deck's one line of chrome, and exactly two things: what this panel
     /// is, and where it is pointed. A count of what's playing belongs to the
-    /// PLAYING section's own heading, which is on the same screen — carried
+    /// Playing section's own heading, which is on the same screen — carried
     /// here as well it is a duplicate, and one that costs the title its width.
     ///
-    /// Truncation has exactly one loser, and it is the picker: `MAIN OUT` is
+    /// Truncation has exactly one loser, and it is the picker: `Main Out` is
     /// two fixed words that name the panel, and `.fixedSize()` is what
     /// guarantees the header can never spend them on a long group name.
     private var deckHeader: some View {
         HStack(spacing: 10) {
-            Text("MAIN OUT")
+            Text("Main Out")
                 .microLabel()
                 .foregroundStyle(WarmSignal.goldText)
                 .fixedSize()
@@ -720,8 +719,8 @@ private final class PreviewSession: MacSessionProtocol {
     SpeakersView(session: DemoMacSession())
 }
 
-/// Main Out pointed at a group: its members are PLAYING and adjustable, and
-/// the Mac — still ticked in the dormant Selected Devices set — is READY.
+/// Main Out pointed at a group: its members are Playing and adjustable, and
+/// the Mac — still ticked in the dormant Selected Devices set — is Ready.
 #Preview("Group is Main Out") {
     let demo = DemoMacSession()
     demo.setMainOut(MainOutState(kind: "group", groupID: "demo-living-room"))

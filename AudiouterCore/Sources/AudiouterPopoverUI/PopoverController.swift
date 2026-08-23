@@ -301,11 +301,23 @@ public final class PopoverController: NSObject {
     /// One committed local trim edit: write the setting AND apply it live.
     /// There is no `persist` flag — the drawer emits only committed gestures.
     public var onSetLocalTrim: ((_ ms: Double) -> Void)?
+    /// The local twin of ``onResetBTAlignment``: delete the stored
+    /// `AppSettings.syncOffsetMs` entry (never write 0 — that is a tuned
+    /// value) and bring the running local sink onto the cleared setting.
+    public var onResetLocalTrim: (() -> Void)?
     /// The wizard's per-trial preview on a LOCAL target, never persisted —
     /// the local twin of `onBTWizardTrimPreview`.
     public var onLocalTrimPreview: ((_ ms: Double) -> Void)?
     /// End a local preview: non-nil keeps (and persists) it, `nil` restores.
     public var onLocalTrimEndPreview: ((_ keepMs: Double?) -> Void)?
+
+    /// Delete a Bluetooth device's STORED alignment — its measured latency AND
+    /// its trim — and re-push the live sink so a playing speaker reverts
+    /// audibly to unaligned scheduling. The drawer's "Reset alignment" (roadmap
+    /// 056); wired to `(backend as? BTOutputControlling)?.resetBTAlignment`.
+    /// Distinct from `onSetBTTrim(0, …)`, which stores a deliberate 0 and would
+    /// leave the chip reading "0 ms" rather than "Not set".
+    public var onResetBTAlignment: ((_ deviceID: String) -> Void)?
 
     /// Called with `true`/`false` as the align-by-ear tick starts/stops
     /// (BT-OFFSET-UI). Wired to
@@ -2234,7 +2246,16 @@ public final class PopoverController: NSObject {
                              trimMs: btSyncTrim(for: device),
                              isSet: btSyncTrimIsSet(for: device),
                              usableRangeMs: btUsableTrimRange(for: device.id),
-                             alignTickActive: alignTickDeviceID == device.id)
+                             alignTickActive: alignTickDeviceID == device.id,
+                             canReset: canResetAlignment(for: device))
+    }
+
+    /// Whether this device has anything STORED for Reset to clear: a trim entry
+    /// (the Mac's `AppSettings` offset, or a Bluetooth device's), or — Bluetooth
+    /// only — a measured latency from an alignment run.
+    private func canResetAlignment(for device: Device) -> Bool {
+        if btSyncTrimIsSet(for: device) { return true }
+        return !device.isLocalDevice && btMeasuredLatency(for: device.id) != nil
     }
 
     private func unmountSyncDrawer(animated: Bool) {
@@ -4080,6 +4101,26 @@ extension PopoverController: BTSyncDrawerViewDelegate {
     public func syncDrawerDidRequestAlignmentWizard(_ d: BTSyncDrawerView) {
         guard let id = expandedSyncDeviceID else { return }
         startBTAlignmentWizard(deviceID: id)
+    }
+
+    /// "Reset alignment": drop this device's stored alignment everywhere it is
+    /// remembered — the backend's store (which also re-pushes the live sink, so
+    /// a playing speaker reverts audibly) and the session caches the rows read
+    /// from. The caches are REMOVED rather than zeroed: the next read re-seeds
+    /// them from the providers, which now answer "nothing stored", and that is
+    /// what puts the chip back on "Not set" instead of a tuned "0 ms". The
+    /// drawer has already moved its own display — its gesture, its readout.
+    public func syncDrawerDidRequestResetAlignment(_ d: BTSyncDrawerView) {
+        guard let id = expandedSyncDeviceID else { return }
+        if devicesByID[id]?.isLocalDevice == true {
+            onResetLocalTrim?()
+        } else {
+            onResetBTAlignment?(id)
+        }
+        btTrimsByID.removeValue(forKey: id)
+        btLatenciesByID.removeValue(forKey: id)
+        btTunedDeviceIDs.remove(id)
+        refreshDeviceRows()
     }
 }
 

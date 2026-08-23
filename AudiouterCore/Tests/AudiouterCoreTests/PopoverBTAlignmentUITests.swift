@@ -97,6 +97,7 @@ import AppKit
         var tickTargets: [String?] = []
         var tickReferences: [String?] = []
         var tempos: [Double] = []
+        var resets: [String] = []
     }
 
     private func local() -> Device {
@@ -393,10 +394,11 @@ import AppKit
 
         #expect(wizard?.test_screen == .kept(valueMs: valueMs))
         let row = popover.test_deviceRow(for: "bt-a:output")
-        #expect(row?.test_syncChipTitle == "0 ms", "the row reads the zeroed trim already")
+        #expect(row?.test_syncChipTitle == "\(Int(valueMs.rounded())) ms",
+                "the row reads the MEASUREMENT already — the zeroed nudge under it would read \"0 ms\", i.e. nothing set")
         #expect(row?.test_syncChipTooltip?
             .contains("Measured latency: \(Int(valueMs.rounded())) ms") == true,
-                "…and the measurement is what the tooltip carries")
+                "…and the tooltip says what that number is")
         #expect(popover.test_lastEnergizeAnnouncement?.contains("aligned at") == true,
                 "VoiceOver hears it on the same beat: \(popover.test_lastEnergizeAnnouncement ?? "-")")
     }
@@ -604,10 +606,11 @@ import AppKit
                 "the reference comes down only once the measurement is stored")
 
         let row = popover.test_deviceRow(for: "bt-a:output")
-        #expect(row?.test_syncChipTitle == "0 ms", "the row reads the zeroed trim")
+        #expect(row?.test_syncChipTitle == "\(Int(latencyMs.rounded())) ms",
+                "the row reads the MEASUREMENT, not the zeroed nudge underneath it")
         #expect(row?.test_syncChipTooltip?
             .contains("Measured latency: \(Int(latencyMs.rounded())) ms") == true,
-                "…and the measurement is what the tooltip carries")
+                "…and the tooltip says what that number is")
 
         let drawer = popover.test_syncDrawer
         #expect(drawer?.test_trimMs == 0, "the open drawer agrees with the store")
@@ -1070,5 +1073,48 @@ import AppKit
         popover.startBTAlignmentWizard(deviceID: "bt-a:output")
         #expect(popover.test_btWizardIsOpen() == false,
                 "an un-live target never opens — the same conditions that tear one down")
+    }
+
+    // MARK: Reset alignment (roadmap 056) — the way back out of a Keep
+
+    /// After a Keep the whole correction is the MEASURED latency, so the chip
+    /// shows it — and the drawer's Reset is the one way to clear it. The row
+    /// must return to "Not set" straight away, off the popover's own caches,
+    /// without waiting for a backend push.
+    @Test func resetClearsTheStoredAlignmentAndReturnsTheChipToNotSet() {
+        let (popover, recorder) = makePopover()
+        var latency: Double? = 429
+        var trimIsSet = false
+        popover.btLatencyProvider = { _ in latency }
+        popover.btTrimProvider = { _ in 0 }
+        popover.btTrimIsSetProvider = { _ in trimIsSet }
+        popover.onResetBTAlignment = { id in
+            recorder.resets.append(id)
+            latency = nil
+            trimIsSet = false
+        }
+        popover.update(devices: [local(), airplay(), bt()])
+
+        let row = popover.test_deviceRow(for: "bt-a:output")
+        #expect(row?.test_syncChipTitle == "429 ms", "the measurement, not a false \"0 ms\"")
+
+        row?.test_fireSyncChipClick()
+        let drawer = popover.test_syncDrawer
+        #expect(drawer?.test_resetVisible == true, "a measured device has something to clear")
+
+        drawer?.test_fireResetClick()
+        #expect(recorder.resets == ["bt-a:output"], "one clear, for this device only")
+        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipTitle == "Not set")
+        #expect(popover.test_deviceRow(for: "bt-a:output")?.test_syncChipIsDashed == true,
+                "back to the dashed invitation")
+    }
+
+    @Test func resetIsNotOfferedForADeviceWithNothingStored() {
+        let (popover, _) = makePopover()
+        popover.btLatencyProvider = { _ in nil }
+        popover.btTrimIsSetProvider = { _ in false }
+        popover.update(devices: [local(), airplay(), bt()])
+        popover.test_deviceRow(for: "bt-a:output")?.test_fireSyncChipClick()
+        #expect(popover.test_syncDrawer?.test_resetVisible == false)
     }
 }

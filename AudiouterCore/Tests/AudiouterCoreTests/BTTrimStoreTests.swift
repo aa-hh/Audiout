@@ -60,6 +60,41 @@ import Testing
         #expect(try store.loadLatencies() == ["a": 320], "a trim write keeps the measurement")
     }
 
+    // MARK: Reset alignment (roadmap 056 — the drawer's clear)
+
+    /// Reset DELETES both of a device's entries. Writing 0 would not do: the
+    /// row reads "tuned" off the entry EXISTING, so a stored 0 leaves the chip
+    /// on "0 ms" forever instead of returning it to "Not set".
+    @Test func clearAlignmentDeletesBothEntriesRatherThanZeroingThem() throws {
+        let store = store()
+        try store.save(["a": 40])
+        try store.saveLatencies(["a": 320])
+        try store.clearAlignment(deviceUID: "a")
+        #expect(try store.load()?["a"] == nil, "the trim entry is gone, not 0")
+        #expect(try store.loadLatencies()?["a"] == nil, "the measurement is gone, not 0")
+    }
+
+    /// It clears ONE device and touches nothing else — neither another
+    /// speaker's alignment nor the dismissal record.
+    @Test func clearAlignmentLeavesOtherDevicesAndDismissalsAlone() throws {
+        let store = store()
+        try store.save(["a": 40, "b": -10])
+        try store.saveLatencies(["a": 320, "b": 640])
+        try store.saveDismissedUIDs(["a"])
+        try store.clearAlignment(deviceUID: "a")
+        #expect(try store.load() == ["b": -10])
+        #expect(try store.loadLatencies() == ["b": 640])
+        #expect(try store.loadDismissedUIDs() == ["a"], "\"Not now\" is final and survives a reset")
+    }
+
+    /// Nothing stored yet (or nothing for this device) is not an error — the
+    /// same read-modify-write, landing on an empty payload.
+    @Test func clearAlignmentOnAnUnknownDeviceIsHarmless() throws {
+        let store = store()
+        try store.clearAlignment(deviceUID: "a")
+        #expect(try store.load() == [:])
+    }
+
     /// Backward compatible: a file written before latencies existed still
     /// loads, and reads as "nothing measured".
     @Test func aTrimsOnlyFileStillLoads() throws {

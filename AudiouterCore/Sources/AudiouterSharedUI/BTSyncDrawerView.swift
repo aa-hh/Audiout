@@ -27,18 +27,24 @@ public protocol BTSyncDrawerViewDelegate: AnyObject {
     /// "Not now" is final, so this stays reachable forever). The row's
     /// "Align speaker…" context-menu item is the discoverable twin.
     func syncDrawerDidRequestAlignmentWizard(_ d: BTSyncDrawerView)
+    /// "Reset alignment" (roadmap 056): delete this device's STORED alignment —
+    /// its measured latency and its trim — returning the row to "Not set".
+    /// Distinct from Revert, which only restores the value the drawer opened on.
+    func syncDrawerDidRequestResetAlignment(_ d: BTSyncDrawerView)
 }
 
 public extension BTSyncDrawerViewDelegate {
     /// Default no-op — only the popover hosts the alignment wizard.
     func syncDrawerDidRequestAlignmentWizard(_ d: BTSyncDrawerView) {}
+    /// Default no-op — only the popover owns the stores Reset clears.
+    func syncDrawerDidRequestResetAlignment(_ d: BTSyncDrawerView) {}
 }
 
 /// The **BT sync drawer** (PLAN-BT-SYNC-DRAWER §3 T5): the panel that opens
 /// underneath a Bluetooth row when its SYNC value chip (T6) is clicked. ONE
 /// horizontal band:
 ///
-///     [♪ Align by ear] [Revert]      hold ⇧ for 10 ms   [ − | −414 ms | + ]
+///     [♪ Align by ear] [Revert] [Reset alignment]   hold ⇧ for 10 ms   [ − | −414 ms | + ]
 ///
 /// **Why the two halves sit at opposite ends.** Align-by-ear and Revert lead
 /// the band; the value cluster hugs the trailing edge so it lands directly
@@ -100,6 +106,7 @@ public final class BTSyncDrawerView: NSView {
 
     private let alignButton = NSButton()
     private let revertButton = NSButton()
+    private let resetButton = NSButton()
     private let hintLabel = NSTextField(labelWithString: "")
     private let minusButton = NSButton()
     private let plusButton = NSButton()
@@ -118,6 +125,11 @@ public final class BTSyncDrawerView: NSView {
     private var trimMs: Double = 0
     private var isSet = false
     private var openTimeMs: Double = 0
+    /// Whether this device has anything STORED to reset — a measured latency, a
+    /// trim, or (on the Mac's row) a set local offset. Pushed by the host,
+    /// which owns both stores; a Reset button over nothing to clear is an
+    /// offer the gesture would refuse.
+    private var canReset = false
     private var usableRangeMs: ClosedRange<Double> = -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs
     /// The direction-spelled value last pushed to the field's accessibility
     /// value (D7). Mirrored here because `NSTextField.accessibilityValue()`
@@ -149,7 +161,7 @@ public final class BTSyncDrawerView: NSView {
         configureButtons()
         configureLabels()
         for subview in [minusButton, plusButton, valueField,
-                        alignButton, revertButton, hintLabel] as [NSView] {
+                        alignButton, revertButton, resetButton, hintLabel] as [NSView] {
             // ONE place, unskippable, for every present and future subview.
             // Live-found: labels that missed this flag kept their translated
             // mask constraints (position 0,0), which fought the explicit chain
@@ -281,6 +293,22 @@ public final class BTSyncDrawerView: NSView {
         revertButton.setAccessibilityLabel("Revert to the value when this drawer opened")
         revertButton.target = self
         revertButton.action = #selector(revertTapped(_:))
+
+        // Same push-button voice as Revert beside it — the two are neighbours
+        // but not twins: Revert restores the value this drawer opened on,
+        // Reset deletes the stored alignment (the measured latency AND the
+        // nudge) so the row goes back to "Not set". Shown only when there IS
+        // something stored to clear.
+        resetButton.bezelStyle = .rounded
+        resetButton.controlSize = .small
+        resetButton.font = Tokens.Font.caption
+        resetButton.title = "Reset alignment"
+        let resetHelp = "Clear the measured alignment and the sync nudge for this device."
+        resetButton.setAccessibilityLabel("Reset alignment")
+        resetButton.setAccessibilityHelp(resetHelp)
+        resetButton.toolTip = resetHelp
+        resetButton.target = self
+        resetButton.action = #selector(resetTapped(_:))
     }
 
     private func configureLabels() {
@@ -317,6 +345,12 @@ public final class BTSyncDrawerView: NSView {
             revertButton.centerYAnchor.constraint(equalTo: alignButton.centerYAnchor),
             revertButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.syncDrawerRevertButtonWidth),
             revertButton.heightAnchor.constraint(equalToConstant: controlH),
+
+            resetButton.leadingAnchor.constraint(equalTo: revertButton.trailingAnchor,
+                                                 constant: PopoverColumnGrid.syncDrawerButtonGap),
+            resetButton.centerYAnchor.constraint(equalTo: alignButton.centerYAnchor),
+            resetButton.widthAnchor.constraint(equalToConstant: PopoverColumnGrid.syncDrawerResetButtonWidth),
+            resetButton.heightAnchor.constraint(equalToConstant: controlH),
 
             // TRAILING half, laid out trailing→leading so it lands directly
             // beneath the SYNC chip that opened the drawer: `+`, the unit, the
@@ -366,11 +400,13 @@ public final class BTSyncDrawerView: NSView {
     /// `currentEditor() == nil` check) — the internal state updates either
     /// way, only the on-screen text is protected.
     public func configure(deviceName: String, trimMs: Double, isSet: Bool,
-                          usableRangeMs: ClosedRange<Double>, alignTickActive: Bool) {
+                          usableRangeMs: ClosedRange<Double>, alignTickActive: Bool,
+                          canReset: Bool = false) {
         self.deviceName = deviceName
         self.trimMs = trimMs
         self.isSet = isSet
         self.usableRangeMs = usableRangeMs
+        self.canReset = canReset
         alignButton.state = alignTickActive ? .on : .off
         alignButton.contentTintColor = alignTickActive
             ? Tokens.Color.engagedChrome : Tokens.Color.secondaryLabel
@@ -480,6 +516,23 @@ public final class BTSyncDrawerView: NSView {
         applyCommit(clampToUsableRange(openTimeMs))
     }
 
+    /// Reset alignment: a gesture of this drawer's own, so it moves its OWN
+    /// display here rather than waiting for the host's next `configure` — that
+    /// is a background model push and by contract never overwrites text being
+    /// edited, which would leave the field showing (and later committing) the
+    /// value just cleared. Same reasoning as `noteExternalTrimChange`, but this
+    /// one lands on NOT-SET rather than on a value. The Revert baseline moves
+    /// with it: a nudge that has just been deleted is not a value to go back to.
+    @objc private func resetTapped(_ sender: NSButton) {
+        trimMs = 0
+        isSet = false
+        openTimeMs = 0
+        canReset = false
+        refreshDisplay()
+        valueFieldEditor.overrideEditedValue(0)
+        delegate?.syncDrawerDidRequestResetAlignment(self)
+    }
+
     /// Escape, anywhere in the drawer other than an in-progress field edit
     /// (which `SyncValueFieldEditor` consumes for its own revert — see its
     /// header comment). Standard AppKit key-binding translation: an unhandled
@@ -512,6 +565,11 @@ public final class BTSyncDrawerView: NSView {
     private func refreshDisplay() {
         valueFieldEditor.setCommittedValue(trimMs, displayText: Self.fieldText(trimMs))
         revertButton.isEnabled = BTSyncTrim.quantise(trimMs) != BTSyncTrim.quantise(openTimeMs)
+        // Hidden, not disabled: with nothing stored there is nothing to explain
+        // — a permanently dead button beside Revert would only invite the
+        // question. Nothing is anchored to it, so hiding it moves no other
+        // control.
+        resetButton.isHidden = !canReset
         // D7 (never a bare signed number with no direction) lives in the
         // spoken value and the field's tooltip — the visible number carries
         // its sign, and the row chip above the drawer states "N ms" for
@@ -563,6 +621,10 @@ public final class BTSyncDrawerView: NSView {
     public var test_isSet: Bool { isSet }
     public var test_usableRangeMs: ClosedRange<Double> { usableRangeMs }
     public var test_revertEnabled: Bool { revertButton.isEnabled }
+    /// Whether the "Reset alignment" button is on screen at all (it is hidden,
+    /// not disabled, when there is nothing stored to clear).
+    public var test_resetVisible: Bool { !resetButton.isHidden }
+    public var test_resetTitle: String { resetButton.title }
     public var test_alignActive: Bool { alignButton.state == .on }
     public var test_valueField: NSTextField { valueField }
     public var test_valueFieldText: String { valueField.stringValue }
@@ -587,6 +649,7 @@ public final class BTSyncDrawerView: NSView {
     public func test_firePlusClick() { plusButton.performClick(nil) }
     public func test_fireAlignClick() { alignButton.performClick(nil) }
     public func test_fireRevertClick() { revertButton.performClick(nil) }
+    public func test_fireResetClick() { resetButton.performClick(nil) }
     public func test_fireCancelOperation() { cancelOperation(nil) }
 }
 

@@ -268,9 +268,21 @@ import AppKit
 
     /// A real, unmodified key press: `NSWindow.sendEvent` is what routes it to
     /// the first responder, exactly as it does on screen.
+    ///
+    /// The flags are AppKit's OWN, not an empty set — the second half of the
+    /// live bug (build wizardv7, ←/→ dead while Space/Esc/Return/⌘Z worked).
+    /// A real ARROW keyDown carries `.function` + `.numericPad`; a test that
+    /// synthesises one with no flags at all is asking a question no keyboard
+    /// ever asks, and a map that rejects those bits ships green.
+    private static func appKitFlags(forKeyCode keyCode: UInt16) -> NSEvent.ModifierFlags {
+        let arrows: Set<UInt16> = [123, 124, 125, 126]
+        return arrows.contains(keyCode) ? [.function, .numericPad] : []
+    }
+
     private func sendKey(_ window: NSWindow, keyCode: UInt16, characters: String) {
         guard let event = NSEvent.keyEvent(
-            with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            with: .keyDown, location: .zero,
+            modifierFlags: Self.appKitFlags(forKeyCode: keyCode), timestamp: 0,
             windowNumber: window.windowNumber, context: nil, characters: characters,
             charactersIgnoringModifiers: characters, isARepeat: false, keyCode: keyCode)
         else {
@@ -373,9 +385,9 @@ import AppKit
                 \(String(describing: wizard?.test_stage.test_state))
                 """)
         }
-        // The click count rides the nameplate row's right slot — "about 15",
+        // The click count rides the title row's right slot — "about 15",
         // because a variable-length run has no exact total to give.
-        #expect(wizard?.test_nameplateRightText == BTAlignmentWizardView.clickCountCopy(1))
+        #expect(wizard?.test_clickCountText == BTAlignmentWizardView.clickCountCopy(1))
     }
 
     @Test func backUndoesTheLastAnswerAndReAsksThatTrial() {
@@ -759,10 +771,10 @@ import AppKit
                 "a long name must shrink its button, not break the panel's layout")
     }
 
-    /// The nameplate is the other place a name can run past its slot, and the
+    /// The title row is the other place a name can run past its slot, and the
     /// failure there is invisible in code: both micro-labels are pinned to
-    /// opposite edges of a plain container, so an over-long `ALIGN · <NAME>`
-    /// draws straight THROUGH `CLICK n OF ABOUT 15` rather than being clipped.
+    /// opposite edges of a plain container, so an over-long `Align <name>`
+    /// draws straight THROUGH `Click n of about 15` rather than being clipped.
     @Test func aVeryLongDeviceNameTruncatesInsteadOfOverprintingTheClickCount() {
         let longName = "Downstairs Living Room Sonos Play:5 Right Channel Speaker"
         let fleet = [local(), airplay(), bt(name: longName)]
@@ -773,8 +785,8 @@ import AppKit
         popover.startBTAlignmentWizard(deviceID: "bt-a:output")
         let wizard = popover.test_btWizardView()
         wizard?.test_clickButton(titled: "Start")
-        #expect(wizard?.test_nameplateRightText == "CLICK 1 OF ABOUT 15")
-        #expect(wizard?.test_nameplateSlotsAreClear == true,
+        #expect(wizard?.test_clickCountText == "Click 1 of about 15")
+        #expect(wizard?.test_titleSlotsAreClear == true,
                 "the name gives way to the click count, never overprints it")
     }
 
@@ -1167,9 +1179,13 @@ import AppKit
 
     /// The locked key map, each key through the seam AppKit really uses for
     /// it — the unmodified three as a first-responder `keyDown` delivered by a
-    /// real window, ⌘Z as a genuine key equivalent. See `hostSheetInWindow`
-    /// for why the old `performKeyEquivalent`-only version of this test could
-    /// pass over a keyboard that did nothing on screen.
+    /// real window, ⌘Z as a genuine key equivalent, and each carrying the
+    /// flags AppKit itself stamps on it (`sendKey` — the arrows arrive
+    /// `.function` + `.numericPad`, never bare). See `hostSheetInWindow` for
+    /// why the old `performKeyEquivalent`-only version of this test could pass
+    /// over a keyboard that did nothing on screen; the flags are the same
+    /// story one layer down — synthesised bare, ← and → answered a question no
+    /// real keyboard asks.
     @Test func theQuestionScreenAnswersFromTheKeyboard() {
         let (popover, recorder) = makePopover()
         let wizard = openWizard(popover)

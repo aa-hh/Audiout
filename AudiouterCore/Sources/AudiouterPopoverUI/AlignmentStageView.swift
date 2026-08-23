@@ -32,6 +32,32 @@ import AudiouterSharedUI
 /// 1–2 s and there is no beat callback, so the stage reacts to ANSWERS only;
 /// a visual metronome would lie.
 ///
+/// **The lights are LIVING RINGS, ported from the marketing site's emitter
+/// component** (`src/scripts/fields/emitters.js` in the Audiouter Website
+/// repo, at the values `house-bg.js` saves for its cabinet instance:
+/// `wobble` 0.03, `wobbleRate` 0.5, `squash` 1.12, breathe `0.4 + 0.6·u` at
+/// rate `0.1 + 0.028·f`, per-light seed `f·6.13 + 1.7`). Three things carry
+/// over and one deliberately does not. The RADIUS bends — two slow-turning
+/// harmonics, three lobes and five, phased by the light's own seed — so parts
+/// of the ring run ahead and the lead drifts, while the CENTRE never moves
+/// (the centre is data: it marks a millisecond value). The wavefront is
+/// squashed 1.12 in y, so a light reads as a slight oval rather than a clock
+/// face. The breathing swell rides the ring's and halo's OPACITY. What is
+/// dropped is the field itself: no outward propagation, no orbit drift — the
+/// website's rings travel because they are sound leaving a speaker; here the
+/// light IS a reading, and a reading that wanders is a lie.
+///
+/// **The swell modulates WITHIN a rung, never across one.** Brightness is the
+/// look table's certainty signal, so the emitter's ±43 % swell is remapped to
+/// ±`swellDepth` (6 %) around whatever opacity the rung settled on — well
+/// under the ~13 % step between two rungs' halos. **Pinned phase is the
+/// settled model**: with no clock running — Reduce Motion, `HeadlessRuntime`,
+/// off screen, or a rung that does not breathe — the wobble term is zero and
+/// the swell factor is exactly 1, so the ring is a plain squashed ellipse at
+/// the table's own opacity and `cacheDisplay` is byte-deterministic. Only the
+/// TIME-VARYING half of the port is pinned; the squash is a settled property
+/// and is present in every render.
+///
 /// Layer colors are stamped `CGColor`s, so the view re-stamps on appearance
 /// flips, accessibility-display changes AND the accent dial (the three live
 /// re-resolution triggers, `AudiouterSharedUI/AGENTS.md`). Model values stay
@@ -294,8 +320,16 @@ final class AlignmentStageView: NSView {
     /// the hero): tall enough for the armed halo (84) plus the name stamps.
     static let stageHeight: CGFloat = 112
     private static let horizontalInset: CGFloat = 26
-    /// The wire sits above centre so the name stamps fit under the lights.
-    private static let wireYFraction: CGFloat = 0.62
+    /// **The wire sits on the plate's midline** (owner ruling 2026-08-24: on
+    /// the intro "the group reads low"). It used to sit at 0.62 — i.e. 42 pt
+    /// up from the bottom of a 112 pt plate — which put the armed halo's lower
+    /// edge and the name stamps within a few points of the plate's bottom rim
+    /// while a clear 27 pt band sat empty above the lights. Centred, the armed
+    /// halo leaves ~14 pt top and bottom and the stamps still clear the rim by
+    /// ~19 pt, so the instrument reads as a thing floating in its case on every
+    /// screen. It stays a constant of the plate's own height, so the wire never
+    /// moves between screens — the fixed chassis rule.
+    private static let wireYFraction: CGFloat = 0.5
     /// The stage IS the plate: a rounded-12 `stagePlate` ground under it all.
     private static let plateCornerRadius: CGFloat = 12
     /// The window never zooms tighter than this, whatever the rung asks for.
@@ -303,6 +337,63 @@ final class AlignmentStageView: NSView {
     /// The sticky centre's dead-band: the interval plus this much of the
     /// window's own span on each side must escape before the camera pans.
     private static let stickyMarginFraction: Double = 0.15
+
+    // MARK: - The emitter (ported knobs — see the type comment)
+
+    /// How a light is drawn. `.still` is the pre-port ring, kept as the
+    /// owner's A/B; the app runs `.living`.
+    enum RingStyle { case still, living }
+    var ringStyle: RingStyle = .living {
+        didSet { reconcileBreathing() }
+    }
+
+    /// `emitters.js` `wobble`: the wavefront bends by ±3 % of its radius.
+    /// razor: 0.03 is the website's own value, ported literally. At the
+    /// website's canvas radii that is many pixels; at a 9–20 pt ring here it
+    /// is a sub-point shimmer. Upgrade path is to raise THIS number (the
+    /// character is the two harmonics, not the amplitude), never to reshape
+    /// the harmonics.
+    private static let wobble: CGFloat = 0.03
+    /// `wobbleRate` — rad/s the three-lobe harmonic turns. The five-lobe one
+    /// counter-turns at ×0.73, which is what keeps the lead drifting.
+    private static let wobbleRate: Double = 0.5
+    /// `squash`: y is shortened by this, so the rings read as slight ovals.
+    /// A SETTLED property — present at pinned phase too.
+    private static let squash: CGFloat = 1.12
+    /// The breathing swell, `breatheFloor + breatheDepth · u`, at
+    /// `breatheRate + breatheStep · f` rad/s — a ~63 s period, a slow swell
+    /// rather than a pulse.
+    private static let breatheFloor: Double = 0.4
+    private static let breatheDepth: Double = 0.6
+    private static let breatheRate: Double = 0.1
+    private static let breatheStep: Double = 0.028
+    /// How far the swell is allowed to move a light's opacity, as a fraction
+    /// of the rung's settled value. The emitter's own swing is ±43 %, which
+    /// would carry a light clean across a rung boundary and make the
+    /// instrument lie about its certainty; the smallest gap between two
+    /// rungs' halo opacities is ~13 %, so the modulation is held to half of
+    /// that. This is the ONE ported number that is not the website's.
+    private static let swellDepth: Float = 0.06
+    /// Segments per living ring. At a 20 pt radius the chord is 1.3 pt and
+    /// the sagitta 0.02 pt, so the polygon is an ellipse on any display.
+    private static let ringSegments = 96
+
+    /// `emitters.js`'s per-emitter seed: the reason the two lights never wave
+    /// in step. `f` is the light's index — 0 target, 1 reference.
+    private static func seed(_ f: Double) -> Double { f * 6.13 + 1.7 }
+
+    /// The breathing swell as a MULTIPLIER on a settled opacity: 1 at pinned
+    /// phase, 1 ± `swellDepth` while the clock runs.
+    private static func swellFactor(phase: Double?, index f: Double) -> Float {
+        guard let phase else { return 1 }
+        let rate = breatheRate + breatheStep * f
+        let unit = 0.5 + 0.5 * sin(phase * rate + seed(f) * 2.3)
+        let swell = breatheFloor + breatheDepth * unit
+        // Centre the emitter's [floor, floor + depth] band on its own mean,
+        // then scale that ±1 down to the depth the ladder can afford.
+        let centred = (swell - (breatheFloor + breatheDepth / 2)) / (breatheDepth / 2)
+        return 1 + swellDepth * Float(centred)
+    }
 
     // MARK: - Curves (spec §5)
 
@@ -977,9 +1068,14 @@ final class AlignmentStageView: NSView {
                              ringRadius: CGFloat, ringOpacity: Float,
                              ringLineWidth: CGFloat,
                              script: Script, curve: CAMediaTimingFunction) {
+        // The swell modulates AROUND these, so they are recorded rather than
+        // read back off the layer — compounding a factor on a layer's own
+        // value would walk the light's brightness away from its rung.
+        settledOpacity[ObjectIdentifier(halo)] = haloOpacity
+        settledOpacity[ObjectIdentifier(ring)] = ringOpacity
+
         animate(layer: halo, keyPath: "bounds",
-                to: NSValue(rect: CGRect(x: 0, y: 0, width: haloDiameter,
-                                         height: haloDiameter)),
+                to: NSValue(rect: Self.haloBox(haloDiameter)),
                 leg: script.halos, curve: curve)
         animate(layer: halo, keyPath: "position", to: NSValue(point: centre),
                 leg: script.halos, curve: curve)
@@ -1022,9 +1118,42 @@ final class AlignmentStageView: NSView {
         ring.add(animation, forKey: "path")
     }
 
-    private static func ringPath(in box: CGRect, lineWidth: CGFloat) -> CGPath {
-        CGPath(ellipseIn: box.insetBy(dx: lineWidth / 2, dy: lineWidth / 2),
-               transform: nil)
+    /// One light's wavefront. At PINNED phase this is the settled model — a
+    /// plain ellipse, squashed in y — and every existing caller gets it by
+    /// default. Given a phase, the radius is bent by the emitter's two
+    /// harmonics, phased by the light's own seed.
+    private static func ringPath(in box: CGRect, lineWidth: CGFloat,
+                                 phase: Double? = nil, index f: Double = 0) -> CGPath {
+        let inset = box.insetBy(dx: lineWidth / 2, dy: lineWidth / 2)
+        let squashed = CGRect(x: inset.midX - inset.width / 2,
+                              y: inset.midY - inset.height / squash / 2,
+                              width: inset.width, height: inset.height / squash)
+        guard let phase, wobble > 0 else {
+            return CGPath(ellipseIn: squashed, transform: nil)
+        }
+        // The GLSL measures r in SQUASHED space and takes θ there too, so the
+        // bend is applied to the circle and the squash lands on the result.
+        let radius = inset.width / 2
+        let seed = self.seed(f)
+        let path = CGMutablePath()
+        for step in 0..<ringSegments {
+            let theta = Double(step) / Double(ringSegments) * 2 * .pi
+            let bend = (sin(3 * theta + phase * wobbleRate + seed)
+                        + 0.5 * sin(5 * theta - phase * wobbleRate * 0.73 + seed * 1.3)) / 1.5
+            let r = radius * (1 + wobble * CGFloat(bend))
+            let point = CGPoint(x: inset.midX + r * CGFloat(cos(theta)),
+                                y: inset.midY + r * CGFloat(sin(theta)) / squash)
+            if step == 0 { path.move(to: point) } else { path.addLine(to: point) }
+        }
+        path.closeSubpath()
+        return path
+    }
+
+    /// A halo's box. The halo is bitmap contents, so it wears the emitter's
+    /// squash in its BOUNDS rather than in a path — same oval, other
+    /// mechanism.
+    private static func haloBox(_ diameter: CGFloat) -> CGRect {
+        CGRect(x: 0, y: 0, width: diameter, height: diameter / squash)
     }
 
     /// Scale ticks along the wire. The step is the RUNG's, so every rung
@@ -1134,10 +1263,8 @@ final class AlignmentStageView: NSView {
     /// composited away the instant it was created.
     private func fireSettleBreath(at begin: TimeInterval, look: Look) {
         guard window != nil, look.haloDiameter > 0 else { return }
-        let settled = CGRect(x: 0, y: 0, width: look.haloDiameter,
-                             height: look.haloDiameter)
-        let swelled = CGRect(x: 0, y: 0, width: look.haloDiameter * 1.04,
-                             height: look.haloDiameter * 1.04)
+        let settled = Self.haloBox(look.haloDiameter)
+        let swelled = Self.haloBox(look.haloDiameter * 1.04)
         for halo in [targetHalo, referenceHalo] {
             pulse(layer: halo, keyPath: "bounds", peak: NSValue(rect: swelled),
                   settled: NSValue(rect: settled), at: begin, duration: 0.24,
@@ -1369,14 +1496,21 @@ final class AlignmentStageView: NSView {
     /// the RUNG's, so the mood follows the run's real progress without ever
     /// claiming to pulse on the beat. Stops when the rung doesn't breathe, off
     /// screen, headless, or Reduce Motion is on.
+    ///
+    /// The living ring's clock rides the SAME gate, deliberately: a rung that
+    /// does not breathe is a rung at rest — `locked` above all, where
+    /// stillness IS the reward — so one condition governs both, and there is
+    /// no second lifecycle to keep in step.
     private func reconcileBreathing() {
         let look = Self.look(for: rung)
         guard let period = look.breathePeriod, !reduceMotion,
               !HeadlessRuntime.isActive, window != nil else {
             targetHalo.removeAnimation(forKey: Self.breatheKey)
             referenceHalo.removeAnimation(forKey: Self.breatheKey)
+            stopLivingRing()
             return
         }
+        startLivingRing()
         for (halo, phase) in [(targetHalo, 0.0), (referenceHalo, 0.5)] {
             // Re-add only when absent or the tempo class changed.
             if let existing = halo.animation(forKey: Self.breatheKey),
@@ -1391,6 +1525,61 @@ final class AlignmentStageView: NSView {
             breathe.timeOffset = period * phase
             halo.add(breathe, forKey: Self.breatheKey)
         }
+    }
+
+    // MARK: - The living ring's clock
+
+    private var livingRingLink: CADisplayLink?
+    private var livingRingEpoch: CFTimeInterval = 0
+    /// The rung's opacity for each light layer, written by `layoutLight`.
+    private var settledOpacity: [ObjectIdentifier: Float] = [:]
+
+    private func startLivingRing() {
+        guard ringStyle == .living else { stopLivingRing(); return }
+        guard livingRingLink == nil else { return }
+        let link = displayLink(target: self, selector: #selector(livingRingTick))
+        // 30 fps: a ±3 % bend turning at 0.5 rad/s has nothing to say at 120.
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 15, maximum: 30,
+                                                        preferred: 30)
+        livingRingEpoch = CACurrentMediaTime()
+        link.add(to: .main, forMode: .common)
+        livingRingLink = link
+    }
+
+    /// Invalidating leaves the last frame's wobble on the layers, so the stop
+    /// writes the PINNED model back — the settled ellipse at the table's own
+    /// opacity. Model values only, so a transition mid-flight is untouched.
+    private func stopLivingRing() {
+        guard livingRingLink != nil else { return }
+        livingRingLink?.invalidate()
+        livingRingLink = nil
+        drawLights(phase: nil)
+    }
+
+    @objc private func livingRingTick(_ link: CADisplayLink) {
+        drawLights(phase: link.targetTimestamp - livingRingEpoch)
+    }
+
+    /// One path and two opacities per light. Everything it needs is already on
+    /// the layers (radius, line width) or in `settledOpacity`, so a frame
+    /// never re-derives the look table and never allocates beyond the two
+    /// paths it draws.
+    private func drawLights(phase: Double?) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for (index, halo, ring) in [(0.0, targetHalo, targetRing),
+                                    (1.0, referenceHalo, referenceRing)] {
+            ring.path = Self.ringPath(in: ring.bounds, lineWidth: ring.lineWidth,
+                                      phase: phase, index: index)
+            let factor = Self.swellFactor(phase: phase, index: index)
+            if let base = settledOpacity[ObjectIdentifier(ring)] {
+                ring.opacity = base * factor
+            }
+            if let base = settledOpacity[ObjectIdentifier(halo)] {
+                halo.opacity = base * factor
+            }
+        }
+        CATransaction.commit()
     }
 
     // MARK: - Colors
@@ -1525,6 +1714,12 @@ final class AlignmentStageView: NSView {
         (targetHalo.position, referenceHalo.position)
     }
     var test_spanFrame: CGRect { spanLayer.frame }
+    /// The target light's SETTLED geometry — the pinned-phase truth the
+    /// renders and the goldens rest on: a squashed ellipse at the rung's own
+    /// opacity, with no wobble and no swell in it.
+    var test_targetLight: (ring: CGRect, halo: CGRect, ringOpacity: Float) {
+        (targetRing.path?.boundingBox ?? .zero, targetHalo.bounds, targetRing.opacity)
+    }
     /// The target ring's settled stroke — `fuseWhite` once locked.
     var test_targetRingColor: NSColor? { targetRing.strokeColor.map(NSColor.init(cgColor:)) ?? nil }
     var test_isBreathing: Bool {

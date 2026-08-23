@@ -125,7 +125,12 @@ plate).
   voice acknowledging banked progress). 100 ms, span shadow only.
 - Demotion: no hue change — geometry + softness only. Failure red never appears.
 - Primary plate fill: `goldCTA` + white ink (existing token, second sanctioned
-  surface). Together bar / secondary plates: no fill, `plateRim` stroke.
+  surface). **SUPERSEDED (owner ruling 2026-08-24): the wizard's primary plate
+  fills with `Tokens.Color.gold` resolved under the DARK appearance — one
+  bright-gold value pinned in both appearances — and sets its title and keycap
+  in `Tokens.Color.inkOnGold` (black, 11.4:1). `goldCTA` is the deepened gold
+  built for WHITE ink and read as dark mustard on screen; it keeps the Setup
+  finale's CTA and nothing here.** Together bar / secondary plates: no fill, `plateRim` stroke.
 - Accent-dial rule: none of the new tokens are dial-remapped. The stage no
   longer uses `gold`/`glow` for the lights, so the dial's `.systemAccent`
   remap cannot collide with the identity hues. `.subtle` dial: detent accent
@@ -142,9 +147,22 @@ view width **504**; `contentPadding` 0; spacing scale **4 / 12 / 16 / 28**
 `wireYFraction` stays 0.58. Stage internal `horizontalInset` stays 26.
 Fixed question-screen height — no reflow during a run.
 
+**SUPERSEDED, geometry (owner rulings 2026-08-23/24):** `stageHeight` is
+**112** — a strip, because the answer plates are the hero — and
+`wireYFraction` is **0.5**: the wire sits on the plate's own midline, so the
+armed halo and the name stamps read as centred rather than crowding the bottom
+rim. The readout row COLLAPSES to zero height on the four screens that print no
+caption (the stage never moves; only what hangs below it does).
+
 ### Question screen (top → bottom)
 1. Nameplate row 504×14: `ALIGN · <TARGET>` left (microLabel voice,
    `inkSecondary` — NOT gold), `m:ss` right. Gap 16.
+   **SUPERSEDED (owner ruling 2026-08-24): a plain sheet TITLE row 504×18 —
+   `Align <device name>` at `bodyEmphasized`/`label` on the left, and the click
+   count as a quiet `caption`/`inkSecondary` aside on its right (`Click n of
+   about 15` / `About 15 clicks`), sentence case, never mono, never all-caps.
+   The mono-caps retirement is WIZARD-ONLY; roadmap 059 covers the rest of the
+   app. The stage's in-plate name stamps keep the micro-label voice.**
 2. Stage 504×176. Gap 12.
 3. Readout caption 504×15, CENTERED: `confidenceCopy · <rung word>`
    (`Tokens.Font.caption`, `inkSecondary`). Gap 28.

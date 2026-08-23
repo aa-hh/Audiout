@@ -101,6 +101,21 @@ import AppKit
         #expect(lightVsCanvas >= floor, "plateRim vs canvas (light): \(lightVsCanvas):1 below the \(floor):1 floor")
     }
 
+    // MARK: The primary plate — bright gold + black ink, ONE value everywhere
+
+    /// The wizard's primary plates (Start / Sounds right / Try again / Done)
+    /// fill with ``Tokens/Color/gold``'s DARK-appearance value in BOTH
+    /// appearances and set their title in ``Tokens/Color/inkOnGold`` (owner
+    /// ruling 2026-08-24), which is why this measures the pair ONCE rather
+    /// than per appearance: the plate has only one.
+    @Test func inkOnGoldClearsTheBodyFloorOnThePinnedPrimaryPlateGold() {
+        let floor: CGFloat = 4.5
+        let fill = resolved(Tokens.Color.gold, appearanceName: .darkAqua)
+        let ratio = contrastRatio(Tokens.Color.inkOnGold, fill)
+        #expect(ratio >= floor,
+                "inkOnGold vs the pinned primary-plate gold: \(ratio):1 below the \(floor):1 floor")
+    }
+
     // MARK: The Deep companions — themed chrome, light grounds only (spec §2.1)
 
     @Test func lightSyncSignalDeepClearsTheFloorOnLightCanvasAndRaised() {

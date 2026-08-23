@@ -87,8 +87,10 @@ with a clear rationale — never by analogy to this screen.
    - **Answer plates are the hero** (236×88), stage is a 112 pt strip.
    - **The question is on the question screen**: readout = `Which clicked
      first? · <rung word>`; the interval moved to the stage's tooltip.
-   - **Clock removed** → nameplate right slot reads `CLICK n OF ABOUT 15`
-     (intro: `ABOUT 15 CLICKS`).
+   - **Clock removed** → the top row's right slot carries the click count
+     (since the 2026-08-24 owner batch: `Click n of about 15`, intro
+     `About 15 clicks` — sentence-case caption, not the old mono-caps
+     `CLICK n OF ABOUT 15` / `ABOUT 15 CLICKS`).
    - **Kept hero line**: `<Target> is ready to play with everything.`, with
      `Change it anytime from the SYNC control.` as a caption and `247 ms ·
      kept` staying the stage's caption. The number is kept visible on
@@ -313,6 +315,30 @@ ios-staging's 063, so the merge is a clean union:
 ### State at close of session 2
 - `bash scripts/build.sh` exit 0; the six wizard suites green after every pass; full-suite run + fresh renders + fresh bundle: see the final session summary in the conversation, or re-run yourself.
 - Handover builds: `build/Audiouter Wizard v5.app` (`.wizardv5`) predates passes 1–5 — superseded. Current build should be cut as **v6 / `.wizardv6`** (never reuse a launched id).
+
+### Owner visual batch — session 3, 2026-08-24 (live-directed, implemented as ruled)
+Six owner instructions off a live run of `.wizardv7`, all built and rendered:
+1. **The mono-caps nameplate is retired here.** `ALIGN · <NAME>` → a plain
+   sheet title `Align <device name>` (`bodyEmphasized`/`label`), with the click
+   count restyled as a quiet sentence-case caption on its right
+   (`caption`/`inkSecondary`). Wizard-ONLY — roadmap 059 owns the rest of the
+   app; the stage's in-plate name stamps deliberately keep the micro-caps voice.
+2. **Wire centred in the stage plate** — `wireYFraction` 0.62 → 0.5.
+3. **Intro breathing room** — the empty readout row now collapses to zero
+   height on the four caption-less screens, the intro's band is top-pinned
+   instead of centred, and a full 28 pt band break sits between the reference
+   line and Start. The plate's own size never changed; it was missing air.
+4. **Primary CTA = bright gold + black ink, one value in both appearances** —
+   `Tokens.Color.gold` resolved under `.darkAqua` and pinned, plus a new
+   `Tokens.Color.inkOnGold`. `goldCTA` (deepened for white ink) keeps the Setup
+   finale and nothing here. Measured 11.4:1.
+5. **Plate titles centred in the PLATE** — the keycap chip no longer displaces
+   them (`titleRect` reserves symmetrically). Every big plate on every screen,
+   the two answer plates included.
+
+Renders in `dev/notes/wizard-v2-handoff/after-sheet/` are current for this
+batch. Queue items 4 and 6 below predate it and should be re-judged against the
+new renders.
 
 ### Owner decision queue (flagged by the passes, deliberately not acted on)
 1. "Both at once" wording (pass 1 — revertible in one constant).

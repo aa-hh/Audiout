@@ -333,4 +333,32 @@ import AudiouterSharedUI
 
         #expect(!stage.test_isBreathing, "breathing never runs headless (no window)")
     }
+
+    /// The living ring's clock rides the same gate as breathing, so headless
+    /// the stage renders at PINNED phase: the ported squash is there (it is a
+    /// settled property), the wobble and the swell are not. This is what keeps
+    /// `cacheDisplay` byte-deterministic for the wizard renders.
+    @Test func headlessDrawsThePinnedRingAtTheRungsOwnOpacity() {
+        let stage = makeStage()
+        // Exactly AT the threshold boundary, so `thresholdProgress` is 0 and
+        // the line width is the table's own — this test is about the port, not
+        // about the top rung's inner ramp.
+        stage.apply(.question(intervalMs: interval(halfWidth: 12), range: range),
+                    animated: false)
+
+        let look = AlignmentStageView.look(for: .threshold)
+        let light = stage.test_targetLight
+        // The ellipse is the ring box inset by half the stroke, shortened 1.12.
+        let width = look.ringRadius * 2 - look.ringLineWidth
+        #expect(abs(light.ring.width - width) < 0.01,
+                "pinned: no wobble — the path is exactly the settled ellipse")
+        #expect(abs(light.ring.height - width / 1.12) < 0.01,
+                "the emitter's squash IS settled, so it renders at pinned phase too")
+        #expect(abs(light.halo.height - look.haloDiameter / 1.12) < 0.01,
+                "the halo wears the same squash in its bounds")
+        // `thresholdProgress` brightens the halo inside this rung; the RING's
+        // opacity is the table's, and the swell must not have touched it.
+        #expect(abs(light.ringOpacity - look.ringOpacity) < 0.001,
+                "brightness still encodes certainty — pinned means factor 1")
+    }
 }

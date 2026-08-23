@@ -32,22 +32,24 @@ import AudiouterSharedUI
 ///   `shadow` @ 0.22, bottom lip lit (`raised` blended 0.20 toward white).
 /// - **disabled**: the interior (fill/lip/rim/chip) dims to
 ///   `PopoverColumnGrid.faderDisabledAlpha` — `WarmFaderCell`'s idiom.
-/// - **primary**: `goldCTA` fill + white ink, wearing the SAME two-edge
-///   bevel as a secondary plate in gold's own inks — rest lights the top lip
-///   (`goldCTA` blended 0.22 toward white) over a `shadow` @ 0.22 bottom,
-///   pressed blends the fill 0.18 toward `shadow` and inverts the two lips.
-///   Its rim is `goldCTA` blended 0.35 toward `shadow` rather than the
-///   neutral `plateRim`. DISABLED primary falls back to the SECONDARY
-///   plate's skin entirely — `raised` fill, secondary bevel, neutral rim,
-///   dimmed `label` ink (never a faded gold) — so a dead CTA reads as an
-///   ordinary dead plate, not a bleached one.
+/// - **primary**: BRIGHT gold fill + `inkOnGold` (black) title and chip,
+///   wearing the SAME two-edge bevel as a secondary plate in gold's own inks
+///   — rest lights the top lip (the fill blended 0.22 toward white) over a
+///   `shadow` @ 0.22 bottom, pressed blends the fill 0.18 toward `shadow` and
+///   inverts the two lips. Its rim is the fill blended 0.35 toward `shadow`
+///   rather than the neutral `plateRim`. DISABLED primary falls back to the
+///   SECONDARY plate's skin entirely — `raised` fill, secondary bevel,
+///   neutral rim, dimmed `label` ink (never a faded gold) — so a dead CTA
+///   reads as an ordinary dead plate, not a bleached one.
 ///
 /// The keycap chip (spec §3): 22×22 r6 for a single glyph ("←"/"→"/"⏎"),
 /// 44×20 for "SPACE", set in `Tokens.Font.keycap`, no fill — a rim and a
 /// glyph over the plate's own face. `trailing` placement seats it at the
-/// plate's trailing edge (14 pt in), vertically centred, with the title
-/// centred in what is left; `inline` places title + chip as one centred
-/// group. Its ink is the `identityTint` at full alpha (the plate rim wears
+/// plate's trailing edge (14 pt in), vertically centred, and the title is
+/// centred in the WHOLE PLATE regardless — the chip overlays the trailing
+/// edge without displacing it (owner ruling 2026-08-24; see `titleRect`);
+/// `inline` places title + chip as one centred group. Its ink is the
+/// `identityTint` at full alpha (the plate rim wears
 /// the tint at the alpha the CALLER handed — FULL-strength electric on
 /// dark, 0.9 Deep on light; owner ruling 2026-08-23, over spec §2.1's
 /// 0.45), `inkSecondary` on a neutral plate, and white
@@ -201,8 +203,8 @@ public final class AlignmentPlateCell: NSButtonCell {
     /// pressed lip is the shallower of the two blends.
     private func litLipColor(pressed: Bool) -> NSColor {
         if usesGoldSkin {
-            return Tokens.Color.goldCTA
-                .blended(withFraction: Self.primaryLitBlend, of: .white) ?? Tokens.Color.goldCTA
+            let gold = Self.primaryFillColor
+            return gold.blended(withFraction: Self.primaryLitBlend, of: .white) ?? gold
         }
         let blend = pressed ? Self.pressedBottomLitBlend : Self.restTopLitBlend
         return Tokens.Color.raised
@@ -222,24 +224,50 @@ public final class AlignmentPlateCell: NSButtonCell {
     /// than a bleached gold one.
     private var usesGoldSkin: Bool { isPrimary && isEnabled }
 
-    /// The primary plate's rim: `goldCTA` taken toward `shadow`, so the edge
-    /// is gold's own dark end rather than a neutral outline over a gold face.
+    /// The primary plate's rim: the gold fill taken toward `shadow`, so the
+    /// edge is gold's own dark end rather than a neutral outline over a gold
+    /// face. Measured against the light ground it has to survive: the blend of
+    /// Full-gold dark `#E8B84B` lands on `#977831`, 3.9:1 vs the light canvas —
+    /// clear of the 3:1 non-text floor, which is what stops a bright plate
+    /// dissolving into paper.
     private static var primaryRimColor: NSColor {
-        Tokens.Color.goldCTA
-            .blended(withFraction: primaryRimShadowBlend, of: Tokens.Color.shadow)
-            ?? Tokens.Color.goldCTA
+        let gold = primaryFillColor
+        return gold.blended(withFraction: primaryRimShadowBlend, of: Tokens.Color.shadow) ?? gold
     }
 
-    /// `goldCTA` (flat, or blended toward `shadow` while pressed) for an
+    /// **The primary plate's gold, pinned to ``Tokens/Color/gold``'s
+    /// DARK-appearance value in BOTH appearances** (owner ruling 2026-08-24).
+    /// Two deliberate departures from what this plate used to draw:
+    ///
+    /// - Not ``Tokens/Color/goldCTA``. That token is the gold family DEEPENED
+    ///   until white ink wins (`#815E0E` dark / `#775913` light) — a dark
+    ///   mustard, which is what the live build read as. The owner's call is
+    ///   that the app's primary CTA wears the app's actual gold.
+    /// - Not the dynamic value. Resolving live would hand the LIGHT appearance
+    ///   `gold`'s own light hex (`#9E761D`, deepened for paper), i.e. two
+    ///   different CTAs; the ruling is one gold everywhere, so it is resolved
+    ///   once under `.darkAqua` — the same force-resolve idiom
+    ///   `AlignmentTokenContrastTests` uses to measure a token under a fixed
+    ///   appearance. `gold` is still read from Tokens rather than copied, so
+    ///   the accent dial and Increase Contrast both still reach it.
+    private static var primaryFillColor: NSColor {
+        var resolved = Tokens.Color.gold
+        NSAppearance(named: .darkAqua)?.performAsCurrentDrawingAppearance {
+            resolved = Tokens.Color.gold.usingColorSpace(.sRGB) ?? resolved
+        }
+        return resolved
+    }
+
+    /// The pinned gold (flat, or blended toward `shadow` while pressed) for an
     /// enabled primary plate; `raised` for every secondary plate AND for a
     /// disabled primary — gold never fades, it is simply not the fill
     /// disabled draws with.
     private func fillColor(pressed: Bool) -> NSColor {
         guard usesGoldSkin else { return Tokens.Color.raised }
-        guard pressed else { return Tokens.Color.goldCTA }
-        return Tokens.Color.goldCTA
-            .blended(withFraction: Self.pressedPrimaryShadowBlend, of: Tokens.Color.shadow)
-            ?? Tokens.Color.goldCTA
+        let gold = Self.primaryFillColor
+        guard pressed else { return gold }
+        return gold.blended(withFraction: Self.pressedPrimaryShadowBlend,
+                            of: Tokens.Color.shadow) ?? gold
     }
 
     /// Disabled dims the whole interior (fill/bevel/rim/chip) to
@@ -258,9 +286,19 @@ public final class AlignmentPlateCell: NSButtonCell {
 
     // MARK: Drawing — titleRect / drawTitle
 
-    /// Trailing mode centers the title in the width left once the trailing
-    /// chip (when a keycap is in use) and a gap are subtracted, so the label
-    /// never runs into the chip. Inline mode instead returns a rect sized
+    /// **Trailing mode centers the title in the WHOLE PLATE** — the keycap
+    /// chip overlays the trailing edge without displacing it (owner ruling
+    /// 2026-08-24). It used to hand the title everything to the LEFT of the
+    /// chip and centre it in THAT, which put every CTA's word ~23 pt left of
+    /// the plate's midline: "Start" and each speaker name visibly sat off
+    /// centre while the plate around them was symmetric.
+    ///
+    /// The reserve is taken off BOTH sides, not just the chip's, which is the
+    /// whole trick: an equal inset leaves the box's centre ON the plate's
+    /// centre, so the title is genuinely centred AND still cannot reach under
+    /// the chip when a long device name truncates. (Handing over the full
+    /// bounds would centre just as well but let a long name run beneath the
+    /// glyph.) Inline mode instead returns a rect sized
     /// exactly to the title's own width, positioned so title+gap+chip form
     /// one horizontally-centered group across the FULL plate height
     /// (`inlineGroupMinX`) — `drawKeycapChip` lays the chip immediately to
@@ -269,24 +307,25 @@ public final class AlignmentPlateCell: NSButtonCell {
         guard let chipSize = chipSize else { return rect }
         switch chipPlacement {
         case .trailing:
-            let chipMinX = trailingChipRect(in: rect, size: chipSize, pressed: false).minX
-            let titleWidth = chipMinX - Self.inlineChipGap - rect.minX
-            return NSRect(x: rect.minX, y: rect.minY, width: max(0, titleWidth), height: rect.height)
+            let reserve = Self.chipTrailingMargin + chipSize.width + Self.inlineChipGap
+            guard rect.width > 2 * reserve else { return rect }
+            return rect.insetBy(dx: reserve, dy: 0)
         case .inline:
             let x = inlineGroupMinX(in: rect, chipWidth: chipSize.width)
             return NSRect(x: x, y: rect.minY, width: inlineTitleWidth, height: rect.height)
         }
     }
 
-    /// State color only: primary = white ink (dimmed `label` when disabled,
-    /// never faded gold text on faded gold fill); secondary = `label`
+    /// State color only: primary = `inkOnGold` (black — the bright gold fill
+    /// is far too light to carry white; dimmed `label` when disabled, never
+    /// faded gold text on faded gold fill); secondary = `label`
     /// (dimmed when disabled) — the panel's brightest text voice, the same
     /// one device/app names use (`AudiouterPopoverUI/AGENTS.md`'s chrome
     /// hierarchy). The inline-chip plate is the together BAR — a quiet
     /// secondary answer that must not own the brightest text — so it speaks
     /// in `inkSecondary`.
     private var titleColor: NSColor {
-        if isPrimary && isEnabled { return .white }
+        if isPrimary && isEnabled { return Tokens.Color.inkOnGold }
         let ink = chipPlacement == .inline ? Tokens.Color.inkSecondary : Tokens.Color.label
         return ink.withAlphaComponent(interiorAlpha)
     }
@@ -348,10 +387,12 @@ public final class AlignmentPlateCell: NSButtonCell {
         return (frame.midX - groupWidth / 2).rounded()
     }
 
-    /// The chip's rim and glyph ink: white on a gold primary, the identity
-    /// tint at full alpha, or `inkSecondary` on a neutral plate.
+    /// The chip's rim and glyph ink: `inkOnGold` on a gold primary (it shares
+    /// the title's ink — a chip drawn in the opposite value would read as a
+    /// separate object stuck on the plate), the identity tint at full alpha,
+    /// or `inkSecondary` on a neutral plate.
     private var chipInk: NSColor {
-        if usesGoldSkin { return .white }
+        if usesGoldSkin { return Tokens.Color.inkOnGold }
         return identityTint?.withAlphaComponent(1) ?? Tokens.Color.inkSecondary
     }
 

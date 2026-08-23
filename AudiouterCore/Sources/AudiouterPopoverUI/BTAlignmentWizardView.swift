@@ -5,7 +5,7 @@ import AudiouterCore
 import AudiouterSharedUI
 
 /// The alignment wizard's window content (wizard-stage v2 spec §3/§4): one
-/// FIXED chassis — nameplate row, ``AlignmentStageView``, readout caption —
+/// FIXED chassis — title row, ``AlignmentStageView``, readout caption —
 /// with only the bottom band changing per
 /// ``BTAlignmentWizardSession/Screen``. The stage sits at the same y on every
 /// screen, so a run never reflows under the user.
@@ -22,7 +22,7 @@ import AudiouterSharedUI
 ///   and handed to the plate cell, which never picks a hue itself. Gold
 ///   stays the app's "is it live" voice and is spent only on the one primary
 ///   plate per screen.
-/// - **The click count is nameplate chrome.** It rides the nameplate row's
+/// - **The click count is an aside to the TITLE.** It rides the title row's
 ///   right slot alongside the intro's cost note, never the content stack.
 ///
 /// The view is sized by its HOST sheet, not by a card stack: it holds one
@@ -109,9 +109,11 @@ public final class BTAlignmentWizardView: NSView {
     private static func signedMs(_ ms: Double) -> String {
         String(Int(ms.rounded())).replacingOccurrences(of: "-", with: "−")
     }
-    /// Where the run is — the nameplate's right slot during the questions. A
-    /// run has no fixed length, so the total is "about".
-    static func clickCountCopy(_ click: Int) -> String { "CLICK \(click) OF ABOUT 15" }
+    /// Where the run is — the title line's right slot during the questions. A
+    /// run has no fixed length, so the total is "about". Sentence case, plain
+    /// system caption: it is an aside to the title beside it, not a second
+    /// piece of instrument chrome (owner ruling 2026-08-24).
+    static func clickCountCopy(_ click: Int) -> String { "Click \(click) of about 15" }
     /// Shown in the reference line's place while no second speaker can be
     /// established — Start stays disabled until one is.
     static let noReferenceCopy = "Select another speaker to compare against"
@@ -139,13 +141,17 @@ public final class BTAlignmentWizardView: NSView {
     /// the window, not theirs), and it was the app's only user-facing use of
     /// it.
     private static let keptLocalCaption = "Fine-tune anytime from the SYNC control."
-    /// What the run costs, before it starts — the nameplate's right slot on
+    /// What the run costs, before it starts — the title line's right slot on
     /// the intro, where the click count lives once the run is under way.
-    private static let introSlotText = "ABOUT 15 CLICKS"
-    /// The nameplate's left slot, on every screen.
-    private static func nameplateTitle(target: String) -> String {
-        "ALIGN · \(target.uppercased())"
-    }
+    private static let introSlotText = "About 15 clicks"
+    /// The sheet's TITLE, on every screen — the plain sentence-form heading a
+    /// sheet gets everywhere else in the app (`GroupCreationSheetController`'s
+    /// "New Group", `Tokens.Font.bodyEmphasized` at full `label`). It replaced
+    /// a tracked all-caps `ALIGN · <NAME>` mono nameplate (owner ruling
+    /// 2026-08-24): that voice is the app's instrument chrome, and spending it
+    /// on the sheet's own heading made the wizard read as a readout panel
+    /// rather than a thing the user is doing.
+    private static func wizardTitle(target: String) -> String { "Align \(target)" }
     /// The readout on the kept screen — crossfaded in when the stage's lock
     /// sequence settles, over the proposal's own bare number.
     private static func keptReadout(valueMs: Int) -> String { "\(valueMs) ms · kept" }
@@ -209,7 +215,9 @@ public final class BTAlignmentWizardView: NSView {
     private static let spacingGroup: CGFloat = 16
     private static let spacingBand: CGFloat = 28
 
-    private static let nameplateHeight: CGFloat = 14
+    /// The title line: a `bodyEmphasized` heading needs real leading, where
+    /// the 8.5 pt mono nameplate it replaced fitted in 14.
+    private static let titleRowHeight: CGFloat = 18
     private static let readoutHeight: CGFloat = 15
     private static let plateWidth: CGFloat = 220
     private static let plateHeight: CGFloat = 64
@@ -233,7 +241,7 @@ public final class BTAlignmentWizardView: NSView {
     /// question-screen height"). Shorter screens leave slack under their
     /// band; a screen that needs more still gets it.
     private static let chassisHeight: CGFloat =
-        nameplateHeight + spacingGroup + AlignmentStageView.stageHeight + spacingRow
+        titleRowHeight + spacingGroup + AlignmentStageView.stageHeight + spacingRow
         + readoutHeight + spacingBand + answerPlateHeight + spacingRow + togetherBarHeight
         + spacingGroup + cornerButtonHeight
     /// Body copy wraps at the together bar's width, so a long line becomes
@@ -243,11 +251,26 @@ public final class BTAlignmentWizardView: NSView {
     // MARK: The fixed chassis
 
     let stage = AlignmentStageView()
-    private let nameplateLeft = NSTextField(labelWithString: "")
-    private let nameplateRight = NSTextField(labelWithString: "")
+    private let titleLabel = NSTextField(labelWithString: "")
+    private let clickCountLabel = NSTextField(labelWithString: "")
     /// The stage's accessible caption — a REAL text field, never layer text.
     private let readout = NSTextField(labelWithString: "")
     private let contentStack = NSStackView()
+    /// The band under the readout holds the per-screen content one of two
+    /// ways, and exactly one of these is ever active. Centred is the default
+    /// (a short bow-out floats in the middle of the slack rather than leaving
+    /// a hole under it); the INTRO pins to the top instead — its own content
+    /// is short enough that centring dropped the opening sentence into the
+    /// middle of the sheet, well below where the eye lands off the stage.
+    private var contentCentred: NSLayoutConstraint!
+    private var contentTopPinned: NSLayoutConstraint!
+    /// The readout's own height, which goes to ZERO on the four screens that
+    /// print no caption. The stage does not move — the readout hangs BELOW it
+    /// — so this only closes the gap under the instrument, and closing it is
+    /// what lifts the intro's opening sentence out of the middle of the sheet:
+    /// an empty 15 pt row plus the 28 pt band break put 55 pt of nothing
+    /// between the stage and the first word.
+    private var readoutHeightConstraint: NSLayoutConstraint!
 
     public init(session: BTAlignmentWizardSession) {
         self.session = session
@@ -264,19 +287,30 @@ public final class BTAlignmentWizardView: NSView {
     private func buildChrome() {
         translatesAutoresizingMaskIntoConstraints = false
 
-        let nameplate = NSView()
-        nameplate.translatesAutoresizingMaskIntoConstraints = false
-        for label in [nameplateLeft, nameplateRight] {
+        let titleRow = NSView()
+        titleRow.translatesAutoresizingMaskIntoConstraints = false
+        for label in [titleLabel, clickCountLabel] {
             label.translatesAutoresizingMaskIntoConstraints = false
-            nameplate.addSubview(label)
+            // MANDATORY on the RIGHT slot and harmless on the left: a label
+            // left in the default multi-line mode publishes no HORIZONTAL
+            // content-size constraint, so Auto Layout is free to hand it zero
+            // width — and a slot pinned on ONE edge only then renders at the
+            // 4 pt empty-field bearing and is simply not on screen.
+            label.usesSingleLineMode = true
+            titleRow.addSubview(label)
         }
-        nameplateRight.alignment = .right
+        titleLabel.font = Tokens.Font.bodyEmphasized
+        titleLabel.textColor = Tokens.Color.label
+        clickCountLabel.font = Tokens.Font.caption
+        clickCountLabel.textColor = Tokens.Color.inkSecondary
+        clickCountLabel.alignment = .right
         // The two slots are pinned to OPPOSITE edges of a plain container, so
         // nothing but this stops a long device name running straight under
-        // `CLICK n OF ABOUT 15` — two micro-labels overprinting each other.
-        // The name is the half that gives way: the click count is fixed-width
-        // chrome and always says the same thing.
-        nameplateLeft.setContentCompressionResistancePriority(
+        // `Click n of about 15` — two labels overprinting each other. The name
+        // is the half that gives way: the click count is fixed-width chrome
+        // and always says the same thing.
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.setContentCompressionResistancePriority(
             .defaultLow, for: .horizontal)
 
         // The stage is PERSISTENT: `render` re-points it at a new state but
@@ -303,35 +337,44 @@ public final class BTAlignmentWizardView: NSView {
         contentStack.alignment = .centerX
         contentStack.spacing = Self.spacingGroup
         addSubview(contentStack)
-        addSubview(nameplate)
+        addSubview(titleRow)
         // The band under the readout. A screen shorter than the question
         // screen floats in its middle rather than leaving all the slack at
         // the bottom — the intro used to open on a 58 pt hole.
         let band = NSLayoutGuide()
         addLayoutGuide(band)
-        let centred = contentStack.centerYAnchor.constraint(equalTo: band.centerYAnchor)
-        centred.priority = .defaultLow
+        contentCentred = contentStack.centerYAnchor.constraint(equalTo: band.centerYAnchor)
+        contentCentred.priority = .defaultLow
+        contentTopPinned = contentStack.topAnchor.constraint(equalTo: band.topAnchor)
+        contentTopPinned.isActive = false
+        readoutHeightConstraint = readout.heightAnchor.constraint(
+            equalToConstant: Self.readoutHeight)
 
         NSLayoutConstraint.activate([
             widthAnchor.constraint(equalToConstant: Self.viewWidth),
             heightAnchor.constraint(greaterThanOrEqualToConstant: Self.chassisHeight),
 
-            nameplate.topAnchor.constraint(equalTo: topAnchor, constant: Self.contentPadding),
-            nameplate.leadingAnchor.constraint(
+            titleRow.topAnchor.constraint(equalTo: topAnchor, constant: Self.contentPadding),
+            titleRow.leadingAnchor.constraint(
                 equalTo: leadingAnchor, constant: Self.contentPadding),
-            nameplate.trailingAnchor.constraint(
+            titleRow.trailingAnchor.constraint(
                 equalTo: trailingAnchor, constant: -Self.contentPadding),
-            nameplate.heightAnchor.constraint(equalToConstant: Self.nameplateHeight),
-            nameplateLeft.leadingAnchor.constraint(equalTo: nameplate.leadingAnchor),
-            nameplateLeft.centerYAnchor.constraint(equalTo: nameplate.centerYAnchor),
-            nameplateRight.trailingAnchor.constraint(equalTo: nameplate.trailingAnchor),
-            nameplateRight.centerYAnchor.constraint(equalTo: nameplate.centerYAnchor),
-            nameplateLeft.trailingAnchor.constraint(
-                lessThanOrEqualTo: nameplateRight.leadingAnchor,
+            titleRow.heightAnchor.constraint(equalToConstant: Self.titleRowHeight),
+            titleLabel.leadingAnchor.constraint(equalTo: titleRow.leadingAnchor),
+            titleLabel.centerYAnchor.constraint(equalTo: titleRow.centerYAnchor),
+            clickCountLabel.trailingAnchor.constraint(equalTo: titleRow.trailingAnchor),
+            // FIRST BASELINE, not centre — the same rule the corner rows' key
+            // chips follow: the caption's type is 2 pt smaller than the
+            // title's, and centring two sizes drops the smaller one's baseline
+            // below the larger's, which reads as a subscript.
+            clickCountLabel.firstBaselineAnchor.constraint(
+                equalTo: titleLabel.firstBaselineAnchor),
+            titleLabel.trailingAnchor.constraint(
+                lessThanOrEqualTo: clickCountLabel.leadingAnchor,
                 constant: -Self.spacingRow),
 
             stage.topAnchor.constraint(
-                equalTo: nameplate.bottomAnchor, constant: Self.spacingGroup),
+                equalTo: titleRow.bottomAnchor, constant: Self.spacingGroup),
             stage.leadingAnchor.constraint(
                 equalTo: leadingAnchor, constant: Self.contentPadding),
             stage.trailingAnchor.constraint(
@@ -344,11 +387,11 @@ public final class BTAlignmentWizardView: NSView {
                 equalTo: leadingAnchor, constant: Self.contentPadding),
             readout.trailingAnchor.constraint(
                 equalTo: trailingAnchor, constant: -Self.contentPadding),
-            readout.heightAnchor.constraint(equalToConstant: Self.readoutHeight),
+            readoutHeightConstraint,
 
             band.topAnchor.constraint(equalTo: readout.bottomAnchor, constant: Self.spacingBand),
             band.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -Self.contentPadding),
-            centred,
+            contentCentred,
             contentStack.topAnchor.constraint(
                 greaterThanOrEqualTo: readout.bottomAnchor, constant: Self.spacingBand),
             contentStack.leadingAnchor.constraint(
@@ -451,7 +494,7 @@ public final class BTAlignmentWizardView: NSView {
     /// ``keyDown(with:)`` below.
     public override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard !isEditingText,
-              event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+              event.modifierFlags.intersection(Self.heldModifiers) == .command,
               event.charactersIgnoringModifiers?.lowercased() == "z",
               isAnswering
         else { return super.performKeyEquivalent(with: event) }
@@ -480,7 +523,7 @@ public final class BTAlignmentWizardView: NSView {
     /// `keyDown(with:)` cannot return it.
     private func handleUnmodifiedKey(_ event: NSEvent) -> Bool {
         guard !isEditingText,
-              event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty
+              event.modifierFlags.intersection(Self.heldModifiers).isEmpty
         else { return false }
         // The three answer keys go through the PLATE's own `performClick`, so
         // a key press visibly depresses the plate it names.
@@ -505,6 +548,21 @@ public final class BTAlignmentWizardView: NSView {
 
     private var lastKeyDownWasConsumed = false
 
+    /// The modifiers a USER can be holding — the only ones "is this key
+    /// unmodified?" may look at.
+    ///
+    /// **TRAP: `.deviceIndependentFlagsMask` is NOT that question** (live bug,
+    /// build wizardv7 — ←/→ did nothing on the question screen while Space,
+    /// Esc, Return and ⌘Z all worked). AppKit stamps every ARROW keyDown with
+    /// `.function` + `.numericPad`, and both bits sit inside that mask, so the
+    /// map's "no modifiers" guard rejected exactly the two keys that carry
+    /// them and nothing else. Probed via `NSEvent(cgEvent:)` on a real ←:
+    /// `deviceIndependent = 0x20a00000` (function 0x800000, numericPad
+    /// 0x200000) against `0x20000000` for Space/Esc/Return. Caps Lock is left
+    /// out on purpose: a user with it on still gets the arrows.
+    private static let heldModifiers: NSEvent.ModifierFlags =
+        [.command, .option, .control, .shift]
+
     /// A live field editor owns the keys and both entry points stand aside for
     /// it — cheap protection for any editable field this sheet gains later.
     private var isEditingText: Bool { window?.firstResponder is NSText }
@@ -526,7 +584,17 @@ public final class BTAlignmentWizardView: NSView {
         clearContent()
 
         styleReadout(hero: false)
-        updateNameplate(for: screen)
+        updateTitleRow(for: screen)
+        // The intro is the one screen that reads better top-pinned — see the
+        // two constraints' own note.
+        if case .intro = screen {
+            contentCentred.isActive = false
+            contentTopPinned.isActive = true
+        } else {
+            contentTopPinned.isActive = false
+            contentCentred.isActive = true
+        }
+        applyReadoutHeight(for: screen)
         refreshReferencePopUp()
         // Armed BEFORE the apply: under Reduce Motion and headless the lock
         // sequence settles synchronously inside it.
@@ -541,6 +609,12 @@ public final class BTAlignmentWizardView: NSView {
             contentStack.setCustomSpacing(Self.spacingRow,
                                           after: contentStack.arrangedSubviews[0])
             addReferenceRow()
+            // A full band break before Start. At the stack's own 16 the CTA
+            // sat right under the reference line and read as part of it —
+            // "far too big, squished against text" (owner, live 2026-08-24).
+            // The plate's size never changed; what it was missing was air.
+            contentStack.setCustomSpacing(Self.spacingBand,
+                                          after: contentStack.arrangedSubviews.last!)
             let canStart = session.reference != nil
             let start = makePlate("Start", keycap: canStart ? "⏎" : nil, isPrimary: true,
                                   action: #selector(startClicked(_:)), isDefault: true)
@@ -697,8 +771,11 @@ public final class BTAlignmentWizardView: NSView {
         clearContent()
         styleReadout(hero: false)
         readout.stringValue = ""
-        applyMicroVoice(nameplateLeft, Self.nameplateTitle(target: session.targetName))
-        applyMicroVoice(nameplateRight, "")
+        titleLabel.stringValue = Self.wizardTitle(target: session.targetName)
+        clickCountLabel.stringValue = ""
+        contentTopPinned.isActive = false
+        contentCentred.isActive = true
+        readoutHeightConstraint.constant = 0
         stage.apply(.dormant, animated: true)
         let copy = Self.targetLostCopy(target: session.targetName)
         addBody(copy)
@@ -756,22 +833,24 @@ public final class BTAlignmentWizardView: NSView {
         return line
     }
 
-    // MARK: The nameplate row
+    // MARK: The title row
 
-    private func updateNameplate(for screen: BTAlignmentWizardSession.Screen) {
-        applyMicroVoice(nameplateLeft, Self.nameplateTitle(target: session.targetName))
-        let rightSlot: String
+    private func updateTitleRow(for screen: BTAlignmentWizardSession.Screen) {
+        titleLabel.stringValue = Self.wizardTitle(target: session.targetName)
         switch screen {
-        case .intro: rightSlot = Self.introSlotText
-        case .question(_, _, let answersSoFar): rightSlot = Self.clickCountCopy(answersSoFar + 1)
-        case .proposal, .kept, .unsettled, .unreachable, .macIsLate: rightSlot = ""
+        case .intro: clickCountLabel.stringValue = Self.introSlotText
+        case .question(_, _, let answersSoFar):
+            clickCountLabel.stringValue = Self.clickCountCopy(answersSoFar + 1)
+        case .proposal, .kept, .unsettled, .unreachable, .macIsLate:
+            clickCountLabel.stringValue = ""
         }
-        applyMicroVoice(nameplateRight, rightSlot)
     }
 
     /// The Warm Signal micro-label voice: tracked uppercase mono at
-    /// `inkSecondary`. Tracking is not a font attribute in AppKit, so the
-    /// nameplate's labels carry attributed strings rather than a font.
+    /// `inkSecondary` — the corner rows' `⌘Z`/`ESC` key chips, and nothing
+    /// else on this sheet since the title row stopped being a nameplate.
+    /// Tracking is not a font attribute in AppKit, so a chip carries an
+    /// attributed string rather than a font.
     private func applyMicroVoice(_ field: NSTextField, _ text: String) {
         field.attributedStringValue = NSAttributedString(
             string: text,
@@ -781,15 +860,10 @@ public final class BTAlignmentWizardView: NSView {
         // MANDATORY, and the reason is invisible until you measure it: a
         // label left in the default multi-line mode publishes no HORIZONTAL
         // content-size constraint, so Auto Layout is free to hand it zero
-        // width. Every micro-label that is not pinned on both sides —
-        // the nameplate's right slot and the corner rows' key chips —
-        // rendered at 4 pt (the empty-field bearing) and simply was not on
-        // screen: no `CLICK n OF ABOUT 15`, no `ESC` beside Stop.
+        // width. A key chip is pinned on one side only, so it rendered at
+        // 4 pt (the empty-field bearing) and simply was not on screen — no
+        // `ESC` beside Stop, no `⌘Z` beside Undo.
         field.usesSingleLineMode = true
-        // Single-line mode alone CLIPS; the nameplate's left slot carries a
-        // device name of any length, so it has to give way with an ellipsis
-        // instead (paired with its low compression resistance and the
-        // `<= nameplateRight.leading` pin in `buildChrome`).
         field.lineBreakMode = .byTruncatingTail
     }
 
@@ -811,6 +885,20 @@ public final class BTAlignmentWizardView: NSView {
         readout.font = .monospacedDigitSystemFont(
             ofSize: NSFont.smallSystemFontSize, weight: hero ? .semibold : .regular)
         readout.textColor = hero ? Tokens.Color.label : Tokens.Color.inkSecondary
+    }
+
+    /// Which screens print a caption under the stage. Driven off the SCREEN,
+    /// never off `readout.stringValue`: the kept screen's own line arrives
+    /// LATER, on the stage's lock cue (``armKeptReadout``), so a string test
+    /// would have collapsed the row to zero and then crossfaded the words in
+    /// behind it.
+    private func applyReadoutHeight(for screen: BTAlignmentWizardSession.Screen) {
+        switch screen {
+        case .question, .proposal, .kept:
+            readoutHeightConstraint.constant = Self.readoutHeight
+        case .intro, .unsettled, .unreachable, .macIsLate:
+            readoutHeightConstraint.constant = 0
+        }
     }
 
     private func crossfadeReadout(_ text: String) {
@@ -1113,10 +1201,10 @@ public final class BTAlignmentWizardView: NSView {
     var test_bodyText: String? {
         (contentStack.arrangedSubviews.first as? NSTextField)?.stringValue
     }
-    /// The nameplate's right slot: the intro's cost note, the live click
+    /// The title row's right slot: the intro's cost note, the live click
     /// count, or `nil` where the run is over and the slot is empty.
-    var test_nameplateRightText: String? {
-        nameplateRight.stringValue.isEmpty ? nil : nameplateRight.stringValue
+    var test_clickCountText: String? {
+        clickCountLabel.stringValue.isEmpty ? nil : clickCountLabel.stringValue
     }
     /// The stage's caption — `nil` on the screens that show no number.
     var test_readoutText: String? {
@@ -1152,7 +1240,10 @@ public final class BTAlignmentWizardView: NSView {
     /// key is offered as a key equivalent, everything else is delivered as a
     /// plain `keyDown`. Routing every key through `performKeyEquivalent` here
     /// would let a dead arrow map ship green — live dispatch never runs that
-    /// pass for unmodified keys. Returns whether the wizard consumed the key.
+    /// pass for unmodified keys. The split asks ``heldModifiers``, not the
+    /// device-independent mask, for that trap's second half: an arrow arrives
+    /// carrying `.function` + `.numericPad` and is still a plain `keyDown`.
+    /// Returns whether the wizard consumed the key.
     @discardableResult
     func test_sendKey(keyCode: UInt16, characters: String = "",
                       modifiers: NSEvent.ModifierFlags = []) -> Bool {
@@ -1161,7 +1252,7 @@ public final class BTAlignmentWizardView: NSView {
             windowNumber: window?.windowNumber ?? 0, context: nil,
             characters: characters, charactersIgnoringModifiers: characters,
             isARepeat: false, keyCode: keyCode) else { return false }
-        guard !modifiers.intersection(.deviceIndependentFlagsMask).isEmpty else {
+        guard !modifiers.intersection(Self.heldModifiers).isEmpty else {
             keyDown(with: event)
             return lastKeyDownWasConsumed
         }
@@ -1180,13 +1271,13 @@ public final class BTAlignmentWizardView: NSView {
             .compactMap { $0 as? NSStackView }
             .allSatisfy { $0.fittingSize.width <= available }
     }
-    /// Do the nameplate's two slots stay clear of each other? They are pinned
+    /// Do the title row's two slots stay clear of each other? They are pinned
     /// to OPPOSITE edges of a plain container, so a long device name has
     /// nothing but its truncation guard between it and overprinting
-    /// `CLICK n OF ABOUT 15`.
-    var test_nameplateSlotsAreClear: Bool {
+    /// `Click n of about 15`.
+    var test_titleSlotsAreClear: Bool {
         layoutSubtreeIfNeeded()
-        return nameplateLeft.frame.maxX <= nameplateRight.frame.minX
+        return titleLabel.frame.maxX <= clickCountLabel.frame.minX
     }
     private func clickButton(titled title: String) {
         actionButtons.first { $0.title == title }?.performClick(nil)

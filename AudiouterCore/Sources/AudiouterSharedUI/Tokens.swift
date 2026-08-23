@@ -606,6 +606,21 @@ public enum Tokens {
                        light: 0x775913, lightHighContrast: 0x7F5D10)
         }
 
+        /// The ink a BRIGHT-gold control carries — the alignment wizard's
+        /// primary plates, which fill with ``gold``'s DARK-appearance value in
+        /// both appearances (owner ruling 2026-08-24) rather than with the
+        /// deepened ``goldCTA``. Deliberately NOT ``shadow``: that token means
+        /// "the colour a drop shadow is painted in", and a title is not a
+        /// shadow. Deliberately NOT ``label``, which is dynamic and would go
+        /// near-white on the dark appearance — over a bright gold fill the ink
+        /// has to be pinned exactly as the fill is.
+        /// CONTRAST RATIONALE: black on Full-gold dark `#E8B84B` measures
+        /// 11.4:1 (Subtle dark `#B99B53` 7.9:1) — both far past the 4.5:1 body
+        /// floor, pinned in `AlignmentTokenContrastTests`. Alias of
+        /// `NSColor.black`, so it needs no light/dark/Increase-Contrast trio:
+        /// the surface it sits on has none either.
+        public static var inkOnGold: NSColor { .black }
+
         // MARK: Fader instruments (spec §5 slider skin, fader-legibility pass)
         //
         // The two hues `WarmFaderCell` needs beyond the surface ladder — the

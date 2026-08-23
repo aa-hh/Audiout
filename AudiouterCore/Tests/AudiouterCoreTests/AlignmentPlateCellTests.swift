@@ -156,8 +156,9 @@ import AppKit
     /// `NSButton.isFlipped` is `true`, so `minY` is the plate's VISUAL TOP and
     /// `maxY` its visual bottom. The keycap chip (spec §3) sits 14 pt in from
     /// the trailing edge, centred on the plate's midline, and the title is
-    /// centred in the width to its left; a press pushes the chip visually
-    /// DOWN. This renders a real 220×64 trailing plate and locates the chip
+    /// centred on the PLATE (owner ruling 2026-08-24 — the chip overlays the
+    /// trailing edge without displacing the title); a press pushes the chip
+    /// visually DOWN. This renders a real 220×64 trailing plate and locates the chip
     /// by its identity tint — the plate's own rim wears it too, so the scan
     /// is inset past the rim.
     @Test func keycapChipSitsAtTheTrailingEdgeOnTheMidlineAndPressesDown() throws {
@@ -173,11 +174,16 @@ import AppKit
         #expect(abs(rest.y - bounds.midY) < 4,
                 "the chip is centred on the plate's midline (centroid y \(rest.y) of 64)")
 
-        // …and the title keeps the width to its left, never running into it.
+        // …and the title is centred on the PLATE, never running into the chip.
+        // The reserve comes off BOTH sides, which is what keeps the box's
+        // centre on the plate's centre — a title box that started at the
+        // leading edge put every CTA's word ~23 pt left of the midline.
         let cell = try #require(button.cell as? AlignmentPlateCell)
         let titleRect = cell.titleRect(forBounds: bounds)
-        #expect(titleRect.minX == bounds.minX && titleRect.height == bounds.height,
-                "the title area is the full-height band to the chip's left")
+        #expect(abs(titleRect.midX - bounds.midX) < 0.5 && titleRect.height == bounds.height,
+                "the title area is a full-height band centred on the PLATE")
+        #expect(titleRect.minX > bounds.minX,
+                "the leading reserve mirrors the chip's, or the box is not centred")
         #expect(titleRect.maxX < rest.x - 11,
                 "the title area ends before the chip (\(titleRect.maxX) vs chip centre \(rest.x))")
 

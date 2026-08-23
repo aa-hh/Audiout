@@ -89,13 +89,18 @@ import AppKit
                 "tone first, alignment second — and no separator between two items")
     }
 
-    @Test func thisMacRowHasNoMenuAndAnInertIcon() {
+    @Test func thisMacRowMenuOffersAlignmentButNeverEqualizer() {
+        // Roadmap 060: the Mac's own row carries the SAME sync affordances as a
+        // Bluetooth row — including "Align speaker…" — but it is still not an
+        // Equalizer target (per-device EQ covers AirPlay and Bluetooth outputs).
         let (popover, _) = makePopover()
         let row = popover.test_deviceRow(for: "mac")
         #expect(row != nil)
-        #expect(row?.test_contextMenu() == nil, "This Mac has no EQ and no alignment")
-        #expect(row?.test_iconIsMenuTrigger == false)
-        #expect(row?.test_clickIcon() == nil, "an empty menu is never popped")
+        #expect(titles(row?.test_contextMenu()) == ["Align speaker…"],
+                "alignment yes, tone no — This Mac is not an EQ target")
+        #expect(row?.test_iconIsMenuTrigger == true)
+        #expect(titles(row?.test_clickIcon()) == ["Align speaker…"],
+                "the icon pops the same menu")
     }
 
     // MARK: The icon is the same door

@@ -286,6 +286,34 @@ import Foundation
         #expect(abs(sink.latestPhaseErrorNanos) <= Int64(nsPerFrame.rounded()))
     }
 
+    /// Fix 4 (Mac-join desync): a release cycle whose engine start landed well
+    /// PAST the target must skip the overshoot's worth of already-buffered ramp
+    /// rather than release from the oldest sample — the same gate-open
+    /// catch-up `BTDeviceSink.catchUpToTargetLocked` already has. Simulates a
+    /// slow `engine.start()` by rendering the very first cycle 200 ms after
+    /// the 87 ms target, i.e. 200 ms &times; 48 frames/ms = 9 600 frames late.
+    @Test func lateFirstCycleSkipsTheOvershootInsteadOfReleasingStaleAudio() throws {
+        let sink = Self.rampSink()
+        let ramp = Self.enqueueRamp(into: sink)
+
+        let nsPerFrame = 1_000_000_000.0 / 48_000.0
+        let cycleStart = Self.rampAnchorNanos + 87_000_000 + 200_000_000
+        var out = [Float](repeating: .nan, count: 512)
+        let produced = out.withUnsafeMutableBufferPointer { ob -> Bool in
+            sink.renderInterleaved(into: ob, frameCount: 512, cycleStartMonotonicNanos: cycleStart)
+        }
+
+        #expect(produced)
+        // Playout is pts-true — the 9 600 already-stale frames are skipped —
+        // not the oldest buffered sample (`ramp[0]`), which the un-fixed sink
+        // would release here.
+        #expect(out[0] == ramp[9_600])
+        // The skip advanced `targetReleaseNanos` by exactly what it consumed,
+        // so the release-cycle phase error nulls out instead of reading the
+        // 200 ms overshoot as error.
+        #expect(abs(sink.latestPhaseErrorNanos) <= Int64((2 * nsPerFrame).rounded()))
+    }
+
     /// The `group × device` gain actually scales the samples it produces. The unity
     /// path is already pinned by `rampReleasesAtComputedHostTime_withinOneFrame`
     /// above — it never calls `setGain` and asserts the raw ramp value — so this
@@ -313,6 +341,26 @@ import Foundation
 
         let sample = try #require(firstRealSample, "audio was never released")
         #expect(sample == ramp[0] * gain)
+    }
+
+    /// Roadmap 056 Part B: the Mac's half of the alignment wizard's arm gate —
+    /// the wizard holds its first tick until every participating sink reports
+    /// here, so this must be false before the delay gate opens and true after.
+    @Test func hasStartedRenderingFlipsWhenTheDelayGateOpens() throws {
+        let sink = Self.rampSink()
+        #expect(!sink.hasStartedRendering, "nothing enqueued, nothing playing")
+        _ = Self.enqueueRamp(into: sink)
+        #expect(!sink.hasStartedRendering, "anchored, but still holding silence")
+
+        let nsPerFrame = 1_000_000_000.0 / 48_000.0
+        var out = [Float](repeating: .nan, count: 512)
+        for cycle in 0..<40 where !sink.hasStartedRendering {
+            let cycleStart = Self.rampAnchorNanos + Int64((Double(cycle * 512) * nsPerFrame).rounded())
+            _ = out.withUnsafeMutableBufferPointer { ob -> Bool in
+                sink.renderInterleaved(into: ob, frameCount: 512, cycleStartMonotonicNanos: cycleStart)
+            }
+        }
+        #expect(sink.hasStartedRendering, "the gate opened — the Mac is audible")
     }
 
     /// Gain 0 is silence, not "quiet". Asserted separately from
@@ -633,6 +681,185 @@ import Foundation
         #expect(!producedBeforeReanchor, "silent until a fresh session is anchored")
         #expect(out2.allSatisfy { $0 == 0 })
     }
+
+    // MARK: T-OFFSET-UI — live trim seek (roadmap 056 Part 1)
+    //
+    // A trim on the Mac's row used to cost a full rebuild: stop, re-measure,
+    // reset, restart, then a fresh delay's worth of silence. These pin the live
+    // seek that replaced it — the audio keeps playing and the delay moves.
+
+    /// Drive `count` render cycles from the ramp anchor, returning each cycle's
+    /// output sample at `probeFrame`. The ramp is `ramp[i] = i + 1`, so a value
+    /// IS its content position: two runs that differ by N frames of delay differ
+    /// by exactly N in every sample. `onCycle` fires before each cycle renders.
+    static func probeRampCycles(
+        _ sink: SyncedLocalSink, cycles: Int, probeFrame: Int = 100,
+        onCycle: (Int, SyncedLocalSink) -> Void = { _, _ in }
+    ) -> [Float] {
+        let nsPerFrame = 1_000_000_000.0 / 48_000.0
+        var probes: [Float] = []
+        var out = [Float](repeating: 0, count: 512)
+        for cycle in 0..<cycles {
+            onCycle(cycle, sink)
+            let cycleStart = rampAnchorNanos + Int64((Double(cycle * 512) * nsPerFrame).rounded())
+            out.withUnsafeMutableBufferPointer {
+                _ = sink.renderInterleaved(into: $0, frameCount: 512, cycleStartMonotonicNanos: cycleStart)
+            }
+            probes.append(out[probeFrame])
+        }
+        return probes
+    }
+
+    /// (a) Post-release, a `+10 ms` offset delta shifts the playout by EXACTLY
+    /// 10 ms — 480 frames at 48 kHz — and by moving the read pointer BACKWARD:
+    /// a larger offset plays the Mac LATER, so the seeked run is 480 frames
+    /// EARLIER in the content at the same instant. Run against an identical
+    /// un-seeked sink in lockstep, so the assertion is the difference between
+    /// the two and owes nothing to the correction loop's exact ratio.
+    @Test func postReleaseOffsetDelta_shiftsPlayoutByExactlyTheDelta() {
+        let seeked = Self.rampSink(), reference = Self.rampSink()
+        Self.enqueueRamp(into: seeked)
+        Self.enqueueRamp(into: reference)
+
+        let seekCycle = 14   // the 87 ms gate opens around cycle 8
+        let seekedProbes = Self.probeRampCycles(seeked, cycles: 20) { cycle, sink in
+            if cycle == seekCycle { sink.applyUserOffsetDelta(ms: 10) }
+        }
+        let referenceProbes = Self.probeRampCycles(reference, cycles: 20)
+
+        // Before the seek the two runs are identical, sample for sample.
+        #expect(Array(seekedProbes[0..<seekCycle]) == Array(referenceProbes[0..<seekCycle]))
+        // After it (skipping the seek cycle itself, whose first frames still
+        // carry the resampler's pre-seek interpolation window) the seeked run
+        // sits exactly 480 frames back in the ramp, and stays there.
+        for cycle in (seekCycle + 1)..<20 {
+            #expect(abs(referenceProbes[cycle] - seekedProbes[cycle] - 480) < 0.05,
+                    "cycle \(cycle): \(referenceProbes[cycle]) vs \(seekedProbes[cycle])")
+        }
+    }
+
+    /// A NEGATIVE delta is the mirror: the Mac plays EARLIER, so the read
+    /// pointer moves forward and the seeked run is 480 frames AHEAD. Pins the
+    /// sign, which compiles either way.
+    @Test func postReleaseNegativeOffsetDelta_seeksTheOtherWay() {
+        let seeked = Self.rampSink(), reference = Self.rampSink()
+        Self.enqueueRamp(into: seeked)
+        Self.enqueueRamp(into: reference)
+
+        let seekedProbes = Self.probeRampCycles(seeked, cycles: 20) { cycle, sink in
+            if cycle == 14 { sink.applyUserOffsetDelta(ms: -10) }
+        }
+        let referenceProbes = Self.probeRampCycles(reference, cycles: 20)
+
+        for cycle in 15..<20 {
+            #expect(abs(seekedProbes[cycle] - referenceProbes[cycle] - 480) < 0.05,
+                    "cycle \(cycle): \(seekedProbes[cycle]) vs \(referenceProbes[cycle])")
+        }
+    }
+
+    /// (b) Pre-release — anchored but still holding silence — the delta moves
+    /// the GATE instead of the audio: nothing has been emitted to be continuous
+    /// with, so the release target is re-derived from the freshly-measured
+    /// delay. 100 ms delay + a 10 ms offset ⇒ first sound 110 ms after the pts.
+    @Test func preReleaseOffsetDelta_movesTheReleaseTarget() throws {
+        let offset = MutableIntBox()
+        let sink = SyncedLocalSink(
+            renderSampleRate: 48_000, channelCount: 1, safetyMarginMs: 0,
+            presentationDelayMs: { 100 }, localOutputLatency: { nil },
+            userOffsetMs: { offset.value })
+        Self.enqueueRamp(into: sink)
+
+        let nsPerFrame = 1_000_000_000.0 / 48_000.0
+        var firstNonSilence: Int64?
+        var out = [Float](repeating: 0, count: 512)
+        for cycle in 0..<40 where firstNonSilence == nil {
+            // One rendered cycle first (still silent), so the change genuinely
+            // lands mid-session rather than before the gate was ever evaluated.
+            if cycle == 1 {
+                offset.value = 10
+                sink.applyUserOffsetDelta(ms: 10)
+            }
+            let cycleStart = Self.rampAnchorNanos + Int64((Double(cycle * 512) * nsPerFrame).rounded())
+            out.withUnsafeMutableBufferPointer {
+                _ = sink.renderInterleaved(into: $0, frameCount: 512, cycleStartMonotonicNanos: cycleStart)
+            }
+            if let idx = out.firstIndex(where: { $0 != 0 }) {
+                firstNonSilence = cycleStart + Int64((Double(idx) * nsPerFrame).rounded())
+            }
+        }
+
+        let released = try #require(firstNonSilence, "audio was never released")
+        let expected = Self.rampAnchorNanos + 110_000_000
+        #expect(abs(released - expected) <= Int64(nsPerFrame.rounded()),
+                "released at \(released - Self.rampAnchorNanos) ns after the pts, wanted 110 ms")
+    }
+
+    /// (c) A REBUILD racing the delta must land it exactly once. The
+    /// pre-release path measures the delay OFF the lock, and a rebuild landing
+    /// inside that measurement clears the session and resets the ring — after
+    /// which falling through to `ring.requestShift` parks a shift the NEXT
+    /// session's first read applies, on top of an anchor that already sampled
+    /// the new offset. The delta would land twice.
+    @Test func aRebuildRacingTheOffsetDelta_appliesItOnce() {
+        // `presentationDelayMs` is called from inside `measureTotalDelayNanos`,
+        // i.e. exactly between `applyUserOffsetDelta`'s two lock takes — the
+        // real window, not a simulated one.
+        final class Race: @unchecked Sendable {
+            var sink: SyncedLocalSink?
+            var clearOnNextMeasure = false
+        }
+        let race = Race()
+        let latency = LocalOutputLatencyMeasurement(
+            safetyOffsetFrames: 0, deviceLatencyFrames: 480, streamLatencyFrames: 0,
+            bufferFrameSizeFrames: 0, nominalSampleRate: 48_000.0)
+        let raced = SyncedLocalSink(
+            renderSampleRate: 48_000.0, channelCount: 1, safetyMarginMs: 3,
+            presentationDelayMs: {
+                if race.clearOnNextMeasure {
+                    race.clearOnNextMeasure = false
+                    race.sink?.lifecycleHooks.resetSessionState(0)
+                }
+                return 100
+            },
+            localOutputLatency: { latency })
+        race.sink = raced
+
+        Self.enqueueRamp(into: raced)     // anchored, gate still closed
+        race.clearOnNextMeasure = true
+        raced.applyUserOffsetDelta(ms: 10)
+
+        // The session the rebuild left behind, driven exactly like an untouched
+        // one: any parked shift shows up as the ramp reading from the wrong
+        // place.
+        Self.enqueueRamp(into: raced)
+        let control = Self.rampSink()
+        Self.enqueueRamp(into: control)
+        #expect(Self.probeRampCycles(raced, cycles: 20) == Self.probeRampCycles(control, cycles: 20),
+                "the rebuilt session plays the content it was handed, unshifted")
+    }
+
+    /// (d) A seek must not read as drift the correction loop then pulls back
+    /// out. The loop's error term is `audioStart − target − consumedContentFrames`
+    /// and a read-pointer move touches none of them, so its correction stays put:
+    /// were the seek visible to it, a 10 ms step would slam the correction to the
+    /// ±200 ppm clamp.
+    @Test func aSeekDoesNotDisturbTheCorrectionLoop() {
+        let sink = Self.rampSink()
+        Self.enqueueRamp(into: sink)
+
+        var beforeSeek: Double?
+        _ = Self.probeRampCycles(sink, cycles: 30) { cycle, sink in
+            if cycle == 14 {
+                beforeSeek = sink.phaseCorrectionPpmForTesting
+                sink.applyUserOffsetDelta(ms: 10)
+            }
+            if cycle > 14, let before = beforeSeek {
+                #expect(abs(sink.phaseCorrectionPpmForTesting - before) < 10,
+                        "cycle \(cycle): correction moved to \(sink.phaseCorrectionPpmForTesting) ppm from \(before)")
+            }
+        }
+        #expect(beforeSeek != nil, "the seek never ran")
+    }
     #endif
 
     // MARK: Ring-overflow drop counting
@@ -719,6 +946,103 @@ extension SerializedSharedState {
             sink.stop()
             Telemetry._installTestSink(nil) // synchronous flush barrier
             #expect(overflowLines().count == 1, "an already-flushed drop must not re-emit")
+        }
+
+        #if canImport(AVFoundation)
+        /// (c) A move the ring cannot make — here a skip forward past everything
+        /// buffered — falls back to the re-anchor, the ONE rebuild the live seek
+        /// leaves in place. Nested here for the `Telemetry` sink that reads the
+        /// cause; the rebuild itself runs through stubbed lifecycle hooks, so no
+        /// real `AVAudioEngine` starts (house rule).
+        @Test func anOffsetDeltaBeyondTheRingsHeadroomFallsBackToAReanchor() {
+            let captured = LineBox()
+            Telemetry._installTestSink { captured.append($0) }
+            defer { Telemetry._installTestSink(nil) }
+
+            // The ramp fixture, inlined: `SyncedLocalSinkTests`' copy is
+            // main-actor isolated and this suite is not.
+            let latency = LocalOutputLatencyMeasurement(
+                safetyOffsetFrames: 0, deviceLatencyFrames: 480, streamLatencyFrames: 0,
+                bufferFrameSizeFrames: 0, nominalSampleRate: 48_000)
+            let sink = SyncedLocalSink(
+                renderSampleRate: 48_000, channelCount: 1, safetyMarginMs: 3,
+                presentationDelayMs: { 100 }, localOutputLatency: { latency })
+            let anchorNanos = Int64(1_000) * 1_000_000_000
+            var ramp = [Float](repeating: 0, count: 20_000)
+            for i in 0..<ramp.count { ramp[i] = Float(i + 1) }
+            ramp.withUnsafeBufferPointer {
+                sink.enqueue(interleavedFrames: $0.baseAddress!, frameCount: ramp.count,
+                             pts: timespec(tv_sec: 1_000, tv_nsec: 0))
+            }
+
+            var steps: [String] = []
+            sink.lifecycleHooks = SyncedLocalSink.LifecycleHooks(
+                stopEngine: { steps.append("stop") },
+                remeasureLatency: { steps.append("remeasure"); return 0 },
+                resetSessionState: { _ in steps.append("reset") },
+                restartEngine: { steps.append("restart") })
+
+            // Render past the 87 ms gate, then ask to skip a second of audio
+            // forward — far more than the fraction of a second the ring holds.
+            let nsPerFrame = 1_000_000_000.0 / 48_000.0
+            var out = [Float](repeating: 0, count: 512)
+            for cycle in 0..<20 {
+                if cycle == 14 { sink.applyUserOffsetDelta(ms: -1_000) }
+                let cycleStart = anchorNanos + Int64((Double(cycle * 512) * nsPerFrame).rounded())
+                out.withUnsafeMutableBufferPointer {
+                    _ = sink.renderInterleaved(
+                        into: $0, frameCount: 512, cycleStartMonotonicNanos: cycleStart)
+                }
+            }
+
+            #expect(steps == ["stop", "remeasure", "reset", "restart"],
+                    "the fallback must be the full re-anchor: \(steps)")
+            Telemetry._installTestSink(nil)   // flush barrier
+            #expect(captured.snapshot.contains {
+                $0.contains("\"evt\":\"synced_local_reanchor\"") && $0.contains("\"cause\":\"offset_change\"")
+            }, "got: \(captured.snapshot)")
+        }
+        #endif
+    }
+
+    /// `sync_session_anchored`'s `anchorPtsNanos` field: the connect-latency
+    /// diagnosis line must carry the anchor pts itself, not just the delay, so
+    /// a live repro can tell "the anchor landed late" from "the delay was
+    /// large." Nested inside `SerializedSharedState` for the same reason as
+    /// `SyncedLocalSinkRingOverflowTelemetryTests` — installs the
+    /// process-global `Telemetry` test sink.
+    @Suite struct SyncedLocalSinkTestsAnchorTelemetry {
+        private final class LineBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var lines: [String] = []
+            func append(_ line: String) { lock.lock(); lines.append(line); lock.unlock() }
+            var snapshot: [String] { lock.lock(); defer { lock.unlock() }; return lines }
+        }
+
+        @Test func sessionAnchoredCarriesAnchorPtsNanos() {
+            let captured = LineBox()
+            Telemetry._installTestSink { captured.append($0) }
+            defer { Telemetry._installTestSink(nil) }
+
+            let latency = LocalOutputLatencyMeasurement(
+                safetyOffsetFrames: 0, deviceLatencyFrames: 480, streamLatencyFrames: 0,
+                bufferFrameSizeFrames: 0, nominalSampleRate: 48_000)
+            let sink = SyncedLocalSink(
+                renderSampleRate: 48_000, channelCount: 1, safetyMarginMs: 3,
+                presentationDelayMs: { 100 }, localOutputLatency: { latency })
+
+            var ramp = [Float](repeating: 0, count: 20_000)
+            for i in 0..<ramp.count { ramp[i] = Float(i + 1) }
+            ramp.withUnsafeBufferPointer {
+                sink.enqueue(interleavedFrames: $0.baseAddress!, frameCount: ramp.count,
+                             pts: timespec(tv_sec: 1_000, tv_nsec: 0))
+            }
+
+            Telemetry._installTestSink(nil)   // flush barrier
+            let anchored = captured.snapshot.filter { $0.contains("\"evt\":\"sync_session_anchored\"") }
+            #expect(anchored.count == 1, "got: \(captured.snapshot)")
+            #expect(anchored.first?.contains("\"anchorPtsNanos\":\"1000000000000\"") == true,
+                    "got: \(anchored)")
         }
     }
 }

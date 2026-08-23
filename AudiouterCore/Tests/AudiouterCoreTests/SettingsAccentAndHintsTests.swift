@@ -197,23 +197,6 @@ extension SerializedSharedState {
         #expect(applied == [0])
     }
 
-    @Test func syncOffsetHintTracksTheSlider() {
-        let latency = LatencySettingModel(optionsMs: AppSettings.startBufferOptionsMs,
-                                          initialMs: 1000,
-                                          envOverrideMs: nil,
-                                          isStreaming: { false },
-                                          apply: { _ in })
-        let pane = makeAudioPane(latency: latency)
-        pane.test_setSyncOffset(ms: 0)
-        let inStep = pane.test_syncOffsetHint
-        #expect(!inStep.isEmpty)
-
-        pane.test_setSyncOffset(ms: 120)
-        #expect(pane.test_syncOffsetHint.contains("120 ms"),
-                "hint must state the CURRENT value: \(pane.test_syncOffsetHint)")
-        #expect(pane.test_syncOffsetHint != inStep)
-    }
-
     // MARK: Audio pane — Advanced disclosure (roadmap 050)
 
     @Test func advancedDisclosureStartsCollapsedAndRepublishesOnToggle() {

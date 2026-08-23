@@ -234,6 +234,17 @@ import CoreAudio
         func stopObservingConnections() {}
     }
 
+    /// A tiny thread-safe `Bool` box so a test can flip "is the Mac in
+    /// Selected Devices" between `setOutputSet` calls — same pattern as
+    /// `NativeBackendSyncedLocalSelectionTests.LockedBool`.
+    private final class LockedBool: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Bool
+        init(_ v: Bool) { value = v }
+        func get() -> Bool { lock.withLock { value } }
+        func set(_ v: Bool) { lock.withLock { value = v } }
+    }
+
     private func makeBackend(
         silenceFallbackDelay: TimeInterval = NativeBackend.defaultSilenceFallbackDelay,
         btConnection: BTConnectionManaging? = nil,
@@ -374,6 +385,37 @@ import CoreAudio
         backend.setOutputSet([btMove.id])                     // AirPlay leaves
         waitFor { sink.compositions.count == 3 }
         #expect(sink.compositions.last?.airPlayPresent == false)
+    }
+
+    /// Fix 3 (Mac-join desync): a Mac toggle alone — `selectedDevicesQuery`
+    /// flips but `setOutputSet` re-runs with the SAME AirPlay+BT ids (the
+    /// `add=[] rm=[]` shape) — must not push a composition. `macLocalPresent`
+    /// never changes a BT delay, so a spurious push would rebuild every BT
+    /// sink into ~570 ms of silence for no reason.
+    @Test func macToggleAloneDoesNotPushComposition() {
+        let (backend, _, discovery, bt, sink, _) = makeBackend()
+        defer { backend.stop() }
+        let macSelected = LockedBool(false)
+        backend.selectedDevicesQuery = { id in
+            id == NativeBackend.localDeviceID ? macSelected.get() : false
+        }
+        backend.start()
+
+        let ap = ap2Device()
+        discovery.fire(.appeared(ap))
+        bt.fire([btMove])
+        waitFor { self.device(backend, ap.id) != nil && self.device(backend, self.btMove.id) != nil }
+
+        backend.setOutputSet([btMove.id, ap.id])
+        waitFor { sink.calls.contains("start") }
+        let compositionPushes = sink.calls.filter { $0 == "setComposition" }.count
+
+        macSelected.set(true)
+        backend.setOutputSet([btMove.id, ap.id])   // same ids — the Mac-toggle shape
+        waitFor(timeout: 0.3) { false }
+
+        #expect(sink.calls.filter { $0 == "setComposition" }.count == compositionPushes,
+                "a Mac toggle alone must not push a composition")
     }
 
     /// BT+BT: both selected BT devices land in ONE device set (one manager, N

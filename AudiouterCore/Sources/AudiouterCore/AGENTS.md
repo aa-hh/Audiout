@@ -35,6 +35,35 @@ sibling, so the upcoming Apple-only Bluetooth sink can share its timing/drift
 math (PLAN-UNIVERSAL-SYNC Decision 5). Never add the GPL header to it and
 never move GPL-derived code into it.
 
+**A trim change — or a measured LATENCY change — must NEVER rebuild a sink** —
+Bluetooth or the Mac's own. Latency and trim are the same linear term in the
+delay (`reference − latency + trim`, roadmap 056 Part A), so
+`BTSyncedSink.setOffsetMs(_:forDeviceUID:)` lands live through the same splice
+`setTrimMs` uses; the alignment wizard pushes one per trial, and a rebuild each
+time would drop the speaker into silence with nothing left to judge. The
+delay is physically the audio piled up in the sink's ring when the release gate
+opened, so a trim is a move of the read position — `BTDeviceSink.applyTrimDelta(ms:)`,
+spliced with an equal-power crossfade (and FLOORED in the forward direction:
+a seek that reaches the write pointer leaves the ring dry for good, so it stops
+`seekSafetyMarginMs` short and logs `bt_sink_seek_clamped`), and
+`SyncedLocalSink.applyUserOffsetDelta(ms:)`,
+whose splice is a plain (uncrossfaded) seek — not a new session. Rebuilding stops
+and restarts the engine and re-holds silence for the whole delay, which a live
+scrub (or a wizard trial run against the Mac) would turn into permanent silence.
+Both are pre-release/post-release pairs: before the gate opens there is nothing
+to be continuous with, so the TARGET moves instead of the audio. The seek must
+also never run `clearSessionStateLocked`/`clearSessionState`: a seek is not a new
+session, and wiping it would throw away the anchor and the ring's contents. A
+rebuild (`requestRebuild`/`requestReanchor`) is for genuine structural changes
+only (`config_change`, `rate_change`, `composition_change`, `wizard_feed`) — plus
+the local sink's one fallback, a trim bigger than its ring can replay, which is
+the only surviving `offset_change`. Moving the BT-only REFERENCE timeline
+(`BTSyncedSink.setBTOnlyBufferMs(_:)`, which `NativeBackend` raises past the
+slowest measured latency and, for the duration of a Bluetooth wizard run, to
+`btWizardReferenceBufferMs`) IS structural, and deliberately reuses
+`composition_change` rather than adding a rebuild kind — the reference moving is
+exactly what that cause means.
+
 **A flat EQ must stay byte-identical passthrough — never route a flat buffer
 through `EQProcessor`.** Widening to float and requantizing is not bit-exact, so
 "EQ off" only stays honest if the processor is bypassed outright. Two siblings of
@@ -103,7 +132,7 @@ the whole reference delay, which would make a tone scrub unusable.
 `BTDeviceSink.setEQ` bakes a NEW `EQProcessor` on `graphQueue` (never on the
 render thread, and never by re-parameterizing a live one — its biquad state
 belongs to the render thread alone) and publishes it under the same `stateLock`
-snapshot `driftPpm` uses; the render block applies it to the frames it just
+snapshot the render gate reads; the render block applies it to the frames it just
 produced. The manager remembers the value per UID like the gain, so a sink
 created later starts already shaped, and `startLocked` re-derives from that
 remembered value after a genuine rebuild.

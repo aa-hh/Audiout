@@ -70,6 +70,11 @@ public struct BTTrimStore: Sendable {
         /// a pre-existing file (and an old reader on a new file) decodes
         /// cleanly; no schema bump needed.
         var alignmentPromptDismissed: [String]?
+        /// Roadmap 056 Part A: each Bluetooth device's MEASURED output latency
+        /// in ms — what the alignment wizard now writes, distinct from the
+        /// user's `trims` nudge on top of it. Optional for the same reason as
+        /// the dismissal list: a file holding only trims still decodes.
+        var latencyMs: [String: Double]?
     }
 
     /// Bump when the on-disk shape changes in a way old readers can't parse.
@@ -104,11 +109,34 @@ public struct BTTrimStore: Sendable {
     /// Overwrite the saved trims, creating the directory/file if needed.
     /// Read-modify-write so the dismissal record survives a trim save.
     public func save(_ trims: [String: Double]) throws {
-        var envelope = ((try? loadEnvelope()) ?? nil)
-            ?? Envelope(schemaVersion: Self.currentSchemaVersion, trims: [:],
-                        alignmentPromptDismissed: nil)
-        envelope.schemaVersion = Self.currentSchemaVersion
+        var envelope = existingEnvelope()
         envelope.trims = trims
+        try write(envelope)
+    }
+
+    /// The saved measured latencies (ms per device UID). Missing file, or a
+    /// file written before this map existed → `nil`.
+    public func loadLatencies() throws -> [String: Double]? {
+        try loadEnvelope()?.latencyMs
+    }
+
+    /// Overwrite the saved latencies, preserving trims and dismissals
+    /// (read-modify-write, same as every other writer here).
+    public func saveLatencies(_ latencies: [String: Double]) throws {
+        var envelope = existingEnvelope()
+        envelope.latencyMs = latencies
+        try write(envelope)
+    }
+
+    /// Delete BOTH of a device's alignment entries — its measured latency and
+    /// its trim — in one read-modify-write (roadmap 056: the drawer's "Reset
+    /// alignment"). Deleting rather than saving 0 is the whole point: "tuned"
+    /// is decided by whether an entry EXISTS, so a stored 0 would leave the row
+    /// reading "0 ms" forever instead of returning it to "Not set".
+    public func clearAlignment(deviceUID: String) throws {
+        var envelope = existingEnvelope()
+        envelope.trims.removeValue(forKey: deviceUID)
+        envelope.latencyMs?.removeValue(forKey: deviceUID)
         try write(envelope)
     }
 
@@ -119,12 +147,20 @@ public struct BTTrimStore: Sendable {
 
     /// Overwrite the dismissal set, preserving trims (read-modify-write).
     public func saveDismissedUIDs(_ uids: Set<String>) throws {
-        var envelope = ((try? loadEnvelope()) ?? nil)
-            ?? Envelope(schemaVersion: Self.currentSchemaVersion, trims: [:],
-                        alignmentPromptDismissed: nil)
-        envelope.schemaVersion = Self.currentSchemaVersion
+        var envelope = existingEnvelope()
         envelope.alignmentPromptDismissed = uids.sorted()
         try write(envelope)
+    }
+
+    /// The file as it stands (or a fresh envelope), stamped with the current
+    /// schema version — the read half of every writer's read-modify-write, so
+    /// saving one map can never drop another.
+    private func existingEnvelope() -> Envelope {
+        var envelope = ((try? loadEnvelope()) ?? nil)
+            ?? Envelope(schemaVersion: Self.currentSchemaVersion, trims: [:],
+                        alignmentPromptDismissed: nil, latencyMs: nil)
+        envelope.schemaVersion = Self.currentSchemaVersion
+        return envelope
     }
 
     private func loadEnvelope() throws -> Envelope? {

@@ -546,6 +546,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             (self?.backend as? BTOutputControlling)?.btUsableTrimRangeMs(forDevice: deviceID)
                 ?? (-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
         }
+        // Roadmap 056: the drawer's "Reset alignment" — delete the stored
+        // measurement AND nudge, and re-push the live sink.
+        popoverController.onResetBTAlignment = { [weak self] deviceID in
+            (self?.backend as? BTOutputControlling)?.resetBTAlignment(forDevice: deviceID)
+        }
         popoverController.onAlignTickActiveChange = { [weak self] active in
             (self?.backend as? BTOutputControlling)?.setBTAlignTickActive(active)
         }
@@ -564,8 +569,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             (self?.backend as? BTOutputControlling)?
                 .endBTWizardTrimPreview(forDevice: deviceID, keepMs: keepMs)
         }
-        popoverController.onBTWizardTickActive = { [weak self] active in
-            (self?.backend as? BTOutputControlling)?.setBTWizardTickActive(active)
+        popoverController.onBTWizardTickActive = { [weak self] active, target, reference in
+            (self?.backend as? BTOutputControlling)?
+                .setBTWizardTickActive(active, btTargetDeviceID: target,
+                                       btReferenceDeviceID: reference)
+        }
+        popoverController.onBTWizardEndRun = { [weak self] in
+            (self?.backend as? BTOutputControlling)?.endBTWizardRun()
+        }
+        popoverController.onBTWizardTempo = { [weak self] bpm in
+            (self?.backend as? BTOutputControlling)?.setBTWizardTickTempo(bpm: bpm)
+        }
+        // Roadmap 056 Part A: a Bluetooth run measures the speaker's own
+        // LATENCY (the Mac is the zero), stored beside the trim rather than
+        // overwriting it.
+        popoverController.btLatencyProvider = { [weak self] deviceID in
+            (self?.backend as? BTOutputControlling)?.btMeasuredLatencyMs(forDevice: deviceID)
+        }
+        popoverController.btLatencyRangeProvider = { [weak self] deviceID in
+            (self?.backend as? BTOutputControlling)?.btWizardLatencyRangeMs(forDevice: deviceID)
+                ?? (-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
+        }
+        popoverController.onBTWizardLatencyPreview = { [weak self] ms, deviceID, halfWidthMs in
+            (self?.backend as? BTOutputControlling)?
+                .setBTWizardLatencyPreview(ms, forDevice: deviceID, halfWidthMs: halfWidthMs)
+        }
+        popoverController.onBTWizardEndLatencyPreview = { [weak self] deviceID, keepMs in
+            (self?.backend as? BTOutputControlling)?
+                .endBTWizardLatencyPreview(forDevice: deviceID, keepMs: keepMs)
+        }
+        // Roadmap 056 Part 1: the Mac's own row gets the identical SYNC
+        // surface. The value lives in `AppSettings`, so reading and writing it
+        // work under ANY backend — only the live apply is native-gated, exactly
+        // like the Bluetooth hooks above.
+        popoverController.localTrimProvider = { [weak self] in
+            Double(self?.settings.syncOffsetMs ?? 0)
+        }
+        popoverController.localTrimIsSetProvider = { [weak self] in
+            self?.settings.isSyncOffsetSet ?? false
+        }
+        popoverController.onSetLocalTrim = { [weak self] ms in
+            guard let self else { return }
+            self.settings.syncOffsetMs = Int(ms)
+            (self.backend as? LocalSyncOffsetControlling)?.noteLocalSyncOffsetChanged()
+        }
+        popoverController.onResetLocalTrim = { [weak self] in
+            guard let self else { return }
+            // Cleared, not zeroed — `isSyncOffsetSet` reads the key's existence.
+            self.settings.clearSyncOffset()
+            (self.backend as? LocalSyncOffsetControlling)?.noteLocalSyncOffsetChanged()
+        }
+        popoverController.onLocalTrimPreview = { [weak self] ms in
+            (self?.backend as? LocalSyncOffsetControlling)?.setLocalTrimPreview(ms)
+        }
+        popoverController.onLocalTrimEndPreview = { [weak self] keepMs in
+            (self?.backend as? LocalSyncOffsetControlling)?.endLocalTrimPreview(keepMs: keepMs)
         }
         // Excluded apps (Settings › Audio) are un-routable: the popover reads this
         // to drop them from the Applications picker + rows.

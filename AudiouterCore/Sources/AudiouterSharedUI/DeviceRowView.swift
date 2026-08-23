@@ -202,8 +202,8 @@ public final class DeviceRowView: NSView {
     private let nameLabel = NSTextField(labelWithString: "")
     /// The single sublabel line under the name (Warm Signal v4.1 item 3 —
     /// re-scoped from the retired routing ladder): carries ONLY state words now.
-    /// The one remaining rung is the small-caps MUTED token, shown iff the
-    /// device is row-muted (not master-muted) AND neither failed nor
+    /// The one remaining rung is the Muted token, shown iff the device is
+    /// muted (master mute included) AND neither failed nor
     /// unavailable — see ``resolveSublabel()``. Failed/unavailable and the
     /// routing/redirect composite all moved to ``feedStack`` (the FEED column).
     private let statusLabel = NSTextField(labelWithString: "")
@@ -897,10 +897,10 @@ public final class DeviceRowView: NSView {
 
     /// On a **bus row** the sublabel carries ONLY state words now (Warm Signal
     /// v4.1 item 3 — the routing/failure content that used to live here moved
-    /// to the FEED column, ``updateFeedText()``): a ROW-muted (never master-
-    /// muted — the Main Out pill carries that) device that is neither failed
-    /// nor unavailable shows the small-caps MUTED token alone; every other
-    /// state hides the sublabel. A **non-bus row** (mixer window / a generic
+    /// to the FEED column, ``updateFeedText()``): a muted device (master mute
+    /// included — a muted row always says so, Alec 2026-08-23) that is
+    /// neither failed nor unavailable shows the Muted token alone; every
+    /// other state hides the sublabel. A **non-bus row** (mixer window / a generic
     /// caller) has no FEED column to fall back on — it keeps the FULL legacy
     /// ladder (``resolveLegacySublabel()``) so that host doesn't silently lose
     /// failed/unavailable/routing information v4.1 never gave it anywhere else
@@ -914,7 +914,12 @@ public final class DeviceRowView: NSView {
             hideSublabel()
         } else if !device.isAvailable {
             hideSublabel()
-        } else if device.isMuted && !isMasterMuted {
+        } else if device.isMuted {
+            // A muted row always says so (Alec, 2026-08-23) — including under
+            // master mute, which is realized by muting every member. Replaces
+            // matrix §3.6's "the Main Out pill carries it" suppression, which
+            // read as the label vanishing when the muted row was the only
+            // member.
             showMutedSublabel()
         } else {
             hideSublabel()
@@ -935,12 +940,13 @@ public final class DeviceRowView: NSView {
         } else if !device.isAvailable {
             showSublabel("Unavailable", color: Tokens.Color.tertiaryLabel)
         } else if let routing = legacyRoutingLine() {
-            // S3 (spec §3.5): a ROW-muted device prepends the small-caps MUTED
-            // token to its EXISTING feed sublabel — never to a single-line row
-            // (this branch only runs when a sublabel already exists, so the
-            // row height is untouched — R7 no-reflow, this host only). Master
-            // mute adds NO token (matrix §3.6: the Main Out pill carries it).
-            if device.isMuted && !isMasterMuted {
+            // S3 (spec §3.5): a ROW-muted device prepends the Muted token to
+            // its EXISTING feed sublabel — never to a single-line row (this
+            // branch only runs when a sublabel already exists, so the row
+            // height is untouched — R7 no-reflow, this host only). A muted
+            // row always says so (Alec, 2026-08-23), master mute included —
+            // see ``resolveSublabel``.
+            if device.isMuted {
                 showLegacyMutedSublabel(feeds: routing)
             } else {
                 showSublabel(routing, color: Tokens.Color.secondaryLabel)

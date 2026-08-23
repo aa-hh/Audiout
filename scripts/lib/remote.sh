@@ -125,6 +125,22 @@ remote_sweep_orphans() {
         2>/dev/null || true
 }
 
+# Delete remote trees not used for 7+ days. Each tree carries a ~1.3 GB
+# .build cache and nothing re-syncs it once its local worktree is gone: 79
+# dead trees (93 GB) filled the remote disk to 118 MB free (Aug 2026), swift
+# died with ENOSPC on every remote run, and everything silently fell back
+# local. Recency = the .last-used stamp remote_run touches (top-dir mtime for
+# trees that predate the stamp). Best-effort: a live tree costs one re-sync
+# (~seconds) plus one cold build if ever pruned wrongly.
+remote_prune_stale() {
+    ssh -o BatchMode=yes "$remote_host" \
+        "cd \"$remote_root\" 2>/dev/null || exit 0; \
+         for d in */; do d=\${d%/}; s=\"\$d/.last-used\"; [ -f \"\$s\" ] || s=\"\$d\"; \
+             [ -n \"\$(find \"\$s\" -maxdepth 0 -mtime +7 2>/dev/null)\" ] && rm -rf \"\$d\"; \
+         done; true" \
+        2>/dev/null || true
+}
+
 # Run a command in the synced tree on the remote.
 #   remote_run <repo_root> <shell command string>
 # Sets $remote_status to the command's own exit code when it ACTUALLY RAN.
@@ -153,6 +169,7 @@ remote_run() {
         return 1
     fi
     remote_sweep_orphans
+    remote_prune_stale
     # PATH is set explicitly: a non-interactive ssh shell often lacks
     # /opt/homebrew/bin, and Package.swift shells out to `brew --prefix` to find
     # the keg-only C dependencies.
@@ -171,6 +188,7 @@ remote_run() {
         "$remote_host" \
         "export PATH=/opt/homebrew/bin:\$PATH; \
          cd \"$_rdir\" || exit 97; \
+         touch .last-used; \
          command -v swift >/dev/null 2>&1 || exit 97; \
          $* ; echo \"REMOTE_EXIT:\$?\"" 2>&1)
     _rc=$?

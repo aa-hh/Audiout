@@ -248,12 +248,12 @@ final class SetupPreviewFrameView: NSView {
         }
     }
 
-    /// Small, tracked-out, quiet — a frame label, deliberately not a heading:
-    /// it names the picture without competing with the headline above it.
+    /// Small and quiet — a frame label, deliberately not a heading: it names
+    /// the picture without competing with the headline above it. Rendered as
+    /// authored, never uppercased (One Case rule).
     private static func captionText(_ text: String) -> NSAttributedString {
-        NSAttributedString(string: text.uppercased(), attributes: [
+        NSAttributedString(string: text, attributes: [
             .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
-            .kern: 0.85,
             .foregroundColor: Tokens.Color.tertiaryLabel,
         ])
     }

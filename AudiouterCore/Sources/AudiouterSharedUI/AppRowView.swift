@@ -423,7 +423,7 @@ public final class AppRowView: NSView {
             let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
             item.isEnabled = false
             item.attributedTitle = NSAttributedString(
-                string: title.uppercased(),
+                string: title,
                 attributes: [
                     .font: Tokens.Font.captionEmphasized,
                     .foregroundColor: Tokens.Color.tertiaryLabel,

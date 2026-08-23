@@ -35,7 +35,7 @@ public struct RunningAppInfo: Equatable {
 ///
 /// Two users, ONE construction so the popover has a single "add a thing to
 /// this list" affordance: Applications takes both segments ("+" opens the
-/// running-app picker, "−" removes the selected row); OUTPUT DEVICES takes
+/// running-app picker, "−" removes the selected row); Output Devices takes
 /// `showsRemove: false` — its "+" fronts the add MENU and there is no
 /// remove (a device leaves the list by going away, never by a button).
 /// Segment metrics are identical either way, so the two "+" glyphs sit on the
@@ -236,7 +236,7 @@ public final class PopoverController: NSObject {
     /// ID with no live local stream, so the popover needs no destination knowledge.
     public var onSetLocalPlaybackVolume: ((_ volume: Int, _ bundleID: String) -> Void)?
 
-    /// Called when the user picks "Pair a Bluetooth speaker…" from the OUTPUT
+    /// Called when the user picks "Pair a Bluetooth speaker…" from the Output
     /// DEVICES header's "+" menu (BT-UI, device-tier decision 3: never-paired
     /// speakers get NO rows — pairing is a one-tap Settings trip). The app
     /// wires this to open `SystemSettingsPane.bluetooth`; the fresh row then
@@ -251,7 +251,7 @@ public final class PopoverController: NSObject {
     /// (mock/tests without the capability) sorts by name alone.
     public var btLastUsedProvider: (() -> [String: Date])?
 
-    /// Called when a Bluetooth device's SYNC trim changes, already quantised.
+    /// Called when a Bluetooth device's Sync trim changes, already quantised.
     /// The app wires this to
     /// `(backend as? BTOutputControlling)?.setBTSyncTrim` — live-applied to
     /// that device's `BTSyncedSink` delay, and written to disk only when
@@ -262,7 +262,7 @@ public final class PopoverController: NSObject {
     /// a stepper click, a typed commit, Revert — arrives with `true`.
     public var onSetBTTrim: ((_ ms: Double, _ deviceID: String, _ persist: Bool) -> Void)?
 
-    /// The saved SYNC trim for a Bluetooth device id — seeds each row's value
+    /// The saved Sync trim for a Bluetooth device id — seeds each row's value
     /// (and the read-only display on a disconnected row). Wired to
     /// `(backend as? BTOutputControlling)?.btSyncTrim`. `nil` = 0, and edits
     /// then live only in `btTrimsByID` (mock/dev — nothing persists them).
@@ -307,7 +307,7 @@ public final class PopoverController: NSObject {
     /// a chip that flips back to "Not set" under the user's hand.
     private var btTunedDeviceIDs: Set<String> = []
 
-    /// The Bluetooth device whose SYNC drawer is currently open, or `nil`
+    /// The Bluetooth device whose Sync drawer is currently open, or `nil`
     /// (D2 — at most one, ever). This is the INTENT; it survives `rebuild()`,
     /// which recreates rows, exactly like `openDiagnosisIDs`.
     private var expandedSyncDeviceID: String?
@@ -560,7 +560,7 @@ public final class PopoverController: NSObject {
     /// the retired "+ Add application…" row as the card's add affordance).
     private let applicationsFooter = CardFooterView()
 
-    /// The OUTPUT DEVICES card's footer row: the "+" that fronts
+    /// The Output Devices card's footer row: the "+" that fronts
     /// `makeOutputDevicesPlusMenu()`. Lives at the BOTTOM of the card, below
     /// every subsection (Alec's call, 2026-08-08 — a list-management control
     /// belongs under the list, not in the column-title header row). Add-only:
@@ -1184,14 +1184,14 @@ public final class PopoverController: NSObject {
 
         // 1. Main Audio card — the single Main Out row. Combined header row
         // (change 1): "Main Audio" title (Warm Signal §5.1 silkscreen vocabulary)
-        // on the left, "OUTPUT" over the destination dropdown on the right
+        // on the left, "Output" over the destination dropdown on the right
         // ("Output" framing, decision m).
         //
         // NO card names the SLIDER column. All three share ONE trailing-anchored
         // slider column, so a title over it prints the same word three times —
         // and a horizontal fader with a live `%` beside it is the most
-        // self-evident control on the surface. The TRAILING titles stay: OUTPUT /
-        // FEED / SYNC / REDIRECT each name a different, genuinely non-obvious
+        // self-evident control on the surface. The TRAILING titles stay: Output /
+        // Feed / Sync / Redirect each name a different, genuinely non-obvious
         // thing occupying one shared column. The asymmetry is the point; don't
         // restore a slider title for symmetry.
         //
@@ -1253,7 +1253,7 @@ public final class PopoverController: NSObject {
             // line only (BT-OFFSET-UI) — and ONLY when that subsection actually
             // has rows carrying a sync chip. The Bluetooth header renders even
             // with nothing listed (its empty body IS the Connect affordance), so
-            // ungating this leaves "SYNC" floating over a column that does not
+            // ungating this leaves "Sync" floating over a column that does not
             // exist: chrome naming absent content, the one thing a legend line
             // must never do. Gated on the SECTION, not on `collapsed` — a
             // collapsed subsection still HAS its rows, exactly as a collapsed
@@ -1336,7 +1336,7 @@ public final class PopoverController: NSObject {
         // Same restore for the first-mix alignment card / wizard panel (W3/W4):
         // their intent survives the rebuild; the mounted views don't.
         reconcileBTAlignmentPanels(animated: false)
-        // Same restore for the SYNC drawer, and the same un-animated reasoning.
+        // Same restore for the Sync drawer, and the same un-animated reasoning.
         reconcileSyncDrawer(animated: false)
 
         // Re-pin the silence-fallback banner (R11) above the cards: `clearRows()`
@@ -1420,7 +1420,7 @@ public final class PopoverController: NSObject {
     /// row (BT-LIST) — `test_bluetoothConnectRowShown()`.
     private var renderedBTConnectShown = false
 
-    /// Whether the LAST `rebuild()` printed the "SYNC" column title on the
+    /// Whether the LAST `rebuild()` printed the "Sync" column title on the
     /// Bluetooth subsection header — `test_syncColumnTitleShown()`. Recorded
     /// rather than derived because the title is a RENDER decision (it must never
     /// name a column with no rows under it), and nothing else on this surface
@@ -1556,7 +1556,7 @@ public final class PopoverController: NSObject {
     // MARK: Collapse-default policy (T-5, PLAN §B)
 
     /// The three card titles — Warm Signal §5.1's silkscreen vocabulary
-    /// ("SYSTEM AUDIO" / "OUTPUT DEVICES" / "APP EXCEPTIONS"; the panel uppercases
+    /// ("System Audio" / "Output Devices" / "App Exceptions"; the panel renders as-is
     /// the displayed header, the title-case copy lives here). Named constants
     /// because the title string IS the card's lookup/collapse key. The System
     /// Audio card was "Main Audio" pre-v4 (§Call-1 renamed the SECTION header to
@@ -2074,7 +2074,7 @@ public final class PopoverController: NSObject {
                   removalUndoOffered: removalUndoDeviceID == device.id && !selected)
     }
 
-    /// A Bluetooth row's current SYNC trim: the session cache first (the
+    /// A Bluetooth row's current Sync trim: the session cache first (the
     /// user's freshest edit), else the persisted value via `btTrimProvider`,
     /// else 0. Non-BT devices short-circuit to 0 (their rows mount no SYNC
     /// chip and ignore the value anyway).
@@ -2096,7 +2096,7 @@ public final class PopoverController: NSObject {
         return btTunedDeviceIDs.contains(device.id)
     }
 
-    // MARK: Bluetooth SYNC drawer (PLAN-BT-SYNC-DRAWER T7)
+    // MARK: Bluetooth Sync drawer (PLAN-BT-SYNC-DRAWER T7)
     //
     // An accordion under its own row: at most one open at a time (D2),
     // inserted directly after the row it belongs to and pushing the rows below
@@ -2279,7 +2279,7 @@ public final class PopoverController: NSObject {
                           dormant: devicesCardDivergence() != nil)
     }
 
-    // MARK: OUTPUT DEVICES "+" menu (BT-UI / BT-LIST)
+    // MARK: Output Devices "+" menu (BT-UI / BT-LIST)
 
     /// Build the "+" affordance's menu FRESH per presentation — two items
     /// dispatching through real `NSMenuItem` target/action (tests drive them
@@ -3175,14 +3175,14 @@ public final class PopoverController: NSObject {
     /// behavior).
     public func test_tapApplicationsFooterRemove() { applicationsFooter.test_tapRemove() }
 
-    /// Whether the OUTPUT DEVICES card's "+" footer strip is currently mounted
+    /// Whether the Output Devices card's "+" footer strip is currently mounted
     /// as the LAST row of that card — the assertion surface for the strip's
     /// position (it moved out of the header row, 2026-08-08).
     public var test_devicesFooterIsLastCardRow: Bool {
         panel.test_cardRows(title: Self.outputDevicesCardTitle).last === devicesFooter
     }
 
-    /// Simulate tapping the OUTPUT DEVICES footer's "+" — the same closure a
+    /// Simulate tapping the Output Devices footer's "+" — the same closure a
     /// real click fires (the on-screen `popUp` itself stays headless-gated).
     public func test_tapDevicesFooterAdd() { devicesFooter.test_tapAdd() }
 
@@ -3374,7 +3374,7 @@ public final class PopoverController: NSObject {
     /// order — the visibility/collapse assertion surface.
     public func test_renderedDeviceIDs() -> [String] { renderedDeviceOrder().map(\.id) }
 
-    /// The OUTPUT DEVICES "+" menu, built exactly as a live click builds it.
+    /// The Output Devices "+" menu, built exactly as a live click builds it.
     /// Tests dispatch its items via `NSMenu.performActionForItem(at:)` — real
     /// AppKit menu dispatch, per the row-selection lesson (never a bypass seam).
     public func test_outputDevicesPlusMenu() -> NSMenu { makeOutputDevicesPlusMenu() }
@@ -3391,7 +3391,7 @@ public final class PopoverController: NSObject {
     /// (BT-LIST).
     public func test_bluetoothConnectRowShown() -> Bool { renderedBTConnectShown }
 
-    /// Whether the last rebuild printed the "SYNC" column title on the Bluetooth
+    /// Whether the last rebuild printed the "Sync" column title on the Bluetooth
     /// subsection header.
     public func test_syncColumnTitleShown() -> Bool { renderedSyncColumnTitleShown }
 
@@ -3439,7 +3439,7 @@ public final class PopoverController: NSObject {
         groupController?.setMainOutMasterVolume(value)
     }
 
-    // MARK: SYNC drawer seams (T7)
+    // MARK: Sync drawer seams (T7)
     //
     // These drive the SAME `toggleSyncDrawer` the chip's target/action reaches,
     // but they do skip AppKit's own dispatch — a shortcut that has hidden real

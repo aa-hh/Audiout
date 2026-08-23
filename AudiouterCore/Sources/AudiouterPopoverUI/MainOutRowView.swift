@@ -260,7 +260,7 @@ public final class MainOutRowView: NSView {
             if option.isHeader {
                 item.isEnabled = false
                 item.attributedTitle = NSAttributedString(
-                    string: option.title.uppercased(),
+                    string: option.title,
                     attributes: [
                         .font: Tokens.Font.captionEmphasized,
                         .foregroundColor: Tokens.Color.tertiaryLabel,

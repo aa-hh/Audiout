@@ -1,6 +1,6 @@
 # Figma design system — contract, map, upkeep
 
-The Audiouter design system lives in Figma file **`aGvr1qZ3tbqGD2e3jmA1Ru`** (built
+The Audiout design system lives in Figma file **`aGvr1qZ3tbqGD2e3jmA1Ru`** (built
 2026-08-07). This doc is how a future agent keeps that file true to the code. The
 build itself is done — maintenance is incremental, per the rubric below.
 
@@ -11,10 +11,10 @@ blocked — it needs a Dev/Full seat on an Org/Enterprise plan — so the contra
 carried in the file itself):
 
 - **Color variable names mirror `Tokens.Color` case names 1:1**
-  (`AudiouterCore/Sources/AudiouterSharedUI/Tokens.swift`; the code's canonical
+  (`AudioutCore/Sources/AudioutSharedUI/Tokens.swift`; the code's canonical
   string is `NSColor.Name "WarmSignal.<caseName>"`).
 - **Layout variable names mirror `PopoverColumnGrid` constant names 1:1**
-  (`AudiouterCore/Sources/AudiouterSharedUI/PopoverColumnGrid.swift`), grouped by
+  (`AudioutCore/Sources/AudioutSharedUI/PopoverColumnGrid.swift`), grouped by
   slash prefix (`rows/bodyRowHeight`, `columns/sliderWidth`, …).
 - **Every variable carries Code Syntax (platform "iOS") = its exact Swift
   constant** — e.g. `Tokens.Color.canvas`, `PopoverColumnGrid.bodyRowHeight`.
@@ -98,61 +98,61 @@ Variable names (each resolvable by name; IDs ledgered in the build state):
 | Reference · Spec backlog | `45:32` |
 | Reference · v3.4 hand mock | `45:33` (mock frame `1:2` — kept until Alec's live review confirms the rebuilt screens match, then delete) |
 
-### Components (all OURS custom drawings; source paths under `AudiouterCore/Sources/`)
+### Components (all OURS custom drawings; source paths under `AudioutCore/Sources/`)
 
 | Component | Node ID | Swift source |
 |---|---|---|
-| HaloRing | `47:20` | `AudiouterSharedUI/HaloRingView.swift` |
-| RouteArmedDot | `47:25` | `AudiouterSharedUI/RouteArmedDotView.swift` |
-| LevelMeter | `48:50` | `AudiouterSharedUI/LevelMeterView.swift` |
-| BusNode | `49:22` | `AudiouterSharedUI/MembershipBusView.swift` |
-| RailSegment | `49:29` | `AudiouterSharedUI/BusRailOverlayView.swift` |
-| RailDetourArc | `49:36` | `AudiouterSharedUI/BusRailOverlayView.swift` |
-| RailOriginHook | `49:41` | `AudiouterSharedUI/BusRailOverlayView.swift` |
-| RailTerminusDot | `49:48` | `AudiouterSharedUI/BusRailOverlayView.swift` |
-| FeedChip | `50:9` | `AudiouterSharedUI/FeedChip.swift` |
-| FeedPill | `50:28` | `AudiouterSharedUI/FeedPillView.swift` |
-| WarmFader | `51:89` | `AudiouterSharedUI/WarmFaderCell.swift` |
-| WarmCanvas | `52:4` | `AudiouterSharedUI/WarmCanvasView.swift` |
-| GroupedSection | `52:5` | `AudiouterWindowUI/GroupedSectionView.swift` |
-| RoundedContainer | `52:7` | `AudiouterOnboardingUI/OnboardingViewController.swift` (permission card) |
-| Hairline | `52:9` | `AudiouterPopoverUI/CardView.swift` (card dividers) |
+| HaloRing | `47:20` | `AudioutSharedUI/HaloRingView.swift` |
+| RouteArmedDot | `47:25` | `AudioutSharedUI/RouteArmedDotView.swift` |
+| LevelMeter | `48:50` | `AudioutSharedUI/LevelMeterView.swift` |
+| BusNode | `49:22` | `AudioutSharedUI/MembershipBusView.swift` |
+| RailSegment | `49:29` | `AudioutSharedUI/BusRailOverlayView.swift` |
+| RailDetourArc | `49:36` | `AudioutSharedUI/BusRailOverlayView.swift` |
+| RailOriginHook | `49:41` | `AudioutSharedUI/BusRailOverlayView.swift` |
+| RailTerminusDot | `49:48` | `AudioutSharedUI/BusRailOverlayView.swift` |
+| FeedChip | `50:9` | `AudioutSharedUI/FeedChip.swift` |
+| FeedPill | `50:28` | `AudioutSharedUI/FeedPillView.swift` |
+| WarmFader | `51:89` | `AudioutSharedUI/WarmFaderCell.swift` |
+| WarmCanvas | `52:4` | `AudioutSharedUI/WarmCanvasView.swift` |
+| GroupedSection | `52:5` | `AudioutWindowUI/GroupedSectionView.swift` |
+| RoundedContainer | `52:7` | `AudioutOnboardingUI/OnboardingViewController.swift` (permission card) |
+| Hairline | `52:9` | `AudioutPopoverUI/CardView.swift` (card dividers) |
 | ~~TabItem / TabGroup~~ | *deleted 2026-08-07* | See **Tab views** below — no component, by decision |
-| WarmNameField | `54:15` | `AudiouterSharedUI/WarmNameFieldCell.swift` |
-| DeviceIconWell | `54:70` | `AudiouterWindowUI/DeviceIconWellView.swift` |
-| PermissionIconTile | `54:111` | `AudiouterOnboardingUI/PermissionRowView.swift` |
-| ThemeTile | `55:134` | `AudiouterSettingsUI/AppearanceSettingsViewController.swift` |
-| ControlPanelShell | `56:11` | `AudiouterSharedUI/ControlPanelBackingView.swift` |
-| Banner | `56:28` | `AudiouterPopoverUI/SilenceFallbackBannerView.swift` (also `SystemAirPlayNoteBannerView.swift`) |
-| ConnectionDiagnosis | `56:29` | `AudiouterPopoverUI/ConnectionDiagnosisView.swift` |
-| DeviceRow | `61:258` | `AudiouterSharedUI/DeviceRowView.swift` |
-| MainOutRow | `64:264` | `AudiouterPopoverUI/MainOutRowView.swift` |
-| AppRow | `65:150` | `AudiouterSharedUI/AppRowView.swift` |
-| GroupRow | `66:771` | `AudiouterPopoverUI/GroupRowView.swift` |
-| MembershipRow | `66:833` | `AudiouterWindowUI/MembershipRowView.swift` |
-| SectionHeader | `67:19` | `AudiouterPopoverUI/PopoverPanelViewController.swift` |
-| SubsectionHeader | `67:20` | `AudiouterPopoverUI/PopoverPanelViewController.swift` |
-| CardNote | `67:22` | `AudiouterPopoverUI/PopoverPanelViewController.swift` |
-| HeaderBar | `67:24` | `AudiouterPopoverUI/PopoverHeaderView.swift` |
-| ApplicationsFooter | `67:38` | `AudiouterPopoverUI/PopoverController.swift` |
-| RefusalNoteRow | `67:43` | `AudiouterSharedUI/DeviceRowView.swift` |
-| PlaceholderRow | `67:47` | `AudiouterPopoverUI/PopoverController.swift` (empty states) |
-| EQResponseCurve | *owed — Atom · Scope* | `AudiouterSharedUI/EQResponseCurveView.swift` |
+| WarmNameField | `54:15` | `AudioutSharedUI/WarmNameFieldCell.swift` |
+| DeviceIconWell | `54:70` | `AudioutWindowUI/DeviceIconWellView.swift` |
+| PermissionIconTile | `54:111` | `AudioutOnboardingUI/PermissionRowView.swift` |
+| ThemeTile | `55:134` | `AudioutSettingsUI/AppearanceSettingsViewController.swift` |
+| ControlPanelShell | `56:11` | `AudioutSharedUI/ControlPanelBackingView.swift` |
+| Banner | `56:28` | `AudioutPopoverUI/SilenceFallbackBannerView.swift` (also `SystemAirPlayNoteBannerView.swift`) |
+| ConnectionDiagnosis | `56:29` | `AudioutPopoverUI/ConnectionDiagnosisView.swift` |
+| DeviceRow | `61:258` | `AudioutSharedUI/DeviceRowView.swift` |
+| MainOutRow | `64:264` | `AudioutPopoverUI/MainOutRowView.swift` |
+| AppRow | `65:150` | `AudioutSharedUI/AppRowView.swift` |
+| GroupRow | `66:771` | `AudioutPopoverUI/GroupRowView.swift` |
+| MembershipRow | `66:833` | `AudioutWindowUI/MembershipRowView.swift` |
+| SectionHeader | `67:19` | `AudioutPopoverUI/PopoverPanelViewController.swift` |
+| SubsectionHeader | `67:20` | `AudioutPopoverUI/PopoverPanelViewController.swift` |
+| CardNote | `67:22` | `AudioutPopoverUI/PopoverPanelViewController.swift` |
+| HeaderBar | `67:24` | `AudioutPopoverUI/PopoverHeaderView.swift` |
+| ApplicationsFooter | `67:38` | `AudioutPopoverUI/PopoverController.swift` |
+| RefusalNoteRow | `67:43` | `AudioutSharedUI/DeviceRowView.swift` |
+| PlaceholderRow | `67:47` | `AudioutPopoverUI/PopoverController.swift` (empty states) |
+| EQResponseCurve | *owed — Atom · Scope* | `AudioutSharedUI/EQResponseCurveView.swift` |
 
 ### Assembled screens
 
 | Screen | Node ID | Swift source |
 |---|---|---|
-| Popover | `68:2` | `AudiouterPopoverUI/PopoverPanelViewController.swift` |
-| Groups window | `70:2` | `AudiouterWindowUI/MixerWindowController.swift` + `GroupEditorViewController.swift` + `SidebarViewController.swift` |
-| Settings · General | `71:287` | `AudiouterSettingsUI/GeneralSettingsViewController.swift` |
-| Settings · Appearance | `71:342` | `AudiouterSettingsUI/AppearanceSettingsViewController.swift` |
-| Settings · Audio | `71:433` | `AudiouterSettingsUI/AudioSettingsViewController.swift` |
-| Onboarding | `72:2` | `AudiouterOnboardingUI/OnboardingViewController.swift` |
-| Menu bar | `73:2` | `AudiouterApp/StatusItemController.swift` + `AudiouterSharedUI/StatusItemIcon.swift` |
-| Menu (right-click) | `73:14` | `AudiouterApp/StatusItemController.swift` |
-| About | `73:21` | `AudiouterSettingsUI/AboutView.swift` |
-| Quitting panel | `73:33` | `AudiouterApp/AppDelegate.swift` |
+| Popover | `68:2` | `AudioutPopoverUI/PopoverPanelViewController.swift` |
+| Groups window | `70:2` | `AudioutWindowUI/MixerWindowController.swift` + `GroupEditorViewController.swift` + `SidebarViewController.swift` |
+| Settings · General | `71:287` | `AudioutSettingsUI/GeneralSettingsViewController.swift` |
+| Settings · Appearance | `71:342` | `AudioutSettingsUI/AppearanceSettingsViewController.swift` |
+| Settings · Audio | `71:433` | `AudioutSettingsUI/AudioSettingsViewController.swift` |
+| Onboarding | `72:2` | `AudioutOnboardingUI/OnboardingViewController.swift` |
+| Menu bar | `73:2` | `AudioutApp/StatusItemController.swift` + `AudioutSharedUI/StatusItemIcon.swift` |
+| Menu (right-click) | `73:14` | `AudioutApp/StatusItemController.swift` |
+| About | `73:21` | `AudioutSettingsUI/AboutView.swift` |
+| Quitting panel | `73:33` | `AudioutApp/AppDelegate.swift` |
 | Cover art | `74:1053` | — |
 
 ### Text styles (mirror `Tokens.Font`)

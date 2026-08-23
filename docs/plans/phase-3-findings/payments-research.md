@@ -1,6 +1,6 @@
-# Payments & Licensing Research — Audiouter (Phase 3, Task R1)
+# Payments & Licensing Research — Audiout (Phase 3, Task R1)
 
-Grounding: Audiouter's AirPlayEngine sender is derived from OwnTone and is
+Grounding: Audiout's AirPlayEngine sender is derived from OwnTone and is
 **GPL-2.0-or-later** end to end (per `LICENSE`, `NOTICE`, and
 `AirPlayEngine/docs/license-inventory.md` in this repo). Copyright on the
 GPL sender cluster (`airplay.c`, `airplay_events.c`, `rtp_common.c`) is held
@@ -49,13 +49,13 @@ Successful GPL/FOSS desktop apps that charge money lean into exactly that:
   (Debian in particular) were shipping free binaries of a program he
   wanted to live off selling. **This move was only legally possible
   because Aseprite's copyright was concentrated enough in the original
-  author's hands that he could relicense his own code.** Audiouter cannot
+  author's hands that he could relicense his own code.** Audiout cannot
   do this: the GPL sender cluster's copyright belongs to Espen Jürgensen
   and the OwnTone Project (third parties this project has no relicensing
   agreement with — see `NOTICE` and `license-inventory.md`), so relicensing
   away from GPL is not on the table here, full stop. ([Aseprite devblog: "New source code license"](https://dev.aseprite.org/2016/09/01/new-source-code-license/), [Aseprite FAQ](https://www.aseprite.org/faq/), [GitHub issue #1666, "Relicense Aseprite back under GPL"](https://github.com/aseprite/aseprite/issues/1666))
 
-Bottom line: the two GPL playbooks that are actually open to Audiouter are
+Bottom line: the two GPL playbooks that are actually open to Audiout are
 Ardour's (free/honor-system, monetize convenience+goodwill) and Krita's
 (identical builds, paid channel = support + auto-update convenience). Both
 are covered as licensing-model options below.
@@ -112,7 +112,7 @@ migration risk (not a reason to avoid it, but worth knowing going in).
   natively) issues a signed key per purchase; the app verifies the
   signature offline (no server round-trip needed after purchase) before
   unlocking or before dismissing a "please register" nag.
-- **Say this plainly:** because Audiouter is GPL, the verification code
+- **Say this plainly:** because Audiout is GPL, the verification code
   itself ships in the open source. Anyone technical enough can read
   exactly where the check branches and patch a binary to skip it, or
   build their own copy from source with the check ripped out entirely.
@@ -178,7 +178,7 @@ Direct comparables, verified current prices:
 | **Airfoil** (Rogue Amoeba) | One-time, license key | **$35** | $15 upgrade price. Older/simpler product (streaming redirection), around since 2006. ([buy page](https://rogueamoeba.com/airfoil/mac/buy.php)) |
 | **Bartender** | Was one-time ($22, later $20); **shifted toward subscription** after a June 2024 ownership change to Applause Group | **$20 one-time OR $15/year "Bartender Pro"** | The ownership change and subscription push drew visible user trust concerns — relevant cautionary data point on how a pricing-model change reads to an existing paid userbase. ([macbartender.com](https://www.macbartender.com/pro/)) |
 | **CleanShot X** | One-time + optional paid updates (Krita/Ardour-adjacent hybrid) | **$29 one-time**, then **$19/year optional** to keep receiving updates (app keeps working forever either way) | This is effectively option (c) above, already proven in the wild at this exact price band. Separate $8/user/month tier exists only for a cloud/team add-on, not the core app. ([cleanshot.com/pricing](https://cleanshot.com/pricing)) |
-| **Ice** | Free, open source | **$0** | Direct free/OSS competitive pressure exists in the *menu-bar management* category generally, but Ice is a Bartender-class menu-bar-hiding tool, not an AirPlay/multi-room audio router — Audiouter doesn't have a free, feature-equivalent OSS competitor in its own category today. |
+| **Ice** | Free, open source | **$0** | Direct free/OSS competitive pressure exists in the *menu-bar management* category generally, but Ice is a Bartender-class menu-bar-hiding tool, not an AirPlay/multi-room audio router — Audiout doesn't have a free, feature-equivalent OSS competitor in its own category today. |
 
 **What the market bears for this category:** paid Mac audio/menu-bar
 utilities from a credible small studio cluster tightly around **$20-$49
@@ -206,7 +206,7 @@ Not viable, for three independent reasons:
    negotiated arrangement that doesn't generalize to a new small project.
    ([FSF: "More about the App Store GPL Enforcement"](https://www.fsf.org/blogs/licensing/more-about-the-app-store-gpl-enforcement))
 2. **Sandboxing/entitlements friction.** The App Store requires the App
-   Sandbox. Audiouter's core functionality depends on Core Audio process
+   Sandbox. Audiout's core functionality depends on Core Audio process
    taps and broad TCC permissions (Local Network, Accessibility, audio
    capture) that sit exactly in the category Apple has historically
    restricted or scrutinized hardest for sandboxed apps — this is a
@@ -239,7 +239,7 @@ priced at $39-$49.**
   signing server because Paddle Billing dropped Classic's native key
   support). $39-$49 sits right at the proven market anchor set by
   SoundSource ($49) and above Airfoil ($35), which is justified because
-  Audiouter's actual AirPlay-2 multi-room + per-app routing is a harder,
+  Audiout's actual AirPlay-2 multi-room + per-app routing is a harder,
   more differentiated feature set than either of those apps offers.
 - **Downside — the number that most drove this pick down to a caveat
   rather than a blocker:** Lemon Squeezy's fee is **5% + $0.50 per

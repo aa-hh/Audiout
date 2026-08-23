@@ -12,7 +12,7 @@ shipped download is video-codec code an audio-only app never calls.
 
 ## 1. What ffmpeg is actually used for (traced, not assumed)
 
-Audiouter captures **already-decoded PCM** system audio via Core Audio process
+Audiout captures **already-decoded PCM** system audio via Core Audio process
 taps. It never decodes video or any media file — the source app already did
 that. ffmpeg is used for exactly one thing: **encoding that PCM into Apple
 Lossless (ALAC)** for AirPlay.
@@ -47,7 +47,7 @@ straight out of Homebrew's `ffmpeg` formula. That formula is a **full** build:
 its `libavcodec.dylib` (9.8 MB) hard-links (`otool -L`) libx264, libx265,
 libvpx, dav1d, SvtAv1Enc, lame, opus, and OpenSSL (libcrypto/libssl, for TLS).
 `scripts/bundle-dylibs.sh` walks that whole `otool -L` graph for a
-self-contained release (`AUDIOUTER_BUNDLE_DYLIBS=1`) and ships all of it.
+self-contained release (`AUDIOUT_BUNDLE_DYLIBS=1`) and ships all of it.
 
 Measured transitive closure that exists **only** because of the fat ffmpeg
 (everything reachable from the ffmpeg trio minus the libs the app needs anyway
@@ -118,7 +118,7 @@ shipped here.
 - Fat mode: `Contents/Frameworks/` carries the 30.86 MB ffmpeg+codec closure
   above (12 dylibs) on top of the 6 libs the app needs regardless.
 - Minimal mode: **zero** ffmpeg/video-codec dylibs (verified by `otool -L` on
-  both `engine-probe` and `AudiouterApp` — only libevent/libsodium/libgcrypt/
+  both `engine-probe` and `AudioutApp` — only libevent/libsodium/libgcrypt/
   libgpg-error/libplist remain). The static minimal libs total 1.4 MB on disk
   and only their dead-stripped ALAC/swresample/avutil objects link into the
   binary.
@@ -129,7 +129,7 @@ shipped here.
 
 ## 6. Verification (headless)
 
-- `swift build` in `AirPlayEngine/` **and** `AudiouterCore/`: green in **both**
+- `swift build` in `AirPlayEngine/` **and** `AudioutCore/`: green in **both**
   minimal (vendor present) and fallback (vendor absent) modes.
 - `swift test` in `AirPlayEngine/`: unchanged from baseline — 137/138, the one
   failure being `PTPHelperIPCTests` "Error creating shared memory", a
@@ -164,7 +164,7 @@ shipped here.
 The win only lands in a bundled release if the minimal ffmpeg exists at
 `swift build` time. `scripts/make-app.sh` / `scripts/bundle-dylibs.sh` (owned by
 another agent) should run `scripts/build-min-ffmpeg.sh` **before** the
-`swift build` step of an `AUDIOUTER_BUNDLE_DYLIBS=1` release, e.g. near the top
+`swift build` step of an `AUDIOUT_BUNDLE_DYLIBS=1` release, e.g. near the top
 of the release path:
 
 ```sh

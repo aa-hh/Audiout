@@ -9,7 +9,7 @@ Status: **APPROVED, not yet executed** · Branch: `claude/firefox-audio-routing-
 - Secondary: no handling for the case where the "current"/main output device is **Bluetooth** headphones.
 
 ## Root cause (grounded in code)
-1. **The leak.** App resolves an app to a *single* PID — the main application process (`AudiouterCore/Sources/AudiouterApp/AppDelegate.swift:42-44`, via `NSRunningApplication…first?.processIdentifier`). Multi-process browsers (Firefox, Chrome) emit audio from a **child** process (media/RDD/utility) with a different PID. So:
+1. **The leak.** App resolves an app to a *single* PID — the main application process (`AudioutCore/Sources/AudioutApp/AppDelegate.swift:42-44`, via `NSRunningApplication…first?.processIdentifier`). Multi-process browsers (Firefox, Chrome) emit audio from a **child** process (media/RDD/utility) with a different PID. So:
    - the whole-system tap's exclusion (`NativeCaptureCoordinator.swift:314-329,347-356,873-882`) misses Firefox's real audio process → Firefox leaks into "Mixer"/Main Out;
    - the per-app capture (`PerAppCaptureCoordinator.swift:735-801`) taps the silent main process → the redirect target hears nothing.
 2. **Bluetooth gap.** `.currentDevice` redirect is *labeled* from the real default output (`kAudioHardwarePropertyDefaultOutputDevice`, house rule) but `LocalPlaybackEngine` hard-pins the **built-in speakers** (`LocalPlaybackEngine.swift:103-116,631-648`). A Bluetooth/AirPods/USB current device plays out the wrong hardware.
@@ -53,4 +53,4 @@ Watched **agents** (not a workflow) — judgment-heavy, correctness/privacy-sens
 - **No merge without Alec's explicit go-ahead** (standing rule). Docs/AGENTS.md land in the worktree as a merge, never ahead of code on main.
 
 ## Key files
-`AudiouterApp/AppDelegate.swift` · `AudiouterCore/PerAppCaptureCoordinator.swift` · `AudiouterCore/NativeCaptureCoordinator.swift` · `AudiouterCore/NativeBackend.swift` · `AudiouterCore/LocalPlaybackEngine.swift` · `AudiouterCore/AppRouteMixer.swift` · `AudiouterPopoverUI/PopoverController.swift`
+`AudioutApp/AppDelegate.swift` · `AudioutCore/PerAppCaptureCoordinator.swift` · `AudioutCore/NativeCaptureCoordinator.swift` · `AudioutCore/NativeBackend.swift` · `AudioutCore/LocalPlaybackEngine.swift` · `AudioutCore/AppRouteMixer.swift` · `AudioutPopoverUI/PopoverController.swift`

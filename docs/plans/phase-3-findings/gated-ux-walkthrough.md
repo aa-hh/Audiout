@@ -2,7 +2,7 @@
 
 **Method:** Alec drove a genuine first-run session (user prefs/Application
 Support backed up and cleared to force true first-launch state — see backup
-path note at end) against a freshly built mock-backend `Audiouter.app`.
+path note at end) against a freshly built mock-backend `Audiout.app`.
 Session ran as free-form narrated reactions rather than strictly walking the
 prepared checklist top-to-bottom — this surfaced a large amount of net-new
 material the checklist didn't anticipate, at the cost of not yet exercising
@@ -87,10 +87,10 @@ session is complete.
   rather than fixing each symptom in isolation.
 - **G1-N7 — Switching outputs via macOS's own Sound menu is untested and
   has no cross-surface indication.** If a user picks an AirPlay device
-  directly from the system output picker (bypassing Audiouter) that
-  Audiouter already has active, behavior is unknown/untested. Alec wants
+  directly from the system output picker (bypassing Audiout) that
+  Audiout already has active, behavior is unknown/untested. Alec wants
   the system's own output picker to show that a device is "in use by
-  Audiouter" so switching away from there doesn't silently break routing.
+  Audiout" so switching away from there doesn't silently break routing.
   Needs both a live behavior test (candidate for G2) and a design answer.
 
 ### Major
@@ -323,7 +323,7 @@ session is complete.
   - **Confirmed separately, real bug in its own right:** the "OUTPUT
     GROUPS" and "DESTINATION" header rows in this dropdown are meant to be
     inert section labels (`NSMenuItem.isEnabled = false` in
-    `MainOutRowView.apply`, `AudiouterPopoverUI/MainOutRowView.swift`) but
+    `MainOutRowView.apply`, `AudioutPopoverUI/MainOutRowView.swift`) but
     visibly highlight and are clickable in the real running app (Alec
     screenshot, confirmed live). Because `Option.init`'s `target` parameter
     defaults to `.selectedDevices` when omitted (`MainOutRowView.swift`
@@ -417,6 +417,6 @@ session.
 
 User preferences and Application Support state were backed up before
 clearing to force a true first-run (see
-`~/Library/Application Support/Audiouter.g1-backup-<timestamp>/` — restore
+`~/Library/Application Support/Audiout.g1-backup-<timestamp>/` — restore
 after the full session concludes, do not leave the user's real groups/
 settings cleared).

@@ -18,10 +18,10 @@ Worktree: `.claude/worktrees/rail-animation-bugs-89dd1a`, branch
 are real, already-tested fixes from earlier in this session, NOT part of the
 refactor below, and should NOT be reverted:
 
-- `AudiouterCore/Sources/AudiouterSharedUI/BusRailOverlayView.swift`
-- `AudiouterCore/Sources/AudiouterPopoverUI/PopoverPanelViewController.swift`
-- `AudiouterCore/Tests/AudiouterCoreTests/BusRailCollapseResolveTests.swift`
-- `AudiouterCore/Tests/AudiouterCoreTests/RailConnectPulseTests.swift`
+- `AudioutCore/Sources/AudioutSharedUI/BusRailOverlayView.swift`
+- `AudioutCore/Sources/AudioutPopoverUI/PopoverPanelViewController.swift`
+- `AudioutCore/Tests/AudioutCoreTests/BusRailCollapseResolveTests.swift`
+- `AudioutCore/Tests/AudioutCoreTests/RailConnectPulseTests.swift`
 
 Confirmed clean baseline just now:
 ```
@@ -52,7 +52,7 @@ Three real bugs found via live testing on real hardware, fixed and verified
    skipped, not restarted (`guard pulseLayer == nil`).
 
 These three fixes are good and live-verified by Alec on real hardware (test
-builds "Audiouter Rail Fix v1/v2/v3"). **Do not touch or revert them** while
+builds "Audiout Rail Fix v1/v2/v3"). **Do not touch or revert them** while
 doing the refactor below — the refactor builds ON TOP of this state.
 
 ## Why we're refactoring instead of patching further

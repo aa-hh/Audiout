@@ -20,10 +20,10 @@ effort on a surface that's about to change out from under it.
   content, not just by branch ancestry — several of these branches predate one
   or two renames, so a literal merge would fail even where the *feature* is
   long since on `main`).
-- Read the root `AGENTS.md`, `AudiouterCore/AGENTS.md` and
-  `AudiouterCore/Sources/*/AGENTS.md` first, per the coordinator's instruction,
+- Read the root `AGENTS.md`, `AudioutCore/AGENTS.md` and
+  `AudioutCore/Sources/*/AGENTS.md` first, per the coordinator's instruction,
   before touching source — this surfaced the stale `speaker-input-responsiveness`
-  reference below directly (root cause: `AudiouterCore/AGENTS.md`'s
+  reference below directly (root cause: `AudioutCore/AGENTS.md`'s
   `RemoteControlPriming` row cites that branch as "not yet merged," so it was
   checked first rather than trusted).
 - All commands were read-only (`log`/`diff`/`show`/`branch`/`grep`/`merge-base`/
@@ -39,7 +39,7 @@ effort on a surface that's about to change out from under it.
 | `claude/focused-nightingale-42a9fd` | 4 | 3707 files, +130093/−54 | "Playback meters" — VU meter UI + real per-app/per-device/main-out level sources. Huge diff is an artifact, not real scope. | **DROP** — see Trap 1 below: already fully on `main`. |
 | `claude/light-dark-appearance-icon` | 2 | 3 files, +123/−3 | Adds a **middle fallback tier** to `make-app.sh`'s icon build: a classic light/dark `appiconset` (via `actool`, works on any Xcode ≥16) between the new Liquid Glass `.icon` path (Xcode 26+ only) and the plain single-image `.icns` last resort. Also fixes a real bug: the first attempt at this claimed to work "on any Xcode" but actually produced a silently non-functional (identical light/dark) icon below Xcode 16 — second commit adds a functional post-build check (render both appearances, hash-compare) instead of trusting `actool`'s exit code. | **MERGE-BEFORE-POLISH** (or cherry-pick both commits: `d75b351`, `ad167d5`). Upside: closes a real gap — `main`'s icon pipeline today only has "Liquid Glass" and "flat `.icns`," so any build machine on Xcode 16–25 currently ships a non-appearance-aware icon; this is the app icon on a paid release, worth getting right. Downside: touches the same `scripts/make-app.sh` and icon assets that icon/visual polish tasks will also touch — land it first so nobody's polish pass conflicts with or gets silently overwritten by this fallback-tier logic. |
 | `claude/serene-elion-24763c` | 1 | 1 file, +1/−1 | Changes the popover header icon buttons' `bezelStyle` from `.accessoryBar` to `.smallSquare`. | **DROP.** A *later* commit already on `main` (`91cc028`, "Header buttons: borderless glyph style instead of solid-outline bezel") deliberately went the other way — explicitly moved *away* from `.smallSquare` ("a boxed, always-visible outline") *to* `.accessoryBar`, to match the borderless toolbar-glyph style used elsewhere in the popover. Applying this branch would silently undo a considered, already-shipped design decision. |
-| `claude/device-audio-playback-connect-a3389b` | 1 | 3 files, +509/−6 | "Seed device volume from system output on connect" — fixes the −30 dB silent-connect bug (new AirPlay connections streamed inaudibly until the user touched the slider). | **DROP.** Byte-for-byte the same fix already shipped on `main`: current `AudiouterCore/AGENTS.md` documents `connectVolumeSeed`, the `bufferReAdding` gate, and the `volumeInFlight`/`volumePending` serialization in the exact same language as this commit's own message. This branch predates even the `AirPlayControllerCore`→`Audiouted` rename (its paths are still `AirPlayControllerCore/`) — a historical duplicate, not new work. |
+| `claude/device-audio-playback-connect-a3389b` | 1 | 3 files, +509/−6 | "Seed device volume from system output on connect" — fixes the −30 dB silent-connect bug (new AirPlay connections streamed inaudibly until the user touched the slider). | **DROP.** Byte-for-byte the same fix already shipped on `main`: current `AudioutCore/AGENTS.md` documents `connectVolumeSeed`, the `bufferReAdding` gate, and the `volumeInFlight`/`volumePending` serialization in the exact same language as this commit's own message. This branch predates even the `AirPlayControllerCore`→`Audiouted` rename (its paths are still `AirPlayControllerCore/`) — a historical duplicate, not new work. |
 | `claude/brave-matsumoto-85c3aa` | 1 | 2 files, +17/−0 | Guards `CaptureCoordinator.spawnCapture()` against a stale, detached-Task respawn resurrecting a pipeline that has already reached a terminal `.failed`/`.stopping` state — fixes a real, reproducible test flake under CPU load. Small, self-contained, includes a strengthened test. | **PARK** (defer past release). Upside: cheap, well-tested, real bug fix. Downside: the file it touches, `CaptureCoordinator.swift`, backs `OwnToneBackend` — the app's own docs mark that backend "superseded" by the native backend that actually ships (`AIRPLAY_BACKEND=native`). Confirmed: `main`'s current `CaptureCoordinator.spawnCapture()` still lacks this guard, so the bug is real and live in-tree, but it's in a code path users of the shipping build don't exercise. Not worth a release-blocking merge; worth pulling in whenever that legacy backend is next touched (or removed as dead weight). |
 | `claude/angry-bartik-f7c42f` | 1 | 4 files, +115/−0 | Adds a warn-only pre-commit script (`.githooks/agents-md-check.sh`, POSIX sh) that flags staged code changes whose owning `AGENTS.md` wasn't also staged, plus a matching Claude-Code `PreToolUse` hook and an `AGENTS.md` policy note. | **DROP.** `main` already has a materially stronger version of the same idea, built later and differently: `.githooks/pre-commit` today runs a **blocking** Guard 1 (refuses a bare `git commit` on `main`) plus a Python **Guard 2** (`.githooks/agents-md-symbol-check.py`) that verifies every symbol an `AGENTS.md` *names* actually exists in that commit's source — a stronger signal than "was the file staged." This branch's mechanism is superseded, not complementary. |
 
@@ -64,7 +64,7 @@ Evidence:
   `.dSYM` bundles, `.swiftdeps`, link databases — build output, not source).
   The branch's tip tree also still contains a stale `AirPlayControllerCore/`
   directory alongside `AudioutedCore/` (one rename behind current
-  `AudiouterCore/`), confirming it's an old, never-cleaned-up branch.
+  `AudioutCore/`), confirming it's an old, never-cleaned-up branch.
 - `main`'s own history has `1e59770` — "Merge claude/focused-nightingale-42a9fd:
   real playback meters (per-app/per-device/main-out)" — whose own message says
   it's "Content-merge of the playback-meter Stage 2 work... into the
@@ -76,10 +76,10 @@ Evidence:
   why `git rev-list` still shows the branch "ahead" — the commits themselves
   never became ancestors of `main` even though their content did.
 - Confirmed independently on the code, not just the merge commit's claim:
-  `main` has `AudiouterCore/Sources/AudiouterSharedUI/LevelMeterView.swift`,
+  `main` has `AudioutCore/Sources/AudioutSharedUI/LevelMeterView.swift`,
   `LocalPlaybackEngine.onAppLevel`, and `docs/PROGRESS.md` documents "Playback
   meters — real per-app/per-device/main-out sources" as five completed tasks
-  (T1–T4b, "verify pass" on each). `AudiouterCore/AGENTS.md`'s own Rules
+  (T1–T4b, "verify pass" on each). `AudioutCore/AGENTS.md`'s own Rules
   section describes the exact three-source metering model (per-app
   `.appLevel`, per-device MAX-of-sources, Main Out = system mix, excluded apps
   never metered) that this branch was building toward.
@@ -97,9 +97,9 @@ Evidence:
 - `main`'s own history has `560eab4` — "Port onboarding/permission-priming
   flow from claude/onboarding-permission-priming" — whose message explains why
   it's a hand-port rather than a merge: "that branch's double rename history —
-  `AirPlayControllerCore` → `Audiouted` → `Audiouter` — ... made automatic
+  `AirPlayControllerCore` → `Audiouted` → `Audiout` — ... made automatic
   merge machinery unreliable." It lists porting the entire
-  `AudiouterOnboardingUI` module (`OnboardingWindowController`/
+  `AudioutOnboardingUI` module (`OnboardingWindowController`/
   `OnboardingViewController`/`PermissionRowView`/`SystemSettingsOpener`),
   `SetupModel` + all three permission-priming probes (audio tone, local
   network, remote control/Accessibility — i.e. the "third permission row"),
@@ -127,7 +127,7 @@ Evidence:
 
 ### At-risk work found in passing (not one of the two named traps, flagged per the coordinator's "flag stale AGENTS.md claims" instruction)
 
-`AudiouterCore/AGENTS.md`'s `RemoteControlPriming` row says the Accessibility
+`AudioutCore/AGENTS.md`'s `RemoteControlPriming` row says the Accessibility
 permission was "primed AHEAD of the feature that needs it (speaker-side
 transport controls simulating Mac media keys — **not yet merged, see
 `claude/speaker-input-responsiveness-b8123f`**)." That branch reference is
@@ -163,9 +163,9 @@ status` in their worktrees) to scope what polish should avoid/anticipate.
 
 ### (a) AP1/RAOP sender port — worktree `airplay-one-support-2abab0`
 
-- **Touches:** `AudiouterCore/Sources/AudiouterCore/NativeDiscovery.swift`,
-  `AudiouterCore/Sources/AudiouterPopoverUI/PopoverController.swift`,
-  `AudiouterCore/Sources/AudiouterSharedUI/DeviceRowView.swift` (plus a
+- **Touches:** `AudioutCore/Sources/AudioutCore/NativeDiscovery.swift`,
+  `AudioutCore/Sources/AudioutPopoverUI/PopoverController.swift`,
+  `AudioutCore/Sources/AudioutSharedUI/DeviceRowView.swift` (plus a
   deleted test file, `DeviceRowUnsupportedTests.swift` — implying older AirPlay
   1 devices are currently shown as an explicit "unsupported" state in the
   popover, and this workstream removes that restriction), and a new
@@ -189,7 +189,7 @@ status` in their worktrees) to scope what polish should avoid/anticipate.
 ### (b) Privileged PTP helper (`SMAppService` daemon) — worktree `ptp-helper-daemon-833a53`
 
 - **Touches:** `AirPlayEngine/Package.swift`, `AirPlayEngine.swift`, the
-  `ptpd.c` C shim, `AudiouterCore/Sources/AudiouterCore/NativeBackend.swift`,
+  `ptpd.c` C shim, `AudioutCore/Sources/AudioutCore/NativeBackend.swift`,
   and — importantly for release polish — **`scripts/make-app.sh`**, the same
   build script `claude/light-dark-appearance-icon` (above) also modifies. New
   `AirPlayEngine/Sources/ptp-helper/` target plus a `scripts/ptp-helper.plist`.

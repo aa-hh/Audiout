@@ -1,12 +1,12 @@
 #!/bin/bash
-# make-app.sh — wrap the AudiouterApp SwiftPM binary into a real,
+# make-app.sh — wrap the AudioutApp SwiftPM binary into a real,
 # double-clickable macOS .app bundle and codesign it (Developer ID when the
 # keychain has one, else ad-hoc).
 #
 # SPDX-License-Identifier: GPL-2.0-or-later
 #
 # RESOLVED Q1: the app ships as a SwiftPM executable + this bundle script (no
-# Xcode project). This produces "Audiouter.app" with an Info.plist
+# Xcode project). This produces "Audiout.app" with an Info.plist
 # (LSUIElement=true → menu-bar-only, no Dock icon), a stable bundle id, and a
 # code signature (Developer ID when the keychain has one, else ad-hoc) so
 # Gatekeeper lets it launch.
@@ -20,10 +20,10 @@ set -euo pipefail
 # APP_NAME / BUNDLE_ID honor env overrides so a side-by-side dev build can carry
 # a distinct identity (its own menu-bar app + LaunchServices registration) and
 # coexist with an installed copy that shares the default bundle id. Defaults are
-# unchanged, so a normal `./scripts/make-app.sh` produces the usual Audiouter.app.
-APP_NAME="${APP_NAME:-Audiouter}"
-EXECUTABLE="AudiouterApp"
-BUNDLE_ID="${BUNDLE_ID:-com.audiouter.Audiouter}"
+# unchanged, so a normal `./scripts/make-app.sh` produces the usual Audiout.app.
+APP_NAME="${APP_NAME:-Audiout}"
+EXECUTABLE="AudioutApp"
+BUNDLE_ID="${BUNDLE_ID:-com.audiout.Audiout}"
 # The oldest macOS the app supports. 14.2, NOT 13.x: the native backend's
 # whole-system audio capture uses Core Audio process taps
 # (AudioHardwareCreateProcessTap / CATapDescription), a macOS 14.2 API — on 13.x
@@ -42,16 +42,16 @@ BUILD_NUMBER="${BUILD_NUMBER:-1}"
 # user's mental model ("send my audio to speakers"), not the OS's ("record"),
 # and states the limit explicitly — this is the only text they get before
 # deciding, so it has to do the whole job.
-AUDIO_CAPTURE_USAGE="Audiouter needs to capture your Mac's audio so it can send it to the AirPlay speakers you choose. Audio goes only to those speakers — it is never recorded, saved, or sent anywhere else."
+AUDIO_CAPTURE_USAGE="Audiout needs to capture your Mac's audio so it can send it to the AirPlay speakers you choose. Audio goes only to those speakers — it is never recorded, saved, or sent anywhere else."
 # Shown INSIDE the macOS Local Network permission dialog. The app browses Bonjour
 # (_airplay._tcp / _raop._tcp) to find AirPlay speakers; say that plainly.
-LOCAL_NETWORK_USAGE="Audiouter looks for AirPlay speakers on your local network so you can play your Mac's audio to them. It only finds speakers — it doesn't read or collect anything else about your network."
+LOCAL_NETWORK_USAGE="Audiout looks for AirPlay speakers on your local network so you can play your Mac's audio to them. It only finds speakers — it doesn't read or collect anything else about your network."
 # Shown INSIDE the macOS Bluetooth permission dialog (BT-CONNECT,
 # PLAN-UNIVERSAL-SYNC §B/§K). Same mental-model rule as the two above.
-BLUETOOTH_USAGE="Audiouter connects to Bluetooth speakers you've already paired so it can play your Mac's audio on them. It only reaches speakers you choose — it never scans for or reads anything else."
+BLUETOOTH_USAGE="Audiout connects to Bluetooth speakers you've already paired so it can play your Mac's audio on them. It only reaches speakers you choose — it never scans for or reads anything else."
 
 # The privileged root PTP helper (T2/T5, ptp-helper-design.md §2). Lives in
-# the AirPlayEngine package, not AudiouterCore — a separate `swift build`
+# the AirPlayEngine package, not AudioutCore — a separate `swift build`
 # invocation below. Label MUST equal the LaunchDaemons plist's own filename
 # (SMAppService.daemon(plistName:) resolves it by exact name match).
 #
@@ -59,7 +59,7 @@ BLUETOOTH_USAGE="Audiouter connects to Bluetooth speakers you've already paired 
 # plistName mirrors this exact derivation (Bundle.main.bundleIdentifier +
 # ".ptphelper.plist"), so a side-by-side dev build under a distinct
 # BUNDLE_ID registers its OWN daemon identity instead of colliding with
-# another Audiouter copy that already claimed "com.audiouter.Audiouter.ptphelper"
+# another Audiout copy that already claimed "com.audiout.Audiout.ptphelper"
 # (2026-07-24 live-testing bug: the loser's SMAppService.register() silently
 # no-ops instead of throwing, so the daemon never shows up in Login Items at
 # all for the losing copy). Default BUNDLE_ID unset ⇒ identical to before.
@@ -71,7 +71,7 @@ HELPER_LABEL="${BUNDLE_ID}.ptphelper"
 # per-process staleness `TCCBucketDiagnostic.swift`'s header comment documents
 # — `TCCProbeRunner` spawns this fresh, on demand, to get a live read with no
 # app relaunch needed. Unlike ptp-helper above, it lives in the SAME package
-# (AudiouterCore) as the app executable, so it's built via the SAME `swift
+# (AudioutCore) as the app executable, so it's built via the SAME `swift
 # build` invocation/bin dir below rather than a second package build.
 TCC_PROBE_EXECUTABLE="tcc-probe"
 
@@ -132,7 +132,7 @@ if [ "$CODESIGN_IDENTITY" = "-" ]; then TIMESTAMP_FLAG=""; else TIMESTAMP_FLAG="
 # Resolve the repo root from this script's location so it runs from anywhere.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-PACKAGE_DIR="$REPO_ROOT/AudiouterCore"
+PACKAGE_DIR="$REPO_ROOT/AudioutCore"
 ENGINE_PACKAGE_DIR="$REPO_ROOT/AirPlayEngine"
 OUTPUT_DIR="${1:-$REPO_ROOT/build}"
 APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
@@ -148,10 +148,10 @@ HELPER_INFO_PLIST="$SCRIPT_DIR/ptp-helper-info.plist"
 # Flattened 1024 "Default" (light) render exported from Icon Composer. See the
 # app-icon step below for why we bake a classic .icns from this instead of
 # compiling the .icon bundle directly.
-ICON_SOURCE="$SCRIPT_DIR/Audiouter-MacOS-Default-1024x1024@1x.png"
+ICON_SOURCE="$SCRIPT_DIR/Audiout-MacOS-Default-1024x1024@1x.png"
 # Flattened 1024 "Dark" render from Icon Composer, paired with ICON_SOURCE to
 # build a light/dark appearance-aware icon (see the app-icon step below).
-ICON_SOURCE_DARK="$SCRIPT_DIR/Audiouter-MacOS-Dark-1024x1024@1x.png"
+ICON_SOURCE_DARK="$SCRIPT_DIR/Audiout-MacOS-Dark-1024x1024@1x.png"
 
 # --- Build (release) ------------------------------------------------------
 # For a self-contained release bundle, build the minimal audio-only ffmpeg FIRST
@@ -161,7 +161,7 @@ ICON_SOURCE_DARK="$SCRIPT_DIR/Audiouter-MacOS-Dark-1024x1024@1x.png"
 # AirPlayEngine/vendor/ffmpeg-min/ and prefers it; absent, it falls back to
 # Homebrew's fat ffmpeg unchanged. Gated to the bundling path only, since the trim
 # is invisible when dylibs aren't bundled. See AirPlayEngine/docs/ffmpeg-minimal-build.md.
-if [ "${AUDIOUTER_BUNDLE_DYLIBS:-0}" = "1" ]; then
+if [ "${AUDIOUT_BUNDLE_DYLIBS:-0}" = "1" ]; then
   echo "==> Building minimal audio-only ffmpeg for the release bundle (first run compiles from source; then cached)"
   "$SCRIPT_DIR/build-min-ffmpeg.sh"
 fi
@@ -188,15 +188,15 @@ fi
 #     local build.
 #   - The .app has to exist on THIS machine to be launched, TCC-granted and
 #     live-tested anyway.
-#   - AUDIOUTER_BUNDLE_DYLIBS=1 walks `otool -L` and copies the referenced
+#   - AUDIOUT_BUNDLE_DYLIBS=1 walks `otool -L` and copies the referenced
 #     Homebrew dylibs from the LOCAL /opt/homebrew. A binary linked on the other
 #     Mac records that machine's formula versions, which may not exist here — so
 #     the bundling path opts out of the remote entirely (the condition below).
 REMOTE_BUILT=0
 # shellcheck source=lib/remote.sh
 . "$SCRIPT_DIR/lib/remote.sh"
-if [ "${AUDIOUTER_BUILD_LOCAL:-0}" != "1" ] &&
-   [ "${AUDIOUTER_BUNDLE_DYLIBS:-0}" != "1" ] &&
+if [ "${AUDIOUT_BUILD_LOCAL:-0}" != "1" ] &&
+   [ "${AUDIOUT_BUNDLE_DYLIBS:-0}" != "1" ] &&
    remote_wins; then
   echo "==> Compiling on remote $remote_host (assembly + signing stay here)"
   # Built from the repo root with --package-path, mirroring the local commands
@@ -206,9 +206,9 @@ if [ "${AUDIOUTER_BUILD_LOCAL:-0}" != "1" ] &&
   # \$ escapes keep PWD/BIN/HBIN for the remote shell; $EXECUTABLE and friends
   # expand here.
   REMOTE_CMD="R=\$PWD; \
-swift build --build-system native --package-path AudiouterCore -c release --product $EXECUTABLE && \
-swift build --build-system native --package-path AudiouterCore -c release --product $TCC_PROBE_EXECUTABLE && \
-BIN=\$(swift build --build-system native --package-path AudiouterCore -c release --show-bin-path) && \
+swift build --build-system native --package-path AudioutCore -c release --product $EXECUTABLE && \
+swift build --build-system native --package-path AudioutCore -c release --product $TCC_PROBE_EXECUTABLE && \
+BIN=\$(swift build --build-system native --package-path AudioutCore -c release --show-bin-path) && \
 swift build --build-system native --package-path AirPlayEngine -c release --product $HELPER_EXECUTABLE \
   -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker \"\$R/scripts/ptp-helper-info.plist\" && \
 HBIN=\$(swift build --build-system native --package-path AirPlayEngine -c release --show-bin-path) && \
@@ -334,7 +334,7 @@ sed "s/__BUNDLE_ID__/$BUNDLE_ID/g" "$HELPER_PLIST_SOURCE" > "$LAUNCH_DAEMONS_DIR
 # otool -L, not a hardcoded list) into Contents/Frameworks and repoints the
 # load commands at @rpath, making the bundle self-contained.
 #
-# Gated behind AUDIOUTER_BUNDLE_DYLIBS=1 (default: skip) because it's a
+# Gated behind AUDIOUT_BUNDLE_DYLIBS=1 (default: skip) because it's a
 # non-trivial extra step (walks + copies + relinks a whole dependency tree)
 # that plain local dev builds don't need — Homebrew is already on the dev
 # machine, so the fast unbundled build launches fine there. Set this env var
@@ -349,20 +349,20 @@ sed "s/__BUNDLE_ID__/$BUNDLE_ID/g" "$HELPER_PLIST_SOURCE" > "$LAUNCH_DAEMONS_DIR
 # It temporarily renames the Homebrew keg dirs this bundle used and launches the
 # app with them gone. That's intentionally left out of the build because it
 # moves real directories on the developer's disk (restored via a trap) and is
-# slow/invasive — you don't want it firing on every AUDIOUTER_BUNDLE_DYLIBS=1
+# slow/invasive — you don't want it firing on every AUDIOUT_BUNDLE_DYLIBS=1
 # build. Invoke it by hand before shipping a distribution build.
-if [ "${AUDIOUTER_BUNDLE_DYLIBS:-0}" = "1" ]; then
-  echo "==> Bundling Homebrew dylibs (AUDIOUTER_BUNDLE_DYLIBS=1)"
+if [ "${AUDIOUT_BUNDLE_DYLIBS:-0}" = "1" ]; then
+  echo "==> Bundling Homebrew dylibs (AUDIOUT_BUNDLE_DYLIBS=1)"
   "$SCRIPT_DIR/bundle-dylibs.sh" "$APP_BUNDLE"
   echo "    (to PROVE this launches with no Homebrew present, run: scripts/verify-standalone-app.sh \"$APP_BUNDLE\")"
 else
-  echo "==> Skipping dylib bundling (set AUDIOUTER_BUNDLE_DYLIBS=1 to bundle for a Homebrew-less target Mac)"
+  echo "==> Skipping dylib bundling (set AUDIOUT_BUNDLE_DYLIBS=1 to bundle for a Homebrew-less target Mac)"
 fi
 
 # --- Sparkle.framework (unconditional) --------------------------------------
 # The executable links Sparkle in EVERY build (Package.swift scopes it to the
-# AudiouterApp target), so the framework has to ship even when
-# AUDIOUTER_BUNDLE_DYLIBS is unset — an unbundled build would otherwise not
+# AudioutApp target), so the framework has to ship even when
+# AUDIOUT_BUNDLE_DYLIBS is unset — an unbundled build would otherwise not
 # launch at all. That is also why the @rpath is added here rather than left to
 # bundle-dylibs.sh, which only runs on the bundling path.
 #
@@ -389,7 +389,7 @@ if [ -z "$SPARKLE_FRAMEWORK" ]; then
   SPARKLE_FRAMEWORK="$(find_sparkle)"
 fi
 [ -n "$SPARKLE_FRAMEWORK" ] && [ -d "$SPARKLE_FRAMEWORK" ] || {
-  echo "ERROR: Sparkle.framework still not found under $PACKAGE_DIR/.build after 'swift package resolve' — run 'AUDIOUTER_BUILD_LOCAL=1 bash scripts/build.sh' to force a local build that populates the artifacts" >&2
+  echo "ERROR: Sparkle.framework still not found under $PACKAGE_DIR/.build after 'swift package resolve' — run 'AUDIOUT_BUILD_LOCAL=1 bash scripts/build.sh' to force a local build that populates the artifacts" >&2
   exit 1
 }
 FRAMEWORKS_DIR="$CONTENTS/Frameworks"
@@ -407,7 +407,7 @@ if ! otool -l "$MACOS_DIR/$EXECUTABLE" | grep -A2 LC_RPATH | grep -q '@executabl
 fi
 
 # --- App icon --------------------------------------------------------------
-# The official icon is authored in Icon Composer (scripts/Audiouter.icon) as a
+# The official icon is authored in Icon Composer (scripts/Audiout.icon) as a
 # Liquid Glass icon. Compiling that bundle into the real Liquid Glass asset
 # (Assets.car) requires Xcode 26's actool, and Liquid Glass only renders on
 # macOS 26 anyway. IMPORTANT: the .icon must be authored in an Icon Composer
@@ -428,7 +428,7 @@ fi
 # Store/distribution listing use.
 mkdir -p "$RESOURCES_DIR"
 ICON_MODE="icns"
-ICON_BUNDLE_SRC="$SCRIPT_DIR/Audiouter.icon"
+ICON_BUNDLE_SRC="$SCRIPT_DIR/Audiout.icon"
 XCODE_MAJOR="$(xcodebuild -version 2>/dev/null | head -1 | grep -oE '[0-9]+' | head -1 || true)"
 if [ -n "$XCODE_MAJOR" ] && [ "$XCODE_MAJOR" -ge 26 ] && [ -d "$ICON_BUNDLE_SRC" ]; then
   echo "==> Xcode $XCODE_MAJOR detected — attempting Liquid Glass icon compile via actool"
@@ -633,20 +633,20 @@ plutil -extract NSAudioCaptureUsageDescription raw -o - "$PLIST" >/dev/null || {
 #   NSBonjourServices — the service types we're allowed to browse; without it the
 #     browse is blocked even with the usage string. These MUST match every type
 #     the app browses: _airplay._tcp for AirPlay 2 and _raop._tcp for AP1
-#     (NativeDiscovery), plus _audiouter-pf._tcp — the service setup
+#     (NativeDiscovery), plus _audiout-pf._tcp — the service setup
 #     publishes and then browses for on this same Mac to PROVE the permission
 #     was granted (LocalNetworkPrimer's self-discovery). Leave that last one out
 #     and the self-browse is silently blocked, so setup can never confirm a
 #     grant on a network with no speaker switched on. That name is SHORT on
 #     purpose: Bonjour caps a service name at 15 characters, and the longer
-#     _audiouter-preflight._tcp was rejected outright (BadParam), which is
+#     _audiout-preflight._tcp was rejected outright (BadParam), which is
 #     exactly as invisible as leaving it out. Keep it in step with
 #     LocalNetworkPrimer.selfServiceType.
 plutil -insert NSLocalNetworkUsageDescription -string "$LOCAL_NETWORK_USAGE" "$PLIST"
 plutil -insert NSBonjourServices -array "$PLIST"
 plutil -insert NSBonjourServices.0 -string "_airplay._tcp" "$PLIST"
 plutil -insert NSBonjourServices.1 -string "_raop._tcp" "$PLIST"
-plutil -insert NSBonjourServices.2 -string "_audiouter-pf._tcp" "$PLIST"
+plutil -insert NSBonjourServices.2 -string "_audiout-pf._tcp" "$PLIST"
 plutil -extract NSLocalNetworkUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSLocalNetworkUsageDescription missing from Info.plist" >&2; exit 1; }
 plutil -extract NSBonjourServices.0 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices missing from Info.plist" >&2; exit 1; }
 plutil -extract NSBonjourServices.2 raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBonjourServices is missing the setup self-discovery type — setup could not prove a Local Network grant" >&2; exit 1; }
@@ -661,35 +661,35 @@ plutil -insert NSBluetoothAlwaysUsageDescription -string "$BLUETOOTH_USAGE" "$PL
 plutil -extract NSBluetoothAlwaysUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBluetoothAlwaysUsageDescription missing from Info.plist" >&2; exit 1; }
 
 # --- License server + buy page (release builds only) ------------------------
-# AUDIOUTER_LICENSE_URL is the base URL of the license server (the Worker in
-# ~/Projects/Audiouter License Server). Its presence is the whole switch for the
+# AUDIOUT_LICENSE_URL is the base URL of the license server (the Worker in
+# ~/Projects/Audiout License Server). Its presence is the whole switch for the
 # app's soft license check: with it the app validates the stored key, checks in,
 # and can show the unregistered note; without it — a build run from source — it
-# does none of those. AUDIOUTER_BUY_URL is where "Buy Audiouter…" sends the
+# does none of those. AUDIOUT_BUY_URL is where "Buy Audiout…" sends the
 # user; absent, every buy affordance stays hidden.
 #
 # Independent of the Sparkle pair below, EXCEPT that a license server already
 # knows where its own appcast lives, so it supplies the feed URL when one wasn't
 # given explicitly. The SPARKLE_ED_PUBLIC_KEY requirement still applies to that
 # derived feed — an unverified update channel is never worth the convenience.
-if [ -n "${AUDIOUTER_LICENSE_URL:-}" ]; then
-  echo "==> Writing AudiouterLicenseServerURL ($AUDIOUTER_LICENSE_URL)"
-  plutil -insert AudiouterLicenseServerURL -string "$AUDIOUTER_LICENSE_URL" "$PLIST"
-  plutil -extract AudiouterLicenseServerURL raw -o - "$PLIST" >/dev/null || { echo "ERROR: AudiouterLicenseServerURL missing from Info.plist" >&2; exit 1; }
+if [ -n "${AUDIOUT_LICENSE_URL:-}" ]; then
+  echo "==> Writing AudioutLicenseServerURL ($AUDIOUT_LICENSE_URL)"
+  plutil -insert AudioutLicenseServerURL -string "$AUDIOUT_LICENSE_URL" "$PLIST"
+  plutil -extract AudioutLicenseServerURL raw -o - "$PLIST" >/dev/null || { echo "ERROR: AudioutLicenseServerURL missing from Info.plist" >&2; exit 1; }
   if [ -z "${SPARKLE_FEED_URL:-}" ]; then
-    SPARKLE_FEED_URL="$AUDIOUTER_LICENSE_URL/appcast.xml"
+    SPARKLE_FEED_URL="$AUDIOUT_LICENSE_URL/appcast.xml"
     echo "==> Defaulting SPARKLE_FEED_URL to the license server's appcast ($SPARKLE_FEED_URL)"
   fi
 else
-  echo "==> Skipping AudiouterLicenseServerURL (set AUDIOUTER_LICENSE_URL for a build that checks its license)"
+  echo "==> Skipping AudioutLicenseServerURL (set AUDIOUT_LICENSE_URL for a build that checks its license)"
 fi
 
-if [ -n "${AUDIOUTER_BUY_URL:-}" ]; then
-  echo "==> Writing AudiouterBuyURL ($AUDIOUTER_BUY_URL)"
-  plutil -insert AudiouterBuyURL -string "$AUDIOUTER_BUY_URL" "$PLIST"
-  plutil -extract AudiouterBuyURL raw -o - "$PLIST" >/dev/null || { echo "ERROR: AudiouterBuyURL missing from Info.plist" >&2; exit 1; }
+if [ -n "${AUDIOUT_BUY_URL:-}" ]; then
+  echo "==> Writing AudioutBuyURL ($AUDIOUT_BUY_URL)"
+  plutil -insert AudioutBuyURL -string "$AUDIOUT_BUY_URL" "$PLIST"
+  plutil -extract AudioutBuyURL raw -o - "$PLIST" >/dev/null || { echo "ERROR: AudioutBuyURL missing from Info.plist" >&2; exit 1; }
 else
-  echo "==> Skipping AudiouterBuyURL (set AUDIOUTER_BUY_URL to offer a purchase link)"
+  echo "==> Skipping AudioutBuyURL (set AUDIOUT_BUY_URL to offer a purchase link)"
 fi
 
 # --- Sparkle in-app updates (release builds only) ---------------------------
@@ -741,12 +741,12 @@ plutil -extract LSEnvironment.AIRPLAY_BACKEND raw -o - "$PLIST" >/dev/null || { 
 # launched via `open` (not the raw binary) for a correct TCC identity — so these
 # can't be passed on the command line. Only written when set at build time, so a
 # normal release carries none of them.
-#   AUDIOUTER_STATUS_LABEL — tags the menu-bar item so side-by-side dev builds
+#   AUDIOUT_STATUS_LABEL — tags the menu-bar item so side-by-side dev builds
 #     (which share the bundle id, hence collide in LaunchServices) are visually
 #     distinguishable; see the multiple-app-copies-collide hazard.
 #   AIRPLAYENGINE_LOG_FILE / _LEVEL — append engine + DACP diagnostics to a file
 #     an `open`-launched session (stderr/os_log swallowed) can still be read from.
-#   AUDIOUTER_TCC_DIAG — starts `TCCBucketDiagnostic`'s once-per-second raw
+#   AUDIOUT_TCC_DIAG — starts `TCCBucketDiagnostic`'s once-per-second raw
 #     TCC-bucket poll (T1); needed here for the same reason as the others — an
 #     `open`ed bundle never sees the shell's env.
 #   AIRPLAY_AUDIO_DIAG — `AudioDiag`'s coreaudiod-object event log + live-handle
@@ -754,14 +754,14 @@ plutil -extract LSEnvironment.AIRPLAY_BACKEND raw -o - "$PLIST" >/dev/null || { 
 #   AIRPLAY_DEBUG_LATENCY — enables the engine's `WriteLatencyProbe`
 #     (pts-freshness stats on the write path).
 #
-# A dev BUNDLE_ID without AUDIOUTER_STATUS_LABEL gets one defaulted here (owner
+# A dev BUNDLE_ID without AUDIOUT_STATUS_LABEL gets one defaulted here (owner
 # rule, 2026-07-29): an unlabeled dev build is visually indistinguishable from
 # the live menu-bar app. APP_NAME override wins, else the BUNDLE_ID suffix.
-if [ "$BUNDLE_ID" != "com.audiouter.Audiouter" ] && [ -z "${AUDIOUTER_STATUS_LABEL:-}" ]; then
-  if [ "$APP_NAME" != "Audiouter" ]; then AUDIOUTER_STATUS_LABEL="$APP_NAME"; else AUDIOUTER_STATUS_LABEL="${BUNDLE_ID##*.}"; fi
-  echo "==> AUDIOUTER_STATUS_LABEL unset with dev BUNDLE_ID — defaulting to \"$AUDIOUTER_STATUS_LABEL\""
+if [ "$BUNDLE_ID" != "com.audiout.Audiout" ] && [ -z "${AUDIOUT_STATUS_LABEL:-}" ]; then
+  if [ "$APP_NAME" != "Audiout" ]; then AUDIOUT_STATUS_LABEL="$APP_NAME"; else AUDIOUT_STATUS_LABEL="${BUNDLE_ID##*.}"; fi
+  echo "==> AUDIOUT_STATUS_LABEL unset with dev BUNDLE_ID — defaulting to \"$AUDIOUT_STATUS_LABEL\""
 fi
-for diag in AUDIOUTER_STATUS_LABEL AIRPLAYENGINE_LOG_FILE AIRPLAYENGINE_LOG_LEVEL AUDIOUTER_TCC_DIAG \
+for diag in AUDIOUT_STATUS_LABEL AIRPLAYENGINE_LOG_FILE AIRPLAYENGINE_LOG_LEVEL AUDIOUT_TCC_DIAG \
             AIRPLAY_AUDIO_DIAG AIRPLAY_DEBUG_LATENCY; do
   eval "val=\${$diag:-}"
   if [ -n "$val" ]; then
@@ -803,13 +803,13 @@ find "$APP_BUNDLE" \( -name '._*' -o -name '.DS_Store' \) -delete
 # dylib into the process and inherit that grant. The hardened runtime makes dyld
 # ignore DYLD_* env vars, closing that vector — as long as we withhold the
 # allow-dyld-environment-variables entitlement (we do). Library validation is
-# deliberately DISABLED in scripts/Audiouter.entitlements even though bundled
+# deliberately DISABLED in scripts/Audiout.entitlements even though bundled
 # dylibs are re-signed here (inside-out): ad-hoc signatures have no Team ID, so
 # library validation would reject them. Developer ID would allow re-enabling it.
 # The DYLD_INSERT protection does NOT depend on library validation.
 #
 # NOT `--deep`: it is deprecated by Apple and signs nested code with the wrong
-# (inherited) options. When AUDIOUTER_BUNDLE_DYLIBS=1 the bundle now has ~20
+# (inherited) options. When AUDIOUT_BUNDLE_DYLIBS=1 the bundle now has ~20
 # Mach-Os (main executable + every Homebrew dylib bundle-dylibs.sh copied into
 # Contents/Frameworks) — so sign them explicitly INSIDE-OUT before this line,
 # same rule this comment has always stated, now actually exercised.
@@ -895,7 +895,7 @@ codesign --force $TIMESTAMP_FLAG --options runtime --sign "$CODESIGN_IDENTITY" "
 codesign --verify --strict "$MACOS_DIR/$TCC_PROBE_EXECUTABLE"
 
 echo "==> Codesigning app (identity: $CODESIGN_IDENTITY, hardened runtime)"
-ENTITLEMENTS="$SCRIPT_DIR/Audiouter.entitlements"
+ENTITLEMENTS="$SCRIPT_DIR/Audiout.entitlements"
 test -f "$ENTITLEMENTS" || { echo "error: entitlements file not found at $ENTITLEMENTS" >&2; exit 1; }
 codesign --force $TIMESTAMP_FLAG --options runtime --entitlements "$ENTITLEMENTS" --sign "$CODESIGN_IDENTITY" "$APP_BUNDLE"
 codesign --verify --strict --verbose "$APP_BUNDLE"

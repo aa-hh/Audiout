@@ -6,7 +6,7 @@ Investigation: 9 subsystem audits (8 complete + 1 partial with residual scoped a
 
 ## Symptom (user report, 2026-07-23)
 
-- Memory growth observed in **coreaudiod / system side**, NOT (primarily) the Audiouter process.
+- Memory growth observed in **coreaudiod / system side**, NOT (primarily) the Audiout process.
 - Occurred while a per-app redirect was active **and broken** (audio out of BOTH the redirect
   target AND Selected Devices — the known child-process/wrong-PID routing bug).
 - Goal: first external users incoming; every combination of audio selection, device
@@ -91,7 +91,7 @@ pass under `swift test --filter <Suite>`, the COMBINED tree builds + passes
 
 ```sh
 while true; do
-  echo "$(date '+%H:%M:%S') $(ps axo rss=,comm= | grep -E '(coreaudiod|Audiouter)' | grep -v grep | tr '\n' ' | ')"
+  echo "$(date '+%H:%M:%S') $(ps axo rss=,comm= | grep -E '(coreaudiod|Audiout)' | grep -v grep | tr '\n' ' | ')"
   sleep 5
 done | tee ~/Desktop/audio-mem-log.txt
 ```
@@ -101,7 +101,7 @@ done | tee ~/Desktop/audio-mem-log.txt
   wait 30 s — ×10. Note start/end clock times. *Tests: does each cycle permanently step memory up?*
 - **Phase B (5 min):** redirect **Firefox** (known-broken double-audio state), hands off 5 min.
   *Tests: steady climb with zero user action = retry-storm churn (C-B) confirmed.*
-- **Phase C (2 min):** remove redirect, wait 30 s, **quit Audiouter**, watch 2 more min.
+- **Phase C (2 min):** remove redirect, wait 30 s, **quit Audiout**, watch 2 more min.
   *Big coreaudiod drop on quit ⇒ process-held leaked objects (L1/L2/L4 class); little drop ⇒
   churn-internal growth (C-A class). This one number halves the fix-priority debate.*
 - Return `~/Desktop/audio-mem-log.txt` + phase times. (Popover closed during phases reads cleanest.)

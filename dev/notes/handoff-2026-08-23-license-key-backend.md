@@ -20,7 +20,7 @@ Alec then decided:
 2. **Backend = Tier B**: self-owned serverless — Cloudflare Worker + D1
    (SQLite) + R2 (DMG storage). ~$0–5/mo.
 3. **Sharing posture = monitor + manual revoke.** No automatic caps.
-4. **Name/trademark**: Alec is not sold on "Audiouter"; roadmap entry 063
+4. **Name/trademark**: Alec is not sold on "Audiout"; roadmap entry 063
    tracks name decision + trademark registration. Not this workstream's job.
 5. **Download links**: the emailed/thank-you-page link is the durable keyed
    endpoint `/download?key=…` (lives as long as the key is active, dies on
@@ -31,8 +31,8 @@ Alec then decided:
 ## State after the build session (2026-08-23, later)
 
 - Key scheme APPROVED by Alec as recommended; backend home = **separate
-  repo**: `~/Projects/Audiouter License Server` →
-  github.com/aa-hh/audiouter-license-server (private). Its README is the
+  repo**: `~/Projects/Audiout License Server` →
+  github.com/aa-hh/audiout-license-server (private). Its README is the
   endpoint contract + Alec's setup checklist. Built and tested (22 tests in
   workerd). One swap from the plan below: `/download` streams the zip from R2
   through the Worker instead of 302-ing to a presigned URL — same property
@@ -60,7 +60,7 @@ sign-off on that spec before building; the note has the full table
 ## Open item 2 — the build (after scheme is chosen)
 
 Backend (likely its own repo or a new top-level dir — ask Alec; the website
-lives separately at `~/Projects/Audiouter Website` and the buy button is
+lives separately at `~/Projects/Audiout Website` and the buy button is
 already there from the 054 work):
 
 - One CF Worker, endpoints: Paddle webhook, `/download?key=`, appcast route,

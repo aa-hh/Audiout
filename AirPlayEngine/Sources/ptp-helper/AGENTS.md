@@ -18,7 +18,7 @@ dependency here without re-justifying that boundary.
 
 **Keep this file up to date** whenever: `main.c`'s startup sequence changes
 (bind/start/shutdown order), the libevent linking strategy changes, the
-`AUDIOUTER_PTP_*` override contract changes, or the SMAppService
+`AUDIOUT_PTP_*` override contract changes, or the SMAppService
 plist/Info.plist identity scheme (`scripts/ptp-helper.plist`,
 `scripts/ptp-helper-info.plist`) changes.
 
@@ -53,16 +53,16 @@ plist/Info.plist identity scheme (`scripts/ptp-helper.plist`,
   Library Validation constraint below is unaffected. `otool -L` on the built
   helper must keep showing `libSystem.B.dylib` and nothing else; treat any
   growth as a release-blocking regression.
-- **`AUDIOUTER_PTP_PORTS=EVENT,GENERAL` env override** lets the whole
+- **`AUDIOUT_PTP_PORTS=EVENT,GENERAL` env override** lets the whole
   bind/start/find/peer path run unprivileged on high ports (CI/dev), applied
   via `airptp_ports_override()` before `airptp_daemon_bind()`. Parsed in
-  `ptp_helper_apply_port_override_if_set()`. `AUDIOUTER_PTP_SHM_NAME` is its
+  `ptp_helper_apply_port_override_if_set()`. `AUDIOUT_PTP_SHM_NAME` is its
   companion (`ptp_helper_apply_shm_name_override_if_set()`): an unprivileged
   test copy cannot `shm_unlink()` the real root daemon's `/airptp_shm`, so it
   must publish under a different name or fail on any machine where the shipped
-  daemon exists. The timing knobs (`AUDIOUTER_PTP_BIND_RETRY_SECS`,
-  `AUDIOUTER_PTP_BIND_RETRY_INTERVAL_MS`, `AUDIOUTER_PTP_IDLE_SECS`,
-  `AUDIOUTER_PTP_IDLE_GRACE_SECS`) exist so tests can run in seconds; `main.c`'s
+  daemon exists. The timing knobs (`AUDIOUT_PTP_BIND_RETRY_SECS`,
+  `AUDIOUT_PTP_BIND_RETRY_INTERVAL_MS`, `AUDIOUT_PTP_IDLE_SECS`,
+  `AUDIOUT_PTP_IDLE_GRACE_SECS`) exist so tests can run in seconds; `main.c`'s
   header comment is the authoritative list.
 - **Static-links libevent**, not the Homebrew dylib (see
   `AirPlayEngine/Package.swift`'s `ptp-helper` target `linkerSettings`, and
@@ -101,7 +101,7 @@ plist/Info.plist identity scheme (`scripts/ptp-helper.plist`,
 3. Install SIGTERM/SIGINT handlers — **before** the bind retry, so a signal
    arriving while the ports are contended is not ignored for the whole budget.
 4. `ptp_helper_mach_checkin()` — hold the launchd Mach-service listener open
-   (skipped entirely when `AUDIOUTER_PTP_MACH_SERVICE` is unset).
+   (skipped entirely when `AUDIOUT_PTP_MACH_SERVICE` is unset).
 5. `ptp_helper_clock_id_seed_get()` — derive a stable per-host clock-id seed.
 6. `ptp_helper_bind_with_retry()` — the one privileged call, retried; binds
    319/320 (or override ports) on all interfaces. Never binding is an
@@ -130,9 +130,9 @@ target). Related test coverage sits elsewhere:
 | File | Focus |
 |---|---|
 | `AirPlayEngine/Sources/PTPHelperTestSupport` | Sibling target exposing `Clibairptp`'s `airptp_*` API to Swift for tests (needed because `airptp.h` is a `textual header` in the module map, invisible to a bare Swift `import`). |
-| `AirPlayEngine/Tests/AirPlayEngineTests/PTPHelperIPCTests.swift` | Exercises the bind/start/find/peer IPC path, typically via the `AUDIOUTER_PTP_PORTS` unprivileged override rather than a real root daemon. |
+| `AirPlayEngine/Tests/AirPlayEngineTests/PTPHelperIPCTests.swift` | Exercises the bind/start/find/peer IPC path, typically via the `AUDIOUT_PTP_PORTS` unprivileged override rather than a real root daemon. |
 | `AirPlayEngine/Tests/AirPlayEngineTests/PTPHelperLifecycleTests.swift` | Launches the BUILT helper as a subprocess and asserts the on-demand lifecycle: idle-exits with status 0, stays up while a peer is active. Both PTP suites nest under its `SerializedPTPGlobals` parent — libairptp's port/shm-name globals are process-wide, so they must not run concurrently. |
-| `AudiouterCore/Sources/AudiouterCore/PTPHelperService.swift` | App-side `PTPHelperManaging`/`SMAppServicePTPHelper` seam for registering and querying this daemon — unit-tested via an injected fake, never the real `SMAppService` call. |
+| `AudioutCore/Sources/AudioutCore/PTPHelperService.swift` | App-side `PTPHelperManaging`/`SMAppServicePTPHelper` seam for registering and querying this daemon — unit-tested via an injected fake, never the real `SMAppService` call. |
 
 ## Cross-references
 

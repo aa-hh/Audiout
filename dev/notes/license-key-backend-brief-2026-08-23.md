@@ -44,7 +44,7 @@ verdict: **half right.**
   the gate is: a hard "won't run" invites a spite-fork; a download gate or
   soft nag doesn't.
 - **The real moat is trademark, not copyright.** A rebuild may legally exist
-  but can't ship as "Audiouter" with the icon if the name is trademarked and
+  but can't ship as "Audiout" with the icon if the name is trademarked and
   branding assets are licensed separately (Mozilla/Iceweasel, Rocky/Alma
   debranding precedents).
 
@@ -132,7 +132,7 @@ same day (see companion notes). Original options kept below for the record.
    unregistered builds show a "please buy" nag, never block *(legal, some
    community-optics risk)*; (c) hard lock *(advised against — worst optics,
    trivially stripped, zero precedent)*.
-2. **Trademark** — register "Audiouter" and keep icon artwork licensed
+2. **Trademark** — register "Audiout" and keep icon artwork licensed
    separately from the GPL code. The real anti-fork moat. Verify the icon
    isn't inside a GPL-covered target.
 3. **Free demo build** (Ardour-style limited build) — orthogonal, legal,

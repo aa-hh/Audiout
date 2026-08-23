@@ -19,23 +19,23 @@ in — see `PLAN-MEMORY-LEAK-AUDIT.md` / `PLAN-MEMORY-LEAK-LIVE-TESTS.md` for th
 
 - **Worktree:** `.claude/worktrees/memory-leak-live-testing`
 - **Branch:** `claude/memory-leak-live-testing` (branched from `claude/memory-leak-investigation-396ac3` @ `08b0a7b`, which has `main` fully merged via `893938d`)
-- **App build:** `./build/Audiouter.app` — rebuild with `scripts/make-app.sh ./build` (the old
+- **App build:** `./build/Audiout.app` — rebuild with `scripts/make-app.sh ./build` (the old
   `CPATH=...` workaround from earlier tonight is **obsolete**; main's `5c55386` already fixes the
   include-path issue). If `xcrun`/SDK errors appear, `xcode-select` needs to point at
   `/Applications/Xcode-beta.app/Contents/Developer` (this Mac runs a beta OS; that's the correct
   Xcode for it, not a mistake to "fix").
-- **Launch:** `open ./build/Audiouter.app` (never launch from a shell directly — TCC grants need
+- **Launch:** `open ./build/Audiout.app` (never launch from a shell directly — TCC grants need
   the `open` path). It's a menu-bar app, no Dock icon, no window after setup.
-- **Telemetry:** `~/Library/Logs/Audiouter/telemetry.jsonl` — **shared across every Audiouter
+- **Telemetry:** `~/Library/Logs/Audiout/telemetry.jsonl` — **shared across every Audiout
   build on this Mac**, not per-worktree. Always-on (no env var), JSONL, `cat`/`evt` fields. This
   is the primary diagnostic tool now — see "Diagnostic tooling" below.
 
 ### Constraints to respect
 
 - **Single-instance native live testing** — PTP ports 319/320 are exclusive. Never launch a
-  second `Audiouter.app` while one is running live. There were 5 stale build artifacts across
+  second `Audiout.app` while one is running live. There were 5 stale build artifacts across
   worktrees tonight from parallel sessions; I deleted 4, kept this one. Check
-  `find .claude/worktrees -name Audiouter.app` before assuming you're the only one.
+  `find .claude/worktrees -name Audiout.app` before assuming you're the only one.
 - **Live audio testing is Alec-only.** Claude never plays/captures audio itself. Diagnosis must
   go through Telemetry, `process-audio-dump`, `ps`/`system_profiler`, and asking Alec what he
   hears — not by trying to drive audio directly.
@@ -83,7 +83,7 @@ popover diagnostic counter that doesn't exist; pointed at Telemetry instead of t
 >   instance starting Music's redirect capture.
 > - `00:21:51.151→.160` Music `capturing→stopping→idle` = the **METERING** instance stopping
 >   Music's meter tap, because a `.device`-routed app leaves the metering-only target set
->   (`listed − routed − local − excluded`, `AudiouterCore/AGENTS.md`). Two instances, same
+>   (`listed − routed − local − excluded`, `AudioutCore/AGENTS.md`). Two instances, same
 >   millisecond, opposite directions — read as one machine it looks like a rebuild that
 >   instantly re-stops.
 > - `00:21:51 → 00:46:24` no Music lines because the routing instance never changed state.
@@ -119,7 +119,7 @@ popover diagnostic counter that doesn't exist; pointed at Telemetry instead of t
 >    own task.
 > 4. *The green "live" indicator is cosmetic* — **RULED IN, confirmed.** It is a PURE
 >    MODEL-STATE dot, never capture- or audio-derived: `RouteArmedDotView`'s own contract says so
->    (`AudiouterSharedUI/RouteArmedDotView.swift:6-10`), `AppRowView` drives it from
+>    (`AudioutSharedUI/RouteArmedDotView.swift:6-10`), `AppRowView` drives it from
 >    `!isNoRedirect && configuration.isRunning` (`AppRowView.swift:278`), and `DeviceRowView`
 >    from `mainMixArmed || hasLiveFeeds` (`DeviceRowView.swift:504-509`) where both terms are
 >    route/connection config. **Nothing in the popover reads
@@ -127,7 +127,7 @@ popover diagnostic counter that doesn't exist; pointed at Telemetry instead of t
 >    capture was alive — though in this instance it happened to be.
 >
 > **Fix landed:** `PerAppCaptureCoordinator` now stores its `name` (already passed by
-> `NativeBackend` as `"AirPlayController"` vs `"AudiouterMeter"`, previously used only to name the
+> `NativeBackend` as `"AirPlayController"` vs `"AudioutMeter"`, previously used only to name the
 > tap/aggregate devices) and stamps it on every `capturePA` transition as a `coordinator` field.
 > Regression test: `PerAppCaptureCoordinatorTests
 > .transitionTelemetryIdentifiesWhichCoordinatorInstanceEmittedIt`.
@@ -148,7 +148,7 @@ fundamental: **`PerAppCaptureCoordinator`'s own state machine does not reliably 
 audio is actually flowing.**
 
 ### The precise evidence (all times UTC, session `21205581-B51D-4A69-9A69-DFF5AA3CAE10`, filter
-`grep '"sid":"21205581..."' ~/Library/Logs/Audiouter/telemetry.jsonl`)
+`grep '"sid":"21205581..."' ~/Library/Logs/Audiout/telemetry.jsonl`)
 
 ```
 00:21:33.378Z  Music: capturePA -> capturing (rate-reconciled 48000->44100, correct)
@@ -169,7 +169,7 @@ audio is actually flowing.**
   During this gap: Alec reported ~15 minutes of continuous, audible Sonos Move 2 playback.
   The popover UI showed a GREEN "live" indicator on both the Music row and the Move 2 row,
   with "Move 2" selected in Music's Redirect dropdown.
-  `swift run process-audio-dump` independently confirmed Audiouter's process (PID 70940) was a
+  `swift run process-audio-dump` independently confirmed Audiout's process (PID 70940) was a
   live, audio-producing Core Audio process object at that time.
 
 00:46:24.998Z  Music: capturePA "from":"capturing" -> "stopping"   <-- NOTE: the immediately
@@ -236,7 +236,7 @@ instance too).
 ### Concrete next steps for whoever picks this up
 
 1. **Find what drives the green live-indicator dot** in the popover UI
-   (`AudiouterPopoverUI` — likely `AppRowView.swift` / `DeviceRowView.swift`). Confirm whether it
+   (`AudioutPopoverUI` — likely `AppRowView.swift` / `DeviceRowView.swift`). Confirm whether it
    reads `PerAppCaptureCoordinator.state(for:)` directly or something else (route config). This
    is hypothesis 4, cheap to rule in/out first.
 2. **Audit `PerAppCaptureCoordinator.teardown()`** for any place a Core Audio call's error is
@@ -268,20 +268,20 @@ instance too).
 - **Telemetry categories relevant here:** `capturePA` (per-app coordinator transitions),
   `captureWS` (whole-system coordinator transitions), `airplay` (engine-level: `set_output_set`,
   `session_reset`, `rebind`, `app_route_rebind_on_discovery` [new], `write_backlog_drop` [new]).
-  Always-on, `~/Library/Logs/Audiouter/telemetry.jsonl`, JSONL with `ts`/`sid`/`cat`/`evt` plus
+  Always-on, `~/Library/Logs/Audiout/telemetry.jsonl`, JSONL with `ts`/`sid`/`cat`/`evt` plus
   event-specific fields. Filter by `sid` to isolate one app run.
-- **`swift run process-audio-dump`** (from `AudiouterCore/`) — silent, no audio, dumps every live
+- **`swift run process-audio-dump`** (from `AudioutCore/`) — silent, no audio, dumps every live
   Core Audio process object with pid/parent/`NSRunningApplication?`. Useful for independently
   verifying whether a given process is genuinely live at the OS level, bypassing the app's own
   self-reported state entirely.
 - **Backlog watcher pattern** (used tonight via the `Monitor` tool, not currently running — restart
   if needed): poll `wc -c` on the telemetry file every 30s, tail new bytes since last offset, grep
   for `write_backlog_drop` / unexpected `session_reset`/`rebind`, and independently check
-  `pgrep -f <AudiouterApp binary path>` for liveness so silence isn't mistaken for "still fine."
+  `pgrep -f <AudioutApp binary path>` for liveness so silence isn't mistaken for "still fine."
 
 ## Housekeeping already done tonight (don't redo)
 
-- Deleted 4 duplicate `Audiouter.app` build artifacts across other worktrees (bundle-id
+- Deleted 4 duplicate `Audiout.app` build artifacts across other worktrees (bundle-id
   collision risk); this worktree's build is the one alive.
 - Told the "Reliability plan execution" session to stand down on the pitch-up/judder bugs with
   the root cause handed over, so it doesn't re-derive `196e5b7`'s fix independently.

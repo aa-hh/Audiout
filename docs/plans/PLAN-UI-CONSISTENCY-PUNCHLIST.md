@@ -53,7 +53,7 @@ Verified against current source, not against the task's premise.
 ### W1 — While a Groups session is open, the menu-bar icon can no longer reach the popover
 
 **Surface:** SHELL + POP.
-**Code:** `AudiouterCore/Sources/AudiouterApp/AppDelegate.swift:302-323`
+**Code:** `AudioutCore/Sources/AudioutApp/AppDelegate.swift:302-323`
 (`onButtonClicked`), `:1074` (`controlPanelSessionActive = true`), `:1065-1069`
 (only `onClose` clears it).
 
@@ -75,7 +75,7 @@ the behavior is a side effect of flag lifetime.
 **Surface:** GRP, both hosts.
 **Code:** `scripts/make-app.sh:531`; `AppDelegate.swift:242` (`useControlPanel`),
 `:1005-1022` (standalone branch) vs `:1029-1044` (panel branch);
-`AudiouterCore/Sources/AudiouterWindowUI/MixerWindowController.swift:244-260`,
+`AudioutCore/Sources/AudioutWindowUI/MixerWindowController.swift:244-260`,
 `:297-303`.
 
 Bundled builds always set the flag, so users only ever see Groups in the
@@ -93,10 +93,10 @@ silent fork.
 ### W3 — The Control Panel floats above Settings and onboarding, so opening either can look like nothing happened
 
 **Surface:** SHELL vs SET vs ONB.
-**Code:** `AudiouterCore/Sources/AudiouterSharedUI/ControlPanelWindowController.swift:109`
+**Code:** `AudioutCore/Sources/AudioutSharedUI/ControlPanelWindowController.swift:109`
 and `:155` (`level = .floating` on the panel and its backing window);
-`AudiouterCore/Sources/AudiouterSettingsUI/SettingsWindowController.swift:177`
-(normal level); `AudiouterCore/Sources/AudiouterOnboardingUI/OnboardingWindowController.swift:58-70`
+`AudioutCore/Sources/AudioutSettingsUI/SettingsWindowController.swift:177`
+(normal level); `AudioutCore/Sources/AudioutOnboardingUI/OnboardingWindowController.swift:58-70`
 (deliberately normal level).
 
 Nothing hides or closes the panel when a sibling surface opens.
@@ -134,12 +134,12 @@ rely on the secondary paths is recorded.
 **Shipped in `c8df2082` (P1).**
 **Surface:** SET, GRP, quit indicator.
 **Code:** the app's only read of `accessibilityDisplayShouldReduceTransparency`
-is `AudiouterCore/Sources/AudiouterSharedUI/WarmCanvasView.swift:71`.
+is `AudioutCore/Sources/AudioutSharedUI/WarmCanvasView.swift:71`.
 No fallback at `SettingsWindowController.swift:371-373` (`.windowBackground` /
-`.behindWindow`), `AudiouterCore/Sources/AudiouterSettingsUI/AboutView.swift:203-205`,
+`.behindWindow`), `AudioutCore/Sources/AudioutSettingsUI/AboutView.swift:203-205`,
 or `AppDelegate.swift:1496-1497` (`.popover`, `state = .active`, forced on
 regardless of key state).
-`AudiouterCore/Sources/AudiouterWindowUI/SidebarViewController.swift:503-508`
+`AudioutCore/Sources/AudioutWindowUI/SidebarViewController.swift:503-508`
 subscribes to `accessibilityDisplayOptionsDidChangeNotification` with a comment
 saying it reconciles "Reduce Transparency / Increase Contrast"; the handler at
 `:518` only sets `needsDisplay`, and `draw(_:)` at `:530-534` branches solely on
@@ -160,7 +160,7 @@ claiming it does.
 
 **Shipped in `50e5302d` (T2).**
 **Surface:** SET.
-**Code:** `AudiouterCore/Sources/AudiouterSettingsUI/AudioSettingsViewController.swift:129`,
+**Code:** `AudioutCore/Sources/AudioutSettingsUI/AudioSettingsViewController.swift:129`,
 `:454-459`, `:498`.
 
 macOS preferences apply on change, and this pane does that for the excluded-apps
@@ -211,15 +211,15 @@ too weak in this one, so fix them together.
 
 **Shipped in `9bc5a3da` (T5).**
 **Surface:** GRP, SET, ONB.
-**Code:** `AudiouterCore/Sources/AudiouterWindowUI/SidebarViewController.swift`
+**Code:** `AudioutCore/Sources/AudioutWindowUI/SidebarViewController.swift`
 (sidebar header "Devices") vs
-`AudiouterCore/Sources/AudiouterWindowUI/GroupEditorViewController.swift:204`
+`AudioutCore/Sources/AudioutWindowUI/GroupEditorViewController.swift:204`
 and `GroupCreationSheetController.swift:123` ("Speakers");
-`AudiouterCore/Sources/AudiouterSettingsUI/GeneralSettingsViewController.swift:69`
+`AudioutCore/Sources/AudioutSettingsUI/GeneralSettingsViewController.swift:69`
 ("Setup") + `:64` ("Check Permissions…") →
 `OnboardingWindowController.swift:60` (window title "Welcome") →
-`AudiouterCore/Sources/AudiouterOnboardingUI/OnboardingViewController.swift:340`
-("Welcome to Audiouter").
+`AudioutCore/Sources/AudioutOnboardingUI/OnboardingViewController.swift:340`
+("Welcome to Audiout").
 
 Groups heads its sidebar list "Devices" and heads the identical set "Speakers"
 two inches to the right, both on screen at once (`mixer-3-edit-group-*.png`).
@@ -237,10 +237,10 @@ end to end, and both are noted beside Warm Signal decision m.
 **Code:** `MixerWindowController.swift:764` and `SidebarViewController.swift:192,196`
 ("New Group"); `GroupEditorViewController.swift:214` ("Delete group…");
 `AudioSettingsViewController.swift:702` ("Add app…");
-`AudiouterCore/Sources/AudiouterSettingsUI/AppearanceSettingsViewController.swift:508`
+`AudioutCore/Sources/AudioutSettingsUI/AppearanceSettingsViewController.swift:508`
 ("Match System") vs `:519,521` ("Full gold", "Follow system accent");
-`AudiouterCore/Sources/AudiouterOnboardingUI/PermissionRowView.swift:258,265`
-("Open Settings") vs `AudiouterCore/Sources/AudiouterOnboardingUI/PTPHelperRowView.swift:148`
+`AudioutCore/Sources/AudioutOnboardingUI/PermissionRowView.swift:258,265`
+("Open Settings") vs `AudioutCore/Sources/AudioutOnboardingUI/PTPHelperRowView.swift:148`
 ("Open Login Items…").
 
 Three contradictions, each inside a single pane:
@@ -264,14 +264,14 @@ ends in "…", and button titles are Title Case app-wide. Mechanical, one pass.
 
 **Shipped in `020d2819` (T4).**
 **Surface:** POP.
-**Code:** `AudiouterCore/Sources/AudiouterPopoverUI/GroupRowView.swift:370-379`
+**Code:** `AudioutCore/Sources/AudioutPopoverUI/GroupRowView.swift:370-379`
 uses raw `NSColor.controlAccentColor` @ **0.15** and raw
 `NSColor.selectedContentBackgroundColor` @ **0.12**; the sibling rows in the
 same stack use `Tokens.Color.accent` @ `rowSelectionWashAlpha` (**0.18**) and
 `Tokens.Color.selectedContentBackground` @ `rowHoverWashAlpha` (**0.10**) —
-`AudiouterCore/Sources/AudiouterSharedUI/DeviceRowView.swift:2117-2122`,
-`AudiouterCore/Sources/AudiouterSharedUI/AppRowView.swift:657-659`, alphas at
-`AudiouterCore/Sources/AudiouterSharedUI/PopoverColumnGrid.swift:472,476`.
+`AudioutCore/Sources/AudioutSharedUI/DeviceRowView.swift:2117-2122`,
+`AudioutCore/Sources/AudioutSharedUI/AppRowView.swift:657-659`, alphas at
+`AudioutCore/Sources/AudioutSharedUI/PopoverColumnGrid.swift:472,476`.
 
 Selected rows and hovered rows are visibly different shades depending on which
 card they are in, inside one scrolling popover. Because `GroupRowView` bypasses
@@ -286,7 +286,7 @@ app rows.
 **Shipped in `020d2819` (T4).**
 **Surface:** SET.
 **Code:** `AppearanceSettingsViewController.swift:321` hard-codes the dark
-preview's `well` as `0x2B2620`; `AudiouterCore/Sources/AudiouterSharedUI/Tokens.swift:186-188`
+preview's `well` as `0x2B2620`; `AudioutCore/Sources/AudioutSharedUI/Tokens.swift:186-188`
 gives `Tokens.Color.well` a dark value of `0x100D0A`.
 
 The Appearance tiles exist to depict the actual product — that is the stated
@@ -302,7 +302,7 @@ the two together so the next re-tune cannot drift them apart again.
 
 **Shipped in `020d2819` (T4).**
 **Surface:** GRP.
-**Code:** `AudiouterCore/Sources/AudiouterWindowUI/DeviceIconWellView.swift:87-88`
+**Code:** `AudioutCore/Sources/AudioutWindowUI/DeviceIconWellView.swift:87-88`
 (`NSColor(white: 0, alpha: 0.55)`, `NSColor(white: 1, alpha: 0.25)`), stamped
 into a `CALayer` at `:138-140`; `viewDidChangeEffectiveAppearance` at `:228-231`
 only calls `needsDisplay`, which repaints `draw(_:)` but never re-stamps the
@@ -320,12 +320,12 @@ on appearance change).
 
 **Shipped in `fab9cd9a` (T3).**
 **Surface:** POP.
-**Code:** `AudiouterCore/Sources/AudiouterPopoverUI/PopoverHeaderView.swift:206-208`
+**Code:** `AudioutCore/Sources/AudioutPopoverUI/PopoverHeaderView.swift:206-208`
 uses `bezelStyle = .accessoryBar` with `showsBorderOnlyWhileMouseInside`;
-`AudiouterCore/Sources/AudiouterPopoverUI/PopoverPanelViewController.swift:482`
+`AudioutCore/Sources/AudioutPopoverUI/PopoverPanelViewController.swift:482`
 uses `.smallSquare` for the card accessory a few points below. The comment at
 `:477-479` says the two use "the same stock bezel (`bezelStyle = .smallSquare`)",
-and `AudiouterCore/Sources/AudiouterSharedUI/AGENTS.md:19` says the header
+and `AudioutCore/Sources/AudioutSharedUI/AGENTS.md:19` says the header
 buttons are `.smallSquare`. Both are wrong.
 
 One family shows its border only on hover, the other always. They sit within
@@ -333,7 +333,7 @@ about 30pt of each other in the popover's top-right region, and two documents
 assert they match.
 
 **Done when:** the two families genuinely use one bezel, and the comment plus
-`AudiouterSharedUI/AGENTS.md:19` say what the code does.
+`AudioutSharedUI/AGENTS.md:19` say what the code does.
 
 ### V8 — Settings shows a user an environment-variable name
 
@@ -361,7 +361,7 @@ group, then switch to it in two clicks from the menu bar." The shipped line is
 atmosphere; the spec'd line teaches the feature at the one moment the user is
 looking at nothing else. §5.9's sibling empty states — devices "Looking for
 speakers…", applications "Route one app somewhere else…" — have no
-implementation in `AudiouterPopoverUI` at all.
+implementation in `AudioutPopoverUI` at all.
 
 **Done when:** the three §5.9 empty states are implemented as specified, or the
 spec is amended on purpose.
@@ -415,7 +415,7 @@ window stops re-centering it.
 **Surface:** all five.
 **Code:** three un-tokenized content widths —
 `PopoverPanelViewController.swift:104` (623),
-`AudiouterCore/Sources/AudiouterSettingsUI/SettingsForm.swift:16` (460),
+`AudioutCore/Sources/AudioutSettingsUI/SettingsForm.swift:16` (460),
 `OnboardingViewController.swift:40` (500). Eight corner radii, none in `Tokens`:
 12 (`ControlPanelBackingView.swift:31`, `DeviceIconWellView.swift:66`,
 `AppDelegate.swift:1500`), 11 (`SilenceFallbackBannerView.swift:37`,
@@ -446,7 +446,7 @@ AGENTS.md. Six sites do not:
 `DeviceRowView.swift:2102`, `AppRowView.swift:666`, `GroupRowView.swift:370`
 (the three hover/selection pills), `MixerWindowController.swift:591`
 (`WarmPanelView`) and `:610` (`HairlineView`),
-`AudiouterCore/Sources/AudiouterWindowUI/IconPickerViewController.swift:481`
+`AudioutCore/Sources/AudioutWindowUI/IconPickerViewController.swift:481`
 (`WarmPreviewTileView`), `AudioSettingsViewController.swift:962`
 (`BorderedListView`).
 
@@ -459,11 +459,11 @@ replaced by system chrome.
 
 **Shipped in `020d2819` (T4).**
 **Surface:** POP vs ONB.
-**Code:** `AudiouterCore/Sources/AudiouterPopoverUI/SilenceFallbackBannerView.swift:40,41,67,68`
+**Code:** `AudioutCore/Sources/AudioutPopoverUI/SilenceFallbackBannerView.swift:40,41,67,68`
 uses raw `NSColor.systemOrange` at 0.14 / 0.40; the visually identical onboarding
 banner uses `Tokens.Color.warning` at 0.14 / 0.4
 (`OnboardingViewController.swift:388-389`). Separately,
-`AudiouterCore/Sources/AudiouterPopoverUI/SystemAirPlayNoteBannerView.swift:40-42`
+`AudioutCore/Sources/AudioutPopoverUI/SystemAirPlayNoteBannerView.swift:40-42`
 returns raw `.systemBlue` / `.systemOrange` for its info tier, for which no
 `Tokens.Color` case exists at all.
 
@@ -477,7 +477,7 @@ requires).
 **Surface:** all.
 **Code:** `OnboardingWindowController.swift:61` is the app's only `isRestorable`;
 `applicationSupportsSecureRestorableState` appears nowhere in
-`AudiouterCore/Sources`.
+`AudioutCore/Sources`.
 
 Unchanged since the old `N2`. Behaviorally inert today (the delegate method
 defaults to `false`), but it reads as unfinished rather than decided.
@@ -501,7 +501,7 @@ different Space or nowhere.
 **Intent satisfied by U4's click-policy tests (`cd051a2d`)** — the arbitration
 now lives in `AppSurfaceController`, where it is directly tested.
 **Surface:** all.
-**Code:** `AppDelegate.swift:302-338`; `AudiouterCore/Tests/AudiouterCoreTests/`
+**Code:** `AppDelegate.swift:302-338`; `AudioutCore/Tests/AudioutCoreTests/`
 has no `AppDelegate` test file.
 
 W1, W3 and W4 are one bug in three costumes: the arbitration between five
@@ -515,7 +515,7 @@ isolation. **Doing this first makes W1, W3 and W4 cheap and safe.**
 **Shipped in P4 (this program's final commit)** — `window-snapshot` now
 composites the panel's frame view, so the close button is in the fixtures.
 **Surface:** SHELL.
-**Code:** `AudiouterCore/Sources/window-snapshot/main.swift:379-440` —
+**Code:** `AudioutCore/Sources/window-snapshot/main.swift:379-440` —
 `snapshotControlPanel` composites `panel.contentView`, never the window frame
 view, so `mixer-5-panel-chrome-*.png` cannot show the standard close button.
 `ControlPanelWindowControllerTests.swift:108-117` does assert
@@ -528,7 +528,7 @@ defect.)
 
 **Shipped in `9bc5a3da` (T5).**
 **Surface:** GRP.
-**Code:** `AudiouterCore/Sources/AudiouterWindowUI/DeviceDetailViewController.swift:144`
+**Code:** `AudioutCore/Sources/AudioutWindowUI/DeviceDetailViewController.swift:144`
 — "In groups:" carries a colon; "Status", "Available", "Volume" and "Kind" do
 not. Visible together in `mixer-4-device-detail-*.png`.
 
@@ -570,7 +570,7 @@ Listed so they are not re-audited.
 - "AirPlay Devices" in the popover while onboarding bans the word — decision m
   keeps AirPlay wording in device context.
 - The group master's stock unskinned slider beside three skinned faders —
-  documented at `AudiouterSharedUI/AGENTS.md:32`.
+  documented at `AudioutSharedUI/AGENTS.md:32`.
 - The Control Panel bubble fill — already repointed to `Tokens.Color.canvas`
   (`ControlPanelBackingView.swift:73-79`); Warm Signal §5.4 satisfied.
 - `NSApp.activate(ignoringOtherApps:)` at six call sites — checked against the

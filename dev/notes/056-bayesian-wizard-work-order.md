@@ -259,7 +259,7 @@ a sink start (the control-path device setup around the `deviceID` member —
 NOT any RT/render callback), log once per uid per connect:
 `Telemetry.log(.localPlayback, "bt_device_reported_latency", ["uid": …,
 "ms": …])` using `LocalOutputLatency.measure(deviceID:)` (already
-internal to AudiouterCore; wrap in `try?` — a failed read logs nothing).
+internal to AudioutCore; wrap in `try?` — a failed read logs nothing).
 Pure diagnostics; no behavior change; no store.
 
 ## T6 — tests

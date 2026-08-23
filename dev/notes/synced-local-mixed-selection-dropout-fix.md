@@ -26,7 +26,7 @@ when the tapped device's nominal sample rate changes, Core Audio continues
 delivering PCM buffers at the full capture cadence (no sample loss or timing
 break) but fills them with **all-zero frames** — silent output. The entire
 tap output goes mute. This is an Apple-unresolved bug in Core Audio's tap
-infrastructure, not a Audiouter issue.
+infrastructure, not a Audiout issue.
 
 The whole-system `NativeCaptureCoordinator` monitors the tapped device for
 IDENTITY changes (UID match), but the nominal sample rate change does not

@@ -22,7 +22,7 @@ toolbar tabs). A **Pin** button sits beside Quit in the header.
 > rendering detail in U3, and the "capsule row is the ONE switcher" decision
 > are all replaced by a REAL window-attached `NSToolbar` (`.unified`,
 > `titleVisibility` hidden in both profiles): tabs as a native
-> `NSToolbarItemGroup` (`selectionMode = .selectOne`), "Audiouter" as a
+> `NSToolbarItemGroup` (`selectionMode = .selectOne`), "Audiout" as a
 > centered toolbar item, Pin + Quit trailing. The system provides the strip's
 > materials (Liquid Glass on 26+, the older material below) and Reduce
 > Transparency handling — the custom `PopoverHeaderView`, `CapsuleFillView`,
@@ -90,9 +90,9 @@ guard — see R1), and a pinned profile (`isMovable = true`,
 frame autosave via the `setFrameUsingName`-first pattern from
 `MixerWindowController.swift:244-259`).
 
-New `AppSurfaceController` lives in **AudiouterPopoverUI** (library ⇒
-testable; `AudiouterApp` is invisible to tests — R9). That target gains deps
-on `AudiouterWindowUI` + `AudiouterSettingsUI` (`Package.swift:170-174`).
+New `AppSurfaceController` lives in **AudioutPopoverUI** (library ⇒
+testable; `AudioutApp` is invisible to tests — R9). That target gains deps
+on `AudioutWindowUI` + `AudioutSettingsUI` (`Package.swift:170-174`).
 Screens: Mixer = `PopoverPanelViewController` via a host-agnostic
 `PopoverController`; Groups = `MixerWindowController.contentController`
 (:315-318); Settings = `SettingsRootViewController` made public, tabs moved
@@ -107,7 +107,7 @@ its scoped verification, then the full suite green, then one commit + push.
 ### Wave 1 — pre-unification punch-list foundations
 
 - **T1 · V10 Tokens.Layout** — corner radii + animation durations into
-  `Tokens.Layout` (`AudiouterSharedUI/Tokens.swift:739-758`); per-surface
+  `Tokens.Layout` (`AudioutSharedUI/Tokens.swift:739-758`); per-surface
   width/margin constants declared once per module. Consumers:
   `PopoverPanelViewController.swift:104` (623), `SettingsForm.swift:16,132-135`,
   `OnboardingViewController.swift:40` + five `contentWidth − 56` sites,
@@ -126,7 +126,7 @@ its scoped verification, then the full suite green, then one commit + push.
 - **T3 · V7 one bezel family** — `PopoverPanelViewController.swift:477-484`
   `.smallSquare` → `.accessoryBar` + `showsBorderOnlyWhileMouseInside`
   (matching `PopoverHeaderView.swift:206-208`); fix the lying comment and
-  `AudiouterSharedUI/AGENTS.md:19`. Model **haiku**. Verify:
+  `AudioutSharedUI/AGENTS.md:19`. Model **haiku**. Verify:
   `--filter PopoverPanelHeaderTests`; full suite.
 - **T4 · V4/V5/V6/V12 raw-color eliminations** — `GroupRowView.swift:370-379`
   → tokens + `PopoverColumnGrid` alphas (:472,476) +
@@ -162,7 +162,7 @@ its scoped verification, then the full suite green, then one commit + push.
   `setFrameUsingName`-first. Appearance bits only — NEVER flip
   `.titled`/`.closable` (R6, :87-100). Additive; Groups-in-shell unchanged
   this commit. Files: `ControlPanelWindowController.swift`, its tests,
-  `AudiouterSharedUI/AGENTS.md`. Model **opus**. Verify:
+  `AudioutSharedUI/AGENTS.md`. Model **opus**. Verify:
   `--filter ControlPanelWindowControllerTests`; full suite.
 - **U2 · PopoverController host-agnostic** — visibility from a host-set flag
   (`isEffectivelyShown` reads it ∨ `test_isShownOverride`);
@@ -172,7 +172,7 @@ its scoped verification, then the full suite green, then one commit + push.
   `PopoverControllerTests` pass untouched. Model **opus**. Verify:
   `--filter PopoverControllerTests`; full suite.
 - **U3 · AppSurfaceController + switcher + pin button** — new
-  `AudiouterPopoverUI/AppSurfaceController.swift`; `Package.swift:170-174`
+  `AudioutPopoverUI/AppSurfaceController.swift`; `Package.swift:170-174`
   deps; `PopoverHeaderView.swift` Groups/Settings buttons → the tab-bar
   switcher + Pin (keep Quit) per the End-state addendum: three icon+label
   tabs (SF Symbols — e.g. `slider.horizontal.3` Mixer,
@@ -206,7 +206,7 @@ its scoped verification, then the full suite green, then one commit + push.
   permission checks :330-347 preserved); `showPopoverHome` :939; menus/⌘,
   :951-999; open paths :1005-1096; `openSettings` :1101-1127 → Settings
   screen; event fan-out :1410-1419; `docs/SPEC.md` §9;
-  `AudiouterApp/AGENTS.md`. Policy lives in `AppSurfaceController` ⇒ directly
+  `AudioutApp/AGENTS.md`. Policy lives in `AppSurfaceController` ⇒ directly
   testable (the W9 answer). Old windows compile but unreachable. Model
   **opus**. Verify: click-policy tests (transient / pinned-open /
   pinned-closed / Setup-open); `AIRPLAY_BACKEND=mock swift run` smoke; full
@@ -215,7 +215,7 @@ its scoped verification, then the full suite green, then one commit + push.
   `SettingsWindowController.swift` (keep panes + sizing machinery; the four
   sizing traps :27-96 survive as surface rules — R5); retarget its 16 tests
   at rootVC seams; `settings-snapshot/main.swift`;
-  `AudiouterSettingsUI/AGENTS.md`. Model **sonnet**. Verify:
+  `AudioutSettingsUI/AGENTS.md`. Model **sonnet**. Verify:
   `--filter SettingsWindowControllerTests`; `swift run settings-snapshot`;
   full suite.
 - **U6 · retire standalone Groups window + kill the flag** —
@@ -225,13 +225,13 @@ its scoped verification, then the full suite green, then one commit + push.
   `scripts/make-app.sh:524-533` LSEnvironment entry removed;
   `window-harness/main.swift:98`; `window-snapshot` fixtures; retarget
   `MixerWindowControllerTests` (38) + `GroupsWindowTextColorLockTests` +
-  `GroupsHeaderParityTests`; `AudiouterWindowUI/AGENTS.md` +
-  `AudiouterApp/AGENTS.md`. Model **sonnet**. Verify:
+  `GroupsHeaderParityTests`; `AudioutWindowUI/AGENTS.md` +
+  `AudioutApp/AGENTS.md`. Model **sonnet**. Verify:
   `--filter MixerWindowControllerTests`; `swift run window-harness`;
   `bash scripts/make-app.sh` plist check; full suite.
 - **U7 · retire NSPopover** — drop `popover`, `NSPopoverDelegate`,
   `toggle(relativeTo:)` from `PopoverController.swift`;
-  `AudiouterPopoverUI/AGENTS.md`. Pure delete (tests use `test_` seams only).
+  `AudioutPopoverUI/AGENTS.md`. Pure delete (tests use `test_` seams only).
   Model **sonnet**. Verify: `swift run popover-harness`; full suite.
 - ~~U8 About tab~~ — DROPPED (owner: About keeps its own window).
 
@@ -281,7 +281,7 @@ its scoped verification, then the full suite green, then one commit + push.
   badly live, suppress while Setup is open too.
 - **R8** copy pass: sidebar tests pattern-match `.header("Devices")`
   (`SidebarViewController.swift:381`) — update key + literals together.
-- **R9** `AudiouterApp` target is test-invisible — all testable behavior goes
+- **R9** `AudioutApp` target is test-invisible — all testable behavior goes
   in library targets.
 
 ## Execution rules (every agent)

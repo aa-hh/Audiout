@@ -1,4 +1,4 @@
-# Settings brainstorm: what a paid Audiouter should offer
+# Settings brainstorm: what a paid Audiout should offer
 
 Today's Settings window has exactly three sections and one control each that
 really matters: **General** (launch at login, a button to re-run the
@@ -19,9 +19,9 @@ and it deliberately stays short of "add every imaginable toggle."
 ### General
 *(today: Launch at login · Run Setup Again…)*
 
-- **Launch at login** — *(EXISTS)* starts Audiouter automatically at login.
+- **Launch at login** — *(EXISTS)* starts Audiout automatically at login.
 - **Run Setup Again…** — *(EXISTS)* re-opens the first-run permission flow.
-- **Global keyboard shortcut to open Audiouter** — *(NEW)* lets the customer
+- **Global keyboard shortcut to open Audiout** — *(NEW)* lets the customer
   assign a hotkey (e.g. ⌥Space) that opens the popover from anywhere, no
   mouse required. Every comparable paid menu-bar utility (Bartender, Alfred,
   Raycast) treats an instant-recall shortcut as table stakes — someone paying
@@ -29,7 +29,7 @@ and it deliberately stays short of "add every imaginable toggle."
   for a small icon in a crowded menu bar.
 - **Resume previous speakers on launch** — *(NEW)* a toggle to automatically
   reconnect the last-selected devices or group whenever the app starts.
-  Today this never happens by design (`AudiouterCore/AGENTS.md`: "the live
+  Today this never happens by design (`AudioutCore/AGENTS.md`: "the live
   routing set is not auto-resumed at launch"). A customer who set up their
   evening listening setup expects it to just come back after a reboot or
   relaunch, the way a real smart-home product would.

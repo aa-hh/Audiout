@@ -33,7 +33,7 @@ func loadSetPresence() -> SetPresenceFn? {
 
 final class SpikeDelegate: NSObject, NSApplicationDelegate {
 
-    private let identifier = NSTouchBarItem.Identifier("com.audiouter.spike.volumetray")
+    private let identifier = NSTouchBarItem.Identifier("com.audiout.spike.volumetray")
     private var item: NSCustomTouchBarItem?
     private var taps = 0
 

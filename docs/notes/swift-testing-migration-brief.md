@@ -1,13 +1,13 @@
-# Brief: migrating AudiouterCoreTests to swift-testing
+# Brief: migrating AudioutCoreTests to swift-testing
 
-**Status (2026-07-26): DONE for the large majority of both `AudiouterCore` and
+**Status (2026-07-26): DONE for the large majority of both `AudioutCore` and
 `AirPlayEngine`'s test suites**, merged to `main`. See
 [swift-testing-conversion-cookbook.md](swift-testing-conversion-cookbook.md)
 for exactly how each XCTest idiom was converted, the shared seams
 (`IsolatedSuite`, `AudioHardwareTestGate.trait`, `SerializedSharedState`) that
 downstream conversions consume, and the AirPlayEngine-specific notes (Part
 III). A small number of files remain on the legacy `XCTestCase` base — current
-set via `git grep ': XCTestCase'` under `AudiouterCore/Tests/` and
+set via `git grep ': XCTestCase'` under `AudioutCore/Tests/` and
 `AirPlayEngine/Tests/`. Everything below is the original pre-migration
 proposal, kept for history; it is no longer the plan of record.
 
@@ -26,7 +26,7 @@ around it.
 Apple's `swift-testing` framework runs tests concurrently *within one process*,
 using Swift's structured-concurrency task scheduling rather than forking a
 process per test. If that holds for this suite, the ~290-CPU-second
-fork/exec+dyld overhead measured this session (`AudiouterCore/AGENTS.md`,
+fork/exec+dyld overhead measured this session (`AudioutCore/AGENTS.md`,
 parallel vs serial comparison) goes away almost entirely — not reduced, gone —
 while keeping (likely beating) parallel's wall-clock speed, since there is no
 process-startup tax per test.
@@ -41,7 +41,7 @@ adaptivity would become moot.
 ## Scope, measured in this repo (not estimated)
 
 - **1025 test methods, 58 test classes, 59 files** import `XCTest` under
-  `AudiouterCore/Tests/AudiouterCoreTests/`.
+  `AudioutCore/Tests/AudioutCoreTests/`.
 - **~2631 XCTest assertion call sites** (`XCTAssert*`, `XCTUnwrap`, `XCTSkip`,
   `XCTFail` combined, rough grep count) that would each need translating to
   swift-testing's `#expect`/`#require` macros.
@@ -53,7 +53,7 @@ adaptivity would become moot.
 - **1 file, `AudioHardwareTestGate.swift`**, uses `XCTSkipUnless` — swift-testing
   has an equivalent (`.disabled(if:)` trait) but the call site and its API
   shape differ.
-- Current toolchain: `swift-tools-version:5.10` in both `AudiouterCore/Package.swift`
+- Current toolchain: `swift-tools-version:5.10` in both `AudioutCore/Package.swift`
   and `AirPlayEngine/Package.swift`; installed compiler is Swift 6.4 on macOS 27.
   **To verify before starting, not assumed here:** the exact minimum
   `swift-tools-version` and deployment target swift-testing requires for this

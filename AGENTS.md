@@ -1,4 +1,4 @@
-# Audiouter
+# Audiout
 
 ## Purpose
 
@@ -38,7 +38,7 @@ symbol you cannot find in source, believe the source and fix the doc.
 
 ## Folder Map
 
-- [AudiouterCore/](AudiouterCore/AGENTS.md) — the Swift package:
+- [AudioutCore/](AudioutCore/AGENTS.md) — the Swift package:
   the `Device` model, the `OutputBackend` seam and its implementations, per-app
   routing, the AppKit UI targets, and the shipping app target. This is the app.
 - [AirPlayEngine/](AirPlayEngine/AGENTS.md) — standalone package: a vendored
@@ -65,13 +65,13 @@ symbol you cannot find in source, believe the source and fix the doc.
   native backend opens real sockets and needs a TCC grant; treat it differently.
 - **The engine is a separate package on purpose.** It knows nothing about
   `Device`, groups, or the UI. Never add AirPlay-protocol logic to
-  `AudiouterCore`, or `Device`/UI-shaped concepts to `AirPlayEngine`. It
+  `AudioutCore`, or `Device`/UI-shaped concepts to `AirPlayEngine`. It
   is also a licensing boundary — it vendors GPL/MIT/BSD source.
 - **Vendored C stays byte-identical.** Fixes belong in the shims or the Swift
   hosting layer; any exception is ledgered in
   `AirPlayEngine/docs/VENDORED-DIFFS.md` with license, rationale and hunk.
 - **UI targets depend on the model, never the reverse.** The
-  `AudiouterCore` library target imports no AppKit, and that is verified.
+  `AudioutCore` library target imports no AppKit, and that is verified.
 - **Read `dev/notes/` before a non-trivial phase** — briefs exist to de-risk work
   before it starts.
 - **"Does this code exist anywhere?" needs more than `git grep`.**
@@ -80,7 +80,7 @@ symbol you cannot find in source, believe the source and fix the doc.
   look as though it had never existed. Also check `git fsck --unreachable`,
   `git stash list`, the reflog, and the other worktrees. Quote every path: this
   repo's own path contains a space, which silently breaks unquoted loops.
-- **Inner-loop test command:** see [AudiouterCore/AGENTS.md](AudiouterCore/AGENTS.md) for
+- **Inner-loop test command:** see [AudioutCore/AGENTS.md](AudioutCore/AGENTS.md) for
   guidance on scoping tests with `--filter`, and for the "tests must stay
   invisible" rule every UI test has to obey.
 - **Flag finished worktrees `.prunable`; never hand-delete them.** Fifteen
@@ -94,14 +94,14 @@ symbol you cannot find in source, believe the source and fix the doc.
   spike packages under `dev/` are included, not just the three top-level
   ones), plus Xcode's own `iOS DeviceSupport` and `DerivedData` directories,
   which the iPhone work fills at ~1.5 GB per attach and which once hit 6.4 GB.
-  Any of them untouched for `AUDIOUTER_CACHE_MAX_AGE_DAYS` (7) is deleted, and
-  below `AUDIOUTER_MIN_FREE_GB` (8) free disk they go cheapest-to-lose first —
+  Any of them untouched for `AUDIOUT_CACHE_MAX_AGE_DAYS` (7) is deleted, and
+  below `AUDIOUT_MIN_FREE_GB` (8) free disk they go cheapest-to-lose first —
   Xcode's ahead of any warm `.build`, since a re-attach costs nobody's time
   and a cold rebuild costs ~95s per commit. **The floor is headroom the script
   guarantees with the caches it owns, not a claim on the disk** — when
   reclaiming everything still would not reach it, the shortfall came from
   elsewhere, so the caches stay warm and it says so instead of thrashing.
-  Below `AUDIOUTER_CRITICAL_FREE_GB` (2) it takes everything anyway. The
+  Below `AUDIOUT_CRITICAL_FREE_GB` (2) it takes everything anyway. The
   building checkout and any checkout a live process references are never
   touched, Xcode's caches are left alone entirely while Xcode is running, and
   the simulator runtime image (~7.5 GB) and simulator devices are never
@@ -117,7 +117,7 @@ symbol you cannot find in source, believe the source and fix the doc.
   lists them (dry-run, no sudo — safe to run anytime, so run it periodically);
   `scripts/purge-stale-ptp-helpers.sh --apply` boots them out. `--apply` needs
   `sudo`, so it prompts and cannot run unattended — an agent runs it only where a
-  human can enter the password. Never `--apply` while a live Audiouter session is
+  human can enter the password. Never `--apply` while a live Audiout session is
   actively streaming: it unloads the running helper too. It only ever touches
   `*.ptphelper` jobs. `--keep <label>` spares one exact label.
 - **Uninstall dead hand-off builds with `scripts/purge-dev-installs.sh`.** The
@@ -126,13 +126,13 @@ symbol you cannot find in source, believe the source and fix the doc.
   preferences domain, TCC grants (a dead row in System Settings › Privacy &
   Security forever), a PUBLIC aggregate audio device that keeps appearing in
   Sound settings, and a root PTP-helper daemon. This script finds every
-  non-shipping `com.audiouter.*` identity across all four surfaces, unions
+  non-shipping `com.audiout.*` identity across all four surfaces, unions
   them, and removes the lot — plus the preference domains leaked by the test
   suites (`swift test` creates a per-test `UserDefaults` suite and never
   removes it; this had reached **48,769 plists**, 98% of everything in
   `~/Library/Preferences`). Dry-run by default; `--apply` to act. The shipping
   id is a hardcoded literal it refuses to touch, and
-  `~/Library/Application Support/Audiouter/` (the real saved groups and routes)
+  `~/Library/Application Support/Audiout/` (the real saved groups and routes)
   is never in scope. Two traps it already handles, both learned the hard way:
   CoreAudio silently refuses to destroy an aggregate that is the current system
   output — it returns `noErr` and the device is still there — so the script
@@ -202,7 +202,7 @@ This app must feel like a native macOS citizen, not a cross-platform port.
   automatically. Don't ship custom assets for something SF Symbols covers.
 - **System colors and materials, never hardcoded hex** — so Dark Mode, accent
   color and contrast settings all work for free. **One sanctioned exception:**
-  `Tokens` (`AudiouterCore/Sources/AudiouterSharedUI/Tokens.swift`, sub-namespaces
+  `Tokens` (`AudioutCore/Sources/AudioutSharedUI/Tokens.swift`, sub-namespaces
   `Tokens.Color`, `Tokens.Font`, `Tokens.Layout`, `Tokens.Material`) is the
   only place a custom palette value may ever live. Everywhere else in the app
   stays plain semantic `NSColor`/`NSFont`/`NSVisualEffectView.Material` — do not

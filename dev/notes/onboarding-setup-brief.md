@@ -68,7 +68,7 @@ for all three is a System Settings deep link.
 - Core (gated Core Audio / Network / ApplicationServices, `#if canImport`):
   `AudioCapturePermissionProbe.swift`, `LocalNetworkPrimer.swift`,
   `RemoteControlPrimer.swift`.
-- UI (`AudiouterOnboardingUI`): `OnboardingWindowController`,
+- UI (`AudioutOnboardingUI`): `OnboardingWindowController`,
   `OnboardingViewController`, `PermissionRowView`, `SystemSettingsOpener`.
   Offscreen render: `swift run onboarding-snapshot` → `dev/notes/onboarding-snapshots/`.
 - App wiring (`AppDelegate`): first-run gate defers `backend.start()` (so the LN
@@ -195,7 +195,7 @@ terminal's grant. Verify on a real launch:
 tccutil reset AudioCapture
 # 2. Build + launch the REAL bundle (never `swift run` — identity drift). `open`
 #    so the app doesn't inherit the terminal's TCC identity.
-scripts/make-app.sh && open "./build/Audiouter.app"
+scripts/make-app.sh && open "./build/Audiout.app"
 ```
 
 Because the shipping default backend must be `native` for setup to present,

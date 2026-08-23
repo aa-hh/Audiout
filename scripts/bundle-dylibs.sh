@@ -41,7 +41,7 @@ if [ $# -lt 1 ]; then
 fi
 
 APP_BUNDLE="$1"
-EXECUTABLE_NAME="AudiouterApp"
+EXECUTABLE_NAME="AudioutApp"
 EXECUTABLE="$APP_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
 FRAMEWORKS_DIR="$APP_BUNDLE/Contents/Frameworks"
 

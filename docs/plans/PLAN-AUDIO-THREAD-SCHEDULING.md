@@ -14,8 +14,8 @@ off a doc page.
 ## 0. Why this plan exists
 
 **Alec's observation (2026-07-25, live):** playing audio normally on macOS — including Apple's own
-AirPlay — never stutters under heavy CPU load, but Audiouter's output stutters when the machine is
-loaded. Measured at the time: load average 16 on 8 cores, Audiouter itself using **2.1% CPU**, and
+AirPlay — never stutters under heavy CPU load, but Audiout's output stutters when the machine is
+loaded. Measured at the time: load average 16 on 8 cores, Audiout itself using **2.1% CPU**, and
 **zero** error events in its telemetry (no tap failures, no rebuild storm, no capture errors).
 
 So the stutter is a **scheduling** problem, not a logic problem. And Alec's framing of the goal is
@@ -31,7 +31,7 @@ scope was insufficient and this revision reopens the real-time question rev 1 ha
 
 ## A. End state
 
-Every byte of audio Audiouter sends leaves on a thread the kernel treats the way it treats Apple's
+Every byte of audio Audiout sends leaves on a thread the kernel treats the way it treats Apple's
 own audio: real-time priority with an explicit deadline, joined to the audio device's workgroup, and
 *structurally* incapable of unbounded work.
 
@@ -264,7 +264,7 @@ summary appears under a synthetic write loop.
 `writeSchedulingSnapshot()` every ~5s while capture is active via the existing self-rescheduling
 `stateQueue.asyncAfter` idiom (@3013, @4016); `Telemetry.log(.airplay, "send_sched", …)`. Never from
 the RT path — `stateQueue` satisfies `Telemetry.swift:33-35`.
-*haiku 4.5 · low · depends: T1* · **verify:** `grep send_sched ~/Library/Logs/Audiouter/telemetry.jsonl`.
+*haiku 4.5 · low · depends: T1* · **verify:** `grep send_sched ~/Library/Logs/Audiout/telemetry.jsonl`.
 
 **T3 · Load generator + runbook** — `scripts/load-gen.sh`, `dev/notes/audio-scheduling-measurement.md`.
 N CPU spinners (default 16, reproducing the observed load), `uptime` before/after, clean teardown.
@@ -380,7 +380,7 @@ faults under load.
 ### CLOSE-OUT
 
 **T15 · Tests** — `AirPlayEngineTests/EngineSchedulingTests.swift` (plain `XCTestCase`, that
-package's convention), `AudiouterCoreTests/WorkgroupLifecycleTests.swift` (**must** subclass
+package's convention), `AudioutCoreTests/WorkgroupLifecycleTests.swift` (**must** subclass
 `IsolatedTestCase`).
 **Can test:** engine-thread QoS asserted from inside the running thread (`qos_class_self()`); probe
 arithmetic against synthetic timestamps; workgroup join/leave **ordering and counts** via a spy
@@ -393,7 +393,7 @@ jitter (scheduler behaviour under load → T17 only); that the HAL publishes `'o
 flaky under `--parallel`, vacuous when idle.
 *sonnet 5 · medium · depends: all implementation tasks* — the judgement is in what to leave untested.
 
-**T16 · Docs** — `AirPlayEngine/AGENTS.md`, `AudiouterCore/AGENTS.md`, `VENDORED-DIFFS.md`.
+**T16 · Docs** — `AirPlayEngine/AGENTS.md`, `AudioutCore/AGENTS.md`, `VENDORED-DIFFS.md`.
 The engine file must record: the one-thread invariant is now **one thread *into the cluster*** with a
 second RT thread that never enters it (the single most important thing for a future agent not to get
 wrong); the RTP send is inline in the enqueued write closure, not timer-driven; `os_workgroup_join`

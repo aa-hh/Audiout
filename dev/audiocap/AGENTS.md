@@ -9,7 +9,7 @@ Standalone SwiftPM CLI that captures system audio via a Core Audio process tap
 `../notes/0f-pipe-brief.md` for the design briefs this implements.
 
 **Relationship to production code:** standalone — deliberately separate from
-`AudiouterCore`, which pins `.macOS(.v13)`; this package targets
+`AudioutCore`, which pins `.macOS(.v13)`; this package targets
 `.macOS("14.4")` because process taps need 14.2+/14.4-public. Not linked by
 and does not link the main app.
 

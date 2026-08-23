@@ -72,7 +72,7 @@ run and pasted in the session:
 - **Point 4 (Advanced row):** The disclosure triangle now sits inside a real
   section row: a 1pt hairline divider above it (`HairlineView`, NOT `NSBox`
   — `test_hasBoxDivider` would fail), the word "Advanced" is itself a
-  clickable `NSButton` (same idiom as `AudiouterSettingsUI/AudioSettingsViewController`'s
+  clickable `NSButton` (same idiom as `AudioutSettingsUI/AudioSettingsViewController`'s
   existing "Advanced" row), a `tertiaryLabel` hint "10 bands" beside it, and
   a trailing readout ("N set", blank when flat) showing how many of the ten
   hidden bands are non-zero — so a user can tell hidden shaping is active
@@ -222,7 +222,7 @@ since step 16 hasn't touched source files but it's good hygiene.
 #### What's NOT done: step 16 (docs) — and the actual blocker
 
 Step 16 asked for two doc updates in
-`AudiouterCore/Sources/AudiouterSharedUI/AGENTS.md`:
+`AudioutCore/Sources/AudioutSharedUI/AGENTS.md`:
 - The `EQEditorView` map-table row — **done**, confirmed present at line 67:
   > Tone editor hosted by the Groups detail panes: Bass/Treble/Balance/Loudness
   > + hairline + Advanced section row; the fold holds the scope above ten
@@ -240,8 +240,8 @@ has a documented, previously-enforced hard cap of **6264 words**
 (`wc -w`), and it currently measures:
 
 ```
-$ wc -w AudiouterCore/Sources/AudiouterSharedUI/AGENTS.md
-    6286 AudiouterCore/Sources/AudiouterSharedUI/AGENTS.md
+$ wc -w AudioutCore/Sources/AudioutSharedUI/AGENTS.md
+    6286 AudioutCore/Sources/AudioutSharedUI/AGENTS.md
 ```
 
 **22 words over the cap.** This cap was hit and enforced exactly this way
@@ -256,7 +256,7 @@ likely rather than certain.
 
 ### The one concrete next step
 
-**Trim `AudiouterCore/Sources/AudiouterSharedUI/AGENTS.md` by at least 22
+**Trim `AudioutCore/Sources/AudioutSharedUI/AGENTS.md` by at least 22
 words**, without:
 - deleting either of the two new EQ-related map rows just written,
 - removing any named symbol the file's own self-check might verify exists
@@ -283,14 +283,14 @@ Once the word count is back at or under 6264:
      --filter MixerWindowControllerTests --filter GroupsHeaderParityTests \
      --filter GroupsWindowTextColorLockTests --filter EQResponseCurveTests
    bash scripts/build.sh
-   wc -w AudiouterCore/Sources/AudiouterSharedUI/AGENTS.md   # must be ≤ 6264
+   wc -w AudioutCore/Sources/AudioutSharedUI/AGENTS.md   # must be ≤ 6264
    ```
 2. Render fresh snapshots and actually look at both new PNGs (this was
    planned but never executed — the scratchpad directory
    `.../scratchpad/snaps-eqb/` referenced by the work order does not
    exist, confirmed by `find`):
    ```
-   cd AudiouterCore && swift run --build-system native window-snapshot <some-scratch-dir>
+   cd AudioutCore && swift run --build-system native window-snapshot <some-scratch-dir>
    ```
    Then visually confirm: `mixer-4-device-detail-{dark,light}.png` shows
    NO scope and NO caption row at rest (card ends at the Advanced row);
@@ -313,30 +313,30 @@ Once the word count is back at or under 6264:
 From `git status --short` at time of writing:
 
 ```
- M AudiouterCore/Sources/AudiouterCore/AppSettings.swift
- M AudiouterCore/Sources/AudiouterSharedUI/AGENTS.md              ← OVER WORD CAP, see above
- M AudiouterCore/Sources/AudiouterSharedUI/EQEditorView.swift
- M AudiouterCore/Sources/AudiouterSharedUI/EQResponseCurveView.swift
- M AudiouterCore/Sources/AudiouterSharedUI/Tokens.swift
- M AudiouterCore/Sources/AudiouterWindowUI/AGENTS.md
-MM AudiouterCore/Sources/AudiouterWindowUI/DeviceDetailViewController.swift
- M AudiouterCore/Sources/AudiouterWindowUI/GroupEditorViewController.swift
- M AudiouterCore/Sources/AudiouterWindowUI/GroupedSectionView.swift
- M AudiouterCore/Sources/AudiouterWindowUI/GroupsPaneLayout.swift
- M AudiouterCore/Sources/AudiouterWindowUI/MainOutDetailViewController.swift
-MM AudiouterCore/Sources/AudiouterWindowUI/MixerWindowController.swift
- M AudiouterCore/Sources/window-harness/main.swift
- M AudiouterCore/Sources/window-snapshot/main.swift
- M AudiouterCore/Tests/AudiouterCoreTests/AppSurfaceControllerTests.swift
-MM AudiouterCore/Tests/AudiouterCoreTests/DeviceDetailViewTests.swift
- M AudiouterCore/Tests/AudiouterCoreTests/EQEditorViewTests.swift
- M AudiouterCore/Tests/AudiouterCoreTests/EQResponseCurveTests.swift
- M AudiouterCore/Tests/AudiouterCoreTests/GroupRenameFieldTests.swift
- M AudiouterCore/Tests/AudiouterCoreTests/GroupsHeaderParityTests.swift
- M AudiouterCore/Tests/AudiouterCoreTests/GroupsWindowTextColorLockTests.swift
- M AudiouterCore/Tests/AudiouterCoreTests/MembershipRailTests.swift
- M AudiouterCore/Tests/AudiouterCoreTests/MembershipWellContrastTests.swift
-MM AudiouterCore/Tests/AudiouterCoreTests/MixerWindowControllerTests.swift
+ M AudioutCore/Sources/AudioutCore/AppSettings.swift
+ M AudioutCore/Sources/AudioutSharedUI/AGENTS.md              ← OVER WORD CAP, see above
+ M AudioutCore/Sources/AudioutSharedUI/EQEditorView.swift
+ M AudioutCore/Sources/AudioutSharedUI/EQResponseCurveView.swift
+ M AudioutCore/Sources/AudioutSharedUI/Tokens.swift
+ M AudioutCore/Sources/AudioutWindowUI/AGENTS.md
+MM AudioutCore/Sources/AudioutWindowUI/DeviceDetailViewController.swift
+ M AudioutCore/Sources/AudioutWindowUI/GroupEditorViewController.swift
+ M AudioutCore/Sources/AudioutWindowUI/GroupedSectionView.swift
+ M AudioutCore/Sources/AudioutWindowUI/GroupsPaneLayout.swift
+ M AudioutCore/Sources/AudioutWindowUI/MainOutDetailViewController.swift
+MM AudioutCore/Sources/AudioutWindowUI/MixerWindowController.swift
+ M AudioutCore/Sources/window-harness/main.swift
+ M AudioutCore/Sources/window-snapshot/main.swift
+ M AudioutCore/Tests/AudioutCoreTests/AppSurfaceControllerTests.swift
+MM AudioutCore/Tests/AudioutCoreTests/DeviceDetailViewTests.swift
+ M AudioutCore/Tests/AudioutCoreTests/EQEditorViewTests.swift
+ M AudioutCore/Tests/AudioutCoreTests/EQResponseCurveTests.swift
+ M AudioutCore/Tests/AudioutCoreTests/GroupRenameFieldTests.swift
+ M AudioutCore/Tests/AudioutCoreTests/GroupsHeaderParityTests.swift
+ M AudioutCore/Tests/AudioutCoreTests/GroupsWindowTextColorLockTests.swift
+ M AudioutCore/Tests/AudioutCoreTests/MembershipRailTests.swift
+ M AudioutCore/Tests/AudioutCoreTests/MembershipWellContrastTests.swift
+MM AudioutCore/Tests/AudioutCoreTests/MixerWindowControllerTests.swift
  M ROADMAP.jsonl
 ```
 
@@ -364,7 +364,7 @@ same effort, both already read/used above:
   work go to a scratch/temp directory, not that folder.
 - Stock AppKit only; no new custom `draw()` overrides beyond what's already
   approved (the scope, the icon well, a couple of named exceptions —
-  documented in `AudiouterCore/Sources/AudiouterWindowUI/AGENTS.md` and
-  `AudiouterCore/Sources/AudiouterSharedUI/AGENTS.md`).
+  documented in `AudioutCore/Sources/AudioutWindowUI/AGENTS.md` and
+  `AudioutCore/Sources/AudioutSharedUI/AGENTS.md`).
 - `AGENTS.md` files have hard word caps per-file that get enforced (see
   above) — check `wc -w` before considering any AGENTS.md edit done.

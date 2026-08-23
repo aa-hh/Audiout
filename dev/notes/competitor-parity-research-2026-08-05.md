@@ -15,7 +15,7 @@ Five families swept in parallel on 2026-08-05:
 4. **Native platform baselines** — macOS/iOS AirPlay UI limits, Windows/Android equivalents, BubbleUPnP (Apple support docs, Apple/MacRumors discussion threads, developer statements).
 5. **Small-vendor casting peers** — Google Home/Cast groups, AirParrot, TuneBlade, Porthole (release notes, help docs, reviews, Home Assistant community).
 
-**Caveat:** all web findings are point-in-time as of 2026-08-05. Competitor release notes, forum threads, and shipped feature sets move; re-verify any specific claim before building against it. Audiouter status below is verified against `docs/SPEC.md`, `ROADMAP.jsonl`, and project memory — not against the researchers' guesses (corrections noted inline, summarized in §6).
+**Caveat:** all web findings are point-in-time as of 2026-08-05. Competitor release notes, forum threads, and shipped feature sets move; re-verify any specific claim before building against it. Audiout status below is verified against `docs/SPEC.md`, `ROADMAP.jsonl`, and project memory — not against the researchers' guesses (corrections noted inline, summarized in §6).
 
 ---
 
@@ -25,9 +25,9 @@ Five families swept in parallel on 2026-08-05:
 
 **Demand key:** `table-stakes` = shipped broadly, users assume it · `differentiator` = shipped by some, marketed · `requested` = asked-for, unbuilt upstream · `complaint` = shipped badly or removed, users loud about it.
 
-### Where Audiouter already has parity (or better)
+### Where Audiout already has parity (or better)
 
-| Feature | Who ships / who asks | Demand | Audiouter status | Evidence |
+| Feature | Who ships / who asks | Demand | Audiout status | Evidence |
 |---|---|---|---|---|
 | Multi-speaker synced system audio from the menu bar | Nobody natively on macOS; Apple confirms the OS can't | complaint | **HAS — core premise** | support.apple.com/105068; macrumors 2350418; snapcast #688/#750 users beg for exactly this |
 | Fast, reliable group/per-device volume | Sonos (badly, post-rewrite); SonoPhone won users by being fast | complaint | **HAS** — DACP absolute setproperty merged, speaker-input responsiveness live-verified | Sonos community 6905208 (3–20 s lag); techradar "biggest remaining problem" |
@@ -36,7 +36,7 @@ Five families swept in parallel on 2026-08-05:
 | Group master + per-speaker expansion | Sonos (patented the interaction) | table-stakes | **HAS** — group rows with master slider + animated expansion, SPEC §9 | docs.sonos.com/docs/volume; patent 12260064 |
 | Speaker hardware buttons/remote adjust app volume | TuneBlade added a DACP server after complaints; OwnTone users still ask | complaint / requested | **HAS** — merged, live-verified | tuneblade.com/releaseNotes 1.6.0; owntone #1094 |
 | Per-app routing (app → speakers, rest local) | SoundSource 6 shipped it Dec 2025 ($49); no native macOS support | requested → now differentiator | **HAS** — shipped, incl. mixing overlapping routes per speaker | weblog.rogueamoeba.com 2025/12/04; SPEC §3 v2 |
-| System-wide selectable output group (aggregate device) | SoundSource 6 custom output groups | differentiator | **HAS** — Wave 3 public "Audiouter" aggregate, live-verified; seamless AirPlay-exclusivity handoff built (unmerged) | rogueamoeba.com/soundsource/whatsnew.php |
+| System-wide selectable output group (aggregate device) | SoundSource 6 custom output groups | differentiator | **HAS** — Wave 3 public "Audiout" aggregate, live-verified; seamless AirPlay-exclusivity handoff built (unmerged) | rogueamoeba.com/soundsource/whatsnew.php |
 | Fully local control, no cloud | Sonos rewrite's cloud round-trip drove users away | complaint | **HAS — inherent** | theregister.com 2024/05/20; Sonos community 6904138 |
 | No driver/kext install friction | Rogue Amoeba's ACE was their biggest support burden for years | complaint | **HAS** — native process-tap API, TCC prompt only | rogueamoeba KB ACE-BigSur-Install-Troubleshooting |
 | Lossless on the wire | Audiophiles loudly complain AirPlay 2 senders silently transcode to AAC-256 | complaint | **HAS (mechanism)** — vendored sender encodes ALAC (`airplay.c` `alac_encode`, send path). No user-facing codec indicator. | audiophilestyle.com "Lossless Mess Part 2"; darko.audio 2023/10 |
@@ -46,7 +46,7 @@ Five families swept in parallel on 2026-08-05:
 
 ### Gaps — candidates (assessed in §3)
 
-| Feature | Who ships / who asks | Demand | Audiouter status | Evidence |
+| Feature | Who ships / who asks | Demand | Audiout status | Evidence |
 |---|---|---|---|---|
 | Per-device delay/latency trim | Google Home ships it; TuneBlade shipped ±500 ms; snapcast per-client latency is table stakes; Airfoil users ask; OwnTone users ask | table-stakes (4 of 5 families) | **MISSING** — global buffer-ms setting only, no per-device trim | support.google.com/googlecast/6318642; tuneblade releaseNotes 1.5.1; snapcast README; forked-daapd #560; rogueamoeba KB AudioDelaysAndSync |
 | Per-device EQ (bass/treble/balance/loudness) | Sonos, SoundSource (per-app 10-band), Airfoil (10-band), TuneBlade (3-band); snapcast users beg (#917, offered a PR) | table-stakes in the niche + requested upstream | **MISSING — already SPEC v2** ("per-device EQ / L-R balance", full window) | rogueamoeba.com/soundsource controls-applications; snapcast #917/#1230; support.sonos.com bass-treble article |
@@ -69,24 +69,24 @@ Five families swept in parallel on 2026-08-05:
 
 ### Recorded, deliberately not chased (see §4)
 
-Queue/playlist management · room correction (Trueplay) · Windows port · notification/announcement ducking · Mac/other-devices as AirPlay *receivers* · volume normalization · Home Assistant integration (downstream of any public API) · pricing/trial mechanics (moot — Audiouter is GPL open source, direct download, per SPEC §2).
+Queue/playlist management · room correction (Trueplay) · Windows port · notification/announcement ducking · Mac/other-devices as AirPlay *receivers* · volume normalization · Home Assistant integration (downstream of any public API) · pricing/trial mechanics (moot — Audiout is GPL open source, direct download, per SPEC §2).
 
 ---
 
-## 3. THE SHORTLIST — parity candidates ranked for Audiouter
+## 3. THE SHORTLIST — parity candidates ranked for Audiout
 
 Ranking = demand strength × fit with the native-macOS / audio-only / multi-room identity × feasibility on the existing engine. Recommendation first, upside and downside both stated.
 
 ### 1. Per-device delay trim (manual sync offset)
 
 The only gap that showed up as *shipped table-stakes* in four of five families (Google Home, TuneBlade, snapcast) *and* as an explicit user request in the other (Airfoil forums, OwnTone #560). It fits the engine unusually well: the engine already owns a shared PTP presentation timeline per output, so a per-device ±ms offset is an adjustment to an anchor that already exists — and it becomes near-mandatory the moment Bluetooth outputs (roadmap 004) land, because BT hardware latency varies wildly and PLAN-UNIVERSAL-SYNC's auto-offset will need a manual escape hatch anyway. Fits Alec's bare-numbers-over-presets preference (a numeric ms field per device, like the existing global buffer setting).
-**Upside:** closes a real sync complaint class cheaply; de-risks the BT plan; snapcast #476 shows users expect trims to persist — Audiouter's per-device persistence pattern (DeviceIconStore) is ready to copy.
+**Upside:** closes a real sync complaint class cheaply; de-risks the BT plan; snapcast #476 shows users expect trims to persist — Audiout's per-device persistence pattern (DeviceIconStore) is ready to copy.
 **Downside:** it's an escape hatch that can mask genuine sync bugs (a user "fixes" drift that the engine should have fixed); one more per-device control in an already dense row UI.
 
 ### 2. Per-device EQ — basic tone first (bass / treble / balance / loudness)
 
-Already promised in SPEC v2 ("per-device EQ / L-R balance" in the full window), shipped by every direct competitor (SoundSource, Airfoil, TuneBlade, Sonos), and begged for upstream (snapcast #917 — a user offered to write the PR). It sits naturally on the existing render path: Audiouter already does per-device gain staging before encode, and a biquad tone stage slots in at the same point. Recommend the Sonos-shaped floor (bass/treble/balance/loudness) rather than a 10-band graphic — loudness compensation is reportedly the most-toggled control.
-**Upside:** fulfills an existing spec commitment; the one feature where Audiouter can beat Sonos at its own hardware (Sonos refuses manual access to its DSP — Audiouter EQs *before* the AirPlay send, so it works on any receiver).
+Already promised in SPEC v2 ("per-device EQ / L-R balance" in the full window), shipped by every direct competitor (SoundSource, Airfoil, TuneBlade, Sonos), and begged for upstream (snapcast #917 — a user offered to write the PR). It sits naturally on the existing render path: Audiout already does per-device gain staging before encode, and a biquad tone stage slots in at the same point. Recommend the Sonos-shaped floor (bass/treble/balance/loudness) rather than a 10-band graphic — loudness compensation is reportedly the most-toggled control.
+**Upside:** fulfills an existing spec commitment; the one feature where Audiout can beat Sonos at its own hardware (Sonos refuses manual access to its DSP — Audiout EQs *before* the AirPlay send, so it works on any receiver).
 **Downside:** DSP scope creep is real — the parametric/room-correction ceiling (shairport-sync convolution) is a rabbit hole; every filter adds CPU on the RT path that Stage-2 scheduling work hasn't been live-measured yet; badly-set EQ + high gain can clip before encode, needing a limiter conversation.
 
 ### 3. Shortcuts / App Intents automation actions
@@ -103,14 +103,14 @@ Already in SPEC's "Later" list, so this is a promotion, not new scope. The Sonos
 
 ### 5. Scenes / full-setup snapshots (Quick Configs)
 
-The step past saved groups that users beg Sonos for (multi-year threads, unbuilt) and SoundSource 6 just shipped. Audiouter's groups already snapshot per-device volumes — this extends the same persistence pattern to the whole routing state (per-app routes, Main, mutes, future EQ) recalled by name. A natural superset of machinery that already exists.
+The step past saved groups that users beg Sonos for (multi-year threads, unbuilt) and SoundSource 6 just shipped. Audiout's groups already snapshot per-device volumes — this extends the same persistence pattern to the whole routing state (per-app routes, Main, mutes, future EQ) recalled by name. A natural superset of machinery that already exists.
 **Upside:** differentiator against Sonos (they never shipped it); mostly persistence + apply logic, no engine work; composes with #3 (a scene as a Shortcut action is the killer combo).
 **Downside:** apply-time edge cases are the real cost (missing devices, apps not running, conflicts with the active state) — the "silent fallback" rules need careful design; risks UI confusion between groups and scenes if not framed crisply.
 
 ### 6. Per-speaker auto-connect on appearance
 
 TuneBlade's set-and-forget shape (per-receiver auto-connect + force-reconnect), and the OwnTone #1760 lesson: users benchmark reconnect behavior against iOS and blame the app that needs manual restarts. SPEC v2 already promises group auto-reconnect; this sharpens it to a per-speaker opt-in toggle.
-**Upside:** turns Audiouter into whole-home always-on infrastructure rather than a session tool; builds on existing reconnect/warm-signal machinery.
+**Upside:** turns Audiout into whole-home always-on infrastructure rather than a session tool; builds on existing reconnect/warm-signal machinery.
 **Downside:** interacts with the open connect-volume-seed questions (roadmap 018's anti-blast decision) — auto-connecting at the wrong level is the worst version of the blast bug; surprise audio on speaker power-on can genuinely annoy households.
 
 ### 7. Manual add receiver by IP:port
@@ -121,32 +121,32 @@ Cheap insurance against the discovery-failure support load every peer documents 
 
 ### 8. Codec transparency ("lossless, and we say so")
 
-Verified this sweep: the vendored sender encodes ALAC on the wire (`airplay.c` send path) — Audiouter is already lossless where Apple's own AirPlay 2 path silently transcodes to AAC-256, which audiophiles loudly resent. The gap is purely surfacing it: a codec/bit-depth line in the device row or diagnostics panel.
+Verified this sweep: the vendored sender encodes ALAC on the wire (`airplay.c` send path) — Audiout is already lossless where Apple's own AirPlay 2 path silently transcodes to AAC-256, which audiophiles loudly resent. The gap is purely surfacing it: a codec/bit-depth line in the device row or diagnostics panel.
 **Upside:** near-zero engineering (the fact is already true); speaks directly to the forum crowd most likely to adopt a tool like this; honest-marketing material.
 **Downside:** invites audiophile scrutiny of the whole pipeline (any future resample/EQ stage must then be disclosed too); a claim, once made, has to be kept true per-receiver-type (AP1 vs AP2 paths).
 
 ### 9. Per-device max-volume limit
 
-SoundSource 6 ships it; Audiouter's gain-staging architecture has the plumbing, and it dovetails with roadmap 018's anti-blast open question (a ceiling clamp is one of the three candidate answers there — building the limit answers 018's T-I2 for free).
+SoundSource 6 ships it; Audiout's gain-staging architecture has the plumbing, and it dovetails with roadmap 018's anti-blast open question (a ceiling clamp is one of the three candidate answers there — building the limit answers 018's T-I2 for free).
 **Upside:** small; protects ears and neighbor relations; one decision serves two roadmap items.
 **Downside:** weak independent demand evidence (only Rogue Amoeba shipping it); another per-device setting to persist and surface without cluttering rows.
 
 ### 10. Cast-like output (already roadmap 006 — keep as research, rank last for building)
 
 The one structural feature gap vs Airfoil/AirParrot (cross-protocol AirPlay+Cast groups). Kept on the shortlist because it's already Alec's roadmap 006 and the sweeps confirm it's a real differentiator — but ranked last on feasibility: it's an entire second sender protocol with its own sync domain, and AirParrot's reviews show cross-protocol sync is fragile even for a company that ships it full-time.
-**Upside:** would make Audiouter the only maintained macOS app spanning both ecosystems; unlocks Chromecast-only households.
+**Upside:** would make Audiout the only maintained macOS app spanning both ecosystems; unlocks Chromecast-only households.
 **Downside:** the engine's PTP timeline doesn't extend to Cast — cross-protocol sync is a research problem, not a feature; large ongoing compat surface (two reverse-engineered/foreign protocols to chase instead of one).
 
 ---
 
 ## 4. Anti-candidates — explicitly not chasing
 
-- **Queue / playlist management.** Sonos users mourned it, but Audiouter routes *system/app* audio — the source app (Music, Spotify) owns the queue, and per-app routing keeps users in the app that already has a good queue UI. Chasing it would mean becoming a media player. Recorded so the skip is conscious.
+- **Queue / playlist management.** Sonos users mourned it, but Audiout routes *system/app* audio — the source app (Music, Spotify) owns the queue, and per-app routing keeps users in the app that already has a good queue UI. Chasing it would mean becoming a media player. Recorded so the skip is conscious.
 - **Room correction / Trueplay-style tuning.** Marquee Sonos feature, but the loud user signal is about iOS/Android *parity lockout*, not demand for tuning itself; target speakers (Sonos, HomePod) already self-tune; mic-based correction is a large DSP project orthogonal to routing. If power users want it, shairport-sync-style convolution is their tool.
 - **Windows port.** The market gap is real (TuneBlade discontinued 2018, Airfoil-for-Windows stagnant), but it forfeits the entire native-AppKit identity and the Core-Audio process-tap architecture. An expansion signal for someone else.
-- **Public HTTP/WebSocket API (for now).** Real demand exists (TuneBlade/HA crowd), but it's a versioned protocol commitment plus a security surface on a LAN port. Shortcuts/App Intents (#3) serves most of the same jobs Mac-natively; revisit only if HA-style demand shows up for Audiouter specifically. Home Assistant integration is downstream of this and inherits the skip.
-- **Notification/announcement ducking (doorbell over music).** Recurring in snapcast's home-automation crowd; niche for a Mac menu-bar app. Audiouter's per-speaker mixing means it's *closer* than competitors if this ever matters — which is exactly why it doesn't need building speculatively.
-- **Mac/other devices as AirPlay receivers (Satellite-style).** Rogue Amoeba never achieved AirPlay-2-protocol receiving either; Audiouter's synced-local playback already covers the host Mac, which is the case that matters.
+- **Public HTTP/WebSocket API (for now).** Real demand exists (TuneBlade/HA crowd), but it's a versioned protocol commitment plus a security surface on a LAN port. Shortcuts/App Intents (#3) serves most of the same jobs Mac-natively; revisit only if HA-style demand shows up for Audiout specifically. Home Assistant integration is downstream of this and inherits the skip.
+- **Notification/announcement ducking (doorbell over music).** Recurring in snapcast's home-automation crowd; niche for a Mac menu-bar app. Audiout's per-speaker mixing means it's *closer* than competitors if this ever matters — which is exactly why it doesn't need building speculatively.
+- **Mac/other devices as AirPlay receivers (Satellite-style).** Rogue Amoeba never achieved AirPlay-2-protocol receiving either; Audiout's synced-local playback already covers the host Mac, which is the case that matters.
 - **Volume normalization across tracks.** Single-issue upstream signal; the source app owns it in a system-capture architecture. Legitimate skip.
 - **Pricing/trial mechanics.** The Rogue-Amoeba-family findings (one-time $29–49 sweet spot, degradation-based trials) are largely moot: SPEC §2 decided open source (GPL-2.0-or-later), direct download. Kept in the raw JSON as context should distribution ever be revisited.
 
@@ -161,13 +161,13 @@ The one structural feature gap vs Airfoil/AirParrot (cross-protocol AirPlay+Cast
 5. **Codec claim (shortlist #8).** Comfortable publicly claiming lossless/ALAC? It's true today, but it commits future pipeline changes (EQ, resampling) to disclosure.
 6. **Stereo-pair HomePods.** Unverified how discovery presents a stereo pair (single AP2 endpoint expected). Cheap live check next hardware session; if it just works, say so on the site.
 7. **Sonos group-volume patents.** Group-volume mechanics are Sonos-patent territory (patent 12260064; they litigated Google over it). Likely irrelevant for a GPL personal tool, but worth a look before any commercial-flavored distribution.
-8. **Sonos firmware-regression exposure.** Oct 2024: a Sonos firmware update broke multi-device AirPlay from third-party senders (hit Airfoil and Roon). Audiouter inherits this class of risk; do we want a canary practice (test after Sonos firmware updates) as a standing rule?
+8. **Sonos firmware-regression exposure.** Oct 2024: a Sonos firmware update broke multi-device AirPlay from third-party senders (hit Airfoil and Roon). Audiout inherits this class of risk; do we want a canary practice (test after Sonos firmware updates) as a standing rule?
 
 ---
 
 ## 6. Corrections made to researchers' status guesses
 
-Spec/roadmap-verified changes from the raw JSON's `audiouter_status_guess` fields:
+Spec/roadmap-verified changes from the raw JSON's `audiout_status_guess` fields:
 
 | Finding | Guess | Corrected | Why |
 |---|---|---|---|

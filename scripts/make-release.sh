@@ -25,7 +25,7 @@ set -euo pipefail
 # defaults them for dev builds) — a release with an unversioned or
 # accidentally-defaulted filename is exactly the kind of mistake this script
 # exists to prevent (Paddle delivery and the Sparkle appcast both key off
-# APP_VERSION). Fail fast rather than silently shipping "Audiouter-0.1.0.zip".
+# APP_VERSION). Fail fast rather than silently shipping "Audiout-0.1.0.zip".
 if [ -z "${APP_VERSION:-}" ]; then
   echo "ERROR: APP_VERSION must be set (e.g. APP_VERSION=1.0.0 BUILD_NUMBER=3 scripts/make-release.sh)" >&2
   exit 1
@@ -43,24 +43,24 @@ fi
 # than silently baked into the thing being notarised and shipped.
 unset APP_NAME BUNDLE_ID
 
-NOTARY_PROFILE="${NOTARY_PROFILE:-audiouter-notary}"
+NOTARY_PROFILE="${NOTARY_PROFILE:-audiout-notary}"
 
 # --- Paths --------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUTPUT_DIR="${1:-$REPO_ROOT/build}"
-APP_BUNDLE="$OUTPUT_DIR/Audiouter.app"
-NOTARIZE_ZIP="$OUTPUT_DIR/Audiouter-notarize.zip"
-DIST_ZIP="$OUTPUT_DIR/Audiouter-${APP_VERSION}.zip"
+APP_BUNDLE="$OUTPUT_DIR/Audiout.app"
+NOTARIZE_ZIP="$OUTPUT_DIR/Audiout-notarize.zip"
+DIST_ZIP="$OUTPUT_DIR/Audiout-${APP_VERSION}.zip"
 
 # --- Build + sign (make-app.sh) ----------------------------------------------
-# AUDIOUTER_BUNDLE_DYLIBS=1: the release build must run on a Mac with no
+# AUDIOUT_BUNDLE_DYLIBS=1: the release build must run on a Mac with no
 # Homebrew — see bundle-dylibs.sh. CODESIGN_REQUIRE_IDENTITY=1: a release
 # built ad-hoc (no Developer ID cert in the keychain) is not shippable —
 # notarization below would reject it anyway, so fail here with make-app.sh's
 # clearer error instead of a confusing notarytool rejection.
 echo "==> Building and signing the release app (make-app.sh)"
-AUDIOUTER_BUNDLE_DYLIBS=1 CODESIGN_REQUIRE_IDENTITY=1 "$SCRIPT_DIR/make-app.sh" "$OUTPUT_DIR"
+AUDIOUT_BUNDLE_DYLIBS=1 CODESIGN_REQUIRE_IDENTITY=1 "$SCRIPT_DIR/make-app.sh" "$OUTPUT_DIR"
 test -d "$APP_BUNDLE" || { echo "ERROR: expected app bundle not found at $APP_BUNDLE" >&2; exit 1; }
 
 # --- Zip for notarization -----------------------------------------------------
@@ -75,7 +75,7 @@ ditto -c -k --keepParent "$APP_BUNDLE" "$NOTARIZE_ZIP"
 # --- Notarize ------------------------------------------------------------------
 # --wait blocks until Apple's notary service returns a verdict (typically
 # minutes). --keychain-profile reads the credentials stored once via
-# `xcrun notarytool store-credentials audiouter-notary` (docs/RELEASE.md) —
+# `xcrun notarytool store-credentials audiout-notary` (docs/RELEASE.md) —
 # never inline an Apple ID / app-specific password here.
 echo "==> Submitting for notarization (profile: $NOTARY_PROFILE)"
 NOTARY_OUTPUT="$(xcrun notarytool submit "$NOTARIZE_ZIP" --keychain-profile "$NOTARY_PROFILE" --wait 2>&1)" || {

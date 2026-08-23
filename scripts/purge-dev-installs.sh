@@ -1,9 +1,9 @@
 #!/bin/bash
 # purge-dev-installs.sh — dev-only tool: erase every trace of every NON-SHIPPING
-# Audiouter build from this Mac, and leave the shipping build untouched.
+# Audiout build from this Mac, and leave the shipping build untouched.
 #
 # WHY THIS EXISTS: CLAUDE.md requires every hand-off build to carry its OWN
-# bundle id ("Audiouter Sync v2" / com.audiouter.Audiouter.syncv2, ...) because
+# bundle id ("Audiout Sync v2" / com.audiout.Audiout.syncv2, ...) because
 # macOS pins TCC grants to bundle id + code signature, so reusing an id after a
 # rebuild produces stale grants and silent denials. That rule is correct and
 # stays — but each of those throwaway ids leaves permanent residue behind:
@@ -35,12 +35,12 @@
 #     a variable a caller can override. Every id-driven step re-checks it
 #     immediately before acting and hard-aborts on a match. Do not make it
 #     configurable — that literal IS the safety boundary.
-#   - Every id-driven step is additionally scoped to the "com.audiouter."
+#   - Every id-driven step is additionally scoped to the "com.audiout."
 #     namespace, so a bug in the discovery logic still cannot reach another
 #     vendor's data.
-#   - ~/Library/Application Support/Audiouter/ (saved groups, per-app routes,
+#   - ~/Library/Application Support/Audiout/ (saved groups, per-app routes,
 #     device icons, BT sync trims) belongs to the SHIPPING build and is never
-#     touched. Neither is ~/Library/Logs/Audiouter/ — every build writes
+#     touched. Neither is ~/Library/Logs/Audiout/ — every build writes
 #     telemetry to that one shared path, so no line in it can be attributed to
 #     a dev build and none of it is safe to attribute away from the shipping
 #     one.
@@ -54,31 +54,31 @@
 set -euo pipefail
 
 # --- The safety boundary. A literal, deliberately not overridable. -----------
-PROD_BUNDLE_ID="com.audiouter.Audiouter"
-PROD_AGGREGATE_UID="com.audiouter.Audiouter.aggregate"   # AggregateOutputDevice.shippingUID
-PROD_HELPER_LABEL="com.audiouter.Audiouter.ptphelper"    # make-app.sh HELPER_LABEL
-PROD_APP_SUPPORT="Audiouter"                             # GroupStore.defaultDirectory
+PROD_BUNDLE_ID="com.audiout.Audiout"
+PROD_AGGREGATE_UID="com.audiout.Audiout.aggregate"   # AggregateOutputDevice.shippingUID
+PROD_HELPER_LABEL="com.audiout.Audiout.ptphelper"    # make-app.sh HELPER_LABEL
+PROD_APP_SUPPORT="Audiout"                             # GroupStore.defaultDirectory
 # Nothing outside this namespace is ever a candidate, whatever discovery finds.
-NAMESPACE="com.audiouter."
+NAMESPACE="com.audiout."
 
 # Preference-domain prefixes leaked by the test suites — one plist per suite
 # per test per run, forever. Historical target names are included because the
 # residue outlives the rename that retired them.
 TEST_PREF_PREFIXES=(
-  AudiouterCoreTests
-  AudiouterTests
+  AudioutCoreTests
+  AudioutTests
   AudioControlSetupTests
   AudioControlTests
   OnboardingUITests
-  AudiouterUITests
+  AudioutUITests
   AudioutedTests
 )
 
 # Dev harness / snapshot-tool preference domains. These are process-name
 # domains (an unbundled `swift run` binary keys UserDefaults by process name,
-# not by bundle id), so they can't be found by the com.audiouter.* scan.
+# not by bundle id), so they can't be found by the com.audiout.* scan.
 HARNESS_PREF_DOMAINS=(
-  AudiouterApp
+  AudioutApp
   popover-harness
   window-harness
   popover-snapshot
@@ -92,14 +92,14 @@ usage() {
   cat <<'EOF'
 Usage: purge-dev-installs.sh [--apply|--help]
 
-Removes every trace of every NON-SHIPPING Audiouter build from this Mac:
+Removes every trace of every NON-SHIPPING Audiout build from this Mac:
 preference domains, TCC privacy grants, persistent aggregate audio devices,
 root PTP-helper daemons, per-build support/cache/saved-state directories, and
 stray .app bundles. Also clears the preference-domain files leaked by the test
 suites.
 
-The shipping build (com.audiouter.Audiouter) and its saved settings in
-~/Library/Application Support/Audiouter/ are never touched.
+The shipping build (com.audiout.Audiout) and its saved settings in
+~/Library/Application Support/Audiout/ are never touched.
 
   (no flags)   Dry run (default). List everything that would be removed.
                Mutates nothing.
@@ -224,7 +224,7 @@ if [ "${#dev_ids[@]}" -gt 0 ]; then
     # Per-id directories. Missing ones are the common case — a build that only
     # ever ran once leaves prefs and a TCC row but no support directory.
     # No ~/Library/Containers entry: the app ships without the app-sandbox
-    # entitlement (scripts/Audiouter.entitlements), so it never gets a
+    # entitlement (scripts/Audiout.entitlements), so it never gets a
     # container. Add one here if that ever changes.
     for dir in \
       "$HOME/Library/Application Support/$id" \
@@ -268,7 +268,7 @@ echo
 # Swift.
 echo "==> Persistent aggregate audio devices"
 
-AGG_SWIFT="$(mktemp -t audiouter-agg).swift"
+AGG_SWIFT="$(mktemp -t audiout-agg).swift"
 trap 'rm -f "$AGG_SWIFT"' EXIT
 cat > "$AGG_SWIFT" <<'SWIFT'
 import CoreAudio

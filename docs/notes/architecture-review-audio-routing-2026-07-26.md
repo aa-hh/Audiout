@@ -102,8 +102,8 @@ which is precisely what this subsystem lacks in four places.
 
 ### A — Two capture coordinators that duplicate and drift
 
-`AudiouterCore/Sources/AudiouterCore/PerAppCaptureCoordinator.swift` and
-`AudiouterCore/Sources/AudiouterCore/NativeCaptureCoordinator.swift` independently re-implement the same
+`AudioutCore/Sources/AudioutCore/PerAppCaptureCoordinator.swift` and
+`AudioutCore/Sources/AudioutCore/NativeCaptureCoordinator.swift` independently re-implement the same
 "detect device/rate change → rebuild tap" machinery. There is no shared base class, protocol, or helper that owns
 that lifecycle.
 
@@ -125,7 +125,7 @@ The one genuinely shared abstraction is `AudioProcessResolver.swift`, consumed c
 
 ### B — Two locking disciplines racing over one engine resource
 
-In `AudiouterCore/Sources/AudiouterCore/NativeBackend.swift`:
+In `AudioutCore/Sources/AudioutCore/NativeBackend.swift`:
 
 - `converging` (`:287`) serializes the whole-system "Selected Devices" path — engine `stream_id` 0.
 - `bindTail` (`:368`) is a separate global FIFO serializing the per-app redirect path — `stream_id` ≥ 1.
@@ -166,7 +166,7 @@ behavioural verification whenever the TCC read already says granted** (`AudioCap
 It is bypassed in exactly the scenario it was built for.
 
 Also flagged: `AppRelauncher.relaunch()` has no external caller. (Correction to an earlier draft of this review:
-`AppRelaunchCommand.swift` lives in `AudiouterCore`, is live, and is covered by a test — only `relaunch()` itself is
+`AppRelaunchCommand.swift` lives in `AudioutCore`, is live, and is covered by a test — only `relaunch()` itself is
 uncalled.)
 
 ### D — The unowned shared sample rate
@@ -323,7 +323,7 @@ things differed from even the re-evaluated predictions above; this section docum
 per defect, plus one unrelated bug found along the way.
 
 **A — landed as a PARTIAL consolidation, not the full unification originally envisioned.** T4
-(`AudiouterCore/Sources/AudiouterCore/TapRebuildLifecycle.swift`) extracted only the parts of the two coordinators'
+(`AudioutCore/Sources/AudioutCore/TapRebuildLifecycle.swift`) extracted only the parts of the two coordinators'
 rebuild machinery that were provably identical: `TapRebuildCoalescer` (the STABILITY(C6) pending-rebuild flag) and
 `TapReanchor` (the `rateMoved`/`deviceMoved` re-anchor compare). The claim/teardown/commit choreography itself —
 what the original review's line-number citations were pointing at — stays two bodies in

@@ -2,7 +2,7 @@
 
 ## The gap
 
-Today, onboarding (`AudiouterOnboardingUI`) exists to secure three OS
+Today, onboarding (`AudioutOnboardingUI`) exists to secure three OS
 permissions — System Audio, Local Network, Remote Control — and nothing
 else. Its one screen is a header, a paragraph reassuring the user about the
 audio-recording prompt, a card of three permission rows, and a Done button.
@@ -23,7 +23,7 @@ own capabilities at all. This document lays out three ways to build one.
 ## Option A — Extend onboarding with a brief feature-tour step
 
 Add one more screen to the existing onboarding flow, after the permission
-card and before Done: a short, visual walk-through of what Audiouter
+card and before Done: a short, visual walk-through of what Audiout
 actually does — "send audio to more than one speaker at once," "group
 speakers together," "send a single app somewhere else while everything
 else stays on your Mac" — three or four beats, each with a small
@@ -84,10 +84,10 @@ depends on the user actually visiting each empty state at all; a user who
 never opens the Groups window still never learns groups exist, so coverage
 isn't guaranteed the way a forced tour's is.
 
-## Option C — A lightweight in-app "How Audiouter Works" page reachable from Help
+## Option C — A lightweight in-app "How Audiout Works" page reachable from Help
 
 Build a single static (or near-static) reference screen — reachable from a
-"How Audiouter Works" item in the status-bar menu or Settings — that lays
+"How Audiout Works" item in the status-bar menu or Settings — that lays
 out what each popover section does and what groups/per-app routing are for,
 written and laid out once, referenced whenever the user wants it (including
 long after first run, e.g. after a macOS update or if they forgot). It is

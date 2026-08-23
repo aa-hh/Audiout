@@ -29,9 +29,9 @@ import PackageDescription
 //
 // Platform: .macOS(.v14). Per T-PKG-1 instructions this matches the
 // capture-side deployment target used elsewhere in this project's Phase-2
-// planning; it is intentionally HIGHER than AudiouterCore's
-// .macOS(.v13) (AudiouterCore/Package.swift) — that package's
-// deployment target is NOT touched by this task. AudiouterCore
+// planning; it is intentionally HIGHER than AudioutCore's
+// .macOS(.v13) (AudioutCore/Package.swift) — that package's
+// deployment target is NOT touched by this task. AudioutCore
 // depends on AirPlayEngine only via NativeBackend (T-BACKEND-1, later),
 // at which point the core app's effective minimum OS follows this
 // package's floor for that one backend.
@@ -157,7 +157,7 @@ let package = Package(
         // one process that runs as root stays small enough to read
         // line-by-line (SPEC.md §4.1). A future SMAppService launchd daemon
         // bundles this binary; today it is built + link-tested here and run
-        // manually via AUDIOUTER_PTP_PORTS for the unprivileged IPC path.
+        // manually via AUDIOUT_PTP_PORTS for the unprivileged IPC path.
         .executable(name: "ptp-helper", targets: ["ptp-helper"]),
     ],
     targets: [

@@ -10,7 +10,7 @@
 // (SPEC.md §4.1).
 //
 // Shape (ptp-helper-design.md §0, §1, §6.1; libairptp/airptp.h):
-//   1. AUDIOUTER_PTP_PORTS / AUDIOUTER_PTP_SHM_NAME overrides (unprivileged
+//   1. AUDIOUT_PTP_PORTS / AUDIOUT_PTP_SHM_NAME overrides (unprivileged
 //      CI/test path, §6.2's "interim dev launch" high-port mode) — applied
 //      via airptp_ports_override()/airptp_shm_name_override() BEFORE binding.
 //   2. Register airptp_callbacks (logmsg/hexdump/thread_name_set) so the
@@ -37,7 +37,7 @@
 // macOS's own AirPlay stack wants UDP 319/320 too, so this daemon must not
 // hold them for the whole login session. It is demand-started and self-exits:
 //
-//   - Mach check-in: when AUDIOUTER_PTP_MACH_SERVICE names a launchd
+//   - Mach check-in: when AUDIOUT_PTP_MACH_SERVICE names a launchd
 //     MachServices key, we open an XPC listener on it and hold it for process
 //     lifetime. It carries exactly one boolean shutdown trigger (see "Release
 //     verb" below) and otherwise answers nothing — shm + loopback UDP stay
@@ -65,18 +65,18 @@
 //               library stopped reporting a running daemon). Respawning is
 //               the right response to these.
 //
-// ENV OVERRIDES (all optional; the AUDIOUTER_PTP_* family)
+// ENV OVERRIDES (all optional; the AUDIOUT_PTP_* family)
 //
-//   AUDIOUTER_PTP_MACH_SERVICE        launchd Mach service name to check in
+//   AUDIOUT_PTP_MACH_SERVICE        launchd Mach service name to check in
 //                                     on. Unset/empty = skip check-in.
-//   AUDIOUTER_PTP_PORTS               "EVENT,GENERAL" high-port override.
-//   AUDIOUTER_PTP_SHM_NAME            shm segment name override, so a test
+//   AUDIOUT_PTP_PORTS               "EVENT,GENERAL" high-port override.
+//   AUDIOUT_PTP_SHM_NAME            shm segment name override, so a test
 //                                     helper never collides with the real
 //                                     root daemon's root-owned /airptp_shm.
-//   AUDIOUTER_PTP_BIND_RETRY_SECS     bind retry budget, default 10.
-//   AUDIOUTER_PTP_BIND_RETRY_INTERVAL_MS  gap between attempts, default 500.
-//   AUDIOUTER_PTP_IDLE_SECS           idle-exit window, default 15.
-//   AUDIOUTER_PTP_IDLE_GRACE_SECS     startup grace before idleness is
+//   AUDIOUT_PTP_BIND_RETRY_SECS     bind retry budget, default 10.
+//   AUDIOUT_PTP_BIND_RETRY_INTERVAL_MS  gap between attempts, default 500.
+//   AUDIOUT_PTP_IDLE_SECS           idle-exit window, default 15.
+//   AUDIOUT_PTP_IDLE_GRACE_SECS     startup grace before idleness is
 //                                     measured at all, default 30.
 
 #include <stdio.h>
@@ -160,9 +160,9 @@ static struct airptp_callbacks ptp_helper_callbacks = {
   .logmsg = ptp_helper_logmsg,
 };
 
-// MARK: - AUDIOUTER_PTP_PORTS override (unprivileged CI/test path)
+// MARK: - AUDIOUT_PTP_PORTS override (unprivileged CI/test path)
 
-// Parses "EVENT,GENERAL" (e.g. "30319,30320") from AUDIOUTER_PTP_PORTS and
+// Parses "EVENT,GENERAL" (e.g. "30319,30320") from AUDIOUT_PTP_PORTS and
 // applies airptp_ports_override() before binding, so the whole
 // bind/start/find/peer path can be exercised without root or contending with
 // a real PTP responder on 319/320 (ptp-helper-design.md §6.2/§6.4).
@@ -175,7 +175,7 @@ ptp_helper_apply_port_override_if_set(void)
   long event_port;
   long general_port;
 
-  env = getenv("AUDIOUTER_PTP_PORTS");
+  env = getenv("AUDIOUT_PTP_PORTS");
   if (!env || !env[0])
     return;
 
@@ -185,7 +185,7 @@ ptp_helper_apply_port_override_if_set(void)
   comma = strchr(buf, ',');
   if (!comma)
   {
-    fprintf(stderr, "ptp-helper: AUDIOUTER_PTP_PORTS must be \"EVENT,GENERAL\" (got \"%s\") - ignoring\n", env);
+    fprintf(stderr, "ptp-helper: AUDIOUT_PTP_PORTS must be \"EVENT,GENERAL\" (got \"%s\") - ignoring\n", env);
     return;
   }
 
@@ -195,16 +195,16 @@ ptp_helper_apply_port_override_if_set(void)
 
   if (event_port <= 0 || event_port > 65535 || general_port <= 0 || general_port > 65535)
   {
-    fprintf(stderr, "ptp-helper: AUDIOUTER_PTP_PORTS out of range (\"%s\") - ignoring\n", env);
+    fprintf(stderr, "ptp-helper: AUDIOUT_PTP_PORTS out of range (\"%s\") - ignoring\n", env);
     return;
   }
 
-  fprintf(stderr, "ptp-helper: AUDIOUTER_PTP_PORTS set - overriding to event=%ld general=%ld (unprivileged test path)\n",
+  fprintf(stderr, "ptp-helper: AUDIOUT_PTP_PORTS set - overriding to event=%ld general=%ld (unprivileged test path)\n",
           event_port, general_port);
   airptp_ports_override((unsigned short)event_port, (unsigned short)general_port);
 }
 
-// MARK: - AUDIOUTER_PTP_SHM_NAME override (unprivileged CI/test path)
+// MARK: - AUDIOUT_PTP_SHM_NAME override (unprivileged CI/test path)
 
 // The shipped daemon runs as root and owns /airptp_shm; an unprivileged test
 // copy cannot shm_unlink() that root-owned segment, so daemon_shm_create()
@@ -216,18 +216,18 @@ ptp_helper_apply_shm_name_override_if_set(void)
 {
   const char *env;
 
-  env = getenv("AUDIOUTER_PTP_SHM_NAME");
+  env = getenv("AUDIOUT_PTP_SHM_NAME");
   if (!env || !env[0])
     return;
 
-  fprintf(stderr, "ptp-helper: AUDIOUTER_PTP_SHM_NAME set - publishing clock state as \"%s\" (unprivileged test path)\n", env);
+  fprintf(stderr, "ptp-helper: AUDIOUT_PTP_SHM_NAME set - publishing clock state as \"%s\" (unprivileged test path)\n", env);
   airptp_shm_name_override(env);
 }
 
 // MARK: - Numeric env overrides
 
 // Reads a non-negative integer from `name`, falling back (loudly) to
-// `fallback` when unset or unparseable. Every AUDIOUTER_PTP_* timing knob
+// `fallback` when unset or unparseable. Every AUDIOUT_PTP_* timing knob
 // goes through here so a typo degrades to the shipping default instead of
 // silently disabling the retry or the idle exit.
 static long
@@ -275,11 +275,11 @@ ptp_helper_mach_checkin(void)
   const char *name;
   dispatch_queue_t queue;
 
-  name = getenv("AUDIOUTER_PTP_MACH_SERVICE");
+  name = getenv("AUDIOUT_PTP_MACH_SERVICE");
   if (!name || !name[0])
     return; // Dev/test path: launched directly, no launchd, nothing to check in with.
 
-  queue = dispatch_queue_create("com.audiouter.ptp-helper.machservice", DISPATCH_QUEUE_SERIAL);
+  queue = dispatch_queue_create("com.audiout.ptp-helper.machservice", DISPATCH_QUEUE_SERIAL);
 
   ptp_helper_mach_listener = xpc_connection_create_mach_service(name, queue, XPC_CONNECTION_MACH_SERVICE_LISTENER);
   if (!ptp_helper_mach_listener)
@@ -377,8 +377,8 @@ ptp_helper_sleep_ms(long ms)
 static struct airptp_handle *
 ptp_helper_bind_with_retry(void)
 {
-  long budget_secs = ptp_helper_env_long("AUDIOUTER_PTP_BIND_RETRY_SECS", 10);
-  long interval_ms = ptp_helper_env_long("AUDIOUTER_PTP_BIND_RETRY_INTERVAL_MS", 500);
+  long budget_secs = ptp_helper_env_long("AUDIOUT_PTP_BIND_RETRY_SECS", 10);
+  long interval_ms = ptp_helper_env_long("AUDIOUT_PTP_BIND_RETRY_INTERVAL_MS", 500);
   struct airptp_handle *hdl;
   long attempts;
   long attempt;
@@ -428,8 +428,8 @@ ptp_helper_bind_with_retry(void)
 static int
 ptp_helper_wait_until_idle_or_signal(struct airptp_handle *hdl)
 {
-  long idle_secs = ptp_helper_env_long("AUDIOUTER_PTP_IDLE_SECS", 15);
-  long grace_secs = ptp_helper_env_long("AUDIOUTER_PTP_IDLE_GRACE_SECS", 30);
+  long idle_secs = ptp_helper_env_long("AUDIOUT_PTP_IDLE_SECS", 15);
+  long grace_secs = ptp_helper_env_long("AUDIOUT_PTP_IDLE_GRACE_SECS", 30);
   time_t started = time(NULL);
   time_t idle_since = 0;
   bool saw_peer = false;

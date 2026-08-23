@@ -8,7 +8,7 @@ the 054 pieces this builds on: `AppSettings.licenseKey / licenseCheckInConsent
 `scripts/make-app.sh`'s `SPARKLE_FEED_URL`/`SPARKLE_ED_PUBLIC_KEY` gating.
 
 The server this talks to is built and tested in
-`~/Projects/Audiouter License Server` (README there is the contract). Decided,
+`~/Projects/Audiout License Server` (README there is the contract). Decided,
 do not re-litigate: keys are opaque `AUDR-XXXXX-XXXXX-XXXXX-XXXXX`, validated
 ONLY by the server; the app never blocks anything.
 
@@ -24,10 +24,10 @@ ONLY by the server; the app never blocks anything.
 
 ## Tasks (all in this repo)
 
-### T1 — `AppSettings` (AudiouterCore/Sources/AudiouterCore/AppSettings.swift)
+### T1 — `AppSettings` (AudioutCore/Sources/AudioutCore/AppSettings.swift)
 
 1. Add `public var licenseServerURL: URL?` — read from
-   `Bundle.main.object(forInfoDictionaryKey: "AudiouterLicenseServerURL") as? String`,
+   `Bundle.main.object(forInfoDictionaryKey: "AudioutLicenseServerURL") as? String`,
    `URL(string:)`; nil when absent. A build run from source has no key in its
    Info.plist, so it has no server, no validation, no check-in and no buy
    prompt — it is the free build. Allow a test override: an initializer
@@ -49,7 +49,7 @@ ONLY by the server; the app never blocks anything.
 4. `public var licenseMaxMajor: Int?` stored under `"license.maxMajor"`
    (0/absent → nil).
 
-### T2 — `LicenseValidator` (new file AudiouterCore/Sources/AudiouterCore/LicenseValidator.swift)
+### T2 — `LicenseValidator` (new file AudioutCore/Sources/AudioutCore/LicenseValidator.swift)
 
 Same shape as `LicenseCheckIn`: `public struct LicenseValidator` with
 `init(settings: AppSettings, transport: @escaping Transport = LicenseValidator.defaultTransport)`
@@ -69,7 +69,7 @@ where `Transport = (URLRequest, @escaping (Data?, URLResponse?, Error?) -> Void)
   (last known state stands — the check is soft).
 - Completion always on the main queue.
 
-### T3 — General settings (AudiouterCore/Sources/AudiouterSettingsUI/GeneralSettingsViewController.swift)
+### T3 — General settings (AudioutCore/Sources/AudioutSettingsUI/GeneralSettingsViewController.swift)
 
 1. `commitLicenseKey()` — after persisting, if the key is non-empty run
    `LicenseValidator(settings:).validate` and refresh the row's status line;
@@ -81,35 +81,35 @@ where `Transport = (URLRequest, @escaping (Data?, URLResponse?, Error?) -> Void)
    `paneView(rows:)` list. Copy, by state (all plain words, no jargon):
    - no server (`licenseServerURL == nil`): hint hidden (`isHidden = true`) —
      nothing to verify in a source build.
-   - key empty: `"Unregistered. Buy a license to support Audiouter and get updates."`
+   - key empty: `"Unregistered. Buy a license to support Audiout and get updates."`
    - `.active`: `"Registered. Thank you."`
    - `.revoked`: `"This key was refunded or revoked. It no longer gets updates."`
    - `.unknown`: `"This key isn't recognised. Check it against your receipt."`
-   - `.invalid`: `"That doesn't look like an Audiouter key (AUDR-XXXXX-XXXXX-XXXXX-XXXXX)."`
+   - `.invalid`: `"That doesn't look like an Audiout key (AUDR-XXXXX-XXXXX-XXXXX-XXXXX)."`
    - key present, status nil (never reached the server): `"Couldn't reach the license server — will try again next launch."`
-3. Add a "Buy Audiouter…" `NSButton` (`.rounded`, `.small`, like
+3. Add a "Buy Audiout…" `NSButton` (`.rounded`, `.small`, like
    `updatesButton`) to the footer strip, visible only when
    `licenseServerURL != nil` AND the key is empty or status ∈ {unknown,
-   invalid, revoked}. It opens `AudiouterBuyURL` from Info.plist via
+   invalid, revoked}. It opens `AudioutBuyURL` from Info.plist via
    `NSWorkspace.shared.open`; when that key is absent the button is hidden
    too. Re-evaluate visibility whenever the status line is refreshed.
 4. Test seams, same style as the existing `test_*` block:
    `test_licenseStatusText: String?` (nil when hidden),
    `test_buyButtonIsVisible: Bool`.
 
-### T4 — Popover note (AudiouterCore/Sources/AudiouterPopoverUI/PopoverController.swift ~line 982 onward)
+### T4 — Popover note (AudioutCore/Sources/AudioutPopoverUI/PopoverController.swift ~line 982 onward)
 
 Add a FOURTH, LOWEST-precedence note to the existing note-slot resolver
 (`resolvedSystemAirPlayNote`): `private var unregisteredNoteActive = false`
 + `public func setUnregisteredNoteActive(_ active: Bool)` (idempotent, same
-shape as `setSystemAirPlayNoteActive`) + `public var onBuyAudiouter: (() -> Void)?`.
+shape as `setSystemAirPlayNoteActive`) + `public var onBuyAudiout: (() -> Void)?`.
 When active and nothing above it is: text
-`"Audiouter is unregistered. Buying a license keeps it updated."`, action
-`Action(title: "Buy…", accessibilityLabel: "Buy an Audiouter license", handler: onBuyAudiouter)`,
+`"Audiout is unregistered. Buying a license keeps it updated."`, action
+`Action(title: "Buy…", accessibilityLabel: "Buy an Audiout license", handler: onBuyAudiout)`,
 severity `.info`. Update the PRECEDENCE comment block to list it last.
 Register the new text as a `static let unregisteredNoteText`.
 
-### T5 — AppDelegate (AudiouterCore/Sources/AudiouterApp/AppDelegate.swift)
+### T5 — AppDelegate (AudioutCore/Sources/AudioutApp/AppDelegate.swift)
 
 1. Launch (next to the existing `LicenseCheckIn(...).checkInIfNeeded()` call,
    ~line 370): run `LicenseValidator(settings:).validate { _ in self.applyLicenseState() }`,
@@ -123,16 +123,16 @@ Register the new text as a `static let unregisteredNoteText`.
    General pane commits a key — add `public var onLicenseChanged: (() -> Void)?`
    on `GeneralSettingsViewController`, fired at the end of every status
    refresh, wired in `openSettings` next to `onRunSetupAgain`.
-3. `popoverController.onBuyAudiouter` opens `AudiouterBuyURL` (same helper as
+3. `popoverController.onBuyAudiout` opens `AudioutBuyURL` (same helper as
    T3.3 — put one `static func buyURL() -> URL?` on `AppSettings` reading the
    plist key, used by both).
 
 ### T6 — scripts/make-app.sh (next to the Sparkle block ~line 668)
 
-New optional env `AUDIOUTER_LICENSE_URL` → `plutil -insert AudiouterLicenseServerURL`,
-and `AUDIOUTER_BUY_URL` → `plutil -insert AudiouterBuyURL`. Independent of the
-Sparkle pair. When `AUDIOUTER_LICENSE_URL` is set and `SPARKLE_FEED_URL` is
-NOT, default `SPARKLE_FEED_URL` to `"$AUDIOUTER_LICENSE_URL/appcast.xml"`
+New optional env `AUDIOUT_LICENSE_URL` → `plutil -insert AudioutLicenseServerURL`,
+and `AUDIOUT_BUY_URL` → `plutil -insert AudioutBuyURL`. Independent of the
+Sparkle pair. When `AUDIOUT_LICENSE_URL` is set and `SPARKLE_FEED_URL` is
+NOT, default `SPARKLE_FEED_URL` to `"$AUDIOUT_LICENSE_URL/appcast.xml"`
 (the key check on `SPARKLE_ED_PUBLIC_KEY` still applies). Echo what was
 written, like the neighbouring blocks.
 
@@ -148,7 +148,7 @@ the app) and additionally gates" with "The key is an opaque random string the
 license server looks up (`/v1/validate`; offline, the app keeps its last known
 answer) and it gates".
 
-### T8 — Tests (Swift Testing, AudiouterCore/Tests/AudiouterCoreTests)
+### T8 — Tests (Swift Testing, AudioutCore/Tests/AudioutCoreTests)
 
 - `AppSettingsTests`: `licenseServerURL` nil by default and honours the init
   override; `checkInURL` derives from it; `licenseStatus` round-trips and is

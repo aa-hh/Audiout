@@ -272,7 +272,7 @@ public actor AirPlayEngine {
 
     /// Whether a PTP clock is available to this session, per the last
     /// `start()`'s `ptpd_find_or_bind()` result (T4, T-HELPER-DESIGN-1): `true`
-    /// if a shared `airptpd` was found (or, under `AUDIOUTER_PTP_INPROC_BIND`,
+    /// if a shared `airptpd` was found (or, under `AUDIOUT_PTP_INPROC_BIND`,
     /// this process bound 319/320 itself), `false` if neither happened — the
     /// shipped find-only default when no root helper is installed yet. This is
     /// NON-FATAL by design (mirrors OwnTone: `airplay_init`'s own `ptpd_init`
@@ -458,7 +458,7 @@ public actor AirPlayEngine {
         // other non-fatal step in this method.
         ptpClockAvailable = ptpAvailable
         if !ptpAvailable {
-            ptpLog.warning("PTP clock unavailable: no shared airptpd found (see AUDIOUTER_PTP_INPROC_BIND for dev fallback); PTP-only receivers will fail to stream")
+            ptpLog.warning("PTP clock unavailable: no shared airptpd found (see AUDIOUT_PTP_INPROC_BIND for dev fallback); PTP-only receivers will fail to stream")
         }
 
         if initResult != 0 {

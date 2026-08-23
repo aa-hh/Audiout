@@ -9,7 +9,7 @@ Scope: the permission-granting interaction ONLY — no other onboarding content.
 1. **Hard gate (full Wispr).** Done is absent — not disabled — until every
    required grant verifies. This REVERSES the documented "setup is guidance,
    not a gate" decision: update `SetupModel.complete()`'s doc comment,
-   `AudiouterOnboardingUI/AGENTS.md`, and remove the "Continue without every
+   `AudioutOnboardingUI/AGENTS.md`, and remove the "Continue without every
    permission?" sheet in the same change.
 2. **Demo medium: native-drawn AppKit mock** — a miniature System Settings
    pane / permission dialog drawn in code, not a screen recording. Adapts to
@@ -46,8 +46,8 @@ Scope: the permission-granting interaction ONLY — no other onboarding content.
   rewrites from imperative to earned capability, next card expands and the
   demo pane swaps.
   - Title pattern per step, imperative → capability (final strings are the
-    builder's, Alec reviews): "Let Audiouter hear your Mac's sound" →
-    "Audiouter can now hear your Mac's sound". Existing row detail copy is
+    builder's, Alec reviews): "Let Audiout hear your Mac's sound" →
+    "Audiout can now hear your Mac's sound". Existing row detail copy is
     reused as the card description.
 - Allow is two-mode (Wispr's trick): first click fires the native prompt /
   probe; every later click deep-links to the right Settings pane
@@ -67,7 +67,7 @@ Scope: the permission-granting interaction ONLY — no other onboarding content.
   - Prompt mode (first Allow): the permission dialog with a cursor moving to
     and pressing Allow/OK.
   - Settings mode (retry / after denial): the relevant Settings pane with the
-    Audiouter row's toggle animating on — System Audio Recording Only
+    Audiout row's toggle animating on — System Audio Recording Only
     section, Local Network list, Privacy & Security ▸ Bluetooth, Login
     Items, Accessibility respectively. (Bluetooth retry should deep-link to
     the PRIVACY Bluetooth pane — `?Privacy_Bluetooth` — not the existing
@@ -150,7 +150,7 @@ indistinguishable from an empty network). Two real signals replace the guess,
 both in `LocalNetworkPrimer`:
 
 - **Grant — self-discovery.** The app publishes its own Bonjour service
-  (`_audiouter-preflight._tcp`, unique instance name) via `NWListener` and
+  (`_audiout-preflight._tcp`, unique instance name) via `NWListener` and
   browses for that same type on this Mac. Publishing isn't gated; BROWSING is —
   so finding OURSELVES proves the permission, on a network with no speaker
   switched on. (Technique: Nonstrict, "Request and check for local network
@@ -171,7 +171,7 @@ list the preflight type or the self-browse is silently blocked.
 
 ## Integration map (verified on this branch 2026-08-11)
 
-- UI to rebuild: `AudiouterCore/Sources/AudiouterOnboardingUI/` — read its
+- UI to rebuild: `AudioutCore/Sources/AudioutOnboardingUI/` — read its
   `AGENTS.md` FIRST (floating-window decision history, Done-vs-✕ contract,
   wrap-stability rules). `OnboardingWindowController` keeps its float/focus
   behavior (`.floating` for life, `keyWindowProvider` guard, no re-center on

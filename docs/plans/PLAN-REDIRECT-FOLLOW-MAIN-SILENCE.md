@@ -37,7 +37,7 @@ audio *flowing* through the failure windows.
 
 ---
 
-## 2. Live evidence, 2026-07-29 (`~/Library/Logs/Audiouter/telemetry.jsonl`)
+## 2. Live evidence, 2026-07-29 (`~/Library/Logs/Audiout/telemetry.jsonl`)
 
 Session `C98DF1E0-87FD-4200-AB18-13E5FFC060B2`. Build: the merge candidate
 `claude/dropout-merge-5c2a1f` @ e960a7b (= `main` + 3 semantic-fix pins; the redirect
@@ -104,7 +104,7 @@ Across all 18,103 lines (2026-07-24 → 2026-07-29), correlating every
 
 **25 out of 25**, no counterexample: an exclusion-change tap rebuild while an AirPlay
 device is live *never* re-anchors the stream-0 session. That is the documented design
-(see `AudiouterCore/AGENTS.md`, the R10 rule) — and it is correct for the other 24, where
+(see `AudioutCore/AGENTS.md`, the R10 rule) — and it is correct for the other 24, where
 audio kept flowing across the rebuild so no skew could accumulate. What made this one
 fatal is §2.2.
 
@@ -240,7 +240,7 @@ aggregate, or receiver state disturbed by the ~113 ms hole), so the write gap in
 incidental.
 
 **Anchors.** `NativeCaptureCoordinator.swift:1239-1254` (the cause-based skip) ·
-`AudiouterCore/AGENTS.md` R10 rule (the skip is deliberate: resetting on every benign
+`AudioutCore/AGENTS.md` R10 rule (the skip is deliberate: resetting on every benign
 rebuild caused "connects fast, then a long silence").
 
 **Evidence against (why it is #2, not #1).** 24 of the 25 exclusion rebuilds in §2.3 were
@@ -283,7 +283,7 @@ walk (c9125eb) did not over-match here.
 
 No `captureWS` transition out of `.capturing` between 19:17:32.327 and 19:18:02.247, and
 `reconcileCaptureGate`'s `want` (**NativeBackend.swift:5502-5503**) reads only
-`expectedSelected`, which a redirect never touches (**AudiouterCore/AGENTS.md**, the T7
+`expectedSelected`, which a redirect never touches (**AudioutCore/AGENTS.md**, the T7
 rule). The gate was structurally uninvolved.
 
 ### C6 — REFUTED: one-role-per-speaker (7c2cf06) cleared the main-output binding
@@ -339,10 +339,10 @@ decide which fix is correct.** No fix task starts before T-I1 reports.
 | # | Task | Scope / files | Depends on | Model + effort |
 |---|---|---|---|---|
 | **T-F1** | **If T-I1 reproduces (C1):** add the missing third trigger for `resetAirPlaySessionForWholeSystem()`. Detect a *single-gap* write starvation on stream 0 and re-anchor once when writes resume. Preferred shape: `EngineSink` (`NativeCaptureCoordinator.swift:1881`) already sees every write and already has `lastGapSeconds`; give it an `onWriteStarvationRecovered` callback that `NativeBackend.start()` wires to `resetAirPlaySessionForWholeSystem()` next to the existing `onDeviceRateRebuild` wiring (`NativeBackend.swift:1389`). **Fire on the resume edge, not during the gap** (there is nothing to re-anchor to until data flows). **Threshold on one gap, never on cumulative deficit** (§5). `resetAirPlaySessionForWholeSystem` is already single-flighted and ownership-guarded, so it cannot thrash a healthy session. **One fix in the shared reset path — do not add a guard per trigger.** | `NativeCaptureCoordinator.swift` (`EngineSink`), `NativeBackend.swift` (wiring only). | T-I1, T-I3 | Opus, **medium** |
-| **T-F2** | **If T-I2 reproduces instead (C2):** make the re-anchor decision at `NativeCaptureCoordinator.swift:1242` evidence-based on the *write* side too, not just device/rate identity — i.e. an `.exclusionChange` rebuild re-anchors when the stream demonstrably lost continuity. Must NOT reintroduce the per-connect redundant re-establish the R10 rule warns about (`AudiouterCore/AGENTS.md`); the synced-local sink attach fires an `.exclusionChange` rebuild on **every** Mac+AirPlay connect. | `NativeCaptureCoordinator.swift` (`recreateTap`, `TapReanchor`). | T-I2 | Opus, **medium-high** |
+| **T-F2** | **If T-I2 reproduces instead (C2):** make the re-anchor decision at `NativeCaptureCoordinator.swift:1242` evidence-based on the *write* side too, not just device/rate identity — i.e. an `.exclusionChange` rebuild re-anchors when the stream demonstrably lost continuity. Must NOT reintroduce the per-connect redundant re-establish the R10 rule warns about (`AudioutCore/AGENTS.md`); the synced-local sink attach fires an `.exclusionChange` rebuild on **every** Mac+AirPlay connect. | `NativeCaptureCoordinator.swift` (`recreateTap`, `TapReanchor`). | T-I2 | Opus, **medium-high** |
 | **T-F3** | Choose the recovery *strength* from T-I4's finding: keep `flush_first` (cheap, no audible drop) or escalate to `removeOutput`→`addOutput` for receivers that ignore a FLUSH re-anchor. The fallback chain already exists in `enqueueRebindRecovery` (`NativeBackend.swift:2844` onward) — this is a threshold/ordering decision, not new machinery. | `NativeBackend.swift` (recovery chain only). | T-I4, T-F1 | Sonnet, **low** |
-| **T-F4** | **Tests.** Hermetic coverage for whichever of T-F1/T-F2 lands: a fake sink driving a synthetic write gap must produce exactly one `session_reset`; a gap below threshold must produce none; the continuous-slide profile from §5 must produce none (the anti-thrash test that matters most); and the existing `.exclusionChange`-does-not-reset behavior must still hold for the no-gap case. Use `_installTestSink` nested under `SerializedSharedState` per `AudiouterCore/AGENTS.md`. | `NativeCaptureCoordinatorTests`, `NativeBackendTests`. | T-F1 or T-F2 | Sonnet, **medium** |
-| **T-F5** | **Docs.** Update `AudiouterCore/AGENTS.md`'s R10 rule — it currently states that an exclusion-set rebuild "must NOT reset", which is true *about the rebuild* but reads as "stream 0 needs no reset here". Add the trap: the rebuild is safe, the **starvation window it can open** is not. Docs land with the code on the same branch. | `AudiouterCore/AGENTS.md`. | T-F1 or T-F2 | Sonnet, **low** |
+| **T-F4** | **Tests.** Hermetic coverage for whichever of T-F1/T-F2 lands: a fake sink driving a synthetic write gap must produce exactly one `session_reset`; a gap below threshold must produce none; the continuous-slide profile from §5 must produce none (the anti-thrash test that matters most); and the existing `.exclusionChange`-does-not-reset behavior must still hold for the no-gap case. Use `_installTestSink` nested under `SerializedSharedState` per `AudioutCore/AGENTS.md`. | `NativeCaptureCoordinatorTests`, `NativeBackendTests`. | T-F1 or T-F2 | Sonnet, **medium** |
+| **T-F5** | **Docs.** Update `AudioutCore/AGENTS.md`'s R10 rule — it currently states that an exclusion-set rebuild "must NOT reset", which is true *about the rebuild* but reads as "stream 0 needs no reset here". Add the trap: the rebuild is safe, the **starvation window it can open** is not. Docs land with the code on the same branch. | `AudioutCore/AGENTS.md`. | T-F1 or T-F2 | Sonnet, **low** |
 
 **Execution note.** T-I3 and T-I4 are independent of each other and of the live tests, and
 can run in parallel today. Everything under Fix waits on T-I1.
@@ -384,7 +384,7 @@ time of each step so the telemetry can be aligned afterwards.
 Reproduce §1 exactly (one app playing → redirect it to This Mac → press play in a second,
 unredirected app) and note the time. This is the acceptance test for whichever fix lands.
 
-**Afterwards:** `~/Library/Logs/Audiouter/telemetry.jsonl` holds everything needed. The
+**Afterwards:** `~/Library/Logs/Audiout/telemetry.jsonl` holds everything needed. The
 lines that matter are `airplay/send_sched` (`gap_count`, `gap_max_ms`) and
 `captureWS/write_cadence_drift` (`deficitDeltaSeconds`) around each test.
 
@@ -397,7 +397,7 @@ lines that matter are `airplay/send_sched` (`gap_count`, `gap_max_ms`) and
 - **Docs orient, code decides.** Every claim in this file carries a `file:line`; re-verify
   before acting on it — line numbers move.
 - **Inner loop is `swift test --filter <Suite>`**; the full run is `scripts/run-tests.sh`,
-  never a bare `swift test`. See `AudiouterCore/AGENTS.md`.
+  never a bare `swift test`. See `AudioutCore/AGENTS.md`.
 - **`Telemetry.log` is never called from the IOProc/render path** — only from the
   non-realtime decision points around it. T-I3(a)'s buffer counter must respect this: count
   on the RT path, log off it.
@@ -409,7 +409,7 @@ lines that matter are `airplay/send_sched` (`gap_count`, `gap_max_ms`) and
 
 | What | Where |
 |---|---|
-| Route table → exclusion set | `AudiouterCore/Sources/AudiouterCore/NativeBackend.swift:2132`, `:2153-2155`, `:2227`, `:2293-2295` |
+| Route table → exclusion set | `AudioutCore/Sources/AudioutCore/NativeBackend.swift:2132`, `:2153-2155`, `:2227`, `:2293-2295` |
 | Capture gate (uninvolved — `expectedSelected` only) | `NativeBackend.swift:5491`, `:5502-5503` |
 | The ONLY two whole-system re-anchor triggers | `NativeBackend.swift:1389-1391` (device/rate rebuild), `:2020` (synced-local churn) |
 | `resetAirPlaySessionForWholeSystem` | `NativeBackend.swift:2557` |

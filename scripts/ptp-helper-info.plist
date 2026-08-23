@@ -6,12 +6,12 @@
   standalone-executable LaunchDaemon to carry an embedded Info.plist with a
   CFBundleIdentifier; without it, register() will not launch the daemon
   (ptp-helper-design.md §2.2). CFBundleIdentifier MUST match the daemon's Label
-  (com.audiouter.Audiouter.ptphelper) and the LaunchDaemons plist filename.
+  (com.audiout.Audiout.ptphelper) and the LaunchDaemons plist filename.
 -->
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.audiouter.Audiouter.ptphelper</string>
+    <string>com.audiout.Audiout.ptphelper</string>
     <key>CFBundleName</key>
     <string>ptp-helper</string>
     <key>CFBundleExecutable</key>

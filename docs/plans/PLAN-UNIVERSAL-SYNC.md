@@ -21,7 +21,7 @@ Goal: make a **Bluetooth speaker feel as natural to add, group, and sync as an A
 
 ## A. End-state overview
 
-Bluetooth speakers become a first-class Audiouter output type that a user adds, groups, and syncs with the same mental model as AirPlay: a BT speaker appears in the device list, can be dropped into a group alongside AirPlay devices and the Mac, stays **visible-but-greyed** when off/out-of-range (never vanishes), and reconnects with at most a single tap. Audio is kept aligned by treating the AirPlay presentation timeline (which we author as PTP **grandmaster**) as the reference and rendering each BT speaker through a per-device, deliberately-delayed app-layer `AVAudioEngine` sink — pinned to that speaker's Core Audio device, offset by a per-device latency figure, and held from drifting by the same continuous rate-correction loop the Mac-local sink uses. When no AirPlay device is present the Mac's own `hostTime` becomes the reference. The honest quality bar (Decision 1): "sounds like one system" — excellent across rooms, good for same-room casual listening, not sample-accurate for same-room BT+BT, and not lip-sync to video.
+Bluetooth speakers become a first-class Audiout output type that a user adds, groups, and syncs with the same mental model as AirPlay: a BT speaker appears in the device list, can be dropped into a group alongside AirPlay devices and the Mac, stays **visible-but-greyed** when off/out-of-range (never vanishes), and reconnects with at most a single tap. Audio is kept aligned by treating the AirPlay presentation timeline (which we author as PTP **grandmaster**) as the reference and rendering each BT speaker through a per-device, deliberately-delayed app-layer `AVAudioEngine` sink — pinned to that speaker's Core Audio device, offset by a per-device latency figure, and held from drifting by the same continuous rate-correction loop the Mac-local sink uses. When no AirPlay device is present the Mac's own `hostTime` becomes the reference. The honest quality bar (Decision 1): "sounds like one system" — excellent across rooms, good for same-room casual listening, not sample-accurate for same-room BT+BT, and not lip-sync to video.
 
 ## B. Feasibility verdict — **GO-WITH-CAVEATS, gated by two hardware spikes**
 
@@ -108,7 +108,7 @@ Kind: new-code · Depends on: — · **Model: sonnet 5 · Effort: low.** Hot fil
 Verify: identity-stability + kind-mapping unit test.
 
 **BT-ENUM — production BT enumeration + discovery→model**
-Files: new clean-room `AudiouterCore/Sources/AudiouterCore/BTDeviceEnumerator.swift` (re-derive from the spike, Apple-only) + wire into discovery so BT speakers emit `Device` snapshots via `BackendEvent`.
+Files: new clean-room `AudioutCore/Sources/AudioutCore/BTDeviceEnumerator.swift` (re-derive from the spike, Apple-only) + wire into discovery so BT speakers emit `Device` snapshots via `BackendEvent`.
 What: Core Audio devices with Bluetooth transport (aggregates excluded) merged with the IOBluetooth paired list; `isAvailable` reflects connected state.
 Kind: new-code · Depends on: BT-DEVICE · **Model: sonnet 5 · Effort: medium.**
 Verify: devices appear as rows; aggregate-exclusion + transport-filter unit test.
@@ -120,7 +120,7 @@ Kind: backend · Depends on: BT-DEVICE · **Model: sonnet 5 · Effort: medium.**
 Verify: selection-matrix tests green.
 
 **BT-SINK — per-device delayed BT sink manager**
-Files: new clean-room `AudiouterCore/Sources/AudiouterCore/BTSyncedSink.swift`; shared `SyncCore` (Decision 5).
+Files: new clean-room `AudioutCore/Sources/AudioutCore/BTSyncedSink.swift`; shared `SyncCore` (Decision 5).
 What: N-instance manager, one `AVAudioEngine` per BT device pinned via `setDeviceID`, delayed on the reference timeline via shared `SyncCore`; per-device offset; tap `mainMixerNode` (NOT outputNode); config-change/rate rebuild.
 Kind: new-code · Depends on: BT-ENUM, synced-local T-SINK/T-CORRECTION **landed on main** (Decision 6) · **Model: opus 4.8 · Effort: high.**
 Verify: offline harness — known ramp+pts, first-non-silence lands at computed hostTime within tolerance, per device.
@@ -150,7 +150,7 @@ Kind: backend · Depends on: BT-FANOUT, BT-SINK, BT-REFSEL · **Model: opus 4.8 
 Verify: backend-spy asserts BT sink enable/disable + no BT id sent to the AirPlay engine.
 
 **BT-CONNECT — IOBluetooth connect/reconnect + deep-link fallback** *(only if BT-SPIKE-CONNECT = GO)*
-Files: new `AudiouterCore/Sources/AudiouterCore/BTConnectionManager.swift`; entitlements + Info.plist usage string.
+Files: new `AudioutCore/Sources/AudioutCore/BTConnectionManager.swift`; entitlements + Info.plist usage string.
 What: `openConnection()` reconnect with timeout → fallback deep-link; availability via `isConnected` + connect notifications; Bluetooth TCC handling.
 Kind: new-code/backend · Depends on: BT-SPIKE-CONNECT, BT-ENUM · **Model: sonnet 5 · Effort: medium.**
 Verify: greyed row → tap → reconnect (or fallback) on hardware (BT-DOCS-LIVE).
@@ -236,19 +236,19 @@ Kind: new-code · Depends on: BT-DEVICE, BT-RECONNECT · **Model: sonnet 5 · Ef
 Verify: rows render + toggle through real dispatch on hardware.
 
 **BT-OFFSET-AUTO — mic-loopback magic-pair (production)** *(fast-follow; only if BT-SPIKE-OFFSET = GO)*
-Files: new `AudiouterCore/Sources/AudiouterCore/BTOffsetProbe.swift`.
+Files: new `AudioutCore/Sources/AudioutCore/BTOffsetProbe.swift`.
 What: production probe — built-in-mic-pinned click/cross-correlation → per-device offset auto-saved; "Tuning sync…" UX; graceful fallback to manual on low confidence.
 Kind: new-code · Depends on: BT-SPIKE-OFFSET, BT-OFFSET-UI · **Model: opus 4.8 · Effort: high.**
 Verify: probe offset matches by-ear within tolerance on hardware.
 
 **BT-TESTS — coverage sweep**
-Files: new tests in `AudiouterCore/Tests/…`.
+Files: new tests in `AudioutCore/Tests/…`.
 What: identity stability, enum/aggregate filter, group selection matrix, reference-selection per composition, drift convergence, output-set partition (no BT→engine), tap self-exclude tone test, offset store/persistence, reconnect transitions.
 Kind: test · Depends on: BT-BACKEND, BT-DRIFT, BT-REFSEL, BT-OFFSET-UI, BT-RECONNECT · **Model: sonnet 5 · Effort: medium.**
 Verify: `swift test --parallel` green; new tests subclass `IsolatedTestCase`.
 
 **BT-DOCS-LIVE — docs + gated by-ear hardware test**
-Files: `PROGRESS.md`, `AudiouterCore/AGENTS.md`, `dev/notes/`, this plan.
+Files: `PROGRESS.md`, `AudioutCore/AGENTS.md`, `dev/notes/`, this plan.
 What: document the shipped design + limitations (same-room BT+BT marginal, no video); run the user-present, PTP-port-gated by-ear test: BT+AirPlay blend, BT-only, reconnect flow, HFP badge, offset effect, sleep/wake.
 Kind: docs + manual test · Depends on: all above · **Model: haiku 4.5 (docs); the live test is Alec-run · Effort: low.**
 Verify: Alec confirms by ear against the Decision-1 bar; findings recorded.
@@ -278,11 +278,11 @@ Judgment-heavy real-time-audio work with a hard serial audio chain, two built-in
 
 ## K. Test + docs/registry impact
 
-- New `IsolatedTestCase` tests under `AudiouterCore/Tests/…`, green under `swift test --parallel`.
+- New `IsolatedTestCase` tests under `AudioutCore/Tests/…`, green under `swift test --parallel`.
 - Existing `GroupController`/`NativeBackend` selection tests may need BT cases added (BT-GROUPCTL/BT-TESTS) — in scope, not optional.
 - New persisted `AppSettings` per-device offset keys — cover load/default/persist.
 - Entitlements + `Info.plist` (`NSBluetoothAlwaysUsageDescription`, `com.apple.security.device.bluetooth`) added — note in the signing/notarization checklist.
-- Docs: `PROGRESS.md`, `AudiouterCore/AGENTS.md`, `dev/notes/`, this plan; record the stated quality-bar limitations. Read the nearest `AGENTS.md` before editing any subsystem; verify every backticked symbol via `git grep`.
+- Docs: `PROGRESS.md`, `AudioutCore/AGENTS.md`, `dev/notes/`, this plan; record the stated quality-bar limitations. Read the nearest `AGENTS.md` before editing any subsystem; verify every backticked symbol via `git grep`.
 - **Merge to `main` only after Alec's live by-ear test + explicit go-ahead** (standing rule; especially here — real-time-audio correctness + a new BT permission).
 
 ## L. Open risks to confirm during execution

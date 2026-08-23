@@ -18,7 +18,7 @@ is the most-churned file in the repo: docs orient, code decides).
 > machinery; mechanism 3 also re-drives deferred settles; `stillOwnsRebind`
 > gains the WS-claim conjunct.
 
-**NB** = `AudiouterCore/Sources/AudiouterCore/NativeBackend.swift`.
+**NB** = `AudioutCore/Sources/AudioutCore/NativeBackend.swift`.
 
 ---
 
@@ -391,7 +391,7 @@ except the `test_` seam.
 | `convergeDevice` defer + `enqueueRebindRecovery` terminal exits (incl. the backed-off retry's terminal exit, NB:2778-2792) | changed: on release-without-requeue with the re-drive flag, call the replay OFF the lock | NB:3666, 2691-2812 |
 | `replayPerAppBindingsAfterClockRecovery` | renamed/generalized → `replayPendingPerAppBindings(trigger:)`; guard unchanged (`outputIDs != nil && streamBindings == nil`, already exactly right) | NB:3601 |
 | `ScopeConflict` (stage `routeDemoted`, bundleIDs, stream, date) + `lastScopeConflicts` + `test_scopeConflict(deviceID:)` | new diagnostic struct + map + `@testable` seam; cleared in `stop()` (NB:1517-1558) | `stateQueue` |
-| `SpyEngine.onRemoveOutputBody`, `SpyEngine.onRebindBody` | new test hooks mirroring `onAddOutputBody` (:105); design review: `onAddOutputBody` must ALSO be invoked from `addOutput(_:streamId:)` — today only the stream-0 `addOutput(_:)` runs it, so no per-app-side interleaving is forceable — and each hold-open hook blocks on a test-controlled continuation, placed BEFORE the spy's `liveStreams` write | `AudiouterCore/Tests/AudiouterCoreTests/NativeBackendTests.swift` |
+| `SpyEngine.onRemoveOutputBody`, `SpyEngine.onRebindBody` | new test hooks mirroring `onAddOutputBody` (:105); design review: `onAddOutputBody` must ALSO be invoked from `addOutput(_:streamId:)` — today only the stream-0 `addOutput(_:)` runs it, so no per-app-side interleaving is forceable — and each hold-open hook blocks on a test-controlled continuation, placed BEFORE the spy's `liveStreams` write | `AudioutCore/Tests/AudioutCoreTests/NativeBackendTests.swift` |
 
 No `AirPlayEngine` changes. No `GroupController`/`AppRoutingController`/UI
 changes. No `OutputBackend`/`EngineControlling` protocol changes.
@@ -435,7 +435,7 @@ changes. No `OutputBackend`/`EngineControlling` protocol changes.
   continuation) with placement BEFORE the spy's `liveStreams` write.
 - **T7 — Race tests** (see §5).
 - **T8 — Regression + docs.** Happy-path op-trace pin tests; full
-  `scripts/run-tests.sh`; AudiouterCore/AGENTS.md rule entry (the arbiter
+  `scripts/run-tests.sh`; AudioutCore/AGENTS.md rule entry (the arbiter
   invariant, where it lives, and the TRAP: bindTail ops must never WAIT on
   `converging` — Alt B's deadlock cycle); PROGRESS.md digest.
 

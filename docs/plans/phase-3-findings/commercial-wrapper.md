@@ -1,6 +1,6 @@
 # Commercial wrapper — discovery audit (Phase 3, R2)
 
-Audiouter is a pure-AppKit menu-bar app, GPL-2.0-or-later, about to move from
+Audiout is a pure-AppKit menu-bar app, GPL-2.0-or-later, about to move from
 ad-hoc-signed personal builds to a paid, direct-download, Developer-ID-signed
 and notarized public release. This audit gap-analyzes everything *around* the
 app that a paying customer expects and that doesn't exist yet: updates, crash
@@ -10,19 +10,19 @@ Recommendations only — nothing here is drafted or built.
 ## Method
 
 Read `AGENTS.md` (repo root), `scripts/make-app.sh` in full, and
-`scripts/Audiouter.entitlements` in full to ground every signing/entitlement
+`scripts/Audiout.entitlements` in full to ground every signing/entitlement
 claim below in what the build actually does today. Ran `git grep` across
 `*.swift` for About/credits/NOTICE/menu handling, checked `NOTICE`, `LICENSE`,
 `README.md`, and `AirPlayEngine/docs/license-inventory.md` for the current
 attribution surface, and checked repo state (`git tag`, `gh release list`,
 `gh repo view`) for release/versioning history. Verified the GitHub remote
-(`aa-hh/Audiouter`) is currently **private**. Used web search/fetch for
+(`aa-hh/Audiout`) is currently **private**. Used web search/fetch for
 current facts on Sparkle 2, MetricKit, Sentry, KSCrash, GPL distribution
 obligations, and Rogue Amoeba's docs approach — cited inline.
 
 Grounding facts from the build that shape every recommendation below:
 
-- **Not sandboxed.** `scripts/Audiouter.entitlements` has no
+- **Not sandboxed.** `scripts/Audiout.entitlements` has no
   `com.apple.security.app-sandbox` key at all — only hardened-runtime flags
   (`disable-library-validation=true`, `allow-dyld-environment-variables=false`,
   `allow-unsigned-executable-memory=false`, `allow-jit=false`). This matters
@@ -36,8 +36,8 @@ Grounding facts from the build that shape every recommendation below:
   hardened-runtime weakening that's currently justified only by ad-hoc
   signing's lack of a Team ID.
 - **No Xcode project.** The app is a SwiftPM executable
-  (`swift build --package-path AudiouterCore -c release --product
-  AudiouterApp`) hand-wrapped into a `.app` by a bash script. Every "just add
+  (`swift build --package-path AudioutCore -c release --product
+  AudioutApp`) hand-wrapped into a `.app` by a bash script. Every "just add
   it in Xcode" integration story (Sparkle's SPM instructions, most tutorials)
   needs translating into a `Package.swift` dependency + explicit bundle/sign
   steps in `make-app.sh`, since there's no build-phase automation to lean on.
@@ -48,7 +48,7 @@ Grounding facts from the build that shape every recommendation below:
 - **No About window customization, no in-app NOTICE/credits surface.**
   `git grep` found no `orderFrontStandardAboutPanel`, no `AboutPanelOptionKey`,
   no Credits.rtf handling anywhere in the Swift sources. The default AppKit
-  "About Audiouter" panel (whatever `NSApplication` synthesizes from
+  "About Audiout" panel (whatever `NSApplication` synthesizes from
   Info.plist) is all a user would see today — it won't show GPL notice or
   third-party attribution.
 - **GitHub repo is currently private** (`gh repo view` confirms
@@ -74,7 +74,7 @@ App Store. Facts specific to this codebase:
   [Sparkle's sandboxing docs](https://sparkle-project.org/documentation/sandboxing/):
   *"If you do not sandbox your application, you should skip this guide unless
   you are interested in Removing the XPC Services."* Since
-  `Audiouter.entitlements` carries no `app-sandbox` key, Audiouter can skip
+  `Audiout.entitlements` carries no `app-sandbox` key, Audiout can skip
   the Installer XPC service, the Downloader XPC service, and the
   `-spks`/`-spki` mach-lookup entitlements entirely — those exist only to let
   a sandboxed app talk to an unsandboxed installer helper, which is moot here.
@@ -83,7 +83,7 @@ App Store. Facts specific to this codebase:
 - **No-Xcode-project integration is real work, not a checkbox.** Sparkle
   ships as an SPM binary target
   ([swiftpackageindex.com/sparkle-project/Sparkle](https://swiftpackageindex.com/sparkle-project/Sparkle)),
-  so `AudiouterCore/Package.swift` can depend on it like any other package —
+  so `AudioutCore/Package.swift` can depend on it like any other package —
   that part is easy. The gap is everything Xcode's build phases normally do
   for you: `make-app.sh` would need new steps to (a) copy
   `Sparkle.framework` into `Contents/Frameworks/`, (b) set an `-rpath` linker
@@ -147,7 +147,7 @@ customer's crash is a lost customer, not just a lost data point.
   ([MetricKit docs](https://developer.apple.com/documentation/MetricKit)),
   and can capture crash diagnostics via `MXCrashDiagnostic` for hang/crash/CPU
   data that in-process handlers can't always see. But there's a documented,
-  unresolved gap for exactly Audiouter's distribution model: **Apple's own
+  unresolved gap for exactly Audiout's distribution model: **Apple's own
   crash-diagnostics *delivery* system (the part that surfaces reports in
   Xcode Organizer) only works for App-Store-delivered apps**; several
   developers report open questions about whether MetricKit's 24-hour payload
@@ -155,7 +155,7 @@ customer's crash is a lost customer, not just a lost data point.
   Developer-ID-only, direct-download app
   ([Chime: MetricKit Crash Reporting](https://www.chimehq.com/blog/metrickit-crash-reporting),
   [Chime: MeterReporter](https://www.chimehq.com/blog/meterreporter)). Since
-  Audiouter is exactly that case (Developer ID direct download, no App
+  Audiout is exactly that case (Developer ID direct download, no App
   Store), MetricKit is not a verified-working option here without a live
   spike — flag as *unproven*, not *ruled out*.
 - **Sentry (sentry-cocoa)**: free tier exists, then usage-based pricing by
@@ -213,7 +213,7 @@ scales with users, which is backwards for a bootstrap launch.
 
 ## 3. Help/docs surface
 
-Audiouter's routing model (Main Out vs. Selected Devices vs. per-app routing,
+Audiout's routing model (Main Out vs. Selected Devices vs. per-app routing,
 per `docs/plans/phase-3-findings/copy.md`'s terminology audit) is genuinely
 non-obvious — this isn't a simple on/off utility, it needs *some* explanation
 surface. Rogue Amoeba's SoundSource (the closest comparable: a paid,
@@ -223,12 +223,12 @@ support responsive within about 24 hours
 ([Rogue Amoeba SoundSource manuals](https://rogueamoeba.com/support/manuals/soundsource/),
 [Rogue Amoeba support knowledgebase](https://rogueamoeba.com/support/knowledgebase/?showCategory=SoundSource)).
 That's the mature end of the spectrum for a company with a support team;
-Audiouter is a solo-maintainer launch and doesn't need to match that scope
+Audiout is a solo-maintainer launch and doesn't need to match that scope
 day one.
 
 The minimum credible set for a $30-50 utility, in priority order:
 
-1. **One well-made "How Audiouter works" page** explaining the three-tier
+1. **One well-made "How Audiout works" page** explaining the three-tier
    routing model in plain language (Main Out / Selected Devices / per-app),
    hosted on the website (§4) and linked from the in-app Help menu. This is
    the single highest-leverage doc — it's the concept every other feature
@@ -341,11 +341,11 @@ collide, so it needs the most care.
   more recently Sentry/Plausible/Cal.com under AGPL all do this
   ([Vircon Legal: Dual Licensing](https://virconlegal.com/term/dual-licensing-open-source-commercial/)).
   But that only works if **the project owns 100% of the copyright** it's
-  relicensing — and Audiouter explicitly does not: `NOTICE` and
+  relicensing — and Audiout explicitly does not: `NOTICE` and
   `AirPlayEngine/docs/license-inventory.md` document vendored GPL-2.0-or-later
   code from the OwnTone project (`airplay.c`, `rtp_common.c`, etc.), plus
   BSD-2-Clause and MIT components. **A commercial/proprietary license for
-  Audiouter as a whole is not legally available** without OwnTone's
+  Audiout as a whole is not legally available** without OwnTone's
   copyright holders' consent for their GPL-licensed portions — a "buy a
   commercial license to go proprietary" page, the classic dual-license
   pattern, is off the table as written. What *is* fully available under GPL:
@@ -501,7 +501,7 @@ path that doesn't exist in today's ad-hoc flow.
 4. Versioning + a minimal changelog discipline (§7) — release notes (§4) and
    any update-check mechanism (§1) both depend on this existing.
 5. A support email, advertised on the site and in the app (§6).
-6. The single "How Audiouter works" explainer page + Help-menu link (§3) —
+6. The single "How Audiout works" explainer page + Help-menu link (§3) —
    the routing model is confusing enough that shipping without any
    explanation invites a wave of avoidable support email on day one.
 7. An in-app About/Credits surface stating GPL-2.0-or-later + source link
@@ -527,7 +527,7 @@ path that doesn't exist in today's ad-hoc flow.
 1. **Developer-ID signing + notarization** (§7) — without this, Gatekeeper
    blocks the app for every customer on first launch; nothing else in this
    document matters if the binary won't open.
-2. **The "How Audiouter works" explainer page** (§3) — the routing model
+2. **The "How Audiout works" explainer page** (§3) — the routing model
    (Main Out / Selected Devices / per-app) is the single biggest source of
    likely confusion for a first-time paying user; this is the cheapest fix
    with the highest clarity payoff.

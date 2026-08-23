@@ -36,7 +36,7 @@ R5's actual shape ended up broader than the plan's one-line "keep the route,
 badge it offline" sketch, resolved live with Alec before implementation: the
 app rejoins normal system audio while its target is unreachable (not silence,
 not forced local-only), the route clears only on TRUE device disappearance or
-an Audiouter relaunch (not the old "isAvailable == false" trigger — that now
+an Audiout relaunch (not the old "isAvailable == false" trigger — that now
 keeps the route), and `NativeBackend` computes an *effective* route table (a
 `.device` route whose target can't carry audio right now reads as
 `.noRedirect` for every per-app mechanism — capture start/stop, the
@@ -74,18 +74,18 @@ rather than treat the label as permanent — it's well-scoped integration work,
 not open-ended DSP risk. Not scheduled; needs its own task when picked up.
 
 **R16's virtual-output-device idea (Wave 6, the bigger half) got a dedicated
-research spike (T10), not a build.** The literal ask — a single "Audiouter"
+research spike (T10), not a build.** The literal ask — a single "Audiout"
 entry in System Settings → Sound that becomes the visibly-selected output
 while routing, so a glance there makes obvious what's active — is achievable
 only via the legacy `AudioServerPlugIn` HAL-plugin API (DriverKit/
 AudioDriverKit explicitly does not support virtual devices, confirmed twice in
 Apple's own docs). Recommendation: **don't build the full driver.** It's
 root-installed and reboot-gated on install/uninstall, and — the decisive
-point — if Audiouter crashes or is force-quit while set as the default output,
+point — if Audiout crashes or is force-quit while set as the default output,
 the user is left silent with no real device selected, which inverts the
 safety rationale that motivated the feature (today a crash leaves you on real
 speakers). Instead, the spike surfaced a cheap ~1-day alternative worth trying
-first: a *public* `AudioAggregateDevice` named "Audiouter"
+first: a *public* `AudioAggregateDevice` named "Audiout"
 (`kAudioAggregateDeviceIsPrivateKey: false` — the tap coordinators already
 create aggregates, just always private) — no root, no install, no reboot,
 using an API this app already calls. Two things are unverified and would need
@@ -155,7 +155,7 @@ gap-closing commits at the top of the table above. What's actually left:
 1. **Live testing — not yet done, not this session's job right now.** Per
    Alec's 2026-07-24 decision, all live audio testing is consolidated into
    the `claude/memory-leak-live-testing` session (bundle-id / PTP-port
-   collision risk from running two Audiouter instances). The full live
+   collision risk from running two Audiout instances). The full live
    checklist per wave is unchanged and listed under each wave below, now
    joined by Waves 4–7's own checklist items. Two live-testing findings from
    that session, for context (not this branch's bugs): the ~8% pitch-up was
@@ -191,7 +191,7 @@ under parallel load, unrelated to this plan's changes.
 
 ---
 
-The goal: make Audiouter one of the most reliable audio-switching apps that
+The goal: make Audiout one of the most reliable audio-switching apps that
 exists. Concretely, that means four invariants the app must uphold at all
 times. Every wave below exists to make one of them true.
 
@@ -240,7 +240,7 @@ wrong physical device · **P2** = confusing or degraded, workaround exists.
 | R13 | **P1** | User listens on Bluetooth headphones; a "Current Device" app plays **out loud from the built-in speakers** | `LocalPlaybackEngine` is pinned to built-in output deliberately (`LocalPlaybackEngine.swift:103`) to avoid an AirPlay-default loop — but has no follow-with-guard logic. Includes the deferred "dies through mic" config-change bug |
 | R14 | **P0** | An excluded **or** routed app that relaunches leaks back into the system mix (excluded: plays on speakers anyway; routed: plays **doubled** — target + Main Out) | Exclusion pids re-resolve only when the bundle-ID *union* changes or the tap is recreated (`NativeCaptureCoordinator.swift:314`); `handleAppLaunched` restarts the per-app tap but never touches the system tap (`NativeBackend.swift:1635`) |
 | R15 | P1? | Plugging in / switching headphones mid-stream rebuilds the system tap with **no AirPlay session reset** — the per-app path documents exactly this rebuild as "desynced… receiver stays silent" and resets; stream 0 doesn't | `NativeBackend.swift:1401` (per-app reset) has no stream-0 counterpart. Needs one live check to confirm severity |
-| R16 | P2 | Nothing tells the user "Audiouter owns the audio" — macOS Sound settings keeps showing the physical device | Process-tap architecture; only a virtual output device changes the Sound panel |
+| R16 | P2 | Nothing tells the user "Audiout owns the audio" — macOS Sound settings keeps showing the physical device | Process-tap architecture; only a virtual output device changes the Sound panel |
 
 Verified healthy along the way: native backend is the default (mock is
 opt-in, `OwnToneBackend.swift:806`); the alert-device selector
@@ -341,7 +341,7 @@ the room; start a stream, then plug/unplug headphones — speakers keep playing.
   normal system audio while the target is unreachable (the smallest, safest
   option of three considered — a forced local-only mode was rejected as
   higher-risk, silence-with-a-badge was rejected as violating invariant 2)
-  and the route clears only on a TRUE disappearance or an Audiouter relaunch
+  and the route clears only on a TRUE disappearance or an Audiout relaunch
   (simpler than "gone > a long horizon" — no new persisted timestamp needed).
   See "Execution status" above for the full mechanism (`1da459f`, `fe452ae`).
 - **Connection dot for redirect targets — folded into the R5 work, smaller
@@ -353,7 +353,7 @@ the room; start a stream, then plug/unplug headphones — speakers keep playing.
   feeds the diagnosis panel/failedGate/R11 watchdog, a separate concern).
 - **R6's relaunch affordance — DONE** (`850922f`, T4): a "Resume → Kitchen"
   entry in the app's destination dropdown, in-memory only (forgotten on
-  Audiouter's own quit, not persisted), consumed the moment any destination
+  Audiout's own quit, not persisted), consumed the moment any destination
   is picked.
 
 ### Wave 5 — Same-speaker multi-app quality *(R3 — decide after Wave 1)* — EXECUTED (stopgap; real fix sized, not built)
@@ -388,7 +388,7 @@ rather than leaving the label as the permanent answer.
 ### Wave 7 — Regression armor — PARTIALLY EXECUTED
 
 - **Selector guard in CI — DONE** (`1da459f`, T11): `OutputSelectorGuardTests`
-  scans `AudiouterCore/Sources` + `AirPlayEngine/Sources`, comment-stripped,
+  scans `AudioutCore/Sources` + `AirPlayEngine/Sources`, comment-stripped,
   for `kAudioHardwarePropertyDefaultSystemOutputDevice`.
 - **Route-truth test suite — NOT a separate task; folded into each
   implementing task's own hermetic tests** instead (a dedicated omnibus task

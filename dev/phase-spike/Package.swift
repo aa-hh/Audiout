@@ -10,7 +10,7 @@ import PackageDescription
 // headless, offline manual rendering (never routes audio to a real device),
 // plus one guarded real-device probe that emits pure digital silence.
 //
-// Deliberately SEPARATE from AudiouterCore (does not link it): this is a
+// Deliberately SEPARATE from AudioutCore (does not link it): this is a
 // disposable measurement tool, not shipping code, and re-derives the timing
 // math independently so it is an INDEPENDENT check of SyncedLocalSink's plan().
 let package = Package(

@@ -2,12 +2,12 @@
 
 Status: research + recommendation, not yet a decision. Owner sign-off pending.
 Date: 2026-08-12. Related roadmap item: 051. Grounds the question Alec raised:
-how to charge for Audiouter given the GPL-2.0-or-later constraint the vendored
+how to charge for Audiout given the GPL-2.0-or-later constraint the vendored
 OwnTone sender forces on the whole work.
 
 ## The question
 
-Audiouter is `GPL-2.0-or-later` because `AirPlayEngine` vendors GPL sender code
+Audiout is `GPL-2.0-or-later` because `AirPlayEngine` vendors GPL sender code
 derived from OwnTone (see [NOTICE](../NOTICE)). We want to charge for the app.
 Two things need to be true at once: we respect the GPL, and we still capture
 revenue. This note surveys how the closest competitors handle their free trial
@@ -15,7 +15,7 @@ and their price, then recommends a model that fits a GPL app specifically.
 
 ## What the GPL does and does not allow
 
-The GPL does **not** stop us charging money. We can sell Audiouter and charge a
+The GPL does **not** stop us charging money. We can sell Audiout and charge a
 license fee. What it forbids is adding "further restrictions" on top of the
 license: anyone we hand a binary to is entitled to the corresponding source, and
 is free to modify it and redistribute it — including for free.
@@ -87,8 +87,8 @@ support**:
 - No license keys, no activation. "Once you have Ardour it will continue to work
   regardless of the status of your subscription."
 
-This maps onto Audiouter almost exactly, because we **already** ship a signed
-Developer ID `.app` and already have the `AUDIOUTER_BUNDLE_DYLIBS=1` release
+This maps onto Audiout almost exactly, because we **already** ship a signed
+Developer ID `.app` and already have the `AUDIOUT_BUNDLE_DYLIBS=1` release
 path that bundles the Homebrew libraries so end users need no Homebrew. That
 bundled, notarized, double-click build **is** the thing people will pay for —
 the alternative for our stated audience ("a Mac user with two AirPlay speakers")

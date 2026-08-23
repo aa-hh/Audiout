@@ -52,7 +52,7 @@ work is clear:
   routed app its own local volume), not this one.
 - The actual on/off restriction you see in the app is implemented cleanly and
   is easy to find: `GroupController.setDeviceSelected` in
-  `AudiouterCore/Sources/AudiouterCore/GroupController.swift` refuses the
+  `AudioutCore/Sources/AudioutCore/GroupController.swift` refuses the
   toggle with a fixed message ("Synced everywhere-audio arrives with the new
   engine") whenever turning on the Mac's speakers would mix it with an
   already-selected AirPlay device, and `PopoverController` wires that refusal

@@ -1,6 +1,6 @@
 #!/bin/bash
 # purge-stale-ptp-helpers.sh — dev-only tool: find and remove stale root
-# PTP-helper launchd daemons left behind by old or side-by-side Audiouter dev
+# PTP-helper launchd daemons left behind by old or side-by-side Audiout dev
 # builds (T-ZOMBIE).
 #
 # WHY THIS EXISTS: scripts/make-app.sh derives each build's helper daemon
@@ -8,7 +8,7 @@
 # for the exact derivation) and registers it as a root SMAppService LaunchDaemon.
 # BUNDLE_ID is deliberately env-overridable so side-by-side dev copies get their
 # own daemon identity instead of colliding — but every distinct BUNDLE_ID ever
-# used (default com.audiouter.Audiouter, a "Coexist" id, ad-hoc *-test/*-dev
+# used (default com.audiout.Audiout, a "Coexist" id, ad-hoc *-test/*-dev
 # override ids, ...) leaves its OWN separate always-on root daemon registered
 # with launchd, forever, until someone boots it out by hand. Live testing has
 # piled up over a dozen of these across unrelated dev builds in a single
@@ -34,7 +34,7 @@
 # Usage:
 #   scripts/purge-stale-ptp-helpers.sh            # list candidates (dry run)
 #   scripts/purge-stale-ptp-helpers.sh --apply     # actually bootout each one
-#   scripts/purge-stale-ptp-helpers.sh --apply --keep com.audiouter.Audiouter.ptphelper
+#   scripts/purge-stale-ptp-helpers.sh --apply --keep com.audiout.Audiout.ptphelper
 #   scripts/purge-stale-ptp-helpers.sh --help
 # Every command below is a paste-proof one-liner — no backslash continuations.
 

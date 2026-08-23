@@ -35,7 +35,7 @@ Adding the Mac's built-in speakers to an output set that already streams to one 
 Anchors verified on this branch (coordinator/backend code is identical to the synced-local branch, which has main merged in). `SyncedLocalSink.swift` anchors are from `claude/synced-local-airplay`.
 
 ### T1 — Port the nominal-sample-rate listener into the whole-system tap (Part A1)
-- files: `AudiouterCore/Sources/AudiouterCore/NativeCaptureCoordinator.swift` — `CoreAudioSystemTap` (class at `:776`; `createAggregate()` `:896`, `createAndStart()` `:817`, `teardown()` `:1041`, `installDefaultDeviceListener()` `:1015`).
+- files: `AudioutCore/Sources/AudioutCore/NativeCaptureCoordinator.swift` — `CoreAudioSystemTap` (class at `:776`; `createAggregate()` `:896`, `createAndStart()` `:817`, `teardown()` `:1041`, `installDefaultDeviceListener()` `:1015`).
 - what: Store the tapped output device id where `createAggregate()` resolves `outputID` (`:903`). Add `installSampleRateListener()`/`removeSampleRateListener()` on `kAudioDevicePropertyNominalSampleRate` modeled EXACTLY on `PerAppCaptureCoordinator.swift:952-977`, routing the notification into the existing `onDefaultDeviceChanged` (→ `handleDeviceChange` → `recreateTap`). Call install in `createAndStart` after the aggregate exists; call remove in `teardown()`. Register add/remove on this class's existing `listenerQueue` (`:806`) — do NOT copy the per-app `nil` queue.
 - kind: new-code
 - depends_on: —
@@ -44,7 +44,7 @@ Anchors verified on this branch (coordinator/backend code is identical to the sy
 - verify: AUTOMATABLE — unit test (T4) drives a simulated nominal-rate notification through the seam and asserts a rebuild; `git grep -c NominalSampleRate NativeCaptureCoordinator.swift` > 0; `swift test --parallel` green. Does NOT prove real-hardware recovery (that's T7, live).
 
 ### T2 — Whole-system AirPlay RTP session reset on tap rebuild (Part A2)
-- files: `AudiouterCore/Sources/AudiouterCore/NativeBackend.swift` — `CaptureControlling` (`:3469-3499`), coordinator wiring (`:861`), recapture-detection precedent (`everCapturedBundleIDs`/`isRecapture` `:1413-1426`), `resetAirPlaySessionForRoutedApp` (`:1463`), `enqueueRebindRecovery`/`performRebindRecovery` (`:1506`/`:1562`), whole-system output set `added`/`desiredOn` (`:192`/`:282`), whole-system bind `engine.addOutput(_:streamId:)` on stream 0 (`:1808`).
+- files: `AudioutCore/Sources/AudioutCore/NativeBackend.swift` — `CaptureControlling` (`:3469-3499`), coordinator wiring (`:861`), recapture-detection precedent (`everCapturedBundleIDs`/`isRecapture` `:1413-1426`), `resetAirPlaySessionForRoutedApp` (`:1463`), `enqueueRebindRecovery`/`performRebindRecovery` (`:1506`/`:1562`), whole-system output set `added`/`desiredOn` (`:192`/`:282`), whole-system bind `engine.addOutput(_:streamId:)` on stream 0 (`:1808`).
 - what: Add `var onStateChange: (@Sendable (NativeCaptureCoordinator.State) -> Void)?` to `CaptureControlling` with a default no-op so existing fakes compile. Wire `captureCoordinator?.onStateChange` in `start()` (near `:861`). Detect a whole-system RE-capture (a `.capturing` transition that is NOT the first — mirror the `everCaptured` flag) and, on recapture, reset the whole-system AirPlay session by rebinding every device in the selected output set (`added`/`desiredOn`, stream 0) via a whole-system analogue of `resetAirPlaySessionForRoutedApp`. Reuse `enqueueRebindRecovery`/`performRebindRecovery` (generalize to a stream-0 / no-per-app-stream rebind); keep the single-flight `rebindRecoveryGen` discipline.
 - kind: backend
 - depends_on: — (can develop in parallel with T1; wire-up reads state the coordinator already publishes)
@@ -53,7 +53,7 @@ Anchors verified on this branch (coordinator/backend code is identical to the sy
 - verify: AUTOMATABLE — unit test (T4) with an engine spy asserts a simulated whole-system recapture issues removeOutput→addOutput per selected device exactly once and is single-flighted; assert all `CaptureControlling` fakes still compile. Does NOT prove the receiver actually un-mutes (T7, live).
 
 ### T3 — Render the local sink at the device-native rate (Part B)
-- files: `AudiouterCore/Sources/AudiouterCore/SyncedLocalSink.swift` (`SyncTiming` rate scaling; `renderSampleRate`/`connectionFormat`; ring sizing) [branch `claude/synced-local-airplay`]; the base-resample point where the 44.1 kHz fan-out feeds the sink; `OwnToneBackend.swift`/`makeBackend` construction rate; reuse the device-rate read idiom in `LocalOutputLatency.swift`.
+- files: `AudioutCore/Sources/AudioutCore/SyncedLocalSink.swift` (`SyncTiming` rate scaling; `renderSampleRate`/`connectionFormat`; ring sizing) [branch `claude/synced-local-airplay`]; the base-resample point where the 44.1 kHz fan-out feeds the sink; `OwnToneBackend.swift`/`makeBackend` construction rate; reuse the device-rate read idiom in `LocalOutputLatency.swift`.
 - what: Read the tapped device's native `kAudioDevicePropertyNominalSampleRate` (house rule: from `kAudioHardwarePropertyDefaultOutputDevice`, NEVER `DefaultSystemOutput`). Render the sink at that native rate so opening the device forces no renegotiation. Base-resample the 44.1 kHz feed UP to the native rate ONCE before the ring; keep any existing `FractionalResampler` as a ±ppm drift corrector only (it must NOT do base conversion). Scale `SyncTiming`/delay math off the render rate. Remove any hardcoded 44100.
 - kind: new-code
 - depends_on: Q0 (must be on the synced-local branch), Q1/Q4 (locked)
@@ -62,7 +62,7 @@ Anchors verified on this branch (coordinator/backend code is identical to the sy
 - verify: AUTOMATABLE (offline/synthetic, T5) — 44.1 input rendered at 48 kHz yields correct frame counts and no pitch shift; `SyncTiming` delays scale with render rate; resampler is pass-through at ratio 1; RT path uses the `stateLock.try()` idiom. `swift test --parallel` green. Real phase-alignment by ear is T7 (live). NOTE: does NOT share a hot file with T1 (see self-critique) — but see risks re latency budget.
 
 ### T4 — Tests for Part A
-- files: `AudiouterCore/Tests/AudiouterCoreTests/NativeCaptureCoordinatorTests.swift`, `NativeBackendTests.swift` (new cases subclass `IsolatedTestCase`).
+- files: `AudioutCore/Tests/AudioutCoreTests/NativeCaptureCoordinatorTests.swift`, `NativeBackendTests.swift` (new cases subclass `IsolatedTestCase`).
 - what: Simulated nominal-rate notification → `recreateTap` fires (via the injected fake tap seam). Whole-system recapture → exactly-once rebind per selected device via an engine spy; assert single-flighting and that per-app rebind is unregressed. No real audio, not in the routine/automated audio-playback suite.
 - kind: test
 - depends_on: T1, T2
@@ -71,7 +71,7 @@ Anchors verified on this branch (coordinator/backend code is identical to the sy
 - verify: AUTOMATABLE — `swift test --parallel` green; new cases fail if T1/T2 reverted.
 
 ### T5 — Tests for Part B
-- files: `AudiouterCore/Tests/AudiouterCoreTests/SyncedLocalSinkTests.swift`, `SyncedLocalFanoutTests.swift`, sync-offset/phase tests (subclass `IsolatedTestCase`) [synced-local branch].
+- files: `AudioutCore/Tests/AudioutCoreTests/SyncedLocalSinkTests.swift`, `SyncedLocalFanoutTests.swift`, sync-offset/phase tests (subclass `IsolatedTestCase`) [synced-local branch].
 - what: 44.1 input rendered at 48 kHz = right frame count + no pitch shift; `SyncTiming` delays scale with render rate; resampler pass-through at ratio 1; sync-offset alignment (not just pitch — the extra resample's latency must fold into the delay).
 - kind: test
 - depends_on: T3
@@ -89,7 +89,7 @@ Anchors verified on this branch (coordinator/backend code is identical to the sy
 - verify: AUTOMATABLE (trivial) — file exists, links resolve.
 
 ### T8 — Tap/RTP health signal (Q3: real health indicator, minimal scope)
-- files: `AudiouterCore/Sources/AudiouterCore/NativeBackend.swift` (T2's `onStateChange` wiring and recapture detection, `:1413-1426`; `emit(_:)` at `:3438`); `AudiouterCore/Sources/AudiouterCore/OutputBackend.swift` (`BackendEvent` enum, `:23` — add a case here, e.g. `streamHealth(id: String, recovering: Bool)`, alongside the existing device-keyed `.level`/`.deviceUpdated` cases).
+- files: `AudioutCore/Sources/AudioutCore/NativeBackend.swift` (T2's `onStateChange` wiring and recapture detection, `:1413-1426`; `emit(_:)` at `:3438`); `AudioutCore/Sources/AudioutCore/OutputBackend.swift` (`BackendEvent` enum, `:23` — add a case here, e.g. `streamHealth(id: String, recovering: Bool)`, alongside the existing device-keyed `.level`/`.deviceUpdated` cases).
 - what: Alec wants the UI to be able to tell when a stream had to be silently recovered, not just see a moving capture-side meter (Q3 finding: `.level` is RMS on the CAPTURED buffer, `NativeCaptureCoordinator.handleBuffer` → `emitLevel` — it says nothing about whether audio is reaching the receiver over RTP). Rather than build a new receiver-side probe (no such mechanism exists, and one would be a much larger, speculative scope), reuse T2's own recapture/rebind signal as the health proxy: when `onStateChange` fires a whole-system recapture and a rebind is enqueued (`enqueueRebindRecovery`), emit a new `BackendEvent` (e.g. `.streamHealth(id:, recovering: true)`) for the affected device(s); emit `recovering: false` once `performRebindRecovery` completes. This is a signal only — no meter redesign, no new view. How it's drawn (badge/color/copy) is an explicit follow-up for a real UI/design pass, not this task. Keep the health flag boolean/enum-simple (e.g. `.healthy` / `.recovering`), not a numeric score.
 - kind: backend
 - depends_on: T2 (needs `onStateChange`/recapture detection wired first — same file, sequence after T2 on the same or a coordinating agent)
@@ -98,7 +98,7 @@ Anchors verified on this branch (coordinator/backend code is identical to the sy
 - verify: AUTOMATABLE — unit test (T9) simulates a recapture and asserts `.streamHealth(recovering: true)` fires before the rebind and `.streamHealth(recovering: false)` after `performRebindRecovery` completes; `swift test --parallel` green. Does NOT prove the indicator is visible/legible in real UI (that's a follow-up design pass, out of scope here) — T7 live test only confirms the underlying event fires correctly during a real recovery, not its visual presentation.
 
 ### T9 — Tests for T8 (health signal)
-- files: `AudiouterCore/Tests/AudiouterCoreTests/NativeBackendTests.swift` (subclass `IsolatedTestCase`), reusing the T4 recapture/engine-spy harness.
+- files: `AudioutCore/Tests/AudioutCoreTests/NativeBackendTests.swift` (subclass `IsolatedTestCase`), reusing the T4 recapture/engine-spy harness.
 - what: Simulated whole-system recapture emits `.streamHealth(recovering: true)` then `.streamHealth(recovering: false)` in the right order relative to the rebind; no `.streamHealth` events on the normal (non-recapture) path; existing `BackendEvent` consumers/fakes still compile.
 - kind: test
 - depends_on: T8

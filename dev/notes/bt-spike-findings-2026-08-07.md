@@ -13,7 +13,7 @@ PLAN-UNIVERSAL-SYNC Decision 4 amendment).
   PRIVACY_VIOLATION__`, no prompt) — the `.app` wrapper with
   `NSBluetoothAlwaysUsageDescription` is REQUIRED, not a fallback. After the one-time
   grant, status reads "allowed" and sticks. Production consequence: none extra —
-  Audiouter ships as a signed .app already; add the usage string + expect the prompt.
+  Audiout ships as a signed .app already; add the usage string + expect the prompt.
 - **`IOBluetoothDevice.pairedDevices()`**: works pre-grant (12 devices, incl. name/
   address/connected/A2DP-SDP flags). First call 2.55s (cold), 0.02s warm.
 - **Reconnect (powered, paired speaker — Sonos Move 2)**: `openConnection()` →

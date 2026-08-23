@@ -150,7 +150,7 @@ final class TapEngine {
         let bytesPerChannelSample = bytesPerFrame // for non-interleaved, per-channel frame bytes
 
         var newProcID: AudioDeviceIOProcID?
-        let queue = DispatchQueue(label: "com.audiouter.audiocap.capture",
+        let queue = DispatchQueue(label: "com.audiout.audiocap.capture",
                                   qos: .userInitiated)
         let cbCount = self.callbackCountPtr
         let inBytes = self.inputBytesSeenPtr

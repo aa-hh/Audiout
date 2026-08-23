@@ -24,7 +24,7 @@ key.** Alec sign-off pending.
   unmaintained.
 - Hybrid (LicenseSeat/Keylight/keygen.sh pattern: short key → server issues
   signed receipt cached for offline hard checks) exists to serve hard client
-  checks Audiouter doesn't have. It layers cleanly on this key format later
+  checks Audiout doesn't have. It layers cleanly on this key format later
   with no migration if a tamper-evident "Licensed to …" display is ever
   wanted — that is the only future reason to add it.
 
@@ -42,7 +42,7 @@ key.** Alec sign-off pending.
 | Verification | Worker only: `/validate` (app soft check + usage telemetry), `/download` + appcast endpoint (hard gates: `revoked_at IS NULL` and `max_major` ≥ release major) |
 | App behavior | POST key to `/validate`; on OK store key + registered flag in prefs, hide banner; on network failure keep last known state (soft check never blocks) |
 | Major upgrades | versioned-license model (Dash-style, fits "one-time covers current major"): `max_major` lives in the ROW, not the key string; Sparkle feed serves ≤ max_major items; a v2 purchase issues a fresh key with `max_major = 2`. Optional cosmetic prefix (`AUDR2-…`) for support triage only — parser must never depend on it |
-| Delivery | `transaction.completed` webhook → generate + insert + email; success page fetches by transaction id and offers an `audiouter://register?key=…` one-click link (CocoaFob's URL-scheme pattern) |
+| Delivery | `transaction.completed` webhook → generate + insert + email; success page fetches by transaction id and offers an `audiout://register?key=…` one-click link (CocoaFob's URL-scheme pattern) |
 
 ## Sources
 

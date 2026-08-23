@@ -77,7 +77,7 @@ clock at engine startup** (T2b/7295940). Instead, the clock lookup is deferred t
 connect time: when a user clicks a device to stream, the app connects to the helper's
 Mach service (T2/4c7da45, demand-starting it), then the session's `convergeDevice`
 call runs `ptpd_daemon_probe()` (T4/1298a70) which finds the helper and snapshots the
-clock_id. A dev/CI-only escape hatch, `AUDIOUTER_PTP_INPROC_BIND=1`, restores the old
+clock_id. A dev/CI-only escape hatch, `AUDIOUT_PTP_INPROC_BIND=1`, restores the old
 in-process bind so the engine can still be exercised end-to-end before the root helper
 is installed (see §6.3); the shipped default has no such fallback. The shim reimplements
 OwnTone's six `ptpd_*` wrappers pointed **find-only**:
@@ -157,7 +157,7 @@ Shipped verbatim as `scripts/ptp-helper.plist`, installed by
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.audiouter.Audiouter.ptphelper</string>
+    <string>com.audiout.Audiout.ptphelper</string>
 
     <key>BundleProgram</key>
     <string>Contents/MacOS/ptp-helper</string>   <!-- path is relative to the app bundle -->
@@ -170,12 +170,12 @@ Shipped verbatim as `scripts/ptp-helper.plist`, installed by
 
     <key>MachServices</key>
     <dict>
-        <key>com.audiouter.Audiouter.ptphelper</key>
+        <key>com.audiout.Audiout.ptphelper</key>
         <true/>
     </dict>                                       <!-- demand-start trigger: launchd launches on first app connect -->
 
     <key>AssociatedBundleIdentifiers</key>        <!-- ties the daemon to this app in Login Items -->
-    <string>com.audiouter.Audiouter</string>
+    <string>com.audiout.Audiout</string>
 
     <key>ProcessType</key>
     <string>Interactive</string>                  <!-- low-latency: PTP is timing-sensitive -->
@@ -444,7 +444,7 @@ standalone daemon would be re-homed verbatim; instead:
   event loop primitives; `shm_open`/`shm_unlink`/`getaddrinfo("localhost")` all
   work unchanged on macOS.
 
-A `AUDIOUTER_PTP_PORTS` env var (parsed in `main.c`, applied via
+A `AUDIOUT_PTP_PORTS` env var (parsed in `main.c`, applied via
 `airptp_ports_override()` before binding) lets the helper itself run on high,
 unprivileged ports for the same CI/dev path described in §6.2.
 
@@ -463,7 +463,7 @@ That is **Library Validation** (part of the hardened runtime): a Developer-ID
 binary may only load libraries signed by the same Team ID or by Apple, and
 Homebrew's libevent is ad-hoc-signed. The **app** dodges this with the
 `com.apple.security.cs.disable-library-validation` entitlement
-(`scripts/Audiouter.entitlements`); the **helper deliberately carries no
+(`scripts/Audiout.entitlements`); the **helper deliberately carries no
 entitlements** (§1.1 — smallest privileged surface), so it enforces validation.
 
 Rather than weaken the root daemon with that entitlement, the helper
@@ -506,7 +506,7 @@ Two dev fallbacks exist, both bypassing the SMAppService/root path:
 - run the built `ptp-helper` binary directly under an **`osascript`
   admin-privilege prompt** with ahh present (RESOLVED DECISIONS; ptp-study §3
   interim) — the live-test stand-in for the signed launchd daemon;
-- or set `AUDIOUTER_PTP_INPROC_BIND=1` so the engine's own shim
+- or set `AUDIOUT_PTP_INPROC_BIND=1` so the engine's own shim
   (`shims/ptpd.c`) falls back to an in-process `airptp_daemon_bind`, skipping
   the helper/IPC path entirely (§1.3).
 

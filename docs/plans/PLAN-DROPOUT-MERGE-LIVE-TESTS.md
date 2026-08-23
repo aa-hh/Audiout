@@ -13,15 +13,15 @@ report results and give the merge go-ahead separately.
 ## Prerequisites (once per session)
 
 1. **Check for a stale build in another worktree or `/Applications` first** — native audio uses
-   exclusive PTP ports 319/320; only ONE `Audiouter.app` can live-test at a time.
+   exclusive PTP ports 319/320; only ONE `Audiout.app` can live-test at a time.
    ```
-   find .claude/worktrees -name Audiouter.app
+   find .claude/worktrees -name Audiout.app
    ```
-   `/Applications/Audiouter.app` is Alec's live build — **do not overwrite it.** If you need to
+   `/Applications/Audiout.app` is Alec's live build — **do not overwrite it.** If you need to
    run this worktree's build side-by-side with an installed copy, give it its own identity so
    the two don't collide on bundle id or PTP daemon registration:
    ```
-   APP_NAME=AudiouterDropoutMerge BUNDLE_ID=com.audiouter.DropoutMerge scripts/make-app.sh ./build
+   APP_NAME=AudioutDropoutMerge BUNDLE_ID=com.audiout.DropoutMerge scripts/make-app.sh ./build
    ```
    Only one of the two may actually be *running* at a time regardless (PTP ports are exclusive)
    — the override just avoids LaunchServices/daemon-identity collisions if both are installed.
@@ -40,7 +40,7 @@ report results and give the merge go-ahead separately.
    points at full Xcode, not CommandLineTools.
 4. **Build + launch:**
    ```
-   cd "/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/dropout-merge-5c2a1f" && scripts/make-app.sh ./build && open ./build/Audiouter.app
+   cd "/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/dropout-merge-5c2a1f" && scripts/make-app.sh ./build && open ./build/Audiout.app
    ```
    Launch via `open` **only** — a shell-launched binary inherits the terminal's TCC grants
    instead of getting its own, which breaks the system-audio capture tap. It's a menu-bar app —
@@ -50,11 +50,11 @@ report results and give the merge go-ahead separately.
    previous ad-hoc rebuild's hash). Remove it with the **−** button and re-grant — toggling the
    switch off/on does **not** fix this.
 6. **Telemetry file**, used throughout this checklist:
-   `~/Library/Logs/Audiouter/telemetry.jsonl` (rotates to `.1` at 5 MB). Always-on, JSONL, one
+   `~/Library/Logs/Audiout/telemetry.jsonl` (rotates to `.1` at 5 MB). Always-on, JSONL, one
    object per line with `ts`/`sid`/`cat`/`evt` plus event-specific fields, shared across every
-   Audiouter build on this Mac. Confirm it's writing:
+   Audiout build on this Mac. Confirm it's writing:
    ```
-   tail -5 ~/Library/Logs/Audiouter/telemetry.jsonl
+   tail -5 ~/Library/Logs/Audiout/telemetry.jsonl
    ```
 7. **Optional: live log windows**, one per Terminal tab, useful during steps 6 and 7 below:
    ```
@@ -71,14 +71,14 @@ four full tap rebuilds on transient, throwaway readings. It now delivers the FIR
 a burst immediately, then coalesces anything more inside a 1.2s window to at most one trailing
 delivery of whatever value actually settled.
 
-1. Connect a Bluetooth output device (headphones or speaker) while Audiouter is playing to an
+1. Connect a Bluetooth output device (headphones or speaker) while Audiout is playing to an
    AirPlay speaker.
 2. Listen through the connect.
 
 **Expected:** at most a brief, single audio hiccup around the connect — not a stutter of several
 rapid rebuilds/dropouts in the first second. Confirm in telemetry:
 ```
-grep '"cat":"captureWS"' ~/Library/Logs/Audiouter/telemetry.jsonl | tail -30
+grep '"cat":"captureWS"' ~/Library/Logs/Audiout/telemetry.jsonl | tail -30
 ```
 A single connect should show a small, bounded number of tap-rebuild/transition lines — not one
 per HAL notification.
@@ -145,7 +145,7 @@ per-app-only route switch does not get this improvement.
 
 1. While AirPlay + the Mac's own speakers/headphones could plausibly both be audible, switch the
    Mac's default output device (e.g. disconnect Bluetooth headphones, or change System Settings →
-   Sound output) while something is playing through Audiouter's whole-system route.
+   Sound output) while something is playing through Audiout's whole-system route.
 
 **Expected:** no brief blast/leak of audio out of the Mac's local output during the switch, and a
 shorter or no audible gap in the AirPlay output compared to a hard cut.
@@ -161,10 +161,10 @@ of each installing its own HAL listeners. This is a consolidation, not a new beh
 here is that ordinary device switching still works and didn't regress.
 
 1. Switch the Mac's default output device a few times in a row (Bluetooth toggle, Sound menu, or
-   physical connect/disconnect), with Audiouter routing active.
+   physical connect/disconnect), with Audiout routing active.
 2. Watch telemetry while you do it:
    ```
-   grep -E '"cat":"(captureWS|capturePA)"' ~/Library/Logs/Audiouter/telemetry.jsonl | tail -40
+   grep -E '"cat":"(captureWS|capturePA)"' ~/Library/Logs/Audiout/telemetry.jsonl | tail -40
    ```
 
 **Expected:** each switch behaves normally (device switching still works, per Tests 1 and 4
@@ -185,9 +185,9 @@ the pass condition — there is no separate behavior to judge by ear here.
    telemetry polls every ~5s while capture is active, so give it time to fire at least once).
 2. Check the telemetry file:
    ```
-   grep '"evt":"send_sched"' ~/Library/Logs/Audiouter/telemetry.jsonl | tail -5
-   grep -E '"evt":"(write_cadence_drift|write_backlog_drop)"' ~/Library/Logs/Audiouter/telemetry.jsonl | tail -10
-   grep -E '"evt":"aggregate_(create|destroy)"' ~/Library/Logs/Audiouter/telemetry.jsonl | tail -10
+   grep '"evt":"send_sched"' ~/Library/Logs/Audiout/telemetry.jsonl | tail -5
+   grep -E '"evt":"(write_cadence_drift|write_backlog_drop)"' ~/Library/Logs/Audiout/telemetry.jsonl | tail -10
+   grep -E '"evt":"aggregate_(create|destroy)"' ~/Library/Logs/Audiout/telemetry.jsonl | tail -10
    ```
 
 **Expected:**
@@ -218,7 +218,7 @@ tap rebuild the two independent fixes would otherwise have caused together.
 3. Listen: does the app you just routed locally leak into the AirPlay speaker's mix?
 4. Check telemetry for the rebuild count:
    ```
-   grep '"cat":"captureWS"' ~/Library/Logs/Audiouter/telemetry.jsonl | tail -20
+   grep '"cat":"captureWS"' ~/Library/Logs/Audiout/telemetry.jsonl | tail -20
    ```
 
 **Expected:** exactly ONE `create_and_start_begin` / `create_and_start_done` pair for this single

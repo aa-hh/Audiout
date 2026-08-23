@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
 // PTPClockProbe.swift — thin Swift surface over the shim's
-// `ptpd_daemon_probe()` (T4, PLAN-AIRPLAY-COEXISTENCE.md). `AudiouterCore`
+// `ptpd_daemon_probe()` (T4, PLAN-AIRPLAY-COEXISTENCE.md). `AudioutCore`
 // depends on the `AirPlayEngine` product only, never `CAirPlayEngine`
 // directly (package boundary — see this package's root AGENTS.md), so this
 // one-function wrapper is what lets the app-side PTP-helper activation

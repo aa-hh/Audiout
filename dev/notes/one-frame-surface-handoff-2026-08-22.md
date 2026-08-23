@@ -10,7 +10,7 @@ As of this note, the working tree in this worktree
 
 - Commit `eee1c27f` on `claude/one-frame-surface`, pushed to
   `origin/claude/one-frame-surface`.
-- PR open: **https://github.com/aa-hh/Audiouter/pull/29** (`claude/one-frame-surface` → `main`), not merged.
+- PR open: **https://github.com/aa-hh/Audiout/pull/29** (`claude/one-frame-surface` → `main`), not merged.
 - Full test suite green at commit time: 2539 tests / 149 suites.
 - `main` is untouched.
 
@@ -33,8 +33,8 @@ Key pieces (all in the merged commit):
 - `AppSurfaceController.minimumContentSize` / `sessionContentSize` /
   `measureSessionContentSize()` / `applySessionFrame()` — the new frame
   policy. No animation, no re-centring, ever, after open.
-- `AudiouterSharedUI/SurfaceLayout.swift` — shared width/sidebar constants.
-- `AudiouterSharedUI/SidebarWarmSurfaceView.swift` — moved out of
+- `AudioutSharedUI/SurfaceLayout.swift` — shared width/sidebar constants.
+- `AudioutSharedUI/SidebarWarmSurfaceView.swift` — moved out of
   `SidebarViewController.swift` so both Groups and the new Settings sidebar
   can use it.
 - Settings screen rewritten: `NSTabViewController` → `NSSplitViewController`
@@ -73,14 +73,14 @@ inert; safe to delete on GitHub whenever.
 ## What remains — the actual open work
 
 1. **Live check on real hardware.** A build with its own bundle id
-   (`Audiouter OneFrame v1`, `com.audiouter.Audiouter.oneframev1`) was
+   (`Audiout OneFrame v1`, `com.audiout.Audiout.oneframev1`) was
    launched during the session that did this work — it may or may not still
    be running depending on whether the machine has restarted since. If not,
    rebuild:
    ```bash
    cd "/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/one-frame-surface"
-   APP_NAME="Audiouter OneFrame v2" BUNDLE_ID="com.audiouter.Audiouter.oneframev2" bash scripts/make-app.sh
-   open "build/Audiouter OneFrame v2.app"
+   APP_NAME="Audiout OneFrame v2" BUNDLE_ID="com.audiout.Audiout.oneframev2" bash scripts/make-app.sh
+   open "build/Audiout OneFrame v2.app"
    ```
    (Bump the suffix — every build needs its own bundle id, see root
    `CLAUDE.md`.) Then check, by eye:
@@ -117,7 +117,7 @@ mule; see the `remote-test-mule`/`build-stalls` memories in this project):
 ```bash
 cd "/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/one-frame-surface"
 bash scripts/build.sh
-AUDIOUTER_TEST_NO_CACHE=1 bash scripts/run-tests.sh
+AUDIOUT_TEST_NO_CACHE=1 bash scripts/run-tests.sh
 ```
 
 If the full suite doesn't reproduce 2539/149 green, that's the actual

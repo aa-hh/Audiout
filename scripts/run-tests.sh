@@ -1,5 +1,5 @@
 #!/bin/sh
-# Machine-wide serialised runner for the AudiouterCore suite.
+# Machine-wide serialised runner for the AudioutCore suite.
 #
 # WHY THIS EXISTS: every worktree's pre-commit Guard 4 runs the full suite, and
 # each run politely caps itself at `--num-workers 4`. But that cap is
@@ -22,15 +22,15 @@
 #
 # Usage:  scripts/run-tests.sh [extra swift-test args...]
 # Env:
-#   AUDIOUTER_TEST_WORKERS   worker count once the lock is held (default 6)
-#   AUDIOUTER_TEST_NO_LOCK=1 run immediately, no lock (for a deliberate
+#   AUDIOUT_TEST_WORKERS   worker count once the lock is held (default 6)
+#   AUDIOUT_TEST_NO_LOCK=1 run immediately, no lock (for a deliberate
 #                            foreground run when you know the machine is idle)
-#   AUDIOUTER_TEST_NO_CACHE=1 always run, never consult or write the cache
-#   AUDIOUTER_TEST_LOCK_TIMEOUT  seconds to wait for the lock (default 1800)
+#   AUDIOUT_TEST_NO_CACHE=1 always run, never consult or write the cache
+#   AUDIOUT_TEST_LOCK_TIMEOUT  seconds to wait for the lock (default 1800)
 set -eu
 
 repo_root=$(git rev-parse --show-toplevel)
-core="$repo_root/AudiouterCore"
+core="$repo_root/AudioutCore"
 
 # Disk housekeeping (prune .prunable-flagged worktrees, cap .build caches) at
 # the moment disk pressure actually appears: a build starting. Best-effort by
@@ -41,13 +41,13 @@ hk="$repo_root/scripts/housekeeping.sh"
 [ -x "$hk" ] || hk="$(cd "$(dirname "$0")" && pwd)/housekeeping.sh"
 if [ -x "$hk" ]; then "$hk" --current "$repo_root" || true; fi
 
-workers=${AUDIOUTER_TEST_WORKERS:-6}
-lock_timeout=${AUDIOUTER_TEST_LOCK_TIMEOUT:-1800}
+workers=${AUDIOUT_TEST_WORKERS:-6}
+lock_timeout=${AUDIOUT_TEST_LOCK_TIMEOUT:-1800}
 # How many suite runs may proceed at once, machine-wide. Default 2: a single run
 # only reaches ~2.6 of 8 cores (it is wait-bound, not CPU-bound), so two overlap
 # comfortably while still leaving headroom for the developer's own machine.
 # Raise for a beefier box, set to 1 for strict one-at-a-time.
-slots=${AUDIOUTER_TEST_SLOTS:-2}
+slots=${AUDIOUT_TEST_SLOTS:-2}
 
 # --- remote machine ---------------------------------------------------------
 # Host resolution, the local-vs-remote decision, sync and the run-there wrapper
@@ -73,14 +73,14 @@ run_remote() {
     # Mode for the REMOTE run is decided independently of the local machine:
     # the whole reason we are here is that this Mac is busy and that one is not,
     # so the remote gets the fast parallel path (~1.8x quicker on an idle host).
-    # An explicitly forced AUDIOUTER_TEST_MODE is still honoured.
-    case "${AUDIOUTER_TEST_MODE:-auto}" in
+    # An explicitly forced AUDIOUT_TEST_MODE is still honoured.
+    case "${AUDIOUT_TEST_MODE:-auto}" in
         serial) rargs="" ;;
         *)      rargs="--parallel --num-workers $workers" ;;
     esac
 
     rrc=0
-    remote_run "$repo_root" "cd AudiouterCore && swift test $rargs $*" || rrc=$?
+    remote_run "$repo_root" "cd AudioutCore && swift test $rargs $*" || rrc=$?
     if [ "$rrc" -eq 2 ]; then
         # "Ran, but failed" — re-run locally rather than trusting the verdict. A
         # machine on a different Swift/SDK must never be what REFUSES a commit:
@@ -99,8 +99,8 @@ run_remote() {
 # Lock and cache live in /tmp on purpose: they must be shared by EVERY worktree
 # and every clone on this machine, so they cannot live under $repo_root (each
 # worktree has its own) or under .git (ditto).
-lock_file=${AUDIOUTER_TEST_LOCK_FILE:-/tmp/audiouter-suite.lock}
-cache_dir=${AUDIOUTER_TEST_CACHE_DIR:-/tmp/audiouter-suite-cache}
+lock_file=${AUDIOUT_TEST_LOCK_FILE:-/tmp/audiout-suite.lock}
+cache_dir=${AUDIOUT_TEST_CACHE_DIR:-/tmp/audiout-suite-cache}
 
 # --- content key ------------------------------------------------------------
 # Hash what the suite's result actually depends on: the Swift sources and tests
@@ -110,7 +110,7 @@ cache_dir=${AUDIOUTER_TEST_CACHE_DIR:-/tmp/audiouter-suite-cache}
 # be committed, and for a manual run mid-edit.
 suite_key() {
     {
-        find "$repo_root/AudiouterCore/Sources" "$repo_root/AudiouterCore/Tests" \
+        find "$repo_root/AudioutCore/Sources" "$repo_root/AudioutCore/Tests" \
              "$repo_root/AirPlayEngine/Sources" \
              -type f \( -name '*.swift' -o -name '*.c' -o -name '*.h' \) \
              -exec shasum -a 256 {} + 2>/dev/null
@@ -118,7 +118,7 @@ suite_key() {
         # they carry the target graph, dependencies and the brew include flags,
         # so a manifest-only edit changes what the suite links and can flip a
         # result with every source file byte-identical.
-        shasum -a 256 "$repo_root/AudiouterCore/Package.swift" \
+        shasum -a 256 "$repo_root/AudioutCore/Package.swift" \
                       "$repo_root/AirPlayEngine/Package.swift" 2>/dev/null
     } | awk '{print $1}' | sort | shasum -a 256 | awk '{print $1}'
 }
@@ -129,14 +129,14 @@ key=$(suite_key)
 args_key=$(printf '%s' "$*" | shasum -a 256 | awk '{print $1}')
 stamp="$cache_dir/$key.$args_key"
 
-if [ "${AUDIOUTER_TEST_NO_CACHE:-0}" != "1" ] && [ -f "$stamp" ]; then
+if [ "${AUDIOUT_TEST_NO_CACHE:-0}" != "1" ] && [ -f "$stamp" ]; then
     echo "  suite: sources unchanged since a passing run — skipping." >&2
-    echo "  (AUDIOUTER_TEST_NO_CACHE=1 to force)" >&2
+    echo "  (AUDIOUT_TEST_NO_CACHE=1 to force)" >&2
     exit 0
 fi
 
 # --- prefer-remote ----------------------------------------------------------
-# With `audiouter.testPrefer = remote`, go to the other Mac FIRST rather than
+# With `audiout.testPrefer = remote`, go to the other Mac FIRST rather than
 # only on contention — this keeps THIS machine free unconditionally. With
 # `= cpu`, only go first if the other Mac is CURRENTLY less loaded — a straight
 # "remote" preference is wrong the moment the remote is the one that's busy
@@ -155,7 +155,7 @@ if [ "$try_remote_first" -eq 1 ] && [ "$remote_tried" -eq 0 ]; then
     rrc=0
     run_remote "$@" || rrc=$?
     if [ "$rrc" -eq 0 ]; then
-        if [ "${AUDIOUTER_TEST_NO_CACHE:-0}" != "1" ]; then
+        if [ "${AUDIOUT_TEST_NO_CACHE:-0}" != "1" ]; then
             mkdir -p "$cache_dir"
             : > "$stamp"
         fi
@@ -185,8 +185,8 @@ fi
 # The cap exists to stop unbounded pile-up, not to enforce single-file.
 acquired=0
 slot_file=""
-if [ "${AUDIOUTER_TEST_NO_LOCK:-0}" = "1" ]; then
-    echo "  suite: AUDIOUTER_TEST_NO_LOCK=1 — not limiting concurrency." >&2
+if [ "${AUDIOUT_TEST_NO_LOCK:-0}" = "1" ]; then
+    echo "  suite: AUDIOUT_TEST_NO_LOCK=1 — not limiting concurrency." >&2
 else
     waited=0
     announced=0
@@ -216,7 +216,7 @@ else
                 # A remote PASS is a real pass of these exact sources, so record
                 # it — otherwise the very next commit re-runs the whole suite and
                 # the cache silently does nothing for every overflowed run.
-                if [ "${AUDIOUTER_TEST_NO_CACHE:-0}" != "1" ]; then
+                if [ "${AUDIOUT_TEST_NO_CACHE:-0}" != "1" ]; then
                     mkdir -p "$cache_dir"
                     : > "$stamp"
                 fi
@@ -277,8 +277,8 @@ fi
 # testing at once nobody is watching a clock, and 5x the CPU is precisely what
 # makes the machine unusable. So: pick by conditions rather than fixing one.
 #
-# AUDIOUTER_TEST_MODE=auto (default) | parallel | serial
-mode=${AUDIOUTER_TEST_MODE:-auto}
+# AUDIOUT_TEST_MODE=auto (default) | parallel | serial
+mode=${AUDIOUT_TEST_MODE:-auto}
 
 # Is anything else already testing? Two sources, because the second is the one
 # that actually bites: other runner slots, AND bare `swift test` invocations
@@ -312,7 +312,7 @@ if [ "$acquired" -eq 1 ]; then
     if [ "$mode" = "auto" ]; then
         why=$([ "$machine_busy" -eq 1 ] && echo "machine busy" || echo "machine idle")
     else
-        why="AUDIOUTER_TEST_MODE=$mode"
+        why="AUDIOUT_TEST_MODE=$mode"
     fi
     if [ -z "$test_args" ]; then
         echo "  suite: slot $(basename "$slot_file") of $slots — SERIAL ($why; ~1/5 the CPU of parallel)." >&2
@@ -333,7 +333,7 @@ set +e
 status=$?
 set -e
 
-if [ "$status" -eq 0 ] && [ "${AUDIOUTER_TEST_NO_CACHE:-0}" != "1" ]; then
+if [ "$status" -eq 0 ] && [ "${AUDIOUT_TEST_NO_CACHE:-0}" != "1" ]; then
     mkdir -p "$cache_dir"
     : > "$stamp"
 else

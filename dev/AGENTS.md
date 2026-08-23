@@ -6,7 +6,7 @@ Offline development tooling for working on the app without real AirPlay
 speakers, plus `dev/notes/`, home for pre-implementation research briefs.
 Owns the *optional* real-wire sanity check (a shairport-sync fake receiver) —
 not the primary offline tool, which is the in-app `MockBackend` in
-`../AudiouterCore`. Full setup docs live in `README.md`.
+`../AudioutCore`. Full setup docs live in `README.md`.
 
 ## Rules
 

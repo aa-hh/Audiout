@@ -24,9 +24,8 @@ is `dev/notes/ios-devices-tab-design-2026-08-23.md`.
   `claude/ios-staging` worktree** — the local worktree has been seen running
   *behind* origin (e.g. missing the One Case voice, PR #36). Verify with
   `git rev-list local..origin`.
-- Slice 1 is on `claude/ios-speakers-chips-pins` (worktree
-  `.claude/worktrees/ios-speakers-chips-pins`), based on origin ios-staging
-  `da9b250b`, commit `3c74877`, pushed, **not merged**.
+- Slice 1 **is merged** into ios-staging (PR #40, origin `0ecf10e3`); its
+  worktree `.claude/worktrees/ios-speakers-chips-pins` is marked `.prunable`.
 - Do iOS feature work in its own worktree branched from origin ios-staging;
   merge finished, phone-verified slices into ios-staging on Alec's word.
 
@@ -34,7 +33,7 @@ is `dev/notes/ios-devices-tab-design-2026-08-23.md`.
 
 | Slice | State | Verify owed |
 |---|---|---|
-| 1 — chips + pins + collapse Unavailable | **Built, compiles** (`ios.sh build` ✓), pushed, not merged | Alec's phone: long-press doesn't steal the 0-distance drag; instant pin re-sort feel; then merge |
+| 1 — chips + pins + collapse Unavailable | **MERGED** to ios-staging (PR #40, `0ecf10e3`); phone-tested, Alec go-ahead | done — one refinement moved to slice 2 (below) |
 | 2 — Devices\|Groups tab + device detail + EQ | **Designed, not built** | — |
 | 3 — Cast banner + `Starting…` + echo-timeout fix | **Designed, not built**; gated on 006 landing on ios-staging | — |
 
@@ -76,6 +75,18 @@ tab on their own):
    10 bands on the Mac" line when bands non-flat; the `Shaped` row mark.
    Main Out tone via the Speakers deck menu ("Main Out tone…").
 6. **A11y/Dynamic Type/phone pass.**
+
+### Slice-1 refinement (from Alec's phone test, 2026-08-23)
+
+- **On pin-add, switch the active chip to Favourites.** Today, favouriting a
+  row (long-press → Pin) re-sorts it but the view stays on the current chip, so
+  the item can move/scroll and the pin feels like it made the item *disappear*.
+  Fix: when a pin is **added**, set the active chip to `Favourites` (the
+  Favourites chip becomes visible on the first pin, so switch to it then) so the
+  just-pinned item stays on screen and the action is confirmed. On **unpin**, no
+  forced switch. Announce the switch for VoiceOver. Small change to the slice-1
+  chip/pin code in `SpeakersView.swift` / `DeviceRowView.swift`; Alec placed it
+  in slice 2.
 
 ### Protocol delta slice 2 needs (`AudiouterProtocol`, all additive/optional)
 

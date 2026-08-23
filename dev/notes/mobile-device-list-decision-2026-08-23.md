@@ -39,6 +39,9 @@ anti-goals where it says so. This is what gets scoped and built on
 - No transport headings, no search, no sort menu, no "hide unavailable"
   toggle. Chip selection resets to ALL on each launch (a filter left on is a
   lie about the system — research anti-pattern).
+- **On pinning a device, switch the chip to Favourites** so the just-pinned
+  row stays visible (added 2026-08-23 after phone testing — pinning otherwise
+  reads as the item disappearing). Slice 2.
 
 ### Devices tab (replaces the Groups tab)
 - The Groups tab becomes **Devices**, with a segmented control at the top:

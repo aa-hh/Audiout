@@ -31,13 +31,9 @@ struct AppRouteRowView: View {
     let availableDevices: [DeviceState]
     let session: any MacSessionProtocol
 
-    /// Which way the finger committed — ``DeviceRowView`` declares its own
-    /// copy rather than sharing one, and so does this row; the only symbol
-    /// the three drag grammars on this screen deliberately share is
-    /// `WarmSignal.faderValue`.
-    private enum DragAxis { case horizontal, vertical }
-
-    @State private var axis: DragAxis?
+    /// Committed horizontally — ``HorizontalDragGesture`` has already handed
+    /// a vertical pan back to the enclosing `ScrollView` by then.
+    @State private var dragging = false
     @State private var dragStartVolume: Int?
     @State private var localVolume: Double?
     @State private var detents = WarmSignal.FaderDetents()
@@ -97,7 +93,6 @@ struct AppRouteRowView: View {
 
     // MARK: - Derived state
 
-    private var dragging: Bool { axis == .horizontal }
     private var displayVolume: Int { Int((localVolume ?? Double(route.volume)).rounded()) }
     private var volumeFraction: CGFloat { CGFloat(displayVolume) / 100 }
 
@@ -150,7 +145,7 @@ struct AppRouteRowView: View {
         .clipShape(RoundedRectangle(cornerRadius: WarmSignal.Radius.row, style: .continuous))
         .contentShape(Rectangle())
         .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { rowWidth = $0 }
-        .simultaneousGesture(dragGesture)
+        .gesture(HorizontalDragGesture { handle($0) })
         .sensoryFeedback(trigger: rail) { _, new in new == nil ? nil : .impact(weight: .light) }
         // The dial's detents, at a fraction of the rails' strength — same
         // family, same rule as `DeviceRowView`'s. No selection tick: this
@@ -187,10 +182,10 @@ struct AppRouteRowView: View {
         }
     }
 
-    /// 66, not Speakers' 60: the glyph is the same 44pt, but this row's
+    /// 74, not Speakers' 68: the glyph is the same 44pt, but this row's
     /// two-line text stack (name + destination sub-line) needs more air than
     /// a device row's single sub-label does.
-    private static let rowHeight: CGFloat = 66
+    private static let rowHeight: CGFloat = 74
 
     // MARK: - Backgrounds
 
@@ -315,38 +310,46 @@ struct AppRouteRowView: View {
 
     // MARK: - Gesture
 
-    /// `DeviceRowView.dragGesture`'s shape, minus its disabled/refusal
-    /// branch: a volume write here is accepted regardless of `isRunning`, so
+    /// ``DeviceRowView/handle(_:)``'s shape, minus its tap, its pressed
+    /// flash and its disabled/refusal branch: this row has no tap action at
+    /// all, and a volume write here is accepted regardless of `isRunning`, so
     /// this drag has nothing to gate.
-    private var dragGesture: some Gesture {
-        DragGesture(minimumDistance: 0)
-            .onChanged { value in
-                let w = value.translation.width, h = value.translation.height
-                if axis == nil {
-                    // 5pt slop, then latch to one axis for the rest of the
-                    // gesture. Vertical stays inert so the enclosing
-                    // ScrollView keeps its own pan.
-                    guard max(abs(w), abs(h)) >= 5 else { return }
-                    axis = abs(w) > abs(h) ? .horizontal : .vertical
-                    if axis == .horizontal {
-                        dragStartVolume = route.volume
-                        detents.begin(at: route.volume)
-                    }
-                }
-                guard axis == .horizontal, let start = dragStartVolume else { return }
-                let v = WarmSignal.faderValue(start: start, translationWidth: w, trackWidth: rowWidth)
-                localVolume = Double(v)
-                detents.advance(to: v)
-                session.setAppVolume(bundleID: route.bundleID, volume: v, isFinal: false)
-            }
-            .onEnded { _ in
-                defer { axis = nil; dragStartVolume = nil }
-                guard axis == .horizontal else { return }
-                session.setAppVolume(bundleID: route.bundleID,
-                                      volume: Int((localVolume ?? Double(route.volume)).rounded()),
-                                      isFinal: true)
-                localVolume = nil   // clear on release — DeviceRowView's policy, not MainOutRow's hold
-            }
+    private func handle(_ phase: HorizontalDragGesture.Phase) {
+        switch phase {
+        case .down, .tapped:
+            break
+        case .began(let width):
+            dragging = true
+            dragStartVolume = route.volume
+            detents.begin(at: route.volume)
+            track(width)
+        case .changed(let width):
+            track(width)
+        case .ended:
+            defer { reset() }
+            session.setAppVolume(bundleID: route.bundleID,
+                                 volume: Int((localVolume ?? Double(route.volume)).rounded()),
+                                 isFinal: true)
+            localVolume = nil   // clear on release — DeviceRowView's policy, not MainOutRow's hold
+        case .cancelled:
+            // The ScrollView has it now — or the system took the touch
+            // mid-drag, in which case the echo is a level nobody confirmed.
+            localVolume = nil
+            reset()
+        }
+    }
+
+    private func track(_ width: CGFloat) {
+        guard let start = dragStartVolume else { return }
+        let v = WarmSignal.faderValue(start: start, translationWidth: width, trackWidth: rowWidth)
+        localVolume = Double(v)
+        detents.advance(to: v)
+        session.setAppVolume(bundleID: route.bundleID, volume: v, isFinal: false)
+    }
+
+    private func reset() {
+        dragging = false
+        dragStartVolume = nil
     }
 }
 

@@ -46,16 +46,10 @@ struct SpeakersView: View {
     /// `NavigationStack` or navigation title here.
     private var header: some View {
         HStack(alignment: .bottom, spacing: 10) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text(eyebrowText)
-                    .microLabel()
-                    .foregroundStyle(WarmSignal.label2)
-                    .lineLimit(1)
-                Text("Speakers")
-                    .font(.system(size: titleSize, weight: .bold))
-                    .tracking(-0.7)
-                    .foregroundStyle(WarmSignal.label)
-            }
+            Text("Speakers")
+                .font(.system(size: titleSize, weight: .bold))
+                .tracking(-0.7)
+                .foregroundStyle(WarmSignal.label)
 
             Spacer(minLength: 8)
 
@@ -91,26 +85,18 @@ struct SpeakersView: View {
 
     private var isLive: Bool { session.connectionStatus == .live }
 
-    /// Whose speakers these are — the one thing the title can't say. With no
-    /// Mac there is no name to give, so it says what the connection is doing.
-    private var eyebrowText: String {
-        guard let name = namedMac else { return statusText }
-        return "Connected to \(name)"
-    }
-
-    /// The Mac the eyebrow can name, or nil when there isn't one to name.
+    /// The Mac this screen is showing, or nil when there isn't one to name.
     private var namedMac: String? {
         guard isLive, let name = session.snapshot?.serverName, !name.isEmpty else { return nil }
         return name
     }
 
-    /// The pill is the glanceable state; the eyebrow is the identity. So once
-    /// the eyebrow has said "Connected to Demo Mac", the pill saying
-    /// "Connected · Demo" is the same two facts a second time, three words
-    /// wider. It drops to the one thing the eyebrow doesn't carry — that the
-    /// link is up right now — and the lit dot beside it says the rest.
+    /// Everything the header says besides the word "Speakers": the glanceable
+    /// state AND whose speakers these are, because the pill is the only place
+    /// either can be said. "Live · Kitchen Mac" while a named Mac is
+    /// connected; what the connection is doing otherwise.
     private var pillText: String {
-        if namedMac != nil { return "Live" }
+        if let name = namedMac { return "Live · \(name)" }
         return session.isDemo ? statusText + " · Demo" : statusText
     }
 

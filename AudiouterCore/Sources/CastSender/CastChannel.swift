@@ -138,9 +138,41 @@ public final class CastChannel: @unchecked Sendable {
     }
 
     private func recordLocalAddress() {
-        guard case let .hostPort(host, _)? = connection?.currentPath?.localEndpoint,
-              case let .ipv4(address) = host else { return }
-        stateLock.withLock { _localIPv4Address = "\(address)" }
+        if case let .hostPort(host, _)? = connection?.currentPath?.localEndpoint,
+           case let .ipv4(address) = host {
+            stateLock.withLock { _localIPv4Address = "\(address)" }
+            return
+        }
+        // The control connection is free to ride IPv6 (Happy Eyeballs picks a
+        // family per attempt, and this receiver's v4 mDNS records come and go)
+        // — but the stream URL handed back to the receiver is built on a v4
+        // host, so derive the Mac's v4 address on the SAME interface the
+        // connection took. Without this, a v6 connect strands the session at
+        // `noLocalAddress` before it ever launches (live failure, 2026-08-23).
+        guard let name = connection?.currentPath?.availableInterfaces.first?.name,
+              let v4 = Self.ipv4Address(onInterface: name) else { return }
+        stateLock.withLock { _localIPv4Address = v4 }
+    }
+
+    /// First IPv4 address bound to `name`, dotted-quad. razor: an IPv6-only
+    /// interface returns nil and the session fails `noLocalAddress` as before;
+    /// lifting that means serving the audio stream itself over v6.
+    private static func ipv4Address(onInterface name: String) -> String? {
+        var addrs: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&addrs) == 0 else { return nil }
+        defer { freeifaddrs(addrs) }
+        var cursor = addrs
+        while let ifa = cursor {
+            defer { cursor = ifa.pointee.ifa_next }
+            guard let sa = ifa.pointee.ifa_addr,
+                  sa.pointee.sa_family == UInt8(AF_INET),
+                  String(cString: ifa.pointee.ifa_name) == name else { continue }
+            var addr = UnsafeRawPointer(sa).assumingMemoryBound(to: sockaddr_in.self).pointee.sin_addr
+            var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+            guard inet_ntop(AF_INET, &addr, &buf, socklen_t(INET_ADDRSTRLEN)) != nil else { continue }
+            return String(cString: buf)
+        }
+        return nil
     }
 
     private func armHeartbeat() {

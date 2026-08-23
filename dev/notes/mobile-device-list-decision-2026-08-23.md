@@ -40,6 +40,9 @@ anti-goals where it says so. This is what gets scoped and built on
   editor move under the Groups segment unchanged. (Alec, 2026-08-23 —
   supersedes the five-tab version above.) Tab name open: "Devices" is the
   working label; the segment names are the real labels.
+- **Mac counterpart: roadmap 064.** The Mac Groups window stacks Groups and
+  Speakers in one sidebar and buries Groups at scale; 064 splits them the same
+  way. Separate work, Mac-side — do not fold into the iOS branch.
 - Devices list: every device the Mac knows, grouped by type (AirPlay,
   Bluetooth, Cast), name + type + availability. Tap → **device detail**.
 - Device detail: identity (name, type, what the Mac knows — AirPlay 2 or

@@ -418,9 +418,9 @@ struct DeviceRowView: View {
         .overlay(alignment: .trailing) { muteControl }
     }
 
-    /// The whole vertical budget: 8 pt of air, the 44 pt halo, and 8 pt of air
-    /// under it. Nothing here is slack.
-    private static let rowHeight: CGFloat = 60
+    /// The whole vertical budget: 12 pt of air, the 44 pt halo, and 12 pt of
+    /// air under it.
+    private static let rowHeight: CGFloat = 68
 
     /// Only on a row that is actually making sound: a mute button on a silent
     /// speaker is a control with nothing to stop.

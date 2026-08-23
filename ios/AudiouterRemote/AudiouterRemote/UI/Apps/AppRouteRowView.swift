@@ -182,10 +182,10 @@ struct AppRouteRowView: View {
         }
     }
 
-    /// 66, not Speakers' 60: the glyph is the same 44pt, but this row's
+    /// 74, not Speakers' 68: the glyph is the same 44pt, but this row's
     /// two-line text stack (name + destination sub-line) needs more air than
     /// a device row's single sub-label does.
-    private static let rowHeight: CGFloat = 66
+    private static let rowHeight: CGFloat = 74
 
     // MARK: - Backgrounds
 

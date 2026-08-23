@@ -49,16 +49,10 @@ struct AppsView: View {
     /// presents fine without one.
     private var header: some View {
         HStack(alignment: .bottom, spacing: 10) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Per-App Routing")
-                    .microLabel()
-                    .foregroundStyle(WarmSignal.label2)
-                    .lineLimit(1)
-                Text("Apps")
-                    .font(.system(size: titleSize, weight: .bold))
-                    .tracking(-0.7)
-                    .foregroundStyle(WarmSignal.label)
-            }
+            Text("Apps")
+                .font(.system(size: titleSize, weight: .bold))
+                .tracking(-0.7)
+                .foregroundStyle(WarmSignal.label)
 
             Spacer(minLength: 8)
 

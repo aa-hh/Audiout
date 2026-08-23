@@ -66,7 +66,7 @@ struct AppGlyph: View {
                 .foregroundStyle(contentTint)
         } else {
             Text(Self.initial(for: displayName))
-                .font(.system(size: size * 0.44, weight: .bold, design: .monospaced))
+                .font(.system(size: size * 0.44, weight: .bold))
                 .foregroundStyle(contentTint)
         }
     }

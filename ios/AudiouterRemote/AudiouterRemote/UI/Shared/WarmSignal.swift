@@ -327,49 +327,35 @@ enum WarmSignal {
 
 // MARK: - Type primitives
 
-/// The design's micro-label voice (doc:36): monospaced, uppercase, tracked out.
-/// 11 pt is the HIG floor for any text, and also the default size here — the
-/// design's own values (doc:57, doc:72-73, doc:124, doc:126, doc:195, doc:197)
-/// run 9–9.5 pt, all under that floor, so no call site should pass anything
-/// smaller than the default.
+/// The design's micro-label voice: small, semibold, sentence case, in the
+/// plain system face. Strings render exactly as authored — no `.textCase`
+/// transform, no monospaced design, no tracking. State is carried by tint
+/// and weight, not by capitals.
+///
+/// 11 pt is the HIG floor for any text, and also the default size here, so
+/// no call site should pass anything smaller than the default.
 ///
 /// Scales with `@ScaledMetric`, not `.custom("", size:relativeTo:)`: an empty
 /// font name has no documented meaning, and nothing verifies it carries
-/// weight or the monospaced trait through Dynamic Type scaling. A plain
-/// `@ScaledMetric` point size composed with an explicit
-/// `.system(size:weight:design:)` guarantees both.
+/// weight through Dynamic Type scaling. A plain `@ScaledMetric` point size
+/// composed with an explicit `.system(size:weight:)` guarantees it.
 struct MicroLabel: ViewModifier {
     @ScaledMetric private var scaledSize: CGFloat
-    private let baseSize: CGFloat
 
-    /// Upper case is the voice, and it is the default. The exception is text
-    /// the app did not choose the words of — a device row's failure headline
-    /// is the Mac's own sentence, and a sentence in capitals is a shout. The
-    /// knob lives here rather than at the call site because `.textCase` is an
-    /// environment value: applied outside this modifier it is simply overruled
-    /// by the one inside.
-    private let uppercased: Bool
-
-    init(size: CGFloat, uppercased: Bool = true) {
-        self.baseSize = size
-        self.uppercased = uppercased
+    init(size: CGFloat) {
         self._scaledSize = ScaledMetric(wrappedValue: size, relativeTo: .caption2)
     }
 
     func body(content: Content) -> some View {
         content
-            .font(.system(size: scaledSize, weight: .bold, design: .monospaced))
-            // Tracking stays keyed to the base size, not the scaled one: it's
-            // a fixed proportion of the label's design size, not something
-            // that should itself expand further as the label already grows.
-            .tracking(baseSize * 0.09)
-            .textCase(uppercased ? .uppercase : nil)
+            .font(.system(size: scaledSize, weight: .semibold))
     }
 }
 
-/// A numeric readout: monospaced, tight, so the digits don't shuffle as the
-/// value changes under a finger. See ``MicroLabel`` for why this scales via
-/// `@ScaledMetric` rather than the old empty-name `.custom(...)` hack.
+/// A numeric readout: tabular digits so the number doesn't shuffle as the
+/// value changes under a finger — the digits are fixed-width, the face is
+/// not. See ``MicroLabel`` for why this scales via `@ScaledMetric` rather
+/// than the old empty-name `.custom(...)` hack.
 struct Readout: ViewModifier {
     @ScaledMetric private var scaledSize: CGFloat
 
@@ -379,8 +365,7 @@ struct Readout: ViewModifier {
 
     func body(content: Content) -> some View {
         content
-            .font(.system(size: scaledSize, weight: .bold, design: .monospaced))
-            .tracking(-0.4)
+            .font(.system(size: scaledSize, weight: .bold))
             .monospacedDigit()
     }
 }
@@ -424,8 +409,8 @@ extension View {
             .padding(-pad)
     }
 
-    func microLabel(_ size: CGFloat = 11, uppercased: Bool = true) -> some View {
-        modifier(MicroLabel(size: size, uppercased: uppercased))
+    func microLabel(_ size: CGFloat = 11) -> some View {
+        modifier(MicroLabel(size: size))
     }
 
     func readout(_ size: CGFloat) -> some View { modifier(Readout(size: size)) }

@@ -39,16 +39,15 @@ typography:
     fontWeight: "400, 600 when the row is the one playing"
     letterSpacing: "-0.2pt"
   readout:
-    fontFamily: "SF system monospaced (design: .monospaced)"
+    fontFamily: "SF Pro (system)"
     fontSize: "16pt at rest, 22pt while dragging (@ScaledMetric, relativeTo: .body/.subheadline)"
     fontWeight: 700
-    letterSpacing: "-0.4pt"
     fontFeature: "monospacedDigit"
   microLabel:
-    fontFamily: "SF system monospaced (design: .monospaced)"
+    fontFamily: "SF Pro (system)"
     fontSize: "11pt floor (@ScaledMetric, relativeTo: .caption2)"
-    fontWeight: 700
-    letterSpacing: "9% of base point size"
+    fontWeight: 600
+    textCase: "sentence case, as authored — never transformed"
 rounded:
   control: "10pt"
   row: "16pt"
@@ -106,14 +105,14 @@ rather than going silently dead.
   untouched remainder mid-drag, so the row becomes a partial fill of itself
 - Level is a knob-style gold arc around the speaker's halo, not a bar or a
   numeric-only readout
-- Three sections — PLAYING / READY / UNAVAILABLE — address every speaker by
+- Three sections — Playing / Ready / Unavailable — address every speaker by
   what it is doing right now, never by transport (no separate Bluetooth or
   Pinned heading)
 - Depth is a ground ladder in dark and edge weight in light; one shadow
   exists on the entire screen
-- A bold, tracked-out, uppercase monospaced micro-voice carries every state
-  word; sentence case is reserved for text the app didn't write itself (a
-  failure headline is the Mac's own sentence)
+- One label voice: small semibold sentence case in the plain system face
+  carries every state word — state is told by tint and weight, never by
+  capitals or a monospaced face
 - Bare numbers, not named presets, for every level readout
 
 ## Colors
@@ -127,8 +126,8 @@ to paper and gold is deepened for text contrast.
   the halo's level arc, the routed-app dot, a fader cap's index bar. Graphic
   use only; clears 3:1 in both grounds but fails 4.5:1 as light-mode text.
 - **Gold Text** (`#E8B84B` dark / `#825E0F` light): the same signal,
-  repurposed for anything at or under 16pt that must read as gold — MAIN
-  OUT, a live volume readout, the PLAYING sub-label. Deepened in light so
+  repurposed for anything at or under 16pt that must read as gold — Main
+  Out, a live volume readout, the Playing sub-label. Deepened in light so
   the identical hue clears the text floor instead of the graphic one.
 
 ### Neutral — the grounds and the two edges
@@ -170,7 +169,7 @@ light grounds now match the Mac app value for value.
   device's name, the screen title.
 - **label2** (55% white / `#706464`): secondary — eyebrow text, a muted
   sub-label, unselected section titles.
-- **label3** (47% white / `#5F5A54`): tertiary — READY sub-labels, counts,
+- **label3** (47% white / `#5F5A54`): tertiary — Ready sub-labels, counts,
   empty-state text. Lifted from the design document's own 28%-white value,
   which measured 1.93:1 against the dark ground; both grounds now clear the
   4.5:1 text floor.
@@ -222,42 +221,45 @@ card's widest element would read as the app being broken, not one speaker.
 **Body Font:** San Francisco (system), entirely Dynamic Type — every size on
 this screen is a `@ScaledMetric` relative to a system text style, never a
 bare point size.
-**Micro/Readout Font:** the system monospaced design (`design: .monospaced`),
-reserved for two jobs — the uppercase micro-label voice and numeric
-readouts — both scaled the same way.
+**Micro/Readout Font:** the same system face. There is no second family and
+no monospaced design anywhere: numeric readouts get tabular digits via
+`.monospacedDigit()` (fixed-width digits in the normal face, so a value
+doesn't shuffle under a finger), and micro labels are simply a smaller,
+semibold cut of the one voice.
 
-**Character:** a mixer's own two voices: a plain, slightly tightened
-system face for anything a person reads as prose or a name, and a bold
-tracked-out monospaced voice for anything the screen states as a fact —
-a level, a state word, a count.
+**Character:** one plain voice at three sizes. What the screen states as a
+fact — a level, a state word, a count — is distinguished by weight, size,
+and tint, never by a monospaced face or capitals. Nothing in the app is set
+in all caps, and no string is ever case-transformed (`.textCase` is banned);
+strings render exactly as authored, in sentence case.
 
 ### Hierarchy
 - **Title** (700, 26pt, tracking −0.7pt): "Speakers" — the screen draws its
   own header; there is no `NavigationStack` title.
 - **Body** (400 / 600 when playing, 16.5pt, tracking −0.2pt): a device's
   name — the one place weight itself carries state.
-- **Readout** (700 monospaced, 16pt at rest / 22pt mid-drag, tracking
-  −0.4pt, tabular digits): any volume number. Main Out's and a device row's
-  are drawn at the same resting size on purpose — the same kind of number,
-  said one way.
-- **Micro Label** (700 monospaced, 11pt floor, tracking 9% of base size,
-  uppercase by default): section headers, sub-labels (PLAYING/READY/
-  MUTED/CONNECTING…), "MAIN OUT", the gesture-coach line. 11pt is both the
-  HIG floor for any text and this voice's default — the source design's own
-  values ran 9–9.5pt, under that floor.
+- **Readout** (700, 16pt at rest / 22pt mid-drag, tabular digits): any
+  volume number. Main Out's and a device row's are drawn at the same resting
+  size on purpose — the same kind of number, said one way.
+- **Micro Label** (600, 11pt floor, sentence case): section headers,
+  sub-labels (Playing/Ready/Muted/Connecting…), "Main Out", the
+  gesture-coach line. 11pt is both the HIG floor for any text and this
+  voice's default — the source design's own values ran 9–9.5pt, under that
+  floor.
 
 ### Named Rules
-**The Sentence-Case Exception.** Uppercase is the default for every state
-word, except text the app did not choose — a failure headline is the Mac's
-own sentence, and a sentence in capitals is a shout. That one string keeps
-sentence case and `label2`, never the micro-label treatment.
+**One Case.** Every string is authored in sentence case (product names like
+"Main Out" keep their title case) and rendered exactly as written. No
+`.textCase(.uppercase)`, no all-caps string literals, no monospaced design —
+capitals-as-styling reads as a shout and is banned across the app. This rule
+is the portable one: the Mac app adopts the same voice (roadmap 059).
 
 ## Layout
 
 One scrolling list — `ScrollView` + `LazyVStack`, deliberately not `List`:
 every row is fully custom-drawn and carries its own horizontal drag gesture,
 which `List`'s cell chrome and swipe handling would fight. The list is cut
-into three sections that are always present — PLAYING, READY, UNAVAILABLE —
+into three sections that are always present — Playing, Ready, Unavailable —
 so an empty heading is the honest answer to "nothing is playing," and
 membership is read off device state, never off transport (a Bluetooth
 speaker is just a speaker with a Bluetooth-shaped icon).
@@ -336,9 +338,9 @@ no drawn slider.
 - **Mute:** a 28pt well/rim square, overlaid rather than composed into the
   row's own gesture subtree (so a mute tap never also toggles play); only
   drawn on a row that is actually sounding.
-- **States:** PLAYING (gold sub-label, semibold name) · READY (label3,
-  regular name) · CONNECTING…/RECONNECTING… (dashed ring, no section
-  change) · MUTED · UNAVAILABLE (0.45 opacity on the halo only — never on
+- **States:** Playing (gold sub-label, semibold name) · Ready (label3,
+  regular name) · Connecting…/REConnecting… (dashed ring, no section
+  change) · Muted · Unavailable (0.45 opacity on the halo only — never on
   text, which is already dim enough via `label3`) · failed (volume and mute
   are replaced outright by a failure card: headline, optional Diagnose
   disclosure, Try Again).
@@ -347,7 +349,7 @@ no drawn slider.
 A frosted `glassPanel` (26pt radius, `.ultraThinMaterial` plus a warm
 `deckFill` tint and a single 0.5pt `glassEdge` stroke) floating over the
 list — the screen's one shadowed surface.
-- **Header:** a fixed "MAIN OUT" micro-label that never truncates, paired
+- **Header:** a fixed "Main Out" micro-label that never truncates, paired
   with `MainOutPicker` — a `Menu` with a hand-drawn `Text` label so it can
   truncate instead. Between the two, the picker is the designated loser for
   width.
@@ -357,7 +359,7 @@ list — the screen's one shadowed surface.
   and a 16pt gold readout.
 
 ### Section Header
-A rotating chevron, a tinted micro-label title (gold for PLAYING, label2
+A rotating chevron, a tinted micro-label title (gold for Playing, label2
 otherwise), a label3 count, and a hairline rule that runs to the trailing
 edge — the full row is a 44pt tap target that collapses or expands the
 section.
@@ -372,8 +374,8 @@ which would be the one hue family Warm Signal doesn't otherwise use (and
 blue reads as a link on iOS).
 
 ### One-Time Gesture Coach
-An inline micro-label line under the first visible row — "TAP TO PLAY · DRAG
-TO SET LEVEL … GOT IT" — never a modal or a spotlight tour. It leaves for
+An inline micro-label line under the first visible row — "Tap to play · Drag
+to set level … Got it" — never a modal or a spotlight tour. It leaves for
 good once both gestures have actually been used, or immediately on tap.
 
 ### App Route Row (Apps tab)

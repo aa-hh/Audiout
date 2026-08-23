@@ -77,7 +77,7 @@ struct DeviceRowView: View {
     }
 
     /// Whether the Mac is sending sound to this speaker right now — the row's
-    /// whole PLAYING/READY notion, and the one thing `isSelected` cannot
+    /// whole Playing/Ready notion, and the one thing `isSelected` cannot
     /// answer.
     ///
     /// Main Out points at EITHER the Selected Devices set or a saved group, and
@@ -170,7 +170,7 @@ struct DeviceRowView: View {
     /// no row-level label — each control is its own element — so the clause
     /// rides on the row's hint instead, and on the toast a dead drag raises
     /// (``refuseAdjustment()``) — the same sentence to the finger. Worded in
-    /// the one vocabulary the screen shows — PLAYING / READY / UNAVAILABLE,
+    /// the one vocabulary the screen shows — Playing / Ready / Unavailable,
     /// never "armed" or "selected".
     static func disabledReason(for device: DeviceState, controllable: Bool) -> String? {
         if controllable { return nil }
@@ -189,9 +189,9 @@ struct DeviceRowView: View {
 
     /// What VoiceOver reads as the row's value. Playing state first — spoken
     /// as the same word the row's own sub-label shows, in the same branch
-    /// order (``subLabel``), so READY is heard as "Ready" and a speaker that
+    /// order (``subLabel``) — and a speaker that
     /// is still connecting says so at all. Then the two states the row
-    /// otherwise carries in colour alone: the `MUTED` sub-label and
+    /// otherwise carries in colour alone: the `Muted` sub-label and
     /// ``routedDot``, an 11 pt disc on a hidden halo. Comma-separated: the row
     /// is one element, so it gets one value.
     ///
@@ -237,7 +237,7 @@ struct DeviceRowView: View {
 
     /// The link isn't up yet, whether this is the first attempt or a recovery.
     /// The two share everything the row draws — the dashed ring, the sub-label
-    /// tint, and being kept out of PLAYING — and differ only in the word.
+    /// tint, and being kept out of Playing — and differ only in the word.
     private var isPending: Bool { isConnecting || isReconnecting }
 
     /// The playing state the row draws and speaks — the Mac's, or the tap that
@@ -277,7 +277,7 @@ struct DeviceRowView: View {
     ///
     /// No text either. `nameTint`, `glyphTint` and `subTint` all already
     /// answer unavailability by dropping to `WarmSignal.label3`, which is the
-    /// dim; multiplying 0.45 on top of it lands the name and `UNAVAILABLE` at
+    /// dim; multiplying 0.45 on top of it lands the name and `Unavailable` at
     /// 1.98:1 against 6.09:1 for the tint alone. That leaves the halo, which
     /// is a graphic, carries no text, and is the strongest of the three
     /// signals anyway.
@@ -366,12 +366,8 @@ struct DeviceRowView: View {
                         .lineLimit(1)
                         .foregroundStyle(nameTint)
 
-                    // Every state but one is a single word in the screen's
-                    // micro voice, which is upper case. A failure headline is
-                    // a SENTENCE the Mac wrote ("Not on the network"), and a
-                    // sentence in capitals is a shout. See ``subLabel``.
                     Text(subLabel)
-                        .microLabel(uppercased: !isFailed)
+                        .microLabel()
                         .foregroundStyle(subTint)
 
                 }
@@ -484,7 +480,7 @@ struct DeviceRowView: View {
     /// edge anywhere in the row that could be read as a level.
     ///
     /// 0.05 is a text budget, not a taste: the row's words sit ON this, and a
-    /// playing row's gold `PLAYING` sub-label measures 4.72:1 here — over the
+    /// playing row's gold `Playing` sub-label measures 4.72:1 here — over the
     /// 4.5:1 floor. The design document's 0.14 puts it at 4.36–4.46:1.
     @ViewBuilder
     private var level: some View {
@@ -623,29 +619,28 @@ struct DeviceRowView: View {
     /// first true branch is what the row says.
     ///
     /// The failure branch is the one that is not a state word: it is the Mac's
-    /// own sentence, and it keeps its sentence case (see the call site) and
-    /// its own tint (see ``subTint``).
+    /// own sentence, and it keeps its own tint (see ``subTint``).
     private var subLabel: String {
         if isFailed { return device.connection.failureHeadline ?? "Connection failed" }
-        if !device.isAvailable { return "UNAVAILABLE" }
-        if isConnecting { return "CONNECTING…" }
-        if isReconnecting { return "RECONNECTING…" }
-        if device.isMuted { return "MUTED" }
+        if !device.isAvailable { return "Unavailable" }
+        if isConnecting { return "Connecting…" }
+        if isReconnecting { return "Reconnecting…" }
+        if device.isMuted { return "Muted" }
         // One word for the state everywhere it appears: the section this row
-        // sits in and the deck's count both say PLAYING too. READY rather than
+        // sits in and the deck's count both say Playing too. Ready rather than
         // IDLE for its opposite — the speaker is fine, it just isn't getting
         // the Mac's sound.
-        if selected { return "PLAYING" }
-        return "READY"
+        if selected { return "Playing" }
+        return "Ready"
     }
 
     private var subTint: Color {
         // ONE thing on this card is red, and it is the ring. Red on the
         // headline too puts the alarm colour on the card's widest element, and
-        // a failure card at the top of READY then reads as the app being
+        // a failure card at the top of Ready then reads as the app being
         // broken rather than one speaker. `label2` is the row's ordinary
         // secondary ink — 5.07:1 on paper, 6.19:1 on the dark ground, and
-        // brighter there than the `label3` a healthy READY row's word takes.
+        // brighter there than the `label3` a healthy Ready row's word takes.
         // The state stays legible; the alarm stays on the ring, next to the
         // two things that can act on it.
         if isFailed { return WarmSignal.label2 }

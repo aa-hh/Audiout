@@ -123,7 +123,7 @@ struct AppRouteRowView: View {
                 HStack(spacing: 8) {
                     destinationPill
                     if !route.isRunning {
-                        Text("NOT RUNNING")
+                        Text("Not running")
                             .microLabel()
                             .foregroundStyle(WarmSignal.label3)
                     }

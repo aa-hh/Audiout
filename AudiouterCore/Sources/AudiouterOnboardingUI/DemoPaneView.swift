@@ -1014,11 +1014,17 @@ final class DemoPromptMockView: DemoMockView {
                                           weight: .regular, color: .white) }
         // Verified against the real Bluetooth dialog (owner screenshot,
         // 2026-08-11): the tile IS the same blue system tile Local Network
-        // uses, carrying the actual Bluetooth rune rather than an
-        // approximation. SF Symbols still carries no such glyph, so it's
-        // hand-drawn — see `DemoBluetoothGlyphView`.
+        // uses, carrying the actual Bluetooth rune. SF Symbols carries no
+        // such glyph, but AppKit itself does — `bluetoothRuneImage` wraps the
+        // stock `NSImage.bluetoothTemplateName`.
         case .bluetooth:
-            return systemTile { DemoBluetoothGlyphView(size: iconSide * 0.55, color: .white) }
+            return systemTile {
+                let rune = NSImageView()
+                rune.image = bluetoothRuneImage(height: iconSide * 0.55)
+                rune.contentTintColor = .white
+                rune.translatesAutoresizingMaskIntoConstraints = false
+                return rune
+            }
         // Neither step reaches this mock. When the app icon IS drawn it is the
         // DIALOG'S icon — the one a separate system process reads out of Launch
         // Services, not this process's own fresher `NSApp.applicationIconImage`
@@ -2396,68 +2402,6 @@ final class DemoLockIconView: NSView {
             return true
         }
         shaded.draw(in: drawn)
-    }
-}
-
-/// The Bluetooth rune. No SF Symbol carries it (checked directly against
-/// `name_availability.plist`, which lists neither `bluetooth` nor any
-/// synonym, on the Xcode 27 toolchain this repo builds with), so it is drawn
-/// as the mark's own standard construction — a bind rune combining ᚼ and ᛒ:
-/// a vertical stem crossed by two diagonal "flags" that meet the stem at its
-/// top, middle and bottom. Verified against the real macOS Bluetooth
-/// permission dialog (owner screenshot, 2026-08-11), which is also what
-/// confirmed the tile itself is the plain system-blue `DemoSystemColor.systemBlue`
-/// this view is drawn on top of, not a separate measured hue.
-final class DemoBluetoothGlyphView: NSView {
-
-    private let color: NSColor
-
-    init(size: CGFloat, color: NSColor) {
-        self.color = color
-        super.init(frame: .zero)
-        wantsLayer = true
-        translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: size),
-            heightAnchor.constraint(equalToConstant: size),
-        ])
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    override var isFlipped: Bool { true }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let w = bounds.width, h = bounds.height
-        let top = NSPoint(x: w * 0.5, y: h * 0.06)
-        let bottom = NSPoint(x: w * 0.5, y: h * 0.94)
-        let upperRight = NSPoint(x: w * 0.78, y: h * 0.28)
-        let lowerRight = NSPoint(x: w * 0.78, y: h * 0.72)
-        let upperLeft = NSPoint(x: w * 0.22, y: h * 0.28)
-        let lowerLeft = NSPoint(x: w * 0.22, y: h * 0.72)
-
-        // ONE unbroken stroke that crosses the stem twice, which is what makes
-        // this the bind rune and not a letter B: each diagonal runs from one
-        // side clean through to the other, so it OVERSHOOTS the stem and leaves
-        // a short tail on the left. Drawing it as a stem plus two right-hand
-        // flags — which is what this did — produces a tidy B and reads as the
-        // wrong mark at a glance (owner, 2026-08-13: "missing its tail").
-        //
-        // The stem is not a separate path any more: the middle leg of this one
-        // (top → bottom) IS the stem, so there is nothing to keep in sync.
-        let rune = NSBezierPath()
-        rune.move(to: lowerLeft)
-        rune.line(to: upperRight)
-        rune.line(to: top)
-        rune.line(to: bottom)
-        rune.line(to: lowerRight)
-        rune.line(to: upperLeft)
-
-        color.setStroke()
-        rune.lineWidth = w * 0.10
-        rune.lineCapStyle = .round
-        rune.lineJoinStyle = .round
-        rune.stroke()
     }
 }
 

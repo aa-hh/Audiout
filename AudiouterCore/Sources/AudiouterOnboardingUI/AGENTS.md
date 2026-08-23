@@ -639,14 +639,17 @@ gate/motion/demo/selection rules change.
         screenshot ever contradicts it, this is the one place to change" escape
         hatch below being used. It is also why `systemTile` takes a `fill`: red
         for recording, the accent blue for the capability panes.
-      - **Bluetooth's glyph is a NAMED APPROXIMATION, twice over.** No screenshot
-        of the real macOS Bluetooth prompt was available and a search turned up
-        none, so the system-tile treatment is INFERRED from the Local Network
-        one; and SF Symbols ships no Bluetooth rune at all (Apple doesn't licence
-        the mark — `name_availability.plist` has no such name), so the tile
-        carries `dot.radiowaves.right`, the glyph the Bluetooth setup row beside
-        it already uses, rather than a hand-drawn rune. If a real screenshot ever
-        contradicts either half, this is the one place to change.
+      - **Bluetooth's glyph is the SYSTEM'S OWN, in both places.** SF Symbols
+        ships no Bluetooth rune (`name_availability.plist` has no such name),
+        but stock AppKit does — `NSImage.bluetoothTemplateName`, wrapped by
+        `bluetoothRuneImage` (OnboardingChrome.swift, which copies before
+        rescaling because the named image is a shared cache entry). The demo
+        pane's system tile shows it white (matching the real Bluetooth dialog,
+        owner screenshot 2026-08-11); the Bluetooth SETUP ROW's icon tile
+        carries it tinted Bluetooth SIG brand blue
+        (`Tokens.Color.bluetoothBrand`, Alec 2026-08-23) — the one row whose
+        tint is a fixed brand hex, not a `permission*` hue. Never hand-draw
+        this mark (Alec 2026-08-23: official glyph only).
     - The one per-step hook left is `confirmTitle`; the ANATOMY is shared and
       nothing else in the card varies by step but its icon tile.
       `DemoPaneView.surfaceSize` is
@@ -1061,7 +1064,7 @@ gate/motion/demo/selection rules change.
 | `DemoPromptMockView` / `DemoSettingsMockView` / `DemoSettledMockView` | The privacy-dialog miniature, the Settings-pane miniature, and the completion finale (one-shot ripple, static gold-aura resting frame). |
 | `DemoSystemAlertMockView` / `DemoLockIconView` | The classic macOS ALERT panel Remote Control's two-stage pass opens on — header, divider, padlock, a MARKED "Open System Settings" beside a ghosted "Deny" — and the gradient-filled padlock it leads with. A passive surface: the host owns the cursor and the crossfade. |
 | `DemoSettingsHandoffMockView` / `DemoStage` | Remote Control's two-stage FIRST ASK: the Accessibility alert handing off to the Settings pane in one pass, the owner of stage one's pointer, and which of its two surfaces the pass rests on. |
-| `DemoWindowSurfaceView` / `DemoPushButtonView` / `DemoButtonEmphasis` / `DemoSwitchView` / `DemoSidebarView` / `DemoSettingsRowView` / `DemoGreekBarView` / `DemoPillView` / `DemoDotView` / `DemoBluetoothGlyphView` / `DemoCursorView` | The drawn parts of the mocks — window body, dialog button (capsule or rounded rect, marked or ghosted), switch, sidebar, list row, greeked label — `demoGistBlock` stacks those into the ragged blocks that stand in for a mock's prose — pill, circle, the hand-drawn Bluetooth rune, pointer. |
+| `DemoWindowSurfaceView` / `DemoPushButtonView` / `DemoButtonEmphasis` / `DemoSwitchView` / `DemoSidebarView` / `DemoSettingsRowView` / `DemoGreekBarView` / `DemoPillView` / `DemoDotView` / `DemoCursorView` | The drawn parts of the mocks — window body, dialog button (capsule or rounded rect, marked or ghosted), switch, sidebar, list row, greeked label — `demoGistBlock` stacks those into the ragged blocks that stand in for a mock's prose — pill, circle, pointer. |
 | `SystemSettingsOpener` | `NSWorkspace` seam for opening a `SystemSettingsPane`, with a Privacy & Security root fallback. |
 | `ProminentButton` | Fill-tinted CTA button with key-window-aware title ink (forced white, or measured from the fill). |
 | `IconTileView` / `RoundedContainerView` | Shared appearance-adaptive chrome (icon chip, grouped-inset card) — no stock AppKit equivalent. |

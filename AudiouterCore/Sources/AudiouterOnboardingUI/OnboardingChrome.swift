@@ -211,6 +211,28 @@ final class ProminentButton: NSButton {
     var test_measuredKeyInk: NSColor { picksInkFromFill ? measuredKeyInk() : .white }
 }
 
+/// The official Bluetooth rune, from stock AppKit
+/// (`NSImage.bluetoothTemplateName` — SF Symbols carries no Bluetooth glyph;
+/// this named template is the system's own mark). Template, so an
+/// `NSImageView`'s `contentTintColor` tints it like a symbol.
+///
+/// Returns a COPY rescaled to `height` (the original is 16 × 21 pt):
+/// `NSImage(named:)` hands back the SHARED cache entry, so resizing it in
+/// place would resize it for every other user of the name.
+///
+/// Optional rather than force-unwrapped even though this name has shipped
+/// since 10.5: a named system asset going missing on some future macOS would
+/// otherwise crash the FIRST screen a new user sees. Both call sites already
+/// degrade — the setup row falls back to its `symbolName`, the demo mock to a
+/// bare tile.
+func bluetoothRuneImage(height: CGFloat) -> NSImage? {
+    guard let rune = NSImage(named: NSImage.bluetoothTemplateName)?.copy() as? NSImage,
+          rune.size.height > 0 else { return nil }
+    rune.size = NSSize(width: rune.size.width * height / rune.size.height,
+                       height: height)
+    return rune
+}
+
 // MARK: - Appearance-adaptive rounded views
 
 /// A small rounded tile holding an SF Symbol. Every tile rests on the same
@@ -235,7 +257,11 @@ final class IconTileView: NSView {
 
     private let symbolImage = NSImageView()
 
+    /// `customImage` overrides the symbol lookup for glyphs SF Symbols doesn't
+    /// ship (Bluetooth's rune). Must be a template image — the tile tints it
+    /// with `color` exactly like a symbol.
     init(symbolName: String,
+         customImage: NSImage? = nil,
          accessibility: String,
          color: NSColor = Tokens.Color.secondaryLabel,
          side: CGFloat = IconTileView.side,
@@ -246,8 +272,13 @@ final class IconTileView: NSView {
         wantsLayer = true
         translatesAutoresizingMaskIntoConstraints = false
 
-        symbolImage.image = NSImage(systemSymbolName: symbolName,
-                                    accessibilityDescription: accessibility)
+        if let customImage {
+            customImage.accessibilityDescription = accessibility
+            symbolImage.image = customImage
+        } else {
+            symbolImage.image = NSImage(systemSymbolName: symbolName,
+                                        accessibilityDescription: accessibility)
+        }
         symbolImage.symbolConfiguration = .init(pointSize: pointSize, weight: .semibold)
         symbolImage.contentTintColor = color
         symbolImage.translatesAutoresizingMaskIntoConstraints = false

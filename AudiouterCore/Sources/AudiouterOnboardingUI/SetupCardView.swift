@@ -16,8 +16,14 @@ struct SetupCardContent {
     /// `raised` well + hairline rim (the fill is never coloured); only the
     /// glyph carries ``iconColor``, and the tint is permanent.
     let symbolName: String
+    /// Override for a glyph SF Symbols doesn't ship (Bluetooth's rune, which
+    /// stock AppKit provides as a named template instead). A template image
+    /// the tile tints with ``iconColor`` exactly like a symbol; when set,
+    /// ``symbolName`` is unused.
+    var customIcon: NSImage? = nil
     /// This card's resting glyph tint — one of the four
-    /// `Tokens.Color.permission*` hues.
+    /// `Tokens.Color.permission*` hues (Bluetooth alone carries its brand
+    /// blue instead — see its case).
     let iconColor: NSColor
     /// The imperative ask, shown while the card is active (and on any state
     /// that has NOT earned a checkmark — skipped, or auto-passed because the OS
@@ -266,6 +272,7 @@ final class SetupSpineRowView: NSView {
         surface.addSubview(edgeBar)
 
         iconTile = IconTileView(symbolName: content.symbolName,
+                                customImage: content.customIcon,
                                 accessibility: content.spineAskTitle,
                                 color: content.iconColor,
                                 side: Self.iconSide,

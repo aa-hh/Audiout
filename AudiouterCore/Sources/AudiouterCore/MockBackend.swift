@@ -96,6 +96,12 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
     /// writes a level out.
     private var masterGain: (mainOut: Int, group: Int) = (100, 100)
 
+    /// The last Main Out EQ handed to `setMainOutEQ` (on `queue`). Recorded only,
+    /// like `masterGain` — the mock has no PCM to filter. The per-DEVICE settings
+    /// need no field of their own: they live on the `Device` snapshots, which is
+    /// also what the UI reads.
+    private var storedMainOutEQ: DeviceEQ = .flat
+
     /// The popover-visibility gate (T-GATE, `MeteringControlling`). `false` until
     /// `setMeteringActive(true)` first fires — the level timer stays off until
     /// then, mirroring the native path's default-inactive metering.
@@ -171,9 +177,15 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
             self.started = true
 
             for (index, device) in self.fleet.enumerated() {
-                let delay = self.staggerDiscovery ? 0.2 + Double(index) * 0.35 : 0
-                self.queue.asyncAfter(deadline: .now() + delay) {
-                    guard self.started, self.live[device.id] == nil else { return }
+                if self.staggerDiscovery {
+                    let delay = 0.2 + Double(index) * 0.35
+                    self.queue.asyncAfter(deadline: .now() + delay) {
+                        guard self.started, self.live[device.id] == nil else { return }
+                        self.live[device.id] = device
+                        self.emit(.deviceAdded(device))
+                    }
+                } else {
+                    guard self.live[device.id] == nil else { continue }
                     self.live[device.id] = device
                     self.emit(.deviceAdded(device))
                 }
@@ -212,6 +224,23 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
 
     public func setMuted(_ muted: Bool, for id: String) {
         mutate(id) { $0.isMuted = muted }
+    }
+
+    public func setEQ(_ eq: DeviceEQ, for id: String, commit: Bool) {
+        // Stored and echoed, never applied — the mock owns no PCM pipeline. `commit`
+        // is ignored for the same reason it can be: there is no disk to persist to
+        // and no stream topology to recompute.
+        mutate(id) { $0.eq = eq }
+    }
+
+    public func setMainOutEQ(_ eq: DeviceEQ, commit: Bool) {
+        queue.async { self.storedMainOutEQ = eq }
+    }
+
+    /// The protocol getter: the Main Out EQ last set, read by tests and the
+    /// Main Audio page.
+    public var mainOutEQ: DeviceEQ {
+        queue.sync { storedMainOutEQ }
     }
 
     public func setMasterGain(mainOut: Int, group: Int, mirrorToSystemVolume: Bool) {
@@ -287,6 +316,18 @@ public final class MockBackend: OutputBackend, @unchecked Sendable {
                 self.emit(.deviceUpdated(updated))
             }
         }
+    }
+
+    // MARK: Test barrier
+
+    /// Flush every mutation already enqueued on `queue` — a complete barrier
+    /// for the non-scripted fixture (all mutation and read paths are
+    /// `queue.async`/`queue.sync`, so a synchronous round-trip guarantees
+    /// everything prior has landed). Does NOT wait for `asyncAfter`-scheduled
+    /// choreography (stagger, scripted connect attempts, drop timers) — those
+    /// still need their own event-driven wait.
+    public func test_settle() {
+        queue.sync {}
     }
 
     // MARK: T9 offline fixture — live per-app routing indicator

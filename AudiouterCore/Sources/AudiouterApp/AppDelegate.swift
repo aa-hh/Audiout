@@ -502,6 +502,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             (self?.backend as? AppRouteConfiguring)?.setLocalPlaybackVolume(
                 volume: volume, bundleID: bundleID)
         }
+        // EQ lives on the GROUPS screen, never on the Mixer (owner decision
+        // 2026-08-22): a row's "Equalizer…" is a DOOR, and this is the hinge —
+        // it opens the surface on the speaker's own page (or the whole mix's).
+        popoverController.onOpenEqualizer = { [weak self] id in
+            self?.showSurface(.groups,
+                              selecting: id == PopoverController.mainOutEQID
+                                  ? .mainOut : .device(id: id))
+        }
         // BT-UI: the OUTPUT DEVICES "+" menu's "Pair a Bluetooth speaker…" —
         // pairing is Apple-owned, so the one-tap Settings trip is the whole
         // affordance; the fresh row auto-appears on return (connect
@@ -1192,10 +1200,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Bring the surface up on `screen` — the one destination every "open X"
     /// affordance now shares (right-click menu, ⌘,, the header tabs' pre-claim
     /// fallbacks, and the post-Setup landing).
+    ///
+    /// `selecting` deep-links INTO the Groups screen (the popover's
+    /// "Equalizer…"), applied after the screen is up so the pane it names is
+    /// built and mounted. A device the Groups screen has not seen yet pends
+    /// there rather than being dropped.
     @MainActor
-    private func showSurface(_ screen: SurfaceScreen) {
+    private func showSurface(_ screen: SurfaceScreen, selecting: SidebarSelection? = nil) {
         surface.select(screen)
         surface.show(anchorRect: statusAnchorRect())
+        if let selecting { mixerWindowController?.select(selecting) }
     }
 
     /// The Groups screen's content: `MixerWindowController`'s split view. The
@@ -1208,14 +1222,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             groupController: groupController,
             deviceIconController: deviceIconController)
         mixerWindowController = controller
+        // The two Equalizer seams. This screen owns no backend (its own
+        // AGENTS.md); the tone it reports is applied here, at the one place
+        // that holds one. A live scrub applies without persisting; the
+        // gesture that ends it does both — the backends make that split.
+        controller.onSetDeviceEQ = { [weak self] eq, deviceID, committed in
+            self?.backend.setEQ(eq, for: deviceID, commit: committed)
+        }
+        controller.onSetMainOutEQ = { [weak self] eq, committed in
+            self?.backend.setMainOutEQ(eq, commit: committed)
+        }
+        controller.mainOutEQProvider = { [weak self] in self?.backend.mainOutEQ ?? .flat }
         controller.update(devices: Array(devicesByID.values))
         return controller.contentController
     }
 
-    /// The Settings screen's content, built on the first visit to the Settings
-    /// tab. In-content tabs (`.segmentedControlOnTop`) so the panes' own tab
-    /// strip renders BENEATH the surface's screen switcher rather than in a
-    /// title bar the surface doesn't have.
+    /// The Settings screen's content, built on the first visit: a Groups-style
+    /// sidebar of sections and one pane.
     @MainActor
     private func makeSettingsRoot() -> SettingsRootViewController {
         let general = GeneralSettingsViewController(loginItem: SMAppServiceLoginItem(),
@@ -1239,11 +1262,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                 wakeRestore: makeWakeRestoreSettingModel())
         audio.onChange = { [weak self] in self?.handleExcludedAppsChanged() }
 
-        return SettingsRootViewController(tabs: [
+        return SettingsRootViewController(sections: [
             .init(title: "General", symbolName: "gearshape", viewController: general),
             .init(title: "Appearance", symbolName: "paintpalette", viewController: appearance),
             .init(title: "Audio", symbolName: "speaker.wave.2", viewController: audio),
-        ], tabStyle: .segmentedControlOnTop)
+        ])
     }
 
     /// The menu-bar item's frame in screen coordinates, for anchoring the

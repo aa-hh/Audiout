@@ -14,7 +14,7 @@ import AppKit
 /// even though light-mode secondary text measures ~3.91:1 and tertiary ~1.87:1
 /// against the warm pane — both under common readability floors. Alec accepted
 /// that debt in exchange for simplicity and zero regression risk: surfaces
-/// (`Tokens.Color.well`/`.hairline`, T5) carry the separation instead of text
+/// (`Tokens.Color.raised`/`.hairline`) carry the separation instead of text
 /// color. This is easy for a future "helpful" contrast pass to quietly undo by
 /// repointing a Groups-window label at a warm `Tokens.Color` token — this file
 /// makes that change fail a test instead of merging silently.
@@ -26,9 +26,9 @@ import AppKit
 ///      `MixerWindowController`/`GroupsEmptyStateViewController`,
 ///      `IconPickerViewController`, `GroupCreationSheetController`) resolves to
 ///      a stock system color and NEVER to a warm palette token.
-///   2. POSITIVE — `GroupEditorViewController`'s membership checklist (T5)
-///      really does paint its recessed background and divider in
-///      `Tokens.Color.well`/`.hairline` — surfaces changed, text didn't.
+///   2. POSITIVE — `GroupEditorViewController`'s membership checklist, the
+///      page's one card, really does paint its fill and divider in
+///      `Tokens.Color.raised`/`.hairline` — surfaces changed, text didn't.
 ///
 /// Deliberately exercises real production view/controller instances (their
 /// public `init`s, `show`/`apply` methods, and — for the sidebar — the actual
@@ -189,7 +189,8 @@ import AppKit
 
     @Test func deviceDetailViewControllerLabelsStayStock() throws {
         let controller = makeGroupController()
-        let vc = DeviceDetailViewController(groupController: controller)
+        let vc = DeviceDetailViewController(groupController: controller,
+                                            settings: AppSettings(defaults: isolatedDefaults))
         vc.loadView()
         vc.show(device: makeDevice())
         vc.view.frame = NSRect(x: 0, y: 0, width: 420, height: 420)
@@ -269,7 +270,8 @@ import AppKit
     // MARK: 5. NEGATIVE — MixerWindowController's footer + empty-state pane
 
     private func makeMixerWindow() -> MixerWindowController {
-        MixerWindowController(groupController: makeGroupController())
+        MixerWindowController(groupController: makeGroupController(),
+                              settings: AppSettings(defaults: isolatedDefaults))
     }
 
     @Test func mixerWindowFooterAndEmptyStateLabelsStayStock() {
@@ -351,14 +353,14 @@ import AppKit
         return colors
     }
 
-    @Test func membershipWellFillIsWellTokenBothAppearances() throws {
+    @Test func membershipWellFillIsRaisedTokenBothAppearances() throws {
         let editor = try makeEditor()
         let well = try membershipWellView(of: editor)
         #expect(well.bounds.width > 0, "well must have real layout to sample")
 
         for appearanceName in [NSAppearance.Name.aqua, .darkAqua] {
             let colors = try sampledColumnColors(of: well, appearanceName: appearanceName)
-            guard let expectedWell = resolved(Tokens.Color.well, appearanceName: appearanceName) else {
+            guard let expectedWell = resolved(Tokens.Color.raised, appearanceName: appearanceName) else {
                 // Environment guard: no resolvable token color ⇒ nothing to
                 // assert; a plain `return` works directly inside the Void @Test
                 // body (unlike the two throwing helpers above).
@@ -367,7 +369,7 @@ import AppKit
             let matches = colors.filter { sameColor($0, expectedWell, tolerance: 0.02) }
             #expect(!matches.isEmpty,
                 Comment(rawValue: "GroupedSectionView's fill under \(appearanceName.rawValue) never matched " +
-                "Tokens.Color.well — the T5 recessed checklist background must stay the well " +
+                "Tokens.Color.raised — the card fill behind the checklist must stay the raised " +
                 "token; if this legitimately changed, that's a design decision for Alec, not a " +
                 "silent repaint."))
         }

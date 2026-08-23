@@ -299,7 +299,7 @@ import Testing
         #expect(vc.test_heroHeadline == "Hear your Mac's sound")
         #expect(vc.test_heroWhy == "Audiouter needs this to send your music to your speakers.")
         #expect(vc.test_ribbonBodyText == nil, "a first ask has no paragraph under it")
-        #expect(vc.test_previewFrameLabel?.contains("MACOS") ?? false,
+        #expect(vc.test_previewFrameLabel?.contains("macOS") ?? false,
                 "the frame says whose surface this is, so no line of copy has to")
         #expect(vc.test_ribbonButtonTitles == ["Enable System Audio"])
         #expect(vc.test_browseStep == nil)
@@ -727,6 +727,49 @@ import Testing
         #expect(opened == [.localNetwork])
     }
 
+    /// The Settings trip a refused Local Network arms: the row keeps its
+    /// spinner — and says so in its label — until a genuine return lets one
+    /// re-read land, then clears while the denial itself is untouched.
+    @Test func aSettingsTripLeavesTheRowWaitingUntilAGenuineReturn() async {
+        var opened: [SystemSettingsPane] = []
+        let vc = makeVC(model: makeModel(audio: .granted,
+                                         localNetwork: CannedOutcomeLocalNetwork(outcome: .denied)),
+                        onOpenSettings: { opened.append($0) })
+        await vc.test_allow([.audio, .localNetwork])
+
+        await vc.test_tapAllow(.localNetwork)   // the second tap: the deep link
+
+        #expect(opened == [.localNetwork])
+        #expect(vc.test_rowIsWaiting(.localNetwork))
+        #expect(vc.test_rowAccessibilityLabel(.localNetwork)?.contains(", waiting") ?? false)
+
+        vc.appDidResignActive()      // Settings takes the front
+        vc.appDidBecomeActive()      // the user comes back
+        await vc.test_awaitSettingsReturn()
+
+        #expect(!vc.test_rowIsWaiting(.localNetwork), "a genuine return re-reads and clears the wait")
+        #expect(vc.test_rowIsBroken(.localNetwork), "the re-read found nothing changed — still denied")
+    }
+
+    /// Our own activation catching up with the click that opened Settings is
+    /// not the user coming back — no resign sits in front of it, so the wait
+    /// must survive untouched (the same self-activation gate the window
+    /// level already enforces, see `askingForRemoteControlYieldsTheLevel…`).
+    @Test func aSelfActivationWithNoResignDoesNotClearTheWait() async {
+        var opened: [SystemSettingsPane] = []
+        let vc = makeVC(model: makeModel(audio: .granted,
+                                         localNetwork: CannedOutcomeLocalNetwork(outcome: .denied)),
+                        onOpenSettings: { opened.append($0) })
+        await vc.test_allow([.audio, .localNetwork])
+        await vc.test_tapAllow(.localNetwork)   // the second tap: the deep link
+        #expect(vc.test_rowIsWaiting(.localNetwork))
+
+        vc.appDidBecomeActive()   // no resign first — our own click, not a return
+        await vc.test_awaitSettingsReturn()
+
+        #expect(vc.test_rowIsWaiting(.localNetwork), "a wait that never saw a real resign must survive")
+    }
+
     /// The permission is what completes this step: a grant with nothing switched
     /// on still earns the checkmark, and the title says exactly what happened.
     @Test func aGrantedLocalNetworkWithNoSpeakersStillCompletes() async {
@@ -754,17 +797,21 @@ import Testing
         await waitUntil { vc.test_ribbonStatusText == OnboardingViewController.waitingStatus }
         #expect(vc.test_ribbonStatusText == OnboardingViewController.waitingStatus)
         #expect(vc.test_ribbonIsWaiting)
+        #expect(vc.test_rowIsWaiting(.localNetwork), "the dialog wait shows on the row too")
 
         net.resume()                                    // the browse reaches the network
         await net.waitUntilParked()
         await waitUntil { vc.test_ribbonStatusText == "Checking your network\u{2026}" }
         #expect(vc.test_ribbonStatusText == "Checking your network\u{2026}")
         #expect(vc.test_ribbonIsWaiting)
+        #expect(vc.test_rowIsWaiting(.localNetwork),
+                "promptInFlightStep excludes the verifying tail, but the row spinner must not")
 
         net.resume()
         await priming.value
 
         #expect(!vc.test_ribbonIsWaiting, "the wait clears with the answer")
+        #expect(!vc.test_rowIsWaiting(.localNetwork), "false after the answer lands")
         #expect(vc.test_spineTitle(of: .localNetwork) == "2 speakers on your network")
     }
 
@@ -828,6 +875,33 @@ import Testing
         #expect(!vc.test_stageIsDimmed)
         #expect(vc.test_ribbonButtonTitles == ["Skip for now", "Enable Bluetooth Access"],
                 "and the step can ask again")
+    }
+
+    /// The row's own spinner mirrors the ribbon's wait for an undecided
+    /// Bluetooth prompt — and, like the ribbon, must never get stuck once the
+    /// prompt's ceiling has passed.
+    @Test func theRowSpinnerTracksAnUndecidedBluetoothPromptAndNeverLatches() async {
+        let model = makeModel(audio: .granted, foundSpeakers: 2,
+                              bluetoothPrimer: NeverDecidingBluetooth())
+        let vc = makeVC(model: model)
+        await vc.test_allow([.audio, .localNetwork])
+
+        await vc.test_tapAllow(.bluetooth)
+
+        #expect(vc.test_rowIsWaiting(.bluetooth))
+
+        let timeoutModel = makeModel(audio: .granted, foundSpeakers: 2,
+                                     bluetoothPrimer: NeverDecidingBluetooth(),
+                                     bluetoothPromptTimeout: 0.05)
+        let timeoutVC = makeVC(model: timeoutModel)
+        await timeoutVC.test_allow([.audio, .localNetwork])
+        await timeoutVC.test_tapAllow(.bluetooth)
+        #expect(timeoutVC.test_rowIsWaiting(.bluetooth))
+
+        await waitUntil { !timeoutModel.isPrimingBluetooth }
+        timeoutVC.test_refresh()
+
+        #expect(!timeoutVC.test_rowIsWaiting(.bluetooth), "a wait must never latch")
     }
 
     /// The demoted link still works, and still goes to the Local Network pane.
@@ -939,6 +1013,30 @@ import Testing
 
         #expect(ptpHelper.openSettingsCount == 1)
         #expect(opened.isEmpty, "Login Items is not a privacy pane deep link")
+    }
+
+    /// Speaker Sync's own Settings trip: the Login Items round-trip covers the
+    /// row in its spinner, and a genuine return that finds the helper enabled
+    /// clears the wait and lands the checkmark.
+    @Test func speakerSyncRowWaitsThroughTheLoginItemsTripThenShowsItsCheckmark() async {
+        let helper = FakePTPHelper(status: .requiresApproval)
+        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 2, bluetooth: .granted,
+                                         ptpHelper: helper))
+        await vc.test_allow([.audio, .localNetwork, .bluetooth])
+        #expect(vc.test_activeStep == .speakerSync)
+
+        await vc.test_tapAllow(.speakerSync)
+
+        #expect(helper.openSettingsCount == 1)
+        #expect(vc.test_rowIsWaiting(.speakerSync))
+
+        helper.status = .enabled
+        vc.appDidResignActive()
+        vc.appDidBecomeActive()
+        await vc.test_awaitSettingsReturn()
+
+        #expect(!vc.test_rowIsWaiting(.speakerSync))
+        #expect(vc.test_hasCheckmark(.speakerSync))
     }
 
     /// Remote Control's first click is the PROMPT — that is what registers our
@@ -2280,7 +2378,7 @@ import Testing
     /// It comes off for the ONE surface that isn't macOS's — our own finale.
     @Test func thePreviewFrameIsCaptionedExceptOnTheFinale() async {
         let vc = makeVC(model: makeGrantableModel())
-        #expect(vc.test_previewFrameLabel == "YOU'LL SEE THIS FROM MACOS")
+        #expect(vc.test_previewFrameLabel == "You'll see this from macOS")
 
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)

@@ -65,8 +65,10 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
         // when summoned/re-fronted, rather than Space-switching (window-panel.md M1).
         window.collectionBehavior.formUnion([.moveToActiveSpace, .fullScreenAuxiliary])
         // Deliberately `.floating` — the resting level for the window's whole
-        // open lifetime, dropped only for a System Settings trip and for the
-        // length of an unanswered permission dialog (`isPromptInFlight`):
+        // open lifetime, dropped only for a surface that draws at NORMAL level
+        // (a System Settings trip, and Remote Control's Accessibility alert —
+        // both via `yieldToSystemSettings()`). The TCC dialogs draw above a
+        // floating window, so an unanswered ask leaves the level alone:
         // granting a permission must never leave this window buried, and the
         // normal-level alternative depends on `NSApp.activate`, which macOS 14's
         // cooperative activation may decline while another app is frontmost.
@@ -125,19 +127,29 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
     ///
     /// Another process fighting a TCC dialog for input focus is what leaves it
     /// frozen and unclickable, so for the length of the ask this window gives
-    /// up all three ways it competes: the floating level (dropped below), the
-    /// reactivate re-front (``appDidBecomeActive``), and the force-activate on
-    /// mouse-down (``OnboardingWindow/suppressesActivation``).
+    /// up both ways it grabs focus: the reactivate re-front
+    /// (``appDidBecomeActive``) and the force-activate on mouse-down
+    /// (``OnboardingWindow/suppressesActivation``).
+    ///
+    /// The LEVEL deliberately stays `.floating` (owner decision 2026-08-22 —
+    /// this narrows the original go-quiet amendment, which also demoted to
+    /// `.normal` here). Every dialog this state covers is a TCC dialog a
+    /// system process draws ABOVE a floating window, so the demote bought
+    /// nothing — and it is what made the setup vanish behind other apps for
+    /// the length of the ask and pop back on the answer (the "blip"). Focus,
+    /// not z-order, is what freezes a dialog; z-order never moves now. The two
+    /// normal-level surfaces (System Settings, the Accessibility alert) still
+    /// yield, via ``yieldToSystemSettings()``.
     private var isPromptInFlight = false
 
     private func setPromptInFlight(_ inFlight: Bool) {
         isPromptInFlight = inFlight
         (window as? OnboardingWindow)?.suppressesActivation = inFlight
-        if inFlight {
-            stepAside()
-        } else if !isYieldingToSettings {
+        if !inFlight, !isYieldingToSettings {
             // Resolved, and not on the way to Settings — a trip there owns the
-            // level until it comes back (see `isYieldingToSettings`).
+            // level until it comes back (see `isYieldingToSettings`); anything
+            // else (e.g. a completed Settings trip that never re-activated us)
+            // is restored to the resting level here.
             window?.level = .floating
         }
     }
@@ -165,6 +177,7 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
         // System Settings (or anything else) took the front: the yield did its
         // job, and the NEXT activation is a real return.
         isYieldingToSettings = false
+        contentVC.appDidResignActive()
     }
 
     @objc private func appDidBecomeActive() {
@@ -197,7 +210,7 @@ public final class OnboardingWindowController: NSWindowController, NSWindowDeleg
         // Returning to the app (e.g. back from System Settings) is exactly when a
         // permission the user just changed should be re-read — so the rows reflect
         // reality instead of a stale "Requested".
-        contentVC.refreshStatuses()
+        contentVC.appDidBecomeActive()
     }
 
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }

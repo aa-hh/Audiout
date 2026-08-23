@@ -7,6 +7,9 @@ import AudiouterSharedUI
 /// What the user selected in the sidebar. Drives which detail pane the window
 /// shows (a group → its editor; a device → its detail pane; nothing → auto-select).
 public enum SidebarSelection: Equatable, Sendable {
+    /// The whole mix — everything the app sends to speakers. One row, no id:
+    /// it is a destination, not a device.
+    case mainOut
     case group(id: String)
     case device(id: String)
 }
@@ -37,7 +40,8 @@ public final class SidebarViewController: NSViewController {
     /// on object identity.
     final class Node {
         enum Payload {
-            case header(String)             // "Groups" / "Speakers" (isGroupItem)
+            case header(String)             // "System Audio" / "Groups" / "Speakers" (isGroupItem)
+            case mainOut                    // the one "Main Audio" row (flat leaf row)
             case group(Group)               // a saved group (flat leaf row)
             case device(Device)             // a device row (flat leaf row)
             case emptyState(String)         // non-selectable placeholder row (e.g. "No groups yet")
@@ -99,23 +103,16 @@ public final class SidebarViewController: NSViewController {
     /// place the sidebar may use it. Pure model state, never audio-driven.
     private var activeGroupID: String?
 
-    /// Whether THIS OS renders the sidebar's automatic Liquid Glass (macOS
-    /// 26+) — the injected seam T7 needs (spec Q4-b: warm tint on 26+, opaque
-    /// warm fallback below). Never read via a bare `#available` on the
-    /// drawing path itself; both branches must be exercisable from a test
-    /// regardless of the machine the suite runs on (this box is macOS 27, so
-    /// without this seam the `< 26` fallback would be untestable here). Same
-    /// injection shape as `SetupModel.osGatesLocalNetwork`/`localNetworkGated`
-    /// — a static real-OS-value property, injected through a defaulted init
-    /// parameter so existing `SidebarViewController()` call sites (e.g.
-    /// `MixerWindowController`) are unaffected, and a test can construct
-    /// either branch directly.
-    public static var osSupportsLiquidGlassSidebar: Bool {
-        if #available(macOS 26, *) { return true } else { return false }
-    }
-
-    public init(osSupportsLiquidGlassSidebar: Bool = SidebarViewController.osSupportsLiquidGlassSidebar) {
-        self.warmSurfaceView = SidebarWarmSurfaceView(rendersOnGlass: osSupportsLiquidGlassSidebar)
+    /// Whether a system sidebar material sits behind the warm wash for it to
+    /// tint (T7, spec Q4-b). FALSE on every OS since the surface's split
+    /// items became plain ones (`MixerWindowController` explains why): with
+    /// no `.sidebar` behavior there is no automatic material — not even
+    /// macOS 26+'s Liquid Glass — so the wash draws the opaque warm backing
+    /// itself, the branch that always shipped below macOS 26. The parameter
+    /// stays injectable because both drawing modes are still real and a test
+    /// must be able to exercise either one directly.
+    public init(rendersOnSystemSidebarMaterial: Bool = false) {
+        self.warmSurfaceView = SidebarWarmSurfaceView(rendersOnGlass: rendersOnSystemSidebarMaterial)
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -384,7 +381,12 @@ public final class SidebarViewController: NSViewController {
 
         var newRoots: [Node] = []
 
-        // 1. Groups section — always shown (this window is groups-configuration
+        // 1. System Audio section — the whole mix, always present and never
+        //    tied to a device: it is where the Main Audio page (and its
+        //    Equalizer) is reached.
+        newRoots.append(Node(.header("System Audio"), children: [Node(.mainOut)]))
+
+        // 2. Groups section — always shown (this window is groups-configuration
         //    only). Zero groups gets a non-selectable "No groups yet"
         //    placeholder row instead of vanishing. Each group is a flat leaf
         //    row (icon + name); members are previewed in the group editor's
@@ -397,7 +399,7 @@ public final class SidebarViewController: NSViewController {
         }
         newRoots.append(groupsHeader)
 
-        // 2. Speakers section — every device, grouped or not, so it stays
+        // 3. Speakers section — every device, grouped or not, so it stays
         //    reachable now that membership isn't previewed via expansion.
         if !devices.isEmpty {
             let devicesHeader = Node(.header("Speakers"))
@@ -427,6 +429,7 @@ public final class SidebarViewController: NSViewController {
     private func selection(for node: Node) -> SidebarSelection? {
         switch node.payload {
         case .header, .emptyState: return nil
+        case .mainOut: return .mainOut
         case .group(let g): return .group(id: g.id)
         case .device(let d): return .device(id: d.id)
         }
@@ -476,7 +479,8 @@ public final class SidebarViewController: NSViewController {
 
     // MARK: Test-support hooks
 
-    /// The section-header titles in order (e.g. ["Groups", "Speakers"]).
+    /// The section-header titles in order
+    /// (["System Audio", "Groups", "Speakers"]).
     public var test_sectionTitles: [String] {
         roots.compactMap { if case .header(let t) = $0.payload { return t } else { return nil } }
     }
@@ -703,105 +707,6 @@ private final class SidebarContainerView: NSView {
     }
 }
 
-/// The Groups window sidebar's warm surface (T7, spec Q4-b): a non-
-/// interactive view sitting between the sidebar's system material and the
-/// outline view. On macOS 26+ the automatic Liquid Glass sidebar material
-/// (applied by `NSSplitViewItem(sidebarWithViewController:)` outside this
-/// controller's own view — there is no public API to tint it directly) is
-/// left completely alone; this draws a LOW-ALPHA warm wash on top of it.
-/// Below macOS 26 there is no glass to tint at all, so this draws the SAME
-/// color fully opaque as the sidebar's whole backing. Reduce Transparency
-/// promotes the 26+ wash to that same opaque backing too — see
-/// ``effectiveAlpha``.
-///
-/// Deliberately NOT drawn by setting `outlineView.backgroundColor` —
-/// `NSTableView.h`'s `NSTableViewStyleSourceList` doc comment states that
-/// moving a source-list table's background color off the system "source
-/// list" color drops the blur/vibrant selection-highlight style entirely.
-/// This view is a separate layer behind the (untouched) outline view instead.
-private final class SidebarWarmSurfaceView: NSView {
-
-    /// Whether THIS instance renders atop Apple's automatic glass (true) or
-    /// stands in as the opaque fallback (false) — set once at init from the
-    /// controller's injected seam value, never re-read live (the OS version
-    /// a process runs under doesn't change mid-session).
-    let rendersOnGlass: Bool
-
-    /// The 26+ overlay's alpha — a taste dial, to be judged live against
-    /// real glass. The plan's original 0.06–0.10 band was ARITHMETICALLY
-    /// TOO WEAK to do the job: the sidebar's base grey is a perfectly
-    /// neutral `#F0F0F0`, and `sidebarWarmTint` carries a 22-unit red-to-
-    /// blue spread, so an 0.08 wash shifts it by ~2 units — invisible. The
-    /// warm cast has to be comparable to the content pane's own (`panel`
-    /// `#FBF8F2` spreads 9 units), which needs `22 × alpha ≈ 9`, i.e. ~0.4;
-    /// 0.30 sits just under that so the sidebar reads warm without
-    /// out-warming the pane it sits beside. Chosen deliberately high rather
-    /// than low: dialing DOWN from a visible wash is far easier to judge by
-    /// eye than nudging up from no perceptible change.
-    static let tintAlpha: CGFloat = 0.30
-
-    /// `nil` = read the live `accessibilityDisplayShouldReduceTransparency`.
-    /// Tests drive both sides of the opaque promotion with this.
-    var test_reduceTransparencyOverride: Bool? {
-        didSet { needsDisplay = true }
-    }
-
-    /// The alpha ``draw(_:)`` actually uses. On the 26+ glass branch, Reduce
-    /// Transparency promotes the wash to the SAME fully-opaque backing the
-    /// pre-26 fallback draws — the system flattens its glass underneath, and
-    /// a translucent tint over whatever it flattens to would still read as
-    /// transparency (A1). The pre-26 branch is already opaque.
-    var effectiveAlpha: CGFloat {
-        let reduceTransparency = test_reduceTransparencyOverride
-            ?? NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
-        return (rendersOnGlass && !reduceTransparency) ? Self.tintAlpha : 1
-    }
-
-    init(rendersOnGlass: Bool) {
-        self.rendersOnGlass = rendersOnGlass
-        super.init(frame: .zero)
-        wantsLayer = true
-        // Reconcile live on a mid-session Reduce Transparency / Increase
-        // Contrast toggle (`AudiouterSharedUI/AGENTS.md`'s instrument rule —
-        // neither arrives through this view's own lifecycle otherwise).
-        // `draw(_:)` re-reads both flags per repaint via `effectiveAlpha`,
-        // so the invalidation is all the reconciliation needed.
-        NSWorkspace.shared.notificationCenter.addObserver(
-            self,
-            selector: #selector(accessibilityDisplayOptionsDidChange),
-            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
-            object: nil)
-    }
-
-    public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    /// Never intercepts a click meant for a sidebar row or the add button —
-    /// this view exists purely to paint a tint underneath them.
-    override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-    override var isFlipped: Bool { false }
-
-    @objc private func accessibilityDisplayOptionsDidChange() {
-        needsDisplay = true
-    }
-
-    /// A light/dark appearance flip re-resolves `Tokens.Color.sidebarWarmTint`
-    /// (its dynamic provider reads `effectiveAppearance` at draw time), so
-    /// this just needs to trigger the repaint.
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        needsDisplay = true
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        let base = Tokens.Color.sidebarWarmTint
-        let alpha = effectiveAlpha
-        let color = alpha < 1 ? base.withAlphaComponent(alpha) : base
-        color.setFill()
-        bounds.fill()
-    }
-}
-
 // MARK: - NSMenuDelegate (row context menu)
 
 extension SidebarViewController: NSMenuDelegate {
@@ -815,7 +720,7 @@ extension SidebarViewController: NSMenuDelegate {
         menu.autoenablesItems = false
         guard let node = clickedNode else { return }
         switch node.payload {
-        case .header, .emptyState:
+        case .header, .emptyState, .mainOut:
             break   // no identity to act on — an empty menu shows nothing at all
         case .group(let group):
             menu.addItem(contextMenuItem("Rename…",
@@ -880,6 +785,9 @@ extension SidebarViewController: NSOutlineViewDelegate {
             return makeHeaderLabel(title)
         case .emptyState(let text):
             return makeLabel(text, identifier: "emptyState", secondary: true)
+        case .mainOut:
+            return makeIconLabel(symbol: DeviceIcon.mainAudioSymbolName,
+                                 text: "Main Audio", identifier: "mainOut")
         case .group(let group):
             let symbol = DeviceIcon.resolve(group.iconSymbolName, default: Group.defaultIconSymbolName)
             return makeIconLabel(symbol: symbol,
@@ -980,7 +888,7 @@ extension SidebarViewController: NSOutlineViewDelegate {
     /// Icon side length matching the outline view's `.medium` `rowSizeStyle`
     /// (design feedback 2026-07-18: 18pt read as visually small next to the
     /// detail pane's large header icon).
-    private static let iconSize: CGFloat = 22
+    private static let iconSize: CGFloat = SurfaceLayout.sidebarIconSize
 
     private static func newCell(identifier: NSUserInterfaceItemIdentifier) -> IconLabelCellView {
         let cell = IconLabelCellView()
@@ -1005,7 +913,8 @@ extension SidebarViewController: NSOutlineViewDelegate {
             imageView.widthAnchor.constraint(equalToConstant: iconSize),
             imageView.heightAnchor.constraint(equalToConstant: iconSize),
 
-            textField.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 8),
+            textField.leadingAnchor.constraint(
+                equalTo: imageView.trailingAnchor, constant: SurfaceLayout.sidebarIconToLabelGap),
             textField.trailingAnchor.constraint(
                 lessThanOrEqualTo: cell.activeMarkerView.leadingAnchor, constant: -6),
             textField.centerYAnchor.constraint(equalTo: cell.centerYAnchor),

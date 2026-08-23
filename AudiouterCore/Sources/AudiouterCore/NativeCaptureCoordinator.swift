@@ -169,6 +169,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         /// which is what lets ``FeedGapTracker`` tell a genuinely post-rebuild
         /// buffer from one that was already in flight when the rebuild claimed.
         let tapEpoch: Int
+        let eqPlan: WholeSystemEQPlan
 
         /// The published value before anything has been started, and the value
         /// every teardown path returns to: no converter, so ``handleBuffer(_:)``
@@ -177,7 +178,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             converter: nil, meteringActive: false,
             syncedLocalSink: nil, syncedLocalBaseResampler: nil,
             btSink: nil, btBaseResampler: nil,
-            tickInjector: nil, wizardActive: false, tapEpoch: 0)
+            tickInjector: nil, wizardActive: false, tapEpoch: 0, eqPlan: .passthrough)
 
         init(
             converter: PCMConverting?,
@@ -188,7 +189,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             btBaseResampler: SyncedLocalBaseResampler?,
             tickInjector: AlignmentTickInjector?,
             wizardActive: Bool,
-            tapEpoch: Int
+            tapEpoch: Int,
+            eqPlan: WholeSystemEQPlan
         ) {
             self.converter = converter
             self.meteringActive = meteringActive
@@ -199,6 +201,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             self.tickInjector = tickInjector
             self.wizardActive = wizardActive
             self.tapEpoch = tapEpoch
+            self.eqPlan = eqPlan
         }
     }
 
@@ -348,6 +351,15 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     private static let wizardPacerInterval: DispatchTimeInterval = .milliseconds(20)
     /// ~93 ms at 44.1 kHz — a ceiling on one fire's catch-up after a stall.
     private static let wizardPacerMaxFramesPerFire = 4_096
+
+    /// The tone stages this coordinator applies to each delivered buffer: the
+    /// Main Out stage (before every fan-out, so the local Mac and Bluetooth
+    /// inherit it) plus one AirPlay write per EQ stream. Queue-confined here
+    /// (set via ``setEQPlan(_:)``), consumed only through the published
+    /// ``BufferSnapshot``. ``WholeSystemEQPlan/passthrough`` — the default — is
+    /// the ONLY shape that stays byte-identical, and it is exactly the legacy
+    /// single stream-0 write.
+    private var eqPlan: WholeSystemEQPlan = .passthrough
 
     /// W1-T7 (Gap 1 + Fix 1): the excluded process-OBJECT set the CURRENT live tap
     /// was last built/recreated against — the compare-before-rebuild key for the
@@ -1129,7 +1141,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             btBaseResampler: btBaseResampler,
             tickInjector: tickInjector,
             wizardActive: wizardActive,
-            tapEpoch: tapEpoch)
+            tapEpoch: tapEpoch,
+            eqPlan: eqPlan)
         snapshotLock.lock()
         _bufferSnapshot = snapshot
         snapshotLock.unlock()
@@ -1292,6 +1305,23 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         }
     }
 
+    /// Swap in the tone stages the delivery path applies (per-device + Main Out
+    /// EQ). ADDITIVE seam, same shape as ``setAlignTickMode(_:)``: it swaps one
+    /// snapshot field and touches neither the tap, the exclusion set, nor the
+    /// per-app routing state. `queue.sync`, so the very next delivered buffer
+    /// already carries the new plan.
+    ///
+    /// The processors inside `plan` are built (or retargeted) off-thread — an
+    /// `EQProcessor` carries mutable filter state driven by the delivery thread
+    /// alone, so a value change reaches a live one only through its own mailbox,
+    /// which the delivery thread itself picks up.
+    public func setEQPlan(_ plan: WholeSystemEQPlan) {
+        queue.sync {
+            self.eqPlan = plan
+            self.publishBufferSnapshot()
+        }
+    }
+
     /// Convert one captured buffer to the engine's fixed S16LE/44100/2ch format
     /// and forward it with a `pts` derived from the buffer's own `mHostTime`.
     /// Runs on the tap's delivery thread (the IOProc, in production). Allocation
@@ -1340,11 +1370,23 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         converter.sampleConversionFailuresIfDue()
         guard var pcm = converted, !pcm.isEmpty else { return }
 
+        // Main Out EQ: the whole mix's own tone stage, applied BEFORE the tick
+        // and before every fan-out, so the AirPlay streams, the synced-local
+        // sink, the BT sinks and the meter all see the same shaped program.
+        // `nil` (the default) is the byte-identical path — a flat EQ never
+        // reaches an `EQProcessor`, because widen/requantize is not bit-exact.
+        let plan = snapshot.eqPlan
+        if let main = plan.main {
+            main.process(&pcm)
+        }
+
         // Align-by-ear tick (BT-OFFSET-UI): mixed in HERE — after conversion,
         // before the engine write and BOTH fan-outs — so the AirPlay engine,
         // the synced-local sink, and every BT sink all render the identical
         // tick through their own delays (that sameness is what makes nudging
-        // the trim until the flam collapses a truthful alignment).
+        // the trim until the flam collapses a truthful alignment). It sits
+        // AFTER the Main Out EQ deliberately: the tick is a measuring tool, not
+        // program material, so it must not be coloured by the user's tone.
         if let tickInjector = snapshot.tickInjector {
             tickInjector.mix(into: &pcm)
         }
@@ -1387,7 +1429,28 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     private func deliver(_ pcm: Data, pts: timespec, snapshot: BufferSnapshot,
                          btPCM: Data? = nil) {
         // pts straight off the producer's capture clock (mHostTime → timespec).
-        sink.write(pcm: pcm, pts: pts)
+        // EQ off is the LITERAL legacy line: one flag test on an already-loaded
+        // struct, then the exact single stream-0 write this path always did.
+        let plan = snapshot.eqPlan
+        if plan.isPassthrough {
+            sink.write(pcm: pcm, pts: pts)
+        } else {
+            // Per-device EQ diverges only here, per AirPlay stream: each entry
+            // filters its OWN copy of the shared program, and all of them go out
+            // in ONE batched call so they stay phase-aligned.
+            var entries: [(pcm: Data, streamId: UInt32)] = []
+            entries.reserveCapacity(plan.streams.count)
+            for stream in plan.streams {
+                guard let processor = stream.processor else {
+                    entries.append((pcm: pcm, streamId: stream.streamID))
+                    continue
+                }
+                var shaped = pcm
+                processor.process(&shaped)
+                entries.append((pcm: shaped, streamId: stream.streamID))
+            }
+            sink.write(streams: entries, pts: pts)
+        }
 
         // T-FANOUT: fan the SAME converted PCM (and its pts) to the delayed local
         // sink — ONE capture, two consumers. Widened to interleaved Float32 and
@@ -2198,6 +2261,22 @@ public protocol AudioIOWorkgroupJoining: Sendable {
 public protocol PCMSink: Sendable {
     /// Forward one buffer of interleaved S16LE / 44100 / 2ch PCM with its `pts`.
     func write(pcm: Data, pts: timespec)
+
+    /// Forward several per-stream buffers sharing one `pts` — what a non-flat
+    /// ``WholeSystemEQPlan`` produces, one entry per EQ stream. Batching matters:
+    /// the engine processes one shared `pts` per call, so N separate writes would
+    /// let simultaneous streams drift apart.
+    ///
+    /// The default below is a TEST CONVENIENCE, not the real path: it loops
+    /// ``write(pcm:pts:)`` per entry so existing fakes keep compiling and keep
+    /// recording. ``EngineSink`` overrides it with the genuinely batched call.
+    func write(streams: [(pcm: Data, streamId: UInt32)], pts: timespec)
+}
+
+extension PCMSink {
+    public func write(streams: [(pcm: Data, streamId: UInt32)], pts: timespec) {
+        for entry in streams { write(pcm: entry.pcm, pts: pts) }
+    }
 }
 
 /// Converts a captured buffer (in the tap's real format) to the engine's fixed
@@ -2517,6 +2596,16 @@ final class EngineSink: PCMSink, @unchecked Sendable {
 
     func write(pcm: Data, pts: timespec) {
         engine.write(pcm: pcm, pts: pts)
+        sampleWriteBacklogIfDue()
+        sampleWriteCadenceIfDue()
+    }
+
+    /// The real batched write (per-device EQ): one engine call carrying every
+    /// stream against a shared `pts`, so the EQ'd streams stay phase-aligned
+    /// with each other and with stream 0. Samples the same two counters — one
+    /// call is one write from the backlog/cadence diagnostics' point of view.
+    func write(streams: [(pcm: Data, streamId: UInt32)], pts: timespec) {
+        engine.write(streams: streams, pts: pts)
         sampleWriteBacklogIfDue()
         sampleWriteCadenceIfDue()
     }

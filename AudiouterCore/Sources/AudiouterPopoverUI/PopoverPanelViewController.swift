@@ -164,7 +164,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// left chrome + slider/readout/trailing columns). Longer device names may
     /// truncate more — accepted. (Footer removed; actions moved to the header +
     /// Groups "+".)
-    private let panelWidth: CGFloat = 623
+    private let panelWidth: CGFloat = SurfaceLayout.width
     /// Trailing inset of a header's accessory button ("+", Groups) from the
     /// header row's OWN trailing edge — unrelated to card-tile geometry
     /// (there's no card margin to reuse after V2's de-nest; this keeps the
@@ -379,11 +379,26 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         railOverlay.dormant = dormant
         railOverlay.originSection = cardsByHeader[originCardTitle]
         if let cutSubsectionTitle, let subsection = subsectionBodies[cutSubsectionTitle]?.rail {
+            // A collapsed device SUBSECTION whose rows the controller has DROPPED
+            // from the model — the hidden device is gone from `deviceRows`, so the
+            // overlay can't judge the cut from the stops and is told to cut here.
             railOverlay.deviceSection = subsection
+            railOverlay.deviceSectionRowsDropped = true
         } else {
+            // The device CARD: its rows stay in `deviceRows` (clipped by the fold),
+            // so the overlay judges the cut from the clipped rows themselves — that
+            // is what keeps a card collapse from running the rail past its lowest
+            // member down through the non-member rows it is still hiding.
             railOverlay.deviceSection = cardsByHeader[deviceCardTitle]
+            railOverlay.deviceSectionRowsDropped = false
         }
         railOverlay.needsDisplay = true
+    }
+
+    /// The controller's model-event → overlay bridge for the connect pulse;
+    /// geometry keeps flowing through `setRailRows`.
+    func playRailConnectPulse(joinedDeviceIDs: Set<String>, cameToLife: Bool) {
+        railOverlay.playConnectPulse(joinedDeviceIDs: joinedDeviceIDs, cameToLife: cameToLife)
     }
 
     // MARK: Exact-fit sizing (T-3)
@@ -411,15 +426,13 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// runs the resize animation). One channel, used consistently: PLAN §E risk 1
     /// "prefer the preferredContentSize channel".
     ///
-    /// `animated` selects the animation via `PopoverController.applySurfaceResize`
-    /// (the controller, not the panel, knows the current host): under the popover
-    /// host that toggles `popover.animates` around the `preferredContentSize`
-    /// assignment. The non-animated path is used for the
-    /// initial show and when `NSWorkspace.shared.accessibilityDisplayShouldReduceMotion`
-    /// is true (the jank escape hatch); it applies the size with `animates` forced
-    /// off so no frame animation runs. **A fold never asks for `animated: true`**
-    /// — `FoldAnimator` calls in with `animated: false` on every tick, so the
-    /// surface has no clock of its own to drift against the content's.
+    /// `animated` is carried through `PopoverController.applySurfaceResize` for
+    /// the host to interpret (the controller, not the panel, knows the current
+    /// host). Under the one-surface host it never animates a window: the frame
+    /// is FIXED, and the host follows the published size only to notice
+    /// content taller than that frame. **A fold never asks for
+    /// `animated: true`** either — `FoldAnimator` calls in with
+    /// `animated: false` on every tick.
     func panelContentDidChangeHeight(animated: Bool) {
         publishContentSize(fittingSizeSettled(), animated: animated)
     }
@@ -488,7 +501,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// card (plus the chevron) is what separates sections now; the type doesn't
     /// have to shout to do it.
     ///
-    /// `trailingTitle` names the trailing control column (OUTPUT / FEED /
+    /// `trailingTitle` names the trailing control column (Output / Feed /
     /// REDIRECT); `nil` omits it for a card with no trailing control. There is
     /// deliberately NO parameter for a title over the SLIDER column — a fader
     /// with a live `%` beside it names itself, and every card shares that one
@@ -540,9 +553,8 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
         // The combined header row is the FIRST element inside the tile: section
         // title on the left, column headers centered over their columns on the
         // right. Height ~28pt (change 1 — one row instead of title + header).
-        // The section title DISPLAYS uppercased (Warm Signal §5.1 silkscreen
-        // vocabulary / v4 §Call-1 "SYSTEM AUDIO"); the `header` argument stays the
-        // title-case lookup/collapse KEY.
+        // The section title displays exactly as authored ("System Audio" —
+        // One Case rule); the `header` argument is also the lookup/collapse KEY.
         let label = Self.makeLegendLabel(header, weight: .semibold,
                                          color: Tokens.Color.secondaryLabel)
         let headerWrap = NSView()
@@ -1086,31 +1098,28 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
                                     follower: self, completion: detach)
     }
 
-    /// Tracking for the uppercase legend voice, in points at the caption size —
-    /// ~0.045 em, half ``Tokens/Font/microLabel``'s +0.09 em because this voice
-    /// is set in the proportional system face, not SF Mono. Small uppercase needs
-    /// the air to read as a silkscreen caption rather than as shrunken words.
-    private static let legendKern: CGFloat = 0.5
-
-    /// The **legend voice**: one small tracked uppercase caption shared by the
-    /// card's section title (semibold, secondary) and the column titles on the
-    /// same line (medium, secondary). Both are chrome that NAMES the content, so
-    /// both sit BELOW the device names in the hierarchy — set a section title at
-    /// `label` weight and the panel spends its loudest type on the words nobody
-    /// opens the mixer to read.
+    /// The **legend voice**: one small caption shared by the card's section
+    /// title (semibold, secondary) and the column titles on the same line
+    /// (medium, secondary), rendered exactly as authored — sentence/title
+    /// case, never uppercased (One Case rule, 2026-08-23). The heading still
+    /// stands apart from the rows through weight, the secondary ink, and the
+    /// size step down from the device names. Both are chrome that NAMES the
+    /// content, so both sit BELOW the device names in the hierarchy — set a
+    /// section title at `label` weight and the panel spends its loudest type
+    /// on the words nobody opens the mixer to read.
     private static func makeLegendLabel(_ text: String,
                                         weight: NSFont.Weight,
                                         color: NSColor) -> NSTextField {
         let font = NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: weight)
         let label = NSTextField(labelWithAttributedString: NSAttributedString(
-            string: text.uppercased(),
-            attributes: [.font: font, .foregroundColor: color, .kern: legendKern]))
+            string: text,
+            attributes: [.font: font, .foregroundColor: color]))
         label.translatesAutoresizingMaskIntoConstraints = false
         return label
     }
 
-    /// A column-header label (OUTPUT / FEED / SYNC / REDIRECT), centered over its
-    /// column in the combined header row built by `beginCard`. VOLUME is
+    /// A column-header label (Output / Feed / Sync / Redirect), centered over its
+    /// column in the combined header row built by `beginCard`. Volume is
     /// deliberately NOT among them — see `PopoverController.rebuild()`.
     private static func makeColumnHeaderLabel(_ text: String) -> NSTextField {
         let label = makeLegendLabel(text, weight: .medium, color: Tokens.Color.secondaryLabel)
@@ -1120,14 +1129,14 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
 
     /// Add a small subsection header ("Current Device" / "AirPlay Devices")
     /// INSIDE the current card (SPEC §9b split). Tertiary label color (V10,
-    /// 2026-07-18): a grouping label sits one step below the uppercase column
+    /// 2026-07-18): a grouping label sits one step below the column
     /// headers (`makeColumnHeaderLabel`, still secondary), so it reads as a
     /// quieter sub-level in the hierarchy rather than competing with them.
     /// `columnTitle`/`columnCenterFromTrailing` optionally add ONE extra
-    /// uppercase column-header label on the same line, centered over a column
-    /// only this subsection's rows carry — the Bluetooth subsection's "SYNC"
+    /// column-header label on the same line, centered over a column
+    /// only this subsection's rows carry — the Bluetooth subsection's "Sync"
     /// title over its stepper cluster (BT-OFFSET-UI). Same
-    /// `makeColumnHeaderLabel` voice as the card header's VOLUME/FEED titles.
+    /// `makeColumnHeaderLabel` voice as the card header's Volume/Feed titles.
     ///
     /// `collapsible` reuses the card header's own affordance verbatim — the
     /// leading `chevron.right`/`chevron.down` button, the whole-row click

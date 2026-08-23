@@ -124,6 +124,18 @@ import AppKit
         popover.showBTAlignmentPrompt(deviceID: id)
     }
 
+    /// Fire "Align speaker…" through real AppKit menu dispatch, found by
+    /// TITLE — every row now carries an "Equalizer…" door above it, so the
+    /// alignment item is no longer at index 0.
+    @discardableResult
+    private func fireAlignItem(_ menu: NSMenu?) -> Bool {
+        guard let menu,
+              let index = menu.items.firstIndex(where: { $0.title == "Align speaker…" })
+        else { return false }
+        menu.performActionForItem(at: index)
+        return true
+    }
+
     // MARK: Card mount + copy
 
     @Test func promptMountsTheCardUnderTheRowWithTheLockedCopy() {
@@ -707,13 +719,14 @@ import AppKit
         let (popover, _) = makePopover()
         let row = selectMixedBT(popover)
         let menu = row?.test_contextMenu()
-        #expect(menu?.items.map(\.title) == ["Align speaker…"],
+        #expect(menu?.items.map(\.title) == ["Equalizer…", "Align speaker…"],
                 "the discoverable route — ⌥ alone is invisible")
-        menu?.performActionForItem(at: 0)   // real AppKit menu dispatch
+        #expect(fireAlignItem(menu))
         #expect(popover.test_btWizardIsOpen())
 
-        #expect(popover.test_deviceRow(for: "office")?.test_contextMenu() == nil,
-                "AirPlay rows carry no alignment menu")
+        #expect(popover.test_deviceRow(for: "office")?.test_contextMenu()?.items.map(\.title)
+                == ["Equalizer…"],
+                "AirPlay rows carry the Equalizer door but no alignment item")
     }
 
     @Test func notNowIsFinalButTheWizardStaysReachableFromTheRow() {
@@ -722,8 +735,7 @@ import AppKit
         popover.test_btAlignmentPromptView()?.test_clickNotNow()
         #expect(recorder.resolves.map(\.dismissed) == [true])
 
-        let menu = popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()
-        menu?.performActionForItem(at: 0)   // real AppKit menu dispatch
+        #expect(fireAlignItem(popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()))
         #expect(popover.test_btWizardIsOpen(),
                 "the FINAL dismissal only silences the auto-prompt, never the manual way in")
     }
@@ -739,8 +751,7 @@ import AppKit
         showPrompt(popover)
         #expect(recorder.resolves.isEmpty, "the hold stands while the card is up")
 
-        let menu = popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()
-        menu?.performActionForItem(at: 0)   // real AppKit menu dispatch
+        #expect(fireAlignItem(popover.test_deviceRow(for: "bt-a:output")?.test_contextMenu()))
         #expect(popover.test_btWizardIsOpen())
         #expect(recorder.resolves.map(\.id) == ["bt-a:output"])
         #expect(recorder.resolves.map(\.dismissed) == [false],

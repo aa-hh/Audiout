@@ -64,6 +64,79 @@ slowest measured latency and, for the duration of a Bluetooth wizard run, to
 `composition_change` rather than adding a rebuild kind — the reference moving is
 exactly what that cause means.
 
+**A flat EQ must stay byte-identical passthrough — never route a flat buffer
+through `EQProcessor`.** Widening to float and requantizing is not bit-exact, so
+"EQ off" only stays honest if the processor is bypassed outright. Two siblings of
+that rule: `DeviceEQ.swift`/`EQProcessor.swift` are LICENSE-CLEAN (no GPL header)
+so the Bluetooth sink can run the same processor — never add one or move
+GPL-derived code in; and `DeviceEQStore` drops flat entries on save, so a
+round-trip legitimately returns fewer keys than it was handed.
+
+**An EQ rebind is a whole-system engine op: it rides the per-device `converging`
+slot, and its stream ids live in their own namespace.** Moving a device onto its
+EQ group's stream is a real `removeOutput`→`addOutput` with the accepted ~1 s
+audible gap, so `NativeBackend.enqueueEQRebindLocked` claims `converging` (and
+records the hold in `rebindConverging`, so the sleep path can release it) exactly
+as `resetAirPlaySessionForWholeSystem` does, and goes through `bindOutput` — the
+one call site that arbitrates on the engine's own answer — never a naked
+`engine.rebindOutput`. A device already `converging` is skipped, not queued: the
+running loop settles it on stream 0 and the next reconcile moves it again.
+`EQStreamAllocator` allocates from `0x8000_0000` upward while `AppRouteMixer`
+allocates from 1, so the two id spaces can never collide and the EQ budget can
+count per-app streams by range test alone.
+
+**`reconcileEQPlan` owns BOTH `added` edges, and `pushEQPlanLocked` NEVER
+rebuilds a live stage.** The departure edge is `removeFromAddedLocked` — the
+single site every per-device `added.remove` goes through — because a departure
+frees a stream for whoever the budget refused AND takes the departed device's
+stream out of the plan; `setOutputSet`'s reconcile cannot cover it (it runs while
+the teardown is still in flight, device still in `added`). The two
+`applyEngineState` arms are the exception: they hold an uncommitted `Device` copy
+that would clobber the reconcile's `eqBypassReason` writes, so they set
+`eqNeedsReconcile` and reconcile AFTER the commit. On the plan side, an unchanged
+stage is carried over instance-and-all (`EQProcessorSlot`) and the EDITED stage
+is `retarget`ed in place: a new `EQProcessor` starts with zeroed IIR delay
+memory, which is a tick on a neighbour and — republished per drag frame — a
+crackle running the whole length of the scrub on the speaker being edited.
+`retarget` builds the coefficients on `stateQueue` and posts them to the
+processor's one-slot mailbox; the DELIVERY thread picks them up under an
+`NSLock.try()` (the `handleBuffer` idiom), carries the surviving sections' delay
+pairs across, and parks the displaced engine for the next `retarget` to free —
+so the audio thread never allocates, frees or blocks. Never read a live
+processor's filter state from `stateQueue`: it may be mid-`process()`. An
+uncommitted edit on a device with no entry in `eqStreamIDByDevice` publishes
+nothing at all.
+
+**A device the per-app domain claims is EXCLUDED from the EQ domain, and must say
+so with its own reason.** Its audio comes from `AppRouteMixer`, never through the
+whole-system EQ stage, so `reconcileEQPlan` sets `eqBypassReason =
+.perAppRouting` for a claimed device with a non-flat stored EQ — a different
+sentence from `.streamBudget`, because sending the user to delete other speakers'
+tone would not help. The Equalizer page (Groups screen)
+carries the honesty — the popover shows no tone state at all.
+
+**A Bluetooth trim change must NEVER rebuild a sink.** The delay is physically
+the audio piled up in `BTDelayLine`'s ring when the release gate opened, so a
+trim is a move of the read position — `applyTrimDelta(ms:)`, spliced with an
+equal-power crossfade — not a new session. Rebuilding stops and restarts the
+engine and re-holds silence for the whole delay, which the drawer's live scrub
+would turn into permanent silence. The seek must also never run
+`clearSessionStateLocked`: a seek is not a new clock context, and wiping the
+drift `PhaseController` would throw away its learned rate. `requestRebuild` is
+for genuine structural changes only (`config_change`, `rate_change`,
+`offset_change`, `composition_change`).
+
+**A Bluetooth EQ change is a property swap too — never a rebuild.** Same reason
+as the trim: a rebuild re-arms the release gate and the device goes silent for
+the whole reference delay, which would make a tone scrub unusable.
+`BTDeviceSink.setEQ` bakes a NEW `EQProcessor` on `graphQueue` (never on the
+render thread, and never by re-parameterizing a live one — its biquad state
+belongs to the render thread alone) and publishes it under the same `stateLock`
+snapshot the render gate reads; the render block applies it to the frames it just
+produced. The manager remembers the value per UID like the gain, so a sink
+created later starts already shaped, and `startLocked` re-derives from that
+remembered value after a genuine rebuild.
+
 ## Architecture
 
 ```mermaid
@@ -140,7 +213,8 @@ Redirecting one app to a specific device:
 | Per-app capture/mix | `PerAppCaptureCoordinator`, `AppRouteMixer` |
 | Shared capture infra | `DefaultOutputDeviceMonitor`, `TapRebuildLifecycle` (`TapRebuildCoalescer`, `TapReanchor`) |
 | Routing brain | `GroupController`, `AppRoutingController`, `PhaseController` |
-| Persistence | `AppRouteStore`, `RoutingStore`, `GroupStore`, `AppSettings`, `ExcludedAppsStore`, `ExcludedAppsController`, `DeviceIconStore` |
+| Persistence | `AppRouteStore`, `RoutingStore`, `GroupStore`, `AppSettings`, `ExcludedAppsStore`, `ExcludedAppsController`, `DeviceIconStore`, `DeviceEQStore` |
+| Tone shaping | `DeviceEQ`, `EQStreamTopology`, `EQProcessor` |
 | Local playback | `LocalPlaybackEngine`, `SyncedLocalSink`, `LocalOutputLatency`, `DefaultOutputObserver`, `SystemOutputVolume` |
 | Public aggregate device (Wave 3) | `AggregateOutputDevice` — PUBLIC aggregate "Audiouter" (UID `com.audiouter.Audiouter.aggregate`); wired by `NativeBackend` (adopt/sweep/restore on start/quit). Becomes Mac default when whole-system routing arms; restore-prior-default-then-destroy on quit. New `BackendEvent` case `routingBlockedNeedsDefault(Bool)` (in `OutputBackend.swift`) drives popover warning via `PopoverController.setRoutingBlockedNeedsDefault(_:)` and user-reselect via `PopoverController.onReselectAudiouter`. Shared `EffectiveCaptureDevice.resolve(_:)` (in `NativeCaptureCoordinator.swift`) prevents the private tap-aggregate nesting on the public aggregate (A1). **Interim ceiling:** system volume slider + hardware volume keys dead (A2); fix is `docs/plans/PLAN-VOLUME-KEY-INTERCEPTION.md`. **Seamless handoff (Wave 3 T9+):** `AirPlayHandoffWatcher` (best-effort unified-log watcher for blocked macOS AirPlay attempts; spawns `/usr/bin/log stream`; degrades silently), `BlockedAirPlayAttempt` (pure matcher), `PTPHelperReleasing` (fast ~1s port release), `releaseForHandoff`/`resumeFromHandoffLocked` (NativeBackend seam; release preserves selection intent, resume restores whole-system + per-app). |
 | Discovery/diagnostics | `NativeDiscovery`, `ConnectionDiagnostics`, `Telemetry`, `AudioDiag` |

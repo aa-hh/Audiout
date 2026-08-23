@@ -48,18 +48,18 @@ import AppKit
     /// since a pane's width comes from the split view, not from a frame a test
     /// picked. The controller owns no window (U6): the split view is laid out
     /// directly at the area the surface's Groups screen gives it
-    /// (`AppSurfaceController.groupsDefaultContentSize` minus the header strip).
+    /// (`AppSurfaceController.minimumContentSize` minus the header strip).
     private func makeWindow() throws -> (MixerWindowController, GroupController, [Device], Group) {
         let devices = (0..<7).map { makeDevice(id: "d\($0)", name: "Device \($0)") }
         let controller = makeController()
         let group = try controller.createGroup(name: "Downstairs", memberIDs: ["d0"],
                                                memberVolumes: [:]).group
-        let window = MixerWindowController(groupController: controller)
+        let window = MixerWindowController(groupController: controller,
+                                           settings: AppSettings(defaults: isolatedDefaults))
         window.setHostVisible(true)
         window.update(devices: devices)
-        // `groupsDefaultContentSize` IS the content area below the window's
-        // toolbar strip (live-review D1), so no header subtraction remains.
-        window.contentController.view.setFrameSize(AppSurfaceController.groupsDefaultContentSize)
+        // The fixed frame's floor; only the width matters here.
+        window.contentController.view.setFrameSize(AppSurfaceController.minimumContentSize)
         return (window, controller, devices, group)
     }
 
@@ -252,18 +252,60 @@ import AppKit
                 "container it drifts one margin to the left of the whole form"))
     }
 
-    // MARK: The detail pane adopts the same sections
+    // MARK: The detail pane is one housing: one card, three titled slots
 
-    @Test func detailPaneWearsGroupedSectionsAndNoOrphanedRule() throws {
+    @Test func detailPageHasOneCardThreeTitlesAndNoOrphanedRule() throws {
         let (window, _, _, _) = try makeWindow()
         window.test_select(.device(id: "d0"))
         settle(window)
 
-        #expect(window.test_detail.test_sectionCount == 3,
-                "header + device state + In groups, all the same section shape the editor uses")
+        #expect(window.test_detail.test_cardFrames.count == 1,
+                "the Equalizer is the page's one instrument, so the page's one card")
+        #expect(window.test_detail.test_slotTitles == ["Equalizer", "Groups", "About"],
+                "identity is bare and unlabelled; every other slot is a titled bare list")
         #expect(!window.test_detail.test_hasBoxDivider,
                 Comment(rawValue: "the stock NSBox rule is gone — it drew a 185pt line that stopped a third of " +
                 "the way across the pane; the sections' own inset hairlines separate rows now"))
+    }
+
+    // MARK: The Main Audio page is the third pane behind the same header
+
+    @Test func mainAudioPaneHeaderMatchesTheDevicePane() throws {
+        let (window, _, _, _) = try makeWindow()
+
+        window.test_select(.device(id: "d0"))
+        settle(window)
+        let detailIcon = window.test_detail.test_headerIconFrame
+        let detailTitle = window.test_detail.test_headerTitleAlignmentFrame
+        let detailHeader = window.test_detail.test_headerSectionFrame
+
+        window.test_select(.mainOut)
+        settle(window)
+        let mainIcon = window.test_mainOutDetail.test_headerIconFrame
+        let mainTitle = window.test_mainOutDetail.test_headerTitleAlignmentFrame
+        let mainHeader = window.test_mainOutDetail.test_headerSectionFrame
+
+        let slack = 0.01 + halfPointSlack()
+        #expect(abs(detailIcon.minX - mainIcon.minX) <= slack,
+                Comment(rawValue: "the Main Audio page is a third pane behind the same sidebar — its icon " +
+                "must land where the other two panes' do"))
+        #expect(abs(detailIcon.width - mainIcon.width) <= 0.01)
+        #expect(abs(detailIcon.height - mainIcon.height) <= 0.01)
+        #expect(abs(detailTitle.minX - mainTitle.minX) <= slack)
+        #expect(abs(detailHeader.height - mainHeader.height) <= 0.01,
+                "identical header BAND height, so the content below starts at the same y")
+        #expect(abs(detailHeader.minX - mainHeader.minX) <= 0.01)
+        #expect(abs(detailHeader.width - mainHeader.width) <= 0.01)
+    }
+
+    @Test func mainAudioIconWellIsNotEditable() throws {
+        let (window, _, _, _) = try makeWindow()
+        window.test_select(.mainOut)
+        settle(window)
+
+        #expect(!window.test_mainOutDetail.test_iconWellIsEditable,
+                Comment(rawValue: "nobody picks a glyph for the whole mix, and the module's vocabulary says a " +
+                "well that can't be edited wears no pencil badge"))
     }
 
     @Test func detailValuesRightAlignIntoTheSectionsWidth() throws {
@@ -271,7 +313,7 @@ import AppKit
         window.test_select(.device(id: "d0"))
         settle(window)
 
-        let section = window.test_detail.test_stateSectionFrame
+        let section = window.test_detail.test_aboutSectionFrame
         let valueTrailing = window.test_detail.test_valueTrailingX
         #expect(abs((section.maxX - valueTrailing) - GroupsPaneLayout.contentTrailingInset) <= 2.5,
                 Comment(rawValue: "values right-align on the section's own inset edge (± the text field's own " +

@@ -102,7 +102,8 @@ public final class MembershipRowView: NSView {
     /// 28 → 32 (2026-08-12): the WHOLE row is the click target on `.warmPane`
     /// now, and a 28pt target with a 6pt gap read as a cramped list rather
     /// than something to hit. Two budgets follow this number — the editor
-    /// pane's fitting height (`AppSurfaceController.groupsDefaultContentSize`,
+    /// pane's fitting height (the fixed surface frame's
+    /// `AppSurfaceController.minimumContentSize` floor,
     /// `MembershipRailTests`) and the create sheet's
     /// `GroupCreationSheetController.checklistMaxHeight` — so re-check both if
     /// it moves again.
@@ -482,6 +483,7 @@ public final class MembershipRowView: NSView {
 /// overlay's `deviceRows` and contribute nothing.
 extension MembershipRowView: RailNodeProviding {
     public var railNode: MembershipBusView.Node? { test_busNode }
+    public var railDeviceID: String? { device.id }
     public var railNodeView: NSView { self }
     public var railNodeBounds: NSRect { bounds }
 }

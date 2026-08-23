@@ -108,6 +108,11 @@ enum AboutCredits {
 @MainActor
 public final class AboutViewController: NSViewController {
 
+    /// About is its OWN window and keeps the width it shipped with — it is
+    /// not inside the fixed surface frame, so it does not read
+    /// `SettingsForm.contentWidth`.
+    private static let windowWidth: CGFloat = 460
+
     private let info: AboutInfo
     private let openURL: (URL) -> Void
     private let sourceCodeButton = NSButton()
@@ -210,7 +215,7 @@ public final class AboutViewController: NSViewController {
         background.translatesAutoresizingMaskIntoConstraints = false
         // A1: opaque stand-in while Reduce Transparency is on, live-updating.
         backgroundFallback = ReduceTransparencyFallbackView.install(in: background)
-        let content = SettingsForm.paneView(rows: rows)
+        let content = SettingsForm.paneView(rows: rows, width: Self.windowWidth)
         background.addSubview(content)
         NSLayoutConstraint.activate([
             content.leadingAnchor.constraint(equalTo: background.leadingAnchor),
@@ -224,7 +229,7 @@ public final class AboutViewController: NSViewController {
     public override func viewDidLoad() {
         super.viewDidLoad()
         view.layoutSubtreeIfNeeded()
-        preferredContentSize = NSSize(width: SettingsForm.contentWidth, height: view.fittingSize.height)
+        preferredContentSize = NSSize(width: Self.windowWidth, height: view.fittingSize.height)
     }
 
     /// A bordered, scrollable, non-editable text area — the same "long text
@@ -283,7 +288,7 @@ public final class AboutViewController: NSViewController {
     }
 
     /// The laid-out content view, for offscreen snapshot rendering (mirrors
-    /// `SettingsRootViewController.tabRootView(at:)`).
+    /// `SettingsRootViewController.paneView(at:)`).
     public var test_rootView: NSView {
         view.layoutSubtreeIfNeeded()
         return view

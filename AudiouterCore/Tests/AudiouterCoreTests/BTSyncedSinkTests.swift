@@ -816,6 +816,25 @@ extension SerializedSharedState {
             #expect(line.contains("\"delayNanos\":\"100000000\""), "\(line)")
         }
     }
+
+    // MARK: - Tone (per-device EQ)
+
+    /// The manager remembers a device's tone in its own table, exactly as it
+    /// does the gain: the usual case is the backend pushing an EQ in the same
+    /// selection change that creates the sink, so a value set BEFORE the sink
+    /// exists has to reach it — otherwise the speaker plays its first buffers
+    /// unshaped.
+    @Test func eqIsRememberedPerUIDBeforeTheSinkExists() throws {
+        let manager = BTSyncedSink(
+            renderSampleRate: 48_000, channelCount: 2, presentationDelayMs: { 100 })
+        let eq = DeviceEQ(bassDB: 5, trebleDB: -4)
+        manager.setEQ(eq, forDeviceUID: "dev-a")
+        manager.setDevices([.init(deviceID: 0, uid: "dev-a")])
+
+        let sink = try #require(manager.sinkForTesting(uid: "dev-a"))
+        #expect(sink.eqForTesting == eq,
+                "a sink created after the EQ was set must start already holding it")
+    }
 }
 
 /// A non-optional witness does not satisfy an optional protocol requirement:

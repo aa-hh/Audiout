@@ -5,66 +5,16 @@ import Testing
 @testable import AudiouterCore
 @testable import AudiouterSharedUI
 
-/// The rail's CONNECT PULSE (Warm Signal v4.1 item 9, reshaped per Alec
-/// 2026-08-12 — "a pulse along the rail towards the main out"): when the wire
-/// GAINS gold reach, a bright `glow` window travels terminus→origin and is
-/// absorbed into the Main Audio ring. These tests pin the firing decision
-/// (pure) and the pulse's contract (settled model, Reduce Motion removal,
-/// mid-flight cancel) against a real windowed overlay with stub providers — no
-/// graphics context, no PopoverController.
+/// The rail's CONNECT PULSE (Warm Signal v4.1 item 9): the HOST detects the
+/// model transition — a device becoming a connected member of the active Main
+/// Out target — and calls `playConnectPulse(joinedDeviceIDs:cameToLife:)`; the
+/// overlay only renders the bead/bloom. These tests pin the overlay's render
+/// contract (departure mapping, guards, settled model, Reduce Motion removal,
+/// mid-flight cancel, burst coalescing) against a real windowed overlay with
+/// stub providers — no graphics context, no PopoverController. The FIRING
+/// decision itself is controller-side: `RailConnectPulseControllerTests`.
 @MainActor
 @Suite final class RailConnectPulseTests: IsolatedSuite {
-
-    // MARK: Pure firing decision
-
-    private typealias Signature = BusRailOverlayView.EnergySignature
-
-    @Test func theFirstDrawNeverFires() {
-        #expect(!BusRailOverlayView.connectPulseFires(
-            previous: nil, current: Signature(gold: true, memberStops: 3)),
-            "no baseline yet ⇒ the first render is settled (no transient fires on open)")
-    }
-
-    @Test func armingFires() {
-        #expect(BusRailOverlayView.connectPulseFires(
-            previous: Signature(gold: false, memberStops: 1),
-            current: Signature(gold: true, memberStops: 1)),
-            "the spine arming is a gain in reach")
-    }
-
-    @Test func aNewMemberOnAnArmedSpineFires() {
-        #expect(BusRailOverlayView.connectPulseFires(
-            previous: Signature(gold: true, memberStops: 1),
-            current: Signature(gold: true, memberStops: 2)),
-            "a new room going live on an armed spine is a gain in reach")
-    }
-
-    @Test func lossAndIdleGainsStayQuiet() {
-        #expect(!BusRailOverlayView.connectPulseFires(
-            previous: Signature(gold: true, memberStops: 2),
-            current: Signature(gold: true, memberStops: 1)),
-            "a room leaving is not a surge")
-        #expect(!BusRailOverlayView.connectPulseFires(
-            previous: Signature(gold: false, memberStops: 0),
-            current: Signature(gold: false, memberStops: 1)),
-            "a member added to an IDLE wire carries no signal yet")
-        #expect(!BusRailOverlayView.connectPulseFires(
-            previous: Signature(gold: true, memberStops: 2),
-            current: Signature(gold: true, memberStops: 2)),
-            "no change, no pulse")
-    }
-
-    @Test func aDormantPlanReadsAsCarryingNothing() {
-        let plan = RailPlan.resolve(RailPlan.Input(
-            gold: true, ringCenterY: 300, ringCenterX: 40, ringRadius: 15,
-            landingDrop: 16, originSectionCollapsed: false, originClipBand: nil,
-            originHeaderY: nil, deviceSectionCollapsed: false, deviceFloorY: nil,
-            dormant: true,
-            stops: [.init(y: 200, node: .member)]))
-        let signature = BusRailOverlayView.energizeSignature(of: plan)
-        #expect(!signature.gold, "a dormant wire is not live, whatever `gold` says")
-        #expect(signature.memberStops == 0, "…and reaches nothing")
-    }
 
     // MARK: Windowed overlay behavior
 
@@ -83,6 +33,7 @@ import Testing
     private final class StubRow: RailNodeProviding {
         let view: NSView
         var node: MembershipBusView.Node?
+        var railDeviceID: String?
         init(view: NSView, node: MembershipBusView.Node?) {
             self.view = view
             self.node = node
@@ -101,7 +52,10 @@ import Testing
     }
 
     private func makeScene(nodes: [MembershipBusView.Node]) -> Scene {
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 300, height: 400),
+        // Parked far outside every screen: the two tests below need a real
+        // render-server-backed layer tree (an ordered-in window), and a test
+        // must never put anything on the developer's actual screen.
+        let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: 300, height: 400),
                               styleMask: .borderless, backing: .buffered, defer: false)
         let content = window.contentView!
         var rows: [StubRow] = []
@@ -126,24 +80,10 @@ import Testing
         return Scene(window: window, overlay: overlay, hook: hook, rows: rows)
     }
 
-    /// The reconcile defers its layer mutation out of the draw pass — spin the
-    /// main run loop briefly so the deferred mount lands.
+    /// `playConnectPulse` defers its whole body out of the calling turn — spin
+    /// the main run loop briefly so the deferred mount lands.
     private func drainMainQueue() {
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-    }
-
-    @Test func theRealDrawPathFiresThePulse() {
-        // Through `display()` → `draw(_:)`, not the `test_reconcileEnergize`
-        // shortcut — the live app has no other route into the reconcile.
-        let scene = makeScene(nodes: [.member])
-        scene.overlay.needsDisplay = true
-        scene.overlay.display()                       // baseline: idle
-        scene.hook.gold = true
-        scene.overlay.needsDisplay = true
-        scene.overlay.display()
-        drainMainQueue()
-        #expect(scene.overlay.test_isConnectPulsing,
-                "arming must fire through the real draw pass, not just the test seam")
     }
 
     @Test func thePulsePresentationActuallyAnimates() throws {
@@ -151,12 +91,10 @@ import Testing
         // presentation tree never commits there — skip rather than lie.
         try #require(NSScreen.main != nil, "needs a window server")
         let scene = makeScene(nodes: [.member])
-        scene.window.orderFrontRegardless()
-        scene.overlay.needsDisplay = true
-        scene.overlay.display()                       // baseline: idle
+        scene.window.orderFrontRegardless()          // off-screen; see `makeScene`
+        defer { scene.window.orderOut(nil) }
         scene.hook.gold = true
-        scene.overlay.needsDisplay = true
-        scene.overlay.display()
+        scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         try #require(scene.overlay.test_isConnectPulsing)
         RunLoop.main.run(until: Date().addingTimeInterval(0.15))
@@ -165,42 +103,11 @@ import Testing
                 "mid-flight the PRESENTATION must differ from the absorbed model — \(String(describing: presented))")
     }
 
-    @Test func aReopenNeverDiffsAgainstTheStalePreCloseBaseline() {
-        // The popover reuses its view across open/close, so the overlay must
-        // forget its baseline when the window orders out — otherwise a room
-        // that joined WHILE CLOSED fires a pulse the instant the panel reopens,
-        // an animation that follows nothing.
-        let scene = makeScene(nodes: [.member, .nonMember])
-        scene.hook.gold = true
-        scene.overlay.test_reconcileEnergize()          // baseline: armed, 1 room
-        drainMainQueue()
-
-        // Popover closes (the window orders out)…
-        NotificationCenter.default.post(
-            name: NSWindow.didChangeOcclusionStateNotification, object: scene.window)
-        // …a second room joins while closed, then the panel reopens and draws.
-        scene.rows[1].node = .member
-        scene.overlay.test_reconcileEnergize()
-        drainMainQueue()
-        #expect(!scene.overlay.test_isConnectPulsing,
-                "the first draw after a reopen is settled — no pulse from a stale diff")
-
-        // A join AFTER that settled draw is a live transition again.
-        let extraRow = NSView(frame: NSRect(x: 10, y: 160, width: 20, height: 20))
-        scene.window.contentView!.addSubview(extraRow)
-        scene.overlay.deviceRows = scene.rows + [StubRow(view: extraRow, node: .member)]
-        scene.overlay.test_reconcileEnergize()
-        drainMainQueue()
-        #expect(scene.overlay.test_isConnectPulsing,
-                "…and pulses normally once the reopened panel is the baseline")
-    }
-
     @Test func anOrderedOutWindowNeverPulses() {
         let scene = makeScene(nodes: [.member])
-        scene.overlay.test_windowVisibleOverride = nil  // read the real window
-        scene.overlay.test_reconcileEnergize()          // baseline: idle
+        scene.overlay.test_windowVisibleOverride = nil  // read the real, never-ordered-in window
         scene.hook.gold = true
-        scene.overlay.test_reconcileEnergize()
+        scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         #expect(!scene.overlay.test_isConnectPulsing,
                 "a window that is not on screen has nothing to animate")
@@ -223,15 +130,14 @@ import Testing
     }
 
     @Test func aJoiningRoomDepartsFromItsOwnNode() throws {
-        // Three rows; the MIDDLE one joins an armed spine — the pulse must
-        // depart from its spot on the wire, not the wire's end.
-        let scene = makeScene(nodes: [.member, .nonMember, .member])
+        // Three member rows; the MIDDLE one joined — the pulse must depart from
+        // its spot on the wire (mapped via `railDeviceID`), not the wire's end.
+        let scene = makeScene(nodes: [.member, .member, .member])
+        scene.rows[0].railDeviceID = "top"
+        scene.rows[1].railDeviceID = "middle"
+        scene.rows[2].railDeviceID = "bottom"
         scene.hook.gold = true
-        scene.overlay.test_reconcileEnergize()          // baseline: armed, rooms 0+2
-        drainMainQueue()
-
-        scene.rows[1].node = .member
-        scene.overlay.test_reconcileEnergize()
+        scene.overlay.playConnectPulse(joinedDeviceIDs: ["middle"], cameToLife: false)
         drainMainQueue()
         let departure = try #require(scene.overlay.test_lastPulseDeparture)
         #expect(departure < 0.95,
@@ -239,15 +145,25 @@ import Testing
         #expect(departure > 0.05, "…and not from the ring either")
     }
 
-    @Test func armingDepartsFromTheTerminus() throws {
+    @Test func comingToLifeDepartsFromTheTerminus() throws {
         let scene = makeScene(nodes: [.member, .member])
-        scene.overlay.test_reconcileEnergize()          // baseline: idle
         scene.hook.gold = true
-        scene.overlay.test_reconcileEnergize()
+        scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         let departure = try #require(scene.overlay.test_lastPulseDeparture)
         #expect(departure == 1,
-                "arming lights every room at once — the pulse runs the whole wire")
+                "the wire coming to life lights every room at once — the pulse runs the whole wire")
+    }
+
+    @Test func anUnmappedJoinFallsBackToTheTerminus() throws {
+        // No row carries this id (`StubRow.railDeviceID` defaults to `nil`) —
+        // the departure falls back to the whole wire (`.max() ?? 1`).
+        let scene = makeScene(nodes: [.member, .member])
+        scene.hook.gold = true
+        scene.overlay.playConnectPulse(joinedDeviceIDs: ["never-mounted"], cameToLife: false)
+        drainMainQueue()
+        let departure = try #require(scene.overlay.test_lastPulseDeparture)
+        #expect(departure == 1, "an id with no matching row departs from the terminus")
     }
 
     // MARK: Arrival (the ring receives the bead)
@@ -275,14 +191,14 @@ import Testing
     }
 
     @Test func aCompletedPulseHandsOffToTheRing() {
-        // On-glass window: an undisplayed window's layer tree never starts its
+        // Ordered-in window: an undisplayed window's layer tree never starts its
         // CA timeline, so the bead's completion (the bloom's trigger) would
         // never fire — same requirement as the presentation probe above.
         let scene = makeScene(nodes: [.member])
-        scene.window.orderFrontRegardless()
-        scene.overlay.test_reconcileEnergize()          // baseline: idle
+        scene.window.orderFrontRegardless()          // off-screen; see `makeScene`
+        defer { scene.window.orderOut(nil) }
         scene.hook.gold = true
-        scene.overlay.test_reconcileEnergize()
+        scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         #expect(scene.overlay.test_isConnectPulsing)
         let received = polls(within: 2.5) { scene.hook.receivedPulses == 1 }
@@ -293,9 +209,8 @@ import Testing
 
     @Test func aCancelledPulseNeverReachesTheRing() {
         let scene = makeScene(nodes: [.member])
-        scene.overlay.test_reconcileEnergize()          // baseline: idle
         scene.hook.gold = true
-        scene.overlay.test_reconcileEnergize()
+        scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         #expect(scene.overlay.test_isConnectPulsing)
 
@@ -374,47 +289,55 @@ import Testing
         #expect(!ring.test_isReceivingRailPulse, "no window, nothing to acknowledge")
     }
 
-    @Test func theFirstReconcileOnlyStampsTheBaseline() {
-        let scene = makeScene(nodes: [.member])
-        scene.hook.gold = true
-        scene.overlay.test_reconcileEnergize()
-        drainMainQueue()
-        #expect(!scene.overlay.test_isConnectPulsing,
-                "an armed wire on first render is settled state, not a transition")
-    }
+    // MARK: The bead's contract
 
     @Test func armingMountsThePulseWithASettledModel() {
         let scene = makeScene(nodes: [.member, .nonMember])
-        scene.overlay.test_reconcileEnergize()          // baseline: idle
         scene.hook.gold = true
-        scene.overlay.test_reconcileEnergize()
+        scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
-        #expect(scene.overlay.test_isConnectPulsing, "arming fires the pulse")
+        #expect(scene.overlay.test_isConnectPulsing, "the connect fires the pulse")
         let model = scene.overlay.test_pulseModelStrokeWindow
         #expect(model?.start == 0 && model?.end == 0,
                 "the pulse's MODEL stays fully absorbed (invisible) — only the presentation animates, so cacheDisplay is deterministic mid-flight")
     }
 
-    @Test func aNewMemberSegmentFiresOnALiveWire() {
-        let scene = makeScene(nodes: [.member, .nonMember])
+    @Test func aSingleJoinMountsTheBead() {
+        let scene = makeScene(nodes: [.member, .member])
+        scene.rows[1].railDeviceID = "joined"
         scene.hook.gold = true
-        scene.overlay.test_reconcileEnergize()          // baseline: armed, one member
-        drainMainQueue()
-        #expect(!scene.overlay.test_isConnectPulsing)
-
-        scene.rows[1].node = .member
-        scene.overlay.test_reconcileEnergize()
+        scene.overlay.playConnectPulse(joinedDeviceIDs: ["joined"], cameToLife: false)
         drainMainQueue()
         #expect(scene.overlay.test_isConnectPulsing,
-                "a second room going live surges the wire again")
+                "a room going live on an armed spine mounts the bead")
+    }
+
+    @Test func aStagedMultiRoomConnectCoalescesIntoOnePulse() {
+        // A fresh build's first connect lands its rooms across several updates
+        // as the handshake settles. A gain that arrives while a bead is already
+        // in flight is coalesced: ONE pulse travels, not one restart per room.
+        let scene = makeScene(nodes: [.member, .member])
+        scene.rows[0].railDeviceID = "room1"
+        scene.rows[1].railDeviceID = "room2"
+        scene.hook.gold = true
+        scene.overlay.playConnectPulse(joinedDeviceIDs: ["room1"], cameToLife: true)
+        drainMainQueue()
+        #expect(scene.overlay.test_isConnectPulsing, "the connect fires a pulse")
+        #expect(scene.overlay.test_pulsesStarted == 1)
+        #expect(scene.overlay.test_lastPulseDeparture == 1,
+                "the wire coming to life runs end to end from the terminus, not from one room's node")
+
+        scene.overlay.playConnectPulse(joinedDeviceIDs: ["room2"], cameToLife: false)
+        drainMainQueue()
+        #expect(scene.overlay.test_pulsesStarted == 1,
+                "the second room landing mid-flight does NOT restart the pulse — one coalesced pulse, no stutter")
     }
 
     @Test func reduceMotionRemovesThePulseEntirely() {
         let scene = makeScene(nodes: [.member])
         scene.overlay.test_reduceMotionOverride = true
-        scene.overlay.test_reconcileEnergize()          // baseline: idle
         scene.hook.gold = true
-        scene.overlay.test_reconcileEnergize()
+        scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         #expect(!scene.overlay.test_isConnectPulsing,
                 "Reduce Motion snaps to the settled wire — no travelling pulse")
@@ -422,9 +345,8 @@ import Testing
 
     @Test func aMidFlightReduceMotionToggleCancelsThePulse() {
         let scene = makeScene(nodes: [.member])
-        scene.overlay.test_reconcileEnergize()          // baseline: idle
         scene.hook.gold = true
-        scene.overlay.test_reconcileEnergize()
+        scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         #expect(scene.overlay.test_isConnectPulsing)
 
@@ -438,9 +360,8 @@ import Testing
 
     @Test func anAccentDialChangeCancelsThePulse() {
         let scene = makeScene(nodes: [.member])
-        scene.overlay.test_reconcileEnergize()          // baseline: idle
         scene.hook.gold = true
-        scene.overlay.test_reconcileEnergize()
+        scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         #expect(scene.overlay.test_isConnectPulsing)
 
@@ -450,14 +371,47 @@ import Testing
                 "the pulse's stamped CGColor can't re-tint — it drops and the settled draw re-resolves")
     }
 
+    @Test func aMidFlightResizeCancelsThePulse() {
+        let scene = makeScene(nodes: [.member])
+        scene.hook.gold = true
+        scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
+        drainMainQueue()
+        #expect(scene.overlay.test_isConnectPulsing)
+
+        scene.overlay.setFrameSize(NSSize(width: scene.overlay.frame.width,
+                                          height: scene.overlay.frame.height + 40))
+        #expect(!scene.overlay.test_isConnectPulsing,
+                "a reflow mid-flight slides the wire out from under the bead — it drops rather than flying a stale path")
+    }
+
+    @Test func aSameSizeLayoutPassNeverCancelsThePulse() {
+        let scene = makeScene(nodes: [.member])
+        scene.hook.gold = true
+        scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
+        drainMainQueue()
+        #expect(scene.overlay.test_isConnectPulsing)
+
+        scene.overlay.setFrameSize(scene.overlay.frame.size)
+        #expect(scene.overlay.test_isConnectPulsing,
+                "layout passes re-set an unchanged frame constantly — only a real size change cancels")
+    }
+
     @Test func aDormantWireNeverPulses() {
         let scene = makeScene(nodes: [.member])
         scene.overlay.dormant = true
-        scene.overlay.test_reconcileEnergize()          // baseline
         scene.hook.gold = true
-        scene.overlay.test_reconcileEnergize()
+        scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
         drainMainQueue()
         #expect(!scene.overlay.test_isConnectPulsing,
                 "a dormant wire feeds nothing — there is no current to show arriving")
+    }
+
+    @Test func anIdleWireNeverPulses() {
+        let scene = makeScene(nodes: [.member])
+        scene.hook.gold = false
+        scene.overlay.playConnectPulse(joinedDeviceIDs: [], cameToLife: true)
+        drainMainQueue()
+        #expect(!scene.overlay.test_isConnectPulsing,
+                "an idle (un-armed) wire carries nothing — no pulse")
     }
 }

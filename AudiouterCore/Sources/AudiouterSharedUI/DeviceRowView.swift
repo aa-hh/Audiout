@@ -71,6 +71,13 @@ public final class DeviceRowView: NSView {
         /// moved into the sync drawer, whose ⌥-click is the other route).
         /// Default no-op for hosts without the wizard.
         func deviceRowDidRequestAlignmentWizard(_ row: DeviceRowView)
+        /// The user asked for this speaker's Equalizer — the "Equalizer…"
+        /// context-menu item, or a click on the row ICON, which pops the same
+        /// menu. The host DEEP-LINKS to the Groups screen's detail pane; the
+        /// row itself edits no tone and holds no tone state (owner decision
+        /// 2026-08-22: EQ never lives on the Mixer). Default no-op for hosts
+        /// with nowhere to link to.
+        func deviceRowDidRequestEqualizer(_ row: DeviceRowView)
         /// The user clicked this Bluetooth row's SYNC value chip
         /// (PLAN-BT-SYNC-DRAWER T6). The chip is READ-ONLY — it neither edits
         /// nor clamps a trim; it asks the host to open (or, on a second
@@ -169,7 +176,7 @@ public final class DeviceRowView: NSView {
     /// mirrors `selectionDimmed` for a bus row, where dimming is a node TINT, not
     /// the checkbox alpha (§4.7 "dim via tint … checkbox at full alpha").
     private var busNodeDimmed = false
-    private let iconView = NSImageView()
+    private let iconView = MenuTriggerImageView()
     /// The connection **halo ring** (Warm Signal v3 §3.2, 2026-07-22): a ring
     /// drawn AROUND the icon carrying the connection lifecycle, driven off
     /// `device.connectionState` alone (teal retired — no routing rung on the
@@ -195,8 +202,8 @@ public final class DeviceRowView: NSView {
     private let nameLabel = NSTextField(labelWithString: "")
     /// The single sublabel line under the name (Warm Signal v4.1 item 3 —
     /// re-scoped from the retired routing ladder): carries ONLY state words now.
-    /// The one remaining rung is the small-caps MUTED token, shown iff the
-    /// device is row-muted (not master-muted) AND neither failed nor
+    /// The one remaining rung is the Muted token, shown iff the device is
+    /// muted (master mute included) AND neither failed nor
     /// unavailable — see ``resolveSublabel()``. Failed/unavailable and the
     /// routing/redirect composite all moved to ``feedStack`` (the FEED column).
     private let statusLabel = NSTextField(labelWithString: "")
@@ -559,6 +566,12 @@ public final class DeviceRowView: NSView {
         // on-icon corner dot carries the connection status instead. (This also
         // covers unsupported/AP1 rows — no accent regardless of stale selection.)
         iconView.contentTintColor = Tokens.Color.secondaryLabel
+        // The icon is the visible door to the row's menu — armed only when
+        // there IS a menu (This Mac has none, so its icon stays a picture).
+        iconView.onPress = buildContextMenu() == nil
+            ? nil
+            : { [weak self] in self?.presentIconMenu() }
+        iconView.setAccessibilityLabel("Speaker options")
         nameLabel.stringValue = device.name
         nameLabel.textColor = rowTextColor
         alphaValue = 1.0
@@ -890,10 +903,10 @@ public final class DeviceRowView: NSView {
 
     /// On a **bus row** the sublabel carries ONLY state words now (Warm Signal
     /// v4.1 item 3 — the routing/failure content that used to live here moved
-    /// to the FEED column, ``updateFeedText()``): a ROW-muted (never master-
-    /// muted — the Main Out pill carries that) device that is neither failed
-    /// nor unavailable shows the small-caps MUTED token alone; every other
-    /// state hides the sublabel. A **non-bus row** (mixer window / a generic
+    /// to the FEED column, ``updateFeedText()``): a muted device (master mute
+    /// included — a muted row always says so, Alec 2026-08-23) that is
+    /// neither failed nor unavailable shows the Muted token alone; every
+    /// other state hides the sublabel. A **non-bus row** (mixer window / a generic
     /// caller) has no FEED column to fall back on — it keeps the FULL legacy
     /// ladder (``resolveLegacySublabel()``) so that host doesn't silently lose
     /// failed/unavailable/routing information v4.1 never gave it anywhere else
@@ -907,7 +920,12 @@ public final class DeviceRowView: NSView {
             hideSublabel()
         } else if !device.isAvailable {
             hideSublabel()
-        } else if device.isMuted && !isMasterMuted {
+        } else if device.isMuted {
+            // A muted row always says so (Alec, 2026-08-23) — including under
+            // master mute, which is realized by muting every member. Replaces
+            // matrix §3.6's "the Main Out pill carries it" suppression, which
+            // read as the label vanishing when the muted row was the only
+            // member.
             showMutedSublabel()
         } else {
             hideSublabel()
@@ -928,12 +946,13 @@ public final class DeviceRowView: NSView {
         } else if !device.isAvailable {
             showSublabel("Unavailable", color: Tokens.Color.tertiaryLabel)
         } else if let routing = legacyRoutingLine() {
-            // S3 (spec §3.5): a ROW-muted device prepends the small-caps MUTED
-            // token to its EXISTING feed sublabel — never to a single-line row
-            // (this branch only runs when a sublabel already exists, so the
-            // row height is untouched — R7 no-reflow, this host only). Master
-            // mute adds NO token (matrix §3.6: the Main Out pill carries it).
-            if device.isMuted && !isMasterMuted {
+            // S3 (spec §3.5): a ROW-muted device prepends the Muted token to
+            // its EXISTING feed sublabel — never to a single-line row (this
+            // branch only runs when a sublabel already exists, so the row
+            // height is untouched — R7 no-reflow, this host only). A muted
+            // row always says so (Alec, 2026-08-23), master mute included —
+            // see ``resolveSublabel``.
+            if device.isMuted {
                 showLegacyMutedSublabel(feeds: routing)
             } else {
                 showSublabel(routing, color: Tokens.Color.secondaryLabel)
@@ -955,31 +974,28 @@ public final class DeviceRowView: NSView {
         return tokens.joined(separator: Self.routingTokenSeparator)
     }
 
-    /// Show the sublabel as the standalone small-caps `MUTED` token (spec §2
-    /// micro-label voice — SF Mono bold, tracked, uppercase) — the bus-row
-    /// case, where the feed list lives in its own column so MUTED needs no
-    /// existing line to piggyback on.
+    /// Show the sublabel as the standalone `Muted` token (micro-label voice —
+    /// semibold, sentence case) — the bus-row case, where the feed list lives
+    /// in its own column so the token needs no existing line to piggyback on.
     private func showMutedSublabel() {
         statusLabel.isHidden = false
         statusLabel.attributedStringValue = NSAttributedString(
-            string: "MUTED",
+            string: "Muted",
             attributes: [.font: Tokens.Font.microLabel,
-                         .kern: Tokens.Font.microLabelKern,
                          .foregroundColor: Tokens.Color.secondaryLabel])
         statusLabel.textColor = Tokens.Color.secondaryLabel
         applyNameStackLayout(twoLine: true)
     }
 
-    /// Show the sublabel as `MUTED · <feeds>` — the non-bus host's own rung,
-    /// unchanged from pre-v4.1: the leading MUTED token in the micro-label
+    /// Show the sublabel as `Muted · <feeds>` — the non-bus host's own rung,
+    /// unchanged from pre-v4.1: the leading Muted token in the micro-label
     /// voice with the feed list continuing in the sublabel's own 10 pt voice.
     private func showLegacyMutedSublabel(feeds: String) {
         statusLabel.isHidden = false
         let bodyFont = statusLabel.font ?? .systemFont(ofSize: 10)
         let composed = NSMutableAttributedString(
-            string: "MUTED",
+            string: "Muted",
             attributes: [.font: Tokens.Font.microLabel,
-                         .kern: Tokens.Font.microLabelKern,
                          .foregroundColor: Tokens.Color.secondaryLabel])
         composed.append(NSAttributedString(
             string: Self.routingTokenSeparator + feeds,
@@ -1156,7 +1172,7 @@ public final class DeviceRowView: NSView {
             let result = NSMutableAttributedString()
             if prefixTag, let tag {
                 result.append(NSAttributedString(string: tag + " ", attributes: [
-                    .font: Tokens.Font.microLabel, .kern: Tokens.Font.microLabelKern,
+                    .font: Tokens.Font.microLabel,
                     .foregroundColor: chromeColor,
                 ]))
             }
@@ -1184,7 +1200,7 @@ public final class DeviceRowView: NSView {
             let result = NSMutableAttributedString()
             if prefixTag, let tag {
                 result.append(NSAttributedString(string: tag + " ", attributes: [
-                    .font: Tokens.Font.microLabel, .kern: Tokens.Font.microLabelKern,
+                    .font: Tokens.Font.microLabel,
                     .foregroundColor: chromeColor,
                 ]))
             }
@@ -1857,31 +1873,70 @@ public final class DeviceRowView: NSView {
         }
     }
 
-    // MARK: Context menu (BT rows)
+    // MARK: Context menu
     //
-    // The discoverable route to the guided wizard — ⌥-click alone is
-    // invisible. AppKit calls `menu(for:)` for a right-click landing anywhere
-    // in the row that no subview's own menu claims (the `AppRowView` idiom).
+    // The row's one menu, reached two ways: a right-click anywhere in the row
+    // that no subview's own menu claims (AppKit's `menu(for:)`, the
+    // `AppRowView` idiom — so VoiceOver's "show menu" shares the path), and a
+    // click on the row ICON (`presentIconMenu`), which is the visible door for
+    // anyone who never right-clicks. Both build the SAME menu, so the two can
+    // never drift.
+    //
+    // Order: "Equalizer…" first (every speaker has tone), then "Align
+    // speaker…" (Bluetooth only). No separators — two items don't need
+    // grouping. This Mac gets NEITHER, so its menu would be empty: the row
+    // returns no menu at all and its icon stays inert, rather than offering a
+    // door onto nothing.
+
+    /// This Mac is not an Equalizer target — per-device EQ covers AirPlay and
+    /// Bluetooth only, and the backend rejects the local id.
+    private var supportsEqualizer: Bool { !device.isLocalDevice && device.kind != .localMac }
 
     public override func menu(for event: NSEvent) -> NSMenu? {
-        guard showsSyncControls else { return super.menu(for: event) }
-        return buildContextMenu()
+        return buildContextMenu() ?? super.menu(for: event)
     }
 
-    private func buildContextMenu() -> NSMenu {
+    /// The row's menu, or `nil` when it would be empty.
+    private func buildContextMenu() -> NSMenu? {
         let menu = NSMenu()
         menu.autoenablesItems = false
-        let align = NSMenuItem(title: "Align speaker…",
-                               action: #selector(alignSpeakerMenuItemSelected(_:)),
-                               keyEquivalent: "")
-        align.target = self
-        align.isEnabled = device.isAvailable
-        menu.addItem(align)
+        if supportsEqualizer {
+            let eq = NSMenuItem(title: "Equalizer…",
+                                action: #selector(equalizerMenuItemSelected(_:)),
+                                keyEquivalent: "")
+            eq.target = self
+            menu.addItem(eq)
+        }
+        if showsSyncControls {
+            let align = NSMenuItem(title: "Align speaker…",
+                                   action: #selector(alignSpeakerMenuItemSelected(_:)),
+                                   keyEquivalent: "")
+            align.target = self
+            align.isEnabled = device.isAvailable
+            menu.addItem(align)
+        }
+        return menu.numberOfItems == 0 ? nil : menu
+    }
+
+    /// Pop the row's menu from the ICON. The on-screen `popUp` BLOCKS, so it is
+    /// `HeadlessRuntime`-gated exactly like the popover's "+" menu; the built
+    /// menu is returned either way so tests dispatch through real
+    /// `performActionForItem(at:)` against the very menu a user would see.
+    @discardableResult
+    private func presentIconMenu() -> NSMenu? {
+        guard let menu = buildContextMenu() else { return nil }
+        if !HeadlessRuntime.isActive {
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: 0), in: iconView)
+        }
         return menu
     }
 
     @objc private func alignSpeakerMenuItemSelected(_ sender: NSMenuItem) {
         delegate?.deviceRowDidRequestAlignmentWizard(self)
+    }
+
+    @objc private func equalizerMenuItemSelected(_ sender: NSMenuItem) {
+        delegate?.deviceRowDidRequestEqualizer(self)
     }
 
     // MARK: Actions
@@ -2388,12 +2443,23 @@ public final class DeviceRowView: NSView {
     /// while disabled, exactly like a live click).
     public func test_fireSyncChipClick() { syncChipButton.performClick(nil) }
 
-    /// The row's context menu exactly as `menu(for:)` builds it — `nil` on a
-    /// non-sync row. Tests dispatch items via `performActionForItem(at:)`
-    /// (real AppKit menu dispatch), never the delegate shortcut.
+    /// The row's context menu exactly as `menu(for:)` builds it — `nil` when
+    /// the row offers nothing (This Mac). Tests dispatch items via
+    /// `performActionForItem(at:)` (real AppKit menu dispatch), never the
+    /// delegate shortcut.
     public func test_contextMenu() -> NSMenu? {
-        showsSyncControls ? buildContextMenu() : nil
+        buildContextMenu()
     }
+
+    /// A click on the row ICON, through the same builder the live click uses.
+    /// `nil` when the icon is inert.
+    public func test_clickIcon() -> NSMenu? { presentIconMenu() }
+
+    /// Whether the icon is currently armed as a menu door.
+    public var test_iconIsMenuTrigger: Bool { iconView.onPress != nil }
+
+    /// The icon's spoken identity while it is a button.
+    public var test_iconAXLabel: String? { iconView.accessibilityLabel() }
 
     /// The chip's spoken identity/value/expanded state and its hover tooltip.
     public var test_syncChipAXLabel: String? { syncChipButton.accessibilityLabel() }
@@ -2576,6 +2642,11 @@ public final class DeviceRowView: NSView {
         // `nameLabel` lives inside `identityStack` now (v4 §Call-1), so its own
         // frame is in the stack's coordinates — convert to this row's space.
         addCursorRect(convert(nameLabel.bounds, from: nameLabel), cursor: .pointingHand)
+        // The icon gets the same invitation, but only while it is armed — an
+        // inert icon that changes the cursor promises a click it won't honour.
+        if iconView.onPress != nil {
+            addCursorRect(convert(iconView.bounds, from: iconView), cursor: .pointingHand)
+        }
     }
 
     /// Cursor rects are frame-snapshotted by AppKit, not live — re-establish
@@ -2921,6 +2992,7 @@ public final class DeviceRowView: NSView {
 extension DeviceRowView: RailNodeProviding {
     /// The node this row renders, or `nil` when it hosts no bus.
     public var railNode: MembershipBusView.Node? { busActive ? busView.test_node : nil }
+    public var railDeviceID: String? { device.id }
     /// The node is centred on the row's own centre-y.
     public var railNodeView: NSView { self }
     public var railNodeBounds: NSRect { bounds }
@@ -3005,6 +3077,9 @@ public extension DeviceRowView.Delegate {
     func deviceRow(_ row: DeviceRowView, didToggleSyncDrawerFor id: String) {}
     /// Default no-op — only the popover hosts the alignment wizard.
     func deviceRowDidRequestAlignmentWizard(_ row: DeviceRowView) {}
+    /// Default no-op — only the popover can deep-link to the Groups screen's
+    /// Equalizer page.
+    func deviceRowDidRequestEqualizer(_ row: DeviceRowView) {}
     /// Default no-op — only the popover offers the live-removal undo.
     func deviceRowDidRequestUndoRemoval(_ row: DeviceRowView) {}
 }

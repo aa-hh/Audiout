@@ -41,11 +41,12 @@ public enum Telemetry {
     /// (bind/rebind/session-reset + device-selection decisions),
     /// `localPlayback` (the local `AVAudioEngine` sink: engine start/config-
     /// change recovery, per-app player attach, and the synced-local session
-    /// anchor — `LocalPlaybackEngine`/`SyncedLocalSink`), and `lifecycle`
+    /// anchor — `LocalPlaybackEngine`/`SyncedLocalSink`), `lifecycle`
     /// (process/session boundaries — currently just the launch banner
-    /// emitted below).
+    /// emitted below), and `surface` (the one-surface window's frame
+    /// decisions).
     public enum Category: String, Sendable {
-        case permission, captureWS, capturePA, airplay, localPlayback, lifecycle
+        case permission, captureWS, capturePA, airplay, localPlayback, lifecycle, surface
     }
 
     /// Non-blocking. Formats `{"ts":...,"sid":...,"cat":...,"evt":...,

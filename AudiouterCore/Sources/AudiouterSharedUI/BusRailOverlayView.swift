@@ -31,20 +31,17 @@ import AppKit
 /// vertical rail never collides with a title.
 ///
 /// **Connect pulse (Warm Signal v4.1 item 9, reshaped 2026-08-12 — "a pulse
-/// along the rail towards the main out"):** when the wire GAINS gold reach —
-/// the spine arms, or a new member segment goes live on an armed spine — a
-/// short bright `glow` window departs from the JOINING ROOM's own node (the
-/// whole wire's terminus when the spine arms), travels up the wire at constant
+/// along the rail towards the main out"):** the HOST detects the model
+/// transition — a device becoming a connected member of the active Main Out
+/// target (`PopoverController.update(devices:)`'s connected-member diff) — and
+/// calls ``playConnectPulse(joinedDeviceIDs:cameToLife:)``. A short bright
+/// `glow` window departs from the JOINING ROOM's own node (the whole wire's
+/// terminus when the wire comes to life), travels up the wire at constant
 /// speed, and is absorbed into the Main Audio ring: the room announcing itself
-/// up the bus. It completes the connect story the row already tells — dashed
-/// breathing node while the handshake runs (`.connecting`), then this pulse
-/// the moment the node lands `.member`. (The first cut was a dim ember film
-/// retreating downward; live it read as nothing on connect and a plain
-/// dim-out on disconnect — inverted. A bright pulse over the gold wire is
-/// unmissable on connect, and a loss animates nothing.) One-shot,
-/// self-removing (nothing runs at rest), gone entirely under Reduce Motion,
-/// and never fired by the first draw in a window (no transient fires on open,
-/// spec §6).
+/// up the bus. The overlay only RENDERS the bead/bloom — it never infers the
+/// firing from its own draws, so a layout-only change (open, rebuild,
+/// collapse/expand) cannot fire it by construction. One-shot, self-removing
+/// (nothing runs at rest), gone entirely under Reduce Motion.
 ///
 /// **Determinism:** the settled wire is steady drawing computed from settled
 /// frames, and the pulse follows the settled-model-layer contract
@@ -76,6 +73,15 @@ public final class BusRailOverlayView: NSView {
     /// WHOLE signal path draws in one quiet tone rather than a per-row patchwork.
     /// Node fills stay per-row; this is the wire's tone alone.
     public var dormant = false
+    /// The device section the rail is cut at is a collapsed SUBSECTION whose rows
+    /// have been DROPPED from the model (`PopoverController.dropSubsectionRowModel`),
+    /// so a member hidden inside it is absent from `deviceRows` and can't be seen
+    /// in the resolved stops. It forces the cut for that case. A CARD collapse
+    /// leaves its rows IN `deviceRows` (clipped by the fold), so it stays `false`
+    /// and the cut is judged from the clipped rows directly — which is what keeps
+    /// a card collapse from growing a tail past its lowest member into the
+    /// non-member rows it is still hiding.
+    public var deviceSectionRowsDropped = false
 
     /// The transient connect pulse currently mid-flight, if any (test-visible
     /// through ``test_isConnectPulsing``; nothing survives the pulse).
@@ -95,14 +101,6 @@ public final class BusRailOverlayView: NSView {
     /// if any (mounted by the bead's completion; dies with any cancel). An
     /// uncollapsed origin has a real ring, which blooms itself.
     private var arrivalLayer: CAShapeLayer?
-    /// The last drawn plan's energize signature. `nil` = no baseline yet, so the
-    /// next draw stamps one WITHOUT firing — the first render in a window is
-    /// always settled (no transient fires on open, spec §6).
-    private var lastEnergy: EnergySignature?
-    /// The last drawn plan's member-stop y positions — diffed against the next
-    /// draw's to name WHICH room just joined, so the pulse departs from its
-    /// node rather than the wire's end.
-    private var lastMemberYs: [CGFloat] = []
 
     public init() {
         super.init(frame: .zero)
@@ -135,40 +133,20 @@ public final class BusRailOverlayView: NSView {
         needsDisplay = true
     }
 
-    /// A (re)mount renders settled: the baseline resets so the first draw in a
-    /// window can never read as a transition, and an in-flight pulse from the
-    /// previous mount dies with it.
+    /// A remount kills an in-flight pulse from the previous mount (the
+    /// `HaloRingView` contract's remount-cancel sibling).
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        settleBaseline()
-        // The popover REUSES this view across open/close — no remount, so this
-        // method never re-fires on a reopen. Watch the window's own visibility
-        // instead: ordering out (popover close) settles the baseline, so the
-        // first draw after a reopen can never diff against a stale pre-close
-        // plan and fire a pulse that follows nothing (spec §6).
-        NotificationCenter.default.removeObserver(
-            self, name: NSWindow.didChangeOcclusionStateNotification, object: nil)
-        if let window {
-            NotificationCenter.default.addObserver(
-                self,
-                selector: #selector(windowOcclusionStateDidChange),
-                name: NSWindow.didChangeOcclusionStateNotification,
-                object: window)
-        }
-    }
-
-    @objc private func windowOcclusionStateDidChange(_ note: Notification) {
-        guard let window = note.object as? NSWindow,
-              !window.occlusionState.contains(.visible) else { return }
-        settleBaseline()
-    }
-
-    /// Forget the transition baseline and kill anything mid-flight: the next
-    /// draw stamps a fresh baseline WITHOUT firing.
-    private func settleBaseline() {
-        lastEnergy = nil
-        lastMemberYs = []
         cancelConnectPulse()
+    }
+
+    /// A bead's path and layer frame are captured at mount, so a resize slides
+    /// the settled wire out from under it — drop the bead rather than let it fly
+    /// a stale path (the RM / accent-dial cancels' sibling).
+    public override func setFrameSize(_ newSize: NSSize) {
+        let sizeChanged = newSize != frame.size
+        super.setFrameSize(newSize)
+        if sizeChanged, pulseLayer != nil || arrivalLayer != nil { cancelConnectPulse() }
     }
 
     /// Reduce Motion turning ON strips an in-flight pulse so the wire lands on
@@ -190,7 +168,6 @@ public final class BusRailOverlayView: NSView {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             drawPlan(plan)
         }
-        reconcileEnergize(with: plan)
     }
 
     // MARK: Geometry resolution (collapse-reactive; pure once converted)
@@ -232,6 +209,7 @@ public final class BusRailOverlayView: NSView {
             originHeaderY: headerTerminusY(of: originSection),
             deviceSectionCollapsed: deviceSection?.railSectionCollapsed ?? false,
             deviceFloorY: clipBand(of: deviceSection)?.lowerBound,
+            dropsHiddenRows: deviceSectionRowsDropped,
             dormant: dormant,
             stops: stops)
         return RailPlan.resolve(input)
@@ -422,76 +400,64 @@ public final class BusRailOverlayView: NSView {
 
     // MARK: Connect pulse (v4.1 item 9, reshaped)
 
-    /// The wire's live-signal signature: whether the spine is carrying gold at
-    /// all, and how many member segments it reaches. A dormant wire (spec §4.7)
-    /// carries nothing, whatever its stops say.
-    struct EnergySignature: Equatable {
-        var gold: Bool
-        var memberStops: Int
-    }
-
-    static func energizeSignature(of plan: RailPlan) -> EnergySignature {
-        EnergySignature(
-            gold: plan.gold && !plan.dormant,
-            memberStops: plan.dormant ? 0 : plan.stops.filter { $0.node == .member }.count)
-    }
-
-    /// Pure firing decision: a pulse plays only when a LIVE wire GAINS reach —
-    /// the spine arms, or a new member segment goes gold on an armed spine.
-    /// Never on the first draw (`previous == nil`), never on an idle/dormant
-    /// wire, never on loss (a room leaving is not a surge).
-    static func connectPulseFires(previous: EnergySignature?, current: EnergySignature) -> Bool {
-        guard let previous, current.gold else { return false }
-        return !previous.gold || current.memberStops > previous.memberStops
-    }
-
     private var reduceMotion: Bool {
         test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
     }
 
-    /// Compare this draw's plan against the last one and fire the pulse on a
-    /// qualifying gain. The layer mutation is deferred out of the draw pass.
-    private func reconcileEnergize(with plan: RailPlan) {
-        let signature = Self.energizeSignature(of: plan)
-        let fires = Self.connectPulseFires(previous: lastEnergy, current: signature)
-        let previousMemberYs = lastMemberYs
-        lastEnergy = signature
-        lastMemberYs = plan.dormant ? [] : plan.stops.filter { $0.node == .member }.map(\.y)
-        guard fires, windowIsVisible, !reduceMotion else { return }
-        let joined = NSBezierPath()
-        for run in wireRuns(for: plan) { joined.append(run.path) }
-        guard !joined.isEmpty else { return }
-        // The pulse departs FROM THE ROOM THAT JUST JOINED (the member stop
-        // with no counterpart in the previous draw — 2 pt tolerance absorbs
-        // AppKit's per-run rounding). Arming has no new room — every member
-        // goes live at once — so the pulse runs the whole wire from its
-        // terminus. Lowest new room wins if several land in one draw.
-        let newYs = lastMemberYs.filter { y in
-            !previousMemberYs.contains { abs($0 - y) < 2 }
-        }
-        let departure = newYs
-            .compactMap { Self.fraction(atY: $0, along: joined) }
-            .max() ?? 1
-        let path = joined.cgPath
-        // Where the bead lands: the wire's own start — the Main Audio ring
-        // (which blooms itself), or the collapsed-origin header dot.
-        let arrival: Arrival
-        switch plan.origin {
-        case .ring:
-            arrival = .ring
-        case let .headerDot(y):
-            arrival = .headerDot(NSPoint(x: PopoverColumnGrid.railGutterCenterX, y: y))
-        }
-        // A run-loop block, not `DispatchQueue.main.async`: it defers the layer
-        // mutation out of the draw pass just the same, and a nested run-loop
-        // spin (tests) can execute it, which the main dispatch queue's
+    /// Play the connect pulse for a MODEL event the host detected: the devices
+    /// in `joinedDeviceIDs` became connected members of the active Main Out
+    /// target. `cameToLife` means the previous member set was empty — the whole
+    /// bus lights up, so the pulse runs end to end from the terminus; otherwise
+    /// it departs from the lowest joined room's own node.
+    public func playConnectPulse(joinedDeviceIDs: Set<String>, cameToLife: Bool) {
+        // The WHOLE body is deferred in one run-loop block — not
+        // `DispatchQueue.main.async`: a run-loop block defers the geometry read
+        // past the current turn's rebuild/refresh + exact-fit layout so the
+        // plan resolves against settled frames, and a nested run-loop spin
+        // (tests) can execute it, which the main dispatch queue's
         // non-reentrancy forbids.
-        // The bead is a fixed LENGTH of light; convert it to this wire's
-        // stroke-fraction space (capped so a very short wire still shows wire
-        // around the bead).
-        let window = min(Self.beadLength / max(Self.length(of: joined), 1), 0.45)
         RunLoop.main.perform { [weak self] in
-            self?.runConnectPulse(along: path, from: departure, window: window, arrivingAt: arrival)
+            guard let self,
+                  self.windowIsVisible,
+                  !self.reduceMotion,
+                  let plan = self.resolvePlan(),
+                  // A dormant or idle wire carries nothing — no pulse.
+                  plan.gold, !plan.dormant else { return }
+            let joined = NSBezierPath()
+            for run in self.wireRuns(for: plan) { joined.append(run.path) }
+            guard !joined.isEmpty else { return }
+            // Where the pulse departs. Coming to life runs the whole wire from
+            // the terminus; a join on a live wire departs from its own node —
+            // lowest new room wins, and an unmounted/unmapped id drops out
+            // (fallback: the terminus).
+            let departure: CGFloat
+            if cameToLife {
+                departure = 1
+            } else {
+                departure = joinedDeviceIDs
+                    .compactMap { id -> CGFloat? in
+                        guard let row = self.deviceRows.first(where: { $0.railDeviceID == id })
+                        else { return nil }
+                        let y = self.convert(row.railNodeBounds, from: row.railNodeView).midY
+                        return Self.fraction(atY: y, along: joined)
+                    }
+                    .max() ?? 1
+            }
+            // Where the bead lands: the wire's own start — the Main Audio ring
+            // (which blooms itself), or the collapsed-origin header dot.
+            let arrival: Arrival
+            switch plan.origin {
+            case .ring:
+                arrival = .ring
+            case let .headerDot(y):
+                arrival = .headerDot(NSPoint(x: PopoverColumnGrid.railGutterCenterX, y: y))
+            }
+            // The bead is a fixed LENGTH of light; convert it to this wire's
+            // stroke-fraction space (capped so a very short wire still shows
+            // wire around the bead).
+            let strokeWindow = min(Self.beadLength / max(Self.length(of: joined), 1), 0.45)
+            self.runConnectPulse(along: joined.cgPath, from: departure,
+                                 strokeWindow: strokeWindow, arrivingAt: arrival)
         }
     }
 
@@ -581,10 +547,22 @@ public final class BusRailOverlayView: NSView {
         case headerDot(NSPoint)
     }
 
-    func runConnectPulse(along path: CGPath, from departure: CGFloat, window: CGFloat, arrivingAt arrival: Arrival) {
+    func runConnectPulse(along path: CGPath, from departure: CGFloat, strokeWindow: CGFloat, arrivingAt arrival: Arrival) {
+        // `window` here is the VIEW's own (`self.window`) — bail if we've left
+        // the window between scheduling this deferred mount and running it. The
+        // guard was dead while the stroke-window arg was ALSO named `window` and
+        // shadowed the property, so `window != nil` compared a CGFloat to nil.
         guard window != nil, !reduceMotion, let hostLayer = layer else { return }
+        // Coalesce a burst into ONE pulse: while a bead is already travelling, a
+        // further gain — the next room of a multi-room connect landing a draw or
+        // two later, as a fresh build's first handshake settles room by room —
+        // does NOT cancel and restart it. That cancel-and-restart WAS the stutter
+        // on a fresh build's first connect: the bead running "up half the way",
+        // twice, before one finally ran out. The one in flight finishes; a
+        // genuinely later connect pulses fresh on its own gain, once this lands.
+        guard pulseLayer == nil else { return }
         test_lastPulseDeparture = departure
-        cancelConnectPulse()
+        test_pulsesStarted += 1
         let bead = CAShapeLayer()
         bead.frame = hostLayer.bounds
         bead.path = path
@@ -614,7 +592,7 @@ public final class BusRailOverlayView: NSView {
         // flight so it would hit zero size exactly at the ring — which
         // extinguished it near the top of the wire before it ever reached the
         // curve, and the bloom then read as an unprovoked explosion.)
-        let clampedWindow = min(window, departure)
+        let clampedWindow = min(strokeWindow, departure)
         let travelDelta = departure - clampedWindow
         let travelTime = max(
             PopoverColumnGrid.railConnectPulseDuration * Double(travelDelta),
@@ -792,6 +770,11 @@ public final class BusRailOverlayView: NSView {
     /// bead still current) — a cancelled bead never hands off.
     public var test_pulseHandoffRuns = 0
 
+    /// How many pulses have actually STARTED travelling. A burst coalesces into
+    /// one — a gain arriving while a bead is in flight is skipped, not restarted
+    /// — so a fresh build's staged first connect counts as 1, not one-per-room.
+    public private(set) var test_pulsesStarted = 0
+
     /// The header-dot bloom's MODEL opacity — the settled-model-layer contract
     /// says it is always 0 (invisible) while the presentation plays.
     public var test_headerDotBloomModelOpacity: Float? { arrivalLayer?.opacity }
@@ -808,13 +791,6 @@ public final class BusRailOverlayView: NSView {
     /// runners never do).
     public var test_pulsePresentationStrokeEnd: CGFloat? {
         pulseLayer?.presentation()?.strokeEnd
-    }
-
-    /// Run the energize reconcile a qualifying draw would, against the current
-    /// live plan (so tests can drive transitions without a graphics context).
-    public func test_reconcileEnergize() {
-        guard let plan = resolvePlan() else { return }
-        reconcileEnergize(with: plan)
     }
 }
 
@@ -880,6 +856,13 @@ public struct RailPlan: Equatable {
         /// The device section's live clip floor (its band's `lowerBound`): the
         /// lowest y the rail may reach. `nil` if the device section has no clip.
         public var deviceFloorY: CGFloat?
+        /// A collapsed device SUBSECTION has DROPPED its rows from `stops`
+        /// (`PopoverController.dropSubsectionRowModel`), so a member hidden inside
+        /// it is absent from `stops`; the rail cuts to the fold anyway. `false`
+        /// for the card-collapse path, whose rows remain in `stops` (clipped by
+        /// the floor) and are judged directly — the difference that stops a card
+        /// collapse growing a tail past its lowest member into non-member rows.
+        public var dropsHiddenRows: Bool
         /// The host-resolved dormant-divergent condition (spec §4.7).
         public var dormant: Bool
         /// Every device stop, unclipped, sorted top-to-bottom (highest y first).
@@ -889,6 +872,7 @@ public struct RailPlan: Equatable {
                     landingDrop: CGFloat, originSectionCollapsed: Bool,
                     originClipBand: ClosedRange<CGFloat>?, originHeaderY: CGFloat?,
                     deviceSectionCollapsed: Bool, deviceFloorY: CGFloat?,
+                    dropsHiddenRows: Bool = false,
                     dormant: Bool = false, stops: [Stop]) {
             self.gold = gold
             self.ringCenterY = ringCenterY
@@ -900,6 +884,7 @@ public struct RailPlan: Equatable {
             self.originHeaderY = originHeaderY
             self.deviceSectionCollapsed = deviceSectionCollapsed
             self.deviceFloorY = deviceFloorY
+            self.dropsHiddenRows = dropsHiddenRows
             self.dormant = dormant
             self.stops = stops
         }
@@ -951,8 +936,20 @@ public struct RailPlan: Equatable {
                 if stop.y <= floorY { break }   // this stop (and all below) are clipped away
                 drawnStops.append(stop)
             }
-            let cut = drawnStops.count < input.stops.count || input.deviceSectionCollapsed
-            if cut {
+            // A cut (the rail runs ON to a terminus dot instead of ending at its
+            // lowest member) means SIGNAL is hidden below the fold — so it fires
+            // only when a MEMBER is actually clipped away. While a collapse is
+            // still only hiding the NON-member rows that sit below the lowest
+            // member, the rail keeps ending at that member with no tail. Cutting
+            // on ANY clipped row — or on the target-collapsed flag, which is set
+            // for the WHOLE animation — grew a line down through those non-members
+            // to the shrinking floor: "the rail expanding into areas where it
+            // wasn't before" on a section toggle. Fully collapsed, the members are
+            // themselves below the floor, so a real cut still lands at the header.
+            let hidesAMember = input.stops[drawnStops.count...]
+                .contains { BusRailOverlayView.onSpine($0.node) }
+                || input.dropsHiddenRows
+            if hidesAMember {
                 // Never let the cut ride ABOVE where the rail started (a degenerate
                 // fully-collapsed panel) — clamp so the dot sits at/below railTop.
                 terminusDotY = min(floorY, railTopY)
@@ -977,6 +974,9 @@ public struct RailPlan: Equatable {
 public protocol RailNodeProviding: AnyObject {
     /// The node this row renders, or `nil` if the row carries no bus node.
     var railNode: MembershipBusView.Node? { get }
+    /// The device id the host uses to map a joined device to its stop for the
+    /// connect pulse's departure; `nil` for a row that represents no device.
+    var railDeviceID: String? { get }
     /// The view whose coordinate space `railNodeBounds` is in.
     var railNodeView: NSView { get }
     /// The bounds whose `midY` is the node's centre (in `railNodeView` coords).

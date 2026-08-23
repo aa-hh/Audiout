@@ -428,15 +428,12 @@ public final class ControlPanelWindowController: NSWindowController {
     }
 
     /// Whether the panel currently offers the user a drag-resize handle/cursor.
-    /// The surface toggles this PER SCREEN (F3, live review): an exact-fit
-    /// screen re-sizes the window itself on every content change, so a manual
-    /// drag fights it — the drag sticks until the next content change, then
-    /// snaps back to the exact fit. Turning `.resizable` off for those screens
-    /// removes the affordance instead of leaving it to fight a resize the user
-    /// didn't ask for; Groups keeps it (its session drag-memory is deliberate,
-    /// U3). Only the `.resizable` bit moves — `.titled`/`.closable` never do
-    /// (R6), and `.resizable` is not one of them, so this is independent of
-    /// the pin-profile manner bits `applyPinProfile()` owns.
+    /// The surface turns this off ONCE at construction (one fixed frame for
+    /// every screen, never per screen) — the shell just keeps the seam so it
+    /// stays content-agnostic. Only the `.resizable` bit moves —
+    /// `.titled`/`.closable` never do (R6), and `.resizable` is not one of
+    /// them, so this is independent of the pin-profile manner bits
+    /// `applyPinProfile()` owns.
     public func setUserResizable(_ resizable: Bool) {
         guard let panel = window else { return }
         if resizable {

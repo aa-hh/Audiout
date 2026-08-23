@@ -42,14 +42,69 @@ import Testing
         func prime(onDecided: @escaping @Sendable () -> Void) {}
     }
 
+    /// A Local Network prime the test drives one step at a time, so both halves
+    /// of the wait are observable: parked with the dialog notionally up, then
+    /// parked AGAIN after the answer landed while the count settles.
+    private final class SteppedLocalNetwork: LocalNetworkPriming, @unchecked Sendable {
+        let found: Int
+        init(found: Int) { self.found = found }
+
+        private let lock = NSLock()
+        private var resumeGate: (() -> Void)?
+        private var parkedWaiter: (() -> Void)?
+
+        func probe() async -> Bool { found > 0 }
+
+        func prime(browseSeconds: TimeInterval,
+                   onReachable: @escaping @Sendable () -> Void) async -> LocalNetworkOutcome {
+            await park()
+            onReachable()
+            await park()
+            return .granted(foundSpeakers: found)
+        }
+
+        private func park() async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let waiter: (() -> Void)? = lock.withLock {
+                    resumeGate = { continuation.resume() }
+                    let waiter = parkedWaiter
+                    parkedWaiter = nil
+                    return waiter
+                }
+                waiter?()
+            }
+        }
+
+        func waitUntilParked() async {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let alreadyParked: Bool = lock.withLock {
+                    if resumeGate != nil { return true }
+                    parkedWaiter = { continuation.resume() }
+                    return false
+                }
+                if alreadyParked { continuation.resume() }
+            }
+        }
+
+        func resume() {
+            let gate: (() -> Void)? = lock.withLock {
+                let gate = resumeGate
+                resumeGate = nil
+                return gate
+            }
+            gate?()
+        }
+    }
+
     private let isolation = TestIsolation(owner: "OnboardingWindowLevelTests")
 
     private func makeController(audioDenied: Bool = true,
+                                localNetwork: LocalNetworkPriming? = nil,
                                 bluetoothPrimer: BluetoothPermissionPriming? = nil,
                                 bluetoothPromptTimeout: TimeInterval = 10) -> OnboardingWindowController {
         let model = SetupModel(
             audioProbe: CannedAudioProbe(result: audioDenied ? .denied : .granted),
-            localNetwork: NoLocalNetwork(),
+            localNetwork: localNetwork ?? NoLocalNetwork(),
             remoteControl: NoopRemoteControl(),
             ptpHelper: FakePTPHelper(),
             bluetoothReader: SimulatedBluetoothPermission(status: .unknown),
@@ -131,8 +186,11 @@ import Testing
     }
 
     /// The freeze this window used to cause: a TCC dialog loses input focus to
-    /// any process that grabs it, and this window had three ways to grab it.
-    /// While a prompt is unanswered it gives up all three.
+    /// any process that grabs it, and this window had two ways to grab it.
+    /// While a prompt is unanswered it gives up both — but the LEVEL stays
+    /// `.floating`: a TCC dialog draws above it, and demoting to `.normal` is
+    /// what made the setup vanish behind other apps for the length of the ask
+    /// and pop back on the answer (the "blip", owner decision 2026-08-22).
     @Test func aPromptInFlightSilencesEveryWayThisWindowTakesTheFront() async {
         let wc = makeController(audioDenied: false, bluetoothPrimer: NeverDecidingBluetooth())
         let vc = wc.test_contentViewController
@@ -142,25 +200,27 @@ import Testing
         await vc.test_tapAllow(.bluetooth)
 
         #expect(vc.test_isPromptInFlight)
-        #expect(wc.test_windowLevel == .normal, "the level drops for the dialog")
+        #expect(wc.test_windowLevel == .floating,
+                "the TCC dialog draws above floating — demoting is what caused the accept blip")
         #expect((wc.window as? OnboardingWindow)?.suppressesActivation == true,
                 "a click is still delivered, but must not force the app active")
 
+        let fronts = wc.test_frontCount
         wc.test_appDidBecomeActive()
 
-        #expect(wc.test_windowLevel == .normal,
-                "reactivating must not re-float over a dialog that is still up")
+        #expect(wc.test_frontCount == fronts,
+                "reactivating must not take key while a dialog is still up")
     }
 
-    /// …and the window is not left demoted: the level comes back the moment the
-    /// prompt resolves (here, its undecided timeout).
-    @Test func theLevelComesBackWhenThePromptResolves() async {
+    /// …and the quiet is not left on: the click force-activate comes back the
+    /// moment the prompt resolves (here, its undecided timeout).
+    @Test func theQuietLiftsWhenThePromptResolves() async {
         let wc = makeController(audioDenied: false, bluetoothPrimer: NeverDecidingBluetooth(),
                                 bluetoothPromptTimeout: 0.05)
         let vc = wc.test_contentViewController
         _ = vc.test_rootView
         await vc.test_tapAllow(.bluetooth)
-        #expect(wc.test_windowLevel == .normal)
+        #expect((wc.window as? OnboardingWindow)?.suppressesActivation == true)
 
         for _ in 0..<600 where vc.test_isPromptInFlight {   // ≤3 s, then give up
             try? await Task.sleep(nanoseconds: 5_000_000)
@@ -168,5 +228,50 @@ import Testing
 
         #expect(wc.test_windowLevel == .floating)
         #expect((wc.window as? OnboardingWindow)?.suppressesActivation == false)
+    }
+
+    /// **The live bug: after Allow on the Local Network prompt the setup window
+    /// dropped to the background** — the one step where that happened, because
+    /// its `allowInFlight` OUTLIVES the dialog: once answered, the prime spends
+    /// a few more seconds settling the speaker count
+    /// (`localNetworkPhase == .verifying`). Two guarantees pin the fix: the
+    /// level never demotes for a TCC ask in the first place (the demote was the
+    /// whole burying mechanism, and the accept "blip" on every other step too),
+    /// and the in-flight quiet — which still gates the ✕, click activation and
+    /// the re-front — ends the instant the answer lands, not when the count
+    /// finishes.
+    @Test func theQuietEndsWhenTheLocalNetworkAnswerLandsNotAfterTheCountSettles() async {
+        let net = SteppedLocalNetwork(found: 2)
+        let wc = makeController(audioDenied: false, localNetwork: net)
+        let vc = wc.test_contentViewController
+        _ = vc.test_rootView
+        await vc.test_tapAllow(.audio)   // clear the first card so Local Network is live
+        #expect(vc.test_activeStep == .localNetwork)
+
+        let priming = Task { await vc.test_tapAllow(.localNetwork) }
+
+        // The dialog is notionally on screen: the app is quiet, the level stays.
+        await net.waitUntilParked()
+        for _ in 0..<600 where !vc.test_isPromptInFlight {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(vc.test_isPromptInFlight)
+        #expect(wc.test_windowLevel == .floating,
+                "no demote for a TCC dialog — it draws above floating, and demoting is the blip")
+
+        // The answer lands (the network proves reachable); the count is still
+        // settling, but there is no dialog left to go quiet for.
+        net.resume()
+        await net.waitUntilParked()
+        for _ in 0..<600 where vc.test_isPromptInFlight {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        #expect(!vc.test_isPromptInFlight,
+                "the quiet ends the moment the answer lands, not after the count settles")
+        #expect(wc.test_windowLevel == .floating)
+
+        net.resume()
+        await priming.value
+        #expect(wc.test_windowLevel == .floating)
     }
 }

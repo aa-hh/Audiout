@@ -9,17 +9,16 @@ import AudiouterSharedUI
 
 /// The Settings panes aren't visible to a headless test run, so — exactly like
 /// `PopoverControllerTests` — these drive `test_` hooks and public seams to
-/// assert structure, the host-sizing contract (`fittedContentSize` +
-/// `onFittedContentSizeChange`, which the one-surface host consumes), and that
-/// the panes route their actions through the injected seams (login item,
-/// `AppSettings`) rather than the real system.
+/// assert structure, the hosting contract, and that the panes route their
+/// actions through the injected seams (login item, `AppSettings`) rather than
+/// the real system.
 ///
-/// Sizing assertions read the PUBLISHED size, never a window frame — the
-/// surface applies that size to its window, and that application is
-/// `AppSurfaceControllerTests`' job. Panes are assembled the way the app
+/// The structure under test: a sidebar of sections over ONE pane. Selecting a
+/// section swaps that pane, top-aligned inside the host's scroll view. NO size
+/// is ever published to a host — the surface frame is fixed, so a pane grows
+/// the scroll document, never the window. Panes are assembled the way the app
 /// assembles them (`AppDelegate.makeSettingsRoot`): built directly, callbacks
-/// wired on the pane itself, mounted on a `SettingsRootViewController` with
-/// the shipping `.segmentedControlOnTop` style.
+/// wired on the pane itself, mounted on a `SettingsRootViewController`.
 @MainActor
 @Suite struct SettingsRootViewControllerTests {
 
@@ -67,11 +66,11 @@ import AudiouterSharedUI
         let appearance = AppearanceSettingsViewController(settings: settings ?? makeSettings())
         let audio = AudioSettingsViewController(excluded: excluded ?? makeExcluded(),
                                                 runningAppsProvider: { [] })
-        let root = SettingsRootViewController(tabs: [
+        let root = SettingsRootViewController(sections: [
             .init(title: "General", symbolName: "gearshape", viewController: general),
             .init(title: "Appearance", symbolName: "paintpalette", viewController: appearance),
             .init(title: "Audio", symbolName: "speaker.wave.2", viewController: audio),
-        ], tabStyle: .segmentedControlOnTop)
+        ])
         return (root, general, appearance, audio)
     }
 
@@ -91,9 +90,9 @@ import AudiouterSharedUI
                 "the stock material background is retired inside the surface")
     }
 
-    @Test func tabLabelsInOrder() {
+    @Test func sectionTitlesInOrder() {
         let (root, _, _, _) = makeRoot()
-        #expect(root.tabViewItems.map(\.label) == ["General", "Appearance", "Audio"])
+        #expect(root.sectionTitles == ["General", "Appearance", "Audio"])
     }
 
     @Test func runSetupAgainForwardsFromGeneralPane() {
@@ -108,175 +107,106 @@ import AudiouterSharedUI
     /// root starts there by construction; the surface builds/keeps the root
     /// and owns any reset-on-show policy of its own.
     @Test func freshRootStartsOnGeneral() {
-        let (root, _, _, _) = makeRoot()
-        #expect(root.selectedTabViewItemIndex == 0)
-        #expect(root.tabViewItems[root.selectedTabViewItemIndex].label == "General")
+        let (root, general, _, _) = makeRoot()
+        #expect(root.selectedSectionIndex == 0)
+        #expect(root.test_hostedPaneView === general.view)
     }
 
-    /// Per-tab sizing-bug regression test: EACH tab's assembled content must
-    /// have a real, non-degenerate size (previously the host opened at an
-    /// AppKit fallback size for an empty tab controller). Bounded per-tab
-    /// rather than one shared range now that content is split across three
-    /// panes instead of one long scrolling column — a single pane collapsing
-    /// to near-zero, or ballooning back toward the pre-tabs single-screen
-    /// height, should each fail this.
-    @Test func eachTabHasNonDegenerateFittedSize() {
-        let (root, _, _, _) = makeRoot()
-        // Comfortably under the OLD single-screen ceiling (previously ~850pt
-        // for all three sections combined) — a per-tab pane should be nowhere
-        // near that now that the content is split three ways.
-        let oldSingleScreenCeiling: CGFloat = 850
-        for index in 0..<3 {
-            root.selectTab(at: index)
-            let size = root.fittedContentSize
-            // `accuracy` absorbs AppKit's sub-point fitting-size rounding
-            // (observed 460.5 vs the 460 constraint — a device-pixel
-            // autolayout artifact, not a real size discrepancy).
-            #expect(abs(size.width - SettingsForm.contentWidth) <= 1,
-                    Comment(rawValue: "tab \(index) (\(root.tabViewItems[index].label))"))
-            #expect(size.height > 50,
-                    Comment(rawValue: "tab \(index) (\(root.tabViewItems[index].label)) collapsed to near-zero"))
-            #expect(size.height < oldSingleScreenCeiling,
-                    Comment(rawValue: "tab \(index) (\(root.tabViewItems[index].label)) is still oversized"))
-        }
-    }
-
-    /// THE regression guard: `NSTabViewController` does NOT resize its host
-    /// when the selected tab changes (probed by T2 — three panes of genuinely
-    /// different heights all left the window at the first tab's size). Goes
-    /// through **real `NSTabView` selection** via `selectTab(at:)` — not a
-    /// direct delegate call — because a `test_` hook that bypassed real AppKit
-    /// dispatch once let broken UI stay green across 78 tests
-    /// (`MainOutRowView.selectionChanged`).
-    ///
-    /// Measured off the PUBLISHED sizes, not `fittedContentSize` — that
-    /// property computes fresh on every read, so it would report the right
-    /// answer even if the push path the surface actually resizes from
-    /// (`tabView(_:didSelect:)` → `onFittedContentSizeChange`) never ran.
-    /// Only a size delivered through the publisher proves the push happened.
-    /// (The standalone window's top-edge-anchor assertion moved with the
-    /// window: applying the published size is now the surface's job, covered
-    /// by `AppSurfaceControllerTests`.) Each tab is visited TWICE: the first
-    /// visit can load the pane's view and publish its initial
-    /// `preferredContentSize` via the KVO re-measure path (trigger 3)
-    /// independently of the tab-switch delegate, so only a SECOND,
-    /// reselect-only visit isolates trigger 2 with no fresh KVO fire to fall
-    /// back on.
-    @Test func selectingEachTabPublishesThatTabsSize() throws {
-        let (root, _, _, _) = makeRoot()
-        for index in 0..<3 { root.selectTab(at: index) }
-
-        var heightByTab: [CGFloat] = []
-        var widths: Set<CGFloat> = []
-        for index in 0..<3 {
-            var published: NSSize?
-            root.onFittedContentSizeChange = { published = $0 }
-            root.selectTab(at: index)
-            let size = try #require(published,
-                                    "tab \(index): the tab-switch push (tabView(_:didSelect:)) never published a size")
-            heightByTab.append(size.height)
-            widths.insert(size.width.rounded())
-        }
-        root.onFittedContentSizeChange = nil
-
-        // Trap 2, guarded: a broken push path would either publish nothing
-        // (caught above) or the same stale height for every tab.
-        #expect(Set(heightByTab.map { $0.rounded() }).count == 3,
-                Comment(rawValue: "expected three distinct per-tab published heights, got \(heightByTab)"))
-        // The width contract: panes never reflow sideways.
-        #expect(widths.count == 1, Comment(rawValue: "the published width must stay pinned across every tab: \(widths)"))
-    }
-
-    /// Trap 4's regression guard: **nothing in the content hierarchy may carry
-    /// a translated autoresizing mask.** One such view (the pane background)
-    /// froze a transient 500×500 into required constraints, so the host could
-    /// never go below `500 −` the pane's own height — General shipped with a
-    /// 116pt dead gap under "Launch at login", Appearance with 37pt, and no
-    /// constraint conflict was ever logged.
-    ///
-    /// A headless run can't display anything, and the frozen constraints only
-    /// bind on a genuine layout pass — but they poison the ROOT view's fitting
-    /// size immediately, and that IS readable headlessly. So the assertion is
-    /// the invariant the poisoning breaks: for every tab, the root view must
-    /// want exactly what that tab's pane wants plus one CONSTANT chrome strip
-    /// (the in-content segmented control — ~30pt, bounded not hardcoded
-    /// because AppKit authors it). While poisoned the surplus instead read
-    /// `500 − pane height`: large, and different on every tab.
-    @Test func rootViewWantsExactlyTheSelectedPaneSizePlusConstantChrome() throws {
+    /// Per-pane sizing-bug regression test: EACH section's assembled content
+    /// must have a real, non-degenerate size (an earlier build opened at an
+    /// AppKit fallback size for an empty container). Bounded per pane rather
+    /// than one shared range: a single pane collapsing to near-zero, or
+    /// ballooning back toward the pre-split single-screen height, should each
+    /// fail this.
+    @Test func eachPaneHasANonDegenerateSize() {
         let (root, general, appearance, audio) = makeRoot()
         let panes: [NSViewController] = [general, appearance, audio]
-
-        var surpluses: [CGFloat] = []
+        // Comfortably under the OLD single-screen ceiling (previously ~850pt
+        // for all three sections combined).
+        let oldSingleScreenCeiling: CGFloat = 850
         for index in 0..<3 {
-            root.selectTab(at: index)
+            root.selectSection(at: index)
             let pane = panes[index].view
             pane.layoutSubtreeIfNeeded()
-            let paneWants = pane.fittingSize
-            root.view.layoutSubtreeIfNeeded()
-            let rootWants = root.view.fittingSize
-            surpluses.append(rootWants.height - paneWants.height)
-            #expect(abs(rootWants.width - SettingsForm.contentWidth) <= 0.5,
-                    Comment(rawValue: "tab \(index): the root view's wanted width must stay pinned to the pane " +
-                    "column, got \(rootWants.width)"))
+            let size = pane.fittingSize
+            // `accuracy` absorbs AppKit's sub-point fitting-size rounding
+            // (a device-pixel autolayout artifact, not a real discrepancy).
+            #expect(abs(size.width - SettingsForm.contentWidth) <= 1,
+                    Comment(rawValue: "section \(index) (\(root.sectionTitles[index])) wants \(size.width)"))
+            #expect(size.height > 50,
+                    Comment(rawValue: "section \(index) (\(root.sectionTitles[index])) collapsed to near-zero"))
+            #expect(size.height < oldSingleScreenCeiling,
+                    Comment(rawValue: "section \(index) (\(root.sectionTitles[index])) is still oversized"))
         }
-        let spread = try #require(surpluses.max()).rounded() - (try #require(surpluses.min())).rounded()
-        #expect(spread <= 1,
-                Comment(rawValue: "the root-over-pane surplus must be one constant chrome strip on every tab, " +
-                "got \(surpluses) — a varying surplus means a view is translating its autoresizing mask " +
-                "and has frozen a transient host size into required constraints"))
-        #expect(surpluses.allSatisfy { $0 >= 0 && $0 <= 60 },
-                Comment(rawValue: "surplus \(surpluses) is not a plausible tab-strip height — dead space " +
-                "would render inside the pane"))
     }
 
-    /// Re-measure trigger 3: `AudioSettingsViewController.rebuildList()`
-    /// republishes `preferredContentSize` at runtime with no tab switch to
-    /// trigger a re-measure — driven by KVO on the pane's own
-    /// `preferredContentSize`, deliberately NOT AppKit's documented
-    /// `preferredContentSizeDidChange(for:)` (probed: AppKit never calls that
-    /// for a tab item's view controller). Tests the BEHAVIOUR — the published
-    /// size follows the pane — not the KVO mechanism itself.
-    @Test func audioPaneGrowthAtRuntimePublishesTheGrownSizeWhenSelected() throws {
-        let (root, _, _, audio) = makeRoot()
-        root.selectTab(at: 2) // Audio
-        let baselineHeight = root.fittedContentSize.height
-
-        var publishedHeights: [CGFloat] = []
-        root.onFittedContentSizeChange = { publishedHeights.append($0.height) }
-
-        audio.test_addExcluded(bundleID: "us.zoom.xos", displayName: "Zoom")
-        let afterOne = root.fittedContentSize.height
-        #expect(afterOne > baselineHeight,
-                "adding an excluded-app row must grow the measured pane")
-        #expect(publishedHeights.last.map { $0 > baselineHeight } == true,
-                Comment(rawValue: "the grown size must reach the host through the publisher with no tab " +
-                "switch (KVO trigger 3), got \(publishedHeights)"))
-
-        audio.test_addExcluded(bundleID: "com.spotify.client", displayName: "Spotify")
-        let afterTwo = root.fittedContentSize.height
-        #expect(afterTwo > afterOne, "a second added row must grow it further")
-        #expect(publishedHeights.last.map { $0 > afterOne } == true)
+    /// THE structural guard: selecting a section swaps the ONE hosted pane,
+    /// and it goes through **real sidebar selection** — `selectSection(at:)`
+    /// moves the outline view's selection and the swap arrives back through
+    /// the delegate. A `test_` hook that bypassed real AppKit dispatch once
+    /// let genuinely broken UI stay green across 78 tests
+    /// (`MainOutRowView.selectionChanged`), so the hook drives the real path.
+    @Test func selectingASectionSwapsThePaneThroughRealSidebarSelection() {
+        let (root, general, appearance, audio) = makeRoot()
+        let panes: [NSViewController] = [general, appearance, audio]
+        for index in 0..<3 {
+            root.selectSection(at: index)
+            #expect(root.selectedSectionIndex == index)
+            #expect(root.test_hostedPaneView === panes[index].view,
+                    Comment(rawValue: "section \(index) (\(root.sectionTitles[index])) never became the hosted pane"))
+        }
     }
 
-    /// The other half of the same contract: a pane republishing its
-    /// `preferredContentSize` while it is NOT the selected tab must be a
-    /// no-op for the host — the KVO handler filters on the selected pane
-    /// precisely so a background pane's growth doesn't yank the host out from
-    /// under whatever tab the user is actually looking at.
-    @Test func audioPaneGrowthWhileNotSelectedPublishesNothing() {
-        let (root, _, _, audio) = makeRoot()
-        root.selectTab(at: 0) // General — NOT Audio
-        let generalHeight = root.fittedContentSize.height
+    /// The sidebar is the Groups screen's own arrangement, at the same pinned
+    /// thickness — that is what lets both arrangement screens sit inside the
+    /// one fixed surface frame without asking AppKit to widen it. And it must
+    /// never collapse: it is the only way to change section, and the surface
+    /// has no sidebar toggle and no View menu to bring it back.
+    @Test func sidebarIsPinnedToTheGroupsSidebarWidthAndCannotCollapse() {
+        let (root, _, _, _) = makeRoot()
+        #expect(root.splitViewItems.count == 2)
+        let sidebar = root.test_sidebarSplitItem
+        #expect(sidebar.minimumThickness == SurfaceLayout.sidebarWidth)
+        #expect(sidebar.maximumThickness == SurfaceLayout.sidebarWidth)
+        #expect(!sidebar.canCollapse)
+        #expect(!sidebar.isCollapsed)
+    }
 
-        var publishes = 0
-        root.onFittedContentSizeChange = { _ in publishes += 1 }
+    /// The pane is TOP-ALIGNED inside the host's scroll view and never
+    /// stretched to the window: the surface frame is fixed, so a short pane
+    /// leaves calm canvas below it rather than being centered or grown, and
+    /// the scroll document is exactly as tall as the pane needs.
+    @Test func paneIsTopAlignedAndNeverStretched() throws {
+        let (root, general, _, _) = makeRoot()
+        root.view.setFrameSize(NSSize(width: SurfaceLayout.width, height: 800))
+        root.view.layoutSubtreeIfNeeded()
+
+        let pane = try #require(root.test_hostedPaneView)
+        #expect(pane === general.view)
+        #expect(pane.frame.minY == 0,
+                Comment(rawValue: "the pane must start at the document's top, got \(pane.frame.minY)"))
+        #expect(abs(pane.frame.height - pane.fittingSize.height) <= 1,
+                Comment(rawValue: "the pane must keep its own height in an 800pt-tall host, got " +
+                "\(pane.frame.height) for a fitting height of \(pane.fittingSize.height)"))
+        #expect(abs(root.test_scrollDocumentHeight - pane.fittingSize.height) <= 1,
+                Comment(rawValue: "the scroll document must be exactly as tall as the pane, got " +
+                "\(root.test_scrollDocumentHeight)"))
+    }
+
+    /// A pane that grows at RUNTIME with no section switch
+    /// (`AudioSettingsViewController.rebuildList()` when the excluded-apps
+    /// list changes) grows the SCROLL DOCUMENT, not the window — the frame is
+    /// fixed, so the extra rows become scrollable content.
+    @Test func audioPaneGrowthGrowsTheScrollDocument() {
+        let (root, _, _, audio) = makeRoot()
+        root.selectSection(at: 2) // Audio
+        let before = root.test_scrollDocumentHeight
 
         audio.test_addExcluded(bundleID: "us.zoom.xos", displayName: "Zoom")
 
-        #expect(publishes == 0, "an unselected pane's growth must not push a resize at the host")
-        #expect(abs(root.fittedContentSize.height - generalHeight) <= 0.5,
-                Comment(rawValue: "Audio republishing its preferredContentSize while unselected must not move " +
-                "the measured (General) content size"))
+        #expect(root.test_scrollDocumentHeight > before,
+                Comment(rawValue: "adding an excluded-app row must grow the scroll document, " +
+                "was \(before), now \(root.test_scrollDocumentHeight)"))
     }
 
     @Test func audioExcludeAndRemoveDrivesTheModelAndNotifies() {

@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Audiouter EQ — design board</title>
+<style>
+  :root{
+    /* Warm Signal dark */
+    --d-canvas:#1F1B15; --d-panel:#272217; --d-row:#2A2519; --d-text:#EFE7D6; --d-sec:#9C9382;
+    --d-hair:rgba(255,255,255,.08); --d-chip:#3A342A; --d-chip-open:#4A4232;
+    --gold:#E7B94E; --gold-dim:#8F7A3B; --gold-deep:#B78A2A;
+    /* Circuit light */
+    --l-canvas:#FFFFFF; --l-panel:#F6F3EC; --l-row:#FBF9F4; --l-text:#3A342B; --l-sec:#8A8272;
+    --l-hair:rgba(60,50,30,.12); --l-chip:#EAE4D6; --l-chip-open:#DDD5C2;
+    /* Instrument (authored — identical in both appearances) */
+    --scope-bg:#14110C; --scope-grid:rgba(231,185,78,.10); --scope-zero:rgba(255,255,255,.16);
+    --scope-flat:#9C9077; --scope-bypass:#8A7E68;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font:14px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text",sans-serif;background:#101010;color:#D8D2C6;padding:28px 24px 56px}
+  h1{font-size:19px;font-weight:700;color:#F2ECDF;letter-spacing:.01em}
+  .sub{color:#9A9282;margin:6px 0 26px;max-width:62ch}
+  h2{font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.09em;color:#8F8878;margin:34px 0 12px}
+  .boards{display:flex;flex-wrap:wrap;gap:22px;align-items:flex-start}
+  .cap{font-size:12px;color:#8F8878;margin:8px 2px 0;max-width:380px}
+  .cap b{color:#C9C1B0;font-weight:600}
+
+  /* ---------- popover shell ---------- */
+  .pop{width:380px;border-radius:12px;padding:14px 0 10px;box-shadow:0 14px 34px rgba(0,0,0,.5)}
+  .pop.dark{background:var(--d-canvas);color:var(--d-text)}
+  .pop.light{background:var(--l-canvas);color:var(--l-text);box-shadow:0 14px 34px rgba(0,0,0,.22)}
+  .sect{font-size:11px;font-weight:700;letter-spacing:.10em;padding:2px 16px 8px;display:flex;justify-content:space-between}
+  .dark .sect{color:var(--d-sec)} .light .sect{color:var(--l-sec)}
+
+  .row{display:flex;align-items:center;gap:10px;padding:9px 16px}
+  .devicon{width:26px;height:26px;border-radius:7px;display:flex;align-items:center;justify-content:center;flex:none}
+  .dark .devicon{background:#3B352A;color:#CFC6B2} .light .devicon{background:#E6E0D2;color:#6E6654}
+  .devicon svg{width:14px;height:14px;fill:currentColor}
+  .dname{font-size:14px;font-weight:600;flex:none;width:118px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .vol{flex:1;height:4px;border-radius:2px;position:relative}
+  .dark .vol{background:#151209} .light .vol{background:#E4DECE}
+  .vol .fill{position:absolute;left:0;top:0;bottom:0;border-radius:2px}
+  .dark .vol .fill{background:var(--gold)} .light .vol .fill{background:var(--gold-deep)}
+  .vol .knob{position:absolute;top:50%;transform:translate(-50%,-50%);width:14px;height:20px;border-radius:7px}
+  .dark .vol .knob{background:#8C8270;border:1px solid #55503F} .light .vol .knob{background:#8C7F63;border:1px solid #6E6248}
+  .pct{font-size:13px;width:38px;text-align:right;flex:none}
+  .dark .pct{color:var(--d-sec)} .light .pct{color:var(--l-sec)}
+
+  /* EQ chip */
+  .chip{flex:none;font-size:11px;font-weight:700;letter-spacing:.06em;padding:3px 8px;border-radius:6px;cursor:default}
+  .dark .chip{background:var(--d-chip);color:var(--d-sec)}
+  .light .chip{background:var(--l-chip);color:var(--l-sec)}
+  .dark .chip.on{color:var(--d-text)} .light .chip.on{color:var(--l-text)}
+  .dark .chip.open{background:var(--d-chip-open);color:var(--d-text)}
+  .light .chip.open{background:var(--l-chip-open);color:var(--l-text)}
+
+  /* ---------- drawer ---------- */
+  .drawer{margin:2px 12px 8px 48px;border-radius:10px;padding:12px 14px 14px}
+  .dark .drawer{background:var(--d-panel);border:1px solid var(--d-hair)}
+  .light .drawer{background:var(--l-panel);border:1px solid var(--l-hair)}
+  .dhead{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:10px}
+  .plate{font-size:10px;font-weight:700;letter-spacing:.14em}
+  .dark .plate{color:var(--d-sec)} .light .plate{color:var(--l-sec)}
+  .reset{font-size:12px;font-weight:500;background:none;border:none;cursor:default}
+  .dark .reset{color:var(--d-sec)} .light .reset{color:var(--l-sec)}
+
+  /* scope — authored instrument, never themes */
+  .scope{background:var(--scope-bg);border-radius:7px;padding:6px 8px 4px;box-shadow:inset 0 1px 4px rgba(0,0,0,.55)}
+  .scope svg{display:block;width:100%;height:64px}
+  .scopelbl{display:flex;justify-content:space-between;font-size:9px;color:#6E6450;padding:1px 2px 2px;font-variant-numeric:tabular-nums}
+
+  .ctl{display:flex;align-items:center;gap:10px;margin-top:11px}
+  .clabel{font-size:12.5px;width:58px;flex:none}
+  .cval{font-size:11.5px;width:46px;text-align:right;flex:none;font-variant-numeric:tabular-nums}
+  .dark .cval{color:var(--d-sec)} .light .cval{color:var(--l-sec)}
+  .hslider{flex:1;height:4px;border-radius:2px;position:relative}
+  .dark .hslider{background:#151209} .light .hslider{background:#E4DECE}
+  .hslider .cfill{position:absolute;top:0;bottom:0;border-radius:2px}
+  .dark .cfill{background:var(--gold)} .light .cfill{background:var(--gold-deep)}
+  .hslider .hknob{position:absolute;top:50%;transform:translate(-50%,-50%);width:12px;height:17px;border-radius:6px}
+  .dark .hknob{background:#8C8270;border:1px solid #55503F} .light .hknob{background:#8C7F63;border:1px solid #6E6248}
+  .tickmid{position:absolute;left:50%;top:-4px;bottom:-4px;width:1px}
+  .dark .tickmid{background:#55503F} .light .tickmid{background:#B9AF98}
+  .check{width:13px;height:13px;border-radius:4px;flex:none;position:relative}
+  .dark .check{border:1.5px solid #55503F} .light .check{border:1.5px solid #B9AF98}
+  .check.on{border-color:transparent}
+  .dark .check.on{background:var(--gold)} .light .check.on{background:var(--gold-deep)}
+  .check.on:after{content:"";position:absolute;left:4px;top:1px;width:3px;height:7px;border:solid #14110C;border-width:0 2px 2px 0;transform:rotate(40deg)}
+  .light .check.on:after{border-color:#fff}
+
+  .disc{display:flex;align-items:center;gap:6px;margin-top:13px;font-size:12.5px;font-weight:600}
+  .disc .tri{width:0;height:0;border-left:5px solid currentColor;border-top:4px solid transparent;border-bottom:4px solid transparent}
+  .disc.open .tri{transform:rotate(90deg)}
+  .dark .disc{color:var(--d-sec)} .light .disc{color:var(--l-sec)}
+
+  .bands{display:flex;justify-content:space-between;margin-top:12px;padding:0 2px}
+  .band{display:flex;flex-direction:column;align-items:center;gap:5px}
+  .vtrack{width:4px;height:72px;border-radius:2px;position:relative}
+  .dark .vtrack{background:#151209} .light .vtrack{background:#E4DECE}
+  .vtrack .vfill{position:absolute;left:0;right:0;border-radius:2px}
+  .dark .vfill{background:var(--gold)} .light .vfill{background:var(--gold-deep)}
+  .vtrack .vzero{position:absolute;left:-3px;right:-3px;top:50%;height:1px}
+  .dark .vzero{background:#453F30} .light .vzero{background:#CEC4AA}
+  .vtrack .vknob{position:absolute;left:50%;transform:translate(-50%,50%);width:16px;height:9px;border-radius:4px}
+  .dark .vknob{background:#8C8270;border:1px solid #55503F} .light .vknob{background:#8C7F63;border:1px solid #6E6248}
+  .bhz{font-size:9px;font-variant-numeric:tabular-nums}
+  .dark .bhz{color:var(--d-sec)} .light .bhz{color:var(--l-sec)}
+  .hzlegend{text-align:right;font-size:9px;margin-top:3px}
+  .dark .hzlegend{color:#6E6450} .light .hzlegend{color:#A79D87}
+
+  .note{font-size:12px;margin-top:11px}
+  .dark .note{color:var(--d-sec)} .light .note{color:var(--l-sec)}
+  .warn{font-size:12.5px;margin-top:11px;font-weight:500}
+  .dark .warn{color:#C9A25A} .light .warn{color:#9A7B2E}
+</style>
+</head>
+<body>
+
+<h1>EQ — the voicing instrument</h1>
+<p class="sub">The response curve is the state, computed live from the same biquad coefficients the audio path runs. Flat draws a neutral hairline; any shaping deviates in gold — gold means signal. The scope is an instrument: authored near-black in both appearances, like hardware.</p>
+
+<h2>Dark · Office voiced, Advanced open</h2>
+<div class="boards">
+  <div>
+    <div class="pop dark" id="ctx-dark">
+  <div class="sect"><span>OUTPUT DEVICES</span><span>FEED</span></div>
+  <div class="row">
+  <div class="devicon"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/></svg></div><div class="dname">Bedroom HomePod</div>
+  <div class="vol"><div class="fill" style="width:25%"></div><div class="knob" style="left:25%"></div></div>
+  <div class="pct">25%</div><div class="chip ">EQ</div>
+</div>
+  <div class="row">
+  <div class="devicon"><svg viewBox="0 0 16 16"><rect x="4" y="1" width="8" height="14" rx="2"/></svg></div><div class="dname">Office</div>
+  <div class="vol"><div class="fill" style="width:50%"></div><div class="knob" style="left:50%"></div></div>
+  <div class="pct">50%</div><div class="chip open">EQ</div>
+</div>
+  <div class="drawer">
+    <div class="dhead"><span class="plate">EQ — OFFICE</span><button class="reset">Reset</button></div>
+    <div class="scope"><svg viewBox="0 0 320 64" preserveAspectRatio="none"><line x1="21.0" y1="0" x2="21.0" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="53.2" y1="0" x2="53.2" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="84.9" y1="0" x2="84.9" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="117.0" y1="0" x2="117.0" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="149.1" y1="0" x2="149.1" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="181.2" y1="0" x2="181.2" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="213.3" y1="0" x2="213.3" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="245.4" y1="0" x2="245.4" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="277.6" y1="0" x2="277.6" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="309.7" y1="0" x2="309.7" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="0" y1="32" x2="320" y2="32" stroke="var(--scope-zero)" stroke-width="1"/><path d="M0.0 23.7 L2.0 23.8 L4.0 23.8 L6.0 23.8 L8.0 23.8 L10.0 23.8 L12.0 23.8 L14.0 23.8 L16.0 23.8 L18.0 23.9 L20.0 23.9 L22.0 23.9 L24.0 23.9 L26.0 24.0 L28.0 24.0 L30.0 24.0 L32.0 24.1 L34.0 24.2 L36.0 24.2 L38.0 24.3 L40.0 24.4 L42.0 24.5 L44.0 24.6 L46.0 24.8 L48.0 25.0 L50.0 25.1 L52.0 25.4 L54.0 25.6 L56.0 25.9 L58.0 26.1 L60.0 26.5 L62.0 26.8 L64.0 27.2 L66.0 27.6 L68.0 28.0 L70.0 28.4 L72.0 28.9 L74.0 29.3 L76.0 29.8 L78.0 30.2 L80.0 30.7 L82.0 31.1 L84.0 31.6 L86.0 32.0 L88.0 32.4 L90.0 32.9 L92.0 33.3 L94.0 33.8 L96.0 34.3 L98.0 34.8 L100.0 35.4 L102.0 36.0 L104.0 36.6 L106.0 37.3 L108.0 38.1 L110.0 38.8 L112.0 39.4 L114.0 39.9 L116.0 40.1 L118.0 40.1 L120.0 39.9 L122.0 39.5 L124.0 38.9 L126.0 38.3 L128.0 37.6 L130.0 37.0 L132.0 36.4 L134.0 35.9 L136.0 35.4 L138.0 35.0 L140.0 34.6 L142.0 34.3 L144.0 34.1 L146.0 33.8 L148.0 33.6 L150.0 33.4 L152.0 33.3 L154.0 33.1 L156.0 33.0 L158.0 32.9 L160.0 32.8 L162.0 32.7 L164.0 32.6 L166.0 32.5 L168.0 32.5 L170.0 32.4 L172.0 32.4 L174.0 32.3 L176.0 32.3 L178.0 32.2 L180.0 32.2 L182.0 32.1 L184.0 32.1 L186.0 32.1 L188.0 32.0 L190.0 32.0 L192.0 31.9 L194.0 31.9 L196.0 31.9 L198.0 31.8 L200.0 31.8 L202.0 31.7 L204.0 31.7 L206.0 31.6 L208.0 31.5 L210.0 31.5 L212.0 31.4 L214.0 31.3 L216.0 31.2 L218.0 31.1 L220.0 31.0 L222.0 30.8 L224.0 30.6 L226.0 30.4 L228.0 30.2 L230.0 29.9 L232.0 29.6 L234.0 29.3 L236.0 28.9 L238.0 28.6 L240.0 28.2 L242.0 27.9 L244.0 27.8 L246.0 27.7 L248.0 27.8 L250.0 27.9 L252.0 28.2 L254.0 28.5 L256.0 28.8 L258.0 29.1 L260.0 29.3 L262.0 29.4 L264.0 29.6 L266.0 29.6 L268.0 29.6 L270.0 29.6 L272.0 29.5 L274.0 29.3 L276.0 29.1 L278.0 28.8 L280.0 28.5 L282.0 28.2 L284.0 27.8 L286.0 27.4 L288.0 27.0 L290.0 26.6 L292.0 26.1 L294.0 25.7 L296.0 25.3 L298.0 25.0 L300.0 24.7 L302.0 24.4 L304.0 24.2 L306.0 24.0 L308.0 23.9 L310.0 23.8 L312.0 23.8 L314.0 23.7 L316.0 23.7 L318.0 23.7 L320.0 23.7 L 320 32 L 0 32 Z" fill="rgba(231,185,78,.13)" stroke="none"/>
+              <path d="M0.0 23.7 L2.0 23.8 L4.0 23.8 L6.0 23.8 L8.0 23.8 L10.0 23.8 L12.0 23.8 L14.0 23.8 L16.0 23.8 L18.0 23.9 L20.0 23.9 L22.0 23.9 L24.0 23.9 L26.0 24.0 L28.0 24.0 L30.0 24.0 L32.0 24.1 L34.0 24.2 L36.0 24.2 L38.0 24.3 L40.0 24.4 L42.0 24.5 L44.0 24.6 L46.0 24.8 L48.0 25.0 L50.0 25.1 L52.0 25.4 L54.0 25.6 L56.0 25.9 L58.0 26.1 L60.0 26.5 L62.0 26.8 L64.0 27.2 L66.0 27.6 L68.0 28.0 L70.0 28.4 L72.0 28.9 L74.0 29.3 L76.0 29.8 L78.0 30.2 L80.0 30.7 L82.0 31.1 L84.0 31.6 L86.0 32.0 L88.0 32.4 L90.0 32.9 L92.0 33.3 L94.0 33.8 L96.0 34.3 L98.0 34.8 L100.0 35.4 L102.0 36.0 L104.0 36.6 L106.0 37.3 L108.0 38.1 L110.0 38.8 L112.0 39.4 L114.0 39.9 L116.0 40.1 L118.0 40.1 L120.0 39.9 L122.0 39.5 L124.0 38.9 L126.0 38.3 L128.0 37.6 L130.0 37.0 L132.0 36.4 L134.0 35.9 L136.0 35.4 L138.0 35.0 L140.0 34.6 L142.0 34.3 L144.0 34.1 L146.0 33.8 L148.0 33.6 L150.0 33.4 L152.0 33.3 L154.0 33.1 L156.0 33.0 L158.0 32.9 L160.0 32.8 L162.0 32.7 L164.0 32.6 L166.0 32.5 L168.0 32.5 L170.0 32.4 L172.0 32.4 L174.0 32.3 L176.0 32.3 L178.0 32.2 L180.0 32.2 L182.0 32.1 L184.0 32.1 L186.0 32.1 L188.0 32.0 L190.0 32.0 L192.0 31.9 L194.0 31.9 L196.0 31.9 L198.0 31.8 L200.0 31.8 L202.0 31.7 L204.0 31.7 L206.0 31.6 L208.0 31.5 L210.0 31.5 L212.0 31.4 L214.0 31.3 L216.0 31.2 L218.0 31.1 L220.0 31.0 L222.0 30.8 L224.0 30.6 L226.0 30.4 L228.0 30.2 L230.0 29.9 L232.0 29.6 L234.0 29.3 L236.0 28.9 L238.0 28.6 L240.0 28.2 L242.0 27.9 L244.0 27.8 L246.0 27.7 L248.0 27.8 L250.0 27.9 L252.0 28.2 L254.0 28.5 L256.0 28.8 L258.0 29.1 L260.0 29.3 L262.0 29.4 L264.0 29.6 L266.0 29.6 L268.0 29.6 L270.0 29.6 L272.0 29.5 L274.0 29.3 L276.0 29.1 L278.0 28.8 L280.0 28.5 L282.0 28.2 L284.0 27.8 L286.0 27.4 L288.0 27.0 L290.0 26.6 L292.0 26.1 L294.0 25.7 L296.0 25.3 L298.0 25.0 L300.0 24.7 L302.0 24.4 L304.0 24.2 L306.0 24.0 L308.0 23.9 L310.0 23.8 L312.0 23.8 L314.0 23.7 L316.0 23.7 L318.0 23.7 L320.0 23.7" fill="none" stroke="var(--gold)" stroke-width="2" stroke-linejoin="round"/></svg>
+    <div class="scopelbl"><span>20 Hz</span><span>+12 dB&nbsp;·&nbsp;−12 dB</span><span>20 kHz</span></div></div>
+    
+    <div class="ctl"><div class="clabel">Bass</div>
+  <div class="hslider">
+    <div class="cfill" style="left:41.66666666666667%;width:8.333333333333329%"></div>
+    <div class="hknob" style="left:41.66666666666667%"></div></div>
+  <div class="cval">-2 dB</div></div>
+    <div class="ctl"><div class="clabel">Treble</div>
+  <div class="hslider">
+    <div class="cfill" style="left:50%;width:4.166666666666664%"></div>
+    <div class="hknob" style="left:54.166666666666664%"></div></div>
+  <div class="cval">+1 dB</div></div>
+    <div class="ctl"><div class="clabel">Balance</div>
+  <div class="hslider"><div class="tickmid"></div>
+    <div class="cfill" style="left:50%;width:0%"></div>
+    <div class="hknob" style="left:50%"></div></div>
+  <div class="cval">Center</div></div>
+    <div class="ctl"><div class="clabel">Loudness</div><div class="check on"></div></div>
+    <div class="disc open"><div class="tri"></div>Advanced</div>
+    <div class="bands"><div class="band"><div class="vtrack"><div class="vzero"></div>
+      
+      <div class="vknob" style="bottom:50%"></div></div><div class="bhz">31</div></div><div class="band"><div class="vtrack"><div class="vzero"></div>
+      
+      <div class="vknob" style="bottom:50%"></div></div><div class="bhz">63</div></div><div class="band"><div class="vtrack"><div class="vzero"></div>
+      
+      <div class="vknob" style="bottom:50%"></div></div><div class="bhz">125</div></div><div class="band"><div class="vtrack"><div class="vzero"></div>
+      <div class="vfill" style="top:50%;height:16.666666666666664%"></div>
+      <div class="vknob" style="bottom:33.33333333333333%"></div></div><div class="bhz">250</div></div><div class="band"><div class="vtrack"><div class="vzero"></div>
+      
+      <div class="vknob" style="bottom:50%"></div></div><div class="bhz">500</div></div><div class="band"><div class="vtrack"><div class="vzero"></div>
+      
+      <div class="vknob" style="bottom:50%"></div></div><div class="bhz">1k</div></div><div class="band"><div class="vtrack"><div class="vzero"></div>
+      
+      <div class="vknob" style="bottom:50%"></div></div><div class="bhz">2k</div></div><div class="band"><div class="vtrack"><div class="vzero"></div>
+      <div class="vfill" style="bottom:50%;height:8.333333333333332%"></div>
+      <div class="vknob" style="bottom:58.333333333333336%"></div></div><div class="bhz">4k</div></div><div class="band"><div class="vtrack"><div class="vzero"></div>
+      
+      <div class="vknob" style="bottom:50%"></div></div><div class="bhz">8k</div></div><div class="band"><div class="vtrack"><div class="vzero"></div>
+      
+      <div class="vknob" style="bottom:50%"></div></div><div class="bhz">16k</div></div>
+  </div><div class="hzlegend">Hz</div>
+    
+  </div>
+  <div class="row">
+  <div class="devicon"><svg viewBox="0 0 16 16"><rect x="4" y="1" width="8" height="14" rx="2"/></svg></div><div class="dname">Sonos Move</div>
+  <div class="vol"><div class="fill" style="width:40%"></div><div class="knob" style="left:40%"></div></div>
+  <div class="pct">40%</div><div class="chip on">EQ</div>
+</div></div>
+    <p class="cap"><b>In context.</b> The chip sits with the device's other feed chips. Closed chips: dim = flat, bright = voiced (Sonos Move). Open = engaged chrome, neutral — never gold.</p>
+  </div>
+  <div>
+    <div class="pop light" id="ctx-light">
+  <div class="sect"><span>OUTPUT DEVICES</span><span>FEED</span></div>
+  <div class="row">
+  <div class="devicon"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/></svg></div><div class="dname">Bedroom HomePod</div>
+  <div class="vol"><div class="fill" style="width:25%"></div><div class="knob" style="left:25%"></div></div>
+  <div class="pct">25%</div><div class="chip ">EQ</div>
+</div>
+  <div class="row">
+  <div class="devicon"><svg viewBox="0 0 16 16"><rect x="4" y="1" width="8" height="14" rx="2"/></svg></div><div class="dname">Office</div>
+  <div class="vol"><div class="fill" style="width:50%"></div><div class="knob" style="left:50%"></div></div>
+  <div class="pct">50%</div><div class="chip open">EQ</div>
+</div>
+  <div class="drawer">
+    <div class="dhead"><span class="plate">EQ — OFFICE</span><button class="reset">Reset</button></div>
+    <div class="scope"><svg viewBox="0 0 320 64" preserveAspectRatio="none"><line x1="21.0" y1="0" x2="21.0" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="53.2" y1="0" x2="53.2" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="84.9" y1="0" x2="84.9" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="117.0" y1="0" x2="117.0" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="149.1" y1="0" x2="149.1" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="181.2" y1="0" x2="181.2" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="213.3" y1="0" x2="213.3" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="245.4" y1="0" x2="245.4" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="277.6" y1="0" x2="277.6" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="309.7" y1="0" x2="309.7" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="0" y1="32" x2="320" y2="32" stroke="var(--scope-zero)" stroke-width="1"/><path d="M0.0 23.7 L2.0 23.8 L4.0 23.8 L6.0 23.8 L8.0 23.8 L10.0 23.8 L12.0 23.8 L14.0 23.8 L16.0 23.8 L18.0 23.9 L20.0 23.9 L22.0 23.9 L24.0 23.9 L26.0 24.0 L28.0 24.0 L30.0 24.0 L32.0 24.1 L34.0 24.2 L36.0 24.2 L38.0 24.3 L40.0 24.4 L42.0 24.5 L44.0 24.6 L46.0 24.8 L48.0 25.0 L50.0 25.1 L52.0 25.4 L54.0 25.6 L56.0 25.9 L58.0 26.1 L60.0 26.5 L62.0 26.8 L64.0 27.2 L66.0 27.6 L68.0 28.0 L70.0 28.4 L72.0 28.9 L74.0 29.3 L76.0 29.8 L78.0 30.2 L80.0 30.7 L82.0 31.1 L84.0 31.6 L86.0 32.0 L88.0 32.4 L90.0 32.9 L92.0 33.3 L94.0 33.8 L96.0 34.3 L98.0 34.8 L100.0 35.4 L102.0 36.0 L104.0 36.6 L106.0 37.3 L108.0 38.1 L110.0 38.8 L112.0 39.4 L114.0 39.9 L116.0 40.1 L118.0 40.1 L120.0 39.9 L122.0 39.5 L124.0 38.9 L126.0 38.3 L128.0 37.6 L130.0 37.0 L132.0 36.4 L134.0 35.9 L136.0 35.4 L138.0 35.0 L140.0 34.6 L142.0 34.3 L144.0 34.1 L146.0 33.8 L148.0 33.6 L150.0 33.4 L152.0 33.3 L154.0 33.1 L156.0 33.0 L158.0 32.9 L160.0 32.8 L162.0 32.7 L164.0 32.6 L166.0 32.5 L168.0 32.5 L170.0 32.4 L172.0 32.4 L174.0 32.3 L176.0 32.3 L178.0 32.2 L180.0 32.2 L182.0 32.1 L184.0 32.1 L186.0 32.1 L188.0 32.0 L190.0 32.0 L192.0 31.9 L194.0 31.9 L196.0 31.9 L198.0 31.8 L200.0 31.8 L202.0 31.7 L204.0 31.7 L206.0 31.6 L208.0 31.5 L210.0 31.5 L212.0 31.4 L214.0 31.3 L216.0 31.2 L218.0 31.1 L220.0 31.0 L222.0 30.8 L224.0 30.6 L226.0 30.4 L228.0 30.2 L230.0 29.9 L232.0 29.6 L234.0 29.3 L236.0 28.9 L238.0 28.6 L240.0 28.2 L242.0 27.9 L244.0 27.8 L246.0 27.7 L248.0 27.8 L250.0 27.9 L252.0 28.2 L254.0 28.5 L256.0 28.8 L258.0 29.1 L260.0 29.3 L262.0 29.4 L264.0 29.6 L266.0 29.6 L268.0 29.6 L270.0 29.6 L272.0 29.5 L274.0 29.3 L276.0 29.1 L278.0 28.8 L280.0 28.5 L282.0 28.2 L284.0 27.8 L286.0 27.4 L288.0 27.0 L290.0 26.6 L292.0 26.1 L294.0 25.7 L296.0 25.3 L298.0 25.0 L300.0 24.7 L302.0 24.4 L304.0 24.2 L306.0 24.0 L308.0 23.9 L310.0 23.8 L312.0 23.8 L314.0 23.7 L316.0 23.7 L318.0 23.7 L320.0 23.7 L 320 32 L 0 32 Z" fill="rgba(231,185,78,.13)" stroke="none"/>
+              <path d="M0.0 23.7 L2.0 23.8 L4.0 23.8 L6.0 23.8 L8.0 23.8 L10.0 23.8 L12.0 23.8 L14.0 23.8 L16.0 23.8 L18.0 23.9 L20.0 23.9 L22.0 23.9 L24.0 23.9 L26.0 24.0 L28.0 24.0 L30.0 24.0 L32.0 24.1 L34.0 24.2 L36.0 24.2 L38.0 24.3 L40.0 24.4 L42.0 24.5 L44.0 24.6 L46.0 24.8 L48.0 25.0 L50.0 25.1 L52.0 25.4 L54.0 25.6 L56.0 25.9 L58.0 26.1 L60.0 26.5 L62.0 26.8 L64.0 27.2 L66.0 27.6 L68.0 28.0 L70.0 28.4 L72.0 28.9 L74.0 29.3 L76.0 29.8 L78.0 30.2 L80.0 30.7 L82.0 31.1 L84.0 31.6 L86.0 32.0 L88.0 32.4 L90.0 32.9 L92.0 33.3 L94.0 33.8 L96.0 34.3 L98.0 34.8 L100.0 35.4 L102.0 36.0 L104.0 36.6 L106.0 37.3 L108.0 38.1 L110.0 38.8 L112.0 39.4 L114.0 39.9 L116.0 40.1 L118.0 40.1 L120.0 39.9 L122.0 39.5 L124.0 38.9 L126.0 38.3 L128.0 37.6 L130.0 37.0 L132.0 36.4 L134.0 35.9 L136.0 35.4 L138.0 35.0 L140.0 34.6 L142.0 34.3 L144.0 34.1 L146.0 33.8 L148.0 33.6 L150.0 33.4 L152.0 33.3 L154.0 33.1 L156.0 33.0 L158.0 32.9 L160.0 32.8 L162.0 32.7 L164.0 32.6 L166.0 32.5 L168.0 32.5 L170.0 32.4 L172.0 32.4 L174.0 32.3 L176.0 32.3 L178.0 32.2 L180.0 32.2 L182.0 32.1 L184.0 32.1 L186.0 32.1 L188.0 32.0 L190.0 32.0 L192.0 31.9 L194.0 31.9 L196.0 31.9 L198.0 31.8 L200.0 31.8 L202.0 31.7 L204.0 31.7 L206.0 31.6 L208.0 31.5 L210.0 31.5 L212.0 31.4 L214.0 31.3 L216.0 31.2 L218.0 31.1 L220.0 31.0 L222.0 30.8 L224.0 30.6 L226.0 30.4 L228.0 30.2 L230.0 29.9 L232.0 29.6 L234.0 29.3 L236.0 28.9 L238.0 28.6 L240.0 28.2 L242.0 27.9 L244.0 27.8 L246.0 27.7 L248.0 27.8 L250.0 27.9 L252.0 28.2 L254.0 28.5 L256.0 28.8 L258.0 29.1 L260.0 29.3 L262.0 29.4 L264.0 29.6 L266.0 29.6 L268.0 29.6 L270.0 29.6 L272.0 29.5 L274.0 29.3 L276.0 29.1 L278.0 28.8 L280.0 28.5 L282.0 28.2 L284.0 27.8 L286.0 27.4 L288.0 27.0 L290.0 26.6 L292.0 26.1 L294.0 25.7 L296.0 25.3 L298.0 25.0 L300.0 24.7 L302.0 24.4 L304.0 24.2 L306.0 24.0 L308.0 23.9 L310.0 23.8 L312.0 23.8 L314.0 23.7 L316.0 23.7 L318.0 23.7 L320.0 23.7" fill="none" stroke="var(--gold)" stroke-width="2" stroke-linejoin="round"/></svg>
+    <div class="scopelbl"><span>20 Hz</span><span>+12 dB&nbsp;·&nbsp;−12 dB</span><span>20 kHz</span></div></div>
+    
+    <div class="ctl"><div class="clabel">Bass</div>
+  <div class="hslider">
+    <div class="cfill" style="left:41.66666666666667%;width:8.333333333333329%"></div>
+    <div class="hknob" style="left:41.66666666666667%"></div></div>
+  <div class="cval">-2 dB</div></div>
+    <div class="ctl"><div class="clabel">Treble</div>
+  <div class="hslider">
+    <div class="cfill" style="left:50%;width:4.166666666666664%"></div>
+    <div class="hknob" style="left:54.166666666666664%"></div></div>
+  <div class="cval">+1 dB</div></div>
+    <div class="ctl"><div class="clabel">Balance</div>
+  <div class="hslider"><div class="tickmid"></div>
+    <div class="cfill" style="left:50%;width:0%"></div>
+    <div class="hknob" style="left:50%"></div></div>
+  <div class="cval">Center</div></div>
+    <div class="ctl"><div class="clabel">Loudness</div><div class="check on"></div></div>
+    <div class="disc open"><div class="tri"></div>Advanced</div>
+    <div class="bands"><div class="band"><div class="vtrack"><div class="vzero"></div>
+      
+      <div class="vknob" style="bottom:50%"></div></div><div class="bhz">31</div></div><div class="band"><div class="vtrack"><div class="vzero"></div>
+      
+      <div class="vknob" style="bottom:50%"></div></div><div class="bhz">63</div></div><div class="band"><div class="vtrack"><div class="vzero"></div>
+      
+      <div class="vknob" style="bottom:50%"></div></div><div class="bhz">125</div></div><div class="band"><div class="vtrack"><div class="vzero"></div>
+      <div class="vfill" style="top:50%;height:16.666666666666664%"></div>
+      <div class="vknob" style="bottom:33.33333333333333%"></div></div><div class="bhz">250</div></div><div class="band"><div class="vtrack"><div class="vzero"></div>
+      
+      <div class="vknob" style="bottom:50%"></div></div><div class="bhz">500</div></div><div class="band"><div class="vtrack"><div class="vzero"></div>
+      
+      <div class="vknob" style="bottom:50%"></div></div><div class="bhz">1k</div></div><div class="band"><div class="vtrack"><div class="vzero"></div>
+      
+      <div class="vknob" style="bottom:50%"></div></div><div class="bhz">2k</div></div><div class="band"><div class="vtrack"><div class="vzero"></div>
+      <div class="vfill" style="bottom:50%;height:8.333333333333332%"></div>
+      <div class="vknob" style="bottom:58.333333333333336%"></div></div><div class="bhz">4k</div></div><div class="band"><div class="vtrack"><div class="vzero"></div>
+      
+      <div class="vknob" style="bottom:50%"></div></div><div class="bhz">8k</div></div><div class="band"><div class="vtrack"><div class="vzero"></div>
+      
+      <div class="vknob" style="bottom:50%"></div></div><div class="bhz">16k</div></div>
+  </div><div class="hzlegend">Hz</div>
+    
+  </div>
+  <div class="row">
+  <div class="devicon"><svg viewBox="0 0 16 16"><rect x="4" y="1" width="8" height="14" rx="2"/></svg></div><div class="dname">Sonos Move</div>
+  <div class="vol"><div class="fill" style="width:40%"></div><div class="knob" style="left:40%"></div></div>
+  <div class="pct">40%</div><div class="chip on">EQ</div>
+</div></div>
+    <p class="cap"><b>Circuit light.</b> Chrome themes; the scope does not. The dark screen inside a light panel is the “instruments never theme” rule made visible.</p>
+  </div>
+</div>
+
+<h2>States</h2>
+<div class="boards">
+  <div>
+    <div class="pop dark" id="st-flat">
+  <div class="sect"><span>OUTPUT DEVICES</span><span>FEED</span></div>
+  <div class="row">
+  <div class="devicon"><svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/></svg></div><div class="dname">Bedroom HomePod</div>
+  <div class="vol"><div class="fill" style="width:25%"></div><div class="knob" style="left:25%"></div></div>
+  <div class="pct">25%</div><div class="chip open">EQ</div>
+</div>
+  <div class="drawer">
+    <div class="dhead"><span class="plate">EQ — BEDROOM HOMEPOD</span><button class="reset">Reset</button></div>
+    <div class="scope"><svg viewBox="0 0 320 64" preserveAspectRatio="none"><line x1="21.0" y1="0" x2="21.0" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="53.2" y1="0" x2="53.2" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="84.9" y1="0" x2="84.9" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="117.0" y1="0" x2="117.0" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="149.1" y1="0" x2="149.1" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="181.2" y1="0" x2="181.2" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="213.3" y1="0" x2="213.3" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="245.4" y1="0" x2="245.4" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="277.6" y1="0" x2="277.6" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="309.7" y1="0" x2="309.7" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="0" y1="32" x2="320" y2="32" stroke="var(--scope-zero)" stroke-width="1"/><line x1="0" y1="32" x2="320" y2="32" stroke="var(--scope-flat)" stroke-width="1.5"/></svg>
+    <div class="scopelbl"><span>20 Hz</span><span>+12 dB&nbsp;·&nbsp;−12 dB</span><span>20 kHz</span></div></div>
+    
+    <div class="ctl"><div class="clabel">Bass</div>
+  <div class="hslider">
+    <div class="cfill" style="left:50%;width:0%"></div>
+    <div class="hknob" style="left:50%"></div></div>
+  <div class="cval">0 dB</div></div>
+    <div class="ctl"><div class="clabel">Treble</div>
+  <div class="hslider">
+    <div class="cfill" style="left:50%;width:0%"></div>
+    <div class="hknob" style="left:50%"></div></div>
+  <div class="cval">0 dB</div></div>
+    <div class="ctl"><div class="clabel">Balance</div>
+  <div class="hslider"><div class="tickmid"></div>
+    <div class="cfill" style="left:50%;width:0%"></div>
+    <div class="hknob" style="left:50%"></div></div>
+  <div class="cval">Center</div></div>
+    <div class="ctl"><div class="clabel">Loudness</div><div class="check "></div></div>
+    <div class="disc "><div class="tri"></div>Advanced</div>
+    
+    
+  </div></div>
+    <p class="cap"><b>Flat.</b> Neutral hairline at 0 dB — nothing pretends to be engaged. Simple tier only; Advanced closed. Reset disabled-quiet.</p>
+  </div>
+  <div>
+    <div class="pop dark" id="st-bypass">
+  <div class="sect"><span>OUTPUT DEVICES</span><span>FEED</span></div>
+  <div class="row">
+  <div class="devicon"><svg viewBox="0 0 16 16"><rect x="4" y="1" width="8" height="14" rx="2"/></svg></div><div class="dname">Office</div>
+  <div class="vol"><div class="fill" style="width:50%"></div><div class="knob" style="left:50%"></div></div>
+  <div class="pct">50%</div><div class="chip open">EQ</div>
+</div>
+  <div class="drawer">
+    <div class="dhead"><span class="plate">EQ — OFFICE</span><button class="reset">Reset</button></div>
+    <div class="scope"><svg viewBox="0 0 320 64" preserveAspectRatio="none"><line x1="21.0" y1="0" x2="21.0" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="53.2" y1="0" x2="53.2" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="84.9" y1="0" x2="84.9" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="117.0" y1="0" x2="117.0" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="149.1" y1="0" x2="149.1" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="181.2" y1="0" x2="181.2" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="213.3" y1="0" x2="213.3" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="245.4" y1="0" x2="245.4" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="277.6" y1="0" x2="277.6" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="309.7" y1="0" x2="309.7" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="0" y1="32" x2="320" y2="32" stroke="var(--scope-zero)" stroke-width="1"/><path d="M0.0 23.7 L2.0 23.8 L4.0 23.8 L6.0 23.8 L8.0 23.8 L10.0 23.8 L12.0 23.8 L14.0 23.8 L16.0 23.8 L18.0 23.9 L20.0 23.9 L22.0 23.9 L24.0 23.9 L26.0 24.0 L28.0 24.0 L30.0 24.0 L32.0 24.1 L34.0 24.2 L36.0 24.2 L38.0 24.3 L40.0 24.4 L42.0 24.5 L44.0 24.6 L46.0 24.8 L48.0 25.0 L50.0 25.1 L52.0 25.4 L54.0 25.6 L56.0 25.9 L58.0 26.1 L60.0 26.5 L62.0 26.8 L64.0 27.2 L66.0 27.6 L68.0 28.0 L70.0 28.4 L72.0 28.9 L74.0 29.3 L76.0 29.8 L78.0 30.2 L80.0 30.7 L82.0 31.1 L84.0 31.6 L86.0 32.0 L88.0 32.4 L90.0 32.9 L92.0 33.3 L94.0 33.8 L96.0 34.3 L98.0 34.8 L100.0 35.4 L102.0 36.0 L104.0 36.6 L106.0 37.3 L108.0 38.1 L110.0 38.8 L112.0 39.4 L114.0 39.9 L116.0 40.1 L118.0 40.1 L120.0 39.9 L122.0 39.5 L124.0 38.9 L126.0 38.3 L128.0 37.6 L130.0 37.0 L132.0 36.4 L134.0 35.9 L136.0 35.4 L138.0 35.0 L140.0 34.6 L142.0 34.3 L144.0 34.1 L146.0 33.8 L148.0 33.6 L150.0 33.4 L152.0 33.3 L154.0 33.1 L156.0 33.0 L158.0 32.9 L160.0 32.8 L162.0 32.7 L164.0 32.6 L166.0 32.5 L168.0 32.5 L170.0 32.4 L172.0 32.4 L174.0 32.3 L176.0 32.3 L178.0 32.2 L180.0 32.2 L182.0 32.1 L184.0 32.1 L186.0 32.1 L188.0 32.0 L190.0 32.0 L192.0 31.9 L194.0 31.9 L196.0 31.9 L198.0 31.8 L200.0 31.8 L202.0 31.7 L204.0 31.7 L206.0 31.6 L208.0 31.5 L210.0 31.5 L212.0 31.4 L214.0 31.3 L216.0 31.2 L218.0 31.1 L220.0 31.0 L222.0 30.8 L224.0 30.6 L226.0 30.4 L228.0 30.2 L230.0 29.9 L232.0 29.6 L234.0 29.3 L236.0 28.9 L238.0 28.6 L240.0 28.2 L242.0 27.9 L244.0 27.8 L246.0 27.7 L248.0 27.8 L250.0 27.9 L252.0 28.2 L254.0 28.5 L256.0 28.8 L258.0 29.1 L260.0 29.3 L262.0 29.4 L264.0 29.6 L266.0 29.6 L268.0 29.6 L270.0 29.6 L272.0 29.5 L274.0 29.3 L276.0 29.1 L278.0 28.8 L280.0 28.5 L282.0 28.2 L284.0 27.8 L286.0 27.4 L288.0 27.0 L290.0 26.6 L292.0 26.1 L294.0 25.7 L296.0 25.3 L298.0 25.0 L300.0 24.7 L302.0 24.4 L304.0 24.2 L306.0 24.0 L308.0 23.9 L310.0 23.8 L312.0 23.8 L314.0 23.7 L316.0 23.7 L318.0 23.7 L320.0 23.7" fill="none" stroke="var(--scope-bypass)" stroke-width="1.5" stroke-dasharray="4 3"/></svg>
+    <div class="scopelbl"><span>20 Hz</span><span>+12 dB&nbsp;·&nbsp;−12 dB</span><span>20 kHz</span></div></div>
+    <div class="warn">Not applied — too many different EQ settings at once.</div>
+    <div class="ctl"><div class="clabel">Bass</div>
+  <div class="hslider">
+    <div class="cfill" style="left:41.66666666666667%;width:8.333333333333329%"></div>
+    <div class="hknob" style="left:41.66666666666667%"></div></div>
+  <div class="cval">-2 dB</div></div>
+    <div class="ctl"><div class="clabel">Treble</div>
+  <div class="hslider">
+    <div class="cfill" style="left:50%;width:4.166666666666664%"></div>
+    <div class="hknob" style="left:54.166666666666664%"></div></div>
+  <div class="cval">+1 dB</div></div>
+    <div class="ctl"><div class="clabel">Balance</div>
+  <div class="hslider"><div class="tickmid"></div>
+    <div class="cfill" style="left:50%;width:0%"></div>
+    <div class="hknob" style="left:50%"></div></div>
+  <div class="cval">Center</div></div>
+    <div class="ctl"><div class="clabel">Loudness</div><div class="check on"></div></div>
+    <div class="disc "><div class="tri"></div>Advanced</div>
+    
+    
+  </div></div>
+    <p class="cap"><b>Bypassed</b> (stream budget exhausted). The curve itself goes hollow — the shaping visibly isn't reaching the air. Settings stay editable, never discarded.</p>
+  </div>
+  <div>
+    <div class="pop dark" id="st-mainout">
+  <div class="sect"><span>SYSTEM AUDIO</span><span>OUTPUT</span></div>
+  <div class="row">
+  <div class="devicon"><svg viewBox="0 0 16 16"><rect x="1" y="3" width="14" height="9" rx="1.5"/><rect x="0" y="12.5" width="16" height="1.8" rx=".9"/></svg></div><div class="dname">Main Audio</div>
+  <div class="vol"><div class="fill" style="width:100%"></div><div class="knob" style="left:100%"></div></div>
+  <div class="pct">100%</div><div class="chip open">EQ</div>
+</div>
+  <div class="drawer">
+    <div class="dhead"><span class="plate">EQ — MAIN OUT</span><button class="reset">Reset</button></div>
+    <div class="scope"><svg viewBox="0 0 320 64" preserveAspectRatio="none"><line x1="21.0" y1="0" x2="21.0" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="53.2" y1="0" x2="53.2" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="84.9" y1="0" x2="84.9" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="117.0" y1="0" x2="117.0" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="149.1" y1="0" x2="149.1" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="181.2" y1="0" x2="181.2" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="213.3" y1="0" x2="213.3" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="245.4" y1="0" x2="245.4" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="277.6" y1="0" x2="277.6" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="309.7" y1="0" x2="309.7" y2="64" stroke="var(--scope-grid)" stroke-width="1"/><line x1="0" y1="32" x2="320" y2="32" stroke="var(--scope-zero)" stroke-width="1"/><path d="M0.0 27.9 L2.0 27.9 L4.0 27.9 L6.0 27.9 L8.0 27.9 L10.0 27.9 L12.0 27.9 L14.0 27.9 L16.0 27.9 L18.0 27.9 L20.0 27.9 L22.0 27.9 L24.0 27.9 L26.0 27.9 L28.0 27.9 L30.0 27.9 L32.0 27.9 L34.0 27.9 L36.0 27.9 L38.0 27.9 L40.0 28.0 L42.0 28.0 L44.0 28.0 L46.0 28.0 L48.0 28.0 L50.0 28.1 L52.0 28.1 L54.0 28.2 L56.0 28.2 L58.0 28.3 L60.0 28.4 L62.0 28.4 L64.0 28.5 L66.0 28.6 L68.0 28.7 L70.0 28.9 L72.0 29.0 L74.0 29.2 L76.0 29.3 L78.0 29.5 L80.0 29.7 L82.0 29.8 L84.0 30.0 L86.0 30.2 L88.0 30.4 L90.0 30.5 L92.0 30.7 L94.0 30.8 L96.0 31.0 L98.0 31.1 L100.0 31.2 L102.0 31.3 L104.0 31.4 L106.0 31.5 L108.0 31.6 L110.0 31.6 L112.0 31.7 L114.0 31.7 L116.0 31.8 L118.0 31.8 L120.0 31.8 L122.0 31.9 L124.0 31.9 L126.0 31.9 L128.0 31.9 L130.0 31.9 L132.0 31.9 L134.0 31.9 L136.0 32.0 L138.0 32.0 L140.0 32.0 L142.0 32.0 L144.0 32.0 L146.0 32.0 L148.0 32.0 L150.0 32.0 L152.0 32.0 L154.0 32.0 L156.0 32.0 L158.0 32.0 L160.0 32.0 L162.0 32.0 L164.0 32.0 L166.0 32.0 L168.0 32.0 L170.0 32.0 L172.0 32.0 L174.0 32.0 L176.0 32.0 L178.0 32.0 L180.0 32.0 L182.0 32.0 L184.0 32.0 L186.0 32.0 L188.0 32.0 L190.0 32.0 L192.0 32.0 L194.0 32.0 L196.0 32.0 L198.0 32.0 L200.0 32.0 L202.0 32.0 L204.0 32.0 L206.0 32.0 L208.0 32.0 L210.0 32.0 L212.0 32.0 L214.0 32.0 L216.0 32.0 L218.0 32.0 L220.0 32.0 L222.0 32.0 L224.0 32.0 L226.0 32.0 L228.0 32.0 L230.0 32.0 L232.0 31.9 L234.0 31.9 L236.0 31.9 L238.0 31.9 L240.0 31.9 L242.0 31.9 L244.0 31.8 L246.0 31.8 L248.0 31.8 L250.0 31.7 L252.0 31.7 L254.0 31.6 L256.0 31.6 L258.0 31.5 L260.0 31.4 L262.0 31.3 L264.0 31.2 L266.0 31.0 L268.0 30.9 L270.0 30.7 L272.0 30.5 L274.0 30.3 L276.0 30.1 L278.0 29.9 L280.0 29.7 L282.0 29.4 L284.0 29.2 L286.0 29.0 L288.0 28.8 L290.0 28.6 L292.0 28.5 L294.0 28.3 L296.0 28.2 L298.0 28.1 L300.0 28.1 L302.0 28.0 L304.0 28.0 L306.0 27.9 L308.0 27.9 L310.0 27.9 L312.0 27.9 L314.0 27.9 L316.0 27.9 L318.0 27.9 L320.0 27.9 L 320 32 L 0 32 Z" fill="rgba(231,185,78,.13)" stroke="none"/>
+              <path d="M0.0 27.9 L2.0 27.9 L4.0 27.9 L6.0 27.9 L8.0 27.9 L10.0 27.9 L12.0 27.9 L14.0 27.9 L16.0 27.9 L18.0 27.9 L20.0 27.9 L22.0 27.9 L24.0 27.9 L26.0 27.9 L28.0 27.9 L30.0 27.9 L32.0 27.9 L34.0 27.9 L36.0 27.9 L38.0 27.9 L40.0 28.0 L42.0 28.0 L44.0 28.0 L46.0 28.0 L48.0 28.0 L50.0 28.1 L52.0 28.1 L54.0 28.2 L56.0 28.2 L58.0 28.3 L60.0 28.4 L62.0 28.4 L64.0 28.5 L66.0 28.6 L68.0 28.7 L70.0 28.9 L72.0 29.0 L74.0 29.2 L76.0 29.3 L78.0 29.5 L80.0 29.7 L82.0 29.8 L84.0 30.0 L86.0 30.2 L88.0 30.4 L90.0 30.5 L92.0 30.7 L94.0 30.8 L96.0 31.0 L98.0 31.1 L100.0 31.2 L102.0 31.3 L104.0 31.4 L106.0 31.5 L108.0 31.6 L110.0 31.6 L112.0 31.7 L114.0 31.7 L116.0 31.8 L118.0 31.8 L120.0 31.8 L122.0 31.9 L124.0 31.9 L126.0 31.9 L128.0 31.9 L130.0 31.9 L132.0 31.9 L134.0 31.9 L136.0 32.0 L138.0 32.0 L140.0 32.0 L142.0 32.0 L144.0 32.0 L146.0 32.0 L148.0 32.0 L150.0 32.0 L152.0 32.0 L154.0 32.0 L156.0 32.0 L158.0 32.0 L160.0 32.0 L162.0 32.0 L164.0 32.0 L166.0 32.0 L168.0 32.0 L170.0 32.0 L172.0 32.0 L174.0 32.0 L176.0 32.0 L178.0 32.0 L180.0 32.0 L182.0 32.0 L184.0 32.0 L186.0 32.0 L188.0 32.0 L190.0 32.0 L192.0 32.0 L194.0 32.0 L196.0 32.0 L198.0 32.0 L200.0 32.0 L202.0 32.0 L204.0 32.0 L206.0 32.0 L208.0 32.0 L210.0 32.0 L212.0 32.0 L214.0 32.0 L216.0 32.0 L218.0 32.0 L220.0 32.0 L222.0 32.0 L224.0 32.0 L226.0 32.0 L228.0 32.0 L230.0 32.0 L232.0 31.9 L234.0 31.9 L236.0 31.9 L238.0 31.9 L240.0 31.9 L242.0 31.9 L244.0 31.8 L246.0 31.8 L248.0 31.8 L250.0 31.7 L252.0 31.7 L254.0 31.6 L256.0 31.6 L258.0 31.5 L260.0 31.4 L262.0 31.3 L264.0 31.2 L266.0 31.0 L268.0 30.9 L270.0 30.7 L272.0 30.5 L274.0 30.3 L276.0 30.1 L278.0 29.9 L280.0 29.7 L282.0 29.4 L284.0 29.2 L286.0 29.0 L288.0 28.8 L290.0 28.6 L292.0 28.5 L294.0 28.3 L296.0 28.2 L298.0 28.1 L300.0 28.1 L302.0 28.0 L304.0 28.0 L306.0 27.9 L308.0 27.9 L310.0 27.9 L312.0 27.9 L314.0 27.9 L316.0 27.9 L318.0 27.9 L320.0 27.9" fill="none" stroke="var(--gold)" stroke-width="2" stroke-linejoin="round"/></svg>
+    <div class="scopelbl"><span>20 Hz</span><span>+12 dB&nbsp;·&nbsp;−12 dB</span><span>20 kHz</span></div></div>
+    
+    <div class="ctl"><div class="clabel">Bass</div>
+  <div class="hslider">
+    <div class="cfill" style="left:50%;width:8.333333333333336%"></div>
+    <div class="hknob" style="left:58.333333333333336%"></div></div>
+  <div class="cval">+2 dB</div></div>
+    <div class="ctl"><div class="clabel">Treble</div>
+  <div class="hslider">
+    <div class="cfill" style="left:50%;width:8.333333333333336%"></div>
+    <div class="hknob" style="left:58.333333333333336%"></div></div>
+  <div class="cval">+2 dB</div></div>
+    <div class="ctl"><div class="clabel">Balance</div>
+  <div class="hslider"><div class="tickmid"></div>
+    <div class="cfill" style="left:50%;width:0%"></div>
+    <div class="hknob" style="left:50%"></div></div>
+  <div class="cval">Center</div></div>
+    <div class="ctl"><div class="clabel">Loudness</div><div class="check "></div></div>
+    <div class="disc "><div class="tri"></div>Advanced</div>
+    
+    <div class="note">Applies to audio sent to speakers.</div>
+  </div></div>
+    <p class="cap"><b>Main Out.</b> Identical instrument on the whole mix, one added plain-speech line. Nameplate carries the scope name.</p>
+  </div>
+</div>
+
+
+</body>
+</html>

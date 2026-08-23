@@ -3,29 +3,21 @@
 import AppKit
 import AudiouterSharedUI
 
-/// A GROUPED-SECTION container (the macOS System Settings idiom) — a rounded
-/// `Tokens.Color.well` fill with a `Tokens.Color.hairline` border, plus an
-/// inset hairline divider between each pair of ADJACENT rows handed to it.
+/// The Groups screen's ONE container shape (the macOS System Settings grouped
+/// idiom), in two modes.
 ///
-/// It started life (T5) as the membership checklist's recessed background:
-/// before it, the checklist carried no surface of its own at all —
-/// `MembershipRowView` paints nothing behind itself — so there was zero visual
-/// separation either between rows or against the pane (measured on the real
-/// post-fix tones: `panel` vs `canvas` ~1.06:1 dark / ~1.08:1 light,
-/// effectively invisible). Measured floors for THIS view's own tokens (WCAG
-/// relative luminance, both ≥ their required floor — see
-/// `MembershipWellContrastTests`): `well` vs `panel` 1.109:1 dark / 1.182:1
-/// light (floor 1.10:1); `hairline` vs `panel` 1.404:1 dark / 1.309:1 light
-/// (floor 1.25:1, the same separator floor `Tokens.Color.hairline` itself
-/// documents against `panel`).
+/// - ``Style/card`` — the page's ONE INSTRUMENT: a rounded
+///   `Tokens.Color.raised` fill with a 1 pt `Tokens.Color.hairline` edge. On
+///   dark, `raised` against the pane's `panel` measures 1.07:1 — below the
+///   surface floor — so the EDGE, not the fill, is what carries the
+///   separation (`hairline` vs `raised`: 1.31:1 dark / 1.40:1 light,
+///   `MembershipWellContrastTests`). Exactly one card per page: the Equalizer
+///   on the two detail pages, the Speakers checklist in the group editor.
+/// - ``Style/bare`` — a DIVIDER-ONLY list: no fill, no border, just the inset
+///   hairlines between rows. The Settings-rows idiom, and what every other
+///   list on these pages wears (Groups, About, and the header bands).
 ///
-/// It is now the Groups window's ONE section shape, used by BOTH content panes
-/// — the group editor's header + membership list, and the device detail pane's
-/// metadata + "In groups" sections (design review 2026-07-25). Two stacked
-/// sections with the rail threading out of the list up into the header mirrors
-/// the popover's own composition: bounded sections, tied together by the spine.
-/// It lives in its own file (rather than `private` inside the editor) precisely
-/// so the detail pane can share it instead of growing a second look-alike.
+/// A box is earned by holding a different instrument, never by length.
 ///
 /// The geometry, all of it load-bearing:
 ///
@@ -33,13 +25,15 @@ import AudiouterSharedUI
 ///   INSIDE the section rather than floating beside it. Content within is inset
 ///   past the gutter (`contentLeadingInset`) so the spine keeps a clear lane.
 /// - **Padded** top/bottom (`verticalPadding`) so content breathes instead of
-///   touching the container's edges.
+///   touching the container's edges. A `.card` host may use
+///   `GroupsPaneLayout.cardContentInset` instead when its content is an
+///   instrument rather than a stack of text rows.
 /// - **Inset dividers** starting at `contentLeadingInset` — the standard
 ///   grouped-list separator treatment, never full-bleed under the corners. A
 ///   section holding fewer than two rows draws none, which is what lets this
-///   same view serve as the plain header container.
-/// - **A visible border** plus a radius large enough to read as a shape; the
-///   first draft's 6 pt radius rendered visually square.
+///   same view serve as a plain header band.
+/// - **A radius large enough to read as a shape** in `.card`; the first
+///   draft's 6 pt radius rendered visually square.
 ///
 /// `draw(_:)`-based, not a frozen layer color — `DeviceIconWellView`'s pattern:
 /// every token re-resolves per appearance/Increase-Contrast on each paint, and
@@ -49,6 +43,18 @@ import AudiouterSharedUI
 /// affected; the dead area beside a narrower row simply swallows a click with
 /// no target, same as clicking blank pane background anywhere else.
 final class GroupedSectionView: NSView {
+    /// How this container draws itself — see the type's doc comment.
+    enum Style {
+        /// The page's one instrument: `raised` fill + a `hairline` edge.
+        case card
+        /// A divider-only list: no fill, no border.
+        case bare
+    }
+
+    /// Defaults to ``Style/card`` so a section is a card unless a page says
+    /// otherwise — there is at most one per page, and it is the loud one.
+    var style: Style = .card { didSet { needsDisplay = true } }
+
     /// Large enough to read as a rounded shape at this container's size — the
     /// 6 pt first draft rendered visually square. Same value as onboarding's
     /// `RoundedContainerView` (both model the System Settings grouped
@@ -74,16 +80,18 @@ final class GroupedSectionView: NSView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
     override func draw(_ dirtyRect: NSRect) {
-        // Stroke sits ON the boundary, so inset by half its width to keep the
-        // 1pt line crisp instead of straddling the pixel edge.
-        let borderRect = bounds.insetBy(dx: Self.borderWidth / 2, dy: Self.borderWidth / 2)
-        let shape = NSBezierPath(roundedRect: borderRect,
-                                 xRadius: Self.cornerRadius, yRadius: Self.cornerRadius)
-        Tokens.Color.well.setFill()
-        shape.fill()
-        Tokens.Color.hairline.setStroke()
-        shape.lineWidth = Self.borderWidth
-        shape.stroke()
+        if case .card = style {
+            // Stroke sits ON the boundary, so inset by half its width to keep
+            // the 1pt line crisp instead of straddling the pixel edge.
+            let borderRect = bounds.insetBy(dx: Self.borderWidth / 2, dy: Self.borderWidth / 2)
+            let shape = NSBezierPath(roundedRect: borderRect,
+                                     xRadius: Self.cornerRadius, yRadius: Self.cornerRadius)
+            Tokens.Color.raised.setFill()
+            shape.fill()
+            Tokens.Color.hairline.setStroke()
+            shape.lineWidth = Self.borderWidth
+            shape.stroke()
+        }
 
         guard rows.count > 1 else { return }
         Tokens.Color.hairline.setFill()

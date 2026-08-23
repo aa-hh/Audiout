@@ -65,6 +65,19 @@ public enum DeviceIcon {
         guard let override, isValid(override) else { return defaultName }
         return override
     }
+
+    /// The glyph for MAIN AUDIO — the whole mix, not a device. Owner's chosen
+    /// symbol `hifispeaker.arrow.forward.fill` arrived in macOS 15 and the
+    /// deployment target is macOS 14, so it resolves through the same
+    /// staleness fallback every other icon uses: the exact symbol once the OS
+    /// is new enough, plain `hifispeaker.fill` below that.
+    ///
+    /// One definition, because two surfaces now draw it — the popover's Main
+    /// Audio row and the Groups screen's Main Audio page (sidebar row and
+    /// header) — and they must never show different speakers.
+    public static var mainAudioSymbolName: String {
+        resolve("hifispeaker.arrow.forward.fill", default: "hifispeaker.fill")
+    }
 }
 
 /// In-memory per-device icon override map, persisted through an injected

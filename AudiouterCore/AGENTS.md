@@ -238,8 +238,10 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   and `.streamHealth` signal-only events). It is BOOKKEEPING-TRANSPARENT and a
   no-op when nothing streams whole-system. This is the stream-0 analog of the
   per-app `resetAirPlaySessionForRoutedApp`. Crucially, an EXCLUSION-set rebuild
-  (the synced-local sink attach on every Mac+AirPlay connect, or an app-route
-  change) leaves the device/clock — and thus the receivers' timeline — intact and
+  (an app-route change, or a synced-local/BT sink attach whose RESOLVED exclusion
+  object set genuinely changed — a plain Mac+AirPlay connect no longer rebuilds at
+  all, since our own render process is already self-excluded)
+  leaves the device/clock — and thus the receivers' timeline — intact and
   must NOT reset: resetting there added a redundant RTP re-establish to every
   connect ("connects fast, then a long silence"). The live exclusion set is instead
   kept correct by the debounced process-object-list membership diff (W1-T7 Gap 1) +

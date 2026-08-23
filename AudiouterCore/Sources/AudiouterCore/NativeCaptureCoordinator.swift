@@ -163,6 +163,12 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         /// single-producer-by-construction shape is the whole point (roadmap
         /// 040 failed as two producers contending for a lock on a cadence).
         let wizardActive: Bool
+        /// Which tap generation this snapshot belongs to — bumped once per
+        /// committed ``recreateTap(cause:)`` (``tapEpoch``). A buffer carries the
+        /// epoch of whatever snapshot it read at the top of ``handleBuffer(_:)``,
+        /// which is what lets ``FeedGapTracker`` tell a genuinely post-rebuild
+        /// buffer from one that was already in flight when the rebuild claimed.
+        let tapEpoch: Int
 
         /// The published value before anything has been started, and the value
         /// every teardown path returns to: no converter, so ``handleBuffer(_:)``
@@ -171,7 +177,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             converter: nil, meteringActive: false,
             syncedLocalSink: nil, syncedLocalBaseResampler: nil,
             btSink: nil, btBaseResampler: nil,
-            tickInjector: nil, wizardActive: false)
+            tickInjector: nil, wizardActive: false, tapEpoch: 0)
 
         init(
             converter: PCMConverting?,
@@ -181,7 +187,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             btSink: SyncedLocalPCMSink?,
             btBaseResampler: SyncedLocalBaseResampler?,
             tickInjector: AlignmentTickInjector?,
-            wizardActive: Bool
+            wizardActive: Bool,
+            tapEpoch: Int
         ) {
             self.converter = converter
             self.meteringActive = meteringActive
@@ -191,8 +198,14 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             self.btBaseResampler = btBaseResampler
             self.tickInjector = tickInjector
             self.wizardActive = wizardActive
+            self.tapEpoch = tapEpoch
         }
     }
+
+    /// The tap generation counter stamped onto every published ``BufferSnapshot``.
+    /// Queue-confined, and bumped in exactly ONE place: ``recreateTap(cause:)``'s
+    /// commit block, alongside the converter republish. See ``FeedGapTracker``.
+    private var tapEpoch = 0
 
     /// Guards ONLY the `_bufferSnapshot` reference — one pointer read on the RT
     /// side, one pointer write on the publish side, nothing else. NEVER held
@@ -674,6 +687,15 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             self.tap = nil
             self.converter = nil
             self.publishBufferSnapshot()
+            // A stop's silence is deliberate: never let it masquerade as a
+            // rebuild hole that some later `start()` fills in. A full reset, not
+            // just a disarm — this coordinator outlives the session, and a
+            // surviving `lastEndPts` would make the NEXT session's first rebuild
+            // measure its hole from the previous session's last buffer
+            // (``FeedGapTracker/reset()``). Safe here and not at the claim in
+            // `recreateTap`: `teardown()` above already blocked until in-flight IO
+            // quiesced, so no delivery thread can be mid-`noteDelivered`.
+            self.feedGap.reset()
             self.transition(to: .idle)
         }
     }
@@ -746,16 +768,28 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// whole-system tap's exclusion set so the sink's own delayed audio is never
     /// re-captured as an echo (R2 / brief §8); `nil` turns both off.
     ///
-    /// If a tap is currently `.capturing` AND the exclusion pid actually changes,
-    /// the tap is recreated immediately so the new exclusion takes effect without
-    /// waiting for a device change — mirroring
-    /// ``updateRouting(appRoutes:excludedBundleIDs:)``. Otherwise the new pid is
-    /// simply applied at the next tap creation. ``NativeBackend`` calls this when
-    /// the selection enters/leaves "play everywhere" mode; it supplies the
-    /// render-process identity (its own `getpid()`, since the sink renders
-    /// in-process).
+    /// A pid change here never forces an unconditional tap recreate: the decision
+    /// is delegated to ``rebuildIfExclusionObjectsChanged()``'s
+    /// compare-before-rebuild, which rebuilds only when the RESOLVED object set
+    /// genuinely changed. In production the pid is our OWN process, which the
+    /// unconditional self-exclude in
+    /// ``resolveExcludedObjectIDsLoggingAttribution(bundleIDs:)`` already applies on
+    /// every tap creation — so attaching/detaching the Mac's own sink mid-capture is
+    /// rebuild-free, while a genuinely new render process still takes effect
+    /// immediately.
+    ///
+    /// That rebuild-free attach is the fix for the Mac-join receiver slip: the
+    /// unconditional recreate this used to do put a ~200 ms hole in the tap feed on
+    /// every Mac-into-group toggle, and the sender re-anchors rtptime↔walltime to
+    /// samples-sent — so every AirPlay receiver came back permanently late while
+    /// already-anchored FIFO sinks ran early (see
+    /// `dev/notes/test3-mac-join-desync-diagnosis.md`).
+    ///
+    /// ``NativeBackend`` calls this when the selection enters/leaves "play
+    /// everywhere" mode; it supplies the render-process identity (its own
+    /// `getpid()`, since the sink renders in-process).
     public func setSyncedLocalSink(_ sink: SyncedLocalPCMSink?, renderProcessPID: pid_t?) {
-        let needsRecreate: Bool = queue.sync {
+        let checkExclusions: Bool = queue.sync {
             self.syncedLocalSink = sink
             // Build the base-rate converter for THIS sink's render rate (read once
             // at sink construction, T3 Part B). A brand-new instance per attach so
@@ -781,15 +815,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             if case .capturing = _state { return true }
             return false
         }
-        guard needsRecreate else { return }
-        // Exclusion-set change only (adding/removing the synced-local sink's own
-        // render pid): the tapped output device and its clock are unchanged, so this
-        // rebuild does NOT desync the AirPlay receivers — no whole-system session
-        // reset. Attaching the sink hits this on EVERY Mac+AirPlay connect; treating
-        // it as a rate-renegotiation recapture is what added a redundant RTP
-        // re-establish (a long post-connect silence) to every connect. See
-        // `onDeviceRateRebuild`.
-        recreateTap(cause: .exclusionChange)
+        guard checkExclusions else { return }
+        rebuildIfExclusionObjectsChanged()
     }
 
     /// Attach (or detach, with `nil`) the Bluetooth sink-manager fan-out
@@ -801,7 +828,7 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// synced-local sink's, so delayed BT output is never re-captured as an
     /// echo (plan risk R-echo).
     ///
-    /// Unlike ``setSyncedLocalSink(_:renderProcessPID:)``, a pid change here
+    /// Exactly as in ``setSyncedLocalSink(_:renderProcessPID:)``, a pid change here
     /// never forces an unconditional tap recreate: in production the pid is our
     /// own process, which the unconditional self-exclude in
     /// ``resolveExcludedObjectIDsLoggingAttribution(bundleIDs:)`` already covers
@@ -959,10 +986,13 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         rebuildIfExclusionObjectsChanged()
     }
 
-    /// The compare-before-rebuild core shared by BOTH exclusion-refresh entry
-    /// points — ``refreshExcludedProcessSet(forRelaunchedBundleID:)`` (relaunch /
-    /// per-app-health triggers, W1-T7 Fix 1) and ``handleMembershipChange()``
-    /// (process-list churn, W1-T7 Gap 1). Re-resolves the live excluded set to the
+    /// The compare-before-rebuild core shared by EVERY exclusion-refresh entry
+    /// point — ``refreshExcludedProcessSet(forRelaunchedBundleID:)`` (relaunch /
+    /// per-app-health triggers, W1-T7 Fix 1), ``handleMembershipChange()``
+    /// (process-list churn, W1-T7 Gap 1), and both sink attaches,
+    /// ``setSyncedLocalSink(_:renderProcessPID:)`` and
+    /// ``setBTSink(_:renderProcessPID:)`` (a fan-out sink's render pid joined or
+    /// left the exclusion set). Re-resolves the live excluded set to the
     /// Core Audio process OBJECTS the tap actually excludes and rebuilds ONLY if
     /// that object set differs from the baseline the live tap was built against
     /// (``lastExcludedObjects``) — so an unchanged set (a duplicate notification,
@@ -1098,7 +1128,8 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             btSink: btSink,
             btBaseResampler: btBaseResampler,
             tickInjector: tickInjector,
-            wizardActive: wizardActive)
+            wizardActive: wizardActive,
+            tapEpoch: tapEpoch)
         snapshotLock.lock()
         _bufferSnapshot = snapshot
         snapshotLock.unlock()
@@ -1318,6 +1349,28 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             tickInjector.mix(into: &pcm)
         }
 
+        // First buffer after a tap rebuild: measure the hole the rebuild left in
+        // the feed, and patch it before this buffer goes downstream (see
+        // ``FeedGapTracker``). Nothing ever delivered (lastEndPts == 0) means
+        // there is no baseline to measure from — the initial `start()`.
+        if let gap = feedGap.consume(deliveredEpoch: snapshot.tapEpoch), gap.lastEndPtsNanos != 0 {
+            let gapNanos = SyncTiming.monotonicNanos(buffer.pts) - gap.lastEndPtsNanos
+            let cause = gap.cause
+            // ALWAYS logged, fill or no fill — an over-cap or negative gap is the
+            // most interesting line in the trail. Never inline: `Telemetry.log`
+            // formats on the caller's thread under a lock and must not run on the
+            // delivery thread (`Telemetry.swift`), so hand it to `queue`.
+            queue.async {
+                Telemetry.log(.captureWS, "tap_feed_gap", [
+                    "cause": cause == .deviceOrRateChange ? "deviceOrRateChange" : "exclusionChange",
+                    "gapMs": String(format: "%.1f", Double(gapNanos) / 1_000_000),
+                ])
+            }
+            if gapNanos > 0, gapNanos <= Self.maxFeedGapFillNanos {
+                fillFeedGap(nanos: gapNanos, from: gap.lastEndPtsNanos, snapshot: snapshot)
+            }
+        }
+
         deliver(pcm, pts: buffer.pts, snapshot: snapshot)
     }
 
@@ -1369,6 +1422,42 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         if snapshot.meteringActive, let onLevel {
             onLevel(Self.rmsOfS16LE(pcm))
         }
+
+        // Where this block's audio ENDS on the capture timeline — `pts` is its
+        // first frame's capture time, so add its own duration. The next rebuild
+        // measures its feed hole from here (``FeedGapTracker``). Both producers
+        // land here and they never run concurrently (the pacer is cancelled and
+        // drained before any snapshot swap), so this stays single-writer.
+        let frames = pcm.count / (PCMFormat.airplay.channels * MemoryLayout<Int16>.size)
+        let endPts = SyncTiming.monotonicNanos(pts)
+            &+ Int64((Double(frames) * 1_000_000_000 / Double(PCMFormat.airplay.sampleRate)).rounded())
+        feedGap.noteDelivered(endPtsNanos: endPts)
+    }
+
+    /// Hand the delivery tail `nanos` worth of S16LE silence starting at
+    /// `startPts`, so the sender's sample count stays honest across a tap rebuild
+    /// and the anchored sink rings stay whole (see ``FeedGapTracker``). Zeroed
+    /// `Data` IS S16LE silence — the same shape ``emitWizardBlock(frames:)`` starts
+    /// from. Runs on the delivery thread inside ``handleBuffer(_:)``, ahead of the
+    /// real buffer, so the single-producer constraint (roadmap 040) holds by
+    /// construction; the allocation matches this path's existing per-buffer
+    /// posture.
+    private func fillFeedGap(nanos: Int64, from startPts: Int64, snapshot: BufferSnapshot) {
+        let rate = Double(PCMFormat.airplay.sampleRate)
+        let bytesPerFrame = PCMFormat.airplay.channels * MemoryLayout<Int16>.size
+        var remaining = Int((Double(nanos) * rate / 1_000_000_000).rounded())
+        var emitted = 0
+        while remaining > 0 {
+            let chunk = min(remaining, Self.feedGapFillChunkFrames)
+            let ptsNanos = startPts
+                &+ Int64((Double(emitted) / rate * 1_000_000_000).rounded())
+            deliver(Data(count: chunk * bytesPerFrame),
+                    pts: timespec(tv_sec: Int(ptsNanos / 1_000_000_000),
+                                  tv_nsec: Int(ptsNanos % 1_000_000_000)),
+                    snapshot: snapshot)
+            emitted += chunk
+            remaining -= chunk
+        }
     }
 
     /// The default output device changed under us (the tap follows it, so its
@@ -1392,12 +1481,133 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// device's clock out from under the live RTP sessions and desyncs the
     /// receivers; an exclusion-set change
     /// (``updateRouting(appRoutes:excludedBundleIDs:)`` /
-    /// ``setSyncedLocalSink(_:renderProcessPID:)``) rebuilds the tap but is EXPECTED
+    /// ``setSyncedLocalSink(_:renderProcessPID:)`` — the latter only via
+    /// ``rebuildIfExclusionObjectsChanged()``, so it recreates ONLY for a genuinely
+    /// changed resolved object set, never on a plain Mac-sink attach) rebuilds the
+    /// tap but is EXPECTED
     /// to leave the device and its clock — and thus the receivers' timeline —
     /// untouched. "Expected", not guaranteed: ``recreateTap(cause:)`` verifies it
     /// against the tap that actually came up and resets anyway if the clock moved, so
     /// this cause is the default assumption, never the last word.
     enum RebuildCause { case deviceOrRateChange, exclusionChange }
+
+    /// The tap-rebuild feed hole, measured and then patched
+    /// (`dev/notes/test3-mac-join-desync-diagnosis.md`).
+    ///
+    /// A rebuild stops delivery for as long as the HAL takes to tear one aggregate
+    /// down and bring the next one up (~200 ms live). That hole is NOT a hole in
+    /// the receivers' timeline: the vendored sender anchors rtptime↔walltime to the
+    /// sample COUNT it has been handed, so a feed that skips 200 ms of samples
+    /// leaves every AirPlay receiver permanently that far late, while
+    /// already-anchored FIFO sinks keep running to wall time. Handing the tail the
+    /// missing samples as silence keeps the count honest and the anchored rings
+    /// whole.
+    ///
+    /// Three single-writer heap words, the same idiom as ``InterleavedFloatRing``'s
+    /// head/tail (aligned word loads/stores are atomic on Apple silicon, paired
+    /// with `OSMemoryBarrier()` for ordering):
+    /// - `lastEndPts` — written ONLY by the delivery thread, at the end of every
+    ///   ``deliver(_:pts:snapshot:btPCM:)``. The one exception is ``reset()``,
+    ///   which runs from `stop()` AFTER the tap's `teardown()` has blocked until
+    ///   in-flight IO quiesced, so there is no delivery thread left to race.
+    /// - `armed` — the pending rebuild cause (`0` = disarmed), written by the
+    ///   control side and cleared by the delivery thread when it consumes it.
+    /// - `armedEpoch` — the ``BufferSnapshot/tapEpoch`` the fill applies FROM,
+    ///   written by the control side next to `armed`.
+    ///
+    /// The epoch is what makes the arm safe to publish from a *live* delivery
+    /// path. `recreateTap(cause:)`'s claim nulls the converter, but a buffer that
+    /// passed ``handleBuffer(_:)``'s converter guard microseconds EARLIER is still
+    /// running, and would otherwise reach ``consume(deliveredEpoch:)`` after the
+    /// arm — eating it, logging a ~0 ms gap against its own predecessor, and
+    /// leaving the real rebuild hole disarmed and unfilled (i.e. the receiver slip
+    /// this whole tracker exists to prevent). That in-flight buffer carries the
+    /// PRE-rebuild epoch, so the gate leaves the arm standing for the first buffer
+    /// of the new tap, which is the only one that can carry the post-commit epoch.
+    private final class FeedGapTracker {
+        private let lastEndPtsPtr = UnsafeMutablePointer<Int64>.allocate(capacity: 1)
+        private let armedPtr = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        private let armedEpochPtr = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+
+        /// `armed` word encoding. `RebuildCause` itself is not word-sized, and a
+        /// plain `Int` is what makes the store a single aligned word.
+        private static let disarmed = 0
+        private static let armedExclusionChange = 1
+        private static let armedDeviceOrRateChange = 2
+
+        init() {
+            lastEndPtsPtr.initialize(to: 0)
+            armedPtr.initialize(to: Self.disarmed)
+            armedEpochPtr.initialize(to: 0)
+        }
+
+        deinit {
+            lastEndPtsPtr.deallocate()
+            armedPtr.deallocate()
+            armedEpochPtr.deallocate()
+        }
+
+        /// Delivery thread only: remember where the audio just handed downstream
+        /// ends, so the next rebuild's hole can be measured from it.
+        func noteDelivered(endPtsNanos: Int64) {
+            lastEndPtsPtr.pointee = endPtsNanos
+        }
+
+        /// Control side only: the first buffer carrying `fromEpoch` or later is
+        /// the first one after this rebuild, so it should measure and fill.
+        /// Anything still in flight from before the claim carries an earlier epoch
+        /// and leaves the arm alone.
+        func arm(_ cause: RebuildCause, fromEpoch: Int) {
+            armedEpochPtr.pointee = fromEpoch   // data...
+            OSMemoryBarrier()   // release: epoch lands before the flag that publishes it
+            armedPtr.pointee = (cause == .deviceOrRateChange)   // ...then the word that makes it live
+                ? Self.armedDeviceOrRateChange : Self.armedExclusionChange
+            OSMemoryBarrier()   // and the arm itself before delivery resumes
+        }
+
+        /// Control side only: a FAILED rebuild leaves a gap nobody should later
+        /// fill — that silence is deliberate, not a hole to patch.
+        func disarm() {
+            armedPtr.pointee = Self.disarmed
+            OSMemoryBarrier()
+        }
+
+        /// Control side only, with delivery quiesced (`stop()`, after teardown):
+        /// back to the "nothing was ever delivered" state. The coordinator outlives
+        /// any one capture session, so a surviving `lastEndPts` would let the first
+        /// rebuild of the NEXT session measure its hole against the previous
+        /// session's final buffer — injecting a stop-length slab of stale-pts
+        /// silence, or logging a multi-second phantom gap.
+        func reset() {
+            lastEndPtsPtr.pointee = 0
+            armedEpochPtr.pointee = 0
+            armedPtr.pointee = Self.disarmed
+            OSMemoryBarrier()
+        }
+
+        /// Delivery thread only: take the pending cause (`nil` when disarmed, or
+        /// when this buffer predates the rebuild) together with the end pts of the
+        /// last block delivered before the rebuild, and clear the arm so one
+        /// rebuild is filled exactly once.
+        func consume(deliveredEpoch: Int) -> (cause: RebuildCause, lastEndPtsNanos: Int64)? {
+            let code = armedPtr.pointee
+            guard code != Self.disarmed else { return nil }
+            OSMemoryBarrier()   // acquire: see the control side's arm
+            guard deliveredEpoch >= armedEpochPtr.pointee else { return nil }
+            armedPtr.pointee = Self.disarmed
+            return (code == Self.armedDeviceOrRateChange ? .deviceOrRateChange : .exclusionChange,
+                    lastEndPtsPtr.pointee)
+        }
+    }
+
+    private let feedGap = FeedGapTracker()
+
+    /// Beyond this the hole is not a tap rebuild's — something else broke, and a
+    /// fill that large would flood the downstream rings (``BTFrameRing`` drops
+    /// over-large chunks wholesale). Measure it and log it, never fill it.
+    private static let maxFeedGapFillNanos: Int64 = 2_000_000_000
+    /// One fill block, capped at the same ~93 ms the wizard pacer uses per fire.
+    private static let feedGapFillChunkFrames = 4_096
 
     /// Tear the current tap down and recreate it — against the (possibly
     /// new) default output device, and always with the LIVE exclusion process-
@@ -1460,6 +1670,14 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             self.converter = nil          // stop forwarding buffers through the dying tap
             self.publishBufferSnapshot()  // ...and make that visible to the RT path NOW
             self.transition(to: .creatingTap)
+            // Arm the feed-gap fill for the tap generation the commit below will
+            // publish (`tapEpoch + 1`) — NOT for whatever is in flight right now.
+            // The converter null above stops all FUTURE deliveries, but a buffer
+            // that cleared `handleBuffer`'s converter guard just before it is still
+            // running and would otherwise consume this arm (``FeedGapTracker``).
+            // Skipped during a wizard run: the pacer keeps feeding right through the
+            // rebuild, so there is no hole in the sender's sample count to patch.
+            if !self.wizardActive { self.feedGap.arm(cause, fromEpoch: self.tapEpoch + 1) }
             // Snapshot what the OUTGOING tap was anchored to, before `teardown()`
             // clears it — the baseline the post-commit compare needs to tell a
             // re-anchor from a like-for-like rebuild.
@@ -1561,6 +1779,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 }
                 self.tap = newTap
                 self.converter = makeConverter(format)
+                // New tap generation: from here on, a delivered buffer is provably
+                // post-rebuild, which is what releases the arm above.
+                self.tapEpoch += 1
                 self.publishBufferSnapshot()
                 self.lastExcludedObjects = claim.excludedProcessObjectIDs // W1-T7 compare-before-rebuild baseline
                 self.transition(to: .capturing(format))
@@ -1648,6 +1869,9 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
                 self.tap = nil
                 self.converter = nil
                 self.publishBufferSnapshot()
+                // Same reason as `stop()`: a rebuild that never came up leaves a
+                // gap no later buffer should fill.
+                self.feedGap.disarm()
                 self.transition(to: .failed(mapped))
             }
         }

@@ -40,7 +40,7 @@ import AVFoundation
     /// `deliverMix` sums the non-excluded tones into an interleaved-Float32
     /// 44100/2ch buffer and fires `onBuffer`, exactly as a real process tap would
     /// deliver the system mix minus the excluded processes.
-    private final class FeedbackFakeTap: SystemAudioTap, @unchecked Sendable {
+    fileprivate final class FeedbackFakeTap: SystemAudioTap, @unchecked Sendable {
         var onBuffer: (@Sendable (CapturedBuffer) -> Void)?
         var onDefaultDeviceChanged: (@Sendable () -> Void)?
 
@@ -94,7 +94,7 @@ import AVFoundation
     /// tap uses (`FeedbackFakeTap.objectID(for:)`) — so
     /// `processResolver.resolve(pid:)` inside the real coordinator resolves the
     /// sink's render pid to the SAME object id the fake tap checks for exclusion.
-    private final class ScriptedEnumerator: AudioProcessEnumerating {
+    fileprivate final class ScriptedEnumerator: AudioProcessEnumerating {
         let pids: [pid_t]
         init(pids: [pid_t]) { self.pids = pids }
         func enumerateProcesses() -> [RawAudioProcess] {
@@ -104,7 +104,7 @@ import AVFoundation
     }
 
     /// Records every forwarded (pcm, pts) pair — what actually reached the engine.
-    private final class SpyPCMSink: PCMSink, @unchecked Sendable {
+    fileprivate final class SpyPCMSink: PCMSink, @unchecked Sendable {
         private let lock = NSLock()
         private var writes: [(pcm: Data, pts: timespec)] = []
         func write(pcm: Data, pts: timespec) { lock.withLock { writes.append((pcm, pts)) } }
@@ -125,11 +125,34 @@ import AVFoundation
 
     /// Deterministic converter emitting a fixed non-empty S16LE payload, so the
     /// fan-out delivery tests don't need AVFoundation.
-    private final class FixedConverter: PCMConverting, @unchecked Sendable {
+    fileprivate final class FixedConverter: PCMConverting, @unchecked Sendable {
         // 4 interleaved S16LE stereo frames = 16 bytes; values 1…8.
         static let payload = Data([0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04, 0x00,
                                    0x05, 0x00, 0x06, 0x00, 0x07, 0x00, 0x08, 0x00])
         func convertToAirPlayPCM(_ buffer: CapturedBuffer) -> Data? { Self.payload }
+    }
+
+    /// The same fixed payload, plus a one-shot action run DURING a conversion.
+    /// `handleBuffer` reads its `BufferSnapshot` before calling the converter, so
+    /// a rebuild triggered from that action leaves this buffer finishing against
+    /// the PRE-rebuild snapshot — which is exactly the in-flight interleaving that
+    /// no amount of poking the coordinator from outside can produce deterministically.
+    fileprivate final class InterposingConverter: PCMConverting, @unchecked Sendable {
+        private let lock = NSLock()
+        private var pending: (() -> Void)?
+
+        func runOnNextConvert(_ action: @escaping () -> Void) {
+            lock.withLock { pending = action }
+        }
+
+        func convertToAirPlayPCM(_ buffer: CapturedBuffer) -> Data? {
+            let action = lock.withLock { () -> (() -> Void)? in
+                defer { pending = nil }
+                return pending
+            }
+            action?()
+            return FixedConverter.payload
+        }
     }
 
     // MARK: Helpers
@@ -297,12 +320,17 @@ import AVFoundation
         waitFor { engineSink.forwarded.count == 1 }
         #expect(localSink.enqueued.count == 0, "no fan-out while the sink is detached")
 
-        // Attach → subsequent buffers fan out to the sink with the same pts.
+        // Attach → subsequent buffers fan out to the sink with the same pts. This
+        // pid is genuinely new, so the attach rebuilds the tap, and the tail also
+        // carries that rebuild's silence fill (fix 2) — the program blocks are the
+        // non-silent ones.
         coordinator.setSyncedLocalSink(localSink, renderProcessPID: sinkRenderPID)
         tap.deliverMix(frames: 4, phaseStart: 4, pts: timespec(tv_sec: 2, tv_nsec: 0))
-        waitFor { localSink.enqueued.count == 1 }
+        waitFor { localSink.enqueued.contains { $0.frames.contains { $0 != 0 } } }
 
-        let call = localSink.enqueued[0]
+        let program = localSink.enqueued.filter { $0.frames.contains { $0 != 0 } }
+        #expect(program.count == 1)
+        let call = program[0]
         #expect(call.frameCount == 4, "16-byte S16LE stereo payload = 4 frames")
         #expect(call.pts.tv_sec == 2, "fan-out carries the capture pts unchanged")
         // The fixed payload widens 1…8 (Int16) → Float32 / 32768.
@@ -315,12 +343,15 @@ import AVFoundation
         // Detach → fan-out stops again.
         coordinator.setSyncedLocalSink(nil, renderProcessPID: nil)
         tap.deliverMix(frames: 4, phaseStart: 8, pts: timespec(tv_sec: 3, tv_nsec: 0))
-        waitFor { engineSink.forwarded.count == 3 }
-        #expect(localSink.enqueued.count == 1, "no fan-out after detach")
+        waitFor { engineSink.forwarded.filter { $0.pcm == FixedConverter.payload }.count == 3 }
+        #expect(localSink.enqueued.filter { $0.frames.contains { $0 != 0 } }.count == 1,
+                "no fan-out after detach")
     }
 
-    /// Attaching while already capturing recreates the tap so the new self-exclude
-    /// takes effect immediately (mirrors the routing-exclusion recreate).
+    /// Attaching a GENUINELY NEW render pid while already capturing recreates the
+    /// tap so the new self-exclude takes effect immediately (mirrors the
+    /// routing-exclusion recreate). An already-excluded pid does not — see
+    /// `attachWithAlreadyExcludedPid_doesNotRecreateTap` below.
     @Test func attachWhileCapturing_recreatesTapWithSelfExclude() {
         let tap = FeedbackFakeTap()
         let engineSink = SpyPCMSink()
@@ -341,6 +372,196 @@ import AVFoundation
         waitFor { tap.excludes(pid: self.sinkRenderPID) }
         #expect(tap.creates == 2, "attaching a sink while capturing recreates the tap")
         #expect(tap.excludes(pid: sinkRenderPID))
+    }
+
+    /// Attaching the Mac's own sink mid-capture with a render pid the tap ALREADY
+    /// excludes (in production: our own `getpid()`, self-excluded on every tap
+    /// creation) must NOT recreate the tap. That rebuild's ~200 ms feed hole is what
+    /// permanently retarded every AirPlay receiver on each Mac-join
+    /// (`dev/notes/test3-mac-join-desync-diagnosis.md`).
+    @Test func attachWithAlreadyExcludedPid_doesNotRecreateTap() {
+        let tap = FeedbackFakeTap()
+        let coordinator = NativeCaptureCoordinator(
+            makeTap: { tap },
+            sink: SpyPCMSink(),
+            makeConverter: { _ in FixedConverter() },
+            processResolver: AudioProcessResolver(enumerator: ScriptedEnumerator(pids: [sinkRenderPID])),
+            muteBehavior: .mutedWhenTapped)
+        // The BT sink attach puts the pid into the exclusion set BEFORE the first
+        // tap is created — in production both sinks render in our own process, so
+        // the first tap already excludes it either way.
+        coordinator.setBTSink(SpySyncedSink(), renderProcessPID: sinkRenderPID)
+        coordinator.start()
+        waitForCapturing(coordinator)
+        #expect(tap.creates == 1)
+        #expect(tap.excludes(pid: sinkRenderPID))
+
+        coordinator.setSyncedLocalSink(SpySyncedSink(), renderProcessPID: sinkRenderPID)
+        waitFor(timeout: 0.3) { false }
+        #expect(tap.creates == 1,
+                "an already-excluded render pid must not force a tap recreate (the Mac-join feed hole)")
+    }
+
+    // MARK: - Fix 2: a tap rebuild's feed hole is filled with silence.
+
+    /// A rebuild that DOES happen still stops delivery for however long the HAL
+    /// takes. The sender anchors rtptime↔walltime to samples-sent, so the missing
+    /// samples must be handed to the same delivery tail as silence — otherwise
+    /// every receiver comes back permanently late by the hole's length
+    /// (`dev/notes/test3-mac-join-desync-diagnosis.md`).
+    @Test func aTapRebuildsFeedHoleIsFilledWithSilenceThroughTheNormalTail() {
+        let tap = FeedbackFakeTap()
+        let engineSink = SpyPCMSink()
+        let localSink = SpySyncedSink()
+
+        let coordinator = NativeCaptureCoordinator(
+            makeTap: { tap },
+            sink: engineSink,
+            makeConverter: { _ in FixedConverter() },
+            processResolver: AudioProcessResolver(enumerator: ScriptedEnumerator(pids: [sinkRenderPID])),
+            muteBehavior: .mutedWhenTapped)
+        // Attached BEFORE start, so the only rebuild in this test is the routing one.
+        coordinator.setSyncedLocalSink(localSink, renderProcessPID: sinkRenderPID)
+        coordinator.start()
+        waitForCapturing(coordinator)
+
+        tap.deliverMix(frames: 4, phaseStart: 0, pts: timespec(tv_sec: 1, tv_nsec: 0))
+        waitFor { engineSink.forwarded.count == 1 }
+
+        // A genuinely changed exclusion union → a real `.exclusionChange` rebuild.
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.example.x"])
+        waitFor { tap.creates == 2 }
+        waitForCapturing(coordinator)
+        #expect(tap.creates == 2)
+
+        // 500 ms after the first buffer's pts: the hole is that half-second minus
+        // the 4 frames buffer 1 itself covered.
+        tap.deliverMix(frames: 4, phaseStart: 4,
+                       pts: timespec(tv_sec: 1, tv_nsec: 500_000_000))
+        waitFor { engineSink.forwarded.last?.pcm == FixedConverter.payload
+                  && engineSink.forwarded.count > 2 }
+
+        let bytesPerFrame = PCMFormat.airplay.channels * MemoryLayout<Int16>.size
+        let forwarded = engineSink.forwarded
+        #expect(forwarded.first?.pcm == FixedConverter.payload, "buffer 1, unchanged")
+        #expect(forwarded.last?.pcm == FixedConverter.payload, "buffer 2, unchanged")
+
+        let fill = Array(forwarded.dropFirst().dropLast())
+        #expect(!fill.isEmpty, "the rebuild's hole must be filled, not skipped")
+        #expect(fill.allSatisfy { $0.pcm.allSatisfy { $0 == 0 } }, "the fill is S16LE silence")
+        #expect(fill.allSatisfy { $0.pcm.count / bytesPerFrame <= 4_096 },
+                "chunked, so no single write floods a downstream ring")
+        let fillFrames = fill.reduce(0) { $0 + $1.pcm.count / bytesPerFrame }
+        // round((0.5 s − 4/44100 s) × 44100).
+        #expect(fillFrames == 22_046, "the fill is exactly the hole, in frames")
+
+        // The fill starts where buffer 1's audio ended, so the timeline is unbroken.
+        let buffer1EndNanos = Int64(1_000_000_000)
+            + Int64((4.0 * 1_000_000_000 / 44_100.0).rounded())
+        #expect(fill.first.map { SyncTiming.monotonicNanos($0.pts) } == buffer1EndNanos)
+
+        // Every consumer of the tail gets it, not just the engine.
+        let fanoutFillFrames = localSink.enqueued
+            .filter { $0.frameCount != 4 }
+            .reduce(0) { $0 + $1.frameCount }
+        #expect(fanoutFillFrames == 22_046, "the synced-local fan-out receives the same fill")
+    }
+
+    /// A buffer that cleared `handleBuffer`'s converter guard just BEFORE a rebuild
+    /// claimed is still in flight when the arm goes up. It must not consume that
+    /// arm: it would measure a ~0 ms gap against its own predecessor and leave the
+    /// real rebuild hole disarmed — unfilled and unmeasured, i.e. the receiver slip
+    /// the fill exists to prevent (`dev/notes/test3-mac-join-desync-diagnosis.md`).
+    @Test func aBufferInFlightWhenTheRebuildClaimsDoesNotConsumeTheArm() {
+        let tap = FeedbackFakeTap()
+        let engineSink = SpyPCMSink()
+        let converter = InterposingConverter()
+
+        let coordinator = NativeCaptureCoordinator(
+            makeTap: { tap },
+            sink: engineSink,
+            makeConverter: { _ in converter },
+            processResolver: AudioProcessResolver(enumerator: ScriptedEnumerator(pids: [sinkRenderPID])),
+            muteBehavior: .mutedWhenTapped)
+        defer { coordinator.stop() }
+        coordinator.start()
+        waitForCapturing(coordinator)
+
+        tap.deliverMix(frames: 4, phaseStart: 0, pts: timespec(tv_sec: 1, tv_nsec: 0))
+        waitFor { engineSink.forwarded.count == 1 }
+
+        // Buffer 2 reads the pre-rebuild snapshot, then the whole rebuild — claim,
+        // arm, commit — runs while it sits inside the converter.
+        converter.runOnNextConvert {
+            coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.example.x"])
+        }
+        tap.deliverMix(frames: 4, phaseStart: 4, pts: timespec(tv_sec: 1, tv_nsec: 100_000_000))
+        waitFor { engineSink.forwarded.count >= 2 }
+        #expect(tap.creates == 2, "the rebuild must have run inside buffer 2's conversion")
+        #expect(engineSink.forwarded.count == 2,
+                "an in-flight pre-rebuild buffer must not consume the arm (no fill of its own)")
+        #expect(engineSink.forwarded.allSatisfy { $0.pcm == FixedConverter.payload })
+
+        // The arm is still standing, so the FIRST genuinely post-rebuild buffer
+        // fills the whole hole — measured from the in-flight buffer's end, because
+        // that audio really did go downstream.
+        tap.deliverMix(frames: 4, phaseStart: 8, pts: timespec(tv_sec: 1, tv_nsec: 600_000_000))
+        waitFor { engineSink.forwarded.count > 3 }
+
+        let bytesPerFrame = PCMFormat.airplay.channels * MemoryLayout<Int16>.size
+        let forwarded = engineSink.forwarded
+        #expect(forwarded.last?.pcm == FixedConverter.payload, "buffer 3, unchanged")
+        let fill = Array(forwarded.dropFirst(2).dropLast())
+        #expect(!fill.isEmpty, "the arm must survive for the real post-rebuild buffer")
+        #expect(fill.allSatisfy { $0.pcm.allSatisfy { $0 == 0 } }, "the fill is S16LE silence")
+        let fillFrames = fill.reduce(0) { $0 + $1.pcm.count / bytesPerFrame }
+        // round((0.5 s − 4/44100 s) × 44100) — measured from buffer 2's end at 1.1 s.
+        #expect(fillFrames == 22_046, "the fill is the hole after buffer 2, not after buffer 1")
+    }
+
+    /// `stop()` must clear the tracker outright, not just disarm it. The
+    /// coordinator outlives a capture session, so a surviving `lastEndPts` lets the
+    /// first rebuild of the NEXT session measure its hole against the PREVIOUS
+    /// session's final buffer — injecting a stop-length slab of stale-pts silence
+    /// that mis-anchors every FIFO sink's one-shot anchor.
+    @Test func aRebuildInAFreshSessionNeverFillsAgainstThePreviousSession() {
+        let tap = FeedbackFakeTap()
+        let engineSink = SpyPCMSink()
+
+        let coordinator = NativeCaptureCoordinator(
+            makeTap: { tap },
+            sink: engineSink,
+            makeConverter: { _ in FixedConverter() },
+            processResolver: AudioProcessResolver(enumerator: ScriptedEnumerator(pids: [sinkRenderPID])),
+            muteBehavior: .mutedWhenTapped)
+        defer { coordinator.stop() }
+        coordinator.start()
+        waitForCapturing(coordinator)
+
+        tap.deliverMix(frames: 4, phaseStart: 0, pts: timespec(tv_sec: 1, tv_nsec: 0))
+        waitFor { engineSink.forwarded.count == 1 }
+
+        coordinator.stop()
+        coordinator.start()
+        waitForCapturing(coordinator)
+        #expect(tap.creates == 2)
+
+        // A rebuild racing the new session up, before it has delivered anything.
+        coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.example.x"])
+        waitFor { tap.creates == 3 }
+        waitForCapturing(coordinator)
+
+        // 1.5 s past the OLD session's last buffer — inside the 2 s fill cap, so a
+        // surviving `lastEndPts` would inject ~66 000 frames of stale-pts silence
+        // ahead of the new capture session's very first write.
+        tap.deliverMix(frames: 4, phaseStart: 4, pts: timespec(tv_sec: 2, tv_nsec: 500_000_000))
+        waitFor { engineSink.forwarded.count >= 2 }
+        waitFor(timeout: 0.3) { false }
+
+        let forwarded = engineSink.forwarded
+        #expect(forwarded.count == 2, "a new session must start from 'nothing ever delivered'")
+        #expect(forwarded.allSatisfy { $0.pcm == FixedConverter.payload },
+                "no silence fill may bridge two capture sessions")
     }
 
     // MARK: - T3 Part B: base-rate resample (44.1 kHz airplay feed → device-native rate)
@@ -546,4 +767,86 @@ import AVFoundation
         #expect(abs(realSample - resampled[0]) <= 1e-6)
     }
     #endif
+}
+
+/// The one fan-out case that touches `Telemetry`'s process-global test sink, so
+/// it lives under `SerializedSharedState` (cookbook §18) while the suite above
+/// stays parallel. Named to keep `--filter SyncedLocalFanoutTests` matching both.
+extension SerializedSharedState {
+
+    @Suite final class SyncedLocalFanoutTestsFeedGapTelemetry: IsolatedSuite {
+
+        private final class LineCapture: @unchecked Sendable {
+            private let lock = NSLock()
+            private var lines: [String] = []
+            func append(_ line: String) { lock.withLock { lines.append(line) } }
+
+            /// Poll (never sleep a fixed amount): the line is emitted from the
+            /// coordinator's own queue, not from the delivery call that measured it.
+            /// Matches on the whole `fields` set, because the sink is process-global
+            /// and a concurrently-running suite can land its own lines here too.
+            func pollForLine(evt: String, containing fields: [String],
+                             timeout: TimeInterval = 5) async -> String? {
+                let deadline = Date().addingTimeInterval(timeout)
+                while Date() < deadline {
+                    let hit = lock.withLock { lines }.first {
+                        $0.contains("\"evt\":\"\(evt)\"") && fields.allSatisfy($0.contains)
+                    }
+                    if let hit { return hit }
+                    try? await Task.sleep(nanoseconds: 5_000_000)
+                }
+                return nil
+            }
+        }
+
+        private let sinkRenderPID: pid_t = 424_242
+
+        private func waitForCapturing(_ c: NativeCaptureCoordinator) async {
+            let deadline = Date().addingTimeInterval(8)
+            while Date() < deadline {
+                if case .capturing = c.state { return }
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+        }
+
+        /// The measurement half of fix 2: whatever the fill decides to do, the hole
+        /// itself is always on the record, so the next live repro reads as facts
+        /// rather than inference (`dev/notes/test3-mac-join-desync-diagnosis.md`).
+        @Test func aTapRebuildLogsTheFeedGapItLeft() async throws {
+            let capture = LineCapture()
+            Telemetry._installTestSink { capture.append($0) }
+            defer { Telemetry._installTestSink(nil) }
+
+            let tap = SyncedLocalFanoutTests.FeedbackFakeTap()
+            let engineSink = SyncedLocalFanoutTests.SpyPCMSink()
+            let coordinator = NativeCaptureCoordinator(
+                makeTap: { tap },
+                sink: engineSink,
+                makeConverter: { _ in SyncedLocalFanoutTests.FixedConverter() },
+                processResolver: AudioProcessResolver(
+                    enumerator: SyncedLocalFanoutTests.ScriptedEnumerator(pids: [sinkRenderPID])),
+                muteBehavior: .mutedWhenTapped)
+            defer { coordinator.stop() }
+
+            coordinator.start()
+            await waitForCapturing(coordinator)
+
+            tap.deliverMix(frames: 4, phaseStart: 0, pts: timespec(tv_sec: 1, tv_nsec: 0))
+            #expect(engineSink.forwarded.count == 1)
+
+            coordinator.updateRouting(appRoutes: [], excludedBundleIDs: ["com.example.x"])
+            await waitForCapturing(coordinator)
+            #expect(tap.creates == 2)
+
+            tap.deliverMix(frames: 4, phaseStart: 4,
+                           pts: timespec(tv_sec: 1, tv_nsec: 500_000_000))
+
+            // The gap: 500 ms minus the 4 frames buffer 1 already covered.
+            _ = try #require(
+                await capture.pollForLine(
+                    evt: "tap_feed_gap",
+                    containing: ["\"cause\":\"exclusionChange\"", "\"gapMs\":\"499.9\""]),
+                "no tap_feed_gap line for the rebuild's hole")
+        }
+    }
 }

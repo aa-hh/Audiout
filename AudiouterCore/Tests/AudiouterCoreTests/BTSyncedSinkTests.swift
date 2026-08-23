@@ -795,6 +795,26 @@ extension SerializedSharedState {
             #expect(line.contains("\"caughtUpMs\":\"625.0\""), "\(line)")
             #expect(line.contains("\"partial\":\"1\""), "\(line)")
         }
+
+        /// The anchor line: fired the instant `enqueue` sets the anchor —
+        /// `anchoredSink()`'s ramp does that on the first buffer — carrying the
+        /// capture pts the session anchored on and the delay the anchor
+        /// resolved (100 ms: `presentationDelayMs: { 100 }`, no offset/trim,
+        /// AirPlay-present so the presentation term is the reference).
+        @Test func anchorEmitsBtSinkAnchoredWithPtsAndDelay() async throws {
+            let capture = LineCapture()
+            Telemetry._installTestSink { capture.append($0) }
+            defer { Telemetry._installTestSink(nil) }
+
+            let (manager, _, _) = try BTSyncedSinkTests.anchoredSink()
+            defer { manager.stop() }
+
+            let line = try #require(
+                await capture.pollForLines(evt: "bt_sink_anchored")?.first, "no line")
+            #expect(line.contains("\"uid\":\"dev-a\""), "\(line)")
+            #expect(line.contains("\"anchorPtsNanos\":\"\(BTSyncedSinkTests.anchorNanos)\""), "\(line)")
+            #expect(line.contains("\"delayNanos\":\"100000000\""), "\(line)")
+        }
     }
 }
 

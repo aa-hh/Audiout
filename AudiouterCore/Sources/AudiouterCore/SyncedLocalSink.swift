@@ -603,6 +603,7 @@ public final class SyncedLocalSink: @unchecked Sendable {
                 Telemetry.log(.localPlayback, "sync_session_anchored", [
                     "delayNanos": "\(delay)",
                     "delayMs": String(format: "%.1f", Double(delay) / 1_000_000),
+                    "anchorPtsNanos": "\(ptsNanos)",
                 ])
             }
             stateLock.unlock()
@@ -709,6 +710,35 @@ public final class SyncedLocalSink: @unchecked Sendable {
                     if plan.releasesThisCycle {
                         released = true
                         shouldDrain = true
+                        // Fix 4: the same gate-open catch-up
+                        // `BTDeviceSink.catchUpToTargetLocked` applies
+                        // (`BTSyncedSink.swift`) — a slow `engine.start()` can
+                        // push this cycle past `targetReleaseNanos`, and the
+                        // ring is a plain FIFO with no catch-up of its own, so
+                        // releasing its oldest frame here would make the
+                        // effective delay "however late the engine took to
+                        // start," permanently, for the whole session. Counter
+                        // arithmetic only, still inside `stateLock`.
+                        let overshootNanos = max(0, cycleStartMonotonicNanos &- targetReleaseNanos)
+                        if overshootNanos > 0 {
+                            let wanted = Int(
+                                (Double(overshootNanos) / 1_000_000_000 * renderSampleRate).rounded())
+                            let skippedFrames = ring.skipForward(samples: wanted * channelCount) / channelCount
+                            // Unlike the BT twin, this sink re-reads
+                            // `targetReleaseNanos` every cycle to drive its PI
+                            // phase loop below; leaving the target unmoved
+                            // would make that loop read the overshoot as phase
+                            // error and drain the frames just skipped a SECOND
+                            // time (double correction → underrun). Advancing it
+                            // by exactly what was skipped — partial if the ring
+                            // held less than the overshoot, matching the BT
+                            // twin's `partial` semantics — keeps playout
+                            // pts-true and the release-cycle phase error ~0.
+                            let nsPerFrameAtRelease = 1_000_000_000.0 / renderSampleRate
+                            targetReleaseNanos &+= Int64(
+                                (Double(skippedFrames) * nsPerFrameAtRelease).rounded())
+                            target = targetReleaseNanos
+                        }
                     }
                 }
             }
@@ -934,6 +964,28 @@ private final class InterleavedFloatRing {
         OSMemoryBarrier()                 // release: finish reading before advancing tail
         tailPtr.pointee = (t &+ count) & mask
         return count
+    }
+
+    /// Consumer-thread-only: drop up to `samples` of buffered content outright
+    /// (no copy) and return how many were actually skipped, clamped to what is
+    /// available. The twin of `BTDelayLine`'s consumer-owned seek
+    /// (`ring.seek(byFrames:)` in `BTSyncedSink.swift`) — deliberately NOT
+    /// routed through ``requestShift(samples:)``: that word has exactly one
+    /// writer, the control thread, and the caller here is the render thread's
+    /// release-gate catch-up, where nothing has played yet for a crossfade to
+    /// be continuous with. Frame alignment holds because both the ring's writes
+    /// and the caller's argument are whole-frame multiples.
+    func skipForward(samples: Int) -> Int {
+        guard samples > 0 else { return 0 }
+        let t = tailPtr.pointee
+        let h = headPtr.pointee
+        OSMemoryBarrier()                 // acquire: see the producer's data
+        let available = (h &- t) & mask
+        let applied = min(available, samples)
+        guard applied != 0 else { return 0 }
+        OSMemoryBarrier()                 // release: finish "reading" before advancing tail
+        tailPtr.pointee = (t &+ applied) & mask
+        return applied
     }
 
     /// Drop all buffered samples and any un-consumed shift. Only safe while

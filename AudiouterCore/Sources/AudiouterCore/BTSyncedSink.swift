@@ -498,6 +498,17 @@ final class BTDeviceSink: @unchecked Sendable {
         let droppedChunks: Int
     }
     private var releaseToLog: ReleaseRecord?
+    /// An anchor (carried or fresh) waiting to be logged. Same reason as
+    /// `carryToLogNanos`: `enqueue` runs on the capture tap's real-time
+    /// thread, which must not allocate/format/log, so the anchor's facts are
+    /// stashed here and `graphQueue` emits them. Not cleared by the
+    /// session-reset path — a recorded anchor is history, same as the carry
+    /// line.
+    private struct AnchorRecord {
+        let anchorPtsNanos: Int64
+        let delayNanos: Int64
+    }
+    private var anchorToLog: AnchorRecord?
 
     /// How close a forward seek may bring the read pointer to the write
     /// pointer. A forward seek IS how a larger measured latency lands, and one
@@ -787,6 +798,7 @@ final class BTDeviceSink: @unchecked Sendable {
         guard frameCount > 0 else { return }
         var carriedDelayNanos: Int64?
         var hasReleaseToLog = false
+        var hasAnchorToLog = false
         if stateLock.try() {
             if !anchored {
                 anchored = true
@@ -803,20 +815,24 @@ final class BTDeviceSink: @unchecked Sendable {
                 targetReleaseNanos = SyncTiming.targetReleaseMonotonicNanos(
                     anchorPtsNanos: anchorPtsNanos,
                     totalDelayNanos: delayNanos)
+                anchorToLog = AnchorRecord(anchorPtsNanos: anchorPtsNanos, delayNanos: delayNanos)
             }
             // The render thread cannot hand its own record to `graphQueue`
             // (dispatch allocates), so the producer — which is here every
             // buffer anyway, and already takes this lock — posts it instead.
             hasReleaseToLog = releaseToLog != nil
+            hasAnchorToLog = anchorToLog != nil
             stateLock.unlock()
         }
         delayLine.write(interleavedFrames: interleavedFrames, frameCount: frameCount)
-        if carriedDelayNanos != nil || hasReleaseToLog {
-            // Once per lineup change / once per gate opening, never per buffer,
-            // and never ON this thread — see `carryToLogNanos`.
+        if carriedDelayNanos != nil || hasReleaseToLog || hasAnchorToLog {
+            // Once per lineup change / once per gate opening / once per
+            // anchor, never per buffer, and never ON this thread — see
+            // `carryToLogNanos`.
             graphQueue.async { [weak self] in
                 self?.emitPendingCarryTelemetry()
                 self?.emitPendingReleaseTelemetry()
+                self?.emitPendingAnchorTelemetry()
             }
         }
     }
@@ -833,6 +849,22 @@ final class BTDeviceSink: @unchecked Sendable {
         Telemetry.log(.localPlayback, "bt_sink_anchor_carried", [
             "uid": deviceUID,
             "delayMs": String(format: "%.1f", Double(carriedDelayNanos) / 1_000_000),
+        ])
+    }
+
+    /// Emit the anchor line for an anchor `enqueue` just recorded — carried or
+    /// fresh, every time. `graphQueue` — off the tap's real-time thread, same
+    /// reason as `emitPendingCarryTelemetry`. Also drained by
+    /// `test_waitForPendingRebuild`.
+    private func emitPendingAnchorTelemetry() {
+        guard let anchor = stateLock.withLock({
+            defer { anchorToLog = nil }
+            return anchorToLog
+        }) else { return }
+        Telemetry.log(.localPlayback, "bt_sink_anchored", [
+            "uid": deviceUID,
+            "anchorPtsNanos": "\(anchor.anchorPtsNanos)",
+            "delayNanos": "\(anchor.delayNanos)",
         ])
     }
 

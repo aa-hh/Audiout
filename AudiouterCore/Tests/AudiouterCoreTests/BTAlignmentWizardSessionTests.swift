@@ -604,9 +604,22 @@ extension SerializedSharedState {
             func lines(evt: String) -> [String] {
                 lock.withLock { lines.filter { $0.contains("\"evt\":\"\(evt)\"") } }
             }
+            /// The sink hands lines over on Telemetry's own serial queue, so a
+            /// synchronous read races the flush — poll, like the BTSyncedSink
+            /// capture does.
+            func pollForLines(evt: String, containing needle: String, count: Int,
+                              timeout: TimeInterval = 3) async -> [String] {
+                let deadline = Date().addingTimeInterval(timeout)
+                while Date() < deadline {
+                    let hits = lines(evt: evt).filter { $0.contains(needle) }
+                    if hits.count >= count { return hits }
+                    try? await Task.sleep(nanoseconds: 5_000_000)
+                }
+                return lines(evt: evt).filter { $0.contains(needle) }
+            }
         }
 
-        @Test func acceptAndRejectEachLogTheProposal() {
+        @Test func acceptAndRejectEachLogTheProposal() async {
             let capture = LineCapture()
             Telemetry._installTestSink { capture.append($0) }
             defer { Telemetry._installTestSink(nil) }
@@ -630,9 +643,12 @@ extension SerializedSharedState {
             }
             session.acceptProposal()
 
-            let lines = capture.lines(evt: "wizard_proposal")
-                .filter { $0.contains("\"uid\":\"\(deviceID)\"") }
-            #expect(lines.count == 2, "one line per proposal answered, got \(lines)")
+            let lines = await capture.pollForLines(
+                evt: "wizard_proposal", containing: "\"uid\":\"\(deviceID)\"", count: 2)
+            guard lines.count == 2 else {
+                Issue.record("one line per proposal answered, got \(lines)")
+                return
+            }
             #expect(lines[0].contains("\"accepted\":\"false\""), "\(lines[0])")
             #expect(lines[0].contains("\"valueMs\":\"\(Int(valueMs.rounded()))\""), "\(lines[0])")
             #expect(lines[0].contains("\"halfWidthMs\""), "\(lines[0])")

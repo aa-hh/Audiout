@@ -286,6 +286,34 @@ import Foundation
         #expect(abs(sink.latestPhaseErrorNanos) <= Int64(nsPerFrame.rounded()))
     }
 
+    /// Fix 4 (Mac-join desync): a release cycle whose engine start landed well
+    /// PAST the target must skip the overshoot's worth of already-buffered ramp
+    /// rather than release from the oldest sample — the same gate-open
+    /// catch-up `BTDeviceSink.catchUpToTargetLocked` already has. Simulates a
+    /// slow `engine.start()` by rendering the very first cycle 200 ms after
+    /// the 87 ms target, i.e. 200 ms &times; 48 frames/ms = 9 600 frames late.
+    @Test func lateFirstCycleSkipsTheOvershootInsteadOfReleasingStaleAudio() throws {
+        let sink = Self.rampSink()
+        let ramp = Self.enqueueRamp(into: sink)
+
+        let nsPerFrame = 1_000_000_000.0 / 48_000.0
+        let cycleStart = Self.rampAnchorNanos + 87_000_000 + 200_000_000
+        var out = [Float](repeating: .nan, count: 512)
+        let produced = out.withUnsafeMutableBufferPointer { ob -> Bool in
+            sink.renderInterleaved(into: ob, frameCount: 512, cycleStartMonotonicNanos: cycleStart)
+        }
+
+        #expect(produced)
+        // Playout is pts-true — the 9 600 already-stale frames are skipped —
+        // not the oldest buffered sample (`ramp[0]`), which the un-fixed sink
+        // would release here.
+        #expect(out[0] == ramp[9_600])
+        // The skip advanced `targetReleaseNanos` by exactly what it consumed,
+        // so the release-cycle phase error nulls out instead of reading the
+        // 200 ms overshoot as error.
+        #expect(abs(sink.latestPhaseErrorNanos) <= Int64((2 * nsPerFrame).rounded()))
+    }
+
     /// The `group × device` gain actually scales the samples it produces. The unity
     /// path is already pinned by `rampReleasesAtComputedHostTime_withinOneFrame`
     /// above — it never calls `setGain` and asserts the raw ramp value — so this
@@ -975,5 +1003,46 @@ extension SerializedSharedState {
             }, "got: \(captured.snapshot)")
         }
         #endif
+    }
+
+    /// `sync_session_anchored`'s `anchorPtsNanos` field: the connect-latency
+    /// diagnosis line must carry the anchor pts itself, not just the delay, so
+    /// a live repro can tell "the anchor landed late" from "the delay was
+    /// large." Nested inside `SerializedSharedState` for the same reason as
+    /// `SyncedLocalSinkRingOverflowTelemetryTests` — installs the
+    /// process-global `Telemetry` test sink.
+    @Suite struct SyncedLocalSinkTestsAnchorTelemetry {
+        private final class LineBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var lines: [String] = []
+            func append(_ line: String) { lock.lock(); lines.append(line); lock.unlock() }
+            var snapshot: [String] { lock.lock(); defer { lock.unlock() }; return lines }
+        }
+
+        @Test func sessionAnchoredCarriesAnchorPtsNanos() {
+            let captured = LineBox()
+            Telemetry._installTestSink { captured.append($0) }
+            defer { Telemetry._installTestSink(nil) }
+
+            let latency = LocalOutputLatencyMeasurement(
+                safetyOffsetFrames: 0, deviceLatencyFrames: 480, streamLatencyFrames: 0,
+                bufferFrameSizeFrames: 0, nominalSampleRate: 48_000)
+            let sink = SyncedLocalSink(
+                renderSampleRate: 48_000, channelCount: 1, safetyMarginMs: 3,
+                presentationDelayMs: { 100 }, localOutputLatency: { latency })
+
+            var ramp = [Float](repeating: 0, count: 20_000)
+            for i in 0..<ramp.count { ramp[i] = Float(i + 1) }
+            ramp.withUnsafeBufferPointer {
+                sink.enqueue(interleavedFrames: $0.baseAddress!, frameCount: ramp.count,
+                             pts: timespec(tv_sec: 1_000, tv_nsec: 0))
+            }
+
+            Telemetry._installTestSink(nil)   // flush barrier
+            let anchored = captured.snapshot.filter { $0.contains("\"evt\":\"sync_session_anchored\"") }
+            #expect(anchored.count == 1, "got: \(captured.snapshot)")
+            #expect(anchored.first?.contains("\"anchorPtsNanos\":\"1000000000000\"") == true,
+                    "got: \(anchored)")
+        }
     }
 }

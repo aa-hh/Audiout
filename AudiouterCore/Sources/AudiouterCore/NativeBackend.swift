@@ -2657,11 +2657,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // Wave-4 delay agreement: a BT presence/AirPlay-presence flip moves
             // the LOCAL sink's reference too (`localSinkReferenceDelayMs`), so
             // capture whether the reference input changed before overwriting.
-            let localReferenceMoved =
-                (wantBT != self.btSinkEnabled)
-                || (wantBT && composition.airPlayPresent != self.btComposition.airPlayPresent)
+            // macLocalPresent never changes a BT delay (BTReferenceTimeline
+            // .delayNanos doc, BTSyncedSink.swift:52-55), so only an
+            // airPlayPresent flip counts as the reference moving.
+            let referenceMoved =
+                wantBT && composition.airPlayPresent != self.btComposition.airPlayPresent
+            let localReferenceMoved = (wantBT != self.btSinkEnabled) || referenceMoved
             if wantBT != self.btSinkEnabled || btUIDs != self.btSelectedUIDs
-                || (wantBT && composition != self.btComposition) {
+                || referenceMoved {
                 self.btSinkEnabled = wantBT
                 self.btSelectedUIDs = btUIDs
                 self.btComposition = composition

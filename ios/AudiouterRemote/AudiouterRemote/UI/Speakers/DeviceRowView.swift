@@ -68,6 +68,11 @@ struct DeviceRowView: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    /// Whether this speaker is a favourite, read the same way ``SpeakerCoach``'s
+    /// flags are so the menu re-labels the instant the pin flips. Phone-local
+    /// for now (roadmap 063 syncs pins through the Mac); see ``SpeakerPins``.
+    @AppStorage(SpeakerPins.key) private var pinnedRaw = ""
+
     /// D9's failure card takes the whole control slot: a `"failed"` device
     /// gets headline / details / Try Again INSTEAD of volume + mute. This is
     /// where the phone's row deliberately parts from the Mac's, which keeps a
@@ -298,6 +303,16 @@ struct DeviceRowView: View {
         } == true
     }
 
+    private var isPinned: Bool { SpeakerPins.decode(pinnedRaw).contains(device.id) }
+
+    /// The one string both the long-press menu and VoiceOver's custom action
+    /// show — sentence case, as authored (One Case).
+    private var pinActionTitle: String {
+        isPinned ? "Remove from Favourites" : "Pin to Favourites"
+    }
+
+    private func togglePin() { SpeakerPins.toggle(device.id) }
+
     // MARK: - Body
 
     var body: some View {
@@ -329,6 +344,11 @@ struct DeviceRowView: View {
                         volume: min(100, max(0, device.volume + (direction == .increment ? 5 : -5))),
                         isFinal: true)
                 }
+                // The long-press menu's twin for VoiceOver, which can't reach a
+                // long press. A failed row is the exception above and gets no
+                // combined element at all (it would swallow Diagnose / Try
+                // Again), so pinning it is left to the touch menu below.
+                .accessibilityAction(named: Text(pinActionTitle)) { togglePin() }
         }
     }
 
@@ -425,6 +445,19 @@ struct DeviceRowView: View {
         // taps and nothing else sees them. It is also outside ``combined``,
         // which is what keeps it reachable as its own VoiceOver element.
         .overlay(alignment: .trailing) { muteControl }
+        // Long-press to pin, on every row including a failed one. A context
+        // menu opens on a stationary long press, which the row's own gesture
+        // never claims (it commits on 5 pt of travel), so tap, drag and mute
+        // are untouched. This is the only entry to favourites for now — the
+        // Devices-tab detail screen is a later slice. VoiceOver gets the same
+        // toggle as a named action in ``combined``.
+        .contextMenu {
+            Button {
+                togglePin()
+            } label: {
+                Label(pinActionTitle, systemImage: isPinned ? "star.slash" : "star")
+            }
+        }
     }
 
     /// The whole vertical budget: 8 pt of air, the 44 pt halo, and 8 pt of air
@@ -809,6 +842,43 @@ enum SpeakerCoach {
     static func dismiss(in defaults: UserDefaults = .standard) {
         learned(.tap, in: defaults)
         learned(.drag, in: defaults)
+    }
+}
+
+// MARK: - Favourites (pins)
+
+/// The phone-local set of favourite speakers, pinned by the user — the same
+/// `@AppStorage` idiom as ``SpeakerCoach``, because a pin is UI preference, not
+/// routing state (Model/MacSessionProtocol.swift:21-23 covers the latter, and
+/// this is not it). Phone-local for now; roadmap 063 syncs pins through the
+/// Mac, because two phones showing different favourites would read as a bug.
+///
+/// `@AppStorage` has no `Set<String>` form, so the set is stored as one
+/// newline-joined string under ``key`` and decoded on read. A device `id` is a
+/// Bonjour service name or a Core Audio UID — never a newline — so the
+/// separator can't collide with a member.
+///
+/// razor: a newline-joined string, not JSON. The ids can't contain the
+/// separator, so there is nothing to escape; move to `Data` + a coder only if
+/// an id ever can.
+enum SpeakerPins {
+    static let key = "speakers.favourites"
+
+    static func decode(_ raw: String) -> Set<String> {
+        Set(raw.split(separator: "\n").map(String.init))
+    }
+
+    private static func encode(_ ids: Set<String>) -> String {
+        ids.sorted().joined(separator: "\n")
+    }
+
+    /// Flip one speaker's pin. Writing the key that ``SpeakerConsole`` and the
+    /// row both observe via `@AppStorage` re-sorts the list and re-labels the
+    /// menu, exactly the way ``SpeakerCoach/learned(_:in:)`` retires the coach.
+    static func toggle(_ id: String, in defaults: UserDefaults = .standard) {
+        var ids = decode(defaults.string(forKey: key) ?? "")
+        if !ids.insert(id).inserted { ids.remove(id) }
+        defaults.set(encode(ids), forKey: key)
     }
 }
 

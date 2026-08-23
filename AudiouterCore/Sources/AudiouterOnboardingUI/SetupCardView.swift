@@ -208,6 +208,8 @@ final class SetupSpineRowView: NSView {
     private let skipGlyph = NSImageView()
     /// Same slot again, for a permission that was on and is off now.
     private let brokenGlyph = NSImageView()
+    /// Same slot again, for an ask this row is waiting to hear back on.
+    private let spinner = NSProgressIndicator()
     /// Sits where the checkmark would, for a step this OS cannot grant.
     private let noteLabel = NSTextField(labelWithString: "")
 
@@ -231,6 +233,9 @@ final class SetupSpineRowView: NSView {
     /// Whether this step's permission was granted and has since been switched
     /// off — the red edge and the alert marker.
     private(set) var isBroken = false
+    /// Whether this row's ask is unresolved and the trailing slot is showing
+    /// the spinner instead of any other marker.
+    private(set) var isWaiting = false
 
     init(content: SetupCardContent, onPress: @escaping () -> Void) {
         self.content = content
@@ -293,6 +298,11 @@ final class SetupSpineRowView: NSView {
         configureMarker(brokenGlyph, symbolName: "exclamationmark.triangle.fill",
                         accessibility: "Turned off", tint: Tokens.Color.failure)
 
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = false
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+
         noteLabel.font = Tokens.Font.caption
         noteLabel.textColor = Tokens.Color.inkSecondary
         noteLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -305,6 +315,7 @@ final class SetupSpineRowView: NSView {
         surface.addSubview(lockGlyph)
         surface.addSubview(skipGlyph)
         surface.addSubview(brokenGlyph)
+        surface.addSubview(spinner)
         surface.addSubview(noteLabel)
 
         let inset = Self.horizontalInset
@@ -340,8 +351,12 @@ final class SetupSpineRowView: NSView {
             noteLabel.trailingAnchor.constraint(equalTo: surface.trailingAnchor, constant: -inset),
             noteLabel.centerYAnchor.constraint(equalTo: iconTile.centerYAnchor),
 
+            spinner.trailingAnchor.constraint(equalTo: surface.trailingAnchor, constant: -inset),
+            spinner.centerYAnchor.constraint(equalTo: iconTile.centerYAnchor),
+
             titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: checkmark.leadingAnchor, constant: -8),
             titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: noteLabel.leadingAnchor, constant: -8),
+            titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: spinner.leadingAnchor, constant: -8),
         ]
         // The three static markers share the checkmark's ONE slot: only one can
         // ever show, so they are pinned to the same trailing inset (never to
@@ -376,6 +391,8 @@ final class SetupSpineRowView: NSView {
     ///     lifted surface, and a press that fires the ribbon's primary action.
     ///   - isBrowseSelected: the hero pane is showing this (decided) row.
     ///   - isBroken: this permission was granted and is off now.
+    ///   - isWaiting: this row's ask is unresolved — the spinner takes the
+    ///     trailing slot over every other marker.
     ///   - animated: run the grant choreography (the checkmark slide-in).
     ///     Callers pass false for the first build, Reduce Motion, and any
     ///     off-window/occluded window — steady states must render settled or
@@ -385,12 +402,14 @@ final class SetupSpineRowView: NSView {
                isLive: Bool,
                isBrowseSelected: Bool,
                isBroken: Bool,
+               isWaiting: Bool = false,
                animated: Bool) {
         let wasCompleted = isCheckmarked(self.state)
         self.state = state
         self.isLive = isLive
         self.isBrowseSelected = isBrowseSelected
         self.isBroken = isBroken
+        self.isWaiting = isWaiting
 
         titleLabel.stringValue = content.spineTitle(for: state, foundSpeakers: foundSpeakers)
         // A step the flow hasn't reached is LOCKED and must read locked: dimmed
@@ -417,13 +436,16 @@ final class SetupSpineRowView: NSView {
             noteLabel.isHidden = true
         }
 
-        // One trailing slot, one occupant — and a broken permission outranks
-        // every other marker, because it is the only one asking for something.
-        lockGlyph.isHidden = isBroken || state != .pending
-        skipGlyph.isHidden = isBroken || state != .skipped
-        brokenGlyph.isHidden = !isBroken
-        applyCheckmark(shown: !isBroken && isCheckmarked(state),
+        // One trailing slot, one occupant — the spinner outranks every other
+        // marker while waiting (the user just acted; broken/locked/skipped
+        // yield to it), and a broken permission outranks the rest otherwise,
+        // because it is the only one asking for something.
+        lockGlyph.isHidden = isWaiting || isBroken || state != .pending
+        skipGlyph.isHidden = isWaiting || isBroken || state != .skipped
+        brokenGlyph.isHidden = isWaiting || !isBroken
+        applyCheckmark(shown: !isWaiting && !isBroken && isCheckmarked(state),
                        animated: animated && !wasCompleted && isCheckmarked(state))
+        if isWaiting { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
 
         applySurface()
         applyAccessibility()
@@ -616,6 +638,7 @@ final class SetupSpineRowView: NSView {
     }
 
     private var stateSuffix: String {
+        if isWaiting { return ", waiting" }
         if isBroken { return ", turned off \u{2014} needs attention" }
         switch state {
         case .active: return ""
@@ -649,6 +672,8 @@ final class SetupSpineRowView: NSView {
     var test_isSkipped: Bool { !skipGlyph.isHidden }
     /// Whether the row is drawing the broken-permission treatment.
     var test_isBroken: Bool { isBroken }
+    /// Whether the trailing slot is showing the waiting spinner.
+    var test_isWaiting: Bool { isWaiting }
     /// Whether the hero pane is browsing this row.
     var test_isBrowseSelected: Bool { isBrowseSelected }
     /// The leading edge bar's fill, or nil when no bar is drawn — the ember-not-

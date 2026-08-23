@@ -326,8 +326,12 @@ public final class BTAlignmentWizardView: NSView {
         addSubview(readout)
 
         referencePopUp.translatesAutoresizingMaskIntoConstraints = false
-        referencePopUp.controlSize = .small
-        referencePopUp.font = Tokens.Font.caption
+        // REGULAR size, stock bezel — this is one of the intro's two actions,
+        // and the same control the mixer's Main Out destination is. At
+        // `.small` in the caption voice it read as punctuation inside a
+        // sentence (see ``addReferenceRow``).
+        referencePopUp.controlSize = .regular
+        referencePopUp.font = Tokens.Font.body
         referencePopUp.setAccessibilityLabel("Compare against")
 
         contentStack.translatesAutoresizingMaskIntoConstraints = false
@@ -606,8 +610,11 @@ public final class BTAlignmentWizardView: NSView {
             readout.stringValue = ""
             stage.lightNames = (session.targetName, session.reference?.name ?? "")
             addBody(Self.introCopy)
-            contentStack.setCustomSpacing(Self.spacingRow,
-                                          after: contentStack.arrangedSubviews[0])
+            // A CHOICE gets its own band; a STATEMENT stays tucked under the
+            // sentence it qualifies (see ``addReferenceRow``).
+            contentStack.setCustomSpacing(
+                referenceOptions.count > 1 ? Self.spacingBand : Self.spacingRow,
+                after: contentStack.arrangedSubviews[0])
             addReferenceRow()
             // A full band break before Start. At the stack's own 16 the CTA
             // sat right under the reference line and read as part of it —
@@ -936,6 +943,15 @@ public final class BTAlignmentWizardView: NSView {
     /// "Comparing <target> against [<reference> ▾]" — intro only (spec §1).
     /// With one candidate there is nothing to choose, so the line states it;
     /// with none it says so and Start stays off.
+    ///
+    /// **A CHOICE is voiced as a control; a STATEMENT is voiced as a caption**
+    /// (owner report 2026-08-24 — the reference "blends right into the
+    /// background beside this huge CTA"). The picker case is the intro's
+    /// SECOND action, so it takes the body voice at full `label` around a
+    /// regular-size pop-up and stands in its own band; drawn as prose around a
+    /// `.small` control it read as a footnote beside the gold Start plate. The
+    /// 0- and 1-candidate lines stay captions: nothing on them can be clicked,
+    /// and the raised voice would promise an affordance they do not have.
     private func addReferenceRow() {
         switch referenceOptions.count {
         case 0:
@@ -944,7 +960,7 @@ public final class BTAlignmentWizardView: NSView {
             referenceLineLabel = addCaption(
                 Self.soleReferenceCopy(name: referenceOptions[0].name))
         default:
-            let label = makeCaption(Self.comparingCopy(target: session.targetName))
+            let label = makeRaisedLabel(Self.comparingCopy(target: session.targetName))
             // Carries the target's name, so it gives way rather than forcing
             // the row past the view's fixed width.
             label.lineBreakMode = .byTruncatingTail
@@ -982,6 +998,16 @@ public final class BTAlignmentWizardView: NSView {
         let label = NSTextField(labelWithString: text)
         label.font = Tokens.Font.caption
         label.textColor = Tokens.Color.inkSecondary
+        return label
+    }
+
+    /// The reference PICKER’s label: body voice at full `label`, one step
+    /// above the caption every other quiet line here wears — it labels a
+    /// control, not a fact.
+    private func makeRaisedLabel(_ text: String) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = Tokens.Font.body
+        label.textColor = Tokens.Color.label
         return label
     }
 
@@ -1223,6 +1249,10 @@ public final class BTAlignmentWizardView: NSView {
         }
     }
     var test_referenceLineText: String? { referenceLineLabel?.stringValue }
+    /// Is the reference line voiced as a CONTROL (body at full `label`) or as
+    /// a STATEMENT (caption at `inkSecondary`)? Only the picker case earns the
+    /// raised voice — see ``addReferenceRow``.
+    var test_referenceLineIsRaised: Bool { referenceLineLabel?.font == Tokens.Font.body }
     /// The screens' own buttons, in reading order — the answer plates and the
     /// corner buttons each sit a stack deeper than the rest, so this walks the
     /// nesting. An `NSPopUpButton` is an `NSButton` too, so the reference

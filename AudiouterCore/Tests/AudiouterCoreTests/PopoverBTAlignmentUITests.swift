@@ -892,6 +892,10 @@ import AppKit
         #expect(wizard?.test_startIsEnabled == true)
         #expect(wizard?.test_referenceOptionTitles == ["This Mac", "Office"],
                 "every other available speaker is offered")
+        // The intro's SECOND action, and it used to disappear beside the gold
+        // Start plate ("blends right into the background beside this huge
+        // CTA", owner 2026-08-24). A choice is voiced as a control.
+        #expect(wizard?.test_referenceLineIsRaised == true)
     }
 
     /// No Mac row in the fleet: the ONE other member the user already has
@@ -1078,6 +1082,7 @@ import AppKit
         #expect(popover.test_btWizardReferenceID() == nil)
         #expect(wizard?.test_referenceLineText == BTAlignmentWizardView.noReferenceCopy)
         #expect(wizard?.test_referencePickerIsEnabled == false)
+        #expect(wizard?.test_referenceLineIsRaised == false)
         #expect(wizard?.test_startIsEnabled == false)
 
         wizard?.test_clickButton(titled: "Start")   // performClick on a disabled button
@@ -1132,6 +1137,10 @@ import AppKit
         #expect(wizard?.test_referenceLineText == "Compare against This Mac")
         #expect(wizard?.test_referencePickerIsEnabled == false)
         #expect(wizard?.test_startIsEnabled == true)
+        // …and it stays in the CAPTION voice. The raised voice is the picker
+        // case's alone: nothing on this line can be clicked, so raising it
+        // would promise an affordance the screen doesn't have.
+        #expect(wizard?.test_referenceLineIsRaised == false)
     }
 
     // MARK: Zero-click (a speaker measured before)

@@ -70,6 +70,13 @@ comments in the wizard files, this wins.
 - Reference picker: **intro only**, conditional — 0 options: `noReferenceCopy`,
   Start disabled; 1 option: plain text "Compare against <name>", no control;
   2+: label + pop-up. Never rendered on question screens.
+  **AMENDED (owner report 2026-08-24, "blends right into the background beside
+  this huge CTA"): the 2+ case is voiced as a CONTROL** — label at
+  `Tokens.Font.body`/`label`, a REGULAR-size pop-up (not `.small`), in its own
+  `spacingBand` under the sentence. The 0- and 1-option lines are statements
+  and keep the caption voice unchanged. Start's own 220×64 plate does NOT
+  change: the intro is the one screen whose gold plate has no same-size peer
+  calibrating it, and the missing peer was the picker, not a smaller CTA.
 - Stage plate stops **above** the answer plates (colorize's off-plate variant):
   plates sit on the themed window ground and wear their light's hue as rim +
   keycap tint only.

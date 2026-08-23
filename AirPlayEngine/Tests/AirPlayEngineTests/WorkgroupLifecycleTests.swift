@@ -4,7 +4,7 @@
 // either call (`os_workgroup_join`/`leave` act on the CALLING thread).
 //
 // The coordinator-side half (which lifecycle edges call join/leave, in what
-// order) lives in AudiouterCoreTests/WorkgroupLifecycleTests.swift.
+// order) lives in AudioutCoreTests/WorkgroupLifecycleTests.swift.
 //
 // CANNOT BE TESTED HERE, on purpose:
 //   * that joining a workgroup changes scheduling. It is a kernel hint with no
@@ -127,7 +127,7 @@ import Testing
     }
 
     @Test func engineWithNoThreadReportsWorkgroupCallsAsUnscheduled() async {
-        // The public cross-package surface AudiouterCore drives. A never-started
+        // The public cross-package surface AudioutCore drives. A never-started
         // engine has no thread to marshal onto; the coordinator treats that as
         // "nothing to manage" rather than an error.
         let engine = AirPlayEngine(config: EngineConfig())

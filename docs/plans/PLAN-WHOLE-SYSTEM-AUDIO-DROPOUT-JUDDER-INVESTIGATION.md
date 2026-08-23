@@ -114,7 +114,7 @@ Consequences (verified arithmetic, R2a):
   independent of the anchor question.
 - **~9–11 heap operations per delivered buffer** (per-channel `[Data]` assembly in the
   IOProc block `:2349-2400`, `AVAudioPCMBuffer` in/out allocs in the converter,
-  `Data` copies) and **zero `autoreleasepool` anywhere** in `AudiouterCore/Sources` or
+  `Data` copies) and **zero `autoreleasepool` anywhere** in `AudioutCore/Sources` or
   `AirPlayEngine/Sources` (re-grepped at e960a7b: zero hits).
 - **Seven rebuild paths, not six**: the six `recreateTap` triggers, plus
   `reconcileCaptureGate`'s full `coordinator.stop()`/`coordinator.start()` cycle —
@@ -196,7 +196,7 @@ Flagged, not silently fixed:
    lifecycle telemetry gap that claim papered over is now closed differently:
    `aggregate_create`/`aggregate_create_rate_delayed`/`aggregate_destroy` Telemetry
    at `NativeCaptureCoordinator.swift:2296/:2323/:2682` and the per-app mirror.
-   **The stale sentence itself SURVIVES at e960a7b** (`AudiouterCore/AGENTS.md` Map
+   **The stale sentence itself SURVIVES at e960a7b** (`AudioutCore/AGENTS.md` Map
    entry for `AudioDiag`; `handleCreated`/`handleDestroyed`/`dumpLiveHandles` still
    have zero production callers — definition + tests only). F-7 owns the doc fix;
    per "docs orient, code decides", believe the source until then.
@@ -685,7 +685,7 @@ priority. Privilege boundary (root helper) — small diff, careful review.
 *Depends: T-10.*
 
 **F-7 — Docs + AGENTS.md + roadmap close-out** *(haiku / low)* **[code-writing]**
-Update `AudiouterCore/AGENTS.md` / `AirPlayEngine/AGENTS.md` for whatever landed
+Update `AudioutCore/AGENTS.md` / `AirPlayEngine/AGENTS.md` for whatever landed
 (≤300-word budget, Guard 2 symbol check), append roadmap 016 notes, retire this
 doc's superseded sections. Rationale: mechanical, but Guard-2-sensitive.
 *Depends: all landed fixes.*
@@ -720,13 +720,13 @@ no new code.
 
 ### J.1 Always-on posture — what ships in every build of e960a7b+
 
-Telemetry file: `~/Library/Logs/Audiouter/telemetry.jsonl` (rotates to
+Telemetry file: `~/Library/Logs/Audiout/telemetry.jsonl` (rotates to
 `telemetry.jsonl.1`; 10 MB total). Always on — no env vars needed.
 
 Watch live while reproducing anything:
 
 ```
-tail -f ~/Library/Logs/Audiouter/telemetry.jsonl | grep --line-buffered -E \
+tail -f ~/Library/Logs/Audiout/telemetry.jsonl | grep --line-buffered -E \
   'write_cadence_drift|send_sched|session_reset|rebuild_reanchored|rebind_recover_flush|aggregate_|exclusion_changed|device_change|create_and_start'
 ```
 
@@ -734,7 +734,7 @@ After the fact, the questions and their greps:
 
 | Question | Command |
 |---|---|
-| Is the anchor sliding, and how fast? | `grep write_cadence_drift ~/Library/Logs/Audiouter/telemetry.jsonl \| tail -20` — read `deficitTotalSeconds` growth per timestamp. Healthy = flat; the known open defect = ~0.02 per 6 s. |
+| Is the anchor sliding, and how fast? | `grep write_cadence_drift ~/Library/Logs/Audiout/telemetry.jsonl \| tail -20` — read `deficitTotalSeconds` growth per timestamp. Healthy = flat; the known open defect = ~0.02 per 6 s. |
 | Did writes stall (single gap)? | `grep send_sched ... \| tail -20` — `gap_max_ms` ≈ 11.8 is healthy cadence; hundreds/thousands = a starvation window (017's territory). |
 | Did anything re-anchor? | `grep -E 'session_reset\|rebuild_reanchored\|rebind_recover_flush' ... \| tail` |
 | Rebuild storm? | `grep -E 'aggregate_create\|aggregate_destroy' ... \| tail -30` — count creates/destroys inside one transition second. |
@@ -773,7 +773,7 @@ converter, no coordinator. If judder survives the probe, the capture side is
 innocent; if it vanishes, the capture side is guilty. That one bit halves the
 search space.
 
-1. **Quit Audiouter first** — PTP ports 319/320 are exclusive; two instances fight.
+1. **Quit Audiout first** — PTP ports 319/320 are exclusive; two instances fight.
 2. **Build:** `swift build --package-path AirPlayEngine --product engine-probe`
 3. **Make a PCM fixture** (none exists in-repo; ffmpeg is already a build dep):
    ```
@@ -788,11 +788,11 @@ search space.
    dns-sd -L "<AirPlay device name>" _airplay._tcp
    ```
 5. **PTP without the root helper** (probe is a bare CLI, no SMAppService daemon):
-   run with `AUDIOUTER_PTP_INPROC_BIND=1` (the documented dev fallback,
+   run with `AUDIOUT_PTP_INPROC_BIND=1` (the documented dev fallback,
    `AirPlayEngine/docs/ptp-helper-design.md` §6.3 option b — no sudo).
 6. **Run** (the gate flag is mandatory — without it the probe dry-runs and exits 0):
    ```
-   AUDIOUTER_PTP_INPROC_BIND=1 swift run --package-path AirPlayEngine engine-probe \
+   AUDIOUT_PTP_INPROC_BIND=1 swift run --package-path AirPlayEngine engine-probe \
      --address <receiver-ip> --device-id <colon-hex-id> \
      --pcm /tmp/audio-s16le-44100-2ch.raw \
      --i-have-a-receiver-and-owntone-is-stopped

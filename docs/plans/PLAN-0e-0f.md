@@ -36,12 +36,12 @@ in sync — with latency and 10-minute stability measured and written up.
 - **Local state:** OwnTone binary + config currently live under the session
   scratchpad (`/private/tmp/claude-501/.../scratchpad/owntone-build/...` and
   `.../scratchpad/ot/`). This path is ephemeral — relocation/rebuild task included.
-- **Package constraint:** `AudiouterCore/Package.swift` targets
+- **Package constraint:** `AudioutCore/Package.swift` targets
   `.macOS(.v13)`; taps need 14.4. The capture CLI must be a SEPARATE tool with its
   own `.macOS(.v14)`+ deployment target, not added to the v13 core target.
 - **Existing mock/dummy system (ahh added 2026-07-13, commit 5b8521b).** TWO
   independent layers, and neither covers the 0e/0f audio path — important:
-  - *In-app `MockBackend`* (`AudiouterCore/Sources/AudiouterCore/MockBackend.swift`)
+  - *In-app `MockBackend`* (`AudioutCore/Sources/AudioutCore/MockBackend.swift`)
     implements the `OutputBackend` protocol (`OutputBackend.swift`) with a fabricated
     `[Device]` fleet (`.demoFleet`, `MockBackend.swift:209`): staggered discovery,
     volume/mute/solo, output-set selection, fake RMS level meters, optional
@@ -205,7 +205,7 @@ stayed selected. Real-multi-room form remains deferred checkpoint 4.
   (`OwnToneBackend`, currently a stub). It does NOT switch the 0e capture path
   (there is only the real tap; the mock has no audio path by design).
 - Steps:
-  1. Add a single resolution point in `AudiouterCore`: a
+  1. Add a single resolution point in `AudioutCore`: a
      `BackendKind.resolved` (or `makeBackend()` with no arg) that reads, in order,
      an explicit arg → env var `AIRPLAY_BACKEND` (`mock`|`owntone`) → default
      `.mock`. Keep the enum; this only adds the resolver, so existing callers and
@@ -222,7 +222,7 @@ stayed selected. Real-multi-room form remains deferred checkpoint 4.
      the app holds an `OutputBackend`, never a concrete type).
 - Deliverable: resolver in core + env-var support + updated `mock-speakers-demo` +
   `dev/README.md` note; `swift test` still passes.
-- Deps: none (pure `AudiouterCore` work; independent of taps/OwnTone).
+- Deps: none (pure `AudioutCore` work; independent of taps/OwnTone).
   PARALLEL with everything. HOT FILES: `OwnToneBackend.swift` (the resolver lives
   by `makeBackend`) and `mock-speakers-demo/main.swift` — no other task touches
   these, so no contention within this plan.
@@ -247,7 +247,7 @@ stayed selected. Real-multi-room form remains deferred checkpoint 4.
 
 - **Wave 1 (all parallel):** T-HK-1 · T-0e-1 · **T-TOGGLE-1** · (T-0f-1 starts once
   T-HK-1 gives a running OwnTone). Critical-path seed = T-0e-1. T-TOGGLE-1 is
-  pure `AudiouterCore` work, independent of taps/OwnTone/speakers, and
+  pure `AudioutCore` work, independent of taps/OwnTone/speakers, and
   edits only `OwnToneBackend.swift` + `mock-speakers-demo/main.swift` (untouched by
   any other task) → fully parallel, off the critical path.
 - **Wave 2:** T-0d (after T-HK-1) ∥ T-0e-2 (after T-0e-1) ∥ T-0f-1 (after T-HK-1).
@@ -280,7 +280,7 @@ T-TOGGLE-1, is slack.)
 - **Q5 — Dev-toggle mechanism & reach.** How should the dummy/real switch be
   driven, and should it gate anything beyond the output backend?
   - (a, recommended) **Env var `AIRPLAY_BACKEND=mock|owntone`**, resolved once in
-    `AudiouterCore`, default `mock`; scope = the `OutputBackend` only (the
+    `AudioutCore`, default `mock`; scope = the `OutputBackend` only (the
     capture CLI stays real-only, since the mock has no audio path). Cheapest,
     works for headless tools and the future app's hidden Developer setting.
   - (b) A CLI flag (`--backend mock|owntone`) on each executable — explicit but
@@ -305,7 +305,7 @@ T-TOGGLE-1, is slack.)
   (float32→S16LE conversion only); OwnTone pipe accepts 48 kHz. Add a resampler
   only if a speaker audibly fails at 48 kHz (T-0f-1 verifies).
 - **Q5 — Dev toggle: env var, backend-scope only.** `AIRPLAY_BACKEND=mock|owntone`,
-  resolved once in `AudiouterCore` (explicit arg → env → default `.mock`).
+  resolved once in `AudioutCore` (explicit arg → env → default `.mock`).
   Scope is the `OutputBackend` seam only — the capture CLI stays real-only (the
   mock has no audio path by design). Maps onto a future hidden Developer setting.
   NB: `OwnToneBackend` is still a stub that `assertionFailure`s — the toggle task

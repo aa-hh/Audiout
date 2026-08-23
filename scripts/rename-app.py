@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rebrand the whole checkout from "Audiouter" to a new name.
+"""Rebrand the whole checkout from "Audiout" to a new name.
 
 The app name is baked into 380+ files and ~300 file/directory names: Swift
 module names, the SwiftPM package, bundle identifiers, log subsystems, Bonjour
@@ -12,10 +12,10 @@ the code and the user-facing text can't end up disagreeing with each other.
     python3 scripts/rename-app.py Halcyon --also "Warm Signal=Northlight" --apply
 
 Display name vs identifier
-    Where the old name stands alone as a word ("Quit Audiouter", the permission
-    prompts, "Audiouter.app") it becomes the new display name. Where it's glued
-    to other characters (AudiouterCore, com.audiouter.Audiouter,
-    AUDIOUTER_BUILD_LOCAL) it becomes the identifier form — the display name
+    Where the old name stands alone as a word ("Quit Audiout", the permission
+    prompts, "Audiout.app") it becomes the new display name. Where it's glued
+    to other characters (AudioutCore, com.audiout.Audiout,
+    AUDIOUT_BUILD_LOCAL) it becomes the identifier form — the display name
     with spaces and punctuation stripped. When the brand is a single word the
     two are the same and the distinction never comes up.
 
@@ -30,14 +30,14 @@ import re
 import subprocess
 import sys
 
-OLD_DISPLAY = "Audiouter"   # how the name appears standing on its own
-OLD_IDENT = "Audiouter"     # how it appears glued into identifiers
-OLD_LOWER = "audiouter"     # bundle ids, Bonjour service types, lowercase halves
-OLD_UPPER = "AUDIOUTER"     # env var prefixes, e.g. AUDIOUTER_BUILD_LOCAL
+OLD_DISPLAY = "Audiout"   # how the name appears standing on its own
+OLD_IDENT = "Audiout"     # how it appears glued into identifiers
+OLD_LOWER = "audiout"     # bundle ids, Bonjour service types, lowercase halves
+OLD_UPPER = "AUDIOUT"     # env var prefixes, e.g. AUDIOUT_BUILD_LOCAL
 
 # The name standing on its own — not touching an identifier character. This is
-# what separates "Quit Audiouter" and "Audiouter.app" (display name) from
-# AudiouterCore and com.audiouter.Audiouter (identifier).
+# what separates "Quit Audiout" and "Audiout.app" (display name) from
+# AudioutCore and com.audiout.Audiout (identifier).
 STANDALONE = re.compile(rf"(?<![A-Za-z0-9_-]){re.escape(OLD_DISPLAY)}(?![A-Za-z0-9_-])")
 
 
@@ -224,7 +224,7 @@ def prune_empty_dirs(root):
 
 NEXT_STEPS = """
 Next:
-  1. rm -rf AudiouterCore/.build .build   # stale module caches under the old name
+  1. rm -rf AudioutCore/.build .build   # stale module caches under the old name
   2. bash scripts/build.sh                # the real check that the rename is consistent
   3. bash scripts/run-tests.sh
   4. git diff — that's your review. `git checkout . && git clean -fd` undoes all of it.
@@ -237,7 +237,7 @@ Deliberately NOT touched:
     permission (system audio, Bluetooth, local network) prompts again, and the
     old copy in /Applications stays behind under the old name.
   - Git branch names, the GitHub repo name, the worktree directory names.
-  - The website repo (~/Projects/Audiouter Website) and the iOS app on
+  - The website repo (~/Projects/Audiout Website) and the iOS app on
     claude/ios-staging — run this script inside each of those too.
   - The artwork inside the icon PNGs, if it carries a wordmark.
 """

@@ -45,7 +45,7 @@ git-owned history and comments that had drifted into being *wrong*.
   (`deviceArray`, `-State` suffixes), generic nouns in specific roles
   (`data`, `info`, `result`).
 - Match the file's existing vocabulary and the domain glossary (device vs
-  speaker vs output distinctions in `AudiouterCore/AGENTS.md` are deliberate).
+  speaker vs output distinctions in `AudioutCore/AGENTS.md` are deliberate).
 - Scope-length rule: single letters die outside tight loops.
 
 ## Protected — never "clean up"

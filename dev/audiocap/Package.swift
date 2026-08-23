@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "audiocap",
     // Core Audio process taps are macOS 14.2+ (publicly usable 14.4). This tool is
-    // deliberately SEPARATE from AudiouterCore (which pins .macOS(.v13)).
+    // deliberately SEPARATE from AudioutCore (which pins .macOS(.v13)).
     platforms: [
         .macOS("14.4")
     ],

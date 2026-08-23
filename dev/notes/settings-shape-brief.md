@@ -34,12 +34,12 @@ three slots. Target is **five visible rows per tab, ~320pt**.
 | | Row |
 |---|---|
 | 1 | Launch at login |
-| 2 | Reconnect last speakers when Audiouter starts |
+| 2 | Reconnect last speakers when Audiout starts |
 | 3 | Check for updates *(with an automatic-checks toggle)* |
 | 4 | **Shortcuts & remote** — disclosure |
-| 5 | Footer strip: `Setup…` · `Diagnostics…` · `About Audiouter…` |
+| 5 | Footer strip: `Setup…` · `Diagnostics…` · `About Audiout…` |
 
-Row 4 discloses three related things — all the ways Audiouter is reached from
+Row 4 discloses three related things — all the ways Audiout is reached from
 outside the panel:
 
 - Keyboard shortcuts: **open the panel**, **mute everything**. (Kill-switch one
@@ -101,7 +101,7 @@ problem to solve.
 - **Disclosures change pane height at runtime with no tab switch** — exactly the
   `rebuildList()` case the module already handles via KVO on
   `preferredContentSize`. Publish through that path; do not add a second one.
-- **The four sizing traps in `AudiouterSettingsUI/AGENTS.md` still bind.** In
+- **The four sizing traps in `AudioutSettingsUI/AGENTS.md` still bind.** In
   particular every new view sets `translatesAutoresizingMaskIntoConstraints =
   false`, and the footer strip and disclosure content are no exception.
 - Re-run the `settings-snapshot` target after the layout lands; the checked-in

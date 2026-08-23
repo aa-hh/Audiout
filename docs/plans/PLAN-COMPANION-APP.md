@@ -28,9 +28,9 @@ gap); connect volume needs no push — `NativeBackend.connectVolumeSeed` reads
 
 | # | Decision |
 |---|---|
-| D1 | Mac-side toggle: Settings › General checkbox. Default OFF while only the Mac side has merged; flipped ON (T22) in the release that ships with the phone app. Dev env override `AUDIOUTER_COMPANION` (explicit, never silent). |
+| D1 | Mac-side toggle: Settings › General checkbox. Default OFF while only the Mac side has merged; flipped ON (T22) in the release that ships with the phone app. Dev env override `AUDIOUT_COMPANION` (explicit, never silent). |
 | D2 | Trust: open to anyone on the same Wi-Fi, Sonos-style. `hello.clientName` carried from day one so per-phone approval can be added later with no wire change. |
-| D3 | App name: decided later. Working name "AudiouterRemote" (rename-safe); T23 renames before App Store Connect setup. |
+| D3 | App name: decided later. Working name "AudioutRemote" (rename-safe); T23 renames before App Store Connect setup. |
 | D4 | Four tabs: Speakers / Apps / Groups / Connection+Settings (current Mac, switch Mac, demo mode, about, phone settings, remote Mac settings per D10). |
 | D5 | Device icons: phone shows the Mac's custom SF Symbol icons, read-only. |
 | D6 | iPhone-only at launch; iPad runs it in compatibility mode. |
@@ -58,16 +58,16 @@ The pending-pool seam introduced by the FIX-A cap work is where the gate slots i
 
 ## Architecture (end state)
 
-New dependency-free Swift package `AudiouterProtocol/` (repo-root sibling of
-AudiouterCore — sibling, not a target, because AudiouterCore's manifest shells out to
+New dependency-free Swift package `AudioutProtocol/` (repo-root sibling of
+AudioutCore — sibling, not a target, because AudioutCore's manifest shells out to
 `brew --prefix` and drags the AirPlayEngine graph; the iOS app must depend on a
 Foundation-only graph). The Mac app grows `CompanionServer` (NWListener +
-NWProtocolWebSocket, Bonjour `_audiouter._tcp`, TXT `{proto, name}`, DACPServer-style
+NWProtocolWebSocket, Bonjour `_audiout._tcp`, TXT `{proto, name}`, DACPServer-style
 serial-queue confinement), `CompanionSnapshotBuilder` (pure mapper over the existing
 controllers), `CompanionCommandDispatcher` (MainActor, calls the exact controller
 methods the popover calls), and a coalesced broadcaster wired at the AppDelegate
 coordination layer — all provable with loopback WebSocket tests before any iOS code.
-A new iOS 18 SwiftUI app under `ios/` consumes only `AudiouterProtocol`, discovers via
+A new iOS 18 SwiftUI app under `ios/` consumes only `AudioutProtocol`, discovers via
 `NWBrowser`, connects via `NWConnection`+WebSocket, renders four tabs, handles
 permission-denial/backgrounding/Wi-Fi honestly, ships a visible opt-in Demo system.
 
@@ -78,9 +78,9 @@ diffs on render; the envelope leaves room for a `delta` message type later).
 
 ## Protocol sketch (T1 implements exactly this)
 
-`AudiouterProtocol/Package.swift` platforms `[.macOS(.v14), .iOS(.v18)]`, zero deps.
+`AudioutProtocol/Package.swift` platforms `[.macOS(.v14), .iOS(.v18)]`, zero deps.
 
-**Constants** (`CompanionProto.swift`): `serviceType = "_audiouter._tcp"`,
+**Constants** (`CompanionProto.swift`): `serviceType = "_audiout._tcp"`,
 `version = 1`, TXT keys `proto` / `name`. Client refuses TXT `proto` greater than its
 own (refuse-forward, mirroring `AppRouteStore.swift:154`).
 
@@ -145,11 +145,11 @@ other assignments upheld, including the three Opus tasks).
 
 ### Phase 1 — protocol + Mac server (mergeable unit: T1-T9 + T21, gate = T21 + Alec go-ahead)
 
-**T1 — `AudiouterProtocol` package** · new-code · deps: — · **sonnet 5, medium**
-Files: NEW `AudiouterProtocol/{Package.swift, Sources/AudiouterProtocol/{CompanionProto,CompanionMessage,CompanionSnapshot,CompanionCommand}.swift, Tests/AudiouterProtocolTests/CompanionMessageTests.swift, AGENTS.md}`; EDIT `AudiouterCore/Package.swift:120-126` (path dep) + `:137-146` (target dep).
-Implements the protocol sketch exactly. Verify: `cd AudiouterProtocol && swift test`
+**T1 — `AudioutProtocol` package** · new-code · deps: — · **sonnet 5, medium**
+Files: NEW `AudioutProtocol/{Package.swift, Sources/AudioutProtocol/{CompanionProto,CompanionMessage,CompanionSnapshot,CompanionCommand}.swift, Tests/AudioutProtocolTests/CompanionMessageTests.swift, AGENTS.md}`; EDIT `AudioutCore/Package.swift:120-126` (path dep) + `:137-146` (target dep).
+Implements the protocol sketch exactly. Verify: `cd AudioutProtocol && swift test`
 (round-trip every message/command/snapshot permutation, unknown-key tolerance,
-refuse-forward); AudiouterCore still builds.
+refuse-forward); AudioutCore still builds.
 
 **T2 — Change hooks on pure-model controllers** · backend · deps: — · **sonnet 5, high**
 Files: `GroupController.swift` (HOT), `ExcludedAppsController.swift`, tests in
@@ -166,10 +166,10 @@ paths (setMemberVolume, setMainOutMasterVolume) — those echo back as
 no-fire-on-no-op tests per method.
 
 **T3 — `CompanionSnapshotBuilder`** · new-code · deps: T1 · **sonnet 5, medium**
-Files: NEW `AudiouterCore/Sources/AudiouterCore/CompanionSnapshotBuilder.swift` + tests.
+Files: NEW `AudioutCore/Sources/AudioutCore/CompanionSnapshotBuilder.swift` + tests.
 Pure `static build(...)` over (devices, groupController, appRouting,
 excludedBundleIDs, iconFor closure — injected because DeviceIconController lives in
-AppKit-importing AudiouterSharedUI and Core stays AppKit-free, addableApps,
+AppKit-importing AudioutSharedUI and Core stays AppKit-free, addableApps,
 runningRouted, liveRoutedAppNames, localFallbackActive, takeoverStatus, serverName,
 settings values+options). Traps encoded as tests: `DeviceState.isSelected` from
 `isSpeakerSelected(_:)` never `Device.isSelected`; `isMainOutMember` from
@@ -207,15 +207,15 @@ proto-refuse, idle cancel, stop() cancels all; zero firewall prompts.
 
 **T6 — Settings toggle plumbing** · new-code · deps: D1/D8 · **sonnet 5, low**
 Files: `AppSettings.swift` (new key `companion.allowRemoteControl`, **default OFF**),
-`AudiouterSettingsUI/GeneralSettingsViewController.swift` (checkbox + change callback),
+`AudioutSettingsUI/GeneralSettingsViewController.swift` (checkbox + change callback),
 `AudioSettingsViewController.swift` (new `onSettingChanged` callback fired from
 `connectVolumeChanged` and the buffer-apply closure — so Mac-side settings edits
 trigger broadcasts; cleaner than adding hooks to AppSettings), tests in
-`AppSettingsTests.swift`. Env override `AUDIOUTER_COMPANION` (explicit opt-in/out,
+`AppSettingsTests.swift`. Env override `AUDIOUT_COMPANION` (explicit opt-in/out,
 `AIRPLAY_BACKEND` knob style). AppDelegate reaction lands in T7 (file-disjointness).
 
 **T7 — AppDelegate wiring** · backend · deps: T2-T6 · **opus 4.8, high**
-Files: `AudiouterCore/Sources/AudiouterApp/AppDelegate.swift` ONLY (HOT — sole owner
+Files: `AudioutCore/Sources/AudioutApp/AppDelegate.swift` ONLY (HOT — sole owner
 in its wave).
 (1) Instantiate/start CompanionServer per T6 setting+env with
 `Host.current().localizedName`; stop/start on setting change. (2) Broadcast triggers →
@@ -247,7 +247,7 @@ CRUD round-trips. Deliberately bypasses T7/AppKit.
 
 **T9 — Docs ride the branch** · docs · deps: T7 · **haiku 4.5, low**
 Files: `docs/SPEC.md:30` (reverse "Mac only"; short companion subsection), root
-`AGENTS.md:39-54` folder map (+AudiouterProtocol/, +ios/), `AudiouterCore/AGENTS.md`
+`AGENTS.md:39-54` folder map (+AudioutProtocol/, +ios/), `AudioutCore/AGENTS.md`
 Map rows (server/builder/dispatcher) + Rules bullet for the two snapshot traps.
 Guard 2 verifies every named symbol.
 
@@ -261,13 +261,13 @@ shipping blocker); `strings` binary-identity check (multiple-app-copies trap).
 ### Phase 2 — iPhone app (branch off merged main)
 
 **T10 — iOS Xcode scaffold** · new-code · deps: T1 · **sonnet 5, medium**
-Files: NEW `ios/AudiouterRemote/` (working name per D3): xcodeproj with
+Files: NEW `ios/AudioutRemote/` (working name per D3): xcodeproj with
 **File-System-Synchronized (buildable-folder) groups** — pbxproj is touched here and
 never again, which is what makes Wave C parallel-safe; app entry + RootView + 4-tab
-skeleton; Info.plist `NSLocalNetworkUsageDescription` ("Audiouter uses the local
-network to find and control the Audiouter app on your Mac.") +
-`NSBonjourServices=["_audiouter._tcp"]`; local package dep on `../../AudiouterProtocol`
-ONLY (never AudiouterCore — brew-manifest trap); iOS 18 target, iPhone-only + iPad
+skeleton; Info.plist `NSLocalNetworkUsageDescription` ("Audiout uses the local
+network to find and control the Audiout app on your Mac.") +
+`NSBonjourServices=["_audiout._tcp"]`; local package dep on `../../AudioutProtocol`
+ONLY (never AudioutCore — brew-manifest trap); iOS 18 target, iPhone-only + iPad
 compatibility (D6/D7); NEW `ios/AGENTS.md` documenting the xcodebuild command;
 `.gitignore` additions. During T10, read `.githooks/pre-commit` to confirm the repo
 guards are indifferent to `ios/` (risk R7). Verify: simulator build succeeds; trivial
@@ -376,7 +376,7 @@ pbxproj-touching → not haiku.
 
 ## Waves, contention, critical path
 
-Hot files: `AudiouterCore/Package.swift` (T1 only) · `GroupController.swift` (T2 only)
+Hot files: `AudioutCore/Package.swift` (T1 only) · `GroupController.swift` (T2 only)
 · `AppDelegate.swift` (T7 only — T6 deliberately split off it) · `project.pbxproj`
 (T10 only, then synchronized folders) · SPEC/AGENTS (T9 only). No two same-wave tasks
 share a file.
@@ -412,7 +412,7 @@ CompanionCommandDispatcherTests, CompanionServerTests, CompanionEndToEndTests, p
 additions to GroupControllerTests / ExcludedAppsTests / AppSettingsTests. All
 swift-testing, `IsolatedSuite` where defaults/temp-dirs are touched, **loopback binds
 only**. No audio-playback tests in the routine suite. Guard 4 does NOT see
-`AudiouterProtocol/Tests` or iOS tests — run `swift test` in AudiouterProtocol/ and
+`AudioutProtocol/Tests` or iOS tests — run `swift test` in AudioutProtocol/ and
 xcodebuild-test in ios/ explicitly at each wave boundary (documented in both new
 AGENTS.md files).
 

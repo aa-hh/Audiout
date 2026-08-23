@@ -10,8 +10,8 @@ context: `../../docs/plans/synced-local-airplay-plan.md`; the writeup this
 harness feeds: `../notes/phase-lock-spike-findings.md`.
 
 **Relationship to production code:** standalone — deliberately does **not**
-link `AudiouterCore`. `PlanMath.swift` re-derives `SyncTiming.plan` from
-`AudiouterCore/Sources/AudiouterCore/SyncedLocalSink.swift` independently, so
+link `AudioutCore`. `PlanMath.swift` re-derives `SyncTiming.plan` from
+`AudioutCore/Sources/AudioutCore/SyncedLocalSink.swift` independently, so
 its Monte-Carlo is a cross-check against the shipping formula rather than a
 test of it (the two must be kept in sync by hand if `SyncTiming.plan` changes).
 Nothing here is vendored into the app; this package is disposable measurement

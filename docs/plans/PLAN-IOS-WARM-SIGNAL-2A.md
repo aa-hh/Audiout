@@ -18,9 +18,9 @@ reconcile.
 
 ## What this is
 
-Implementation of `Audiouter Remote - iOS Design System.dc.html` — the Claude Design project at
+Implementation of `Audiout Remote - iOS Design System.dc.html` — the Claude Design project at
 <https://claude.ai/design/p/2b310903-1a59-446f-900c-3c784920b7e8> — onto the existing SwiftUI companion app
-at `ios/AudiouterRemote/`.
+at `ios/AudioutRemote/`.
 
 The design document is a two-turn canvas: turn 1 explores three directions, turn 2 converges on seven screens
 (`2a` Speakers · `2b` light mode · `2c` Apps · `2d` Groups · `2e` Connect · `2f` device sheet · `2g`
@@ -76,7 +76,7 @@ which are fixed here. **Appendix A records what was verified so the next agent d
 
 ---
 
-# Work order — Warm Signal token layer + Speakers (`2a`) on `AudiouterRemote`
+# Work order — Warm Signal token layer + Speakers (`2a`) on `AudioutRemote`
 
 ## Goal
 
@@ -88,16 +88,16 @@ Seven designed elements have no data behind them in the companion protocol. They
 
 ## Verified facts
 
-Base commit is `381a0f63` on `claude/companion-app-phase2-ios`. **Every citation below was re-read via `git show 381a0f63:<path>`**, not from the existing worktree's uncommitted copy. Design doc = `dev/notes/ios-design-system-2a.dc.html`, cited `doc:N`. Swift paths are relative to `ios/AudiouterRemote/` unless absolute.
+Base commit is `381a0f63` on `claude/companion-app-phase2-ios`. **Every citation below was re-read via `git show 381a0f63:<path>`**, not from the existing worktree's uncommitted copy. Design doc = `dev/notes/ios-design-system-2a.dc.html`, cited `doc:N`. Swift paths are relative to `ios/AudioutRemote/` unless absolute.
 
 **Baseline, measured this session** (throwaway detached worktree at `381a0f63`, since removed):
 - `xcodebuild ... -destination 'generic/platform=iOS Simulator' build` → `** BUILD SUCCEEDED **`
 - `xcodebuild test ... -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max'` → `** TEST FAILED **`; `Test run with 110 tests in 6 suites failed after 0.666 seconds with 1 issue`; the one issue is `✘ Test zzDebugDump() recorded an issue at SpeakerRowRulesTests.swift:81:9: Expectation failed: Bool(false)`. XCUITest suite: `Executed 1 test, with 0 failures ... in 89.730 seconds`.
-- `zzDebugDump` occupies `AudiouterRemoteTests/SpeakerRowRulesTests.swift:75-82` **at base** (file is 207 lines). Another session has deleted it in their uncommitted copy — irrelevant to us. Not ours to touch.
+- `zzDebugDump` occupies `AudioutRemoteTests/SpeakerRowRulesTests.swift:75-82` **at base** (file is 207 lines). Another session has deleted it in their uncommitted copy — irrelevant to us. Not ours to touch.
 
 **Toolchain:** Xcode 27.0 (27A5228h). `xcrun simctl list devices available` → iOS 27.0 iPhones are `iPhone 17 Pro Max`, `iPhone 17e`, `iPhone Air`. **No `iPhone 17`**, so `ios/AGENTS.md:47` is wrong. `scripts/build.sh` does not exist on this branch; `grep -c xcodebuild scripts/run-tests.sh` → `0`. Raw `xcodebuild` is the only iOS path (`ios/AGENTS.md:33-48`).
 
-**Rules that bind this change** (`ios/AGENTS.md`): `:12-20` `project.pbxproj` hand-edited exactly once, never again — both targets use `PBXFileSystemSynchronizedRootGroup`, so a new `.swift` file needs no project edit; `:21-24` only `AudiouterProtocol` may be depended on, never `AudiouterCore`; `:25-27` iOS 18.0, iPhone-only; `:28-31` Guard 4 does not run these tests. The existing `companion-app-phase2-ios` worktree has `project.pbxproj` modified by another session right now (`objectVersion 77 → 70`). Never work there.
+**Rules that bind this change** (`ios/AGENTS.md`): `:12-20` `project.pbxproj` hand-edited exactly once, never again — both targets use `PBXFileSystemSynchronizedRootGroup`, so a new `.swift` file needs no project edit; `:21-24` only `AudioutProtocol` may be depended on, never `AudioutCore`; `:25-27` iOS 18.0, iPhone-only; `:28-31` Guard 4 does not run these tests. The existing `companion-app-phase2-ios` worktree has `project.pbxproj` modified by another session right now (`objectVersion 77 → 70`). Never work there.
 
 **The test fence on `SpeakersView` — the constraint that shapes this whole plan.** At base, `SpeakerRowRulesTests.swift:66-73` defines `stateProperties(of:)`, matching any property whose type description contains `"State<"`. `:95` asserts:
 ```swift
@@ -108,15 +108,15 @@ and `:96-99` asserts `MainOutRow`'s state `.contains("localVolume")`. `SpeakersV
 Other asserted symbols at base: `MainOutRow.thumbValue(local:server:)` at `:106-108` and `:116`; `MainOutRow(masterVolume:isMuted:session:)` called with exactly three arguments at `:96-98`; **ten** device-row tests over `DeviceRowView.isControllable` / `showsFailureCard` / `disabledReason` at `:122-206`.
 
 **Current Speakers implementation:**
-- `AudiouterRemote/UI/Speakers/SpeakersView.swift:15-48` — `NavigationStack` → custom `header` → `StatusBanners` → `List(.insetGrouped)`, sections "Main Out" (`MainOutPicker` + `MainOutRow`) and "Speakers" (`ForEach` of `DeviceRowView`). `:54-83` header. `:85-109` status text/symbol/colour.
+- `AudioutRemote/UI/Speakers/SpeakersView.swift:15-48` — `NavigationStack` → custom `header` → `StatusBanners` → `List(.insetGrouped)`, sections "Main Out" (`MainOutPicker` + `MainOutRow`) and "Speakers" (`ForEach` of `DeviceRowView`). `:54-83` header. `:85-109` status text/symbol/colour.
 - `SpeakersView.swift:114-127` — `MainOutRow`'s type doc comment stating the released-value hold policy (and `:121-127` the rubber-band regression it guards against). `:128-191` the type; `:133` `@State localVolume`; `:137` `@State isDragging`; `:142-144` `static thumbValue`; `:156-188` the `Slider` and its send policy (`:166-170` the `onEditingChanged` that is the *only* writer of `isDragging`); `:174-178` the hold-on-release comment; `:180-186` the `.onChange(of: masterVolume)` that clears the echo.
-- `AudiouterRemote/UI/Speakers/DeviceRowView.swift:103-141` row body; `:37-39` `showsFailureCard`; `:70-75` `isControllable`; `:84-87` `disabledReason`; `:154-193` `controlsRow`; `:195-220` `failureCard`, whose `:201` guards `failureSuggestion` with `if let`; `:176-181` the current release policy (clear the echo on release).
-- `AudiouterRemote/UI/Speakers/MainOutPicker.swift` — `struct` opens `:9`, `let snapshot`/`let session` `:10-11`, `private enum Target` `:13-16`, `current` `:18-24`, `body` `:26-44` with the `Picker` at `:27-42` and `.accessibilityHint("Choose which speakers Main Out sends to")` verbatim at `:43`.
-- `AudiouterRemote/UI/Speakers/StatusBanners.swift:21-37` — three whole-app status strips.
-- `AudiouterRemote/RootView.swift` (**not** under `UI/`) — stock `TabView` at `:125-152`; fourth tab labelled `"Connection"` at `:150`.
+- `AudioutRemote/UI/Speakers/DeviceRowView.swift:103-141` row body; `:37-39` `showsFailureCard`; `:70-75` `isControllable`; `:84-87` `disabledReason`; `:154-193` `controlsRow`; `:195-220` `failureCard`, whose `:201` guards `failureSuggestion` with `if let`; `:176-181` the current release policy (clear the echo on release).
+- `AudioutRemote/UI/Speakers/MainOutPicker.swift` — `struct` opens `:9`, `let snapshot`/`let session` `:10-11`, `private enum Target` `:13-16`, `current` `:18-24`, `body` `:26-44` with the `Picker` at `:27-42` and `.accessibilityHint("Choose which speakers Main Out sends to")` verbatim at `:43`.
+- `AudioutRemote/UI/Speakers/StatusBanners.swift:21-37` — three whole-app status strips.
+- `AudioutRemote/RootView.swift` (**not** under `UI/`) — stock `TabView` at `:125-152`; fourth tab labelled `"Connection"` at `:150`.
 - No asset catalog exists. `grep -rn "Color("` over `ios/` → 5 hits: `UI/Groups/GroupIconPicker.swift:53`, `UI/Apps/AppGlyph.swift:46,47,106,112`. Explicit `Color.accentColor` literals live at `UI/Groups/GroupsView.swift:54` and `UI/Groups/GroupIconPicker.swift:52,55,60`.
 
-**Model available** (`AudiouterProtocol/Sources/AudiouterProtocol/CompanionSnapshot.swift:39-52`): `DeviceState` carries `id, name, kind, iconSymbolName, isAvailable, supportsAirPlay2, isLocalDevice, volume, isMuted, isSelected, isMainOutMember, connection`. `ConnectionInfo` is `state: String`, `failureHeadline: String?`, `failureSuggestion: String?` (`:28-31`). `kind` is a plain `String` (`:42`). No `isPinned`, no meter level. `MacSessionProtocol.swift:21-23` forbids phone-side persistence of routing state. `DemoMacSession.swift:121` seeds `DeviceRecord(id: "local-mac", name: "This Mac", kind: "localMac", ...)`.
+**Model available** (`AudioutProtocol/Sources/AudioutProtocol/CompanionSnapshot.swift:39-52`): `DeviceState` carries `id, name, kind, iconSymbolName, isAvailable, supportsAirPlay2, isLocalDevice, volume, isMuted, isSelected, isMainOutMember, connection`. `ConnectionInfo` is `state: String`, `failureHeadline: String?`, `failureSuggestion: String?` (`:28-31`). `kind` is a plain `String` (`:42`). No `isPinned`, no meter level. `MacSessionProtocol.swift:21-23` forbids phone-side persistence of routing state. `DemoMacSession.swift:121` seeds `DeviceRecord(id: "local-mac", name: "This Mac", kind: "localMac", ...)`.
 
 **Roadmap tooling** — `/Users/alechenderson/.claude/plugins/cache/foundry/foreman/0.46.0-alpha/scripts/roadmap.js`:
 - `:8-10` `projectDir()` returns `path.resolve(process.env.CLAUDE_PROJECT_DIR || process.cwd())`. **`CLAUDE_PROJECT_DIR` wins over the working directory** — `cd`-ing into the worktree is not sufficient.
@@ -124,7 +124,7 @@ Other asserted symbols at base: `MainOutRow.thumbValue(local:server:)` at `:106-
 - `add` takes stdin JSON `{title, why, what, source, depends_on?, touches?, notes?, status?, doc?}` and prints one `{"ok":true,...}` line.
 - `git show 381a0f63:ROADMAP.jsonl | grep -c ''` → **23** entries, ids `001`–`023`. Entry `004` is `Bluetooth output support`, `"status":"planned"`.
 
-**UI test coupling** (`AudiouterRemoteUITests/CompanionSmokeUITests.swift`, verified exact): `:32-34` hardcoded screenshot dir; `:45` `createDirectory(withIntermediateDirectories: true)`; `:79-93` `attachAndSaveScreenshot`; `:99` `tabBar.buttons["Connection"]`; `:126` saves `01-speakers.png`; `:129-134` and `:177` `app.switches["Select Kitchen HomePod"]`; `:143` `navigationBars["Apps"].buttons["Add App"]`; `:159` `navigationBars["Groups"].buttons["Add Group"]`.
+**UI test coupling** (`AudioutRemoteUITests/CompanionSmokeUITests.swift`, verified exact): `:32-34` hardcoded screenshot dir; `:45` `createDirectory(withIntermediateDirectories: true)`; `:79-93` `attachAndSaveScreenshot`; `:99` `tabBar.buttons["Connection"]`; `:126` saves `01-speakers.png`; `:129-134` and `:177` `app.switches["Select Kitchen HomePod"]`; `:143` `navigationBars["Apps"].buttons["Add App"]`; `:159` `navigationBars["Groups"].buttons["Add Group"]`.
 
 **Design values:** dark palette `doc:1686-1691` (= the CSS block `doc:14-21`); light palette `doc:1693-1699`. Micro-label *voice* `doc:36` (`ui-monospace / SF Mono`, uppercase, `letter-spacing:.09em`, weight 700) — **no size there**; sizes come from usages: 9.5 px at `doc:57`, `doc:72-73`, `doc:124`, `doc:195`, and 9 px at `doc:126`, `doc:197`; the measured Mac→iOS table gives 10 at `doc:1037`. Row geometry `doc:84-105`; row view-model `doc:1823-1866` (`showEdge` at `doc:1854`); drag maths `doc:1730-1794`; sections `doc:2000-2006`; deck `doc:121-142` (its background is `rgba(84,72,58,.48)` at `doc:122`); drawer `doc:188-217`; header `doc:55-65`. The design's mocks place "This Mac" in `ARMED / LIVE` (`doc:1940`, `doc:1998`, light mock `doc:310`) and never show it unarmed.
 
@@ -146,9 +146,9 @@ Export this once per shell in every later step:
 export WT="/Users/alechenderson/Projects/AirPlay Controller/.claude/worktrees/ios-warm-signal-2a"
 ```
 
-### Step 1 — New file: `AudiouterRemote/UI/Shared/WarmSignal.swift`
+### Step 1 — New file: `AudioutRemote/UI/Shared/WarmSignal.swift`
 
-New `.swift` files under `AudiouterRemote/` need no project edit (`ios/AGENTS.md:12-20`). Begin with `// SPDX-License-Identifier: GPL-2.0-or-later`.
+New `.swift` files under `AudioutRemote/` need no project edit (`ios/AGENTS.md:12-20`). Begin with `// SPDX-License-Identifier: GPL-2.0-or-later`.
 
 **UIKit has no `UIColor(hex:alpha:)` — write it here, in this file.** It is the only supporting helper this pass adds, and it must live in `WarmSignal.swift` (the one-new-file fence):
 ```swift
@@ -224,14 +224,14 @@ Also in this file:
 
 Two edits, and an honest statement of what each does:
 
-1. `AudiouterRemote/RootView.swift:125` — add `.tint(WarmSignal.gold)` to the `TabView`. This changes **tint-derived chrome only**: tab-bar selection, `Button`s, `NavigationLink` chevrons, `Picker` menus, toggles. It does **not** reach `Color.accentColor`, which resolves from the app accent (no asset catalog exists → system blue) and ignores the ancestor tint.
+1. `AudioutRemote/RootView.swift:125` — add `.tint(WarmSignal.gold)` to the `TabView`. This changes **tint-derived chrome only**: tab-bar selection, `Button`s, `NavigationLink` chevrons, `Picker` menus, toggles. It does **not** reach `Color.accentColor`, which resolves from the app accent (no asset catalog exists → system blue) and ignores the ancestor tint.
 2. Therefore also replace the four explicit `Color.accentColor` literals with `WarmSignal.gold`: `UI/Groups/GroupsView.swift:54` (`.tint(.accentColor)`) and `UI/Groups/GroupIconPicker.swift:52`, `:55`, `:60`. Token swaps only — no other change to either file.
 
 Adding an `AccentColor` asset catalog remains banned (see Out of scope); four token swaps are smaller than introducing a resource bundle.
 
 Do **not** change the tab labels — `"Connection"` at `RootView.swift:150` stays. The design's "Connect" name and custom glass tab bar (`doc:143-175`) belong to a later pass, and keeping the label keeps `CompanionSmokeUITests.swift:99` and `:168` green untouched.
 
-### Step 3 — Rewrite `AudiouterRemote/UI/Speakers/DeviceRowView.swift` as the fader row
+### Step 3 — Rewrite `AudioutRemote/UI/Speakers/DeviceRowView.swift` as the fader row
 
 Keep the type name, `let device: DeviceState`, `let session: any MacSessionProtocol`, and **all three statics byte-identical with their doc comments**: `showsFailureCard(_:)` (`:37-39`), `isControllable(_:appRoutes:)` (`:70-75`), `disabledReason(for:controllable:)` (`:84-87`). Ten tests at `SpeakerRowRulesTests.swift:122-206` depend on them. `DeviceRowView` is not fenced against `@State` — only `SpeakersView` is.
 
@@ -364,7 +364,7 @@ The strings `device.name` and `"Armed"`/`"Not armed"` are load-bearing — Step 
 
 Update the two `#Preview`s at `:223-246` so they compile.
 
-### Step 4 — Rewrite `AudiouterRemote/UI/Speakers/SpeakersView.swift`
+### Step 4 — Rewrite `AudioutRemote/UI/Speakers/SpeakersView.swift`
 
 **`SpeakersView` keeps zero `@State` properties** (`SpeakerRowRulesTests.swift:95`; the invariant is documented at `SpeakersView.swift:8`). Do not widen it, do not touch the test.
 
@@ -413,8 +413,8 @@ Section header (`doc:70-75`): `.frame(height: 34)`; a 9×9 chevron of two 1.8 pt
 - `BLUETOOTH` → `"BLUETOOTH OUTPUT NOT AVAILABLE YET"`
 
 The other three render nothing under an empty header — their count says it. **No fabricated device names, halos, levels or volume readouts anywhere.** Nothing in `PINNED` or `BLUETOOTH` may be mistakable for a real speaker. Above the Bluetooth case add:
-`// razor: structural placeholder only. Nothing on the wire ever reports a Bluetooth output — DeviceState.kind is a free-form String (AudiouterProtocol CompanionSnapshot.swift:42) and the Mac never sends one. Tracked as roadmap 004.`
-(Stated as a fact about the wire, not a compile-time fact: `ios/AGENTS.md:21-24` forbids this target from referencing `AudiouterCore` at all.)
+`// razor: structural placeholder only. Nothing on the wire ever reports a Bluetooth output — DeviceState.kind is a free-form String (AudioutProtocol CompanionSnapshot.swift:42) and the Mac never sends one. Tracked as roadmap 004.`
+(Stated as a fact about the wire, not a compile-time fact: `ios/AGENTS.md:21-24` forbids this target from referencing `AudioutCore` at all.)
 
 ### Step 5 — Main Out deck
 
@@ -463,7 +463,7 @@ private var master: Int { snapshot.mainOutMasterVolume }
 - Gesture (`doc:1730-1749`): the **same** axis-latch shape as Step 3, over `trackWidth`, using `WarmSignal.faderValue`. Horizontal commit → `setMainOutMasterVolume(..., isFinal: false)` per tick, `isFinal: true` on release, echo held (do **not** clear `localVolume` on release — that is `MainOutRow`'s documented difference at `:174-178`). No commit at all (a press under 5 pt) → call `onIdlePress()`.
 - Accessibility: `.accessibilityLabel("Main Out volume")`, `.accessibilityValue("\(Int(Self.thumbValue(local: localVolume, server: masterVolume))) percent")`, and an `.accessibilityAdjustableAction` in 5-point steps — the removed `Slider` gave this for free and it must not regress.
 
-### Step 6 — `AudiouterRemote/UI/Speakers/MainOutPicker.swift`: menu style
+### Step 6 — `AudioutRemote/UI/Speakers/MainOutPicker.swift`: menu style
 
 Keep `Target` (`:13-16`), `current` (`:18-24`) and the whole `Picker` expression (`:27-42`) verbatim, including `.accessibilityHint(...)` at `:43`. Add only, after `:42`: `.pickerStyle(.menu)`, `.labelsHidden()`, `.tint(WarmSignal.label)`, `.font(.system(size: 15, weight: .semibold))` — so it renders as the deck header's tappable target name.
 
@@ -485,7 +485,7 @@ Per `doc:188-217`, driven by `SpeakerConsole`'s `drawerOpen`:
 
 ```bash
 cd "$WT"
-xcodebuild -project ios/AudiouterRemote/AudiouterRemote.xcodeproj -scheme AudiouterRemote \
+xcodebuild -project ios/AudioutRemote/AudioutRemote.xcodeproj -scheme AudioutRemote \
   -destination 'generic/platform=iOS Simulator' build
 ```
 Must print `** BUILD SUCCEEDED **` before continuing.
@@ -494,7 +494,7 @@ Must print `** BUILD SUCCEEDED **` before continuing.
 
 `-destination 'platform=iOS Simulator,name=iPhone 17'` → `'platform=iOS Simulator,name=iPhone 17 Pro Max'`. In the prose at `:41-44`, replace "today that's the iPhone 17 family" with the three that exist: `iPhone 17 Pro Max`, `iPhone 17e`, `iPhone Air`. Nothing else in that file changes.
 
-### Step 10 — `AudiouterRemoteUITests/CompanionSmokeUITests.swift`: two assertions
+### Step 10 — `AudioutRemoteUITests/CompanionSmokeUITests.swift`: two assertions
 
 | Line | Assertion | Verdict |
 |---|---|---|
@@ -522,7 +522,7 @@ and `:177` with `let persistedToggle = app.buttons["Kitchen HomePod"].value as? 
 
 ```bash
 cd "$WT"
-xcodebuild test -project ios/AudiouterRemote/AudiouterRemote.xcodeproj -scheme AudiouterRemote \
+xcodebuild test -project ios/AudioutRemote/AudioutRemote.xcodeproj -scheme AudioutRemote \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max' 2>&1 | tee /tmp/ios-warm-signal-test.log
 grep -E "✘|Test run with|Executed .* test" /tmp/ios-warm-signal-test.log
 ```
@@ -564,15 +564,15 @@ If the main checkout's count grew, STOP before running the remaining six: delete
 
 **Ids — no collision, but check before asserting one.** Base has 23 entries, ids `001`–`023` (`git show 381a0f63:ROADMAP.jsonl | grep -c ''` → 23), and `roadmap.js:54-60` assigns `max+1`, so these seven become `024`–`030`. Main's roadmap currently holds `001`–`023`, `025`–`032`, `034`–`039` — so `024` is **free** and `033` is free; only `025`–`030` are taken by different tasks there. Add all seven anyway; report the overlap as a merge-time renumber for the user. Re-derive main's id set at execution time rather than repeating that list — other sessions add entries. Do not hand-edit ids, do not skip entries to dodge it.
 
-Every entry: `"source": "user"`, `"doc": "none"`, omit `status`. Each `why` states plainly that the iOS design document `Audiouter Remote - iOS Design System.dc.html` draws this element but the companion protocol carries no data for it, and names the files that would change; `touches` lists those files.
+Every entry: `"source": "user"`, `"doc": "none"`, omit `status`. Each `why` states plainly that the iOS design document `Audiout Remote - iOS Design System.dc.html` draws this element but the companion protocol carries no data for it, and names the files that would change; `touches` lists those files.
 
 | # | title | element | files to name |
 |---|---|---|---|
-| 1 | Pinned speakers in the companion protocol | `PINNED` section (`doc:1045`) + "Pin to top" (`doc:770-773`) | `AudiouterProtocol/Sources/AudiouterProtocol/CompanionSnapshot.swift` (`isPinned` on `DeviceState`), `CompanionCommand.swift` (`setDevicePinned`), `AudiouterCore/Sources/AudiouterCore/CompanionSnapshotBuilder.swift`, `CompanionCommandDispatcher.swift`. Note the phone may not persist it (`ios/.../MacSessionProtocol.swift:21-23`). |
+| 1 | Pinned speakers in the companion protocol | `PINNED` section (`doc:1045`) + "Pin to top" (`doc:770-773`) | `AudioutProtocol/Sources/AudioutProtocol/CompanionSnapshot.swift` (`isPinned` on `DeviceState`), `CompanionCommand.swift` (`setDevicePinned`), `AudioutCore/Sources/AudioutCore/CompanionSnapshotBuilder.swift`, `CompanionCommandDispatcher.swift`. Note the phone may not persist it (`ios/.../MacSessionProtocol.swift:21-23`). |
 | 2 | Per-device output level in the companion snapshot | live meter (`doc:98-102`, `doc:1860`) | `CompanionSnapshot.swift`, `CompanionSnapshotBuilder.swift` |
 | 3 | Rename and re-icon a speaker from the phone | `doc:739`, `doc:776-778` | `CompanionCommand.swift`, `CompanionCommandDispatcher.swift` |
 | 4 | Structured failure diagnosis for the companion | `doc:812-844` — checklist + Mac IP + last-seen, replacing the two free-text strings at `CompanionSnapshot.swift:29-31` | `CompanionSnapshot.swift`, `CompanionSnapshotBuilder.swift` |
-| 5 | Report companion link latency to the phone | `PAIRED · 3 MS LINK` (`doc:599`) | `CompanionSnapshot.swift`, `AudiouterCore/Sources/AudiouterCore/CompanionServer.swift`, `CompanionSnapshotBuilder.swift` |
+| 5 | Report companion link latency to the phone | `PAIRED · 3 MS LINK` (`doc:599`) | `CompanionSnapshot.swift`, `AudioutCore/Sources/AudioutCore/CompanionServer.swift`, `CompanionSnapshotBuilder.swift` |
 | 6 | User-ordered groups | drag handle to reorder (`doc:493`) | `CompanionSnapshot.swift` (order on `GroupState`), `CompanionCommand.swift`, `CompanionCommandDispatcher.swift` |
 | 7 | Mute a single app's route from the phone | tap-to-mute (`doc:1819`) | `CompanionCommand.swift` (`setAppMuted`), `CompanionSnapshot.swift` (`AppRouteState.isMuted`), `CompanionCommandDispatcher.swift` |
 
@@ -588,7 +588,7 @@ The UI smoke test saves `01-speakers.png` (`CompanionSmokeUITests.swift:126`) in
 set -euo pipefail
 # SHOTS is hardcoded in CompanionSmokeUITests.swift:32-34 — read it out of the source rather
 # than pasting it, because it is an absolute path baked in by an older session and may drift.
-SHOTS=$(sed -n '32,34p' ios/AudiouterRemote/AudiouterRemoteUITests/CompanionSmokeUITests.swift \
+SHOTS=$(sed -n '32,34p' ios/AudioutRemote/AudioutRemoteUITests/CompanionSmokeUITests.swift \
         | grep -o '/[^"]*' | head -1)
 test -n "$SHOTS" || { echo "FAIL: could not read the screenshot dir from CompanionSmokeUITests.swift:32-34"; exit 1; }
 
@@ -606,9 +606,9 @@ for f in "$SHOTS"/*.png; do [ -e "$f" ] && mv "$f" "$STASH/"; done
 for MODE in dark light; do
   rm -f "$SHOTS/01-speakers.png"                      # ours from the previous loop pass only
   xcrun simctl ui booted appearance "$MODE"
-  xcodebuild test -project ios/AudiouterRemote/AudiouterRemote.xcodeproj -scheme AudiouterRemote \
+  xcodebuild test -project ios/AudioutRemote/AudioutRemote.xcodeproj -scheme AudioutRemote \
     -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max' \
-    -only-testing:AudiouterRemoteUITests 2>&1 | tail -20   # exit code propagates via pipefail
+    -only-testing:AudioutRemoteUITests 2>&1 | tail -20   # exit code propagates via pipefail
   test -f "$SHOTS/01-speakers.png" || { echo "FAIL: no screenshot produced for $MODE"; exit 1; }
   mv "$SHOTS/01-speakers.png" "$OUT/speakers-$MODE.png"    # move, don't copy — leave their dir clean
 done
@@ -637,18 +637,18 @@ Any of the six not visibly true is a failure — report it, do not paper over it
 
 ## Out of scope — do not touch
 
-- `UI/Apps/` (all 4 files), `UI/Connect/` (all 6), `UI/Shared/ToastBanner.swift`, `UI/Shared/ToastCenter.swift`, `UI/Speakers/StatusBanners.swift`, `Model/`, `Networking/`, `AudiouterRemoteApp.swift`. In `UI/Groups/`: **`GroupEditorView.swift` is entirely out of scope**, and in the other two files **only** the four `Color.accentColor` → `WarmSignal.gold` token swaps named in Step 2 (`GroupsView.swift:54`, `GroupIconPicker.swift:52,55,60`) — nothing else in either.
+- `UI/Apps/` (all 4 files), `UI/Connect/` (all 6), `UI/Shared/ToastBanner.swift`, `UI/Shared/ToastCenter.swift`, `UI/Speakers/StatusBanners.swift`, `Model/`, `Networking/`, `AudioutRemoteApp.swift`. In `UI/Groups/`: **`GroupEditorView.swift` is entirely out of scope**, and in the other two files **only** the four `Color.accentColor` → `WarmSignal.gold` token swaps named in Step 2 (`GroupsView.swift:54`, `GroupIconPicker.swift:52,55,60`) — nothing else in either.
 - The one sanctioned deletion inside a file being rewritten: `DeviceRowView`'s now-callerless `disabledClause` (`:98-101`) and `kindLabel` (`:143-152`), per Step 3. No other dead-code removal anywhere.
-- `AudiouterProtocol/` and everything under `AudiouterCore/` — no protocol fields, no commands, no Mac-side work. That is what Step 12 tracks.
-- `AudiouterRemote.xcodeproj/project.pbxproj` and `xcshareddata/xcschemes/AudiouterRemote.xcscheme` — forbidden by `ios/AGENTS.md:12-20`, and another session has both open. New `.swift` files need no project edit. If anything seems to require a pbxproj edit, STOP.
+- `AudioutProtocol/` and everything under `AudioutCore/` — no protocol fields, no commands, no Mac-side work. That is what Step 12 tracks.
+- `AudioutRemote.xcodeproj/project.pbxproj` and `xcshareddata/xcschemes/AudioutRemote.xcscheme` — forbidden by `ios/AGENTS.md:12-20`, and another session has both open. New `.swift` files need no project edit. If anything seems to require a pbxproj edit, STOP.
 - **No asset catalog.** Do not add `Assets.xcassets`, an `AccentColor` colour set, or any resource bundle. Step 2's four token swaps are the sanctioned alternative.
-- **`AudiouterRemote/Info.plist`** — in particular do not set `UIUserInterfaceStyle`. Forcing an appearance would defeat Step 13's dark/light comparison outright.
-- `AudiouterRemoteTests/` — all five files, including `SpeakerRowRulesTests.swift`. `zzDebugDump` stays failing; the zero-`@State` fence on `SpeakersView` stays as written (Step 4 satisfies it by construction, not by editing it).
+- **`AudioutRemote/Info.plist`** — in particular do not set `UIUserInterfaceStyle`. Forcing an appearance would defeat Step 13's dark/light comparison outright.
+- `AudioutRemoteTests/` — all five files, including `SpeakerRowRulesTests.swift`. `zzDebugDump` stays failing; the zero-`@State` fence on `SpeakersView` stays as written (Step 4 satisfies it by construction, not by editing it).
 - `CompanionSmokeUITests.swift:32-34`, `:143`, `:159`, and the `"Connection"` tab label at `RootView.swift:150`.
 - Repo-root `AGENTS.md`, `CLAUDE.md`, `PROGRESS.md`, `docs/`, `.githooks/`, `scripts/`. The only doc edit is `ios/AGENTS.md:41-47` (Step 9). `ROADMAP.jsonl` is written only through `roadmap.js add` in the worktree (Step 12) — never hand-edited.
 - Design sections `2b`'s Appearance UI, `2c`, `2d`, `2e`, `2f`, `2g`, `1f` — including the long-press multi-select at `doc:1761-1764` and the per-row meter at `doc:98-102`.
 - No cleanup, no abstractions, no error handling for impossible cases, no backwards-compat shims. No refactor of `MacSessionProtocol`, `DemoMacSession`, or `RemoteSession`. No new dependency.
-- **New files:** the only new file this pass creates is `AudiouterRemote/UI/Shared/WarmSignal.swift`. Any further new file is out of scope — if a step seems to need one, STOP and report.
+- **New files:** the only new file this pass creates is `AudioutRemote/UI/Shared/WarmSignal.swift`. Any further new file is out of scope — if a step seems to need one, STOP and report.
 - **Never** `git commit`, `git push`, `git add`, `git stash`, `git checkout <file>`, or `git restore`. Everything stays uncommitted. Never write in `.claude/worktrees/companion-app-phase2-ios` or in the main checkout.
 
 ---
@@ -659,14 +659,14 @@ Run in the fresh worktree; paste real output for each.
 
 **1. Build**
 ```bash
-xcodebuild -project ios/AudiouterRemote/AudiouterRemote.xcodeproj -scheme AudiouterRemote \
+xcodebuild -project ios/AudioutRemote/AudioutRemote.xcodeproj -scheme AudioutRemote \
   -destination 'generic/platform=iOS Simulator' build
 ```
 Expect `** BUILD SUCCEEDED **`. *Baseline observed this session: `** BUILD SUCCEEDED **`.*
 
 **2. Tests**
 ```bash
-xcodebuild test -project ios/AudiouterRemote/AudiouterRemote.xcodeproj -scheme AudiouterRemote \
+xcodebuild test -project ios/AudioutRemote/AudioutRemote.xcodeproj -scheme AudioutRemote \
   -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max'
 ```
 Expect exactly the baseline: `Test run with 110 tests in 6 suites failed ... with 1 issue`, that issue being `✘ Test zzDebugDump() recorded an issue at SpeakerRowRulesTests.swift:81:9`, and the XCUITest suite reporting `Executed 1 test, with 0 failures`. **Any second failure, or a count other than 110, is ours** — in particular a failure in `theMainOutDragEchoCannotOutliveTheRowItBelongsTo` means Step 4's split was not honoured and `SpeakersView` gained `@State`. *Baseline observed this session: 110 tests / 1 issue / `zzDebugDump`; UI test passed in 89.730 s.*
@@ -691,18 +691,18 @@ Done = 1–5 all produced in the executor's session, with output pasted.
 
 **Track B is already done** — the seven roadmap entries are filed and committed (see Step 12). Two tracks remain, A then C.
 
-**Track A — token layer + Speakers redesign.** Steps 1–8. Files: `AudiouterRemote/UI/Shared/WarmSignal.swift` (new — the only new file), `AudiouterRemote/UI/Speakers/SpeakersView.swift`, `AudiouterRemote/UI/Speakers/DeviceRowView.swift`, `AudiouterRemote/UI/Speakers/MainOutPicker.swift`, `AudiouterRemote/RootView.swift`, `AudiouterRemote/UI/Groups/GroupsView.swift` (one token), `AudiouterRemote/UI/Groups/GroupIconPicker.swift` (three tokens).
+**Track A — token layer + Speakers redesign.** Steps 1–8. Files: `AudioutRemote/UI/Shared/WarmSignal.swift` (new — the only new file), `AudioutRemote/UI/Speakers/SpeakersView.swift`, `AudioutRemote/UI/Speakers/DeviceRowView.swift`, `AudioutRemote/UI/Speakers/MainOutPicker.swift`, `AudioutRemote/RootView.swift`, `AudioutRemote/UI/Groups/GroupsView.swift` (one token), `AudioutRemote/UI/Groups/GroupIconPicker.swift` (three tokens).
 **Model: opus · Effort: high.** Hand-drawn instrument layout, a drag gesture that must coexist with a `ScrollView` under an axis latch, a six-branch state machine, and a zero-`@State` fence plus a three-argument init and a `Mirror`-inspected property list that must all survive.
 
 **Track B — roadmap entries.** Step 12. Files: `ROADMAP.jsonl`.
 **Model: haiku · Effort: low.** Seven mechanical stdin-JSON invocations from a filled-in table, plus one stop-check.
 
-**Track C — test + docs follow-up.** Steps 9–10. Files: `ios/AGENTS.md`, `AudiouterRemoteUITests/CompanionSmokeUITests.swift`.
+**Track C — test + docs follow-up.** Steps 9–10. Files: `ios/AGENTS.md`, `AudioutRemoteUITests/CompanionSmokeUITests.swift`.
 **Model: sonnet · Effort: low.**
 
 **Concurrency: Step 0 → (A ∥ B) → C → Verification.**
-- A's seven files all sit under `ios/AudiouterRemote/AudiouterRemote/`; B's single file is `ROADMAP.jsonl` at the worktree root. Fully disjoint, and neither consumes the other's output once Step 0 exists — safe in parallel.
-- C is serialized after A. Its files (`ios/AGENTS.md`, `AudiouterRemoteUITests/CompanionSmokeUITests.swift`) are disjoint from both, but its assertion rewrite depends on Track A actually shipping the `device.name` / `"Armed"` / `"Not armed"` accessibility contract. Serialize — a red UI test costs more than the two minutes saved.
+- A's seven files all sit under `ios/AudioutRemote/AudioutRemote/`; B's single file is `ROADMAP.jsonl` at the worktree root. Fully disjoint, and neither consumes the other's output once Step 0 exists — safe in parallel.
+- C is serialized after A. Its files (`ios/AGENTS.md`, `AudioutRemoteUITests/CompanionSmokeUITests.swift`) are disjoint from both, but its assertion rewrite depends on Track A actually shipping the `device.name` / `"Armed"` / `"Not armed"` accessibility contract. Serialize — a red UI test costs more than the two minutes saved.
 - Verification (Steps 11 + 13 + all five checks) runs once, on the combined tree, after all tracks finish.
 
 ---
@@ -728,7 +728,7 @@ executor rules.
 ## Language and framework mechanics
 
 - **The zero-`@State` fence works as designed.** `stateProperties(of:)`
-  (`AudiouterRemoteTests/SpeakerRowRulesTests.swift:66-73`) is `Mirror(reflecting:).children` — one level,
+  (`AudioutRemoteTests/SpeakerRowRulesTests.swift:66-73`) is `Mirror(reflecting:).children` — one level,
   stored properties of the value handed in. A `SpeakerConsole` built inside `body` is not a stored property of
   `SpeakersView`, so its `@State` is invisible to `#expect(stateProperties(of: SpeakersView(...)).isEmpty)` at
   `:95`. Step 4's split satisfies the test without editing it.
@@ -748,7 +748,7 @@ executor rules.
 
 ## API surface — all confirmed present at base
 
-`MacSessionProtocol` (`ios/AudiouterRemote/AudiouterRemote/Model/MacSessionProtocol.swift`): `snapshot`,
+`MacSessionProtocol` (`ios/AudioutRemote/AudioutRemote/Model/MacSessionProtocol.swift`): `snapshot`,
 `isDemo`, `toasts`, `connectionStatus` (`:34`), `setDeviceSelected(id:selected:)`,
 `setDeviceVolume(id:volume:isFinal:)`, `setMainOutMuted(_:)`, `setMainOutMasterVolume(_:isFinal:)` (`:50`),
 `retryConnection(id:)`. Phone-side persistence ban at `:21-23`.
@@ -759,7 +759,7 @@ executor rules.
 `disabledReason(for device: DeviceState, controllable: Bool) -> String?` (`:84-87`). Ten tests at
 `SpeakerRowRulesTests.swift:122-206` depend on them.
 
-Protocol model (`AudiouterProtocol/Sources/AudiouterProtocol/CompanionSnapshot.swift`): `DeviceState` `:39-52`
+Protocol model (`AudioutProtocol/Sources/AudioutProtocol/CompanionSnapshot.swift`): `DeviceState` `:39-52`
 with all eight fields Step 3 reads, `kind` a plain `String` at `:42`; `ConnectionInfo` `:28-31` with
 `failureHeadline`/`failureSuggestion` both `String?`; `AppRouteState.destinationKind: String` and
 `deviceID: String?` at `:136-138`; `Snapshot.serverName` `:202`, `mainOutMasterVolume` `:205`,

@@ -5,9 +5,9 @@ T-CORRECTION starts.** This is not a pass-through rubber stamp (plan §T-SPIKE-P
 Risk R7).
 
 Harness: `dev/phase-spike/` (throwaway SPM tool, pattern of `dev/audiocap/`; does
-**not** link AudiouterCore — it re-derives the timing math independently as a
+**not** link AudioutCore — it re-derives the timing math independently as a
 cross-check). Evaluated against the real `SyncedLocalSink` graph shape and its
-`latestPhaseErrorNanos` seam (`AudiouterCore/Sources/AudiouterCore/SyncedLocalSink.swift`,
+`latestPhaseErrorNanos` seam (`AudioutCore/Sources/AudioutCore/SyncedLocalSink.swift`,
 the `T-CORRECTION / T-SPIKE-PHASE INSERTION SEAM` ~line 236).
 
 Machine: this MacBook, macOS 14.4.1 (23E224), Apple silicon, Swift 5.10.

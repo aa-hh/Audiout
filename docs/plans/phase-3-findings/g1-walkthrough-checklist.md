@@ -13,7 +13,7 @@ the session. Items marked **(if time allows)** are the first to cut.
 
 ## Setup (2 min)
 
-Repo root = this worktree. Build once if `./build/Audiouter.app` doesn't exist yet:
+Repo root = this worktree. Build once if `./build/Audiout.app` doesn't exist yet:
 
 ```
 scripts/make-app.sh build
@@ -44,13 +44,13 @@ forward shell env, so set session-wide first):
 ```
 # Mode 2 — scripted connection failures (Pass 2 below)
 launchctl setenv AIRPLAY_MOCK_SCENARIO connection-demo
-open "./build/Audiouter.app"
+open "./build/Audiout.app"
 # … when done:
 launchctl unsetenv AIRPLAY_MOCK_SCENARIO
 
 # Mode 3 — the unified floating-panel shell (Pass 3 below)
 launchctl setenv AIRPLAY_CONTROL_PANEL 1
-open "./build/Audiouter.app"
+open "./build/Audiout.app"
 # … when done:
 launchctl unsetenv AIRPLAY_CONTROL_PANEL
 ```
@@ -197,7 +197,7 @@ Trigger via Settings ▸ General ▸ **"Run Setup Again…"**.
 
 ### Performance feel (~2 min)
 
-- [ ] **P1-21** Open Activity Monitor, filter for "Audiouter." Open/close
+- [ ] **P1-21** Open Activity Monitor, filter for "Audiout." Open/close
   the popover ~10 times quickly, then open and close Groups and Settings a
   few times each. Watch the Memory column before/after. **Confirms bug if:**
   memory climbs noticeably and doesn't come back down. Also glance at CPU%
@@ -217,7 +217,7 @@ Trigger via Settings ▸ General ▸ **"Run Setup Again…"**.
 Quit, then:
 ```
 launchctl setenv AIRPLAY_MOCK_SCENARIO connection-demo
-open "./build/Audiouter.app"
+open "./build/Audiout.app"
 ```
 This scripts three of the demo devices to behave specially: **"Mixer"**
 fails once (~1.5s) then succeeds on retry; **"Move 2"** takes a long
@@ -254,7 +254,7 @@ This is a built-but-off-by-default alternate window system
 Quit, then:
 ```
 launchctl setenv AIRPLAY_CONTROL_PANEL 1
-open "./build/Audiouter.app"
+open "./build/Audiout.app"
 ```
 
 - [ ] **P3-01** Click the popover's Groups header icon — it should open as a

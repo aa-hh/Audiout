@@ -50,7 +50,7 @@ detector write-up).
   accumulator `a` → `parsed`; `OwnToneClient` URLError switch collapsed (all
   branches threw `.unreachable`); `MainOutRowView` `isMasterMutedState`/
   `isArmedState` → `isMasterMuted`/`isArmed`; five self-imports of
-  `AudiouterSharedUI` removed; `assertSameHue` → `assertSameColor` (+
+  `AudioutSharedUI` removed; `assertSameHue` → `assertSameColor` (+
   `Metric`→`Meter` test-name typo); a journey variable, a dead `% 1 == 0`
   conditional, and an unused-loop-var silencer removed.
 

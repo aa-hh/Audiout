@@ -1,8 +1,8 @@
 import Foundation
 
 // INDEPENDENT re-derivation of SyncedLocalSink's release-plan math (SyncTiming.plan
-// in AudiouterCore/Sources/AudiouterCore/SyncedLocalSink.swift). We do NOT import
-// AudiouterCore — reimplementing the tiny formula here is a cross-check that the
+// in AudioutCore/Sources/AudioutCore/SyncedLocalSink.swift). We do NOT import
+// AudioutCore — reimplementing the tiny formula here is a cross-check that the
 // sub-buffer placement bound the shipping code claims ("< 1 frame at release") is
 // real, and lets us Monte-Carlo it over random targets/cycles.
 

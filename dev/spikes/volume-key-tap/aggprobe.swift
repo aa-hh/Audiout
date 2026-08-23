@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// Why does the public "Audiouter" aggregate not appear at launch? Walks the same
+// Why does the public "Audiout" aggregate not appear at launch? Walks the same
 // steps `AggregateOutputDevice.adoptOrCreate()` takes and prints where the chain
 // breaks: resolve-existing, find the built-in output, read its UID, create.
 // Read-only up to the create, and the create is undone immediately.
@@ -8,7 +8,7 @@
 import Foundation
 import CoreAudio
 
-let productUID = "com.audiouter.Audiouter.aggregate"
+let productUID = "com.audiout.Audiout.aggregate"
 
 func stringProperty(_ id: AudioObjectID, _ selector: AudioObjectPropertySelector) -> String? {
     var addr = AudioObjectPropertyAddress(
@@ -97,7 +97,7 @@ if existing != nil { print("\nAlready exists; not creating."); exit(0) }
 print("\nSTEP 4 — creating the aggregate the same way the app does")
 let desc: [String: Any] = [
     kAudioAggregateDeviceUIDKey as String: productUID,
-    kAudioAggregateDeviceNameKey as String: "Audiouter",
+    kAudioAggregateDeviceNameKey as String: "Audiout",
     kAudioAggregateDeviceIsPrivateKey as String: false,
     kAudioAggregateDeviceSubDeviceListKey as String: [
         [kAudioSubDeviceUIDKey as String: subUID]

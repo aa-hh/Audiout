@@ -13,7 +13,7 @@ source before relying on it (docs orient, code decides); line numbers drift.
 
 ## 1. Why this is needed (proven live)
 
-When the public **"Audiouter" aggregate device** is the macOS default output,
+When the public **"Audiout" aggregate device** is the macOS default output,
 macOS refuses to move the system volume: the hardware volume keys draw the
 crossed-out HUD, every volume slider (menu bar, Control Center, Touch Bar)
 greys out, and the only way to change volume is opening the app.
@@ -24,9 +24,9 @@ gate on capability — see §4.
 
 **Second trap (cost us a false "it doesn't work" live test 2026-08-08):**
 every test build creates its own aggregate with its own UID. A stale build
-from another worktree ("Audiouter Sync v7") held the default output, so this
+from another worktree ("Audiout Sync v7") held the default output, so this
 build's identity gate never matched and nothing installed. Quit other
-Audiouter builds before any live test.
+Audiout builds before any live test.
 
 ## 2. The mechanism — CORRECTED by live probe 2026-08-08
 
@@ -62,7 +62,7 @@ the app drawing **its own button** in the Control Strip region — §7.
 2. **Dead sliders are acceptable** (Alec): menu bar, Control Center, Touch
    Bar slider stay greyed. The app and its shortcuts are the volume surface.
 3. **Touch Bar gets OUR button, reversibly, driven by the current output**
-   (Alec, 2026-08-08): while Audiouter is the output the user keeps their own
+   (Alec, 2026-08-08): while Audiout is the output the user keeps their own
    non-audio buttons, dead audio controls go, our working control appears; the
    moment they switch away, everything restores exactly. Never permanent.
 4. **No HUD** (Alec): consuming a key kills the crossed-out HUD and we post
@@ -72,7 +72,7 @@ the app drawing **its own button** in the Control Strip region — §7.
 6. **Step feel matches macOS**: 1/16 per press, 1/64 with ⇧⌥, snap to
    sixteenths. (Built and pinned, `VolumeStep`.)
 
-Deployment target macOS 14 (`AudiouterCore/Package.swift:60`). The Touch Bar
+Deployment target macOS 14 (`AudioutCore/Package.swift:60`). The Touch Bar
 model list is closed forever (2018 → 13" M2 2022), which keeps the hardware
 check a literal set (`CoreFoundationControlStripControl.touchBarModels`).
 
@@ -98,10 +98,10 @@ aggregate-reporting-a-readable-volume regression.
 
 Physical volume keys and external keyboards only, per §2.
 
-- Pure decision core `AudiouterCore/VolumeKeyInterception.swift`: ownership
+- Pure decision core `AudioutCore/VolumeKeyInterception.swift`: ownership
   predicate, subtype-8 decode (`data1` layout, `deviceIndependentFlagsMask`
   trap), sixteen-detent step math, consume/pass decision. 24 tests.
-- Shell `AudiouterApp/VolumeKeyInterceptor.swift`: `.cgSessionEventTap`,
+- Shell `AudioutApp/VolumeKeyInterceptor.swift`: `.cgSessionEventTap`,
   `.headInsertEventTap`, `.defaultTap`, mask `1<<14` only (never `.keyDown`),
   lock-guarded state for the C callback, re-enable on `tapDisabledByTimeout`,
   installed only while `weOwnVolume`.
@@ -226,7 +226,7 @@ tray registration itself and the tap shell are thin and not headlessly
 testable; keep them dumb.
 
 **Live (owed to Alec, in one session, ONE build, launched via `open`, all
-other Audiouter builds quit):**
+other Audiout builds quit):**
 1. −/+ pair renders as one tray item (7a's open question) — FIRST; stop if not.
 2. Aggregate active → our buttons appear, taps move Main, Mac's own speakers
    and AirPlay members both follow; Apple's dead audio controls are gone from

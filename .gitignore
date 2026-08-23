@@ -21,9 +21,9 @@ AirPlayEngine/.swiftpm/
 AirPlayEngine/vendor/
 
 # SwiftPM build artifacts for the other local packages (same reasoning).
-AudiouterCore/.build/
-AudiouterProtocol/.build/
-AudiouterCore/.swiftpm/
+AudioutCore/.build/
+AudioutProtocol/.build/
+AudioutCore/.swiftpm/
 dev/audiocap/.build/
 dev/audiocap/.swiftpm/
 
@@ -35,7 +35,7 @@ DerivedData/
 .swiftpm/xcode/
 *.xcuserstate
 
-# iOS app (ios/AudiouterRemote) build artifacts — DerivedData defaults to
+# iOS app (ios/AudioutRemote) build artifacts — DerivedData defaults to
 # ~/Library/Developer/Xcode/DerivedData, but xcodebuild can be pointed at an
 # in-tree build dir with -derivedDataPath; ignore that case too.
 ios/DerivedData/

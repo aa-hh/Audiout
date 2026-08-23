@@ -1,8 +1,8 @@
 // AirPlayEngine's counterpart to
-// `AudiouterCoreTests/SerializedSharedStateSuite.swift` (see the migration
+// `AudioutCoreTests/SerializedSharedStateSuite.swift` (see the migration
 // cookbook's Part II §18). AirPlayEngine is the LOWER package —
-// AudiouterCore depends on it, not the reverse — so this package cannot
-// import AudiouterCore's `SerializedSharedState` type; it needs its own
+// AudioutCore depends on it, not the reverse — so this package cannot
+// import AudioutCore's `SerializedSharedState` type; it needs its own
 // declaration following the same pattern.
 //
 // Why this exists: `shims/outputs.c` keeps the device/callback registry as
@@ -17,7 +17,7 @@
 // `output_status_cb` from one test's device firing into a completion table
 // another test just reset would misattribute or lose callbacks.
 //
-// The fix is the same one T2 proved out on the AudiouterCore side: don't put
+// The fix is the same one T2 proved out on the AudioutCore side: don't put
 // `.serialized` on each affected suite independently — that only orders
 // tests *within* a suite, so two independently-serialized suites can still
 // run against each other, which is exactly the collision that matters here
@@ -27,7 +27,7 @@
 // in the consumer's own file (the file does not move). A `.serialized`
 // parent gives true mutual exclusion across all of its (possibly
 // multi-file) children — T2 measured a maximum concurrent overlap of 1
-// doing this on the AudiouterCore side, and the probe suites below confirm
+// doing this on the AudioutCore side, and the probe suites below confirm
 // the same holds in this package's toolchain.
 //
 // Confirmed by `grep -rl "outputs_dispatcher_reset\|outputs_list\|

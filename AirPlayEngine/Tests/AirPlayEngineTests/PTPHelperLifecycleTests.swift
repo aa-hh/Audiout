@@ -20,7 +20,7 @@
 //     connections?" prompt on every `swift test`).
 //
 // Deliberately NOT covered (needs launchd + a signed build): the
-// AUDIOUTER_PTP_MACH_SERVICE check-in. `xpc_connection_create_mach_service`
+// AUDIOUT_PTP_MACH_SERVICE check-in. `xpc_connection_create_mach_service`
 // with the LISTENER flag only works for a name launchd has actually vended to
 // the process from its plist's MachServices dictionary, which an
 // unprivileged test cannot arrange. The env var is left unset here, which is
@@ -77,7 +77,7 @@ final class PTPHelperLifecycleTests {
     /// respawn storm that never gives the ports back.
     @Test func idleExitsOnItsOwnWhenNoPeerEverAppears() throws {
         guard let binary = ptpHelperBinaryURL else {
-            Issue.record("ptp-helper binary not found next to the test bundle; set AUDIOUTER_PTP_HELPER_BINARY to point at it")
+            Issue.record("ptp-helper binary not found next to the test bundle; set AUDIOUT_PTP_HELPER_BINARY to point at it")
             return
         }
 
@@ -95,7 +95,7 @@ final class PTPHelperLifecycleTests {
     /// once that peer is removed.
     @Test func staysAliveWhileAPeerIsActiveAndExitsAfterItIsRemoved() throws {
         guard let binary = ptpHelperBinaryURL else {
-            Issue.record("ptp-helper binary not found next to the test bundle; set AUDIOUTER_PTP_HELPER_BINARY to point at it")
+            Issue.record("ptp-helper binary not found next to the test bundle; set AUDIOUT_PTP_HELPER_BINARY to point at it")
             return
         }
 
@@ -150,11 +150,11 @@ final class PTPHelperLifecycleTests {
 /// `.build/<config>/AirPlayEngineTests.xctest` sits next to
 /// `.build/<config>/ptp-helper` (`swift build --build-tests` builds the
 /// executable products too), so the test bundle's own directory is the
-/// lookup. `AUDIOUTER_PTP_HELPER_BINARY` overrides it for anyone running the
+/// lookup. `AUDIOUT_PTP_HELPER_BINARY` overrides it for anyone running the
 /// suite against a bundled/installed copy. Not `private` — `PTPYieldBackTests`
 /// (T7) reuses this lookup; see the reuse note on `ptpLifecycleEventPort`.
 let ptpHelperBinaryURL: URL? = {
-    let env = ProcessInfo.processInfo.environment["AUDIOUTER_PTP_HELPER_BINARY"]
+    let env = ProcessInfo.processInfo.environment["AUDIOUT_PTP_HELPER_BINARY"]
     if let env, !env.isEmpty { return URL(fileURLWithPath: env) }
 
     let candidate = Bundle(for: SerializedLibairptpState.PTPHelperLifecycleTests.self)
@@ -184,17 +184,17 @@ final class HelperRun {
         FileManager.default.createFile(atPath: logURL.path, contents: nil)
 
         process.executableURL = binary
-        // A wholesale environment, so AUDIOUTER_PTP_MACH_SERVICE is
+        // A wholesale environment, so AUDIOUT_PTP_MACH_SERVICE is
         // definitively unset (the "no launchd, no check-in" path) whatever the
         // test runner inherited.
         process.environment = [
-            "AUDIOUTER_PTP_PORTS": "\(ptpLifecycleEventPort),\(ptpLifecycleGeneralPort)",
-            "AUDIOUTER_PTP_SHM_NAME": ptpLifecycleShmName,
-            "AUDIOUTER_PTP_IDLE_SECS": "\(idleSecs)",
-            "AUDIOUTER_PTP_IDLE_GRACE_SECS": "\(graceSecs)",
+            "AUDIOUT_PTP_PORTS": "\(ptpLifecycleEventPort),\(ptpLifecycleGeneralPort)",
+            "AUDIOUT_PTP_SHM_NAME": ptpLifecycleShmName,
+            "AUDIOUT_PTP_IDLE_SECS": "\(idleSecs)",
+            "AUDIOUT_PTP_IDLE_GRACE_SECS": "\(graceSecs)",
             // The suite gate already proved the ports are free, so don't burn
             // the shipping 10 s budget before reporting a surprise.
-            "AUDIOUTER_PTP_BIND_RETRY_SECS": "2",
+            "AUDIOUT_PTP_BIND_RETRY_SECS": "2",
         ]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = try FileHandle(forWritingTo: logURL)

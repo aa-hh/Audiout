@@ -15,7 +15,7 @@ the screen review so it isn't lost. These surfaces are file-disjoint from the po
 
 ### Resolved — implementation record (2026-07-25)
 
-Implemented in `AudiouterCore/Sources/AudiouterSharedUI/Tokens.swift` as four new
+Implemented in `AudioutCore/Sources/AudioutSharedUI/Tokens.swift` as four new
 `Tokens.Color` cases, one per permission row, colour on the SF Symbol glyph only
 (tile fill/rim stay `Tokens.Color.raised` + hairline, untouched):
 
@@ -86,7 +86,7 @@ See: `fd77c79` (window-snapshot tool bug fix), `ffe966c` (sidebar Liquid Glass +
 `9b97984` (MembershipRowView.Surface split + BusRailOverlayView rail), `1aaf9ac` (MembershipWellView
 well/hairlines), `06ee4b6` (elastic sections, 560×505 window, inline rename field), `d3d86c2`
 (review-follow-up: device-pane insets, section padding, title-text centering, gold rail terminus).
-Docs in `AudiouterWindowUI/AGENTS.md` and `AudiouterSharedUI/AGENTS.md`. Rules locked: text colors
+Docs in `AudioutWindowUI/AGENTS.md` and `AudioutSharedUI/AGENTS.md`. Rules locked: text colors
 frozen (contrast via surfaces only); row height 28pt (no slack for matching popover's 42pt); header
 parity between the group editor and device-detail panes is enforced by test.
 

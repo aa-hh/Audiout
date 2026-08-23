@@ -25,11 +25,11 @@ approvals file. No phone required — dev/notes/wspoke.py (pure-stdlib Python) s
   Every command below assumes this directory.
 
 - [ ] **Verify the build actually contains the companion code.** Several
-  Audiouter.app copies exist on this Mac and they share a bundle id, so proving
+  Audiout.app copies exist on this Mac and they share a bundle id, so proving
   identity matters. Check for companion symbols — NOT a version string, which
   lives in `Info.plist` and never appears in the executable:
   ```bash
-  strings build/Audiouter.app/Contents/MacOS/AudiouterApp | grep -c "_audiouter._tcp"
+  strings build/Audiout.app/Contents/MacOS/AudioutApp | grep -c "_audiout._tcp"
   ```
   Expected: `1` or more. If it prints `0`, you built the wrong tree — go back to
   the previous step. (Belt and braces: `strings … | grep -c CompanionServer`
@@ -38,7 +38,7 @@ approvals file. No phone required — dev/notes/wspoke.py (pure-stdlib Python) s
 - [ ] **Confirm it is Developer-ID signed** — the firewall check in step 5 is only
   meaningful on a signed build.
   ```bash
-  codesign -dvvv build/Audiouter.app 2>&1 | grep -c "Authority=Developer ID Application"
+  codesign -dvvv build/Audiout.app 2>&1 | grep -c "Authority=Developer ID Application"
   ```
   Expected: `1`. (Needs `-dvvv` — the authority chain isn't printed at `-dv`.)
   An ad-hoc build will prompt for firewall access regardless and tells you
@@ -50,12 +50,12 @@ approvals file. No phone required — dev/notes/wspoke.py (pure-stdlib Python) s
 
 - [ ] **Launch with mock backend** (safest for first run; no network/firewall exposure)
   ```bash
-  AIRPLAY_BACKEND=mock open build/Audiouter.app
+  AIRPLAY_BACKEND=mock open build/Audiout.app
   ```
 
-- [ ] **Confirm server NOT listening** (should be empty; no `_audiouter._tcp` advertised)
+- [ ] **Confirm server NOT listening** (should be empty; no `_audiout._tcp` advertised)
   ```bash
-  dns-sd -B _audiouter._tcp
+  dns-sd -B _audiout._tcp
   ```
   Expected: times out or shows "no results" after ~5 seconds. Kill with Ctrl+C.
 
@@ -69,16 +69,16 @@ approvals file. No phone required — dev/notes/wspoke.py (pure-stdlib Python) s
 
 - [ ] **Verify server now advertises** (should appear in the browse list immediately)
   ```bash
-  dns-sd -B _audiouter._tcp
+  dns-sd -B _audiout._tcp
   ```
-  Expected: one entry `_audiouter._tcp.local.` with `Audiouter` or `Alec's Mac` (the host
+  Expected: one entry `_audiout._tcp.local.` with `Audiout` or `Alec's Mac` (the host
   name). Note the full advertised name for the protocol poke below. Kill with Ctrl+C.
 
 - [ ] **Disable the checkbox** in Settings › General
 
 - [ ] **Verify server disappears** from dns-sd browse (should go empty again)
   ```bash
-  dns-sd -B _audiouter._tcp
+  dns-sd -B _audiout._tcp
   ```
 
 ---
@@ -87,9 +87,9 @@ approvals file. No phone required — dev/notes/wspoke.py (pure-stdlib Python) s
 
 - [ ] **Override ON via env** (default OFF, explicit opt-in)
   ```bash
-  AUDIOUTER_COMPANION=1 AIRPLAY_BACKEND=mock open build/Audiouter.app
+  AUDIOUT_COMPANION=1 AIRPLAY_BACKEND=mock open build/Audiout.app
   ```
-  Verify server advertises (`dns-sd -B _audiouter._tcp`). In Settings › General the
+  Verify server advertises (`dns-sd -B _audiout._tcp`). In Settings › General the
   checkbox must show **ON, greyed out, with an explanatory line** naming the override —
   it must NOT show OFF while the server runs, and clicking it must do nothing. (This was
   a real bug found in review: the checkbox used to lie. If it lies again, that's a
@@ -97,25 +97,25 @@ approvals file. No phone required — dev/notes/wspoke.py (pure-stdlib Python) s
 
 - [ ] **Override OFF via env** (reverts to OFF despite Settings, explicit opt-out for testing)
   ```bash
-  AUDIOUTER_COMPANION=0 open build/Audiouter.app
+  AUDIOUT_COMPANION=0 open build/Audiout.app
   ```
-  Verify server does NOT advertise (`dns-sd -B _audiouter._tcp` empty). Quit and close app.
+  Verify server does NOT advertise (`dns-sd -B _audiout._tcp` empty). Quit and close app.
 
 ---
 
 ## 5. **R4 FIREWALL CHECK — Merge blocker**
 
-Close all Audiouter instances. This is the critical risk: a per-launch Application
+Close all Audiout instances. This is the critical risk: a per-launch Application
 Firewall prompt means the code is not shipping.
 
 - [ ] **On a Developer-ID signed build**, launch with native backend and companion ON
   (this is your real production signing; ad-hoc builds will differ)
   ```bash
-  AUDIOUTER_COMPANION=1 AIRPLAY_BACKEND=native open build/Audiouter.app
+  AUDIOUT_COMPANION=1 AIRPLAY_BACKEND=native open build/Audiout.app
   ```
 
 - [ ] **Watch for macOS Application Firewall prompt** at launch. A Developer-ID
-  signature should auto-allow. If a **"Do you want the application AudiouterApp to
+  signature should auto-allow. If a **"Do you want the application AudioutApp to
   accept incoming connections?"** dialog appears:
   - **STOP. Do not merge. File the blocker.** A per-launch prompt is a shipping
     blocker (D1/D8 requires always-on when enabled; per-launch breaks UX). Report
@@ -139,12 +139,12 @@ Use the dependency-free Python client checked in at
 `dev/notes/wspoke.py` (pure stdlib, does the WS upgrade + framing itself). *(Verified
 live 2026-07-27: this is exactly how the gate was passed.)*
 
-- [ ] **Keep Audiouter open**, companion toggle ON.
+- [ ] **Keep Audiout open**, companion toggle ON.
 
 - [ ] **Resolve the actual companion port** (browse gives the name, `-L` resolves the
-  port — substitute your advertised name from `dns-sd -B _audiouter._tcp`):
+  port — substitute your advertised name from `dns-sd -B _audiout._tcp`):
   ```bash
-  dns-sd -L "$(scutil --get ComputerName)" _audiouter._tcp local
+  dns-sd -L "$(scutil --get ComputerName)" _audiout._tcp local
   # → "…can be reached at <host>.local.:PORT"  — note PORT, then Ctrl+C
   ```
 
@@ -182,10 +182,10 @@ live 2026-07-27: this is exactly how the gate was passed.)*
   client receives `goodbye` with reason `disabled` before the socket closes (not a bare
   connection drop — the phone uses this to settle quietly instead of redialling).
 
-**Supplement (does NOT replace the live poke above):** the AudiouterProtocol suite
+**Supplement (does NOT replace the live poke above):** the AudioutProtocol suite
 proves the wire format round-trips, but exercises no socket and no approval alert:
 ```bash
-cd AudiouterProtocol && swift test
+cd AudioutProtocol && swift test
 ```
 Expected: all CompanionMessageTests pass (hello, welcome, awaitingApproval, command,
 state, goodbye + every command case).
@@ -232,17 +232,17 @@ CompanionSnapshotBuilder logs.
 
 - [ ] **Confirm the approvals file was written**
   ```bash
-  cat ~/Library/Application\ Support/Audiouter/companion-approvals.json
+  cat ~/Library/Application\ Support/Audiout/companion-approvals.json
   ```
   Expected: a `{"schemaVersion":1,...}` envelope. It should be EMPTY of entries if you
   revoked everything in step 6b.
 
-- [ ] **Run AudiouterProtocol tests** explicitly (not in the standard suite)
+- [ ] **Run AudioutProtocol tests** explicitly (not in the standard suite)
   ```bash
-  cd AudiouterProtocol && swift test
+  cd AudioutProtocol && swift test
   ```
 
-- [ ] **Quit Audiouter** (Cmd+Q)
+- [ ] **Quit Audiout** (Cmd+Q)
 
 - [ ] **Report results to the session** before any merge attempt. Main is merge-only;
   no merge without Alec's explicit go-ahead. Include:

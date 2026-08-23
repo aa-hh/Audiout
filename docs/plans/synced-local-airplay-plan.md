@@ -9,7 +9,7 @@ Say "go" to launch Wave 1. Per standing rule: commits to this branch don't need 
 **Feasible with public Apple APIs for the core "delayed synced local sink."** Three de-risking facts from research:
 - We are the PTP grandmaster, not a slave — `AirPlayEngine/Sources/ptp-helper/main.c:216` starts libairptp as master; RTP timing is off our own `CLOCK_MONOTONIC` (`AirPlayEngine/Sources/CAirPlayEngine/sender/airplay.c:557-570`). Every receiver disciplines *its* clock to *us* — no network-clock conversion to invent.
 - The presentation delay is a known constant we set, not something to measure: `startBufferMs − 250 ms` (`AirPlayEngine.swift:48-49`; `sender/airplay.c:1229`, `AIRPLAY_AUDIO_LATENCY_MS = 250` at `airplay.c:94`).
-- The clock-domain reconciliation ("the hard part") already ships: `AudiouterCore/Sources/AudiouterCore/NativeCaptureCoordinator.swift:1049-1093` already converts Core Audio `mHostTime` ↔ `CLOCK_MONOTONIC` with a per-instance, sleep-aware rebase offset.
+- The clock-domain reconciliation ("the hard part") already ships: `AudioutCore/Sources/AudioutCore/NativeCaptureCoordinator.swift:1049-1093` already converts Core Audio `mHostTime` ↔ `CLOCK_MONOTONIC` with a per-instance, sleep-aware rebase offset.
 
 **One decision materially raises the risk: Alec chose studio-grade, phase-perfect sync** over the simpler ~10ms/periodic-hard-resync design. That pulls in a continuous micro-rate control loop and may exceed what `AVAudioEngine`'s public scheduling APIs cleanly deliver — see Risk R7. A feasibility spike (T-SPIKE-PHASE) is inserted before the expensive DSP task specifically to prove this on real hardware before committing, rather than discovering a public-API ceiling late.
 
@@ -19,7 +19,7 @@ There's also a prior engineering brief worth reading before executing, not re-de
 
 ## End state
 
-The Mac's own speakers become a first-class, PTP-aligned Audiouter output. Selecting the Mac alongside ≥1 AirPlay device mutes the Mac's raw system output (already `.mutedWhenTapped`) and renders a deliberately delayed copy of the captured audio through a new app-layer `AVAudioSourceNode`-backed sink, scheduled in `hostTime` and held phase-locked by a continuous micro-rate correction loop (studio-grade target). A user-facing numeric ms offset (Audio settings) biases the target for devices that misreport latency. The `GroupController` local-mix refusal is lifted with a precise, unchanged auto-drop rule; the popover allows the combined selection; correctness is confirmed by a gated by-ear hardware test.
+The Mac's own speakers become a first-class, PTP-aligned Audiout output. Selecting the Mac alongside ≥1 AirPlay device mutes the Mac's raw system output (already `.mutedWhenTapped`) and renders a deliberately delayed copy of the captured audio through a new app-layer `AVAudioSourceNode`-backed sink, scheduled in `hostTime` and held phase-locked by a continuous micro-rate correction loop (studio-grade target). A user-facing numeric ms offset (Audio settings) biases the target for devices that misreport latency. The `GroupController` local-mix refusal is lifted with a precise, unchanged auto-drop rule; the popover allows the combined selection; correctness is confirmed by a gated by-ear hardware test.
 
 ## Decisions locked (were open questions — all confirmed by Alec)
 
@@ -35,7 +35,7 @@ The Mac's own speakers become a first-class, PTP-aligned Audiouter output. Selec
 > Anchors from a `warm-signal-v2`-era read of the codebase, 2026-07-22 — re-confirm exact line numbers before editing (this worktree is based off `main`, not `warm-signal-v2`, and may differ). Executors should read `dev/notes/p2b-synced-local-brief.md` rather than re-derive, and read the nearest `AGENTS.md` for whatever subsystem they're editing first.
 
 **T-LATENCY — Core Audio output-latency measurement helper**
-Files: new `AudiouterCore/Sources/AudiouterCore/LocalOutputLatency.swift`
+Files: new `AudioutCore/Sources/AudioutCore/LocalOutputLatency.swift`
 What: read `kAudioDevicePropertySafetyOffset` + `kAudioDevicePropertyLatency` (device/output scope) + `kAudioStreamPropertyLatency` (active stream) + `kAudioDevicePropertyBufferFrameSize` for the default output device; frames→seconds via `kAudioDevicePropertyNominalSampleRate` (brief §4b).
 Kind: new-code · Depends on: — · **Model: sonnet 5 · Effort: medium**
 Verify: unit test asserts plausible non-zero latency; log measured vs reported on a real device.
@@ -47,7 +47,7 @@ Kind: backend · Depends on: — · **Model: sonnet 5 · Effort: low**
 Verify: unit test reads it back, matches configured buffer.
 
 **T-SINK — the delayed local sink (foundation)**
-Files: new `AudiouterCore/Sources/AudiouterCore/SyncedLocalSink.swift`
+Files: new `AudioutCore/Sources/AudioutCore/SyncedLocalSink.swift`
 What: app-layer `AVAudioSourceNode`-backed `AVAudioEngine` fed by a lock-free ring; render block silent until `hostTime` reaches `capture_pts + presentationDelay − localOutputLatency − safetyMargin (+ userOffset later)`, then emits; reuse the mach↔`CLOCK_MONOTONIC` rebase (`NativeCaptureCoordinator.swift:1049-1093`). Build the graph so a rate-correction node (T-CORRECTION) and a phase-error readout (render-block `AVAudioTime`) can be inserted (brief §5.1/§1).
 Kind: new-code · Depends on: T-LATENCY, T-ENGINE-DELAY · **Model: opus 4.8 · Effort: high**
 Verify: offline harness feeds a known ramp+pts, asserts first-non-silence frame lands at the computed `hostTime` within tolerance.
@@ -119,13 +119,13 @@ Kind: new-code (small) · Depends on: T-GROUPCTL · **Model: sonnet 5 · Effort:
 Verify: toggling the Mac row into a mixed set is accepted and routes. (Note: AppKit row/menu dispatch has bitten this codebase before — see memory "Row selection tests bypass AppKit dispatch" — test via real dispatch, not delegate shortcuts.)
 
 **T-TESTS — coverage across the new surface**
-Files: new tests in `AudiouterCore/Tests/...`; update existing `GroupController` tests
+Files: new tests in `AudioutCore/Tests/...`; update existing `GroupController` tests
 What: unit-cover T-LATENCY, the mach↔hostTime scheduling math, the T-CORRECTION convergence/hold behavior, the T-GROUPCTL transition matrix (every case above), the T-OFFSET-UI store+delay contribution, and the tap self-exclude tone test.
 Kind: test · Depends on: T-CORRECTION, T-GROUPCTL, T-FANOUT, T-OFFSET-UI · **Model: sonnet 5 · Effort: medium**
 Verify: `swift test --parallel` green; new tests subclass `IsolatedTestCase`.
 
 **T-DOCS-LIVE — docs + gated by-ear hardware test**
-Files: `PROGRESS.md`, `AudiouterCore/AGENTS.md` / `AirPlayEngine/AGENTS.md`, `dev/notes/`, mark `docs/plans/phase-3-findings/proposals/local-mix.md` resolved (Option A built)
+Files: `PROGRESS.md`, `AudioutCore/AGENTS.md` / `AirPlayEngine/AGENTS.md`, `dev/notes/`, mark `docs/plans/phase-3-findings/proposals/local-mix.md` resolved (Option A built)
 What: document the shipped design; run the user-present, PTP-port-gated by-ear test with a real AirPlay 2 receiver + Mac speakers — confirm phase alignment against the studio-grade target, no echo (R2), sleep/wake resync (R3), and offset-slider effect (R1).
 Kind: docs + test · Depends on: all above · **Model: haiku 4.5 (docs); the live test is a manual Alec-run step · Effort: low**
 Verify: Alec confirms by ear against the studio-grade target; findings recorded.

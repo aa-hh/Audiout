@@ -12,7 +12,7 @@ unarbitrated."* This document maps exactly those two residuals against the
 current code.
 
 All paths below are relative to the repo root; the main file is
-`AudiouterCore/Sources/AudiouterCore/NativeBackend.swift` (6165 lines),
+`AudioutCore/Sources/AudioutCore/NativeBackend.swift` (6165 lines),
 abbreviated **NB**.
 
 ---
@@ -197,7 +197,7 @@ under the exclusivity assumption, undefined without it (see §3).
 on `captureControlQueue` (NB:2299-2301). Tap-only; issues **no engine session
 ops** and never crosses the two FIFOs. Relevant to 008 only insofar as an
 `.exclusionChange` tap rebuild can escalate into Path E's whole-system reset
-when the tap comes back on a different device/rate (`AudiouterCore/AGENTS.md`,
+when the tap comes back on a different device/rate (`AudioutCore/AGENTS.md`,
 R10 rule).
 
 ---
@@ -333,7 +333,7 @@ above needs both FIFOs live at once.
 
 ## 5. Test seams for a hermetic cross-FIFO race suite
 
-All in `AudiouterCore/Tests/AudiouterCoreTests/NativeBackendTests.swift`
+All in `AudioutCore/Tests/AudioutCoreTests/NativeBackendTests.swift`
 (nested in `SerializedSharedState` for Telemetry-sink mutual exclusion, :22):
 
 - **`SpyEngine: EngineControlling`** (:66) — the key double:

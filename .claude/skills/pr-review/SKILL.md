@@ -1,13 +1,13 @@
 ---
 name: pr-review
-description: Adversarial, evidence-only review of an Audiouter PR or branch, published as PR comments in one idempotent sweep. Explicit invocation only (/pr-review <PR# or branch>); never select automatically.
+description: Adversarial, evidence-only review of an Audiout PR or branch, published as PR comments in one idempotent sweep. Explicit invocation only (/pr-review <PR# or branch>); never select automatically.
 disable-model-invocation: true
 ---
 
-# Audiouter PR review
+# Audiout PR review
 
 Review a pull request (or a pushed `claude/*` branch — create no PR yourself;
-ask if one is wanted) in `aa-hh/Audiouter` and publish findings as PR comments.
+ask if one is wanted) in `aa-hh/Audiout` and publish findings as PR comments.
 Two jobs:
 
 1. Give the author concrete, actionable findings.
@@ -33,7 +33,7 @@ Never approve, request changes, or merge. Alec owns every merge decision
 
 ## Preflight
 
-1. `gh auth status --hostname github.com`; `gh repo view aa-hh/Audiouter`.
+1. `gh auth status --hostname github.com`; `gh repo view aa-hh/Audiout`.
 2. `gh pr view "$PR" --json title,body,author,baseRefName,baseRefOid,headRefName,headRefOid,changedFiles,url`
    — record base and head SHAs. Check out the exact head SHA in a TEMPORARY
    detached worktree (`git worktree add --detach`); never review a moving ref,
@@ -71,7 +71,7 @@ Severities: `blocking` (defect or unresolved decision that should precede
 merge) / `important` (concrete issue worth fixing in this PR) / `optional`
 (small improvement in the touched area).
 
-## What to review (Audiouter-specific attention list)
+## What to review (Audiout-specific attention list)
 
 - **Correctness first**: trace changed inputs through the REAL call path to
   observable results. Empty/missing/duplicate/boundary inputs; defaults that
@@ -98,7 +98,7 @@ merge) / `important` (concrete issue worth fixing in this PR) / `optional`
   `Incompatible` (exactly what breaks, for whom, when) / `Not established`
   (what evidence is missing).
 - **Verification**: run the smallest scoped check that answers the question
-  (`swift test --package-path AudiouterCore --filter <Suite>` — NEVER a bare
+  (`swift test --package-path AudioutCore --filter <Suite>` — NEVER a bare
   full `swift test`; the full run is `scripts/run-tests.sh` and rarely needed
   for review). Record exact commands + outcomes in the summary. Separate
   clearly: covered by tests here / needs Alec's live hardware test (TCC,

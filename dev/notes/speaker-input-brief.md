@@ -34,7 +34,7 @@ Accessibility); volume **is built and verified on real hardware**.
    `iTunes_Ctrl_<DACP-ID>`, and a `setproperty?dmcp.device-volume=<dB>` or
    `volumeup`/`volumedown` callback routes through
    `applyDacpVolume`/`applyDacpVolumeStep` to the same `setSpeakerVolume` core.
-5. **App** — `AudiouterApp/MediaKeyController.swift`: turns `.remoteTransport`
+5. **App** — `AudioutApp/MediaKeyController.swift`: turns `.remoteTransport`
    into a Mac aux media key (`NX_KEYTYPE_PLAY`/`NEXT`/`PREVIOUS` via a
    `.systemDefined` NSEvent → `.cghidEventTap`). First press while untrusted
    asks for **Accessibility** once (`AXIsProcessTrustedWithOptions`).
@@ -44,11 +44,11 @@ Accessibility); volume **is built and verified on real hardware**.
 - `AirPlayEngineTests/RemoteEventStreamTests.swift` — fires the real C
   `airplayengine_remote_fire` and asserts the mapped `RemoteEvent` (volume,
   clamp, all three transport keys, UNKNOWN dropped, stream finishes on stop).
-- `AudiouterCoreTests/NativeBackendTests.swift` — `testSpeakerVolumeMovesThatDeviceSlider`,
+- `AudioutCoreTests/NativeBackendTests.swift` — `testSpeakerVolumeMovesThatDeviceSlider`,
   `testSpeakerVolumeForUnknownOutputIsIgnored`, `testSpeakerTransportKeysEmitRemoteTransport`,
   plus the DACP routing/write-back/echo-guard/step-accumulation tests added in
   the 2026-07-22 rework below.
-- `AudiouterCoreTests/DACPServerTests.swift` — pure request-parsing + dB↔level
+- `AudioutCoreTests/DACPServerTests.swift` — pure request-parsing + dB↔level
   mapping tests (no sockets).
 
 ## Gated live test (needs the real Sonos + a human)
@@ -69,14 +69,14 @@ Two things changed since this brief was first written:
   entry, so a press on the speaker doesn't need its own separate first-prompt.
 
 1. `scripts/make-app.sh` (no special flags — Developer ID auto-detected) then
-   launch via **`open build/Audiouter.app`** (a shell-launched binary inherits
+   launch via **`open build/Audiout.app`** (a shell-launched binary inherits
    the terminal's TCC identity — use `open`). Set `AIRPLAYENGINE_LOG_LEVEL`
    high enough to see `L_AIRPLAY` info/debug (the volume + "Unhandled AirPlay
    event" lines).
    - **Before testing transport**, confirm Remote Control is actually granted —
      it's an enhancement, not a required permission, so Setup can be "complete"
      with this row skipped. Check System Settings › Privacy & Security ›
-     Accessibility lists Audiouter ON, or open the app's Setup screen and
+     Accessibility lists Audiout ON, or open the app's Setup screen and
      confirm the Remote Control row shows Granted. If not, click Allow there
      once — that grant now persists across rebuilds (see above).
 2. Select the Sonos so a session is streaming.
@@ -124,7 +124,7 @@ Fix (this worktree):
 ## Second live test — PASSED (2026-07-22, Sonos Move 2)
 
 The reworked loop was live-verified working, and the log confirms every part of
-the design (`/tmp/audiouter-speaker-input.log`, `AIRPLAYENGINE_LOG_LEVEL=4`):
+the design (`/tmp/audiout-speaker-input.log`, `AIRPLAYENGINE_LOG_LEVEL=4`):
 
 - **Wire format confirmed:** the Sonos reports its own volume as an absolute
   DACP `GET /ctrl-int/1/setproperty?dmcp.device-volume=<dB>` (NOT the RTSP
@@ -151,10 +151,10 @@ press — Accessibility already granted via Setup, no prompt). **Net: the featur
 works end-to-end on real hardware.** This supersedes the earlier "parked / not
 working" verdict — that was the pre-rework "report" model.
 
-Test rig: build with `AUDIOUTER_STATUS_LABEL=speaker-input
-AIRPLAYENGINE_LOG_FILE=/tmp/audiouter-speaker-input.log AIRPLAYENGINE_LOG_LEVEL=4
+Test rig: build with `AUDIOUT_STATUS_LABEL=speaker-input
+AIRPLAYENGINE_LOG_FILE=/tmp/audiout-speaker-input.log AIRPLAYENGINE_LOG_LEVEL=4
 bash scripts/make-app.sh` (those three now flow into `LSEnvironment` so an
-`open`-launched bundle sees them), then `open build/Audiouter.app`. The status
+`open`-launched bundle sees them), then `open build/Audiout.app`. The status
 label disambiguates this build from other worktrees' (shared bundle id → they
 collide in LaunchServices).
 

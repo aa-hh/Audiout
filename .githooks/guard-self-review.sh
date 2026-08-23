@@ -63,7 +63,7 @@ fi
 
 # --- Part B: the self-review receipt (BLOCKING) --------------------------
 expected=$(git diff --cached -- '*.swift' 2>/dev/null | shasum -a 256 | cut -d' ' -f1)
-receipt=$(cat "$git_dir/audiouter-review-receipt" 2>/dev/null || echo none)
+receipt=$(cat "$git_dir/audiout-review-receipt" 2>/dev/null || echo none)
 if [ "$receipt" != "$expected" ]; then
     echo "" >&2
     echo "  REFUSED (Guard 7): staged Swift has no matching self-review receipt." >&2

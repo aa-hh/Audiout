@@ -21,7 +21,7 @@
 # routing, reusing lib/remote.sh so there is one answer to "which machine", not
 # two that drift.
 #
-# AUDIOUTER_IOS_REMOTE_ONLY=1 turns the local fallback into a hard stop, for
+# AUDIOUT_IOS_REMOTE_ONLY=1 turns the local fallback into a hard stop, for
 # when running here is the thing being ruled out. Off by default.
 #
 # --root exists because `ios/` and this script currently live on DIFFERENT
@@ -88,7 +88,7 @@ if [ "$mode" = shot ]; then
     done
 fi
 
-project="ios/AudiouterRemote/AudiouterRemote.xcodeproj"
+project="ios/AudioutRemote/AudioutRemote.xcodeproj"
 [ -e "$root/$project" ] || {
     echo "ios.sh: no $project under $root" >&2
     echo "        (the companion app lives on claude/companion-app-phase2-ios — pass --root <that worktree>)" >&2
@@ -104,7 +104,7 @@ project="ios/AudiouterRemote/AudiouterRemote.xcodeproj"
 # needs an "Apple Development" certificate plus a provisioning profile for the
 # target device; the mule carries only "Developer ID Application" (Mac
 # distribution) and `devicectl list devices` there reports none paired. So the
-# work is pinned here, where the phone and the cert both are. AUDIOUTER_IOS_
+# work is pinned here, where the phone and the cert both are. AUDIOUT_IOS_
 # REMOTE_ONLY is deliberately ignored for this mode rather than made to fail:
 # there is no remote that could ever do it.
 #
@@ -167,23 +167,23 @@ run_device() {
     fi
     slug=$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
     [ -n "$slug" ] || slug=dev
-    bundle="com.audiouter.remote.$slug"
+    bundle="com.audiout.remote.$slug"
 
-    dd="${TMPDIR:-/tmp/}audiouter-ios-device/$(basename "$root")"
+    dd="${TMPDIR:-/tmp/}audiout-ios-device/$(basename "$root")"
     echo "  device:  $name ($udid)" >&2
     echo "  team:    $team" >&2
     echo "  bundle:  $bundle  (\"$label\")" >&2
 
     cd "$root"
-    xcodebuild -project "$project" -scheme AudiouterRemote -configuration Debug \
+    xcodebuild -project "$project" -scheme AudioutRemote -configuration Debug \
         -destination "id=$udid" -derivedDataPath "$dd" -allowProvisioningUpdates \
         DEVELOPMENT_TEAM="$team" \
         PRODUCT_BUNDLE_IDENTIFIER="$bundle" \
         INFOPLIST_KEY_CFBundleDisplayName="$label" \
         ${1+"$@"} build || exit 65
 
-    app=$(find "$dd/Build/Products" -maxdepth 2 -type d -name 'AudiouterRemote.app' | head -1)
-    [ -n "$app" ] || { echo "ios.sh: no AudiouterRemote.app was built" >&2; exit 70; }
+    app=$(find "$dd/Build/Products" -maxdepth 2 -type d -name 'AudioutRemote.app' | head -1)
+    [ -n "$app" ] || { echo "ios.sh: no AudioutRemote.app was built" >&2; exit 70; }
 
     xcrun devicectl device install app --device "$udid" "$app" >/dev/null || {
         echo "ios.sh: built and signed, but the install failed. Is the phone unlocked?" >&2
@@ -239,12 +239,12 @@ shot_cmd_for() {
             | grep -oE '[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}'); \
     [ -n \"\$udid\" ] || { echo \"ios.sh: no udid for '\$dev'\" >&2; exit 70; }; \
     echo \"  simulator: \$dev (\$udid)\" >&2; \
-    dd=\"\${TMPDIR:-/tmp/}audiouter-ios-shot/$(basename "$root")\"; \
-    xcodebuild -project $project -scheme AudiouterRemote \
+    dd=\"\${TMPDIR:-/tmp/}audiout-ios-shot/$(basename "$root")\"; \
+    xcodebuild -project $project -scheme AudioutRemote \
         -destination \"platform=iOS Simulator,id=\$udid\" \
         -derivedDataPath \"\$dd\" -quiet build || exit 65; \
-    app=\$(find \"\$dd/Build/Products\" -maxdepth 2 -type d -name 'AudiouterRemote.app' | head -1); \
-    [ -n \"\$app\" ] || { echo 'ios.sh: no AudiouterRemote.app was built' >&2; exit 70; }; \
+    app=\$(find \"\$dd/Build/Products\" -maxdepth 2 -type d -name 'AudioutRemote.app' | head -1); \
+    [ -n \"\$app\" ] || { echo 'ios.sh: no AudioutRemote.app was built' >&2; exit 70; }; \
     bundle=\$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \"\$app/Info.plist\"); \
     xcrun simctl bootstatus \"\$udid\" -b >/dev/null; \
     xcrun simctl install \"\$udid\" \"\$app\"; \
@@ -262,13 +262,13 @@ shot_cmd_for() {
 
 # `build` needs no device at all, so it never depends on a runtime being
 # installed — only on the platform being present.
-build_cmd="xcodebuild -project $project -scheme AudiouterRemote \
+build_cmd="xcodebuild -project $project -scheme AudioutRemote \
     -destination 'generic/platform=iOS Simulator' build"
 
 test_cmd="dev=\$($newest_iphone); \
     [ -n \"\$dev\" ] || { echo 'ios.sh: no iPhone simulator installed' >&2; exit 70; }; \
     echo \"  simulator: \$dev\" >&2; \
-    xcodebuild -project $project -scheme AudiouterRemote \
+    xcodebuild -project $project -scheme AudioutRemote \
         -destination \"platform=iOS Simulator,name=\$dev\" test"
 
 # Where a REMOTE shot writes its PNGs: inside the synced tree, so remote_fetch
@@ -298,11 +298,11 @@ remote_toolchain=xcodebuild
 # false pass — other callers depend on that. This is for the case where running
 # here is the thing being ruled out (a loaded machine), and then a remote that
 # cannot be used has to be LOUD rather than quietly satisfied by doing nothing.
-remote_only=${AUDIOUTER_IOS_REMOTE_ONLY:-}
+remote_only=${AUDIOUT_IOS_REMOTE_ONLY:-}
 
 # 75 = EX_TEMPFAIL: the work never ran, and that is different from it failing.
 refuse_local() {
-    echo "ios.sh: AUDIOUTER_IOS_REMOTE_ONLY=1 — $1; refusing to run locally." >&2
+    echo "ios.sh: AUDIOUT_IOS_REMOTE_ONLY=1 — $1; refusing to run locally." >&2
     exit 75
 }
 
@@ -333,13 +333,13 @@ if remote_wins; then
         # A remote FAILURE is re-confirmed locally before it blocks anything:
         # the Xcode versions differ, and the expensive error is a false refusal.
         if [ -n "$remote_only" ]; then
-            echo "ios.sh: AUDIOUTER_IOS_REMOTE_ONLY=1 — $remote_host failed (exit $remote_status); not re-running here." >&2
+            echo "ios.sh: AUDIOUT_IOS_REMOTE_ONLY=1 — $remote_host failed (exit $remote_status); not re-running here." >&2
             exit "$remote_status"
         fi
         echo "  remote reported failure — re-running here to confirm." >&2
     fi
 elif [ -n "$remote_only" ]; then
-    refuse_local "no remote was chosen (audiouter.remoteHost unset, or audiouter.testPrefer is 'local')"
+    refuse_local "no remote was chosen (audiout.remoteHost unset, or audiout.testPrefer is 'local')"
 fi
 
 cd "$root"

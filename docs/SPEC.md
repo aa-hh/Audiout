@@ -1,4 +1,4 @@
-# Audiouter — Product Spec & Feasibility Plan
+# Audiout — Product Spec & Feasibility Plan
 
 *Draft v0.1 — 2026-07-09. Based on our interview. Everything here is up for revision.*
 
@@ -60,9 +60,9 @@ output. You want a single app that:
 
 ### Companion control (Mac + iPhone)
 
-Optional iPhone app. Connects via Bonjour (`_audiouter._tcp`) WebSocket to a server on the Mac
+Optional iPhone app. Connects via Bonjour (`_audiout._tcp`) WebSocket to a server on the Mac
 (source of truth). Phone receives full snapshots on connect and change, sends commands back.
-Protocol defined in `AudiouterProtocol` package. Disabled by default (Settings › General).
+Protocol defined in `AudioutProtocol` package. Disabled by default (Settings › General).
 See [PLAN-COMPANION-APP.md](docs/plans/PLAN-COMPANION-APP.md).
 
 ---
@@ -507,8 +507,8 @@ trailing control, a device-selector dropdown as THE routing control.
 
    Owning types: `AppRoutingController` (model/persistence logic, sibling of
    `GroupController`) and `AppRouteStore` (versioned-JSON persistence,
-   `app-routes.json`) — see `AudiouterCore/AGENTS.md` Key Types.
-   `AppRowView` / `AddApplicationRowView` (`AudiouterSharedUI`) render
+   `app-routes.json`) — see `AudioutCore/AGENTS.md` Key Types.
+   `AppRowView` / `AddApplicationRowView` (`AudioutSharedUI`) render
    the rows; `PopoverController` wires the card and the running-app picker.
 
 **Rules:**

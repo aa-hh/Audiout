@@ -1,6 +1,6 @@
 # Third-Party Licenses and Attribution
 
-Audiouter (including AirPlayEngine) is licensed under the GNU General
+Audiout (including AirPlayEngine) is licensed under the GNU General
 Public License, version 2 or later (GPL-2.0-or-later). See LICENSE for
 the full text.
 
@@ -47,7 +47,7 @@ AirPlayEngine/docs/license-inventory.md for the full per-file audit.
 
 AirPlayEngine's C target links against these libraries at build/run time
 via Homebrew (see AirPlayEngine/Package.swift). In a release/distribution
-build (`scripts/make-app.sh` run with `AUDIOUTER_BUNDLE_DYLIBS=1`), these
+build (`scripts/make-app.sh` run with `AUDIOUT_BUNDLE_DYLIBS=1`), these
 libraries are copied into `Contents/Frameworks/` inside the shipped
 `.app` so it can run without a Homebrew install present. A plain local
 dev build (the flag unset) still links them from the developer's own
@@ -63,7 +63,7 @@ user-managed Homebrew install.
 The compliance mechanism used for the dynamically-linked libraries:
 each library ships as its own separate, individually replaceable
 `.dylib` file inside `Contents/Frameworks/` — never statically merged
-into AirPlayEngine's or Audiouter's own binary. This is intended to
+into AirPlayEngine's or Audiout's own binary. This is intended to
 satisfy LGPL §6's requirement that a user be able to relink or
 substitute a compatible version of the library. This is not a legal
 guarantee; it is the mechanism this project relies on for compliance.

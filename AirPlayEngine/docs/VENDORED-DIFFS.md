@@ -225,7 +225,7 @@ it's empty, there's nothing to ledger yet.
   receivers through the shared engine (no longer surfacing them
   dimmed/unsupported) landed in T7. None of T4–T7 touched vendored source —
   they are all `shims/`, `AirPlayEngine.swift`/`AirPlayTypes.swift`, or
-  `AudiouterCore` — so this ledger's entry count is unaffected; see
+  `AudioutCore` — so this ledger's entry count is unaffected; see
   `PROGRESS.md` for each task's own verification. The optional `stream_id`
   surgery for AP1 per-app routing (brief §4bis) was originally deferred here;
   it landed 2026-07-19 and is documented as Entry 3b below.

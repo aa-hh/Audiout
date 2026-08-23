@@ -128,7 +128,7 @@ segment brightens top-to-bottom, failed devices stay red.
 - Drawing/geometry + wiring only; no change to the membership/connection/mute/routing MODEL.
 - Hot files (serialize same-file tasks): `DeviceRowView`, `MainOutRowView`, `MembershipBusView`,
   `LevelMeterView`, `WarmFaderCell`, `PopoverColumnGrid`, `PopoverController`, `AppRowView`,
-  `BusRailOverlayView` (all in AudiouterSharedUI / AudiouterPopoverUI).
+  `BusRailOverlayView` (all in AudioutSharedUI / AudioutPopoverUI).
 - Determinism: settle model layers so `cacheDisplay` snapshots stay byte-identical; animations
   (energize, brighten) run over settled presentation layers (HaloRingView/WarmFaderCell
   precedent).

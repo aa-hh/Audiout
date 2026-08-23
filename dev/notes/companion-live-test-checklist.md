@@ -17,12 +17,12 @@ states the expected result so a deviation is unmistakable.*
 No TestFlight build exists yet — Xcode direct-install is the only path today.
 
 - [ ] **Cable the iPhone to the Mac** (or use wireless debugging if already paired),
-  open `ios/AudiouterRemote/AudiouterRemote.xcodeproj` in Xcode, select the iPhone as
+  open `ios/AudioutRemote/AudioutRemote.xcodeproj` in Xcode, select the iPhone as
   the run destination.
 - [ ] **Set a signing team** in Signing & Capabilities. A free Apple ID works — it
   issues a 7-day provisioning profile, so re-install weekly during this test round.
   Expected: no paid Developer Program membership required for this phase.
-- [ ] **Confirm the bundle id**: `com.audiouter.remote`. Expected: this is still the
+- [ ] **Confirm the bundle id**: `com.audiout.remote`. Expected: this is still the
   working-name identifier — T23 (pre-App-Store rename) has not run yet, so don't be
   surprised it doesn't say the final product name.
 - [ ] **Build & run to the device.** Expected: app installs and launches; you may need
@@ -33,8 +33,8 @@ No TestFlight build exists yet — Xcode direct-install is the only path today.
 
 ## 2. First launch
 
-- [ ] **Local Network permission prompt appears.** Expected wording: *"Audiouter uses
-  the local network to find and control the Audiouter app on your Mac."* It should
+- [ ] **Local Network permission prompt appears.** Expected wording: *"Audiout uses
+  the local network to find and control the Audiout app on your Mac."* It should
   fire the first time the app actually tries to browse (on launch, or when you open
   the Connection tab) — not before, and not as a generic first-run interstitial.
 - [ ] **Tap Allow.** Expected: prompt dismisses, browsing begins immediately.

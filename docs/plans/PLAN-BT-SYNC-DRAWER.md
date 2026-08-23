@@ -57,13 +57,13 @@ This plan replaces it with:
 
 ## 2. Current state — read this before touching anything
 
-Package layout note: core audio/model code is `AudiouterCore/Sources/AudiouterCore/`,
-shared row views are `AudiouterCore/Sources/AudiouterSharedUI/`, the popover is
-`AudiouterCore/Sources/AudiouterPopoverUI/`.
+Package layout note: core audio/model code is `AudioutCore/Sources/AudioutCore/`,
+shared row views are `AudioutCore/Sources/AudioutSharedUI/`, the popover is
+`AudioutCore/Sources/AudioutPopoverUI/`.
 
 ### How the delay is actually realised
 
-`BTDeviceSink` (in `AudiouterCore/Sources/AudiouterCore/BTSyncedSink.swift`)
+`BTDeviceSink` (in `AudioutCore/Sources/AudioutCore/BTSyncedSink.swift`)
 does **not** schedule audio at absolute times. It:
 
 1. accepts captured PCM into a lock-free `BTFrameRing` via `enqueue(...)`,
@@ -118,7 +118,7 @@ The `≥ 0` clamp is what creates D11's usable floor.
 
 ### Where the UI lives
 
-- `AudiouterCore/Sources/AudiouterSharedUI/DeviceRowView.swift`
+- `AudioutCore/Sources/AudioutSharedUI/DeviceRowView.swift`
   - `showsSyncControls: Bool` (init param, line ~355) gates the whole cluster.
   - Fields: `syncMinusButton`, `syncPlusButton`, `syncField`, `alignButton`,
     `syncTrimMs`, `alignSymbolName` (~lines 297–311).
@@ -126,11 +126,11 @@ The `≥ 0` clamp is what creates D11's usable floor.
   - `configureSyncControls()` + the `showsSyncControls` constraint block
     (~lines 1432, 1531–1560) build the trailing→leading cluster.
   - Delegate methods at lines ~69–76.
-- `AudiouterCore/Sources/AudiouterSharedUI/PopoverColumnGrid.swift` §"SYNC
+- `AudioutCore/Sources/AudioutSharedUI/PopoverColumnGrid.swift` §"SYNC
   column" (~lines 578–620) holds every SYNC metric as a named constant. The
   Figma design system mirrors this file 1:1 — **all new metrics go here, none
   inline.**
-- `AudiouterCore/Sources/AudiouterPopoverUI/PopoverController.swift`
+- `AudioutCore/Sources/AudioutPopoverUI/PopoverController.swift`
   - `btTrimProvider` (line ~259), `btTrimsByID` cache (~269), row construction
     passing `showsSyncControls: device.isBluetooth` (~1445), trim resolution
     (~1615–1622), delegate implementations (~2751–2757).
@@ -166,12 +166,12 @@ staged diff before commit. Push to `origin/claude/foreman-roadmap-004-bt`.
 **Why:** every other task needs 0.1 ms to exist as a type.
 
 **Files**
-- `AudiouterCore/Sources/AudiouterCore/BTTrimStore.swift`
-- `AudiouterCore/Sources/AudiouterCore/BTSyncedSink.swift`
-- `AudiouterCore/Sources/AudiouterCore/NativeBackend.swift`
-- `AudiouterCore/Sources/AudiouterSharedUI/DeviceRowView.swift` (delegate signature only)
-- `AudiouterCore/Sources/AudiouterPopoverUI/PopoverController.swift` (cache + provider types)
-- `AudiouterCore/Sources/AudiouterApp/AppDelegate.swift` (~line 467, `btTrimProvider` closure)
+- `AudioutCore/Sources/AudioutCore/BTTrimStore.swift`
+- `AudioutCore/Sources/AudioutCore/BTSyncedSink.swift`
+- `AudioutCore/Sources/AudioutCore/NativeBackend.swift`
+- `AudioutCore/Sources/AudioutSharedUI/DeviceRowView.swift` (delegate signature only)
+- `AudioutCore/Sources/AudioutPopoverUI/PopoverController.swift` (cache + provider types)
+- `AudioutCore/Sources/AudioutApp/AppDelegate.swift` (~line 467, `btTrimProvider` closure)
 
 **Do**
 
@@ -214,7 +214,7 @@ staged diff before commit. Push to `origin/claude/foreman-roadmap-004-bt`.
 type. The steppers keep behaving exactly as they do today.
 
 **Tests** (extend the existing BT trim suites; find them with
-`git grep -l BTSyncTrim AudiouterCore/Tests`)
+`git grep -l BTSyncTrim AudioutCore/Tests`)
 - `quantise` snaps 22.44 → 22.4, 22.45 → 22.5, −22.45 → −22.5, and clamps
   ±500.0.
 - `quantise` output has no float dust: `quantise(0.1 * 3)` is exactly the same
@@ -231,7 +231,7 @@ type. The steppers keep behaving exactly as they do today.
 
 **Why:** D6. This is the load-bearing change; everything else is chrome.
 
-**File:** `AudiouterCore/Sources/AudiouterCore/BTSyncedSink.swift` only.
+**File:** `AudioutCore/Sources/AudioutCore/BTSyncedSink.swift` only.
 
 **Do**
 
@@ -297,7 +297,7 @@ type. The steppers keep behaving exactly as they do today.
    `offset_change`, `composition_change`, `config_change`, `rate_change`
    exactly as they are — those are genuine structural changes.
 
-**Tests** (`AudiouterCore/Tests/AudiouterCoreTests/`, near the existing
+**Tests** (`AudioutCore/Tests/AudioutCoreTests/`, near the existing
 `BTSyncedSink` render tests — these use `renderInterleaved` directly with no
 engine, which is the seam to reuse)
 - `seek` clamps at both ends and reports the applied delta.
@@ -359,7 +359,7 @@ yields the full range.
 
 **Why:** D3/D4/D5. The one genuinely new control.
 
-**File (new):** `AudiouterCore/Sources/AudiouterSharedUI/BTSyncRulerView.swift`
+**File (new):** `AudioutCore/Sources/AudioutSharedUI/BTSyncRulerView.swift`
 
 **Shape:** an `NSView` drawing a horizontal tape of tick marks that slides
 under a **fixed centre pointer**. No thumb, no filled track — it must not read
@@ -428,7 +428,7 @@ public final class BTSyncRulerView: NSView {
 - Respect `NSWorkspace.shared.accessibilityDisplayShouldReduceMotion` — no
   inertial glide when set.
 
-**Tests** (`AudiouterCore/Tests/…UITests` — follow the existing headless
+**Tests** (`AudioutCore/Tests/…UITests` — follow the existing headless
 `DeviceRowView` test style; drive with synthesised `NSEvent`s or expose
 `test_scrub(byPoints:speed:)` seams in the same spirit as the existing
 `test_select*` hooks)
@@ -445,7 +445,7 @@ public final class BTSyncRulerView: NSView {
 ### T5 — `BTSyncDrawerView`
 
 **Depends on:** T4.
-**File (new):** `AudiouterCore/Sources/AudiouterSharedUI/BTSyncDrawerView.swift`
+**File (new):** `AudioutCore/Sources/AudioutSharedUI/BTSyncDrawerView.swift`
 
 The drawer's visual contract (mockup-locked):
 
@@ -509,7 +509,7 @@ during scrub and true on end; align toggle round-trips.
 ### T6 — Row: value chip replaces the cluster
 
 **Depends on:** T1, T5.
-**File:** `AudiouterCore/Sources/AudiouterSharedUI/DeviceRowView.swift` (+ grid constants).
+**File:** `AudioutCore/Sources/AudioutSharedUI/DeviceRowView.swift` (+ grid constants).
 
 **Do**
 
@@ -550,7 +550,7 @@ run them and do not modify their expectations.
 ### T7 — Accordion, wiring, persistence
 
 **Depends on:** T1, T3, T5, T6.
-**File:** `AudiouterCore/Sources/AudiouterPopoverUI/PopoverController.swift`.
+**File:** `AudioutCore/Sources/AudioutPopoverUI/PopoverController.swift`.
 
 **Do**
 
@@ -601,7 +601,7 @@ run them and do not modify their expectations.
    column is now a chip + drawer, and the align button lives in the drawer.
    Keep the older cluster description only as a struck-through note explaining
    what replaced it and why.
-2. Update the nearest `AGENTS.md` files (`AudiouterSharedUI/`, `AudiouterCore/`)
+2. Update the nearest `AGENTS.md` files (`AudioutSharedUI/`, `AudioutCore/`)
    with two rules worth having: **a trim change must never rebuild a sink**, and
    **only one sync drawer may be open at a time**.
 3. Figma: follow `docs/FIGMA-DESIGN-SYSTEM.md` exactly, including the light-mode

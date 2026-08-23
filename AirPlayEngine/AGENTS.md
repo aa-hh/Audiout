@@ -3,7 +3,7 @@
 ## Purpose
 
 A standalone SwiftPM package (sibling of, not a target inside,
-`AudiouterCore`) vendoring OwnTone's AirPlay 2 sender under
+`AudioutCore`) vendoring OwnTone's AirPlay 2 sender under
 `Sources/CAirPlayEngine/`, wrapped in a neutral Swift `async`/`await` API.
 Separate on purpose: it knows nothing about `Device`, groups, or the UI — a
 session-primitives actor, not app logic — and it is a **licensing boundary**,
@@ -54,7 +54,7 @@ app-owned: no mDNS browse here, only resolved `DeviceDescriptor`s fed in.
   (see `docs/ptp-helper-design.md` §1.3, §5.1; Waves 1–2 PLAN). **The clock lookup is
   deferred per-session** (T4: `ptpd_daemon_probe()` at connect time), not at engine
   startup. This keeps the PTP ports free when idle, enabling coexistence with macOS's
-  own AirPlay. `AUDIOUTER_PTP_INPROC_BIND=1` restores the old in-process bind as a
+  own AirPlay. `AUDIOUT_PTP_INPROC_BIND=1` restores the old in-process bind as a
   **dev/CI-only** fallback — never rely on it in the shipped path.
 - **Two sender backends share one registry.** `sender/raop.c` (classic
   AirPlay 1 / RAOP) is vendored alongside `sender/airplay.c` (AirPlay 2) as a

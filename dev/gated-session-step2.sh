@@ -7,7 +7,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP_BIN="$ROOT/build/Audiouter.app/Contents/MacOS/AudiouterApp"
+APP_BIN="$ROOT/build/Audiout.app/Contents/MacOS/AudioutApp"
 [ -x "$APP_BIN" ] || { echo "app not built (scripts/make-app.sh)"; exit 1; }
 
 FW=/usr/libexec/ApplicationFirewall/socketfilterfw

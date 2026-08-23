@@ -47,15 +47,15 @@ Two paths:
 Always launch the Mac app with the mock backend — a deterministic fake fleet (This Mac +
 HomePod + a Sonos pair + one offline device), no AirPlay hardware touched:
 ```bash
-AIRPLAY_BACKEND=mock AUDIOUTER_COMPANION=1 open build/Audiouter.app
+AIRPLAY_BACKEND=mock AUDIOUT_COMPANION=1 open build/Audiout.app
 ```
-`AUDIOUTER_COMPANION=1` forces the companion server on regardless of the checkbox. The
+`AUDIOUT_COMPANION=1` forces the companion server on regardless of the checkbox. The
 phone then discovers "…'s MacBook Pro", you approve it once, and drive everything:
 select speakers, volumes, mutes, groups, per-app routing, the two remote settings. The
 only thing you can't see is audio physically leaving a speaker — which the phone app
 never controls anyway.
 
-You'll need the built `Audiouter.app` on whichever Mac acts as the server. If that Mac
+You'll need the built `Audiout.app` on whichever Mac acts as the server. If that Mac
 isn't this dev machine, copy over the Developer-ID-signed build (or I can hand you one).
 
 ## Fidelity ladder — what proves what, with zero AirPlay hardware

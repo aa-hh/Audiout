@@ -7,7 +7,7 @@ constraints (current as of mid-2026, sources cited in the constraints section).*
 ## 1. What we're building (confirmed with Alec this session)
 
 - A **native iPhone app**, shipped **publicly on the App Store**, that remote-controls
-  the Audiouter Mac app.
+  the Audiout Mac app.
 - **Sonos connection model:** works only when the phone is on the same Wi-Fi as the Mac.
   No accounts, no login, no cloud — the phone finds the Mac on the network and connects.
 - **Full control scope** — everything the popover does: speaker select/deselect, Main Out
@@ -28,7 +28,7 @@ docs-first rule, SPEC.md must be updated on the same branch that lands the code.
 ```
 iPhone app                                Mac app
 ─────────                                 ───────
-NWBrowser "_audiouter._tcp"  ◄──Bonjour── NWListener (ephemeral port)
+NWBrowser "_audiout._tcp"  ◄──Bonjour── NWListener (ephemeral port)
         │                                 advertises name + TXT {proto=1, name=…}
         ▼
 NWConnection + WebSocket  ────connect───► accepts; sends FULL STATE SNAPSHOT
@@ -62,7 +62,7 @@ Version with the repo's established `{schemaVersion, payload}` envelope idiom
 (refuse-forward, ignore-unknown-keys), plus a `proto=` key in the Bonjour TXT record so
 the phone can refuse an incompatible Mac before even connecting.
 
-**Shared code:** a new dependency-free Swift package target (e.g. `AudiouterProtocol`)
+**Shared code:** a new dependency-free Swift package target (e.g. `AudioutProtocol`)
 holding the DTOs + message enums, compiled into both the Mac app and the iOS app. Keep it
 free of AppKit/backend imports so the iOS app never pulls in Mac-only code.
 
@@ -73,7 +73,7 @@ nearly every piece:
 
 | Need | Existing template | Where |
 |---|---|---|
-| Bonjour-advertised LAN server | **DACPServer** — `NWListener`, ephemeral port, TXT record, serial-queue confinement, per-connection idle timeout, pure-function request parsing behind a socket-free test seam | `AudiouterCore/Sources/AudiouterCore/DACPServer.swift` |
+| Bonjour-advertised LAN server | **DACPServer** — `NWListener`, ephemeral port, TXT record, serial-queue confinement, per-connection idle timeout, pure-function request parsing behind a socket-free test seam | `AudioutCore/Sources/AudioutCore/DACPServer.swift` |
 | Resilient Bonjour browsing (for the iOS side to copy) | `NetworkFrameworkBrowser` — per-service-type recreate on `.failed` with capped exponential backoff | `NativeDiscovery.swift:650` |
 | Local-network permission preflight | `LocalNetworkPrimer` — browse-as-permission-check (macOS has no status API; iOS has none either, same trick applies) | `LocalNetworkPrimer.swift` |
 | Demo-mode policy | `BackendKind.resolved()` — mock is explicit opt-in only, never a silent fallback | `OwnToneBackend.swift:806` |
@@ -83,7 +83,7 @@ nearly every piece:
 **No new entitlements needed on the Mac.** The app is unsandboxed (hardened runtime
 only), so it can bind a listening socket freely — DACPServer proves this in production.
 And `NSBonjourServices` gates *browsing*, not *advertising*, so advertising
-`_audiouter._tcp` needs no Info.plist change on the Mac either.
+`_audiout._tcp` needs no Info.plist change on the Mac either.
 
 **State/command surface is fully mapped** (see the agent report in this branch's history
 for the complete table). The short version:
@@ -146,8 +146,8 @@ serial queue like DACPServer.
 ## 6. iOS-side constraints (the things that bite)
 
 - **Info.plist:** `NSLocalNetworkUsageDescription` (concrete wording — vague strings
-  draw 5.1.1 rejections: "Audiouter uses the local network to find and control the
-  Audiouter app on your Mac") + `NSBonjourServices` = `["_audiouter._tcp"]`. Browsing a
+  draw 5.1.1 rejections: "Audiout uses the local network to find and control the
+  Audiout app on your Mac") + `NSBonjourServices` = `["_audiout._tcp"]`. Browsing a
   type not in that array fails outright, independent of user permission.
 - **There is still no Local Network permission status/request API (mid-2026).** The
   prompt fires on first browse. Denial does NOT error the browser — it sits in
@@ -171,7 +171,7 @@ serial queue like DACPServer.
 
 ## 7. App Store review path
 
-The reviewer will not have a Mac running Audiouter. Guideline 2.1 (App Completeness) is
+The reviewer will not have a Mac running Audiout. Guideline 2.1 (App Completeness) is
 the risk; >40% of stuck reviews are 2.1. The proven package:
 
 1. **Review notes** stating plainly: companion controller for free Mac host software, no
@@ -198,17 +198,17 @@ ASC side when we get there.
    model Alec referenced). Recommendation: ship open like Sonos — anyone on your Wi-Fi
    can control playback, same as Sonos accepts. A one-time "Allow 'Alec's iPhone' to
    control?" prompt on the Mac is the easy upgrade later if wanted.
-3. **App name/branding** for the store ("Audiouter Remote"?) — needed before ASC setup,
+3. **App name/branding** for the store ("Audiout Remote"?) — needed before ASC setup,
    not before building.
 
 ## 9. Suggested build shape (for the eventual plan, not started)
 
-1. **Protocol + Mac server first:** `AudiouterProtocol` target (DTOs, messages),
-   companion server in AudiouterCore (DACPServer-style NWListener + WebSocket +
+1. **Protocol + Mac server first:** `AudioutProtocol` target (DTOs, messages),
+   companion server in AudioutCore (DACPServer-style NWListener + WebSocket +
    Bonjour advertise), state broadcaster, command dispatch onto the existing
    controllers. Fully testable with loopback WebSocket clients — no iOS code yet, and
    the socket-free parse/serialize seams follow the DACPServer testing pattern.
-2. **iPhone app:** new Xcode project consuming `AudiouterProtocol`; discovery/connect
+2. **iPhone app:** new Xcode project consuming `AudioutProtocol`; discovery/connect
    flow with all the permission-denial UX; tab-based SwiftUI UI (Speakers / Apps /
    Groups); reconnect + snapshot re-sync.
 3. **Demo mode + review prep:** simulated system on the phone, demo video, review

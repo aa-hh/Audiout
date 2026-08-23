@@ -1,19 +1,19 @@
-# App Store submission kit — Audiouter Remote (companion iOS app)
+# App Store submission kit — Audiout Remote (companion iOS app)
 
-Working name: **Audiouter Remote** (bundle id `com.audiouter.remote`, target name
-`AudiouterRemote`). This whole doc is written under that working name — see §7 for the
+Working name: **Audiout Remote** (bundle id `com.audiout.remote`, target name
+`AudioutRemote`). This whole doc is written under that working name — see §7 for the
 rename gate (T23) before it can actually ship.
 
 ## 1. Review notes (paste into App Store Connect › App Review Information › Notes)
 
 ```
-Audiouter Remote is a free companion controller for Audiouter, a free Mac app that
+Audiout Remote is a free companion controller for Audiout, a free Mac app that
 sends system audio to AirPlay 2 speakers. There is no account, no sign-in, and no
 backend server — the phone talks directly to the Mac app over the local Wi-Fi network
-via Bonjour discovery (service type _audiouter._tcp) and a local WebSocket connection.
+via Bonjour discovery (service type _audiout._tcp) and a local WebSocket connection.
 No data is collected, stored, or transmitted off the local network.
 
-What the reviewer sees WITHOUT a Mac running Audiouter on the network: the app opens
+What the reviewer sees WITHOUT a Mac running Audiout on the network: the app opens
 to a 4-tab layout (Speakers / Apps / Groups / Connection). The Connection tab shows a
 "No Mac found" empty state with a short explanation, plus a clearly labeled "Demo
 system" row. Tapping it connects the app to a built-in, fully interactive simulated
@@ -22,7 +22,7 @@ in the app (speaker selection, volume, mute, per-app routing, group creation) is
 and functional against this demo fleet. This is not a stub screen; it is the same UI
 the app uses against a real Mac.
 
-What the reviewer sees WITH a Mac on the same Wi-Fi network running Audiouter: the Mac
+What the reviewer sees WITH a Mac on the same Wi-Fi network running Audiout: the Mac
 is discovered automatically and listed by name; tapping it (or auto-connect, if it's
 the only Mac seen and the one last used) opens a live two-way session — speaker
 selection, per-app routing, groups, and volume all mirror the Mac app's own popover in
@@ -42,7 +42,7 @@ One take, under 60 seconds, both iPhone and Mac visible in frame (side-by-side r
 or phone screen-recording + Mac screen-recording edited side by side — either is
 acceptable, no cuts needed within each device's recording).
 
-1. Launch Audiouter Remote (cold launch, not resumed).
+1. Launch Audiout Remote (cold launch, not resumed).
 2. Local Network permission prompt appears — tap Allow.
 3. Discovery finds the Mac by name within a few seconds.
 4. Tap the Mac to connect.
@@ -81,7 +81,7 @@ lists (Contact Info, Health & Fitness, Financial Info, Location, Sensitive Info,
 Contacts, User Content, Browsing History, Identifiers, Purchases, Usage Data,
 Diagnostics, Other Data). Rationale for the nutrition label: the app has no backend —
 all traffic is a direct LAN WebSocket to a Mac the user already owns and runs; nothing
-is transmitted to Audiouter's developer or any third party. Resulting privacy
+is transmitted to Audiout's developer or any third party. Resulting privacy
 "nutrition label": **Data Not Collected**.
 
 ## 5. Export compliance
@@ -100,20 +100,20 @@ UGC, or unrestricted web access) — answer every questionnaire item "None."
 
 ## 7. Naming — placeholder, not decided
 
-"Audiouter Remote" (used throughout this doc, and as the current Xcode target name /
-bundle id `com.audiouter.remote`) is a **working name only**. The real App Store name,
+"Audiout Remote" (used throughout this doc, and as the current Xcode target name /
+bundle id `com.audiout.remote`) is a **working name only**. The real App Store name,
 subtitle, and bundle id are Alec's call and are executed by **T23 (pre-ASC rename)**
 before this kit can be submitted — folder, scheme, display name, and bundle id all move
 together in that one task.
 
 App Store name/subtitle — TODO, options for Alec to pick from:
-- **"Audiouter Remote"** — leading candidate; matches the Mac app name directly, clear
+- **"Audiout Remote"** — leading candidate; matches the Mac app name directly, clear
   it's a companion, no invented branding.
-- "Audiouter Controller" — more literal about function, slightly more generic.
-- "Audiouter for iPhone" — platform-first framing, less idiomatic for a subtitle-bearing
+- "Audiout Controller" — more literal about function, slightly more generic.
+- "Audiout for iPhone" — platform-first framing, less idiomatic for a subtitle-bearing
   listing.
 
-Subtitle suggestion (if "Audiouter Remote" is chosen): "Control your Mac's AirPlay
+Subtitle suggestion (if "Audiout Remote" is chosen): "Control your Mac's AirPlay
 speakers."
 
 ## 8. ASC execution notes (for later — delegated to the `lance` operator)
@@ -134,7 +134,7 @@ branch/commit** (git URL + branch or SHA), not a local working tree. When ready:
 ## 9. Guideline 2.1 (App Completeness) checklist
 
 Per `dev/notes/companion-app-research.md` §7: Guideline 2.1 is the specific review
-risk for a phone app whose host hardware/software (a Mac running Audiouter) the
+risk for a phone app whose host hardware/software (a Mac running Audiout) the
 reviewer won't have — cited there as the majority failure mode for stuck reviews.
 Mitigations, mapped:
 

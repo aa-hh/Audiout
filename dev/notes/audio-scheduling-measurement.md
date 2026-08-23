@@ -89,7 +89,7 @@ Fill in after all four phases complete. Each row represents one measurement pass
 | Idle (after fixes) | None (idle, load avg ~5.5) | **clear** | 50 | 270 | 580 | 1280 | 11.61 | 11.83 | 720 | N | N | N |
 | Loaded (after fixes) | 16 spinners (load avg peaked **35.7**, roughly 2x the load-16 originally observed stuttering under) | **clear** | 30 | 270 | 640 | 1020 | 11.61 | 11.67 | 600 | N | N | N |
 
-**2026-07-26, Alec live, quiet machine:** ran on a fresh `APP_NAME=AudiouterSchedProbe` build of this worktree
+**2026-07-26, Alec live, quiet machine:** ran on a fresh `APP_NAME=AudioutSchedProbe` build of this worktree
 (commit b849320, Stage 1 complete), connected to a real receiver, `scripts/load-gen.sh 16 30`. Numbers above are
 from the last 5-second probe sample of each 30-second window (`log stream --predicate 'subsystem ==
 "com.airplayengine" AND category == "write-scheduling"'`). No "before fixes" comparison was run — Stage 1 was

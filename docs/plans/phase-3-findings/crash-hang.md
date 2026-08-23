@@ -1,7 +1,7 @@
 # Phase 3 Polish — Crash & Hang Surface Audit (A3)
 
-Audit of the concurrency, lifecycle, and crash/hang surface ahead of Audiouter's
-paid public release. Read-only pass over `AudiouterCore/` and `AirPlayEngine/`;
+Audit of the concurrency, lifecycle, and crash/hang surface ahead of Audiout's
+paid public release. Read-only pass over `AudioutCore/` and `AirPlayEngine/`;
 every claim below was re-verified against current source (file:line), not docs or
 memory. No live audio/AirPlay session was started and the app was not launched —
 items needing a running/signed build are tagged `[confirm-in-G1]` /
@@ -121,7 +121,7 @@ process.**
   headphones / AirPods / HDMI, or switching output devices, while a
   Current-Device app is playing can still hard-crash the whole app.
 - Evidence:
-  - Shim exists and is unit-tested: `AudiouterCore/Sources/AudiouterCore/ObjCExceptionCatching.swift:26` (`catchingObjCException`), target wired in `AudiouterCore/Package.swift:77`.
+  - Shim exists and is unit-tested: `AudioutCore/Sources/AudioutCore/ObjCExceptionCatching.swift:26` (`catchingObjCException`), target wired in `AudioutCore/Package.swift:77`.
   - **Zero production call sites** — `git grep catchingObjCException` returns only its own definition, its tests, and a Package.swift comment.
   - The exact sites the handoff (`dev/notes/objc-exception-shim-handoff.md` §4) says to wrap are still bare AVFoundation calls guarded only by an `isRunning`/`engineRunning` re-check — which the handoff §1 explicitly says "narrows the window but can't close it (classic TOCTOU)":
     - `LocalPlaybackEngine.swift:389` `player.play()` (guarded by `engine.isRunning` at :378)
@@ -144,7 +144,7 @@ symbol; and on 14.0–14.1 it installs but can't play audio.**
   13.0–14.1 users get an app that opens, finds speakers, and produces no sound.
 - Evidence:
   - `scripts/make-app.sh:21` `MIN_MACOS="13.0"` → written to Info.plist `LSMinimumSystemVersion` (`make-app.sh:159`) and passed as `--minimum-deployment-target` (`:120`).
-  - `AudiouterCore/Package.swift:18` `platforms: [.macOS(.v14)]` and `AirPlayEngine/Package.swift:99` `.macOS(.v14)` — the actual compile floor is 14.0, above the advertised 13.0.
+  - `AudioutCore/Package.swift:18` `platforms: [.macOS(.v14)]` and `AirPlayEngine/Package.swift:99` `.macOS(.v14)` — the actual compile floor is 14.0, above the advertised 13.0.
   - True functional floor is **14.2**: the process-tap APIs are 14.2+ (`NativeCaptureCoordinator.swift:166` `#available(macOS 14.2, *)`); below that the code returns `UnavailableSystemTap` which throws `osUnsupported` and lands capture in `.failed` (`NativeCaptureCoordinator.swift:712`). Fails soft (no crash) but the product does nothing useful.
 - Suggested fix direction: set `LSMinimumSystemVersion` (and `MIN_MACOS`) to **14.2** to match both the compile target and the true functional floor — LaunchServices then blocks install on OSes where it would crash or be useless.
 - Confidence: **High** on the version mismatch (declared values are unambiguous). **Medium** that a macOS-13 launch actually crashes (depends on whether any 14.0-but-not-14.2 symbol is referenced outside an `#available` guard — the compiler permits such references at a .v14 floor; I did not enumerate every symbol). `[confirm-in-G1]` on real 13.x / 14.1 hardware/VM.
@@ -167,7 +167,7 @@ instance.**
 - Plain-language: There's no "already running" guard. A second launch puts a
   second icon in the menu bar; its audio engine can't grab the exclusive network
   ports the first instance holds, so it's inert and confusing.
-- Evidence: no single-instance check anywhere in `AudiouterApp` (grep for
+- Evidence: no single-instance check anywhere in `AudioutApp` (grep for
   running-app/second-instance handling is empty in `AppDelegate.swift`); memory
   and `dev/notes/native-live-test-single-instance` note that PTP ports 319/320
   are exclusive → second engine fails to bind + duplicate icons. LaunchServices

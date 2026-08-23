@@ -370,9 +370,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // Licence check-in (roadmap 054): telemetry recording device spread,
-        // never a gate — see `LicenseCheckIn`'s doc comment. A no-op today
-        // since `AppSettings.checkInURL` is unset everywhere in this app.
+        // never a gate — see `LicenseCheckIn`'s doc comment. A build run from
+        // source carries no license server, so it never fires.
         LicenseCheckIn(settings: settings).checkInIfNeeded()
+
+        // The SOFT licence check. Ask the server what it thinks of the stored
+        // key, and meanwhile show whatever it said last time — an unreachable
+        // server must never change what the user sees, and nothing here gates
+        // a single feature. `applyLicenseState()` is idempotent, so running it
+        // now and again on the answer costs nothing.
+        LicenseValidator(settings: settings).validate { [weak self] _ in
+            self?.applyLicenseState()
+        }
+        applyLicenseState()
 
         // Seed the accent dial's live token remap (W1, spec §1.3) before any
         // UI paints — the token module defaults to `.fullGold`, so this only
@@ -510,6 +520,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // capability hooks above.
         popoverController.onReselectAudiouter = { [weak self] in
             (self?.backend as? NativeBackend)?.reselectAggregateAsDefault()
+        }
+        // The unregistered note's "Buy…" button. Nil URL (a build with no
+        // `AudiouterBuyURL`) never gets the note in the first place, since
+        // `applyLicenseState()` needs a license server to arm it.
+        popoverController.onBuyAudiouter = { [settings] in
+            guard let url = settings.buyURL else { return }
+            NSWorkspace.shared.open(url)
         }
         // Metering-active gate (T-GATE): only compute/emit `.level` while the
         // popover is actually open. `backend as? MeteringControlling` is nil for
@@ -1270,6 +1287,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // "Open Setup…" (General pane) re-opens the first-run priming window;
         // the backend is already running, so its onFinished is a guarded no-op.
         general.onRunSetupAgain = { [weak self] in self?.presentSetup() }
+        // A committed key changes both the note and the update feed's header.
+        general.onLicenseChanged = { [weak self] in self?.applyLicenseState() }
         // Left nil in a build with no updater, which hides the button.
         if let updaterController {
             general.onCheckForUpdates = { updaterController.checkForUpdates(nil) }
@@ -1413,6 +1432,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .light:  NSApp.appearance = NSAppearance(named: .aqua)
         case .dark:   NSApp.appearance = NSAppearance(named: .darkAqua)
         }
+    }
+
+    /// Push the stored licence state at the two things that read it: the
+    /// Mixer's lowest-precedence note, and the update feed's authorization
+    /// header (the server serves the appcast and the download only to a key).
+    /// Called at launch, on every validator answer, and whenever the General
+    /// pane commits a key. Idempotent by construction — both writes are plain
+    /// assignments of a computed value.
+    ///
+    /// A build with no licence server is the free build: no note, no matter
+    /// what is stored. `popoverController` is still nil at the launch call
+    /// (it is built later in `applicationDidFinishLaunching`); the validator's
+    /// answer always lands after that, so the note is never missed.
+    private func applyLicenseState() {
+        let key = settings.licenseKey ?? ""
+        let status = settings.licenseStatus
+        let unregistered = settings.licenseServerURL != nil
+            && (key.isEmpty || status == .unknown || status == .invalid || status == .revoked)
+        popoverController?.setUnregisteredNoteActive(unregistered)
+        updaterController?.updater.httpHeaders = key.isEmpty ? nil : ["Authorization": "Bearer \(key)"]
     }
 
     /// Gives graceful AirPlay teardown a bounded window before the process exits

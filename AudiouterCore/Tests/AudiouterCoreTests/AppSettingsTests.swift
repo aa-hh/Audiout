@@ -260,6 +260,51 @@ import Testing
         #expect(AppSettings(defaults: defaults).licenseKey == nil)
     }
 
+    /// The bundle key is what a real build reads; under a test run
+    /// `Bundle.main` is the runner, so the honest default here is "no server"
+    /// — which IS the free build's state — and the init override is the only
+    /// way to get the other one.
+    @Test func licenseServerURLIsAbsentByDefaultAndHonoursTheInitOverride() {
+        #expect(AppSettings(defaults: defaults).licenseServerURL == nil,
+                "no bundle key ⇒ the free build: nothing to validate against")
+        let server = URL(string: "https://license.example.com")!
+        #expect(AppSettings(defaults: defaults, licenseServerURL: server).licenseServerURL == server)
+    }
+
+    @Test func checkInURLDerivesFromTheLicenseServerAndYieldsToAStoredValue() {
+        #expect(AppSettings(defaults: defaults).checkInURL == nil, "no server ⇒ no endpoint")
+
+        let derived = AppSettings(defaults: defaults,
+                                  licenseServerURL: URL(string: "https://license.example.com")!)
+        #expect(derived.checkInURL == URL(string: "https://license.example.com/v1/checkin"))
+
+        derived.checkInURL = URL(string: "https://elsewhere.example.com/checkin")
+        #expect(derived.checkInURL == URL(string: "https://elsewhere.example.com/checkin"),
+                "an explicitly stored endpoint wins over the derived one")
+    }
+
+    @Test func licenseStatusRoundTripsAndIsClearedWithTheKey() {
+        let settings = AppSettings(defaults: defaults)
+        #expect(settings.licenseStatus == nil, "never verified")
+
+        settings.licenseKey = "AUDR-AAAAA-BBBBB-CCCCC-DDDDD"
+        settings.licenseStatus = .active
+        #expect(AppSettings(defaults: defaults).licenseStatus == .active)
+
+        settings.licenseKey = nil
+        #expect(AppSettings(defaults: defaults).licenseStatus == nil,
+                "a verdict about a deleted key is a verdict about nothing")
+    }
+
+    @Test func licenseMaxMajorRoundTrips() {
+        let settings = AppSettings(defaults: defaults)
+        #expect(settings.licenseMaxMajor == nil, "absent ⇒ nil, never 0")
+        settings.licenseMaxMajor = 1
+        #expect(AppSettings(defaults: defaults).licenseMaxMajor == 1)
+        settings.licenseMaxMajor = nil
+        #expect(AppSettings(defaults: defaults).licenseMaxMajor == nil)
+    }
+
     @Test func licenseCheckInConsentDefaultsOffAndRoundTrips() {
         let settings = AppSettings(defaults: defaults)
         #expect(!settings.licenseCheckInConsent, "identified stream: opt-in, never assumed on")

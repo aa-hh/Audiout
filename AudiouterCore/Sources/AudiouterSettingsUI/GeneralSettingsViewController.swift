@@ -28,17 +28,32 @@ public final class GeneralSettingsViewController: NSViewController {
     private let reconnectSwitch = NSSwitch()
     private let reconnectHint = SettingsForm.hintLabel()
     private let licenseKeyField = NSTextField()
+    private let licenseStatusHint = SettingsForm.hintLabel()
     private let licenseCheckInSwitch = NSSwitch()
     private let licenseHint = SettingsForm.hintLabel()
     private let setupButton = NSButton()
     private let aboutButton = NSButton()
     private let updatesButton = NSButton()
+    private let buyButton = NSButton()
     private let aboutWindowController: AboutWindowController
+    private let openURL: (URL) -> Void
 
     /// Fired when "Open Setup…" is clicked, so the app can re-present the
     /// first-run onboarding/permission-priming flow. Nil (unset) leaves the
     /// button inert — the app layer wires it in `openSettings`.
     public var onRunSetupAgain: (() -> Void)?
+
+    /// Fired at the end of every license status refresh — launch, and every
+    /// commit of the key field. The app layer re-reads ``AppSettings`` from it
+    /// (the unregistered note, the Sparkle authorization header); nil leaves
+    /// this pane's own display the only thing that moves.
+    public var onLicenseChanged: (() -> Void)?
+
+    /// The transport ``LicenseValidator`` uses when this pane checks a
+    /// freshly-entered key. Nil (unset) is the real network, which is what the
+    /// app always wants; tests stub it so a commit never leaves the machine —
+    /// same injection shape as ``onRunSetupAgain``.
+    public var licenseTransport: LicenseValidator.Transport?
 
     /// Fired when "Check for Updates…" is clicked. Nil (unset) means this build
     /// has no updater at all — a build run from source or without a Sparkle feed
@@ -52,15 +67,17 @@ public final class GeneralSettingsViewController: NSViewController {
     ///     the live app bundle (`AboutInfo.current()`), injected as a fixed
     ///     value in tests so the rendered version string never depends on how
     ///     the test binary was built.
-    ///   - openURL: opens the About window's "View Source Code…" link; defaults
-    ///     to `NSWorkspace`, injected as a recording closure in tests so a
-    ///     test run never actually launches a browser.
+    ///   - openURL: opens the About window's "View Source Code…" link and the
+    ///     "Buy Audiouter…" button's purchase page; defaults to `NSWorkspace`,
+    ///     injected as a recording closure in tests so a test run never
+    ///     actually launches a browser.
     public init(loginItem: LoginItemManaging,
                 settings: AppSettings = AppSettings(),
                 aboutInfo: AboutInfo = .current(),
                 openURL: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }) {
         self.loginItem = loginItem
         self.settings = settings
+        self.openURL = openURL
         self.aboutWindowController = AboutWindowController(info: aboutInfo, openURL: openURL)
         super.init(nibName: nil, bundle: nil)
         title = "General"
@@ -150,19 +167,69 @@ public final class GeneralSettingsViewController: NSViewController {
         updatesButton.setAccessibilityLabel("Check for Updates")
         updatesButton.isHidden = onCheckForUpdates == nil
 
+        buyButton.title = "Buy Audiouter…"
+        buyButton.bezelStyle = .rounded
+        buyButton.controlSize = .small
+        buyButton.target = self
+        buyButton.action = #selector(buyTapped)
+        buyButton.setAccessibilityLabel("Buy an Audiouter license")
+
         let hairline = NSBox()
         hairline.boxType = .separator
         hairline.translatesAutoresizingMaskIntoConstraints = false
 
-        let strip = NSStackView(views: [setupButton, aboutButton, updatesButton])
+        let strip = NSStackView(views: [setupButton, aboutButton, updatesButton, buyButton])
         strip.orientation = .horizontal
         strip.alignment = .centerY
         strip.spacing = 8
         strip.translatesAutoresizingMaskIntoConstraints = false
 
         view = SettingsForm.paneView(rows: [launchRow, reconnectRow, reconnectHint,
-                                             licenseKeyRow, licenseConsentRow, licenseHint,
+                                             licenseKeyRow, licenseStatusHint,
+                                             licenseConsentRow, licenseHint,
                                              hairline, strip])
+
+        refreshLicenseStatus()
+    }
+
+    /// What the status line under the key field says, per state — plain words,
+    /// no jargon, and never a claim the app is about to stop working. `nil`
+    /// means the line is hidden: with no license server this build has nothing
+    /// to verify against, so it says nothing at all.
+    private static func licenseStatusLine(serverConfigured: Bool,
+                                          keyIsEmpty: Bool,
+                                          status: LicenseStatus?) -> String? {
+        guard serverConfigured else { return nil }
+        if keyIsEmpty { return "Unregistered. Buy a license to support Audiouter and get updates." }
+        switch status {
+        case .active: return "Registered. Thank you."
+        case .revoked: return "This key was refunded or revoked. It no longer gets updates."
+        case .unknown: return "This key isn’t recognised. Check it against your receipt."
+        case .invalid: return "That doesn’t look like an Audiouter key (AUDR-XXXXX-XXXXX-XXXXX-XXXXX)."
+        case nil: return "Couldn’t reach the license server — will try again next launch."
+        }
+    }
+
+    /// Re-read the stored license state into the status line and the Buy
+    /// button, then tell the app layer. Every path that can change the state —
+    /// the launch build, a committed key, a validator answer — ends here, so
+    /// there is one place that decides what the pane shows.
+    private func refreshLicenseStatus() {
+        let serverConfigured = settings.licenseServerURL != nil
+        let key = settings.licenseKey ?? ""
+        let status = settings.licenseStatus
+        let line = Self.licenseStatusLine(serverConfigured: serverConfigured,
+                                          keyIsEmpty: key.isEmpty,
+                                          status: status)
+        licenseStatusHint.stringValue = line ?? ""
+        licenseStatusHint.isHidden = line == nil
+
+        // Buying is offered only where it can work (a server) and only where it
+        // would help (no key, or a key the server won’t honour).
+        let unregistered = key.isEmpty || status == .unknown || status == .invalid || status == .revoked
+        buyButton.isHidden = !(serverConfigured && unregistered && settings.buyURL != nil)
+
+        onLicenseChanged?()
     }
 
     /// The reconnect-at-launch live hint: what the NEXT launch will do.
@@ -182,13 +249,29 @@ public final class GeneralSettingsViewController: NSViewController {
         settings.licenseCheckInConsent = licenseCheckInSwitch.state == .on
     }
 
-    /// Persists the license key. Empty text clears it (`AppSettings.licenseKey`
-    /// treats an empty string the same as any other value it stores — the
-    /// field's placeholder, not a stored empty string, is what communicates
-    /// "unset").
+    /// Persists the license key and asks the server about it. Empty text
+    /// clears it (`AppSettings.licenseKey` treats an empty string the same as
+    /// any other value it stores — the field's placeholder, not a stored empty
+    /// string, is what communicates "unset") and refreshes straight away, since
+    /// there is nothing to ask about. A real key refreshes twice: once now
+    /// from what is already known, and again when the answer lands.
     private func commitLicenseKey() {
         let text = licenseKeyField.stringValue
+        // A different key is an unanswered question: the previous key's
+        // verdict must not stand in for it while the server is asked.
+        if text != settings.licenseKey { settings.licenseStatus = nil }
         settings.licenseKey = text.isEmpty ? nil : text
+        refreshLicenseStatus()
+        guard !text.isEmpty else { return }
+
+        let validator = licenseTransport.map { LicenseValidator(settings: settings, transport: $0) }
+            ?? LicenseValidator(settings: settings)
+        validator.validate { [weak self] _ in
+            guard let self else { return }
+            // The server may have written back a canonical spelling.
+            self.licenseKeyField.stringValue = self.settings.licenseKey ?? ""
+            self.refreshLicenseStatus()
+        }
     }
 
     public override func viewDidLoad() {
@@ -211,6 +294,11 @@ public final class GeneralSettingsViewController: NSViewController {
     @objc private func aboutTapped() { aboutWindowController.show() }
 
     @objc private func checkForUpdatesTapped() { onCheckForUpdates?() }
+
+    @objc private func buyTapped() {
+        guard let url = settings.buyURL else { return }
+        openURL(url)
+    }
 
     // STABILITY(D4): SMAppService register/status round-trips launchd XPC synchronously on the main thread; see dev/notes/stability-audit-2026-07-18.md
     @objc private func launchToggled() {
@@ -293,6 +381,19 @@ public final class GeneralSettingsViewController: NSViewController {
         _ = view
         licenseCheckInSwitch.state = on ? .on : .off
         licenseCheckInConsentToggled()
+    }
+
+    /// The license status line under the key field, or `nil` when it is hidden
+    /// (a build with no license server has nothing to verify).
+    public var test_licenseStatusText: String? {
+        _ = view
+        return licenseStatusHint.isHidden ? nil : licenseStatusHint.stringValue
+    }
+
+    /// Whether "Buy Audiouter…" is on screen.
+    public var test_buyButtonIsVisible: Bool {
+        _ = view
+        return !buyButton.isHidden
     }
 
     /// The license check-in hint line's fixed disclosure copy.

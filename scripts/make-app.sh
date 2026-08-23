@@ -660,6 +660,38 @@ plutil -extract NSBonjourServices.2 raw -o - "$PLIST" >/dev/null || { echo "ERRO
 plutil -insert NSBluetoothAlwaysUsageDescription -string "$BLUETOOTH_USAGE" "$PLIST"
 plutil -extract NSBluetoothAlwaysUsageDescription raw -o - "$PLIST" >/dev/null || { echo "ERROR: NSBluetoothAlwaysUsageDescription missing from Info.plist" >&2; exit 1; }
 
+# --- License server + buy page (release builds only) ------------------------
+# AUDIOUTER_LICENSE_URL is the base URL of the license server (the Worker in
+# ~/Projects/Audiouter License Server). Its presence is the whole switch for the
+# app's soft license check: with it the app validates the stored key, checks in,
+# and can show the unregistered note; without it — a build run from source — it
+# does none of those. AUDIOUTER_BUY_URL is where "Buy Audiouter…" sends the
+# user; absent, every buy affordance stays hidden.
+#
+# Independent of the Sparkle pair below, EXCEPT that a license server already
+# knows where its own appcast lives, so it supplies the feed URL when one wasn't
+# given explicitly. The SPARKLE_ED_PUBLIC_KEY requirement still applies to that
+# derived feed — an unverified update channel is never worth the convenience.
+if [ -n "${AUDIOUTER_LICENSE_URL:-}" ]; then
+  echo "==> Writing AudiouterLicenseServerURL ($AUDIOUTER_LICENSE_URL)"
+  plutil -insert AudiouterLicenseServerURL -string "$AUDIOUTER_LICENSE_URL" "$PLIST"
+  plutil -extract AudiouterLicenseServerURL raw -o - "$PLIST" >/dev/null || { echo "ERROR: AudiouterLicenseServerURL missing from Info.plist" >&2; exit 1; }
+  if [ -z "${SPARKLE_FEED_URL:-}" ]; then
+    SPARKLE_FEED_URL="$AUDIOUTER_LICENSE_URL/appcast.xml"
+    echo "==> Defaulting SPARKLE_FEED_URL to the license server's appcast ($SPARKLE_FEED_URL)"
+  fi
+else
+  echo "==> Skipping AudiouterLicenseServerURL (set AUDIOUTER_LICENSE_URL for a build that checks its license)"
+fi
+
+if [ -n "${AUDIOUTER_BUY_URL:-}" ]; then
+  echo "==> Writing AudiouterBuyURL ($AUDIOUTER_BUY_URL)"
+  plutil -insert AudiouterBuyURL -string "$AUDIOUTER_BUY_URL" "$PLIST"
+  plutil -extract AudiouterBuyURL raw -o - "$PLIST" >/dev/null || { echo "ERROR: AudiouterBuyURL missing from Info.plist" >&2; exit 1; }
+else
+  echo "==> Skipping AudiouterBuyURL (set AUDIOUTER_BUY_URL to offer a purchase link)"
+fi
+
 # --- Sparkle in-app updates (release builds only) ---------------------------
 # Set BOTH SPARKLE_FEED_URL and SPARKLE_ED_PUBLIC_KEY to build an updating
 # release; set neither for a dev/handover build, which then gets no updater at

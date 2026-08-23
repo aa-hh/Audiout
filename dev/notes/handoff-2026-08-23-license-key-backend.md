@@ -28,7 +28,25 @@ Alec then decided:
    explicitly rejected short-lived emailed links; this construction is the
    agreed answer — don't email presigned URLs.
 
-## Open item 1 — key generation scheme (discovery DONE, Alec sign-off pending)
+## State after the build session (2026-08-23, later)
+
+- Key scheme APPROVED by Alec as recommended; backend home = **separate
+  repo**: `~/Projects/Audiouter License Server` →
+  github.com/aa-hh/audiouter-license-server (private). Its README is the
+  endpoint contract + Alec's setup checklist. Built and tested (22 tests in
+  workerd). One swap from the plan below: `/download` streams the zip from R2
+  through the Worker instead of 302-ing to a presigned URL — same property
+  (no file URL outlives the key), no S3 signing.
+- The website's unmerged `claude/buy-page-paddle-c3b002` branch polls
+  `GET /v1/license/by-transaction/<txn>`; the server implements exactly that.
+- App side: commit da337e3f folds the 054 work onto this branch; the soft
+  check (validate, status line, buy button, popover note, Sparkle bearer
+  header, make-app.sh plist keys) is specified in
+  `work-order-2026-08-23-license-soft-check.md`.
+- Still Alec's: Cloudflare/Paddle-sandbox/Resend setup per the server README,
+  then a sandbox end-to-end (tunnel → webhook → /thanks), then merge go-ahead.
+
+## Open item 1 — key generation scheme (APPROVED 2026-08-23)
 
 Result in `dev/notes/license-key-generation-scheme-2026-08-23.md`.
 Recommendation: **random opaque key** `AUDR-XXXXX-XXXXX-XXXXX-XXXXX`

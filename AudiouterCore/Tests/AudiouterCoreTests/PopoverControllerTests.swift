@@ -2693,6 +2693,36 @@ import AppKit
         #expect(popover.test_systemAirPlayNoteText == nil, "the note clears once the guard ends")
     }
 
+    /// The unregistered-build note sits at the BOTTOM of the one note slot: it
+    /// is a standing condition, so anything actually happening right now takes
+    /// the slot away from it and hands it back afterwards. Its "Buy…" button is
+    /// the only remedy it can offer, and it routes out to the host.
+    @Test func unregisteredNoteShowsOffersBuyAndYieldsTheSlot() async throws {
+        let (popover, _, _) = try await makePopover()
+        var buyTaps = 0
+        popover.onBuyAudiouter = { buyTaps += 1 }
+
+        #expect(popover.test_systemAirPlayNoteText == nil, "no note by default")
+
+        popover.setUnregisteredNoteActive(true)
+        #expect(popover.test_systemAirPlayNoteText == "Audiouter is unregistered. Buying a license keeps it updated.")
+        #expect(popover.test_systemAirPlayNoteHasActionButton, "the note offers Buy…")
+        popover.test_tapSystemAirPlayNoteAction()
+        #expect(buyTaps == 1, "Buy… routes out to the host, which owns the URL")
+
+        // Lowest precedence: the double-path guard takes the slot…
+        popover.setSystemAirPlayNoteActive(true)
+        #expect(popover.test_systemAirPlayNoteText == PopoverController.systemAirPlayNoteText,
+                "something happening now outranks a standing condition")
+
+        // …and hands it straight back when it clears.
+        popover.setSystemAirPlayNoteActive(false)
+        #expect(popover.test_systemAirPlayNoteText == "Audiouter is unregistered. Buying a license keeps it updated.")
+
+        popover.setUnregisteredNoteActive(false)
+        #expect(popover.test_systemAirPlayNoteText == nil, "the note clears once a key is in place")
+    }
+
     // MARK: Routing-blocked warning (Wave 3 T-UI)
 
     /// The "Audiouter isn't your output device" warning: shows the verbatim copy

@@ -124,6 +124,135 @@ import AudiouterSharedUI
         #expect(fired == 1, "Check for Updates… routes from the General pane out to the app")
     }
 
+    // MARK: License soft check (General pane)
+
+    private static let licenseServer = URL(string: "https://license.example.com")!
+    private static let buyPage = URL(string: "https://audiout.app/buy")!
+
+    /// A settings value shaped like a PAID build: it knows a license server and
+    /// a buy page. A build from source has neither, which is the other half of
+    /// every assertion below.
+    private func makePaidBuildSettings() -> AppSettings {
+        AppSettings(defaults: isolation.makeDefaults(),
+                    licenseServerURL: Self.licenseServer,
+                    buyURL: Self.buyPage)
+    }
+
+    /// Answers every validate request with one canned reply.
+    private final class StubTransport: @unchecked Sendable {
+        var answer: (Data?, URLResponse?, Error?) = (nil, nil, URLError(.notConnectedToInternet))
+
+        func replies(_ json: String) {
+            answer = (Data(json.utf8),
+                      HTTPURLResponse(url: SettingsRootViewControllerTests.licenseServer,
+                                      statusCode: 200, httpVersion: nil, headerFields: nil),
+                      nil)
+        }
+
+        var closure: LicenseValidator.Transport {
+            { [self] _, completion in completion(answer.0, answer.1, answer.2) }
+        }
+    }
+
+    /// Lets the validator's main-queue completion (and the refresh it drives)
+    /// run before the next assertion. FIFO on the main queue is what makes this
+    /// deterministic rather than a sleep.
+    private func drainMainQueue() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+    }
+
+    /// A build run from source has no license server, so it has nothing to
+    /// verify and nothing to sell — the whole license surface stays silent
+    /// rather than telling the user something it cannot know.
+    @Test func aBuildWithNoLicenseServerSaysNothingAboutLicensing() {
+        let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false),
+                                                    settings: makeSettings())
+        #expect(general.test_licenseStatusText == nil)
+        #expect(!general.test_buyButtonIsVisible)
+    }
+
+    /// The status line's copy for every state the server can put the app in,
+    /// driven through the real commit path with a stubbed transport.
+    @Test func licenseStatusLineSpeaksEachState() async {
+        let settings = makePaidBuildSettings()
+        let transport = StubTransport()
+        let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false),
+                                                    settings: settings)
+        general.licenseTransport = transport.closure
+
+        #expect(general.test_licenseStatusText == "Unregistered. Buy a license to support Audiouter and get updates.")
+
+        transport.replies(#"{"status":"active"}"#)
+        general.test_setLicenseKey("AUDR-AAAAA-BBBBB-CCCCC-DDDDD")
+        await drainMainQueue()
+        #expect(general.test_licenseStatusText == "Registered. Thank you.")
+
+        transport.replies(#"{"status":"revoked"}"#)
+        general.test_setLicenseKey("AUDR-AAAAA-BBBBB-CCCCC-DDDDD")
+        await drainMainQueue()
+        #expect(general.test_licenseStatusText == "This key was refunded or revoked. It no longer gets updates.")
+
+        transport.replies(#"{"status":"unknown"}"#)
+        general.test_setLicenseKey("AUDR-AAAAA-BBBBB-CCCCC-DDDDD")
+        await drainMainQueue()
+        #expect(general.test_licenseStatusText == "This key isn’t recognised. Check it against your receipt.")
+
+        transport.replies(#"{"status":"invalid"}"#)
+        general.test_setLicenseKey("nonsense")
+        await drainMainQueue()
+        #expect(general.test_licenseStatusText == "That doesn’t look like an Audiouter key (AUDR-XXXXX-XXXXX-XXXXX-XXXXX).")
+
+        // Clearing the key clears the verdict with it, so the next commit —
+        // against a server that never answers — lands on "never verified".
+        general.test_setLicenseKey("")
+        transport.answer = (nil, nil, URLError(.notConnectedToInternet))
+        general.test_setLicenseKey("AUDR-AAAAA-BBBBB-CCCCC-DDDDD")
+        await drainMainQueue()
+        #expect(general.test_licenseStatusText == "Couldn’t reach the license server — will try again next launch.")
+    }
+
+    /// A different key is an open question, not the old key's answer: while
+    /// the server is asked, the line says "couldn't reach", never "Registered".
+    @Test func changingTheKeyDropsThePreviousVerdictImmediately() async {
+        let settings = makePaidBuildSettings()
+        let transport = StubTransport()
+        let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false),
+                                                    settings: settings)
+        general.licenseTransport = transport.closure
+        transport.replies(#"{"status":"active"}"#)
+        general.test_setLicenseKey("AUDR-AAAAA-BBBBB-CCCCC-DDDDD")
+        await drainMainQueue()
+        #expect(general.test_licenseStatusText == "Registered. Thank you.")
+
+        transport.answer = (nil, nil, URLError(.notConnectedToInternet))
+        general.test_setLicenseKey("AUDR-ZZZZZ-ZZZZZ-ZZZZZ-ZZZZZ")
+        #expect(general.test_licenseStatusText == "Couldn’t reach the license server — will try again next launch.")
+        await drainMainQueue()
+        #expect(general.test_licenseStatusText == "Couldn’t reach the license server — will try again next launch.")
+    }
+
+    /// Buying is offered only where it can work and only where it would help.
+    @Test func buyButtonAppearsOnlyWhileUnregistered() async {
+        let transport = StubTransport()
+        let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false),
+                                                    settings: makePaidBuildSettings())
+        general.licenseTransport = transport.closure
+
+        #expect(general.test_buyButtonIsVisible, "no key yet ⇒ the offer is the point")
+
+        transport.replies(#"{"status":"active"}"#)
+        general.test_setLicenseKey("AUDR-AAAAA-BBBBB-CCCCC-DDDDD")
+        await drainMainQueue()
+        #expect(!general.test_buyButtonIsVisible, "a registered build is quiet")
+
+        transport.replies(#"{"status":"revoked"}"#)
+        general.test_setLicenseKey("AUDR-AAAAA-BBBBB-CCCCC-DDDDD")
+        await drainMainQueue()
+        #expect(general.test_buyButtonIsVisible, "a key the server won’t honour is worth re-buying")
+    }
+
     /// Owner decision (AGENTS.md): Settings always opens on General. A fresh
     /// root starts there by construction; the surface builds/keeps the root
     /// and owns any reset-on-show policy of its own.

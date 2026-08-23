@@ -12,10 +12,10 @@ import Foundation
 /// there is no enforcement path here to build even if one were wanted.
 ///
 /// razor: fires once per launch, fire-and-forget — no retry, no schedule, no
-/// queue. That ceiling is correct because there is no server yet
-/// (`AppSettings.checkInURL` is unset everywhere in this app — see its doc
-/// comment). Upgrade path, once a backend exists: add a real schedule +
-/// endpoint contract, not a queue bolted onto this call.
+/// queue. The endpoint is derived from the bundle's license server
+/// (`AppSettings.checkInURL`), so a build run from source has none and this
+/// never fires at all. Upgrade path, if once-per-launch turns out to under-
+/// count: a real schedule, not a queue bolted onto this call.
 public struct LicenseCheckIn {
 
     /// Sends one check-in request. Defaults to firing a real `URLSession` data

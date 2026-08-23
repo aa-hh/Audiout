@@ -983,9 +983,11 @@ public final class PopoverController: NSObject {
     // — there is only one, never two stacked notes (PLAN-AIRPLAY-COEXISTENCE.md T6).
     // PRECEDENCE, highest first: routing-blocked (T-UI, WARNING severity — audio is
     // dead right now) outranks the takeover status, which outranks the double-path
-    // guard note; each lower note reappears underneath the instant the one above it
-    // clears. Each condition keeps its own idempotence-check state var
-    // (`routingBlockedNeedsDefault` / `takeoverStatus` / `systemAirPlayNoteActive`);
+    // guard note, which outranks the unregistered-build note (lowest — it is a
+    // standing condition, never something happening right now); each lower note
+    // reappears underneath the instant the one above it clears. Each condition
+    // keeps its own idempotence-check state var (`routingBlockedNeedsDefault` /
+    // `takeoverStatus` / `systemAirPlayNoteActive` / `unregisteredNoteActive`);
     // `applyNoteSlot()` is the one place that resolves precedence and actually
     // pushes to the panel, called by every setter and by the tail of `rebuild()`.
 
@@ -1030,6 +1032,29 @@ public final class PopoverController: NSObject {
         applyNoteSlot()
     }
 
+    /// The unregistered-build note's copy: a standing fact stated once, not a
+    /// nag — the app is doing everything it always does either way.
+    static let unregisteredNoteText = "Audiouter is unregistered. Buying a license keeps it updated."
+
+    /// Whether this build has a license server but no key the server honours.
+    /// Drives the LOWEST-precedence note (see PRECEDENCE above); re-applied on
+    /// every `rebuild()` so a rebuild while unregistered keeps it pinned.
+    private var unregisteredNoteActive = false
+
+    /// Opens the purchase page. The host owns the URL (`AppSettings.buyURL`),
+    /// exactly as it owns every other note action's remedy.
+    public var onBuyAudiouter: (() -> Void)?
+
+    /// Show or clear the unregistered-build note. Called by the host
+    /// (`AppDelegate`) directly — a whole-app condition with no home on
+    /// `Device`, same shape as ``setSystemAirPlayNoteActive(_:)``. Idempotent:
+    /// a repeat of the current state is a no-op.
+    public func setUnregisteredNoteActive(_ active: Bool) {
+        guard active != unregisteredNoteActive else { return }
+        unregisteredNoteActive = active
+        applyNoteSlot()
+    }
+
     /// Show or clear the "double-path audio" note
     /// (`BackendEvent.systemDefaultIsAirPlayActive`). Called by the host
     /// (`AppDelegate`) directly — a whole-app condition with no home on `Device`,
@@ -1065,10 +1090,11 @@ public final class PopoverController: NSObject {
 
     /// What the note slot should currently show, highest precedence first:
     /// routing-blocked (T-UI, WARNING — audio is dead right now) outranks a
-    /// takeover status (T6), which outranks the double-path guard (W3-T3);
-    /// none active means no note. `action` is non-nil for routing-blocked (the
-    /// "Use <productName>" button) and for the takeover strip's
-    /// `.needsApproval` (state 1) — the only states with an actual remedy a
+    /// takeover status (T6), which outranks the double-path guard (W3-T3),
+    /// which outranks the unregistered-build note; none active means no note.
+    /// `action` is non-nil for routing-blocked (the "Use <productName>"
+    /// button), for the takeover strip's `.needsApproval` (state 1), and for
+    /// the unregistered note ("Buy…") — the states with an actual remedy a
     /// button can offer.
     private var resolvedSystemAirPlayNote: (text: String?, action: SystemAirPlayNoteBannerView.Action?, severity: SystemAirPlayNoteBannerView.Severity) {
         if routingBlockedNeedsDefault {
@@ -1080,7 +1106,18 @@ public final class PopoverController: NSObject {
         if systemAirPlayNoteActive {
             return (Self.systemAirPlayNoteText, nil, .info)
         }
+        if unregisteredNoteActive {
+            return (Self.unregisteredNoteText, unregisteredNoteAction, .info)
+        }
         return (nil, nil, .info)
+    }
+
+    /// The unregistered note's action button.
+    private var unregisteredNoteAction: SystemAirPlayNoteBannerView.Action {
+        SystemAirPlayNoteBannerView.Action(
+            title: "Buy…",
+            accessibilityLabel: "Buy an Audiouter license",
+            handler: { [weak self] in self?.onBuyAudiouter?() })
     }
 
     /// The routing-blocked warning's action button (T-UI, Alec's Q6 — the

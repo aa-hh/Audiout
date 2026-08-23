@@ -21,7 +21,8 @@ replies) restates this, not a variant of it.
 ```bash
 # 1. Bump the version/build number for this release, then run the pipeline:
 APP_VERSION=1.0.0 BUILD_NUMBER=3 \
-SPARKLE_FEED_URL="https://<release-domain>/appcast.xml" \
+AUDIOUTER_LICENSE_URL="https://<license-server>" \
+AUDIOUTER_BUY_URL="https://<site>/buy" \
 SPARKLE_ED_PUBLIC_KEY="<public key from Sparkle's generate_keys>" \
 scripts/make-release.sh
 
@@ -30,12 +31,24 @@ scripts/make-release.sh
 # to be set — it errors out immediately otherwise.
 ```
 
+### Build-time env vars
+
+| Variable | Info.plist key | What it turns on |
+|---|---|---|
+| `AUDIOUTER_LICENSE_URL` | `AudiouterLicenseServerURL` | The soft license check: key validation (`POST /v1/validate`), check-ins, and the unregistered note. Also supplies `SPARKLE_FEED_URL` when that isn't set. |
+| `AUDIOUTER_BUY_URL` | `AudiouterBuyURL` | The "Buy Audiouter…" button in Settings and the Mixer note's "Buy…" action. Absent ⇒ both hidden. |
+| `SPARKLE_FEED_URL` | `SUFeedURL` | Where the updater checks. Defaults to `$AUDIOUTER_LICENSE_URL/appcast.xml`. |
+| `SPARKLE_ED_PUBLIC_KEY` | `SUPublicEDKey` | The EdDSA public key update archives are verified against. |
+
+All four are optional, and each absence is a real product state, not a broken
+build: a build run from source has no license server, so it validates nothing,
+prompts nothing and updates nothing — that is the free build.
+
 `SPARKLE_FEED_URL` / `SPARKLE_ED_PUBLIC_KEY` are consumed by `make-app.sh`
-(which `make-release.sh` calls internally): when both are set, they're written
-into the app's Info.plist as `SUFeedURL` / `SUPublicEDKey` so the bundled
-Sparkle updater knows where to check and which signature to trust. Setting
-only one is a hard error in `make-app.sh` — a feed with no key (or a key with
-no feed) is a broken updater, not a degraded one.
+(which `make-release.sh` calls internally). Setting only one is a hard error —
+a feed with no key (or a key with no feed) is a broken updater, not a degraded
+one. That check applies to the feed URL derived from `AUDIOUTER_LICENSE_URL`
+too, so a license-server build still needs the signing key.
 
 **A release build must never be launched on this Mac for testing.** It carries
 the real Developer ID signature and the real `SUFeedURL`/`SUPublicEDKey` — the
@@ -107,23 +120,35 @@ the app can verify update signatures against it.
 - No Paddle SDK or checkout script lives in either repo yet — the marketing
   site's buy button is still a placeholder link until this step is done.
 
-### e. Per-release: sign the update archive and publish the appcast entry
+### e. Per-release: sign the archive and upload it to the license server's R2
 
-For every release meant to reach existing users via Sparkle:
+The download and the update feed are both served by the license server
+(`~/Projects/Audiouter License Server`, README there is the contract), gated on
+a key — so publishing a release is an upload to its R2 bucket, not an edit to
+the website. For every release meant to reach existing users via Sparkle, with
+`N` the major version:
 
 1. Sign the distributable zip with Sparkle's `sign_update` tool (same
    distribution as `generate_keys` above), using the private key from step c.
-2. Add an `<item>` to the website repo's `public/appcast.xml`
-   (`~/Projects/Audiouter Website`) with the version, the download URL, and
-   the signature `sign_update` printed — see that file's own comment for the
-   minimal feed shape. This repo does not touch the website repo; that edit
-   happens there.
+2. Write `appcast-vN.xml` listing only the N.x releases, each `<item>` carrying
+   the version and the signature `sign_update` printed. Enclosure URLs are
+   simply `<PUBLIC_BASE_URL>/download` — Sparkle sends the key as a bearer
+   header on the enclosure fetch too, and the server resolves which file that
+   key is entitled to.
+3. Write `latest-vN.json`: `{"version": "<version>", "file": "releases/Audiouter-<version>.zip"}`.
+4. Upload all three:
 
-### f. Choose the appcast's serving domain
+   ```bash
+   wrangler r2 object put audiouter-releases/releases/Audiouter-1.0.0.zip --file build/Audiouter-1.0.0.zip
+   wrangler r2 object put audiouter-releases/releases/latest-v1.json --file latest-v1.json
+   wrangler r2 object put audiouter-releases/appcast-v1.xml --file appcast-v1.xml
+   ```
 
-`SPARKLE_FEED_URL` (passed at build time, see above) has to be a real URL
-that will keep serving `appcast.xml` for the life of every copy of the app
-already installed — this is a one-time choice, not a per-release one, because
-changing it later strands existing installs (they keep checking the OLD
-URL forever unless a manual update ships a new one). Decide the domain before
-the first public release, not after.
+### f. Choose the license server's public URL
+
+`AUDIOUTER_LICENSE_URL` (passed at build time, see above) has to be a real URL
+that will keep serving `/v1/validate` and `/appcast.xml` for the life of every
+copy of the app already installed — a one-time choice, not a per-release one,
+because changing it later strands existing installs (they keep checking the OLD
+URL forever unless a manual update ships a new one). Decide it before the first
+public release, not after; it is the license server's `PUBLIC_BASE_URL`.

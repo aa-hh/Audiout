@@ -28,6 +28,17 @@ public enum AccentStyle: String, CaseIterable, Sendable {
     case systemAccent
 }
 
+/// What the license server last said about the stored key (`POST /v1/validate`).
+/// The raw values are the server's own strings, so a response maps straight
+/// across. `active`/`revoked` are answers about a real key; `unknown` means the
+/// server has no such key; `invalid` means the text isn't key-shaped at all.
+public enum LicenseStatus: String {
+    case active
+    case revoked
+    case unknown
+    case invalid
+}
+
 /// The app's **scalar** user preferences, backed by `UserDefaults`.
 ///
 /// This is the deliberate other half of the persistence split (decided with the
@@ -47,9 +58,24 @@ public enum AccentStyle: String, CaseIterable, Sendable {
 public struct AppSettings {
 
     private let defaults: UserDefaults
+    private let licenseServerURLOverride: URL?
+    private let buyURLOverride: URL?
 
-    public init(defaults: UserDefaults = .standard) {
+    /// - Parameters:
+    ///   - licenseServerURL: overrides the bundle-supplied license server (see
+    ///     ``licenseServerURL``).
+    ///   - buyURL: overrides the bundle-supplied purchase page (see ``buyURL``).
+    ///
+    ///   Both exist because the values normally come from the app bundle's
+    ///   Info.plist, and under `swift test` `Bundle.main` is the test
+    ///   runner — there is no other way to exercise a build that HAS a license
+    ///   server. The app always passes neither.
+    public init(defaults: UserDefaults = .standard,
+                licenseServerURL: URL? = nil,
+                buyURL: URL? = nil) {
         self.defaults = defaults
+        self.licenseServerURLOverride = licenseServerURL
+        self.buyURLOverride = buyURL
     }
 
     private enum Keys {
@@ -68,6 +94,8 @@ public struct AppSettings {
         static let licenseCheckInConsent = "license.checkInConsent"
         static let licenseInstallID = "license.installID"
         static let licenseCheckInURL = "license.checkInURL"
+        static let licenseStatus = "license.status"
+        static let licenseMaxMajor = "license.maxMajor"
     }
 
     /// The user-selectable sender start-buffer options in ms (Settings › Audio
@@ -299,10 +327,57 @@ public struct AppSettings {
     /// The purchase licence key, entered once from the receipt (Settings ›
     /// General, roadmap 054). `nil` when unset — Audiouter is fully functional
     /// without one (the Ardour model: the binary is what's sold, never a
-    /// software lock — GPL forbids one). Setting `nil` removes the stored value.
+    /// software lock — GPL forbids one). Setting `nil` removes the stored value
+    /// AND clears ``licenseStatus``: a verdict about a key the user has deleted
+    /// is not a verdict about anything.
     public var licenseKey: String? {
         get { defaults.string(forKey: Keys.licenseKey) }
-        nonmutating set { defaults.set(newValue, forKey: Keys.licenseKey) }
+        nonmutating set {
+            defaults.set(newValue, forKey: Keys.licenseKey)
+            if newValue == nil { licenseStatus = nil }
+        }
+    }
+
+    /// What the server last said about ``licenseKey`` (``LicenseValidator``).
+    /// `nil` means never verified — no key, or no answer has ever arrived. The
+    /// check is SOFT, so a value here only ever chooses what the UI says; it
+    /// gates nothing.
+    public var licenseStatus: LicenseStatus? {
+        get { defaults.string(forKey: Keys.licenseStatus).flatMap(LicenseStatus.init(rawValue:)) }
+        nonmutating set { defaults.set(newValue?.rawValue, forKey: Keys.licenseStatus) }
+    }
+
+    /// The highest major version the stored key covers, as the server reported
+    /// it. `nil` when absent (and for a stored 0, which no real answer uses).
+    public var licenseMaxMajor: Int? {
+        get {
+            let stored = defaults.integer(forKey: Keys.licenseMaxMajor)
+            return stored == 0 ? nil : stored
+        }
+        nonmutating set { defaults.set(newValue, forKey: Keys.licenseMaxMajor) }
+    }
+
+    /// The license server this build talks to, from the bundle's
+    /// `AudiouterLicenseServerURL` (written by `scripts/make-app.sh` from
+    /// `AUDIOUTER_LICENSE_URL`). **A build run from source has none** — so it
+    /// does no validation, no check-in and shows no buy prompt. That is the
+    /// free build, and the absence is the whole switch. The initializer's
+    /// override wins when non-nil, for tests.
+    public var licenseServerURL: URL? {
+        licenseServerURLOverride ?? Self.bundleURL(forInfoDictionaryKey: "AudiouterLicenseServerURL")
+    }
+
+    /// Where "Buy Audiouter…" sends the user, from the bundle's
+    /// `AudiouterBuyURL` (written by `scripts/make-app.sh` from
+    /// `AUDIOUTER_BUY_URL`). `nil` in a build that carries no such key, which
+    /// is what hides every buy affordance — the Settings button and the
+    /// Mixer note's action alike read this one value.
+    public var buyURL: URL? {
+        buyURLOverride ?? Self.bundleURL(forInfoDictionaryKey: "AudiouterBuyURL")
+    }
+
+    private static func bundleURL(forInfoDictionaryKey key: String) -> URL? {
+        (Bundle.main.object(forInfoDictionaryKey: key) as? String).flatMap(URL.init(string:))
     }
 
     /// Consent to send licence check-ins (``LicenseCheckIn``) — telemetry that
@@ -327,13 +402,17 @@ public struct AppSettings {
         return generated
     }
 
-    /// The licence check-in endpoint. **Absent by default, and no code path in
-    /// this app sets it** — that absence is what keeps ``LicenseCheckIn``
-    /// inert until a real backend exists (roadmap 054: "check-in client built
-    /// now with no server"). `nil` when unset or when the stored string isn't a
-    /// valid URL.
+    /// The licence check-in endpoint (``LicenseCheckIn``). Normally DERIVED —
+    /// `v1/checkin` under ``licenseServerURL`` — so a build that carries a
+    /// license server checks in and a build run from source, which carries
+    /// none, has no endpoint and stays silent. A stored value overrides the
+    /// derived one, which is how tests point it somewhere harmless. `nil` when
+    /// there is neither.
     public var checkInURL: URL? {
-        get { defaults.string(forKey: Keys.licenseCheckInURL).flatMap(URL.init(string:)) }
+        get {
+            defaults.string(forKey: Keys.licenseCheckInURL).flatMap(URL.init(string:))
+                ?? licenseServerURL?.appending(path: "v1/checkin")
+        }
         nonmutating set { defaults.set(newValue?.absoluteString, forKey: Keys.licenseCheckInURL) }
     }
 }

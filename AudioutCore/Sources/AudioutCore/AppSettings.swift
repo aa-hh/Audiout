@@ -91,7 +91,6 @@ public struct AppSettings {
         static let surfacePinned = "surface.pinned"
         static let eqAdvancedExpanded = "eq.advancedExpanded"
         static let licenseKey = "license.key"
-        static let licenseCheckInConsent = "license.checkInConsent"
         static let licenseInstallID = "license.installID"
         static let licenseCheckInURL = "license.checkInURL"
         static let licenseStatus = "license.status"
@@ -378,15 +377,6 @@ public struct AppSettings {
 
     private static func bundleURL(forInfoDictionaryKey key: String) -> URL? {
         (Bundle.main.object(forInfoDictionaryKey: key) as? String).flatMap(URL.init(string:))
-    }
-
-    /// Consent to send licence check-ins (``LicenseCheckIn``) — telemetry that
-    /// records device spread for a licence, never a gate. Defaults to **off**:
-    /// this is the identified stream (PRODUCT.md Data Collection stream 2), so
-    /// it is opt-in like the anonymous stream, never assumed on.
-    public var licenseCheckInConsent: Bool {
-        get { defaults.bool(forKey: Keys.licenseCheckInConsent) }
-        nonmutating set { defaults.set(newValue, forKey: Keys.licenseCheckInConsent) }
     }
 
     /// A stable per-install identifier for licence check-ins — lazily created

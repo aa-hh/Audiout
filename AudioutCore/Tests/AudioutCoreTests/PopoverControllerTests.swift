@@ -2705,7 +2705,7 @@ import AppKit
         #expect(popover.test_systemAirPlayNoteText == nil, "no note by default")
 
         popover.setUnregisteredNoteActive(true)
-        #expect(popover.test_systemAirPlayNoteText == "Audiout is unregistered. Buying a license keeps it updated.")
+        #expect(popover.test_systemAirPlayNoteText == "Audiout is unregistered. Buying a license keeps it updated and funds the work of improving it.")
         #expect(popover.test_systemAirPlayNoteHasActionButton, "the note offers Buy…")
         popover.test_tapSystemAirPlayNoteAction()
         #expect(buyTaps == 1, "Buy… routes out to the host, which owns the URL")
@@ -2717,7 +2717,7 @@ import AppKit
 
         // …and hands it straight back when it clears.
         popover.setSystemAirPlayNoteActive(false)
-        #expect(popover.test_systemAirPlayNoteText == "Audiout is unregistered. Buying a license keeps it updated.")
+        #expect(popover.test_systemAirPlayNoteText == "Audiout is unregistered. Buying a license keeps it updated and funds the work of improving it.")
 
         popover.setUnregisteredNoteActive(false)
         #expect(popover.test_systemAirPlayNoteText == nil, "the note clears once a key is in place")

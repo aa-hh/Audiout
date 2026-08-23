@@ -120,20 +120,33 @@ final class SystemAirPlayNoteBannerView: NSView {
         layer?.backgroundColor = severity.tintColor.withAlphaComponent(severity.backgroundAlpha).cgColor
         layer?.borderColor = severity.tintColor.withAlphaComponent(severity.borderAlpha).cgColor
 
-        var rowViews: [NSView] = [icon, text]
-        if let button { rowViews.append(button) }
-        let row = NSStackView(views: rowViews)
-        row.orientation = .horizontal
-        row.alignment = .firstBaseline
-        row.spacing = 10
-        row.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(row)
+        // The icon+text pair sits at its own natural (leading-hugging) width —
+        // it does NOT stretch to fill the banner. The button is a SEPARATE
+        // view pinned to the banner's trailing edge, not a third stack member:
+        // an all-in-one-stack layout left the button hugging the text with
+        // any leftover width stranded past it, against the banner's true
+        // trailing edge, instead of where the eye expects a CTA to sit.
+        let leading = NSStackView(views: [icon, text])
+        leading.orientation = .horizontal
+        leading.alignment = .firstBaseline
+        leading.spacing = 10
+        leading.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(leading)
         NSLayoutConstraint.activate([
-            row.topAnchor.constraint(equalTo: topAnchor, constant: 10),
-            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
-            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
-            row.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+            leading.topAnchor.constraint(equalTo: topAnchor, constant: 10),
+            leading.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -10),
+            leading.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
         ])
+        if let button {
+            addSubview(button)
+            NSLayoutConstraint.activate([
+                leading.trailingAnchor.constraint(lessThanOrEqualTo: button.leadingAnchor, constant: -10),
+                button.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+                button.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
+            ])
+        } else {
+            leading.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14).isActive = true
+        }
 
         button?.target = self
         button?.action = #selector(actionButtonTapped)

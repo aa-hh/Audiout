@@ -384,6 +384,52 @@ extension SerializedSharedState {
         let raised = resolved(Tokens.Color.raised, appearanceName: .aqua)
         #expect(panel != raised, "light mode needs a real raised step above panel, not an identical fill")
     }
+
+    // MARK: 8 — Bluetooth's row wears the OFFICIAL mark
+
+    /// The Bluetooth row's glyph must be the system's own Bluetooth image:
+    /// NEVER an SF Symbol stand-in (there is no Bluetooth symbol, so any
+    /// stand-in is some other mark) and NEVER a hand-drawn rune. Asserting the
+    /// card really carries that image is what stops a later pass from quietly
+    /// dropping back to `symbolName`.
+    @Test func bluetoothCardCarriesTheSystemBluetoothGlyph() {
+        let content = OnboardingViewController.content(for: .bluetooth)
+        let system = try? #require(NSImage(named: NSImage.bluetoothTemplateName))
+
+        #expect(content.customIcon != nil,
+                "the Bluetooth row must carry a real glyph override, not fall through to symbolName")
+        #expect(content.customIcon?.isTemplate == true,
+                "the rune has to be a template image or the tile can't tint it")
+        // Same underlying system asset — compared by drawn content, since
+        // `bluetoothRuneImage` hands back a rescaled COPY, never the shared
+        // cache entry itself (resizing that would resize it app-wide).
+        #expect(content.customIcon !== system,
+                "must be a copy: rescaling the shared named image would resize it for every other user")
+        #expect(content.customIcon?.tiffRepresentation != nil,
+                "the copied rune must still carry drawable content after the rescale")
+    }
+
+    /// The rune wears the Bluetooth SIG brand blue rather than one of the four
+    /// warmed `permission*` hues — a BRAND mark, so it is deliberately fixed
+    /// across appearances. It still has to clear the same 3:1 glyph floor on
+    /// the neutral `raised` well it sits in.
+    @Test func bluetoothBrandIsTheOfficialBlueAndClearsTheGlyphFloor() {
+        let floor: CGFloat = 3.0
+        let srgb = Tokens.Color.bluetoothBrand.usingColorSpace(.sRGB)
+        #expect(srgb.map { Int(($0.redComponent * 255).rounded()) } == 0x00)
+        #expect(srgb.map { Int(($0.greenComponent * 255).rounded()) } == 0x82)
+        #expect(srgb.map { Int(($0.blueComponent * 255).rounded()) } == 0xFC,
+                "the row must wear the official Bluetooth blue #0082FC")
+
+        for appearance: NSAppearance.Name in [.darkAqua, .aqua] {
+            let brand = resolved(Tokens.Color.bluetoothBrand, appearanceName: appearance)
+            for (name, token) in [("raised", Tokens.Color.raised), ("panel", Tokens.Color.panel)] {
+                let ratio = contrastRatio(brand, resolved(token, appearanceName: appearance))
+                #expect(ratio >= floor,
+                        "bluetoothBrand/\(appearance.rawValue) vs \(name): \(ratio):1 under the \(floor):1 floor")
+            }
+        }
+    }
 }
 
 } // extension SerializedSharedState

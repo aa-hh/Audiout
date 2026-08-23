@@ -904,6 +904,20 @@ public enum Tokens {
                                                    light: 0x796356, lightHighContrast: 0x524036))
         }
 
+        /// Bluetooth SIG brand blue `#0082FC` — the Bluetooth setup row's
+        /// glyph tint (Alec, 2026-08-23: the rune wears its official colour).
+        /// A BRAND MARK, so one fixed hex in every appearance/contrast
+        /// variant, deliberately outside the warmed `permission*` family and
+        /// its dial-aware resolver. CONTRAST RATIONALE (measured, same WCAG
+        /// relative-luminance formula as the `permission*` hues above):
+        /// 4.35:1 vs dark `raised` `#241F1A` / 3.29:1 vs light `raised`
+        /// `#F2F0EA`; 4.66:1 / 3.62:1 vs dark/light `panel` — clearing the
+        /// same >=3:1 glyph bar those four hold, in the one appearance pair
+        /// `raised` authors (it has no Increase-Contrast variants to match).
+        public static var bluetoothBrand: NSColor {
+            NSColor(srgbRed: 0x00 / 255, green: 0x82 / 255, blue: 0xFC / 255, alpha: 1)
+        }
+
         // MARK: FEED-pill instruments (Circuit light pass, 2026-08-07 decision)
         //
         // The two tokens `FeedPillView` needs now that the pill reads by FILL

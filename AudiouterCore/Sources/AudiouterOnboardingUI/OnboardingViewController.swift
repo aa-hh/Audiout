@@ -558,15 +558,16 @@ public final class OnboardingViewController: NSViewController {
         case .bluetooth:
             return SetupCardContent(
                 step: step,
+                // SF Symbols ships no Bluetooth rune, so the tile carries the
+                // system's own official one (`NSImage.bluetoothTemplateName`
+                // via `bluetoothRuneImage`). The symbol name below is the
+                // FALLBACK the tile draws if that image ever fails to load —
+                // not a dead value.
                 symbolName: "dot.radiowaves.right",
-                // razor: Bluetooth SHARES Remote Control's hue rather than
-                // minting a fifth `Tokens.Color.permission*` token, which would
-                // need authored light/dark/Increase-Contrast values and a
-                // measured contrast rationale from the palette owner. The two
-                // rows are never adjacent, so the repeat doesn't read as a
-                // mistake. Upgrade path: add `permissionBluetooth` to `Tokens`
-                // with those three variants and swap this one line.
-                iconColor: Tokens.Color.permissionRemoteControl,
+                customIcon: bluetoothRuneImage(height: 13),
+                // The rune wears the official Bluetooth SIG brand blue, not a
+                // warmed `permission*` hue — rationale on the token.
+                iconColor: Tokens.Color.bluetoothBrand,
                 activeTitle: "Let Audiouter use Bluetooth speakers",
                 completedTitle: "Audiouter can now use Bluetooth speakers",
                 detail: "Reconnect a paired Bluetooth speaker that's switched "

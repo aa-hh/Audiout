@@ -165,6 +165,67 @@ enum SpeakerSection {
 /// `WarmSignal.faderValue`.
 private enum DragAxis { case horizontal, vertical }
 
+/// A speaker's output transport, for the filter chips. `Device.Kind` has six
+/// AirPlay-class kinds plus `bluetooth` (and, once roadmap 006 lands, `cast`);
+/// anything that isn't Bluetooth or Cast is AirPlay. The local Mac is a real
+/// device but belongs to no transport chip.
+private enum SpeakerTransport: Hashable {
+    case airplay, bluetooth, cast
+
+    var chip: SpeakerChip {
+        switch self {
+        case .airplay:   return .airplay
+        case .bluetooth: return .bluetooth
+        case .cast:      return .cast
+        }
+    }
+
+    /// From the wire `kind` (``DeviceState/kind`` = `Device.Kind.rawValue`).
+    /// The local Mac (`isLocalDevice`) is excluded here — it still shows under
+    /// ALL and FAVOURITES, just under no transport lens. `"cast"` never appears
+    /// on this branch yet (no `Device.Kind.cast` until 006), so the CAST chip
+    /// simply never draws — the mapping is forward-compatible, not dead.
+    static func of(_ device: DeviceState) -> SpeakerTransport? {
+        guard !device.isLocalDevice else { return nil }
+        switch device.kind {
+        case "bluetooth": return .bluetooth
+        case "cast":      return .cast
+        default:          return .airplay
+        }
+    }
+}
+
+/// The filter chips under the Playing section. Sentence/product case and drawn
+/// through `.microLabel()`, per the One Case rule — the app never shouts, so
+/// the decision record's `ALL · FAVOURITES · …` notation renders as
+/// `All · Favourites · …` (DESIGN.md).
+private enum SpeakerChip: String, CaseIterable, Identifiable {
+    case all, favourites, airplay, bluetooth, cast
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .all:        return "All"
+        case .favourites: return "Favourites"
+        case .airplay:    return "AirPlay"
+        case .bluetooth:  return "Bluetooth"
+        case .cast:       return "Cast"
+        }
+    }
+
+    /// The transport this chip filters to, or `nil` for the two that don't
+    /// filter by transport.
+    var transport: SpeakerTransport? {
+        switch self {
+        case .airplay:   return .airplay
+        case .bluetooth: return .bluetooth
+        case .cast:      return .cast
+        case .all, .favourites: return nil
+        }
+    }
+}
+
 /// The sections and the floating Main Out deck. Split out of ``SpeakersView``
 /// so this screen's presentation state has a legal home: it is only ever
 /// constructed when a snapshot exists, so its state dies with the snapshot
@@ -174,10 +235,25 @@ private struct SpeakerConsole: View {
     let session: any MacSessionProtocol
 
     // razor: collapse state is in-memory only. The design wants it remembered per Mac (doc:1046), but the phone may not persist routing state (Model/MacSessionProtocol.swift:21-23); revisit if that rule changes.
-    @State private var collapsed: Set<String> = []   // the `= []` is required: State<Set<String>>
-                                                     // has no init(), so without it `collapsed`
-                                                     // becomes a memberwise-init parameter and
-                                                     // SpeakerConsole(snapshot:session:) won't compile
+    // Unavailable starts collapsed: its rows are speakers gone from the network,
+    // so the section opens as a count in its header rather than a wall of dim
+    // rows, and a first glance lands on what can actually play. The explicit
+    // member is also what the init needs — `State<Set<String>>` has no init(),
+    // so without a value here `collapsed` becomes a memberwise-init parameter
+    // and SpeakerConsole(snapshot:session:) won't compile. "unavailable" is the
+    // section's own id, three specs down in `sections`.
+    @State private var collapsed: Set<String> = ["unavailable"]
+
+    /// Which lens the Ready and Unavailable lists are shown through. In-memory
+    /// only, so it resets to ``SpeakerChip/all`` every launch — a filter left
+    /// on across launches reads as the system being smaller than it is
+    /// (the decision record's research anti-pattern). Playing is never filtered.
+    @State private var chip: SpeakerChip = .all
+
+    /// The favourites, phone-local, observed exactly the way the coach flags
+    /// are: a row's menu writes ``SpeakerPins`` and this `@AppStorage` re-sorts
+    /// the list. Phone-local for now — roadmap 063 syncs pins through the Mac.
+    @AppStorage(SpeakerPins.key) private var pinnedRaw = ""
 
     /// The deck's shadow is the one elevation in the screen, and it differs
     /// between the two grounds — 0.4 black over paper is a smudge, not height.
@@ -218,17 +294,76 @@ private struct SpeakerConsole: View {
         snapshot.devices.filter { SpeakerSection.of($0) == section }
     }
 
-    /// Ready, with anything that failed at the top of it. A failure card is
-    /// the one row in the section that is asking for something, and it is also
-    /// the tallest, so burying it under three idle speakers hides both the ask
-    /// and the reason. Two passes rather than a `sorted` predicate, because
-    /// this has to be stable: the Mac's own device order is what the rest of
-    /// the list is in.
-    private var readyDevices: [DeviceState] {
-        let ready = devices(in: .ready)
-        return ready.filter(DeviceRowView.showsFailureCard)
-             + ready.filter { !DeviceRowView.showsFailureCard($0) }
+    private var pinnedIDs: Set<String> { SpeakerPins.decode(pinnedRaw) }
+
+    // MARK: Chips
+
+    /// The transports present among chip-eligible (non-local) devices, in the
+    /// chip row's fixed order.
+    private var presentTransports: [SpeakerTransport] {
+        let present = Set(snapshot.devices.compactMap(SpeakerTransport.of))
+        return [.airplay, .bluetooth, .cast].filter(present.contains)
     }
+
+    private var hasAnyPinned: Bool {
+        snapshot.devices.contains { pinnedIDs.contains($0.id) }
+    }
+
+    /// The chips to draw, in fixed order. ALL always; FAVOURITES once a known
+    /// speaker is pinned; the transport chips only once devices span two or
+    /// more transports — a lone transport chip would just restate ALL, so the
+    /// all-AirPlay household sees no transport chip at all, and with nothing
+    /// pinned no chip row (decision record: "sees `ALL · FAVOURITES` at most").
+    private var visibleChips: [SpeakerChip] {
+        var chips: [SpeakerChip] = [.all]
+        if hasAnyPinned { chips.append(.favourites) }
+        if presentTransports.count >= 2 { chips += presentTransports.map(\.chip) }
+        return chips
+    }
+
+    /// The chip actually in force. Falls back to ALL when the selected chip is
+    /// no longer drawn (its last device or its last pin went away), so the
+    /// filtering and the highlighted chip can never disagree and a now-hidden
+    /// filter can't strand the list looking empty.
+    private var activeChip: SpeakerChip {
+        visibleChips.contains(chip) ? chip : .all
+    }
+
+    /// The chip filter, for Ready and Unavailable only — Playing is never
+    /// filtered. The local Mac has no transport, so it drops out of every
+    /// transport lens while staying under ALL and FAVOURITES.
+    private func filtered(_ devices: [DeviceState]) -> [DeviceState] {
+        switch activeChip {
+        case .all:        return devices
+        case .favourites: return devices.filter { pinnedIDs.contains($0.id) }
+        case .airplay, .bluetooth, .cast:
+            return devices.filter { SpeakerTransport.of($0) == activeChip.transport }
+        }
+    }
+
+    /// Ready, ordered failed → pinned → rest, then chip-filtered. A failure
+    /// card is the one row asking for something and the tallest, so it stays
+    /// first (a call to action) even ahead of a pin; pins float to the top of
+    /// what's left. Stable passes, not a `sorted` predicate, so the Mac's own
+    /// device order survives inside each group.
+    ///
+    /// The pin promotion is the ALL view's alone: under FAVOURITES `filtered`
+    /// has already cut the list to pinned rows (still failed-first), and under
+    /// a transport chip pins don't reshuffle the lens — it's failed → rest.
+    private var readyDevices: [DeviceState] {
+        let ready = filtered(devices(in: .ready))
+        let failed = ready.filter(DeviceRowView.showsFailureCard)
+        let rest   = ready.filter { !DeviceRowView.showsFailureCard($0) }
+        guard activeChip == .all else { return failed + rest }
+        let pins = pinnedIDs
+        return failed
+             + rest.filter { pins.contains($0.id) }
+             + rest.filter { !pins.contains($0.id) }
+    }
+
+    /// Unavailable, chip-filtered. No failed/pin ordering — these rows are gone
+    /// from the network and the section starts collapsed to a count anyway.
+    private var unavailableDevices: [DeviceState] { filtered(devices(in: .unavailable)) }
 
     /// One motion for the whole screen: a row's move between sections and a
     /// section's collapse run on the same curve for the same length, so the
@@ -270,7 +405,7 @@ private struct SpeakerConsole: View {
             SpeakerSectionSpec(id: "ready", title: "Ready", tint: WarmSignal.label2,
                                devices: readyDevices),
             SpeakerSectionSpec(id: "unavailable", title: "Unavailable", tint: WarmSignal.label2,
-                               devices: devices(in: .unavailable)),
+                               devices: unavailableDevices),
         ]
     }
 
@@ -286,6 +421,11 @@ private struct SpeakerConsole: View {
             LazyVStack(spacing: 0) {
                 ForEach(sections) { section in
                     sectionView(section)
+                    // Directly under Playing (which is never filtered) and
+                    // above Ready. Placed between the two `sectionView`s as a
+                    // sibling, so it never sits inside the row-travel namespace
+                    // and can't disturb a row moving between Ready and Playing.
+                    if section.id == "live" { chipRow }
                 }
             }
             .padding(.horizontal, 14)
@@ -364,6 +504,58 @@ private struct SpeakerConsole: View {
         // header for nothing. What it CAN'T infer is which way this one is
         // pointing — the chevron is the only cue, and it is decorative.
         .accessibilityValue(collapsed.contains(section.id) ? "Collapsed" : "Expanded")
+    }
+
+    // MARK: Chip filter row
+
+    /// The filter chips, scrolling with the list directly under Playing. Drawn
+    /// only once there's more than one chip to choose between — the all-AirPlay
+    /// household with nothing pinned gets no row, which is the point of
+    /// ``visibleChips``' gate.
+    @ViewBuilder
+    private var chipRow: some View {
+        let chips = visibleChips
+        if chips.count > 1 {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(chips) { chipButton($0) }
+                }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 6)
+            }
+            .padding(.bottom, 2)
+        }
+    }
+
+    /// One chip: a recessed `well` capsule wearing the same rim the mute
+    /// buttons and fader tracks do, lit to `goldText` + a gold edge when it's
+    /// the one in force — gold is this screen's whole "engaged" signal, so a
+    /// selected chip reads the same as a live row does.
+    private func chipButton(_ option: SpeakerChip) -> some View {
+        let selected = activeChip == option
+        return Button {
+            chip = option
+        } label: {
+            Text(option.label)
+                .microLabel()
+                .foregroundStyle(selected ? WarmSignal.goldText : WarmSignal.label2)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .background(Capsule().fill(WarmSignal.well))
+                .overlay(Capsule().strokeBorder(selected ? WarmSignal.gold : WarmSignal.rim,
+                                                lineWidth: selected ? 1 : 0.5))
+                // The 44 pt tap floor, reached vertically only: the capsule
+                // keeps its drawn height and transparent tap area fills the
+                // rest, so a chip's target never overlaps its neighbour's the
+                // way `hittable`'s outward padding would in a tight row.
+                .frame(height: WarmSignal.hitTarget)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        // The visible text is already the label, but stated explicitly so the
+        // trait rides beside a spoken name rather than an inferred one.
+        .accessibilityLabel(option.label)
+        .accessibilityAddTraits(selected ? [.isButton, .isSelected] : .isButton)
     }
 
     // MARK: The one-time coach

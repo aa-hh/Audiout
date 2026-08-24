@@ -59,6 +59,14 @@ import AppKit
         }
     }
 
+    @Test func theCenteredItemIsALockupWhoseMarkIsDecorative() {
+        let (controller, _) = makeAttached()
+        #expect(controller.test_centeredMarkHasImage,
+                "the brand mark leads the wordmark")
+        #expect(controller.test_centeredMarkIsDecorative,
+                "the wordmark speaks the name — the mark must not say it twice")
+    }
+
     @Test func pinAndQuitItemsResolveGlyphs() {
         let (controller, _) = makeAttached()
         #expect(controller.test_pinItemHasImage)

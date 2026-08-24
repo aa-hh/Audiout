@@ -365,6 +365,25 @@ import AppKit
         #expect(surface.test_toolbarController.test_centeredTitleText == "Audiout")
     }
 
+    /// Task A: the centered brand lockup fits WITHIN the unified strip, so the
+    /// mark's top no longer clips against the strip and the bubble's rounded
+    /// corner. The mark scales down to its box (never up), and the whole lockup
+    /// sits inside the measured strip height.
+    @Test func theHeaderLockupFitsTheToolbarStripUnclipped() throws {
+        let (surface, _, _, _) = makeSurface()
+        surface.show(anchorRect: nil)
+        surface.shell.window?.layoutIfNeeded()
+        let toolbar = surface.test_toolbarController
+        #expect(toolbar.test_centeredMarkScalesToFit,
+                "the mark scales to fit its box — the whole figure, un-clipped")
+        let strip = surface.test_chromeTopInset
+        #expect(strip > 0, "the unified strip has real height to measure against")
+        let lockup = toolbar.test_centeredLockupFittingHeight
+        #expect(lockup > 0, "the centered lockup materialized")
+        #expect(lockup <= strip,
+                "the lockup fits within the strip — nothing clips (lockup \(lockup), strip \(strip))")
+    }
+
     @Test func toolbarTracksSelectionAndPin() {
         let (surface, _, _, _) = makeSurface()
         surface.show(anchorRect: nil)
@@ -884,5 +903,147 @@ import AppKit
             settingsContent: { [self] in makeSettingsRoot() },
             frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurfaceTests")))
         return (surface, groups, group.group.id)
+    }
+
+    // MARK: Launch splash
+
+    /// Run `body` as if this were a real (non-headless) launch that has never
+    /// shown a splash, and put both process-wide facts back afterwards.
+    private func asAFirstRealLaunch(reduceMotion: Bool = false,
+                                    _ body: () throws -> Void) rethrows {
+        SurfaceSplashView.test_headlessOverride = false
+        SurfaceSplashView.test_reduceMotionOverride = reduceMotion
+        SurfaceSplashView.test_resetProcessFlag()
+        defer {
+            SurfaceSplashView.test_headlessOverride = nil
+            SurfaceSplashView.test_reduceMotionOverride = nil
+            SurfaceSplashView.test_resetProcessFlag()
+        }
+        try body()
+    }
+
+    @Test func theDecisionIsARealRunsFirstOpenAndNothingElse() {
+        #expect(SurfaceSplashView.shouldPresent(headless: false, reduceMotion: false,
+                                                alreadyShown: false))
+        #expect(!SurfaceSplashView.shouldPresent(headless: true, reduceMotion: false,
+                                                 alreadyShown: false),
+                "a headless run renders the screen it was pointed at, never ornament")
+        #expect(!SurfaceSplashView.shouldPresent(headless: false, reduceMotion: true,
+                                                 alreadyShown: false),
+                "Reduce Motion skips it entirely — it is pure ornament")
+        #expect(!SurfaceSplashView.shouldPresent(headless: false, reduceMotion: false,
+                                                 alreadyShown: true),
+                "once per process, never once per open")
+    }
+
+    @Test func theFirstShowRevealsTheBrandMarkOnlyOnceDiscoverySettles() throws {
+        try asAFirstRealLaunch {
+            let (surface, _, _, _) = makeSurface()
+            surface.show(anchorRect: nil)
+            // The reveal is DEFERRED: the window is fronted once, already at the
+            // settled size, so the centred mark never slides. Nothing on screen
+            // yet — just a settle tracker gating the reveal.
+            #expect(surface.test_splash == nil,
+                    "no splash on screen until discovery settles — the reveal is deferred")
+            #expect(surface.test_settleTracker != nil, "a settle tracker gates the first reveal")
+            #expect(surface.test_isRevealPending)
+
+            surface.test_settleDiscovery()
+            let splash = try #require(surface.test_splash,
+                                      "settling reveals the surface with its branded hold")
+            #expect(splash.test_isVisible)
+            #expect(!surface.test_isRevealPending)
+            #expect(splash.superview === surface.shell.window?.contentView,
+                    "it covers the mounted screen, not the window chrome")
+            // Content is in place and discovery already quiet at reveal, so only
+            // the hold gates the cross-fade — "splash solid, then cross-fade onto
+            // an already-settled list".
+            splash.test_fireHoldTimer()
+            #expect(!splash.test_isVisible)
+            #expect(splash.superview == nil, "it takes itself off when it leaves")
+        }
+    }
+
+    /// The reveal is deferred until discovery quiets, and the window is fronted
+    /// ONCE at the settled size — the fleet that streams in during the wait is
+    /// measured at reveal, never guessed early. Fronting off screen until then
+    /// is what keeps the resize (`preferredContentSize` grows a REAL ordered
+    /// window on screen — the trap that stayed invisible headless) off the
+    /// user's view: while the reveal is pending there is no on-screen window to
+    /// slide.
+    @Test func theWindowIsFrontedOnceAtTheSettledSizeAfterDiscoverySettles() throws {
+        try asAFirstRealLaunch {
+            let (surface, popover, _, _) = makeSurface()
+            popover.test_isShownOverride = true
+            surface.show(anchorRect: nil)
+            #expect(surface.test_isRevealPending, "the reveal waits off screen for discovery to settle")
+
+            // Discovery streams a full fleet in during the pre-reveal wait.
+            let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                      emitsLevels: false, simulatesDropouts: false)
+            backend.start()
+            popover.update(devices: backend.devices)
+
+            surface.test_settleDiscovery()
+            #expect(!surface.test_isRevealPending, "settling fronts the surface")
+            let window = try #require(surface.shell.window)
+            let settledHeight = window.contentRect(forFrameRect: window.frame).height
+            // The full fleet raises the fit well above the 600 floor, and the
+            // window opens at exactly that measured size — its first and only
+            // on-screen frame.
+            #expect(settledHeight > 600.5,
+                    "the settled fleet's fit decides the one frame the user sees (got \(settledHeight))")
+        }
+    }
+
+    @Test func aClickTakesTheSplashAwayAtOnce() throws {
+        try asAFirstRealLaunch {
+            let (surface, _, _, _) = makeSurface()
+            surface.show(anchorRect: nil)
+            surface.test_settleDiscovery()
+            let splash = try #require(surface.test_splash)
+            splash.test_click()
+            #expect(!splash.test_isVisible)
+        }
+    }
+
+    /// Discovery may never quiet — the reveal backstop must still front the
+    /// surface (and its branded hold) so the user is never left waiting on a
+    /// click that seemed to do nothing.
+    @Test func theRevealBackstopFrontsTheSurfaceWithNoSettleSignal() throws {
+        try asAFirstRealLaunch {
+            let (surface, _, _, _) = makeSurface()
+            surface.show(anchorRect: nil)
+            #expect(surface.test_splash == nil, "nothing on screen while discovery is still quieting")
+            #expect(surface.test_isRevealPending)
+            surface.test_fireRevealCeiling()
+            let splash = try #require(surface.test_splash,
+                                      "the backstop fronts the surface even if discovery never quiets")
+            #expect(!surface.test_isRevealPending)
+            splash.test_fireHoldTimer()
+            #expect(!splash.test_isVisible, "and the hold then cross-fades it away")
+        }
+    }
+
+    @Test func reduceMotionOpensStraightOntoTheScreen() {
+        asAFirstRealLaunch(reduceMotion: true) {
+            let (surface, _, _, _) = makeSurface()
+            surface.show(anchorRect: nil)
+            #expect(surface.test_splash == nil)
+            #expect(surface.test_settleTracker == nil,
+                    "no splash ⇒ no settle wait; the surface opens immediately on the old timing")
+        }
+    }
+
+    @Test func aSecondSurfaceInTheSameProcessGetsNoSplash() throws {
+        try asAFirstRealLaunch {
+            let (first, _, _, _) = makeSurface()
+            first.show(anchorRect: nil)
+            first.test_settleDiscovery()   // reveal the first open's splash (sets the once-per-process flag)
+            #expect(first.test_splash != nil)
+            let (second, _, _, _) = makeSurface()
+            second.show(anchorRect: nil)
+            #expect(second.test_splash == nil)
+        }
     }
 }

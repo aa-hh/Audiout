@@ -147,10 +147,13 @@ public final class AboutViewController: NSViewController {
         let icon = NSImageView()
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.imageScaling = .scaleProportionallyUpOrDown
-        // `NSApplication.shared` (not the bare `NSApp` global) so this is safe
-        // even the very first time any AppKit code runs in this process — the
-        // bare global stays nil until `.shared` has been accessed once.
-        icon.image = NSApplication.shared.applicationIconImage
+        // The BRAND MARK, not the OS app icon: About states our identity, and
+        // `BrandMark` is the render we control (see its doc comment). The app
+        // icon stays as the fallback for a build with no bundled asset, read
+        // through `NSApplication.shared` (not the bare `NSApp` global) so it is
+        // safe even the very first time any AppKit code runs in this process —
+        // the bare global stays nil until `.shared` has been accessed once.
+        icon.image = BrandMark.image ?? NSApplication.shared.applicationIconImage
         NSLayoutConstraint.activate([
             icon.widthAnchor.constraint(equalToConstant: 32),
             icon.heightAnchor.constraint(equalToConstant: 32),

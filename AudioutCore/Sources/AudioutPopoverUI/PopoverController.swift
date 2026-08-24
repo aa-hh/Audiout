@@ -227,6 +227,10 @@ public final class PopoverController: NSObject {
     /// means "no backend adopts the capability" — the popover works exactly the
     /// same either way, just without the RMS work switched off underneath it.
     public var onMeteringActiveChange: ((Bool) -> Void)?
+    /// The device-id set of every `update(devices:)`, fired regardless of
+    /// visibility — the discovery stream the surface's launch `DiscoverySettleTracker`
+    /// debounces to decide when the fleet has quiesced. `nil` when no host cares.
+    public var onDeviceSnapshot: ((Set<String>) -> Void)?
     /// Called when an Applications-card slider moves, so the app can push the new
     /// volume straight to a `.currentDevice` app's LOCAL playback stream (Bug T2)
     /// for a low-latency response, in ADDITION to the persisted
@@ -760,6 +764,9 @@ public final class PopoverController: NSObject {
     public func update(devices: [Device]) {
         let previousDevices = devicesByID
         devicesByID = Dictionary(uniqueKeysWithValues: devices.map { ($0.id, $0) })
+        // The raw discovery stream (visibility-independent): the launch splash's
+        // settle tracker debounces this to know when the fleet has quiesced.
+        onDeviceSnapshot?(Set(devicesByID.keys))
         // A SELECTED Bluetooth device that LOSES availability is DESELECTED
         // (Alec's call — off = unselected, replacing the backend's power-off
         // park). Both loss paths — a listed-but-disconnected snapshot AND a

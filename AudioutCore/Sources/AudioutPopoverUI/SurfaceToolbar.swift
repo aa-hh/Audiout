@@ -20,8 +20,10 @@ import AudioutSharedUI
 ///   plain items, kept working). The tab names survive the missing labels —
 ///   per-segment tooltips ("Mixer (⌘1)"), the subitems' `label`s (VoiceOver
 ///   and the overflow menu), and ⌘1/⌘2/⌘3;
-/// - "Audiout" as a centered label item (`centeredItemIdentifiers`) — the
-///   one place the app name appears in the header, both profiles;
+/// - the brand mark beside "Audiout" as a centered LOCKUP item
+///   (`centeredItemIdentifiers`) — the one place the app names itself in the
+///   header, both profiles. The mark is decorative; the wordmark is what
+///   VoiceOver reads, so the name is spoken once;
 /// - Pin and Quit as trailing bordered items.
 ///
 /// One toolbar per process: unlike the retired per-screen header instances,
@@ -40,6 +42,18 @@ import AudioutSharedUI
 /// screens, and the shell stays content-agnostic.
 @MainActor
 final class SurfaceToolbarController: NSObject {
+
+    /// Side of the centered brand mark's square box. Sized so the halo's thin
+    /// top ring survives the macOS 26/27 Liquid Glass capsule's compositing
+    /// (see the lockup builder) while staying inside the unified strip so it
+    /// does not grow the toolbar. Alec's "the one constant" — bump it here.
+    static let markSide: CGFloat = 22
+
+    /// Equal padding on every side of the brand lockup, so the mark and wordmark
+    /// breathe inside the Liquid Glass capsule instead of touching its edges.
+    /// Kept small enough that `markSide + 2 * lockupInset` stays within the
+    /// unified strip's height (the strip must not grow — see `chromeTopInset`).
+    static let lockupInset: CGFloat = 7
 
     static let tabsItemIdentifier = NSToolbarItem.Identifier("SurfaceTabs")
     static let titleItemIdentifier = NSToolbarItem.Identifier("SurfaceTitle")
@@ -65,6 +79,7 @@ final class SurfaceToolbarController: NSObject {
     private var tabsGroup: NSToolbarItemGroup?
     private var pinItem: NSToolbarItem?
     private var titleLabel: NSTextField?
+    private var markView: NSImageView?
 
     override init() {
         toolbar = NSToolbar(identifier: "SurfaceToolbar")
@@ -151,6 +166,15 @@ final class SurfaceToolbarController: NSObject {
     var test_selectedTabIndex: Int? { tabsGroup?.selectedIndex }
     /// The centered app-name label's text, `nil` if the item never built.
     var test_centeredTitleText: String? { titleLabel?.stringValue }
+    /// Whether the centered lockup's brand mark resolved its image.
+    var test_centeredMarkHasImage: Bool { markView?.image != nil }
+    /// Whether the mark scales DOWN to fit its box (never clipping — Task A).
+    var test_centeredMarkScalesToFit: Bool { markView?.imageScaling == .scaleProportionallyDown }
+    /// The centered lockup's fitting height — must sit within the strip so
+    /// nothing clips. `0` when the item never built.
+    var test_centeredLockupFittingHeight: CGFloat { markView?.superview?.fittingSize.height ?? 0 }
+    /// Whether that mark is decorative (the wordmark speaks the name).
+    var test_centeredMarkIsDecorative: Bool { markView?.isAccessibilityElement() == false }
     /// Whether the pin/quit items resolved symbol images.
     var test_pinItemHasImage: Bool { pinItem?.image != nil }
     var test_pinItemLabel: String? { pinItem?.label }
@@ -210,9 +234,55 @@ extension SurfaceToolbarController: NSToolbarDelegate {
             label.font = NSFont.titleBarFont(ofSize: NSFont.systemFontSize)
             label.textColor = .labelColor
             label.setAccessibilityRole(.staticText)
-            item.view = label
+            // The brand mark leads the wordmark, one lockup. The image is
+            // DECORATIVE — the label beside it already speaks the name, and two
+            // elements saying "Audiout" is the name spoken twice.
+            let mark = NSImageView()
+            mark.image = BrandMark.image
+            // Scale the portrait mark DOWN to fit its box, never up past it, so
+            // the whole figure renders inside the box.
+            mark.imageScaling = .scaleProportionallyDown
+            mark.setAccessibilityElement(false)
+            mark.translatesAutoresizingMaskIntoConstraints = false
+            let lockup = NSStackView(views: [mark, label])
+            lockup.orientation = .horizontal
+            lockup.alignment = .centerY
+            // 4, not the usual 8: the mark is a PORTRAIT figure inside a square
+            // image, so its own transparent margin already contributes ~4 pt of
+            // air on the wordmark's side.
+            lockup.spacing = 4
+            // Equal padding on all four sides so the mark+wordmark don't sit
+            // flush against the Liquid Glass capsule's edges — the capsule sizes
+            // to this stack, so its inset IS this. Vertical stays well inside the
+            // unified strip (mark box + 2×inset ≤ strip height; see markSide).
+            lockup.edgeInsets = NSEdgeInsets(top: Self.lockupInset,
+                                             left: Self.lockupInset,
+                                             bottom: Self.lockupInset,
+                                             right: Self.lockupInset)
+            // TRAP: the halo is a THIN gold ring at the very top of the figure,
+            // and on macOS 26/27 the centered item renders inside a Liquid Glass
+            // capsule (`NSGlassEffectView`) whose compositing ERASES that ring
+            // when the mark is small — the halo has too few pixels at ~16 pt to
+            // survive the effect, and its top comes out sliced flat. This is NOT
+            // a view-bounds clip (every ancestor is `clipsToBounds = false`) and
+            // NOT the image view (a 16 pt retina render off-glass shows the full
+            // round halo), so tying the box to the wordmark's ~16 pt height —
+            // the smallest the mark can be — was exactly the worst case and left
+            // the halo clipped. `Self.markSide` is the smallest box at which the
+            // halo survives the glass with margin (verified against real
+            // system-rendered captures, 20 pt threshold); it stays well inside
+            // the unified strip's height, so the strip does not grow and the
+            // measured chrome inset is unchanged. A CONSTANT box (not tied to
+            // the label) so the 1024 px image's intrinsic size can never leak
+            // into the lockup's fitting height.
+            NSLayoutConstraint.activate([
+                mark.widthAnchor.constraint(equalToConstant: Self.markSide),
+                mark.heightAnchor.constraint(equalToConstant: Self.markSide),
+            ])
+            item.view = lockup
             item.label = ""
             titleLabel = label
+            markView = mark
             return item
 
         case Self.pinItemIdentifier:

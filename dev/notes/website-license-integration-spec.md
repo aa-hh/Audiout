@@ -12,7 +12,7 @@ truth if the two ever disagree.
 |---|---|---|
 | Website | Static Astro site, repo `aa-hh/audiouter-website` | Buy funnel built on branch `claude/buy-page-paddle-c3b002`, unmerged, not deployed |
 | License server | Cloudflare Worker at `https://license.audiout.app` | **Live and verified** — purchase → key → email proven on sandbox |
-| Paddle | Merchant of record (checkout, receipts, VAT) | **Sandbox only.** Product "Audiout", price `pri_01m0pkeeq1hw4wg7055aekgev6` (€29.95 one-time) |
+| Paddle | Merchant of record (checkout, receipts, VAT) | **Sandbox only.** Product "Audiout", price `pri_01m0pkeeq1hw4wg7055aekgev6` (€30 one-time; per-market overrides $30 USD / £25 GBP) |
 
 ## What each page must do
 

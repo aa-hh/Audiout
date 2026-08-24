@@ -10,7 +10,7 @@ when that changes, not a claim that it has.
 
 ## Purchase terms (state once, exactly)
 
-**$35, one-time. Covers the current major version and every update until the
+**€30, one-time. Covers the current major version and every update until the
 next major release.**
 
 Any other copy about price or what it includes (site, receipts, support
@@ -112,7 +112,7 @@ the app can verify update signatures against it.
 
 ### d. Paddle account + product setup
 
-- Create the Paddle product: **$35, one-time**, matching the purchase terms
+- Create the Paddle product: **€30, one-time**, matching the purchase terms
   stated above exactly.
 - Upload each release's distributable zip (`build/Audiout-<version>.zip`
   from `make-release.sh`) as the thing Paddle delivers on purchase, or wire

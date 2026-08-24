@@ -8,5 +8,12 @@
 	<array>
 		<string>_audiout._tcp</string>
 	</array>
+	<key>UILaunchScreen</key>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchGround</string>
+		<key>UIImageName</key>
+		<string>BrandMark</string>
+	</dict>
 </dict>
 </plist>

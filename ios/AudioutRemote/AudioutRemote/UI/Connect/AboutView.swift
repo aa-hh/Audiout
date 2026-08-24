@@ -3,10 +3,12 @@
 import SwiftUI
 
 /// Static app identity + orientation, no external links. App name is read
-/// from the bundle rather than hardcoded "Audiout Remote" — that's only
-/// the working name (`AGENTS.md`), and a rename is pending; `Info.plist`
-/// (`INFOPLIST_KEY_CFBundleDisplayName`) is the single source of truth.
+/// from the bundle rather than hardcoded: `INFOPLIST_KEY_CFBundleDisplayName`
+/// is the single source of truth, and a test build overrides it per install
+/// (`scripts/ios.sh device --name`), so a literal here would go wrong.
 struct AboutView: View {
+    @ScaledMetric(relativeTo: .largeTitle) private var markSize: CGFloat = 64
+
     private var appName: String {
         Bundle.main.infoDictionary?["CFBundleDisplayName"] as? String
             ?? Bundle.main.infoDictionary?["CFBundleName"] as? String
@@ -23,9 +25,10 @@ struct AboutView: View {
         Form {
             Section {
                 VStack(spacing: 4) {
-                    Image(systemName: "hifispeaker.fill")
-                        .font(.largeTitle)
-                        .foregroundStyle(.secondary)
+                    Image(.brandMark)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: markSize, height: markSize)
                         .accessibilityHidden(true)
                     Text(appName)
                         .font(.title2.weight(.semibold))

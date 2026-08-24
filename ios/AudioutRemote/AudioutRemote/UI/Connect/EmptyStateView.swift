@@ -15,6 +15,10 @@ struct EmptyStateView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            if isSearching {
+                BrandLockup()
+            }
+
             Label {
                 Text(isSearching ? "Looking for a Mac…" : "No Mac Found")
                     .font(.headline)

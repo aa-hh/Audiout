@@ -168,6 +168,7 @@ let package = Package(
         .target(
             name: "AudioutSharedUI",
             dependencies: ["AudioutCore"],
+            resources: [.copy("Resources/Audiout-Hero-1024.svg")],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // The pure-AppKit popover dropdown (SPEC §9 revised — NSMenu → NSPopover):

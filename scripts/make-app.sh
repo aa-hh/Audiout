@@ -75,6 +75,14 @@ HELPER_LABEL="${BUNDLE_ID}.ptphelper"
 # build` invocation/bin dir below rather than a second package build.
 TCC_PROBE_EXECUTABLE="tcc-probe"
 
+# SwiftPM resource bundle for AudioutSharedUI (holds the in-app brand mark,
+# Audiout-Hero-1024.svg). SwiftPM emits it next to the app executable in the
+# build's bin dir and `Bundle.module` resolves it from Contents/Resources at
+# runtime — so it MUST be copied into the .app or the first BrandMark.image
+# access traps (the generated accessor fatalErrors when the bundle is absent).
+# Name is `<PackageName>_<TargetName>.bundle`, deterministic from Package.swift.
+RESOURCE_BUNDLE_NAME="AudioutCore_AudioutSharedUI.bundle"
+
 # Codesigning identity, resolved in priority order:
 #   1. CODESIGN_IDENTITY from the environment — an explicit override. Set it to
 #      "-" to force ad-hoc, or to a full identity string to pin a specific one.
@@ -213,7 +221,8 @@ swift build --build-system native --package-path AirPlayEngine -c release --prod
   -Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker \"\$R/scripts/ptp-helper-info.plist\" && \
 HBIN=\$(swift build --build-system native --package-path AirPlayEngine -c release --show-bin-path) && \
 rm -rf .remote-products && mkdir -p .remote-products && \
-cp \"\$BIN/$EXECUTABLE\" \"\$BIN/$TCC_PROBE_EXECUTABLE\" \"\$HBIN/$HELPER_EXECUTABLE\" .remote-products/"
+cp \"\$BIN/$EXECUTABLE\" \"\$BIN/$TCC_PROBE_EXECUTABLE\" \"\$HBIN/$HELPER_EXECUTABLE\" .remote-products/ && \
+cp -R \"\$BIN/$RESOURCE_BUNDLE_NAME\" .remote-products/"
 
   RRC=0
   remote_run "$REPO_ROOT" "$REMOTE_CMD" || RRC=$?
@@ -228,10 +237,12 @@ cp \"\$BIN/$EXECUTABLE\" \"\$BIN/$TCC_PROBE_EXECUTABLE\" \"\$HBIN/$HELPER_EXECUT
     trap 'rm -rf "$STAGE"' EXIT HUP INT TERM
     if remote_fetch "$REPO_ROOT" ".remote-products/$EXECUTABLE" "$STAGE/$EXECUTABLE" &&
        remote_fetch "$REPO_ROOT" ".remote-products/$TCC_PROBE_EXECUTABLE" "$STAGE/$TCC_PROBE_EXECUTABLE" &&
-       remote_fetch "$REPO_ROOT" ".remote-products/$HELPER_EXECUTABLE" "$STAGE/$HELPER_EXECUTABLE"; then
+       remote_fetch "$REPO_ROOT" ".remote-products/$HELPER_EXECUTABLE" "$STAGE/$HELPER_EXECUTABLE" &&
+       remote_fetch "$REPO_ROOT" ".remote-products/$RESOURCE_BUNDLE_NAME" "$STAGE/$RESOURCE_BUNDLE_NAME"; then
       BUILT_BINARY="$STAGE/$EXECUTABLE"
       BUILT_TCC_PROBE="$STAGE/$TCC_PROBE_EXECUTABLE"
       BUILT_HELPER="$STAGE/$HELPER_EXECUTABLE"
+      BUILT_RESOURCE_BUNDLE="$STAGE/$RESOURCE_BUNDLE_NAME"
       chmod +x "$BUILT_BINARY" "$BUILT_TCC_PROBE" "$BUILT_HELPER"
       REMOTE_BUILT=1
       echo "==> Fetched 3 products from $remote_host"
@@ -264,6 +275,7 @@ echo "==> Building $EXECUTABLE (release)"
 swift build --build-system native --package-path "$PACKAGE_DIR" -c release --product "$EXECUTABLE"
 BIN_DIR="$(swift build --build-system native --package-path "$PACKAGE_DIR" -c release --show-bin-path)"
 BUILT_BINARY="$BIN_DIR/$EXECUTABLE"
+BUILT_RESOURCE_BUNDLE="$BIN_DIR/$RESOURCE_BUNDLE_NAME"
 test -x "$BUILT_BINARY" || { echo "error: built binary not found at $BUILT_BINARY" >&2; exit 1; }
 
 # Same package as $EXECUTABLE, same release config — this lands in $BIN_DIR
@@ -296,6 +308,7 @@ fi  # REMOTE_BUILT
 test -x "$BUILT_BINARY"    || { echo "error: app binary not found at $BUILT_BINARY" >&2; exit 1; }
 test -x "$BUILT_TCC_PROBE" || { echo "error: tcc-probe not found at $BUILT_TCC_PROBE" >&2; exit 1; }
 test -x "$BUILT_HELPER"    || { echo "error: ptp-helper not found at $BUILT_HELPER" >&2; exit 1; }
+test -d "$BUILT_RESOURCE_BUNDLE" || { echo "error: resource bundle not found at $BUILT_RESOURCE_BUNDLE" >&2; exit 1; }
 
 # --- Assemble the bundle --------------------------------------------------
 echo "==> Assembling $APP_BUNDLE"
@@ -313,6 +326,12 @@ chmod +x "$MACOS_DIR/$HELPER_EXECUTABLE"
 # resolves it at exactly Contents/MacOS/tcc-probe, relative to the running bundle.
 cp "$BUILT_TCC_PROBE" "$MACOS_DIR/$TCC_PROBE_EXECUTABLE"
 chmod +x "$MACOS_DIR/$TCC_PROBE_EXECUTABLE"
+
+# SwiftPM resource bundle → Contents/Resources. `Bundle.module`'s generated
+# accessor searches Bundle.main.resourceURL (== Contents/Resources) first, so
+# this is where the in-app brand mark becomes reachable at runtime.
+mkdir -p "$RESOURCES_DIR"
+cp -R "$BUILT_RESOURCE_BUNDLE" "$RESOURCES_DIR/$RESOURCE_BUNDLE_NAME"
 
 # --- SMAppService launchd daemon plist -------------------------------------
 # Ships from scripts/ptp-helper.plist with __BUNDLE_ID__ substituted for the

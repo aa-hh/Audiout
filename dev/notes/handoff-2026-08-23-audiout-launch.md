@@ -11,7 +11,7 @@ current as of the merge of `claude/license-key-backend-cb2e78` into `main`.
 | Product name | **Audiout** (decided 2026-08-23, roadmap 063). Bundle id `com.audiout.Audiout`, Bonjour `_audiout-pf._tcp`, env prefix `AUDIOUT_*`, key prefix `AUDT-` | this repo, renamed in one commit (a359aab8) |
 | License server | **Live and verified** at `https://license.audiout.app` — simulated purchase → key → email received → validate/refund/revoke all proven | `~/Projects/Audiout License Server` = github.com/aa-hh/audiout-license-server (private). README = endpoint contract + setup log |
 | Cloudflare | Worker + D1 + R2 + Email Sending on `audiout.app`, all secrets set. Resource names keep the old spelling (`audiouter-license`, `audiouter-releases`) — immutable, invisible | Alec's CF account |
-| Paddle | **Sandbox only.** Product "Audiout", price `pri_01m0pkeeq1hw4wg7055aekgev6` (€29.95 one-time), webhook destination → the Worker | sandbox-vendors.paddle.com |
+| Paddle | **Sandbox only.** Product "Audiout", price `pri_01m0pkeeq1hw4wg7055aekgev6` (€30 one-time), webhook destination → the Worker | sandbox-vendors.paddle.com |
 | App: soft license check | Built + tested: Settings › General key field with status line, "Buy Audiout…" button, lowest-priority "unregistered" note in the popover, Sparkle sends the key as a bearer header, check-in client live. All switched on by one Info.plist key (`AudioutLicenseServerURL`) that only a release build carries | `AudioutCore/Sources/AudioutCore/LicenseValidator.swift`, `LicenseCheckIn.swift`, `GeneralSettingsViewController.swift`, `PopoverController.swift`, `AppDelegate.swift` |
 | Release pipeline | `scripts/make-release.sh` + `docs/RELEASE.md` exist, **never run end-to-end** (needs Apple credentials) | this repo |
 | Website | Buy page + `/thanks` key handover built on branch `claude/buy-page-paddle-c3b002`, **unmerged**, all placeholders, still says "Audiouter" | `~/Projects/Audiouter Website` |
@@ -110,8 +110,8 @@ first time all three repos meet; budget an hour for small fixes.
 
 ### 6. Go live (Alec decisions + Agent config)
 
-- Final price + currency (sandbox says €29.95; `docs/RELEASE.md` still says
-  $35 — pick one and fix the other).
+- ~~Final price + currency~~ SETTLED 2026-08-24: **€30 one-time**, applied to
+  the sandbox price, PRODUCT.md, docs/PRICING.md and docs/RELEASE.md.
 - Paddle live account: verify the business, recreate product + price +
   webhook destination on live (same shape as sandbox; the MCP `paddle-live`
   server or the dashboard), new live API key + webhook secret.

@@ -102,10 +102,10 @@ is installing Homebrew and running a build script, which they will never do.
 2. **Paid product = the notarized, Homebrew-free `.app` + updates + support.**
    Frame the charge as paying for the ready-to-run build and updates, never as a
    usage license.
-3. **Price: one-time, ~$25–35**, sitting just under Airfoil ($35) and well under
-   SoundSource ($49). Undercutting the incumbent is defensible for a new entrant
-   that also offers a free source path. Copy Ardour's "updates through the next
-   major version" wrinkle if we want a soft recurring hook.
+3. **Price: €30, one-time** (SETTLED 2026-08-24), sitting under Airfoil ($35)
+   and well under SoundSource ($49). Undercutting the incumbent is defensible for
+   a new entrant that also offers a free source path. Copy Ardour's "updates
+   through the next major version" wrinkle if we want a soft recurring hook.
 4. **Optional subscription for revenue smoothing**, Ardour-style — but it must
    never disable the app. Only if we want predictable income; the category norm
    here is one-time.
@@ -119,7 +119,7 @@ is installing Homebrew and running a build script, which they will never do.
 ## Open questions for owner
 
 - One-time vs one-time-plus-optional-subscription?
-- Exact price point in the $25–35 band?
+- ~~Exact price point in the $25–35 band?~~ SETTLED 2026-08-24: **€30**, one-time.
 - Do we ship an in-app soft trial at all, or lean entirely on "free from source,
   paid binary"?
 - Setapp as a second channel, yes/no?

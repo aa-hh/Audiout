@@ -116,7 +116,13 @@ final class AppSessionModel {
 /// backgrounded, eager reconnect + permission-suspected browser recovery on
 /// return).
 struct RootView: View {
-    @State private var model = AppSessionModel()
+    // Optional, not built eagerly at init: `AppSessionModel` owns a
+    // `ConnectionController`, whose default `clientName` used to run a
+    // synchronous, Local-Network-gated lookup during `RootView.init` (see
+    // `ConnectionController.defaultClientName`) — on an ungranted first
+    // launch that deadlocked the main thread before the permission prompt
+    // could appear. Built once in `.task` instead, off the init path.
+    @State private var model: AppSessionModel?
     @State private var selection: Tab = .connection
     @Environment(\.scenePhase) private var scenePhase
 
@@ -125,52 +131,67 @@ struct RootView: View {
     }
 
     var body: some View {
-        TabView(selection: $selection) {
-            SpeakersView(session: model.activeSession)
-                .tabItem { Label("Speakers", systemImage: "speaker.wave.2") }
-                .tag(Tab.speakers)
+        Group {
+            if let model {
+                TabView(selection: $selection) {
+                    SpeakersView(session: model.activeSession)
+                        .tabItem { Label("Speakers", systemImage: "speaker.wave.2") }
+                        .tag(Tab.speakers)
 
-            AppsView(session: model.activeSession)
-                .tabItem { Label("Apps", systemImage: "square.grid.2x2") }
-                .tag(Tab.apps)
+                    AppsView(session: model.activeSession)
+                        .tabItem { Label("Apps", systemImage: "square.grid.2x2") }
+                        .tag(Tab.apps)
 
-            GroupsView(session: model.activeSession)
-                .tabItem { Label("Groups", systemImage: "rectangle.3.group") }
-                .tag(Tab.groups)
+                    GroupsView(session: model.activeSession)
+                        .tabItem { Label("Groups", systemImage: "rectangle.3.group") }
+                        .tag(Tab.groups)
 
-            ConnectionTabView(
-                session: model.activeSession,
-                macs: model.macs,
-                browserState: model.browserState,
-                onWiFi: model.onWiFi,
-                lastUsedMacID: model.lastUsedMacID,
-                isDemoActive: model.isDemoActive,
-                onConnect: model.connect(to:),
-                onDisconnect: model.disconnect,
-                onEnterDemo: model.enterDemo,
-                onExitDemo: model.exitDemo
-            )
-            .tabItem { Label("Connection", systemImage: "antenna.radiowaves.left.and.right") }
-            .tag(Tab.connection)
-        }
-        // Warm Signal's gold, everywhere the tint reaches: tab-bar selection,
-        // buttons, chevrons, picker menus, toggles. It does NOT reach
-        // `Color.accentColor` (which resolves from the app accent — no asset
-        // catalog exists, so system blue — and ignores an ancestor tint), so
-        // the four explicit `.accentColor` literals in UI/Groups/ are swapped
-        // to `WarmSignal.gold` directly.
-        .tint(WarmSignal.gold)
-        .environment(model.iconStore)
-        .task { model.start() }
-        .onChange(of: model.isConnected) { wasConnected, isConnected in
-            if isConnected, !wasConnected, selection == .connection {
-                selection = .speakers
+                    ConnectionTabView(
+                        session: model.activeSession,
+                        macs: model.macs,
+                        browserState: model.browserState,
+                        onWiFi: model.onWiFi,
+                        lastUsedMacID: model.lastUsedMacID,
+                        isDemoActive: model.isDemoActive,
+                        onConnect: model.connect(to:),
+                        onDisconnect: model.disconnect,
+                        onEnterDemo: model.enterDemo,
+                        onExitDemo: model.exitDemo
+                    )
+                    .tabItem { Label("Connection", systemImage: "antenna.radiowaves.left.and.right") }
+                    .tag(Tab.connection)
+                }
+                // Warm Signal's gold, everywhere the tint reaches: tab-bar selection,
+                // buttons, chevrons, picker menus, toggles. It does NOT reach
+                // `Color.accentColor` (which resolves from the app accent — no asset
+                // catalog exists, so system blue — and ignores an ancestor tint), so
+                // the four explicit `.accentColor` literals in UI/Groups/ are swapped
+                // to `WarmSignal.gold` directly.
+                .tint(WarmSignal.gold)
+                .environment(model.iconStore)
+                .onChange(of: model.isConnected) { wasConnected, isConnected in
+                    if isConnected, !wasConnected, selection == .connection {
+                        selection = .speakers
+                    }
+                }
+            } else {
+                // Pre-model frame only (at most one): plain system
+                // background, no spinner or loading copy.
+                Color(uiColor: .systemBackground)
             }
+        }
+        .task {
+            // Runs once per view identity regardless of the if/else branch
+            // above, so this never re-creates the model on later body
+            // re-evaluations.
+            let model = model ?? AppSessionModel()
+            self.model = model
+            model.start()
         }
         .onChange(of: scenePhase) { _, phase in
             switch phase {
-            case .active: model.enterForeground()
-            case .background: model.enterBackground()
+            case .active: model?.enterForeground()
+            case .background: model?.enterBackground()
             case .inactive: break
             @unknown default: break
             }

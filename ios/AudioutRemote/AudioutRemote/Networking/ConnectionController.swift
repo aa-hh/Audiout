@@ -2,6 +2,7 @@
 
 import Foundation
 import Network
+import UIKit
 import AudioutProtocol
 
 /// The phone's stable identity for per-phone approval: ONE
@@ -212,12 +213,15 @@ final class ConnectionController: @unchecked Sendable {
         }
     }
 
-    /// The hello's client name: the device's network host name (UIKit is
-    /// off-limits in this layer, and `UIDevice.name` is the generic
-    /// "iPhone" since iOS 16 anyway).
+    /// The hello's client name. `UIDevice.name` has been the generic
+    /// "iPhone" since iOS 16 — but the alternative, `ProcessInfo.hostName`,
+    /// does a synchronous mDNS lookup gated by the Local Network permission.
+    /// Evaluated as this init's default argument, that lookup used to run
+    /// during `RootView.init` on the main thread, before the permission
+    /// prompt could even appear: an ungranted first launch deadlocked into a
+    /// black screen. A generic name beats a launch hang.
     static var defaultClientName: String {
-        let host = ProcessInfo.processInfo.hostName
-        return host.hasSuffix(".local") ? String(host.dropLast(".local".count)) : host
+        UIDevice.current.name
     }
 
     // MARK: Lifecycle (call from the app layer)

@@ -244,8 +244,11 @@ func run() -> Int32 {
     shoot(lost, "9b-target-lost", light: true)
 
     // 10 · the intro's reference-row branches: one candidate (plain text), none.
-    shoot(Run(referenceOptions: [twoOptions[0]]), "10-intro-one-option")
-    shoot(Run(referenceOptions: []), "11-intro-no-option")
+    // Both in LIGHT too: the picker case is the only one that mounts a control,
+    // so these two are how a reader checks that the degraded states stay
+    // undressed in the appearance where a ground reads loudest.
+    shoot(Run(referenceOptions: [twoOptions[0]]), "10-intro-one-option", light: true)
+    shoot(Run(referenceOptions: []), "11-intro-no-option", light: true)
 
     print("done")
     return 0

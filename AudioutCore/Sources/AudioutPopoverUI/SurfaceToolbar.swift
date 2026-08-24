@@ -49,6 +49,12 @@ final class SurfaceToolbarController: NSObject {
     /// does not grow the toolbar. Alec's "the one constant" — bump it here.
     static let markSide: CGFloat = 22
 
+    /// Equal padding on every side of the brand lockup, so the mark and wordmark
+    /// breathe inside the Liquid Glass capsule instead of touching its edges.
+    /// Kept small enough that `markSide + 2 * lockupInset` stays within the
+    /// unified strip's height (the strip must not grow — see `chromeTopInset`).
+    static let lockupInset: CGFloat = 7
+
     static let tabsItemIdentifier = NSToolbarItem.Identifier("SurfaceTabs")
     static let titleItemIdentifier = NSToolbarItem.Identifier("SurfaceTitle")
     static let pinItemIdentifier = NSToolbarItem.Identifier("SurfacePin")
@@ -245,6 +251,14 @@ extension SurfaceToolbarController: NSToolbarDelegate {
             // image, so its own transparent margin already contributes ~4 pt of
             // air on the wordmark's side.
             lockup.spacing = 4
+            // Equal padding on all four sides so the mark+wordmark don't sit
+            // flush against the Liquid Glass capsule's edges — the capsule sizes
+            // to this stack, so its inset IS this. Vertical stays well inside the
+            // unified strip (mark box + 2×inset ≤ strip height; see markSide).
+            lockup.edgeInsets = NSEdgeInsets(top: Self.lockupInset,
+                                             left: Self.lockupInset,
+                                             bottom: Self.lockupInset,
+                                             right: Self.lockupInset)
             // TRAP: the halo is a THIN gold ring at the very top of the figure,
             // and on macOS 26/27 the centered item renders inside a Liquid Glass
             // capsule (`NSGlassEffectView`) whose compositing ERASES that ring

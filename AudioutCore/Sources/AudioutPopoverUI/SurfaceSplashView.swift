@@ -17,13 +17,14 @@ import AudioutSharedUI
 ///
 /// It leaves on whichever comes LAST of the hold elapsing, the content being
 /// in place, and network discovery having QUIESCED — so it never uncovers a
-/// half-built panel or rows still sliding in. The settled frame is measured
-/// and applied behind this opaque cover (`DiscoverySettleTracker` drives
-/// ``noteDiscoverySettled()``), so the user only ever sees one frame. A raised
-/// ``ceilingDuration`` is the backstop, because a network that never quiets
-/// must not leave the surface behind a curtain. A click anywhere dismisses it
-/// at once: the user who is already reaching for a fader has said what they
-/// think of the ornament.
+/// half-built panel or rows still sliding in. The host defers the whole
+/// on-screen reveal until discovery settles (`DiscoverySettleTracker`), so this
+/// hold is laid over an ALREADY-settled list at the settled size — content-ready
+/// and settled are both true the instant it appears, leaving only the hold to
+/// gate the cross-fade. A raised ``ceilingDuration`` is the backstop, because a
+/// network that never quiets must not hold the hold forever. A click anywhere
+/// dismisses it at once: the user who is already reaching for a fader has said
+/// what they think of the ornament.
 ///
 /// Composed of stock pieces (`WarmPanelView` ground, `NSImageView`,
 /// `NSTextField`) — nothing here draws its own chrome.
@@ -76,6 +77,16 @@ final class SurfaceSplashView: NSView {
     /// The whole decision, pure: ornament for a real run's first open only.
     static func shouldPresent(headless: Bool, reduceMotion: Bool, alreadyShown: Bool) -> Bool {
         !headless && !reduceMotion && !alreadyShown
+    }
+
+    /// Would `present(over:)` install a splash right now? The SAME decision, read
+    /// with NO side effects (it does not set `hasShownThisProcess`), so the host
+    /// can decide to defer the on-screen reveal until discovery settles BEFORE
+    /// committing to the ornament.
+    static var wouldPresent: Bool {
+        shouldPresent(headless: test_headlessOverride ?? HeadlessRuntime.isActive,
+                      reduceMotion: reduceMotion,
+                      alreadyShown: hasShownThisProcess)
     }
 
     private var holdElapsed = false

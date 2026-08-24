@@ -936,51 +936,63 @@ import AppKit
                 "once per process, never once per open")
     }
 
-    @Test func theFirstShowHoldsTheBrandMarkOverTheMountedScreen() throws {
+    @Test func theFirstShowRevealsTheBrandMarkOnlyOnceDiscoverySettles() throws {
         try asAFirstRealLaunch {
             let (surface, _, _, _) = makeSurface()
             surface.show(anchorRect: nil)
-            let splash = try #require(surface.test_splash, "the first open earns a splash")
-            #expect(surface.test_settleTracker != nil, "and a settle tracker to gate it")
+            // The reveal is DEFERRED: the window is fronted once, already at the
+            // settled size, so the centred mark never slides. Nothing on screen
+            // yet — just a settle tracker gating the reveal.
+            #expect(surface.test_splash == nil,
+                    "no splash on screen until discovery settles — the reveal is deferred")
+            #expect(surface.test_settleTracker != nil, "a settle tracker gates the first reveal")
+            #expect(surface.test_isRevealPending)
+
+            surface.test_settleDiscovery()
+            let splash = try #require(surface.test_splash,
+                                      "settling reveals the surface with its branded hold")
             #expect(splash.test_isVisible)
+            #expect(!surface.test_isRevealPending)
             #expect(splash.superview === surface.shell.window?.contentView,
                     "it covers the mounted screen, not the window chrome")
-            // The hold is the MINIMUM, not the whole condition: content is in
-            // place, but discovery has not settled, so the mark holds past it.
+            // Content is in place and discovery already quiet at reveal, so only
+            // the hold gates the cross-fade — "splash solid, then cross-fade onto
+            // an already-settled list".
             splash.test_fireHoldTimer()
-            #expect(splash.test_isVisible,
-                    "the hold elapsed but the splash waits for discovery to settle")
-            // Settling releases it (and sizes the settled frame behind the cover).
-            surface.test_settleDiscovery()
             #expect(!splash.test_isVisible)
             #expect(splash.superview == nil, "it takes itself off when it leaves")
         }
     }
 
-    /// The settled frame is measured AFTER discovery quiets, never guessed
-    /// early: an empty fleet opens at the floor, a fleet that streams in behind
-    /// the cover raises it — but only once settle fires, and all before reveal.
-    @Test func theSettledFrameIsMeasuredAfterDiscoverySettlesNotBefore() throws {
+    /// The reveal is deferred until discovery quiets, and the window is fronted
+    /// ONCE at the settled size — the fleet that streams in during the wait is
+    /// measured at reveal, never guessed early. Fronting off screen until then
+    /// is what keeps the resize (`preferredContentSize` grows a REAL ordered
+    /// window on screen — the trap that stayed invisible headless) off the
+    /// user's view: while the reveal is pending there is no on-screen window to
+    /// slide.
+    @Test func theWindowIsFrontedOnceAtTheSettledSizeAfterDiscoverySettles() throws {
         try asAFirstRealLaunch {
             let (surface, popover, _, _) = makeSurface()
             popover.test_isShownOverride = true
             surface.show(anchorRect: nil)
-            let window = try #require(surface.shell.window)
-            let heightAtOpen = window.contentRect(forFrameRect: window.frame).height
-            #expect(abs(heightAtOpen - 600) < 0.5, "empty fleet opens at the floor")
+            #expect(surface.test_isRevealPending, "the reveal waits off screen for discovery to settle")
 
-            // Discovery streams a full fleet in AFTER open.
+            // Discovery streams a full fleet in during the pre-reveal wait.
             let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
                                       emitsLevels: false, simulatesDropouts: false)
             backend.start()
             popover.update(devices: backend.devices)
-            #expect(abs(window.contentRect(forFrameRect: window.frame).height - heightAtOpen) < 0.5,
-                    "the surface does not resize on every device event — the frame is not re-measured yet")
 
             surface.test_settleDiscovery()
+            #expect(!surface.test_isRevealPending, "settling fronts the surface")
+            let window = try #require(surface.shell.window)
             let settledHeight = window.contentRect(forFrameRect: window.frame).height
-            #expect(settledHeight > heightAtOpen + 0.5,
-                    "the settled frame is measured after settle, and the fleet raised it (got \(settledHeight))")
+            // The full fleet raises the fit well above the 600 floor, and the
+            // window opens at exactly that measured size — its first and only
+            // on-screen frame.
+            #expect(settledHeight > 600.5,
+                    "the settled fleet's fit decides the one frame the user sees (got \(settledHeight))")
         }
     }
 
@@ -988,23 +1000,28 @@ import AppKit
         try asAFirstRealLaunch {
             let (surface, _, _, _) = makeSurface()
             surface.show(anchorRect: nil)
+            surface.test_settleDiscovery()
             let splash = try #require(surface.test_splash)
             splash.test_click()
             #expect(!splash.test_isVisible)
         }
     }
 
-    /// Discovery may never quiet — the ceiling backstop must still force the
-    /// mark off so the user is never trapped behind the curtain.
-    @Test func theCeilingFadesItWithNoOtherSignal() throws {
+    /// Discovery may never quiet — the reveal backstop must still front the
+    /// surface (and its branded hold) so the user is never left waiting on a
+    /// click that seemed to do nothing.
+    @Test func theRevealBackstopFrontsTheSurfaceWithNoSettleSignal() throws {
         try asAFirstRealLaunch {
             let (surface, _, _, _) = makeSurface()
             surface.show(anchorRect: nil)
-            let splash = try #require(surface.test_splash)
+            #expect(surface.test_splash == nil, "nothing on screen while discovery is still quieting")
+            #expect(surface.test_isRevealPending)
+            surface.test_fireRevealCeiling()
+            let splash = try #require(surface.test_splash,
+                                      "the backstop fronts the surface even if discovery never quiets")
+            #expect(!surface.test_isRevealPending)
             splash.test_fireHoldTimer()
-            #expect(splash.test_isVisible, "hold alone does not dismiss when discovery never settles")
-            splash.test_fireCeilingTimer()
-            #expect(!splash.test_isVisible, "the raised ceiling forces it off regardless")
+            #expect(!splash.test_isVisible, "and the hold then cross-fades it away")
         }
     }
 
@@ -1022,6 +1039,7 @@ import AppKit
         try asAFirstRealLaunch {
             let (first, _, _, _) = makeSurface()
             first.show(anchorRect: nil)
+            first.test_settleDiscovery()   // reveal the first open's splash (sets the once-per-process flag)
             #expect(first.test_splash != nil)
             let (second, _, _, _) = makeSurface()
             second.show(anchorRect: nil)

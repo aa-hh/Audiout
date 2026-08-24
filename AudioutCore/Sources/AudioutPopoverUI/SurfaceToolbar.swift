@@ -43,6 +43,12 @@ import AudioutSharedUI
 @MainActor
 final class SurfaceToolbarController: NSObject {
 
+    /// Side of the centered brand mark's square box. Sized so the halo's thin
+    /// top ring survives the macOS 26/27 Liquid Glass capsule's compositing
+    /// (see the lockup builder) while staying inside the unified strip so it
+    /// does not grow the toolbar. Alec's "the one constant" — bump it here.
+    static let markSide: CGFloat = 22
+
     static let tabsItemIdentifier = NSToolbarItem.Identifier("SurfaceTabs")
     static let titleItemIdentifier = NSToolbarItem.Identifier("SurfaceTitle")
     static let pinItemIdentifier = NSToolbarItem.Identifier("SurfacePin")
@@ -228,7 +234,7 @@ extension SurfaceToolbarController: NSToolbarDelegate {
             let mark = NSImageView()
             mark.image = BrandMark.image
             // Scale the portrait mark DOWN to fit its box, never up past it, so
-            // the whole figure renders un-clipped.
+            // the whole figure renders inside the box.
             mark.imageScaling = .scaleProportionallyDown
             mark.setAccessibilityElement(false)
             mark.translatesAutoresizingMaskIntoConstraints = false
@@ -239,21 +245,25 @@ extension SurfaceToolbarController: NSToolbarDelegate {
             // image, so its own transparent margin already contributes ~4 pt of
             // air on the wordmark's side.
             lockup.spacing = 4
-            // The mark box is pinned to the wordmark's own height and no taller.
-            // The unified strip does NOT grow to fit an oversized custom item,
-            // and there is no separate title bar to borrow height from (owner:
-            // no separate title bar ever), so a fixed 22 pt box overran the
-            // strip's usable height — clipping the mark's top against the strip
-            // and the backing bubble's rounded corner. Bounding it to the text
-            // the strip already fits keeps the whole lockup inside the strip,
-            // centreY, un-clipped. A CONSTANT box (not an equal-height tie to
+            // TRAP: the halo is a THIN gold ring at the very top of the figure,
+            // and on macOS 26/27 the centered item renders inside a Liquid Glass
+            // capsule (`NSGlassEffectView`) whose compositing ERASES that ring
+            // when the mark is small — the halo has too few pixels at ~16 pt to
+            // survive the effect, and its top comes out sliced flat. This is NOT
+            // a view-bounds clip (every ancestor is `clipsToBounds = false`) and
+            // NOT the image view (a 16 pt retina render off-glass shows the full
+            // round halo), so tying the box to the wordmark's ~16 pt height —
+            // the smallest the mark can be — was exactly the worst case and left
+            // the halo clipped. `Self.markSide` is the smallest box at which the
+            // halo survives the glass with margin (verified against real
+            // system-rendered captures, 20 pt threshold); it stays well inside
+            // the unified strip's height, so the strip does not grow and the
+            // measured chrome inset is unchanged. A CONSTANT box (not tied to
             // the label) so the 1024 px image's intrinsic size can never leak
-            // into the lockup's fitting height; `.scaleProportionallyDown` fits
-            // the portrait figure inside it.
-            let markSide = ceil(label.fittingSize.height)
+            // into the lockup's fitting height.
             NSLayoutConstraint.activate([
-                mark.widthAnchor.constraint(equalToConstant: markSide),
-                mark.heightAnchor.constraint(equalToConstant: markSide),
+                mark.widthAnchor.constraint(equalToConstant: Self.markSide),
+                mark.heightAnchor.constraint(equalToConstant: Self.markSide),
             ])
             item.view = lockup
             item.label = ""

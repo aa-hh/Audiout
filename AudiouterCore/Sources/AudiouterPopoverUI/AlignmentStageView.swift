@@ -228,48 +228,69 @@ final class AlignmentStageView: NSView {
     /// the wire, so the open interval has unlit wire to be narrower than.
     private static let openRulerFill: CGFloat = 0.72
 
-    /// Spec §5's look table, verbatim — plus the ruler fill (above) and a
-    /// 10 ms tick step on the tight rungs (the table's 5 ms put 13 ticks on
-    /// the calmest moment of the run).
+    /// Spec §5's look table — plus the ruler fill (above), a 10 ms tick step
+    /// on the tight rungs (the table's 5 ms put 13 ticks on the calmest
+    /// moment of the run), and the 1.8× LIGHT SCALE below.
+    ///
+    /// **The lights are drawn 1.8× the spec's own sizes** (owner ruling
+    /// 2026-08-24, after the living-ring port shipped): the ported wobble is
+    /// ±3 % of the RADIUS, so on the spec's 9–20 pt rings the wavefront's
+    /// whole peak-to-peak travel was 1.1–2.4 Retina pixels — the life that
+    /// had just been ported could not be seen. Radii 36/32/25/20/16 put that
+    /// travel at 1.9–4.3 px, and the ring finally fills its own halo (ring
+    /// diameter ~⅔ of the halo box, where it was ~half and read as a small
+    /// circle adrift in a blob).
+    ///
+    /// Three things move together, and none of them is a free multiply.
+    /// **The halos scale with the rings**, or the glow stops being a glow —
+    /// which is what forces `stageHeight` up to 132. **The line widths rise
+    /// sub-linearly** (×1.25 rather than ×1.8): a stroke that scaled with the
+    /// radius would read as a drawn hoop instead of a lit edge. **And the
+    /// ladder's gaps grow with everything else** — adjacent rungs sit 4/7/5/4
+    /// pt apart where they used to sit 2/4/3/2, so each step is twice as
+    /// legible while its ratio to the wobble at that size is unchanged. That
+    /// last part is the constraint: the radius is how the ladder encodes
+    /// certainty, so a scale that let the wobble catch up with the gap would
+    /// make the instrument lie.
     static func look(for rung: Rung) -> Look {
         switch rung {
         case .armed:
-            return Look(haloDiameter: 84, haloOpacity: 0.20, ringRadius: 20,
-                        ringOpacity: 0.18, ringLineWidth: 1.0, wireOpacity: 0.55,
+            return Look(haloDiameter: 106, haloOpacity: 0.20, ringRadius: 36,
+                        ringOpacity: 0.18, ringLineWidth: 1.25, wireOpacity: 0.55,
                         tickHalfHeight: 4, tickOpacity: 0.35, spanOpacity: 0.22,
                         spanHeight: 1.5, spanShadowRadius: 3, windowSpanMs: nil,
                         tickStepMs: 250, breathePeriod: 5.2, breatheAmplitude: 1.05,
                         rulerFill: openRulerFill)
         case .open:
-            return Look(haloDiameter: 76, haloOpacity: 0.40, ringRadius: 18,
-                        ringOpacity: 0.30, ringLineWidth: 1.0, wireOpacity: 0.66,
+            return Look(haloDiameter: 96, haloOpacity: 0.40, ringRadius: 32,
+                        ringOpacity: 0.30, ringLineWidth: 1.25, wireOpacity: 0.66,
                         tickHalfHeight: 4.75, tickOpacity: 0.48, spanOpacity: 0.42,
                         spanHeight: 2.0, spanShadowRadius: 3.5, windowSpanMs: nil,
                         tickStepMs: 250, breathePeriod: 4.4, breatheAmplitude: 1.045,
                         rulerFill: openRulerFill)
         case .closing:
-            return Look(haloDiameter: 58, haloOpacity: 0.46, ringRadius: 14,
-                        ringOpacity: 0.55, ringLineWidth: 1.25, wireOpacity: 0.78,
+            return Look(haloDiameter: 76, haloOpacity: 0.46, ringRadius: 25,
+                        ringOpacity: 0.55, ringLineWidth: 1.6, wireOpacity: 0.78,
                         tickHalfHeight: 5.5, tickOpacity: 0.60, spanOpacity: 0.61,
                         spanHeight: 2.5, spanShadowRadius: 4, windowSpanMs: 640,
                         tickStepMs: 100, breathePeriod: 3.5, breatheAmplitude: 1.04)
         case .near:
-            return Look(haloDiameter: 42, haloOpacity: 0.52, ringRadius: 11,
-                        ringOpacity: 0.78, ringLineWidth: 1.5, wireOpacity: 0.89,
+            return Look(haloDiameter: 60, haloOpacity: 0.52, ringRadius: 20,
+                        ringOpacity: 0.78, ringLineWidth: 2.0, wireOpacity: 0.89,
                         tickHalfHeight: 6.25, tickOpacity: 0.73, spanOpacity: 0.81,
                         spanHeight: 3.0, spanShadowRadius: 4.5, windowSpanMs: 200,
                         tickStepMs: 25, breathePeriod: 2.7, breatheAmplitude: 1.035)
         case .threshold:
-            return Look(haloDiameter: 30, haloOpacity: 0.58, ringRadius: 9,
-                        ringOpacity: 1.0, ringLineWidth: 2.0, wireOpacity: 1.0,
+            return Look(haloDiameter: 46, haloOpacity: 0.58, ringRadius: 16,
+                        ringOpacity: 1.0, ringLineWidth: 2.5, wireOpacity: 1.0,
                         tickHalfHeight: 7, tickOpacity: 0.85, spanOpacity: 1.0,
                         spanHeight: 3.5, spanShadowRadius: 5, windowSpanMs: 64,
                         tickStepMs: 10, breathePeriod: 2.0, breatheAmplitude: 1.03)
         case .fused:
             // The span has collapsed INTO the ring, so it carries no opacity
             // of its own; the reference ring steps out to the outer companion.
-            return Look(haloDiameter: 34, haloOpacity: 0.55, ringRadius: 9,
-                        ringOpacity: 1.0, ringLineWidth: 2.0, wireOpacity: 1.0,
+            return Look(haloDiameter: 50, haloOpacity: 0.55, ringRadius: 16,
+                        ringOpacity: 1.0, ringLineWidth: 2.5, wireOpacity: 1.0,
                         tickHalfHeight: 7, tickOpacity: 0.85, spanOpacity: 0,
                         spanHeight: 3.5, spanShadowRadius: 5, windowSpanMs: 64,
                         tickStepMs: 10, breathePeriod: 2.7, breatheAmplitude: 1.03)
@@ -277,14 +298,14 @@ final class AlignmentStageView: NSView {
             // Halo larger and brighter than the table's 40 @ 0.42: the settled
             // look carries the fusion itself, so a Reduce Motion user who
             // never sees the lock sequence still sees the bloom.
-            return Look(haloDiameter: 56, haloOpacity: 0.55, ringRadius: 11,
-                        ringOpacity: 1.0, ringLineWidth: 2.0, wireOpacity: 1.0,
+            return Look(haloDiameter: 74, haloOpacity: 0.55, ringRadius: 20,
+                        ringOpacity: 1.0, ringLineWidth: 2.5, wireOpacity: 1.0,
                         tickHalfHeight: 7, tickOpacity: 0.85, spanOpacity: 0,
                         spanHeight: 3.5, spanShadowRadius: 5, windowSpanMs: 64,
                         tickStepMs: 10, breathePeriod: nil, breatheAmplitude: 1.03)
         case .dormant:
-            return Look(haloDiameter: 0, haloOpacity: 0, ringRadius: 10,
-                        ringOpacity: 0.30, ringLineWidth: 1.0, wireOpacity: 0.55,
+            return Look(haloDiameter: 0, haloOpacity: 0, ringRadius: 18,
+                        ringOpacity: 0.30, ringLineWidth: 1.25, wireOpacity: 0.55,
                         tickHalfHeight: 4, tickOpacity: 0.35, spanOpacity: 0,
                         spanHeight: 1.5, spanShadowRadius: 3, windowSpanMs: nil,
                         tickStepMs: 250, breathePeriod: nil, breatheAmplitude: 1.0)
@@ -317,16 +338,26 @@ final class AlignmentStageView: NSView {
     // MARK: - Geometry constants
 
     /// A strip, not a screen (owner ruling 2026-08-23: the answer plates are
-    /// the hero): tall enough for the armed halo (84) plus the name stamps.
-    static let stageHeight: CGFloat = 112
+    /// the hero): tall enough for the armed halo (106) plus the name stamps.
+    ///
+    /// 112 until the lights were scaled 1.8× (see `look(for:)`), and the 20 pt
+    /// it grew by is the price of that scale rather than a separate decision —
+    /// the halo is the tallest thing on the plate, and a halo that did not
+    /// grow with its ring would have stopped reading as glow. It feeds
+    /// `BTAlignmentWizardView.chassisHeight` 1:1, so it is also the sheet's
+    /// height: every screen gets 20 pt taller, none of them reflows, and the
+    /// stage goes from 27 % of the question sheet to 30 % — the ratio the
+    /// answer plates' primacy actually rests on. Going further (a 2.2× scale
+    /// wanted 152, i.e. 33 %) is what tips the stage into being the hero.
+    static let stageHeight: CGFloat = 132
     private static let horizontalInset: CGFloat = 26
     /// **The wire sits on the plate's midline** (owner ruling 2026-08-24: on
     /// the intro "the group reads low"). It used to sit at 0.62 — i.e. 42 pt
     /// up from the bottom of a 112 pt plate — which put the armed halo's lower
     /// edge and the name stamps within a few points of the plate's bottom rim
     /// while a clear 27 pt band sat empty above the lights. Centred, the armed
-    /// halo leaves ~14 pt top and bottom and the stamps still clear the rim by
-    /// ~19 pt, so the instrument reads as a thing floating in its case on every
+    /// halo leaves ~19 pt top and bottom and the stamps still clear the rim by
+    /// ~13 pt, so the instrument reads as a thing floating in its case on every
     /// screen. It stays a constant of the plate's own height, so the wire never
     /// moves between screens — the fixed chassis rule.
     private static let wireYFraction: CGFloat = 0.5
@@ -348,11 +379,16 @@ final class AlignmentStageView: NSView {
     }
 
     /// `emitters.js` `wobble`: the wavefront bends by ±3 % of its radius.
-    /// razor: 0.03 is the website's own value, ported literally. At the
-    /// website's canvas radii that is many pixels; at a 9–20 pt ring here it
-    /// is a sub-point shimmer. Upgrade path is to raise THIS number (the
-    /// character is the two harmonics, not the amplitude), never to reshape
-    /// the harmonics.
+    /// razor: 0.03 is the website's own value, ported literally, and the
+    /// 1.8× light scale (see `look(for:)`) is what makes it visible — at the
+    /// spec's original 9–20 pt rings the wavefront's peak-to-peak travel was
+    /// 1.1–2.4 Retina pixels. At 16–36 pt it is 1.9–4.3. The tight
+    /// rungs are still the quietest, which is the intent: a belief that has
+    /// narrowed should read calmer than one that has not. If the endgame
+    /// ever needs more life than that, the upgrade path is to raise THIS
+    /// number (the character is the two harmonics, not the amplitude), never
+    /// to reshape the harmonics and never to grow the tight rungs into the
+    /// wide ones' sizes.
     private static let wobble: CGFloat = 0.03
     /// `wobbleRate` — rad/s the three-lobe harmonic turns. The five-lobe one
     /// counter-turns at ×0.73, which is what keeps the lead drifting.
@@ -374,8 +410,9 @@ final class AlignmentStageView: NSView {
     /// rungs' halo opacities is ~13 %, so the modulation is held to half of
     /// that. This is the ONE ported number that is not the website's.
     private static let swellDepth: Float = 0.06
-    /// Segments per living ring. At a 20 pt radius the chord is 1.3 pt and
-    /// the sagitta 0.02 pt, so the polygon is an ellipse on any display.
+    /// Segments per living ring. At the largest radius the table now asks for
+    /// (36 pt) the chord is 2.4 pt and the sagitta 0.02 pt, so the polygon is
+    /// still an ellipse on any display.
     private static let ringSegments = 96
 
     /// `emitters.js`'s per-emitter seed: the reason the two lights never wave
@@ -1038,7 +1075,7 @@ final class AlignmentStageView: NSView {
                     centre: CGPoint(x: highX, y: y),
                     haloDiameter: look.haloDiameter,
                     haloOpacity: fused || locked ? 0 : haloOpacity,
-                    ringRadius: fused ? look.ringRadius + 4 : look.ringRadius,
+                    ringRadius: fused ? look.ringRadius + 6 : look.ringRadius,
                     // ×0.85, not the table's ×0.55: over the green halo the
                     // outer ring measured dusty mauve, not magenta.
                     ringOpacity: locked ? 0 : (fused ? look.ringOpacity * 0.85

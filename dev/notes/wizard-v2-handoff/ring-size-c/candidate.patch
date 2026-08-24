@@ -1,0 +1,96 @@
+diff --git a/AudiouterCore/Sources/AudiouterPopoverUI/AlignmentStageView.swift b/AudiouterCore/Sources/AudiouterPopoverUI/AlignmentStageView.swift
+index e490b88f..f5dc23e9 100644
+--- a/AudiouterCore/Sources/AudiouterPopoverUI/AlignmentStageView.swift
++++ b/AudiouterCore/Sources/AudiouterPopoverUI/AlignmentStageView.swift
+@@ -234,42 +234,42 @@ final class AlignmentStageView: NSView {
+     static func look(for rung: Rung) -> Look {
+         switch rung {
+         case .armed:
+-            return Look(haloDiameter: 84, haloOpacity: 0.20, ringRadius: 20,
+-                        ringOpacity: 0.18, ringLineWidth: 1.0, wireOpacity: 0.55,
++            return Look(haloDiameter: 130, haloOpacity: 0.20, ringRadius: 44,
++                        ringOpacity: 0.18, ringLineWidth: 1.5, wireOpacity: 0.55,
+                         tickHalfHeight: 4, tickOpacity: 0.35, spanOpacity: 0.22,
+                         spanHeight: 1.5, spanShadowRadius: 3, windowSpanMs: nil,
+                         tickStepMs: 250, breathePeriod: 5.2, breatheAmplitude: 1.05,
+                         rulerFill: openRulerFill)
+         case .open:
+-            return Look(haloDiameter: 76, haloOpacity: 0.40, ringRadius: 18,
+-                        ringOpacity: 0.30, ringLineWidth: 1.0, wireOpacity: 0.66,
++            return Look(haloDiameter: 118, haloOpacity: 0.40, ringRadius: 40,
++                        ringOpacity: 0.30, ringLineWidth: 1.5, wireOpacity: 0.66,
+                         tickHalfHeight: 4.75, tickOpacity: 0.48, spanOpacity: 0.42,
+                         spanHeight: 2.0, spanShadowRadius: 3.5, windowSpanMs: nil,
+                         tickStepMs: 250, breathePeriod: 4.4, breatheAmplitude: 1.045,
+                         rulerFill: openRulerFill)
+         case .closing:
+-            return Look(haloDiameter: 58, haloOpacity: 0.46, ringRadius: 14,
+-                        ringOpacity: 0.55, ringLineWidth: 1.25, wireOpacity: 0.78,
++            return Look(haloDiameter: 94, haloOpacity: 0.46, ringRadius: 31,
++                        ringOpacity: 0.55, ringLineWidth: 1.9, wireOpacity: 0.78,
+                         tickHalfHeight: 5.5, tickOpacity: 0.60, spanOpacity: 0.61,
+                         spanHeight: 2.5, spanShadowRadius: 4, windowSpanMs: 640,
+                         tickStepMs: 100, breathePeriod: 3.5, breatheAmplitude: 1.04)
+         case .near:
+-            return Look(haloDiameter: 42, haloOpacity: 0.52, ringRadius: 11,
+-                        ringOpacity: 0.78, ringLineWidth: 1.5, wireOpacity: 0.89,
++            return Look(haloDiameter: 72, haloOpacity: 0.52, ringRadius: 24,
++                        ringOpacity: 0.78, ringLineWidth: 2.25, wireOpacity: 0.89,
+                         tickHalfHeight: 6.25, tickOpacity: 0.73, spanOpacity: 0.81,
+                         spanHeight: 3.0, spanShadowRadius: 4.5, windowSpanMs: 200,
+                         tickStepMs: 25, breathePeriod: 2.7, breatheAmplitude: 1.035)
+         case .threshold:
+-            return Look(haloDiameter: 30, haloOpacity: 0.58, ringRadius: 9,
+-                        ringOpacity: 1.0, ringLineWidth: 2.0, wireOpacity: 1.0,
++            return Look(haloDiameter: 58, haloOpacity: 0.58, ringRadius: 20,
++                        ringOpacity: 1.0, ringLineWidth: 3, wireOpacity: 1.0,
+                         tickHalfHeight: 7, tickOpacity: 0.85, spanOpacity: 1.0,
+                         spanHeight: 3.5, spanShadowRadius: 5, windowSpanMs: 64,
+                         tickStepMs: 10, breathePeriod: 2.0, breatheAmplitude: 1.03)
+         case .fused:
+             // The span has collapsed INTO the ring, so it carries no opacity
+             // of its own; the reference ring steps out to the outer companion.
+-            return Look(haloDiameter: 34, haloOpacity: 0.55, ringRadius: 9,
+-                        ringOpacity: 1.0, ringLineWidth: 2.0, wireOpacity: 1.0,
++            return Look(haloDiameter: 62, haloOpacity: 0.55, ringRadius: 20,
++                        ringOpacity: 1.0, ringLineWidth: 3, wireOpacity: 1.0,
+                         tickHalfHeight: 7, tickOpacity: 0.85, spanOpacity: 0,
+                         spanHeight: 3.5, spanShadowRadius: 5, windowSpanMs: 64,
+                         tickStepMs: 10, breathePeriod: 2.7, breatheAmplitude: 1.03)
+@@ -277,14 +277,14 @@ final class AlignmentStageView: NSView {
+             // Halo larger and brighter than the table's 40 @ 0.42: the settled
+             // look carries the fusion itself, so a Reduce Motion user who
+             // never sees the lock sequence still sees the bloom.
+-            return Look(haloDiameter: 56, haloOpacity: 0.55, ringRadius: 11,
+-                        ringOpacity: 1.0, ringLineWidth: 2.0, wireOpacity: 1.0,
++            return Look(haloDiameter: 90, haloOpacity: 0.55, ringRadius: 24,
++                        ringOpacity: 1.0, ringLineWidth: 3, wireOpacity: 1.0,
+                         tickHalfHeight: 7, tickOpacity: 0.85, spanOpacity: 0,
+                         spanHeight: 3.5, spanShadowRadius: 5, windowSpanMs: 64,
+                         tickStepMs: 10, breathePeriod: nil, breatheAmplitude: 1.03)
+         case .dormant:
+-            return Look(haloDiameter: 0, haloOpacity: 0, ringRadius: 10,
+-                        ringOpacity: 0.30, ringLineWidth: 1.0, wireOpacity: 0.55,
++            return Look(haloDiameter: 0, haloOpacity: 0, ringRadius: 22,
++                        ringOpacity: 0.30, ringLineWidth: 1.5, wireOpacity: 0.55,
+                         tickHalfHeight: 4, tickOpacity: 0.35, spanOpacity: 0,
+                         spanHeight: 1.5, spanShadowRadius: 3, windowSpanMs: nil,
+                         tickStepMs: 250, breathePeriod: nil, breatheAmplitude: 1.0)
+@@ -318,7 +318,7 @@ final class AlignmentStageView: NSView {
+ 
+     /// A strip, not a screen (owner ruling 2026-08-23: the answer plates are
+     /// the hero): tall enough for the armed halo (84) plus the name stamps.
+-    static let stageHeight: CGFloat = 112
++    static let stageHeight: CGFloat = 152
+     private static let horizontalInset: CGFloat = 26
+     /// **The wire sits on the plate's midline** (owner ruling 2026-08-24: on
+     /// the intro "the group reads low"). It used to sit at 0.62 — i.e. 42 pt
+@@ -1038,7 +1038,7 @@ final class AlignmentStageView: NSView {
+                     centre: CGPoint(x: highX, y: y),
+                     haloDiameter: look.haloDiameter,
+                     haloOpacity: fused || locked ? 0 : haloOpacity,
+-                    ringRadius: fused ? look.ringRadius + 4 : look.ringRadius,
++                    ringRadius: fused ? look.ringRadius + 7 : look.ringRadius,
+                     // ×0.85, not the table's ×0.55: over the green halo the
+                     // outer ring measured dusty mauve, not magenta.
+                     ringOpacity: locked ? 0 : (fused ? look.ringOpacity * 0.85

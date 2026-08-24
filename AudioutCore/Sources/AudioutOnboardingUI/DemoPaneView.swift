@@ -788,6 +788,8 @@ func demoGlyph(_ name: String, pointSize: CGFloat,
 /// fresher in-process icon here would make the preview WRONG on a Mac where
 /// Launch Services hasn't caught up to the latest build yet (verified against
 /// live testing, where the real dialog and this mock visibly disagreed).
+/// Intentionally exempt from the `BrandMark` swap: a mock of an OS surface has
+/// to show what the OS will show, which is this icon.
 func demoIconAsAThirdPartyProcessSeesIt() -> NSImage {
     NSWorkspace.shared.icon(forFile: Bundle.main.bundlePath)
 }
@@ -1849,7 +1851,12 @@ final class DemoSettledMockView: NSView {
         // NOTHING here clips: no `masksToBounds`, no corner rounding, no mask.
         // This card is ours and draws unframed, and the ripple has to cross
         // the stage edge rather than end at it.
-        icon.image = NSApp?.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
+        // The finale card is OURS, not a mock of a macOS surface, so it wears
+        // the BRAND MARK rather than the OS app icon (see `BrandMark`); the
+        // icon stays as the fallback for a build with no bundled asset.
+        icon.image = BrandMark.image
+            ?? NSApp?.applicationIconImage
+            ?? NSImage(named: NSImage.applicationIconName)
         icon.imageScaling = .scaleProportionallyUpOrDown
         icon.translatesAutoresizingMaskIntoConstraints = false
 

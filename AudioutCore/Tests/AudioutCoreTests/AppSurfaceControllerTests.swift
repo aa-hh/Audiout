@@ -885,4 +885,90 @@ import AppKit
             frameAutosaveName: NSWindow.FrameAutosaveName(uniqueName("SurfaceTests")))
         return (surface, groups, group.group.id)
     }
+
+    // MARK: Launch splash
+
+    /// Run `body` as if this were a real (non-headless) launch that has never
+    /// shown a splash, and put both process-wide facts back afterwards.
+    private func asAFirstRealLaunch(reduceMotion: Bool = false,
+                                    _ body: () throws -> Void) rethrows {
+        SurfaceSplashView.test_headlessOverride = false
+        SurfaceSplashView.test_reduceMotionOverride = reduceMotion
+        SurfaceSplashView.test_resetProcessFlag()
+        defer {
+            SurfaceSplashView.test_headlessOverride = nil
+            SurfaceSplashView.test_reduceMotionOverride = nil
+            SurfaceSplashView.test_resetProcessFlag()
+        }
+        try body()
+    }
+
+    @Test func theDecisionIsARealRunsFirstOpenAndNothingElse() {
+        #expect(SurfaceSplashView.shouldPresent(headless: false, reduceMotion: false,
+                                                alreadyShown: false))
+        #expect(!SurfaceSplashView.shouldPresent(headless: true, reduceMotion: false,
+                                                 alreadyShown: false),
+                "a headless run renders the screen it was pointed at, never ornament")
+        #expect(!SurfaceSplashView.shouldPresent(headless: false, reduceMotion: true,
+                                                 alreadyShown: false),
+                "Reduce Motion skips it entirely — it is pure ornament")
+        #expect(!SurfaceSplashView.shouldPresent(headless: false, reduceMotion: false,
+                                                 alreadyShown: true),
+                "once per process, never once per open")
+    }
+
+    @Test func theFirstShowHoldsTheBrandMarkOverTheMountedScreen() throws {
+        try asAFirstRealLaunch {
+            let (surface, _, _, _) = makeSurface()
+            surface.show(anchorRect: nil)
+            let splash = try #require(surface.test_splash, "the first open earns a splash")
+            #expect(splash.test_isVisible)
+            #expect(splash.superview === surface.shell.window?.contentView,
+                    "it covers the mounted screen, not the window chrome")
+            // The hold is the LAST of the two conditions here: `show` already
+            // noted the content in place.
+            splash.test_fireHoldTimer()
+            #expect(!splash.test_isVisible)
+            #expect(splash.superview == nil, "it takes itself off when it leaves")
+        }
+    }
+
+    @Test func aClickTakesTheSplashAwayAtOnce() throws {
+        try asAFirstRealLaunch {
+            let (surface, _, _, _) = makeSurface()
+            surface.show(anchorRect: nil)
+            let splash = try #require(surface.test_splash)
+            splash.test_click()
+            #expect(!splash.test_isVisible)
+        }
+    }
+
+    @Test func theCeilingFadesItWithNoOtherSignal() throws {
+        try asAFirstRealLaunch {
+            let (surface, _, _, _) = makeSurface()
+            surface.show(anchorRect: nil)
+            let splash = try #require(surface.test_splash)
+            splash.test_fireCeilingTimer()
+            #expect(!splash.test_isVisible)
+        }
+    }
+
+    @Test func reduceMotionOpensStraightOntoTheScreen() {
+        asAFirstRealLaunch(reduceMotion: true) {
+            let (surface, _, _, _) = makeSurface()
+            surface.show(anchorRect: nil)
+            #expect(surface.test_splash == nil)
+        }
+    }
+
+    @Test func aSecondSurfaceInTheSameProcessGetsNoSplash() throws {
+        try asAFirstRealLaunch {
+            let (first, _, _, _) = makeSurface()
+            first.show(anchorRect: nil)
+            #expect(first.test_splash != nil)
+            let (second, _, _, _) = makeSurface()
+            second.show(anchorRect: nil)
+            #expect(second.test_splash == nil)
+        }
+    }
 }

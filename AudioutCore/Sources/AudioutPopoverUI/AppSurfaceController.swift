@@ -123,6 +123,11 @@ public final class AppSurfaceController {
     /// frame. Once per open: the panel republishes its size on every fold tick.
     private var overflowReported = false
 
+    /// The launch splash while it is on screen. WEAK on purpose: the hosting
+    /// content view owns it, and it takes itself off when it leaves — nothing
+    /// here has to remember to clear a stale one.
+    private weak var splash: SurfaceSplashView?
+
     /// Whether the surface window is currently presented (show → close). The
     /// Mixer's `surfaceDidShow`/`surfaceDidHide` lifecycle keys off this so
     /// metering/monitors only run while a user can see the panel.
@@ -216,6 +221,10 @@ public final class AppSurfaceController {
             overflowReported = false
             sessionContentSize = measureSessionContentSize()
             mount(selectedScreen)
+            // The launch hold, first open of the process only — over the
+            // MOUNTED content, so the screen is already built underneath it
+            // (`SurfaceSplashView`).
+            splash = SurfaceSplashView.present(over: shell.window?.contentView)
         }
         shell.show(anchorRect: anchorRect)
         isShown = true
@@ -223,6 +232,9 @@ public final class AppSurfaceController {
             popoverController.surfaceDidShow()
         }
         publishVisibleScreen()
+        // The other half of the splash's leave condition: the surface is on
+        // screen with its screen shown, so there is something to uncover.
+        splash?.noteContentReady()
     }
 
     /// Close through the shell's real-close path (`windowWillClose` →
@@ -526,6 +538,8 @@ public final class AppSurfaceController {
     var test_settingsRoot: SettingsRootViewController? { settingsRoot }
     /// The chrome inset screens are currently seated below (0 unpinned).
     var test_chromeTopInset: CGFloat { chromeTopInset }
+    /// The launch splash, `nil` when this open showed none or it has left.
+    var test_splash: SurfaceSplashView? { splash }
 }
 
 // MARK: - SurfaceScreenViewController

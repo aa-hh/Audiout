@@ -20,8 +20,10 @@ import AudioutSharedUI
 ///   plain items, kept working). The tab names survive the missing labels —
 ///   per-segment tooltips ("Mixer (⌘1)"), the subitems' `label`s (VoiceOver
 ///   and the overflow menu), and ⌘1/⌘2/⌘3;
-/// - "Audiout" as a centered label item (`centeredItemIdentifiers`) — the
-///   one place the app name appears in the header, both profiles;
+/// - the brand mark beside "Audiout" as a centered LOCKUP item
+///   (`centeredItemIdentifiers`) — the one place the app names itself in the
+///   header, both profiles. The mark is decorative; the wordmark is what
+///   VoiceOver reads, so the name is spoken once;
 /// - Pin and Quit as trailing bordered items.
 ///
 /// One toolbar per process: unlike the retired per-screen header instances,
@@ -46,6 +48,11 @@ final class SurfaceToolbarController: NSObject {
     static let pinItemIdentifier = NSToolbarItem.Identifier("SurfacePin")
     static let quitItemIdentifier = NSToolbarItem.Identifier("SurfaceQuit")
 
+    /// Side of the brand mark's square image box in the centered lockup — one
+    /// step under the wordmark's cap-to-descender run, so the mark reads as
+    /// part of the name rather than as a toolbar button.
+    static let brandMarkSide: CGFloat = 22
+
     /// A tab was clicked. The host decides what a selection means; the group's
     /// segmented state is re-asserted from `selectedScreen` after this returns
     /// (the host confirms via `setSelectedScreen`).
@@ -65,6 +72,7 @@ final class SurfaceToolbarController: NSObject {
     private var tabsGroup: NSToolbarItemGroup?
     private var pinItem: NSToolbarItem?
     private var titleLabel: NSTextField?
+    private var markView: NSImageView?
 
     override init() {
         toolbar = NSToolbar(identifier: "SurfaceToolbar")
@@ -151,6 +159,10 @@ final class SurfaceToolbarController: NSObject {
     var test_selectedTabIndex: Int? { tabsGroup?.selectedIndex }
     /// The centered app-name label's text, `nil` if the item never built.
     var test_centeredTitleText: String? { titleLabel?.stringValue }
+    /// Whether the centered lockup's brand mark resolved its image.
+    var test_centeredMarkHasImage: Bool { markView?.image != nil }
+    /// Whether that mark is decorative (the wordmark speaks the name).
+    var test_centeredMarkIsDecorative: Bool { markView?.isAccessibilityElement() == false }
     /// Whether the pin/quit items resolved symbol images.
     var test_pinItemHasImage: Bool { pinItem?.image != nil }
     var test_pinItemLabel: String? { pinItem?.label }
@@ -210,9 +222,29 @@ extension SurfaceToolbarController: NSToolbarDelegate {
             label.font = NSFont.titleBarFont(ofSize: NSFont.systemFontSize)
             label.textColor = .labelColor
             label.setAccessibilityRole(.staticText)
-            item.view = label
+            // The brand mark leads the wordmark, one lockup. The image is
+            // DECORATIVE — the label beside it already speaks the name, and two
+            // elements saying "Audiout" is the name spoken twice.
+            let mark = NSImageView()
+            mark.image = BrandMark.image
+            mark.imageScaling = .scaleProportionallyUpOrDown
+            mark.setAccessibilityElement(false)
+            mark.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                mark.widthAnchor.constraint(equalToConstant: Self.brandMarkSide),
+                mark.heightAnchor.constraint(equalToConstant: Self.brandMarkSide),
+            ])
+            let lockup = NSStackView(views: [mark, label])
+            lockup.orientation = .horizontal
+            lockup.alignment = .centerY
+            // 4, not the usual 8: the mark is a PORTRAIT figure inside a square
+            // image, so its own transparent margin already contributes ~4 pt of
+            // air on the wordmark's side.
+            lockup.spacing = 4
+            item.view = lockup
             item.label = ""
             titleLabel = label
+            markView = mark
             return item
 
         case Self.pinItemIdentifier:

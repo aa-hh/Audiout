@@ -356,11 +356,15 @@ public final class OnboardingViewController: NSViewController {
     static let heroFrameToRibbonGap: CGFloat = 13
 
     private func makeHeader() -> NSView {
-        // Show the app's REAL icon (not a generic glyph) — a stronger first
-        // impression for a paid product. Fetched from the running app so it
-        // tracks whatever icon ships, with no hardcoded asset name to go stale.
+        // Show the BRAND MARK (not a generic glyph) — a stronger first
+        // impression for a paid product. Deliberately not the OS app icon:
+        // that tile belongs to Dock/Finder, while the mark is the identity we
+        // control (see `BrandMark`). The icon stays as the fallback for a
+        // build with no bundled asset.
         let tile = NSImageView()
-        tile.image = NSApp?.applicationIconImage ?? NSImage(named: NSImage.applicationIconName)
+        tile.image = BrandMark.image
+            ?? NSApp?.applicationIconImage
+            ?? NSImage(named: NSImage.applicationIconName)
         tile.imageScaling = .scaleProportionallyUpOrDown
         tile.setAccessibilityLabel("Audiout")
         tile.translatesAutoresizingMaskIntoConstraints = false

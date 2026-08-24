@@ -15,22 +15,29 @@ import AudioutSharedUI
 /// setting turns off) and in every headless run, so the snapshot tools render
 /// the screens they were pointed at.
 ///
-/// It leaves on whichever comes LAST of the hold elapsing and the content
-/// being in place, so it never uncovers a half-built panel — with
-/// ``ceilingDuration`` as the backstop, because a content signal that never
-/// arrives must not leave the surface behind a curtain. A click anywhere
-/// dismisses it at once: the user who is already reaching for a fader has said
-/// what they think of the ornament.
+/// It leaves on whichever comes LAST of the hold elapsing, the content being
+/// in place, and network discovery having QUIESCED — so it never uncovers a
+/// half-built panel or rows still sliding in. The settled frame is measured
+/// and applied behind this opaque cover (`DiscoverySettleTracker` drives
+/// ``noteDiscoverySettled()``), so the user only ever sees one frame. A raised
+/// ``ceilingDuration`` is the backstop, because a network that never quiets
+/// must not leave the surface behind a curtain. A click anywhere dismisses it
+/// at once: the user who is already reaching for a fader has said what they
+/// think of the ornament.
 ///
 /// Composed of stock pieces (`WarmPanelView` ground, `NSImageView`,
 /// `NSTextField`) — nothing here draws its own chrome.
 @MainActor
 final class SurfaceSplashView: NSView {
 
-    /// How long the mark holds before it may start leaving.
+    /// The MINIMUM the mark holds before it may start leaving.
     static let holdDuration: TimeInterval = 0.7
-    /// The backstop: it fades at this point whatever else has happened.
-    static let ceilingDuration: TimeInterval = 1.2
+    /// The backstop: it fades at this point whatever else has happened. Raised
+    /// from 1.2 s so a cold open's discovery (Bonjour/AirPlay/Cast/BT, which
+    /// streams in over ~1–2 s) has room to quiet behind the cover before the
+    /// settled frame is revealed — while still capping the wait so a network
+    /// that never quiets can't trap the user behind the curtain.
+    static let ceilingDuration: TimeInterval = 2.7
     /// The fade itself.
     static let fadeDuration: TimeInterval = 0.25
     /// Side of the mark's square image box.
@@ -73,6 +80,7 @@ final class SurfaceSplashView: NSView {
 
     private var holdElapsed = false
     private var contentReady = false
+    private var discoverySettled = false
     private var isLeaving = false
     private var timers: [Timer] = []
 
@@ -157,9 +165,18 @@ final class SurfaceSplashView: NSView {
             object: nil)
     }
 
-    /// The host's content is built and on screen. Half of the leave condition.
+    /// The host's content is built and on screen. Part of the leave condition.
     func noteContentReady() {
         contentReady = true
+        leaveIfReady()
+    }
+
+    /// Network discovery has quiesced and the settled frame has been applied
+    /// behind this cover (`DiscoverySettleTracker`). The last part of the leave
+    /// condition: the mark holds until the frame the user will see is settled,
+    /// so it never uncovers rows still sliding into place.
+    func noteDiscoverySettled() {
+        discoverySettled = true
         leaveIfReady()
     }
 
@@ -169,7 +186,7 @@ final class SurfaceSplashView: NSView {
     }
 
     private func leaveIfReady() {
-        guard holdElapsed, contentReady else { return }
+        guard holdElapsed, contentReady, discoverySettled else { return }
         leave(animated: true)
     }
 

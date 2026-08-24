@@ -128,6 +128,13 @@ public final class AppSurfaceController {
     /// here has to remember to clear a stale one.
     private weak var splash: SurfaceSplashView?
 
+    /// Debounces the discovery stream to decide when the fleet has quiesced, so
+    /// the settled frame is measured behind the splash and the user sees one
+    /// frame. Non-nil only while a launch splash is up (the settle wait exists
+    /// only to gate that ornament); the headless/Reduce-Motion open never makes
+    /// one and keeps the old synchronous timing.
+    private var settleTracker: DiscoverySettleTracker?
+
     /// Whether the surface window is currently presented (show → close). The
     /// Mixer's `surfaceDidShow`/`surfaceDidHide` lifecycle keys off this so
     /// metering/monitors only run while a user can see the panel.
@@ -184,6 +191,12 @@ public final class AppSurfaceController {
         toolbarController.onSelectScreen = { [weak self] in self?.select($0) }
         toolbarController.onTogglePin = { [weak self] in self?.togglePin() }
         toolbarController.onQuit = { NSApp?.terminate(nil) }
+
+        // The discovery stream feeds the launch splash's settle tracker (nil
+        // outside a splash — a plain no-op then).
+        popoverController.onDeviceSnapshot = { [weak self] ids in
+            self?.settleTracker?.note(deviceIDs: ids)
+        }
         if let window = shell.window {
             toolbarController.attach(to: window)
             // Materialize the toolbar's title-bar machinery NOW (a toolbar on
@@ -225,6 +238,18 @@ public final class AppSurfaceController {
             // MOUNTED content, so the screen is already built underneath it
             // (`SurfaceSplashView`).
             splash = SurfaceSplashView.present(over: shell.window?.contentView)
+            // Only while there IS a splash to hold: gate its dismissal on the
+            // fleet quiescing, and measure/apply the settled frame behind it.
+            // Headless / Reduce Motion make no splash, so this never runs and
+            // the open stays synchronous exactly as before.
+            if splash != nil {
+                let tracker = DiscoverySettleTracker()
+                tracker.onSettled = { [weak self] in self?.handleDiscoverySettled() }
+                settleTracker = tracker
+                tracker.start()
+            } else {
+                settleTracker = nil
+            }
         }
         shell.show(anchorRect: anchorRect)
         isShown = true
@@ -232,9 +257,32 @@ public final class AppSurfaceController {
             popoverController.surfaceDidShow()
         }
         publishVisibleScreen()
-        // The other half of the splash's leave condition: the surface is on
-        // screen with its screen shown, so there is something to uncover.
+        // Part of the splash's leave condition: the surface is on screen with
+        // its screen shown, so there is something to uncover.
         splash?.noteContentReady()
+    }
+
+    /// Discovery has quiesced (`DiscoverySettleTracker`). While the opaque
+    /// splash still covers the content, re-measure and re-apply the session
+    /// frame ONCE to the settled fleet, feeding the first burst of rows in
+    /// un-animated so nothing slides, then release the splash. Net effect: the
+    /// one frame the user ever sees is the settled one. A no-op if the cover is
+    /// already gone (a click, or the ceiling backstop, revealed it early — the
+    /// early frame then stands).
+    private func handleDiscoverySettled() {
+        guard isShown, splash?.test_isVisible == true else { return }
+        overflowReported = false
+        sessionContentSize = measureSessionContentSize()
+        if selectedScreen == .mixer {
+            // First-burst rows settled, not sliding — animated:false through the
+            // panel's own re-fit, all behind the cover.
+            mixerPanel?.panelContentDidChangeHeight(animated: false)
+        }
+        // The proper resize path: `applySessionFrame` → `window.setFrame` →
+        // `ControlPanelWindowController.windowDidResize`, which keeps the
+        // decorative bubble/beak in lockstep. Never a raw desync.
+        applySessionFrame()
+        splash?.noteDiscoverySettled()
     }
 
     /// Close through the shell's real-close path (`windowWillClose` →
@@ -253,6 +301,8 @@ public final class AppSurfaceController {
             popoverController.surfaceDidHide()
         }
         isShown = false
+        // The settle wait belongs to this open's splash; a close ends it.
+        settleTracker = nil
         publishVisibleScreen()
         onClose?()
     }
@@ -540,6 +590,10 @@ public final class AppSurfaceController {
     var test_chromeTopInset: CGFloat { chromeTopInset }
     /// The launch splash, `nil` when this open showed none or it has left.
     var test_splash: SurfaceSplashView? { splash }
+    /// The launch settle tracker, `nil` when no splash gated this open.
+    var test_settleTracker: DiscoverySettleTracker? { settleTracker }
+    /// Drive the settle path exactly as a quiesced fleet would.
+    func test_settleDiscovery() { settleTracker?.test_settleNow() }
 }
 
 // MARK: - SurfaceScreenViewController

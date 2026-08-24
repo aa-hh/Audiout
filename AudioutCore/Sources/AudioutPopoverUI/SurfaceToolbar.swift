@@ -48,11 +48,6 @@ final class SurfaceToolbarController: NSObject {
     static let pinItemIdentifier = NSToolbarItem.Identifier("SurfacePin")
     static let quitItemIdentifier = NSToolbarItem.Identifier("SurfaceQuit")
 
-    /// Side of the brand mark's square image box in the centered lockup — one
-    /// step under the wordmark's cap-to-descender run, so the mark reads as
-    /// part of the name rather than as a toolbar button.
-    static let brandMarkSide: CGFloat = 22
-
     /// A tab was clicked. The host decides what a selection means; the group's
     /// segmented state is re-asserted from `selectedScreen` after this returns
     /// (the host confirms via `setSelectedScreen`).
@@ -161,6 +156,11 @@ final class SurfaceToolbarController: NSObject {
     var test_centeredTitleText: String? { titleLabel?.stringValue }
     /// Whether the centered lockup's brand mark resolved its image.
     var test_centeredMarkHasImage: Bool { markView?.image != nil }
+    /// Whether the mark scales DOWN to fit its box (never clipping — Task A).
+    var test_centeredMarkScalesToFit: Bool { markView?.imageScaling == .scaleProportionallyDown }
+    /// The centered lockup's fitting height — must sit within the strip so
+    /// nothing clips. `0` when the item never built.
+    var test_centeredLockupFittingHeight: CGFloat { markView?.superview?.fittingSize.height ?? 0 }
     /// Whether that mark is decorative (the wordmark speaks the name).
     var test_centeredMarkIsDecorative: Bool { markView?.isAccessibilityElement() == false }
     /// Whether the pin/quit items resolved symbol images.
@@ -227,13 +227,11 @@ extension SurfaceToolbarController: NSToolbarDelegate {
             // elements saying "Audiout" is the name spoken twice.
             let mark = NSImageView()
             mark.image = BrandMark.image
-            mark.imageScaling = .scaleProportionallyUpOrDown
+            // Scale the portrait mark DOWN to fit its box, never up past it, so
+            // the whole figure renders un-clipped.
+            mark.imageScaling = .scaleProportionallyDown
             mark.setAccessibilityElement(false)
             mark.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                mark.widthAnchor.constraint(equalToConstant: Self.brandMarkSide),
-                mark.heightAnchor.constraint(equalToConstant: Self.brandMarkSide),
-            ])
             let lockup = NSStackView(views: [mark, label])
             lockup.orientation = .horizontal
             lockup.alignment = .centerY
@@ -241,6 +239,22 @@ extension SurfaceToolbarController: NSToolbarDelegate {
             // image, so its own transparent margin already contributes ~4 pt of
             // air on the wordmark's side.
             lockup.spacing = 4
+            // The mark box is pinned to the wordmark's own height and no taller.
+            // The unified strip does NOT grow to fit an oversized custom item,
+            // and there is no separate title bar to borrow height from (owner:
+            // no separate title bar ever), so a fixed 22 pt box overran the
+            // strip's usable height — clipping the mark's top against the strip
+            // and the backing bubble's rounded corner. Bounding it to the text
+            // the strip already fits keeps the whole lockup inside the strip,
+            // centreY, un-clipped. A CONSTANT box (not an equal-height tie to
+            // the label) so the 1024 px image's intrinsic size can never leak
+            // into the lockup's fitting height; `.scaleProportionallyDown` fits
+            // the portrait figure inside it.
+            let markSide = ceil(label.fittingSize.height)
+            NSLayoutConstraint.activate([
+                mark.widthAnchor.constraint(equalToConstant: markSide),
+                mark.heightAnchor.constraint(equalToConstant: markSide),
+            ])
             item.view = lockup
             item.label = ""
             titleLabel = label

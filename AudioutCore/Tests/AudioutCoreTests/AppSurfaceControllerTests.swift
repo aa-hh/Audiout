@@ -365,6 +365,25 @@ import AppKit
         #expect(surface.test_toolbarController.test_centeredTitleText == "Audiout")
     }
 
+    /// Task A: the centered brand lockup fits WITHIN the unified strip, so the
+    /// mark's top no longer clips against the strip and the bubble's rounded
+    /// corner. The mark scales down to its box (never up), and the whole lockup
+    /// sits inside the measured strip height.
+    @Test func theHeaderLockupFitsTheToolbarStripUnclipped() throws {
+        let (surface, _, _, _) = makeSurface()
+        surface.show(anchorRect: nil)
+        surface.shell.window?.layoutIfNeeded()
+        let toolbar = surface.test_toolbarController
+        #expect(toolbar.test_centeredMarkScalesToFit,
+                "the mark scales to fit its box — the whole figure, un-clipped")
+        let strip = surface.test_chromeTopInset
+        #expect(strip > 0, "the unified strip has real height to measure against")
+        let lockup = toolbar.test_centeredLockupFittingHeight
+        #expect(lockup > 0, "the centered lockup materialized")
+        #expect(lockup <= strip,
+                "the lockup fits within the strip — nothing clips (lockup \(lockup), strip \(strip))")
+    }
+
     @Test func toolbarTracksSelectionAndPin() {
         let (surface, _, _, _) = makeSurface()
         surface.show(anchorRect: nil)
@@ -922,14 +941,46 @@ import AppKit
             let (surface, _, _, _) = makeSurface()
             surface.show(anchorRect: nil)
             let splash = try #require(surface.test_splash, "the first open earns a splash")
+            #expect(surface.test_settleTracker != nil, "and a settle tracker to gate it")
             #expect(splash.test_isVisible)
             #expect(splash.superview === surface.shell.window?.contentView,
                     "it covers the mounted screen, not the window chrome")
-            // The hold is the LAST of the two conditions here: `show` already
-            // noted the content in place.
+            // The hold is the MINIMUM, not the whole condition: content is in
+            // place, but discovery has not settled, so the mark holds past it.
             splash.test_fireHoldTimer()
+            #expect(splash.test_isVisible,
+                    "the hold elapsed but the splash waits for discovery to settle")
+            // Settling releases it (and sizes the settled frame behind the cover).
+            surface.test_settleDiscovery()
             #expect(!splash.test_isVisible)
             #expect(splash.superview == nil, "it takes itself off when it leaves")
+        }
+    }
+
+    /// The settled frame is measured AFTER discovery quiets, never guessed
+    /// early: an empty fleet opens at the floor, a fleet that streams in behind
+    /// the cover raises it — but only once settle fires, and all before reveal.
+    @Test func theSettledFrameIsMeasuredAfterDiscoverySettlesNotBefore() throws {
+        try asAFirstRealLaunch {
+            let (surface, popover, _, _) = makeSurface()
+            popover.test_isShownOverride = true
+            surface.show(anchorRect: nil)
+            let window = try #require(surface.shell.window)
+            let heightAtOpen = window.contentRect(forFrameRect: window.frame).height
+            #expect(abs(heightAtOpen - 600) < 0.5, "empty fleet opens at the floor")
+
+            // Discovery streams a full fleet in AFTER open.
+            let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                      emitsLevels: false, simulatesDropouts: false)
+            backend.start()
+            popover.update(devices: backend.devices)
+            #expect(abs(window.contentRect(forFrameRect: window.frame).height - heightAtOpen) < 0.5,
+                    "the surface does not resize on every device event — the frame is not re-measured yet")
+
+            surface.test_settleDiscovery()
+            let settledHeight = window.contentRect(forFrameRect: window.frame).height
+            #expect(settledHeight > heightAtOpen + 0.5,
+                    "the settled frame is measured after settle, and the fleet raised it (got \(settledHeight))")
         }
     }
 
@@ -943,13 +994,17 @@ import AppKit
         }
     }
 
+    /// Discovery may never quiet — the ceiling backstop must still force the
+    /// mark off so the user is never trapped behind the curtain.
     @Test func theCeilingFadesItWithNoOtherSignal() throws {
         try asAFirstRealLaunch {
             let (surface, _, _, _) = makeSurface()
             surface.show(anchorRect: nil)
             let splash = try #require(surface.test_splash)
+            splash.test_fireHoldTimer()
+            #expect(splash.test_isVisible, "hold alone does not dismiss when discovery never settles")
             splash.test_fireCeilingTimer()
-            #expect(!splash.test_isVisible)
+            #expect(!splash.test_isVisible, "the raised ceiling forces it off regardless")
         }
     }
 
@@ -958,6 +1013,8 @@ import AppKit
             let (surface, _, _, _) = makeSurface()
             surface.show(anchorRect: nil)
             #expect(surface.test_splash == nil)
+            #expect(surface.test_settleTracker == nil,
+                    "no splash ⇒ no settle wait; the surface opens immediately on the old timing")
         }
     }
 

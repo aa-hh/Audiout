@@ -2399,6 +2399,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // audible level only moves once we write it back (SET_PARAMETER).
         backend.applyDacpVolume(activeRemote: token, level: 0.40)
         await pollUntil { backend.devices.first { $0.id == device.id }?.volume == 80 }
+        // The store and the re-push land on different queues — wait for the
+        // push too, or the assert below races it under load.
+        await pollUntil { engine.volumeCalls.contains { $0.0 == device.outputID && abs($0.1 - 0.40) < 0.001 } }
 
         #expect(backend.devices.first { $0.id == device.id }?.volume == 80,
                        "a genuine speaker knob turn must store the correctly INVERSE-mapped level (0.40 wire / 50% gain = 80 stored)")

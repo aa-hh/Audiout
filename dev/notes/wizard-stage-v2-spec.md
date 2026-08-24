@@ -23,9 +23,10 @@ comments in the wizard files, this wins.
 
 ## 0b. Owner rulings after the 2026-08-23 critique (supersede where they conflict)
 
-1. **The answer plates are the hero**, the stage a strip: `stageHeight` 112,
-   answer plates 236×88 (32 gap) with a 15 pt semibold title; every other
-   plate stays 220×64. Short screens centre in the band under the readout.
+1. **The answer plates are the hero**, the stage a strip: `stageHeight` 112
+   (**now 132** — see §0c), answer plates 236×88 (32 gap) with a 15 pt
+   semibold title; every other plate stays 220×64. Short screens centre in
+   the band under the readout.
 2. **The question is on the question screen**: readout = `Which clicked
    first? · <rung word>`; the interval (`Somewhere between −8 and 8 ms`) is
    the stage's tooltip. The elapsed clock is GONE; the nameplate's right
@@ -58,6 +59,46 @@ comments in the wizard files, this wins.
    a separate window. The window rehost exists because the popover-anchored
    panel died on click-away; a modal over the popover re-opens that. Decision
    owed — see HANDOFF-wizard-v2.md.
+
+## 0c. Ring sizing (owner direction 2026-08-24 — supersedes §5's look table)
+
+**The lights are drawn 1.8× §5's sizes, and `stageHeight` is 132 rather than
+112 as the price of it.** §5's table was written before the living-ring port;
+the ported wobble is ±3 % of the RADIUS, so on 9–20 pt rings the wavefront's
+whole peak-to-peak travel was 1.1–2.4 Retina pixels. The life that had just
+been ported could not be seen, and the ring read as a small circle adrift in
+its halo rather than as a light. At 16–36 pt that travel is 1.9–4.3 px.
+
+| Rung | armed | open | closing | near | threshold | fused | locked | dormant |
+|---|---|---|---|---|---|---|---|---|
+| Ring radius | 36 | 32 | 25 | 20 | 16 | 16 (ref +6) | 20 | 18 |
+| Halo diameter | 106 | 96 | 76 | 60 | 46 | 50 | 74 | 0 |
+| Ring lineWidth | 1.25 | 1.25 | 1.6 | 2.0 | 2.5 | 2.5 | 2.5 | 1.25 |
+
+Opacities, windows, tick gearing and breathing are §5's, untouched. Three
+constraints govern any future rescale:
+
+- **Halos scale with rings** or the glow stops being glow — which is what
+  forces the taller plate. `stageHeight` feeds `chassisHeight` 1:1, so it is
+  the sheet's height too: every screen grew 20 pt, none reflows, and the
+  stage goes from 27 % of the question sheet to 30 %. A 2.2× scale wanted 152
+  (33 %) and tipped the stage into being the hero, against §0b.1.
+- **Line widths rise sub-linearly** (×1.25–1.33, not ×1.8). A stroke scaled
+  with the radius reads as a drawn hoop instead of a lit edge.
+- **The ladder's gaps grow with everything else**: adjacent rungs sit 4/7/5/4
+  pt apart where they sat 2/4/3/2, so each certainty step is twice as legible
+  while its ratio to the wobble at that size is unchanged. Radius is how the
+  ladder encodes certainty; a scale that let the wobble catch the gap would
+  make the instrument lie. Widening the spread instead — the wide rungs at
+  1.8× while the tight ones stay near their old sizes (36/32/22/15/11.5) —
+  was tried and rejected: it pays the same 132 pt plate but leaves the
+  endgame's wobble at 1.4 px, so the light reads as retreating into an empty
+  box exactly when the user is most invested.
+
+Reduce Motion, headless and pinned phase are untouched; renders stay
+byte-deterministic. Renders per candidate: `dev/notes/wizard-v2-handoff/
+ring-size-{baseline,a,b,c,d}/`, each with the `candidate.patch` that produced
+it; `b` is what shipped.
 
 ## 1. Synthesis rulings (design lead — resolved cross-track conflicts)
 
@@ -269,6 +310,8 @@ the word (delete `nearlyLockedHalfWidthMs`); add a one-line Core accessor
 `BTAlignmentWizardSession.proposeHalfWidthMs` forwarding the posterior's 6.
 
 ### Look table (settled model values per rung)
+**Sizes here are superseded by §0c** (rings 1.8×, halos with them, line widths
+×1.25); everything else in this table stands.
 Adopt wiz-animate's parameter table verbatim: halo diameter 84/76/58/42/30/
 34/40/0 · halo opacity 0.20/0.40/0.46/0.52/0.58/0.55/0.42/0 · target ring
 radius 20/18/14/11/9/9/11/10 · ring opacity 0.18/0.30/0.55/0.78/1.0/1.0/1.0/

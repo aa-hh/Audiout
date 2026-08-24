@@ -886,15 +886,17 @@ import AppKit
         let wizard = openWizard(popover)
         #expect(popover.test_btWizardReferenceID() == "mac",
                 "the Mac's own output is the default — always there, always in step")
-        #expect(wizard?.test_referenceLineText
-                == BTAlignmentWizardView.comparingCopy(target: "Move 2"))
+        #expect(wizard?.test_referenceLineText == BTAlignmentWizardView.compareLabel)
         #expect(wizard?.test_selectedReferenceTitle == "This Mac")
         #expect(wizard?.test_startIsEnabled == true)
         #expect(wizard?.test_referenceOptionTitles == ["This Mac", "Office"],
                 "every other available speaker is offered")
         // The intro's SECOND action, and it used to disappear beside the gold
         // Start plate ("blends right into the background beside this huge
-        // CTA", owner 2026-08-24). A choice is voiced as a control.
+        // CTA", owner 2026-08-24). Raising the voice alone was the right
+        // direction and not enough ("bring the fact that this is an element you
+        // need to interact with further in focus"), so a choice is now a FORM
+        // FIELD: labelled line over a large pop-up at the full body measure.
         #expect(wizard?.test_referenceLineIsRaised == true)
     }
 
@@ -1082,6 +1084,7 @@ import AppKit
         #expect(popover.test_btWizardReferenceID() == nil)
         #expect(wizard?.test_referenceLineText == BTAlignmentWizardView.noReferenceCopy)
         #expect(wizard?.test_referencePickerIsEnabled == false)
+        // Nothing to pick, so no field is mounted — the line is a caption.
         #expect(wizard?.test_referenceLineIsRaised == false)
         #expect(wizard?.test_startIsEnabled == false)
 
@@ -1137,9 +1140,9 @@ import AppKit
         #expect(wizard?.test_referenceLineText == "Compare against This Mac")
         #expect(wizard?.test_referencePickerIsEnabled == false)
         #expect(wizard?.test_startIsEnabled == true)
-        // …and it stays in the CAPTION voice. The raised voice is the picker
-        // case's alone: nothing on this line can be clicked, so raising it
-        // would promise an affordance the screen doesn't have.
+        // …and it stays a CAPTION with no field mounted. The form field is the
+        // choice case's alone: nothing on this line can be clicked, so dressing
+        // it as a control would promise an affordance the screen doesn't have.
         #expect(wizard?.test_referenceLineIsRaised == false)
     }
 

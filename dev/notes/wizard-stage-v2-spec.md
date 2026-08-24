@@ -111,13 +111,23 @@ it; `b` is what shipped.
 - Reference picker: **intro only**, conditional — 0 options: `noReferenceCopy`,
   Start disabled; 1 option: plain text "Compare against <name>", no control;
   2+: label + pop-up. Never rendered on question screens.
-  **AMENDED (owner report 2026-08-24, "blends right into the background beside
-  this huge CTA"): the 2+ case is voiced as a CONTROL** — label at
-  `Tokens.Font.body`/`label`, a REGULAR-size pop-up (not `.small`), in its own
-  `spacingBand` under the sentence. The 0- and 1-option lines are statements
-  and keep the caption voice unchanged. Start's own 220×64 plate does NOT
-  change: the intro is the one screen whose gold plate has no same-size peer
-  calibrating it, and the missing peer was the picker, not a smaller CTA.
+  **AMENDED TWICE (owner live passes, 2026-08-24). Round 1** — "blends right
+  into the background beside this huge CTA" — raised the 2+ case to a body-voice
+  label around a regular pop-up in its own `spacingBand`: right direction,
+  accepted, not strong enough. **Round 2** — "if we're keeping the CTA the same
+  size, then we should definitely do something to bring the fact that this is an
+  element you need to interact with further in focus" — makes the 2+ case a
+  **FORM FIELD**: the label `Compare against` (`Tokens.Font.body`/`label`, no
+  device name — the title and the stage stamps already print it) on its OWN
+  line, above a `.large` pop-up pinned to `bodyMeasure` (400), leading-aligned,
+  the whole field in its own `spacingBand`. The 0- and 1-option lines are
+  statements and keep the caption voice with NO control mounted. Start's own
+  220×64 plate does NOT change; the field is wider than the CTA on purpose —
+  form above, submit below, gold and height carrying primacy. Rejected in round
+  2 with renders (`dev/notes/wizard-v2-handoff/intro-cta-r2-*`): a bordered
+  `well` control row (dresses a band that isn't clickable), and that row with
+  the reference's identity rim (1 pt of `partySignal` around 400 pt of ground is
+  invisible, and identity rims belong to the answer plates).
 - Stage plate stops **above** the answer plates (colorize's off-plate variant):
   plates sit on the themed window ground and wear their light's hue as rim +
   keycap tint only.

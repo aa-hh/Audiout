@@ -117,7 +117,13 @@ public final class BTAlignmentWizardView: NSView {
     /// Shown in the reference line's place while no second speaker can be
     /// established — Start stays disabled until one is.
     static let noReferenceCopy = "Select another speaker to compare against"
-    static func comparingCopy(target: String) -> String { "Comparing \(target) against" }
+    /// The picker field's label. It carries NO device name — the sheet title
+    /// already says `Align <target>` and the stage stamps both names under
+    /// their lights, so a third printing bought nothing and cost the field its
+    /// measure (a real speaker name pushed the label past 400 pt). Matches
+    /// ``soleReferenceCopy(name:)`` word for word, so the choice case and the
+    /// stated case read as the same line with and without a control.
+    static let compareLabel = "Compare against"
     /// The one-option case: nothing to choose, so the line states the fact
     /// rather than mounting a picker with a single item in it (spec §1).
     private static func soleReferenceCopy(name: String) -> String {
@@ -190,6 +196,9 @@ public final class BTAlignmentWizardView: NSView {
     /// the host can still swap the reference mid-run, and that swap arrives
     /// through this menu's own item dispatch.
     private let referencePopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    /// The picker's full-measure width — see ``addReferenceRow``.
+    private lazy var referencePopUpWidth: NSLayoutConstraint =
+        referencePopUp.widthAnchor.constraint(equalToConstant: Self.bodyMeasure)
     private weak var referenceLineLabel: NSTextField?
     private weak var startPlate: AlignmentPlateButton?
     /// The three answer plates ←/→/SPACE route through: a key press does a
@@ -940,18 +949,28 @@ public final class BTAlignmentWizardView: NSView {
         contentStack.addArrangedSubview(label)
     }
 
-    /// "Comparing <target> against [<reference> ▾]" — intro only (spec §1).
-    /// With one candidate there is nothing to choose, so the line states it;
-    /// with none it says so and Start stays off.
+    /// The reference the run compares against — intro only (spec §1). With one
+    /// candidate there is nothing to choose, so the line states it; with none it
+    /// says so and Start stays off.
     ///
-    /// **A CHOICE is voiced as a control; a STATEMENT is voiced as a caption**
-    /// (owner report 2026-08-24 — the reference "blends right into the
-    /// background beside this huge CTA"). The picker case is the intro's
-    /// SECOND action, so it takes the body voice at full `label` around a
-    /// regular-size pop-up and stands in its own band; drawn as prose around a
-    /// `.small` control it read as a footnote beside the gold Start plate. The
-    /// 0- and 1-candidate lines stay captions: nothing on them can be clicked,
-    /// and the raised voice would promise an affordance they do not have.
+    /// **A CHOICE is a FORM FIELD; a STATEMENT is a caption.** The picker case
+    /// is the intro's second action and has to look like one at a glance, so it
+    /// is the macOS form field every Settings pane already taught the user:
+    /// `Compare against` on its own line above a LARGE pop-up spanning
+    /// ``bodyMeasure`` — one bounded 400 pt object with the chevron out at the
+    /// far edge. Wearing the control's own bounds is the point: the field is
+    /// exactly as clickable as it looks, which a label-plus-ground container
+    /// cannot honestly claim. Inside the sentence, at any size, it reads as
+    /// prose (owner, two live passes 2026-08-24: "blends right into the
+    /// background beside this huge CTA", then "bring the fact that this is an
+    /// element you need to interact with further in focus").
+    ///
+    /// Start is untouched and still the primary — gold, 64 pt tall, the one
+    /// thing Return fires. The field being WIDER is form above, submit below.
+    ///
+    /// The 0- and 1-candidate lines stay captions with no control mounted at
+    /// all: nothing on them can be clicked, and a field would promise an
+    /// affordance the screen doesn't have.
     private func addReferenceRow() {
         switch referenceOptions.count {
         case 0:
@@ -960,17 +979,23 @@ public final class BTAlignmentWizardView: NSView {
             referenceLineLabel = addCaption(
                 Self.soleReferenceCopy(name: referenceOptions[0].name))
         default:
-            let label = makeRaisedLabel(Self.comparingCopy(target: session.targetName))
-            // Carries the target's name, so it gives way rather than forcing
-            // the row past the view's fixed width.
-            label.lineBreakMode = .byTruncatingTail
-            label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            let label = makeRaisedLabel(Self.compareLabel)
             referenceLineLabel = label
-            let row = NSStackView(views: [label, referencePopUp])
-            row.orientation = .horizontal
-            row.alignment = .firstBaseline
-            row.spacing = 6
-            contentStack.addArrangedSubview(row)
+            referencePopUp.controlSize = .large
+            referencePopUp.font = Tokens.Font.body
+            // The label is a sibling view, so VoiceOver would otherwise reach
+            // the pop-up with only a device name to announce.
+            referencePopUp.setAccessibilityLabel(Self.compareLabel)
+            // The pop-up is PERSISTENT and re-mounted on every intro render, so
+            // its width is one stored constraint rather than a fresh one each
+            // time — `isActive = true` on the same object is idempotent where a
+            // new constraint per render would pile up.
+            referencePopUpWidth.isActive = true
+            let field = NSStackView(views: [label, referencePopUp])
+            field.orientation = .vertical
+            field.alignment = .leading
+            field.spacing = Self.spacingTight
+            contentStack.addArrangedSubview(field)
         }
     }
 
@@ -1001,9 +1026,9 @@ public final class BTAlignmentWizardView: NSView {
         return label
     }
 
-    /// The reference PICKER’s label: body voice at full `label`, one step
-    /// above the caption every other quiet line here wears — it labels a
-    /// control, not a fact.
+    /// The reference FIELD’s label: body voice at full `label`, one step above
+    /// the caption every other quiet line here wears — it labels a control, not
+    /// a fact.
     private func makeRaisedLabel(_ text: String) -> NSTextField {
         let label = NSTextField(labelWithString: text)
         label.font = Tokens.Font.body
@@ -1249,10 +1274,18 @@ public final class BTAlignmentWizardView: NSView {
         }
     }
     var test_referenceLineText: String? { referenceLineLabel?.stringValue }
-    /// Is the reference line voiced as a CONTROL (body at full `label`) or as
-    /// a STATEMENT (caption at `inkSecondary`)? Only the picker case earns the
-    /// raised voice — see ``addReferenceRow``.
-    var test_referenceLineIsRaised: Bool { referenceLineLabel?.font == Tokens.Font.body }
+    /// Is the reference line dressed as a CONTROL or as a STATEMENT? The label
+    /// voice, the pop-up's `.large` size and its full-measure width are all
+    /// asserted together, because the voice alone passes on a screen that still
+    /// reads as prose. A caption line mounts no pop-up at all, so it fails the
+    /// last three outright.
+    var test_referenceLineIsRaised: Bool {
+        referenceLineLabel?.font == Tokens.Font.body
+            && referencePopUp.superview != nil
+            && referencePopUp.controlSize == .large
+            && referencePopUpWidth.isActive
+            && referencePopUpWidth.constant == Self.bodyMeasure
+    }
     /// The screens' own buttons, in reading order — the answer plates and the
     /// corner buttons each sit a stack deeper than the rest, so this walks the
     /// nesting. An `NSPopUpButton` is an `NSButton` too, so the reference

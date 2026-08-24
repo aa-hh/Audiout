@@ -817,7 +817,7 @@ public final class DeviceDetailViewController: NSViewController {
         }
         test_picker = picker
 
-        if iconWell.window != nil {
+        if iconWell.window != nil, !HeadlessRuntime.isActive {
             let popover = NSPopover()
             popover.behavior = .transient
             popover.contentViewController = picker

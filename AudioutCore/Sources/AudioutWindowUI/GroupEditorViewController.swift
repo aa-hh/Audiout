@@ -695,7 +695,9 @@ public final class GroupEditorViewController: NSViewController {
     /// sheet when a window hosts the pane, skipped headless (the `test_*`
     /// seams observe the failure instead).
     private func presentPersistFailureAlert(message: String) {
-        guard let window = view.window else { return }
+        // `view.window != nil` is NOT a headless proxy — suites host this pane
+        // in a real (ordered-out) window, so the gate has to be explicit.
+        guard let window = view.window, !HeadlessRuntime.isActive else { return }
         let alert = NSAlert()
         alert.messageText = message
         alert.informativeText = "The group\u{2019}s saved settings couldn\u{2019}t be updated. Try again."
@@ -802,7 +804,7 @@ public final class GroupEditorViewController: NSViewController {
             self?.pickIcon(name)
         }
 
-        guard anchor.window != nil else { return }
+        guard anchor.window != nil, !HeadlessRuntime.isActive else { return }
         let popover = NSPopover()
         popover.behavior = .transient
         popover.contentViewController = picker
@@ -838,9 +840,9 @@ public final class GroupEditorViewController: NSViewController {
 
     @objc private func deleteTapped(_ sender: NSButton) {
         guard let editingGroupID else { return }
-        // Confirm before deleting (HIG — destructive action). In a headless
-        // test there's no window to host the sheet, so the test hook bypasses
-        // this and calls `test_confirmDelete()` directly.
+        // Confirm before deleting (HIG — destructive action). Headless, the
+        // sheet is skipped and the delete runs straight through: a suite that
+        // wants the confirm step calls `test_confirmDelete()` itself.
         let alert = NSAlert()
         alert.messageText = "Delete this group?"
         alert.informativeText = "Deleting a group doesn't change which speakers are playing."
@@ -848,7 +850,7 @@ public final class GroupEditorViewController: NSViewController {
         alert.addButton(withTitle: "Cancel")
         alert.alertStyle = .warning
         let performDelete = { self.performDelete(id: editingGroupID) }
-        if let window = view.window {
+        if let window = view.window, !HeadlessRuntime.isActive {
             alert.beginSheetModal(for: window) { response in
                 if response == .alertFirstButtonReturn { performDelete() }
             }

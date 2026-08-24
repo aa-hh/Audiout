@@ -42,7 +42,7 @@ unit later, on Alec's go-ahead — not per-branch.
 git config core.hooksPath .githooks
 ```
 
-Guards: **Guard 1** blocks direct commits on `main` (merges only). **Guard 4/6** run the test suites on any commit touching Swift sources. **Guard 7** blocks Swift commits until the staged-diff readability self-review has run — `scripts/self-review.sh`, rubric in [`docs/REVIEW-RUBRIC.md`](docs/REVIEW-RUBRIC.md).
+Guards: **Guard 1** blocks direct commits on `main` (merges only). **Guard 4/6** run the test suites on any commit touching Swift sources. **Guard 8** blocks any newly-added line that could put a window on a real screen during a test run (see "Tests must stay invisible" in [`AudioutCore/AGENTS.md`](AudioutCore/AGENTS.md)). **Guard 7** blocks Swift commits until the staged-diff readability self-review has run — `scripts/self-review.sh`, rubric in [`docs/REVIEW-RUBRIC.md`](docs/REVIEW-RUBRIC.md).
 
 ## Build & run
 

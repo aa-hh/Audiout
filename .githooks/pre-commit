@@ -112,6 +112,26 @@ if [ -n "$iso_hits" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# GUARD 8 (BLOCKING): staged code must not put a window on a real screen.
+#
+# AudioutCore/AGENTS.md has said "tests must stay invisible" for a long time,
+# and it kept being re-broken by hand — most often by using `view.window != nil`
+# as a stand-in for "headless", which is wrong: suites DO host panes in real,
+# ordered-out windows, so that check passes and the sheet/popover/menu shows.
+# A prose rule nobody was checking against wasn't holding, so it now has a hook.
+#
+# Only ADDED lines are scanned (same technique as Guards 3 and 5), so this can
+# never nag about pre-existing code. Library sources pass by mentioning
+# `HeadlessRuntime` in the hunk; test sources must not present at all; the app
+# and the harness/snapshot executables are exempt. Escape: a trailing
+# `screen-ok` comment, or --no-verify. Logic in no-visible-tests-check.py;
+# missing checker or no python3 => silently skip, same principle as Guard 2.
+g8="$hook_dir/no-visible-tests-check.py"
+if [ -f "$g8" ] && command -v python3 >/dev/null 2>&1; then
+    python3 "$g8" || exit 1
+fi
+
+# ---------------------------------------------------------------------------
 # GUARD 7 (BLOCKING): staged Swift must pass the readability self-review.
 #
 # Numbered by arrival like every guard, but positioned HERE — before the

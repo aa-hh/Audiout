@@ -726,6 +726,19 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   sanctioned reason is an assertion that needs a real render-server-attached
   layer tree (CA animation timing). Then: an origin that intersects no
   `NSScreen`, and `defer { window.orderOut(nil) }` right after ordering in.
+  **`view.window != nil` is NOT a headless check** and never was: suites host
+  panes in real, ordered-out windows, so that condition is TRUE under test and
+  the sheet/popover/menu presents anyway. It was the single most common way
+  this rule got re-broken (fixed in `GroupEditorViewController`'s failure
+  alert, delete sheet and icon picker, and `DeviceDetailViewController`'s icon
+  picker); `AudioSettingsViewController`'s "+" menu and Finder open panel had
+  no gate at all — the open panel being the worst case, a modal that wedges the
+  remote Mac. Because prose alone did not hold, **Guard 8**
+  (`.githooks/no-visible-tests-check.py`) now BLOCKS a commit whose newly-added
+  lines present anything: a library hunk passes by mentioning
+  `HeadlessRuntime`, a test file may not present at all, executables (`main.swift`
+  present — the app, the harness and snapshot tools) are exempt, and the escape
+  is a trailing `screen-ok` comment saying why.
   New UI-showing code paths must ship with one of the two escapes above — a
   `HeadlessRuntime.isActive` gate or a `test_*` seam. Both menu presenters
   (`presentOutputDevicesPlusMenu`, `presentAddApplicationPicker`) are gated;

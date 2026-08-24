@@ -835,7 +835,12 @@ public final class AudioSettingsViewController: NSViewController {
         let browse = NSMenuItem(title: "Choose from Finder…", action: #selector(browseForApp), keyEquivalent: "")
         browse.target = self
         menu.addItem(browse)
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height), in: sender)
+        // The on-screen `popUp` BLOCKS, so it is `HeadlessRuntime`-gated like
+        // every other menu presenter — see AudioutCore/AGENTS.md, "Tests must
+        // stay invisible". The menu is built either way.
+        if !HeadlessRuntime.isActive {
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height), in: sender)
+        }
     }
 
     @objc private func pickRunningApp(_ sender: NSMenuItem) {
@@ -844,6 +849,9 @@ public final class AudioSettingsViewController: NSViewController {
     }
 
     @objc private func browseForApp() {
+        // A modal open panel on the unattended remote Mac wedges the run until
+        // someone walks over and dismisses it — AudioutCore/AGENTS.md.
+        guard !HeadlessRuntime.isActive else { return }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.application]
         panel.canChooseDirectories = false

@@ -99,3 +99,6 @@ formula is the most common cause.
 GPL-2.0-or-later. See [LICENSE](LICENSE) and [NOTICE](NOTICE) — the
 AirPlay 2 sender is derived in part from OwnTone and bundles third-party
 code under GPL, BSD, and MIT terms.
+
+The Audiout name and icon are trademarks and are not covered by that
+license — see [TRADEMARKS.md](TRADEMARKS.md).

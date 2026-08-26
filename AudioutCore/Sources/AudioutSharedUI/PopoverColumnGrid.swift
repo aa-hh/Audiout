@@ -607,6 +607,14 @@ public enum PopoverColumnGrid {
     /// slider is disabled — matches `selectionDimmedAlpha`'s dim-not-hide idiom.
     public static let faderDisabledAlpha: CGFloat = 0.4
 
+    // MARK: Alignment-wizard plate (wizard-stage v2 spec §3)
+    //
+    // Geometry for `AlignmentPlateButton`/`AlignmentPlateCell` (AudioutPopoverUI),
+    // named here per house rule alongside the fader skin's own drawing-only cell.
+
+    /// Corner radius of the alignment-wizard plate button (spec §3).
+    public static let alignPlateCornerRadius: CGFloat = 12
+
     // MARK: Inline rename field (Groups window header)
     //
     // The group editor's title is a REAL `NSTextField` wearing a drawing-only

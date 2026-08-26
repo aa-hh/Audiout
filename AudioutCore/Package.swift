@@ -96,6 +96,9 @@ let package = Package(
         // priming) — the window isn't visible to an agent shell, so this renders
         // it (light + dark, each permission status) for visual verification.
         .executable(name: "onboarding-snapshot", targets: ["onboarding-snapshot"]),
+        // Offscreen PNG renderer for the alignment-wizard window (v2 visual
+        // verification). Run: `swift run wizard-snapshot [output-dir]`.
+        .executable(name: "wizard-snapshot", targets: ["wizard-snapshot"]),
         // Silent read-only Core Audio diagnostic for enumerating process objects and
         // their PIDs/bundle IDs, useful for diagnosing per-app routing (T7).
         .executable(name: "core-audio-diagnostic", targets: ["core-audio-diagnostic"]),
@@ -277,6 +280,13 @@ let package = Package(
         .executableTarget(
             name: "onboarding-snapshot",
             dependencies: ["AudioutCore", "AudioutOnboardingUI"],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
+        ),
+        // Offscreen PNG renderer for the alignment-wizard window — see the
+        // product comment above.
+        .executableTarget(
+            name: "wizard-snapshot",
+            dependencies: ["AudioutCore", "AudioutPopoverUI", "AudioutSharedUI"],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // Offscreen PNG renderer for the mixer window (group-creation design

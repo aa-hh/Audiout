@@ -17,11 +17,13 @@ private final class Recorder {
                      invertsEstimate: Bool = false,
                      openingProposalMs: Double? = nil,
                      reference: BTAlignmentWizardSession.Reference? =
-                        .init(id: "homepod", name: "Kitchen HomePod")) -> BTAlignmentWizardSession {
+                        .init(id: "homepod", name: "Kitchen HomePod"),
+                     targetIsBluetooth: Bool = false) -> BTAlignmentWizardSession {
         let session = BTAlignmentWizardSession(
             deviceID: deviceID,
             targetName: "Move 2",
             reference: reference,
+            targetIsBluetooth: targetIsBluetooth,
             baseValueMs: baseTrimMs,
             candidateRangeMs: candidateRangeMs,
             invertsEstimate: invertsEstimate,
@@ -100,15 +102,23 @@ private func driveAlwaysTarget(_ session: BTAlignmentWizardSession) -> Int {
     return asked
 }
 
-/// Two answers one way and one the other, forever: consistent enough to keep
-/// the belief moving, contradictory enough that it never settles.
+/// Two answers one way and one the other, forever, rejecting whatever the run
+/// proposes: consistent enough to keep the belief moving, contradictory enough
+/// that nothing it names is right.
 @discardableResult
 private func driveContradictorily(_ session: BTAlignmentWizardSession) -> Int {
     let pattern: [BTAlignmentWizardSession.Answer] = [.target, .target, .reference]
     var asked = 0
-    while case .question = session.screen, asked < 120 {
-        session.answer(pattern[asked % 3])
-        asked += 1
+    while asked < 120 {
+        switch session.screen {
+        case .question:
+            session.answer(pattern[asked % 3])
+            asked += 1
+        case .proposal:
+            session.rejectProposal()
+        default:
+            return asked
+        }
     }
     return asked
 }
@@ -348,8 +358,9 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
         #expect(recorder.ends == [nil], "…and no second restore")
     }
 
-    /// Contradictory answers never let the interval close: the run bows out
-    /// and offers its best guess for the manual control.
+    /// Contradictory answers never land on a value the listener agrees with:
+    /// the run offers one, is told it is wrong three times, then bows out and
+    /// offers its best guess for the manual control.
     @Test func answersThatNeverSettleBowOutWithABestGuess() {
         let recorder = Recorder()
         let session = recorder.makeSession(baseTrimMs: 0)
@@ -454,6 +465,26 @@ private func proposalValue(_ session: BTAlignmentWizardSession) -> Double? {
         session.start()
         #expect(recorder.ticks == [true])
         session.cancel()
+    }
+
+    /// The two tick timbres are split by TRANSPORT (the Bluetooth fan-out gets
+    /// the bright click, the engine feed the low knock), so whether the pair
+    /// sounds different is a fact about the two speakers' transports — and it
+    /// follows the reference the user can still swap mid-run.
+    @Test func thePairSoundsDifferOnlyAcrossTransports() {
+        let recorder = Recorder()
+        let session = recorder.makeSession(
+            reference: .init(id: "mac", name: "This Mac", isBluetooth: false),
+            targetIsBluetooth: true)
+        #expect(session.pairSoundsDiffer, "a Bluetooth speaker against the Mac")
+
+        session.setReference(.init(id: "bt-b", name: "Roam", isBluetooth: true))
+        #expect(!session.pairSoundsDiffer, "two Bluetooth speakers play one identical click")
+
+        let local = recorder.makeSession(
+            reference: .init(id: "homepod", name: "Kitchen HomePod", isBluetooth: false))
+        #expect(!local.pairSoundsDiffer, "the Mac against AirPlay is one feed, one sound")
+        #expect(!recorder.makeSession(reference: nil).pairSoundsDiffer)
     }
 
     @Test func changingTheReferenceMidRunRestartsTheRun() {

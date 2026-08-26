@@ -380,6 +380,41 @@ import AudioToolbox
         #expect(low != bright, "different partials — a low knock against the bright click")
     }
 
+    /// …and they are equally LOUD, not equally scaled. The bright click sits
+    /// nearer the ear's most sensitive band, so at equal digital amplitude it is
+    /// the louder of the two — and a louder event is perceived as EARLIER,
+    /// which the estimator has no counterbalanced condition to cancel: the whole
+    /// psychometric fit shifts and the displacement is stored as latency
+    /// (`dev/notes/wizard-tick-stimulus-brief.md` §3). A-weighted, the bright
+    /// click is +1.28 dB, so it is rendered at ×0.863.
+    ///
+    /// The RATIO is what is pinned, never either variant's absolute level: the
+    /// caller's `amplitude` is free to change and the match has to survive it.
+    @Test func theTwoTimbresAreLoudnessMatched() {
+        #expect(abs(AlignmentTickInjector.brightLoudnessScale - 0.863) < 0.002,
+                "A-weighted correction, computed \(AlignmentTickInjector.brightLoudnessScale)")
+
+        let injector = AlignmentTickInjector(
+            sampleRate: 44_100,
+            config: .init(bpm: 60, maxTicks: AlignmentTickInjector.unlimitedTicks,
+                          armedAtStart: false, bedEnabled: false, replacesProgram: true))
+        injector.armTicks()
+        var pcm = zeroBuffer(frames: injector.test_beatFrames + 2_000)
+        var bedded = Data()
+        injector.mixWizardVariants(into: &pcm, bedded: &bedded)
+        // Same window, same frame count, so the silence around the tick divides
+        // out and the ratio is the two ticks' own.
+        let ratio = pow(10, (dBFS(channel0(bedded)) - dBFS(channel0(pcm))) / 20)
+        #expect(abs(ratio - AlignmentTickInjector.brightLoudnessScale) < 0.03,
+                "the rendered click is quieter than the knock by the correction, measured \(ratio)")
+
+        // Downward, deliberately: the low knock is untouched, so nothing in the
+        // run moved closer to the Int16 clamp.
+        let knockPeak = channel0(pcm).map { abs(Int($0)) }.max() ?? 0
+        #expect(knockPeak > channel0(bedded).map { abs(Int($0)) }.max() ?? 0)
+        #expect(knockPeak < 16_000, "peak \(knockPeak) — nowhere near clipping")
+    }
+
     /// The bed stops WITH the tick budget — an expired injector adds nothing,
     /// so a forgotten switch-off leaks silence, not hiss.
     @Test func bedStopsWhenTheTickBudgetExpires() {

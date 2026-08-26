@@ -202,7 +202,7 @@ import AppKit
             #expect((-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs).contains(first))
         }
 
-        wizard?.test_clickDismiss()
+        wizard?.test_clickButton(titled: BTAlignmentWizardView.stopTitle)
         #expect(recorder.localEnds == [nil], "abandoning restores the stored offset")
     }
 }

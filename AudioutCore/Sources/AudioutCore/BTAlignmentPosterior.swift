@@ -23,13 +23,18 @@ import Foundation
 /// (García-Pérez 2014), which is exactly why the old code needed blocks —
 /// multiplying likelihoods has no such limitation.
 ///
-/// **The listener model is deliberately WIDER than a real listener** (fusion
-/// half-window `c = 6 ms`, slope `σ = 5 ms`, lapse `λ = 0.12`). An over-broad
-/// model is unbiased within ~10 trials where an under-broad one is not
-/// (Alcalá-Quintana & García-Pérez 2004), and the lapse rate must be non-zero
-/// or real mistakes bias the result WORSE the longer the run goes
-/// (Wichmann & Hill 2001). These constants are simulation-backed; do not tune
-/// them.
+/// **The listener model is still WIDER than a real listener, and it comes in
+/// two widths** (`dev/notes/wizard-estimator-effectiveness-brief.md` §3.4).
+/// Slope `σ = 5 ms` everywhere — that one must not move, dropping it to 3
+/// doubles the bow-out rate. The fusion half-window and the lapse rate depend
+/// on how wide the grid is: an ordinary (trim) run gets `c = 4`, `λ = 0.06`,
+/// and a LATENCY run keeps the original `c = 6`, `λ = 0.12`, because on its
+/// twice-as-wide grid the breadth is the thing holding the error down. An
+/// over-broad model is unbiased within ~10 trials where an under-broad one is
+/// not (Alcalá-Quintana & García-Pérez 2004), and the lapse rate must be
+/// non-zero or real mistakes bias the result WORSE the longer the run goes
+/// (Wichmann & Hill 2001) — 0.06 still satisfies both. These constants are
+/// simulation-backed; tune them only against a fresh sweep.
 ///
 /// Sign convention, identical to every estimator before it: `.target` means the
 /// user heard the wizard's TARGET device first — it plays EARLY, so the true
@@ -67,9 +72,23 @@ struct BTAlignmentPosterior {
 
     // MARK: The listener model (fixed — see the type comment)
 
-    static let fusionHalfWindowMs: Double = 6
+    /// The SHARPENED model — every run whose grid is the ordinary width.
+    /// `4 / 5 / 0.06` against the `6 / 5 / 0.12` this shipped with: measured on
+    /// the trim grid it is strictly better on every axis at once — median 9
+    /// answers → 7, p90 error 7 ms → 5 ms, results more than 10 ms off
+    /// 5.1% → 3.7%, bow-outs 2.7% → 2.0% (brief §3.4). Widening it back to 6 /
+    /// 0.12 buys nothing here and costs two answers.
+    static let fusionHalfWindowMs: Double = 4
     static let slopeMs: Double = 5
-    static let lapseRate: Double = 0.12
+    static let lapseRate: Double = 0.06
+
+    /// The WIDE model, kept for a LATENCY run — twice the grid (2001 points
+    /// against 1001), where the breadth earns its keep: sharpening there saves
+    /// one answer but takes results more than 10 ms off from 6.3% to 8.6%
+    /// (brief §3.4). Do not collapse the two models into one until a sweep says
+    /// the wide grid can afford it.
+    static let latencyFusionHalfWindowMs: Double = 6
+    static let latencyLapseRate: Double = 0.12
 
     /// The confirm step's window. "They land as one" is a claim that the
     /// residual is inside ±4 ms, and it carries its own (much smaller) lapse
@@ -78,9 +97,19 @@ struct BTAlignmentPosterior {
     static let fusedHalfWindowMs: Double = 4
     static let fusedLapseRate: Double = 0.05
 
-    /// Propose as soon as the 95% credible interval is this tight. Simulation:
-    /// median ~13–15 answers, ~20 worst case, 97% within 4 ms of truth.
-    static let proposeHalfWidthMs: Double = 6
+    /// Propose as soon as the 95% credible interval is this tight. 8 ms, not
+    /// the 6 ms this shipped with, and the reason is that the two thresholds
+    /// have the SAME p97 error: 12 ms, flat from 6 ms all the way out to 20 ms,
+    /// because the tail is set by the listener's own resolution and not by
+    /// where the run stops (brief §3.5). 6 ms simply pays two extra answers for
+    /// that same tail, and 4 ms pays six. What loosening does cost is the
+    /// middle of the distribution — results more than 10 ms off go 5.1% → ~6%
+    /// (trim) and 6.3% → 8.5% (latency) — which the confirm-by-ear step
+    /// backstops: nothing is persisted until the user has heard the value, and
+    /// a rejection folds in real evidence rather than discarding the run.
+    /// Measured end to end with the model above: median 6 answers / 8 clicks on
+    /// a trim run, 9 / 10 on a latency one. Do NOT put this back to 6.
+    static let proposeHalfWidthMs: Double = 8
 
     /// Where the next question may sit, relative to the posterior median.
     /// Coarse wings so a never-aligned speaker is reachable in a few answers,
@@ -96,7 +125,7 @@ struct BTAlignmentPosterior {
 
     /// ``Phase/unsettled``: the interval has to shrink by this much across
     /// this many answers, nobody is asked more than ``maxAnswers``, and a
-    /// second rejected proposal ends the run wherever it stands.
+    /// third rejected proposal ends the run wherever it stands.
     ///
     /// The shrink check gets two guards, one per false-positive mode it was
     /// measured producing (210 simulated runs, ~10% lapse listener). It never
@@ -105,14 +134,21 @@ struct BTAlignmentPosterior {
     /// recovers given a few more answers. And it never fires once the
     /// interval is inside ``stagnationFloorMs``: near the finish line
     /// relative shrink slows for every listener (the crawl from ~13 ms of
-    /// half-width down to the 6 ms stop), which is convergence, not noise.
-    /// ``maxAnswers`` and the two-rejection rule stay the hard backstops.
+    /// half-width down to the 8 ms stop), which is convergence, not noise.
+    /// ``maxAnswers`` and ``maxRejections`` stay the hard backstops.
     static let stagnationWindow = 8
     static let stagnationShrinkFraction: Double = 0.2
     static let stagnationFloorMs: Double = 20
     static let minAnswersForStagnation = 16
     static let maxAnswers = 40
-    static let maxRejections = 2
+
+    /// Three rejected proposals, not the two this shipped with. Measured, the
+    /// third one is free — no accuracy cost at all — and it HALVES the share of
+    /// runs that bow out `.unsettled` (5.6% → 2.9%, brief §3.5). That halving
+    /// is what pays for the looser ``proposeHalfWidthMs`` above: a slightly
+    /// looser stop proposes sooner, and the extra rejection is what a run gets
+    /// back if the sooner proposal was wrong. Do NOT put this back to 2.
+    static let maxRejections = 3
 
     /// How far outside the belief grid a presented level may sit, so the
     /// likelihood tables cover every residual that can ever be looked up.
@@ -154,12 +190,16 @@ struct BTAlignmentPosterior {
 
     /// - Parameters:
     ///   - range: the offsets a question may be asked at, in estimate space.
+    ///   - measuresLatency: whether this run is a device LATENCY over the wide
+    ///     grid, which picks the wide listener model — see
+    ///     ``latencyFusionHalfWindowMs``.
     ///   - openingProposalMs: a value to open on rather than a question — the
     ///     zero-click path for a device that has been measured before. The
     ///     prior stays FLAT behind it: this is a UI shortcut, not a
     ///     statistical one (a narrow prior seeded from a stored value is
     ///     exactly the under-broad model the citations warn about).
-    init(range: ClosedRange<Double>, openingProposalMs: Double? = nil) {
+    init(range: ClosedRange<Double>, measuresLatency: Bool = false,
+         openingProposalMs: Double? = nil) {
         self.range = range
         let lower = Int(range.lowerBound.rounded())
         let upper = Swift.max(lower, Int(range.upperBound.rounded()))
@@ -173,9 +213,14 @@ struct BTAlignmentPosterior {
         var target = [Double](repeating: 0, count: 2 * lutOffset + 1)
         var reference = target
         var together = target
+        let halfWindow = measuresLatency ? Self.latencyFusionHalfWindowMs
+                                         : Self.fusionHalfWindowMs
+        let lapse = measuresLatency ? Self.latencyLapseRate : Self.lapseRate
         for index in target.indices {
             let residual = Double(index - lutOffset)
-            let (t, r, g) = Self.judgmentProbabilities(residualMs: residual)
+            let (t, r, g) = Self.judgmentProbabilities(residualMs: residual,
+                                                       halfWindowMs: halfWindow,
+                                                       lapseRate: lapse)
             target[index] = t
             reference[index] = r
             together[index] = g
@@ -275,8 +320,9 @@ struct BTAlignmentPosterior {
     }
 
     /// "Still off": the opposite evidence, which widens the belief around the
-    /// proposal and sends the run back to questions. Twice is enough — a third
-    /// proposal from the same answers would be the same proposal.
+    /// proposal and sends the run back to questions. ``maxRejections`` is
+    /// enough — one more proposal from the same answers would be the same
+    /// proposal.
     mutating func rejectProposal() {
         guard case .proposing(let valueMs) = phase else { return }
         foldFusedJudgment(atLevel: valueMs, fused: false)
@@ -440,11 +486,13 @@ struct BTAlignmentPosterior {
     /// The three-way judgment model at one residual `a = θ − x`, every limb
     /// mixed with the lapse rate so no answer can ever rule a value out
     /// outright.
-    private static func judgmentProbabilities(residualMs a: Double)
+    private static func judgmentProbabilities(residualMs a: Double,
+                                              halfWindowMs: Double,
+                                              lapseRate: Double)
         -> (target: Double, reference: Double, together: Double)
     {
-        let target = phi((a - fusionHalfWindowMs) / slopeMs)
-        let reference = phi((-a - fusionHalfWindowMs) / slopeMs)
+        let target = phi((a - halfWindowMs) / slopeMs)
+        let reference = phi((-a - halfWindowMs) / slopeMs)
         let together = Swift.max(0, 1 - target - reference)
         func lapsed(_ p: Double) -> Double { (1 - lapseRate) * p + lapseRate / 3 }
         return (lapsed(target), lapsed(reference), lapsed(together))

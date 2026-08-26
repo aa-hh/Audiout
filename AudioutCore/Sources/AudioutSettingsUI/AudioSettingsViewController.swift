@@ -417,7 +417,9 @@ public final class AudioSettingsViewController: NSViewController {
                          .foregroundColor: Tokens.Color.secondaryLabel])
         advancedTitle.target = self
         advancedTitle.action = #selector(advancedTitleTapped)
-        advancedTitle.setAccessibilityLabel("Advanced")
+        // A click-target duplicate of the triangle beside it, which keeps the
+        // label — VoiceOver should hear "Advanced" once, not twice.
+        advancedTitle.setAccessibilityElement(false)
 
         let header = NSStackView(views: [advancedDisclosure, advancedTitle])
         header.orientation = .horizontal
@@ -716,8 +718,13 @@ public final class AudioSettingsViewController: NSViewController {
             listStack.removeArrangedSubview(row)
             row.removeFromSuperview()
         }
+        // ONE snapshot for the whole rebuild: `runningAppsProvider()`
+        // materializes every running app's icon, so calling it per row made an
+        // n-row rebuild cost n full enumerations of the system's app list.
+        let running = Dictionary(runningAppsProvider().map { ($0.bundleID, $0) },
+                                 uniquingKeysWith: { first, _ in first })
         for app in excluded.excludedApps {
-            listStack.addArrangedSubview(makeExcludedRow(app))
+            listStack.addArrangedSubview(makeExcludedRow(app, running: running))
         }
         listStack.addArrangedSubview(makeAddRow())
         for row in listStack.arrangedSubviews {
@@ -727,14 +734,14 @@ public final class AudioSettingsViewController: NSViewController {
         republishFittedHeight()
     }
 
-    private func makeExcludedRow(_ app: ExcludedApp) -> NSView {
+    private func makeExcludedRow(_ app: ExcludedApp, running: [String: AppPickerItem]) -> NSView {
         let row = NSView()
         row.translatesAutoresizingMaskIntoConstraints = false
 
         let iconView = NSImageView()
         iconView.translatesAutoresizingMaskIntoConstraints = false
         iconView.imageScaling = .scaleProportionallyDown
-        iconView.image = icon(for: app.bundleID)
+        iconView.image = icon(for: app.bundleID, running: running)
 
         let nameLabel = SettingsForm.label(app.displayName)
         nameLabel.lineBreakMode = .byTruncatingTail
@@ -801,8 +808,10 @@ public final class AudioSettingsViewController: NSViewController {
     /// Resolve an excluded app's icon: the running app's icon if it's running,
     /// else a generic placeholder (an excluded app need not be running — it can
     /// be pre-excluded). Mirrors the popover's `appIcon`.
-    private func icon(for bundleID: String) -> NSImage? {
-        if let running = runningAppsProvider().first(where: { $0.bundleID == bundleID }), let icon = running.icon {
+    /// `running` is the caller's one snapshot of the running-apps list, so a
+    /// rebuild enumerates the system once rather than once per row.
+    private func icon(for bundleID: String, running: [String: AppPickerItem]) -> NSImage? {
+        if let icon = running[bundleID]?.icon {
             return icon
         }
         if let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first,

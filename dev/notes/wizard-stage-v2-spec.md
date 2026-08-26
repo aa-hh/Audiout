@@ -279,6 +279,17 @@ Exact strings; `[…]` control, ‹…› chrome (console voice OK), else plain 
 - **intro:** stage `.armed` · ‹USUALLY ~15 CLICKS› · "You'll hear a click from
   each speaker. Tap the one you hear first." · reference row (conditional,
   §1) · [Start]
+  - **when the two speakers play DIFFERENT sounds** (target and reference on
+    different transports — the tick's timbres are split by fan-out, so this is
+    every run against the default Mac reference): "You'll hear a bright click
+    from ‹target› and a low knock from ‹reference›. Tap the one you hear
+    first." — target first, matching the answer plates' order, and the two
+    sounds named per SIDE, never assumed (a Mac target with a Bluetooth
+    reference is the same sentence the other way round). Same-transport pairs
+    keep the line above verbatim: `BTAlignmentWizardSession.pairSoundsDiffer`
+    is the gate. Added 2026-08-24 off `dev/notes/wizard-tick-stimulus-brief.md`
+    §5.2 — the colour cue has been in the audio since roadmap 056 and was
+    never advertised.
 - **question:** stage `.question` · ‹m:ss› · readout ‹Somewhere between 180
   and 320 ms · <word>› · [Target ‹←›] [Reference ‹→›] · [Both at once
   ‹SPACE›] · [Back ⌘Z] [Stop ESC]

@@ -46,6 +46,27 @@ public final class BTAlignmentWizardView: NSView {
 
     static let introCopy =
         "You’ll hear a click from each speaker. Tap the one you hear first."
+    /// The same sentence when the two speakers really do make DIFFERENT sounds
+    /// — a Bluetooth speaker against the Mac or an AirPlay one, which is every
+    /// run on the default reference. The cue has been in the audio since
+    /// roadmap 056 and was never advertised, and naming it is the cheapest
+    /// distinguishability win available (`dev/notes/wizard-tick-stimulus-brief.md`
+    /// §5.2). Named per SIDE, never assumed: the timbre follows the TRANSPORT,
+    /// so a Mac target and a Bluetooth reference is the same sentence the other
+    /// way round. Target first, matching the answer plates' own left-to-right
+    /// order. Bluetooth-against-Bluetooth makes ONE sound on both sides and
+    /// keeps ``introCopy`` verbatim.
+    static func introCopyNamingSounds(target: String, targetIsBluetooth: Bool,
+                                      reference: String) -> String {
+        let targetSound = targetIsBluetooth ? brightSound : lowSound
+        let referenceSound = targetIsBluetooth ? lowSound : brightSound
+        return "You’ll hear \(targetSound) from \(target) and \(referenceSound) "
+            + "from \(reference). Tap the one you hear first."
+    }
+    /// The two timbres in the user's words. Plain description, no instrument
+    /// voice: they are sounds in the room, not readings.
+    private static let brightSound = "a bright click"
+    private static let lowSound = "a low knock"
     /// The old "Can't tell", renamed because it is no longer a shrug: a
     /// posterior treats "both at once" as evidence that the offset is inside
     /// the ear's fusion window, which is the direct answer to "it sounded
@@ -618,7 +639,8 @@ public final class BTAlignmentWizardView: NSView {
         case .intro:
             readout.stringValue = ""
             stage.lightNames = (session.targetName, session.reference?.name ?? "")
-            addBody(Self.introCopy)
+            let intro = introBody()
+            addBody(intro)
             // A CHOICE gets its own band; a STATEMENT stays tucked under the
             // sentence it qualifies (see ``addReferenceRow``).
             contentStack.setCustomSpacing(
@@ -644,7 +666,7 @@ public final class BTAlignmentWizardView: NSView {
             // ESC chip the question and proposal screens already use; there
             // is simply no Undo to put in the other corner yet.
             addCornerRow(trailing: (Self.stopTitle, #selector(stopClicked(_:)), "ESC"))
-            setAccessibilityLabel("Align \(session.targetName): \(Self.introCopy)")
+            setAccessibilityLabel("Align \(session.targetName): \(intro)")
 
         case .question(_, let intervalMs, let answersSoFar):
             let referenceName = session.reference?.name ?? ""
@@ -754,6 +776,18 @@ public final class BTAlignmentWizardView: NSView {
         needsLayout = true
         ensureKeyboardFocus()
         onContentSizeChange?()
+    }
+
+    /// The intro's sentence, with the two sounds named only when the pair
+    /// actually makes two — the session owns that fact, since it owns the
+    /// reference the user can still swap mid-run.
+    private func introBody() -> String {
+        guard session.pairSoundsDiffer, let reference = session.reference else {
+            return Self.introCopy
+        }
+        return Self.introCopyNamingSounds(target: session.targetName,
+                                          targetIsBluetooth: session.targetIsBluetooth,
+                                          reference: reference.name)
     }
 
     /// The screen-change preamble: empty the content band and drop every

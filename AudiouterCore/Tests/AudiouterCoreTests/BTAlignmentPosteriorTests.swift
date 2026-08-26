@@ -77,10 +77,20 @@ import Testing
     /// different animals: a WRONG proposal is an estimator defect, a bow-out
     /// is the bow-out rules' strictness. ``stagnationFloorMs`` exists because
     /// this test once measured 9 of its 10 bow-outs as the stagnation rule
-    /// catching the endgame's slow crawl from ~13 ms of half-width down to 6
-    /// — runs whose next few answers would have proposed accurately. Both
+    /// catching the endgame's slow crawl from ~13 ms of half-width down to the
+    /// stop — runs whose next few answers would have proposed accurately. Both
     /// thresholds sit below what this build measures with room for the seeds
     /// to move, and tight enough that a real regression trips them.
+    ///
+    /// The accuracy bar is the stop rule's OWN half-width, not a number of its
+    /// own: a run proposes as soon as the 95% interval is `proposeHalfWidthMs`
+    /// wide either side of the median, so that is the accuracy it is claiming.
+    /// It was 4 ms while the stop was 6, which was always stricter than the
+    /// estimator promised — the far tail belongs to the listener, not the stop
+    /// rule (`dev/notes/wizard-estimator-effectiveness-brief.md` §3.5 measures
+    /// it flat at 12 ms from a 6 ms stop out to a 20 ms one). This build
+    /// measures 96% inside 8 ms, and it takes a median of 8 answers to get
+    /// there.
     @Test func simulatedListenersReachAnAccurateProposalQuickly() {
         let offsets: [Double] = [0, 3, -3, 180, -180, 450, -450]
         var proposals = 0
@@ -98,17 +108,53 @@ import Testing
                     continue
                 }
                 proposals += 1
-                if abs(valueMs - offset) <= 4 { accurate += 1 }
-                else { misses.append("offset \(offset) seed \(seed): proposed \(valueMs)") }
+                if abs(valueMs - offset) <= BTAlignmentPosterior.proposeHalfWidthMs {
+                    accurate += 1
+                } else {
+                    misses.append("offset \(offset) seed \(seed): proposed \(valueMs)")
+                }
             }
         }
         #expect(total == 210)
         #expect(Double(proposals) / Double(total) >= 0.95,
                 "\(proposals)/\(total) reached a proposal — \(misses.prefix(8))")
         #expect(Double(accurate) / Double(proposals) >= 0.95,
-                "\(accurate)/\(proposals) proposals landed within 4 ms — \(misses.prefix(8))")
+                "\(accurate)/\(proposals) inside the stop rule's own half-width — \(misses.prefix(8))")
         let median = answerCounts.sorted()[answerCounts.count / 2]
         #expect(median <= 20, "median run length was \(median) answers")
+    }
+
+    /// Pins the estimator's headline speed claim
+    /// (`dev/notes/wizard-estimator-effectiveness-brief.md` R1 + R2), so that
+    /// putting `proposeHalfWidthMs` back to 6 or the listener model back to
+    /// `6 / 5 / 0.12` fails here rather than quietly costing every user two or
+    /// three clicks. The listener is the SCRIPTED one the session suite uses —
+    /// truthful, no lapses — so this measures the estimator's own pace with the
+    /// noise taken out, across the whole reachable range.
+    @Test func aScriptedListenerReachesAProposalInSevenAnswers() {
+        var counts: [Int] = []
+        var stalled: [Double] = []
+        for offset in stride(from: -450.0, through: 450.0, by: 25.0) {
+            var estimator = BTAlignmentPosterior(range: Self.range)
+            var answers = 0
+            while case .asking(let levelMs) = estimator.phase, answers < 80 {
+                // The scripted listener's own fusion window is 4 ms.
+                if abs(levelMs - offset) < 4 {
+                    estimator.record(.together)
+                } else {
+                    estimator.record(levelMs < offset ? .target : .reference)
+                }
+                answers += 1
+            }
+            guard case .proposing = estimator.phase else {
+                stalled.append(offset)
+                continue
+            }
+            counts.append(answers)
+        }
+        #expect(stalled.isEmpty, "a truthful listener always gets a value: \(stalled)")
+        let median = counts.sorted()[counts.count / 2]
+        #expect(median <= 7, "median answers to a proposal was \(median): \(counts)")
     }
 
     /// "Both at once" is EVIDENCE, not a shrug: the old constant-stimuli
@@ -175,27 +221,36 @@ import Testing
                 "the bar RETREATS, honestly — \(estimator.progress) vs \(progressBefore)")
     }
 
-    @Test func twoRejectionsBowOutAsUnsettled() {
+    /// THREE rejections, not two: the third one is free and halves the share of
+    /// runs that bow out (brief §3.5), which is what pays for the looser stop
+    /// rule. Every rejection in between has to put the questions back.
+    @Test func threeRejectionsBowOutAsUnsettled() {
         var (estimator, proposed) = drivenToProposal()
         #expect(!proposed.isNaN)
-        estimator.rejectProposal()
-        // Back to the same listener until it proposes again, then reject once
-        // more: that is the run's last word.
         var listener = Listener(trueOffsetMs: 120, rng: SeededRNG(seed: 99))
-        var answers = 0
-        while case .asking(let levelMs) = estimator.phase, answers < 60 {
-            estimator.record(listener.judge(levelMs: levelMs))
-            answers += 1
+        var rejections = 0
+        while case .proposing = estimator.phase {
+            estimator.rejectProposal()
+            rejections += 1
+            if rejections < BTAlignmentPosterior.maxRejections {
+                guard case .asking = estimator.phase else {
+                    Issue.record("rejection \(rejections) must resume the questions, got \(estimator.phase)")
+                    return
+                }
+            }
+            // Back to the same listener until it proposes again.
+            var answers = 0
+            while case .asking(let levelMs) = estimator.phase, answers < 60 {
+                estimator.record(listener.judge(levelMs: levelMs))
+                answers += 1
+            }
         }
-        guard case .proposing = estimator.phase else {
-            Issue.record("expected a second proposal, got \(estimator.phase)")
-            return
-        }
-        estimator.rejectProposal()
         guard case .unsettled(let bestGuessMs) = estimator.phase else {
-            Issue.record("expected unsettled, got \(estimator.phase)")
+            Issue.record("expected unsettled, got \(estimator.phase) after \(rejections)")
             return
         }
+        #expect(rejections == BTAlignmentPosterior.maxRejections,
+                "the run's last word comes on rejection \(BTAlignmentPosterior.maxRejections)")
         #expect(estimator.test_rejections == BTAlignmentPosterior.maxRejections)
         #expect(Self.range.contains(bestGuessMs))
     }
@@ -237,24 +292,45 @@ import Testing
                 "unreachable, not talked out of two proposals")
     }
 
-    /// A listener whose answers contradict each other never lets the interval
-    /// close, and the run says so rather than asking forever. Two-thirds one
-    /// way and a third the other is the shape that does it: consistent enough
-    /// to keep the belief moving, contradictory enough that it never settles.
+    /// A listener whose answers contradict each other never lands on a value
+    /// they will agree with, and the run says so rather than asking forever.
+    /// Two-thirds one way and a third the other is the shape that does it:
+    /// consistent enough to keep the belief moving, contradictory enough that
+    /// nothing it names is right.
+    ///
+    /// The route to the bow-out is the REJECTIONS, not the stagnation rule:
+    /// with the sharpened model this listener's belief does close up, so the
+    /// run offers it a value (at answer 9), is told it is wrong, and repeats
+    /// until `maxRejections` is spent. That is the shape a real user in this
+    /// position sees, and it is why the third rejection had to be free.
     static let contradictoryAnswers: [BTAlignmentPosterior.Answer] =
         [.target, .target, .reference]
 
     @Test func answersThatNeverNarrowBowOutAsUnsettled() {
         var estimator = BTAlignmentPosterior(range: Self.range)
         var answers = 0
-        while case .asking = estimator.phase, answers < 80 {
-            estimator.record(Self.contradictoryAnswers[answers % 3])
-            answers += 1
+        var rejections = 0
+        while answers < 80 {
+            switch estimator.phase {
+            case .asking:
+                estimator.record(Self.contradictoryAnswers[answers % 3])
+                answers += 1
+            case .proposing:
+                estimator.rejectProposal()
+                rejections += 1
+            default:
+                break
+            }
+            if case .asking = estimator.phase { continue }
+            if case .proposing = estimator.phase { continue }
+            break
         }
         guard case .unsettled(let bestGuessMs) = estimator.phase else {
             Issue.record("expected unsettled, got \(estimator.phase) after \(answers)")
             return
         }
+        #expect(rejections == BTAlignmentPosterior.maxRejections,
+                "the bow-out comes on rejection \(BTAlignmentPosterior.maxRejections), got \(rejections)")
         #expect(answers <= BTAlignmentPosterior.maxAnswers,
                 "nobody is asked more than \(BTAlignmentPosterior.maxAnswers): got \(answers)")
         #expect(Self.range.contains(bestGuessMs))

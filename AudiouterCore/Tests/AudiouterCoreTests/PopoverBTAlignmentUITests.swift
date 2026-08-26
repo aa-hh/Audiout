@@ -177,7 +177,38 @@ import AppKit
         #expect(popover.test_btAlignmentPromptView() == nil, "the wizard replaces the card")
         #expect(popover.test_btWizardIsOpen())
         #expect(popover.test_btWizardView()?.test_screen == .intro)
-        #expect(popover.test_btWizardView()?.test_bodyText == BTAlignmentWizardView.introCopy)
+        // The default reference is the Mac, so this pair spans two transports
+        // and the intro names the two sounds — see
+        // `theIntroNamesTheTwoSoundsOnlyWhenThePairMakesTwo`.
+        #expect(popover.test_btWizardView()?.test_bodyText
+                == BTAlignmentWizardView.introCopyNamingSounds(
+                    target: "Move 2", targetIsBluetooth: true, reference: "This Mac"))
+    }
+
+    /// The tick's two timbres are split by TRANSPORT, not by role: the
+    /// Bluetooth fan-out gets the bright click, the engine feed (AirPlay + the
+    /// Mac's own output) the low knock. So a Bluetooth target against the Mac
+    /// really does make two sounds and the intro says which is which — while
+    /// Bluetooth-against-Bluetooth plays one identical click on both sides and
+    /// the copy stays exactly as it was, because promising a cue the run isn't
+    /// giving is worse than saying nothing (research brief §1/§5).
+    @Test func theIntroNamesTheTwoSoundsOnlyWhenThePairMakesTwo() {
+        let (popover, _) = makePopover()
+        showPrompt(popover)
+        popover.test_btAlignmentPromptView()?.test_clickAlignWithTicks()
+        #expect(popover.test_btWizardView()?.test_bodyText
+                == "You’ll hear a bright click from Move 2 and a low knock from "
+                + "This Mac. Tap the one you hear first.")
+
+        // Two Bluetooth speakers and nothing else: both sides are on the same
+        // fan-out, so both play the SAME click.
+        let fleet = [bt("bt-a:output", name: "Move 2"), bt("bt-b:output", name: "Roam")]
+        let (btOnly, _) = makePopover(fleet: fleet)
+        btOnly.update(devices: fleet)
+        btOnly.test_toggleDeviceEnabled(deviceID: "bt-a:output", on: true)
+        btOnly.test_toggleDeviceEnabled(deviceID: "bt-b:output", on: true)
+        btOnly.startBTAlignmentWizard(deviceID: "bt-a:output")
+        #expect(btOnly.test_btWizardView()?.test_bodyText == BTAlignmentWizardView.introCopy)
     }
 
     // MARK: Two never-aligned devices in one first mix — the queue
@@ -460,10 +491,23 @@ import AppKit
 
         #expect(wizard?.test_screen == .kept(valueMs: valueMs))
         let row = popover.test_deviceRow(for: "bt-a:output")
-        #expect(row?.test_syncChipTitle == "0 ms", "the row reads the zeroed trim already")
+        // The owner's live report on v11: the kept screen printed the number
+        // and the row printed "0 ms" — the zeroed nudge — so the run's result
+        // was nowhere on the row. The chip now carries the measurement itself.
+        #expect(row?.test_syncChipTitle == "\(Int(valueMs.rounded())) ms",
+                "the row shows what the wizard measured, got \(row?.test_syncChipTitle ?? "none")")
         #expect(row?.test_syncChipTooltip?
             .contains("Measured latency: \(Int(valueMs.rounded())) ms") == true,
-                "…and the measurement is what the tooltip carries")
+                "…and the tooltip still splits it from the nudge")
+
+        // Survives the surface AND the process: a fresh controller reading the
+        // same store — no session cache — paints the same number.
+        let (reopened, _) = makePopover()
+        reopened.btLatencyProvider = { latencies[$0] }
+        reopened.update(devices: [local(), airplay(), bt()])
+        #expect(reopened.test_deviceRow(for: "bt-a:output")?.test_syncChipTitle
+                == "\(Int(valueMs.rounded())) ms",
+                "the measurement is read from the store, not the run that made it")
         // Peak first, housekeeping last — the same order the screen prints.
         #expect(popover.test_lastEnergizeAnnouncement?
             .hasPrefix(BTAlignmentWizardView.keptReadyCopy(target: "Move 2")) == true,
@@ -707,10 +751,11 @@ import AppKit
                 "the reference comes down only once the measurement is stored")
 
         let row = popover.test_deviceRow(for: "bt-a:output")
-        #expect(row?.test_syncChipTitle == "0 ms", "the row reads the zeroed trim")
+        #expect(row?.test_syncChipTitle == "\(Int(latencyMs.rounded())) ms",
+                "the row's chip carries the measurement, not the zeroed nudge")
         #expect(row?.test_syncChipTooltip?
             .contains("Measured latency: \(Int(latencyMs.rounded())) ms") == true,
-                "…and the measurement is what the tooltip carries")
+                "…and the tooltip splits it from the nudge")
 
         let drawer = popover.test_syncDrawer
         #expect(drawer?.test_trimMs == 0, "the open drawer agrees with the store")
@@ -1185,6 +1230,24 @@ import AppKit
             Issue.record("expected a question, got \(String(describing: wizard?.test_screen))")
             return
         }
+    }
+
+    /// The Mac's run writes its TRIM, and its row keeps reading that setting —
+    /// a Bluetooth speaker's measured latency is never borrowed onto it, and
+    /// its chip never grows a "Measured latency" line.
+    @Test func theMacsOwnRowKeepsShowingItsTrim() {
+        let (popover, _) = makePopover()
+        var trim: Double = 18
+        popover.btLatencyProvider = { _ in 244 }
+        popover.localTrimProvider = { trim }
+        popover.localTrimIsSetProvider = { true }
+        popover.onLocalTrimEndPreview = { if let keep = $0 { trim = keep } }
+        popover.update(devices: [local(), airplay(), bt()])
+
+        let mac = popover.test_deviceRow(for: "mac")
+        #expect(mac?.test_syncChipTitle == "18 ms", "the Mac's chip is its own setting")
+        #expect(mac?.test_syncChipTooltip?.contains("Measured latency") == false,
+                "and a Bluetooth measurement never leaks onto it")
     }
 
     // MARK: Keyboard

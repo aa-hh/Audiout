@@ -62,9 +62,15 @@ public final class BTAlignmentWizardSession {
     public struct Reference: Equatable {
         public let id: String
         public let name: String
-        public init(id: String, name: String) {
+        /// Which fan-out this speaker plays through, and so WHICH SOUND it
+        /// makes during the run: the Bluetooth fan-out carries the bright
+        /// click, the engine feed (AirPlay, and the Mac's own output) the low
+        /// knock. See ``BTAlignmentWizardSession/pairSoundsDiffer``.
+        public let isBluetooth: Bool
+        public init(id: String, name: String, isBluetooth: Bool = false) {
             self.id = id
             self.name = name
+            self.isBluetooth = isBluetooth
         }
     }
 
@@ -75,6 +81,22 @@ public final class BTAlignmentWizardSession {
     /// `nil` when the host could not establish a second audible speaker: the
     /// run is refused (``start()`` is inert) until the host picks one.
     public private(set) var reference: Reference?
+
+    /// Whether the target plays through the Bluetooth fan-out — see
+    /// ``Reference/isBluetooth``.
+    public let targetIsBluetooth: Bool
+
+    /// Whether the two speakers really do make DIFFERENT sounds this run. The
+    /// tick's two timbres are split by TRANSPORT, not by role
+    /// (`AlignmentTickInjector.mixWizardVariants` → the capture coordinator's
+    /// fan-outs), so a Bluetooth target against the Mac differs while
+    /// Bluetooth-against-Bluetooth plays one identical click on both sides. The
+    /// panel names the two sounds only when this is true — copy that promised a
+    /// cue the run isn't giving would be worse than saying nothing.
+    public var pairSoundsDiffer: Bool {
+        guard let reference else { return false }
+        return reference.isBluetooth != targetIsBluetooth
+    }
 
     /// Repainted on every transition (also fired by ``start()``).
     public var onScreenChange: ((Screen) -> Void)?
@@ -164,6 +186,7 @@ public final class BTAlignmentWizardSession {
         deviceID: String,
         targetName: String,
         reference: Reference?,
+        targetIsBluetooth: Bool = false,
         baseValueMs: Double,
         candidateRangeMs: ClosedRange<Double> = -BTSyncTrim.rangeMs...BTSyncTrim.rangeMs,
         invertsEstimate: Bool = false,
@@ -176,6 +199,7 @@ public final class BTAlignmentWizardSession {
         self.deviceID = deviceID
         self.targetName = targetName
         self.reference = reference
+        self.targetIsBluetooth = targetIsBluetooth
         self.baseValueMs = Swift.min(Swift.max(baseValueMs, candidateRangeMs.lowerBound),
                                      candidateRangeMs.upperBound)
         self.candidateRangeMs = candidateRangeMs
@@ -192,7 +216,11 @@ public final class BTAlignmentWizardSession {
         if let openingProposalMs {
             opening = invertsEstimate ? anchor - openingProposalMs : openingProposalMs - anchor
         }
-        self.estimator = BTAlignmentPosterior(range: estimateRange, openingProposalMs: opening)
+        // `invertsEstimate` IS the latency run, and the latency run is the wide
+        // grid — which is the one that still needs the wide listener model.
+        self.estimator = BTAlignmentPosterior(range: estimateRange,
+                                              measuresLatency: invertsEstimate,
+                                              openingProposalMs: opening)
     }
 
     /// The estimator works in ESTIMATE space (`E`, relative to the base); the
@@ -224,7 +252,8 @@ public final class BTAlignmentWizardSession {
     private func makeEstimator() -> BTAlignmentPosterior {
         BTAlignmentPosterior(range: Self.estimateRange(base: baseValueMs,
                                                        candidates: candidateRangeMs,
-                                                       inverted: invertsEstimate))
+                                                       inverted: invertsEstimate),
+                             measuresLatency: invertsEstimate)
     }
 
     // MARK: Intents (host-called, main thread by convention)

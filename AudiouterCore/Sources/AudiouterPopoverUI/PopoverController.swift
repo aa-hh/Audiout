@@ -3838,7 +3838,14 @@ extension PopoverController: DeviceRowView.Delegate {
         let session = BTAlignmentWizardSession(
             deviceID: deviceID,
             targetName: device.name,
-            reference: reference.map { .init(id: $0.id, name: $0.name) },
+            // The transport of each side, which is what decides whether the two
+            // speakers make different SOUNDS this run (the tick's two timbres
+            // are split by fan-out, never by role) and so whether the intro
+            // names them.
+            reference: reference.map {
+                .init(id: $0.id, name: $0.name, isBluetooth: $0.isBluetooth)
+            },
+            targetIsBluetooth: device.isBluetooth,
             baseValueMs: base,
             candidateRangeMs: candidateRange,
             // A larger latency feeds the speaker EARLIER, so an early target
@@ -4016,7 +4023,8 @@ extension PopoverController: DeviceRowView.Delegate {
         if let previous, previous != id {
             groupController?.setDeviceSelected(previous, false)
         }
-        session.setReference(.init(id: id, name: device.name))
+        session.setReference(.init(id: id, name: device.name,
+                                   isBluetooth: device.isBluetooth))
         // The session restarts the questions but never re-fires the tick, so
         // the backend still has the OLD reference on its participant hold —
         // which would leave the new one silent. Re-push while the run is live.

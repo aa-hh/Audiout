@@ -179,21 +179,55 @@ import AppKit
                 "the chip is too narrow for D7's phrasing, so the tooltip carries the direction")
     }
 
-    /// Roadmap 056 Part A: the chip's number is still the user's TRIM, and the
-    /// speaker's own measured latency — what the wizard determined — rides the
-    /// tooltip alongside it. Nothing else about the row changes.
-    @Test func theTooltipCarriesTheMeasuredLatencyWhenThereIsOne() {
+    /// The live complaint (owner, wizard v11): a run that printed "248 ms ·
+    /// kept" left the row's SYNC chip reading the zeroed nudge, so the
+    /// measurement was nowhere on the row. The chip's number is now the TOTAL
+    /// the speaker actually carries — measurement plus nudge — and the split
+    /// stays in the tooltip.
+    @Test func theChipCarriesTheMeasuredLatencyNotJustTheNudge() {
         let measured = makeRow(btDevice(), delegate: SpyDelegate(),
                                syncTrimMs: 24, syncTrimIsSet: true,
                                syncMeasuredLatencyMs: 320)
-        #expect(measured.test_syncChipTitle == "24 ms", "the chip still shows the trim")
+        #expect(measured.test_syncChipTitle == "344 ms", "measurement plus the nudge on top")
         #expect(measured.test_syncChipTooltip?.contains("Measured latency: 320 ms") == true,
                 "got \(measured.test_syncChipTooltip ?? "none")")
+        #expect(measured.test_syncChipTooltip?.contains("24 milliseconds later") == true,
+                "…and the nudge is named as the other half")
+
+        // What a finished wizard run leaves: the nudge zeroed, the measurement
+        // stored. The chip must read the measurement, never "0 ms".
+        let justKept = makeRow(btDevice(), delegate: SpyDelegate(),
+                               syncTrimMs: 0, syncTrimIsSet: true,
+                               syncMeasuredLatencyMs: 248)
+        #expect(justKept.test_syncChipTitle == "248 ms", "the number the wizard showed")
+        #expect(justKept.test_syncChipAXValue?.hasPrefix("248 milliseconds later") == true,
+                "got \(justKept.test_syncChipAXValue ?? "none")")
+        #expect(justKept.test_syncChipTooltip?.contains("no nudge on top") == true)
 
         let neverMeasured = makeRow(btDevice(), delegate: SpyDelegate(),
                                     syncTrimMs: 24, syncTrimIsSet: true)
+        #expect(neverMeasured.test_syncChipTitle == "24 ms", "no measurement, so just the nudge")
         #expect(neverMeasured.test_syncChipTooltip?.contains("Measured latency") == false,
                 "a speaker the wizard has never run against says nothing about latency")
+    }
+
+    /// A measured latency can sit outside the TRIM's own ±500 ms bound, and the
+    /// chip must print it rather than shrink it to the bound.
+    @Test func aLatencyBeyondTheTrimsRangeIsPrintedWhole() {
+        let row = makeRow(btDevice(), delegate: SpyDelegate(),
+                          syncTrimMs: 0, syncTrimIsSet: true, syncMeasuredLatencyMs: 640)
+        #expect(row.test_syncChipTitle == "640 ms")
+        #expect(row.test_syncChipTooltip?.contains("640 milliseconds later") == true,
+                "got \(row.test_syncChipTooltip ?? "none")")
+    }
+
+    /// A measurement alone counts as tuned: the dashed "never touched this"
+    /// outline must not survive a finished run.
+    @Test func aMeasuredSpeakerIsNeverTheUntunedInvitation() {
+        let row = makeRow(btDevice(), delegate: SpyDelegate(),
+                          syncTrimMs: 0, syncTrimIsSet: false, syncMeasuredLatencyMs: 248)
+        #expect(row.test_syncChipTitle == "248 ms", "never 'Not set' once a run has measured it")
+        #expect(row.test_syncChipIsDashed == false)
     }
 
     /// D10, the discoverability fix: an untuned speaker must not read "0.0 ms"

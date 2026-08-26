@@ -1090,7 +1090,7 @@ final class AlignmentStageView: NSView {
     }
 
     /// 0 at the threshold rung's entry (half-width 12) rising to 1 at the
-    /// run's propose stop (6); 0 on every other rung.
+    /// run's propose stop (8); 0 on every other rung.
     private var thresholdProgress: CGFloat {
         guard rung == .threshold, case .question(let interval, _) = state else { return 0 }
         let halfWidth = (interval.upperBound - interval.lowerBound) / 2

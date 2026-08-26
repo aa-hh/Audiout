@@ -1,21 +1,29 @@
 # HANDOVER — Alignment wizard (`claude/wizard-ui-handoff-a6ca38`)
 
-Written 2026-08-23 for an agent with **no access to the working
-conversation**; **§8 (2026-08-23, second session) is the newest state** —
-§4's sheet plan is BUILT and five design passes have run on top. This file
-supersedes `HANDOFF-wizard-v2.md` (kept only for its critique evidence and
-earlier fix-list history). Read this top to bottom before touching anything.
+Written 2026-08-23, extended through a fourth session on 2026-08-24.
+**§9 and §10 are the newest state — read them FIRST, then backfill from §1
+onward only for things §9/§10 don't cover.** §10 is the authoritative owed
+list; §6 and §8's "still owed" lists are superseded. This file supersedes
+`HANDOFF-wizard-v2.md` (kept only for its critique evidence and earlier
+fix-list history).
 
 ---
 
 ## 1. Where you are
 
-- **Worktree:** `.claude/worktrees/device-list-cleanup-opus-4a8ff0` (the
-  directory name is historical), branch `claude/wizard-ui-handoff-a6ca38`
-  (base `202dc4e4`, pushed to origin). **Everything below is UNCOMMITTED
-  working-tree state.** Do not restore from HEAD — the tree is the truth.
-  Nobody has committed on purpose: Guard 7 (staged-diff self-review) is
-  Alec's step, and Alec has not yet given the go-ahead to commit.
+- **Worktree:** `.claude/worktrees/wizard-handoff` as of session 4 — the
+  directory name has changed TWICE already (originally
+  `device-list-cleanup-opus-4a8ff0`, swept by housekeeping mid-session-4 on a
+  stale marker unrelated to this branch's actual state; see §9a's opening
+  note). **The branch, not the directory, is the truth**:
+  `claude/wizard-ui-handoff-a6ca38`, base `202dc4e4`, pushed to origin at
+  every session boundary. If this directory is also gone: `git worktree add
+  .claude/worktrees/<any-name> claude/wizard-ui-handoff-a6ca38` recreates it
+  from origin — check `git log --oneline -1` against §9's mentioned SHAs to
+  confirm you have what you expect.
+  **As of session 4's close, HEAD is `fa5e4a9e` (committed, pushed) plus
+  UNCOMMITTED work described in §9c/§10 — check `git status --short` before
+  assuming either state.**
   The old `.claude/worktrees/wizard-ui` tree holds the PRE-SHEET state
   untouched, as fallback only — never work there.
 - `main` is **merge-only.** Work stays on this branch until Alec merges. The
@@ -251,7 +259,7 @@ ios-staging's 063, so the merge is a clean union:
 
 ---
 
-## 6. Everything else owed to close out this worktree
+## 6. ~~Everything else owed to close out this worktree~~ — SUPERSEDED, see §10
 
 - **Commit** (Alec runs Guard 7 self-review) → merge + PR per the repo
   workflow (local `git merge` into `main` AND a GitHub PR so origin/main and
@@ -355,3 +363,253 @@ new renders.
 - Figma mirror of the final screens (house rule; not started).
 - Purge test bundles `.wizardv1`–`.wizardv5` after v6 verifies (`scripts/purge-dev-installs.sh`, dry-run first).
 - NOTE for the eventual merge: `main` has since renamed the app (AudiouterCore → Audiout, license-key merge `2b523c4f`) — this branch still uses Audiouter paths; expect rename-scale conflicts at merge time.
+
+---
+
+## 9. SESSION 4 (2026-08-24, live-directed) — keyboard fix, discovery pipeline, estimator/SYNC/tick round
+
+**Read this section, then §10, before touching anything. §8's "still owed" list above is
+STALE where it conflicts with this section — §10 is the current owed-list.**
+
+### Where the work actually lives now
+The worktree that carried sessions 2–3 (`device-list-cleanup-opus-4a8ff0`) was swept by
+`housekeeping.sh` mid-session-4 (a stale `.prunable` marker from an EARLIER life of that
+directory name — nothing of this branch's work was lost, everything below was already
+pushed). **This worktree, `.claude/worktrees/wizard-handoff`, is the live one now.**
+Branch is unchanged: `claude/wizard-ui-handoff-a6ca38`. If this worktree is also gone by
+the time you read this: `git worktree add .claude/worktrees/<any-name>
+claude/wizard-ui-handoff-a6ca38` recreates it from origin — nothing is lost, the branch is
+the truth, not the directory.
+
+Two short-lived exploration worktrees were used and are now gone (branches survive on
+origin, already merged in): `wizard-ring-sizing` and `wizard-intro-cta`. Do not recreate
+them unless you specifically want their rejected-candidate history — the merges already
+carry the winning candidates and all render sets into this branch.
+
+### 9a. The keyboard fix (two rounds — READ BOTH, the first round's fix was real but incomplete)
+Owner live-tested `.wizardv7` on real hardware, through the real `presentAsSheet`, not the
+test harness's plain-window mounting — this is what caught what two rounds of headless
+verification missed.
+
+**Round 1 root cause**: the whole key map lived in `performKeyEquivalent`, which real
+AppKit dispatch never runs for *unmodified* keys — only Command-modified ones. So the
+whole map (←/→/Space/Esc/Return) was DEAD live; only ⌘Z (a real key equivalent) worked.
+Fixed: `keyDown(with:)` + `acceptsFirstResponder`/first-responder claiming
+(`BTAlignmentWizardView.swift`), `performKeyEquivalent` reduced to the ⌘Z case only.
+Tests moved to drive real `NSWindow.sendEvent`.
+
+**Round 1 shipped it as fixed. It was not.** Owner re-tested `.wizardv7`: Space/Esc/⌘Z/
+Return all now worked — **← and → still did nothing.** That asymmetry was the clue.
+
+**Round 2 root cause** (proven with a probe binary against a REAL sheet, not a plain
+window): AppKit stamps every arrow keyDown with hidden `.function` + `.numericPad`
+modifier bits. The round-1 "is this key unmodified?" guard checked
+`modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty` — and both those bits
+live inside that mask. So the guard rejected exactly ←/→ and nothing else. Nothing to do
+with the sheet, first responder, or Full Keyboard Access (all probed and ruled out).
+Fixed: an explicit `heldModifiers = [.command, .option, .control, .shift]` check
+(Caps Lock deliberately excluded). The test `sendKey` helper now synthesizes AppKit's own
+per-key flags (`appKitFlags(forKeyCode:)`) — **a bare-flag arrow keyDown is a press no real
+keyboard makes, and synthesizing one is exactly how a dead map shipped green twice.**
+
+**Lesson for whoever touches this view's keyboard handling next: verify live, on the real
+sheet, not just against the test harness — two rounds of "suites green" both missed a
+totally dead control before a live pass caught it.**
+
+### 9b. Discovery pipeline — three owner critiques from the v7/v8 live pass, worked as parallel discoveries
+Owner critique on `.wizardv7`/`.wizardv8` covered the intro screen's crowding, the stage
+lights' visibility, and asked for a living-ring prototype ported from the marketing site.
+Order of events:
+
+1. **Owner visual batch** (§8's session-3 block above) — mono-caps retired, wire centred,
+   intro breathing room, bright-gold+black CTAs, titles centred. Built directly, no
+   discovery needed (instructions were concrete).
+2. **Living-ring prototype** — ported from `~/Projects/Audiouter Website`'s emitter
+   component (`src/scripts/fields/emitters.js` + the `house-bg.js` instance values:
+   `wobble: 0.03, wobbleRate: 0.5, squash: 1.12`), applied as a radius-bend + breathing
+   swell on the stage's two lights, position/travel dropped (a light's position IS the
+   measurement — it must not drift). **Locked and dormant rungs go still** (rest as the
+   reward — falls out for free, both rungs already had `breathePeriod: nil`). Reduce
+   Motion / headless render the pinned settled shape — byte-identical to the old static
+   dots, so nothing downstream broke. **Honest finding from that pass**: at the site's
+   scale the wobble bends visibly; at the stage's original 9–20 pt ring radii it was
+   sub-pixel — invisible. Raising the wobble amplitude was flagged as the WRONG fix (it
+   would swamp the 2–4 pt gaps between adjacent certainty rungs).
+3. **Owner: "make the rings bigger."** → `claude/wizard-ring-sizing` discovery (its own
+   worktree, now gone; branch on origin). Built 4 candidate scales, rendered and
+   self-judged all of them, recommended **1.8×** (radii 36/32/25/20/16 pt, halos scaled
+   sub-linearly at ×1.25 so a scaled stroke doesn't read as a drawn hoop, `stageHeight`
+   112→132 pt, which is why every sheet screen is ~20 pt taller now). Owner **ACCEPTED**
+   after seeing it live in `.wizardv10`. Merged into this branch (`85a0db9a`).
+4. **Owner: "the intro's Start button is too big/dominant, the reference picker gets
+   lost beside it."** → `claude/wizard-intro-cta` discovery, TWO rounds:
+   - Round 1: diagnosed the REAL defect — Start isn't oversized in isolation, it's the
+     only screen where gold has no same-size peer to calibrate it (every other screen
+     pairs the gold plate with an equal secondary). The picker had been demoted to
+     caption prose inside a sentence. Built and rejected a bottom action bar and a
+     smaller Start; **recommended raising the picker to a body-size label + regular
+     pop-up.** Owner: "right direction, not strong enough."
+   - Round 2 (after merging in the accepted 1.8× rings first, so it designed against
+     current truth): explored echoing the mixer's own Destination control (collapsed —
+     it's an undressed small pop-up, nothing to borrow), a dressed "well" row (REJECTED —
+     it visually promised the whole row was clickable when only the inner pop-up was;
+     the copy also truncated real device names against a fixed measure), and a row with
+     an identity-tinted rim (REJECTED — pixel-indistinguishable at 1 pt of tint over
+     400 pt of ground). **Shipped: a plain macOS form field** — `Compare against` label
+     over a `.large` pop-up spanning the body measure, honest (the clickable bounds ARE
+     the visible control), copy shortened from "Comparing ‹target› against" (the target's
+     name already appears twice on screen; the old sentence is what truncated). Owner
+     tested live in `.wizardv11`, confirmed with "every test passes." Merged (`fa5e4a9e`,
+     currently HEAD, pushed).
+
+Renders for every rejected AND accepted candidate from both discoveries are preserved
+under `dev/notes/wizard-v2-handoff/ring-size-*/` and `dev/notes/wizard-v2-handoff/
+intro-cta-*/` — useful if a future critique reopens either question.
+
+### 9c. Owner live-report round → three parallel tracks, all landed, ALL CURRENTLY UNCOMMITTED
+Live-tested `.wizardv11`/`v12` to Keep on real hardware; three issues/questions raised,
+worked as three parallel agents (two implementation, one pure research feeding a third
+implementation):
+
+**SYNC value never reached the row (bug, fixed).** After Keep, the speaker row's SYNC chip
+read the pre-run nudge ("0 ms" — Keep zeroes it), not the measured latency. Root cause:
+the number reached the row fine (`refreshDeviceRows` fires on Keep, the store-backed
+provider was wired) — it was just never RENDERED as a chip number, only appended to a
+tooltip string. Fixed: `DeviceRowView` now keys the chip on `tuned = syncTrimIsSet ||
+syncMeasuredLatencyMs != nil` and prints the TOTAL (`trim + latency`), unclamped (a
+measured latency can exceed the trim's own ±500 ms range). **Deliberate, owner-confirmed
+design**: the chip shows the total, the SYNC drawer's editable field still shows only the
+nudge (0 after Keep) — owner said "fine as is" when asked whether that split should be
+reconciled. Do not "fix" it into matching without asking again.
+
+**Two-tone colour question (research only, no change).** Owner asked if the green/magenta
+identity pair is well-chosen. Researched (CIEDE2000 ≈86, all three colour-blindness types
+simulated and pass because the pair differs on both cone axes, not just hue) —
+**recommendation: no change**, the pair is already ~40–80× a just-noticeable-difference
+apart and the existing non-colour redundancy (fixed position, name stamps, printed
+device names) covers the one weak axis (1.5:1 luminance contrast). Brief:
+`dev/notes/wizard-two-tone-distinguishability-brief.md`. **Closed — no action item.**
+
+**Estimator felt slow (research → implemented, owner-approved).** Owner's live impression
+("it only ever finishes once I start saying they sound the same") was CONFIRMED by
+simulation, not just validated as a feeling: a "Both at once" answer carries 5.76 bits vs
+2.67 for a side answer — 2.2× the information, because it brackets both ends at once.
+Brief: `dev/notes/wizard-estimator-effectiveness-brief.md`. Owner approved implementing
+recommendations R1 (stop-rule loosening) + R2 (sharper listener model). Implemented:
+- `proposeHalfWidthMs` 6→**8** ms (p97 proposal error was flat at 12 ms from 6 ms all the
+  way to 20 ms — the tail belongs to the listener model, not the stop threshold; 6 ms was
+  paying for nothing).
+- `maxRejections` 2→**3** (free — no accuracy cost, halves the `.unsettled` bow-out rate).
+- Listener model sharpened (`c` 6→4, `λ` 0.12→0.06) **for TRIM runs only** — the
+  simulation showed this is strictly better on the Mac's trim grid but costs accuracy on
+  the wider Bluetooth latency grid, so it is gated on `measuresLatency` exactly as the
+  brief's own evidence bounds it. Do not widen this gate without re-running the sim.
+- New simulation-backed test pins the headline claim: median ≤7 answers to a proposal on
+  a scripted truthful listener (trim grid). Was ~9–11 before this round.
+- A stale doc comment claiming "97% within 4 ms of truth" was corrected to the measured
+  12 ms (the accompanying click estimate was conversely too pessimistic — corrected too).
+
+**Tick stimulus question (research → implemented, owner-approved, ALL THREE approved).**
+Owner asked whether the two speakers' click sounds could be made easier to tell apart.
+Researched from source first (established the wizard ALREADY plays two different
+timbres — a 900+1450 Hz "low knock" on the AirPlay/Mac engine feed, an 1800+2900 Hz
+"bright click" on the Bluetooth fan-out, split by TRANSPORT not role, so a BT-vs-BT run
+plays identical clicks on both sides). Literature verdict: do NOT make them more
+different — very-distinct pitches segregate into separate auditory streams and
+CROSS-stream order judgment is measurably harder (thresholds ~100+ ms vs ~85 ms for the
+current close pair) — this is the opposite of what naive intuition suggests, and it's why
+the recommendation was to fix bias, not widen the difference. Brief:
+`dev/notes/wizard-tick-stimulus-brief.md`. All three of its recommendations approved and
+implemented:
+1. **Loudness-matched** the two timbres (A-weighted the four partials; the bright click
+   was +1.28 dB louder at equal digital amplitude — a constant bias that shifts the
+   measured latency 1:1 and more trials do NOT average it out). Bright click now scaled
+   ×0.863. Documented residual: A-weighting under-states the 2–4 kHz ear dip vs a full
+   ISO 226 contour — the swap flag below is how you'd measure what's left.
+2. **Intro copy now names the two sounds** ("You'll hear a bright click from ‹target› and
+   a low knock from ‹reference›…") — but ONLY when target and reference are actually on
+   different transports (`BTAlignmentWizardSession.pairSoundsDiffer`); a same-transport
+   pair (BT-vs-BT, Mac-vs-AirPlay) keeps the original copy verbatim, because for those
+   pairs the cue would be a lie.
+3. **Debug flag** `AUDIOUTER_DEBUG_TICK_SWAP=1` swaps which fan-out gets which timbre.
+   Protocol (documented in the injector's header): run the wizard twice on the same
+   speaker pair, once with the flag set — **half the difference between the two kept
+   values is the total remaining stimulus bias, in milliseconds.** Nobody has run this
+   experiment yet — it's an open measurement, not just a debug toggle nobody will use.
+
+### State at close of session 4 — READ BEFORE DOING ANYTHING
+- **Everything in §9c is UNCOMMITTED.** `git status --short` in this worktree shows ~39
+  modified/new files (SYNC-chip fix, estimator tuning, tick-stimulus work, three new
+  brief files, refreshed `after-sheet/` renders reflecting the 1.8× rings). §9a and 9b's
+  work IS committed (through `fa5e4a9e`, pushed to origin).
+- `bash scripts/build.sh` — exit 0, verified against the current uncommitted tree at the
+  time this was written. Re-verify before trusting it further — do not assume it still
+  holds if you've made changes since.
+- Every agent in this session reported its own suites green before handing off (see the
+  per-track detail above for which filters). Nobody has run a FULL suite pass since
+  before 9a — do that before committing (`AUDIOUT_FULL_SUITE=1 bash scripts/run-tests.sh`,
+  sanctioned override for `run-tests.sh`'s "prefer filtered" nudge).
+- **Owner has NOT yet given a verdict on the §9c round** (SYNC/estimator/tick). The build
+  containing all three, `Audiouter Wizard v14.app`
+  (`com.audiouter.Audiouter.wizardv14`), was handed to the owner for a live pass and no
+  result had come back as of this write-up. **Do not commit §9c until that verdict
+  lands** — if the owner rejects or wants changes to any of the three tracks, the diff
+  needs to shrink or change before it becomes a commit, the same discipline every prior
+  round in this session followed (build → live-test → THEN commit, never the reverse).
+- `.wizardv14` may or may not still be running — check `ps aux | grep Audiouter` before
+  assuming. If it's not running and you need the owner to re-test, rebuild is cheap
+  (`APP_NAME="Audiouter Wizard v14" BUNDLE_ID="com.audiouter.Audiouter.wizardv14"
+  bash scripts/make-app.sh` reproduces it byte-for-byte from the same uncommitted tree —
+  do NOT bump the version number just to relaunch the same code; only bump on a REAL
+  code change per the repo's bundle-id rule).
+
+### Commit protocol reminder for this branch specifically
+Guard 7's self-review hook has been REFUSING commits on this branch all session with a
+false positive: root `AGENTS.md` names `NSInternalInconsistencyException` (an AppKit
+exception, not a repo symbol) and the guard's symbol-existence check doesn't know the
+difference — this is explicitly non-blocking per the guard's own message, but it still
+prints as a warning. The REAL blocker every round has been: run `scripts/self-review.sh`
+fresh against the exact staged diff (a stale receipt from a previous staging does not
+count), fix any genuine change-log-narration/reviewer-speak comments it flags, restage,
+re-run, THEN commit. Every commit this session needed `--no-verify` in the end because
+this repo's `main`-checkout hooks are written for the Audiout-renamed layout and cannot
+run against this Audiouter-era branch at all (a pre-existing, unrelated mismatch — not
+something to fix on this branch). Document the out-of-band verification in the commit
+message exactly as the last several commits on this branch do (see `git log`).
+
+---
+
+## 10. CURRENT OWED LIST (supersedes §6 and §8's "still owed" — this is the real one)
+
+1. **Owner verdict on `.wizardv14`** (SYNC chip + faster estimator + tick loudness/copy/
+   swap-flag) — blocking the §9c commit. If approved as-is: commit (see protocol above),
+   push, done. If changes are wanted: the relevant sub-agent's track needs a follow-up
+   pass BEFORE committing — do not commit partial/rejected work.
+2. **The 7-item owner decision queue from session 3** (§8 above) — none of these have
+   been explicitly resolved yet; items 4 and 6 predate the 1.8× ring/intro changes and
+   should be re-judged against current renders before answering.
+3. **The `AUDIOUTER_DEBUG_TICK_SWAP` bias measurement** — nobody has actually run the
+   two-pass experiment yet. Worth doing once the owner has real speakers in front of them
+   again; the number it produces may itself become a follow-up task (a residual bias
+   correction) or may confirm the loudness fix was sufficient.
+4. **Full-suite pass + fresh full render set + version bump**, once §9c is either
+   committed or reverted to match the owner's verdict — the render set currently
+   committed (`fa5e4a9e`) reflects the 1.8× rings but NOT the estimator/tick changes.
+5. **Live hardware pass** (unchanged from §8): sheet z-order above the beak, Esc reaching
+   the view rather than cancelling the sheet, tuck-away/restore with a run live, pinned +
+   unpinned launch, one real Stop mid-run — NONE of this has been checked on real
+   hardware yet, only in the popover/sheet mechanics the owner has been live-testing.
+6. **Figma mirror** of the final screens (house rule) — not started, unchanged from §8.
+7. **Purge stale test bundles.** `build/` currently holds `Audiouter Wizard v5.app`
+   through `v14.app` (ten bundles, ten bundle ids all TCC-granted separately on the
+   owner's Mac). `scripts/purge-dev-installs.sh` (dry-run first) once the owner is done
+   testing and a final version is chosen — do not purge the one currently under test.
+8. **The eventual merge to `main`.** Unchanged blocker from §8: `main` has since renamed
+   the whole app (AudiouterCore → Audiout, `2b523c4f`) — this entire branch still uses
+   the pre-rename `Audiouter`/`AudiouterCore` paths throughout. Expect a rename-scale
+   conflict resolution pass at merge time, not a clean fast-forward. Guard 7's own
+   AppKit-exception false-positive (see commit protocol above) is ALSO a symptom of this
+   same drift and will need re-checking once the branch is rebased onto the renamed tree.
+9. Roadmap entries **065** and **066** are present in this branch's `ROADMAP.jsonl`
+   (added session 1, still open) — item 065 (unsynced-BT alert state) explicitly depends
+   on the sheet work landing on `main` first; re-read both before resuming either.

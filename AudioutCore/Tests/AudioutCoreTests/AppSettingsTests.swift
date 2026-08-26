@@ -283,11 +283,42 @@ import Testing
                 "an explicitly stored endpoint wins over the derived one")
     }
 
+    /// The check-in and validate calls carry the license key, so a stored
+    /// endpoint that is not https is ignored outright — the derived https URL
+    /// answers instead of the planted one.
+    @Test func aStoredCheckInEndpointMustBeHTTPS() {
+        let settings = AppSettings(defaults: defaults,
+                                   licenseServerURL: URL(string: "https://license.example.com")!)
+        settings.checkInURL = URL(string: "http://evil.example.com/checkin")!
+        #expect(settings.checkInURL == URL(string: "https://license.example.com/v1/checkin"),
+                "a plain-http endpoint never wins — the derived https one answers")
+    }
+
+    /// The one predicate every "is this install registered?" caller reads. A
+    /// stored key with no verdict yet is NOT unregistered: the check is soft,
+    /// so an unanswered question gets the benefit of the doubt.
+    @Test func licenseUnregisteredIsTrueOnlyForNoKeyOrARefusedOne() {
+        let settings = AppSettings(defaults: defaults)
+        #expect(settings.licenseUnregistered, "no key at all")
+
+        settings.licenseKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
+        #expect(settings.licenseStatus == nil)
+        #expect(!settings.licenseUnregistered, "a key awaiting an answer is given the benefit of the doubt")
+
+        for refused: LicenseStatus in [.unknown, .invalid, .revoked] {
+            settings.licenseStatus = refused
+            #expect(settings.licenseUnregistered, Comment(rawValue: "\(refused) is a refusal"))
+        }
+
+        settings.licenseStatus = .active
+        #expect(!settings.licenseUnregistered)
+    }
+
     @Test func licenseStatusRoundTripsAndIsClearedWithTheKey() {
         let settings = AppSettings(defaults: defaults)
         #expect(settings.licenseStatus == nil, "never verified")
 
-        settings.licenseKey = "AUDR-AAAAA-BBBBB-CCCCC-DDDDD"
+        settings.licenseKey = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
         settings.licenseStatus = .active
         #expect(AppSettings(defaults: defaults).licenseStatus == .active)
 

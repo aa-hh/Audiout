@@ -32,7 +32,7 @@ key.** Alec sign-off pending.
 
 | Field | Choice |
 |---|---|
-| Key shape | `AUDR-XXXXX-XXXXX-XXXXX-XXXXX` — literal `AUDR` prefix + 20 random Crockford-base32 chars in four groups of five |
+| Key shape | `AUDT-XXXXX-XXXXX-XXXXX-XXXXX` — literal `AUDT` prefix + 20 random Crockford-base32 chars in four groups of five (the deployed worker diverged from this doc's original `AUDR` recommendation and issues `AUDT-`; verified 2026-08-27 from the deployed bundle, `var PREFIX = "AUDT"` in `src/keys.ts`) |
 | Entropy | 100 bits via `crypto.getRandomValues(new Uint8Array(13))` mapped to Crockford alphabet (0-9 A-Z minus I L O U), truncated to 20 chars |
 | Length | 29 chars with dashes — hand-typeable, phone-readable |
 | Collisions | `UNIQUE` on canonical key column; retry on conflict |

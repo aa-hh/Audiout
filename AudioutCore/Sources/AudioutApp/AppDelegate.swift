@@ -333,6 +333,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// (C1, user-requested). Owned here so it can be closed before the reply fires.
     private var quittingIndicator: QuittingIndicatorPanel?
 
+    /// Set by the first ``presentStoreDataAlertOnce(message:info:)`` of the launch.
+    private var storeDataAlertShown = false
+
+    /// Tell the user, at most once per launch, that a settings file could not be
+    /// read or written. ONE alert covers both kinds and every store: a full or
+    /// failing disk takes them all down together, and a stack of modals saying
+    /// so in turn would be hostile. First event wins; the rest are dropped.
+    private func presentStoreDataAlertOnce(message: String, info: String) {
+        guard !storeDataAlertShown else { return }
+        storeDataAlertShown = true
+        NSApp.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = message
+        alert.informativeText = info
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+    }
+
     // MARK: Lifecycle
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -445,6 +464,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // app. A minimal main menu supplies ⌘Q / ⌘, while the app is active.
         statusItemController.secondaryClickMenu = { [weak self] in self?.makeStatusMenu() }
         installMainMenu()
+
+        // The persistence layer's two silent failures get their one voice here.
+        // `StoreRecovery` deliberately knows no UI, and this target is the only
+        // place that has any.
+        StoreRecovery.onWriteFailure = { [weak self] error in
+            DispatchQueue.main.async {
+                self?.presentStoreDataAlertOnce(
+                    message: "Audiout couldn't save a settings change",
+                    info: "\(error.localizedDescription)\n\nRecent changes may be lost when Audiout quits. Check that the startup disk isn't full.")
+            }
+        }
+        // Covers the stores whose owners are stored properties, so they have
+        // loaded before this line: the BT trims and EQ (via `backend`), the
+        // device icons, and the excluded apps. `groups.json`, `app-routes.json`
+        // and `routing.json` are read by controllers built LATER in this method,
+        // so a corrupt one of those is set aside but not named here. Async so
+        // launch finishes before any modal.
+        if !StoreRecovery.quarantinedFileNames.isEmpty {
+            DispatchQueue.main.async { [weak self] in
+                self?.presentStoreDataAlertOnce(
+                    message: "Some of Audiout's saved settings couldn't be read",
+                    info: "The unreadable files were set aside so nothing is lost: \(StoreRecovery.quarantinedFileNames.joined(separator: ", ")). The affected settings are back to their defaults. Everything else is untouched.")
+            }
+        }
 
         // The mixer model binds to the resolved backend, then the popover binds
         // to the model. From here the popover drives all group/master/mute/
@@ -1472,6 +1515,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         eventTask?.cancel()
         eventTask = nil
+        // A selection made in the last moment before quitting is still sitting
+        // on the coalescing writer's queue. Draining it is one small JSON write
+        // at most, so it costs nothing measurable and the setting survives.
+        groupController.flushPendingRoutingSave()
         backend.stop()
         // Hand the user's Touch Bar back BEFORE anything that can block. While we
         // own the volume the Mac is in "App Controls only" mode, so a quit that
@@ -1664,13 +1711,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// after moving Main — that path never enters the event stream, so without
     /// this the readouts would sit stale until the next unrelated backend event.
     private func repaintFromCurrentState() {
+        // One snapshot, taken first and handed to everyone — the controller
+        // included, so its device reads stop hopping onto the backend's state
+        // queue. `devicesByID` is folded from the backend's own events, so it is
+        // already current here.
+        let devices = Array(devicesByID.values)
+        groupController.updateDevices(devices)
         // Establish the out-of-the-box default (current device selected ⇒
         // passthrough) once the fleet is known (SPEC §9b). No-op after the first
-        // time / if a persisted selection was loaded.
+        // time / if a persisted selection was loaded. Seeded from the snapshot
+        // above, so it sees this event's fleet rather than the previous one's.
         groupController.ensureDefaultSelection()
         // Feed the popover (repaints open rows in place, or caches for next
         // open), then drive the status symbol from the Main Out master.
-        let devices = Array(devicesByID.values)
         popoverController.update(devices: devices)
         // The status glyph is a truthful glance: the arc is the Main Out master,
         // and the symbol goes accent-coloured while anything is actually leaving

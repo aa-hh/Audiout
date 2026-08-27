@@ -55,14 +55,6 @@ public final class GroupRowView: NSView {
     private var isDraggingMaster = false
     private var isHovered = false
 
-    /// App-local mouse-moved monitor guaranteeing the group header's hover wash
-    /// clears even when the pointer leaves into a region with no tracking area
-    /// (the last group row before the inter-card gap/footer). Same root fix as
-    /// `DeviceRowView`: `NSTrackingArea` only emits `mouseExited` when the pointer
-    /// enters another tracked region, so a row with a dead zone below it never
-    /// gets one. General to any row, not a last-row special-case.
-    private var mouseMovedMonitor: Any?
-
     init(group: Group, isActive: Bool, isExpanded: Bool, masterVolume: Int, isMuted: Bool = false) {
         self.group = group
         self.isActive = isActive
@@ -305,7 +297,7 @@ public final class GroupRowView: NSView {
         trackingAreas.forEach(removeTrackingArea)
         addTrackingArea(NSTrackingArea(
             rect: bounds,
-            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeInActiveApp, .inVisibleRect],
             owner: self
         ))
     }
@@ -331,41 +323,21 @@ public final class GroupRowView: NSView {
     /// Reconcile hover from the real pointer position — the general root-cause fix
     /// for a hover that "sticks" on a row with an untracked dead zone below it
     /// (the bottom-most row). `NSTrackingArea` emits `mouseExited` only on a
-    /// crossing into another tracked region, which never happens there.
+    /// crossing into another tracked region, which never happens there. Fed by
+    /// the tracking area's own `.mouseMoved` option (P2-1), not an app-wide
+    /// `NSEvent` monitor.
     private func refreshHoverFromPointer() { setHovered(pointerIsInside()) }
+
+    public override func mouseMoved(with event: NSEvent) { refreshHoverFromPointer() }
 
     /// Drop any transient hover when the row is (un)mounted so it can't stick as a
     /// stale highlight if the pointer leaves without a matching `mouseExited`
-    /// (T-U8), and (un)install the mouse-moved monitor that catches the pointer
-    /// leaving into an untracked dead zone.
+    /// (T-U8) — the row's own tracking area keeps hover live going forward.
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         isHovered = false
         needsDisplay = true
-        if window != nil {
-            installMouseMovedMonitor()
-        } else {
-            removeMouseMovedMonitor()
-        }
     }
-
-    private func installMouseMovedMonitor() {
-        guard mouseMovedMonitor == nil else { return }
-        // STABILITY(D4): every row installs its own app-wide monitor, churned on each rebuild — any fix should reduce multiplicity/churn only; the monitor pattern itself is deliberate (see AudioutSharedUI/AGENTS.md); see dev/notes/stability-audit-2026-07-18.md
-        mouseMovedMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
-            self?.refreshHoverFromPointer()
-            return event
-        }
-    }
-
-    private func removeMouseMovedMonitor() {
-        if let monitor = mouseMovedMonitor {
-            NSEvent.removeMonitor(monitor)
-            mouseMovedMonitor = nil
-        }
-    }
-
-    deinit { removeMouseMovedMonitor() }
 
     /// Row highlight colour, `nil` when neither active nor hovered. Same
     /// two washes and alphas as `DeviceRowView`/`AppRowView`
@@ -405,7 +377,7 @@ public final class GroupRowView: NSView {
         setAccessibilityRole(.button)
         let state = isActive ? "active" : "inactive"
         let expanded = isExpanded ? "expanded" : "collapsed"
-        setAccessibilityLabel("Group \(group.name), \(state), \(expanded), master volume \(masterVolume) percent")
+        setAccessibilityLabel("Group \(group.name), \(state), \(expanded), master volume \(VolumePercent.spoken(masterVolume))")
 
         activateButton.setAccessibilityLabel(isActive ? "\(group.name) is active" : "Activate \(group.name)")
         chevronButton.setAccessibilityLabel(isExpanded ? "Collapse \(group.name)" : "Expand \(group.name)")

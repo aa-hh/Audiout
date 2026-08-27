@@ -390,11 +390,11 @@ public final class BusRailOverlayView: NSView {
 
     /// Whether a node sits ON the spine (rail runs through it) vs OFF it (the
     /// line detours around it). Members and members-in-transition are on-spine;
-    /// genuine non-members and the blocked local node are detoured.
+    /// genuine non-members are detoured.
     static func onSpine(_ node: MembershipBusView.Node) -> Bool {
         switch node {
         case .member, .connecting, .failed, .origin: return true
-        case .nonMember, .blocked:                   return false
+        case .nonMember:                             return false
         }
     }
 

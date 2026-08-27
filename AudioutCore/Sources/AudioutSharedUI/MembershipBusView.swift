@@ -22,8 +22,8 @@ import AppKit
 ///
 /// **Node vocabulary (v4 §Call-1, the static states the energize agent drives):**
 /// `.member` (filled gold — connected member), `.connecting` (gold dashed
-/// hollow), `.failed` (failure-red ring), `.nonMember` (hollow, detoured),
-/// `.blocked` (greyed hollow). The energize "pending" beat has NO node form of
+/// hollow), `.failed` (failure-red ring), `.nonMember` (hollow, detoured).
+/// The energize "pending" beat has NO node form of
 /// its own — an ember dashed rim is indistinguishable from the gold dashed one
 /// at node size, so the beat renders as `.connecting`. **Rail segment tone:**
 /// GOLD through a connected member, `ember` otherwise — ember survives as a
@@ -57,9 +57,6 @@ public final class MembershipBusView: NSView {
         case failed
         /// Not in the mix set — a HOLLOW node the line bows around (spec §4.4).
         case nonMember
-        /// The local-mix **blocked** node (spec §4.6): a distinct greyed hollow
-        /// node; the underlying checkbox is honestly disabled.
-        case blocked
         /// The Main Audio **origin** (spec §Call-1 "the rail hooks UP into the
         /// Main Audio row's meter"): draws nothing here — the panel-level
         /// ``BusRailOverlayView`` draws the L-shaped hook that rises at
@@ -169,11 +166,9 @@ public final class MembershipBusView: NSView {
 
     /// The hover ring: a thin gold circle standing off the node while the pointer
     /// is over the gutter, so the node admits it is the click target without the
-    /// rail carrying a permanent affordance. A `.blocked` node never draws it —
-    /// its checkbox is honestly disabled, and a disabled control must not invite
-    /// the click.
+    /// rail carrying a permanent affordance.
     private func drawHoverRing(centerX: CGFloat, centerY: CGFloat) {
-        guard hovered, node != .blocked else { return }
+        guard hovered else { return }
         let r = PopoverColumnGrid.busNodeHoverRingRadius
         let ring = NSBezierPath(ovalIn: NSRect(x: centerX - r, y: centerY - r,
                                                width: 2 * r, height: 2 * r))
@@ -204,7 +199,6 @@ public final class MembershipBusView: NSView {
         switch node {
         case .connecting:              return dimmed ? Tokens.Color.tertiaryLabel : Tokens.Color.gold
         case .failed:                  return Tokens.Color.failure  // never dimmed
-        case .blocked:                 return Tokens.Color.tertiaryLabel
         case .nonMember, .member,
              .origin:                  return ember
         }
@@ -249,5 +243,5 @@ public final class MembershipBusView: NSView {
     public var test_armed: Bool { armed }
     /// Whether the node currently draws its gold hover ring (structural hook —
     /// the same condition `drawHoverRing` guards on).
-    public var test_drawsHoverRing: Bool { hovered && node != .blocked }
+    public var test_drawsHoverRing: Bool { hovered }
 }

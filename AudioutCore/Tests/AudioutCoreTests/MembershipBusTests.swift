@@ -45,13 +45,6 @@ import AudioutCore
                        "a non-member's node is hollow — the line detours around it")
     }
 
-    @Test func blockedLocalMixRendersBlockedNode() {
-        let row = makeBusRow()
-        row.apply(makeDevice(), selected: false, blocked: true, blockReason: "no mixed set")
-        #expect(row.test_busNode == .blocked,
-                       "the local-mix blocked row renders the distinct greyed hollow node (§4.6)")
-    }
-
     @Test func unavailableRendersHollowTintedNode() {
         let row = makeBusRow()
         // Even a held (selected) membership renders hollow while unavailable —
@@ -59,10 +52,9 @@ import AudioutCore
         row.apply(makeDevice(isAvailable: false), selected: true)
         #expect(row.test_busNode == .nonMember, "an unavailable device's node is hollow")
         #expect(row.test_busNodeDimmed == true, "…and tinted (the unavailable signature)")
-        // Distinct from blocked (R5): blocked is `.blocked`, unavailable is a
-        // tinted `.nonMember` + the "Unavailable" FEED override (v4.1 item 3
-        // moved this word off the sublabel and onto the FEED column, since
-        // this row is a bus row).
+        // Unavailable is a tinted `.nonMember` + the "Unavailable" FEED
+        // override (v4.1 item 3 moved this word off the sublabel and onto the
+        // FEED column, since this row is a bus row).
         #expect(row.test_feedText == "Unavailable")
         #expect(row.test_feedIsErrorColored)
         #expect(row.test_statusText == nil, "the sublabel carries no words on a bus row's unavailable state")
@@ -218,15 +210,6 @@ import AudioutCore
         #expect(!row.test_drawsHoverRing, "and it settles back on exit")
     }
 
-    @Test func blockedRowNeverInvitesTheClick() {
-        let row = makeBusRow()
-        row.apply(makeDevice(), selected: false, blocked: true, blockReason: "no mixed set")
-        row.test_setGutterHovered(true)
-        #expect(row.test_busNode == .blocked)
-        #expect(!row.test_drawsHoverRing,
-                "a disabled membership control must not offer a hover it would refuse")
-    }
-
     @Test func modelRefreshClearsTheGutterHover() {
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true)
@@ -245,5 +228,19 @@ import AudioutCore
         #expect(row.test_membershipAXLabel == "Add Test Speaker to Selected Devices")
         row.apply(makeDevice(), selected: true, controllable: true)
         #expect(row.test_membershipAXLabel == "Remove Test Speaker from Selected Devices")
+    }
+
+    @Test func gutterCheckboxTooltipNamesTheMixAction() {
+        let row = makeBusRow()
+        row.apply(makeDevice(), selected: false)
+        #expect(row.test_membershipTooltip == "Add Test Speaker to the mix")
+        row.apply(makeDevice(), selected: true, controllable: true)
+        #expect(row.test_membershipTooltip == "Remove Test Speaker from the mix")
+    }
+
+    @Test func nonBusRowHasNoMembershipTooltip() {
+        let row = DeviceRowView(device: makeDevice())
+        row.apply(makeDevice(), selected: false)
+        #expect(row.test_membershipTooltip == nil)
     }
 }

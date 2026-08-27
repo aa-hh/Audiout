@@ -64,7 +64,7 @@ import AppKit
     @Test func warmPaneNodeStaysAMemberWhenTheCheckboxIsPinned() {
         // The sole remaining member is pinned (disabled) so it can't be
         // unchecked into an empty group — but it IS still a member, so it keeps
-        // the filled gold node rather than dropping to a greyed `.blocked` one.
+        // the filled gold node rather than dropping to a hollow `.nonMember` one.
         let row = makeRow(.warmPane, checked: true)
         row.setCheckboxEnabled(false, tooltip: "A group needs at least one device.")
         #expect(row.test_busNode == .member)
@@ -131,9 +131,9 @@ import AppKit
     }
 
     @Test func aPinnedRowNeverRingsItself() {
-        // `MembershipBusView` refuses the ring for a `.blocked` node on its own,
-        // but a PINNED row keeps its `.member` node (it IS a member) — so the
-        // refusal for that case has to come from the row's checkbox enablement.
+        // A PINNED row keeps its `.member` node (it IS a member) — so the
+        // refusal for that case has to come from the row's checkbox enablement,
+        // not from `MembershipBusView`'s own node-based ring gate.
         let row = makeRow(.warmPane, checked: true)
         row.test_setHovered(true)
         #expect(row.test_drawsHoverRing)

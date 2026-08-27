@@ -29,7 +29,7 @@ import Testing
         func prime() {}
         func isTrusted() -> Bool { false }
     }
-    private final class FakePTPHelper: PTPHelperManaging {
+    private final class FakePTPHelper: PTPHelperManaging, @unchecked Sendable {
         var status: PTPHelperStatus = .notRegistered
         func register() throws {}
         func openSystemSettingsLoginItems() {}

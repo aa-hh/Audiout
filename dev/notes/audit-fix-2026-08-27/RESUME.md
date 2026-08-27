@@ -68,3 +68,4 @@ finished. If the coordinating session died mid-flight, some worktrees may hold U
 ## Review ledger
 - T4 license-money: APPROVED (fable review, 0 findings, 3 deviations endorsed) — commits 3a8d4b65+4110e92d on origin. READY TO MERGE pending Alec.
 - T2 data-safety: FIX-FIRST (1 medium: launch alert evaluated before groups/app-routes loads — fix agent running; everything else clean, async-write flag judged acceptable). WRAP-UP +1: inject temp-dir routing stores across GroupControllerTests (reviewer follow-up).
+- T1 backend-failures: EXECUTED — 49ae524e on origin, full suite 2862/168 green (Guard 4, mule). Fable review running.

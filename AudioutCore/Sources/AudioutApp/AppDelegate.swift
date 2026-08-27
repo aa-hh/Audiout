@@ -1464,6 +1464,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// sends `performClose:` down the responder chain, so it reaches whichever
     /// window is key (the surface, Setup, or About) rather than being
     /// hardwired to one.
+    ///
+    /// The Edit menu is there for the same reason: every text field's field
+    /// editor already implements Cut/Copy/Paste/Undo, but their key
+    /// equivalents only fire when a main-menu Edit menu carries them, so
+    /// without this ⌘C/⌘V/⌘X/⌘A/⌘Z are dead in every field in the app.
     @MainActor
     private func installMainMenu() {
         let mainMenu = NSMenu()
@@ -1483,6 +1488,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let close = fileMenu.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
         close.target = nil
         fileItem.submenu = fileMenu
+
+        let editItem = NSMenuItem()
+        mainMenu.addItem(editItem)
+        let editMenu = NSMenu(title: "Edit")
+        // `target: nil` throughout, so each verb travels the responder chain to
+        // whichever field editor is currently first responder.
+        for (title, action, key) in [
+            ("Undo", Selector(("undo:")), "z"),
+            ("Redo", Selector(("redo:")), "Z"),
+        ] as [(String, Selector, String)] {
+            editMenu.addItem(withTitle: title, action: action, keyEquivalent: key).target = nil
+        }
+        editMenu.addItem(.separator())
+        for (title, action, key) in [
+            ("Cut", #selector(NSText.cut(_:)), "x"),
+            ("Copy", #selector(NSText.copy(_:)), "c"),
+            ("Paste", #selector(NSText.paste(_:)), "v"),
+            ("Delete", #selector(NSText.delete(_:)), ""),
+            ("Select All", #selector(NSText.selectAll(_:)), "a"),
+        ] as [(String, Selector, String)] {
+            editMenu.addItem(withTitle: title, action: action, keyEquivalent: key).target = nil
+        }
+        editItem.submenu = editMenu
 
         NSApp.mainMenu = mainMenu
     }

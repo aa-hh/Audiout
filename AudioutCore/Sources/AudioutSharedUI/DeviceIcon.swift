@@ -78,6 +78,41 @@ public enum DeviceIcon {
     public static var mainAudioSymbolName: String {
         resolve("hifispeaker.arrow.forward.fill", default: "hifispeaker.fill")
     }
+
+    /// The cache behind ``image(_:pointSize:weight:)``. MAIN-THREAD ONLY — every
+    /// call site is AppKit view code, so no lock is bought for a dictionary that
+    /// is only ever touched from one thread.
+    private nonisolated(unsafe) static var imageCache: [String: NSImage] = [:]
+
+    /// A template `NSImage` for the SF Symbol `name`, built once and reused.
+    ///
+    /// Row builds are the hot path: the sidebar, the membership rows and the
+    /// detail pane's group rows each mint a fresh `NSImage` per row per
+    /// rebuild, and rebuilds arrive with every backend event. The symbol lookup
+    /// is the expensive half and its result is immutable, so it is memoized on
+    /// all three inputs. No eviction: the key space is the curated set plus the
+    /// device kinds, times a handful of sizes.
+    ///
+    /// The returned image is SHARED — callers must NOT mutate it. Tinting is a
+    /// view property (`contentTintColor`), which is what every call site
+    /// already uses.
+    public static func image(_ name: String,
+                             pointSize: CGFloat? = nil,
+                             weight: NSFont.Weight = .regular) -> NSImage? {
+        let key = "\(name)|\(pointSize ?? -1)|\(weight.rawValue)"
+        if let cached = imageCache[key] { return cached }
+        guard var image = NSImage(systemSymbolName: name, accessibilityDescription: nil) else {
+            return nil
+        }
+        if let pointSize,
+           let configured = image.withSymbolConfiguration(
+               NSImage.SymbolConfiguration(pointSize: pointSize, weight: weight)) {
+            image = configured
+        }
+        image.isTemplate = true
+        imageCache[key] = image
+        return image
+    }
 }
 
 /// In-memory per-device icon override map, persisted through an injected

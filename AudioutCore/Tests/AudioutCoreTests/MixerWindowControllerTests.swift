@@ -467,6 +467,31 @@ import AppKit
         #expect(window.test_editor.test_checkedDeviceIDs.contains("sonos-move"), "the reverted checkbox shows the member still belongs")
     }
 
+    /// Fable review fix: `rebuildCandidates`'s REUSE path (`apply` re-enables
+    /// the checkbox but never clears the tooltip/VoiceOver help `pinSoleMember`
+    /// set earlier) used to leave a formerly-pinned row stuck announcing "A
+    /// group needs at least one device…" even after it stopped being the sole
+    /// member.
+    @Test func gainingASecondMemberClearsTheFormerSoleMembersStalePin() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try controller.createGroup(name: "Solo", memberIDs: ["office"]).group
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: saved.id))
+        await drain()
+
+        #expect(!(window.test_editor.test_isMembershipRowEnabled(for: "office")), "the sole member starts pinned")
+        let officeRow = try #require(window.test_editor.test_membershipRow(for: "office") as? MembershipRowView)
+        #expect(officeRow.test_checkboxAccessibilityHelp != nil, "the pin explanation is set")
+
+        // Every demo-fleet device is already available, so this takes the
+        // REUSE path (the candidate ID sequence is unchanged), not a full
+        // rebuild that would have fresh rows anyway.
+        window.test_editor.test_setMembership(true, for: "sonos-move")
+
+        #expect(window.test_editor.test_isMembershipRowEnabled(for: "office"), "no longer the sole member — its checkbox must re-enable")
+        #expect(officeRow.test_checkboxAccessibilityHelp == nil, "the reuse path must clear the stale pin explanation, not just re-enable the checkbox")
+    }
+
     @Test func deleteInEditorCallsDeleteGroupAndReturnsToMixer() async throws {
         let (window, controller, backend) = try await makeWindow()
         let saved = try makeGroup1(controller)
@@ -482,6 +507,289 @@ import AppKit
         #expect(!(window.test_isShowingEditor))
         #expect(window.test_isShowingEmptyState, "deleting the last group falls back to the 'No groups yet' pane")
         #expect(window.test_sidebar.test_hasGroupsEmptyStateRow, "the Groups section stays but shows the empty state again")
+    }
+
+    // MARK: The delete confirmation (P0-1)
+
+    @Test func deleteAlertNamesTheGroupAndDefaultsToCancel() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: saved.id))
+        await drain()
+
+        let alert = try #require(window.test_editor.test_makeDeleteAlert())
+        #expect(alert.messageText == "Delete \u{201C}Group 1\u{201D}?",
+                "the sheet names the group being deleted, not \"this group\"")
+        #expect(alert.informativeText == "Deleting a group doesn't change which speakers are playing.",
+                "an inactive group really is pure configuration")
+        #expect(alert.buttons[0].title == "Delete")
+        #expect(alert.buttons[0].hasDestructiveAction)
+        #expect(alert.buttons[0].keyEquivalent == "",
+                "Return must not be the destructive answer")
+        #expect(alert.buttons[1].title == "Cancel")
+        #expect(alert.buttons[1].keyEquivalent == "\r", "Cancel is the default button")
+    }
+
+    /// The lie this fixed: deleting the group that is PLAYING switches Main Out
+    /// back to Selected Devices, so a speaker that is only in this group stops.
+    /// The old sentence claimed nothing would change.
+    @Test func deleteAlertTellsTheTruthForTheGroupThatIsPlaying() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: saved.id))
+        await drain()
+
+        controller.activateGroup(id: saved.id)
+        window.update(devices: backend.devices)
+        await drain()
+
+        let alert = try #require(window.test_editor.test_makeDeleteAlert())
+        #expect(alert.informativeText
+                == "This group is playing now. Deleting it switches playback to Selected Devices; "
+                   + "speakers that are only in this group will stop.")
+    }
+
+    /// With no window there is no confirmation, so the sidebar's "Delete
+    /// Group…" must NOT delete — it used to delete outright on that path.
+    @Test func aWindowlessDeleteRequestIsANoOp() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: saved.id))
+        await drain()
+
+        window.test_editor.requestDelete()
+        await drain()
+        #expect(controller.groups.count == 1, "no window means no confirmation, so nothing is deleted")
+
+        window.test_editor.test_confirmDelete()
+        await drain()
+        #expect(controller.groups.isEmpty, "the confirmed path still deletes")
+        _ = saved
+    }
+
+    // MARK: The editor's projection gate (P1-1) and row reuse (P1-2)
+
+    @Test func editorSkipsAnEQOnlyChangeButNotARename() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: saved.id))
+        await drain()
+        let baseline = window.test_editor.test_renderCount
+        #expect(baseline > 0, "opening the editor rendered it once")
+
+        var eqOnly = backend.devices
+        eqOnly[0].eq = DeviceEQ(bassDB: 4)
+        window.update(devices: eqOnly)
+        #expect(window.test_editor.test_renderCount == baseline,
+                "nothing this pane draws shows a tone value")
+
+        var renamed = eqOnly
+        renamed[0].name += " (renamed)"
+        window.update(devices: renamed)
+        #expect(window.test_editor.test_renderCount == baseline + 1,
+                "a device name IS on a membership row, so the pane repaints")
+    }
+
+    @Test func aRefreshReusesTheMembershipRowsWhenTheCandidateListIsUnchanged() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: saved.id))
+        await drain()
+        let editor = window.test_editor
+        // The host's own order, so the candidate SEQUENCE is the one already
+        // on screen and only the row contents move.
+        let base = backend.devices.sorted { ($0.name, $0.id) < ($1.name, $1.id) }
+        let candidatesBefore = editor.test_candidateDeviceIDs
+        let row = try #require(editor.test_membershipRow(for: "office"))
+
+        var updated = base
+        let officeIndex = try #require(updated.firstIndex { $0.id == "office" })
+        updated[officeIndex].isAvailable = false   // a member stays a candidate
+        editor.show(groupID: saved.id, devices: updated)
+        #expect(editor.test_membershipRow(for: "office") === row,
+                "the same list, refreshed in place — clicks and hover ride on these instances")
+        #expect(editor.test_candidateDeviceIDs == candidatesBefore)
+
+        // A candidate DROPPING OUT changes the sequence, so the list is rebuilt.
+        let fewer = updated.filter { $0.id != "homepod-bed" }
+        editor.show(groupID: saved.id, devices: fewer)
+        #expect(!editor.test_candidateDeviceIDs.contains("homepod-bed"))
+        #expect(editor.test_membershipRow(for: "office") !== row,
+                "a changed candidate sequence falls through to the full rebuild")
+    }
+
+    /// Fable review fix: the projection gate in `show(groupID:devices:)` used
+    /// to return early on a volume-only change (correctly — nothing this pane
+    /// draws shows a volume) WITHOUT refreshing `allDevices`/`candidateDevices`,
+    /// so a check-in right after persisted the volume from BEFORE that event
+    /// instead of the fresh one. The render count must stay untouched either
+    /// way — this is a model-write fix, not a rendering one.
+    @Test func aVolumeOnlyRefreshBeforeACheckInPersistsTheFreshVolume() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)   // sonos-move, office
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: saved.id))
+        await drain()
+        let editor = window.test_editor
+        let baseline = editor.test_renderCount
+
+        // Through `window.update(devices:)`, exactly like a real backend echo
+        // arrives — it re-sorts into `orderedDevices()` before handing the
+        // editor its snapshot, so this isn't a second, independently-ordered
+        // fetch of `backend.devices` (which doesn't promise a stable order).
+        var volumeOnly = backend.devices
+        let index = try #require(volumeOnly.firstIndex { $0.id == "homepod-bed" })
+        volumeOnly[index].volume = 77
+        window.update(devices: volumeOnly)
+        #expect(editor.test_renderCount == baseline, "a volume-only change draws nothing this pane shows")
+
+        editor.test_setMembership(true, for: "homepod-bed")
+
+        #expect(controller.groups.first { $0.id == saved.id }?.memberVolumes["homepod-bed"] == 77,
+                "the persisted volume must come from the FRESH snapshot, not the stale one from before the gated refresh")
+    }
+
+    // MARK: Duplicate names are refused (P2-5)
+
+    @Test func renamingOntoAnotherGroupsNameIsRefused() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let first = try makeGroup1(controller)
+        _ = try controller.createGroup(name: "Upstairs", memberIDs: ["homepod-bed"], memberVolumes: [:])
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: first.id))
+        await drain()
+
+        window.test_editor.test_rename(to: "upstairs")
+
+        #expect(controller.groups.first { $0.id == first.id }?.name == "Group 1",
+                "the model is untouched")
+        #expect(window.test_editor.test_nameFieldValue == "Group 1",
+                "…and the field goes back to what is actually saved")
+        #expect(window.test_editor.test_duplicateNameRefused)
+    }
+
+    @Test func recasingAGroupsOwnNameIsStillAllowed() async throws {
+        let (window, controller, backend) = try await makeWindow()
+        let saved = try makeGroup1(controller)
+        window.update(devices: backend.devices)
+        window.test_select(.group(id: saved.id))
+        await drain()
+
+        window.test_editor.test_rename(to: "GROUP 1")
+
+        #expect(controller.groups.first { $0.id == saved.id }?.name == "GROUP 1",
+                "a group never collides with itself")
+        #expect(!window.test_editor.test_duplicateNameRefused)
+    }
+
+    @Test func creatingWithATakenNameIsRefused() async throws {
+        let (window, controller, _) = try await makeWindow()
+        _ = try makeGroup1(controller)   // "Group 1"
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        let sheet = try #require(window.test_createSheet)
+        var completed = false
+        sheet.onComplete = { _ in completed = true }
+
+        sheet.test_setName("group 1")
+        sheet.test_setMembership(deviceID: "homepod-bed", isChecked: true)
+        sheet.test_commit()
+        await drain()
+
+        #expect(controller.groups.count == 1, "nothing was created")
+        #expect(!completed, "the sheet stays up with the form intact")
+        #expect(sheet.test_duplicateNameRefused)
+        #expect(sheet.test_checkedDeviceIDs == ["homepod-bed"], "the selection survives the refusal")
+    }
+
+    // MARK: The creation sheet reports a failed save (P1-4)
+
+    @Test func createSheetReportsAFailedSaveAndKeepsTheForm() async throws {
+        let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,
+                                  emitsLevels: false, simulatesDropouts: false)
+        try await waitForFleet(backend, count: 7)
+        // A plain FILE where the store wants a directory: `createDirectory`
+        // throws, so every write fails.
+        let blocker = tempDirectory().appendingPathComponent("blocker")
+        FileManager.default.createFile(atPath: blocker.path, contents: Data())
+        let controller = GroupController(
+            backend: backend,
+            store: GroupStore(directory: blocker.appendingPathComponent("sub", isDirectory: true)),
+            loadPersisted: false)
+        let window = MixerWindowController(groupController: controller,
+                                           settings: AppSettings(defaults: isolatedDefaults))
+        window.test_isVisibleOverride = true
+        window.update(devices: backend.devices)
+
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        let sheet = try #require(window.test_createSheet)
+        var completed = false
+        sheet.onComplete = { _ in completed = true }
+        sheet.test_setName("Downstairs")
+        sheet.test_setMembership(deviceID: "office", isChecked: true)
+
+        sheet.test_commit()
+        await drain()
+
+        #expect(sheet.test_saveFailureReported, "a failed write is reported, never swallowed")
+        #expect(!completed, "the sheet does not finish on a failure")
+        #expect(sheet.test_nameFieldText == "Downstairs", "the form is intact…")
+        #expect(sheet.test_checkedDeviceIDs == ["office"])
+        #expect(sheet.test_isCreateEnabled, "…and Create stays live, so the user can try again")
+    }
+
+    /// The dedup announcement is a WINDOW-path sheet; headless keeps today's
+    /// silent resolve, which every existing flow depends on.
+    @Test func aHeadlessDedupStillCompletesWithAlreadyExisted() async throws {
+        let (window, controller, _) = try await makeWindow()
+        window.test_presentCreateSheet(preselected: ["office", "homepod-bed"])
+        await drain()
+        try #require(window.test_createSheet).test_commit()
+        await drain()
+        #expect(controller.groups.count == 1)
+
+        window.test_presentCreateSheet(preselected: ["homepod-bed", "office"])
+        await drain()
+        let second = try #require(window.test_createSheet)
+        var result: (group: Group, alreadyExisted: Bool)?
+        second.onComplete = { result = $0 }
+        second.test_commit()
+        await drain()
+
+        #expect(controller.groups.count == 1, "the identical member set resolved to the existing group")
+        #expect(result?.alreadyExisted == true, "and headless still reports it, rather than waiting on a sheet")
+    }
+
+    // MARK: The creation sheet's empty checklist (P1-5)
+
+    @Test func anEmptyChecklistExplainsItself() async throws {
+        let (window, _, backend) = try await makeWindow()
+        let allOffline = backend.devices.map { device -> Device in
+            var d = device
+            d.isAvailable = false
+            return d
+        }
+        window.update(devices: allOffline)
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        let sheet = try #require(window.test_createSheet)
+
+        #expect(sheet.test_candidateDeviceIDs.isEmpty)
+        #expect(sheet.test_emptyChecklistText
+                == "No speakers found yet. Speakers appear here once they\u{2019}re reachable on your network.")
+        #expect(!sheet.test_isCreateEnabled)
+
+        window.update(devices: backend.devices)
+        window.test_presentCreateSheet(preselected: [])
+        await drain()
+        #expect(try #require(window.test_createSheet).test_emptyChecklistText == nil,
+                "with real rows there is nothing to explain")
     }
 
     // MARK: Selecting a device → detail pane (config-only, never activation)

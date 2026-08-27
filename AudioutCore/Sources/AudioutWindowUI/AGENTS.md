@@ -70,19 +70,30 @@ All group logic goes through the shared
   overlay and the "Delete Group…" button anchor to the COLUMN, not the
   container, or they drift by exactly the column margin.
 - **`SidebarViewController.viewDidAppear()` seeds Tab traversal for the whole
-  hosting window** (A11Y-GROUPS) — nothing else ever calls
-  `makeFirstResponder`. It only fires on a genuine on-screen appearance, so
-  it is invisible to headless coverage; don't remove it as dead code.
-  `ContentPaneHostViewController.setContent(_:)` re-seeds the key-view loop
-  after every pane swap (re-parenting invalidates it) — keep both halves.
-- **Gold means LIVE, so the editor's rail is armed/idle end to end.** The
-  active Main Out group's editor draws its spine — hook, wire, member discs,
-  hover ring — in gold; any other group's draws the whole spine in the quiet
-  `ember` idle tone (`MembershipRowView.railArmed` →
-  `MembershipBusView.apply(armed:)`, same truth as `railHookAnchor`'s `gold`).
-  The sidebar mirrors it: the active group's row carries the small gold
-  `speaker.wave.2.fill` "Playing now" marker (`IconLabelCellView`), the
-  sidebar's only sanctioned gold.
+  hosting window** (A11Y-GROUPS). It only fires on a genuine on-screen
+  appearance, so it is invisible to headless coverage; don't remove it as dead
+  code. `ContentPaneHostViewController.setContent(_:)` re-seeds the key-view
+  loop after every pane swap (re-parenting invalidates it) — keep both halves.
+  Exactly TWO places call `makeFirstResponder`: that seed, and
+  `SidebarViewController.claimKeyboardFocus()`, which the editor's Escape
+  routes to (`onDidCancelRename`) so an abandoned rename lands focus on the
+  row list instead of on `nil` — the dead-Tab state A11Y-GROUPS fixed.
+- **Gold means LIVE, so the editor's rail is armed/idle — and for the member
+  discs that is the ROUTED truth, PER ROW.** An inactive group's editor arms
+  nothing: its whole spine draws in the quiet `ember` idle tone. In the ACTIVE
+  group's editor the hook, wire and hover ring follow the active flag
+  (`railHookAnchor`), but each disc follows whether that speaker is receiving
+  the Main Out feed right now — `Device.isSelected` (the backend's own echo)
+  for AirPlay/Bluetooth/Cast, saved Main-Out membership for the Mac's local
+  sink (`GroupController.isMainOutMember(_:)`). Saving a speaker into a group
+  never re-routes (`saveGroup` is a pure model op), so a checked row that
+  isn't in the output set fills ember, not gold — checked+routed = gold
+  filled, checked+unrouted = ember filled, unchecked+routed = gold hollow,
+  unchecked+unrouted = ember idle (`GroupEditorViewController.railArmed(for:
+  memberSet:isActiveGroup:)` → `MembershipRowView.railArmed` →
+  `MembershipBusView.apply(armed:)`). The sidebar mirrors the active flag: the
+  active group's row carries the small gold `speaker.wave.2.fill` "Playing
+  now" marker (`IconLabelCellView`), the sidebar's only sanctioned gold.
 - **Persistence failures are reported, never swallowed.** Every editor write
   goes through `saveOrReport(_:)` / `performDelete(id:)`: on a throw the pane
   re-renders from the model (no control claims a never-saved state)

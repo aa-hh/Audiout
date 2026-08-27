@@ -367,6 +367,10 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// it, so the engage delay never leaves a block of frames owed.
     private var pacerStartNanos: Int64 = 0
     private var pacerEmittedFrames = 0
+    /// Mic-probe callbacks (roadmap 064) — pacer-queue confined, one-shot,
+    /// dropped when the wizard injector is swapped.
+    private var micProbeStarted: (() -> Void)?
+    private var micProbeFinished: (() -> Void)?
 
     /// The engine's fixed feed format, which the pacer synthesizes directly.
     private static let wizardFeedRate = 44_100.0
@@ -1290,6 +1294,12 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
             guard self.tickConfig != config else { return }
             self.tickConfig = config
             self.tickInjector = config.map { AlignmentTickInjector(config: $0) }
+            // A staged mic probe belongs to the injector being replaced; its
+            // session recovers by timeout, never by a callback from a dead run.
+            self.pacerQueue.async { [weak self] in
+                self?.micProbeStarted = nil
+                self?.micProbeFinished = nil
+            }
             // Leaving `.wizard`: cancel and DRAIN the pacer before the new
             // snapshot goes out, so no in-flight pacer block can be delivered
             // against it — zero producer overlap at the resume boundary.
@@ -1305,8 +1315,40 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
     /// alone — the pacer is the single producer for a wizard run, and an arm
     /// from any other thread would be a second toucher of lock-free state.
     /// Inert when no wizard injector is live.
+    ///
+    /// When a mic probe is staged (roadmap 064), the SAME arm moment starts the
+    /// probe sweeps INSTEAD, and the tick grid arms automatically the moment the
+    /// sweeps finish — one gate, two payloads, so the backend's release gate
+    /// needs no probe awareness at all.
     public func armWizardTicks() {
-        pacerQueue.async { [weak self] in self?.currentWizardInjector()?.armTicks() }
+        pacerQueue.async { [weak self] in
+            guard let self, let injector = self.currentWizardInjector() else { return }
+            if injector.probeStaged, !injector.test_probeArmed {
+                injector.armProbe()
+                let started = self.micProbeStarted
+                self.micProbeStarted = nil
+                if let started { DispatchQueue.global(qos: .userInitiated).async(execute: started) }
+            } else {
+                injector.armTicks()
+            }
+        }
+    }
+
+    /// Stage the one-shot calibration sweeps on the live wizard injector
+    /// (roadmap 064). Call AFTER ``setAlignTickMode(_:)`` has entered `.wizard`.
+    /// `onStarted` fires when the arm gate opens and the sweeps begin rendering
+    /// into the feed; `onFinished` when the last sweep frame has been rendered
+    /// (air arrival lags by the sinks' pipeline delay). Both fire off-queue,
+    /// at most once; a run torn down early fires neither — callers recover by
+    /// timeout.
+    public func stageWizardMicProbe(onStarted: @escaping () -> Void,
+                                    onFinished: @escaping () -> Void) {
+        pacerQueue.async { [weak self] in
+            guard let self, let injector = self.currentWizardInjector() else { return }
+            injector.stageProbe()
+            self.micProbeStarted = onStarted
+            self.micProbeFinished = onFinished
+        }
     }
 
     /// Swap the wizard's beat interval mid-run (the estimator's search stage
@@ -1385,6 +1427,14 @@ public final class NativeCaptureCoordinator: @unchecked Sendable {
         var pcm = Data(count: frames * Self.wizardFeedChannels * MemoryLayout<Int16>.size)
         var bedded = Data()
         injector.mixWizardVariants(into: &pcm, bedded: &bedded)
+        if injector.takeProbeCompletion() {
+            // The sweeps are fully in the feed: start the by-ear grid (a clean
+            // interval away) and let the mic session know the tail is coming.
+            injector.armTicks()
+            let finished = micProbeFinished
+            micProbeFinished = nil
+            if let finished { DispatchQueue.global(qos: .userInitiated).async(execute: finished) }
+        }
         // Host clock only, never a device clock (the standing rule), on the same
         // CLOCK_MONOTONIC timeline `CapturedBuffer.pts` rides.
         let ptsNanos = pacerStartNanos

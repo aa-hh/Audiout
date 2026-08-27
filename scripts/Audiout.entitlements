@@ -23,5 +23,12 @@
          now so a future sandbox adoption cannot silently strip IOBluetooth. -->
     <key>com.apple.security.device.bluetooth</key>
     <true/>
+    <!-- Microphone (roadmap 064, mic-probe alignment measurement). Same
+         posture as Bluetooth above: App-Sandbox-scoped and inert unsandboxed —
+         the live gate is the mic TCC prompt via NSMicrophoneUsageDescription
+         (make-app.sh). Listed so a future sandbox adoption cannot silently
+         strip the built-in-mic capture. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
 </dict>
 </plist>

@@ -249,6 +249,21 @@ final class AlignmentTickInjector: @unchecked Sendable {
     /// onset from the same block and a re-render is free of side effects.
     private var tickEpochFrame: Int
 
+    // MARK: Mic-probe lanes (wizard only; pacer-queue confined like the grid)
+
+    /// The one-shot calibration sweeps (roadmap 064): DOWN sweep for the
+    /// engine/AirPlay/Mac fan-out, UP sweep for the Bluetooth fan-out — the
+    /// per-lane orthogonality that lets one mic recording tell the two sides
+    /// apart. Empty until ``stageProbe()``.
+    private var probeEngineLane: [Int32] = []
+    private var probeBTLane: [Int32] = []
+    /// The frame the sweeps start on; `-1` until ``armProbe()``. One epoch for
+    /// both lanes, off the same cursor the tick grid reads — the shared start
+    /// is what the BeepBeep cancellation rests on.
+    private var probeEpochFrame = -1
+    /// One-shot completion latch — ``takeProbeCompletion()``.
+    private var probeCompletionTaken = false
+
     init(sampleRate: Double = 44_100,
          channels: Int = 2,
          config: Config = .manual,
@@ -337,6 +352,53 @@ final class AlignmentTickInjector: @unchecked Sendable {
         tickEpochFrame = lastTickFrame + frames
     }
 
+    // MARK: Mic-probe run control (pacer-queue only)
+
+    /// How long each calibration sweep runs. One second buys ~40 dB of
+    /// processing gain across the band — see `SyncProbe`.
+    static let probeSweepSeconds = 1.0
+    /// Silence between the arm and the sweeps, so the probe never rides on the
+    /// tail of whatever the gate interrupted.
+    static let probeLeadSeconds = 0.5
+
+    /// Pre-render the calibration sweeps so a later ``armProbe()`` starts them
+    /// on the next block. Staging is separate from arming for the same reason
+    /// ticks' arm is: rendering is done off the hot path, and the arm gate
+    /// decides WHEN.
+    func stageProbe(amplitude: Double = 0.35) {
+        let scale = amplitude * 32_767.0
+        probeEngineLane = SyncProbe.samples(
+            .downSweep(sampleRate: sampleRate, duration: Self.probeSweepSeconds))
+            .map { Int32((Double($0) * scale).rounded()) }
+        probeBTLane = SyncProbe.samples(
+            .upSweep(sampleRate: sampleRate, duration: Self.probeSweepSeconds))
+            .map { Int32((Double($0) * scale).rounded()) }
+    }
+
+    var probeStaged: Bool { !probeBTLane.isEmpty }
+
+    /// Start the sweeps ``probeLeadSeconds`` from here. Idempotent, like
+    /// ``armTicks()``. Inert until ``stageProbe()`` has run.
+    func armProbe() {
+        guard probeStaged, probeEpochFrame < 0 else { return }
+        probeEpochFrame = cursor + Int(Self.probeLeadSeconds * sampleRate)
+    }
+
+    private var probeArmed: Bool { probeEpochFrame >= 0 }
+
+    private var probeFinished: Bool {
+        probeArmed && cursor >= probeEpochFrame + probeBTLane.count
+    }
+
+    /// True exactly once, on the first call after the staged sweeps have been
+    /// fully rendered into the feed — the pacer's cue to arm the tick grid and
+    /// tell the mic session the air will soon carry the last of the probe.
+    func takeProbeCompletion() -> Bool {
+        guard probeFinished, !probeCompletionTaken else { return false }
+        probeCompletionTaken = true
+        return true
+    }
+
     /// The keep-alive loop, whichever kind ``Config/keepAliveKind`` selects.
     /// Both are LOOP TABLES indexed by the absolute frame position in
     /// ``render(into:from:tick:bed:replace:)``, which is what makes them
@@ -407,8 +469,8 @@ final class AlignmentTickInjector: @unchecked Sendable {
     /// `endFrame` bound the additive path uses — that, and dropping the
     /// injector, are the two ways the music comes back.
     func mix(into pcm: inout Data) {
-        cursor += render(into: &pcm, from: cursor, tick: brightTick, bed: !bed.isEmpty,
-                         replace: replacesProgram)
+        cursor += render(into: &pcm, from: cursor, tick: brightTick, probe: nil,
+                         bed: !bed.isEmpty, replace: replacesProgram)
     }
 
     /// The wizard pacer's two-variant render. `pcm` comes back with the LOW
@@ -437,9 +499,11 @@ final class AlignmentTickInjector: @unchecked Sendable {
         // one: the two variants carry different ticks, so one cannot be built
         // by adding to the other.
         var beddedBlock = pcm
-        let frames = render(into: &pcm, from: start, tick: engineTick, bed: false,
+        let frames = render(into: &pcm, from: start, tick: engineTick,
+                            probe: probeArmed ? probeEngineLane : nil, bed: false,
                             replace: replacesProgram)
-        _ = render(into: &beddedBlock, from: start, tick: bluetoothTick, bed: !bed.isEmpty,
+        _ = render(into: &beddedBlock, from: start, tick: bluetoothTick,
+                   probe: probeArmed ? probeBTLane : nil, bed: !bed.isEmpty,
                    replace: replacesProgram)
         bedded = beddedBlock
         cursor += frames
@@ -449,7 +513,8 @@ final class AlignmentTickInjector: @unchecked Sendable {
     /// owns the cursor — ``mixWizardVariants(into:bedded:)`` renders the same
     /// frames twice and advances once.
     private func render(into pcm: inout Data, from start: Int,
-                        tick tickTable: [Int32]?, bed useBed: Bool, replace: Bool) -> Int {
+                        tick tickTable: [Int32]?, probe probeLane: [Int32]?,
+                        bed useBed: Bool, replace: Bool) -> Int {
         let bytesPerFrame = channels * MemoryLayout<Int16>.size
         guard bytesPerFrame > 0 else { return 0 }
         let frameCount = pcm.count / bytesPerFrame
@@ -464,6 +529,12 @@ final class AlignmentTickInjector: @unchecked Sendable {
                 if let tickTable, tickEpochFrame >= 0, position >= tickEpochFrame {
                     let phase = (position - tickEpochFrame) % beatFrames
                     if phase < tickTable.count { add += tickTable[phase] }
+                }
+                if let probeLane, probeEpochFrame >= 0 {
+                    let probeIndex = position - probeEpochFrame
+                    if probeIndex >= 0, probeIndex < probeLane.count {
+                        add += probeLane[probeIndex]
+                    }
                 }
                 if replace {
                     for ch in 0..<channels {
@@ -488,4 +559,7 @@ final class AlignmentTickInjector: @unchecked Sendable {
     var test_maxTicks: Int { maxTicks }
     var test_isArmed: Bool { tickEpochFrame >= 0 }
     var test_bedFrameCount: Int { bed.count }
+    var test_probeArmed: Bool { probeArmed }
+    var test_probeEpochFrame: Int { probeEpochFrame }
+    var test_probeLaneFrames: Int { probeBTLane.count }
 }

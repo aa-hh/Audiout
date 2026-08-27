@@ -57,6 +57,32 @@ unless the Mac sits far off-centre; one sentence of UX copy).
   post-peak reverb shadow: echoes are the room's answer, not evidence against
   the measurement.
 
+## Build state (2026-08-27)
+
+All four steps are BUILT, none live-tested (Alec's call — live checks later):
+
+1. DSP core — `SyncProbeCorrelator.swift` + tests.
+2. `mic-probe-spike` CLI (HFP survival check on hardware still OWED).
+3. In-app pipeline: `AlignmentTickInjector.stageProbe/armProbe` renders the
+   sweeps into the two wizard lanes (DOWN→engine/Mac, UP→Bluetooth); the
+   backend's existing arm gate starts the probe instead of the first tick
+   and hands over to the tick grid on completion
+   (`NativeCaptureCoordinator.stageWizardMicProbe`); `BuiltInMicRecorder` +
+   `MicProbeSession` capture and reduce to Δ; TCC surface added
+   (make-app.sh `NSMicrophoneUsageDescription` + plutil gate, audio-input
+   entitlement, `MicCapturePermission`).
+4. Wizard wiring: `PopoverController.startBTWizardMicProbe` runs a probe on
+   every tick-on edge when the pair spans two fan-outs; the result —
+   `preview-in-force + Δ` — arrives via
+   `BTAlignmentWizardSession.offerMeasuredProposal` as the proposal to
+   confirm by ear (flat prior untouched). A preview change mid-probe
+   (answer, reference swap) voids the measurement via a generation counter.
+
+Known v1 seams: the FIRST run on a fresh install prompts for the mic
+mid-run, so that run usually falls back to by-ear and the SECOND run
+measures; BT-vs-BT pairs never probe (same fan-out, unattributable
+arrivals); probe only wired for the native backend (mock never prompts).
+
 ## Constraints from prior repo findings (read before building the capture leg)
 
 - **HFP hazard is unresolved on hardware.** Opening a BT device's OWN mic

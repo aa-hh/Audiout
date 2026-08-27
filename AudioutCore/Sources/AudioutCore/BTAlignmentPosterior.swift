@@ -319,6 +319,19 @@ struct BTAlignmentPosterior {
         phase = .converged(resultMs: valueMs)
     }
 
+    /// An externally MEASURED value arriving mid-run (the mic probe, roadmap
+    /// 064): the same UI shortcut `openingProposalMs` is at birth — the run
+    /// jumps to proposing it, and the belief stays exactly what the answers so
+    /// far made it. A measurement feeds the PROPOSAL, never the prior (the
+    /// flat-prior fence); its rejection then folds in as evidence through the
+    /// ordinary ``rejectProposal()``. Only meaningful while asking — a run
+    /// already proposing, or ended, keeps its state.
+    mutating func offerProposal(_ valueMs: Double) {
+        guard case .asking = phase else { return }
+        phase = .proposing(valueMs: Swift.min(Swift.max(valueMs, range.lowerBound),
+                                              range.upperBound).rounded())
+    }
+
     /// "Still off": the opposite evidence, which widens the belief around the
     /// proposal and sends the run back to questions. ``maxRejections`` is
     /// enough — one more proposal from the same answers would be the same

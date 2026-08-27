@@ -24,7 +24,6 @@ import AppKit
         func deviceRow(_ row: DeviceRowView, didToggleEnabled on: Bool, for id: String) {
             toggles.append((on, id))
         }
-        func deviceRowDidRequestBlockedExplanation(_ row: DeviceRowView) {}
         func deviceRowDidRequestReconnect(_ row: DeviceRowView) {
             reconnects.append(row.device.id)
         }

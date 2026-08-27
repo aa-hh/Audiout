@@ -69,6 +69,26 @@ import AudioutSharedUI
         #expect(!view.test_copyDetailsEnabled)
     }
 
+    // MARK: Copy Details is HIDDEN (not just disabled) when there's nothing to copy (P3-1)
+
+    @Test func copyDetailsHiddenExactlyWhenNoDetail() {
+        let view = ConnectionDiagnosisView(
+            failure: ConnectionFailure(cause: .unknown, detail: nil), deviceName: "Den")
+        #expect(view.test_copyDetailsHidden)
+        view.apply(failure: ConnectionFailure(cause: .unknown, detail: "some evidence"), deviceName: "Den")
+        #expect(!view.test_copyDetailsHidden)
+        view.apply(failure: ConnectionFailure(cause: .unknown, detail: nil), deviceName: "Den")
+        #expect(view.test_copyDetailsHidden)
+    }
+
+    // MARK: Keyboard equivalents (P1-6) — Return is "Try Again", Escape dismisses
+
+    @Test func keyboardEquivalents() {
+        let view = ConnectionDiagnosisView(failure: ConnectionFailure(cause: .timedOut), deviceName: "Cellar")
+        #expect(view.test_retryKeyEquivalent == "\r")
+        #expect(view.test_dismissKeyEquivalent == "\u{1b}")
+    }
+
     // MARK: Closure firing — host owns the pasteboard write
 
     @Test func tapRetryFiresOnRetry() {

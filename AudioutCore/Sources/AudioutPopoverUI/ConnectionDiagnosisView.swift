@@ -100,6 +100,7 @@ public final class ConnectionDiagnosisView: NSView {
         headlineLabel.stringValue = failure.headline
         suggestionLabel.stringValue = failure.suggestion
         copyDetailsButton.isEnabled = failure.detail != nil
+        copyDetailsButton.isHidden = failure.detail == nil
 
         configureAccessibility()
         needsLayout = true
@@ -123,12 +124,16 @@ public final class ConnectionDiagnosisView: NSView {
         background.addSubview(headlineLabel)
 
         suggestionLabel.translatesAutoresizingMaskIntoConstraints = false
-        suggestionLabel.font = Tokens.Font.detail
+        suggestionLabel.font = .systemFont(ofSize: NSFont.systemFontSize)
         suggestionLabel.textColor = Tokens.Color.secondaryLabel
         background.addSubview(suggestionLabel)
 
         configureSmallButton(retryButton, title: "Try Again", action: #selector(retryClicked(_:)))
         configureSmallButton(copyDetailsButton, title: "Copy Details", action: #selector(copyDetailsClicked(_:)))
+        // "Try Again" is the default action (P1-6): Return fires it without a
+        // click, the stock `.rounded` bezel renders the default treatment on
+        // its own.
+        retryButton.keyEquivalent = "\r"
         background.addSubview(retryButton)
         background.addSubview(copyDetailsButton)
 
@@ -147,6 +152,8 @@ public final class ConnectionDiagnosisView: NSView {
             dismissButton.topAnchor.constraint(equalTo: background.topAnchor, constant: Self.dismissButtonInset),
             dismissButton.trailingAnchor.constraint(
                 equalTo: background.trailingAnchor, constant: -Self.dismissButtonInset),
+            dismissButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 24),
+            dismissButton.heightAnchor.constraint(greaterThanOrEqualToConstant: 24),
 
             headlineLabel.topAnchor.constraint(equalTo: background.topAnchor, constant: Self.contentPadding),
             headlineLabel.leadingAnchor.constraint(equalTo: background.leadingAnchor, constant: Self.contentPadding),
@@ -183,23 +190,24 @@ public final class ConnectionDiagnosisView: NSView {
         button.setContentCompressionResistancePriority(.required, for: .horizontal)
     }
 
-    /// The quiet dismiss ("x") control pinned to the tinted background's
+    /// The dismiss ("x") control pinned to the tinted background's
     /// top-trailing corner: `bezelStyle = .accessoryBar` + `isBordered = false`
     /// (no box at rest, matching the popover's borderless icon-glyph
-    /// convention — e.g. the card accessory buttons), a small bold glyph,
-    /// and `.tertiaryLabelColor` so it reads as a quiet affordance rather than
-    /// competing with "Try Again"/"Copy Details".
+    /// convention — e.g. the card accessory buttons), a standard-size bold
+    /// glyph at a `secondaryLabel` tint and a ≥24×24 hit target (P1-6), and
+    /// Escape as its key equivalent so the panel dismisses without a click.
     private func configureDismissButton() {
         dismissButton.translatesAutoresizingMaskIntoConstraints = false
         dismissButton.bezelStyle = .accessoryBar
         dismissButton.isBordered = false
         dismissButton.imagePosition = .imageOnly
         dismissButton.imageScaling = .scaleProportionallyDown
-        dismissButton.contentTintColor = Tokens.Color.tertiaryLabel
+        dismissButton.contentTintColor = Tokens.Color.secondaryLabel
         dismissButton.target = self
         dismissButton.action = #selector(dismissClicked(_:))
+        dismissButton.keyEquivalent = "\u{1b}"
 
-        let symbolConfig = NSImage.SymbolConfiguration(pointSize: 9.5, weight: .bold)
+        let symbolConfig = NSImage.SymbolConfiguration(pointSize: 12, weight: .bold)
         if let image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss")?
             .withSymbolConfiguration(symbolConfig) {
             dismissButton.image = image
@@ -290,11 +298,18 @@ public final class ConnectionDiagnosisView: NSView {
     public var test_suggestionText: String { suggestionLabel.stringValue }
     /// Whether "Copy Details" is currently enabled (`failure.detail != nil`).
     public var test_copyDetailsEnabled: Bool { copyDetailsButton.isEnabled }
+    /// Whether "Copy Details" is currently hidden (`failure.detail == nil`,
+    /// P3-1 — hidden, not just disabled, when there's nothing to copy).
+    public var test_copyDetailsHidden: Bool { copyDetailsButton.isHidden }
     /// The tinted background's current layer color (appearance-adaptivity asserts).
     public var test_backgroundTint: CGColor? { background.layer?.backgroundColor }
 
     /// Whether the dismiss button is present and has a resolved image (never blank).
     public var test_hasDismissButton: Bool { dismissButton.image != nil }
+    /// "Try Again"'s key equivalent — the default-button treatment (P1-6).
+    public var test_retryKeyEquivalent: String { retryButton.keyEquivalent }
+    /// The dismiss button's key equivalent — Escape (P1-6).
+    public var test_dismissKeyEquivalent: String { dismissButton.keyEquivalent }
 
     /// Simulate a "Try Again" click.
     public func test_tapRetry() { retryClicked(retryButton) }

@@ -34,6 +34,7 @@ import AudioutCore
         let row = makeBusRow()
         row.apply(makeDevice(), selected: true, controllable: true)
         #expect(row.test_feedText == "System")
+        #expect(!row.test_feedErrorPillHasGlyph, "an ordinary member pill carries no error glyph")
     }
 
     @Test func groupMemberShowsTheGroupNameInsteadOfSystem() {
@@ -77,6 +78,9 @@ import AudioutCore
                   routedAppNames: ["Music", "Safari"])
         #expect(row.test_feedText == "System · Music · +1")
         #expect(row.test_feedHasOverflow)
+        // The tooltip is uncapped (VoiceOver/hover have no viewport to
+        // overflow) — every name, no "+N".
+        #expect(row.test_feedTooltip == "Feeding System, Music, Safari")
     }
 
     @Test func neitherMainMixNorAppsShowsNothing() {
@@ -101,6 +105,8 @@ import AudioutCore
         #expect(row.test_feedText == "Didn't respond", "failure overrides the composite entirely — never both — with the failure's own headline")
         #expect(row.test_feedIsErrorColored)
         #expect(row.test_statusText == nil, "the sublabel carries no words for a failed bus row")
+        #expect(row.test_feedTooltip == nil, "a failed row's tooltip carries no feed names")
+        #expect(row.test_feedErrorPillHasGlyph, "an error pill reads by shape, not colour alone (P2-6)")
     }
 
     @Test func unavailableOverridesTheFeed() {
@@ -108,6 +114,7 @@ import AudioutCore
         row.apply(makeDevice(isAvailable: false), selected: true, routedAppNames: ["Music"])
         #expect(row.test_feedText == "Unavailable")
         #expect(row.test_feedIsErrorColored)
+        #expect(row.test_feedErrorPillHasGlyph)
     }
 
     // MARK: Connecting/reconnecting/muted are NOT shown in the FEED column
@@ -137,7 +144,10 @@ import AudioutCore
         let row = makeBusRow()
         row.apply(makeDevice(supportsAirPlay2: false), selected: true, controllable: true)
         #expect(row.test_feedHasAP1Tag)
-        #expect(row.test_feedText == "AP1 System")
+        #expect(row.test_feedText == "Older AirPlay System")
+        let tooltip = row.test_feedTooltip ?? ""
+        #expect(tooltip.contains("Feeding System"))
+        #expect(tooltip.contains("Older AirPlay — can't route single apps"))
     }
 
     @Test func aP2DeviceNeverGetsATag() {

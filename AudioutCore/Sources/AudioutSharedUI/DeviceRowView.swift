@@ -53,13 +53,6 @@ public final class DeviceRowView: NSView {
         func deviceRow(_ row: DeviceRowView, didToggleMute muted: Bool, for id: String)
         /// The user flipped the row's primary "send audio here" ON/OFF switch.
         func deviceRow(_ row: DeviceRowView, didToggleEnabled on: Bool, for id: String)
-        /// The user clicked the BODY of a row whose membership toggle is BLOCKED
-        /// (the Phase-1 local-mix block, spec §4.6). The host surfaces the
-        /// in-place refusal note (from `GroupController.localMixRefusalReason`) —
-        /// the reachable trigger that a disabled control + tooltip alone lacked
-        /// (resolves the significant break §8.5). Default no-op so non-bus hosts
-        /// (mixer window, tests) are unaffected.
-        func deviceRowDidRequestBlockedExplanation(_ row: DeviceRowView)
         /// The user clicked a greyed (paired-but-disconnected) BLUETOOTH row's
         /// name (BT-UI): "click connects" — the macOS-Bluetooth-menu behavior.
         /// The host maps this to a membership-free reconnect
@@ -129,19 +122,9 @@ public final class DeviceRowView: NSView {
     /// Membership in the "Selected Devices" set (SPEC §9b). This is *composition*,
     /// not routing — the row is "selected" iff the host says so, independent of
     /// whether the backend currently reports the device as an output. The host
-    /// passes this in via ``apply(_:selected:blocked:blockReason:)`` because the
+    /// passes this in via ``apply(_:selected:controllable:…)`` because the
     /// set lives in `GroupController`, not on the `Device`.
     public private(set) var isSelectedInSet: Bool = false
-
-    /// True when this row's toggle is disabled by the Phase-1 local-mix block
-    /// (the Mac can't join a mixed set) — the checkbox is greyed with a tooltip.
-    private var isToggleBlocked: Bool = false
-
-    /// The refusal reason accompanying `isToggleBlocked` (spec §4.6), held so the
-    /// row can speak it: it rides the row's accessibility HINT (the VoiceOver
-    /// equivalent of the body-click refusal note — every visual state ships its
-    /// spoken counterpart) as well as the checkbox tooltip. `nil` when not blocked.
-    private var blockReasonText: String?
 
     /// Transient pointer-hover state (menu-less hosts). Kept SEPARATE from the
     /// model `isSelectedInSet` and always reset in ``apply(_:selected:…)`` and on
@@ -356,17 +339,6 @@ public final class DeviceRowView: NSView {
     /// when there's no meter or after a ``LevelMeterView/reset()``.
     private var lastMeterLevel: Float = 0
 
-    /// App-local mouse-moved monitor that guarantees hover clears even when the
-    /// pointer leaves the row into a "dead zone" with no sibling tracking area
-    /// (the card's bottom padding, the inter-card gap, the footer). This is the
-    /// root fix for the last-row sticky-highlight bug: `NSTrackingArea` only
-    /// delivers `mouseExited` when the pointer crosses INTO another tracked
-    /// region, so the bottom-most row — which has nothing tracked below it —
-    /// never gets an exit and its hover flag sticks. The monitor observes pointer
-    /// movement anywhere in the app and clears hover as soon as the pointer is
-    /// verified outside this row's bounds, for ANY row, not just the last.
-    private var mouseMovedMonitor: Any?
-
     /// Extra leading inset applied to group members so they read as indented
     /// under their group header (SPEC §9 "one indented device row per member").
     private let indented: Bool
@@ -441,9 +413,6 @@ public final class DeviceRowView: NSView {
     ///     Defaults to `false` — the caller must pass `selected || isRedirectTarget`
     ///     to keep a plain selected device's slider/mute enabled; the default is a
     ///     back-compat footgun for callers that omit it entirely.
-    ///   - blocked: whether the membership toggle should be disabled (Phase-1
-    ///     local-mix block) — greyed with `blockReason` as a tooltip.
-    ///   - blockReason: tooltip text shown when `blocked` is true.
     ///   - selectionDimmed: dims the "Selected Devices" checkbox (alpha ~0.4)
     ///     without disabling it — DECISION: a dimmed row's checkbox stays fully
     ///     interactive; this is a visual de-emphasis only (e.g. a filtered/greyed
@@ -503,8 +472,6 @@ public final class DeviceRowView: NSView {
     public func apply(_ device: Device,
                       selected: Bool,
                       controllable: Bool = false,
-                      blocked: Bool = false,
-                      blockReason: String? = nil,
                       selectionDimmed: Bool = false,
                       routedAppNames: [String] = [],
                       liveAppNames: [String] = [],
@@ -522,15 +489,13 @@ public final class DeviceRowView: NSView {
                       volumePendingApply: Bool = false) {
         self.device = device
         self.isSelectedInSet = selected
-        self.isToggleBlocked = blocked
         self.energizePending = energizePending
-        self.blockReasonText = blocked ? blockReason : nil
         self.removalUndoOffered = removalUndoOffered
         // Any model refresh (select OR deselect) clears a transient hover so the
         // row can't keep a stale hover wash after the pointer left the popover
         // (T-U8 root-cause fix — hover is transient, selection is model-driven).
         // The gutter's socket hover is the same kind of transient state, cleared
-        // on the same beat and re-established by the mouse-moved monitor.
+        // on the same beat and re-established by the row's own tracking area.
         self.isHovered = false
         setGutterHovered(false)
 
@@ -548,8 +513,10 @@ public final class DeviceRowView: NSView {
         // therefore keeps a live toggle regardless of availability; an
         // unavailable+UNselected row keeps the dead toggle (nothing to drop).
         enableCheckbox.state = selected ? .on : .off
-        enableCheckbox.isEnabled = showsToggle && (device.isAvailable || selected) && !blocked
-        enableCheckbox.toolTip = (showsToggle && blocked) ? blockReason : nil
+        enableCheckbox.isEnabled = showsToggle && (device.isAvailable || selected)
+        enableCheckbox.toolTip = (busActive && showsToggle)
+            ? (selected ? "Remove \(device.name) from the mix" : "Add \(device.name) to the mix")
+            : nil
         // A1: dim, don't disable — `isEnabled` above is untouched by
         // `selectionDimmed`, only the alpha is. EXCEPTION for bus rows (spec §4.7):
         // dimming is a NODE TINT, not the checkbox alpha ("dim via tint … checkbox
@@ -690,7 +657,7 @@ public final class DeviceRowView: NSView {
         // drag by the slider action; on a model refresh it shows the model value.)
         if !isDraggingSlider {
             slider.integerValue = device.volume
-            readoutLabel.stringValue = "\(device.volume)%"
+            readoutLabel.stringValue = VolumePercent.label(device.volume)
         }
         // The volume slider + mute are usable whenever the device is available
         // and controllable (selected member OR an app-redirect target) — kept
@@ -751,7 +718,7 @@ public final class DeviceRowView: NSView {
         updateRemovalUndo()
 
         // Membership bus (spec §4): re-derive the node from the freshly-applied
-        // membership/blocked/dim state. No-op when `showsBus` is false.
+        // membership/dim state. No-op when `showsBus` is false.
         updateBus()
 
         configureAccessibility()
@@ -759,7 +726,7 @@ public final class DeviceRowView: NSView {
     }
 
     /// Re-derive and push the bus node rendering from the current membership /
-    /// blocked / availability / dim / terminate state (spec §4). No-op when the
+    /// availability / dim / terminate state (spec §4). No-op when the
     /// row hosts no bus (`busActive` false).
     private func updateBus() {
         guard busActive else { return }
@@ -771,9 +738,7 @@ public final class DeviceRowView: NSView {
             default: return false
             }
         }
-        if isToggleBlocked {
-            node = .blocked              // §4.6 greyed hollow node
-        } else if device.isBluetooth, !device.isAvailable, isConnectingNow {
+        if device.isBluetooth, !device.isAvailable, isConnectingNow {
             // BT reconnect attempt (BT-UI): a greyed row's click starts a
             // baseband reconnect while `isAvailable` is STILL false (the
             // endpoint only appears on success), so without this branch the
@@ -1058,8 +1023,9 @@ public final class DeviceRowView: NSView {
     /// The one monochrome SF Mono uppercase micro-tag this column ever shows,
     /// prefixed ahead of the FIRST visible pill's own text for a true
     /// protocol exception. AP2 is the default and is never badged (spec item
-    /// 3 "attributes/flags").
-    private static let ap1FeedTag = "AP1"
+    /// 3 "attributes/flags"). Plain speech, not the protocol jargon "AP1" —
+    /// the tooltip carries the consequence (popover P1-5).
+    private static let ap1FeedTag = "Older AirPlay"
 
     /// Re-derive and push the FEED column's pills from the current device/
     /// mix/redirect state (``mainMixSourceName``/``feedAppNames``, set by
@@ -1092,6 +1058,7 @@ public final class DeviceRowView: NSView {
             // must read distinctly; `.unknown` still renders "Couldn't
             // connect", so AirPlay's common case is unchanged). Copy lives on
             // `ConnectionFailure` — single source shared with the panel.
+            feedStack.toolTip = nil
             setFeedText(failure.headline, color: Tokens.Color.failure)
             return
         }
@@ -1106,6 +1073,7 @@ public final class DeviceRowView: NSView {
                 }
             }
             if !(device.isBluetooth && isConnectingNow) {
+                feedStack.toolTip = nil
                 setFeedText("Unavailable", color: Tokens.Color.failure)
                 return
             }
@@ -1127,6 +1095,29 @@ public final class DeviceRowView: NSView {
         }
         let tag = device.supportsAirPlay2 ? nil : Self.ap1FeedTag
         setFeedSegments(segments, tag: tag)
+        // Tooltip (P1-5): the FULL, uncapped feed list — the "+N" cap is a
+        // screen-only affordance — plus the Older-AirPlay consequence line
+        // when this device can't route single apps. Two lines max, joined by
+        // a newline; `nil` when there's nothing to say (mirrors the
+        // FEED column's own empty case). MUST be set AFTER `setFeedSegments`:
+        // it rebuilds the pills through `renderFeedPills` → `clearFeedPills()`,
+        // which unconditionally wipes `feedStack.toolTip` as part of tearing
+        // down the old pills — setting it before that call had it silently
+        // erased on every apply.
+        var tooltipLines: [String] = []
+        if !feedNames.isEmpty { tooltipLines.append("Feeding " + feedNames.joined(separator: ", ")) }
+        if !device.supportsAirPlay2 { tooltipLines.append("Older AirPlay — can't route single apps") }
+        feedStack.toolTip = tooltipLines.isEmpty ? nil : tooltipLines.joined(separator: "\n")
+    }
+
+    /// The FEED column's spoken/tooltip names, in order: `mainMixSourceName`
+    /// then `feedAppNames` — the single source both ``feedAccessibilityClause``
+    /// and the feed-stack tooltip read, so the two can never diverge.
+    private var feedNames: [String] {
+        var names: [String] = []
+        if let mainMixSourceName { names.append(mainMixSourceName) }
+        names.append(contentsOf: feedAppNames)
+        return names
     }
 
     /// Alpha applied to an app-tint FEED segment while the row is in the
@@ -1166,6 +1157,7 @@ public final class DeviceRowView: NSView {
             view.removeFromSuperview()
         }
         feedStack.isHidden = true
+        feedStack.toolTip = nil
     }
 
     /// Render a SINGLE failure-red pill (no tag, no chip) — the "Couldn't
@@ -1326,7 +1318,7 @@ public final class DeviceRowView: NSView {
     /// Backward-compatible one-arg update (selection derived from the backend
     /// `isSelected` flag). Retained for callers/tests not yet passing explicit
     /// membership; new hosts should use
-    /// ``apply(_:selected:controllable:blocked:blockReason:routedAppNames:)``.
+    /// ``apply(_:selected:controllable:routedAppNames:)``.
     ///
     /// NOTE: this path leaves `controllable` at its `false` default, so the
     /// slider/mute come up DISABLED regardless of `selected` — see that
@@ -1608,8 +1600,7 @@ public final class DeviceRowView: NSView {
                 // sized to the WHOLE leading gutter — the region that reads as
                 // "the node" — rather than the drawn disc alone. Nothing else
                 // claims that region: the row's only gutter behaviour IS this
-                // checkbox (the bus skin never hit-tests, and a blocked row's
-                // disabled checkbox still falls through to the row body).
+                // checkbox (the bus skin never hit-tests).
                 enableCheckbox.widthAnchor.constraint(
                     equalToConstant: PopoverColumnGrid.busHitTargetWidth),
                 enableCheckbox.heightAnchor.constraint(equalTo: heightAnchor),
@@ -1952,20 +1943,43 @@ public final class DeviceRowView: NSView {
     // MARK: Actions
 
     @objc private func volumeChanged(_ sender: NSSlider) {
-        // STABILITY(D4): the drag flag clears only when the last change callback coincides with .leftMouseUp — Esc/cancelled drags leave it stuck and the row ignores model updates; see dev/notes/stability-audit-2026-07-18.md
-        // NSSlider continuous drag: mark drag in-progress so a concurrent
-        // `deviceUpdated` echo doesn't yank the thumb back under the user.
-        isDraggingSlider = true
-        // `NSApp` is an implicitly-unwrapped optional and is genuinely NIL in a
-        // narrowly-filtered `swift test` run that never creates the shared
-        // application — so this must be an optional chain, not a force-unwrap
-        // that happens to survive because some other suite ran first.
-        let event = NSApp?.currentEvent
-        if event?.type == .leftMouseUp { isDraggingSlider = false }
+        // Only a genuine mouse drag suppresses model pushes; keyboard/scroll/AX
+        // changes arrive as single events with no drag in flight.
+        switch NSApp?.currentEvent?.type {
+        case .leftMouseDown, .leftMouseDragged:
+            isDraggingSlider = true
+            installSliderDragEndMonitor()
+        case .leftMouseUp:
+            endSliderDrag()
+        default:
+            break
+        }
         // Keep the `%` readout live through the drag (change 4 — mirrors
         // MainOutRowView), since `apply` won't push the model value mid-drag.
-        readoutLabel.stringValue = "\(sender.integerValue)%"
+        readoutLabel.stringValue = VolumePercent.label(sender.integerValue)
         delegate?.deviceRow(self, didSetVolume: sender.integerValue, for: device.id)
+    }
+
+    private var sliderDragEndMonitor: Any?
+
+    /// Arms a scoped `.leftMouseUp` local monitor so a drag whose final
+    /// `volumeChanged` callback doesn't coincide with mouse-up (a fast
+    /// release, or a drag cancelled by Esc) still clears the flag from a real
+    /// gesture end (P1-9), rather than staying wedged until the next drag.
+    private func installSliderDragEndMonitor() {
+        guard sliderDragEndMonitor == nil else { return }
+        sliderDragEndMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseUp]) { [weak self] event in
+            self?.endSliderDrag()   // real gesture end — fires even for a drag whose
+            return event            // final change callback never coincided with mouse-up
+        }
+    }
+
+    private func endSliderDrag() {
+        isDraggingSlider = false
+        if let monitor = sliderDragEndMonitor {
+            NSEvent.removeMonitor(monitor)
+            sliderDragEndMonitor = nil
+        }
     }
 
     @objc private func muteToggled(_ sender: NSButton) {
@@ -1981,19 +1995,11 @@ public final class DeviceRowView: NSView {
     }
 
     /// Clicking the device NAME toggles the ENABLED checkbox (2026-07-17), firing
-    /// the SAME delegate path as the checkbox itself. On a BLOCKED row (spec §4.6
-    /// — "a click ANYWHERE on the row body / name / node") the click instead
-    /// requests the in-place refusal note, so the name is never a dead surface on
-    /// the one row whose toggle can't move (S4 — the label consumes the mouseDown,
-    /// so the row-body `mouseDown(with:)` branch alone can't cover it). Otherwise
-    /// a disabled checkbox (an unavailable device) keeps the click a no-op —
-    /// the same conditions `enableCheckbox.isEnabled` uses. For a `.failed`
-    /// device this re-enables it (= retry), which is intended.
+    /// the SAME delegate path as the checkbox itself. A disabled checkbox (an
+    /// unavailable device) keeps the click a no-op — the same conditions
+    /// `enableCheckbox.isEnabled` uses. For a `.failed` device this re-enables
+    /// it (= retry), which is intended.
     @objc private func nameClicked(_ sender: NSClickGestureRecognizer) {
-        if isToggleBlocked {
-            delegate?.deviceRowDidRequestBlockedExplanation(self)
-            return
-        }
         // A greyed Bluetooth row's click CONNECTS (BT-UI "click to connect" is
         // the row's ordinary click behavior, never a printed instruction).
         // Ordered before the enabled guard: an unavailable+unselected row's
@@ -2011,12 +2017,6 @@ public final class DeviceRowView: NSView {
     /// The name/label colour for the current state: menu highlight wins, then a
     /// dropped device greys out, then a not-selected device de-emphasizes (it's
     /// not in the Selected Devices set), then normal.
-    ///
-    /// A BLOCKED row deliberately keeps NORMAL text (spec §4.6/§7 R5, S4 —
-    /// supersedes the older V12 name-grey): its signature is the distinct greyed
-    /// bus node + the body-click refusal note. A row-level text dim here would
-    /// blur into the UNAVAILABLE signature (disabled text + "Unavailable"
-    /// sublabel + tinted node) — the two "can't" states must never look alike.
     private var rowTextColor: NSColor {
         if isInMenu, enclosingMenuItem?.isHighlighted == true { return .selectedMenuItemTextColor }
         if !device.isAvailable { return .disabledControlTextColor }
@@ -2099,14 +2099,9 @@ public final class DeviceRowView: NSView {
     }
 
     /// Simulate the user clicking the device NAME (toggles the ENABLED checkbox,
-    /// same delegate path). Mirrors the real gesture handler: on a BLOCKED row it
-    /// requests the in-place refusal note (spec §4.6, S4) instead; on any other
-    /// disabled checkbox it's a no-op.
+    /// same delegate path). Mirrors the real gesture handler: on a disabled
+    /// checkbox it's a no-op.
     public func test_clickName() {
-        if isToggleBlocked {
-            delegate?.deviceRowDidRequestBlockedExplanation(self)
-            return
-        }
         // Mirrors the real gesture handler's greyed-BT branch (BT-UI).
         if device.isBluetooth, !device.isAvailable {
             delegate?.deviceRowDidRequestReconnect(self)
@@ -2231,6 +2226,13 @@ public final class DeviceRowView: NSView {
         feedPills.first?.test_isErrorColored ?? false
     }
 
+    /// Whether the FEED column's leading (error-override) pill CURRENTLY
+    /// carries its triangle glyph (P2-6) — an error pill reads by shape, not
+    /// colour alone.
+    public var test_feedErrorPillHasGlyph: Bool {
+        feedPills.first?.test_hasErrorGlyph ?? false
+    }
+
     /// The FEED column's leading pill's CURRENTLY-painted foreground color
     /// (the neutral main-mix pill when not an error override) — item 8's
     /// "muted feed text" dims this from `secondaryLabel` to `tertiaryLabel`
@@ -2266,6 +2268,10 @@ public final class DeviceRowView: NSView {
     /// AP2 is the default and is never badged).
     public var test_feedHasAP1Tag: Bool { test_feedText?.hasPrefix("\(Self.ap1FeedTag) ") == true }
 
+    /// The FEED stack's tooltip — the uncapped "Feeding …" line plus the
+    /// Older-AirPlay consequence line, `nil` when neither applies (P1-5).
+    public var test_feedTooltip: String? { feedStack.toolTip }
+
     /// The color a FEED app-name segment for `appName` currently resolves to —
     /// the seam T7 rewires (``appSegmentColor(for:)``) to `AppTetherColor`.
     /// Exposed so a test can pin today's flat `secondaryLabel` value; T7's swap
@@ -2287,7 +2293,7 @@ public final class DeviceRowView: NSView {
 
     /// The last level pushed to the leading VU meter via ``setLevel(_:)`` — `0`
     /// when the row has no meter (`showsMeter == false`) or after a reset
-    /// (``apply(_:selected:controllable:blocked:blockReason:routedAppNames:)``
+    /// (``apply(_:selected:controllable:routedAppNames:)``
     /// resets it whenever the row isn't a playing output).
     public func test_meterLevel() -> Float { lastMeterLevel }
 
@@ -2538,6 +2544,10 @@ public final class DeviceRowView: NSView {
     /// from the un-subclassed `NSButton` state machinery for free).
     public var test_membershipAXLabel: String? { enableCheckbox.accessibilityLabel() }
 
+    /// The membership checkbox's tooltip — "Add/Remove <name> to/from the mix"
+    /// on a bus row with its toggle shown, `nil` otherwise (P1-2).
+    public var test_membershipTooltip: String? { enableCheckbox.toolTip }
+
     /// Drive the REAL checkbox action dispatch (spec §4.8 — the checkbox stays the
     /// control underneath). Mirrors `MainOutRowMenuDispatchTests`' house style:
     /// set the checkbox's state then invoke its OWN `target`/`action` with the
@@ -2551,14 +2561,9 @@ public final class DeviceRowView: NSView {
         _ = target.perform(action, with: enableCheckbox)
     }
 
-    /// Simulate a click on the BODY of a blocked row (spec §4.6) — runs the exact
-    /// production branch `mouseDown(with:)` runs, without synthesizing an event.
-    public func test_simulateBlockedBodyClick() { _ = handleBodyMouseDown() }
-
     /// The device name label's current colour (``rowTextColor``) — asserts the
-    /// V12 blocked-name branch (`.tertiaryLabelColor`) alongside the ordinary
-    /// available/selected states. `apply` already stamps this, so no `draw(_:)`
-    /// call is needed to read it.
+    /// ordinary available/selected states. `apply` already stamps this, so no
+    /// `draw(_:)` call is needed to read it.
     public var test_nameColor: NSColor? { nameLabel.textColor }
 
     /// Drive the transient hover state through the same private path
@@ -2580,11 +2585,12 @@ public final class DeviceRowView: NSView {
         trackingAreas.forEach(removeTrackingArea)
         // Re-tracking means the geometry moved under the pointer — drop the
         // gutter hover rather than leaving a socket lit for a region that has
-        // shifted; the mouse-moved monitor re-establishes it on the next move.
+        // shifted; the tracking area's own `.mouseMoved` stream re-establishes
+        // it on the next move.
         setGutterHovered(false)
         addTrackingArea(NSTrackingArea(
             rect: bounds,
-            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeInActiveApp, .inVisibleRect],
             owner: self
         ))
         // The bus gutter's own region: hovering it wakes the socket rim (the
@@ -2623,27 +2629,10 @@ public final class DeviceRowView: NSView {
         if isGutterArea(event) { setGutterHovered(false) } else { setHovered(false) }
     }
 
-    /// A click on the BODY of a BLOCKED row (spec §4.6) surfaces the refusal note
-    /// — the reachable trigger the disabled checkbox + tooltip alone lacked
-    /// (§8.5). A click landing on a live control (slider/mute) is consumed by
-    /// that subview and never reaches here; the NAME label also consumes its
-    /// clicks but routes a blocked row's to the same request via `nameClicked(_:)`
-    /// (S4 — "anywhere on the row body / name / node"); a click on the disabled
-    /// checkbox (disabled controls don't hit-test) or the row body lands here. On
-    /// a non-blocked row this falls through to the default handling.
-    public override func mouseDown(with event: NSEvent) {
-        if handleBodyMouseDown() { return }
-        super.mouseDown(with: event)
-    }
-
-    /// The blocked-body-click branch, factored out so the test hook exercises the
-    /// exact production logic without synthesizing an `NSEvent`. Returns `true`
-    /// when the click was handled as a blocked-explanation request.
-    private func handleBodyMouseDown() -> Bool {
-        guard isToggleBlocked else { return false }
-        delegate?.deviceRowDidRequestBlockedExplanation(self)
-        return true
-    }
+    /// Reconciles hover against the true pointer position (P2-1) — fed by the
+    /// bounds tracking area's own `.mouseMoved` option now, not an app-wide
+    /// `NSEvent` monitor (see ``refreshHoverFromPointer()``).
+    public override func mouseMoved(with event: NSEvent) { refreshHoverFromPointer() }
 
     /// C3: a pointing-hand cursor over the NAME label only (its click toggles
     /// membership, ``nameClicked(_:)``) — scoped to `nameLabel.frame`, not the
@@ -2661,6 +2650,12 @@ public final class DeviceRowView: NSView {
         if iconView.onPress != nil {
             addCursorRect(convert(iconView.bounds, from: iconView), cursor: .pointingHand)
         }
+        // The gutter gets the same invitation, but only while the checkbox
+        // underneath it would actually accept the click (mirrors
+        // `setGutterHovered`'s "never invite a click it would refuse").
+        if busActive && enableCheckbox.isEnabled {
+            addCursorRect(gutterHitRect, cursor: .pointingHand)
+        }
     }
 
     /// Cursor rects are frame-snapshotted by AppKit, not live — re-establish
@@ -2673,8 +2668,8 @@ public final class DeviceRowView: NSView {
     }
 
     /// Push the gutter hover into the bus skin. Only a LIVE membership control
-    /// ever reports a hover: an honestly-disabled checkbox (blocked row, or an
-    /// unavailable+unselected one) must not have its socket invite a click it
+    /// ever reports a hover: an honestly-disabled checkbox (an
+    /// unavailable+unselected row) must not have its socket invite a click it
     /// would refuse.
     private func setGutterHovered(_ hovered: Bool) {
         guard busActive else { return }
@@ -2694,7 +2689,11 @@ public final class DeviceRowView: NSView {
     /// row with a dead zone directly below it (the bottom-most row — under it lie
     /// the card's bottom padding, the inter-card gap and the footer, none of them
     /// tracked) never receives an exit. Driving hover off the real pointer
-    /// position makes the highlight clear for ANY row, last or not.
+    /// position makes the highlight clear for ANY row, last or not. Fed by the
+    /// row's OWN bounds tracking area's `.mouseMoved` stream (P2-1) — an
+    /// `NSTrackingArea` with that option delivers `mouseMoved(with:)` to its
+    /// owner without any window `acceptsMouseMovedEvents` opt-in, so no
+    /// app-wide monitor is needed any more.
     private func refreshHoverFromPointer() {
         guard let window = window else {
             setHovered(false)
@@ -2708,41 +2707,23 @@ public final class DeviceRowView: NSView {
 
     /// Belt-and-suspenders against a sticky hover: whenever the row is added to /
     /// removed from a window (a popover rebuild, scroll, or close), drop any
-    /// transient hover so it can't persist as a stale highlight (T-U8), and
-    /// (un)install the app-local mouse-moved monitor that guarantees the row
-    /// notices the pointer leaving into an untracked dead zone.
+    /// transient hover so it can't persist as a stale highlight (T-U8). The
+    /// row's own tracking area (re-established by `updateTrackingAreas`) is
+    /// what keeps hover live going forward — no app-local monitor to
+    /// (un)install any more (P2-1).
     public override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         isHovered = false
         setGutterHovered(false)
         setNeedsDisplay(bounds)
-        if window != nil {
-            installMouseMovedMonitor()
-        } else {
-            removeMouseMovedMonitor()
+        if window == nil {
+            // A row detached mid-drag (a rebuild while the user is dragging)
+            // must not keep a monitor or a stuck flag (P1-9).
+            endSliderDrag()
         }
     }
 
-    private func installMouseMovedMonitor() {
-        guard mouseMovedMonitor == nil else { return }
-        // STABILITY(D4): every row installs its own app-wide monitor, churned on each rebuild — any fix should reduce multiplicity/churn only; the monitor pattern itself is deliberate (see this target's AGENTS.md); see dev/notes/stability-audit-2026-07-18.md
-        // `.mouseMoved` fires for pointer movement anywhere in the app; on every
-        // move we reconcile hover against the true pointer position, so leaving
-        // the row into an untracked region still clears the highlight.
-        mouseMovedMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
-            self?.refreshHoverFromPointer()
-            return event
-        }
-    }
-
-    private func removeMouseMovedMonitor() {
-        if let monitor = mouseMovedMonitor {
-            NSEvent.removeMonitor(monitor)
-            mouseMovedMonitor = nil
-        }
-    }
-
-    deinit { removeMouseMovedMonitor() }
+    deinit { endSliderDrag() }
 
     public override func draw(_ dirtyRect: NSRect) {
         if isInMenu {
@@ -2752,6 +2733,10 @@ public final class DeviceRowView: NSView {
                 Tokens.Color.selectedContentBackground.setFill()
                 bounds.fill()
             }
+            // Menu highlight is the one input that changes `rowTextColor`
+            // without an `apply` — a menu redraw is its only signal, so only
+            // this path still needs a draw-time re-stamp (perf P3-11 / P2-2).
+            nameLabel.textColor = rowTextColor
         } else {
             // Menu-less host (popover card / mixer window). A rounded pill behind
             // the row: a subtle accent wash when the device is IN the Selected
@@ -2771,7 +2756,6 @@ public final class DeviceRowView: NSView {
                 path.fill()
             }
         }
-        nameLabel.textColor = rowTextColor
         super.draw(dirtyRect)
     }
 
@@ -2856,7 +2840,7 @@ public final class DeviceRowView: NSView {
     /// Simulate a pointer-move reconcile in which the pointer is NO LONGER inside
     /// the row, WITHOUT AppKit ever delivering a `mouseExited:` — exactly the
     /// last-row dead-zone case. The hover must clear anyway. `pointerInside`
-    /// stands in for the live pointer-position check the mouse-moved monitor runs
+    /// stands in for the live pointer-position check `mouseMoved(with:)` runs
     /// (headless tests can't move a real cursor). General to any row.
     public func test_reconcileHover(pointerInside: Bool) { setHovered(pointerInside) }
 
@@ -2889,7 +2873,7 @@ public final class DeviceRowView: NSView {
         // same fact through two channels.
         let feedClause = feedAccessibilityClause.map { ", \($0)" } ?? ""
         setAccessibilityLabel(
-            "\(device.name), \(membership), volume \(device.volume) percent\(stateClause)\(feedClause)")
+            "\(device.name), \(membership), volume \(VolumePercent.spoken(device.volume))\(stateClause)\(feedClause)")
 
         // The row's VALUE carries the live signal channels (S2/S3 — every
         // visual state has a spoken equivalent, shipped with the drawing):
@@ -2901,12 +2885,6 @@ public final class DeviceRowView: NSView {
         if isRouteArmed { valueParts.append(hasLiveFeeds ? "playing here" : "armed") }
         if volumePendingApply { valueParts.append("applying volume") }
         setAccessibilityValue(valueParts.joined(separator: ", "))
-
-        // Blocked local-mix row (spec §4.6, S4): the refusal reason rides the
-        // row's HINT — the spoken equivalent of the body-click refusal note, so
-        // the disabled control + tooltip is never the only surfacing for
-        // VoiceOver either. `nil` clears it on any non-blocked repaint.
-        setAccessibilityHelp(isToggleBlocked ? blockReasonText : nil)
 
         if busActive {
             // Bus rows (spec §4.8): the node IS the checkbox to VoiceOver. A
@@ -2939,16 +2917,10 @@ public final class DeviceRowView: NSView {
         muteButton.setAccessibilityLabel(device.isMuted ? "Unmute \(device.name)" : "Mute \(device.name)")
         // The name-click is a mouse convenience; the switch stays the
         // authoritative accessibility control. A hint on the name label documents
-        // the click for VoiceOver users who land on it. On a BLOCKED row the
-        // name-click surfaces the refusal note instead (spec §4.6), so its hint
-        // carries the reason too.
-        if isToggleBlocked {
-            nameLabel.setAccessibilityHelp(blockReasonText)
-        } else {
-            nameLabel.setAccessibilityHelp(
-                isSelectedInSet ? "Click to remove from Selected Devices"
-                                : "Click to add to Selected Devices")
-        }
+        // the click for VoiceOver users who land on it.
+        nameLabel.setAccessibilityHelp(
+            isSelectedInSet ? "Click to remove from Selected Devices"
+                            : "Click to add to Selected Devices")
     }
 
     /// The spoken FEED clause (v4.1 item 3) — the same `mainMixSourceName` +
@@ -2966,11 +2938,8 @@ public final class DeviceRowView: NSView {
         guard busActive else { return nil }
         if case .failed = device.connectionState { return nil }
         if !device.isAvailable { return nil }
-        var names: [String] = []
-        if let mainMixSourceName { names.append(mainMixSourceName) }
-        names.append(contentsOf: feedAppNames)
-        guard !names.isEmpty else { return nil }
-        return "feeding " + names.joined(separator: ", ")
+        guard !feedNames.isEmpty else { return nil }
+        return "feeding " + feedNames.joined(separator: ", ")
     }
 
     /// The accessibility-label clause for the current connection state
@@ -3072,10 +3041,6 @@ public extension DeviceRowView.Delegate {
     /// The real host (the popover) overrides this to call
     /// `GroupController.setDeviceSelected`.
     func deviceRow(_ row: DeviceRowView, didToggleEnabled on: Bool, for id: String) {}
-    /// Default no-op so non-bus hosts (mixer window, narrow test doubles) needn't
-    /// implement the blocked-explanation surfacing (spec §4.6). The popover
-    /// overrides this to present the in-place refusal note.
-    func deviceRowDidRequestBlockedExplanation(_ row: DeviceRowView) {}
     /// Default no-op — only the popover maps the greyed-BT-row click to a
     /// reconnect (BT-UI).
     func deviceRowDidRequestReconnect(_ row: DeviceRowView) {}

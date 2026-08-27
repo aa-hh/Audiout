@@ -224,7 +224,6 @@ public final class AppRowView: NSView {
     private var isHovered: Bool = false {
         didSet { if isHovered != oldValue { setNeedsDisplay(bounds) } }
     }
-    private var hoverMoveMonitor: Any?
 
     public init(showsMeter: Bool = false) {
         self.showsMeter = showsMeter
@@ -260,7 +259,7 @@ public final class AppRowView: NSView {
 
         if !isDraggingSlider {
             slider.integerValue = configuration.volume
-            readoutLabel.stringValue = "\(configuration.volume)%"
+            readoutLabel.stringValue = VolumePercent.label(configuration.volume)
         }
         // Always visible, dimmed/disabled ONLY on "No Redirect" — same dimming
         // approach `DeviceRowView` uses for an unavailable/unselected row. "Current
@@ -685,7 +684,7 @@ public final class AppRowView: NSView {
         isDraggingSlider = true
         let event = NSApp?.currentEvent
         if event?.type == .leftMouseUp { isDraggingSlider = false }
-        readoutLabel.stringValue = "\(sender.integerValue)%"
+        readoutLabel.stringValue = VolumePercent.label(sender.integerValue)
         delegate?.appRow(self, didSetVolume: sender.integerValue, for: appID)
     }
 
@@ -776,32 +775,27 @@ public final class AppRowView: NSView {
         for area in trackingAreas { removeTrackingArea(area) }
         addTrackingArea(NSTrackingArea(
             rect: bounds,
-            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+            options: [.mouseEnteredAndExited, .mouseMoved, .activeInActiveApp, .inVisibleRect],
             owner: self))
     }
 
     public override func mouseEntered(with event: NSEvent) { isHovered = true }
     public override func mouseExited(with event: NSEvent) { isHovered = false }
 
-    public override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        if let monitor = hoverMoveMonitor { NSEvent.removeMonitor(monitor); hoverMoveMonitor = nil }
-        isHovered = false
-        guard window != nil else { return }
-        // Sticky-hover fix (shared row idiom): a bottom-most row can miss
-        // `mouseExited` when the pointer leaves into an untracked dead-zone
-        // below the card, so reconcile against the true pointer position.
-        // STABILITY(D4): every row installs its own app-wide monitor, churned on each rebuild — any fix should reduce multiplicity/churn only; the monitor pattern itself is deliberate (see this target's AGENTS.md); see dev/notes/stability-audit-2026-07-18.md
-        hoverMoveMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
-            guard let self, let window = self.window else { return event }
-            let point = self.convert(window.mouseLocationOutsideOfEventStream, from: nil)
-            self.isHovered = self.bounds.contains(point)
-            return event
-        }
+    /// Sticky-hover fix (shared row idiom): a bottom-most row can miss
+    /// `mouseExited` when the pointer leaves into an untracked dead-zone below
+    /// the card, so reconcile against the true pointer position — fed by the
+    /// tracking area's own `.mouseMoved` option (P2-1), not an app-wide
+    /// `NSEvent` monitor.
+    public override func mouseMoved(with event: NSEvent) {
+        guard let window else { return }
+        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        isHovered = bounds.contains(point)
     }
 
-    deinit {
-        if let monitor = hoverMoveMonitor { NSEvent.removeMonitor(monitor) }
+    public override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        isHovered = false
     }
 
     /// Test hooks for the hover wash.
@@ -1020,7 +1014,7 @@ public final class AppRowView: NSView {
         // Composition (S6 item 6): an UNROUTED app reads "…, follows main
         // output" (the bridge phrase, spec §5.1); a routed app reads
         // "…, routed to <destination>".
-        var label = "\(appName), volume \(slider.integerValue) percent"
+        var label = "\(appName), volume \(VolumePercent.spoken(slider.integerValue))"
         if isNoRedirect {
             label += ", follows main output"
         } else if let destinationTitle = destinationPopUp.selectedItem?.title,

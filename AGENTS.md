@@ -16,8 +16,7 @@ folder. It is not a summary of the code.
 code without thinking about docs?** If yes, it does not belong. Document intent,
 constraints and traps — never implementation.
 
-**Three sections. Target ≤300 words per folder AGENTS.md; a trap-dense folder may
-run to ~150 lines, never more:**
+**Three sections, ≤150 lines per folder AGENTS.md — most folders need far fewer:**
 
 1. **Purpose** — what lives here, why it is separate, what it must never do.
 2. **Rules** — constraints an agent breaks by accident: architectural

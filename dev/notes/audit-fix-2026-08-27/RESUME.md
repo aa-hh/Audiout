@@ -98,3 +98,5 @@ finished. If the coordinating session died mid-flight, some worktrees may hold U
 ## ALL TEN TRACKS EXECUTED + REVIEWED + APPROVED (2026-08-28). Merge proposal delivered to Alec; NO merge until his go-ahead.
 
 ## MERGED TO MAIN 2026-08-28 — ALL TEN TRACKS (PRs #52-61), origin/main=85ce3aa4, final suite 2982/173 green. Conflicts resolved per ledger + on-merits for the analytics-branch collisions (all additive unions; T3a's dead-code deletion taken over T9's swaps inside it; rows' 13pt suggestion label kept). Remaining: the WRAP-UP PASS (branch claude/audit-fix-wrapup) + Alec's live-check list + T8 coalescing-test bound widening (failed at 10>8 and 12>8 under extreme load during merge guards — needs more headroom).
+
+## WRAP-UP MERGED 2026-08-28 — PR #62, main=e1bb0c71. EFFORT CLOSED except Alec's live-check list (incl. link-launches-app reveal path + audiout:// end-to-end on a signed build with AUDIOUT_LICENSE_URL set — note: bare make-app.sh no longer registers the scheme). fix-* worktrees await live verification before .prunable.

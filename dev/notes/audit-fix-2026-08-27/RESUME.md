@@ -96,3 +96,5 @@ finished. If the coordinating session died mid-flight, some worktrees may hold U
 - T6 onboarding: APPROVED (fable review; four-place P0-1 consistency audited clean; skip-ratchet re-arm verified) — f7c1a931 READY TO MERGE. WRAP-UP +1: PTP poll doesn't stop on ptpHelperRegistrationFailed (harmless). LIVE-CHECK +1: SMAppService.daemon.register on a fresh install must not throw for pending-approval.
 
 ## ALL TEN TRACKS EXECUTED + REVIEWED + APPROVED (2026-08-28). Merge proposal delivered to Alec; NO merge until his go-ahead.
+
+## MERGED TO MAIN 2026-08-28 — ALL TEN TRACKS (PRs #52-61), origin/main=85ce3aa4, final suite 2982/173 green. Conflicts resolved per ledger + on-merits for the analytics-branch collisions (all additive unions; T3a's dead-code deletion taken over T9's swaps inside it; rows' 13pt suggestion label kept). Remaining: the WRAP-UP PASS (branch claude/audit-fix-wrapup) + Alec's live-check list + T8 coalescing-test bound widening (failed at 10>8 and 12>8 under extreme load during merge guards — needs more headroom).

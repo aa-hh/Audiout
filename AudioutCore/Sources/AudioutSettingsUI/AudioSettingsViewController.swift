@@ -22,14 +22,16 @@ public struct LatencySettingModel {
     /// Whether any device is currently streaming — drives the reconnect status
     /// UI ("Reconnecting speakers…" / "Speakers reconnected" vs plain "Applied").
     public let isStreaming: @MainActor () -> Bool
-    /// Persist + apply the new value; returns when the reconnect pass is done.
-    public let apply: @MainActor (Int) async -> Void
+    /// Persist + apply the new value; returns when the reconnect pass is done,
+    /// with how many of the devices that were streaming actually came back
+    /// (`reconnected`) out of how many there were (`expected`).
+    public let apply: @MainActor (Int) async -> (reconnected: Int, expected: Int)
 
     public init(optionsMs: [Int],
                 initialMs: Int,
                 envOverrideMs: Int?,
                 isStreaming: @escaping @MainActor () -> Bool,
-                apply: @escaping @MainActor (Int) async -> Void) {
+                apply: @escaping @MainActor (Int) async -> (reconnected: Int, expected: Int)) {
         self.optionsMs = optionsMs
         self.initialMs = initialMs
         self.envOverrideMs = envOverrideMs
@@ -677,13 +679,20 @@ public final class AudioSettingsViewController: NSViewController {
             applyStatusLabel.isHidden = false
         }
 
-        await latency.apply(target)
+        let result = await latency.apply(target)
 
         appliedMs = target
         isApplying = false
         bufferPopup.isEnabled = true
         applySpinner.stopAnimation(nil)
-        applyStatusLabel.stringValue = wasStreaming ? "Speakers reconnected" : "Applied"
+        // Only claim they all came back if they all came back — the re-add is
+        // best-effort per device (D4), and a silent speaker the pane called
+        // "reconnected" is the kind of lie this app doesn't tell.
+        applyStatusLabel.stringValue = wasStreaming
+            ? (result.reconnected == result.expected
+                ? "Speakers reconnected"
+                : "Some speakers didn't reconnect — check the mixer")
+            : "Applied"
         applyStatusLabel.isHidden = false
 
         // Transient confirmation: fades after a beat (cancelled by any newer

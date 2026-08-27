@@ -1344,7 +1344,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             },
             apply: { [weak self] ms in
                 self?.settings.startBufferMs = ms
-                await configurable.applyStartBuffer(ms: ms)
+                return await configurable.applyStartBuffer(ms: ms)
             }
         )
     }
@@ -1628,6 +1628,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popoverController.setTakeoverStatus(status)
             log("event: \(describe(event))")
             return
+        case .captureFailed(let message, _):
+            // The whole-system tap died, so every selected speaker is silent
+            // while its row still reads "Connected". Show or clear the popover's
+            // note; no device model changed — handle it and return.
+            popoverController.setCaptureFailureMessage(message)
+            log("event: \(describe(event))")
+            return
         case .routingBlockedNeedsDefault(let active):
             // Wave 3 T5: the app is actively routing but the Mac's default output
             // isn't our public aggregate, so audio is dead until the user switches
@@ -1722,6 +1729,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return "streamHealth(\(id), recovering: \(recovering))"
         case .takeoverStatus(let status):
             return "takeoverStatus(\(status.map { "\($0)" } ?? "nil"))"
+        case .captureFailed(let message, let retrying):
+            return "captureFailed(\(message ?? "cleared"), retrying: \(retrying))"
         case .routingBlockedNeedsDefault(let active):
             return "routingBlockedNeedsDefault(\(active)) — \(active ? "actively routing but the aggregate isn't the Mac's default output" : "aggregate is default again / routing stopped")"
         case .btFirstMixAlignmentPrompt(let deviceID):

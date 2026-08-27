@@ -1001,17 +1001,19 @@ public final class PopoverController: NSObject {
     // MARK: System-AirPlay guard note (Wave 3 W3-T3) + takeover status strip (T6)
     //        + routing-blocked-needs-default warning (T-UI)
     //
-    // All three conditions want the SAME physical note slot (`panel.setSystemAirPlayNote`)
+    // All these conditions want the SAME physical note slot (`panel.setSystemAirPlayNote`)
     // — there is only one, never two stacked notes (PLAN-AIRPLAY-COEXISTENCE.md T6).
-    // PRECEDENCE, highest first: routing-blocked (T-UI, WARNING severity — audio is
-    // dead right now) outranks the takeover status, which outranks the double-path
-    // guard note, which outranks the unregistered-build note (lowest — it is a
-    // standing condition, never something happening right now); each lower note
-    // reappears underneath the instant the one above it clears. Each condition
-    // keeps its own idempotence-check state var (`routingBlockedNeedsDefault` /
-    // `takeoverStatus` / `systemAirPlayNoteActive` / `unregisteredNoteActive`);
-    // `applyNoteSlot()` is the one place that resolves precedence and actually
-    // pushes to the panel, called by every setter and by the tail of `rebuild()`.
+    // PRECEDENCE, highest first: capture-failed (WARNING — the tap is dead, so every
+    // speaker is silent while its row still says Connected) outranks routing-blocked
+    // (T-UI, WARNING — audio is dead right now), which outranks the takeover status,
+    // which outranks the double-path guard note, which outranks the unregistered-build
+    // note (lowest — it is a standing condition, never something happening right now);
+    // each lower note reappears underneath the instant the one above it clears. Each
+    // condition keeps its own idempotence-check state var (`captureFailureMessage` /
+    // `routingBlockedNeedsDefault` / `takeoverStatus` / `systemAirPlayNoteActive` /
+    // `unregisteredNoteActive`); `applyNoteSlot()` is the one place that resolves
+    // precedence and actually pushes to the panel, called by every setter and by the
+    // tail of `rebuild()`.
 
     /// The exact note copy from PLAN-RELIABILITY Wave 3's "System-AirPlay guard"
     /// bullet: non-blocking, informational — this never changes what's actually
@@ -1051,6 +1053,24 @@ public final class PopoverController: NSObject {
     public func setRoutingBlockedNeedsDefault(_ active: Bool) {
         guard active != routingBlockedNeedsDefault else { return }
         routingBlockedNeedsDefault = active
+        applyNoteSlot()
+    }
+
+    /// The whole-system capture failure's message (`NativeCaptureError.userMessage`),
+    /// or `nil` when the tap is healthy. Rendered verbatim — the error type owns
+    /// this copy, including the remedy it names. TOP precedence in the note slot
+    /// (see PRECEDENCE above); re-applied on every `rebuild()` so a rebuild
+    /// mid-condition keeps it pinned.
+    private var captureFailureMessage: String?
+
+    /// Show or clear the whole-system capture-failure note
+    /// (`BackendEvent.captureFailed`). Called by the host (`AppDelegate`)
+    /// directly — a whole-app condition with no home on `Device`, same shape as
+    /// ``setRoutingBlockedNeedsDefault(_:)``. Idempotent: a repeat of the current
+    /// message is a no-op.
+    public func setCaptureFailureMessage(_ message: String?) {
+        guard message != captureFailureMessage else { return }
+        captureFailureMessage = message
         applyNoteSlot()
     }
 
@@ -1111,14 +1131,19 @@ public final class PopoverController: NSObject {
     }
 
     /// What the note slot should currently show, highest precedence first:
-    /// routing-blocked (T-UI, WARNING — audio is dead right now) outranks a
-    /// takeover status (T6), which outranks the double-path guard (W3-T3),
-    /// which outranks the unregistered-build note; none active means no note.
-    /// `action` is non-nil for routing-blocked (the "Use <productName>"
-    /// button), for the takeover strip's `.needsApproval` (state 1), and for
-    /// the unregistered note ("Buy…") — the states with an actual remedy a
-    /// button can offer.
+    /// capture-failed (WARNING — the tap is dead, so the speakers are silent
+    /// behind rows that still read Connected) outranks routing-blocked (T-UI,
+    /// WARNING — audio is dead right now), which outranks a takeover status
+    /// (T6), which outranks the double-path guard (W3-T3), which outranks the
+    /// unregistered-build note; none active means no note. `action` is non-nil
+    /// for routing-blocked (the "Use <productName>" button), for the takeover
+    /// strip's `.needsApproval` (state 1), and for the unregistered note
+    /// ("Buy…") — the states with an actual remedy a button can offer. The
+    /// capture-failure message names its own remedy in prose, so it has none.
     private var resolvedSystemAirPlayNote: (text: String?, action: SystemAirPlayNoteBannerView.Action?, severity: SystemAirPlayNoteBannerView.Severity) {
+        if let captureFailureMessage {
+            return (captureFailureMessage, nil, .warning)
+        }
         if routingBlockedNeedsDefault {
             return (Self.routingBlockedNeedsDefaultText, routingBlockedNeedsDefaultAction, .warning)
         }

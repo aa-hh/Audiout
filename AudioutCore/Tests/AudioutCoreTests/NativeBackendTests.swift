@@ -47,6 +47,9 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     /// connect path surfaces `.authRequired` instead of flattening to
     /// `.unknown`.
     var addFailureError: AirPlayEngineError = .sessionFailed
+    /// Ids whose `setVolume` should THROW (still recording the call) — a
+    /// receiver that refuses the write, which the fader must not keep lying about.
+    var volumeFailures: Set<UInt64> = []
     /// Ids that should THROW on `removeOutput`.
     var removeFailures: Set<UInt64> = []
     /// Ids that should THROW on `flushOutput` — forces a whole-system rebind
@@ -272,6 +275,7 @@ private final class SpyEngine: EngineControlling, @unchecked Sendable {
     func feedCount(for id: OutputID) -> Int { lock.withLock { feedCounts[id.rawValue] ?? 0 } }
     func setVolume(_ id: OutputID, _ volume: Double) async throws {
         lock.withLock { volumes.append((id, volume)); opLog.append("volume:\(id.rawValue)") }
+        if volumeFailures.contains(id.rawValue) { throw AirPlayEngineError.sessionFailed }
     }
     func setStartBufferMs(_ ms: Int) async {
         lock.withLock { bufferSets.append(ms); opLog.append("setBuffer:\(ms)") }
@@ -2213,6 +2217,54 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                        "Main 40 × device 50 must reach the engine as ONE Double product (0.40 × 0.50 = 0.20), with no intermediate rounding")
     }
 
+    /// A refused volume write must not leave the fader parked on a level the
+    /// speaker never took. There is no poll loop down here by design — the
+    /// engine's completion IS the only ground truth — so that completion has to
+    /// be the fader's bound: the optimistic echo snaps back to the last level
+    /// the engine actually acknowledged.
+    @Test func refusedVolumePushRevertsTheFaderToTheLastConfirmedLevel() async {
+        let (backend, engine, discovery) = makeBackend()
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:6A", name: "Refuser")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil(timeout: 5) {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+
+        // A push the engine accepts: this level is now the confirmed one.
+        backend.setVolume(60, for: device.id)
+        #expect(await waitForVolumePush(engine, device.outputID, 0.60), "precondition: the accepted push reached the engine")
+        await pollUntil { backend.devices.first { $0.id == device.id }?.volume == 60 }
+        // The engine records the call before it can throw, so arming the failure
+        // the instant the call is seen could still catch THIS push. Let the
+        // completion's confirm hop land first — it is the thing under test.
+        try? await Task.sleep(nanoseconds: 100_000_000)
+
+        // Now the receiver starts refusing. The next push echoes optimistically
+        // to 25, then must snap back to the confirmed 60.
+        engine.volumeFailures = [device.outputID.rawValue]
+        let events = await collect(from: backend) { events in
+            events.contains { if case .deviceUpdated(let d) = $0 { return d.id == device.id && d.volume == 60 } else { return false } }
+        } after: { backend.setVolume(25, for: device.id) }
+
+        #expect(backend.devices.first { $0.id == device.id }?.volume == 60,
+                "a refused push must leave the fader on the level the engine last confirmed, not the one it rejected")
+
+        let volumeEdits = events.compactMap { event -> Int? in
+            if case .deviceUpdated(let d) = event, d.id == device.id { return d.volume } else { return nil }
+        }
+        #expect(volumeEdits.firstIndex(of: 25) != nil, "the optimistic echo still shows the user's edit immediately")
+        if let echoed = volumeEdits.firstIndex(of: 25), let reverted = volumeEdits.lastIndex(of: 60) {
+            #expect(echoed < reverted, "the snap-back follows the echo, it doesn't replace it")
+        }
+    }
+
     /// The GROUP stage actually multiplies into the wire — not just Main × Device.
     /// Every other `setMasterGain` in these tests passes `group: 100`, so a
     /// regression dropping the group term from `masterGainFraction` would ship
@@ -3237,8 +3289,8 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
                        "an offline AP2 device MUST stay supportsAirPlay2==true — NOT reclassified AP1-only (the bug)")
         #expect(d?.isAvailable == false, "an offline AP2 device is unavailable")
         #expect(d?.isSelected == false)
-        #expect(d?.connectionState == .failed(ConnectionFailure(cause: .unknown)),
-                       "an offline AP2 device shows a retry-on-click .failed dot, not the AP1 .off state")
+        #expect(d?.connectionState == .failed(ConnectionFailure(cause: .vanished)),
+                       "an offline AP2 device shows a retry-on-click .vanished dot — it literally stopped advertising — not the AP1 .off state")
     }
 
     /// An offline AP2 device coming back (airplay advert re-resolves → `.updated`
@@ -3748,9 +3800,71 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
             Issue.record("expected .failed after a NACKed addOutput, got \(String(describing: d?.connectionState))")
             return
         }
-        #expect(failure.cause == .unknown, "NativeBackend has no diagnostics seam — always .unknown")
+        #expect(failure.cause == .unknown,
+                "a bare session failure carries no evidence for a specific cause — guessing one would be worse than vague")
+        #expect(failure.detail != nil, "the engine's raw error backs Copy Details")
         #expect(d?.isAvailable == false)
         #expect(d?.isSelected == false)
+    }
+
+    /// A timed-out connect op says so: the engine's `opTimedOut` is exactly
+    /// `.timedOut`'s copy ("the connection attempt didn't complete"), so it must
+    /// not flatten to "failed for an unknown reason".
+    @Test func connectionStateAddTimeoutMapsToTimedOut() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:3A", name: "Slowpoke")
+        engine.addFailures = [device.outputID.rawValue]
+        engine.addFailureError = .opTimedOut
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil {
+            if case .failed = backend.devices.first(where: { $0.id == device.id })?.connectionState { return true }
+            return false
+        }
+        guard case .failed(let failure) = backend.devices.first(where: { $0.id == device.id })?.connectionState else {
+            Issue.record("expected .failed after a timed-out addOutput")
+            return
+        }
+        #expect(failure.cause == .timedOut, "an op whose completion never arrived IS the timed-out story")
+        #expect(failure.detail != nil, "the engine's raw error backs Copy Details")
+    }
+
+    /// A LIVE session dying out-of-band is "was connected, silently dropped" —
+    /// the one shape the engine's own state stream can prove, and a materially
+    /// more useful sentence than the unknown-reason fallback.
+    @Test func connectionStateLiveSessionDeathMapsToDroppedMidStream() async {
+        let (backend, engine, discovery) = makeBackend()
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:3B", name: "Dropper")
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+
+        backend.setOutputSet([device.id])
+        await pollUntil(timeout: 5) {
+            backend.devices.first { $0.id == device.id }?.connectionState == .connected
+        }
+
+        engine.pushState(device.outputID, .failed)
+        await pollUntil {
+            if case .failed = backend.devices.first(where: { $0.id == device.id })?.connectionState { return true }
+            return false
+        }
+        guard case .failed(let failure) = backend.devices.first(where: { $0.id == device.id })?.connectionState else {
+            Issue.record("expected .failed after the engine reported the live session dead")
+            return
+        }
+        #expect(failure.cause == .droppedMidStream,
+                "a device that WAS streaming when the engine reported .failed dropped mid-stream")
+        #expect(failure.detail != nil, "the engine state backs Copy Details")
     }
 
     /// Recovery clears to connecting/connected: after a NACK parks the device
@@ -4221,6 +4335,90 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
 
         await pollUntil(timeout: 2) { capture.startCount >= 2 }
         #expect(capture.startCount >= 2, "a transient whole-system-tap failure must self-heal via a backoff retry (T16, E10)")
+    }
+
+    /// A dead tap is silence on EVERY speaker while their rows still read
+    /// "Connected" — the one condition no per-device state can express. It must
+    /// reach the UI as a `.captureFailed` event carrying the error's own
+    /// user-facing message, and must retire itself when capture recovers.
+    @Test func wholeSystemCaptureFailureEmitsAndClearsTheNote() async {
+        let (backend, engine, discovery) = makeBackend(captureRetryDelay: 5, captureRetryMaxBackoff: 5)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:96", name: "Note Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+
+        let error = NativeCaptureError.tapCreationFailed(reason: "x")
+        let failEvents = await collect(from: backend) { events in
+            events.contains { if case .captureFailed(let m, _) = $0 { return m != nil } else { return false } }
+        } after: { capture.fireState(.failed(error)) }
+        let reported = failEvents.compactMap { event -> (String?, Bool)? in
+            if case .captureFailed(let m, let retrying) = event { return (m, retrying) } else { return nil }
+        }.first
+        #expect(reported?.0 == error.userMessage, "the note renders the capture error's own message verbatim")
+        #expect(reported?.1 == true, "a retryable failure says the backoff retry is armed")
+
+        let format = TapFormat(sampleRate: 44100, channels: 2, bitsPerSample: 16, isFloat: false, isInterleaved: true)
+        let clearEvents = await collect(from: backend) { events in
+            events.contains { if case .captureFailed(let m, _) = $0 { return m == nil } else { return false } }
+        } after: { capture.fireState(.capturing(format)) }
+        #expect(clearEvents.contains { if case .captureFailed(let m, _) = $0 { return m == nil } else { return false } },
+                "recovering to .capturing retires the note")
+    }
+
+    /// `.osUnsupported` still surfaces — it is the WORST case for the user (no
+    /// retry will ever fix it) — but it must say so: `retrying: false`.
+    @Test func wholeSystemCaptureFailureNoteSaysWhenNoRetryIsArmed() async {
+        let (backend, engine, discovery) = makeBackend(captureRetryDelay: 5, captureRetryMaxBackoff: 5)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:97", name: "Permanent Speaker")
+        _ = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: { discovery.fire(.appeared(device)) }
+        backend.setOutputSet([device.id])
+        await pollUntil { capture.isCapturing }
+
+        let events = await collect(from: backend) { events in
+            events.contains { if case .captureFailed(let m, _) = $0 { return m != nil } else { return false } }
+        } after: { capture.fireState(.failed(.osUnsupported(minimum: "14.2"))) }
+        let retrying = events.compactMap { event -> Bool? in
+            if case .captureFailed(let m, let retrying) = event, m != nil { return retrying } else { return nil }
+        }.first
+        #expect(retrying == false, "a permanently-dead failure must not claim a retry is coming")
+    }
+
+    /// A tap failure while NOTHING is selected is noise, not news — nobody is
+    /// listening, so it must not put a warning in the popover.
+    @Test func wholeSystemCaptureFailureWithNothingSelectedEmitsNoNote() async {
+        let (backend, engine, discovery) = makeBackend(captureRetryDelay: 5, captureRetryMaxBackoff: 5)
+        let capture = FakeCapture()
+        backend.captureCoordinator = capture
+        backend.start(); defer { backend.stop() }
+        await waitUntilStarted(engine)
+
+        // The tap failure is emitted synchronously if at all, and the discovery
+        // that follows it is the marker that the stream has caught up — so a
+        // `.captureFailed` would have to appear before the `.deviceAdded`.
+        let device = ap2Device(id: "AA:BB:CC:DD:EE:98", name: "Bystander")
+        let events = await collect(from: backend) { events in
+            events.contains { if case .deviceAdded(let d) = $0 { return d.id == device.id } else { return false } }
+        } after: {
+            capture.fireState(.failed(.tapCreationFailed(reason: "test")))
+            discovery.fire(.appeared(device))
+        }
+        #expect(!events.contains { if case .captureFailed = $0 { return true } else { return false } },
+                "a failure while capture isn't desired must never surface a note")
     }
 
     /// A `.capturing` transition — recovery, whether from our own retry or a

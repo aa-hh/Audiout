@@ -117,8 +117,7 @@ final class SystemAirPlayNoteBannerView: NSView {
         layer?.cornerRadius = Tokens.Layout.bannerCornerRadius
         layer?.cornerCurve = .continuous
         layer?.borderWidth = 1
-        layer?.backgroundColor = severity.tintColor.withAlphaComponent(severity.backgroundAlpha).cgColor
-        layer?.borderColor = severity.tintColor.withAlphaComponent(severity.borderAlpha).cgColor
+        stampLayerColors()
 
         // The icon+text pair sits at its own natural (leading-hugging) width —
         // it does NOT stretch to fill the banner. The button is a SEPARATE
@@ -151,7 +150,11 @@ final class SystemAirPlayNoteBannerView: NSView {
         button?.target = self
         button?.action = #selector(actionButtonTapped)
 
-        setAccessibilityRole(.staticText)
+        // A GROUP, not one static string: the banner carries a label and — when
+        // it has one — a real button, so VoiceOver must be able to step into it
+        // and reach the action. `.staticText` swallowed the button entirely.
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
         setAccessibilityLabel(text.stringValue)
     }
 
@@ -169,12 +172,31 @@ final class SystemAirPlayNoteBannerView: NSView {
     /// Simulate a click on the action button. No-op if there isn't one.
     func test_tapActionButton() { actionButtonTapped() }
 
-    /// Keep the CGColor-backed fills correct across light/dark appearance switches
-    /// (layer colors don't auto-resolve dynamic `NSColor`s).
+    /// Keep the CGColor-backed fills correct across light/dark appearance
+    /// switches (layer colors don't auto-resolve dynamic `NSColor`s).
+    ///
+    /// `wantsUpdateLayer` is what makes this run at all: without it AppKit takes
+    /// the `draw(_:)` path and `updateLayer()` is never called, so the re-stamp
+    /// below sat dead and the banner kept its build-time appearance across a
+    /// live light/dark flip.
+    override var wantsUpdateLayer: Bool { true }
+
     override func updateLayer() {
         super.updateLayer()
-        layer?.backgroundColor = severity.tintColor.withAlphaComponent(severity.backgroundAlpha).cgColor
-        layer?.borderColor = severity.tintColor.withAlphaComponent(severity.borderAlpha).cgColor
+        stampLayerColors()
+    }
+
+    /// The one place the tint is resolved and stamped — under the view's own
+    /// effective appearance, the `ConnectionDiagnosisView.applyBackgroundTint`
+    /// idiom, so a dynamic token resolves for the appearance actually on screen
+    /// rather than whatever was current at build time.
+    private func stampLayerColors() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.backgroundColor = severity.tintColor
+                .withAlphaComponent(severity.backgroundAlpha).cgColor
+            layer?.borderColor = severity.tintColor
+                .withAlphaComponent(severity.borderAlpha).cgColor
+        }
     }
 
     /// The layer's currently-stamped fill/border, read back as `NSColor` —

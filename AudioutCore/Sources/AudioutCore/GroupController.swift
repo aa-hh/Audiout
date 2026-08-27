@@ -315,15 +315,6 @@ public final class GroupController {
         }
     }
 
-    /// Legacy user-facing string for the (now-lifted) local-mix block. Retained
-    /// only because out-of-tree callers still reference the symbol
-    /// (`AudioutPopoverUI.PopoverController`, popover-harness); with the synced
-    /// local sink the Mac may now join a mixed Selected Devices set, so nothing in
-    /// this type ever emits it as a refusal any more (T-GROUPCTL / Q5). The popover
-    /// wiring is retired separately in T-UI-ALLOW.
-    public static let localMixRefusalReason =
-        "Can't combine with AirPlay yet"
-
     /// The local (Mac's own) device id in the current fleet, if discovered.
     private var localDeviceID: String? { devices.first(where: \.isLocalDevice)?.id }
 
@@ -460,13 +451,6 @@ public final class GroupController {
     public func requestReconnect(for id: String) {
         backend.retryOutput(id)
     }
-
-    /// Whether the local Mac may currently be toggled ON. Always `true` now: with
-    /// the synced local sink the Mac may join any (including mixed) Selected
-    /// Devices set (Q5 / T-GROUPCTL), so the pre-engine local-mix block is gone.
-    /// Retained as a stable predicate for the popover row (its greying-out is
-    /// retired separately in T-UI-ALLOW).
-    public func canSelectLocalSpeaker(_ id: String) -> Bool { true }
 
     // MARK: Legacy on/off shims (kept for callers not yet migrated)
 

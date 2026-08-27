@@ -499,8 +499,6 @@ import Testing
         let (controller, _) = try await makeController()
         controller.ensureDefaultSelection()                       // S = {local-mac}
         _ = controller.setDeviceSelected("office", true)          // → {office}
-        #expect(controller.canSelectLocalSpeaker("local-mac"),
-                      "the Mac is selectable into a mixed set now")
         let r = controller.setDeviceSelected("local-mac", true)
         #expect(r.applied)
         #expect(r.refusalReason == nil)
@@ -528,17 +526,6 @@ import Testing
         #expect(r.applied)
         #expect(!r.autoSwappedCurrentDevice)
         #expect(controller.selectedDeviceIDs == ["office", "local-mac"])
-    }
-
-    // canSelectLocalSpeaker is unconditionally true (block lifted), in every state.
-    @Test func canSelectLocalSpeakerAlwaysTrue() async throws {
-        let (controller, _) = try await makeController()
-        #expect(controller.canSelectLocalSpeaker("local-mac"))      // S == {L}
-        _ = controller.setDeviceSelected("office", true)                 // S == {office}
-        #expect(controller.canSelectLocalSpeaker("local-mac"),
-                      "the pre-engine local-mix block is gone")
-        _ = controller.setDeviceSelected("local-mac", true)              // S == {office, local-mac}
-        #expect(controller.canSelectLocalSpeaker("local-mac"))
     }
 
     // --- REMOVE: current-device floor + subsumed reverse auto-swap ---
@@ -647,7 +634,7 @@ import Testing
     // MARK: Activation — the local Mac is never an engine output
     //
     // A saved group may MIX the Mac with AirPlay speakers (the pre-engine
-    // local-mix block is gone — `canSelectLocalSpeaker` is unconditionally true).
+    // local-mix block is gone).
     // `activateGroup` must therefore apply the SAME local-device filter
     // `applyRouting()`'s Selected-Devices branch does: the Mac is the Mac's own
     // output, not an engine output, and `NativeBackend.setOutputSet` documents

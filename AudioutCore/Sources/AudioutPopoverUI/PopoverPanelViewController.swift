@@ -1303,6 +1303,7 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     // MARK: Silence-fallback banner (Wave 2 W2-T2, R11)
 
     private weak var bannerLabel: NSTextField?
+    private weak var bannerView: SilenceFallbackBannerView?
 
     /// Show (or, with `nil`, clear) a full-width warning banner PINNED above every
     /// card — used by the generalized silence watchdog to say "Speakers unreachable
@@ -1310,17 +1311,24 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
     /// rounded inset card with a warning glyph and a wrapping label; system colors
     /// only, no custom drawing. `clearRows()` drops it along with the cards, so the
     /// host re-applies it at the tail of every `rebuild()`.
-    func setBanner(_ text: String?) {
+    ///
+    /// `action`, when non-nil, renders a trailing call-to-action button — the
+    /// note slot's shape, so the banner is a place the user can DO something
+    /// rather than a dead end.
+    func setBanner(_ text: String?, action: SilenceFallbackBannerView.Action? = nil) {
         if let existing = stackView.arrangedSubviews.first(where: { $0 is SilenceFallbackBannerView }) {
             stackView.removeArrangedSubview(existing)
             existing.removeFromSuperview()
         }
         bannerLabel = nil
+        bannerView = nil
         guard let text else { return }
         let banner = SilenceFallbackBannerView(
             text: text,
-            maxTextWidth: panelWidth - 28 - 30)
+            maxTextWidth: panelWidth - 28 - 30,
+            action: action)
         bannerLabel = banner.label
+        bannerView = banner
         stackView.insertArrangedSubview(banner, at: 0)
         NSLayoutConstraint.activate([
             // Flush to the stack edges, matching the cards (Warm Signal dropped
@@ -1332,6 +1340,10 @@ final class PopoverPanelViewController: NSViewController, FoldFollowing {
 
     /// Test-only: the banner's copy, or `nil` when no banner is shown.
     var test_bannerText: String? { bannerLabel?.stringValue }
+    /// Test-only: whether the currently-shown banner has an action button.
+    var test_bannerHasActionButton: Bool { bannerView?.test_hasActionButton ?? false }
+    /// Test-only: simulate a click on the banner's action button, if any.
+    func test_tapBannerAction() { bannerView?.test_tapActionButton() }
 
     // MARK: System-AirPlay guard note (Wave 3 W3-T3)
 

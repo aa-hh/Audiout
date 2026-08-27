@@ -133,6 +133,8 @@ let package = Package(
         // Scoped to the `AudioutApp` executable target so no library, test or
         // harness target ever links it.
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.9.0"),
+        // PostHog product analytics SDK for the app lifecycle and UI.
+        .package(url: "https://github.com/PostHog/posthog-ios.git", from: "3.59.3"),
     ],
     targets: [
         // Block-based Objective-C exception catcher. Swift's `catch` cannot
@@ -244,6 +246,7 @@ let package = Package(
                 "AudioutSettingsUI",
                 "AudioutOnboardingUI",
                 .product(name: "Sparkle", package: "Sparkle"),
+                .product(name: "PostHog", package: "posthog-ios"),
             ],
             swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),

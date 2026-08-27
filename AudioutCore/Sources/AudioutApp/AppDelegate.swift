@@ -7,6 +7,7 @@ import AudioutWindowUI
 import AudioutSettingsUI
 import AudioutSharedUI
 import AudioutOnboardingUI
+import PostHog
 import Sparkle
 
 /// Writes `message` to `STDERR_FILENO` with a raw `write(2)`, retrying on
@@ -70,6 +71,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `bundleIDForPID`) into the native backend's per-app capture AND
     /// whole-system-exclusion paths.
     private let backend: OutputBackend = makeBackend(resolver: audioProcessResolver)
+
+    private func configurePostHog() {
+        let environment = ProcessInfo.processInfo.environment
+        guard let projectToken = environment["POSTHOG_PROJECT_TOKEN"], !projectToken.isEmpty else {
+#if DEBUG
+            assertionFailure("POSTHOG_PROJECT_TOKEN variable required by PostHog is missing or un-configured, this causes events to be silently missed. This error stops appearing once POSTHOG_PROJECT_TOKEN is configured")
+#endif
+            return
+        }
+        guard let host = environment["POSTHOG_HOST"], !host.isEmpty else {
+#if DEBUG
+            assertionFailure("POSTHOG_HOST variable required by PostHog is missing or un-configured, this causes events to be silently missed. This error stops appearing once POSTHOG_HOST is configured")
+#endif
+            return
+        }
+
+        let config = PostHogConfig(projectToken: projectToken, host: host)
+        config.errorTrackingConfig.autoCapture = true
+        PostHogSDK.shared.setup(config)
+    }
 
     /// Owns the status item's `.button` (SPEC §9 / brief §4 — customize ONLY
     /// via `.button`, never the deprecated `.view`/`.title`/`.image`).
@@ -348,6 +369,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     func applicationDidFinishLaunching(_ notification: Notification) {
+        configurePostHog()
+
         // T1 diagnostic (`AUDIOUT_TCC_DIAG=1`, off by default): starts a
         // once-per-second raw-bucket poll as early as possible so a fresh
         // `open`-launch is captured before any permission prompt can fire.
@@ -437,6 +460,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                self.presentSetupForUndeterminedIfNeeded() {
                 return
             }
+            PostHogSDK.shared.capture("menu_bar_surface_requested")
             self.surface.perform(action, anchorRect: self.statusAnchorRect())
         }
 
@@ -526,6 +550,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `applyLicenseState()` needs a license server to arm it.
         popoverController.onBuyAudiout = { [settings] in
             guard let url = settings.buyURL else { return }
+            PostHogSDK.shared.capture("purchase_link_opened")
             NSWorkspace.shared.open(url)
         }
         // Metering-active gate (T-GATE): only compute/emit `.level` while the
@@ -556,6 +581,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // affordance; the fresh row auto-appears on return (connect
         // notification → enumerator refresh).
         popoverController.onPairBluetoothSpeaker = {
+            PostHogSDK.shared.capture("bluetooth_pairing_settings_opened")
             NSWorkspace.shared.open(SystemSettingsPane.bluetooth.url)
         }
         // BT-UI ghost pairings: recency feed for the Bluetooth subsection's

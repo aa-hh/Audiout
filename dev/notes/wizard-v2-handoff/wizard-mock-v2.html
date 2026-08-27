@@ -1,0 +1,680 @@
+<title>Alignment Wizard Directions</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  /* Single-theme by commitment: these are mockups of a dark-room instrument.
+     Every color painted explicitly so the page holds on any host ground. */
+  :root {
+    --ground: #171310;
+    --panel: #201b16;
+    --well: #2a241e;
+    --hairline: rgba(255, 235, 200, 0.10);
+    --text: #f2ead9;
+    --secondary: #a79a85;
+    --tertiary: #6f6455;
+    --gold: #e4a83c;
+    --gold-bright: #f0c25e;
+  }
+  * { margin: 0; box-sizing: border-box; }
+  body {
+    background: var(--ground);
+    color: var(--text);
+    font-family: "IBM Plex Sans", -apple-system, "Helvetica Neue", sans-serif;
+    font-size: 15px;
+    line-height: 1.55;
+    padding: 56px 24px 96px;
+  }
+  .page { max-width: 860px; margin: 0 auto; }
+  .mono {
+    font-family: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .nameplate {
+    font-family: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--gold);
+  }
+  h1 {
+    font-size: 34px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+    margin: 10px 0 14px;
+  }
+  .lede { color: var(--secondary); max-width: 62ch; }
+  .lede strong { color: var(--text); font-weight: 500; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 22px 0 0; }
+  .chip {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    color: var(--secondary);
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 999px;
+    padding: 5px 12px;
+  }
+  .chip b { color: var(--text); font-weight: 500; }
+
+  section { margin-top: 72px; }
+  .prop-head { display: flex; align-items: baseline; gap: 14px; margin-bottom: 6px; }
+  h2 { font-size: 24px; font-weight: 600; letter-spacing: -0.01em; }
+  .thesis { color: var(--secondary); max-width: 62ch; margin-bottom: 22px; }
+  .thesis em { color: var(--text); font-style: normal; font-weight: 500; }
+
+  .stage {
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+  .stage svg { display: block; width: 100%; height: auto; }
+  .stage-row { display: grid; grid-template-columns: 1fr 200px; gap: 14px; align-items: stretch; }
+  .finale {
+    background: var(--panel);
+    border: 1px solid var(--hairline);
+    border-radius: 14px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .finale svg { display: block; width: 100%; height: auto; flex: 1; }
+  .finale figcaption {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--tertiary);
+    padding: 8px 12px 10px;
+    border-top: 1px solid var(--hairline);
+  }
+  @media (max-width: 640px) {
+    .stage-row { grid-template-columns: 1fr; }
+  }
+  .states { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 14px; }
+  @media (max-width: 720px) { .states { grid-template-columns: repeat(2, 1fr); } }
+
+  .facts { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 28px; margin-top: 20px; }
+  @media (max-width: 640px) { .facts { grid-template-columns: 1fr; } }
+  .facts p { color: var(--secondary); font-size: 14px; padding-left: 16px; position: relative; }
+  .facts p::before {
+    content: "";
+    position: absolute; left: 0; top: 9px;
+    width: 6px; height: 2px; background: var(--gold); opacity: 0.7;
+  }
+  .facts p b { color: var(--text); font-weight: 500; }
+  .facts p.risk::before { background: var(--tertiary); }
+
+  .shared { border-top: 1px solid var(--hairline); padding-top: 40px; }
+  .shared h2 { margin-bottom: 4px; }
+  .shared .sub { color: var(--secondary); margin-bottom: 20px; max-width: 62ch; }
+
+  table { border-collapse: collapse; width: 100%; margin-top: 18px; }
+  th {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--tertiary); text-align: left; font-weight: 500;
+    padding: 0 14px 8px 0;
+  }
+  td {
+    padding: 9px 14px 9px 0;
+    border-top: 1px solid var(--hairline);
+    font-size: 14px; color: var(--secondary);
+    vertical-align: top;
+  }
+  td:first-child {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12px; color: var(--gold); white-space: nowrap;
+  }
+  td b { color: var(--text); font-weight: 500; }
+</style>
+
+<div class="page">
+  <header>
+    <div class="nameplate">Audiouter · Speaker alignment</div>
+    <h1>Alignment Wizard Directions</h1>
+    <p class="lede"><strong>Production pass (v2), after the first live test:</strong> four design tracks — distill, layout, color, motion — synthesized below. The v1 synthesis and original three directions follow for the record.</p>
+    <div class="chips">
+      <span class="chip"><b>Dedicated window</b></span>
+      <span class="chip">Shape leads · <b>one ms caption</b></span>
+      <span class="chip">Calm instrument · <b>earned finale</b></span>
+      <span class="chip">Condensed brief · <b>self-explanatory stage</b></span>
+    </div>
+  </header>
+
+  <!-- ============ V2 · PRODUCTION PASS ============ -->
+  <section>
+    <div class="prop-head"><span class="nameplate">v2</span><h2>Two Voices, on the Plate</h2></div>
+    <p class="thesis">The stage becomes a <em>fixed dark instrument plate</em> — an inset screen that never themes, taking over half the window. The two lights speak the brand's two secondaries: <em>Sync Green</em> for the speaker being aligned, <em>Party Magenta</em> for the reference — both gamut-chosen to stay electric on near-black, and exact complements, so their additive fusion is literally <em>white</em>. Gold stays the primary voice (CTAs, detent, chrome). Each light spills softly into the room, so the whole window leans with the belief. Below the plate: two big tactile plates (drawn, hardware-feeling, fully stock behavior underneath), one quiet bar, two corner exits. One line of text on the entire screen.</p>
+    <figure class="stage">
+      <svg viewBox="0 0 560 500" role="img" aria-label="v2 mockup: dark instrument plate with green and magenta lights, two large tactile answer plates below">
+        <defs>
+          <filter id="softV2" x="-80%" y="-80%" width="260%" height="260%">
+            <feGaussianBlur stdDeviation="10"/>
+          </filter>
+          <filter id="softV2b" x="-80%" y="-80%" width="260%" height="260%">
+            <feGaussianBlur stdDeviation="4"/>
+          </filter>
+          <filter id="spillV2" x="-120%" y="-120%" width="340%" height="340%">
+            <feGaussianBlur stdDeviation="26"/>
+          </filter>
+          <linearGradient id="spanV2" x1="0" y1="0" x2="1" y2="0">
+            <stop offset="0" stop-color="#2BFF8F"/>
+            <stop offset="1" stop-color="#FF90E9"/>
+          </linearGradient>
+        </defs>
+        <rect width="560" height="500" fill="#16130F"/>
+        <!-- native title bar hint -->
+        <circle cx="20" cy="15" r="5" fill="#3A332B"/><circle cx="38" cy="15" r="5" fill="#3A332B"/><circle cx="56" cy="15" r="5" fill="#3A332B"/>
+        <text x="280" y="19" text-anchor="middle" fill="#A79A85" font-family="IBM Plex Sans, sans-serif" font-size="11">Align Kitchen HomePod</text>
+
+        <!-- nameplate row -->
+        <text x="28" y="50" fill="#B4ADA0" font-family="IBM Plex Mono, monospace" font-size="9.5" letter-spacing="2">ALIGN · KITCHEN HOMEPOD</text>
+        <text x="532" y="50" text-anchor="end" fill="#B4ADA0" font-family="IBM Plex Mono, monospace" font-size="9.5">0:47</text>
+
+        <!-- room spill (behind the plate) -->
+        <circle cx="180" cy="150" r="90" fill="#2BFF8F" opacity="0.10" filter="url(#spillV2)"/>
+        <circle cx="390" cy="150" r="85" fill="#FF90E9" opacity="0.08" filter="url(#spillV2)"/>
+
+        <!-- the instrument plate -->
+        <rect x="28" y="60" width="504" height="176" rx="12" fill="#100B07" stroke="rgba(255,235,200,0.10)"/>
+        <!-- wire + ticks -->
+        <line x1="54" y1="162" x2="506" y2="162" stroke="#6A5F50" stroke-width="1.5" opacity="0.8"/>
+        <g stroke="#6A5F50" opacity="0.55">
+          <line x1="90" y1="157" x2="90" y2="167"/>
+          <line x1="150" y1="157" x2="150" y2="167"/>
+          <line x1="210" y1="157" x2="210" y2="167"/>
+          <line x1="270" y1="157" x2="270" y2="167"/>
+          <line x1="330" y1="157" x2="330" y2="167"/>
+          <line x1="390" y1="157" x2="390" y2="167"/>
+          <line x1="450" y1="157" x2="450" y2="167"/>
+        </g>
+        <!-- span: gold → verdigris gradient -->
+        <rect x="228" y="160.5" width="104" height="3" rx="1.5" fill="url(#spanV2)"/>
+        <rect x="228" y="160.5" width="104" height="3" rx="1.5" fill="url(#spanV2)" filter="url(#softV2b)" opacity="0.8"/>
+        <!-- target light: bright gold -->
+        <circle cx="228" cy="162" r="24" fill="#2BFF8F" opacity="0.5" filter="url(#softV2)"/>
+        <circle cx="228" cy="162" r="12" fill="none" stroke="#2BFF8F" stroke-width="1.6" opacity="0.9"/>
+        <!-- reference light: verdigris -->
+        <circle cx="332" cy="162" r="24" fill="#FF90E9" opacity="0.42" filter="url(#softV2)"/>
+        <circle cx="332" cy="162" r="12" fill="none" stroke="#FF90E9" stroke-width="1.6" opacity="0.85"/>
+
+        <!-- caption -->
+        <text x="280" y="258" text-anchor="middle" fill="#B4ADA0" font-family="IBM Plex Mono, monospace" font-size="10.5">Somewhere between 180 and 320 ms · the clicks are quicker now</text>
+
+        <!-- the two answer plates -->
+        <g>
+          <rect x="28" y="282" width="220" height="64" rx="12" fill="#241F1A" stroke="rgba(43,255,143,0.40)"/>
+          <line x1="40" y1="284" x2="236" y2="284" stroke="#FFFFFF" opacity="0.08"/>
+          <line x1="40" y1="344" x2="236" y2="344" stroke="#000000" opacity="0.30"/>
+          <text x="122" y="318" text-anchor="middle" fill="#F2EAD9" font-family="IBM Plex Sans, sans-serif" font-size="13.5" font-weight="600">Kitchen HomePod</text>
+          <rect x="212" y="303" width="22" height="22" rx="6" fill="none" stroke="rgba(43,255,143,0.55)"/>
+          <text x="223" y="318" text-anchor="middle" fill="#2BFF8F" font-family="IBM Plex Mono, monospace" font-size="11">←</text>
+        </g>
+        <g>
+          <rect x="312" y="282" width="220" height="64" rx="12" fill="#241F1A" stroke="rgba(255,144,233,0.40)"/>
+          <line x1="324" y1="284" x2="520" y2="284" stroke="#FFFFFF" opacity="0.08"/>
+          <line x1="324" y1="344" x2="520" y2="344" stroke="#000000" opacity="0.30"/>
+          <text x="406" y="318" text-anchor="middle" fill="#F2EAD9" font-family="IBM Plex Sans, sans-serif" font-size="13.5" font-weight="600">Office Sonos One</text>
+          <rect x="496" y="303" width="22" height="22" rx="6" fill="none" stroke="rgba(255,144,233,0.55)"/>
+          <text x="507" y="318" text-anchor="middle" fill="#FF90E9" font-family="IBM Plex Mono, monospace" font-size="11">→</text>
+        </g>
+
+        <!-- together bar -->
+        <rect x="80" y="358" width="400" height="36" rx="12" fill="none" stroke="rgba(255,235,200,0.16)"/>
+        <text x="252" y="380" text-anchor="middle" fill="#B4ADA0" font-family="IBM Plex Sans, sans-serif" font-size="12">They sound together</text>
+        <rect x="330" y="366" width="44" height="20" rx="6" fill="none" stroke="rgba(180,173,160,0.5)"/>
+        <text x="352" y="380" text-anchor="middle" fill="#B4ADA0" font-family="IBM Plex Mono, monospace" font-size="8.5">SPACE</text>
+
+        <!-- corner exits -->
+        <text x="28" y="438" fill="#B4ADA0" font-family="IBM Plex Sans, sans-serif" font-size="11" font-weight="600">Back <tspan font-family="IBM Plex Mono, monospace" font-size="9" fill="#6f6455">⌘Z</tspan></text>
+        <text x="532" y="438" text-anchor="end" fill="#B4ADA0" font-family="IBM Plex Sans, sans-serif" font-size="11" font-weight="600">Stop <tspan font-family="IBM Plex Mono, monospace" font-size="9" fill="#6f6455">ESC</tspan></text>
+      </svg>
+    </figure>
+
+    <!-- the confidence ladder -->
+    <div class="states">
+      <figure class="finale">
+        <svg viewBox="0 0 200 90" role="img" aria-label="Rung: open — huge soft halos, coarse ruler">
+          <rect width="200" height="90" fill="#100B07"/>
+          <line x1="16" y1="52" x2="184" y2="52" stroke="#6A5F50" opacity="0.7"/>
+          <line x1="36" y1="52" x2="164" y2="52" stroke="#2BFF8F" stroke-width="1.5" opacity="0.5"/>
+          <circle cx="36" cy="52" r="20" fill="#2BFF8F" opacity="0.32" filter="url(#softV2)"/>
+          <circle cx="164" cy="52" r="20" fill="#FF90E9" opacity="0.26" filter="url(#softV2)"/>
+        </svg>
+        <figcaption>Open · &gt;250 ms — vast &amp; soft</figcaption>
+      </figure>
+      <figure class="finale">
+        <svg viewBox="0 0 200 90" role="img" aria-label="Rung: closing — halos gathering, ruler re-geared">
+          <rect width="200" height="90" fill="#100B07"/>
+          <line x1="16" y1="52" x2="184" y2="52" stroke="#6A5F50" opacity="0.8"/>
+          <g stroke="#6A5F50" opacity="0.5"><line x1="50" y1="48" x2="50" y2="56"/><line x1="100" y1="48" x2="100" y2="56"/><line x1="150" y1="48" x2="150" y2="56"/></g>
+          <line x1="62" y1="52" x2="138" y2="52" stroke="#2BFF8F" stroke-width="2" opacity="0.75"/>
+          <circle cx="62" cy="52" r="14" fill="#2BFF8F" opacity="0.46" filter="url(#softV2b)"/>
+          <circle cx="62" cy="52" r="7" fill="none" stroke="#2BFF8F" stroke-width="1.2" opacity="0.55"/>
+          <circle cx="138" cy="52" r="14" fill="#FF90E9" opacity="0.38" filter="url(#softV2b)"/>
+          <circle cx="138" cy="52" r="7" fill="none" stroke="#FF90E9" stroke-width="1.2" opacity="0.5"/>
+        </svg>
+        <figcaption>Closing · ≤250 — quick clicks</figcaption>
+      </figure>
+      <figure class="finale">
+        <svg viewBox="0 0 200 90" role="img" aria-label="Rung: near — crisp rings, dense ticks">
+          <rect width="200" height="90" fill="#100B07"/>
+          <line x1="16" y1="52" x2="184" y2="52" stroke="#6A5F50" opacity="0.9"/>
+          <g stroke="#6A5F50" opacity="0.7"><line x1="40" y1="46" x2="40" y2="58"/><line x1="70" y1="46" x2="70" y2="58"/><line x1="100" y1="46" x2="100" y2="58"/><line x1="130" y1="46" x2="130" y2="58"/><line x1="160" y1="46" x2="160" y2="58"/></g>
+          <line x1="82" y1="52" x2="118" y2="52" stroke="#2BFF8F" stroke-width="2.5" opacity="0.9"/>
+          <circle cx="82" cy="52" r="9" fill="#2BFF8F" opacity="0.52" filter="url(#softV2b)"/>
+          <circle cx="82" cy="52" r="6" fill="none" stroke="#2BFF8F" stroke-width="1.5" opacity="0.8"/>
+          <circle cx="118" cy="52" r="9" fill="#FF90E9" opacity="0.44" filter="url(#softV2b)"/>
+          <circle cx="118" cy="52" r="6" fill="none" stroke="#FF90E9" stroke-width="1.5" opacity="0.75"/>
+        </svg>
+        <figcaption>Near · ≤60 — getting close</figcaption>
+      </figure>
+      <figure class="finale">
+        <svg viewBox="0 0 200 90" role="img" aria-label="Locked: one warm-white ring, gather bars sweeping in">
+          <rect width="200" height="90" fill="#100B07"/>
+          <line x1="16" y1="46" x2="78" y2="46" stroke="#2BFF8F" stroke-width="2" opacity="0.5"/>
+          <line x1="122" y1="46" x2="184" y2="46" stroke="#FF90E9" stroke-width="2" opacity="0.5"/>
+          <circle cx="100" cy="46" r="16" fill="#FFF4E2" opacity="0.30" filter="url(#softV2b)"/>
+          <circle cx="100" cy="46" r="11" fill="none" stroke="#FFF4E2" stroke-width="2"/>
+          <text x="100" y="78" text-anchor="middle" fill="#EFE9DD" font-family="IBM Plex Sans, sans-serif" font-size="10.5" font-weight="500">247 ms · kept</text>
+        </svg>
+        <figcaption>Locked · fused to warm white</figcaption>
+      </figure>
+    </div>
+
+    <div class="facts">
+      <p><b>A real state ladder replaces the smooth lerp.</b> Four confidence rungs (open &gt;250 ms · closing ≤250 · near ≤60 · nearly-locked ≤12), each an unmistakably distinct look. Promotion = a camera push-in with a mechanical detent — a ratchet click of banked progress. A mistake = a slower, softer pull-back that never brightens. The ambiguity you saw is structurally gone.</p>
+      <p><b>Two voices, additive fusion.</b> Sync Green #2BFF8F (your speaker) + Party Magenta #FF90E9 (the reference) — the website's own pair, exact complements, both at peak brightness on near-black. Their meeting makes <em>white</em>, brighter than either. The lock is a 1.6 s sequence: quiet → rings merge with a soft collision → the wire's light gathers into the ring from both sides → contract → one white bloom → settle. Doctrine note: this is the group-identity exception (color names <em>which speaker</em>, never state) — "is it live" stays gold everywhere else.</p>
+      <p><b>The plate never themes.</b> Fixed near-black in both appearances — in light mode it's a dark screen set into a light chassis, like hardware. This also fixes two latent light-mode bugs (the glow that measured 1.78:1, themed stamps on the stage).</p>
+      <p><b>One line of text on the question screen.</b> The interval caption under the plate — that's it. Reference picker moves to intro only (changing it mid-run restarts the run anyway); the clock and "usually ~15 clicks" live in the nameplate corner; "Which speaker clicked first?" is carried by the plates themselves.</p>
+      <p><b>Plates are drawn, behavior is stock.</b> Custom-drawn NSButton cells (the WarmFaderCell pattern): press inverts the bevel, arrow keys visibly depress the plate, focus rings/VoiceOver/keyboard all native. Every color token ships with light + dark + Increase Contrast variants and measured contrast.</p>
+      <p><b>Locked ring goes warm-white #FFF4E2</b> with the value stamped beneath — neither voice "wins"; the pair resolves into the brand's warmth. The fused-state gradient between the lights passes through a pale desaturated band, never through a third hue (complements can't accidentally make red).</p>
+    </div>
+  </section>
+
+  <!-- ============ SYNTHESIS · AS ONE, ON THE RAIL ============ -->
+  <section>
+    <div class="prop-head"><span class="nameplate">The pick</span><h2>As One, on the Rail</h2></div>
+    <p class="thesis">C's two lights become <em>the two ends of the credible interval, riding on one wire</em>. The gap between them is the uncertainty; the lit span of the wire between them is the interval — the lights and the rail are one mechanism, not two. They can meet, but never cross: separation is the interval's width, and a width can't go negative. At fusion they arrive concentric, then lock into one ring.</p>
+    <figure class="stage">
+      <svg viewBox="0 0 560 360" role="img" aria-label="Synthesis mockup: two lights as interval endpoints on a scaled wire between two speaker plates">
+        <defs>
+          <filter id="softS" x="-80%" y="-80%" width="260%" height="260%">
+            <feGaussianBlur stdDeviation="10"/>
+          </filter>
+          <filter id="softS2" x="-80%" y="-80%" width="260%" height="260%">
+            <feGaussianBlur stdDeviation="5"/>
+          </filter>
+        </defs>
+        <rect width="560" height="360" fill="#201b16"/>
+        <text x="28" y="32" fill="#e4a83c" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="2.5">ALIGN · KITCHEN HOMEPOD</text>
+        <text x="532" y="32" text-anchor="end" fill="#6f6455" font-family="IBM Plex Mono, monospace" font-size="9">USUALLY ~15 CLICKS</text>
+
+        <!-- the rail: one wire, faint scale ticks that slide as the stage zooms -->
+        <line x1="60" y1="150" x2="500" y2="150" stroke="#f2ead9" stroke-opacity="0.10" stroke-width="1.5"/>
+        <g stroke="#f2ead9" stroke-opacity="0.07">
+          <line x1="100" y1="144" x2="100" y2="156"/>
+          <line x1="145" y1="146" x2="145" y2="154"/>
+          <line x1="190" y1="146" x2="190" y2="154"/>
+          <line x1="370" y1="146" x2="370" y2="154"/>
+          <line x1="415" y1="146" x2="415" y2="154"/>
+          <line x1="460" y1="144" x2="460" y2="156"/>
+        </g>
+        <!-- lit span = credible interval = the gap between the lights -->
+        <line x1="216" y1="150" x2="326" y2="150" stroke="#e4a83c" stroke-width="2.5"/>
+        <line x1="216" y1="150" x2="326" y2="150" stroke="#e4a83c" stroke-width="2.5" filter="url(#softS2)" opacity="0.8"/>
+
+        <!-- the lights: beads at the interval's ends, off-center = the lean -->
+        <circle cx="216" cy="150" r="28" fill="#f0c25e" opacity="0.45" filter="url(#softS)"/>
+        <circle cx="216" cy="150" r="15" fill="none" stroke="#f0c25e" stroke-width="1.5" opacity="0.85" filter="url(#softS2)"/>
+        <circle cx="326" cy="150" r="28" fill="#f2ead9" opacity="0.30" filter="url(#softS)"/>
+        <circle cx="326" cy="150" r="15" fill="none" stroke="#f2ead9" stroke-width="1.5" opacity="0.6" filter="url(#softS2)"/>
+
+        <text x="271" y="208" text-anchor="middle" fill="#a79a85" font-family="IBM Plex Mono, monospace" font-size="10.5">Somewhere between 180 and 320 ms · narrowing</text>
+
+        <g>
+          <rect x="36" y="234" width="196" height="58" rx="10" fill="#2a241e" stroke="rgba(255,235,200,0.10)"/>
+          <text x="58" y="266" fill="#f2ead9" font-family="IBM Plex Sans, sans-serif" font-size="13.5" font-weight="500">Kitchen HomePod</text>
+          <rect x="196" y="252" width="22" height="22" rx="5" fill="none" stroke="#6f6455"/>
+          <text x="207" y="267" text-anchor="middle" fill="#a79a85" font-size="11">←</text>
+        </g>
+        <g>
+          <rect x="328" y="234" width="196" height="58" rx="10" fill="#2a241e" stroke="rgba(255,235,200,0.10)"/>
+          <text x="350" y="266" fill="#f2ead9" font-family="IBM Plex Sans, sans-serif" font-size="13.5" font-weight="500">Office Sonos One</text>
+          <rect x="488" y="252" width="22" height="22" rx="5" fill="none" stroke="#6f6455"/>
+          <text x="499" y="267" text-anchor="middle" fill="#a79a85" font-size="11">→</text>
+        </g>
+
+        <rect x="170" y="308" width="220" height="30" rx="15" fill="none" stroke="rgba(255,235,200,0.14)"/>
+        <text x="280" y="327" text-anchor="middle" fill="#a79a85" font-family="IBM Plex Sans, sans-serif" font-size="12">They sound together&#160;&#160;·&#160;&#160;space</text>
+
+        <text x="28" y="345" fill="#6f6455" font-family="IBM Plex Mono, monospace" font-size="9">⌘Z BACK</text>
+        <text x="532" y="345" text-anchor="end" fill="#6f6455" font-family="IBM Plex Mono, monospace" font-size="9">ESC STOP</text>
+      </svg>
+    </figure>
+
+    <!-- the motion story, four states -->
+    <div class="states">
+      <figure class="finale">
+        <svg viewBox="0 0 200 110" role="img" aria-label="State: wide open, lights far apart and very soft">
+          <rect width="200" height="110" fill="#201b16"/>
+          <line x1="16" y1="55" x2="184" y2="55" stroke="#f2ead9" stroke-opacity="0.10"/>
+          <line x1="34" y1="55" x2="166" y2="55" stroke="#e4a83c" stroke-width="2" opacity="0.7"/>
+          <circle cx="34" cy="55" r="17" fill="#f0c25e" opacity="0.30" filter="url(#softS)"/>
+          <circle cx="166" cy="55" r="17" fill="#f2ead9" opacity="0.20" filter="url(#softS)"/>
+        </svg>
+        <figcaption>1 · Wide open — soft, far apart</figcaption>
+      </figure>
+      <figure class="finale">
+        <svg viewBox="0 0 200 110" role="img" aria-label="State: the swing, pair shifted sideways and spread slightly">
+          <rect width="200" height="110" fill="#201b16"/>
+          <line x1="16" y1="55" x2="184" y2="55" stroke="#f2ead9" stroke-opacity="0.10"/>
+          <line x1="88" y1="55" x2="172" y2="55" stroke="#e4a83c" stroke-width="2" opacity="0.7"/>
+          <circle cx="88" cy="55" r="14" fill="#f0c25e" opacity="0.35" filter="url(#softS)"/>
+          <circle cx="172" cy="55" r="14" fill="#f2ead9" opacity="0.24" filter="url(#softS)"/>
+          <path d="M 70 30 Q 110 18 150 30" fill="none" stroke="#6f6455" stroke-width="1" stroke-dasharray="2 3"/>
+        </svg>
+        <figcaption>2 · The swing — slides &amp; softens, never red</figcaption>
+      </figure>
+      <figure class="finale">
+        <svg viewBox="0 0 200 110" role="img" aria-label="State: close quarters, zoomed scale, lights nearly touching and crisper">
+          <rect width="200" height="110" fill="#201b16"/>
+          <line x1="16" y1="55" x2="184" y2="55" stroke="#f2ead9" stroke-opacity="0.10"/>
+          <g stroke="#f2ead9" stroke-opacity="0.09">
+            <line x1="40" y1="50" x2="40" y2="60"/>
+            <line x1="70" y1="51" x2="70" y2="59"/>
+            <line x1="130" y1="51" x2="130" y2="59"/>
+            <line x1="160" y1="50" x2="160" y2="60"/>
+          </g>
+          <line x1="88" y1="55" x2="112" y2="55" stroke="#e4a83c" stroke-width="2.5"/>
+          <circle cx="88" cy="55" r="11" fill="#f0c25e" opacity="0.5" filter="url(#softS2)"/>
+          <circle cx="88" cy="55" r="7" fill="none" stroke="#f0c25e" stroke-width="1.2" opacity="0.9"/>
+          <circle cx="112" cy="55" r="11" fill="#f2ead9" opacity="0.35" filter="url(#softS2)"/>
+          <circle cx="112" cy="55" r="7" fill="none" stroke="#f2ead9" stroke-width="1.2" opacity="0.7"/>
+        </svg>
+        <figcaption>3 · Close quarters — zoomed, crisper, quick clicks</figcaption>
+      </figure>
+      <figure class="finale">
+        <svg viewBox="0 0 200 110" role="img" aria-label="State: locked, one crisp ring with a soft bloom and the value beneath">
+          <rect width="200" height="110" fill="#201b16"/>
+          <circle cx="100" cy="46" r="20" fill="#f0c25e" opacity="0.22" filter="url(#softS2)"/>
+          <circle cx="100" cy="46" r="13" fill="none" stroke="#f0c25e" stroke-width="2"/>
+          <circle cx="100" cy="46" r="13" fill="none" stroke="#f2ead9" stroke-width="0.8" opacity="0.5"/>
+          <text x="100" y="92" text-anchor="middle" fill="#f2ead9" font-family="IBM Plex Sans, sans-serif" font-size="11" font-weight="500">247 ms — kept</text>
+        </svg>
+        <figcaption>4 · Locked — one ring, one bloom</figcaption>
+      </figure>
+    </div>
+
+    <div class="facts">
+      <p><b>Crossing is solved by the mapping.</b> The lights aren't "the two speakers moving toward each other" — they're the two ends of what the run still can't rule out. Ends of a range meet; they never pass through each other. At fusion they sit concentric (gold ring inside warm-white ring), then become one.</p>
+      <p><b>Blur and distance can't disagree.</b> Both are driven by the same number — the interval's width. Softer always means farther apart, crisper always means closer. One truth, two expressions.</p>
+      <p><b>The rail is native, not bolted on.</b> The wire is the stage floor; the lit span between the lights <em>is</em> the interval — same one-wire language as the popover's connection rail. Faint scale ticks slide outward as the stage zooms in (A-zoom), so precision is felt as the ruler stretching.</p>
+      <p><b>The swing is the pair's position.</b> Where the pair sits along the wire is the current lean. A contradicting answer slides the pair sideways and eases it apart-and-softer over ~600 ms — interesting weather, never a penalty.</p>
+      <p><b>The lights are alive but honest.</b> Each breathes slowly, out of phase with the other — ambient, music-like. The breathing's mood follows the run's real tempo class (searching = slow, close quarters = quicker) without ever claiming to pulse on the beat, which the AirPlay buffer forbids. Reduce Motion: breathing off, states crossfade.</p>
+      <p><b>The lock is two-stage.</b> Proposal: the fused soft ring breathes while you listen ("Here's the alignment — listen"). "Sounds right": the ring snaps crisp with one contained bloom, the lit span collapses into it, and the value stamps beneath. Camera-focus lock, not confetti.</p>
+    </div>
+  </section>
+
+  <!-- ============ A · THE RIDGE ============ -->
+  <section>
+    <div class="prop-head"><span class="nameplate">A</span><h2>The Ridge</h2></div>
+    <p class="thesis">The estimator's actual belief curve, drawn as a <em>luminous gold ridge over a baseline wire</em> between the two speakers. Every answer reflows it — it leans toward whichever speaker is early, sharpens as it narrows, softens and spreads when an answer contradicts. The math itself is the spectacle; nothing is faked.</p>
+    <div class="stage-row">
+      <figure class="stage">
+        <svg viewBox="0 0 560 360" role="img" aria-label="Mockup: window with two speaker plates and a glowing ridge of probability between them">
+          <defs>
+            <filter id="glowA" x="-40%" y="-40%" width="180%" height="180%">
+              <feGaussianBlur stdDeviation="7"/>
+            </filter>
+            <linearGradient id="ridgeFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="#f0c25e" stop-opacity="0.55"/>
+              <stop offset="1" stop-color="#e4a83c" stop-opacity="0.06"/>
+            </linearGradient>
+          </defs>
+          <rect width="560" height="360" fill="#201b16"/>
+          <text x="28" y="32" fill="#e4a83c" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="2.5">ALIGN · KITCHEN HOMEPOD</text>
+          <text x="532" y="32" text-anchor="end" fill="#6f6455" font-family="IBM Plex Mono, monospace" font-size="9">USUALLY ~15 CLICKS</text>
+
+          <!-- ridge (belief curve) -->
+          <path d="M 100 178 C 180 176 220 168 250 128 C 268 104 292 104 310 128 C 340 168 380 176 460 178"
+                fill="none" stroke="#f0c25e" stroke-width="5" opacity="0.75" filter="url(#glowA)"/>
+          <path d="M 100 178 C 180 176 220 168 250 128 C 268 104 292 104 310 128 C 340 168 380 176 460 178 L 460 178 L 100 178 Z"
+                fill="url(#ridgeFill)"/>
+          <path d="M 100 178 C 180 176 220 168 250 128 C 268 104 292 104 310 128 C 340 168 380 176 460 178"
+                fill="none" stroke="#f0c25e" stroke-width="1.5"/>
+          <!-- baseline wire; lit span = credible interval -->
+          <line x1="60" y1="178" x2="500" y2="178" stroke="#f2ead9" stroke-opacity="0.10" stroke-width="1.5"/>
+          <line x1="228" y1="178" x2="336" y2="178" stroke="#e4a83c" stroke-width="2.5"/>
+          <line x1="228" y1="178" x2="336" y2="178" stroke="#e4a83c" stroke-width="2.5" filter="url(#glowA)" opacity="0.8"/>
+
+          <text x="280" y="208" text-anchor="middle" fill="#a79a85" font-family="IBM Plex Mono, monospace" font-size="10.5">Somewhere between 180 and 320 ms · narrowing</text>
+
+          <!-- plates -->
+          <g>
+            <rect x="36" y="234" width="196" height="58" rx="10" fill="#2a241e" stroke="rgba(255,235,200,0.10)"/>
+            <text x="58" y="266" fill="#f2ead9" font-family="IBM Plex Sans, sans-serif" font-size="13.5" font-weight="500">Kitchen HomePod</text>
+            <rect x="196" y="252" width="22" height="22" rx="5" fill="none" stroke="#6f6455"/>
+            <text x="207" y="267" text-anchor="middle" fill="#a79a85" font-size="11">←</text>
+          </g>
+          <g>
+            <rect x="328" y="234" width="196" height="58" rx="10" fill="#2a241e" stroke="rgba(255,235,200,0.10)"/>
+            <text x="350" y="266" fill="#f2ead9" font-family="IBM Plex Sans, sans-serif" font-size="13.5" font-weight="500">Office Sonos One</text>
+            <rect x="488" y="252" width="22" height="22" rx="5" fill="none" stroke="#6f6455"/>
+            <text x="499" y="267" text-anchor="middle" fill="#a79a85" font-size="11">→</text>
+          </g>
+
+          <!-- together pill -->
+          <rect x="170" y="308" width="220" height="30" rx="15" fill="none" stroke="rgba(255,235,200,0.14)"/>
+          <text x="280" y="327" text-anchor="middle" fill="#a79a85" font-family="IBM Plex Sans, sans-serif" font-size="12">They sound together&#160;&#160;·&#160;&#160;space</text>
+
+          <text x="28" y="345" fill="#6f6455" font-family="IBM Plex Mono, monospace" font-size="9">⌘Z BACK</text>
+          <text x="532" y="345" text-anchor="end" fill="#6f6455" font-family="IBM Plex Mono, monospace" font-size="9">ESC STOP</text>
+        </svg>
+      </figure>
+      <figure class="finale">
+        <svg viewBox="0 0 200 130" role="img" aria-label="Finale: the ridge collapsed into a single gold filament">
+          <rect width="200" height="130" fill="#201b16"/>
+          <line x1="30" y1="78" x2="170" y2="78" stroke="#f2ead9" stroke-opacity="0.10"/>
+          <line x1="100" y1="24" x2="100" y2="78" stroke="#f0c25e" stroke-width="3" filter="url(#glowA)"/>
+          <line x1="100" y1="24" x2="100" y2="78" stroke="#f0c25e" stroke-width="1.5"/>
+          <text x="100" y="100" text-anchor="middle" fill="#f2ead9" font-family="IBM Plex Sans, sans-serif" font-size="11" font-weight="500">247 ms — listen</text>
+          <text x="100" y="116" text-anchor="middle" fill="#6f6455" font-family="IBM Plex Mono, monospace" font-size="8">SOUNDS RIGHT · STILL OFF</text>
+        </svg>
+        <figcaption>Finale · collapse to a filament</figcaption>
+      </figure>
+    </div>
+    <div class="facts">
+      <p><b>The zoom is the drama.</b> The stage rescales as confidence tightens — early answers move mountains, the endgame is a close-up on a few ms. Homing in is felt as a camera closing in.</p>
+      <p><b>Rail kinship.</b> The lit span of the baseline wire is the credible interval — same one-wire language as the popover's connection rail.</p>
+      <p><b>Mistakes read as weather</b>, not failure: the ridge eases wider over ~600 ms. No lurch, no red.</p>
+      <p class="risk"><b>Risk:</b> the opening flat ridge is visually quiet — the armed state needs a deliberate "wide open" look so the first answers feel like sculpting.</p>
+    </div>
+  </section>
+
+  <!-- ============ B · THE NEEDLE ============ -->
+  <section>
+    <div class="prop-head"><span class="nameplate">B</span><h2>The Needle</h2></div>
+    <p class="thesis">A pan-pot for time. A damped needle on a wide dial arc leans toward whichever speaker is early; behind it, a <em>fan of light whose spread is the uncertainty</em>. Answers narrow the fan into a beam; the needle settles inside it. The most mixing-desk of the three — this is an instrument you'd find on the console.</p>
+    <div class="stage-row">
+      <figure class="stage">
+        <svg viewBox="0 0 560 360" role="img" aria-label="Mockup: dial arc with a needle and a fan of uncertainty between two speaker plates">
+          <defs>
+            <filter id="glowB" x="-40%" y="-40%" width="180%" height="180%">
+              <feGaussianBlur stdDeviation="6"/>
+            </filter>
+            <linearGradient id="fanFill" x1="0" y1="1" x2="0" y2="0">
+              <stop offset="0" stop-color="#e4a83c" stop-opacity="0.02"/>
+              <stop offset="1" stop-color="#f0c25e" stop-opacity="0.4"/>
+            </linearGradient>
+          </defs>
+          <rect width="560" height="360" fill="#201b16"/>
+          <text x="28" y="32" fill="#e4a83c" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="2.5">ALIGN · KITCHEN HOMEPOD</text>
+          <text x="532" y="32" text-anchor="end" fill="#6f6455" font-family="IBM Plex Mono, monospace" font-size="9">USUALLY ~15 CLICKS</text>
+
+          <!-- dial arc -->
+          <path d="M 120 180 A 160 160 0 0 1 440 180" fill="none" stroke="#f2ead9" stroke-opacity="0.12" stroke-width="2"/>
+          <!-- ticks -->
+          <line x1="120" y1="180" x2="130" y2="180" stroke="#6f6455"/>
+          <line x1="440" y1="180" x2="430" y2="180" stroke="#6f6455"/>
+          <line x1="280" y1="20" x2="280" y2="32" stroke="#6f6455"/>
+          <line x1="166" y1="67" x2="173" y2="74" stroke="#4a4238"/>
+          <line x1="394" y1="67" x2="387" y2="74" stroke="#4a4238"/>
+          <!-- fan of uncertainty -->
+          <path d="M 280 180 L 195 45 A 160 160 0 0 1 320 26 Z" fill="url(#fanFill)" filter="url(#glowB)"/>
+          <!-- needle -->
+          <line x1="280" y1="180" x2="248" y2="30" stroke="#f0c25e" stroke-width="2.5" filter="url(#glowB)" opacity="0.9"/>
+          <line x1="280" y1="180" x2="248" y2="30" stroke="#f0c25e" stroke-width="1.5"/>
+          <circle cx="280" cy="180" r="5" fill="#2a241e" stroke="#e4a83c" stroke-width="1.5"/>
+
+          <text x="280" y="208" text-anchor="middle" fill="#a79a85" font-family="IBM Plex Mono, monospace" font-size="10.5">Somewhere between 180 and 320 ms · narrowing</text>
+
+          <g>
+            <rect x="36" y="234" width="196" height="58" rx="10" fill="#2a241e" stroke="rgba(255,235,200,0.10)"/>
+            <text x="58" y="266" fill="#f2ead9" font-family="IBM Plex Sans, sans-serif" font-size="13.5" font-weight="500">Kitchen HomePod</text>
+            <rect x="196" y="252" width="22" height="22" rx="5" fill="none" stroke="#6f6455"/>
+            <text x="207" y="267" text-anchor="middle" fill="#a79a85" font-size="11">←</text>
+          </g>
+          <g>
+            <rect x="328" y="234" width="196" height="58" rx="10" fill="#2a241e" stroke="rgba(255,235,200,0.10)"/>
+            <text x="350" y="266" fill="#f2ead9" font-family="IBM Plex Sans, sans-serif" font-size="13.5" font-weight="500">Office Sonos One</text>
+            <rect x="488" y="252" width="22" height="22" rx="5" fill="none" stroke="#6f6455"/>
+            <text x="499" y="267" text-anchor="middle" fill="#a79a85" font-size="11">→</text>
+          </g>
+
+          <rect x="170" y="308" width="220" height="30" rx="15" fill="none" stroke="rgba(255,235,200,0.14)"/>
+          <text x="280" y="327" text-anchor="middle" fill="#a79a85" font-family="IBM Plex Sans, sans-serif" font-size="12">They sound together&#160;&#160;·&#160;&#160;space</text>
+
+          <text x="28" y="345" fill="#6f6455" font-family="IBM Plex Mono, monospace" font-size="9">⌘Z BACK</text>
+          <text x="532" y="345" text-anchor="end" fill="#6f6455" font-family="IBM Plex Mono, monospace" font-size="9">ESC STOP</text>
+        </svg>
+      </figure>
+      <figure class="finale">
+        <svg viewBox="0 0 200 130" role="img" aria-label="Finale: needle at rest in a detent, fan collapsed to a beam">
+          <rect width="200" height="130" fill="#201b16"/>
+          <path d="M 45 85 A 65 65 0 0 1 155 85" fill="none" stroke="#f2ead9" stroke-opacity="0.12" stroke-width="1.5"/>
+          <line x1="100" y1="85" x2="100" y2="22" stroke="#f0c25e" stroke-width="2" filter="url(#glowB)"/>
+          <line x1="100" y1="85" x2="100" y2="22" stroke="#f0c25e" stroke-width="1"/>
+          <path d="M 95 18 L 100 25 L 105 18" fill="none" stroke="#e4a83c" stroke-width="1.5"/>
+          <text x="100" y="105" text-anchor="middle" fill="#f2ead9" font-family="IBM Plex Sans, sans-serif" font-size="11" font-weight="500">247 ms — listen</text>
+          <text x="100" y="120" text-anchor="middle" fill="#6f6455" font-family="IBM Plex Mono, monospace" font-size="8">SOUNDS RIGHT · STILL OFF</text>
+        </svg>
+        <figcaption>Finale · detent click, beam lock</figcaption>
+      </figure>
+    </div>
+    <div class="facts">
+      <p><b>Heavily damped by design.</b> The needle carries mass — it drifts, never snaps. The election-needle failure was jitter without annotation; here motion only ever means "belief moved", and the words below say so.</p>
+      <p><b>The range ring shows the zoom.</b> A faint outer scale relabels as the dial rescales from ±900 ms toward ±10 ms, so precision is visible as the dial "gearing down".</p>
+      <p><b>Detent finale.</b> The lock is mechanical: fan collapses to a beam, needle drops into a notch. Deeply satisfying, zero confetti.</p>
+      <p class="risk"><b>Risk:</b> a needle summarizes — the median leans, but skew and lumpy belief are invisible. Least honest of the three about what the estimator actually knows.</p>
+    </div>
+  </section>
+
+  <!-- ============ C · AS ONE ============ -->
+  <section>
+    <div class="prop-head"><span class="nameplate">C</span><h2>As One</h2></div>
+    <p class="thesis">Two soft discs of light, one per speaker. Their <em>separation is the believed offset; their blur is the uncertainty</em>. Answers slide them together and pull them into focus, until they fuse into one crisp ring — which is <em>exactly what you're listening for</em>. The goal is drawn, so the stage explains itself; the condensed brief barely has a job.</p>
+    <div class="stage-row">
+      <figure class="stage">
+        <svg viewBox="0 0 560 360" role="img" aria-label="Mockup: two blurred discs of light approaching each other between two speaker plates">
+          <defs>
+            <filter id="softC" x="-80%" y="-80%" width="260%" height="260%">
+              <feGaussianBlur stdDeviation="12"/>
+            </filter>
+            <filter id="softC2" x="-80%" y="-80%" width="260%" height="260%">
+              <feGaussianBlur stdDeviation="8"/>
+            </filter>
+          </defs>
+          <rect width="560" height="360" fill="#201b16"/>
+          <text x="28" y="32" fill="#e4a83c" font-family="IBM Plex Mono, monospace" font-size="10" letter-spacing="2.5">ALIGN · KITCHEN HOMEPOD</text>
+          <text x="532" y="32" text-anchor="end" fill="#6f6455" font-family="IBM Plex Mono, monospace" font-size="9">USUALLY ~15 CLICKS</text>
+
+          <!-- the two lights -->
+          <circle cx="238" cy="122" r="34" fill="#f0c25e" opacity="0.5" filter="url(#softC)"/>
+          <circle cx="238" cy="122" r="20" fill="none" stroke="#f0c25e" stroke-width="1.5" opacity="0.8" filter="url(#softC2)"/>
+          <circle cx="322" cy="122" r="34" fill="#f2ead9" opacity="0.35" filter="url(#softC)"/>
+          <circle cx="322" cy="122" r="20" fill="none" stroke="#f2ead9" stroke-width="1.5" opacity="0.6" filter="url(#softC2)"/>
+          <!-- device initials under each light -->
+          <text x="238" y="180" text-anchor="middle" fill="#6f6455" font-family="IBM Plex Mono, monospace" font-size="9" letter-spacing="1.5">KITCHEN</text>
+          <text x="322" y="180" text-anchor="middle" fill="#6f6455" font-family="IBM Plex Mono, monospace" font-size="9" letter-spacing="1.5">OFFICE</text>
+
+          <text x="280" y="208" text-anchor="middle" fill="#a79a85" font-family="IBM Plex Mono, monospace" font-size="10.5">Somewhere between 180 and 320 ms · narrowing</text>
+
+          <g>
+            <rect x="36" y="234" width="196" height="58" rx="10" fill="#2a241e" stroke="rgba(255,235,200,0.10)"/>
+            <text x="58" y="266" fill="#f2ead9" font-family="IBM Plex Sans, sans-serif" font-size="13.5" font-weight="500">Kitchen HomePod</text>
+            <rect x="196" y="252" width="22" height="22" rx="5" fill="none" stroke="#6f6455"/>
+            <text x="207" y="267" text-anchor="middle" fill="#a79a85" font-size="11">←</text>
+          </g>
+          <g>
+            <rect x="328" y="234" width="196" height="58" rx="10" fill="#2a241e" stroke="rgba(255,235,200,0.10)"/>
+            <text x="350" y="266" fill="#f2ead9" font-family="IBM Plex Sans, sans-serif" font-size="13.5" font-weight="500">Office Sonos One</text>
+            <rect x="488" y="252" width="22" height="22" rx="5" fill="none" stroke="#6f6455"/>
+            <text x="499" y="267" text-anchor="middle" fill="#a79a85" font-size="11">→</text>
+          </g>
+
+          <rect x="170" y="308" width="220" height="30" rx="15" fill="none" stroke="rgba(255,235,200,0.14)"/>
+          <text x="280" y="327" text-anchor="middle" fill="#a79a85" font-family="IBM Plex Sans, sans-serif" font-size="12">They sound together&#160;&#160;·&#160;&#160;space</text>
+
+          <text x="28" y="345" fill="#6f6455" font-family="IBM Plex Mono, monospace" font-size="9">⌘Z BACK</text>
+          <text x="532" y="345" text-anchor="end" fill="#6f6455" font-family="IBM Plex Mono, monospace" font-size="9">ESC STOP</text>
+        </svg>
+      </figure>
+      <figure class="finale">
+        <svg viewBox="0 0 200 130" role="img" aria-label="Finale: the two lights fused into one crisp ring">
+          <rect width="200" height="130" fill="#201b16"/>
+          <circle cx="100" cy="52" r="22" fill="#f0c25e" opacity="0.25" filter="url(#softC2)"/>
+          <circle cx="100" cy="52" r="16" fill="none" stroke="#f0c25e" stroke-width="2"/>
+          <text x="100" y="102" text-anchor="middle" fill="#f2ead9" font-family="IBM Plex Sans, sans-serif" font-size="11" font-weight="500">247 ms — listen</text>
+          <text x="100" y="118" text-anchor="middle" fill="#6f6455" font-family="IBM Plex Mono, monospace" font-size="8">SOUNDS RIGHT · STILL OFF</text>
+        </svg>
+        <figcaption>Finale · fused into one ring</figcaption>
+      </figure>
+    </div>
+    <div class="facts">
+      <p><b>Meaning matches the ear.</b> "The clicks should land as one" is drawn literally: when the lights become one, so do the clicks. The proposal screen needs almost no words.</p>
+      <p><b>Calmest of the three</b> — no chart, no axis, no instrument to read. Two lights breathing toward each other in a dark room. Peak "Instrument in a Dark Room".</p>
+      <p><b>Mistakes are a refocus:</b> the lights drift apart slightly and soften. Reads as "hmm, let's look again", never as a penalty.</p>
+      <p class="risk"><b>Risk:</b> least informative — the belief's shape and skew are invisible, and separation must be log-scaled or the endgame (a few ms) shows nothing moving.</p>
+    </div>
+  </section>
+
+  <!-- ============ SHARED CHASSIS ============ -->
+  <section class="shared">
+    <div class="nameplate">Common to all three</div>
+    <h2>The chassis</h2>
+    <p class="sub">Everything below ships regardless of which stage wins. It's where the research earned its keep.</p>
+    <div class="facts">
+      <p><b>Dedicated floating window</b> (~560×380), opened from the row's Align action. Esc stops; closing cancels safely — the session already guarantees the tick dies and the prior value returns on any teardown.</p>
+      <p><b>Armed state replaces the intro screen.</b> The same stage, dormant: one line ("Tap the speaker you hear first"), the reference picker, Start. No separate briefing card to read past.</p>
+      <p><b>The plates are the speakers.</b> Real device names as the two big answer targets, keycaps ←/→, Space for "They sound together", ⌘Z Back kept quiet. Same locked answer model, same session, new skin.</p>
+      <p><b>Status in words, ms in one caption.</b> "Still wide → narrowing → close now → nearly locked." The tempo shift to quick clicks at 250 ms gets its own beat: "Close — quick clicks now."</p>
+      <p><b>Frugality stated up front:</b> "usually ~15 clicks" (SoundID's trick — each answer feels high-leverage).</p>
+      <p><b>No per-answer verdicts.</b> Never right/wrong, never red (Apple's hearing test). Backward swings ease over ~600 ms and get words, not drama — the election-needle lesson.</p>
+      <p><b>No visual metronome.</b> The AirPlay path buffers 1–2 s and there's no beat callback, so nothing on screen pretends to pulse with the clicks. The stage reacts to answers only.</p>
+      <p><b>Reduce Motion:</b> morphs become crossfades; the finale becomes a fade-in of the locked state.</p>
+      <p><b>Bow-outs and kept screens</b> restyled in the same chrome with today's locked plain-speech copy.</p>
+      <p><b>Cost honesty:</b> new window + the session exposing a belief snapshot (the posterior already holds it). Estimator, flow, and audio path untouched.</p>
+    </div>
+  </section>
+
+  <!-- ============ PICK & MIX ============ -->
+  <section class="shared">
+    <div class="nameplate">Pick &amp; mix</div>
+    <h2>Parts worth stealing across directions</h2>
+    <table>
+      <thead><tr><th>ID</th><th>Part</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>A-zoom</td><td><b>The stage rescales with confidence</b> — homing in feels like a camera closing in. Works under B and C too.</td><td>Ridge</td></tr>
+        <tr><td>A-rail</td><td><b>Interval as a lit span on one wire</b> — kinship with the popover's connection rail.</td><td>Ridge</td></tr>
+        <tr><td>B-detent</td><td><b>Mechanical lock finale</b> — the settle-into-a-notch moment, whatever the stage shows.</td><td>Needle</td></tr>
+        <tr><td>B-gear</td><td><b>Visible rescaling scale</b> — precision shown as the instrument gearing down.</td><td>Needle</td></tr>
+        <tr><td>C-fuse</td><td><b>Fused-ring proposal state</b> — any stage can end by becoming one ring while you listen.</td><td>As One</td></tr>
+        <tr><td>C-drift</td><td><b>Mistake = gentle drift apart + soften</b>, the kindest backward-swing language.</td><td>As One</td></tr>
+      </tbody>
+    </table>
+  </section>
+</div>

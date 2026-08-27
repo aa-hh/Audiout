@@ -46,8 +46,13 @@ public enum BTSyncTrim {
     /// (D7 — never a bare signed number, which readers get backwards). Shared
     /// by the row chip's tooltip and VoiceOver value and the drawer's field
     /// value, so the two can never phrase it differently.
+    /// Rounds but deliberately does NOT clamp: the row chip also speaks a
+    /// measured latency plus its nudge, and a speaker whose measured latency
+    /// exceeds the trim's own ±``rangeMs`` bound must be described as it is,
+    /// not shrunk to the bound. Every caller passing a trim passes an
+    /// already-clamped one, so nothing else changes.
     public static func spokenOffset(_ ms: Double) -> String {
-        let whole = Int(quantise(ms))
+        let whole = Int(ms.rounded(.toNearestOrAwayFromZero))
         if whole == 0 { return "in sync" }
         return whole > 0 ? "\(whole) milliseconds later" : "\(abs(whole)) milliseconds earlier"
     }

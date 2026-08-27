@@ -62,10 +62,16 @@ unless the Mac sits far off-centre; one sentence of UX copy).
 - **HFP hazard is unresolved on hardware.** Opening a BT device's OWN mic
   collapses A2DP to narrowband HFP (PLAN-UNIVERSAL-SYNC risk R-A2DP/HFP,
   highest; live bug: roadmap 019). BT-SPIKE-OFFSET was cut before running, so
-  "does A2DP survive while the BUILT-IN mic records" is still unproven —
-  prove it first, with a standalone `dev/` probe in the `audiocap` mould. Pin
-  the built-in mic by device ID, never the default input (which may BE the
-  headset).
+  "does A2DP survive while the BUILT-IN mic records" is still unproven. The
+  measuring tool now exists — `mic-probe-spike` (an `AudioutCore` executable
+  target): dual-sweep playback on a chosen output, built-in-mic capture
+  pinned by device ID (never the default input, which may BE the headset),
+  matched-filter analysis, and an HFP verdict from the output device's
+  nominal sample rate before/during/after capture. Run from a terminal
+  against a BT speaker:
+  `swift run --package-path AudioutCore mic-probe-spike --output "<speaker>"`
+  (`--selftest` for the hardware-free wiring check). Live run on real
+  speakers still OWED.
 - **No mic capture exists anywhere in the repo.** New TCC surface:
   `NSMicrophoneUsageDescription` in `scripts/make-app.sh` (with the same
   plutil gate as the other three), `com.apple.security.device.audio-input`

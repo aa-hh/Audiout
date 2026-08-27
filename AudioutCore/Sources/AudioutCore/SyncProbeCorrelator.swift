@@ -30,26 +30,26 @@ import Foundation
 /// off below a few hundred Hz, and A2DP codecs commonly roll off above
 /// 14–18 kHz, so probe energy parked outside this band would be spent where
 /// the physical path may silently drop it.
-enum SyncProbe {
+public enum SyncProbe {
 
     /// One sweep's parameters. `startHz > endHz` is legal and produces the
     /// DOWN sweep; both edges must be positive and distinct.
-    struct SweepDesign: Equatable, Sendable {
-        var sampleRate: Double
-        var startHz: Double
-        var endHz: Double
-        var duration: Double
+    public struct SweepDesign: Equatable, Sendable {
+        public var sampleRate: Double
+        public var startHz: Double
+        public var endHz: Double
+        public var duration: Double
         /// Raised-cosine fade applied at both ends, so the probe starts and
         /// ends without a click that would smear the correlation peak (and
         /// annoy the listener).
-        var fadeDuration: Double
+        public var fadeDuration: Double
 
-        static func upSweep(sampleRate: Double, duration: Double = 1.0) -> SweepDesign {
+        public static func upSweep(sampleRate: Double, duration: Double = 1.0) -> SweepDesign {
             SweepDesign(sampleRate: sampleRate, startHz: 500, endHz: 10_000,
                         duration: duration, fadeDuration: 0.01)
         }
 
-        static func downSweep(sampleRate: Double, duration: Double = 1.0) -> SweepDesign {
+        public static func downSweep(sampleRate: Double, duration: Double = 1.0) -> SweepDesign {
             SweepDesign(sampleRate: sampleRate, startHz: 10_000, endHz: 500,
                         duration: duration, fadeDuration: 0.01)
         }
@@ -59,7 +59,7 @@ enum SyncProbe {
     /// fades included, zero outside `[0, duration)`. Exposed separately from
     /// ``samples(_:)`` so tests can render a FRACTIONALLY delayed arrival
     /// analytically instead of resampling one.
-    static func value(_ design: SweepDesign, at t: Double) -> Double {
+    public static func value(_ design: SweepDesign, at t: Double) -> Double {
         guard t >= 0, t < design.duration else { return 0 }
         let ratio = design.endHz / design.startHz
         let lnRatio = log(ratio)
@@ -82,7 +82,7 @@ enum SyncProbe {
     }
 
     /// The sweep rendered at its design sample rate.
-    static func samples(_ design: SweepDesign) -> [Float] {
+    public static func samples(_ design: SweepDesign) -> [Float] {
         precondition(design.startHz > 0 && design.endHz > 0 && design.startHz != design.endHz,
                      "an exponential sweep needs two positive, distinct band edges")
         let count = Int((design.duration * design.sampleRate).rounded())
@@ -116,19 +116,21 @@ enum SyncProbe {
 ///
 /// Everything here is pure and hardware-free; capture and probe playback live
 /// elsewhere.
-struct SyncProbeCorrelator {
+public struct SyncProbeCorrelator {
 
-    let sampleRate: Double
+    public let sampleRate: Double
+
+    public init(sampleRate: Double) { self.sampleRate = sampleRate }
 
     /// Correlation peaks below this peak-to-sidelobe ratio are rejected as
     /// "probe not found" — the recording's best match is not convincingly
     /// better than its own background. Pure noise correlates at ~2–3×;
     /// a real arrival at sane SNR clears 10× easily.
-    var minPeakToSidelobe: Double = 5
+    public var minPeakToSidelobe: Double = 5
 
     /// Sidelobe search excludes this much on either side of the peak, wide
     /// enough to cover the sweep autocorrelation's own skirt.
-    var sidelobeExclusionSeconds: Double = 0.005
+    public var sidelobeExclusionSeconds: Double = 0.005
 
     /// Sidelobe search also excludes this long AFTER the peak: a real room
     /// answers a probe with its reflections, so the correlation legitimately
@@ -136,33 +138,33 @@ struct SyncProbeCorrelator {
     /// response's tail, not evidence against the measurement. Nothing
     /// physical arrives BEFORE the direct path, so the region ahead of the
     /// peak (plus anything beyond this shadow) is the honest noise floor.
-    var reverbShadowSeconds: Double = 0.25
+    public var reverbShadowSeconds: Double = 0.25
 
     /// One probe's arrival in a recording.
-    struct Arrival: Equatable {
+    public struct Arrival: Equatable {
         /// Where the probe's first sample lands in the recording, in samples
         /// from the recording's start — fractional, via parabolic
         /// interpolation on the correlation peak.
-        var sampleOffset: Double
+        public var sampleOffset: Double
         /// Peak height over the strongest correlation outside the exclusion
         /// window: the measurement's own confidence statement.
-        var peakToSidelobe: Double
+        public var peakToSidelobe: Double
     }
 
     /// Two arrivals from one recording, reduced to the number the sync engine
     /// wants.
-    struct Measurement: Equatable {
+    public struct Measurement: Equatable {
         /// Arrival of `probeB` minus arrival of `probeA`, seconds. Positive
         /// means B sounded later.
-        var offsetSeconds: Double
-        var arrivalA: Arrival
-        var arrivalB: Arrival
+        public var offsetSeconds: Double
+        public var arrivalA: Arrival
+        public var arrivalB: Arrival
     }
 
     /// Finds `probe` in `recording`, or nil when no convincing peak exists.
     /// `ambientNoise` is an optional probe-free slice of the same capture used
     /// to weight the correlation by measured noise (see the type note).
-    func arrival(of probe: [Float], in recording: [Float],
+    public func arrival(of probe: [Float], in recording: [Float],
                  ambientNoise: [Float]? = nil) -> Arrival? {
         guard probe.count > 1, recording.count >= probe.count else { return nil }
         let corr = Self.correlate(recording: recording, probe: probe,
@@ -207,7 +209,7 @@ struct SyncProbeCorrelator {
     /// reduced to their arrival difference. Nil when either probe is missing
     /// or unconvincing — the caller falls back to the by-ear wizard, never to
     /// a shaky number.
-    func relativeOffset(probeA: [Float], probeB: [Float], recording: [Float],
+    public func relativeOffset(probeA: [Float], probeB: [Float], recording: [Float],
                         ambientNoise: [Float]? = nil) -> Measurement? {
         guard let a = arrival(of: probeA, in: recording, ambientNoise: ambientNoise),
               let b = arrival(of: probeB, in: recording, ambientNoise: ambientNoise)

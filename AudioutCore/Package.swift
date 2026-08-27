@@ -122,6 +122,10 @@ let package = Package(
         // Roadmap 006 Phase 0: the hardware-free Google Cast sender spike —
         // browse, launch, stream, time it. Not linked by the app.
         .executable(name: "cast-spike", targets: ["cast-spike"]),
+        // Mic-probe calibration hardware spike (roadmap 064): dual-sweep
+        // playback + built-in-mic capture + matched filter, with the A2DP/HFP
+        // survival check. Run from a terminal; never linked by the app.
+        .executable(name: "mic-probe-spike", targets: ["mic-probe-spike"]),
     ],
     dependencies: [
         // The native AirPlay 2 sender engine (PLAN-PHASE-2b T-NB-PKGDEP-1).
@@ -305,6 +309,12 @@ let package = Package(
         .executableTarget(
             name: "core-audio-diagnostic",
             dependencies: ["AudioutCore"]
+        ),
+        // Mic-probe hardware spike — see the product comment above.
+        .executableTarget(
+            name: "mic-probe-spike",
+            dependencies: ["AudioutCore"],
+            swiftSettings: [.unsafeFlags(swiftClangImporterFlags)]
         ),
         // Tiny, short-lived TCC-preflight probe (T14) — see Sources/tcc-probe/main.swift
         // for the output contract `TCCProbeRunner` parses. Run directly with:

@@ -93,3 +93,6 @@ finished. If the coordinating session died mid-flight, some worktrees may hold U
 - T7 shell: FIX LANDED per reviewer prescription — 2cfdad81 on origin, full suite 2873/169 clean (quiet machine; the six prior refusals were confirmed load flakes). READY TO MERGE (ceff5db0 + e2b02cd9 + 2cfdad81).
 - T6 onboarding: EXECUTED — f7c1a931 on origin (18 files), full suite 2874/168 green. Fable review running — LAST review of the effort. ALL TEN TRACKS LANDED.
 - NOTE: every push prints the repo-moved notice (origin still aa-hh/Audiouter.git → moved to Audiout.git); wrap-up item already recorded.
+- T6 onboarding: APPROVED (fable review; four-place P0-1 consistency audited clean; skip-ratchet re-arm verified) — f7c1a931 READY TO MERGE. WRAP-UP +1: PTP poll doesn't stop on ptpHelperRegistrationFailed (harmless). LIVE-CHECK +1: SMAppService.daemon.register on a fresh install must not throw for pending-approval.
+
+## ALL TEN TRACKS EXECUTED + REVIEWED + APPROVED (2026-08-28). Merge proposal delivered to Alec; NO merge until his go-ahead.

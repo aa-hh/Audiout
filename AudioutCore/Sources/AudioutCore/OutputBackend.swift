@@ -253,6 +253,17 @@ public enum BackendEvent: Sendable, Equatable {
     /// ``NativeBackend`` emits it — it's the only backend with a real PTP
     /// handover to explain; `MockBackend`/`OwnToneBackend` never do.
     case takeoverStatus(TakeoverStatus?)
+
+    /// The whole-system capture tap failed, so every selected speaker is
+    /// silent while its row still reads "Connected" — the one condition the
+    /// device rows structurally cannot express. `message` is
+    /// ``NativeCaptureError/userMessage``, rendered verbatim; `retrying` says
+    /// whether the T16 backoff retry is armed (`false` = permanent, e.g.
+    /// `.osUnsupported`, and only a restart or deselecting everything clears
+    /// it). `message: nil` clears the condition — capture recovered, or is no
+    /// longer desired. Only ``NativeBackend`` emits it; it's the only backend
+    /// that owns a real tap.
+    case captureFailed(message: String?, retrying: Bool)
 }
 
 /// View-facing state for the takeover status strip (T6). Almost exactly
@@ -495,7 +506,13 @@ public protocol LatencyConfigurable: AnyObject {
     /// when idle it applies silently. Returns when the re-add pass has
     /// completed (per-device failures follow the D4 best-effort rule: marked
     /// unavailable, the rest proceed).
-    func applyStartBuffer(ms: Int) async
+    ///
+    /// `expected` is how many devices were streaming when the apply began;
+    /// `reconnected` is how many of those the best-effort re-add actually
+    /// re-established. The settings pane needs both so it can only claim
+    /// "Speakers reconnected" when they all did.
+    @discardableResult
+    func applyStartBuffer(ms: Int) async -> (reconnected: Int, expected: Int)
 }
 
 /// The optional metering-active capability (T-GATE, playback-meter-research.md).

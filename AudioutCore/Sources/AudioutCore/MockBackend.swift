@@ -686,12 +686,15 @@ extension MockBackend: LatencyConfigurable {
         queue.sync { fakeStartBufferMs }
     }
 
-    public func applyStartBuffer(ms: Int) async {
-        let streaming = queue.sync { !expectedSelected.isEmpty }
-        if streaming {
+    @discardableResult
+    public func applyStartBuffer(ms: Int) async -> (reconnected: Int, expected: Int) {
+        let n = queue.sync { expectedSelected.count }
+        if n > 0 {
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
         queue.sync { fakeStartBufferMs = ms }
+        // Nothing can fail under mock, so every expected device "reconnected".
+        return (reconnected: n, expected: n)
     }
 }
 

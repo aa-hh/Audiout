@@ -134,7 +134,7 @@ func makeRoot() -> SettingsRootViewController {
         initialMs: AppSettings.defaultStartBufferMs,
         envOverrideMs: nil,
         isStreaming: { false },
-        apply: { _ in })
+        apply: { _ in (0, 0) })
 
     // Section order/labels/symbols mirror the app's own assembly
     // (`AppDelegate.makeSettingsRoot`) exactly.

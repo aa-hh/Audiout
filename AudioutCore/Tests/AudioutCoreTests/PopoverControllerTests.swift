@@ -2760,6 +2760,37 @@ import AppKit
         #expect(popover.test_systemAirPlayNoteText == nil, "clearing both empties the slot")
     }
 
+    /// A dead capture tap means every speaker is silent while its row still
+    /// says "Connected" — nothing else the note slot carries is worse, so it
+    /// takes the slot from everything, including the routing-blocked warning.
+    @Test func captureFailureNoteOutranksRoutingBlockedAndClearsBackToIt() async throws {
+        let (popover, _, _) = try await makePopover()
+        #expect(popover.test_systemAirPlayNoteText == nil, "no note by default")
+
+        popover.setCaptureFailureMessage("Audiout lost access to system audio.")
+        #expect(popover.test_systemAirPlayNoteText == "Audiout lost access to system audio.",
+                "the capture error's own message renders verbatim")
+        #expect(!popover.test_systemAirPlayNoteHasActionButton,
+                "the message names its own remedy in prose — there is no button to add")
+
+        // A repeat of the same message changes nothing.
+        popover.setCaptureFailureMessage("Audiout lost access to system audio.")
+        #expect(popover.test_systemAirPlayNoteText == "Audiout lost access to system audio.")
+
+        // Precedence: even the routing-blocked warning loses to it.
+        popover.setRoutingBlockedNeedsDefault(true)
+        #expect(popover.test_systemAirPlayNoteText == "Audiout lost access to system audio.",
+                "capture-failed outranks routing-blocked")
+
+        // Clearing it reveals the still-set, lower-precedence warning.
+        popover.setCaptureFailureMessage(nil)
+        #expect(popover.test_systemAirPlayNoteText == "Audiout isn't your Mac's output device — audio won't play until you switch back.",
+                "with capture recovered, the routing-blocked warning shows through")
+
+        popover.setRoutingBlockedNeedsDefault(false)
+        #expect(popover.test_systemAirPlayNoteText == nil, "clearing both empties the slot")
+    }
+
     // MARK: Takeover status strip (T6, PLAN-AIRPLAY-COEXISTENCE.md)
 
     /// All four takeover states render their own copy, and the "Open Login

@@ -270,8 +270,15 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     var btSyncedSinkFactory: (() -> BTSyncedSinkControlling)?
 
     /// The constructed manager (real or spy), built lazily on first enable and
-    /// reused across disable/re-enable. Confined to `captureControlQueue`.
+    /// reused across disable/re-enable. Every USE of the sink is confined to
+    /// `captureControlQueue`; the reference itself is guarded by
+    /// ``btSinkRefLock`` so the sync drawer can read the sink without waiting
+    /// behind a tap rebuild.
     private var btSink: BTSyncedSinkControlling?
+
+    /// Guards the ``btSink`` REFERENCE only (never the sink's own state — the
+    /// sink is internally synchronized).
+    private let btSinkRefLock = NSLock()
 
     // MARK: Bluetooth connect lifecycle (BT-LIFECYCLE)
 
@@ -1199,6 +1206,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// item already running when cancelled still completes, same D4 tolerance as
     /// `pendingRetries`). Confined to `stateQueue`.
     private var pendingCaptureRetry: DispatchWorkItem?
+
+    /// Whether a `.captureFailed` note is currently showing in the popover, so
+    /// the clear event is emitted exactly once, on the edge that actually
+    /// retires the condition (recovery, or capture stopping being desired).
+    /// Confined to `stateQueue`.
+    private var captureFailureNoteActive = false
 
     /// Base delay before the FIRST whole-system-tap `.failed` retry (T16, E10),
     /// and the seed of its capped-exponential backoff (doubled per attempt,
@@ -2412,7 +2425,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.applyLocal(id) { $0.volume = clamped }
             } else {
                 self.applyLocal(id) { $0.volume = clamped }
-                self.pushVolume(outputID, engineValue: self.engineVolume(forID: id, uiVolume: clamped))
+                self.pushVolume(outputID, id: id,
+                                engineValue: self.engineVolume(forID: id, uiVolume: clamped),
+                                uiLevel: clamped)
             }
         }
     }
@@ -2476,7 +2491,10 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // For AirPlay-2, use the standard 0 volume with stashed value.
                 let isAirPlay1 = !(self.known[id]?.supportsAirPlay2 ?? true)
                 let engineValue = isAirPlay1 ? -1.0 : Self.engineVolume(0)
-                self.pushVolume(outputID, engineValue: engineValue)
+                // `uiLevel: nil` — the fader is at 0 because the device is MUTED,
+                // not because of a level the engine confirmed, so a refused mute
+                // push must not move it.
+                self.pushVolume(outputID, id: id, engineValue: engineValue, uiLevel: nil)
             } else {
                 self.muted.remove(id)
                 self.applyLocal(id) { $0.isMuted = false }
@@ -2505,8 +2523,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // `volumeInFlight`/`volumePending` coalescing already collapses a burst
             // to at most one extra call per output, latest-wins.
             for (id, outputID) in self.outputIDs where !self.muted.contains(id) {
-                self.pushVolume(outputID, engineValue: self.engineVolume(
-                    forID: id, uiVolume: self.known[id]?.volume ?? 0))
+                // `uiLevel: nil` — gain-only. The fader didn't move, so a refused
+                // push must not move it either.
+                self.pushVolume(outputID, id: id,
+                                engineValue: self.engineVolume(
+                                    forID: id, uiVolume: self.known[id]?.volume ?? 0),
+                                uiLevel: nil)
             }
             // BT sinks carry the full `Main × Group × Device` product (unlike
             // the Mac's own path below, they never see the system volume), so
@@ -3738,7 +3760,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 sink = existing
             } else if let factory = btSyncedSinkFactory {
                 sink = factory()
-                btSink = sink
+                btSinkRefLock.withLock { btSink = sink }
             } else {
                 return   // no factory wired (tests / UI-only smoke) — inert
             }
@@ -5030,11 +5052,25 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 self.pendingCaptureRetry?.cancel()
                 self.pendingCaptureRetry = nil
                 self.captureRetryCount = 0
+                if self.captureFailureNoteActive {
+                    self.captureFailureNoteActive = false
+                    self.emit(.captureFailed(message: nil, retrying: false))
+                }
             }
 
         case .failed(let error):
             let (shouldRetry, attempt): (Bool, Int) = stateQueue.sync {
-                guard self.captureRunning, error.isRetryable else {
+                let running = self.captureRunning
+                let retryable = error.isRetryable
+                if running {
+                    // The tap is dead while audio is still wanted: every selected
+                    // speaker has gone silent behind a row that still reads
+                    // "Connected", and no per-device state can say so. A failure
+                    // while capture isn't desired is noise — nobody is listening.
+                    self.captureFailureNoteActive = true
+                    self.emit(.captureFailed(message: error.userMessage, retrying: retryable))
+                }
+                guard running, retryable else {
                     // Bookkeeping-hygiene fix (mirrors `handlePerAppCaptureHealthChange`):
                     // no retry is being scheduled from here — either capture
                     // isn't desired any more or this is a non-retryable failure
@@ -6078,13 +6114,19 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                     // Cause mapping mirrors `applyEngineState`'s `.passwordRequired`
                     // arm: an auth rejection is the one connect failure with a
                     // known, actionable cause — never flatten it to `.unknown`.
+                    // `opTimedOut` is the second: the armed op's completion never
+                    // arrived inside the bounded window, which is exactly what
+                    // `.timedOut` tells the user. Anything else stays `.unknown` —
+                    // a plausible-but-wrong cause is worse than a vague one — but
+                    // the raw error always rides along as `detail`.
                     var cause: ConnectionFailure.Cause = .unknown
                     if case AirPlayEngineError.passwordRequired = error { cause = .authRequired }
+                    if case AirPlayEngineError.opTimedOut = error { cause = .timedOut }
                     stateQueue.sync {
                         self.removeFromAddedLocked(id)
                         self.failedGate.insert(id)
                         self.applyLocal(id) { $0.isSelected = false; $0.isAvailable = false }
-                        self.enterFailure(id, cause: cause)
+                        self.enterFailure(id, cause: cause, detail: String(describing: error))
                     }
                     return
                 }
@@ -6432,7 +6474,8 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     ///
     /// With nothing streaming, phases 1 and 3 are empty and this reduces to the
     /// engine set — silent/instant.
-    public func applyStartBuffer(ms: Int) async {
+    @discardableResult
+    public func applyStartBuffer(ms: Int) async -> (reconnected: Int, expected: Int) {
         // Snapshot the streaming set under the lock and record the new value.
         // (Re-feed + volume/mute restoration are handled by convergeDevice via
         // `lastDescriptors` / `restoreEffectiveVolume`, so we only need the ids.)
@@ -6500,9 +6543,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         // The apply has fully settled — teardown, buffer set, re-add, and the
         // in-session volume re-push above have all run. Lift the seed suppression so
         // any subsequent REAL (re)connect reseeds from the connect default as usual.
-        stateQueue.sync {
+        // Count what actually came back while we're on the queue: the D4 re-add is
+        // best-effort, so the caller can only claim "reconnected" for the devices
+        // still in `added`.
+        let reconnected = stateQueue.sync { () -> Int in
             for item in streaming { self.bufferReAdding.remove(item.id) }
+            return streaming.filter { self.added.contains($0.id) }.count
         }
+        return (reconnected: reconnected, expected: streaming.count)
     }
 
     /// Set `desiredOn[id] = target`, claim the (awaited) `converging` slot, then
@@ -7615,7 +7663,12 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// (``BTDeviceSnapshot/lastUsed``). `Device` deliberately doesn't carry this
     /// yet — it's stashed here so the UI wave can filter/sort the ghost rows a
     /// forever-remembered pairing list produces, whatever surface it picks.
-    private var btLastUsed: [String: Date] = [:]   // on stateQueue
+    /// Under its own lock rather than `stateQueue` because the popover reads it
+    /// on the OPEN path, and `stateQueue` can be busy behind a converge.
+    private var btLastUsed: [String: Date] = [:]   // btLastUsedLock
+
+    /// Guards ``btLastUsed`` alone — see that property's note.
+    private let btLastUsedLock = NSLock()
 
     /// The ids the enumerator's LATEST merged list contains — i.e. every BT id
     /// macOS currently knows a pairing (or live endpoint) for. `nil` until the
@@ -7626,11 +7679,16 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// On `stateQueue`.
     private var btPairedIDs: Set<String>?
 
-    /// The ``btLastUsed`` stash, read safely off `stateQueue` — the
-    /// ``BTOutputControlling`` read the popover's Bluetooth-subsection sort
-    /// uses (ghost pairings sink to the bottom by recency; sort-only in v1).
+    /// The ``btLastUsed`` stash — the ``BTOutputControlling`` read the popover's
+    /// Bluetooth-subsection sort uses (ghost pairings sink to the bottom by
+    /// recency; sort-only in v1).
+    ///
+    /// This is on the popover's OPEN path (`deviceSections()` →
+    /// `orderedBluetoothDevices`), so it must never wait on `stateQueue`, which
+    /// can be seconds deep behind a converge. Its own lock instead — the same
+    /// pattern `btSyncTrim(forDevice:)` and the cached system volume use.
     public func lastUsedDatesForBTDevices() -> [String: Date] {
-        stateQueue.sync { btLastUsed }
+        btLastUsedLock.withLock { btLastUsed }
     }
 
     /// Fold a full BT enumeration into the model, through the same
@@ -7645,7 +7703,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         for snapshot in snapshots {
             let id = snapshot.id
             seen.insert(id)
-            btLastUsed[id] = snapshot.lastUsed
+            btLastUsedLock.withLock { btLastUsed[id] = snapshot.lastUsed }
             if let existing = known[id] {
                 var updated = existing
                 updated.name = snapshot.name
@@ -7918,17 +7976,24 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
                 // edge, or `retryOutput` — a same-descriptor re-announce keeps it.
                 device.isAvailable = false
                 device.isSelected = false
-                eqNeedsReconcile = self.added.remove(id) != nil
+                let wasStreaming = self.added.remove(id) != nil
+                eqNeedsReconcile = wasStreaming
                 if self.desiredOn[id] == true {
                     self.failedGate.insert(id)
                     // `.passwordRequired` is the one engine failure with a KNOWN,
                     // actionable cause — don't flatten it to `.unknown` (live
                     // 2026-08-06: an auth-blocked receiver was debugged blind
                     // because the panel said "failed for an unknown reason" while
-                    // the engine knew it wanted a password).
+                    // the engine knew it wanted a password). A device that WAS
+                    // streaming is the other known shape: a live session dying
+                    // out-of-band is precisely "was connected, silently dropped".
                     let cause: ConnectionFailure.Cause =
-                        state == .passwordRequired ? .authRequired : .unknown
-                    device.connectionState = .failed(ConnectionFailure(cause: cause))
+                        state == .passwordRequired
+                            ? .authRequired
+                            : (wasStreaming ? .droppedMidStream : .unknown)
+                    device.connectionState = .failed(
+                        ConnectionFailure(cause: cause, detail: "engine state: \(state)")
+                    )
                 }
             case .stopped:
                 device.isSelected = false
@@ -8083,7 +8148,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         applyLocal(id) { $0.volume = stored }
         // Per-device (AP1 curve or AP2 linear) rather than the AP2-only static map —
         // a pre-existing inconsistency, since every other push here is per-device.
-        pushVolume(outputID, engineValue: engineVolume(forID: id, uiVolume: stored))
+        pushVolume(outputID, id: id,
+                   engineValue: engineVolume(forID: id, uiVolume: stored),
+                   uiLevel: stored)
     }
 
     /// A relative `volumeup`/`volumedown` DACP verb from the speaker
@@ -8184,7 +8251,7 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // NOT `.off` (which would look like a clean, deliberate stop).
             result.isAvailable = false
             result.isSelected = false
-            result.connectionState = .failed(ConnectionFailure(cause: .unknown))
+            result.connectionState = .failed(ConnectionFailure(cause: .vanished))
         } else {
             // An unavailable non-AP2 (AP1) receiver. A live AP1 device reports
             // `isAvailable == true` (first branch) and only reaches here if it has
@@ -8336,35 +8403,73 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
     /// for one id (e.g. a fast slider drag) collapses to at most one extra call
     /// once the in-flight one completes, instead of replaying every
     /// intermediate value.
-    private var volumePending: [OutputID: Double] = [:]
+    private var volumePending: [OutputID: (engineValue: Double, id: String, uiLevel: Int?)] = [:]
+
+    /// The last UI-domain level per device id the ENGINE actually acknowledged —
+    /// the only level we know a receiver really has. A refused push falls back to
+    /// this so the fader shows something true rather than the value that failed.
+    /// On `stateQueue`.
+    private var confirmedVolume: [String: Int] = [:]
 
     /// Push a volume to the engine off-queue (the engine op is async), serialized
     /// per output id via ``volumeInFlight``/``volumePending`` so at most one
     /// `engine.setVolume` call for a given output is ever in flight concurrently.
-    /// Failures are non-fatal (volume completions don't gate anything) —
-    /// swallowed, the next state event / user action reconciles. On `stateQueue`.
-    private func pushVolume(_ outputID: OutputID, engineValue: Double) {
+    /// `uiLevel` is the 0–100 level the fader is optimistically showing because of
+    /// this push, or `nil` when the push doesn't correspond to a fader position
+    /// (a mute's silence push, a master-gain re-push, a seed while muted) — a
+    /// throw then re-emits the last confirmed level so the fader never lies about
+    /// where a speaker is. On `stateQueue`.
+    private func pushVolume(_ outputID: OutputID, id: String, engineValue: Double, uiLevel: Int?) {
         guard !volumeInFlight.contains(outputID) else {
-            volumePending[outputID] = engineValue
+            volumePending[outputID] = (engineValue, id, uiLevel)
             return
         }
         volumeInFlight.insert(outputID)
-        issueVolumePush(outputID, engineValue)
+        issueVolumePush(outputID, id: id, engineValue: engineValue, uiLevel: uiLevel)
     }
 
     /// Issue one `setVolume` call and, on completion, either chase the latest
     /// superseding value queued in ``volumePending`` or clear ``volumeInFlight``.
     /// Not on `stateQueue` itself (the engine call is async) — re-enters it only
-    /// to touch the two dictionaries, matching every other engine-callback
-    /// pattern in this file.
-    private func issueVolumePush(_ outputID: OutputID, _ engineValue: Double) {
+    /// to touch the dictionaries, matching every other engine-callback pattern in
+    /// this file.
+    ///
+    /// The completion is also the ONLY feedback this backend gets about a volume
+    /// write (there is no poll loop by design — the engine's completions ARE
+    /// ground truth), so it doubles as the fader's bound: success records
+    /// ``confirmedVolume``, a throw snaps the model back to it.
+    private func issueVolumePush(_ outputID: OutputID, id: String, engineValue: Double, uiLevel: Int?) {
         let engine = self.engine
         Task { [weak self] in
-            try? await engine.setVolume(outputID, engineValue)
+            var failed = false
+            do {
+                try await engine.setVolume(outputID, engineValue)
+            } catch {
+                failed = true
+            }
             guard let self else { return }
             self.stateQueue.async {
+                if let uiLevel {
+                    if failed {
+                        // Revert only when this push's optimistic echo is still
+                        // exactly what the UI shows: a newer user edit (queued
+                        // push, a mute, or a level that has since moved on) owns
+                        // the fader now and must never be clobbered by a stale
+                        // failure. Nor is there anything to say without a level
+                        // the engine once acknowledged.
+                        if self.volumePending[outputID] == nil,
+                           !self.muted.contains(id),
+                           self.known[id]?.volume == uiLevel,
+                           let confirmed = self.confirmedVolume[id],
+                           confirmed != uiLevel {
+                            self.applyLocal(id) { $0.volume = confirmed }
+                        }
+                    } else {
+                        self.confirmedVolume[id] = uiLevel
+                    }
+                }
                 if let next = self.volumePending.removeValue(forKey: outputID) {
-                    self.issueVolumePush(outputID, next)
+                    self.issueVolumePush(outputID, id: next.id, engineValue: next.engineValue, uiLevel: next.uiLevel)
                 } else {
                     self.volumeInFlight.remove(outputID)
                 }
@@ -8424,12 +8529,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
 
     /// Enter the resting `.failed` state (converge add-throw or an out-of-band
     /// `.failed`/`.passwordRequired` from the engine's state stream). NativeBackend
-    /// has no diagnostics seam (T3 is OwnTone-only per the brief; the engine's
-    /// completion IS the evidence), so every caller but one has no better guess
-    /// than `.unknown`; the connect-time PTP gate (T4) is the one exception and
-    /// passes its own `cause` explicitly.
-    private func enterFailure(_ id: String, cause: ConnectionFailure.Cause = .unknown) {   // on stateQueue
-        setConnectionState(.failed(ConnectionFailure(cause: cause)), for: id)
+    /// still has no diagnostics seam (T3 is OwnTone-only per the brief; the engine's
+    /// completion IS the evidence), so causes come from the evidence already in
+    /// hand: the converge catch maps `passwordRequired → .authRequired` and
+    /// `opTimedOut → .timedOut` and always carries the engine error as `detail`,
+    /// the connect-time PTP gate (T4) passes its own `cause`, and anything else
+    /// stays `.unknown`. `detail` is what backs "Copy details" in the UI.
+    private func enterFailure(_ id: String, cause: ConnectionFailure.Cause = .unknown, detail: String? = nil) {   // on stateQueue
+        setConnectionState(.failed(ConnectionFailure(cause: cause, detail: detail)), for: id)
     }
 
     /// Recompute the effective (wire) volume after an unmute: push the stashed
@@ -8439,7 +8546,9 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
         let intended = stashedVolume[id] ?? known[id]?.volume ?? 0
         stashedVolume[id] = nil
         applyLocal(id) { $0.volume = intended }
-        pushVolume(outputID, engineValue: engineVolume(forID: id, uiVolume: intended))
+        pushVolume(outputID, id: id,
+                   engineValue: engineVolume(forID: id, uiVolume: intended),
+                   uiLevel: intended)
     }
 
     /// Seed a just-(re)connected engine output's starting volume — from the
@@ -8541,9 +8650,13 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // which is not what "muted" means. `setMuted` already sends the sentinel
             // on this device; this path had been missing it.
             stashedVolume[id] = seed
-            pushVolume(outputID, engineValue: engineVolume(forID: id, uiVolume: 0))
+            pushVolume(outputID, id: id,
+                       engineValue: engineVolume(forID: id, uiVolume: 0),
+                       uiLevel: nil)
         } else {
-            pushVolume(outputID, engineValue: engineVolume(forID: id, uiVolume: seed))
+            pushVolume(outputID, id: id,
+                       engineValue: engineVolume(forID: id, uiVolume: seed),
+                       uiLevel: seed)
         }
         return seed
     }
@@ -8618,6 +8731,14 @@ public final class NativeBackend: OutputBackend, LatencyConfigurable, MeteringCo
             // `captureRunning`) 5s from now.
             schedulingSnapshotPollWork?.cancel()
             schedulingSnapshotPollWork = nil
+            // Nothing is routed any more, so a standing capture-failure note is
+            // about a tap nobody wants — retire it. For a non-retryable failure
+            // (`.osUnsupported`) this edge is the only thing short of a restart
+            // that ever clears the note.
+            if captureFailureNoteActive {
+                captureFailureNoteActive = false
+                emit(.captureFailed(message: nil, retrying: false))
+            }
         }
         // W3-T3: streaming just started or stopped — re-evaluate the double-path
         // guard (it also depends on the system default output, which didn't
@@ -9598,17 +9719,17 @@ extension NativeBackend: BTOutputControlling {
         stateQueue.async { self.releaseBTAlignmentHoldLocked(id) }
     }
 
-    /// `btSink` is confined to `captureControlQueue` (every other touch in
-    /// this file reaches it only via `.async` there), so this hops in with
-    /// `.sync` rather than reading the property directly from whatever
-    /// thread the caller is on — the same synchronous-read-of-confined-state
-    /// pattern `stateQueue.sync` uses elsewhere in this file. The hop also
-    /// keeps the live-query contract honest: nothing here is cached on the
-    /// `NativeBackend` side to go stale between AirPlay joining/leaving.
+    /// The sync drawer asks for this on its own open path, so it must not wait
+    /// on `captureControlQueue` — a tap rebuild parked there runs for hundreds
+    /// of milliseconds. Only the `btSink` REFERENCE is queue-confined state, so
+    /// it is read under ``btSinkRefLock`` and the sink is then asked directly:
+    /// the sink synchronizes its own tables, so the call is safe off-queue.
+    /// The answer stays a LIVE query per the sink's contract — nothing is
+    /// cached here, because the range moves the instant an AirPlay device joins
+    /// or leaves the composition.
     public func btUsableTrimRangeMs(forDevice id: String) -> ClosedRange<Double> {
-        captureControlQueue.sync {
-            btSink?.usableTrimRangeMs(forDeviceUID: id) ?? (-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
-        }
+        let sink = btSinkRefLock.withLock { btSink }
+        return sink?.usableTrimRangeMs(forDeviceUID: id) ?? (-BTSyncTrim.rangeMs...BTSyncTrim.rangeMs)
     }
 
     public func setBTWizardTickTempo(bpm: Double) {
@@ -9946,7 +10067,9 @@ protocol BTSyncedSinkControlling: SyncedLocalPCMSink {
     /// The usable trim range for a device (D11/T3) — see
     /// ``BTSyncedSink/usableTrimRangeMs(forDeviceUID:)``. Default returns the
     /// full ±`BTSyncTrim.rangeMs` so lifecycle-only spies compile unchanged;
-    /// ``BTSyncedSink`` provides the live one.
+    /// ``BTSyncedSink`` provides the live one. Unlike the rest of this
+    /// protocol, this may be called off `captureControlQueue`, so an
+    /// implementation must be internally synchronized (the real sink is).
     func usableTrimRangeMs(forDeviceUID uid: String) -> ClosedRange<Double>
     /// Per-device render gain: the backend's composed
     /// `Main × Group × Device` product, 0 while muted or first-mix-held (W3).

@@ -407,8 +407,14 @@ on the model, never the reverse. `OutputBackend` is the only seam between them.
   clears every redirect there, so a fresh launch after granting is the
   supported — and only — recovery path. Do not reintroduce a mid-session
   resume without revisiting that decision.
-- `NativeBackend` has no `ConnectionDiagnosing` seam — `.failed` cause is
-  always `.unknown`. `MockBackend` mutation stays no-op-silent and confined
+- `NativeBackend` still has no `ConnectionDiagnosing` seam, but a `.failed`
+  cause is no longer always `.unknown`: it is mapped from the engine's own
+  evidence — `.authRequired` (`passwordRequired`), `.timedOut` (`opTimedOut`),
+  `.droppedMidStream` (a live session dying out-of-band), `.vanished` (the
+  sticky-AP2 offline merge), `.timingUnavailable` (the PTP gate). Anything
+  else stays `.unknown`, because a plausible-but-wrong cause is worse than a
+  vague one, and every native failure carries `detail` so Copy Details works.
+  `MockBackend` mutation stays no-op-silent and confined
   to its private serial queue.
 - Known stability findings in this package carry `STABILITY(id)` inline
   markers — details and fix sketches in

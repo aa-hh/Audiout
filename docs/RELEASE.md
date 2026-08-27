@@ -19,8 +19,13 @@ replies) restates this, not a variant of it.
 ## Pipeline command sequence
 
 ```bash
-# 1. Bump the version/build number for this release, then run the pipeline:
-APP_VERSION=1.0.0 BUILD_NUMBER=3 \
+# 1. Tag the commit that is the release. The tag is the single source of truth
+#    for the version — publishing refuses to run from an untagged or dirty tree.
+git tag v1.0.0 && git push origin v1.0.0
+
+# 2. Build it. APP_VERSION comes off the tag; BUILD_NUMBER just has to increase,
+#    and the commit count is a fine monotonic source for it.
+APP_VERSION=1.0.0 BUILD_NUMBER="$(git rev-list --count HEAD)" \
 AUDIOUT_LICENSE_URL="https://<license-server>" \
 AUDIOUT_BUY_URL="https://<site>/buy" \
 SPARKLE_ED_PUBLIC_KEY="<public key from Sparkle's generate_keys>" \
@@ -30,6 +35,12 @@ scripts/make-release.sh
 # shasum -a 256. scripts/make-release.sh requires APP_VERSION and BUILD_NUMBER
 # to be set — it errors out immediately otherwise.
 ```
+
+**Why the tag comes first:** a release otherwise exists in three places that can
+drift apart — the git tag, `APP_VERSION`, and the appcast item. Making the tag
+authoritative collapses that to one, and `scripts/publish-release.sh` enforces
+it: `git describe --tags --exact-match` must equal `v$APP_VERSION`, and the tree
+must be clean, or it refuses to upload.
 
 ### Build-time env vars
 
@@ -66,9 +77,93 @@ live-testing session; do it, then don't keep using that copy.
 
 - No DMG. The zip `make-release.sh` produces is what both Paddle's file
   delivery and Sparkle's updater consume directly.
-- No automatic upload anywhere. Paddle and the appcast are both manual steps
-  below, on purpose — this pipeline builds and proves the artifact; it doesn't
-  publish it.
+- No upload. `make-release.sh` builds and proves the artifact; publishing is a
+  separate command run later, by hand — see the next section.
+
+---
+
+## Publishing: upload, then promote
+
+Publishing is **two separate events**, and they are separate on purpose. A
+release is three independent objects in R2 (bucket `audiouter-releases` — note
+the "er"), and the license server reads each one on its own:
+
+| Object | Who reads it | What it does |
+|---|---|---|
+| `releases/Audiout-<version>.zip` | `GET /download` streams it | Present but unreferenced = **invisible to everyone** |
+| `releases/latest-vN.json` | `GET /download` resolves the current build for the key's major | Flipping it = **new buyers get the new build**. Reversible. |
+| `appcast-vN.xml` | `GET /appcast.xml` serves it to Sparkle | Adding the `<item>` = **existing users get the update**. One-way. |
+
+`N` is the major version, derived from `APP_VERSION` — never given separately.
+
+```bash
+# Stage 1 — upload. Nothing becomes reachable; smoke-test at your leisure.
+APP_VERSION=1.0.0 scripts/publish-release.sh upload
+
+# ...then run scripts/verify-standalone-app.sh by hand, and sign the zip with
+# Sparkle's sign_update (step c/e below).
+
+# Stage 2 — promote. This is what users see.
+APP_VERSION=1.0.0 SPARKLE_ED_SIGNATURE="<sign_update output>" \
+  scripts/publish-release.sh promote --verified-standalone
+```
+
+**The order is not a style preference.** An uploaded-but-unreferenced zip is the
+exact analogue of a deployment sitting at 0% traffic: it exists, it costs
+nothing, nobody can reach it, and it can sit there for weeks. Do it the other
+way round — publish an appcast item pointing at a zip that is not in R2 yet —
+and every running copy of the app shows a **failed update** until you fix it.
+For the same reason `promote` writes `latest-vN.json` *before* `appcast-vN.xml`:
+if the appcast put fails, new buyers still get a working download and no
+installed copy is broken.
+
+`upload` also refuses a zip whose app is not notarised **and** stapled — `build/`
+is never cleaned, so the zip sitting there can be a stale artifact from an
+earlier attempt, and that check is the one that catches it.
+
+`promote` refuses without an explicit `--verified-standalone`. That is an
+acknowledgement, not a check: `scripts/verify-standalone-app.sh` moves real
+Homebrew directories on this Mac, so it stays a deliberate manual step and is
+never invoked from the publish script. It also refuses if the object in R2 is
+not byte-identical to the local zip, since the appcast item's length and version
+fields are read from the local copy.
+
+### Phased rollout
+
+Every appcast item carries
+`<sparkle:phasedRolloutInterval>86400</sparkle:phasedRolloutInterval>` —
+seconds between groups. Sparkle uses **seven hardcoded groups**, so 86400
+spreads the update over roughly a week, one group per day after the item's
+`pubDate`. The group id is generated on the user's machine and never sent
+anywhere. Manual "Check for Updates…" and items marked critical bypass the
+phasing entirely, so anyone checking by hand gets it immediately.
+
+This is the only brake on the one-way step: a copy that has already updated
+cannot be rolled back by editing XML, but pulling the item mid-rollout limits
+the blast radius to the groups already served.
+
+Sparkle 2's `sparkle:channel` (a separate beta feed) is deliberately **not**
+built — the appcast is served per-major off the key's `max_major`, so a channel
+dimension would mean teaching the license server about channels.
+
+### Rollback
+
+Re-put the previous `releases/latest-vN.json` and remove the new `<item>` from
+`appcast-vN.xml`. `/download` serves the old build again and the feed stops
+offering the new one. Copies that already updated stay updated.
+
+### The GitHub Release: metadata only
+
+Cutting a GitHub Release is a good record of what shipped and a natural home for
+the notes. **Never attach the distributable zip to it.** This repo is public, so
+a release asset is public the moment it is uploaded — and the entire paid model
+rests on `/download` being gated on a key. An attached zip routes around that
+gate permanently, and you cannot un-publish something that has been mirrored.
+
+Notarisation also cannot run in GitHub-hosted CI without exporting the Developer
+ID `.p12` and an app-specific password into repo secrets, which for a one-person
+shop is a worse trade than typing one command on the Mac that already holds the
+keychain. `make-release.sh` stays local.
 
 ---
 
@@ -120,29 +215,40 @@ the app can verify update signatures against it.
 - No Paddle SDK or checkout script lives in either repo yet — the marketing
   site's buy button is still a placeholder link until this step is done.
 
-### e. Per-release: sign the archive and upload it to the license server's R2
+### e. Per-release: sign the distributable archive
 
 The download and the update feed are both served by the license server
-(`~/Projects/Audiout License Server`, README there is the contract), gated on
-a key — so publishing a release is an upload to its R2 bucket, not an edit to
-the website. For every release meant to reach existing users via Sparkle, with
-`N` the major version:
+(`~/Projects/Audiout License Server`, README there is the contract), gated on a
+key — so publishing a release is an upload to its R2 bucket, not an edit to the
+website. `scripts/publish-release.sh` does that upload (see **Publishing**
+above); the one part it cannot do is the signature.
 
-1. Sign the distributable zip with Sparkle's `sign_update` tool (same
-   distribution as `generate_keys` above), using the private key from step c.
-2. Write `appcast-vN.xml` listing only the N.x releases, each `<item>` carrying
-   the version and the signature `sign_update` printed. Enclosure URLs are
-   simply `<PUBLIC_BASE_URL>/download` — Sparkle sends the key as a bearer
-   header on the enclosure fetch too, and the server resolves which file that
-   key is entitled to.
-3. Write `latest-vN.json`: `{"version": "<version>", "file": "releases/Audiout-<version>.zip"}`.
-4. Upload all three:
+Sign the distributable zip with Sparkle's `sign_update` tool (same distribution
+as `generate_keys` above), using the private key from step c, and hand the
+output to `promote` as `SPARKLE_ED_SIGNATURE`:
 
-   ```bash
-   wrangler r2 object put audiout-releases/releases/Audiout-1.0.0.zip --file build/Audiout-1.0.0.zip
-   wrangler r2 object put audiout-releases/releases/latest-v1.json --file latest-v1.json
-   wrangler r2 object put audiout-releases/appcast-v1.xml --file appcast-v1.xml
-   ```
+```bash
+./bin/sign_update build/Audiout-1.0.0.zip
+```
+
+The private key stays in the keychain. No script here holds it, derives it, or
+asks for it — a signature is pasted in per release, on purpose.
+
+For reference, the three objects `publish-release.sh` writes (bucket
+`audiouter-releases`; `N` is the major version):
+
+```bash
+# Stage 1: upload
+wrangler r2 object put audiouter-releases/releases/Audiout-1.0.0.zip --file build/Audiout-1.0.0.zip
+# Stage 2: promote — latest first, appcast second
+wrangler r2 object put audiouter-releases/releases/latest-v1.json --file latest-v1.json
+wrangler r2 object put audiouter-releases/appcast-v1.xml --file appcast-v1.xml
+```
+
+Enclosure URLs in the appcast are simply `<PUBLIC_BASE_URL>/download` — Sparkle
+sends the key as a bearer header on the enclosure fetch too, and the server
+resolves which file that key is entitled to. `latest-vN.json` is
+`{"version": "<version>", "file": "releases/Audiout-<version>.zip"}`.
 
 ### f. Choose the license server's public URL
 

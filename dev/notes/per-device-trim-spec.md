@@ -121,8 +121,15 @@ known holes, one measurement:
 ## Out of scope
 
 - AirPlay per-device trim (Decision 1; revisit trigger recorded there).
-- Mic-based auto-offset — CUT by Alec 2026-08-07 (mic position
-  uncontrollable; different-rooms is the good case). Do not revive.
+- ~~Mic-based auto-offset — CUT by Alec 2026-08-07 (mic position
+  uncontrollable; different-rooms is the good case). Do not revive.~~
+  **REVERSED by Alec 2026-08-27** on the strength of the "Beyond the Tick"
+  research brief: mic position only contributes distance asymmetry
+  (~2.9 ms/m), well inside the ±6 ms blend bar unless the Mac sits far
+  off-centre — a UX-copy problem, not a blocker. The mic measurement feeds
+  the wizard's existing `openingProposalMs` seam (by-ear confirm stays the
+  gate; wizard remains the mic-denied fallback). See
+  `mic-probe-calibration-brief.md`.
 - Continuous drift correction — measured unnecessary (drift ≈ 0).
 - Per-brand seed table — no data source exists.
 

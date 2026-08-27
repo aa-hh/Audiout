@@ -64,3 +64,6 @@ finished. If the coordinating session died mid-flight, some worktrees may hold U
 - Naming: "Main Audio" is canonical (Alec 2026-08-27); PRODUCT.md still says "Main Out" until
   the wrap-up pass.
 - Deployment floor: macOS 14.2 (T6 raises Package.swift; make-app.sh already ships 14.2).
+
+## Review ledger
+- T4 license-money: APPROVED (fable review, 0 findings, 3 deviations endorsed) — commits 3a8d4b65+4110e92d on origin. READY TO MERGE pending Alec.

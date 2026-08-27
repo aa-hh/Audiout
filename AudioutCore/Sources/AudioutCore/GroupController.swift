@@ -667,6 +667,17 @@ public final class GroupController {
         )
     }
 
+    /// The default name a new group is offered: "Group N" for the lowest N not
+    /// already taken. `groups.count + 1` — what both call sites used — collides
+    /// after a delete: "Group 1" and "Group 2" saved, "Group 1" deleted, and the
+    /// next suggestion is "Group 2" again.
+    public func nextDefaultGroupName() -> String {
+        let taken = Set(groups.map(\.name))
+        var n = 1
+        while taken.contains("Group \(n)") { n += 1 }
+        return "Group \(n)"
+    }
+
     /// Remove a group. Deactivates it if it was active, and if Main Out pointed
     /// at it, falls back to `.selectedDevices` so the routing target never
     /// dangles at a deleted group.

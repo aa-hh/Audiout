@@ -2525,9 +2525,9 @@ public final class PopoverController: NSObject {
         if device.isLocalDevice, controller.localRowDrivesMain {
             device.volume = controller.mainOutMasterVolume
         }
-        // T-UI-ALLOW: the Phase-1 local-mix block is gone — `canSelectLocalSpeaker`
-        // is unconditionally `true` now (T-GROUPCTL / Q5, synced local sink), so
-        // the Mac row is never blocked/greyed any more. This no longer computes
+        // T-UI-ALLOW: the Phase-1 local-mix block is gone — the Mac row's
+        // select-ability gate went with it (T-GROUPCTL / Q5, synced local sink),
+        // so the Mac row is never blocked/greyed any more. This no longer computes
         // or passes `blocked`/`blockReason` to the row (both default to
         // false/nil in `DeviceRowView.apply`, which is exactly the always-un-blocked
         // behavior this now produces).
@@ -3465,7 +3465,7 @@ public final class PopoverController: NSObject {
     /// unsaved — state rather than a group that isn't there.
     private func saveCurrentSetup() {
         guard let controller = groupController else { return }
-        let name = "Group \(controller.groups.count + 1)"
+        let name = controller.nextDefaultGroupName()
         do {
             _ = try controller.saveCurrentSetupAsGroup(name: name)
             test_saveGroupFailureReported = false

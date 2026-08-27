@@ -197,10 +197,9 @@ func defaultOutputID() -> AudioDeviceID {
 
 // MARK: - Resolve devices
 
-guard let builtInMic = allDeviceIDs().first(where: {
-    transportType($0) == kAudioDeviceTransportTypeBuiltIn &&
-    channelCount($0, scope: kAudioObjectPropertyScopeInput) > 0
-}) else {
+// The SAME lookup the app's recorder uses — the spike exists to exercise the
+// shipping capture path, not a parallel one.
+guard let builtInMic = BuiltInMicRecorder.builtInMicrophoneID() else {
     fputs("No built-in microphone found — this tool never records any other input.\n", stderr)
     exit(2)
 }
@@ -240,43 +239,7 @@ guard accessGranted else {
     exit(2)
 }
 
-// MARK: - Capture + playback
-
-final class MicCapture {
-    private let engine = AVAudioEngine()
-    private let lock = NSLock()
-    private var samples: [Float] = []
-    let sampleRate: Double
-
-    init(deviceID: AudioDeviceID) throws {
-        try engine.inputNode.auAudioUnit.setDeviceID(deviceID)
-        let format = engine.inputNode.outputFormat(forBus: 0)
-        sampleRate = format.sampleRate
-        engine.inputNode.installTap(onBus: 0, bufferSize: 4_096, format: nil) { [self] buffer, _ in
-            let frames = Int(buffer.frameLength)
-            guard frames > 0, let data = buffer.floatChannelData else { return }
-            let channels = Int(buffer.format.channelCount)
-            var mono = [Float](repeating: 0, count: frames)
-            for c in 0..<channels {
-                for i in 0..<frames { mono[i] += data[c][i] }
-            }
-            if channels > 1 {
-                let inv = 1 / Float(channels)
-                for i in 0..<frames { mono[i] *= inv }
-            }
-            lock.lock(); samples.append(contentsOf: mono); lock.unlock()
-        }
-        engine.prepare()
-        try engine.start()
-    }
-
-    func stop() -> [Float] {
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        lock.lock(); defer { lock.unlock() }
-        return samples
-    }
-}
+// MARK: - Playback (capture is the app's own BuiltInMicRecorder)
 
 final class ProbePlayer {
     private let engine = AVAudioEngine()
@@ -314,8 +277,9 @@ final class ProbePlayer {
 }
 
 let rateBefore = nominalRate(outputID)
-let capture: MicCapture
-do { capture = try MicCapture(deviceID: builtInMic) } catch {
+let capture = BuiltInMicRecorder()
+let captureRate: Double
+do { captureRate = try capture.start() } catch {
     fputs("Could not open the built-in microphone: \(error)\n", stderr)
     exit(2)
 }
@@ -345,7 +309,7 @@ let recording = capture.stop()
 // MARK: - Verdicts
 
 print(String(format: "captured %.2f s at %.0f Hz from the built-in mic",
-             Double(recording.count) / capture.sampleRate, capture.sampleRate))
+             Double(recording.count) / captureRate, captureRate))
 
 if rateBefore == rateDuringCapture && rateDuringCapture == rateAfter {
     print("HFP check: PASS — output stayed at \(Int(rateBefore)) Hz while the built-in mic recorded")
@@ -365,17 +329,17 @@ if let keepPath {
     recording.withUnsafeBufferPointer { buf in
         try? Data(buffer: buf).write(to: URL(fileURLWithPath: keepPath))
     }
-    print("capture kept: \(keepPath) (mono Float32 @ \(Int(capture.sampleRate)) Hz)")
+    print("capture kept: \(keepPath) (mono Float32 @ \(Int(captureRate)) Hz)")
 }
 
-guard let analysis = analyze(recording: recording, sampleRate: capture.sampleRate,
+guard let analysis = analyze(recording: recording, sampleRate: captureRate,
                              leadInSeconds: leadIn) else {
     print("MEASUREMENT FAILED: no convincing probe arrivals in the capture.")
     print("Hints: raise --gain, quieten the room, move the Mac nearer the speaker(s),")
     print("or check the probes were audible at all.")
     exit(1)
 }
-report(analysis, sampleRate: capture.sampleRate)
+report(analysis, sampleRate: captureRate)
 print("Reminder: after a fresh Bluetooth connect, wait ~60 s before trusting a " +
       "measurement (the BT clock settles chaotically first — bt-spike-findings 2026-08-07).")
 exit(0)

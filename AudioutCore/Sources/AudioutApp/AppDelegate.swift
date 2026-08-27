@@ -475,18 +475,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     info: "\(error.localizedDescription)\n\nRecent changes may be lost when Audiout quits. Check that the startup disk isn't full.")
             }
         }
-        // Covers the stores whose owners are stored properties, so they have
-        // loaded before this line: the BT trims and EQ (via `backend`), the
-        // device icons, and the excluded apps. `groups.json`, `app-routes.json`
-        // and `routing.json` are read by controllers built LATER in this method,
-        // so a corrupt one of those is set aside but not named here. Async so
-        // launch finishes before any modal.
-        if !StoreRecovery.quarantinedFileNames.isEmpty {
-            DispatchQueue.main.async { [weak self] in
-                self?.presentStoreDataAlertOnce(
-                    message: "Some of Audiout's saved settings couldn't be read",
-                    info: "The unreadable files were set aside so nothing is lost: \(StoreRecovery.quarantinedFileNames.joined(separator: ", ")). The affected settings are back to their defaults. Everything else is untouched.")
-            }
+        // The emptiness check runs INSIDE the async block, not before it, so it
+        // fires after `applicationDidFinishLaunching` returns — by then
+        // `groupController` (below) and `appRouting` (below) have finished
+        // loading `groups.json` and `app-routes.json`, so a corrupt one of
+        // those IS named here, alongside the stores whose owners are stored
+        // properties (the BT trims and EQ via `backend`, the device icons, and
+        // the excluded apps). `routing.json` is still a gap: `RoutingStore`
+        // loads lazily in `ensureDefaultSelection()`, which only runs from
+        // `repaintFromCurrentState()` on the first backend event — structurally
+        // after any launch-time check. Async so launch finishes before any modal.
+        DispatchQueue.main.async { [weak self] in
+            let quarantined = StoreRecovery.quarantinedFileNames
+            guard !quarantined.isEmpty else { return }
+            self?.presentStoreDataAlertOnce(
+                message: "Some of Audiout's saved settings couldn't be read",
+                info: "The unreadable files were set aside so nothing is lost: \(quarantined.joined(separator: ", ")). The affected settings are back to their defaults. Everything else is untouched.")
         }
 
         // The mixer model binds to the resolved backend, then the popover binds

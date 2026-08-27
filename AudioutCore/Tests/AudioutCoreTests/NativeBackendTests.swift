@@ -4098,7 +4098,9 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil { capture.meteringActive }
         #expect(capture.meteringActive, "setMeteringActive(true) must reach the coordinator")
         capture.fireLevelIfActive(0.5)
-        try? await Task.sleep(nanoseconds: 50_000_000)
+        // A fired sample is try-stored, then picked up by the `stateQueue` drain
+        // at the ~40 ms display cadence, so allow several cadences here.
+        try? await Task.sleep(nanoseconds: 150_000_000)
         seen = await box.snapshot()
         #expect(seen.contains { if case .level = $0 { return true } else { return false } },
                        "a level fired while active must reach the event stream")
@@ -6940,6 +6942,76 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         await pollUntil { sink.hasAppLevel("com.plain") }
         #expect(sink.lastAppLevel("com.plain") ?? 0 > 0,
                              "a .noRedirect listed app must emit .appLevel from its metering-only tap")
+    }
+
+    /// D3, app half: `.appLevel` rides the SAME leading/trailing-edge sampler the
+    /// per-device `.level` does, keyed by bundle id. A tap delivering buffers far
+    /// above the ~25 Hz display cadence must not fan out one event per buffer,
+    /// and the burst's LOUDEST final buffer must still land via the trailing
+    /// flush — the app row's version of "the meter never freezes on a stale
+    /// pre-quiet value".
+    @Test func appLevelEmissionIsCoalescedToDisplayCadence() async {
+        let registry = TapRegistry()
+        let metering = registeringPerAppCapture(muteBehavior: .unmuted, bundleIDs: ["com.burst"], into: registry)
+        let (backend, engine, discovery) = makeBackend(injectedMeteringCapture: metering)
+        defer { backend.stop() }
+        backend.start(); await waitUntilStarted(engine)
+        _ = discovery
+
+        backend.updateAppRoutes([AppRoute(bundleID: "com.burst", displayName: "Burst")])
+        backend.setMeteringActive(true)
+        await pollUntil {
+            if case .capturing = metering.state(for: "com.burst") { return true }; return false
+        }
+        guard let tap = registry.tap(for: "com.burst") else {
+            Issue.record("the metering-only tap must register once metering is active")
+            return
+        }
+
+        // A dedicated stream: the shared `collect` helper filters meter events out.
+        let stream = backend.makeEventStream()
+        actor LevelBox {
+            private(set) var levels: [Float] = []
+            func append(_ v: Float) { levels.append(v) }
+        }
+        let box = LevelBox()
+        let collector = Task {
+            for await event in stream {
+                if case .appLevel(let bundleID, let rms) = event, bundleID == "com.burst" {
+                    await box.append(rms)
+                }
+            }
+        }
+        try? await Task.sleep(nanoseconds: 20_000_000)   // let the subscription register
+
+        // 40 buffers over ~100 ms, the last one distinctly louder than the rest.
+        let steps = 40
+        let began = DispatchTime.now().uptimeNanoseconds
+        for i in 0..<steps {
+            let amplitude: Float = i == steps - 1 ? 0.9 : 0.3
+            tap.push(float32Buffer(amplitude: amplitude, frames: 512, atSecond: i + 1))
+            try? await Task.sleep(nanoseconds: 100_000_000 / UInt64(steps))
+        }
+
+        // Room for the trailing flush (up to ~40 ms after the last coalesced
+        // leading edge) to deliver the loudest buffer.
+        try? await Task.sleep(nanoseconds: 120_000_000)
+        collector.cancel()
+        let elapsed = DispatchTime.now().uptimeNanoseconds - began
+
+        let levels = await box.levels
+        #expect(levels.count > 0, "the app row must still receive events")
+        // The bound is derived from the WALL CLOCK the burst actually took, not
+        // from the 100 ms it was asked to take: under parallel load `Task.sleep`
+        // stretches, and a longer window legitimately fits more 40 ms slots. The
+        // point is coalescing to the cadence, not to a fixed count.
+        let allowed = Int(elapsed / 40_000_000) + 3
+        #expect(levels.count <= allowed,
+                "`.appLevel` must be coalesced to ~25 Hz, not fanned out per tap buffer: got \(levels.count) events for \(steps) buffers over \(elapsed / 1_000_000) ms (allowed \(allowed))")
+        let last = levels.last ?? 0
+        let earlier = levels.dropLast().max() ?? 0
+        #expect(last > earlier,
+                "the burst's loudest FINAL buffer must land via the trailing flush: last \(last) vs earlier max \(earlier)")
     }
 
     /// T3 PRIVACY: a user-EXCLUDED app is NEVER metered — no metering-only tap is

@@ -33,8 +33,13 @@ public protocol FoldFollowing: AnyObject {
 /// Constants are set DIRECTLY: never through `animator()`, never inside an
 /// `NSAnimationContext`, never with `allowsImplicitAnimation`. Any of those
 /// puts a second clock back on the one value this driver owns.
+///
+/// The one clock is a `CADisplayLink`, so ticks land on the display's vsync
+/// instead of on a fixed 120 Hz timer that fires whether or not a frame is
+/// coming. A screenless process (a headless test host) has no display link to
+/// take, so a coalescing `Timer` stands in as the fallback clock there.
 @MainActor
-public final class FoldAnimator {
+public final class FoldAnimator: NSObject {
 
     /// One driver for the process: a `CardView` can be folded without a panel
     /// (the trajectory unit tests build a bare card), so the fold clock cannot
@@ -61,9 +66,28 @@ public final class FoldAnimator {
     }
 
     private var tweens: [Tween] = []
+    /// The vsync clock. `NSScreen.displayLink` keeps a strong reference to its
+    /// target (self) while active — the same retention contract `LevelMeterView`
+    /// documents for the view-side call.
+    private var link: CADisplayLink?
+    /// Fallback clock only: used when the process has no screen to take a
+    /// display link from.
     private var timer: Timer?
 
+    /// Test seam for Reduce Motion (`nil` = the live system setting).
+    public var test_reduceMotionOverride: Bool?
+
+    private var reduceMotion: Bool {
+        test_reduceMotionOverride ?? NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+    }
+
     /// Fold `constraint` to `target`, calling `completion` once it arrives.
+    ///
+    /// Under Reduce Motion nothing travels: every in-flight fold — including the
+    /// one just added — is settled to its terminal state synchronously, in the
+    /// caller's own turn, follower ticked once and completions fired. That is
+    /// the same synchronous-terminal contract every caller's `animated: false`
+    /// branch already has, so callers need no extra handling.
     ///
     /// Retarget: a constraint that is already folding has its running tween
     /// REPLACED, and the replaced tween's completion never fires — the terminal
@@ -85,27 +109,53 @@ public final class FoldAnimator {
                             completion: completion))
         // Sample tick 0 in the caller's own turn: the surface has to be sized
         // from the fold's START state before anything displays, or the first
-        // timer tick lands as a step instead of a frame of travel.
-        advance(to: CACurrentMediaTime())
-        startTimerIfNeeded()
+        // clock tick lands as a step instead of a frame of travel.
+        //
+        // razor: deliberate ceiling — no observer for a Reduce Motion toggle
+        // flipped MID-fold. A fold lasts `Tokens.Motion.collapseRevealDuration`,
+        // and every caller gates on Reduce Motion too, so the window is
+        // vanishingly small. Upgrade path: observe
+        // `accessibilityDisplayOptionsDidChangeNotification` and settle the
+        // in-flight tweens from it.
+        advance(to: reduceMotion ? .greatestFiniteMagnitude : CACurrentMediaTime())
+        startClockIfNeeded()
     }
 
     /// Test hook: run every in-flight fold straight to its end state — the
-    /// runloop time a headless test cannot spend. Same tick order as the timer.
+    /// runloop time a headless test cannot spend. Same tick order as the clock.
     public func test_settleNow() { advance(to: .greatestFiniteMagnitude) }
 
-    private func startTimerIfNeeded() {
-        guard timer == nil, !tweens.isEmpty else { return }
+    private func startClockIfNeeded() {
+        guard link == nil, timer == nil, !tweens.isEmpty else { return }
         // `.common` mode: a fold started by a mouse-down that is still held (a
         // header-row click) has to keep ticking inside event tracking.
-        let ticker = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated { self?.advance(to: CACurrentMediaTime()) }
+        //
+        // The link is per-`NSScreen` vsync and this driver has no view to hang
+        // it off (a torn-down view's link would pause mid-fold and strand the
+        // other tweens), so it takes the main screen's. A fold shown on another
+        // screen is still frame-paced, just to the wrong display's rhythm.
+        if let screen = NSScreen.main ?? NSScreen.screens.first {
+            let l = screen.displayLink(target: self, selector: #selector(clockDidTick))
+            l.add(to: RunLoop.main, forMode: .common)
+            link = l
+        } else {
+            let ticker = Timer(timeInterval: 1.0 / 120.0, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.advance(to: CACurrentMediaTime()) }
+            }
+            // Let the runloop coalesce these ticks: the fallback clock has no
+            // vsync to align to, so exact 120 Hz buys nothing and costs wakeups.
+            ticker.tolerance = 1.0 / 240.0
+            RunLoop.main.add(ticker, forMode: .common)
+            timer = ticker
         }
-        RunLoop.main.add(ticker, forMode: .common)
-        timer = ticker
     }
 
-    private func stopTimer() {
+    /// Marked `@objc` for the selector-based `NSScreen.displayLink` callback.
+    @objc private func clockDidTick() { advance(to: CACurrentMediaTime()) }
+
+    private func stopClock() {
+        link?.invalidate()
+        link = nil
         timer?.invalidate()
         timer = nil
     }
@@ -144,6 +194,6 @@ public final class FoldAnimator {
         tweens = running
         for tween in arrived { tween.completion() }
 
-        if tweens.isEmpty { stopTimer() } else { startTimerIfNeeded() }
+        if tweens.isEmpty { stopClock() } else { startClockIfNeeded() }
     }
 }

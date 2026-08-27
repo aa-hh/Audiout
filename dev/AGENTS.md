@@ -38,18 +38,7 @@ not the primary offline tool, which is the in-app `MockBackend` in
 |---|---|
 | `fake-speakers.sh` | Launches shairport-sync fake receivers (single-instance caveat above). |
 | `stop-fake-speakers.sh` | Kills every process tracked by a pidfile in `.run/`. |
-| `audiocap/` | Standalone Core Audio process-tap capture CLI; independent tool. |
+| `audiocap/` | Standalone Core Audio process-tap capture CLI; own `AGENTS.md`. |
+| `phase-spike/` | Standalone phase-lock feasibility harness; own `AGENTS.md`. |
 | `README.md` | Setup/rationale for the mock, fake-speaker, and `native` backends. |
-| `notes/p2b-nativebackend-runbook.md` | How to run `native`: build/test, TCC grant, verification. |
-| `notes/onboarding-setup-brief.md` | First-run permission-priming flow: design + gated live-verify recipe for the audio self-test tone. |
-| `notes/p2b-nativebackend-seam-brief.md` | Gap analysis behind `NativeBackend`'s design. |
-| `notes/p2b-multistream-brief.md` | `stream_id` design, per-app routing (deferred). |
-| `notes/p2b-synced-local-brief.md` | Synced local Core Audio output design (deferred). |
-| `notes/p2b-helper-productionization-brief.md` | PTP helper review, needs paid Developer ID (deferred). |
-| `notes/p2b-v2-smallwork-brief.md` | Smaller v2 backlog items (deferred). |
-| `notes/playback-meter-research.md` | Level-meter design research (not built). |
-| `notes/stability-audit-2026-07-18.md` | Crash/freeze audit ledger: findings, marker convention, resolved list. |
-| `notes/objc-exception-shim-handoff.md` | ObjC exception shim adoption brief for the per-app-routing branch. |
-| `notes/p1-*.md` | Phase 1 UI/API research. |
-| `notes/0e-taps-brief.md`, `0f-pipe-brief.md`, `p2-ptp-bind-probe.md` | Early capture/pipe/PTP-bind spikes. |
-| `../AirPlayEngine/docs/first-light-report.md` | Live-hardware-test ledger (that package). |
+| `notes/` | Pre-implementation research briefs, one per initiative; see filenames. |

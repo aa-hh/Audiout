@@ -9,10 +9,9 @@ Owns the argument grammar for `engine-probe` (`ProbeArgParsing.swift`): parses
 dependency on `AirPlayEngine` or any C target; it is pure `Foundation` string
 parsing. Boundary: it does not open sockets, print anything, or know about
 `AirPlayEngine` types (`DeviceDescriptor`, `OutputID`, etc.) — `engine-probe`'s
-`main.swift` converts `ProbeDevice` into engine calls.
-
-Keep this file up to date when the flag grammar changes (new per-device flags,
-changed commit rules) or when `ProbeArgs`/`ProbeDevice` gain/lose fields.
+`main.swift` converts `ProbeDevice` into engine calls. Update this file when
+the flag grammar changes (new per-device flags, changed commit rules) or
+`ProbeArgs`/`ProbeDevice` gain or lose fields.
 
 ## Notable Patterns
 
@@ -22,8 +21,8 @@ changed commit rules) or when `ProbeArgs`/`ProbeDevice` gain/lose fields.
   `--password`) amend the in-progress slot in any order until it's complete;
   the next per-device flag after that commits it and starts a new device.
   This exists because an earlier parser committed early on flag arrival,
-  silently splitting one device into two on a 2026-07-17 live run — see the
-  file-header comment for the full incident and the full grammar rules.
+  silently splitting one device into two during a live hardware run — see
+  the file-header comment for the full incident and the full grammar rules.
 - **Defaults vs. in-progress slot**: per-device options given *before* the
   first `--address` edit `defaults` (the template every later slot starts
   from), not just device 0. `--device-id` is never a default.
@@ -34,15 +33,6 @@ changed commit rules) or when `ProbeArgs`/`ProbeDevice` gain/lose fields.
   itself never exits or prints.
 - `usage()` and the grammar comments in `ProbeArgParsing.swift` must be kept
   in lockstep — the doc claims are what `engine-probe --help` prints.
-
-## Key Types
-
-| Type | Role |
-|---|---|
-| `ProbeDevice` | One output device as described by the command line (address, port, device ID, features, model, ipv6, password, raop). |
-| `ProbeArgs` | Full parse result: `devices`, `pcmPath`, `gated`, `wantsHelp`, and the `problems` diagnostic list. |
-| `parseProbeArgs(_:)` | Entry point; turns `argv` into `ProbeArgs` per the device-slot grammar above. |
-| `usage()` | Returns the CLI's help text (also the ordering/grouping spec for the grammar). |
 
 ## Tests
 

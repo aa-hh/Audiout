@@ -3,7 +3,7 @@
 ## Purpose
 
 A TEST-ONLY C shim that re-exposes `Clibairptp`'s `airptp_*` API as a
-Swift-visible module (T7, `ptp-helper-design.md` §6.2). It owns exactly one
+Swift-visible module (`ptp-helper-design.md` §6.2). It owns exactly one
 thing: making `airptp_*` callable from Swift test code. `Clibairptp/module.modulemap`
 deliberately declares `airptp.h` as a `textual header` (so the vendored,
 byte-identical header — which uses `bool` without `#include <stdbool.h>` —
@@ -11,10 +11,9 @@ passes Clang's modular self-containment check), and a textual header is never
 part of a module's Swift-visible interface. This target's own header
 (`include/ptp_test_support.h`) is a normal, self-contained modular header
 that forwards 1:1 to the real `airptp_*` calls. No logic of its own, no
-vendored source touched.
-
-Keep this file up to date if the forwarded function set changes (i.e. if
-`ptp_test_support.c`/`.h` gain or drop a `ptp_test_*` wrapper).
+vendored source touched. Update this file if the forwarded function set
+changes (`ptp_test_support.c`/`.h` gaining or dropping a `ptp_test_*`
+wrapper).
 
 ## Notable Patterns
 

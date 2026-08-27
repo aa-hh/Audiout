@@ -2,8 +2,7 @@
 
 ## Purpose
 
-`engine-probe` is the gated, manual multi-device AirPlay session probe
-(T-API-1, extended by T-ENG-MULTIROOM-CLI-1 and the `--raop` RAOP path). It
+`engine-probe` is the gated, manual multi-device AirPlay session probe. It
 is a diagnostic executable a human runs later, by hand, against real
 receivers — it drives one or more real `AirPlayEngine` sessions end-to-end
 (discovery descriptor → `addOutput` → `setVolume` → pump one shared PCM file
@@ -11,10 +10,8 @@ to all outputs off one advancing pts → `stop`). It is built green by
 `swift build`/CI (dry-run only) but is NEVER invoked by the build or by any
 automated test — see the file-header comment for the three preconditions a
 live run needs (real receiver(s), OwnTone/any PTP daemon stopped, a human
-watching).
-
-Keep this file up to date if the gate flag, the RAOP-vs-AirPlay2 TXT/descriptor
-shape, or the PCM pacing scheme changes.
+watching). Update this file if the gate flag, the RAOP-vs-AirPlay2
+TXT/descriptor shape, or the PCM pacing scheme changes.
 
 ## Notable Patterns
 
@@ -39,8 +36,8 @@ shape, or the PCM pacing scheme changes.
   CALCULATED clock (`samples/sampleRate` since start), not the actual
   wall clock, because `airplay.c`'s `timestamp_set()` prefers a calculated
   clock the same way OwnTone's player does — a frozen/wrong pts makes the
-  receiver keep the session but schedule no audible audio (this was the
-  2026-07-16 first-light failure mode).
+  receiver keep the session but schedule no audible audio (this produced a
+  real receiver session with no audible audio during hardware bring-up).
 
 ## External Dependencies
 

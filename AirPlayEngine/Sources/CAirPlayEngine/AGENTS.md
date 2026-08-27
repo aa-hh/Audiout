@@ -14,10 +14,10 @@ Swift-visible state. This folder's responsibility ends at the C ABI exposed by
 `include/CAirPlayEngine.h` — it does not know about `AVAudioEngine`, app UI,
 or macOS permissions.
 
-**Keep this file up to date** when: a shim's STUB STATUS changes (no-op ->
-real implementation, e.g. the outputs dispatcher), a new vendored cluster is
-added/removed, `engine_bridge.h`'s public C surface changes, or a doc under
-`AirPlayEngine/docs/` that this file references is renamed/replaced.
+Update this file when a shim's stub status changes (no-op to real
+implementation, e.g. the outputs dispatcher), a vendored cluster is added or
+removed, `engine_bridge.h`'s public C surface changes, or a doc under
+`AirPlayEngine/docs/` that this file references is renamed or replaced.
 
 ## Notable Patterns
 
@@ -39,16 +39,15 @@ added/removed, `engine_bridge.h`'s public C surface changes, or a doc under
   this wrong and the engine hangs waiting on a callback that never arrives.
 - **`evthread_use_pthreads()` must run before the event_base is created**
   (`include/CAirPlayEngine.h`) — without it, cross-thread `event_base_once()`
-  silently defers until the keep-alive timer fires (found at first-light,
-  2026-07-16).
+  silently defers until the keep-alive timer fires.
 - **`engine_crypto_init()` and `engine_mask_sigpipe()`** must be called once
   on the engine thread before `airplay_init`/`raop_init` open sockets or do
   crypto — OwnTone's `main()` did both process-wide; this hosting must too.
 - **Two independent backends, not a shared struct.** `output_airplay`
   (`sender/airplay.c`) and `output_raop` (`sender/raop.c`) are separate
-  non-static `struct output_definition` globals; their file-static helpers
-  never collide because RAOP's are the file's only external symbol. Dispatch
-  between them by `device->type` is owned by the Swift layer, not this folder.
+  non-static `struct output_definition` globals with non-colliding
+  file-static helpers. Dispatch between them by `device->type` is owned by
+  the Swift layer, not this folder.
 - **Ownership at the discovery seam**: `struct keyval *txt` passed to the
   `airplayengine_feed_*` functions stays owned by the caller — the callback
   reads it synchronously and does not retain it.
@@ -56,6 +55,10 @@ added/removed, `engine_bridge.h`'s public C surface changes, or a doc under
   `raop_test_master_session_*`, `raop_test_write_one`) are declared in
   `engine_bridge.h` but are explicitly NOT part of the shipping session API —
   do not call them from production Swift code.
+- **Ignore `include/CAirPlayEngine.h`'s and `module.modulemap`'s header
+  comments claiming a scaffold-in-progress state** ("not yet wired to build
+  cleanly") — the target builds and has an extensive test suite, so treat
+  those specific comments as outdated pending a comment refresh.
 
 ## Folder Map
 
@@ -80,7 +83,7 @@ added/removed, `engine_bridge.h`'s public C surface changes, or a doc under
 
 | Type / symbol | Role |
 |---|---|
-| `struct output_definition output_airplay` (`sender/airplay.c`) | AirPlay 2 backend's non-static vtable: `.init/.deinit/.device_start/.device_stop/.device_volume_set/.device_cb_set/.write`. Swift calls through these directly. |
+| `struct output_definition output_airplay` (`sender/airplay.c`) | AirPlay 2 backend's non-static vtable; Swift calls through these entry points directly. |
 | `struct output_definition output_raop` (`sender/raop.c`) | AirPlay 1/RAOP backend's equivalent vtable. |
 | `struct output_device` / `struct output_buffer` (`shims/outputs.h`) | Per-device state and the PCM fan-out buffer; field layout mirrors OwnTone's `src/outputs.h` verbatim because `sender/*.c` reads many fields directly. |
 | `outputs_cb` / `outputs_cb_register` (`shims/outputs.c`) | The R-A async-callback dispatcher: tracks in-flight callback ids and their expected N-count, delivers on `evbase_player`. |
@@ -97,14 +100,6 @@ added/removed, `engine_bridge.h`'s public C surface changes, or a doc under
 | libsodium | Additional crypto for pairing; initialized alongside libgcrypt in `engine_crypto_init()`. |
 | libplist (`plist/plist.h`) | Binary/XML plist parsing for AirPlay's RTSP payloads (`sender/plist_wrap.h`). |
 | Vendored OwnTone source (`sender/`, `evrtsp/`) | Extracted AirPlay sender core; see `docs/VENDORED-DIFFS.md` and `docs/license-inventory.md` for what was changed vs. upstream. |
-
-## In-Progress Work
-
-| Marker | Description |
-|---|---|
-| T-SHIM-1 (`shims/outputs.h`, `shims/outputs.c`) | Registry ownership/merge semantics and string-freeing edge cases around the outputs dispatcher; the dispatcher itself is complete per `shims/outputs.c`'s header comment. |
-| T-API-1 (`shims/mdns.h`) | Confirms discovery only ever flows in via `airplayengine_feed_device`/`airplayengine_feed_raop_device`; `mdns_browse` stays a permanent no-op. |
-| Stale scaffold comments (`include/CAirPlayEngine.h`, `include/module.modulemap`) | Header comments still describe a T-PKG-1/T-BUILD-1 scaffold state ("not yet wired to build cleanly"); the target does build and has an extensive test suite (`AirPlayEngine/Tests/AirPlayEngineTests/`), so treat those specific claims as outdated pending a comment refresh. |
 
 ## Tests
 

@@ -4,7 +4,7 @@ A standalone SwiftPM executable that captures **all system audio** via a Core Au
 process tap (macOS 14.4+) and writes raw interleaved Float32 PCM to a file and/or
 stdout. This is the T-0e-2 spike tool; it feeds the 0f capture→OwnTone pipeline.
 
-It is deliberately **separate** from `AudioutCore` (which pins macOS 13).
+It is deliberately **separate** from `AudioutCore` (which pins macOS 14).
 This package targets `.macOS("14.4")` because the tap API is 14.2+/14.4-public.
 
 ## Build

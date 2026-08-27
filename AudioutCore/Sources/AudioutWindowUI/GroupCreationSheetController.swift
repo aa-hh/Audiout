@@ -381,6 +381,11 @@ public final class GroupCreationSheetController: NSViewController {
             name: name, memberIDs: memberIDs, memberVolumes: memberVolumes,
             iconSymbolName: selectedIconSymbolName
         ) else { return }
+        Analytics.capture("scene:created", [
+            "source": "sheet",
+            "member_count": String(memberIDs.count),
+            "already_existed": result.alreadyExisted ? "true" : "false",
+        ])
         finish((group: result.group, alreadyExisted: result.alreadyExisted))
     }
 

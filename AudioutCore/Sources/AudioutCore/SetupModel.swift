@@ -1060,6 +1060,7 @@ public final class SetupModel {
     /// here — the flow returns next launch.
     public func complete() {
         settings.hasCompletedSetup = true
+        Analytics.capture("onboarding:setup_completed")
     }
 
     /// Whether the flow should present at launch.

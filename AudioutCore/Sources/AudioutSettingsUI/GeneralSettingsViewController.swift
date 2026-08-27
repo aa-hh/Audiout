@@ -27,6 +27,8 @@ public final class GeneralSettingsViewController: NSViewController {
     private let launchSwitch = NSSwitch()
     private let reconnectSwitch = NSSwitch()
     private let reconnectHint = SettingsForm.hintLabel()
+    private let consentSwitch = NSSwitch()
+    private let consentHint = SettingsForm.hintLabel()
     private let licenseStatusHint = SettingsForm.hintLabel()
     private let enterLicenseButton = NSButton()
     private var licenseRow: NSView?
@@ -111,6 +113,17 @@ public final class GeneralSettingsViewController: NSViewController {
         // Live hint (spec §5.2) — re-written on every toggle.
         reconnectHint.stringValue = Self.reconnectHintLine(settings.reconnectAtLaunch)
 
+        // Anonymous usage analytics (opt-in, off by default) — the Settings ›
+        // General toggle for the consent `AppSettings.telemetryOptIn` gates.
+        consentSwitch.target = self
+        consentSwitch.action = #selector(consentToggled)
+        consentSwitch.state = settings.telemetryOptIn ? .on : .off
+        consentSwitch.setAccessibilityLabel("Share anonymous usage statistics")
+        let consentRow = SettingsForm.row(
+            title: "Share anonymous usage statistics",
+            control: consentSwitch)
+        consentHint.stringValue = Self.consentHintLine(settings.telemetryOptIn)
+
         // License (roadmap 054, Ardour model): entirely optional — the app is
         // fully functional with no key at all. NO inline key field: entry is a
         // deliberate act behind "Enter License…" (a sheet), the convention
@@ -177,6 +190,7 @@ public final class GeneralSettingsViewController: NSViewController {
         strip.translatesAutoresizingMaskIntoConstraints = false
 
         view = SettingsForm.paneView(rows: [launchRow, reconnectRow, reconnectHint,
+                                             consentRow, consentHint,
                                              licenseKeyRow, licenseStatusHint,
                                              hairline, strip])
 
@@ -235,6 +249,7 @@ public final class GeneralSettingsViewController: NSViewController {
     /// only when a visible window can host it — headless tests drive the held
     /// controller's hooks directly).
     @objc private func enterLicenseTapped() {
+        Analytics.capture("license:enter_sheet_opened")
         let sheet = LicenseSheetViewController(settings: settings,
                                                transport: licenseTransport,
                                                openURL: openURL)
@@ -260,6 +275,22 @@ public final class GeneralSettingsViewController: NSViewController {
         let enabled = reconnectSwitch.state == .on
         settings.reconnectAtLaunch = enabled
         reconnectHint.stringValue = Self.reconnectHintLine(enabled)
+        Analytics.capture("settings:reconnect_at_launch_toggled", ["enabled": enabled ? "true" : "false"])
+    }
+
+    /// The usage-analytics consent live hint: what sharing does or doesn't do.
+    private static func consentHintLine(_ enabled: Bool) -> String {
+        enabled
+            ? "Anonymous feature counts are shared to improve Audiout."
+            : "No usage data leaves this Mac."
+    }
+
+    @objc private func consentToggled() {
+        let enabled = consentSwitch.state == .on
+        settings.telemetryOptIn = enabled
+        settings.telemetryAsked = true
+        Analytics.setConsent(enabled)
+        consentHint.stringValue = Self.consentHintLine(enabled)
     }
 
     public override func viewDidLoad() {
@@ -285,6 +316,7 @@ public final class GeneralSettingsViewController: NSViewController {
 
     @objc private func buyTapped() {
         guard let url = settings.buyURL else { return }
+        Analytics.capture("license:buy_link_opened", ["source": "settings"])
         openURL(url)
     }
 
@@ -293,6 +325,7 @@ public final class GeneralSettingsViewController: NSViewController {
         let desired = launchSwitch.state == .on
         do {
             try loginItem.setEnabled(desired)
+            Analytics.capture("settings:launch_at_login_toggled", ["enabled": desired ? "true" : "false"])
         } catch {
             // The system refused (commonly: a loose dev binary that isn't a
             // registered .app). Bounce the switch back to the real state rather

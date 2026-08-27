@@ -95,6 +95,8 @@ public struct AppSettings {
         static let licenseCheckInURL = "license.checkInURL"
         static let licenseStatus = "license.status"
         static let licenseMaxMajor = "license.maxMajor"
+        static let telemetryOptIn = "telemetry.optIn"
+        static let telemetryAsked = "telemetry.asked"
     }
 
     /// The user-selectable sender start-buffer options in ms (Settings › Audio
@@ -390,6 +392,21 @@ public struct AppSettings {
         let generated = UUID().uuidString
         defaults.set(generated, forKey: Keys.licenseInstallID)
         return generated
+    }
+
+    /// Opt-in usage analytics consent (PRODUCT.md Data Collection stream 1).
+    /// Defaults to `false` — off by default, and only ever flipped on by the
+    /// user's own answer to the one-time ask (``telemetryAsked``).
+    public var telemetryOptIn: Bool {
+        get { defaults.bool(forKey: Keys.telemetryOptIn) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.telemetryOptIn) }
+    }
+
+    /// Whether the one-time ask has been answered — never re-prompt.
+    /// Defaults to `false` (unset): a fresh install hasn't been asked yet.
+    public var telemetryAsked: Bool {
+        get { defaults.bool(forKey: Keys.telemetryAsked) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.telemetryAsked) }
     }
 
     /// The licence check-in endpoint (``LicenseCheckIn``). Normally DERIVED —

@@ -645,6 +645,7 @@ public final class AudioSettingsViewController: NSViewController {
 
     @objc private func bufferOptionChanged() {
         guard let target = updateBufferHintAndResolveTarget() else { return }
+        Analytics.capture("settings:buffer_changed", ["ms": String(target)])
         Task { await applyBuffer(target) }
     }
 
@@ -818,6 +819,7 @@ public final class AudioSettingsViewController: NSViewController {
 
     @objc private func removeTapped(_ sender: NSButton) {
         guard let bundleID = sender.identifier?.rawValue else { return }
+        Analytics.capture("settings:excluded_app_removed")
         remove(bundleID: bundleID)
     }
 
@@ -859,6 +861,7 @@ public final class AudioSettingsViewController: NSViewController {
 
     private func add(bundleID: String, displayName: String) {
         excluded.exclude(bundleID: bundleID, displayName: displayName)
+        Analytics.capture("settings:excluded_app_added")
         rebuildList()
         onChange?()
     }

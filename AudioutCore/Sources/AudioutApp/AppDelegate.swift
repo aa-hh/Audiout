@@ -7,6 +7,7 @@ import AudioutWindowUI
 import AudioutSettingsUI
 import AudioutSharedUI
 import AudioutOnboardingUI
+import PostHog
 import Sparkle
 
 /// Writes `message` to `STDERR_FILENO` with a raw `write(2)`, retrying on
@@ -70,6 +71,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `bundleIDForPID`) into the native backend's per-app capture AND
     /// whole-system-exclusion paths.
     private let backend: OutputBackend = makeBackend(resolver: audioProcessResolver)
+
+    private func configurePostHog() {
+        guard !HeadlessRuntime.isActive else { return }
+
+        let environment = ProcessInfo.processInfo.environment
+        guard let projectToken = environment["POSTHOG_PROJECT_TOKEN"], !projectToken.isEmpty else {
+#if DEBUG
+            assertionFailure("POSTHOG_PROJECT_TOKEN variable required by PostHog is missing or un-configured, this causes events to be silently missed. This error stops appearing once POSTHOG_PROJECT_TOKEN is configured")
+#endif
+            return
+        }
+        guard let host = environment["POSTHOG_HOST"], !host.isEmpty else {
+#if DEBUG
+            assertionFailure("POSTHOG_HOST variable required by PostHog is missing or un-configured, this causes events to be silently missed. This error stops appearing once POSTHOG_HOST is configured")
+#endif
+            return
+        }
+
+        let config = PostHogConfig(projectToken: projectToken, host: host)
+        config.errorTrackingConfig.autoCapture = true
+        config.captureScreenViews = false
+        config.optOut = !settings.telemetryOptIn
+        let installID = settings.installID
+        config.getAnonymousId = { UUID(uuidString: installID) ?? $0 }
+        PostHogSDK.shared.setup(config)
+        analyticsAvailable = true
+        Analytics.install(Analytics.Sink(
+            capture: { PostHogSDK.shared.capture($0, properties: $1) },
+            consentChanged: { $0 ? PostHogSDK.shared.optIn() : PostHogSDK.shared.optOut() }
+        ), consent: settings.telemetryOptIn)
+    }
+
+    /// True once `configurePostHog()` has successfully called `setup(_:)` —
+    /// guards every other PostHog touch point (`applyLicenseState()`,
+    /// `applicationShouldTerminate`) so they no-op when analytics never came
+    /// up (headless runtime, or missing env config).
+    private var analyticsAvailable = false
 
     /// Owns the status item's `.button` (SPEC §9 / brief §4 — customize ONLY
     /// via `.button`, never the deprecated `.view`/`.title`/`.image`).
@@ -348,6 +386,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @MainActor
     func applicationDidFinishLaunching(_ notification: Notification) {
+        configurePostHog()
+
         // T1 diagnostic (`AUDIOUT_TCC_DIAG=1`, off by default): starts a
         // once-per-second raw-bucket poll as early as possible so a fresh
         // `open`-launch is captured before any permission prompt can fire.
@@ -436,6 +476,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if SystemAudioCaptureTCC.effectiveStatus() == .undetermined,
                self.presentSetupForUndeterminedIfNeeded() {
                 return
+            }
+            if self.analyticsAvailable && !self.settings.telemetryAsked {
+                let alert = NSAlert()
+                alert.messageText = "Share anonymous usage statistics?"
+                alert.informativeText = "Audiout counts which features are used, anonymously. No audio, speaker names, network details, or license keys are ever collected. You can change this anytime in Settings › General."
+                alert.addButton(withTitle: "Share")
+                alert.addButton(withTitle: "Don't Share")
+                let granted = alert.runModal() == .alertFirstButtonReturn
+                self.settings.telemetryAsked = true
+                self.settings.telemetryOptIn = granted
+                Analytics.setConsent(granted)
             }
             self.surface.perform(action, anchorRect: self.statusAnchorRect())
         }
@@ -526,6 +577,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `applyLicenseState()` needs a license server to arm it.
         popoverController.onBuyAudiout = { [settings] in
             guard let url = settings.buyURL else { return }
+            Analytics.capture("license:buy_link_opened", ["source": "mixer_note"])
             NSWorkspace.shared.open(url)
         }
         // Metering-active gate (T-GATE): only compute/emit `.level` while the
@@ -556,6 +608,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // affordance; the fresh row auto-appears on return (connect
         // notification → enumerator refresh).
         popoverController.onPairBluetoothSpeaker = {
+            Analytics.capture("mixer:bt_pairing_settings_opened")
             NSWorkspace.shared.open(SystemSettingsPane.bluetooth.url)
         }
         // BT-UI ghost pairings: recency feed for the Bluetooth subsection's
@@ -1456,6 +1509,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             && (key.isEmpty || status == .unknown || status == .invalid || status == .revoked)
         popoverController?.setUnregisteredNoteActive(unregistered)
         updaterController?.updater.httpHeaders = key.isEmpty ? nil : ["Authorization": "Bearer \(key)"]
+
+        // License identity for analytics (PRODUCT.md Data Collection stream 1,
+        // owner-approved): the installID stays the identity even when the
+        // license is removed — only the super properties change. Never
+        // `reset()`, and never touch `settings.licenseKey` here.
+        if analyticsAvailable {
+            if status == .active {
+                PostHogSDK.shared.identify(settings.installID)
+                PostHogSDK.shared.register(["license_status": "active"])
+                if let maxMajor = settings.licenseMaxMajor {
+                    PostHogSDK.shared.register(["license_max_major": String(maxMajor)])
+                } else {
+                    PostHogSDK.shared.unregister("license_max_major")
+                }
+            } else {
+                PostHogSDK.shared.register(["license_status": status?.rawValue ?? "none"])
+                PostHogSDK.shared.unregister("license_max_major")
+            }
+        }
     }
 
     /// Gives graceful AirPlay teardown a bounded window before the process exits
@@ -1469,6 +1541,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !isTerminating else { return .terminateLater }
         isTerminating = true
+        if analyticsAvailable { PostHogSDK.shared.flush() }
 
         eventTask?.cancel()
         eventTask = nil

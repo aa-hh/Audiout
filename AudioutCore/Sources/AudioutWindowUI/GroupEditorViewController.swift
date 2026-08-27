@@ -668,6 +668,7 @@ public final class GroupEditorViewController: NSViewController {
         guard trimmed != group.name else { return restoreNameField() }
         group.name = trimmed
         guard saveOrReport(group) else { return }
+        Analytics.capture("scene:renamed")
         nameField.stringValue = trimmed
         updateNameFieldWidth()
         onDidEditGroup?()
@@ -782,6 +783,7 @@ public final class GroupEditorViewController: NSViewController {
             group.memberVolumes[deviceID] = nil
         }
         guard saveOrReport(group) else { return }   // failure re-renders from the model
+        Analytics.capture("scene:membership_changed", ["added": isChecked ? "true" : "false"])
         // Rebuild: an unchecked unavailable device drops out of the list.
         rebuildCandidates(memberSet: Set(group.memberIDs))
         onDidEditGroup?()
@@ -1009,6 +1011,7 @@ public final class GroupEditorViewController: NSViewController {
             presentPersistFailureAlert(message: "Couldn\u{2019}t delete the group.")
             return
         }
+        Analytics.capture("scene:deleted")
         editingGroupID = nil
         onDidDeleteGroup?()
     }

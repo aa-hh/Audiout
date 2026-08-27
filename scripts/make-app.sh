@@ -744,6 +744,17 @@ fi
 # is NOT applied and the shell's own env wins (and `swift run`/tests never read
 # Info.plist at all).
 #
+# PostHog must be present in a bundled release because double-clicked apps do not
+# inherit the build shell's environment. CI supplies these values directly; local
+# release builds may use the wizard-managed root .env.
+if [ -f "$REPO_ROOT/.env" ]; then
+  set -a
+  . "$REPO_ROOT/.env"
+  set +a
+fi
+[ -n "${POSTHOG_PROJECT_TOKEN:-}" ] || { echo "ERROR: POSTHOG_PROJECT_TOKEN is required for a release bundle" >&2; exit 1; }
+[ -n "${POSTHOG_HOST:-}" ] || { echo "ERROR: POSTHOG_HOST is required for a release bundle" >&2; exit 1; }
+#
 #   AIRPLAY_BACKEND=native — a double-clicked release MUST drive real speakers.
 #     BackendKind.resolved() already defaults to `.native` in code (mock is
 #     opt-in only), so this is belt-and-suspenders: it makes the release intent
@@ -756,7 +767,11 @@ fi
 echo "==> Writing LSEnvironment (release backend default)"
 plutil -insert LSEnvironment -dictionary "$PLIST"
 plutil -insert LSEnvironment.AIRPLAY_BACKEND -string "native" "$PLIST"
+plutil -insert LSEnvironment.POSTHOG_PROJECT_TOKEN -string "$POSTHOG_PROJECT_TOKEN" "$PLIST"
+plutil -insert LSEnvironment.POSTHOG_HOST -string "$POSTHOG_HOST" "$PLIST"
 plutil -extract LSEnvironment.AIRPLAY_BACKEND raw -o - "$PLIST" >/dev/null || { echo "ERROR: LSEnvironment.AIRPLAY_BACKEND missing from Info.plist — release builds must pin the native backend explicitly (belt-and-suspenders over the native code default)" >&2; exit 1; }
+plutil -extract LSEnvironment.POSTHOG_PROJECT_TOKEN raw -o - "$PLIST" >/dev/null || { echo "ERROR: POSTHOG_PROJECT_TOKEN missing from Info.plist" >&2; exit 1; }
+plutil -extract LSEnvironment.POSTHOG_HOST raw -o - "$PLIST" >/dev/null || { echo "ERROR: POSTHOG_HOST missing from Info.plist" >&2; exit 1; }
 
 # Opt-in dev diagnostics, baked into LSEnvironment so an `open`-launched bundle
 # still sees them: an `open`ed app does NOT inherit the shell env, and it MUST be

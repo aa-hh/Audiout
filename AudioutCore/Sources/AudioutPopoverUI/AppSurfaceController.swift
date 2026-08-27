@@ -270,6 +270,7 @@ public final class AppSurfaceController {
         guard !isRevealPending else { return }
         let wasShown = isShown
         if !wasShown {
+            Analytics.capture("surface:shown", ["screen": String(describing: selectedScreen)])
             overflowReported = false
             sessionContentSize = measureSessionContentSize()
             mount(selectedScreen)
@@ -445,6 +446,7 @@ public final class AppSurfaceController {
     /// size. Selecting the current screen is a no-op.
     public func select(_ screen: SurfaceScreen) {
         guard screen != selectedScreen else { return }
+        Analytics.capture("surface:screen_selected", ["screen": String(describing: screen)])
         if selectedScreen == .mixer, isShown {
             // The panel is leaving the window: drop what must not outlive a
             // session (transient selection, stale meter bars) and stop paying
@@ -599,7 +601,11 @@ public final class AppSurfaceController {
 
     public var isPinned: Bool { shell.isPinned }
 
-    public func togglePin() { setPinned(!shell.isPinned) }
+    public func togglePin() {
+        let newValue = !shell.isPinned
+        Analytics.capture("surface:pin_toggled", ["pinned": newValue ? "true" : "false"])
+        setPinned(newValue)
+    }
 
     /// Flip the shell's manner profile (U1) and persist the choice. Also
     /// re-seats every screen's content below the toolbar strip (measured —

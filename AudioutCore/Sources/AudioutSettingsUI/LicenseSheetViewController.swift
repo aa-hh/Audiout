@@ -153,6 +153,7 @@ public final class LicenseSheetViewController: NSViewController {
 
     @objc private func buyTapped() {
         guard let url = settings.buyURL else { return }
+        Analytics.capture("license:buy_link_opened", ["source": "license_sheet"])
         // Leaves the sheet open: the buyer comes back with a key to paste.
         openURL(url)
     }
@@ -161,6 +162,7 @@ public final class LicenseSheetViewController: NSViewController {
         // The setter clears the stored verdict with the key (`AppSettings
         // .licenseKey`) — one write, both gone.
         settings.licenseKey = nil
+        Analytics.capture("license:removed")
         finish()
     }
 
@@ -194,6 +196,15 @@ public final class LicenseSheetViewController: NSViewController {
             ?? LicenseValidator(settings: settings)
         validator.validate { [weak self] result in
             guard let self else { return }
+            let outcome: String
+            switch result {
+            case .verified(.active): outcome = "active"
+            case .verified(let status): outcome = status.rawValue
+            case .unreachable: outcome = "unreachable"
+            case .noServer: outcome = "no_server"
+            case .noKey: outcome = "no_key"
+            }
+            Analytics.capture("license:key_submitted", ["outcome": outcome])
             switch result {
             case .verified(.active):
                 self.finish()

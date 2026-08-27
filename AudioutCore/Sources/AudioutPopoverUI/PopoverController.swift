@@ -146,6 +146,11 @@ public final class PopoverController: NSObject {
     private var groupController: GroupController?
     private var devicesByID: [String: Device] = [:]
 
+    /// `mixer:volume_adjusted` fires once per control kind ("device" /
+    /// "master" / "app") per surface session — the sliders are continuous,
+    /// so per-tick capture is forbidden. Cleared in `surfaceDidShow()`.
+    private var volumeAdjustedControls: Set<String> = []
+
     /// Live per-device "which apps are actually streaming here now" map (T9),
     /// keyed by device id — driven entirely by `BackendEvent.routedApps` via
     /// ``applyRoutedApps(deviceID:appNames:)``. This is the CONFIRMED signal
@@ -2444,6 +2449,9 @@ public final class PopoverController: NSObject {
     /// session cache updates either way, so the row's chip tracks the scrub
     /// digit by digit.
     private func applyBTTrim(_ ms: Double, deviceID id: String, persist: Bool) {
+        if persist {
+            Analytics.capture("bt_sync:trim_committed")
+        }
         let value = BTSyncTrim.quantise(ms)
         btTrimsByID[id] = value
         // Editing a device IS tuning it — a scrub that passes through exactly
@@ -2743,6 +2751,10 @@ public final class PopoverController: NSObject {
                 // what keeps a mid-episode dismissal honored — a still-`.failed`
                 // re-report breaks here, so the panel never pops back.
                 guard !previous.isFailedState else { break }
+                if case .failed(let failure) = current {
+                    Analytics.capture("connection:failed", ["kind": device.kind.rawValue,
+                                                              "cause": String(describing: failure.cause)])
+                }
                 // A fresh `→ .failed` edge is a NEW episode: its auto-expand wins
                 // over any prior dismissal, so clear the dismissal record before
                 // (re)opening. This is what re-surfaces the panel on a
@@ -2750,6 +2762,9 @@ public final class PopoverController: NSObject {
                 dismissedDiagnosisIDs.remove(device.id)
                 openDiagnosisIDs.insert(device.id)
             case .connected, .off:
+                if current == .connected && previous != .connected && !device.isLocalDevice {
+                    Analytics.capture("connection:connected", ["kind": device.kind.rawValue])
+                }
                 // Leaving `.failed` ends the episode — clear both the open intent
                 // and the dismissal record so a future failure re-expands afresh.
                 openDiagnosisIDs.remove(device.id)
@@ -2839,6 +2854,7 @@ public final class PopoverController: NSObject {
     private func mountDiagnosisPanel(for id: String, failure: ConnectionFailure,
                                      device: Device, animated: Bool) {
         guard let row = deviceRowsByID[id] else { return }
+        Analytics.capture("connection:diagnosis_shown", ["cause": String(describing: failure.cause)])
         let view = ConnectionDiagnosisView(failure: failure, deviceName: device.name)
         view.onRetry = { [weak self] in self?.retryConnection(for: id) }
         view.onCopyDetails = { [weak self] in self?.copyDiagnosisDetails(for: id) }
@@ -2872,6 +2888,7 @@ public final class PopoverController: NSObject {
     /// is also what marks the attempt USER-INITIATED for the episode
     /// semantics above — the backend's autonomous recovery never emits it.
     private func retryConnection(for id: String) {
+        Analytics.capture("connection:retry_clicked")
         let result = groupController?.retryConnection(for: id) ?? .ok
         handleSelection(result, deviceID: id)
     }
@@ -3195,7 +3212,10 @@ public final class PopoverController: NSObject {
     private func saveCurrentSetup() {
         guard let controller = groupController else { return }
         let name = "Group \(controller.groups.count + 1)"
-        _ = try? controller.saveCurrentSetupAsGroup(name: name)
+        let result = try? controller.saveCurrentSetupAsGroup(name: name)
+        if result != nil {
+            Analytics.capture("scene:created", ["source": "mixer"])
+        }
         rebuild()
     }
 
@@ -3234,6 +3254,7 @@ public final class PopoverController: NSObject {
     /// preserving this open's transient collapse state (a plain `rebuild()`,
     /// not `rebuildForOpen()`).
     private func pickApp(bundleID: String, displayName: String) {
+        Analytics.capture("app_routing:app_added")
         appRouting.addRoute(bundleID: bundleID, displayName: displayName)
         rebuild()
     }
@@ -3726,12 +3747,16 @@ public final class PopoverController: NSObject {
 extension PopoverController: DeviceRowView.Delegate {
 
     public func deviceRow(_ row: DeviceRowView, didSetVolume volume: Int, for id: String) {
+        if volumeAdjustedControls.insert("device").inserted {
+            Analytics.capture("mixer:volume_adjusted", ["control": "device"])
+        }
         groupController?.setMemberVolume(volume, for: id)
         refreshMainOutRow()
         raiseCastVolumePending(for: id)
     }
 
     public func deviceRow(_ row: DeviceRowView, didToggleMute muted: Bool, for id: String) {
+        Analytics.capture("mixer:device_mute_toggled", ["muted": muted ? "true" : "false"])
         groupController?.setMuted(muted, for: id)
         // A per-device mute may flip the Main Out master to fully-muted or back, so
         // refresh those glyphs live.
@@ -3749,6 +3774,10 @@ extension PopoverController: DeviceRowView.Delegate {
         // Out targets Selected Devices; the model handles the local-mix block +
         // auto-swap and returns a result we present.
         let result = groupController?.setDeviceSelected(id, on) ?? .ok
+        var props: [String: String] = [:]
+        if let kind = devicesByID[id]?.kind { props["kind"] = kind.rawValue }
+        if let reason = result.refusalReason { props["refusal_reason"] = reason }
+        Analytics.capture(on ? "mixer:device_selected" : "mixer:device_deselected", props)
         // Any membership edit retires a standing offer; a live removal raises a
         // fresh one. A refused edit changed nothing, so it offers nothing.
         if wasLiveRemoval && result.refusalReason == nil {
@@ -3786,6 +3815,7 @@ extension PopoverController: DeviceRowView.Delegate {
     /// greyed row separately means "play when up" and stays the node/checkbox's
     /// job, exactly like AirPlay rows).
     public func deviceRowDidRequestReconnect(_ row: DeviceRowView) {
+        Analytics.capture("mixer:reconnect_requested")
         groupController?.requestReconnect(for: row.device.id)
     }
 
@@ -3943,6 +3973,7 @@ extension PopoverController: DeviceRowView.Delegate {
     /// to the manual SYNC affordance — the row's sync drawer (BT-SYNC-DRAWER),
     /// opened under the row so its steppers/field are immediately at hand.
     private func btAlignmentAlignWithMusic(_ id: String) {
+        Analytics.capture("bt_sync:method_chosen", ["method": "music"])
         onResolveBTAlignmentPrompt?(id, false)
         clearBTAlignmentPrompt()
         if expandedSyncDeviceID != id {
@@ -3957,6 +3988,7 @@ extension PopoverController: DeviceRowView.Delegate {
     /// reconciling before the wizard opens would hand the freed slot to a
     /// queued device's card, mounting it alongside this device's wizard.
     private func btAlignmentAlignWithTicks(_ id: String) {
+        Analytics.capture("bt_sync:method_chosen", ["method": "ticks"])
         startBTAlignmentWizard(deviceID: id)
         if btWizardDeviceID != id {
             // Refused (the target went un-live under the card): the offer
@@ -4108,6 +4140,7 @@ extension PopoverController: DeviceRowView.Delegate {
             setTempo: { [weak self] bpm in self?.onBTWizardTempo?(bpm) })
         btWizardDeviceID = deviceID
         btWizardSession = session
+        Analytics.capture("bt_sync:wizard_started", ["target": isLocalTarget ? "local" : "bluetooth"])
         reconcileBTAlignmentPanels(animated: true)
         refreshDeviceRows()
     }
@@ -4236,7 +4269,10 @@ extension PopoverController: DeviceRowView.Delegate {
     /// committed or restored; drop sheet + session, repaint the row's trim
     /// display, and let a queued first-mix card take the freed slot.
     private func finishBTWizard() {
-        tearDownBTWizard()
+        if btWizardSession != nil {
+            Analytics.capture("bt_sync:wizard_finished")
+        }
+        tearDownBTWizard(viaFinish: true)
         refreshDeviceRows()
         reconcileBTAlignmentPanels(animated: true)
     }
@@ -4250,8 +4286,11 @@ extension PopoverController: DeviceRowView.Delegate {
     /// instead of vanishing the sheet silently. The run still ends here and
     /// now — only the chrome lingers; Done re-enters this funnel through
     /// `onFinished` with the session already gone and dismisses then.
-    private func tearDownBTWizard(targetLost: Bool = false) {
+    private func tearDownBTWizard(targetLost: Bool = false, viaFinish: Bool = false) {
         let hadRun = btWizardSession != nil
+        if hadRun && !viaFinish {
+            Analytics.capture("bt_sync:wizard_abandoned", ["target_lost": targetLost ? "true" : "false"])
+        }
         btWizardSession?.cancel()
         btWizardSession = nil
         btWizardDeviceID = nil
@@ -4361,6 +4400,12 @@ extension PopoverController: BTSyncDrawerViewDelegate {
 extension PopoverController: MainOutRowView.Delegate {
 
     public func mainOutRow(_ row: MainOutRowView, didSelect target: MainOutTarget) {
+        let targetProp: String
+        switch target {
+        case .selectedDevices: targetProp = "selected_devices"
+        case .group: targetProp = "group"
+        }
+        Analytics.capture("main_out:target_selected", ["target": targetProp])
         groupController?.setMainOut(target)
         // Item 9: the source switch plays the energize sequence. Raise the
         // pending beat over the (now-current) member states BEFORE `rebuild()`
@@ -4371,11 +4416,15 @@ extension PopoverController: MainOutRowView.Delegate {
     }
 
     public func mainOutRow(_ row: MainOutRowView, didSetMaster volume: Int) {
+        if volumeAdjustedControls.insert("master").inserted {
+            Analytics.capture("mixer:volume_adjusted", ["control": "master"])
+        }
         groupController?.setMainOutMasterVolume(volume)
         refreshDeviceRows()
     }
 
     public func mainOutRow(_ row: MainOutRowView, didSetMuted muted: Bool) {
+        Analytics.capture("main_out:mute_toggled", ["muted": muted ? "true" : "false"])
         groupController?.setMainOutMuted(muted)
         refreshDeviceRows()
         refreshMainOutRow()
@@ -4399,6 +4448,9 @@ extension PopoverController: MainOutRowView.Delegate {
 extension PopoverController: AppRowView.Delegate {
 
     public func appRow(_ row: AppRowView, didSetVolume volume: Int, for appID: String) {
+        if volumeAdjustedControls.insert("app").inserted {
+            Analytics.capture("mixer:volume_adjusted", ["control": "app"])
+        }
         // Drive `.currentDevice` local stream immediately (low-latency path).
         // `appRouting.setVolume` fires `onRoutesDidChange` which re-pushes volumes
         // to the mixer/engine — no rebuild needed here; a rebuild would replace
@@ -4408,11 +4460,20 @@ extension PopoverController: AppRowView.Delegate {
     }
 
     public func appRow(_ row: AppRowView, didSelectDestination destinationID: String, for appID: String) {
-        appRouting.setDestination(destination(forID: destinationID), for: appID)
+        let mapped = destination(forID: destinationID)
+        let destProp: String
+        switch mapped {
+        case .noRedirect: destProp = "no_redirect"
+        case .currentDevice: destProp = "current_device"
+        case .device: destProp = "device"
+        }
+        Analytics.capture("app_routing:destination_selected", ["destination": destProp])
+        appRouting.setDestination(mapped, for: appID)
         rebuild()
     }
 
     public func appRow(_ row: AppRowView, didRemoveFor appID: String) {
+        Analytics.capture("app_routing:app_removed")
         removeApp(bundleID: appID)
     }
 
@@ -4476,6 +4537,7 @@ extension PopoverController: AppRowView.Delegate {
     /// skip-work-while-hidden gate opens), arms the deselect monitor, and turns
     /// the backend's RMS computation on.
     func surfaceDidShow() {
+        volumeAdjustedControls.removeAll()
         hostIsShown = true
         installDeselectMonitor()
         onMeteringActiveChange?(true)

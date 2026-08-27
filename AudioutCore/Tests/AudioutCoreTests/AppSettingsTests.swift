@@ -34,6 +34,22 @@ import Testing
         #expect(AppSettings(defaults: defaults).reconnectAtLaunch == true)
     }
 
+    @Test func telemetryOptInRoundTrips() {
+        let settings = AppSettings(defaults: defaults)
+        #expect(settings.telemetryOptIn == false)
+        settings.telemetryOptIn = true
+        #expect(settings.telemetryOptIn == true)
+        #expect(AppSettings(defaults: defaults).telemetryOptIn == true)
+    }
+
+    @Test func telemetryAskedRoundTrips() {
+        let settings = AppSettings(defaults: defaults)
+        #expect(settings.telemetryAsked == false)
+        settings.telemetryAsked = true
+        #expect(settings.telemetryAsked == true)
+        #expect(AppSettings(defaults: defaults).telemetryAsked == true)
+    }
+
     @Test func unknownStoredValueFallsBack() {
         defaults.set("chartreuse", forKey: "appearance.theme")
         #expect(AppSettings(defaults: defaults).theme == .system)

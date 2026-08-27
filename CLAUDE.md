@@ -113,6 +113,15 @@ the work to this machine, which is also the one running every other agent.
 
 `AIRPLAY_BACKEND=mock` (default for dev) · `AIRPLAY_BACKEND=native` (real hardware, needs TCC + signed app)
 
+## Usage analytics (PostHog)
+
+Feature usage is tracked through `AudioutCore/Sources/AudioutCore/Analytics.swift`, a consent-gated facade. PostHog itself is linked ONLY to the `AudioutApp` target (same scoping as Sparkle) — never `import PostHog` anywhere else. Event names are an external contract: PostHog insights reference them by string, so treat every `Analytics.capture("...")` name like a public API.
+
+- **Don't silently break tracking.** When you move, refactor, or delete code containing an `Analytics.capture` call, the call moves with the behavior — same event name, same properties, still success-gated (fire only after the action actually happened, never before its guard). If a feature is removed outright, say so in the task report so the event's dashboard owner knows the stream ends.
+- **New user-facing features get instrumented.** Any new user action (button, toggle, gesture, funnel step) gets an `Analytics.capture` at its choke point, named `category:object_action` in snake_case (e.g. `scene:created`, `bt_sync:wizard_finished`). Grep `Analytics.capture` for the live event list and match its style.
+- **Privacy fence (PRODUCT.md "Data Collection"):** properties never carry speaker/device names, bundle IDs, network identifiers, audio content, license keys, or free-text user input. Counts, enum-like strings, and booleans only.
+- Consent is opt-in and off by default. `Analytics.capture` is always safe to call (no-op without sink + consent) — never wrap it in your own consent checks, and never call `PostHogSDK` directly outside `AppDelegate`.
+
 ## Paddle integration
 
 Paddle lives in **one place**: the Node.js license server (private repo

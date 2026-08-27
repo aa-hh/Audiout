@@ -1158,6 +1158,7 @@ extension DeviceDetailViewController: EQEditorViewDelegate {
         eqEdits[id] = (eq, committed)
         onSetEQ?(eq, id, committed)
         refreshResetEnabled()
+        if committed { Analytics.capture("eq:adjusted", ["target": "device"]) }
     }
 
     public func eqEditorDidRequestReset(_ editor: EQEditorView) {
@@ -1167,6 +1168,7 @@ extension DeviceDetailViewController: EQEditorViewDelegate {
         eqEdits[id] = (.flat, true)
         onSetEQ?(.flat, id, true)
         refreshResetEnabled()
+        Analytics.capture("eq:reset", ["target": "device"])
     }
 }
 

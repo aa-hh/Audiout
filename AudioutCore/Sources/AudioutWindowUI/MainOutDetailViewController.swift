@@ -348,6 +348,7 @@ extension MainOutDetailViewController: EQEditorViewDelegate {
         pendingEdit = (eq, committed)
         onSetEQ?(eq, committed)
         refreshResetEnabled()
+        if committed { Analytics.capture("eq:adjusted", ["target": "main_out"]) }
     }
 
     public func eqEditorDidRequestReset(_ editor: EQEditorView) {
@@ -355,6 +356,7 @@ extension MainOutDetailViewController: EQEditorViewDelegate {
         pendingEdit = (.flat, true)
         onSetEQ?(.flat, true)
         refreshResetEnabled()
+        Analytics.capture("eq:reset", ["target": "main_out"])
     }
 }
 

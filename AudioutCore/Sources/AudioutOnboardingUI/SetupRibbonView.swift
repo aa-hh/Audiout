@@ -88,7 +88,7 @@ final class SetupHeroHeadView: NSView {
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
 
-        headlineLabel.font = .systemFont(ofSize: 20, weight: .bold)
+        headlineLabel.font = Tokens.Font.display
         headlineLabel.textColor = Tokens.Color.label
         headlineLabel.maximumNumberOfLines = 2
 
@@ -253,7 +253,7 @@ final class SetupPreviewFrameView: NSView {
     /// authored, never uppercased (One Case rule).
     private static func captionText(_ text: String) -> NSAttributedString {
         NSAttributedString(string: text, attributes: [
-            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .font: Tokens.Font.microLabel,
             .foregroundColor: Tokens.Color.tertiaryLabel,
         ])
     }

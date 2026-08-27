@@ -401,12 +401,12 @@ import AppKit
 
     @Test func readoutIsSecondaryWhenDestinationIsCurrentDevice() {
         let (row, _) = makeRow(selected: "local")
-        #expect(row.test_readoutTextColor == .secondaryLabelColor)
+        #expect(row.test_readoutTextColor == Tokens.Color.secondaryLabel)
     }
 
     @Test func readoutIsSecondaryWhenRedirected() {
         let (row, _) = makeRow(selected: "device-1")
-        #expect(row.test_readoutTextColor == .secondaryLabelColor)
+        #expect(row.test_readoutTextColor == Tokens.Color.secondaryLabel)
     }
 
     // MARK: Destination subtitle microcopy (A3)
@@ -614,7 +614,7 @@ import AppKit
     /// name sits at secondary, with no idle suffix.
     @Test func unroutedAppNameIsSecondary() {
         let row = makeThreeStateRow(selected: "no-redirect", isRunning: true)
-        #expect(row.test_nameTextColor == .secondaryLabelColor)
+        #expect(row.test_nameTextColor == Tokens.Color.secondaryLabel)
         #expect(row.test_idleSuffixColor == nil)
         #expect(row.test_nameDisplayText == "Example App")
     }
@@ -626,7 +626,7 @@ import AppKit
     @Test func routedIdleAppShowsTertiaryIdleSuffixAndNoBadge() {
         let row = makeThreeStateRow(selected: "device-1", isRunning: false)
         #expect(row.test_nameDisplayText == "Example App (idle)")
-        #expect(row.test_nameTextColor == .secondaryLabelColor)
+        #expect(row.test_nameTextColor == Tokens.Color.secondaryLabel)
         #expect(row.test_idleSuffixColor == .tertiaryLabelColor, "the (idle) suffix must render in the tertiary idle voice")
         #expect(!(row.test_isOfflineBadgeVisible), "the routed-idle treatment replaces the warning badge")
     }

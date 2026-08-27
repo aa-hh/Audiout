@@ -96,7 +96,7 @@ public final class GroupRowView: NSView {
             systemSymbolName: isActive ? "checkmark.circle.fill" : "circle",
             accessibilityDescription: isActive ? "Group is active" : "Activate group"
         )
-        activateButton.contentTintColor = isActive ? Tokens.Color.accent : Tokens.Color.secondaryLabel
+        activateButton.contentTintColor = isActive ? Tokens.Color.engagedChrome : Tokens.Color.secondaryLabel
 
         chevronButton.image = NSImage(
             systemSymbolName: isExpanded ? "chevron.down" : "chevron.right",

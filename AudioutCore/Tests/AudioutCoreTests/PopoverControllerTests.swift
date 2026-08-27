@@ -361,7 +361,7 @@ import AppKit
         #expect(row.test_isEnabledOn, "switch is ON")
         // The icon is neutral in BOTH states now (2026-07-17 redesign): identity
         // only, no accent-when-selected fill. Selection reads from the switch.
-        #expect(row.test_iconTint == .secondaryLabelColor, "icon is always neutral")
+        #expect(row.test_iconTint == Tokens.Color.secondaryLabel, "icon is always neutral")
 
         // Toggle it OFF — the row must return to the unselected appearance.
         _ = popover.test_toggleDeviceEnabled(deviceID: "office", on: false)
@@ -369,7 +369,7 @@ import AppKit
         #expect(!(row.test_isShowingSelectedBackground), "deselected row paints NO selected background (no stale highlight)")
         #expect(!(row.test_isHovered), "no stale hover wash after deselect")
         #expect(!(row.test_isEnabledOn), "switch returned to OFF")
-        #expect(row.test_iconTint == .secondaryLabelColor, "icon tint stays neutral (always secondary)")
+        #expect(row.test_iconTint == Tokens.Color.secondaryLabel, "icon tint stays neutral (always secondary)")
     }
 
     /// T-U9a — the last-row sticky-highlight bug. A row hovered by the pointer

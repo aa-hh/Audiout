@@ -1017,6 +1017,11 @@ gate/motion/demo/selection rules change.
   re-read — the load-time one fires a detached task, so a caller that needs its
   result (Bluetooth and Remote Control only reach `.granted` through it) has to be
   able to wait.
+- **The Setup window runs its own display scale at five ledgered off-token
+  sizes** (9.5 pt `DemoPaneView:2696`, 11.5 pt `SetupRibbonView:348`, 12 pt
+  `DemoPaneView:2336`, 14.5 pt `SetupRibbonView:97`, 24 pt `DemoPaneView:1863`)
+  — deliberate, same ledger idea as `DemoSystemColor`; do not tokenise
+  without a type-scale decision.
 
 ## Feature Flow
 

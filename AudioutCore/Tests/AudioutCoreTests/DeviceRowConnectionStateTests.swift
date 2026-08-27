@@ -536,14 +536,14 @@ import AudioutCore
         let row = DeviceRowView(device: device)
         row.apply(device, selected: true, controllable: true)
 
-        #expect(row.test_muteTintColor == .secondaryLabelColor, "unmuted reads as the neutral secondary tint")
+        #expect(row.test_muteTintColor == Tokens.Color.secondaryLabel, "unmuted reads as the neutral secondary tint")
     }
 
     @Test func muteTintUpdatesInstantlyOnLiveClick() {
         let device = Device(id: "dev-1", name: "Test Speaker", kind: .homePod, isMuted: false)
         let row = DeviceRowView(device: device)
         row.apply(device, selected: true, controllable: true)
-        #expect(row.test_muteTintColor == .secondaryLabelColor)
+        #expect(row.test_muteTintColor == Tokens.Color.secondaryLabel)
 
         // `test_toggleMute` drives the exact same path a real click does
         // (AppKit's own state flip, then `muteToggled(_:)`'s `updateMuteTint()`)
@@ -553,7 +553,7 @@ import AudioutCore
                 "a live click updates the tint instantly")
 
         row.test_toggleMute(false)
-        #expect(row.test_muteTintColor == .secondaryLabelColor, "toggling back off reverts the tint instantly")
+        #expect(row.test_muteTintColor == Tokens.Color.secondaryLabel, "toggling back off reverts the tint instantly")
     }
 
     // MARK: V7 — the `%` readout dims with the slider's disabled state
@@ -574,7 +574,7 @@ import AudioutCore
         row.apply(device, selected: true, controllable: true)
 
         #expect(row.test_isSliderEnabled)
-        #expect(row.test_readoutColor == .secondaryLabelColor, "readout is the normal secondary color when enabled")
+        #expect(row.test_readoutColor == Tokens.Color.secondaryLabel, "readout is the normal secondary color when enabled")
     }
 
     // MARK: S4 (spec §4.6/R5) — blocked keeps NORMAL text, distinct from unavailable
@@ -587,7 +587,7 @@ import AudioutCore
         let blocked = Device(id: "local", name: "This Mac", kind: .localMac)
         let blockedRow = DeviceRowView(device: blocked)
         blockedRow.apply(blocked, selected: false, blocked: true, blockReason: "blocked")
-        #expect(blockedRow.test_nameColor == .secondaryLabelColor,
+        #expect(blockedRow.test_nameColor == Tokens.Color.secondaryLabel,
                 "a blocked row's name stays at the normal non-member treatment (S4)")
         #expect(blockedRow.test_statusText == nil, "…and it carries no sublabel")
 

@@ -971,7 +971,7 @@ public final class DeviceRowView: NSView {
             // failed halo ring.
             showSublabel("Couldn't connect", color: Tokens.Color.failure)
         } else if !device.isAvailable {
-            showSublabel("Unavailable", color: Tokens.Color.tertiaryLabel)
+            showSublabel("Unavailable", color: Tokens.Color.inkTertiary)
         } else if let routing = legacyRoutingLine() {
             // S3 (spec §3.5): a ROW-muted device prepends the Muted token to
             // its EXISTING feed sublabel — never to a single-line row (this
@@ -1790,7 +1790,7 @@ public final class DeviceRowView: NSView {
         } else if tuned {
             color = Tokens.Color.label
         } else {
-            color = Tokens.Color.tertiaryLabel
+            color = Tokens.Color.inkTertiary
         }
         syncChipButton.attributedTitle = NSAttributedString(
             string: title,
@@ -3060,7 +3060,7 @@ private final class SyncChipCell: NSButtonCell {
     /// chip wears the shared `hairline`, the codebase's border tone.
     var borderColor: NSColor {
         if isEngaged { return Tokens.Color.engagedChrome }
-        return isUntuned ? Tokens.Color.tertiaryLabel : Tokens.Color.hairline
+        return isUntuned ? Tokens.Color.inkTertiary : Tokens.Color.hairline
     }
 }
 

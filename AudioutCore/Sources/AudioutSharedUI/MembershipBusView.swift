@@ -148,13 +148,13 @@ public final class MembershipBusView: NSView {
             // place the rail's gap (on-spine) or detour arc (off-spine).
             let cx = bounds.midX
             let cy = bounds.midY
-            let ember = dimmed ? Tokens.Color.tertiaryLabel : Tokens.Color.ember
+            let ember = dimmed ? Tokens.Color.railDormant : Tokens.Color.ember
             drawHoverRing(centerX: cx, centerY: cy)
             let rect = NSRect(x: cx - r, y: cy - r, width: 2 * r, height: 2 * r)
             if node == .member {
                 // Filled disc + rim in the spine's own tone: gold on an armed
                 // rail, ember on an idle one (same split the wire draws with).
-                let fill = dimmed ? Tokens.Color.tertiaryLabel : Tokens.Color.spineTone(armed: armed)
+                let fill = dimmed ? Tokens.Color.railDormant : Tokens.Color.spineTone(armed: armed)
                 fill.setFill()
                 NSBezierPath(ovalIn: rect).fill()
                 strokeNodeRim(in: rect, color: fill, dashed: false)
@@ -202,7 +202,7 @@ public final class MembershipBusView: NSView {
     /// The rim colour for a hollow node.
     private func rimColor(for node: Node, ember: NSColor) -> NSColor {
         switch node {
-        case .connecting:              return dimmed ? Tokens.Color.tertiaryLabel : Tokens.Color.gold
+        case .connecting:              return dimmed ? Tokens.Color.railDormant : Tokens.Color.gold
         case .failed:                  return Tokens.Color.failure  // never dimmed
         case .blocked:                 return Tokens.Color.tertiaryLabel
         case .nonMember, .member,

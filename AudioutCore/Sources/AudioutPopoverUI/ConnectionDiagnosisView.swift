@@ -123,7 +123,7 @@ public final class ConnectionDiagnosisView: NSView {
         background.addSubview(headlineLabel)
 
         suggestionLabel.translatesAutoresizingMaskIntoConstraints = false
-        suggestionLabel.font = .systemFont(ofSize: 11)
+        suggestionLabel.font = Tokens.Font.detail
         suggestionLabel.textColor = Tokens.Color.secondaryLabel
         background.addSubview(suggestionLabel)
 

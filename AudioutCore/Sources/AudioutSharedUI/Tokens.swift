@@ -72,6 +72,15 @@ public enum Tokens {
     public static let accentStyleDidChangeNotification =
         Notification.Name("Audiout.Tokens.accentStyleDidChange")
 
+    /// Test-only override for the live `NSWorkspace` Increase-Contrast flag —
+    /// `nil` means "use the live value" (same seam idea as the views'
+    /// `test_reduceMotionOverride`). A test that sets this to a non-`nil`
+    /// value MUST restore it to `nil` when done, so no other test in the
+    /// process inherits a forced Increase-Contrast reading. Internal (not
+    /// `public`): only this module's own token providers and its test target
+    /// need it.
+    static var test_increaseContrastOverride: Bool?
+
     // MARK: - Color
 
     /// Semantic color aliases plus the Warm Signal custom palette. The
@@ -81,9 +90,35 @@ public enum Tokens {
     public enum Color {
         /// Primary label text. Alias of `NSColor.labelColor`.
         public static var label: NSColor { .labelColor }
-        /// Secondary/subordinate label text (subtitles, hints). Alias of
-        /// `NSColor.secondaryLabelColor`.
-        public static var secondaryLabel: NSColor { .secondaryLabelColor }
+        /// Secondary/subordinate label text (subtitles, hints). Mode-aware,
+        /// not a plain alias (P2-1): dark keeps the unmodified system
+        /// `NSColor.secondaryLabelColor` (the system color already resolves
+        /// its own Increase-Contrast response); light resolves an authored
+        /// warm hex instead, because the alias's light-mode value sits under
+        /// the text floor.
+        ///
+        /// `static let`, not a computed var: call sites and several tests
+        /// compare this token by INSTANCE IDENTITY — two independently
+        /// created dynamic `NSColor`s are not reliably `==`
+        /// (`OnboardingPermissionColorTests.swift:81-96`) — so this must be
+        /// the one shared instance every consumer reads.
+        ///
+        /// CONTRAST RATIONALE (WCAG relative luminance, measured): light base
+        /// `#5C574C` = 6.93:1 vs canvas/panel (`#FBFBF9`) / 6.30:1 vs raised /
+        /// 5.38:1 vs well — clears the 4.5:1 text floor on every light
+        /// ground. Light Increase Contrast `#453F35` = 10.06:1 / 10.06:1 /
+        /// 9.14:1 / 7.80:1. The light base hex IS ``inkSecondary``'s light
+        /// hex — one authored light "secondary text" voice, not two
+        /// independent ones. All non-text consumers of this token (verified
+        /// by grep: every one is a `contentTintColor` glyph tint) only ever
+        /// GAIN contrast from this change in light mode; dark is untouched,
+        /// since dark keeps the unmodified system color.
+        public static let secondaryLabel: NSColor = NSColor(name: NSColor.Name("WarmSignal.secondaryLabel")) { appearance in
+            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            guard !isDark else { return .secondaryLabelColor }
+            let increaseContrast = Tokens.test_increaseContrastOverride ?? NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+            return NSColor(warmSignalHex: increaseContrast ? 0x453F35 : 0x5C574C)
+        }
         /// De-emphasized label text (sublabels, dimmed inline detail). Alias
         /// of `NSColor.tertiaryLabelColor`.
         public static var tertiaryLabel: NSColor { .tertiaryLabelColor }
@@ -134,9 +169,6 @@ public enum Tokens {
         /// `AppRowView`, `DeviceRowView`). Alias of
         /// `NSColor.selectedContentBackgroundColor`.
         public static var selectedContentBackground: NSColor { .selectedContentBackgroundColor }
-        /// Faint recessed track fill behind a meter/indicator (`LevelMeterView`'s
-        /// track layer). Alias of `NSColor.tertiarySystemFill`.
-        public static var tertiarySystemFill: NSColor { .tertiarySystemFill }
         /// Destructive/error inline text (e.g. AppRowView's removed-app
         /// strikethrough label). Alias of `NSColor.systemRed`.
         public static var destructive: NSColor { .systemRed }
@@ -302,10 +334,10 @@ public enum Tokens {
         /// CONTRAST RATIONALE (WCAG relative luminance): dark `#4E463A` ≈ 2.0:1
         /// vs `canvas` `#16130F` (the empty channel reads as a recess), and the
         /// dimmest fill end `ember` `#8A6A2F` sits ≈ 1.9:1 OVER it so the fill
-        /// boundary is legible; light `#CBBEA1` ≈ 1.6:1 vs `canvas` `#F4EFE7`
+        /// boundary is legible; light `#CBBEA1` ≈ 1.77:1 vs `canvas` `#FBFBF9`
         /// (kept quiet so a full-length empty track never competes with the
         /// name). IC variants deepen the recess for definition (dark `#5A5245`,
-        /// light `#BEAF90`) without turning the track into a signal.
+        /// light `#BEAF90` ≈ 2.08:1) without turning the track into a signal.
         public static var meterTrack: NSColor {
             warmDynamic(name: "meterTrack", dark: 0x4E463A, darkHighContrast: 0x5A5245,
                        light: 0xCBBEA1, lightHighContrast: 0xBEAF90)
@@ -329,18 +361,18 @@ public enum Tokens {
         /// use): dark `#1F1A15` is 1.07:1 vs `canvas` `#16130F` / 1.01:1 vs
         /// `panel` `#1D1915` (a near-invisible step, deliberately — the
         /// sidebar should read as part of the same warm surface family, not a
-        /// clashing plane); light `#F2EBDC` is 1.04:1 vs `canvas` `#F4EFE7` /
-        /// 1.12:1 vs `panel` `#FBF8F2`, and 1.04:1 against today's neutral
-        /// sidebar grey `#F0F0F0` it replaces — enough of a warm hue shift to
-        /// read visibly warmer while staying a quiet background. Row text
+        /// clashing plane). Light `#F5F4ED` is 1.06:1 vs Circuit
+        /// `canvas`/`panel` `#FBFBF9` (P2-3, re-measured against the shipped
+        /// Circuit light ground) — enough of a warm hue shift to read
+        /// visibly warmer while staying a quiet background. Row text
         /// (`Tokens.Color.label`/`secondaryLabel`) is unaffected — those are
         /// system dynamic colors already proven legible over the warm
         /// canvas/panel ladder elsewhere, and the 26+ overlay's low alpha
         /// makes any shift negligible. IC variants (my picks, flagged for a
         /// future accessibility sweep like `ringConnected`'s) deepen/lighten
         /// for a slightly more distinct plane under Increase Contrast: dark
-        /// `#2A241C` (1.21:1 vs `canvas`), light `#E9DFC9` (1.25:1 vs
-        /// `panel`).
+        /// `#2A241C` (1.21:1 vs `canvas`), light-IC `#E8E6DC` is 1.21:1 vs
+        /// Circuit `canvas`/`panel`.
         public static var sidebarWarmTint: NSColor {
             warmDynamic(name: "sidebarWarmTint", dark: 0x1F1A15, darkHighContrast: 0x2A241C,
                        light: 0xF5F4ED, lightHighContrast: 0xE8E6DC)
@@ -363,12 +395,18 @@ public enum Tokens {
         /// CONTRAST RATIONALE: spec §1.1/§1.2 set a NORMATIVE ≥3:1 floor tested
         /// at the 21 px ring circle, dark vs BOTH `panel` and `raised`, light vs
         /// `panel`. Measured (WCAG relative luminance): dark `#8D7D5E` = 4.35:1
-        /// vs `panel` / 4.07:1 vs `raised`; light `#A08C66` = 3.08:1 vs `panel`
-        /// (passes, tight — spec §10 flagged the exact hex for the Wave-5 sweep).
+        /// vs `panel` / 4.07:1 vs `raised` / 4.82:1 vs `well`; light `#A08C66`
+        /// = 3.15:1 vs `panel`/`canvas` `#FBFBF9` (P2-4 re-measurement —
+        /// passes, tight, same hex the spec flagged for the Wave-5 sweep).
         /// Both clear the floor as-is, so the spec hexes stand (no escape-valve
-        /// brightening needed). Increase-Contrast variants push further from
-        /// `panel` for headroom (dark `#A99A78` = 6.31:1; light `#8A7550` =
-        /// 4.18:1), per house rule 3 (every case ships an IC variant).
+        /// brightening needed). GUARANTEED GROUNDS, stated explicitly: ≥3:1
+        /// vs dark `panel`/`raised`/`well` and vs light `panel`/`canvas` — NOT
+        /// guaranteed on light `raised` (2.86:1) or light `well` (2.44:1); no
+        /// ring draws on either today (AGENTS.md rule 46), so a future
+        /// consumer putting a ring on them must re-tune first. Increase-
+        /// Contrast variants push further from `panel` for headroom (dark
+        /// `#A99A78` = 6.31:1; light `#8A7550` = 4.18:1), per house rule 3
+        /// (every case ships an IC variant).
         public static var ringConnected: NSColor {
             warmDynamic(name: "ringConnected", dark: 0x8D7D5E, darkHighContrast: 0xA99A78,
                        light: 0xA08C66, lightHighContrast: 0x8A7550)
@@ -397,9 +435,12 @@ public enum Tokens {
         /// CONTRAST RATIONALE (>=4.5:1 vs both `canvas` and `panel`, both
         /// appearances; measured, WCAG relative luminance): dark `#D08A45` =
         /// 6.3:1 vs `panel` (`#16130F`); light `#A55B22` = 4.9:1 vs `panel`
-        /// (`#FBFBF9`).
+        /// (`#FBFBF9`). IC variants (house rule 3 — every case ships one):
+        /// dark `#E09A55` = 7.42:1 vs `panel`; light `#8F4E1D` = 6.19:1 vs
+        /// `panel`.
         public static var warningText: NSColor {
-            warmDynamic(name: "warningText", dark: 0xD08A45, light: 0xA55B22)
+            warmDynamic(name: "warningText", dark: 0xD08A45, darkHighContrast: 0xE09A55,
+                       light: 0xA55B22, lightHighContrast: 0x8F4E1D)
         }
 
         /// Authored secondary text for onboarding surfaces that commit to the
@@ -409,10 +450,57 @@ public enum Tokens {
         /// light, under floor for body text. CONTRAST RATIONALE (>=4.5:1 vs
         /// `canvas`/`panel`/`raised`, both appearances; measured): dark
         /// `#B4ADA0` = 7.3:1 vs `panel`; light `#5C574C` = 7.1:1 vs `panel`
-        /// (`#FBFBF9`).
+        /// (`#FBFBF9`). IC variants (house rule 3): dark `#C6C0B4` = 9.65:1
+        /// vs `panel` / 9.02:1 vs `raised`; light `#453F35` = 10.06:1 vs
+        /// `panel` / 9.14:1 vs `raised` / 7.80:1 vs `well` — the same hex as
+        /// ``secondaryLabel``'s light Increase-Contrast value (one authored
+        /// light "secondary text" voice).
         public static var inkSecondary: NSColor {
-            warmDynamic(name: "inkSecondary", dark: 0xB4ADA0, light: 0x5C574C)
+            warmDynamic(name: "inkSecondary", dark: 0xB4ADA0, darkHighContrast: 0xC6C0B4,
+                       light: 0x5C574C, lightHighContrast: 0x453F35)
         }
+
+        /// Authored tertiary TEXT for state-bearing de-emphasis ("Unavailable",
+        /// "Not set", subsection headers, empty-state placeholders) — the
+        /// system `tertiaryLabelColor` alias measures 1.85-2.26:1 on the warm
+        /// grounds, under every floor. `static let`, not a computed var: the
+        /// BT sync-chip tests compare this token by instance identity, same
+        /// reason as ``secondaryLabel``. Decorative dimming (readouts, idle
+        /// suffixes, disabled chrome, decorative chevrons) stays on the
+        /// ``tertiaryLabel`` alias — this token is only for TEXT that carries
+        /// state.
+        ///
+        /// CONTRAST RATIONALE (>=4.5:1 vs canvas/panel/well, both appearances;
+        /// measured, WCAG relative luminance): dark `#969083` = 5.83:1 vs
+        /// canvas / 5.50:1 vs panel / 5.14:1 vs raised / 6.10:1 vs well;
+        /// light `#665F4C` = 6.13:1 vs canvas/panel / 5.57:1 vs raised /
+        /// 4.76:1 vs well. The >=4.5-on-well constraint necessarily narrows
+        /// the light gap to ``inkSecondary`` (6.13 vs 6.93 on canvas) —
+        /// hierarchy there is carried by size/weight as well as ink. IC
+        /// variants: dark `#AFA79A` = 7.33:1 vs panel / 6.86:1 vs raised;
+        /// light `#4A443A` = 9.30:1 vs canvas/panel / 7.22:1 vs well.
+        public static let inkTertiary: NSColor = warmDynamic(
+            name: "inkTertiary", dark: 0x969083, darkHighContrast: 0xAFA79A,
+            light: 0x665F4C, lightHighContrast: 0x4A443A)
+
+        /// The membership rail's ONE dormancy tone (§4.7 — dormancy is one
+        /// flag, one tone): a hue-neutral warm grey, `static let` for the same
+        /// instance-identity reason as ``inkTertiary``. Replaces
+        /// ``tertiaryLabel`` (~2.2:1) on a graphical object held to a 3:1
+        /// floor, not a 4.5:1 text floor.
+        ///
+        /// CONTRAST RATIONALE (>=3:1 vs canvas/panel/raised, both
+        /// appearances; measured): dark `#7D7466` = 4.02:1 vs canvas / 3.79:1
+        /// vs panel / 3.55:1 vs raised; light `#8A8272` = 3.67:1 vs
+        /// canvas/panel / 3.34:1 vs raised. These are the ONLY grounds this
+        /// token guarantees — NOT light `well` (2.85:1): the rail never draws
+        /// on `well` (AGENTS.md rule 46 retired `.well` from Groups
+        /// surfaces). IC variants: dark `#948C7C` = 5.56:1 vs canvas / 5.24:1
+        /// vs panel / 4.90:1 vs raised; light `#7A7263` = 4.59:1 vs
+        /// canvas/panel / 4.17:1 vs raised.
+        public static let railDormant: NSColor = warmDynamic(
+            name: "railDormant", dark: 0x7D7466, darkHighContrast: 0x948C7C,
+            light: 0x8A8272, lightHighContrast: 0x7A7263)
 
         /// The earned-checkmark green — the rehearsal-led Setup spine/ribbon's
         /// granted-state glyph (Direction 04). No existing green token: the
@@ -420,9 +508,12 @@ public enum Tokens {
         /// measures 2.14:1 vs `panel` in light, under the 3:1 UI floor.
         /// CONTRAST RATIONALE (>=3:1 vs `panel`/`raised`, both appearances;
         /// measured): dark `#5FC27E` = clears floor vs `panel` (`#1D1915`);
-        /// light `#2C7A46` = 5.2:1 vs `panel` (`#FBFBF9`).
+        /// light `#2C7A46` = 5.2:1 vs `panel` (`#FBFBF9`). IC variants (house
+        /// rule 3): dark `#7BD495` = 9.73:1 vs `panel` / 9.09:1 vs `raised`;
+        /// light `#246B3C` = 6.25:1 vs `panel` / 5.68:1 vs `raised`.
         public static var success: NSColor {
-            warmDynamic(name: "success", dark: 0x5FC27E, light: 0x2C7A46)
+            warmDynamic(name: "success", dark: 0x5FC27E, darkHighContrast: 0x7BD495,
+                       light: 0x2C7A46, lightHighContrast: 0x246B3C)
         }
 
         // MARK: Gold accent instruments (spec §1, S-BUS)
@@ -502,9 +593,14 @@ public enum Tokens {
         /// hex (2.66:1 vs dark `panel` — below the instrument floor exactly
         /// like Full-gold light ember already is: `ember` is a 2 pt line
         /// paired with high-contrast `gold` nodes, and the IC variant is the
-        /// spec's escape valve — dark IC `#877146` 3.73:1). Subtle light
-        /// `#AE9668` (2.69:1, IC `#8A744C` 4.23:1) is my symmetrical pick,
-        /// flagged for the Wave-5 sweep. Follow-system = accent × 0.55
+        /// spec's escape valve — dark IC `#877146` 3.73:1). Subtle light was
+        /// `#AE9668`, measured 2.14:1 vs light `well` `#E2DFD3` (P2-2: the
+        /// Subtle column was never re-measured after the Direction-04 well
+        /// deepening) — re-tuned to `#877750` (3.29:1 vs `well` / 4.24:1 vs
+        /// `panel`), hue 42.5°, saturation 0.41 vs Subtle gold's 0.48 — still
+        /// the muted, duller companion. IC `#8A744C` is kept (still strictly
+        /// darker: luminance 0.1842 < base 0.1892), measuring 3.36:1 vs
+        /// `well` / 4.33:1 vs `panel`. Follow-system = accent × 0.55
         /// luminance (spec's own formula; component-scaled sRGB).
         public static var ember: NSColor {
             accentDynamic(name: "ember",
@@ -516,7 +612,7 @@ public enum Tokens {
                           full: WarmVariants(dark: 0x8A6A2F, darkHighContrast: 0xA5824A,
                                              light: 0x947637, lightHighContrast: 0x8F702F),
                           subtle: WarmVariants(dark: 0x6D5B34, darkHighContrast: 0x877146,
-                                               light: 0xAE9668, lightHighContrast: 0x8A744C),
+                                               light: 0x877750, lightHighContrast: 0x8A744C),
                           systemAccentScale: 0.55)
         }
 
@@ -548,11 +644,12 @@ public enum Tokens {
         /// warm meter gradient tops out HERE, never at `failure` red (house
         /// rule 8). CONTRAST RATIONALE: spec ≥3:1 floor vs `panel`. Measured
         /// (WCAG relative luminance): dark `#E29A3D` = 7.42:1 vs `panel`
-        /// `#1D1915` (6.94:1 vs `raised`); light `#B3701C` = 3.77:1 vs `panel`
-        /// `#FBF8F2` — both clear the floor as spec'd, so the spec hexes
+        /// `#1D1915` (6.94:1 vs `raised`); light `#B3701C` = 3.86:1 vs `panel`
+        /// `#FBFBF9` (P2-3 re-measurement against the shipped Circuit ground)
+        /// — both clear the floor as spec'd, so the spec hexes
         /// stand. IC variants push further from `panel` for headroom (my
         /// picks, flagged for the Wave-5 sweep like `ringConnected`): dark
-        /// `#F2AC4F` = 8.98:1; light `#8F5A12` = 5.44:1.
+        /// `#F2AC4F` = 8.98:1; light `#8F5A12` = 5.57:1.
         public static var caution: NSColor {
             warmDynamic(name: "caution", dark: 0xE29A3D, darkHighContrast: 0xF2AC4F,
                        light: 0xB3701C, lightHighContrast: 0x8F5A12)
@@ -638,7 +735,9 @@ public enum Tokens {
         /// dark `#857762` = 4.44:1 vs `well` `#100D0A` / 4.24:1 vs `canvas`
         /// `#16130F`; light `#8A7A62` (a warm mid-brown knob on paper —
         /// `raised`'s pure white measured 1.25:1, unusable) = 3.12:1 vs
-        /// `well` `#E2DFD3` / 3.64:1 vs `canvas` `#F4EFE7`. IC variants push
+        /// `well` `#E2DFD3` / 4.02:1 vs `canvas` `#FBFBF9` (P2-3
+        /// re-measurement against the shipped Circuit ground — the well
+        /// number was already correct). IC variants push
         /// further (dark `#9A8C74` = 5.88:1 / 5.62:1; light `#6E6050` =
         /// 4.86:1 / 5.31:1).
         public static var faderThumb: NSColor {
@@ -651,10 +750,11 @@ public enum Tokens {
         /// `canvas`; the rim IS the trough's edge), so it gets a real floor
         /// where `hairline` (1.21:1 dark / 1.11:1 light vs `well`) has none.
         /// Measured: dark `#6B5F4E` = 3.11:1 vs `well` / 2.97:1 vs `canvas`;
-        /// light `#9E8D6B` = 2.59:1 vs `well` / 2.83:1 vs `canvas` — kept
-        /// just under strict 3:1 in light so a 1 px ring reads as a rim, not
-        /// a stripe, on paper. IC variants clear 3:1 outright (dark `#786B5A`
-        /// = 3.74:1 vs `well`; light `#8A7550` = 3.54:1 vs `well`).
+        /// light `#9E8D6B` = 2.43:1 vs `well` / 3.13:1 vs `canvas` `#FBFBF9`
+        /// (P2-3 re-measurement) — kept just under strict 3:1 in light so a
+        /// 1 px ring reads as a rim, not a stripe, on paper. IC variants
+        /// clear 3:1 outright (dark `#786B5A` = 3.74:1 vs `well`; light
+        /// `#8A7550` = 3.32:1 vs `well`).
         public static var faderRim: NSColor {
             warmDynamic(name: "faderRim", dark: 0x6B5F4E, darkHighContrast: 0x786B5A,
                        light: 0x9E8D6B, lightHighContrast: 0x8A7550)
@@ -1094,10 +1194,14 @@ public enum Tokens {
 
     /// Typography aliases. Every case forwards to the exact
     /// `NSFont.systemFont`/`.boldSystemFont`/`.menuFont` call and size the
-    /// codebase already uses (verified via `git grep -n "NSFont\."` across
-    /// the same five UI packages) — with ONE spec-named custom exception,
-    /// ``microLabel`` (the Warm Signal §2 micro-label voice, added with its
-    /// first consumer, S3's MUTED sublabel token).
+    /// codebase already used at the exact-duplicate sites migrated in this
+    /// pass (design-token audit P1-4) — the aliases mirror shipped usage as
+    /// of this pass, not a claim that every call site in the five UI
+    /// packages has been swept; the remaining off-scale sizes this pass left
+    /// alone are ledgered in their owning folders' `AGENTS.md` rather than
+    /// tokenised without a type-scale decision. Two spec-named custom
+    /// exceptions: ``microLabel`` (the Warm Signal §2 micro-label voice) and
+    /// ``detail``/``display`` (P1-4's two newly-promoted sizes).
     public enum Font {
         /// Standard body text at the system's default control size — the most
         /// common label font in the app (row names, headings, form labels).
@@ -1172,6 +1276,15 @@ public enum Tokens {
         public static var keycap: NSFont {
             .monospacedSystemFont(ofSize: 11, weight: .medium)
         }
+        /// The compact explanatory voice (design-token audit P1-4): the
+        /// alignment prompt/wizard copy, the connection-diagnosis suggestion,
+        /// and the popover footer detail line — an 11 pt regular size four
+        /// exact-duplicate call sites already used independently.
+        public static var detail: NSFont { .systemFont(ofSize: 11) }
+        /// The Setup window's display headline voice (design-token audit
+        /// P1-4): a 20 pt bold size two exact-duplicate call sites already
+        /// used independently.
+        public static var display: NSFont { .systemFont(ofSize: 20, weight: .bold) }
     }
 
     // MARK: - Layout
@@ -1263,11 +1376,6 @@ public enum Tokens {
         /// window background, About panel). Alias of
         /// `NSVisualEffectView.Material.windowBackground`.
         public static var windowBackground: NSVisualEffectView.Material { .windowBackground }
-        /// The source-list sidebar material, applied via
-        /// `NSSplitViewItem(sidebarWithViewController:)` in
-        /// `MixerWindowController`. Alias of
-        /// `NSVisualEffectView.Material.sidebar`.
-        public static var sidebar: NSVisualEffectView.Material { .sidebar }
     }
 }
 
@@ -1286,7 +1394,7 @@ private func warmDynamic(name: String,
                           light: UInt32, lightHighContrast: UInt32? = nil) -> NSColor {
     NSColor(name: NSColor.Name("WarmSignal.\(name)")) { appearance in
         let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        let increaseContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        let increaseContrast = Tokens.test_increaseContrastOverride ?? NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
         let hex: UInt32
         if isDark {
             hex = increaseContrast ? (darkHighContrast ?? dark) : dark
@@ -1308,7 +1416,7 @@ private func warmDynamic(name: String,
 /// own constructor.
 private func scrimDynamic(name: String, hex: UInt32, alpha: CGFloat, highContrastAlpha: CGFloat) -> NSColor {
     NSColor(name: NSColor.Name("WarmSignal.\(name)")) { _ in
-        let increaseContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        let increaseContrast = Tokens.test_increaseContrastOverride ?? NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
         return NSColor(warmSignalHex: hex).withAlphaComponent(increaseContrast ? highContrastAlpha : alpha)
     }
 }
@@ -1344,7 +1452,7 @@ private func accentDynamic(name: String,
                            systemAccentScale: CGFloat) -> NSColor {
     NSColor(name: NSColor.Name("WarmSignal.\(name)")) { appearance in
         let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        let increaseContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        let increaseContrast = Tokens.test_increaseContrastOverride ?? NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
         switch Tokens.accentStyle {
         case .fullGold:
             return NSColor(warmSignalHex: full.hex(isDark: isDark, increaseContrast: increaseContrast))
@@ -1408,7 +1516,7 @@ private func permissionDynamic(name: String,
                                subtle: WarmVariants) -> NSColor {
     NSColor(name: NSColor.Name("WarmSignal.\(name)")) { appearance in
         let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        let increaseContrast = NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+        let increaseContrast = Tokens.test_increaseContrastOverride ?? NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
         switch Tokens.accentStyle {
         case .fullGold, .systemAccent:
             return NSColor(warmSignalHex: full.hex(isDark: isDark, increaseContrast: increaseContrast))

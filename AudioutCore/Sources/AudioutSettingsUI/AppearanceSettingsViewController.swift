@@ -380,7 +380,7 @@ final class ThemeTileButton: NSButton {
         let para = NSMutableParagraphStyle()
         para.alignment = .center
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: isSelectedTile ? .medium : .regular),
+            .font: isSelectedTile ? Tokens.Font.captionMedium : Tokens.Font.caption,
             .foregroundColor: isSelectedTile ? NSColor.labelColor : NSColor.secondaryLabelColor,
             .paragraphStyle: para,
         ]

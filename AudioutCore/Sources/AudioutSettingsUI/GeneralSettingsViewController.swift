@@ -371,6 +371,16 @@ public final class GeneralSettingsViewController: NSViewController {
         }
     }
 
+    /// Open the Enter License… sheet pre-filled with `key` and submit it — the
+    /// landing point for the purchase flow's `audiout://register?key=…` link.
+    /// The user already asked for this by following the link, so the Register
+    /// click is not asked for a second time; the sheet is what shows the result.
+    /// A sheet already up is re-used rather than replaced.
+    public func presentLicenseSheet(registering key: String) {
+        enterLicenseTapped()
+        licenseSheet?.submit(key: key)
+    }
+
     /// The reconnect-at-launch live hint: what the NEXT launch will do.
     private static func reconnectHintLine(_ enabled: Bool) -> String {
         enabled

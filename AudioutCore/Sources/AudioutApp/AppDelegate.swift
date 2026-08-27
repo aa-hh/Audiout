@@ -130,6 +130,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `GroupController` as the Mixer, so the two screens stay in lockstep.
     private var mixerWindowController: MixerWindowController?
 
+    /// The Settings screen and its General pane, once built (`makeSettingsRoot`
+    /// runs on the first visit). Weak — the surface owns them; these exist only
+    /// so `audiout://register` can reach the license sheet without the user
+    /// navigating there first.
+    private weak var settingsRootController: SettingsRootViewController?
+    private weak var generalSettingsController: GeneralSettingsViewController?
+
     /// The one surface (U4): a single window hosting the Mixer, Groups and
     /// Settings screens behind the header's tab switcher. Owns the menu-bar
     /// click policy, so this class only forwards clicks to it.
@@ -445,6 +452,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Menu-bar-only: no Dock icon, no app menu (RESOLVED Q1). Set before
         // finishing launch so a Dock icon never even flickers.
         NSApp.setActivationPolicy(.accessory)
+        // `audiout://` (CFBundleURLTypes, written by scripts/make-app.sh).
+        // Registered HERE, not in didFinishLaunching: a link that LAUNCHES the
+        // app delivers its Apple Event as part of finishing launch, and a
+        // handler installed afterwards never sees it.
+        NSAppleEventManager.shared().setEventHandler(
+            self,
+            andSelector: #selector(handleGetURLEvent(_:withReplyEvent:)),
+            forEventClass: AEEventClass(kInternetEventClass),
+            andEventID: AEEventID(kAEGetURL))
+    }
+
+    /// `audiout://register?key=<key>` — the purchase flow's return link. Event
+    /// plumbing only; what counts as a key is `LicenseDeepLink.parse` (Core, so
+    /// it is testable — this target is not).
+    @objc private func handleGetURLEvent(_ event: NSAppleEventDescriptor,
+                                         withReplyEvent reply: NSAppleEventDescriptor) {
+        guard let text = event.paramDescriptor(forKeyword: keyDirectObject)?.stringValue,
+              let url = URL(string: text),
+              let key = LicenseDeepLink.parse(url)
+        else { return }
+        openLicenseSheet(registering: key)
+    }
+
+    /// A key that arrived before there was any UI to show it in — a link that
+    /// LAUNCHES the app delivers its Apple Event while `applicationDidFinish
+    /// Launching` is still building the surface. Drained at the end of it.
+    private var pendingLicenseKeyFromURL: String?
+
+    /// Bring up Settings ▸ General with the license sheet open on `key`.
+    @MainActor
+    private func openLicenseSheet(registering key: String) {
+        guard surface != nil else {
+            pendingLicenseKeyFromURL = key
+            return
+        }
+        showSurface(.settings)
+        // The first open of the process DEFERS the window until discovery
+        // settles, so the surface may not be on screen yet. Submitting into a
+        // sheet that was never presented would validate the key with no UI at
+        // all — and a REJECTED key would then leave the sheet held but
+        // invisible, wedging "Enter License…" for the rest of the session.
+        surface.whenRevealed { [weak self] in
+            // General is the first section (`makeSettingsRoot`), and it has to
+            // be the MOUNTED one: an unmounted pane has no window to host a
+            // sheet.
+            self?.settingsRootController?.selectSection(at: 0)
+            self?.generalSettingsController?.presentLicenseSheet(registering: key)
+        }
     }
 
     /// Decided policy (P3/W7): a menu-bar app with no window restoration —
@@ -846,6 +901,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popoverController.isAppExcluded = { [weak self] bundleID in
             self?.excludedApps.isExcluded(bundleID) ?? false
         }
+        // The popover can't ask macOS whether local-network access was denied —
+        // that answer only exists in `SetupModel`. `permissionAuditModel` is the
+        // app's live one (setup window or the automatic audit); no model yet this
+        // launch reads as "not known denied", which is the dormant default.
+        popoverController.localNetworkDeniedProvider = { [weak self] in
+            self?.permissionAuditModel?.localNetworkStatus == .denied
+        }
 
         // The one surface (U4). Both screen providers are lazy — the Groups and
         // Settings trees are only built when their tab is first visited — and
@@ -1108,6 +1170,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Live diagnosis (2026-08-23): offline reproduction of the Cast
         // pending-fill "pixels never move" report. Inert without its env var.
         startCastPendingProbeIfEnabled()
+
+        // A link that LAUNCHED the app was handled before any of this existed.
+        if let key = pendingLicenseKeyFromURL {
+            pendingLicenseKeyFromURL = nil
+            openLicenseSheet(registering: key)
+        }
 
         warnIfTranslocated()
     }
@@ -1566,6 +1634,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func makeSettingsRoot() -> SettingsRootViewController {
         let general = GeneralSettingsViewController(loginItem: SMAppServiceLoginItem(),
                                                     settings: settings)
+        // The way back in for `audiout://register` — weak because the surface
+        // owns both for as long as the Settings screen exists.
+        generalSettingsController = general
         // "Open Setup…" (General pane) re-opens the first-run priming window;
         // the backend is already running, so its onFinished is a guarded no-op.
         general.onRunSetupAgain = { [weak self] in self?.presentSetup() }
@@ -1599,11 +1670,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                                                 wakeRestore: makeWakeRestoreSettingModel())
         audio.onChange = { [weak self] in self?.handleExcludedAppsChanged() }
 
-        return SettingsRootViewController(sections: [
+        let root = SettingsRootViewController(sections: [
             .init(title: "General", symbolName: "gearshape", viewController: general),
             .init(title: "Appearance", symbolName: "paintpalette", viewController: appearance),
             .init(title: "Audio", symbolName: "speaker.wave.2", viewController: audio),
         ])
+        settingsRootController = root
+        return root
     }
 
     /// The menu-bar item's frame in screen coordinates, for anchoring the

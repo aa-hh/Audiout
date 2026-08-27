@@ -380,6 +380,38 @@ import AudioutSharedUI
         #expect(sheet?.test_removeIsVisible == true)
     }
 
+    /// A second `audiout://register` link that arrives while the first key is
+    /// still being checked is DROPPED, not stacked: Register is disabled for
+    /// exactly that window, and restarting the commit under the answer the user
+    /// is waiting for would leave the sheet describing the wrong key.
+    @Test func aSecondRegisterLinkDuringTheCheckIsDropped() async {
+        /// Records each request and never answers, so the first commit stays in
+        /// flight for the whole test.
+        final class HeldTransport: @unchecked Sendable {
+            private(set) var requests = 0
+            var closure: LicenseValidator.Transport {
+                { [self] _, _ in requests += 1 }
+            }
+        }
+
+        let held = HeldTransport()
+        let settings = makePaidBuildSettings()
+        let general = GeneralSettingsViewController(loginItem: FakeLoginItem(enabled: false),
+                                                    settings: settings)
+        general.licenseTransport = held.closure
+
+        general.presentLicenseSheet(registering: "AUDT-AAAAA-BBBBB-CCCCC-DDDDD")
+        await drainMainQueue()
+        #expect(held.requests == 1)
+        #expect(general.test_licenseSheet?.test_resultText == "Checking…")
+
+        general.presentLicenseSheet(registering: "AUDT-EEEEE-FFFFF-GGGGG-HHHHH")
+        await drainMainQueue()
+        #expect(held.requests == 1, "the second link is dropped while the first is unanswered")
+        #expect(settings.licenseKey == "AUDT-AAAAA-BBBBB-CCCCC-DDDDD",
+                "the in-flight key stands — the second link never committed")
+    }
+
     /// A paying customer opening Change… is not a sales prospect.
     @Test func aRegisteredSheetDoesNotOfferToSell() async {
         let transport = StubTransport()

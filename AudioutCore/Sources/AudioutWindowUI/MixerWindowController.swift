@@ -459,7 +459,7 @@ public final class MixerWindowController {
     private func suggestedGroupName(preselected: [String], devices: [Device]) -> String {
         let names = preselected.compactMap { id in devices.first(where: { $0.id == id })?.name }
         switch names.count {
-        case 0:  return "Group \(groupController.groups.count + 1)"
+        case 0:  return groupController.nextDefaultGroupName()
         case 1:  return names[0]
         case 2:  return "\(names[0]) + \(names[1])"
         default: return "\(names[0]) + \(names.count - 1) more"

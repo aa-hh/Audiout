@@ -2741,6 +2741,9 @@ import AppKit
         let blocker = FileManager.default.temporaryDirectory
             .appendingPathComponent("PopoverSaveBlocker-\(UUID().uuidString)")
         try Data().write(to: blocker)
+        // The blocker is a FILE in the shared temp dir, not a `tempDirectory()`
+        // the fixture cleans up — remove it here or every run leaks one.
+        defer { try? FileManager.default.removeItem(at: blocker) }
         let unwritable = blocker.appendingPathComponent("groups", isDirectory: true)
 
         let backend = MockBackend(fleet: .demoFleet, staggerDiscovery: false,

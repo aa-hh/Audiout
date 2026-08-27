@@ -146,6 +146,11 @@ public final class AppSurfaceController {
     private var pendingRevealAnchor: NSRect?
     private var revealCeilingTimer: Timer?
 
+    /// Work handed to ``whenRevealed(_:)`` while that wait was still on — run at
+    /// the end of the reveal, dropped if the wait is cancelled (a close during
+    /// the wait means the user has moved on).
+    private var pendingRevealWork: (() -> Void)?
+
     /// The most recent device-id snapshot from discovery, kept across opens so a
     /// warm first open (fleet already known) can seed the settle tracker at once.
     private var lastDeviceIDs: Set<String> = []
@@ -458,6 +463,23 @@ public final class AppSurfaceController {
         splash = SurfaceSplashView.present(over: shell.window?.contentView)
         splash?.noteContentReady()
         splash?.noteDiscoverySettled()
+
+        // Anything that was waiting for a window to exist (the deep link's
+        // license sheet) — last, so it lands on the fronted, settled surface.
+        let deferred = pendingRevealWork
+        pendingRevealWork = nil
+        deferred?()
+    }
+
+    /// Run `work` once the surface is genuinely on screen: straight away when it
+    /// already is, otherwise at the end of the deferred first-open reveal. Call
+    /// it AFTER ``show(anchorRect:)`` — a sheet presented during the reveal wait
+    /// would never appear, because the window has not been fronted yet.
+    /// Last ask wins; the wait's only caller is a deep link, and a newer link
+    /// supersedes an older one.
+    public func whenRevealed(_ work: @escaping () -> Void) {
+        guard isRevealPending else { return work() }
+        pendingRevealWork = work
     }
 
     /// Close through the shell's real-close path (`windowWillClose` →
@@ -491,6 +513,7 @@ public final class AppSurfaceController {
     private func cancelPendingReveal() {
         isRevealPending = false
         pendingRevealAnchor = nil
+        pendingRevealWork = nil
         revealCeilingTimer?.invalidate()
         revealCeilingTimer = nil
         settleTracker = nil

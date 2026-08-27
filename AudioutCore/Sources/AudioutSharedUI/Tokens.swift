@@ -1277,9 +1277,8 @@ public enum Tokens {
             .monospacedSystemFont(ofSize: 11, weight: .medium)
         }
         /// The compact explanatory voice (design-token audit P1-4): the
-        /// alignment prompt/wizard copy, the connection-diagnosis suggestion,
-        /// and the popover footer detail line — an 11 pt regular size four
-        /// exact-duplicate call sites already used independently.
+        /// alignment prompt copy and the card note line — an 11 pt regular size
+        /// two call sites already used independently.
         public static var detail: NSFont { .systemFont(ofSize: 11) }
         /// The Setup window's display headline voice (design-token audit
         /// P1-4): a 20 pt bold size two exact-duplicate call sites already

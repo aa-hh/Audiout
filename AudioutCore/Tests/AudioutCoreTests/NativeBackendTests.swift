@@ -4244,7 +4244,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         } after: { discovery.fire(.appeared(device)) }
 
         backend.setOutputSet([device.id])
-        // This backend's `emitLevel` is metering-gated, so turn metering ON for
+        // This backend's level emission is metering-gated, so turn metering ON for
         // levels to flow at all (the gate defaults off).
         (backend as MeteringControlling).setMeteringActive(true)
         await pollUntil { engine.addedIDs.contains(device.outputID) }
@@ -4273,6 +4273,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         let burstDuration: UInt64 = 100_000_000
         let steps = 40
         let finalValue: Float = 0.987
+        let windowStart = DispatchTime.now()
         for i in 0..<steps {
             let value: Float = i == steps - 1 ? finalValue : Float(i) / Float(steps)
             capture.onLevel?(value)
@@ -4282,15 +4283,22 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
         // Give the trailing flush (scheduled up to ~40ms after the last coalesced
         // leading edge) time to deliver the final value.
         try? await Task.sleep(nanoseconds: 80_000_000)
+        let windowMs = Double(DispatchTime.now().uptimeNanoseconds - windowStart.uptimeNanoseconds) / 1_000_000
         collector.cancel()
 
         let levels = await box.levels
-        // Burst spans ~100ms at a 40ms cadence: the ideal count is ceil(100/40)+1
-        // = 4, generously bounded to allow for scheduler/timer jitter — the point
-        // is coalescing to well below 40 (one event per callback), not a razor's
-        // edge on exact timer firing.
-        #expect(levels.count <= 8,
-            "level emission must be coalesced to ~25Hz, not fanned out per capture buffer (D3): got \(levels.count) events for \(steps) callbacks")
+        // The bound scales with how long the emission window ACTUALLY took: under
+        // heavy load every `Task.sleep` above stretches, so genuinely more 40ms
+        // cadences elapse and more coalesced events are CORRECT (a fixed bound of
+        // 8 refused legitimate runs at 10 and 12 during the merge guards). Ideal
+        // is ceil(window/40)+1; +50% absorbs timer jitter, and the floor keeps the
+        // old bound on a quiet machine. Still far below 40 — one event per
+        // callback — which is the property under test.
+        // Capped at 39 — the per-buffer fan-out is 40, so the property stays
+        // falsifiable however long the window stretched.
+        let allowed = min(max(8, Int((ceil(windowMs / 40.0) + 1) * 1.5)), 39)
+        #expect(levels.count <= allowed,
+            "level emission must be coalesced to ~25Hz, not fanned out per capture buffer (D3): got \(levels.count) events for \(steps) callbacks over \(Int(windowMs))ms (allowed \(allowed))")
         #expect(levels.count > 0, "meter must still receive events")
         #expect(levels.last == finalValue,
             "the burst's final value must eventually land via the trailing-edge flush, so the meter never freezes on a stale pre-quiet value")
@@ -7291,7 +7299,7 @@ private func takeoverEvents(in events: [BackendEvent]) -> [TakeoverStatus?] {
     // Pre-existing gap fix (docs/plans/PLAN-SYNCED-LOCAL-DROPOUT-FIX.md
     // follow-up, live by-ear report): the local device's meter never received
     // ANY `.level`, even while genuinely playing the synced mix, because
-    // `emitLevel`/`emitCombinedLevel` gated the whole-system contribution on
+    // `emitCombinedLevel` gated the whole-system contribution on
     // `Device.isSelected` — a flag the local device structurally never sets
     // (see "MARK: Current (local) output device (BUG B)"). `isMeterable` now
     // substitutes `syncedLocalSinkEnabled` for the local device only.

@@ -28,7 +28,7 @@ git tag v1.0.0 && git push origin v1.0.0
 APP_VERSION=1.0.0 BUILD_NUMBER="$(git rev-list --count HEAD)" \
 AUDIOUT_LICENSE_URL="https://<license-server>" \
 AUDIOUT_BUY_URL="https://<site>/buy" \
-SPARKLE_ED_PUBLIC_KEY="<public key from Sparkle's generate_keys>" \
+SPARKLE_ED_PUBLIC_KEY="pTDAl+JJHH5ryMLZdPbUfSh0Ugq488O+Vjc1FURssQk=" \
 scripts/make-release.sh
 
 # Produces build/Audiout-1.0.0.zip (notarised, stapled) and prints its
@@ -204,6 +204,13 @@ never enters the repo. The **public key** is a build input: pass it as
 `SPARKLE_ED_PUBLIC_KEY` (see Pipeline command sequence above), which
 `make-app.sh` embeds as `SUPublicEDKey` in Info.plist so every shipped copy of
 the app can verify update signatures against it.
+
+**Done 2026-08-27.** The key pair lives in the login keychain on this Mac and
+its public half is the value baked into the Pipeline command sequence above:
+`pTDAl+JJHH5ryMLZdPbUfSh0Ugq488O+Vjc1FURssQk=`. Reprint it anytime with
+`generate_keys -p`. Never run a bare `generate_keys` again once a release has
+shipped — a second key pair would strand every installed copy, which verifies
+updates against this one forever.
 
 ### d. Paddle account + product setup
 

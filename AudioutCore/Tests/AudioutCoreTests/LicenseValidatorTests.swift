@@ -19,7 +19,7 @@ import Testing
     private var defaults: UserDefaults { isolation.isolatedDefaults }
 
     private static let server = URL(string: "https://license.example.com")!
-    private static let key = "AUDR-AAAAA-BBBBB-CCCCC-DDDDD"
+    private static let key = "AUDT-AAAAA-BBBBB-CCCCC-DDDDD"
 
     /// Collects what the validator asked for and answers with a canned reply.
     /// A class because the transport closure escapes into the validator.
@@ -70,7 +70,7 @@ import Testing
 
     @Test func anActiveAnswerWritesStatusCanonicalKeyAndMaxMajor() async throws {
         let settings = AppSettings(defaults: defaults, licenseServerURL: Self.server)
-        settings.licenseKey = "audr-aaaaa-bbbbb-ccccc-ddddd"
+        settings.licenseKey = "audt-aaaaa-bbbbb-ccccc-ddddd"
         let transport = Transport()
         transport.stub(status: 200,
                        json: #"{"status":"active","key":"\#(Self.key)","max_major":1}"#)
@@ -83,9 +83,10 @@ import Testing
         let request = try #require(transport.requests.first)
         #expect(request.url == URL(string: "https://license.example.com/v1/validate"))
         #expect(request.httpMethod == "POST")
+        #expect(request.timeoutInterval == 10, "never the 60s default: nothing waits on this answer")
         let body = try #require(request.httpBody)
         let object = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
-        #expect(object["license_key"] as? String == "audr-aaaaa-bbbbb-ccccc-ddddd")
+        #expect(object["license_key"] as? String == "audt-aaaaa-bbbbb-ccccc-ddddd")
     }
 
     /// The user retyped the key while the server was still answering about
@@ -103,13 +104,13 @@ import Testing
         let result = Task { await withCheckedContinuation { c in validator.validate { c.resume(returning: $0) } } }
         while held.completion == nil { await Task.yield() }
 
-        settings.licenseKey = "AUDR-ZZZZZ-ZZZZZ-ZZZZZ-ZZZZZ"
+        settings.licenseKey = "AUDT-ZZZZZ-ZZZZZ-ZZZZZ-ZZZZZ"
         held.completion?(Data(#"{"status":"active","key":"\#(Self.key)","max_major":1}"#.utf8),
                          HTTPURLResponse(url: Self.server, statusCode: 200, httpVersion: nil, headerFields: nil),
                          nil)
 
         #expect(await result.value == .unreachable)
-        #expect(settings.licenseKey == "AUDR-ZZZZZ-ZZZZZ-ZZZZZ-ZZZZZ", "the newer key is not overwritten")
+        #expect(settings.licenseKey == "AUDT-ZZZZZ-ZZZZZ-ZZZZZ-ZZZZZ", "the newer key is not overwritten")
         #expect(settings.licenseStatus == nil)
     }
 

@@ -1570,7 +1570,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the backend is already running, so its onFinished is a guarded no-op.
         general.onRunSetupAgain = { [weak self] in self?.presentSetup() }
         // A committed key changes both the note and the update feed's header.
-        general.onLicenseChanged = { [weak self] in self?.applyLicenseState() }
+        general.onLicenseChanged = { [weak self, settings] in
+            self?.applyLicenseState()
+            // A key entered mid-session registers the device now rather than at
+            // the next launch. This closure fires a few times around one
+            // registration, so the POST may repeat — harmless: it is
+            // fire-and-forget, /v1/checkin always 204s, and the device-spread
+            // metric counts distinct install ids.
+            LicenseCheckIn(settings: settings).checkInIfNeeded()
+        }
         // Left nil in a build with no updater, which hides the button.
         if let updaterController {
             general.onCheckForUpdates = { updaterController.checkForUpdates(nil) }

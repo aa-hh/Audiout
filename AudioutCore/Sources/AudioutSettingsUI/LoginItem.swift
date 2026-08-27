@@ -17,6 +17,23 @@ public protocol LoginItemManaging {
     /// the caller reverts the toggle and surfaces the failure rather than lying
     /// about the state.
     func setEnabled(_ enabled: Bool) throws
+
+    /// Whether the system has the registration but is waiting for the user to
+    /// approve it in System Settings › General › Login Items. `register()`
+    /// SUCCEEDS in that state while ``isEnabled`` stays false, so without this
+    /// the switch just silently springs back with no explanation.
+    var needsApproval: Bool { get }
+
+    /// Open System Settings at the Login Items list, so the approval the user
+    /// has to give is one click away instead of a hunt.
+    func openSystemSettingsLoginItems()
+}
+
+/// Defaults, so the existing test fakes and the snapshot tool keep conforming
+/// without change: a seam that cannot report an approval simply never needs one.
+public extension LoginItemManaging {
+    var needsApproval: Bool { false }
+    func openSystemSettingsLoginItems() {}
 }
 
 /// Production `LoginItemManaging` over `SMAppService.mainApp` — the macOS 13+
@@ -27,6 +44,12 @@ public struct SMAppServiceLoginItem: LoginItemManaging {
     public init() {}
 
     public var isEnabled: Bool { SMAppService.mainApp.status == .enabled }
+
+    public var needsApproval: Bool { SMAppService.mainApp.status == .requiresApproval }
+
+    public func openSystemSettingsLoginItems() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
 
     public func setEnabled(_ enabled: Bool) throws {
         if enabled {

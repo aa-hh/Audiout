@@ -349,6 +349,23 @@ public struct AppSettings {
         nonmutating set { defaults.set(newValue?.rawValue, forKey: Keys.licenseStatus) }
     }
 
+    /// Whether this install should be treated as unregistered: no key at all,
+    /// or a key the server declined (`unknown`/`invalid`/`revoked`). A stored
+    /// key with NO verdict yet is **not** unregistered — the check is soft, so
+    /// an unanswered question gets the benefit of the doubt.
+    ///
+    /// Deliberately says nothing about whether this build even has a license
+    /// server: callers compose it with `licenseServerURL != nil` themselves,
+    /// because a build run from source hides the whole surface rather than
+    /// calling anyone unregistered.
+    public var licenseUnregistered: Bool {
+        if (licenseKey ?? "").isEmpty { return true }
+        switch licenseStatus {
+        case .unknown, .invalid, .revoked: return true
+        case .active, nil: return false
+        }
+    }
+
     /// The highest major version the stored key covers, as the server reported
     /// it. `nil` when absent (and for a stored 0, which no real answer uses).
     public var licenseMaxMajor: Int? {
@@ -378,8 +395,16 @@ public struct AppSettings {
         buyURLOverride ?? Self.bundleURL(forInfoDictionaryKey: "AudioutBuyURL")
     }
 
+    /// **https only.** Requests to the license server carry the license key, so
+    /// a plain-http endpoint would put it on the wire in the clear; a non-https
+    /// value is treated as absent, which degrades to the free build's behavior
+    /// rather than to an insecure one. The initializer's
+    /// `licenseServerURL`/`buyURL` overrides deliberately bypass this — they
+    /// are a test seam, not a shipped input.
     private static func bundleURL(forInfoDictionaryKey key: String) -> URL? {
-        (Bundle.main.object(forInfoDictionaryKey: key) as? String).flatMap(URL.init(string:))
+        (Bundle.main.object(forInfoDictionaryKey: key) as? String)
+            .flatMap(URL.init(string:))
+            .flatMap { $0.scheme == "https" ? $0 : nil }
     }
 
     /// A stable per-install identifier for licence check-ins — lazily created
@@ -416,9 +441,16 @@ public struct AppSettings {
     /// none, has no endpoint and stays silent. A stored value overrides the
     /// derived one, which is how tests point it somewhere harmless. `nil` when
     /// there is neither.
+    ///
+    /// The stored value must be **https** for the same reason
+    /// ``bundleURL(forInfoDictionaryKey:)`` insists on it — the check-in POSTs
+    /// the license key — so a preference-planted `http://` endpoint is ignored
+    /// and the derived https URL answers instead.
     public var checkInURL: URL? {
         get {
-            defaults.string(forKey: Keys.licenseCheckInURL).flatMap(URL.init(string:))
+            defaults.string(forKey: Keys.licenseCheckInURL)
+                .flatMap(URL.init(string:))
+                .flatMap { $0.scheme == "https" ? $0 : nil }
                 ?? licenseServerURL?.appending(path: "v1/checkin")
         }
         nonmutating set { defaults.set(newValue?.absoluteString, forKey: Keys.licenseCheckInURL) }

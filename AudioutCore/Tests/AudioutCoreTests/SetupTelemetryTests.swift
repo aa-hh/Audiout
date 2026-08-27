@@ -117,6 +117,34 @@ extension SerializedSharedState {
             #expect(refused.contains("\"unmet\":\"speaker_sync\""), "names the permission: \(refused)")
         }
 
+        /// A `register()` that throws is a packaging/signing fault the user can
+        /// neither see nor fix, and stderr dies with the process — so it has to
+        /// reach the decision log, where a support ticket can quote it.
+        @Test func aFailedPTPHelperRegistrationReachesTheDecisionLog() throws {
+            struct RegistrationFailed: Error {}
+            struct FailingPTPHelper: PTPHelperManaging {
+                let status: PTPHelperStatus = .notRegistered
+                func register() throws { throw RegistrationFailed() }
+                func openSystemSettingsLoginItems() {}
+                func unregister() async throws {}
+            }
+            let setup = SetupModel(audioProbe: CannedAudio(result: .granted),
+                                   localNetwork: ReachableNetwork(),
+                                   remoteControl: UntrustedRemote(),
+                                   ptpHelper: FailingPTPHelper(),
+                                   settings: AppSettings(defaults: isolatedDefaults))
+            let capture = TelemetrySetupLineCapture()
+            Telemetry._installTestSink { capture.append($0) }
+            setup.registerPTPHelper()
+            Telemetry._installTestSink(nil)   // flush barrier (serial queue) + removes the sink
+
+            let lines = capture.snapshot().filter { $0.contains("\"evt\":\"ptp_register_failed\"") }
+            #expect(lines.count == 1, "one failure, one line: \(lines)")
+            #expect(try #require(lines.first).contains("RegistrationFailed"),
+                    "the error itself is in the line: \(lines)")
+            #expect(setup.ptpHelperRegistrationFailed)
+        }
+
         /// Every physical click on the Setup window leaves a `setup_click`
         /// down/up pair naming what it hit — the witness for a live click
         /// that dies before any control's action (the "first CTA click left

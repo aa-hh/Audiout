@@ -552,6 +552,11 @@ final class SetupSpineRowView: NSView {
     /// (owner decision: no padlock shake — a refusal that animates invites a
     /// second try).
     var isPressable: Bool {
+        // A BROKEN row is the one row on the spine asking to be looked at, so
+        // it is pressable whatever state it is otherwise in — pressing it snaps
+        // the flow to it. Ahead of the switch, because the state it wears
+        // (usually `.pending`) would otherwise refuse the click.
+        if isBroken { return true }
         switch state {
         case .pending, .autoPassed: return false
         case .active: return isLive
@@ -650,7 +655,11 @@ final class SetupSpineRowView: NSView {
         switch state {
         case .active: return ""
         case .pending: return ", locked"
-        case .completed, .autoPassed: return ", allowed"
+        case .completed: return ", allowed"
+        // An auto-pass is NOT a grant, and saying "allowed" for one hid the
+        // whole reason it passed. The visible note is the explanation; this is
+        // the same words, lower-cased into the sentence the label already is.
+        case .autoPassed(let note): return ", " + note.prefix(1).lowercased() + note.dropFirst()
         case .skipped: return ", skipped"
         }
     }

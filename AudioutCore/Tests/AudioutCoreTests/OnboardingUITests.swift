@@ -201,7 +201,7 @@ import Testing
     }
     /// Reports a fixed ``PTPHelperStatus`` and records `register()`/
     /// `openSystemSettingsLoginItems()` calls — never touches `SMAppService`.
-    private final class FakePTPHelper: PTPHelperManaging {
+    private final class FakePTPHelper: PTPHelperManaging, @unchecked Sendable {
         var status: PTPHelperStatus
         private(set) var registerCount = 0
         private(set) var openSettingsCount = 0
@@ -281,6 +281,14 @@ import Testing
                   ptpHelper: FakePTPHelper(status: .enabled))
     }
 
+    /// The announcements MINUS the in-flight wait line. A wait is not a
+    /// transition — it is the beat between two of them — and it is spoken on its
+    /// own edge now (`theWaitTheStuckHintAndARefusedCloseAreAllSpoken` pins that
+    /// half), so the transition pins below read past it.
+    private func transitionAnnouncements(_ vc: OnboardingViewController) -> [String] {
+        vc.test_announcements.filter { $0 != OnboardingViewController.waitingStatus }
+    }
+
     /// Wait for something a background timeout will make true. A fixed sleep is a
     /// flake here: the main actor is shared with every other test in the run, so
     /// how soon that work lands is not this test's to decide.
@@ -297,7 +305,8 @@ import Testing
         let vc = makeVC(model: makeModel(audio: .unknown))
         #expect(vc.test_activeStep == .audio)
         #expect(vc.test_heroHeadline == "Hear your Mac's sound")
-        #expect(vc.test_heroWhy == "Audiout needs this to send your music to your speakers.")
+        #expect(vc.test_heroWhy == "Audiout needs this to send your music to your speakers. "
+                + "Allowing plays a brief tone to confirm it's working.")
         #expect(vc.test_ribbonBodyText == nil, "a first ask has no paragraph under it")
         #expect(vc.test_previewFrameLabel?.contains("macOS") ?? false,
                 "the frame says whose surface this is, so no line of copy has to")
@@ -1005,7 +1014,7 @@ import Testing
         await vc.test_allow([.audio, .localNetwork])
         vc.test_tapSkip(.bluetooth)
         #expect(vc.test_activeStep == .speakerSync)
-        #expect(vc.test_ribbonButtonTitles == ["Turn On at Login"])
+        #expect(vc.test_ribbonButtonTitles == ["Skip for now", "Turn On at Login"])
         #expect(vc.test_heroHeadline == "Keep speakers in perfect time")
         #expect(vc.test_heroWhy == "A small helper shares one clock so your speakers never drift.")
 
@@ -1037,6 +1046,171 @@ import Testing
 
         #expect(!vc.test_rowIsWaiting(.speakerSync))
         #expect(vc.test_hasCheckmark(.speakerSync))
+    }
+
+    // MARK: Speaker Sync's un-rehearsed states (P0-1)
+
+    /// …and the trip that comes back with the switch STILL off — the state that
+    /// used to re-draw the untouched first ask and leave the gate shut forever.
+    /// It now says where the switch really is, offers the trip again, and offers
+    /// the way past.
+    @Test func speakerSyncSaysWhereTheSwitchIsWhenLoginItemsCameBackStillOff() async {
+        let helper = FakePTPHelper(status: .requiresApproval)
+        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 2, bluetooth: .granted,
+                                         ptpHelper: helper))
+        await vc.test_allow([.audio, .localNetwork, .bluetooth])
+        #expect(vc.test_activeStep == .speakerSync)
+
+        await vc.test_tapAllow(.speakerSync)        // → Login Items
+        vc.appDidResignActive()
+        vc.appDidBecomeActive()                     // → back, still unapproved
+        await vc.test_awaitSettingsReturn()
+
+        #expect(vc.test_ribbonStatusText == OnboardingViewController.speakerSyncRecoveryStatus)
+        #expect(vc.test_ribbonBodyText == OnboardingViewController.speakerSyncRecoveryBody)
+        #expect(vc.test_ribbonButtonTitles == ["Skip for now", "Open Login Items\u{2026}"])
+
+        vc.test_ribbonTapSkip()
+
+        #expect(vc.test_isSkipped(.speakerSync), "and the way past really goes through")
+    }
+
+    /// The daemon isn't in the bundle: there is no switch anywhere, so the row
+    /// auto-passes with the note as its whole explanation and the flow moves on.
+    @Test func speakerSyncAutoPassesWithItsNoteWhenTheHelperIsMissing() async {
+        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 2, bluetooth: .granted,
+                                         ptpHelper: FakePTPHelper(status: .notFound)))
+        await vc.test_awaitInitialStatuses()
+        await vc.test_allow([.audio, .localNetwork, .bluetooth])
+
+        #expect(!vc.test_hasCheckmark(.speakerSync), "nobody approved anything")
+        #expect(vc.test_note(of: .speakerSync) == "Couldn't be turned on")
+        #expect(vc.test_activeStep == .remoteControl, "the gate is not held on a packaging bug")
+    }
+
+    /// An auto-pass is not a grant, so VoiceOver hears the NOTE — the reason the
+    /// row passed — where a completed row says ", allowed".
+    @Test func anAutoPassedRowSpeaksItsNoteInsteadOfClaimingAGrant() async {
+        let vc = makeVC(model: makeModel(audio: .unsupported))
+        await vc.test_tapAllow(.audio)
+
+        let label = vc.test_rowAccessibilityLabel(.audio) ?? ""
+        #expect(label.hasSuffix(", requires macOS 14.2 or later"), "\(label)")
+        #expect(!label.contains(", allowed"), "\(label)")
+    }
+
+    /// A row drawn BROKEN is the one row asking to be looked at, so pressing it
+    /// has to do the thing it is asking for — whatever state it otherwise wears,
+    /// and for VoiceOver as much as for the mouse.
+    @Test func aBrokenPendingRowIsPressableAndPressingItMovesTheFlow() async {
+        let vc = makeVC(model: makeModel(audio: .unknown, foundSpeakers: 2,
+                                         ptpHelper: FakePTPHelper(status: .requiresApproval)),
+                        reason: .permissionLost([.ptpHelper]))
+        await vc.test_awaitInitialStatuses()
+        #expect(vc.test_activeStep == .audio, "the walk starts at the first unmet step")
+        #expect(vc.test_rowIsBroken(.speakerSync))
+        #expect(vc.test_isRowPressable(.speakerSync))
+        #expect(vc.test_rowIsAccessibilityButton(.speakerSync))
+
+        #expect(await vc.test_pressRow(.speakerSync))
+
+        #expect(vc.test_snapBackStep == .speakerSync)
+        #expect(vc.test_activeStep == .speakerSync)
+    }
+
+    // MARK: What a wait, a stuck dialog and a refused ✕ say out loud
+
+    /// None of the three has anything a screen reader can see: the buttons leave
+    /// the layout, the stage dims, and the ✕ simply does nothing. So all three
+    /// are spoken, and the refusal takes the ribbon's status line too.
+    @Test func theWaitTheStuckHintAndARefusedCloseAreAllSpoken() async {
+        let model = makeModel(audio: .granted, foundSpeakers: 2,
+                              bluetoothPrimer: NeverDecidingBluetooth())
+        let vc = makeVC(model: model)
+        await vc.test_awaitInitialStatuses()   // announcements start once the opening state is known
+        await vc.test_allow([.audio, .localNetwork])
+
+        await vc.test_tapAllow(.bluetooth)
+        #expect(vc.test_announcements.contains(OnboardingViewController.waitingStatus),
+                "\(vc.test_announcements)")
+
+        vc.noteCloseRefused()
+        #expect(vc.test_announcements.contains(OnboardingViewController.closeRefusedStatus),
+                "\(vc.test_announcements)")
+        #expect(vc.test_ribbonStatusText == OnboardingViewController.closeRefusedStatus,
+                "the reason replaces the wait's line")
+        #expect(vc.test_ribbonIsWaiting, "…and the spinner stays: the dialog is still up")
+
+        vc.test_fireStuckPromptTimer()
+        #expect(vc.test_announcements.contains(OnboardingViewController.stuckPromptHint),
+                "\(vc.test_announcements)")
+    }
+
+    /// …and the window is the half that starts it: it still refuses to close
+    /// while a dialog is unanswered, but hands the refusal to the content VC
+    /// instead of swallowing it.
+    @Test func theWindowHandsARefusedCloseToTheContentSoItCanSayWhy() async throws {
+        let model = makeModel(audio: .granted, foundSpeakers: 2,
+                              bluetoothPrimer: NeverDecidingBluetooth())
+        let wc = OnboardingWindowController(model: model, openSettings: { _ in }, onFinished: {})
+        let window = try #require(wc.window)
+        let vc = wc.test_contentViewController
+        _ = vc.test_rootView
+        await vc.test_allow([.audio, .localNetwork])
+        #expect(wc.windowShouldClose(window), "nothing in flight — the ✕ is the free exit")
+
+        await vc.test_tapAllow(.bluetooth)
+
+        #expect(!wc.windowShouldClose(window), "refused while the dialog is unanswered")
+        #expect(vc.test_ribbonStatusText == OnboardingViewController.closeRefusedStatus,
+                "and the refusal is not silent")
+    }
+
+    /// An armed Settings/Login Items trip that never actually left cannot leave
+    /// the row spinning for the rest of the presentation: the ceiling stands it
+    /// back down. (Only a REAL departure hands the wait to the return re-read.)
+    @Test func theSettingsTripSpinnerCannotLatchPastItsCeiling() async {
+        let vc = makeVC(model: makeModel(audio: .granted, foundSpeakers: 2, bluetooth: .granted,
+                                         ptpHelper: FakePTPHelper(status: .requiresApproval)))
+        await vc.test_allow([.audio, .localNetwork, .bluetooth])
+        await vc.test_tapAllow(.speakerSync)
+        #expect(vc.test_rowIsWaiting(.speakerSync), "the trip is armed")
+
+        vc.test_fireSettingsTripTimer()
+
+        #expect(!vc.test_rowIsWaiting(.speakerSync))
+    }
+
+    // MARK: Headings and the spoken caption
+
+    /// Remote Control's rehearsal is the one that INSTRUCTS — two surfaces in
+    /// sequence with the wrong button ghosted — and none of that reaches
+    /// VoiceOver. The caption band speaks it instead.
+    @Test func remoteControlsFirstAskSpeaksTheInstructionItsRehearsalDraws() async {
+        let vc = makeVC(model: makeGrantableModel())
+        await vc.test_allow([.audio, .localNetwork])
+        vc.test_tapSkip(.bluetooth)
+        #expect(vc.test_activeStep == .remoteControl)
+        #expect(vc.test_demoMode == .prompt)
+
+        #expect(vc.test_previewFrameSpokenCaption
+                == OnboardingViewController.remoteControlSpokenCaption)
+    }
+
+    /// …and only that one: every other step's caption speaks its visible words.
+    @Test func noOtherStepSubstitutesASpokenCaption() {
+        let vc = makeVC(model: makeModel(audio: .unknown))
+        #expect(vc.test_activeStep == .audio)
+        #expect(vc.test_previewFrameSpokenCaption
+                != OnboardingViewController.remoteControlSpokenCaption)
+    }
+
+    /// Both headlines are headings, so VoiceOver's rotor can jump between the
+    /// window's title and the step's own.
+    @Test func theHeaderAndHeroHeadlinesAreHeadingsForTheRotor() {
+        let vc = makeVC(model: makeModel(audio: .unknown))
+        #expect(vc.test_titleIsHeading)
+        #expect(vc.test_heroHeadlineIsHeading)
     }
 
     /// Remote Control's first click is the PROMPT — that is what registers our
@@ -1502,22 +1676,22 @@ import Testing
 
         await vc.test_allow([.audio, .localNetwork])
 
-        #expect(vc.test_announcements
+        #expect(transitionAnnouncements(vc)
                 == ["Hearing your Mac's sound", "3 speakers on your network"])
 
         vc.test_refresh()   // a repaint that changes nothing
 
-        #expect(vc.test_announcements.count == 2, "a repaint says nothing new")
+        #expect(transitionAnnouncements(vc).count == 2, "a repaint says nothing new")
 
         vc.test_tapSkip(.bluetooth)
         vc.test_tapSkip(.remoteControl)
         await vc.test_awaitFinalCheck()
 
-        #expect(vc.test_announcements == ["Hearing your Mac's sound",
-                                          "3 speakers on your network",
-                                          "Skipped. Bluetooth speakers",
-                                          "Skipped. Volume-key control",
-                                          "Everything's ready"])
+        #expect(transitionAnnouncements(vc) == ["Hearing your Mac's sound",
+                                                "3 speakers on your network",
+                                                "Skipped. Bluetooth speakers",
+                                                "Skipped. Volume-key control",
+                                                "Everything's ready"])
     }
 
     /// A permission already in place when the window opens is the opening
@@ -1535,7 +1709,7 @@ import Testing
 
         await vc.test_tapAllow(.audio)   // a grant the user really did make
 
-        #expect(vc.test_announcements == ["Hearing your Mac's sound"])
+        #expect(transitionAnnouncements(vc) == ["Hearing your Mac's sound"])
     }
 
     /// The ribbon is REAL UI sitting inside the hero pane beside a demo that is
@@ -2172,17 +2346,28 @@ import Testing
         #expect(text.contains("Speaker Sync"), "\(text)")
     }
 
-    /// The pronoun has to agree with the count: "Flip it back on" beside two
-    /// named permissions is a broken sentence, on the one screen whose whole job
-    /// is explaining what went wrong.
+    /// One whole sentence per arity, not one sentence with a pronoun spliced in:
+    /// "Flip it back on" beside two named permissions was a broken sentence, on
+    /// the one screen whose whole job is explaining what went wrong. And nothing
+    /// says "access" any more — Speaker Sync's switch is a Login Item, not a
+    /// grant. The list itself is `ListFormatter`'s, not a hand-rolled join.
     @Test func theLostPermissionMessageAgreesWithHowManyItNamed() {
         let one = OnboardingViewController.permissionLostText(for: [.audioCapture])
-        #expect(one.contains("access was switched off after setup"), "\(one)")
-        #expect(one.contains("Flip it back on"), "\(one)")
+        #expect(one == "System Audio was turned off after setup. Turn it back on and your "
+                + "speakers pick up where they left off.", "\(one)")
 
         let two = OnboardingViewController.permissionLostText(for: [.audioCapture, .ptpHelper])
-        #expect(two.contains("System Audio and Speaker Sync"), "\(two)")
-        #expect(two.contains("Flip them back on"), "\(two)")
+        #expect(two == "System Audio and Speaker Sync were turned off after setup. Turn them "
+                + "back on and your speakers pick up where they left off.", "\(two)")
+
+        // Three names: the exact separators are `ListFormatter`'s business (the
+        // Oxford comma is not the same in every English), so this pins the
+        // sentence around them rather than the punctuation inside them.
+        let three = OnboardingViewController
+            .permissionLostText(for: [.audioCapture, .localNetwork, .ptpHelper])
+        #expect(three.hasPrefix("System Audio, Local Network"), "\(three)")
+        #expect(three.contains("Speaker Sync were turned off after setup."), "\(three)")
+        #expect(!three.contains("access"), "\(three)")
     }
 
     @Test func permissionLostMessageClearsOnceItsFlaggedPermissionIsGranted() async {

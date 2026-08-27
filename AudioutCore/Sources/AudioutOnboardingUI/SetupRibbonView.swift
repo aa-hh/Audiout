@@ -91,6 +91,10 @@ final class SetupHeroHeadView: NSView {
         headlineLabel.font = .systemFont(ofSize: 20, weight: .bold)
         headlineLabel.textColor = Tokens.Color.label
         headlineLabel.maximumNumberOfLines = 2
+        // The hero's heading, findable in VoiceOver's rotor. The raw AX string,
+        // not `NSAccessibilityHeadingRole`: that constant is macOS 26+ and this
+        // app installs on 14.2.
+        headlineLabel.setAccessibilityRole(NSAccessibility.Role(rawValue: "AXHeading"))
 
         // Primary ink, not secondary: this is the sentence the whole step rests
         // on, and it is the only body copy a first ask has.
@@ -127,6 +131,8 @@ final class SetupHeroHeadView: NSView {
 
     var test_headline: String? { headlineLabel.isHidden ? nil : headlineLabel.stringValue }
     var test_why: String? { whyLabel.isHidden ? nil : whyLabel.stringValue }
+    /// The headline's accessibility role — the rotor's heading contract.
+    var test_headlineAccessibilityRole: NSAccessibility.Role? { headlineLabel.accessibilityRole() }
 }
 
 /// The LABELLED frame the rehearsal plays inside: a warm well with a caption
@@ -230,6 +236,21 @@ final class SetupPreviewFrameView: NSView {
         }
     }
 
+    /// What VoiceOver reads for the caption band INSTEAD of its visible words.
+    ///
+    /// The band is small and quiet on purpose, and the picture it labels is
+    /// deliberately invisible to VoiceOver (the demo's accessibility opt-out) —
+    /// so for the one step whose rehearsal carries an instruction the drawing
+    /// alone conveys, the caption is where that instruction can be spoken
+    /// without putting a fourth line of copy on screen. `nil` puts the visible
+    /// text back.
+    var spokenCaption: String? {
+        didSet {
+            guard spokenCaption != oldValue else { return }
+            captionLabel.setAccessibilityLabel(spokenCaption)
+        }
+    }
+
     /// Take the frame's VISUAL chrome away — well fill, rim and clip — leaving
     /// the geometry exactly where it is.
     ///
@@ -264,6 +285,9 @@ final class SetupPreviewFrameView: NSView {
     var test_caption: String? {
         labelBand.isHidden ? nil : captionLabel.attributedStringValue.string
     }
+
+    /// What VoiceOver reads for the caption band.
+    var test_captionAccessibilityLabel: String? { captionLabel.accessibilityLabel() }
 
     /// Whether the well is actually drawing chrome (fill, rim, clip).
     var test_drawsChrome: Bool {

@@ -83,6 +83,7 @@ public struct AppSettings {
         static let accentStyle = "appearance.accentStyle"
         static let startBufferMs = "audio.startBufferMs"
         static let hasCompletedSetup = "setup.hasCompleted"
+        static let speakerSyncWasEnabled = "speakerSync.wasEnabled"
         static let reconnectAtLaunch = "general.reconnectAtLaunch"
         static let wakeRestoreMinutes = "audio.wakeRestoreMinutes"
         static let connectVolume = "audio.connectVolume"
@@ -146,6 +147,17 @@ public struct AppSettings {
     public var hasCompletedSetup: Bool {
         get { defaults.bool(forKey: Keys.hasCompletedSetup) }
         nonmutating set { defaults.set(newValue, forKey: Keys.hasCompletedSetup) }
+    }
+
+    /// Whether the Speaker Sync helper has EVER been seen `.enabled` — set the
+    /// first time ``SetupModel`` reads that status, and cleared by an explicit
+    /// skip of the Speaker Sync step. It gates the wake audit's "this was
+    /// turned off in Login Items" nag (``SetupModel/unmetRequiredPermissions()``),
+    /// so only a real REGRESSION re-opens the Setup window: a user who never
+    /// approved the helper, or who passed on it, is never nagged about it.
+    public var speakerSyncWasEnabled: Bool {
+        get { defaults.bool(forKey: Keys.speakerSyncWasEnabled) }
+        nonmutating set { defaults.set(newValue, forKey: Keys.speakerSyncWasEnabled) }
     }
 
     /// Settings › General "Reconnect last speakers when Audiout starts"

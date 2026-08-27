@@ -76,6 +76,10 @@ public final class VolumeHUDPanel: NSPanel {
     /// screen.
     public var test_isShown: Bool { shown }
 
+    /// Test-only: runs the private dismiss path directly, without waiting on
+    /// the real hold timer — simulates a fade-out already in flight.
+    public func test_simulateDismiss() { dismiss() }
+
     public init() {
         super.init(
             contentRect: NSRect(origin: .zero, size: Self.panelSize),
@@ -175,19 +179,29 @@ public final class VolumeHUDPanel: NSPanel {
         dismissTimer = nil
         shown = false
         guard !reduceMotion else {
-            orderOut(nil)
-            alphaValue = 1
+            finishDismiss()
             return
         }
         NSAnimationContext.runAnimationGroup { context in
+            // A newer `show()` may have already re-shown the panel by the
+            // time this runs — never start (or land) a fade meant for a dismiss
+            // that no longer applies.
+            guard !self.shown else { return }
             context.duration = Self.fadeDuration
-            animator().alphaValue = 0
+            self.animator().alphaValue = 0
         } completionHandler: { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.orderOut(nil)
-                self.alphaValue = 1
-            }
+            MainActor.assumeIsolated { self?.finishDismiss() }
         }
+    }
+
+    /// The actual "go away" — shared by the Reduce Motion path (synchronous)
+    /// and the fade's completion (async, up to `fadeDuration` later). Guarded
+    /// on `shown`: a keypress mid-fade calls `show()`, which sets `shown =
+    /// true` again, and this stale fade's completion must then be a no-op —
+    /// otherwise it orders the just-reshown panel back out from under it.
+    private func finishDismiss() {
+        guard !shown else { return }
+        orderOut(nil)
+        alphaValue = 1
     }
 }

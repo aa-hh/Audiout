@@ -39,6 +39,17 @@ import Testing
         #expect(panel.test_symbolName == "speaker.slash.fill")
     }
 
+    /// A keypress landing mid-fade must win: `show()` re-arms the panel, and
+    /// the in-flight dismiss it interrupted must not later order it back out.
+    @Test func showDuringInFlightDismiss_leavesThePanelShownAtFullOpacity() {
+        let panel = VolumeHUDPanel()
+        panel.show(volumePercent: 50, isMuted: false, on: nil)
+        panel.test_simulateDismiss()
+        panel.show(volumePercent: 60, isMuted: false, on: nil)
+        #expect(panel.test_isShown)
+        #expect(panel.alphaValue == 1)
+    }
+
     @Test func panel_isNonRestorableAndNonInteractive() {
         let panel = VolumeHUDPanel()
         // A menu-bar app restores no windows, and a transient readout must
